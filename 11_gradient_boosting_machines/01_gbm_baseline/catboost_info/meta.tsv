@@ -1,0 +1,7 @@
+name	experiment
+iterCount	500
+learnErrorLog	learn_error.tsv
+testErrorLog	test_error.tsv
+timeLeft	time_left.tsv
+loss	AUC	max
+loss	Logloss	min
