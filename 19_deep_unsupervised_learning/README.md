@@ -1,6 +1,7 @@
 # Chapter 18: Autoencoders - Unsupervised Deep Learning
 
 - [Unsupervised Learning](https://cilvr.nyu.edu/lib/exe/fetch.php?media=deeplearning:2016:lecun-20160308-unssupervised-learning-nyu.pdf), Yann LeCun, 2016
+
 ## How Autoencoders work
 
 - [Autoencoders](http://www.deeplearningbook.org/contents/autoencoders.html), Ian Goodfellow, Yoshua Bengio and Aaron Courville, Deep Learning Book, Chapter 14, MIT Press 2016
