@@ -79,8 +79,6 @@ News
 #### Building a fundamental data time series
 - [SEC Financial Statements & Notes Data Set](https://www.sec.gov/dera/data/financial-statement-and-notes-data-set.html)
 
-
-
 #### Code Examples
 
 The folder EDGAR contains the code to download and parse EDGAR data in XBRL format.
@@ -107,4 +105,7 @@ The folder EDGAR contains the code to download and parse EDGAR data in XBRL form
 - Apache Parquet [docs](https://parquet.apache.org/)
 - PyArrow: Parquet for Python [docs](https://arrow.apache.org/docs/python/parquet.html)
 - Development update: High speed Apache Parquet in Python with Apache Arrow by Wes McKinney [blog](http://wesmckinney.com/blog/python-parquet-update/)
+
+
+Latest test: 03-06-2019
 
