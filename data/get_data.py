@@ -9,8 +9,12 @@ pd.set_option('display.expand_frame_repr', False)
 
 
 def get_wiki_prices():
-    """source: https://www.quandl.com/api/v3/datatables/WIKI/PRICES?qopts.export=true&api_key=<API_KEY>
-        Download and rename to wiki_prices.csv
+    """source: https://www.quandl.com/databases/WIKIP/usage/export
+    1. Follow the instructions to create a Quandl account
+    2. Download the entire WIKI/PRICES data
+    3. Extract the .zip file,
+    4. Move to this directory and rename to wiki_prices.csv
+    5. Run this function to store in fast HDF format
     """
 
     df = pd.read_csv('wiki_prices.csv',
@@ -23,19 +27,26 @@ def get_wiki_prices():
         store.put('quandl/wiki/prices', df)
 
 
-def get_wiki_constitutents():
-    """source: https://www.quandl.com/api/v3/databases/WIKI/codes?api_key=<API_KEY>
+def get_wiki_constituents():
+    """source: https://www.quandl.com/api/v3/databases/WIKI/metadata?api_key=<API_KEY>
+    1. Follow the instructions to create a Quandl account
+    2. Find link to download wiki metadata under 'Companies': https://www.quandl.com/databases/WIKIP/documentation
+    3. Extract the .zip file,
+    4. Move to this directory and rename to wiki_stocks.csv
+    5. Run this function to store in fast HDF format
         Download and rename to wiki_stocks.csv
     """
-    df = pd.read_csv('wiki_stocks.csv', header=None)
-    df = pd.concat([df[0].str.split('/', expand=True)[1].str.strip(),
-                    df[1].str.split('(', expand=True)[0].str.strip()], axis=1)
-    df.columns = ['symbol', 'name']
+    df = pd.read_csv('wiki_stocks.csv')
+    df = pd.concat([df.loc[:, 'code'].str.strip(),
+                    df.loc[:, 'name'].str.split('(', expand=True)[0].str.strip().to_frame('name')], axis=1)
+
     print(df.info(null_counts=True))
     with pd.HDFStore('assets.h5') as store:
-        store.put('quandl/wiki/prices', df)
+        store.put('quandl/wiki/stocks', df)
 
 
+# currently broken; fix only available from development branch:
+# https://github.com/pydata/pandas-datareader/pull/591
 def get_sp500_prices():
     """Download historical S&P 500 prices from stooq"""
     df = pd.read_csv('https://stooq.com/q/d/l/?s=^spx&i=d', parse_dates=['Date'])
@@ -81,32 +92,3 @@ def get_fred():
 
     with pd.HDFStore('assets.h5') as store:
         store.put('fred/assets', df)
-
-
-def get_treasury_index():
-    name = 'S&P U.S. Treasury Bond Current 10-Year Index'
-    df = pd.read_excel('treasury_10y.xls')
-    df.Data = pd.to_datetime(df.Date)
-    return df.set_index('Date').Index.resample('B').mean().to_frame('Treasury Index')
-
-
-def get_bcom():
-    bcom = pd.read_csv('BCOM.csv', parse_dates=['Date'])
-    return bcom.set_index('Date').Price.resample('B').mean().to_frame('BCOM')
-
-
-def get_stock_sample():
-    data_dir = Path('..', '00_data')
-    with pd.HDFStore(str(data_dir / 'assets.h5')) as store:
-        df = store.get(join('quandl', 'wiki', 'prices'))
-        close = df.adj_close.unstack().loc[str(start):str(end)]
-        open = df.adj_open.unstack().loc[str(start):str(end)]
-
-    nobs = close.count()
-    close = close.loc[:, nobs[nobs == nobs.quantile(.9)].index]
-    print(close.info(null_counts=True))
-    open = open.loc[:, close.columns]
-    print(open.info())
-    with pd.HDFStore('alpha_factors.h5') as store:
-        store.put('prices/open', open)
-        store.put('prices/close', close)
