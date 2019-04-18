@@ -46,10 +46,19 @@ def get_wiki_constituents():
 
 # currently broken; fix only available from development branch:
 # https://github.com/pydata/pandas-datareader/pull/591
+# use FRED servide instead
+# def get_sp500_prices():
+#     """Download historical S&P 500 prices from stooq"""
+#     df = pd.read_csv('https://stooq.com/q/d/l/?s=^spx&i=d', parse_dates=['Date'])
+#     df = df.rename(columns=str.lower).set_index('date')
+#     print(df.info())
+#     with pd.HDFStore('assets.h5') as store:
+#         store.put('sp500/prices', df)
+
+
 def get_sp500_prices():
-    """Download historical S&P 500 prices from stooq"""
-    df = pd.read_csv('https://stooq.com/q/d/l/?s=^spx&i=d', parse_dates=['Date'])
-    df = df.rename(columns=str.lower).set_index('date')
+    """Download historical S&P 500 prices from FRED"""
+    df = web.DataReader(name='SP500', data_source='fred', start=2008)
     print(df.info())
     with pd.HDFStore('assets.h5') as store:
         store.put('sp500/prices', df)

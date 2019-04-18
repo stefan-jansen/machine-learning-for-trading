@@ -1,0 +1,7 @@
+## How to size your bets – the Kelly rule
+
+The Kelly rule has a long history in gambling because it provides guidance on how much to stake on each of an (infinite) sequence of bets with varying (but favorable) odds to maximize terminal wealth. It was published as A New Interpretation of the Information Rate in 1956 by John Kelly who was a colleague of Claude Shannon's at Bell Labs. He was intrigued by bets placed on candidates at the new quiz show The $64,000 Question, where a viewer on the west coast used the three-hour delay to obtain insider information about the winners. 
+
+Kelly drew a connection to Shannon's information theory to solve for the bet that is optimal for long-term capital growth when the odds are favorable, but uncertainty remains. His rule maximizes logarithmic wealth as a function of the odds of success of each game, and includes implicit bankruptcy protection since log(0) is negative infinity so that a Kelly gambler would naturally avoid losing everything.
+
+The notebook [kelly_rule](kelly_rule.ipynb) demonstrate the application for the single and multiple asset case. The latter result is also included in the notebook [mean_variance_optimization](../04_efficient_frontier/mean_variance_optimization.ipynb).

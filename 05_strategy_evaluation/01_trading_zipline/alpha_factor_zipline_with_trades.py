@@ -17,6 +17,7 @@ import logbook
 
 from pyfolio.utils import extract_rets_pos_txn_from_zipline
 
+# setup stdout logging
 zipline_logging = logbook.NestedSetup([
     logbook.NullHandler(level=logbook.DEBUG),
     logbook.StreamHandler(sys.stdout, level=logbook.INFO),
@@ -106,23 +107,18 @@ backtest = run_algorithm(start=start,
                          before_trading_start=before_trading_start,
                          capital_base=capital_base)
 
+# depending on the pyfolio version, gross_leverage may also be returned
 returns, positions, transactions = extract_rets_pos_txn_from_zipline(backtest)
-# print(returns.head())
-# print(positions.info())
-# print(transactions.info())
 
 
-id = f'_long_{N_LONGS}_short_{N_SHORTS}_vol_{VOL_SCREEN}'
-with pd.HDFStore('backtests.h5') as store:
-    store.put('backtest' + id, backtest)
-    store.put('returns' + id, returns)
-    store.put('positions' + id, positions)
-    store.put('transactions' + id, transactions)
+print(returns.head())
+print(returns.info())
 
+# print(gross_lev.info())
+# print(gross_lev.head())
 
-exit()
-results_path = Path('results')
-if not results_path.exists():
-    results_path.mkdir(exist_ok=True, parents=True)
-    backtest.to_pickle('results/mean_reversal.pickle')
+print(positions.info())
+print(positions.head())
 
+print(transactions.info())
+print(transactions.head())
