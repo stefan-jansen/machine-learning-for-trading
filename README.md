@@ -40,9 +40,17 @@ This [chapter](02_market_and_fundamental_data) outlines categories and describes
 
 ### 04: Research & Evaluation of Alpha Factors
 
-[Chapter 4](04_alpha_factor_research) provides a framework for understanding how factors work and how to measure their performance, for example using the information coefficient (IC). 
+[Chapter 4](04_alpha_factor_research) provides a framework for understanding how factors work and how to measure their performance, for example using the information coefficient (IC). It demonstrates how to engineer alpha factors from data using Python libraries offline and on the Quantopian platform. It also introduces the `zipline` library to backtest factors and the `alphalens` library to evaluate their predictive power.
 
-It demonstrates how to engineer alpha factors from data using Python libraries offline and on the Quantopian platform. It also introduces the `zipline` library to backtest factors and the `alphalens` library to evaluate their predictive power. 
+We use a simple mean-reversal factor to introduce the algorithmic trading simulator `zipline` that is written in Python and facilitates the testing of alpha factors for a given investment universe. We will also use `zipline` when we backtest trading strategies in a portfolio context in the next chapter. Next, we will discuss key metrics to evaluate the predictive performance of alpha factors, including the information coefficient and the information ratio, which leads to the fundamental law of active management. In particular, this chapter will address the following topics:
+
+- How to characterize, justify and measure key types of alpha factors
+- How to create alpha factors using financial feature engineering
+- How to use zipline offline to test individual alpha factors
+- How to use zipline on Quantopian to combine alpha factors and identify more sophisticated signals
+- How the information coefficient (IC) measures an alpha factor's predictive performance
+- How to use alphalens to evaluate predictive performance and turnover
+ 
 
 ### 05: Strategy Evaluation & Portfolio Management
 
