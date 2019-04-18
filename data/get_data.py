@@ -34,7 +34,6 @@ def get_wiki_constituents():
     3. Extract the .zip file,
     4. Move to this directory and rename to wiki_stocks.csv
     5. Run this function to store in fast HDF format
-        Download and rename to wiki_stocks.csv
     """
     df = pd.read_csv('wiki_stocks.csv')
     df = pd.concat([df.loc[:, 'code'].str.strip(),

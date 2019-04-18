@@ -26,7 +26,6 @@ In an idealized world, categories of risk factors should be independent of each 
 
 - The notebook `feature_engineering.ipynb` in the data directory illustrates how to engineer basic factors.
 
-
 #### References
 
 - [The Barra Equity Risk Model Handbook](https://www.alacra.com/alacra/help/barra_handbook_GEM.pdf)
@@ -40,29 +39,22 @@ In an idealized world, categories of risk factors should be independent of each 
 
 The open source [zipline](http://www.zipline.io/index.html) library is an event-driven backtesting system maintained and used in production by the crowd-sourced quantitative investment fund [Quantopian](https://www.quantopian.com/) to facilitate algorithm-development and live-trading. It automates the algorithm's reaction to trade events and provides it with current and historical point-in-time data that avoids look-ahead bias.
 
-### Code Examples
-
 - `zipline` installation: see [docs](http://www.zipline.io/index.html) and the introduction to `zipline` in [Chapter 2](../02_market_and_fundamental_data/02_data_providers/04_zipline) for more detail.
 
 ## Separating signal and noise – how to use alphalens
 
 This section introduces the [alphalens](http://quantopian.github.io/alphalens/) library for the performance analysis of predictive (alpha) factors.
 
-### The Information Coefficient
-
-### Code Examples
-
 - `alphalens` installation see [docs](http://quantopian.github.io/alphalens/) for detail
 
 Alphalens depends on:
 
--  [`matplotlib`]( <https://github.com/matplotlib/matplotlib)
--  [`numpy`](https://github.com/numpy/numpy)
--  [`pandas`](https://github.com/pydata/pandas)
--  [`scipy`](https://github.com/scipy/scipy)
--  [`seaborn`](https://github.com/mwaskom/seaborn)
--  [`statsmodels`](https://github.com/statsmodels/statsmodels)
-
+-  [matplotlib](https://github.com/matplotlib/matplotlib)
+-  [numpy](https://github.com/numpy/numpy)
+-  [pandas](https://github.com/pydata/pandas)
+-  [scipy](https://github.com/scipy/scipy)
+-  [seaborn](https://github.com/mwaskom/seaborn)
+-  [statsmodels](https://github.com/statsmodels/statsmodels)
 
 ## Alternative Algorithmic Trading Libraries
 
