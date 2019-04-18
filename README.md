@@ -8,7 +8,7 @@ The first part provides a framework for the development of trading strategies dr
 
 ### 01 Machine Learning for Trading
 
-This chapter summarizes how and why ML became central to investment, describes the trading process and outlines how ML can add value. It covers:
+This [chapter](01_machine_learning_for_trading) summarizes how and why ML became central to investment, describes the trading process and outlines how ML can add value. It covers:
 
 - How to read this book
 - The rise of ML in the Investment Industry 
@@ -17,7 +17,7 @@ This chapter summarizes how and why ML became central to investment, describes t
 
 ### 02: Market & Fundamental Data
 
-This chapter introduces market and fundamental data sources and the environment in which they are created. Familiarity with various types of orders and the trading infrastructure matters because they affect backtest simulations of a trading strategy. We also illustrate how to use Python to access and work with trading and financial statement data. 
+This [chapter](02_market_and_fundamental_data) introduces market and fundamental data sources and the environment in which they are created. Familiarity with various types of orders and the trading infrastructure matters because they affect backtest simulations of a trading strategy. We also illustrate how to use Python to access and work with trading and financial statement data. 
 
 In particular, this chapter will cover the following topics:
 - How market microstructure shapes market data
@@ -30,17 +30,23 @@ In particular, this chapter will cover the following topics:
 
 ### 03: Alternative Data for Finance
 
-This chapter outlines categories and describes criteria to assess the exploding number of alternative data sources and providers. It also demonstrates how to create alternative data sets by scraping websites, for example to collect earnings call transcripts for use with natural language processing (NLP) and sentiment analysis algorithms in the second part of the book.
+This [chapter](02_market_and_fundamental_data) outlines categories and describes criteria to assess the exploding number of alternative data sources and providers. It also demonstrates how to create alternative data sets by scraping websites, for example to collect earnings call transcripts for use with natural language processing (NLP) and sentiment analysis algorithms in the second part of the book. More specifically, this chapter covers:
+
+- How the alternative data revolution has unleashed new sources of information
+- How individuals, business processes, and sensors generate alternative data
+- How to evaluate the proliferating supply of alternative data used for algorithmic trading
+- How to work with alternative data in Python, such as by scraping the internet
+- Important categories and providers of alternative data
 
 ### 04: Research & Evaluation of Alpha Factors
 
-Chapter 4 provides a framework for understanding how factors work and how to measure their performance, for example using the information coefficient (IC). 
+[Chapter 4](04_alpha_factor_research) provides a framework for understanding how factors work and how to measure their performance, for example using the information coefficient (IC). 
 
 It demonstrates how to engineer alpha factors from data using Python libraries offline and on the Quantopian platform. It also introduces the `zipline` library to backtest factors and the `alphalens` library to evaluate their predictive power. 
 
 ### 05: Strategy Evaluation & Portfolio Management
 
-In this chapter, we cover 
+In this [chapter](05_strategy_evaluation), we cover 
 - how to build, test and evaluate trading strategies using historical data with `zipline` offline and on the Quantopian platform. 
 - how to compute portfolio performance and risk metrics using the `pyfolio` library. 
 - how to manage methodological challenges of strategy backtests 

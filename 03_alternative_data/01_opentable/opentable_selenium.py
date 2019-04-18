@@ -9,6 +9,7 @@ from selenium import webdriver
 
 
 def parse_html(html):
+    """Parse content from various tags from OpenTable restaurants listing"""
     data, item = pd.DataFrame(), {}
     soup = BeautifulSoup(html, 'lxml')
     for i, resto in enumerate(soup.find_all('div', class_='rest-row-info')):
@@ -30,19 +31,26 @@ def parse_html(html):
     return data.T
 
 
-restaurants = pd.DataFrame()
+# Start selenium and click through pages until reach end
+# store results by iteratively appending to csv file
 driver = webdriver.Firefox()
 url = "https://www.opentable.com/new-york-restaurant-listings"
 driver.get(url)
+page = collected = 0
 while True:
     sleep(1)
     new_data = parse_html(driver.page_source)
     if new_data.empty:
         break
-    restaurants = pd.concat([restaurants, new_data], ignore_index=True)
-    print(len(restaurants))
+    if page == 0:
+        new_data.to_csv('results.csv', index=False)
+    elif page > 0:
+        new_data.to_csv('results.csv', index=False, header=None, mode='a')
+    page += 1
+    collected += len(new_data)
+    print(f'Page: {page} | Downloaded: {collected}')
     driver.find_element_by_link_text('Next').click()
 
 driver.close()
-restaurants.to_csv('results.csv', index=False)
+restaurants = pd.read_csv('results.csv')
 print(restaurants)
