@@ -81,6 +81,15 @@ this [chapter](06_machine_learning_process) sets the stage by outlining how to f
 - Why the nature of financial data requires different approaches to out-of-sample testing
 
 ### 07: Linear Models for Regression & Classification
+
+Linear models are applied to regression and classification problems with the goals of inference and prediction. Numerous asset pricing models that have been developed by academic and industry researchers leverage linear regression. Applications include the identification of significant factors that drive asset returns, for example, as a basis for risk management, as well as the prediction of returns over various time horizons. Classification problems, on the other hand, include directional price forecasts. [Chapter 07](07_linear_models) covers the following topics:
+- How linear regression works and which assumptions it makes
+- How to train and diagnose linear regression models
+- How to use linear regression to predict future returns
+- How use regularization to improve the predictive performance
+- How logistic regression works
+- How to convert a regression into a classification problem
+
 ### 08: Linear Time Series Models
 ### 09: Bayesian Machine Learning
 ### 10: Decision Trees & Random Forests
