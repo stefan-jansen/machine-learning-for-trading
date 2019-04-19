@@ -83,6 +83,7 @@ this [chapter](06_machine_learning_process) sets the stage by outlining how to f
 ### 07: Linear Models for Regression & Classification
 
 Linear models are applied to regression and classification problems with the goals of inference and prediction. Numerous asset pricing models that have been developed by academic and industry researchers leverage linear regression. Applications include the identification of significant factors that drive asset returns, for example, as a basis for risk management, as well as the prediction of returns over various time horizons. Classification problems, on the other hand, include directional price forecasts. [Chapter 07](07_linear_models) covers the following topics:
+
 - How linear regression works and which assumptions it makes
 - How to train and diagnose linear regression models
 - How to use linear regression to predict future returns
@@ -91,6 +92,18 @@ Linear models are applied to regression and classification problems with the goa
 - How to convert a regression into a classification problem
 
 ### 08: Linear Time Series Models
+
+ This [chapter](08_time_series_models) focuses on models that extract signals from previously observed data to predict future values for the same time series. The time dimension of trading makes the application of time series models to market, fundamental, and alternative data very popular. 
+ 
+ We present tools to diagnose time series characteristics, including stationarity, and extract features that capture potential patterns. Then it introduces univariate and multivariate time series models and how to apply them to forecast macro data and volatility patterns. It concludes with the concept of cointegration and how to apply it to develop a pairs trading strategy.
+
+In particular, we will cover the following topics:
+- How to use time series analysis to diagnose diagnostic statistics that inform the modeling process
+- How to estimate and diagnose autoregressive and moving-average time series models
+- How to build Autoregressive Conditional Heteroskedasticity (ARCH) models to predict volatility
+- How to build vector autoregressive models
+- How to use cointegration for a pairs trading strategy
+
 ### 09: Bayesian Machine Learning
 ### 10: Decision Trees & Random Forests
 ### 11: Gradient Boosting Machines
