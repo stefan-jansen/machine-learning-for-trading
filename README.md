@@ -64,7 +64,22 @@ More specifically, in this [chapter](05_strategy_evaluation), we cover
 
 ## Part 2: Machine Learning Fundamentals
 
+The second part covers the fundamental supervised and unsupervised learning algorithms and illustrates their application to trading strategies. It also introduces the Quantopian platform where you can leverage and combine the data and ML techniques developed in this book to implement algorithmic strategies that execute trades in live markets.
+
 ### 06: The Machine Learning Process
+
+this [chapter](06_machine_learning_process) sets the stage by outlining how to formulate, train, tune and evaluate the predictive performance of ML models as a systematic workflow. It covers:
+
+- How supervised and unsupervised learning using data works
+- How to apply the ML workflow
+- How to formulate loss functions for regression and classification
+- How to train and evaluate supervised learning models
+- How the bias-variance trade-off impacts prediction errors
+- How to diagnose and address prediction errors 
+- How to train a model using cross-validation to manage the bias-variance trade-off 
+- How to implement cross-validation using scikit-learn
+- Why the nature of financial data requires different approaches to out-of-sample testing
+
 ### 07: Linear Models for Regression & Classification
 ### 08: Linear Time Series Models
 ### 09: Bayesian Machine Learning
