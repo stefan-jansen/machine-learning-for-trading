@@ -105,6 +105,16 @@ In particular, we will cover the following topics:
 - How to use cointegration for a pairs trading strategy
 
 ### 09: Bayesian Machine Learning
+
+This [chapter](09_bayesian_machine_learning) introduces how Bayesian approaches to machine learning add value when developing and evaluating trading strategies due to their different perspective on uncertainty. More specifically, this chapter covers:
+
+- How Bayesian statistics apply to machine learning
+- How to use probabilistic programming with PyMC3
+- How to define and train machine learning models
+- How to run state-of-the-art sampling methods to conduct approximate inference
+- How to apply Bayesian machine learning to compute dynamic Sharpe ratios, build Bayesian classifiers, and estimate stochastic volatility
+
+
 ### 10: Decision Trees & Random Forests
 ### 11: Gradient Boosting Machines
 ### 12: Unsupervised Learning
