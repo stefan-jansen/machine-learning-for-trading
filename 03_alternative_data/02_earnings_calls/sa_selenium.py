@@ -17,6 +17,7 @@ transcript_path = Path('transcripts')
 
 
 def store_result(meta, participants, content):
+    """Save parse content to csv"""
     path = transcript_path / 'parsed' / meta['symbol']
     if not path.exists():
         path.mkdir(parents=True, exist_ok=True)
@@ -26,6 +27,7 @@ def store_result(meta, participants, content):
 
 
 def parse_html(html):
+    """Main html parser function"""
     date_pattern = re.compile(r'(\d{2})-(\d{2})-(\d{2})')
     quarter_pattern = re.compile(r'(\bQ\d\b)')
     soup = BeautifulSoup(html, 'lxml')

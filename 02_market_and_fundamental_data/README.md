@@ -1,87 +1,40 @@
-# Chapter 02: Market & Fundamental Data
-
-## How to work with Market Data
-###  Market microstructure
-
-- [Trading and Exchanges - Market Microstructure for Practitioners](https://global.oup.com/ushe/product/trading-and-exchanges-9780195144703?cc=us&lang=en&), Larry Harris, Oxford University Press, 2002
-- [World Federation of Exchanges](https://www.world-exchanges.org/our-work/statistics)
-
-### Working with Order Book data
-
-#### The FIX protocol
-
-- [FIX Trading Standards](https://www.fixtrading.org/standards/)
-- Python: [Simplefix](https://github.com/da4089/simplefix)
-- C++ version: [quickfixengine](http://www.quickfixengine.org/)
-- Interactive Brokers [interface](https://www.interactivebrokers.com/en/index.php?f=4988)
-
-#### Nasdaq TotalView-ITCH data
-
-- The ITCH [Specifications](http://www.nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/NQTVITCHspecification.pdf)
-- [Sample Files](ftp://emi.nasdaq.com/ITCH/)
-
-#### Code Examples
-
-- The folder `NASDAQ TotalView ITCH Order Book` contains the notebooks to
-    - download NASDAQ Total View sample tick data,
-    - parse the messages from the binary source data
-    - reconstruct the order book for a given stock
-    - visualize order flow data
-    - normalize tick data
-- Binary Data services: the `struct` [module](https://docs.python.org/3/library/struct.html)
-
-
-#### Other protocols
-
- - Native exchange protocols [around the world](https://en.wikipedia.org/wiki/List_of_electronic_trading_protocols_
-
-### Access to Market Data
-
-#### Remote data access using pandas
-
-- read_html [docs](http://pandas.pydata.org/pandas-docs/stable/generated/pandas.read_html.html?highlight=pandas%20io%20read_html)
-- S&P 500 constituents from [Wikipedia](https://en.wikipedia.org/wiki/List_of_S%26P_500_companies)
-- `pandas-datareader`[docs](https://pandas-datareader.readthedocs.io/en/latest/index.html)
-
-#### Code Examples
-
-The folder `data providers` contains examples to use various data providers.
-
-Relevant sources include:
-
-- Quandl [docs](https://docs.quandl.com/docs) and Python [API](https://www.quandl.com/tools/python﻿)
-- [Quantopian](https://www.quantopian.com/posts)
-- [Zipline](http://www.zipline.io/﻿)
-- [LOBSTER](https://lobsterdata.com/)
-- [The Investor Exchange](https://iextrading.com/﻿)
-- [Money.net](https://www.money.net/)
-- [Trading Economic](https://tradingeconomics.com/)
-- [Barchart](https://www.barchart.com/)
-- [Alpha Vantage](https://www.alphavantage.co/﻿)
-- [Alpha Trading Labs](https://www.alphatradinglabs.com/)
-
-News
-- [Bloomberg and Reuters lose data share to smaller rivals](https://www.ft.com/content/622855dc-2d31-11e8-9b4b-bc4b9f08f381), FT, 2018
-
 ## How to work with Fundamental data
+
+Fundamental data pertains to the economic drivers that determine the value of securities. The nature of the data depends on the asset class:
+- For equities and corporate credit, it includes corporate financials as well as industry and economy-wide data.
+- For government bonds, it includes international macro-data and foreign exchange.
+- For commodities, it includes asset-specific supply-and-demand determinants, such as weather data for crops. 
+
+We will focus on equity fundamentals for the US, where data is easier to access. There are some 13,000+ public companies worldwide that generate 2 million pages of annual reports and 30,000+ hours of earnings calls. In algorithmic trading, fundamental data and features engineered from this data may be used to derive trading signals directly, for example as value indicators, and are an essential input for predictive models, including machine learning models.
+
 
 ### Financial statement data
 
+The Securities and Exchange Commission (SEC) requires US issuers, that is, listed companies and securities, including mutual funds to file three quarterly financial statements (Form 10-Q) and one annual report (Form 10-K), in addition to various other regulatory filing requirements.
+
+Since the early 1990s, the SEC made these filings available through its Electronic Data Gathering, Analysis, and Retrieval (EDGAR) system. They constitute the primary data source for the fundamental analysis of equity and other securities, such as corporate credit, where the value depends on the business prospects and financial health of the issuer. 
+
 #### Automated processing using XBRL markup
 
-- [SEC Standard EDGAR Taxonomies](https://www.sec.gov/info/edgar/edgartaxonomies.shtml)
-- [ EDGAR Public Dissemination Service (PDS)](https://www.sec.gov/oit/announcement/public-dissemination-service-system-contact.html)
-- [SEC Really Simple Syndication (RSS) Feeds](https://www.sec.gov/structureddata/rss-feeds-submitted-filings)
-- [SEC EDGAR index files](https://www.sec.gov/edgar/searchedgar/accessing-edgar-data.htm)
-- [SEC seach traffic log files](https://www.sec.gov/dera/data/edgar-log-file-data-set.html)
+Automated analysis of regulatory filings has become much easier since the SEC introduced XBRL, a free, open, and global standard for the electronic representation and exchange of business reports. XBRL is based on XML; it relies on [taxonomies](https://www.sec.gov/dera/data/edgar-log-file-data-set.html) that define the meaning of the elements of a report and map to tags that highlight the corresponding information in the electronic version of the report. One such taxonomy represents the US Generally Accepted Accounting Principles (GAAP).
+
+The SEC introduced voluntary XBRL filings in 2005 in response to accounting scandals before requiring this format for all filers since 2009 and continues to expand the mandatory coverage to other regulatory filings. The SEC maintains a website that lists the current taxonomies that shape the content of different filings and can be used to extract specific items.
+
+There are several avenues to track and access fundamental data reported to the SEC:
+- As part of the [EDGAR Public Dissemination Service]((https://www.sec.gov/oit/announcement/public-dissemination-service-system-contact.html)) (PDS), electronic feeds of accepted filings are available for a fee. 
+- The SEC updates [RSS feeds](https://www.sec.gov/structureddata/rss-feeds-submitted-filings) every 10 minutes, which list structured disclosure submissions.
+- There are public [index files](https://www.sec.gov/edgar/searchedgar/accessing-edgar-data.htm) for the retrieval of all filings through FTP for automated processing.
+- The financial statement (and notes) datasets contain parsed XBRL data from all financial statements and the accompanying notes.
+
+The SEC also publishes log files containing the [internet search traffic](https://www.sec.gov/dera/data/edgar-log-file-data-set.html) for EDGAR filings through SEC.gov, albeit with a six-month delay.
 
 
 #### Building a fundamental data time series
-- [SEC Financial Statements & Notes Data Set](https://www.sec.gov/dera/data/financial-statement-and-notes-data-set.html)
 
-#### Code Examples
+The scope of the data in the [Financial Statement and Notes](https://www.sec.gov/dera/data/financial-statement-and-notes-data-set.html) datasets consists of numeric data extracted from the primary financial statements (Balance sheet, income statement, cash flows, changes in equity, and comprehensive income) and footnotes on those statements. The data is available as early as 2009.
 
-The folder EDGAR contains the code to download and parse EDGAR data in XBRL format.
+
+The folder [03_sec_edgar](03_sec_edgar) contains the notebook [edgar_xbrl](03_sec_edgar/edgar_xbrl.ipynb) to download and parse EDGAR data in XBRL format, and create fundamental metrics like the P/E ratio by combining financial statement and price data.
 
 ### Other fundamental data sources
 
@@ -92,20 +45,13 @@ The folder EDGAR contains the code to download and parse EDGAR data in XBRL form
 - [Northfield Information Services](www.northinfo.com)
 - [Quantitative Services Group](www.qsg.com)
 
+
 ### Efficient data storage with pandas
 
-#### HDF Format
+We'll be using many different data sets in this book, and it's worth comparing the main formats for efficiency and performance. In particular, we compare the following:
 
-- Pandas [HDF5](http://pandas.pydata.org/pandas-docs/version/0.22/io.html#hdf5-pytables)
-- [HDF Support Portal](http://portal.hdfgroup.org/display/support)
-- PyTables [docs](https://www.pytables.org/)
+- CSV: Comma-separated, standard flat text file format.
+- HDF5: Hierarchical data format, developed initially at the National Center for Supercomputing, is a fast and scalable storage format for numerical data, available in pandas using the PyTables library.
+- Parquet: A binary, columnar storage format, part of the Apache Hadoop ecosystem, that provides efficient data compression and encoding and has been developed by Cloudera and Twitter. It is available for pandas through the pyarrow library, led by Wes McKinney, the original author of pandas.
 
-#### Parquet Format
-
-- Apache Parquet [docs](https://parquet.apache.org/)
-- PyArrow: Parquet for Python [docs](https://arrow.apache.org/docs/python/parquet.html)
-- Development update: High speed Apache Parquet in Python with Apache Arrow by Wes McKinney [blog](http://wesmckinney.com/blog/python-parquet-update/)
-
-
-Latest test: 03-06-2019
-
+The notebook [storage_benchmark](04_storage_benchmark/storage_benchmark.ipynb) in the directory [04_storage_benchmark](04_storage_benchmark) compares the performance of the preceding libraries.
