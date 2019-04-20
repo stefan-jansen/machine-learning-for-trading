@@ -114,8 +114,16 @@ This [chapter](09_bayesian_machine_learning) introduces how Bayesian approaches 
 - How to run state-of-the-art sampling methods to conduct approximate inference
 - How to apply Bayesian machine learning to compute dynamic Sharpe ratios, build Bayesian classifiers, and estimate stochastic volatility
 
-
 ### 10: Decision Trees & Random Forests
+
+This [chapter](10_decision_trees_random_forests) shows how decision trees and random forests can be used for trading. We will see how decision trees learn rules from data that encodes non-linear relationships between the input and the output variables. We also  introduce ensemble models that combine multiple individual models to produce a single aggregate prediction with lower prediction-error variance. In short, in this chapter, we will cover:
+- How to use decision trees for regression and classification
+- How to gain insights from decision trees and visualize the decision rules learned from the data
+- Why ensemble models tend to deliver superior results
+- How bootstrap aggregation addresses the overfitting challenges of decision trees
+- How to train, tune, and interpret random forests
+
+
 ### 11: Gradient Boosting Machines
 ### 12: Unsupervised Learning
 
