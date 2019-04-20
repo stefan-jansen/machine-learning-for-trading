@@ -1,6 +1,10 @@
 # Machine Learning for Algorithmic Trading using Python
 
-The book provides a comprehensive introduction to how ML can add value to the design and execution of algorithmic trading strategies. It is organized in four parts that cover different aspects of the data sourcing and strategy development process, as well as different solutions to various ML challenges.
+This book provides a comprehensive introduction to how ML can add value to the design and execution of algorithmic trading strategies. It was [published](https://www.amazon.com/Hands-Machine-Learning-Algorithmic-Trading-ebook/dp/B07JLFH7C5/ref=sr_1_2?ie=UTF8&qid=1548455634&sr=8-2&keywords=machine+learning+algorithmic+trading) in January 2019 by [Stefan Jansen](https://www.linkedin.com/in/applied-ai/).
+
+It is organized in four parts that cover different aspects of the data sourcing and strategy development process, as well as different solutions to various ML challenges.
+
+For instructions on installing the packages used in the notebooks, see [here](./installation.md).
 
 ## Part 1: How to Design a Trading Strategy
 
@@ -125,7 +129,29 @@ This [chapter](10_decision_trees_random_forests) shows how decision trees and ra
 
 
 ### 11: Gradient Boosting Machines
+
+This chapter explores boosting, an alternative tree-based ensemble algorithm that often produces better results. The key difference is that boosting modifies the data that is used to train each tree based on the cumulative errors made by the model before adding the new tree. In contrast to random forests, which train many trees independently from each other using different versions of the training set, boosting proceeds sequentially using reweighted versions of the data. State-of-the-art boosting implementations also adopt the randomization strategies of random forests. More specifically, in this chapter we will cover the following topics:
+- How boosting works, and how it compares to bagging
+- How boosting has evolved from adaptive to gradient boosting
+- How to use and tune AdaBoost and gradient boosting models with sklearn
+- How state-of-the-art GBM implementations dramatically speed up computation
+- How to prevent overfitting of gradient boosting models
+- How to build, tune, and evaluate gradient boosting models on large datasets using xgboost, lightgbm, and catboost
+- How to interpret and gain insights from gradient boosting models
+
 ### 12: Unsupervised Learning
+
+Dimensionality reduction and clustering are the main tasks for unsupervised learning: 
+- Dimensionality reduction transforms the existing features into a new, smaller set while minimizing the loss of information. A broad range of algorithms exists that differ by how they measure the loss of information, whether they apply linear or non-linear transformations or the constraints they impose on the new feature set. 
+- Clustering algorithms identify and group similar observations or features instead of identifying new features. Algorithms differ in how they define the similarity of observations and their assumptions about the resulting groups.
+
+More specifically, this chapter covers:
+- how principal and independent component analysis perform linear dimensionality reduction
+- how to apply PCA to identify risk factors and eigen portfolios from asset returns 
+- how to use non-linear manifold learning to summarize high-dimensional data for effective visualization
+- how to use T-SNE and UMAP to explore high-dimensional alternative image data
+- how k-Means, hierarchical, and density-based clustering algorithms work
+- how to apply agglomerative clustering to build robust portfolios according to hierarchical risk parity
 
 ## Part 3: Natural Language Processing
 
