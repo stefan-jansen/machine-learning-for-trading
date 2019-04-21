@@ -210,9 +210,19 @@ In the following chapters, we will build on this foundation to design and train 
 - How to implement deep NN using Keras, TensorFlow, and PyTorch
 - How to build and tune a deep NN to predict asset price moves
 
-
 ### 17:	Recurrent Neural Networks
 ### 18:	Convolutional Neural Networks
+
+CNNs are named after the linear algebra operation called convolution that replaces the general matrix multiplication typical of feed-forward networks. Research into CNN architectures has proceeded very rapidly and new architectures that improve performance on some benchmark continue to emerge frequently. CNNs are designed to learn hierarchical feature representations from grid-like data. One of their shortcomings is that they do not learn spatial relationships, i.e., the relative positions of these features. In the last section, we will outline how Capsule Networks work that have emerged to overcome these limitations. 
+More specifically, in this chapter, you will learn:
+
+- How CNNs use key building blocks to efficiently model grid-like data
+- How to design CNN architectures using Keras and PyTorch
+- How to train, tune and regularize CNN for various data types
+- How to use transfer learning to streamline CNN, even with fewer data
+- How Capsule Networks improve on CNN and may enable a new wave of innovation
+
+
 ### 19:	Autoencoders & Generative Adversarial Networks
 ### 20:	Reinforcement Learning
 

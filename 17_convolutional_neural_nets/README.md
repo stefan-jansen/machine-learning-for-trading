@@ -2,7 +2,17 @@
 
 ## How to build a Deep ConvNet
 
+CNNs are conceptually similar to the feedforward NNs we covered in the previous chapter. They consist of units that contain parameters called weights and biases, and the training process adjusts these parameters to optimize the network’s output for a given input. Each unit applies its parameters to a linear operation on the input data or activations received from other units, possibly followed by a non-linear transformation. 
+
+CNNs differ because they encode the assumption that the input has a structure most commonly found in image data where pixels form a two-dimensional grid, typically with several channels to represent the components of the color signal, such as the red, green and blue channels of the RGB color model.
+
+The most important element to encode the assumption of a grid-like topology is the convolution operation that gives CNNs their name, combined with pooling. We will see that the specific assumptions about the functional relationship between input and output data implies that CNNs need far fewer parameters and compute more efficiently.
+
 ### How Convolutional Layers work
+
+Fully-connected feedforwardNNs make no assumptions about the topology, or local structure of the input data so that arbitrarily reordering the features has no impact on the training result.
+
+For many data sources, however, local structure is quite significant. Examples include autocorrelation in time series or the spatial correlation among pixel values due to common patterns like edges or corners. For image data, this local structure has traditionally motivated the development of hand-coded filter methods that extract local patterns for the use as features in machine learning models.
 
 - [Deep Learning](http://www.deeplearningbook.org/contents/convnets.html), Chapter 9, Convolutional Networks, Ian Goodfellow et al, MIT Press, 2016
 - [Convolutional Neural Networks (CNNs / ConvNets)](http://cs231n.github.io/convolutional-networks/#conv), Module 2 in CS231n Convolutional Neural Networks for Visual Recognition, Lecture Notes by Andrew Karpathy, Stanford, 2016
@@ -15,15 +25,20 @@
 
 #### Code examples
 
-
+- the python script [conv_filter_viz](01_conv_filter_viz.py) ([source](https://github.com/keras-team/keras/blob/master/examples/conv_filter_visualization.py))  creates a visualization of the filters learned by a deep CNN using the VGG16 architecture.
+- The notebook [filter_example](01_filter_example.ipynb) illustrates how to use hand-coded filters in a convolutional network and visualize the resulting transformation of the image.
 
 ### Computer Vision Tasks
+
+Image classification is a fundamental computer vision task that requires labeling an image based on certain objects it contains. Many practical applications, including investment and trading strategies, require additional information. 
+- The object detection task requires not only the identification but also the spatial location of all objects of interest, typically using bounding boxes. Several algorithms have been developed to overcome the inefficiency of brute-force sliding-window approaches, including region proposal methods (R-CNN) and the You Only Look Once (YOLO) real-time object detection algorithm (see references on GitHub).
+- The object segmentation task goes a step further and requires a class label and an outline of every object in the input image. This may be useful to count objects in an image and evaluate a level of activity. 
+- Semantic segmentation, also called scene parsing, makes dense predictions to assign a class label to each pixel in the image. As a result, the image is divided into semantic regions and each pixel is assigned to its enclosing object or region.
 
 - [YOLO: Real-Time Object Detection](https://pjreddie.com/darknet/yolo/), You Only Look Once real-time object detection
 - [Rich feature hierarchies for accurate object detection and semantic segmentation](https://arxiv.org/pdf/1311.2524.pdf), Girshick et al, Berkely, arxiv 2014
 - [Playing around with RCNN](https://cs.stanford.edu/people/karpathy/rcnn/), Andrew Karpathy, Stanford
 - [R-CNN, Fast R-CNN, Faster R-CNN, YOLO — Object Detection Algorithms](https://towardsdatascience.com/r-cnn-fast-r-cnn-faster-r-cnn-yolo-object-detection-algorithms-36d53571365e), Rohith Ghandi, 2018
-
 
 ### Reference Architectures & Benchmarks
 
@@ -44,16 +59,69 @@
 - [An Overview of ResNet and its Variants](https://towardsdatascience.com/an-overview-of-resnet-and-its-variants-5281e2f56035), Vincent Fung, 2017
 
 
-## CNN with Keras and PyTorch
+## How to design and train a CNN using Python
 
+### LeNet5 and MNIST using Keras
+
+All libraries we introduced in the last chapter provide support for convolutional layers. The notebook [mnist_with_ffnn_and_lenet5](02_mnist_with_ffnn_and_lenet5.ipynb) illustrates the LeNet5 architecture using the most basic MNIST handwritten digit dataset, and then use AlexNet on CIFAR10, a simplified version of the original ImageNet to demonstrate the use of data augmentation.
+
+### AlexNet and CIFAR10 with Keras
+
+Fast-forward to 2012, and we move on to the deeper and more modern AlexNet architecture. We will use the CIFAR10 dataset that uses 60,000 ImageNet samples, compressed to 32x32 pixel resolution (from the original 224x224), but still with three color channels. There are only 10 of the original 1,000 classes. See the notebook [cifar10_image_classification](03_cifar10_image_classification.ipynb) for implementation. 
+
+### How to use CNN with time series data
+
+The regular measurements of time series result in a similar grid-like data structure as for the image data we have focused on so far. As a result, we can use CNN architectures for univariate and multivariate time series. In the latter case, we consider different time series as channels, similar to the different color signals.
+
+The notebook [cnn_with_time_series](04_cnn_with_time_series.ipynb) illustrates the time series use case with the univariate asset price forecast example we introduced in the last chapter. Recall that we create rolling monthly stock returns and use the 24 lagged returns alongside one-hot-encoded month information to predict whether the subsequent monthly return is positive or negative.
 
 ## Transfer Learning
+
+In practice, we often do not have enough data to train a CNN from scratch with random initialization. Transfer learning is a machine learning technique that repurposes a model trained on one set of data for another task. Naturally, it works if the learning from the first task carries over to the task of interest. If successful, it can lead to better performance and faster training that requires less labeled data than training a neural network from scratch on the target task.
 
 - [Building powerful image classification models using very little data](https://blog.keras.io/building-powerful-image-classification-models-using-very-little-data.html)
 - [How transferable are features in deep neural networks?](https://papers.nips.cc/paper/5347-how-transferable-are-features-in-deep-neural-networks.pdf), Jason Yosinski, Jeff Clune, Yoshua Bengio, and Hod Lipson, NIPS, 2014
 - [PyTorch Transfer Learning Tutorial](https://pytorch.org/tutorials/beginner/transfer_learning_tutorial.html)
 
+### How to build on a pre-trained CNN
+
+The transfer learning approach to CNN relies on pre-training on a very large dataset like ImageNet. The goal is that the convolutional filters extract a feature representation that generalizes to new images. In a second step, it leverages the result to either initialize and retrain a new CNN or as inputs to in a new network that tackles the task of interest.
+
+CNN architectures typically use a sequence of convolutional layers to detect hierarchical patterns, adding one or more fully-connected layers to map the convolutional activations to the outcome classes or values. The output of the last convolutional layer that feeds into the fully-connected part is called bottleneck features. We can use the bottleneck features of a pre-trained network as inputs into a new fully-connected network, usually after applying a ReLU activation function. 
+
+In other words, we freeze the convolutional layers and replace the dense part of the network. An additional benefit is that we can then use inputs of different sizes because it is the dense layers that constrain the input size. 
+
+Alternatively, we can use the bottleneck features as inputs into a different machine learning algorithm. In the AlexNet architecture, e.g., the bottleneck layer computes a vector with 4096 entries for each 224 x 224 input image. We then use this vector as features for a new model.
+
+Alternatively, we can go a step further and not only replace and retrain the classifier on top of the CNN using new data but to also fine-tune the weights of the pre-trained CNN. To achieve this, we continue training, either only for later layers while freezing the weights of some earlier layers. The motivation is to preserve presumably more generic patterns learned by lower layers, such as edge or color blob detectors while allowing later layers of the CNN to adapt to the details of a new task. ImageNet, e.g., contains a wide variety of dog breeds which may lead to feature representations specifically useful for differentiating between these classes.
+
+### How to extract bottleneck features
+
+Modern CNNs can take weeks to train on multiple GPUs on ImageNet, but fortunately, many researchers share their final weights. Keras, e.g., contains pre-trained models for several of the reference architectures discussed above, namely VGG16 and 19, ResNet50, InceptionV3 and InceptionResNetV2, MobileNet, DenseNet, NASNet and MobileNetV2
+
+The notebook [bottleneck_features](05_bottleneck_features.ipynb) illustrates how to download pre-trained VGG16 model, either with the final layers to generate predictions or without the final layers as illustrated in the figure below to extract the outputs produced by the bottleneck features.
+
+### How to further train a pre-trained model
+
+The notebook [transfer_learning](06_transfer_learning.ipynb) demonstrates how to freeze some or all of the layers of a pre-trained model and continue training using a new fully-connected set of layers and data with a different format.
+
+## How to detect objects
+
+Object detection requires the ability to distinguish between several classes of objects and to decide how many and which of these objects are present in an image.
+
+### Google Street View Housenumber Dataset
+
+ A prominent example is Ian Goodfellow’s identification of house numbers from Google’s street view dataset. It requires to identify 
+- how many of up to five digits make up the house number, 
+- The correct digit for each component, and
+- The proper order of the constituent digits.
+
+The notebooks [svhn_preprocessing](07_svhn_preprocessing.ipynb) contains code to produce a simplified, cropped dataset that uses bounding box information to create regularly shaped 32x32 images containing the digits; the original images are of arbitrary shape.
+
+The notebook [svhn_object_detection](08_svhn_object_detection.ipynb) goes on to illustrate how to build a deep CNN using Keras’ functional API to generate multiple outputs: one to predict how many digits are present, and five for the value of each in the order they appear.
+
 ## Capsule Nets
+
 - [Dynamic Routing Between Capsules](https://arxiv.org/abs/1710.09829), Sara Sabour, Nicholas Frosst, Geoffrey E Hinton, arxiv, 2017
 
 ## Resources
