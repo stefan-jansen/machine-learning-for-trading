@@ -199,6 +199,18 @@ Embeddings result from training a model to relate tokens to their context with t
 ## Part 4: Deep & Reinforcement Learning
 
 ### 16:	Deep Learning
+
+The chapter presents feedforward neural networks (NN) to demonstrate how to efficiently train large models using backpropagation, and manage the risks of overfitting. It also shows how to use of the frameworks Keras, TensorFlow 2.0, and PyTorch.
+
+In the following chapters, we will build on this foundation to design and train a variety of architectures suitable for different investment applications with a particular focus on alternative data sources. These include recurrent NN tailored to sequential data like time series or natural language and convolutional NN particularly well suited to image data. We will also cover deep unsupervised learning, including Generative Adversarial Networks (GAN) to create synthetic data and reinforcement learning to train agents that interactively learn from their environment. In particular, this chapter will cover
+- How DL solves AI challenges in complex domains
+- How key innovations have propelled DL to its current popularity
+- How feed-forward networks learn representations from data
+- How to design and train deep neural networks in Python
+- How to implement deep NN using Keras, TensorFlow, and PyTorch
+- How to build and tune a deep NN to predict asset price moves
+
+
 ### 17:	Recurrent Neural Networks
 ### 18:	Convolutional Neural Networks
 ### 19:	Autoencoders & Generative Adversarial Networks
