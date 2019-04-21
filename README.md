@@ -211,6 +211,16 @@ In the following chapters, we will build on this foundation to design and train 
 - How to build and tune a deep NN to predict asset price moves
 
 ### 17:	Recurrent Neural Networks
+
+The major innovation of RNN is that each output is a function of both previous output and new data. As a result, RNN gain the ability to incorporate information on previous observations into the computation it performs on a new feature vector, effectively creating a model with memory. This recurrent formulation enables parameter sharing across a much deeper computational graph that includes cycles. Prominent architectures include Long Short-Term Memory (LSTM) and Gated Recurrent Units (GRU) that aim to overcome the challenge of vanishing gradients associated with learning long-range dependencies, where errors need to be propagated over many connections. 
+
+RNNs have been successfully applied to various tasks that require mapping one or more input sequences to one or more output sequences and are particularly well suited to natural language. RNN can also be applied to univariate and multivariate time series to predict market or fundamental data. This chapter covers how RNN can model alternative text data using the word embeddings that we covered in [Chapter 15](15_word_embeddings) to classify the sentiment expressed in documents. Most specifically, this chapter addresses:
+- How to unroll and analyze the computational graph for an RNN
+- How gated units learn to regulate an RNN’s memory from data to enable long-range dependencies
+- How to design and train RNN for univariate and multivariate time series in Python
+- How to leverage word embeddings for sentiment analysis with RNN
+
+
 ### 18:	Convolutional Neural Networks
 
 CNNs are named after the linear algebra operation called convolution that replaces the general matrix multiplication typical of feed-forward networks. Research into CNN architectures has proceeded very rapidly and new architectures that improve performance on some benchmark continue to emerge frequently. CNNs are designed to learn hierarchical feature representations from grid-like data. One of their shortcomings is that they do not learn spatial relationships, i.e., the relative positions of these features. In the last section, we will outline how Capsule Networks work that have emerged to overcome these limitations. 
