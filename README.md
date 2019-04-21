@@ -155,9 +155,46 @@ More specifically, this chapter covers:
 
 ## Part 3: Natural Language Processing
 
+Text data are rich in content, yet unstructured in format and hence require more preprocessing so that a machine learning algorithm can extract the potential signal. The key challenge consists in converting text into a numerical format for use by an algorithm, while simultaneously expressing the semantics or meaning of the content. We will cover several techniques that capture nuances of language readily understandable to humans so that they can be used as input for machine learning algorithms.
+
 ### 13:	Working with Text Data
+
+In this chapter, we will introduce fundamental feature extraction techniques that focus on individual semantic units, i.e. words or short groups of words called tokens. We will show how to represent documents as vectors of token counts by creating a document-term matrix that in turn serves as input for text classification and sentiment analysis. We will also introduce the Naive Bayes algorithm that is popular for this purpose. 
+
+In particular, in this chapter we will cover:
+- What the NLP workflow looks like
+- How to build a multilingual feature extraction pipeline using spaCy and Textblob
+- How to perform NLP tasks like parts-of-speech tagging or named entity recognition
+- How to convert tokens to numbers using the document-term matrix
+- How to classify text using the Naive Bayes model
+- How to perform sentiment analysis
+
 ### 14:	Topic Modeling
+
+This chapter uses unsupervised learning to model latent topics and extract hidden themes from documents. These themes can produce detailed insights into a large body of documents in an automated way. They are very useful to understand the haystack itself and permit the concise tagging of documents because using the degree of association of topics and documents. 
+
+Topic models permit the extraction of sophisticated, interpretable text features that can be used in various ways to extract trading signals from large collections of documents. They speed up the review of documents, help identify and cluster similar documents, and can be annotated as a basis for predictive modeling. Applications include the identification of key themes in company disclosures or earnings call transcripts, customer reviews or contracts, annotated using, e.g., sentiment analysis or direct labeling with subsequent asset returns. More specifically, this chapter covers:
+- What topic modeling achieves, why it matters and how it has evolved
+- How Latent Semantic Indexing (LSI) reduces the dimensionality of the DTM
+- How probabilistic Latent Semantic Analysis (pLSA) uses a generative model to extract topics
+- How Latent Dirichlet Allocation (LDA) refines pLSA and why it is the most popular topic model
+- How to visualize and evaluate topic modeling results
+- How to implement LDA using sklearn and gensim
+- How to apply topic modeling to collections of earnings calls and Yelp business reviews
+
 ### 15:	Word Vector Embeddings
+
+This chapter introduces uses neural networks to learn a vector representation of individual semantic units like a word or a paragraph. These vectors are dense rather than sparse as in the bag-of-words model and have a few hundred real-valued rather than tens of thousand binary or discrete entries. They are called embeddings because they assign each semantic unit a location in a continuous vector space.
+ 
+Embeddings result from training a model to relate tokens to their context with the benefit that similar usage implies a similar vector. As a result, the embeddings encode semantic aspects like relationships among words by means of their relative location. They are powerful features for use in the deep learning models that we will introduce in the following chapters. More specifically, in this chapter, we will cover:
+- What word embeddings are, how they work and capture semantic information
+- How to use trained word vectors
+- Which network architectures are useful to train word2vec models
+- How to train a word2vec model using keras, gensim, and TensorFlow
+- How to visualize and evaluate the quality of word vectors
+- How to train a word2vec model using SEC filings
+- How doc2vec extends word2vec
+
 
 ## Part 4: Deep & Reinforcement Learning
 
