@@ -1,4 +1,4 @@
-# Chapter 10: Gradient Boosting Machines
+# Chapter 11: Gradient Boosting Machines
 
 This chapter explores boosting, another ensemble learning algorithm typically based on decision trees that often produces even better results the [Random Forests](../10_decision_trees_random_forests). 
 
@@ -14,7 +14,6 @@ In this chapter, we will see how boosting has evolved into one of the most succe
 - How to build, tune, and evaluate gradient boosting models on large datasets using xgboost, lightgbm, and catboost
 - How to interpret and gain insights from gradient boosting models
 
-[](../10_decision_trees_random_forests/02_random_forest.ipynb)
 ## Adaptive Boosting
 
 Like bagging, boosting combines base learners into an ensemble. Boosting was initially developed for classification problems, but can also be used for regression, and has been called one of the most potent learning ideas introduced in the last 20 years (as described in [Elements of Statistical Learning](http://web.stanford.edu/~hastie/ElemStatLearn/) by Trevor Hastie, et al). Like bagging, it is a general method or metamethod that can be applied to many statistical learning models.

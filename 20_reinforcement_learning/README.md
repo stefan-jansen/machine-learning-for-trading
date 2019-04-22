@@ -1,11 +1,127 @@
-# Chapter 19: Reinforcement Learning
+# Chapter 20: Reinforcement Learning
 
-## Overview
+Reinforcement Learning (RL) is a computational approach to goal-directed learning performed by an agent that interacts with a typically stochastic environment which the agent has incomplete information about. RL aims to automate how the agent makes decisions to achieve a long-term objective by learning the value of states and actions from a reward signal. The ultimate goal is to derive a policy that encodes behavioral rules and maps states to actions.
+
+This [chapter](20_reinforcement_learning) shows how to formulate an RL problem and how to apply various solution methods. It covers model-based and model-free methods, introduces the [OpenAI Gym](https://gym.openai.com/) environment, and combines deep learning with RL to train an agent that navigates a complex environment. Finally, we'll show you how to adapt RL to algorithmic trading by modeling an agent that interacts with the financial market while trying to optimize an objective function. 
+
+More specifically,this chapter will cover:
+
+- How to define a Markov Decision Problem (MDP)
+- How to use Value and Policy Iteration to solve an MDP
+- How to apply Q-learning in an environment with discrete states and actions
+- How to build and train a deep Q-learning agent in a continuous environment
+- How to use OpenAI Gym to train an RL trading agent
+
+## Key elements of RL
+
+RL problems aim to optimize an agent's decisions based on an objective function vis-a-vis an environment. The environment presents information about its state to the agent, assigns rewards for actions, and transitions the agent to new states subject to probability distributions the agent may or may not know about. It may be fully or partially observable, and may also contain other agents. The design of the environment typically requires significant up-front design effort to facilitate goal-oriented learning by the agent during training.
+
+RL problems differ by the complexity of their state and action spaces that can be either discrete or continuous. The latter requires ML to approximate a functional relationship between states, actions, and their value. They also require us to generalize from the subset of states and actions they are experienced by the agent during training.
+
+### Components of an interactive RL system
+
+The components of an RL system typically include:
+
+- Observations by the agent of the state of the environment
+- A set of actions that are available to the agent
+- A policy that governs the agent's decisions
+
+In addition, the environment emits a reward signal that reflects the new state resulting from the agent's action. At the core, the agent usually learns a value function that shapes its judgment over actions. The agent has an objective function to process the reward signal and translate the value judgments into an optimal policy.
 
 - [Reinforcement Learning: An Introduction, 2nd eition](http://incompleteideas.net/book/RLbook2018.pdf), Richard S. Sutton and Andrew G. Barto, 2018
-- []
+- [University College of Longon Course on Reinforcement Learning](http://www0.cs.ucl.ac.uk/staff/d.silver/web/Teaching.html), David Silver, 2015
 
-## RL Algorithms
+
+## How to solve RL problems
+
+RL methods aim to learn from experience on how to take actions that achieve a long-term goal. To this end, the agent and the environment interact over a sequence of discrete time steps via the interface of actions, state observations, and rewards that we described in the previous section.
+
+### Fundamental approaches to solving RL problems
+
+There are numerous approaches to solving RL problems which implies finding rules for the agent's optimal behavior:
+
+- **Dynamic programming** (DP) methods make the often unrealistic assumption of complete knowledge of the environment, but are the conceptual foundation for most other approaches.
+- **Monte Carlo** (MC) methods learn about the environment and the costs and benefits of different decisions by sampling entire state-action-reward sequences.
+- **Temporal difference** (TD) learning significantly improves sample efficiency by learning from shorter sequences. To this end, it relies on bootstrapping, which is defined as refining its estimates based on its own prior estimates.
+
+Approaches for continuous state and/or action spaces often leverage ML to approximate a value or policy function. Hence, they integrate supervised learning, and in particular, the deep learning methods we discussed in the last several chapters. However, these methods face distinct challenges in the RL context:
+
+- The reward signal does not directly reflect the target concept, such as a labeled sample
+- The distribution of the observations depends on the agent's actions and the policy which is itself the subject of the learning process
+
+## Dynamic programming – value and policy iteration
+
+Finite MDPs are a simple yet fundamental framework. This section introduces the trajectories of rewards that the agent aims to optimize, and define the policy and value functions they are used to formulate the optimization problem and the Bellman equations that form the basis for the solution methods.
+
+### Dynamic programming in Python
+
+The notebook [ridworld_dynamic_programming](01_gridworld_dynamic_programming.ipynb) applies Value and Policy Iteration to a toy environment that consists of a 3 x 4 grid.
+
+## Q-Learning
+
+Q-learning was an early RL breakthrough when it was developed by Chris Watkins for his [PhD thesis]((http://www.cs.rhul.ac.uk/~chrisw/thesis.html)) in 1989 . It introduces incremental dynamic programming to control an MDP without knowing or modeling the transition and reward matrices that we used for value and policy iteration in the previous section. A convergence proof followed three years later by [Watkins and Dayan](http://www.gatsby.ucl.ac.uk/~dayan/papers/wd92.html).
+
+### The Q-learning algorithm
+
+Q-learning directly optimizes the action-value function, q, to approximate q*. The learning proceeds off-policy, that is, the algorithm does not need to select actions based on the policy that's implied by the value function alone. However, convergence requires that all state-action pairs continue to be updated throughout the training process. A straightforward way to ensure this is by using an ε-greedy policy.
+
+The Q-learning algorithm keeps improving a state-action value function after random initialization for a given number of episodes. At each time step, it chooses an action based on an ε-greedy policy, and uses a learning rate, α, to update the value function based on the reward  and its current estimate of the value function for the next state.
+
+### Training a Q-learning agent using Python
+
+The notebook [gridworld_q_learning](02_gridworld_q_learning.ipynb) demonstrates how to build a Q-learning agent using the 3 x 4 grid of states from the previous section.
+
+## Deep Reinforcement Learning
+
+This section adapts Q-Learning to continuous states and actions where we cannot use the tabular solution that simply fills an array with state-action values. Instead, we will see how to approximate the optimal state-value function using a neural network to build a deep Q network with various refinements to accelerate convergence. We will then see how we can use the [OpenAI Gym](http://gym.openai.com/docs/) to apply the algorithm to the [Lunar Lander](https://gym.openai.com/envs/LunarLander-v2) environment.
+
+### Value function approximation with neural networks
+
+As in other fields, deep neural networks have become popular for approximating value functions. However, ML faces distinct challenges in the RL context where the data is generated by the interaction of the model with the environment using a (possibly randomized) policy:
+
+- With continuous states, the agent will fail to visit most states and, thus, needs to generalize.
+- Supervised learning aims to generalize from a sample of independently and identically distributed samples that are representative and correctly labeled. In the RL context, there is only one sample per time step so that learning needs to occur online.
+- Samples can be highly correlated when sequential states are similar and the behavior distribution over states and actions is not stationary, but changes as a result of the agent's learning.
+
+### The Deep Q-learning algorithm and extensions
+
+Deep Q learning estimates the value of the available actions for a given state using a deep neural network. It was introduced by Deep Mind's [Playing Atari with Deep Reinforcement Learning](https://www.cs.toronto.edu/~vmnih/docs/dqn.pdf) (2013), where RL agents learned to play games solely from pixel input.
+
+The deep Q-learning algorithm approximates the action-value function, q, by learning a set of weights, θ, of a multi-layered Deep Q Network (DQN) that maps states to actions.
+
+Several innovations have improved the accuracy and convergence speed of deep Q-Learning, namely:
+- **Experience replay** stores a history of state, action, reward, and next state transitions and randomly samples mini-batches from this experience to update the network weights at each time step before the agent selects an ε-greedy action. It increases sample efficiency, reduces the autocorrelation of samples, and limits the feedback due to the current weights producing training samples that can lead to local minima or divergence.
+- **Slowly-changing target network** weakens the feedback loop from the current network parameters on the neural network weight updates. Also invented by by Deep Mind in [Human-level control through deep reinforcement learning](https://web.stanford.edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf) (2015), it use a slowly-changing target network that has the same architecture as the Q-network, but its weights are only updated periodically. The target network generates the predictions of the next state value used to update the Q-Networks estimate of the current state's value.
+- **Double deep Q-learning** addresses the bias of deep Q-Learning to overestimate action values because it purposely samples the highest action value. This bias can negatively affect the learning process and the resulting policy if it does not apply uniformly , as shown by Hado van Hasselt in [Deep Reinforcement Learning with Double Q-learning](https://arxiv.org/abs/1509.06461) (2015). To decouple the estimation of action values from the selection of actions, Double Deep Q-Learning (DDQN) uses the weights, of one network to select the best action given the next state, and the weights of another network to provide the corresponding action value estimate.
+
+### The Open AI Gym – the Lunar Lander environment
+
+The [OpenAI Gym](https://gym.openai.com/) is a RL platform that provides standardized environments to test and benchmark RL algorithms using Python. It is also possible to extend the platform and register custom environments.
+
+The [Lunar Lander](https://gym.openai.com/envs/LunarLander-v2) (LL) environment requires the agent to control its motion in two dimensions, based on a discrete action space and low-dimensional state observations that include position, orientation, and velocity. At each time step, the environment provides an observation of the new state and a positive or negative reward. Each episode consists of up to 1,000 time steps.
+
+### Double Deep Q-Learning using Tensorflow
+
+The [lunar_lander_deep_q_learning](03_lunar_lander_deep_q_learning.ipynb) notebook implements a DDQN agent that uses TensorFlow and Open AI Gym's Lunar Lander environment.
+
+## Reinforcement Learning for trading
+
+To train a trading agent, we need to create a market environment that provides price and other information, offers trading-related actions, and keeps track of the portfolio to reward the agent accordingly.
+
+### How to Design an OpenAI trading environment
+
+The OpenAI Gym allows for the design, registration, and utilization of environments that adhere to its architecture, as described in its [documentation](https://github.com/openai/gym/tree/master/gym/envs#how-to-create-new-environments-for-gym). The [trading_env.py](trading_env.py) file implements an example that illustrates how to create a class that implements the requisite `step()` and `reset()` methods.
+
+The trading environment consists of three classes that interact to facilitate the agent's activities:
+ 1. The `DataSource` class loads a time series, generates a few features, and provides the latest observation to the agent at each time step. 
+ 2. `TradingSimulator` tracks the positions, trades and cost, and the performance. It also implements and records the results of a buy-and-hold benchmark strategy. 
+ 3. `TradingEnvironment` itself orchestrates the process. 
+ 
+ ### How to build a Deep Q-learning agent for the stock market
+ 
+ The notebook [q_learning_for_trading](04_q_learning_for_trading.ipynb) demonstrates how to set up a simple game with a limited set of options, a relatively low-dimensional state, and other parameters that can be easily modified and extended o train the same Deep Q-Learning agent used in [lunar_lander_deep_q_learning](03_lunar_lander_deep_q_learning.ipynb).
+ 
+## RL Algorithms - References
 
 - Q Learning
     - [Learning from Delayed Rewards](http://www.cs.rhul.ac.uk/~chrisw/thesis.html), PhD Thesis, Chris Watkins, 1989

@@ -34,7 +34,7 @@ In particular, this chapter will cover the following topics:
 
 ### 03: Alternative Data for Finance
 
-This [chapter](02_market_and_fundamental_data) outlines categories and describes criteria to assess the exploding number of alternative data sources and providers. It also demonstrates how to create alternative data sets by scraping websites, for example to collect earnings call transcripts for use with natural language processing (NLP) and sentiment analysis algorithms in the second part of the book. More specifically, this chapter covers:
+This [chapter](03_alternative_data) outlines categories and describes criteria to assess the exploding number of alternative data sources and providers. It also demonstrates how to create alternative data sets by scraping websites, for example to collect earnings call transcripts for use with natural language processing (NLP) and sentiment analysis algorithms in the second part of the book. More specifically, this chapter covers:
 
 - How the alternative data revolution has unleashed new sources of information
 - How individuals, business processes, and sensors generate alternative data
@@ -130,14 +130,16 @@ This [chapter](10_decision_trees_random_forests) shows how decision trees and ra
 
 ### 11: Gradient Boosting Machines
 
-This chapter explores boosting, an alternative tree-based ensemble algorithm that often produces better results. The key difference is that boosting modifies the data that is used to train each tree based on the cumulative errors made by the model before adding the new tree. In contrast to random forests, which train many trees independently from each other using different versions of the training set, boosting proceeds sequentially using reweighted versions of the data. State-of-the-art boosting implementations also adopt the randomization strategies of random forests. More specifically, in this chapter we will cover the following topics:
+This [chapter](11_gradient_boosting_machines) explores boosting, an alternative tree-based ensemble algorithm that often produces better results. The key difference is that boosting modifies the data that is used to train each tree based on the cumulative errors made by the model before adding the new tree. In contrast to random forests, which train many trees independently from each other using different versions of the training set, boosting proceeds sequentially using reweighted versions of the data. State-of-the-art boosting implementations also adopt the randomization strategies of random forests. 
+
+More specifically, in this chapter we will cover the following topics:
 - How boosting works, and how it compares to bagging
-- How boosting has evolved from adaptive to gradient boosting
-- How to use and tune AdaBoost and gradient boosting models with sklearn
-- How state-of-the-art GBM implementations dramatically speed up computation
-- How to prevent overfitting of gradient boosting models
-- How to build, tune, and evaluate gradient boosting models on large datasets using xgboost, lightgbm, and catboost
-- How to interpret and gain insights from gradient boosting models
+- How boosting has evolved from adaptive to gradient boosting (GB)
+- How to use and tune AdaBoost and GB models with sklearn
+- How state-of-the-art GB implementations speed up computation
+- How to prevent overfitting of GB models
+- How to build, tune, and evaluate GB models using xgboost, lightgbm, and catboost
+- How to interpret and gain insights from GM models using [SHAP](https://github.com/slundberg/shap) values
 
 ### 12: Unsupervised Learning
 
@@ -145,7 +147,7 @@ Dimensionality reduction and clustering are the main tasks for unsupervised lear
 - Dimensionality reduction transforms the existing features into a new, smaller set while minimizing the loss of information. A broad range of algorithms exists that differ by how they measure the loss of information, whether they apply linear or non-linear transformations or the constraints they impose on the new feature set. 
 - Clustering algorithms identify and group similar observations or features instead of identifying new features. Algorithms differ in how they define the similarity of observations and their assumptions about the resulting groups.
 
-More specifically, this chapter covers:
+More specifically, this [chapter](12_unsupervised_learning) covers:
 - how principal and independent component analysis perform linear dimensionality reduction
 - how to apply PCA to identify risk factors and eigen portfolios from asset returns 
 - how to use non-linear manifold learning to summarize high-dimensional data for effective visualization
@@ -159,9 +161,9 @@ Text data are rich in content, yet unstructured in format and hence require more
 
 ### 13:	Working with Text Data
 
-In this chapter, we will introduce fundamental feature extraction techniques that focus on individual semantic units, i.e. words or short groups of words called tokens. We will show how to represent documents as vectors of token counts by creating a document-term matrix that in turn serves as input for text classification and sentiment analysis. We will also introduce the Naive Bayes algorithm that is popular for this purpose. 
+This [chapter](13_working_with_text_data) introduces text feature extraction techniques that focus on individual semantic units, i.e. words or short groups of words called tokens. We will show how to represent documents as vectors of token counts by creating a document-term matrix that in turn serves as input for text classification and sentiment analysis. We will also introduce the Naive Bayes algorithm that is popular for this purpose. 
 
-In particular, in this chapter we will cover:
+In particular, in this chapter covers:
 - What the NLP workflow looks like
 - How to build a multilingual feature extraction pipeline using spaCy and Textblob
 - How to perform NLP tasks like parts-of-speech tagging or named entity recognition
@@ -210,7 +212,20 @@ In the following chapters, we will build on this foundation to design and train 
 - How to implement deep NN using Keras, TensorFlow, and PyTorch
 - How to build and tune a deep NN to predict asset price moves
 
-### 17:	Recurrent Neural Networks
+### 17:	Convolutional Neural Networks
+
+CNNs are named after the linear algebra operation called convolution that replaces the general matrix multiplication typical of feed-forward networks. Research into CNN architectures has proceeded very rapidly and new architectures that improve performance on some benchmark continue to emerge frequently. CNNs are designed to learn hierarchical feature representations from grid-like data. One of their shortcomings is that they do not learn spatial relationships, i.e., the relative positions of these features. In the last section, we will outline how Capsule Networks work that have emerged to overcome these limitations. 
+
+More specifically, this [chapter](17_convolutional_neural_nets) covers
+
+- How CNNs use key building blocks to efficiently model grid-like data
+- How to design CNN architectures using Keras and PyTorch
+- How to train, tune and regularize CNN for various data types
+- How to use transfer learning to streamline CNN, even with fewer data
+- How Capsule Networks improve on CNN and may enable a new wave of innovation
+
+
+### 18:	Recurrent Neural Networks
 
 The major innovation of RNN is that each output is a function of both previous output and new data. As a result, RNN gain the ability to incorporate information on previous observations into the computation it performs on a new feature vector, effectively creating a model with memory. This recurrent formulation enables parameter sharing across a much deeper computational graph that includes cycles. Prominent architectures include Long Short-Term Memory (LSTM) and Gated Recurrent Units (GRU) that aim to overcome the challenge of vanishing gradients associated with learning long-range dependencies, where errors need to be propagated over many connections. 
 
@@ -221,20 +236,33 @@ RNNs have been successfully applied to various tasks that require mapping one or
 - How to leverage word embeddings for sentiment analysis with RNN
 
 
-### 18:	Convolutional Neural Networks
-
-CNNs are named after the linear algebra operation called convolution that replaces the general matrix multiplication typical of feed-forward networks. Research into CNN architectures has proceeded very rapidly and new architectures that improve performance on some benchmark continue to emerge frequently. CNNs are designed to learn hierarchical feature representations from grid-like data. One of their shortcomings is that they do not learn spatial relationships, i.e., the relative positions of these features. In the last section, we will outline how Capsule Networks work that have emerged to overcome these limitations. 
-More specifically, in this chapter, you will learn:
-
-- How CNNs use key building blocks to efficiently model grid-like data
-- How to design CNN architectures using Keras and PyTorch
-- How to train, tune and regularize CNN for various data types
-- How to use transfer learning to streamline CNN, even with fewer data
-- How Capsule Networks improve on CNN and may enable a new wave of innovation
-
-
 ### 19:	Autoencoders & Generative Adversarial Networks
+
+This [chapter](19_deep_unsupervised_learning) presents two unsupervised learning techniques that leverage deep learning: autoencoders, which have been around for decades, and Generative Adversarial Networks (GANs), which were introduced by Ian Goodfellow in 2014 and which Yann LeCun has called the most exciting idea in AI in the last ten years. 
+- An autoencoder is a neural network trained to reproduce the input while learning a new representation of the data, encoded by the parameters of a hidden layer. Autoencoders have long been used for nonlinear dimensionality reduction and manifold learning. More recently, autoencoders have been designed as generative models that learn probability distributions over observed and latent variables. A variety of designs leverage the feedforward network, Convolutional Neural Network (CNN), and recurrent neural network (RNN) architectures we covered in the last three chapters.
+- GANs are a recent innovation that train two neural nets—a generator and a discriminator—in a competitive setting. The generator aims to produce samples that the discriminator is unable to distinguish from a given class of training data. The result is a generative model capable of producing new (fake) samples that are representative of a certain target distribution. GANs have produced a wave of research and can be successfully applied in many domains. An example from the medical domain that could potentially be highly relevant for trading is the generation of time-series data that simulates alternative trajectories and can be used to train supervised or reinforcement algorithms.
+
+More specifically, this chapter covers:
+
+- Which types of autoencoders are of practical use and how they work
+- How to build and train autoencoders using Python
+- How GANs work, why they're useful, and how they could be applied to trading
+- How to build GANs using Python
+
+
 ### 20:	Reinforcement Learning
+
+Reinforcement Learning (RL) is a computational approach to goal-directed learning performed by an agent that interacts with a typically stochastic environment which the agent has incomplete information about. RL aims to automate how the agent makes decisions to achieve a long-term objective by learning the value of states and actions from a reward signal. The ultimate goal is to derive a policy that encodes behavioral rules and maps states to actions.
+
+This [chapter](20_reinforcement_learning) shows how to formulate an RL problem and how to apply various solution methods. It covers model-based and model-free methods, introduces the [OpenAI Gym](https://gym.openai.com/) environment, and combines deep learning with RL to train an agent that navigates a complex environment. Finally, we'll show you how to adapt RL to algorithmic trading by modeling an agent that interacts with the financial market while trying to optimize an objective function. 
+
+More specifically,this chapter will cover:
+
+- How to define a Markov Decision Problem (MDP)
+- How to use Value and Policy Iteration to solve an MDP
+- How to apply Q-learning in an environment with discrete states and actions
+- How to build and train a deep Q-learning agent in a continuous environment
+- How to use OpenAI Gym to train an RL trading agent
 
 ## Part 5: Conclusion
 
