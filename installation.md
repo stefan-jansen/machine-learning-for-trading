@@ -20,11 +20,18 @@ e.g.
 ```python
 conda create --name pandas_environment pandas=0.24
 ```
+### Create conda environment from file for this book
 
-Here, we will create an environment from a file to ensure you install the versions the code has been tested with. The environment specs are in the file `environment.yml` in the root of this repo. To create the environment with the name `ml4t` (specified in the file), just run:
+Here, we will create an environment from a file to ensure you install the versions the code has been tested with. The environment specs are in the file `environment_[linux|mac_osx].yml` in the root of this repo, where you should choose the one corresponding to your operating system. To create the environment with the name `ml4t` (specified in the file), just run:
 
 ```python
-conda env create -f environment.yml
+conda env create -f environment_linux.yml
+```
+
+or 
+
+```python
+conda env create -f environment_mac_osx.yml
 ```
 from the command line in the root directory.
 
