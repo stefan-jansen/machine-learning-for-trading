@@ -35,6 +35,20 @@ conda env create -f environment_mac_osx.yml
 ```
 from the command line in the root directory.
 
+### Activate conda environment
+
+After you've create it, you can activate the environment using its name, which in our case is `ml4t`:
+
+```python
+conda activate ml4t
+```
+
+To deactivate, simply use
+
+```python
+conda deactivate
+```
+
 ## Set up jupyter extensions
 
 jupyter notebooks can use a range of [extentsion](https://github.com/ipython-contrib/jupyter_contrib_nbextensions) provided by the community. There are many useful ones that are described in the [documentation](https://jupyter-contrib-nbextensions.readthedocs.io/en/latest/).

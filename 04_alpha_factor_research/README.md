@@ -4,6 +4,15 @@ Alpha factors aim to predict the price movements of assets in the investment uni
 
 Trade decisions typically rely on relative values across assets. Trading strategies are often based on signals emitted by multiple factors, and we will see that machine learning (ML) models are particularly well suited to integrate the various signals efficiently to make more accurate predictions.
 
+This chapter provides a framework for understanding how factors work and how to measure their performance, for example using the information coefficient (IC). It demonstrates how to engineer alpha factors from data using Python libraries offline and on the Quantopian platform. It also introduces the `zipline` library to backtest factors and the `alphalens` library to evaluate their predictive power. More specifically, this chapter covers:
+
+- How to characterize, justify and measure key types of alpha factors
+- How to create alpha factors using financial feature engineering
+- How to use `zipline` offline to test individual alpha factors
+- How to use `zipline` on Quantopian to combine alpha factors and identify more sophisticated signals
+- How the information coefficient (IC) measures an alpha factor's predictive performance
+- How to use `alphalens` to evaluate predictive performance and turnover
+
 ## Engineering Alpha Factor
 
 Alpha factors are transformations of market, fundamental, and alternative data that contain predictive signals. They are designed to capture risks that drive asset returns. One set of factors describes fundamental, economy-wide variables such as growth, inflation, volatility, productivity, and demographic risk. Another set consists of tradeable investment styles such as the market portfolio, value-growth investing, and momentum investing.
@@ -24,7 +33,7 @@ In an idealized world, categories of risk factors should be independent of each 
 
 ### How to transform Data into Factors
 
-- The notebook `feature_engineering.ipynb` in the data directory illustrates how to engineer basic factors.
+- The notebook [feature_engineering.ipynb](00_data/feature_engineering.ipynb) in the [data](00_data) directory illustrates how to engineer basic factors.
 
 #### References
 

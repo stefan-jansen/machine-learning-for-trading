@@ -1,4 +1,4 @@
-# Chapter 09: Decision Trees & Random Forests
+# Chapter 10: Decision Trees & Random Forests
 
 This chapter introduces decision trees and random forests. In short, it covers the following:
 - How to use decision trees for regression and classification

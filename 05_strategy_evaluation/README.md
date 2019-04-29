@@ -4,6 +4,7 @@ This chapter covers:
 
 - How to build and test a portfolio based on alpha factors using zipline
 - How to measure portfolio risk and return
+- How to avoid the pitfalls of backtesting
 - How to evaluate portfolio performance using pyfolio
 - How to manage portfolio weights using mean-variance optimization and alternatives
 - How to use machine learning to optimize asset allocation in a portfolio context
