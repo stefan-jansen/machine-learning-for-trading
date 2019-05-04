@@ -35,6 +35,16 @@ conda env create -f environment_mac_osx.yml
 ```
 from the command line in the root directory.
 
+#### Know Issues
+
+In case `conda` throws a `RemoveError`, a quick fix [can be](https://github.com/conda/conda/issues/8149):
+
+```python
+conda update conda
+``` 
+
+possibly adding `--force`.
+
 ### Activate conda environment
 
 After you've create it, you can activate the environment using its name, which in our case is `ml4t`:
