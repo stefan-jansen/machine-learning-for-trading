@@ -6,6 +6,16 @@ It is organized in four parts that cover different aspects of the data sourcing 
 
 For instructions on installing the packages used in the notebooks, see [here](./installation.md).
 
+## Online Chapters
+
+Chapters 16-20 are available as pdfs in the corresponding code directories:
+
+- Chapter 16: [Deep Learning](16_deep_learning/16_Deep_Learning.pdf)
+- Chapter 17: [Convolutional Neural Networks](17_convolutional_neural_nets/17_Convolutional_Neural_Networks.pdf)
+- Chapter 18: [Recurrent Neural Networks](18_recurrent_neural_nets/18_Recurrent_Neural_Networks.pdf)
+- Chapter 19: [Autoencoders & GANs](19_deep_unsupervised_learning/19_Autoencoders_and_GANs.pdf)
+- Chapter 20: [Reinforcement Learning](20_reinforcement_learning/20_Reinforcement_Learning.pdf)
+
 ## Part 1: How to Design a Trading Strategy
 
 The first part provides a framework for the development of trading strategies driven by machine learning (ML). It focuses on the data that power the ML algorithms and strategies discussed in this book, outlines how ML can be used to derive trading signals, and how to deploy and evaluate strategies as part of a portfolio.
