@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
-__author__ = 'Stefan Jansen'
+# coding: utf-8
+
+# zipline MeanReversion Backtest
 
 import sys
-from pathlib import Path
 import pandas as pd
 from pytz import UTC
 from zipline import run_algorithm
@@ -14,10 +14,14 @@ from zipline.finance import commission, slippage
 from zipline.pipeline import Pipeline, CustomFactor
 from zipline.pipeline.factors import Returns, AverageDollarVolume
 import logbook
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 from pyfolio.utils import extract_rets_pos_txn_from_zipline
 
-# setup stdout logging
+sns.set_style('darkgrid')
+
+# Logging Setup
 zipline_logging = logbook.NestedSetup([
     logbook.NullHandler(level=logbook.DEBUG),
     logbook.StreamHandler(sys.stdout, level=logbook.INFO),
@@ -25,7 +29,7 @@ zipline_logging = logbook.NestedSetup([
 ])
 zipline_logging.push_application()
 
-# Settings
+# ## Algo Settings
 MONTH = 21
 YEAR = 12 * MONTH
 N_LONGS = 200
@@ -36,6 +40,8 @@ start = pd.Timestamp('2010-01-01', tz=UTC)
 end = pd.Timestamp('2018-01-01', tz=UTC)
 capital_base = 1e7
 
+
+# Mean Reversion Factor
 
 class MeanReversion(CustomFactor):
     """Compute ratio of latest monthly return to 12m average,
@@ -48,6 +54,10 @@ class MeanReversion(CustomFactor):
         out[:] = df.iloc[-1].sub(df.mean()).div(df.std())
 
 
+# Create Pipeline
+
+# The Pipeline created by the `compute_factors()` method returns a table with a long and a short column for the 25 stocks with the largest negative and positive deviations of their last monthly return from its annual average, normalized by the standard deviation. It also limited the universe to the 500 stocks with the highest average trading volume over the last 30 trading days. 
+
 def compute_factors():
     """Create factor pipeline incl. mean reversion,
         filtered by 30d Dollar Volume; capture factor ranks"""
@@ -59,12 +69,18 @@ def compute_factors():
                     screen=dollar_volume.top(VOL_SCREEN))
 
 
-def exec_trades(data, assets, target_percent):
-    """Place orders for assets using target portfolio percentage"""
-    for asset in assets:
-        if data.can_trade(asset) and not get_open_orders(asset):
-            order_target_percent(asset, target_percent)
+# Before_trading_start() ensures the daily execution of the pipeline and the recording of the results, including the current prices.
 
+def before_trading_start(context, data):
+    """Run factor pipeline"""
+    context.factor_data = pipeline_output('factor_pipeline')
+    record(factor_data=context.factor_data.ranking)
+    assets = context.factor_data.index
+    record(prices=data.current(assets, 'price'))
+
+
+# Set up Rebalancing
+# The new rebalance() method submits trade orders to the exec_trades() method for the assets flagged for long and short positions by the pipeline with equal positive and negative weights. It also divests any current holdings that are no longer included in the factor signals:
 
 def rebalance(context, data):
     """Compute long, short and obsolete holdings; place trade orders"""
@@ -80,6 +96,21 @@ def rebalance(context, data):
     exec_trades(data, assets=shorts, target_percent=-1 / N_SHORTS if N_SHORTS else 0)
 
 
+def exec_trades(data, assets, target_percent):
+    """Place orders for assets using target portfolio percentage"""
+    for asset in assets:
+        if data.can_trade(asset) and not get_open_orders(asset):
+            order_target_percent(asset, target_percent)
+
+
+# Initialize Backtest
+# The `rebalance()` method runs according to `date_rules` and `time_rules` set by the
+# `schedule_function()` utility at the beginning of the week, right after market_open as stipulated
+# by the built-in US_EQUITIES calendar (see docs for details on rules).
+
+# You can also specify a trade commission both in relative terms and as a minimum amount.
+# There is also an option to define slippage, which is the cost of an adverse change in price between trade decision and execution
+
 def initialize(context):
     """Setup: register pipeline, schedule rebalancing,
         and set trading params"""
@@ -93,32 +124,33 @@ def initialize(context):
     set_slippage(us_equities=slippage.VolumeShareSlippage(volume_limit=0.0025, price_impact=0.01))
 
 
-def before_trading_start(context, data):
-    """Run factor pipeline"""
-    context.factor_data = pipeline_output('factor_pipeline')
-    record(factor_data=context.factor_data.ranking)
-    assets = context.factor_data.index
-    record(prices=data.current(assets, 'price'))
-
-
+# Run Algorithm
+# The algorithm executes upon calling the run_algorithm() function and returns the backtest performance DataFrame.
 backtest = run_algorithm(start=start,
                          end=end,
                          initialize=initialize,
                          before_trading_start=before_trading_start,
                          capital_base=capital_base)
 
-# depending on the pyfolio version, gross_leverage may also be returned
+# Extract pyfolio Inputs
+# The `extract_rets_pos_txn_from_zipline` utility
+# provided by `pyfolio` extracts the data used to compute performance metrics.
 returns, positions, transactions = extract_rets_pos_txn_from_zipline(backtest)
 
+# ## Persist Results for use with `pyfolio`
+with pd.HDFStore('backtests.h5') as store:
+    store.put('backtest', backtest)
+    store.put('returns', returns)
+    store.put('positions', positions)
+    store.put('transactions', transactions)
 
-print(returns.head())
-print(returns.info())
-
-# print(gross_lev.info())
-# print(gross_lev.head())
+# ## Plot Results
+fig, axes = plt.subplots(nrows=2, figsize=(14, 6))
+returns.add(1).cumprod().sub(1).plot(ax=axes[0], title='Cumulative Returns')
+transactions.groupby(transactions.dt.dt.day).txn_dollars.sum().cumsum().plot(ax=axes[1],
+                                                                             title='Cumulative Transactions')
+fig.tight_layout()
+plt.show()
 
 print(positions.info())
-print(positions.head())
-
-print(transactions.info())
-print(transactions.head())
+print(transactions.describe())

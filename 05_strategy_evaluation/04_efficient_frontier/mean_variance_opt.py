@@ -13,7 +13,6 @@ N_PORTFOLIOS = 2500000  # number of pf to simulate
 RF_RATE = 0.0178
 TRADING_DAYS = 252
 
-
 with pd.HDFStore('mv.h5') as store:
     factor = store.get('factor').loc['2016':]
     prices = store.get('prices').loc['2010': '2015']
@@ -27,7 +26,6 @@ start = baseline.name
 print(start)
 base_pf = baseline.div(baseline.abs().sum())
 print(base_pf.abs().sum())
-
 
 assets = baseline.index.tolist()
 n_assets = len(assets)  # number of assets to allocate

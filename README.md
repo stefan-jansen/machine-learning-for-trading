@@ -1,20 +1,43 @@
 # Machine Learning for Algorithmic Trading using Python
 
-This book provides a comprehensive introduction to how ML can add value to the design and execution of algorithmic trading strategies. It was [published](https://www.amazon.com/Hands-Machine-Learning-Algorithmic-Trading-ebook/dp/B07JLFH7C5/ref=sr_1_2?ie=UTF8&qid=1548455634&sr=8-2&keywords=machine+learning+algorithmic+trading) in January 2019 by [Stefan Jansen](https://www.linkedin.com/in/applied-ai/).
+This book provides a comprehensive introduction to how ML can add value to algorithmic trading strategies. It was [published](https://www.amazon.com/Hands-Machine-Learning-Algorithmic-Trading-ebook/dp/B07JLFH7C5/ref=sr_1_2?ie=UTF8&qid=1548455634&sr=8-2&keywords=machine+learning+algorithmic+trading) in January 2019 by [Stefan Jansen](https://www.linkedin.com/in/applied-ai/).
 
-It is organized in four parts that cover different aspects of the data sourcing and strategy development process, as well as different solutions to various ML challenges.
+The book provides a comprehensive introduction on how to use ML to add value to trading strategies. It is organized in four parts that cover different aspects of the data sourcing and strategy development process, as well as different solutions to various ML challenges.
 
-For instructions on installing the packages used in the notebooks, see [here](./installation.md).
-
-## Online Chapters
-
-Chapters 16-20 are available as pdfs in the corresponding code directories:
+Chapters 16-20 of Part IV, Deep and Reinforcement Learning are available as pdfs in the corresponding directories:
 
 - Chapter 16: [Deep Learning](16_deep_learning/16_Deep_Learning.pdf)
 - Chapter 17: [Convolutional Neural Networks](17_convolutional_neural_nets/17_Convolutional_Neural_Networks.pdf)
 - Chapter 18: [Recurrent Neural Networks](18_recurrent_neural_nets/18_Recurrent_Neural_Networks.pdf)
 - Chapter 19: [Autoencoders & GANs](19_deep_unsupervised_learning/19_Autoencoders_and_GANs.pdf)
 - Chapter 20: [Reinforcement Learning](20_reinforcement_learning/20_Reinforcement_Learning.pdf)
+
+## What to expect
+
+This book aims to equip you with the strategic perspective, conceptual understanding, and practical tools to add value from applying ML to the trading and investment process. To this end, it covers ML as an important element in a process rather than a standalone exercise.
+
+First and foremost, it illustrates how a broad range of supervised, unsupervised, and reinforcement learning algorithms can be used to extract signals from a diverse set of data sources relevant to different asset classes. It demonstrates how to develop an end-to-end trading strategy and presents ML models as building blocks that extract or combine alpha factors using a systematic workflow. The modular approach implies that not every algorithm is shown as part of a complete strategy. This allows to develop the mathematical and statistical background that in turn facilitate the tuning of an algorithm or the interpretation of the results.
+
+Investors can extract value from third-party data more than other industries. As a consequence, the book covers not only how to work with market and fundamental data but also how to source, evaluate, process, and model alternative data sources such as unstructured text and image data.
+
+It should not be a surprise that this book does not provide investment advice or ready-made trading algorithms. Instead, it presents building blocks required to identify, evaluate, and combine datasets suitable for a given investment objective, to select and apply ML algorithms to this data, and to develop and test algorithmic trading strategies based on the results.
+
+## Who should read this book
+
+You should find the book informative if you are an analyst, data scientist, or ML engineer with an understanding of financial markets and interest in how to apply ML to trading strategies. You should also find value as an investment professional who aims to leverage ML to make better decisions.
+
+If your background is software and ML, you may be able to just skim or skip some introductory material on ML. Similarly, if your expertise is in investment, you will likely be familiar with some or all of the financial context. You will likely find the book most useful as a survey of key algorithms, building blocks and use cases than for specialized coverage of a particular algorithm or strategy. However, the book assumes you are interested in continuing to learn about this very dynamic area. To this end, it references numerous resources to support your journey towards customized trading strategies that leverage and build on the fundamental methods and tools it covers.
+
+You should be comfortable using Python and various scientific computing libraries like `numpy`, `pandas`, or `scipy` and be interested in picking up numerous others along the way. Some experience with ML and `scikit-learn` would be helpful, but we briefly cover the basic workflow and reference various resources to fill gaps or dive deeper.
+
+## Installation and Data Sources
+
+- For instructions on setting up a `conda` environment and installing the packages used in the notebooks, see [here](./installation.md).
+- To download and preprocess many of the data sources used in this book see [create_datasets](data/create_datasets.ipynb).
+
+# How the book is organized
+
+It is organized in four parts that cover different aspects of the data sourcing and strategy development process, as well as different solutions to various ML challenges.
 
 ## Part 1: How to Design a Trading Strategy
 
@@ -41,7 +64,6 @@ In particular, this chapter will cover the following topics:
 - How to parse and combine market and fundamental data to create a P/E series
 - How to access various market and fundamental data sources using Python
 
-
 ### Chapter 03: Alternative Data for Finance
 
 This [chapter](03_alternative_data) outlines categories and describes criteria to assess the exploding number of alternative data sources and providers. It also demonstrates how to create alternative data sets by scraping websites, for example to collect earnings call transcripts for use with natural language processing (NLP) and sentiment analysis algorithms in the second part of the book. More specifically, this chapter covers:
@@ -63,7 +85,6 @@ This [chapter](03_alternative_data) outlines categories and describes criteria t
 - How the information coefficient (IC) measures an alpha factor's predictive performance
 - How to use `alphalens` to evaluate predictive performance and turnover
  
-
 ### Chapter 05: Strategy Evaluation & Portfolio Management
 
 Testing a strategy requires simulating the portfolios generated by an algorithm to verify its performance under market conditions. Strategy evaluation includes backtesting against historical data to optimize the strategy's parameters, and forward-testing to validate the in-sample performance against new, out-of-sample data and avoid false discoveries from tailoring a strategy to specific past circumstances. This [chapter](05_strategy_evaluation) introduces several approaches to optimizing portfolios that include the application of machine learning (ML) to learn hierarchical relationships among assets. 
@@ -74,7 +95,6 @@ More specifically, in this [chapter](05_strategy_evaluation), we cover
 - How to evaluate portfolio performance using pyfolio
 - How to manage portfolio weights using mean-variance optimization and alternatives
 - How to use machine learning to optimize asset allocation in a portfolio context
-
 
 ## Part 2: Machine Learning Fundamentals
 

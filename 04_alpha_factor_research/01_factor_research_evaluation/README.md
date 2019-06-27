@@ -41,9 +41,3 @@ Quantopian has open sourced the Python library [alphalens](https://github.com/qu
 - Breakdowns of the preceding by sector
 
 The analysis can be conducted using `tearsheets` or individual computations and plots. The tearsheets are illustrated in the online repo to save some space.
-
-
-
-
-
- 

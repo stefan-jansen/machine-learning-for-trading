@@ -62,7 +62,7 @@ The following table summarizes the key tasks of an NLP pipeline:
 
 ### NLP pipeline with spaCy and textacy
 
-The notebook [nlp_pipeline_with_spaCy](01_nlp_pipeline%20with_spaCy.ipynb) demonstrates how to construct an NLP pipeline using the open-source python library [spaCy]((https://spacy.io/)). The [textacy](https://chartbeat-labs.github.io/textacy/index.html) library builds on spaCy and provides easy access to spaCy attributes and additional functionality.
+The notebook [nlp_pipeline_with_spaCy](01_nlp_pipeline_with_spaCy.ipynb) demonstrates how to construct an NLP pipeline using the open-source python library [spaCy]((https://spacy.io/)). The [textacy](https://chartbeat-labs.github.io/textacy/index.html) library builds on spaCy and provides easy access to spaCy attributes and additional functionality.
 
 - spaCy [docs](https://spacy.io/) and installation [instructions](https://spacy.io/usage/#installation)
 - textacy relies on `spaCy` to solve additional NLP tasks - see [documentation](https://chartbeat-labs.github.io/textacy/index.html)

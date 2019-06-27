@@ -6,12 +6,20 @@ The data needs to be extracted from the HTML source, barring any legal obstacles
 
 ### Building a dataset of restaurant bookings
 
-With Selenium, you can follow the links to the next pages and quickly build a dataset of over 10,000 restaurants in NYC that you could then update periodically to track a time series.
+With the browser automation tool [Selenium](https://www.seleniumhq.org/), you can follow the links to the next pages and quickly build a dataset of over 10,000 restaurants in NYC that you could then update periodically to track a time series.
 
-The script [opentable_selenium](opentable_selenium.py) illustrates how to scrape and store the data.
+To set up selenium, run 
+```bash
+./selenium_setup.sh
+```
+with suitable permission, i.e., after running `chmod +x selenium_setup.sh`.
 
-Websites change frequently so that this code may stop working at any moment.
+The script [opentable_selenium](opentable_selenium.py) illustrates how to scrape and store the data. Simply run as 
+```python
+python opentable_selenium.py
+```
 
+Since websites change frequently, this code may stop working at any moment.
 
 ### One step further – Scrapy and splash
 

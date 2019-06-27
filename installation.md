@@ -1,5 +1,13 @@
 # Installation Instructions
 
+The book uses [jupyter](https://jupyter.org/) notebooks to present the code with extensive commentary and context information and facilitate the visualization of results in one place. Some of the code examples are longer and make more sense to run as `python` scripts; you can convert a notebook to a script by running the following on the command line:
+
+```bash
+$ jupyter nbconvert --to script [YOUR_NOTEBOOK].ipynb
+```
+
+For testing purposes, most directories already include notebooks converted to python scripts that are more sparsely commented.  
+
 ## How to install the required libaries
 
 ### Install miniconda
@@ -13,33 +21,37 @@ The notebooks use a virtual environment based on [miniconda3]() that you need to
 Just like there are [virtual environments](https://docs.python.org/3/tutorial/venv.html) for generic python installations, conda permits the creation of separate [environments](https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html) that are based on the same interpreter (miniconda3 if you followed the above instructions) but can contain different package and versions of packages. See also [here](https://towardsdatascience.com/getting-started-with-python-environments-using-conda-32e9f2779307) for a more detailed tutorial.
 
 You can create a new conda environment with name `env_name` and one or more packages with a specific version number using the command: 
-```python
+```bash
 conda create --name env_name package=version_number 
 ```
 e.g.
-```python
+```bash
 conda create --name pandas_environment pandas=0.24
 ```
 ### Create conda environment from file for this book
 
 Here, we will create an environment from a file to ensure you install the versions the code has been tested with. The environment specs are in the file `environment_[linux|mac_osx].yml` in the root of this repo, where you should choose the one corresponding to your operating system. To create the environment with the name `ml4t` (specified in the file), just run:
 
-```python
+```bash
 conda env create -f environment_linux.yml
 ```
 
 or 
 
-```python
+```bash
 conda env create -f environment_mac_osx.yml
 ```
 from the command line in the root directory.
 
-#### Know Issues
+#### Separate environments for Chapters 4 & 5
+
+The `zipline` backtesting library was at time of writing only compatible with older `pandas` versions so that we provided different `environment.yml` files for these applications.
+
+#### Known Issues
 
 In case `conda` throws a `RemoveError`, a quick fix [can be](https://github.com/conda/conda/issues/8149):
 
-```python
+```bash
 conda update conda
 ``` 
 
@@ -49,13 +61,13 @@ possibly adding `--force`.
 
 After you've create it, you can activate the environment using its name, which in our case is `ml4t`:
 
-```python
+```bash
 conda activate ml4t
 ```
 
 To deactivate, simply use
 
-```python
+```bash
 conda deactivate
 ```
 
