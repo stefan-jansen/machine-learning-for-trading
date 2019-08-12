@@ -1,6 +1,8 @@
-# Machine Learning for Algorithmic Trading using Python
+# Machine Learning for Algorithmic Trading - 1st Edition
 
-This book provides a comprehensive introduction to how ML can add value to algorithmic trading strategies. It was [published](https://www.amazon.com/Hands-Machine-Learning-Algorithmic-Trading-ebook/dp/B07JLFH7C5/ref=sr_1_2?ie=UTF8&qid=1548455634&sr=8-2&keywords=machine+learning+algorithmic+trading) in January 2019 by [Stefan Jansen](https://www.linkedin.com/in/applied-ai/).
+This book provides a comprehensive introduction to how ML can add value to trading strategies. It was [published](https://www.amazon.com/Hands-Machine-Learning-Algorithmic-Trading-ebook/dp/B07JLFH7C5/ref=sr_1_2?ie=UTF8&qid=1548455634&sr=8-2&keywords=machine+learning+algorithmic+trading) in January 2019 by [Stefan Jansen](https://www.linkedin.com/in/applied-ai/).
+
+**Update**: I've started working on the **second edition** that will add more end-to-end backtesting examples using zipline to complement the current illustrations how to generate signals using ML models. This should hopefully become available around the end of this year.   
 
 The book provides a comprehensive introduction on how to use ML to add value to trading strategies. It is organized in four parts that cover different aspects of the data sourcing and strategy development process, as well as different solutions to various ML challenges.
 
