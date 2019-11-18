@@ -148,7 +148,7 @@ dependencies:
   - libprotobuf=3.8.0=hd408876_0
   - libsodium=1.0.16=h1bed415_0
   - libstdcxx-ng=9.1.0=hdf63c60_0
-  - libtiff=4.0.10=h2733197_1001
+  - libtiff=4.0.10
   - libtool=2.4.6=h7b6447c_5
   - libuuid=2.32.1=h14c3975_1000
   - libvpx=1.7.0=h439df22_0
@@ -327,8 +327,6 @@ dependencies:
   - pip:
     - box2d-py==2.3.8
     - cached-property==1.5.1
-    - en-core-web-sm==2.0.0
-    - es-core-news-sm==2.0.0
     - gym==0.12.1
     - linearmodels==4.12
     - mako==1.0.7

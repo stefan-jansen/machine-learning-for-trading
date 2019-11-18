@@ -1,16 +1,8 @@
-# Machine Learning for Algorithmic Trading using Python
+# Machine Learning for Algorithmic Trading - 2nd Edition
 
-This book provides a comprehensive introduction to how ML can add value to algorithmic trading strategies. It was [published](https://www.amazon.com/Hands-Machine-Learning-Algorithmic-Trading-ebook/dp/B07JLFH7C5/ref=sr_1_2?ie=UTF8&qid=1548455634&sr=8-2&keywords=machine+learning+algorithmic+trading) in January 2019 by [Stefan Jansen](https://www.linkedin.com/in/applied-ai/).
+This book provides a comprehensive introduction to how ML can add value to algorithmic trading strategies.
 
 The book provides a comprehensive introduction on how to use ML to add value to trading strategies. It is organized in four parts that cover different aspects of the data sourcing and strategy development process, as well as different solutions to various ML challenges.
-
-Chapters 16-20 of Part IV, Deep and Reinforcement Learning are available as pdfs in the corresponding directories:
-
-- Chapter 16: [Deep Learning](16_deep_learning/16_Deep_Learning.pdf)
-- Chapter 17: [Convolutional Neural Networks](17_convolutional_neural_nets/17_Convolutional_Neural_Networks.pdf)
-- Chapter 18: [Recurrent Neural Networks](18_recurrent_neural_nets/18_Recurrent_Neural_Networks.pdf)
-- Chapter 19: [Autoencoders & GANs](19_deep_unsupervised_learning/19_Autoencoders_and_GANs.pdf)
-- Chapter 20: [Reinforcement Learning](20_reinforcement_learning/20_Reinforcement_Learning.pdf)
 
 ## What to expect
 

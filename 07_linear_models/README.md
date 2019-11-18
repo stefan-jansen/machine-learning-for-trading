@@ -95,7 +95,7 @@ The lasso, known as basis pursuit in signal processing, also shrinks the coeffic
 
 ## How to predict stock prices using linear regression
 
-The notebook [linear_regression](03_linear_regression.ipynb) contains examples for the prediction of stock prices using OLS with statsmodels and sklearn, as well as ridge and lasso models. 
+The notebook [linear_regression](04_linear_regression.ipynb) contains examples for the prediction of stock prices using OLS with statsmodels and sklearn, as well as ridge and lasso models. 
 
 It is designed to run as a notebook on the [Quantopian](https://www.quantopian.com/help) research platform and relies on the [factor_library](../04_alpha_factor_research/02_alpha_factor_library) introduced in Chapter 4, Research and Evaluation of Alpha Factors.
 
