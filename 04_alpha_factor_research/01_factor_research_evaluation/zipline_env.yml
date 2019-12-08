@@ -1,4 +1,4 @@
-name: backtesting
+name: zipline_env
 channels:
   - defaults
   - conda-forge
