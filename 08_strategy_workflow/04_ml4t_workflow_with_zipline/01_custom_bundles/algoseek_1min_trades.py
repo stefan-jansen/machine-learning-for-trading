@@ -11,12 +11,12 @@ pd.set_option('display.expand_frame_repr', False)
 np.random.seed(42)
 
 # create symbolic link to algoseek.h5 in ~/.zipline/custom_data directory
-# create symbolic link to algoseek_1min_trades.py in ~/.zipline/custom_data directory
+# create symbolic link to algoseek_1min_trades.py in ~/.zipline directory
 # in ~/.zipline/:
-# ln -s /path/to/machine-learning-for-trading/08_strategy_workflow/04_ml4t_workflow_with_zipline/01_custom_bundles/algoseek_1min_trades.py .
+# ln -s /path/to/machine-learning-for-trading/08_strategy_workflow/04_ml4t_workflow_with_zipline/algoseek_1min_trades.py .
 custom_data_path = Path('~/.zipline/custom_data').expanduser()
 
-...
+
 def load_equities():
     return pd.read_hdf(custom_data_path / 'algoseek.h5', 'equities')
 
