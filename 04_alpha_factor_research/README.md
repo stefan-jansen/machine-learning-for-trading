@@ -33,8 +33,6 @@ In an idealized world, categories of risk factors should be independent of each 
 
 ## Engineering alpha factors that predict returns
 
-
-
 ### How to engineer factors using pandas and NumPy
 
 - The notebook [feature_engineering.ipynb](00_data/feature_engineering.ipynb) in the [data](00_data) directory illustrates how to engineer basic factors.

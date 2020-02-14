@@ -1,0 +1,60 @@
+# Putting it all together: The End-to-End ML4T Workflow
+
+This chapter integrates the various building blocks of the ML4T workflow so far discussed separately to present the end-to-end process of designing, simulating and evaluating a trading strategy driven by a machine learning (ML) algorithm. Most importantly, we will demonstrate in more detail how to backtest an ML-driven strategy in a historical market context using the Python libraries `BackTrader` and `zipline`.
+
+The open source [zipline](http://www.zipline.io/index.html) library is an event-driven backtesting system maintained and used in production by the crowd-sourced quantitative investment fund [Quantopian](https://www.quantopian.com/) to facilitate algorithm-development and live-trading. It automates the algorithm's reaction to trade events and provides it with current and historical point-in-time data that avoids look-ahead bias. [Chapter 8 - The ML4T Workflow](../08_strategy_workflow) has a more detailed, dedicated introduction to backtesting using both `zipline` and `backtrader`. 
+
+The ultimate goal of the ML4T workflow is to gather evidence from historical data that helps decide whether to trade the strategy in live markets. This process builds on the skills developed in the previous chapters: it relies on your ability to work with a diverse set of data sources to engineer informative factors, to design and train ML models that generate predictive signals to inform your trading strategy and to optimize the resulting portfolio from a risk-return perspective.
+
+A realistic simulation of your strategy also needs to faithfully represent how security markets operate and how trades are executed. Hence, the institutional details o exchanges such as which order types are available and how prices are determined also matter when you design a backtest or evaluate whether a backtesting engine includes features required for accurate performance measurements. Finally, there are several methodological aspects that require attention to avoid biased results and false discoveries that would lead to poor decisions. 
+
+More specifically, after working through this chapter you will be able to:
+- Plan and implement end-to-end strategy backtesting
+- Understand and avoid critical pitfalls when implementing backtests,
+- Discuss the advantages and disadvantages of vectorized vs event-driven backtesting engines,
+- Identify and evaluate the key components of an event-driven backtester,
+- Design and execute the ML4T workflow using data sources at minute and daily frequencies, with ML models trained separately or as part of the backtest, 
+- Know how to use zipline and backtrader
+
+## How to backtest an ML-driven strategy
+
+## The pitfalls of backtesting and how to avoid them
+
+- The code examples for this section are in the subfolder [multiple_testing](01_multiple_testing).
+
+## How a backtesting engine works
+
+### Vectorized vs event-driven backtesting
+
+- The code examples for this section are in the notebook [vectorized_backtest](02_vectorized_backtest.ipynb).
+
+### Key Implementation Aspects
+
+## backtrader: a flexible tool for local backtests
+
+- The code examples for this section are in the notebook [backtesting_with_backtrader](03_backtesting_with_backtrader.ipynb).
+
+### Key concepts of backtrader’s Cerebro architecture
+
+### How to use backtrader in practice
+
+### Resources
+
+- [Backtrader](https://www.backtrader.com/) website 
+    - [Documentation](https://www.backtrader.com/docu/)
+    - [Installation](https://www.backtrader.com/docu/installation/)
+
+## zipline: production-ready backtesting by Quantopian
+
+In [Chapter 4](../04_alpha_factor_research), we introduced `zipline` to simulate the computation of alpha factors, and in [Chapter 5](../05_strategy_evaluation) we added trades to simulate a simple strategy and measure its performance as well as optimize portfolio holdings using different techniques.
+
+The code for this section is in the subdirectory [ml4t_workflow_with_zipline](04_ml4t_workflow_with_zipline):
+- the notebook [backtesting_with_zipline](04_ml4t_workflow_with_zipline/02_backtesting_with_zipline.ipynb) demonstrates the use of the `Pipeline` interface while loading ML predictions from another local (HDF5) data source
+- the notebook [ml4t_with_zipline](04_ml4t_workflow_with_zipline/03_ml4t_with_zipline.ipynb) shows how to train an ML model locally as part of a `Pipeline` using a `CustomFactor` and various technical indicators as features for daily `bundle` data.
+- the notebook [ml4t_quantopian](04_ml4t_workflow_with_zipline/04_ml4t_quantopian.ipynb) shows how to train an ML model on the Quantopian platform to utilize the broad range of data sources available there.
+
+### Installation
+
+- The current release 1.3 has a few shortcomings such as the [dependency on benchmark data from the IEX exchange](https://github.com/quantopian/zipline/issues/2480) and limitations for importing features beyond the basic OHLCV data points.
+- To enable the use of `zipline`, I've provided a [patched version](https://github.com/stefan-jansen/zipline) that works for the purposes of this book.
+    - Install by cloning the repo, `cd` into the packages' root folder and, after activating the `ml4t` environment, run `pip install -e`

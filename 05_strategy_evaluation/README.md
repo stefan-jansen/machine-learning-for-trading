@@ -11,11 +11,21 @@ This chapter covers:
 
 ## How to build and test a portfolio with `zipline`
 
+The open source [zipline](http://www.zipline.io/index.html) library is an event-driven backtesting system maintained and used in production by the crowd-sourced quantitative investment fund [Quantopian](https://www.quantopian.com/) to facilitate algorithm-development and live-trading. It automates the algorithm's reaction to trade events and provides it with current and historical point-in-time data that avoids look-ahead bias. [Chapter 8 - The ML4T Workflow](../08_strategy_workflow) has a more detailed, dedicated introduction to backtesting using both `zipline` and `backtrader`. 
+
 In [Chapter 4](../04_alpha_factor_research), we introduced `zipline` to simulate the computation of alpha factors from trailing cross-sectional market, fundamental, and alternative data. Now we will exploit the alpha factors to derive and act on buy and sell signals. 
 
 We will postpone optimizing the portfolio weights until later in this chapter, and for now, just assign positions of equal value to each holding. 
 
-The code for this section is in the subdirectory [trading_zipline](01_trading_zipline) subdirectory; the notebook [alpha_factor_zipline_with_trades](01_trading_zipline/alpha_factor_zipline_with_trades.ipynb) simulates the trading decisions that build a portfolio based on the simple MeanReversion alpha factor from the last chapter using zipline.
+The code for this section is in the subdirectory [trading_zipline](01_trade_simulation_pf_management_zipline): 
+- The notebook [backtest_with_trades](01_trade_simulation_pf_management_zipline/01_backtest_with_trades.ipynb) simulates the trading decisions that build a portfolio based on the simple MeanReversion alpha factor from the last chapter using zipline.
+- The notebook [backtest_with_pf_optimization](01_trade_simulation_pf_management_zipline/02_backtest_with_pf_optimization.ipynb) demonstrates how to use PF optimization as part of a simple strategy backtest. 
+
+### Installation
+
+- The current release 1.3 has a few shortcomings such as the [dependency on benchmark data from the IEX exchange](https://github.com/quantopian/zipline/issues/2480) and limitations for importing features beyond the basic OHLCV data points.
+- To enable the use of `zipline`, I've provided a [patched version](https://github.com/stefan-jansen/zipline) that works for the purposes of this book.
+    - Install by cloning the repo, `cd` into the packages' root folder and, after activating the `ml4t` environment, run `pip install -e`
 
 ## How to measure performance with `pyfolio`
 
