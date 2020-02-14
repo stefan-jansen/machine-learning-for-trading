@@ -169,6 +169,15 @@ ML extracts signals from a wide range of market, fundamental, and alternative da
 - [](http://deeplearning.ai/), Andrew Ng
     - Andrew Ng’s introductory deep learning course
 
+### ML Competitions & Trading
+
+- [IEEE Investment Ranking Challenge](https://www.crowdai.org/challenges/ieee-investment-ranking-challenge)
+    - [Investment Ranking Challenge : Identifying the best performing stocks based on their semi-annual returns](https://arxiv.org/pdf/1906.08636.pdf)
+- [Two Sigma Financial Modeling Challenge](https://www.kaggle.com/c/two-sigma-financial-modeling)
+- [Two Sigma: Using News to Predict Stock Movements](https://www.kaggle.com/c/two-sigma-financial-news)
+- [The Winton Stock Market Challenge](https://www.kaggle.com/c/the-winton-stock-market-challenge)
+- [Algorithmic Trading Challenge](https://www.kaggle.com/c/AlgorithmicTradingChallenge)
+   
 ### Python Libraries
 
 - matplotlib [docs]( <https://github.com/matplotlib/matplotlib)
