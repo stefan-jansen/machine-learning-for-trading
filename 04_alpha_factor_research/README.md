@@ -77,8 +77,11 @@ The open source [zipline](http://www.zipline.io/index.html) library is an event-
 
 - The current release 1.3 has a few shortcomings such as the [dependency on benchmark data from the IEX exchange](https://github.com/quantopian/zipline/issues/2480) and limitations for importing features beyond the basic OHLCV data points.
 - To enable the use of `zipline`, I've provided a [patched version](https://github.com/stefan-jansen/zipline) that works for the purposes of this book.
-    - Install by cloning the repo, `cd` into the packages' root folder and, after activating the `ml4t` environment, run `pip install -e`
-
+    - Create a virtual environment based on Python 3.5, for instance using [pyenv](https://github.com/pyenv/pyenv)
+    - After activating the virtual environment, run `pip install -U pip Cython`
+    - Install the patched `zipline` version by cloning the repo, `cd` into the packages' root folder and run `pip install -e`
+    - Run `pip install jupyter pyfolio`
+    
 ## Separating signal and noise – how to use alphalens
 
 This section introduces the [alphalens](http://quantopian.github.io/alphalens/) library for the performance analysis of predictive (alpha) factors.
