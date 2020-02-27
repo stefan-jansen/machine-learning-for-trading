@@ -25,13 +25,13 @@ def get_backtest_data():
                   .swaplevel(axis=0))
 
     with pd.HDFStore(PROJECT_DIR / '07_linear_models/data.h5') as store:
-        predictions = store['ridge/predictions']
+        predictions = store['lasso/predictions']
     best_alpha = predictions.groupby('alpha').apply(lambda x: spearmanr(x.actuals, x.predicted)[0]).idxmax()
+    print(best_alpha)
     predictions = predictions[predictions.alpha == best_alpha]
     tickers = predictions.index.get_level_values('ticker').unique()
     start = predictions.index.get_level_values('date').min().strftime('%Y-%m-%d')
     stop = (predictions.index.get_level_values('date').max() + pd.DateOffset(1)).strftime('%Y-%m-%d')
-    print(len(tickers), start, stop)
     idx = pd.IndexSlice
     prices = prices.sort_index().loc[idx[tickers, start:stop], :]
     predictions = predictions.loc[predictions.alpha == best_alpha, ['predicted']]

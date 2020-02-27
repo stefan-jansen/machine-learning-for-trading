@@ -87,6 +87,7 @@ The open source [zipline](http://www.zipline.io/index.html) library is an event-
 This section introduces the [alphalens](http://quantopian.github.io/alphalens/) library for the performance analysis of predictive (alpha) factors.
 
 - `alphalens` installation see [docs](http://quantopian.github.io/alphalens/) for detail
+- See [here](https://github.com/quantopian/alphalens/blob/master/alphalens/examples/alphalens_tutorial_on_quantopian.ipynb) for a detailed `alphalens` tutorial by Quantopian
 
 Alphalens depends on:
 
