@@ -92,6 +92,7 @@ while next_page:
     print(f'Page: {page}')
     url = f'{SA_URL}/earnings/earnings-call-transcripts/{page}'
     driver.get(urljoin(SA_URL, url))
+    sleep(8 + (random() - .5) * 2)
     response = driver.page_source
     page += 1
     soup = BeautifulSoup(response, 'lxml')
@@ -109,7 +110,7 @@ while next_page:
                 meta, participants, content = result
                 meta['link'] = link
                 store_result(meta, participants, content)
-            sleep(5 + (random() - .5) * 2)
+                sleep(8 + (random() - .5) * 2)
 
 driver.close()
 # pd.Series(articles).to_csv('articles.csv')

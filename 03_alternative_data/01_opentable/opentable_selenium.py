@@ -18,15 +18,15 @@ def parse_html(html):
         booking = resto.find('div', class_='booking')
         item['bookings'] = re.search('\d+', booking.text).group() if booking else 'NA'
 
-        rating = resto.select('div.all-stars.filled')
-        item['rating'] = int(re.search('\d+', rating[0].get('style')).group()) if rating else 'NA'
+        rating = resto.find('div', class_='star-rating-score')
+        item['rating'] = float(rating['aria-label'].split()[0]) if rating else 'NA'
 
-        reviews = resto.find('span', class_='star-rating-text--review-text')
+        reviews = resto.find('span', class_='underline-hover')
         item['reviews'] = int(re.search('\d+', reviews.text).group()) if reviews else 'NA'
 
         item['price'] = int(resto.find('div', class_='rest-row-pricing').find('i').text.count('$'))
-        item['cuisine'] = resto.find('span', class_='rest-row-meta--cuisine').text
-        item['location'] = resto.find('span', class_='rest-row-meta--location').text
+        item['cuisine'] = resto.find('span', class_='rest-row-meta--cuisine rest-row-meta-text sfx1388addContent').text
+        item['location'] = resto.find('span', class_='rest-row-meta--location rest-row-meta-text sfx1388addContent').text
         data[i] = pd.Series(item)
     return data.T
 
