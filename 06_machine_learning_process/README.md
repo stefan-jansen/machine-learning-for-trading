@@ -27,6 +27,7 @@ The process is iterative throughout, and the effort at different stages will var
 The notebook [machine_learning_workflow](01_machine_learning_workflow.ipynb) contains several examples that illustrate the machine learning workflow using a simple dataset of house prices.
 
 - sklearn [Documentation](http://scikit-learn.org/stable/documentation.html)
+- k-nearest neighbors [tutorial](https://www.datacamp.com/community/tutorials/k-nearest-neighbor-classification-scikit-learn) and [visualization](http://vision.stanford.edu/teaching/cs231n-demos/knn/)
 
 ### Frame the problem: goals & metrics
 
