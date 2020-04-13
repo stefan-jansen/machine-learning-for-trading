@@ -1,12 +1,14 @@
-# Machine Learning for Algorithmic Trading - 2nd Edition
+# Machine Learning for Algorithmic Trading - 2nd Edition (May 2020)
 
-This book provides a comprehensive introduction to how ML can add value to algorithmic trading strategies. It covers a broad range of ML techniques and demonstrates how build, backtest and evaluate a trading strategy that acts on predictives signals. 
+This book provides a comprehensive introduction to how ML can add value to algorithmic trading strategies. It covers a broad range of ML techniques and demonstrates how build, backtest and evaluate a trading strategy that acts on predictive signals. 
 
 It is organized in four parts that cover 
 - different aspects of the data sourcing and strategy development process, 
 - fundamental ML and strategy development techniques
 - specialized approaches for natural language processing, and
 - deep learning models from simple multilayer feed-forward networks to CNN, RNN, autoencoders and deep reinforcement learning
+
+> This content is still under review; if you have any suggestions or find a bug, please open an issue and let me know.
 
 > You can find the content for the 1st edition on the branch `first_edition`. 
 
