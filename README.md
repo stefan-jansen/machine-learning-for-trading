@@ -8,6 +8,8 @@ It is organized in four parts that cover
 - specialized approaches for natural language processing, and
 - deep learning models from simple multilayer feed-forward networks to CNN, RNN, autoencoders and deep reinforcement learning
 
+> You can find the content for the 1st edition on the branch `first_edition`. 
+
 ## What to expect
 
 This book aims to equip you with the strategic perspective, conceptual understanding, and practical tools to add value from applying ML to the trading and investment process. To this end, it covers ML as an important element in a process rather than a standalone exercise.
