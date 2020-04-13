@@ -1,7 +1,7 @@
-# Chapter 09: Linear Time Series Models
+# From Volatility Forecasts to Statistical Arbitrage: Linear Time Series Models
 
 To Do:
-- Stooq Data sourcing 
+- Stooq Data sourcing
 
 This chapter covers:
 - How to use time series analysis to diagnose diagnostic statistics that inform the modeling process

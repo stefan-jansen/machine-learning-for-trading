@@ -1,4 +1,4 @@
-# Chapter 16: Word-Vector Embeddings
+# Extracting better features: Word Embeddings for SEC Filings
 
 This chapter introduces uses neural networks to learn a vector representation of individual semantic units like a word or a paragraph. These vectors are dense rather than sparse as in the bag-of-words model and have a few hundred real-valued rather than tens of thousand binary or discrete entries. They are called embeddings because they assign each semantic unit a location in a continuous vector space.
  

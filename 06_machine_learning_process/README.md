@@ -1,12 +1,31 @@
-# Chapter 06: Machine Learning
+# The Machine Learning Workflow
 
-In this introductory chapter, we will start to illustrate how you can use a broad range of supervised and unsupervised machine learning (ML) models for algorithmic trading. 
+This chapter starts part 2 of this book where we illustrate how you can use a range of supervised and unsupervised machine learning (ML) models for trading. We will explain each model's assumptions and use cases before we demonstrate relevant applications using various Python libraries. The categories of models that we will cover in parts 2-4 include:
 
- We cover aspects that apply across model categories so that we can focus on model-specific usage in the following chapters. These aspects include the goal of learning a functional relationship from data by optimizing an objective or loss function. They also include the closely related methods of measuring model performance.
- 
- We distinguish between unsupervised and supervised learning, and supervised regression and classification problems. We also outline use cases for algorithmic trading.  
+- Linear models for the regression and classification of cross-section, time series, and panel data
+- Generalized additive models, including nonlinear tree-based models, such as decision trees
+- Ensemble models, including random forest and gradient-boosting machines
+- Unsupervised linear and nonlinear methods for dimensionality reduction and clustering
+- Neural network models, including recurrent and convolutional architectures
+- Reinforcement learning models
 
-## Learning from Data
+We will apply these models to the market, fundamental, and alternative data sources introduced in the first part of this book. We will build on the material covered so far by demonstrating how to embed these models in a trading strategy that translates model signals into trades, how to optimize portfolio, and how to evaluate strategy performance.
+
+There are several aspects that many of these models and their applications have in common. This chapter covers these common aspects so that we can focus on model-specific usage in the following chapters. They include the overarching goal of learning a functional relationship from data by optimizing an objective or loss function. They also include the closely related methods of measuring model performance.
+
+We distinguish between unsupervised and supervised learning and outline use cases for algorithmic trading. We contrast supervised regression and classification problems, the use of supervised learning for statistical inference of relationships between input and output data with its use for the prediction of future outputs. We also illustrate how prediction errors are due to the model's bias or variance, or because of a high noise-to-signal ratio in the data. Most importantly, we present methods to diagnose sources of errors like overfitting and improve your model's performance.
+
+In this chapter, we will cover the following topics relevant for applying the ML workflow in practice:
+- How supervised and unsupervised learning from data works
+- Training and evaluating supervised learning models for regression and classification tasks
+- How the bias-variance trade-off impacts predictive performance
+- How to diagnose and address prediction errors due to overfitting
+- Using cross-validation to optimize hyperparameters with a focus on time-series data
+- Why financial data requires additional attention when testing out-of-sample
+
+If you are already quite familiar with ML, feel free to skip ahead and dive right into learning how to use ML models to produce and combine alpha factors for an algorithmic trading strategy.
+
+## How machine learning from data works
 
 ## The Machine Learning Workflow
 
@@ -20,7 +39,6 @@ The process is iterative throughout, and the effort at different stages will var
 4. Pick one or more machine learning algorithms suitable for your data
 5. Train, test, and tune your models
 6. Use your model to solve the original problem
-
 
 ### Basic Walkthrough: K-nearest neighbors
 

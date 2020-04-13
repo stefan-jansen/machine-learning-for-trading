@@ -1,4 +1,4 @@
-# Chapter 03: Alternative Data
+# Alternative Data for Trading
 
 This chapter explains how individuals, business processes, and sensors produce alternative data. It also provides a framework to navigate and evaluate the proliferating supply of alternative data for investment purposes. 
 

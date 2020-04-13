@@ -1,17 +1,19 @@
-# Chapter 04: Financial Feature Engineering: How to research Alpha Factors
+# Financial Feature Engineering: How to research Alpha Factors
 
-Alpha factors aim to predict the price movements of assets in the investment universe based on the available market, fundamental, or alternative data. A factor may combine one or several input variables, but assumes a single value for each asset every time the strategy evaluates the factor. 
+Algorithmic trading strategies are driven by signals that indicate when to buy or sell assets to generate superior returns relative to a benchmark such as an index. The portion of an asset's return that is not explained by exposure to this benchmark is called alpha, and hence the signals that aim to produce such uncorrelated returns are also called alpha factors.
 
-Trade decisions typically rely on relative values across assets. Trading strategies are often based on signals emitted by multiple factors, and we will see that machine learning (ML) models are particularly well suited to integrate the various signals efficiently to make more accurate predictions.
+If you are already familiar with ML, you may know that feature engineering is a key ingredient for successful predictions. This is no different in trading. Investment, however, is particularly rich in decades of research into how markets work and which features may work better than others to explain or predict price movements as a result. This chapter provides an overview as a starting point for your own search for alpha factors.
 
-This chapter provides a framework for understanding how factors work and how to measure their performance, for example using the information coefficient (IC). It demonstrates how to engineer alpha factors from data using Python libraries offline and on the Quantopian platform. It also introduces the `zipline` library to backtest factors and the `alphalens` library to evaluate their predictive power. More specifically, this chapter covers:
+This chapter also presents key tools that facilitate the computing and testing alpha factors. We will highlight how the NumPy, pandas and TA-Lib libraries facilitate the manipulation of data and present popular smoothing techniques like the wavelets and the Kalman filter that help reduce noise in data.
 
-- Which categories of factors exist, why they work and how to measure them
-- How to create alpha factors using numpy, pandas, and talib
+We also preview how you can use the trading simulator Zipline to evaluate the predictive performance of (traditional) alpha factors. We discuss key alpha factor metrics like the information coefficient and factor turnover. An in-depth introduction to backtesting trading strategies that use machine learning follows in Chapter 6, which covers the ML4T workflow that we will use throughout the book to evaluate trading strategies. 
+
+In particular, this chapter will address the following topics:
+- Which categories of factors exist, why they work, and how to measure them
+- Creating e alpha factors using NumPy, pandas, and TA-Lib
 - How to denoise data using wavelets and the Kalman filter
-- How to use zipline offline and on Quantopian to test individual and multiple alpha factors
-- How the information coefficient (IC) measures an alpha factor's predictive performance
-- How to use alphalens to evaluate predictive performance and turnover using, among other metrics, the information coefficient (IC)
+- Using e Zipline offline and on Quantopian to test individual and multiple alpha factors
+- How to use Alphalens to evaluate predictive performance and turnover using, among other metrics, the information coefficient (IC)
 
 ## Alpha Factors in practice: from data to signals
 

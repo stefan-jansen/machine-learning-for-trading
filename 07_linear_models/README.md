@@ -1,4 +1,4 @@
-# Chapter 06: Linear Models for Regression & Classification
+# Linear Models: From Risk Factors to Asset Return Forecasts
 
 The family of linear models represents one of the most useful hypothesis classes. Many learning algorithms that are widely applied in algorithmic trading rely on linear predictors because they can be efficiently trained in many cases, they are relatively robust to noisy financial data, and they have strong links to the theory of finance. Linear predictors are also intuitive, easy to interpret, and often fit the data reasonably well or at least provide a good baseline.
 

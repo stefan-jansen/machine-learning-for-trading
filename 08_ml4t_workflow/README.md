@@ -1,4 +1,4 @@
-# Putting it all together: The End-to-End ML4T Workflow
+# Putting it all together: The ML4T Workflow
 
 This chapter integrates the various building blocks of the ML4T workflow so far discussed separately to present the end-to-end process of designing, simulating and evaluating a trading strategy driven by a machine learning (ML) algorithm. Most importantly, we will demonstrate in more detail how to backtest an ML-driven strategy in a historical market context using the Python libraries `BackTrader` and `zipline`.
 

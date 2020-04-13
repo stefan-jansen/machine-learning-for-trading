@@ -1,4 +1,4 @@
-# Chapter 11: Gradient Boosting Machines
+# Boosting your Trading Strategy
 
 This chapter explores boosting, another ensemble learning algorithm typically based on decision trees that often produces even better results the [Random Forests](../10_decision_trees_random_forests). 
 

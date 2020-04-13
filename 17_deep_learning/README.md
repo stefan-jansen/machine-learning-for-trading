@@ -1,14 +1,18 @@
-# Chapter 17: Deep Learning
+# Deep Learning for Trading
 
-The chapter presents feedforward neural networks (NN) to demonstrate how to efficiently train large models using backpropagation, and manage the risks of overfitting. It also shows how to use of the frameworks Keras, TensorFlow 2.0, and PyTorch.
+This chapter kicks off part four, which covers how several deep learning (DL) modeling techniques can be useful for investment and trading. DL has achieved numerous breakthroughs in many domains ranging from image and speech recognition to robotics and intelligent agents that have drawn widespread attention and revived large-scale research into Artificial Intelligence (AI). The expectations are high that the rapid development will continue and many more solutions to difficult practical problems will emerge.
 
-In the following chapters, we will build on this foundation to design and train a variety of architectures suitable for different investment applications with a particular focus on alternative data sources. These include recurrent NN tailored to sequential data like time series or natural language and convolutional NN particularly well suited to image data. We will also cover deep unsupervised learning, including Generative Adversarial Networks (GAN) to create synthetic data and reinforcement learning to train agents that interactively learn from their environment. In particular, this chapter will cover
+In this chapter, we will present feedforward neural networks to introduce key elements of working with neural networks relevant to the various DL architectures covered in the following chapters. More specifically, we will demonstrate how to train large models efficiently using the backpropagation algorithm and manage the risks of overfitting. We will also show how to use the popular Keras, TensorFlow 2.0, and PyTorch frameworks, which we will leverage throughout part four.
+
+In the following chapters, we will build on this foundation to design various architectures suitable for different investment applications with a particular focus on alternative text and image data. These include recurrent neural networks (RNNs) tailored to sequential data such as time series or natural language, and Convolutional Neural Networks (CNNs), which are particularly well suited to image data but can also be used with time-series data. We will also cover deep unsupervised learning, including autoencoders and Generative Adversarial Networks (GANs) as well as reinforcement learning to train agents that interactively learn from their environment.
+
+In particular, this chapter will cover
 - How DL solves AI challenges in complex domains
-- How key innovations have propelled DL to its current popularity
+- Key innovations that have propelled DL to its current popularity
 - How feed-forward networks learn representations from data
-- How to design and train deep neural networks in Python
-- How to implement deep NN using Keras, TensorFlow, and PyTorch
-- How to build and tune a deep NN to predict asset price moves
+- Designing and training deep neural networks in Python
+- Implementing deep NN using Keras, TensorFlow, and PyTorch
+- Building and tuning a deep NN to predict asset price moves
 
 ## How Deep Learning Works
 

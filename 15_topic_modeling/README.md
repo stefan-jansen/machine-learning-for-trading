@@ -1,4 +1,4 @@
-# Chapter 14: Topic Modeling
+# Topic Modeling for Earnings Calls and Financial News
 
 This chapter uses unsupervised machine learning to extract latent topics from documents. These themes can produce detailed insights into a large body of documents in an automated way. They are very useful to understand the haystack itself and permit the concise tagging of documents because using the degree of association of topics and documents. 
 

@@ -1,13 +1,23 @@
-# Chapter 05: Strategy Evaluation & Portfolio Management
+# Portfolio Optimization and Performance Evaluation
 
-This chapter covers:
+Alpha factors generate signals that an algorithmic strategy translates into trades, which, in turn, produce long and short positions. The returns and risk of the resulting portfolio determine the success of the strategy.
 
-- How to build and test a portfolio based on alpha factors using zipline
+To test a strategy prior to implementation under market conditions, we need to simulate the trades that the algorithm would make and verify their performance. Strategy evaluation includes backtesting against historical data to optimize the strategy's parameters and forward-testing to validate the in-sample performance against new, out-of-sample data. The goal is to avoid false discoveries from tailoring a strategy to specific past circumstances.
+
+In a portfolio context, positive asset returns can offset negative price movements. Positive price changes for one asset are more likely to offset losses on another the lower the correlation between the two positions. Based on how portfolio risk depends on the positions’ covariance, Harry Markowitz developed the theory behind modern portfolio management based on diversification in 1952. The result is mean-variance optimization that selects weights for a given set of assets to minimize risk, measured as the standard deviation of returns for a given expected return.
+
+The capital asset pricing model (CAPM) introduces a risk premium, measured as the expected return in excess of a risk-free investment, as an equilibrium reward for holding an asset. This reward compensates for the exposure to a single risk factor—the market—that is systematic as opposed to idiosyncratic to the asset and thus cannot be diversified away. 
+
+Risk management has evolved to become more sophisticated as additional risk factors and more granular choices for exposure have emerged. The Kelly criterion is a popular approach to dynamic portfolio optimization, which is the choice of a sequence of positions over time; it has been famously adapted from its original application in gambling to the stock market by Edward Thorp in 1968.
+
+As a result, there are several approaches to optimize portfolios that include the application of machine learning (ML) to learn hierarchical relationships among assets and treat their holdings as complements or substitutes with respect to the portfolio risk profile.
+
+In this chapter, we will cover the following topics:
 - How to measure portfolio risk and return
-- How to avoid the pitfalls of backtesting
+- Managing portfolio weights using mean-variance optimization and alternatives
+- Using machine learning to optimize asset allocation in a portfolio context
+- Simulating trades and create a portfolio based on alpha factors using Zipline
 - How to evaluate portfolio performance using pyfolio
-- How to manage portfolio weights using mean-variance optimization and alternatives
-- How to use machine learning to optimize asset allocation in a portfolio context
 
 ## How to build and test a portfolio with `zipline`
 

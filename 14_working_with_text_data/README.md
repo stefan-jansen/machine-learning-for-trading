@@ -1,14 +1,21 @@
-# Chapter 13: Working with Text Data
+# Text Data for Trading: Sentiment Analysis
 
-This chapter introduces text feature extraction techniques that focus on individual semantic units, i.e. words or short groups of words called tokens. We will show how to represent documents as vectors of token counts by creating a document-term matrix that in turn serves as input for text classification and sentiment analysis. We will also introduce the Naive Bayes algorithm that is popular for this purpose. 
+This is the first of three chapters dedicated to extracting signals for algorithmic trading strategies from text data using natural language processing (NLP) and machine learning.
 
-In particular, in this chapter covers:
-- What the NLP workflow looks like
+Text data is very rich in content but highly unstructured so that it requires more preprocessing to enable an ML algorithm to extract relevant information. A key challenge consists of converting text into a numerical format without losing its meaning. We will cover several techniques capable of capturing nuances of language so that they can be used as input for ML algorithms.
+
+In this chapter, we will introduce fundamental feature extraction techniques that focus on individual semantic units, i.e. words or short groups of words called tokens. We will show how to represent documents as vectors of token counts by creating a document-term matrix and then proceed to use it as input for news classification and sentiment analysis. We will also introduce the Naive Bayes algorithm that is popular for this purpose.
+
+In the following two chapters, we build on these techniques and use ML algorithms like topic modeling and word-vector embeddings to capture the information contained in a broader context. 
+
+In particular, in this chapter we will cover:
+- What the fundamental NLP workflow looks like
 - How to build a multilingual feature extraction pipeline using spaCy and Textblob
-- How to perform NLP tasks like parts-of-speech tagging or named entity recognition
+- How to perform NLP tasks like part-of-speech tagging or named entity recognition
 - How to convert tokens to numbers using the document-term matrix
 - How to classify text using the Naive Bayes model
 - How to perform sentiment analysis
+
 
 ## How to extract features from text data
 - [Speech and Language Processing](https://web.stanford.edu/~jurafsky/slp3/ed3book.pdf), Daniel Jurafsky & James H. Martin, 3rd edition, draft, 2018

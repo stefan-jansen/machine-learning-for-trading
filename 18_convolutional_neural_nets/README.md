@@ -1,14 +1,18 @@
-# Chapter 17: Convolutional Neural Networks
+# Convolutional Neural Networks: Time Series as Images
 
-CNNs are named after the linear algebra operation called convolution that replaces the general matrix multiplication typical of feed-forward networks. Research into CNN architectures has proceeded very rapidly and new architectures that improve performance on some benchmark continue to emerge frequently. CNNs are designed to learn hierarchical feature representations from grid-like data. One of their shortcomings is that they do not learn spatial relationships, i.e., the relative positions of these features. In the last section, we will outline how Capsule Networks work that have emerged to overcome these limitations. 
+In this chapter, we introduce the first specialized Deep Learning architectures that we will cover in part 4. Deep Convolutional Neural Networks, also ConvNets or CNN, have enabled superhuman performance in classifying images, video, speech, and audio. Recurrent nets, the subject of the following chapter, have performed exceptionally well on sequential data such as text and speech.
 
-More specifically, this chapter covers
+CNNs are named after the linear algebra operation called convolution that replaces the general matrix multiplication typical of feed-forward networks (discussed in the last chapter on Deep Learning) in at least one of their layers. We will discuss how convolutions work and why they are particularly useful to data with a certain regular structure like images or time series.
 
+Research into CNN architectures has proceeded very rapidly and new architectures that improve benchmark performance continue to emerge. We will describe a set of building blocks that consistently appears in successful applications and illustrate their application to image data and financial time series. We will also demonstrate how transfer learning can speed up learning by using pre-trained weights for some of the CNN layers.
+
+More specifically, in this chapter, you will learn about:
 - How CNNs use key building blocks to efficiently model grid-like data
-- How to design CNN architectures using Keras and PyTorch
-- How to train, tune and regularize CNN for various data types
-- How to use transfer learning to streamline CNN, even with fewer data
-- How Capsule Networks improve on CNN and may enable a new wave of innovation
+- Designing CNN architectures using Keras and PyTorch
+- Training, tuning, and regularizing CNN for various data types
+- Using transfer learning to streamline CNN, even with fewer data
+- How to classify satellite images
+
 
 ## How to build a Deep ConvNet
 

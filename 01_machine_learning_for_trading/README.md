@@ -1,4 +1,4 @@
-# Chapter 01: From Idea to Execution
+# Machine Learning for Trading: From Idea to Execution
 
 ## The rise of ML in the investment industry
 

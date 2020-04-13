@@ -1,4 +1,4 @@
-# Chapter 19: Autoencoders - Unsupervised Deep Learning
+# Conditional Autoencoders for Asset Pricing and GANs
 
 This chapter presents two unsupervised learning techniques that leverage deep learning: autoencoders, which have been around for decades, and Generative Adversarial Networks (GANs), which were introduced by Ian Goodfellow in 2014 and which Yann LeCun has called the most exciting idea in AI in the last ten years. 
 - An autoencoder is a neural network trained to reproduce the input while learning a new representation of the data, encoded by the parameters of a hidden layer. Autoencoders have long been used for nonlinear dimensionality reduction and manifold learning. More recently, autoencoders have been designed as generative models that learn probability distributions over observed and latent variables. A variety of designs leverage the feedforward network, Convolutional Neural Network (CNN), and recurrent neural network (RNN) architectures we covered in the last three chapters.

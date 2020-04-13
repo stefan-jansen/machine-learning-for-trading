@@ -1,6 +1,4 @@
-# Chapter 13: Unsupervised Learning
-
-- [Stock Market Structure](https://scikit-learn.org/stable/auto_examples/applications/plot_stock_market.html)
+# Unsupervised Learning: From Data-Driven Risk Factors to Hierarchical Risk Parity 
 
 Unsupervised learning is useful when a dataset contains only features and no measurement of the outcome, or when we want to extract information independent from the outcome. Instead of predicting future outcomes, the goal is to learn an informative representation of the data that is useful for solving another task, including the exploration of a data set. Examples include the identification of topics to summarize documents (see [Chapter 14](../14_topic_modeling), the reduction of the number of features to lower the risk of overfitting and computational cost for supervised learning, or to group similar observations as illustrated by the use of clustering for asset allocation at the end of this chapter.
 
@@ -84,7 +82,6 @@ The notebook [pca_and_risk_factor_models](01_linear_dimensionality_reduction/03_
 - [The Prediction Performance of Independent Factor Models](http://www.cs.cuhk.hk/~lwchan/papers/icapred.pdf), Chan, In: proceedings of the 2002 IEEE International Joint Conference on Neural Networks
 - [An Overview of Independent Component Analysis and Its Applications](http://www.informatica.si/ojs-2.4.3/index.php/informatica/article/download/334/333), Ganesh R. Naik, Dinesh K Kumar, Informatica 2011
 
-
 ### Manifold Learning
 
 The manifold hypothesis emphasizes that high-dimensional data often lies on or near a lower-dimensional non-linear manifold that is embedded in the higher dimensional space. 
@@ -147,7 +144,6 @@ Algorithms also differ by the notion of what constitutes a useful collection of 
 - Density-based clusters of arbitrary shape
 - Connectivity- or graph-based clusters
 
-
 Important additional aspects of a clustering algorithm include whether 
 - it requires exclusive cluster membership, 
 - makes hard, i.e., binary, or soft, probabilistic assignment, and 
@@ -202,7 +198,7 @@ The notebook [hrp](04_hierarchical_risk_parity/hrp.ipynb) and the python files i
 
 - [Building Diversified Portfolios that Outperform Out-of-Sample](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2708678), Lopez de Prado, Journal of Portfolio Management, 2015
 - [Hierarchical Clustering Based Asset Allocation](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2840729), Raffinot 2016
-
+- [Visualizing the Stock Market Structure](https://scikit-learn.org/stable/auto_examples/applications/plot_stock_market.html)
 
 
 

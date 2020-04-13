@@ -1,4 +1,4 @@
-# Chapter 20: Reinforcement Learning
+# Chapter 21: Reinforcement Learning
 
 Reinforcement Learning (RL) is a computational approach to goal-directed learning performed by an agent that interacts with a typically stochastic environment which the agent has incomplete information about. RL aims to automate how the agent makes decisions to achieve a long-term objective by learning the value of states and actions from a reward signal. The ultimate goal is to derive a policy that encodes behavioral rules and maps states to actions.
 

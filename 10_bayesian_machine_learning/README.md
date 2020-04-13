@@ -1,4 +1,4 @@
-# Chapter 9: Bayesian Machine Learning
+# Bayesian ML: From dynamic Sharpe Ratios to Pairs Trading
 
 Bayesian statistics allows us to quantify uncertainty about future events and refine our estimates in a principled way as new information arrives. This dynamic approach adapts well to the evolving nature of financial markets. It is particularly useful when there are fewer relevant data and we require methods that systematically integrate prior knowledge or assumptions.
 

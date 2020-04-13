@@ -1,4 +1,4 @@
-# Chapter 02: Market & Fundamental Data
+# Market & Fundamental Data
 
 This chapter introduces market and fundamental data sources and the environment in which they are created. Familiarity with various types of orders and the trading infrastructure matters because they affect backtest simulations of a trading strategy. We also illustrate how to use Python to access and work with trading and financial statement data.
  
