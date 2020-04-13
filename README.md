@@ -1,4 +1,4 @@
-# Machine Learning for Trading - 2nd Edition (May 2020)
+# Machine Learning for Trading (2nd edition, May 2020)
 
 This book provides a comprehensive introduction to how ML can add value to algorithmic trading strategies. It covers a broad range of ML techniques and demonstrates how build, backtest and evaluate a trading strategy that acts on predictive signals. 
 
