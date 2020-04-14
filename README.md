@@ -14,7 +14,9 @@ It is organized in four parts that cover
 
 ## What to expect
 
-This book aims to equip you with the strategic perspective, conceptual understanding, and practical tools to add value from applying ML to the trading and investment process. To this end, it covers ML as an important element in a process rather than a standalone exercise.
+This book aims to equip you with the strategic perspective, conceptual understanding, and practical tools to add value from applying ML to the trading and investment process. To this end, it covers ML as an important element as part of the Machine Learning for Trading (ML4T) workflow rather than a standalone exercise.
+
+![The ML4T Workflow](assets/ml4t_workflow.png)
 
 First and foremost, it illustrates how a broad range of supervised, unsupervised, and reinforcement learning algorithms can be used to extract signals from a diverse set of data sources relevant to different asset classes. It demonstrates how to develop an end-to-end trading strategy and presents ML models as building blocks that extract or combine alpha factors using a systematic workflow. The modular approach implies that not every algorithm is shown as part of a complete strategy. This allows to develop the mathematical and statistical background that in turn facilitate the tuning of an algorithm or the interpretation of the results.
 
