@@ -41,7 +41,7 @@ You should be comfortable using Python and various scientific computing librarie
 
 It is organized in four parts that cover different aspects of the data sourcing and strategy development process, as well as different solutions to various ML challenges.
 
-## Part 1: How to Design a Trading Strategy
+## Part 1: From Data to Strategy Development
 
 The first part provides a framework for the development of trading strategies driven by machine learning (ML). It focuses on the data that power the ML algorithms and strategies discussed in this book, outlines how ML can be used to derive trading signals, and how to deploy and evaluate strategies as part of a portfolio.
 
@@ -59,12 +59,14 @@ This [chapter](01_machine_learning_for_trading) summarizes how and why ML became
 This [chapter](02_market_and_fundamental_data) introduces market and fundamental data sources and the environment in which they are created. Familiarity with various types of orders and the trading infrastructure matters because they affect backtest simulations of a trading strategy. We also illustrate how to use Python to access and work with trading and financial statement data. 
 
 In particular, this chapter will cover the following topics:
-- How market microstructure shapes market data
-- How to reconstruct the order book from tick data using Nasdaq ITCH 
-- How to summarize tick data using various time, volume and dollar bars
-- How to work with eXtensible Business Reporting Language (XBRL)-encoded electronic filings
-- How to parse and combine market and fundamental data to create a P/E series
+- How market data reflects the structure of the trading environment
+- Working with trade and quotes data at minute frequency
+- Reconstructing the order book from tick data using NASDAQ ITCH 
+- Summarize tick data using various types of bars
+- Working with eXtensible Business Reporting Language (XBRL)-encoded electronic filings
+- Parsing and combining market and fundamental data to create a P/E series
 - How to access various market and fundamental data sources using Python
+
 
 ### 03 Alternative Data for Finance: Categories and Use Cases
 
