@@ -72,37 +72,6 @@ Pyfolio facilitates the analysis of portfolio performance and risk in-sample and
 
 The directory [risk_metrics_pyfolio](02_risk_metrics_pyfolio) contains the notebook [pyfolio_demo](02_risk_metrics_pyfolio/pyfolio_demo.ipynb) that illustrates how to extract the `pyfolio` input from the backtest conducted in the previous folder. It then proceeds to calcuate several performance metrics and tear sheets using `pyfolio`
 
-## How to avoid the pitfalls of backtesting
-
-### Data Challenges
-
-Backtesting simulates an algorithmic strategy using historical data with the goal of identifying patterns that generalize to new market conditions. In addition to the generic challenges of predicting an uncertain future in changing markets, numerous factors make mistaking positive in-sample performance for the discovery of true patterns very likely. 
-
-These factors include aspects of the data, the implementation of the strategy simulation, and flaws with the statistical tests and their interpretation. The risks of false discoveries multiply with the use of more computing power, bigger datasets, and more complex algorithms that facilitate the identification of apparent patterns in the noise.
-
-### Data-snooping and backtest overfitting
-
-The most prominent challenge to backtest validity, including to published results, relates to the discovery of spurious patterns due to multiple testing during the strategy-selection process. Selecting a strategy after testing different candidates on the same data will likely bias the choice because a positive outcome is more likely to be due to the stochastic nature of the performance measure itself. In other words, the strategy is overly tailored, or overfit, to the data at hand and produces deceptively positive results.
-
-[Marcos Lopez de Prado](http://www.quantresearch.info/) has published extensively on the risks of backtesting, and how to detect or avoid it. This includes an [online simulator of backtest-overfitting](http://datagrid.lbl.gov/backtest/).
-
-
-#### The deflated Sharpe Ratio
-
-De Lopez Prado and Bailey (2014) derive a deflated SR to compute the probability that the SR is statistically significant while controlling for the inflationary effect of multiple testing, non-normal returns, and shorter sample lengths.
-
-The pyton script [deflated_sharpe_ratio](03_multiple_testing/deflated_sharpe_ratio.py) in the directory [multiple_testing](03_multiple_testing) contains the Python implementation with references for the derivation of the related formulas. 
-
-#### References
-
-- [The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality](https://www.davidhbailey.com/dhbpapers/deflated-sharpe.pdf), Bailey, David and Lopez de Prado, Marcos, Journal of Portfolio Management, 2013
-- [Backtest Overfitting: An Interactive Example](http://datagrid.lbl.gov/backtest/)
-- [Backtesting](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2606462), Lopez de Prado, Marcos, 2015
-- [Secretary Problem (Optimal Stopping)](https://www.geeksforgeeks.org/secretary-problem-optimal-stopping-problem/)
-- [Optimal Stopping and Applications](https://www.math.ucla.edu/~tom/Stopping/Contents.html), Ferguson, Math Department, UCLA
-- [Advances in Machine Learning Lectures 4/10 - Backtesting I](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3257420), Marcos Lopez de Prado, 2018
-- [Advances in Machine Learning Lectures 5/10 - Backtesting II](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3257497), Marcos Lopez de Prado, 2018
-
 ## How to Manage Portfolio Risk & Return
 
 - [Portfolio Selection](https://www.math.ust.hk/~maykwok/courses/ma362/07F/markowitz_JF.pdf), Harry Markowitz, The Journal of Finance, 1952

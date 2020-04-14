@@ -1,26 +1,59 @@
 # Putting it all together: The ML4T Workflow
 
-This chapter integrates the various building blocks of the ML4T workflow so far discussed separately to present the end-to-end process of designing, simulating and evaluating a trading strategy driven by a machine learning (ML) algorithm. Most importantly, we will demonstrate in more detail how to backtest an ML-driven strategy in a historical market context using the Python libraries `BackTrader` and `zipline`.
+This chapter integrates the various building blocks of the ML4T workflow so far discussed separately to present the end-to-end process of designing, simulating and evaluating a trading strategy driven by a machine learning (ML) algorithm. Most importantly, we will demonstrate in more detail how to backtest an ML-driven strategy in a historical market context using the Python libraries `Backtrader` and `Zipline`.
 
-The open source [zipline](http://www.zipline.io/index.html) library is an event-driven backtesting system maintained and used in production by the crowd-sourced quantitative investment fund [Quantopian](https://www.quantopian.com/) to facilitate algorithm-development and live-trading. It automates the algorithm's reaction to trade events and provides it with current and historical point-in-time data that avoids look-ahead bias. [Chapter 8 - The ML4T Workflow](../08_strategy_workflow) has a more detailed, dedicated introduction to backtesting using both `zipline` and `backtrader`. 
+Now it’s time to integrate the various building blocks of the machine learning for trading (ML4T) workflow that we have so far discussed separately. The goal of this chapter is to present an end-to-end perspective on the process of designing, simulating, and evaluating a trading strategy driven by an ML algorithm. To this end, we will demonstrate in more detail how to backtest an ML-driven strategy in a historical market context using the Python libraries backtrader and Zipline.
 
-The ultimate goal of the ML4T workflow is to gather evidence from historical data that helps decide whether to trade the strategy in live markets. This process builds on the skills developed in the previous chapters: it relies on your ability to work with a diverse set of data sources to engineer informative factors, to design and train ML models that generate predictive signals to inform your trading strategy and to optimize the resulting portfolio from a risk-return perspective.
+The ultimate objective of the ML4T workflow is to gather evidence from historical data that helps decide whether to deploy a candidate strategy in a live market and put financial resources at risk. This process builds on the skills you developed in the previous chapters because it relies on your ability
+- to work with a diverse set of data sources to engineer informative factors, 
+- to design ML models that generate predictive signals to inform your trading strategy, and 
+- to optimize the resulting portfolio from a risk-return perspective.
 
-A realistic simulation of your strategy also needs to faithfully represent how security markets operate and how trades are executed. Hence, the institutional details o exchanges such as which order types are available and how prices are determined also matter when you design a backtest or evaluate whether a backtesting engine includes features required for accurate performance measurements. Finally, there are several methodological aspects that require attention to avoid biased results and false discoveries that would lead to poor decisions. 
+A realistic simulation of your strategy also needs to faithfully represent how security markets operate and how trades are executed. Therefore, the institutional details of exchanges, such as which order types are available and how prices are determined, also matter when you design a backtest or evaluate whether a backtesting engine includes the requisite features for accurate performance measurements. Finally, there are several methodological aspects that require attention to avoid biased results and false discoveries that will lead to poor investment decisions.
 
 More specifically, after working through this chapter you will be able to:
 - Plan and implement end-to-end strategy backtesting
-- Understand and avoid critical pitfalls when implementing backtests,
-- Discuss the advantages and disadvantages of vectorized vs event-driven backtesting engines,
-- Identify and evaluate the key components of an event-driven backtester,
-- Design and execute the ML4T workflow using data sources at minute and daily frequencies, with ML models trained separately or as part of the backtest, 
-- Know how to use zipline and backtrader
+- Understand and avoid critical pitfalls when implementing backtests
+- Discuss the advantages and disadvantages of vectorized vs event-driven backtesting engines
+- Identify and evaluate the key components of an event-driven backtester
+- Design and execute the ML4T workflow using data sources at minute and daily frequencies, with ML models trained separately or as part of the backtest
+- Know how to use Zipline and backtrader
+
 
 The data used for some of the backtest simulations are generated by the script [data_prep.py](00_data/data_prep.py) in the [data](00_data) directory.
 
 ## How to backtest an ML-driven strategy
 
 ## The pitfalls of backtesting and how to avoid them
+
+### Data Challenges
+
+Backtesting simulates an algorithmic strategy using historical data with the goal of identifying patterns that generalize to new market conditions. In addition to the generic challenges of predicting an uncertain future in changing markets, numerous factors make mistaking positive in-sample performance for the discovery of true patterns very likely. 
+
+These factors include aspects of the data, the implementation of the strategy simulation, and flaws with the statistical tests and their interpretation. The risks of false discoveries multiply with the use of more computing power, bigger datasets, and more complex algorithms that facilitate the identification of apparent patterns in the noise.
+
+### Data-snooping and backtest overfitting
+
+The most prominent challenge to backtest validity, including to published results, relates to the discovery of spurious patterns due to multiple testing during the strategy-selection process. Selecting a strategy after testing different candidates on the same data will likely bias the choice because a positive outcome is more likely to be due to the stochastic nature of the performance measure itself. In other words, the strategy is overly tailored, or overfit, to the data at hand and produces deceptively positive results.
+
+[Marcos Lopez de Prado](http://www.quantresearch.info/) has published extensively on the risks of backtesting, and how to detect or avoid it. This includes an [online simulator of backtest-overfitting](http://datagrid.lbl.gov/backtest/).
+
+
+#### The deflated Sharpe Ratio
+
+De Lopez Prado and Bailey (2014) derive a deflated SR to compute the probability that the SR is statistically significant while controlling for the inflationary effect of multiple testing, non-normal returns, and shorter sample lengths.
+
+The pyton script [deflated_sharpe_ratio](03_multiple_testing/deflated_sharpe_ratio.py) in the directory [multiple_testing](03_multiple_testing) contains the Python implementation with references for the derivation of the related formulas. 
+
+#### References
+
+- [The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality](https://www.davidhbailey.com/dhbpapers/deflated-sharpe.pdf), Bailey, David and Lopez de Prado, Marcos, Journal of Portfolio Management, 2013
+- [Backtest Overfitting: An Interactive Example](http://datagrid.lbl.gov/backtest/)
+- [Backtesting](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2606462), Lopez de Prado, Marcos, 2015
+- [Secretary Problem (Optimal Stopping)](https://www.geeksforgeeks.org/secretary-problem-optimal-stopping-problem/)
+- [Optimal Stopping and Applications](https://www.math.ucla.edu/~tom/Stopping/Contents.html), Ferguson, Math Department, UCLA
+- [Advances in Machine Learning Lectures 4/10 - Backtesting I](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3257420), Marcos Lopez de Prado, 2018
+- [Advances in Machine Learning Lectures 5/10 - Backtesting II](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3257497), Marcos Lopez de Prado, 2018
 
 - The code examples for this section are in the subfolder [multiple_testing](01_multiple_testing).
 
@@ -47,6 +80,8 @@ The data used for some of the backtest simulations are generated by the script [
     - [Installation](https://www.backtrader.com/docu/installation/)
 
 ## zipline: production-ready backtesting by Quantopian
+
+The open source [Zipline](http://www.zipline.io/index.html) library is an event-driven backtesting system maintained and used in production by the crowd-sourced quantitative investment fund [Quantopian](https://www.quantopian.com/) to facilitate algorithm-development and live-trading. It automates the algorithm's reaction to trade events and provides it with current and historical point-in-time data that avoids look-ahead bias.
 
 In [Chapter 4](../04_alpha_factor_research), we introduced `zipline` to simulate the computation of alpha factors, and in [Chapter 5](../05_strategy_evaluation) we added trades to simulate a simple strategy and measure its performance as well as optimize portfolio holdings using different techniques.
 
