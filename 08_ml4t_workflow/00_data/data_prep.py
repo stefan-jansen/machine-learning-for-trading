@@ -26,6 +26,7 @@ def get_backtest_data():
 
     with pd.HDFStore(PROJECT_DIR / '07_linear_models/data.h5') as store:
         predictions = store['lasso/predictions']
+
     best_alpha = predictions.groupby('alpha').apply(lambda x: spearmanr(x.actuals, x.predicted)[0]).idxmax()
     predictions = predictions[predictions.alpha == best_alpha]
     predictions.index.names = ['ticker', 'date']

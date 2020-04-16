@@ -160,7 +160,7 @@ More specifically, after working through this chapter you will be able to:
 - Know how to use Zipline and backtrader
 
 
-### 09 From Volatility Forecasts to Statistical Aribtrage: Time Series Models
+### 09 From Volatility Forecasts to Statistical Arbitrage: Time Series Models
 
  This [chapter](09_time_series_models) focuses on models that extract signals from previously observed data to predict future values for the same time series. The time dimension of trading makes the application of time series models to market, fundamental, and alternative data very popular. 
  
