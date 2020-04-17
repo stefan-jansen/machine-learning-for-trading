@@ -1,14 +1,20 @@
 # From Volatility Forecasts to Statistical Arbitrage: Linear Time Series Models
 
-To Do:
-- Stooq Data sourcing
+In this chapter, we will build dynamic linear models to explicitly represent time and include variables observed at specific intervals or lags. A key characteristic of time-series data is their sequential order: rather than random samples of individual observations as in the case of cross-sectional data, our data are a single realization of a stochastic process that we cannot repeat.
+
+Our goal is to identify systematic patterns in time series that help us predict how the time series will behave in the future. More specifically, we focus on models that extract signals from a historical sequence of the output and, optionally, other contemporaneous or lagged input variables to predict future values of the output. For example, we might try to predict future returns for a stock using past returns, combined with historical returns of a benchmark or macroeconomic variables. We focus on linear time-series models before turning to nonlinear models like recurrent or convolutional neural networks in Part 4. 
+
+Time-series models are very popular given the time dimension inherent to trading. Key applications include the prediction of asset returns and volatility, as well as the identification of co-movements of asset price series. Time-series data are likely to become more prevalent as an ever-broader array of connected devices collects regular measurements with potential signal content.
+
+We first introduce tools to diagnose time-series characteristics and to extract features that capture potential patterns. Then we introduce univariate and multivariate time-series models and apply them to forecast macro data and volatility patterns. We conclude with the concept of cointegration and how to apply it to develop a pairs trading strategy.
 
 This chapter covers:
-- How to use time series analysis to diagnose diagnostic statistics that inform the modeling process
-- How to estimate and diagnose autoregressive and moving-average time series models
-- How to build Autoregressive Conditional Heteroskedasticity (ARCH) models to predict volatility
+- How to use time-series analysis to diagnose diagnostic statistics that inform the modeling process
+- Estimate and diagnosing autoregressive and moving-average time-series models
+- Building autoregressive conditional heteroskedasticity (ARCH) models to predict volatility
 - How to build vector autoregressive models
-- How to use cointegration for a pairs trading strategy
+- Using cointegration to develop a pairs trading strategy
+
 
 - [Quantopian](https://github.com/quantopian/research_public/blob/master/notebooks/lectures/Introduction_to_Pairs_Trading/notebook.ipynb)
 - [Quantopian Johansen](https://www.quantopian.com/posts/trading-baskets-co-integrated-with-spy)
@@ -110,7 +116,9 @@ The development of a volatility model for an asset-return series consists of fou
 
 The notebook [arch_garch_models](02_arch_garch_models.ipynb) demonstrates the usage of the ARCH library to estimate time series models for volatility foreccasting with NASDAQ data.  
 
-- ARCH Library [examples](http://nbviewer.jupyter.org/github/bashtage/arch/blob/master/examples/univariate_volatility_modeling.ipynb)
+- ARCH Library
+    - [docs](https://arch.readthedocs.io/en/latest/index.html) 
+    - [examples](http://nbviewer.jupyter.org/github/bashtage/arch/blob/master/examples/univariate_volatility_modeling.ipynb)
 
 
 ## Multivariate Time Series Models
