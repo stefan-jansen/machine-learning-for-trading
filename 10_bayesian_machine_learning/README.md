@@ -25,7 +25,6 @@ This chapter first introduces the Bayes Theorem that crystallizes the concept of
 - [Andrew Gelman's Blog](https://andrewgelman.com/)
 - [Thomas Wiecki's Blog](https://twiecki.github.io/)
 
-
 ### How to update assumptions from empirical evidence
 
 The theorem that Reverend Thomas Bayes came up with over 250 years ago uses fundamental probability theory to prescribe how probabilities or beliefs should change as relevant new information arrives as captured by John Maynard Keynes’ quote “When the facts change, I change my mind. What do you do, sir?”.
@@ -93,6 +92,7 @@ PyMC3 aims for intuitive and readable, yet powerful syntax that reflects how sta
 - [Theano: A Python framework for fast computation of mathematical expressions](https://pdfs.semanticscholar.org/6b57/0069f14c7588e066f7138e1f21af59d62e61.pdf), Al-Rfou et al, 2016
 - [Bayesian Methods for Hackers](https://github.com/CamDavidsonPilon/Probabilistic-Programming-and-Bayesian-Methods-for-Hackers)
 - [Bad Traces, or, Don't Use Metropolis](https://colindcarroll.com/2018/01/01/bad-traces-or-dont-use-metropolis/)
+- PyMC 4 on [GitHub](https://github.com/pymc-devs/pymc4) with design guide and a usage example (pre-release in April 2020).
 
 ### Model Definition: Bayesian Logistic Regression
 
