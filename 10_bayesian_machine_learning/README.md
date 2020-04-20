@@ -1,22 +1,31 @@
-# Bayesian ML: From dynamic Sharpe Ratios to Pairs Trading
+# Bayesian ML: From recession forecasts to dynamic pairs trading
+
+In this chapter, we will introduce Bayesian approaches to machine learning (ML) and how their different perspective on uncertainty adds value when developing and evaluating trading strategies.
 
 Bayesian statistics allows us to quantify uncertainty about future events and refine our estimates in a principled way as new information arrives. This dynamic approach adapts well to the evolving nature of financial markets. It is particularly useful when there are fewer relevant data and we require methods that systematically integrate prior knowledge or assumptions.
 
-Bayesian approaches to machine learning allow for richer insights into the uncertainty around statistical metrics, parameters estimates and predictions. The applications range from more granular risk management to dynamic updates of predictive models that incorporate changes in the market environment. The Black-Litterman approach to asset allocation (see [Chapter 5](../05_strategy_evaluation)) can be interpreted as a Bayesian model. It computes the expected return as an average of the market equilibrium and the investor’s views, weighted by each asset’s volatility, cross-asset correlations and the confidence in each forecast. More specifically, this chapter covers:
+We will see that Bayesian approaches to machine learning allow for richer insights into the uncertainty around statistical metrics, parameter estimates, and predictions. The applications range from more granular risk management to dynamic updates of predictive models that incorporate changes in the market environment. The Black-Litterman approach to asset allocation (see [Chapter 5, Portfolio Optimization and Performance Evaluation](../05_strategy_evaluation) can be interpreted as a Bayesian model. It computes the expected return of an asset as an average of the market equilibrium and the investor’s views, weighted by each asset’s volatility, cross-asset correlations, and the confidence in each forecast.
+
+More specifically, in this chapter, we will cover:
 - How Bayesian statistics apply to machine learning
-- How to use probabilistic programming with PyMC3
-- How to define and train machine learning models
+- Probabilistic programming with PyMC3
+- Defining and training machine learning models using PyMC3
 - How to run state-of-the-art sampling methods to conduct approximate inference
-- How to apply Bayesian machine learning to compute dynamic Sharpe ratios, build Bayesian classifiers, and estimate stochastic volatility
+- Bayesian ML applications to compute dynamic Sharpe ratios, dynamic pairs trading hedge ratios, and estimate stochastic volatility
 
 ## How Bayesian Machine Learning Works
 
-Classical statistics is also called frequentist statistics because it interprets probability as the relative frequency of an event over the long run, i.e. after observing a large number of trials. In the context of probabilities, an event is a combination of one or more elementary outcomes of an experiment, such as any of six equal results in rolls of two dice or an asset price dropping by 10% or more on a given day). 
+Classical statistics is said to follow the frequentist approach because it interprets probability as the relative frequency of an event over the long run, i.e. after observing a large number of trials. In the context of probabilities, an event is a combination of one or more elementary outcomes of an experiment, such as any of six equal results in rolls of two dice or an asset price dropping by 10 percent or more on a given day). 
 
-Bayesian statistics, in contrast, views probability as a measure of the confidence or belief in the occurrence of an event. The Bayesian perspective on probability leaves more room for subjective views and, consequently, differences in opinions than the frequentist interpretation. This difference is most striking for events that do not happen often enough to arrive at an objective measure of long-term frequency.
+Bayesian statistics, in contrast, views probability as a measure of the confidence or belief in the occurrence of an event. The Bayesian perspective, thus, leaves more room for subjective views and differences in opinions than the frequentist interpretation. This difference is most striking for events that do not happen often enough to arrive at an objective measure of long-term frequency.
 
-This chapter first introduces the Bayes Theorem that crystallizes the concept of updating beliefs by combining prior assumptions with new empirical evidence and compare the resulting parameter estimates with their frequentist counterparts. We then demonstrate two approaches to Bayesian statistical inference that produce insights into the posterior distribution of the latent, i.e. unobserved parameters, such as their expected values, under different circumstances:  
-1. Conjugate priors facilitate the updating process by providing a closed-form solution, but exact, analytical methods are not always available.
+Put differently, frequentist statistics assumes that data is a random sample from a population and aims to identify the fixed parameters that generated the data. Bayesian statistics, in turn, takes the data as given and considers the parameters to be random variables with a distribution that can be inferred from data. As a result, frequentist approaches require at least as many data points as there are parameters to be estimated. Bayesian approaches, on the other hand, are compatible with smaller datasets, and well suited for online learning from one sample at a time.
+
+The Bayesian view is very useful for many real-world events that are rare or unique, at least in important respects. Examples include the outcome of the next election or the question of whether the markets will crash within three months. In each case, there is both relevant historical data as well as unique circumstances that unfold as the event approaches.
+
+We first introduce the Bayes theorem that crystallizes the concept of updating beliefs by combining prior assumptions with new empirical evidence and compare the resulting parameter estimates with their frequentist counterparts. We then demonstrate two approaches to Bayesian statistical inference, namely conjugate priors and approximate inference that produce insights into the posterior distribution of latent, i.e. unobserved parameters, such as the expected value:
+
+1. Conjugate priors facilitate the updating process by providing a closed-form solution that allows us to precisely compute the solution. However, such exact, analytical methods are not always available.
 2. Approximate inference simulates the distribution that results from combining assumptions and data and uses samples from this distribution to compute statistical insights.
 
 #### References
@@ -37,7 +46,6 @@ The theorem that Reverend Thomas Bayes came up with over 250 years ago uses fund
 Practical applications of Bayes’ rule to exactly compute posterior probabilities are quite limited because the computation of the evidence term in the denominator is quite challenging.
 
 #### How to keep inference simple: Conjugate Priors
-
 A prior distribution is conjugate with respect to the likelihood when the resulting posterior is of the same type of distribution as the prior except for different parameters. The conjugacy of prior and likelihood implies a closed-form solution for the posterior that facilitates the update process and avoids the need to use numerical methods to approximate the posterior.
 
 #### How to dynamically estimate the probabilities of asset price moves
@@ -58,7 +66,6 @@ will be of interest, most often it is primarily required to evaluate expectation
 - Deterministic methods called variational inference or variational Bayes are based on analytical approximations to the posterior distribution and can scale well to large applications. They make simplifying assumptions, e.g., that the posterior factorizes in a particular way or it has a specific parametric form such as a Gaussian. Hence, they do not generate exact results and can be used as complements to sampling methods.
     - [Variational Inference: A Review for Statisticians](https://arxiv.org/pdf/1601.00670.pdf), David Blei et al, 2018
 
-
 ## Probabilistic Programming with PyMC3
 
 Probabilistic programming provides a language to describe and fit probability distributions so that we can design, encode and automatically estimate and evaluate complex models. It aims to abstract away some of the computational and analytical complexity to allow us to focus on the conceptually more straightforward and intuitive aspects of Bayesian reasoning and inference.
@@ -74,7 +81,7 @@ The field has become quite dynamic since new languages emerged since Uber open-s
 
 PyMC3 was released in January 2017 to add Hamiltonian MC methods to the Metropolis-Hastings sampler used in PyMC2 (released 2012). PyMC3 uses [Theano](http://www.deeplearning.net/software/theano/) as its computational backend for dynamic C compilation and automatic differentiation. Theano is a matrix-focused and GPU-enabled optimization library developed at Yoshua Bengio’s Montreal Institute for Learning Algorithms (MILA) that inspired TensorFlow. MILA recently ceased to further develop Theano due to the success of newer deep learning libraries (see chapter 16 for details). PyMC4, planned for 2019, will use TensorFlow instead, with presumably limited impact on the API.
 
-### The PyMC3 Workflow
+### The PyMC3 workflow: predicting a recession
 
 PyMC3 aims for intuitive and readable, yet powerful syntax that reflects how statisticians describe models. The modeling process generally follows these three steps:
 1) Encode a probability model by defining: 
@@ -92,7 +99,15 @@ PyMC3 aims for intuitive and readable, yet powerful syntax that reflects how sta
 - [Theano: A Python framework for fast computation of mathematical expressions](https://pdfs.semanticscholar.org/6b57/0069f14c7588e066f7138e1f21af59d62e61.pdf), Al-Rfou et al, 2016
 - [Bayesian Methods for Hackers](https://github.com/CamDavidsonPilon/Probabilistic-Programming-and-Bayesian-Methods-for-Hackers)
 - [Bad Traces, or, Don't Use Metropolis](https://colindcarroll.com/2018/01/01/bad-traces-or-dont-use-metropolis/)
-- PyMC 4 on [GitHub](https://github.com/pymc-devs/pymc4) with design guide and a usage example (pre-release in April 2020).
+- PyMC 4 on [GitHub](https://github.com/pymc-devs/pymc4) with design guide and a usage examples.
+
+### The Data: Leading Recession Indicators
+
+We will use a small and simple dataset so we can focus on the workflow. We use the Federal Reserve’s Economic Data (FRED) service (see Chapter 2) to download the US recession dates as defined by the National Bureau of Economic Research. We also source four variables that are commonly used to predict the onset of a recession (Kelley 2019) and available via FRED, namely:
+- The long-term spread of the treasury yield curve, defined as the difference between the ten-year and the three-month Treasury yield.
+- The University of Michigan’s consumer sentiment indicator
+- The National Financial Conditions Index (NFCI), and
+- The NFCI nonfinancial leverage subindex.
 
 ### Model Definition: Bayesian Logistic Regression
 
@@ -109,26 +124,32 @@ The notebook [bayesian_logistic_regression](02_bayesian_logistic_regression.ipyn
 - Model Diagnostics
     - Energy Plot
     - Forest Plot
-    - Posterior Predictive Credible Intervals (CI)
+    - Posterior Predictive Checks (PPD), and 
+    - Credible Intervals (CI)
 - Prediction
 - MCMC Sampler Animation
     
+## Bayesian ML for Trading
 
-### Practical Applications
+Now that we are familiar with the Bayesian approach to ML and probabilistic programming with PyMC3, let’s explore a few relevant trading-related applications, namely 
+- modeling the Sharpe ratio as a probabilistic model for more insightful performance comparison
+- computing pairs trading hedge ratios using Bayesian linear regression
+- analyzing linear time series models from a Bayesian perspective
+
+Thomas Wiecki, one of the main PyMC3 authors who also leads Data Science at Quantopian has created several examples that the following sections follow and build on. The PyMC3 documentation has many additional tutorials (see GitHub for links).
 
 - [Tackling the Poor Assumptions of Naive Bayes Text Classifiers](http://people.csail.mit.edu/jrennie/papers/icml03-nb.pdf), Rennie, et al, MIT SAIL, 2003
 - [On Discriminative vs Generative Classifiers: A comparison of logistic regression and naive Bayes](https://ai.stanford.edu/~ang/papers/nips01-discriminativegenerative.pdf), Jordan, Ng, 2002
 - [Bayesian estimation supersedes the t test](http://www.indiana.edu/~kruschke/BEST/BEST.pdf), John K. Kruschke, Journal of Experimental Psychology, 2012
 - [Automatic Differentiation Variational Inference](https://arxiv.org/pdf/1603.00788.pdf)
 
-#### Bayesian Linear Regression for Pairs Trading
+#### Bayesian Rolling Regression for Pairs Trading
 
-The chapter [Time Series Models](../08_time_series_models) introduced pairs trading as a popular algorithmic trading strategy that relies on cointegration of two or more assets. Given such assets, we need to estimate the hedging ratio to decide on the relative magnitude of long and short positions. A basic approach uses linear regression. 
-The notebook [linear_regression](04_linear_regression.ipynb) illustrates how Bayesian linear regression tracks changes in the relationship between two assets over time.
+The chapter [Time Series Models](../09_time_series_models) introduced pairs trading as a popular algorithmic trading strategy that relies on cointegration of two or more assets. Given such assets, we need to estimate the hedging ratio to decide on the relative magnitude of long and short positions. A basic approach uses linear regression. 
 
-#### Bayesian Time Series Models
-
-PyMC3 includes AR(p) models that allow us to gain similar insights into the parameter uncertainty as for the previous models. The notebook [bayesian_time_series](05_bayesian_time_series.ipynb)notebook illustrates time series model for one and more lags.
+The notebook [linear_regression](04_rolling_regression.ipynb) illustrates how Bayesian linear regression tracks changes in the relationship between two assets over time.
 
 #### Stochastic Volatility Models
-As discussed in the chapter [Time Series Models](../08_time_series_models), asset prices have time-varying volatility. In some periods, returns are highly variable, while in others very stable. Stochastic volatility models model this with a latent volatility variable, modeled as a stochastic process. The  No-U-Turn Sampler was introduced using such a model, and the notebook [stochastic_volatility](06_stochastic_volatility.ipynb) illustrates this use case.
+As discussed in the chapter [Time Series Models](../09_time_series_models), asset prices have time-varying volatility. In some periods, returns are highly variable, while in others very stable. 
+
+Stochastic volatility models model this with a latent volatility variable, modeled as a stochastic process. The  No-U-Turn Sampler was introduced using such a model, and the notebook [stochastic_volatility](05_stochastic_volatility.ipynb) illustrates this use case.
