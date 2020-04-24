@@ -53,7 +53,7 @@ class MultipleTimeSeriesCV:
                              & (dates.date <= days[test_end])].index
             if self.shuffle:
                 np.random.shuffle(list(train_idx))
-            yield train_idx, test_idx
+            yield train_idx.to_numpy(), test_idx.to_numpy()
 
     def get_n_splits(self, X, y, groups=None):
         return self.n_splits
