@@ -28,6 +28,8 @@ Market microstructure is the branch of financial economics that investigates the
 ### Working with Order Book data
 The primary source of market data is the order book, which is continuously updated in real-time throughout the day to reflect all trading activity. Exchanges typically offer this data as a real-time service and may provide some historical data for free. 
 
+- [Feature Engineering for Mid-Price Prediction With Deep Learning](https://arxiv.org/abs/1904.05384)
+
 #### The FIX protocol
 
 The trading activity is reflected in numerous messages about trade orders sent by market participants. These messages typically conform to the electronic Financial Information eXchange (FIX) communications protocol for real-time exchange of securities transactions and market data or a native exchange protocol. 
