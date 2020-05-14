@@ -49,7 +49,7 @@ class MultipleTimeSeriesCV:
         dates = X.reset_index()[[self.date_idx]]
         for train_start, train_end, test_start, test_end in split_idx:
 
-            train_idx = dates[(dates[self.idx] > days[train_start])
+            train_idx = dates[(dates[self.date_idx] > days[train_start])
                               & (dates.date <= days[train_end])].index
             test_idx = dates[(dates.date > days[test_start])
                              & (dates.date <= days[test_end])].index
