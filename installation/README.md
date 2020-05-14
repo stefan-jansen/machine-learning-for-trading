@@ -1,18 +1,14 @@
-# Installation Instructions
+# Installation instructions
 
-The book uses [jupyter](https://jupyter.org/) notebooks to present the code with extensive commentary and context information and facilitate the visualization of results in one place. Some of the code examples are longer and make more sense to run as `python` scripts; you can convert a notebook to a script by running the following on the command line:
-
-```bash
-$ jupyter nbconvert --to script [YOUR_NOTEBOOK].ipynb
-```
-
-For testing purposes, most directories already include notebooks converted to python scripts that are more sparsely commented.  
+This book uses Python 3.7 and numerous libraries that require installation. The first section covers how to handle this using the [Anaconda](https://www.anaconda.com/) distribution. Then, we address how to work with [Jupyter](https://jupyter.org/) notebooks to view and execute the code examples. Finally, we list additional installation instructions for libraries that require non-python dependencies.
 
 ## How to install the required libaries
 
+The book has been developed using Anaconda's miniconda distribution to facilitate dependency management, in particular on Windows machines. If you are experienced and/or work in a Unix-based environment, feel free to create your own environment using `pip`; the book uses the latest compatible versions as of May 2020 as listed in the various environment files.
+
 ### Install miniconda
 
-The notebooks use a virtual environment based on [miniconda3]() that you need to install first. You can find detailed instructions for various operating systems [here](https://conda.io/projects/conda/en/latest/user-guide/install/index.html).
+The notebooks have been tested using several virtual environments based on [miniconda3](https://docs.conda.io/en/latest/miniconda.html) that you need to install first. You can find detailed instructions for various operating systems [here](https://conda.io/projects/conda/en/latest/user-guide/install/index.html).
 
 ### Create a virtual conda environment
 
@@ -28,24 +24,37 @@ e.g.
 ```bash
 conda create --name pandas_environment pandas=0.24
 ```
-### Create conda environment from file for this book
+### Create conda environment from a file for this book
 
-Here, we will create an environment from a file to ensure you install the versions the code has been tested with. The environment specs are in the file `environment_[linux|mac_osx].yml` in the root of this repo, where you should choose the one corresponding to your operating system. To create the environment with the name `ml4t` (specified in the file), just run:
+Here, we will create an environment from a file to ensure you install the versions the code has been tested with. There are separate environment specs for parts 1&2, 3 and 4 as described in the following table. They differ by operating system and can be found under the respective path.
+
+| Part(s) | Chapters | File          | Path                                               |
+|---------|----------|---------------|----------------------------------------------------|
+| 1 & 2   | 2-13     | ml4t.yml      | environments/{linux\|macos\|windows}/ml4t.yml      |
+| 3       | 14-16    | ml4t_text.yml | environments/{linux\|macos\|windows}/ml4t_text.yml |
+| 4       | 17-22    | ml4t_dl.yml   | environments/{linux\|macos\|windows}/ml4t_dl.yml   |
+
+To create the environment with the name `ml4t` (specified in the file) for `linux`, just run:
 
 ```bash
-conda env create -f environment_linux.yml
+conda env create -f environments/linux/ml4t.yml
 ```
 
-or 
+or, for Max OS X
 
 ```bash
-conda env create -f environment_mac_osx.yml
+conda env create -f environments/macos/ml4t.yml
 ```
-from the command line in the root directory.
+from the command line in this directory.
 
-#### Separate environments for Chapters 4 & 5
+### Separate environment for using Zipline
 
-The `zipline` backtesting library was at time of writing only compatible with older `pandas` versions so that we provided different `environment.yml` files for these applications.
+- The current Zipline release 1.3 has a few shortcomings such as the [dependency on benchmark data from the IEX exchange](https://github.com/quantopian/zipline/issues/2480) and limitations for importing features beyond the basic OHLCV data points.
+- To enable the use of `Zipline`, I've provided a [patched version](https://github.com/stefan-jansen/zipline) that works for the purposes of this book.
+    - Create a virtual environment based on Python 3.5, for instance using [pyenv](https://github.com/pyenv/pyenv)
+    - After activating the virtual environment, run `pip install -U pip Cython`
+    - Install the patched `zipline` version by cloning the repo, `cd` into the packages' root folder and run `pip install -e`
+    - Run `pip install jupyter pyfolio`
 
 #### Known Issues
 
@@ -70,13 +79,28 @@ To deactivate, simply use
 ```bash
 conda deactivate
 ```
+## Working with Jupyter notebooks
 
-## Set up jupyter extensions
+This section covers how to set up notebook extension that facilitate working in this environment and how to convert notebooks to python script if preferred. 
+
+### Set up jupyter extensions
 
 jupyter notebooks can use a range of [extentsion](https://github.com/ipython-contrib/jupyter_contrib_nbextensions) provided by the community. There are many useful ones that are described in the [documentation](https://jupyter-contrib-nbextensions.readthedocs.io/en/latest/).
 
 The notebooks in this repo are formatted to use the [Table of Contents (2)](https://jupyter-contrib-nbextensions.readthedocs.io/en/latest/nbextensions/toc2/README.html) extension. For the best experience, activate it using the Configurator inthe [Nbextensions](https://github.com/Jupyter-contrib/jupyter_nbextensions_configurator) tab available in your browser after starting the jupyter server. Modify the settings to check the option 'Leave h1 items out of ToC' if not set by default.
 
-## TA-Lib
+### Converting jupyter notebooks to python scripts
+
+The book uses [jupyter](https://jupyter.org/) notebooks to present the code with extensive commentary and context information and facilitate the visualization of results in one place. Some of the code examples are longer and make more sense to run as `python` scripts; you can convert a notebook to a script by running the following on the command line:
+
+```bash
+$ jupyter nbconvert --to script [YOUR_NOTEBOOK].ipynb
+```
+
+For testing purposes, most directories already include notebooks converted to python scripts that are more sparsely commented.  
+
+## Additional installation instructions
+
+### TA-Lib
 
 For the python wrapper around TA-Lib, please follow installation instructions [here](https://mrjbq7.github.io/ta-lib/install.html).
