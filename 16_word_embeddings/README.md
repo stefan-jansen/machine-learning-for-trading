@@ -74,6 +74,14 @@ Many tasks require embeddings or domain-specific vocabulary that pre-trained mod
 
 E.g., when working with industry-specific documents, the vocabulary or its usage may change over time as new technologies or products emerge. As a result, the embeddings need to evolve as well. In addition, corporate earnings releases use nuanced language not fully reflected in Glove vectors pre-trained on Wikipedia articles.
 
+- [Word embeddings | TensorFlow Core](https://www.tensorflow.org/tutorials/text/word_embeddings)
+- [Visualizing Data using the Embedding Projector in TensorBoard](https://www.tensorflow.org/tensorboard/tensorboard_projector_plugin)
+
+### Bonus: word2vec for translation
+
+- [Exploiting Similarities among Languages for Machine Translation](https://arxiv.org/abs/1309.4168), Tomas Mikolov, Quoc V. Le, Ilya Sutskever, arxiv 2013
+- [Word and Phrase Translation with word2vec](https://arxiv.org/abs/1705.03127), Stefan Jansen, arxiv, 2017
+
 ## Word Vectors from SEC Filings using gensim
 
 In this section, we will learn word and phrase vectors from annual SEC filings using gensim to illustrate the potential value of word embeddings for algorithmic trading. In the following sections, we will combine these vectors as features with price returns to train neural networks to predict equity prices from the content of security filings.
@@ -93,10 +101,40 @@ In contrast, the state-of-the-art generation of embeddings for pieces of text li
 
 The notebook [yelp_sentiment](doc2vec/yelp_sentiment.ipynb) applied doc2vec to a random sample of 1mn Yelp reviews with their associated star ratings.
 
-## Bonus: word2vec for translation
+## New Frontiers: Attention, Transformers, and Pretraining
 
-- [Exploiting Similarities among Languages for Machine Translation](https://arxiv.org/abs/1309.4168), Tomas Mikolov, Quoc V. Le, Ilya Sutskever, arxiv 2013
-- [Word and Phrase Translation with word2vec](https://arxiv.org/abs/1705.03127), Stefan Jansen, arxiv, 2017
+Word2vec and GloVe embeddings capture more semantic information than the bag-of-words approach, but only allow for a single fixed-length representation of each token that does not differentiate between context-specific usages. To address unsolved problems like multiple meanings for the same word, called polysemy, several new models have emerged that build on the attention mechanism designed to learn more contextualized word embeddings ([Vaswani et al. 2017](https://arxiv.org/abs/1706.03762)). Key characteristics of these models are 
+- the use of bidirectional language models that process text both left-to-right and right-to-left for a richer context representation, and
+- the use of semi-supervised pretraining on a large generic corpus to learn universal language aspects in the form of embeddings and network weights that can be used end fine-tuned for specific tasks
+
+### Attention is all you need: transforming natural language generation
+
+In 2018, Google released the BERT model, which stands for Bidirectional Encoder Representations from Transformers ([Devlin et al. 2019](https://arxiv.org/abs/1810.04805)). In a major breakthrough for NLP research, it achieved groundbreaking results on eleven natural language understanding tasks ranging from question answering and named entity recognition to paraphrasing and sentiment analysis as measured by the General Language Understanding Evaluation (GLUE) [benchmark](https://gluebenchmark.com/).
+
+- [The Annotated Transformer](http://nlp.seas.harvard.edu/2018/04/03/attention.html)
+- [Visualizing A Neural Machine Translation Model (Mechanics of Seq2seq Models With Attention)](https://jalammar.github.io/visualizing-neural-machine-translation-mechanics-of-seq2seq-models-with-attention/)
+
+### BERT: Towards a more universal, pretrained language model
+
+The BERT model builds on two key ideas, namely the transformer architecture described in the previous section and unsupervised pre-training so that it doesn’t need to be trained from scratch for each new task; rather, its weights are fine-tuned.
+- BERT takes the attention mechanism to a new (deeper) level by using 12 or 24 layers depending on the architecture, each with 12 or 16 attention heads, resulting in up to 24 x 16 = 384 attention mechanisms to learn context-specific embeddings.  
+- BERT uses unsupervised, bidirectional pre-training to learn its weights in advance on two tasks: masked language modeling (predicting a missing word given the left and right context) and next sentence prediction (predicting whether one sentence follows another).
+
+- [The Illustrated BERT, ELMo, and co. (How NLP Cracked Transfer Learning)](https://jalammar.github.io/illustrated-bert/)
+- [The General Language Understanding Evaluation (GLUE) benchmark](https://gluebenchmark.com/leaderboard)
+- [Financial NLP at S&P Global ](https://www.youtube.com/watch?v=rdmaR4WRYEM&list=PLBmcuObd5An4UC6jvK_-eSl6jCvP1gwXc&index=9)
+
+### Using pretrained state-of-the-art models
+
+- [Huggingface Transformers](https://github.com/huggingface/transformers)
+    - Transformers (formerly known as pytorch-transformers and pytorch-pretrained-bert) provides state-of-the-art general-purpose architectures (BERT, GPT-2, RoBERTa, XLM, DistilBert, XLNet, T5, CTRL...) for Natural Language Understanding (NLU) and Natural Language Generation (NLG) with over thousands of pretrained models in 100+ languages and deep interoperability between PyTorch & TensorFlow 2.0.
+- [spacy-transformers](https://github.com/explosion/spacy-transformers)
+    - This package (previously spacy-pytorch-transformers) provides spaCy model pipelines that wrap Hugging Face's transformers package, so you can use them in spaCy. The result is convenient access to state-of-the-art transformer architectures, such as BERT, GPT-2, XLNet, etc. For more details and background.
+- [Allen NLP](https://allennlp.org/)
+    - Deep learning for NLP: AllenNLP makes it easy to design and evaluate new deep learning models for nearly any NLP problem, along with the infrastructure to easily run them in the cloud or on your laptop.
+    - State of the art models: AllenNLP includes reference implementations of high quality models for both core NLP problems (e.g. semantic role labeling) and NLP applications (e.g. textual entailment).
+- [Sentence Transformers: Multilingual Sentence Embeddings using BERT / RoBERTa / XLM-RoBERTa & Co. with PyTorch]
+     -BERT / RoBERTa / XLM-RoBERTa produces out-of-the-box rather bad sentence embeddings. This repository fine-tunes BERT / RoBERTa / DistilBERT / ALBERT / XLNet with a siamese or triplet network structure to produce semantically meaningful sentence embeddings that can be used in unsupervised scenarios: Semantic textual similarity via cosine-similarity, clustering, semantic search.
 
 ### Resources
 
@@ -105,3 +143,4 @@ The notebook [yelp_sentiment](doc2vec/yelp_sentiment.ipynb) applied doc2vec to a
 - [word2vec analogy samples](https://github.com/nicholas-leonard/word2vec/blob/master/questions-words.txt)
 - [spaCy word vectors and semantic similarity](https://spacy.io/usage/vectors-similarity)
 - [2013-2016 Cleaned/Parsed 10-K Filings with the SEC](https://data.world/jumpyaf/2013-2016-cleaned-parsed-10-k-filings-with-the-sec)
+- [Stanford Sentiment Tree Bank](https://nlp.stanford.edu/sentiment/treebank.html)
