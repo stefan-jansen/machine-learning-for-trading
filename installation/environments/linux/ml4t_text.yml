@@ -228,8 +228,6 @@ dependencies:
   - zstd=1.4.4
   - pip:
     - click==7.1.2
-    - en-core-web-sm==2.2.5
-    - es-core-news-sm==2.2.5
     - filelock==3.0.12
     - pyqt5-sip==4.19.18
     - pyqtchart==5.12
@@ -239,5 +237,3 @@ dependencies:
     - sentencepiece==0.1.86
     - tokenizers==0.7.0
     - transformers==2.9.0
-prefix: /home/stefan/.pyenv/versions/miniconda3-latest/envs/ml4t-text
-

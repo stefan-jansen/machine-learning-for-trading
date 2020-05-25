@@ -15,7 +15,6 @@ dependencies:
   - automat=20.2.0
   - autopep8=1.5.2
   - backcall=0.1.0
-  - backtrader=1.9.74.123
   - bcrypt=3.1.7
   - beautifulsoup4=4.9.0
   - bleach=3.1.5
@@ -87,6 +86,7 @@ dependencies:
   - jupyter_highlight_selected_word=0.2.0
   - jupyter_latex_envs=1.4.6
   - jupyter_nbextensions_configurator=0.4.1
+  - jupyterlab
   - kiwisolver=1.2.0
   - krb5=1.17.1
   - ld_impl_linux-64=2.34
@@ -130,6 +130,7 @@ dependencies:
   - mock=4.0.2
   - multitasking=0.0.9
   - mypy_extensions=0.4.3
+#  - nb_conda_kernels
   - nbconvert=5.6.1
   - nbformat=5.0.6
   - ncurses=6.2
@@ -259,9 +260,6 @@ dependencies:
   - pip:
     - alphalens==0.4.0
     - empyrical==0.5.3
-    - pyfolio==0.5.1
     - pyqt5-sip==4.19.18
     - pyqtchart==5.12
     - pyqtwebengine==5.12.1
-prefix: /home/stefan/.pyenv/versions/miniconda3-latest/envs/ml4t
-

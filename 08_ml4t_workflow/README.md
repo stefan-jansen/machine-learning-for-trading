@@ -98,3 +98,14 @@ The code for this section is in the subdirectory [ml4t_workflow_with_zipline](04
     - After activating the virtual environment, run `pip install -U pip Cython`
     - Install the patched `zipline` version by cloning the repo, `cd` into the packages' root folder and run `pip install -e`
     - Run `pip install jupyter pyfolio`
+    
+    
+"""
+conda create -n ml4t-zipline python=3.5 pip git  pytables jupyter jupyterlab jupyter_contrib_nbextensions
+conda activate ml4t-zipline
+pip install numpy==1.16
+pip install -e .
+
+Failed to build cyordereddict bottleneck bcolz lru-dict
+
+"""
