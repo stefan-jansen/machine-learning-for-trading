@@ -236,7 +236,10 @@ class TradingEnvironment(gym.Env):
     """
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, trading_days=252, trading_cost_bps=1e-3, time_cost_bps=1e-4, ticker='AAPL'):
+    def __init__(self, trading_days=252,
+                 trading_cost_bps=1e-3,
+                 time_cost_bps=1e-4,
+                 ticker='AAPL'):
         self.trading_days = trading_days
         self.ticker = ticker
         self.trading_cost_bps = trading_cost_bps

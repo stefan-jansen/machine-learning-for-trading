@@ -54,9 +54,22 @@ The notebook [deep_autoencoders](01_deep_autoencoders.ipynb) illustrates how to 
 
 The notebook [convolutional_denoising_autoencoders](02_convolutional_denoising_autoencoders.ipynb) goes on to demonstrate how to implement convolutionals and denoising autencoders to recover corrupted image inputs.
 
+### Sequence-to-sequence autoencoders
+
+Sequence-to-sequence autoencoders are based on RNN components like long short-term memory (LSTM) or gated recurrent units (GRUs). They learn a compressed representation of sequential data and have been applied to video, text, audio, and time-series data.
+
+- [Gradient Trader Part 1: The Surprising Usefulness of Autoencoders](https://rickyhan.com/jekyll/update/2017/09/14/autoencoders.html)
+    - [Code examples](https://github.com/0b01/recurrent-autoencoder)
+- [Deep Learning Financial Market Data](http://wp.doc.ic.ac.uk/hipeds/wp-content/uploads/sites/78/2017/01/Steven_Hutt_Deep_Networks_Financial.pdf)
+    - Motivation: Regulators identify prohibited patterns of trading activity detrimental to orderly markets. Financial Exchanges are responsible for maintaining orderly markets. (e.g. Flash Crash and Hound of Hounslow.)
+    - Challenge: Identify prohibited trading patterns quickly and efficiently.
+    Goal: Build a trading pattern search function using Deep Learning. Given a sample trading pattern identify similar patterns in historical LOB data.
 ### Variational Autoencoders
 
 The notebook [variational_autoencoder](03_variational_autoencoder.ipynb) shows how to build a Variational Autoencoder using Keras.
+
+- [Tutorial: What is a variational autoencoder?](https://jaan.io/what-is-variational-autoencoder-vae-tutorial/)
+    - [Variational Autoencoder / Deep Latent Gaussian Model in tensorflow and pytorch](https://github.com/altosaar/variational-autoencoder)
 
 ## Generative Adversarial Networks
 
@@ -99,5 +112,5 @@ The goal of generative models is to produce complex output, such as realistic im
 
 The notebook [deep_convolutional_generative_adversarial_network](04_deep_convolutional_generative_adversarial_network.ipynb) illustrates the implementation of a GAN using Python. It uses the Deep Convolutional GAN (DCGAN) example to synthesize images from the fashion MNIST dataset
 
-- [Kears-GAN](https://github.com/eriklindernoren/Keras-GAN), numerous Keras GAN implementations
+- [Keras-GAN](https://github.com/eriklindernoren/Keras-GAN), numerous Keras GAN implementations
 - [PyTorch-GAN](https://github.com/eriklindernoren/PyTorch-GAN), numerous PyTorch GAN implementations

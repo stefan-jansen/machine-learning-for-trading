@@ -24,11 +24,16 @@ Market microstructure is the branch of financial economics that investigates the
 
 - [Trading and Exchanges - Market Microstructure for Practitioners](https://global.oup.com/ushe/product/trading-and-exchanges-9780195144703?cc=us&lang=en&), Larry Harris, Oxford University Press, 2002
 - [World Federation of Exchanges](https://www.world-exchanges.org/our-work/statistics)
+- [Econophysics of Order-driven Markets](https://www.springer.com/gp/book/9788847017658), Abergel et al, 2011
+    - Presents the ideas and research from various communities (physicists, economists, mathematicians, financial engineers) on the  modelling and analyzing order-driven markets. Of primary interest in these studies are the mechanisms leading to the statistical regularities of price statistics. Results pertaining to other important issues such as market impact, the profitability of trading strategies, or mathematical models for microstructure effects, are also presented.
 
 ### Working with Order Book data
 The primary source of market data is the order book, which is continuously updated in real-time throughout the day to reflect all trading activity. Exchanges typically offer this data as a real-time service and may provide some historical data for free. 
 
+- [The Limit Order Book](https://arxiv.org/pdf/1012.0349.pdf)
 - [Feature Engineering for Mid-Price Prediction With Deep Learning](https://arxiv.org/abs/1904.05384)
+- [Price jump prediction in Limit Order Book](https://arxiv.org/pdf/1204.1381.pdf)
+- [Handling and visualizing order book data](https://github.com/0b01/recurrent-autoencoder/blob/master/Visualizing%20order%20book.ipynb) by Ricky Han
 
 #### The FIX protocol
 
@@ -59,6 +64,15 @@ While FIX has a dominant large market share, exchanges also offer native protoco
 #### Other protocols
 
  - Native exchange protocols [around the world](https://en.wikipedia.org/wiki/List_of_electronic_trading_protocols_
+ 
+ #### Resources
+ 
+ - [High-frequency trading in a limit order book](https://www.math.nyu.edu/faculty/avellane/HighFrequencyTrading.pdf), Avellaneda and Stoikov, Quantitative Finance, Vol. 8, No. 3, April 2008, 217–224
+ - [Using a Simulator to Develop Execution Algorithms](http://www.math.ualberta.ca/~cfrei/PIMS/Almgren5.pdf), Robert Almgren, quantitative brokers, 2016
+ - [Backtesting Microstructure Strategies](https://rickyhan.com/jekyll/update/2019/12/22/how-to-simulate-market-microstructure.html), Ricky Han, 2019
+- [Optimal High-Frequency Market Making](http://stanford.edu/class/msande448/2018/Final/Reports/gr5.pdf), Fushimi et al, 2018
+- [Simulating and analyzing order book data: The queue-reactive model](https://arxiv.org/pdf/1312.0563.pdf), Huan et al, 2014
+- [How does latent liquidity get revealed in the limit order book?](https://arxiv.org/pdf/1808.09677.pdf), Dall’Amico et al, 2018
 
 ### Access to Market Data
 
