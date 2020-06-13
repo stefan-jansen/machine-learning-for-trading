@@ -1,22 +1,42 @@
 # Machine Learning for Trading: From Idea to Execution
 
+Algorithmic trading relies on computer programs that execute algorithms to automate some or all elements of a trading strategy. Algorithms are a sequence of steps or rules designed to achieve a goal. They can take many forms and facilitate optimization throughout the investment process, from idea generation to asset allocation, trade execution, and risk management.
+
+Machine learning (ML) involves algorithms that learn rules or patterns from data to achieve a goal such as minimizing a prediction error. The examples in this book will illustrate how ML algorithms can extract information from data to support or automate key investment activities. These activities include observing the market and analyzing data to form expectations about the future and decide on placing buy or sell orders, as well as managing the resulting portfolio to produce attractive returns relative to the risk.
+
+The competition of sophisticated investors in financial markets implies that making precise predictions to generate alpha requires superior information, either through access to better data, a superior ability to process it, or both. This is where ML comes in: applications of ML for trading (ML4T) typically aim to make more efficient use of a rapidly diversifying range of data to produce both better and more actionable forecasts, thus improving the quality of investment decisions and results.
+
+Historically, algorithmic trading used to be more narrowly defined as the automation of trade execution to minimize the costs offered by the sell-side. This book takes a more comprehensive perspective since the use of algorithms in general and ML, in particular, has come to impact a broader range of activities from generating ideas and extracting signals from data to asset allocation, position-sizing, and testing and evaluating strategies.
+
+This chapter looks at industry trends that have led to the emergence of ML as a source of competitive advantage in the investment industry. We will also look at where ML fits into the investment process to enable algorithmic trading strategies. More specifically, we will be covering the following topics:
+- How this book is organized and who should read it
+- Key trends behind the rise of ML in the investment industry
+- The design and execution of a trading strategy that leverages ML
+- Popular use cases for ML in trading
+
+
 ## The rise of ML in the investment industry
 
-The investment industry has evolved dramatically over the last several decades and continues to do so amid increased competition, technological advances, and a challenging economic environment. This section reviews several key trends that have shaped the investment environment in general, and the context for algorithmic trading more specifically, and related themes that will recur throughout this book.
+The investment industry has evolved dramatically over the last several decades and continues to do so amid increased competition, technological advances, and a challenging economic environment. This section reviews key trends that have shaped the overall investment environment overall and the context for algorithmic trading and the use of ML more specifically.
 
 The trends that have propelled algorithmic trading and ML to current prominence include:
 - Changes in the market microstructure, such as the spread of electronic trading and the integration of markets across asset classes and geographies
 - The development of investment strategies framed in terms of risk-factor exposure, as opposed to asset classes
-- The revolutions in computing power, data-generation and management, and analytic methods
-- The outperformance of the pioneers in algorithmic traders relative to human, discretionary investors
+- The revolutions in computing power, data generation and management, and statistical methods, including breakthroughs in deep learning
+- The outperformance of the pioneers in algorithmic trading relative to human, discretionary investors
 
-In addition, the financial crises of 2001 and 2008 have affected how investors approach diversification and risk management and have given rise to low-cost passive investment vehicles in the form of exchange-traded funds (ETFs). Amid low yield and low volatility after the 2008 crisis, cost-conscious investors shifted $2 trillion from actively-managed mutual funds into passively managed ETFs. Competitive pressure is also reflected in lower hedge fund fees that dropped from the traditional 2% annual management fee and 20% take of profits to an average of 1.48% and 17.4%, respectively, in 2017.
+In addition, the financial crises of 2001 and 2008 have affected how investors approach diversification and risk management. One outcome is the rise to low-cost passive investment vehicles in the form of exchange-traded funds (ETFs). Amid low yields and low volatility following the 2008 crisis that triggered large-scale asset purchases by leading central banks, cost-conscious investors shifted over $3.5 trillion from actively managed mutual funds into passively managed ETFs. 
+
+Competitive pressure is also reflected in lower hedge fund fees that dropped from the traditional 2 percent annual management fee and 20 percent take of profits to an average of 1.48 percent and 17.4 percent, respectively, in 2017.
 
 ### From electronic to high-frequency trading
 
 Electronic trading has advanced dramatically in terms of capabilities, volume, coverage of asset classes, and geographies since networks started routing prices to computer terminals in the 1960s.
 
+- [Dark Pool Trading & Finance](https://www.cfainstitute.org/en/advocacy/issues/dark-pools), CFA Institute
+- [Dark Pools in Equity Trading: Policy Concerns and Recent Developments](https://crsreports.congress.gov/product/pdf/R/R43739), Congressional Research Service, 2014
 - [High Frequency Trading: Overview of Recent Developments](https://fas.org/sgp/crs/misc/R44443.pdf), Congressional Research Service, 2016
+
 ### Factor investing and smart beta funds
 
 The return provided by an asset is a function of the uncertainty or risk associated with the financial investment. An equity investment implies, for example, assuming a company's business risk, and a bond investment implies assuming default risk.
@@ -40,6 +60,9 @@ DE Shaw, Citadel, and Two Sigma, three of the most prominent quantitative hedge 
 #### ML driven funds attract $1 trillion AUM
 
 Morgan Stanley estimated in 2017 that algorithmic strategies have grown at 15% per year over the past six years and control about $1.5 trillion between hedge funds, mutual funds, and smart beta ETFs. Other reports suggest the quantitative hedge fund industry was about to exceed $1 trillion AUM, nearly doubling its size since 2010 amid outflows from traditional hedge funds. In contrast, total hedge fund industry capital hit $3.21 trillion according to the latest global Hedge Fund Research report.
+
+- [Global Algorithmic Trading Market to Surpass US$ 21,685.53 Million by 2026](https://www.bloomberg.com/press-releases/2019-02-05/global-algorithmic-trading-market-to-surpass-us-21-685-53-million-by-2026)
+- [The stockmarket is now run by computers, algorithms and passive managers](https://www.economist.com/briefing/2019/10/05/the-stockmarket-is-now-run-by-computers-algorithms-and-passive-managers), Economist, Oct 5, 2019
 
 #### The emergence of quantamental funds
 
@@ -118,12 +141,14 @@ ML extracts signals from a wide range of market, fundamental, and alternative da
 
 ## References
 
+### Academic Research
+
 - [The fundamental law of active management](http://jpm.iijournals.com/content/15/3/30), Richard C. Grinold, The Journal of Portfolio Management Spring 1989, 15 (3) 30-37
 - [The relationship between return and market value of common stocks](https://www.sciencedirect.com/science/article/pii/0304405X81900180), Rolf Banz,Journal of Financial Economics, March 1981
 - [The Arbitrage Pricing Theory: Some Empirical Results](https://onlinelibrary.wiley.com/doi/abs/10.1111/j.1540-6261.1981.tb00444.x), Marc Reinganum, Journal of Finance, 1981
 - [The Relationship between Earnings' Yield, Market Value and Return for NYSE Common Stock](https://pdfs.semanticscholar.org/26ab/311756099c8f8c4e528083c9b90ff154f98e.pdf), Sanjoy Basu, Journal of Financial Economics, 1982
 
-### News
+### Industry News
 
 - [The Rise of the Artificially Intelligent Hedge Fund](https://www.wired.com/2016/01/the-rise-of-the-artificially-intelligent-hedge-fund/#comments), Wired, 25-01-2016
 - [Crowd-Sourced Quant Network Allocates Most Ever to Single Algo](https://www.bloomberg.com/news/articles/2018-08-02/crowd-sourced-quant-network-allocates-most-ever-to-single-algo), Bloomberg, 08-02-2018
