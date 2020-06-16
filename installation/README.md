@@ -1,5 +1,8 @@
 # Installation instructions
 
+# docker run -it -v $(pwd):/home/packt --name ml4t packt bash
+# jupyter lab --ip 0.0.0.0 --port 8888 --no-browser --allow-root
+
 This book uses Python 3.7 and numerous libraries that require installation. The first section covers how to handle this using the [Anaconda](https://www.anaconda.com/) distribution. Then, we address how to work with [Jupyter](https://jupyter.org/) notebooks to view and execute the code examples. Finally, we list additional installation instructions for libraries that require non-python dependencies.
 
 ## How to install the required libaries

@@ -17,25 +17,30 @@ dependencies:
   - bcrypt=3.1.7
   - beautifulsoup4=4.9.1
   - bleach=3.1.5
-  - blosc=1.18.1
+  - blosc=1.19.0
+  - bokeh=2.0.2
   - bqplot=0.12.12
+  - brotli=1.0.7
   - brotlipy=0.7.0
   - bzip2=1.0.8
-  - ca-certificates=2020.4.5.1
+  - ca-certificates=2020.4.5.2
   - cairo=1.16.0
   - catboost=0.23
-  - certifi=2020.4.5.1
+  - certifi=2020.4.5.2
   - cffi=1.14.0
   - chardet=3.0.4
+  - charls=2.1.0
   - cloudpickle=1.4.1
   - colorlover=0.3.0
+  - conda=4.8.3
+  - conda-package-handling=1.6.1
   - constantly=15.1.0
   - cryptography=2.9.2
   - cssselect=1.1.0
   - curl=7.69.1
   - cycler=0.10.0
   - cytoolz=0.10.1
-  - dask-core=2.17.2
+  - dask-core=2.18.1
   - dbus=1.13.14
   - decorator=4.4.2
   - defusedxml=0.6.0
@@ -47,6 +52,7 @@ dependencies:
   - funcsigs=1.0.2
   - future=0.18.2
   - gettext=0.19.8.1
+  - giflib=5.2.1
   - git=2.27.0
   - glances=3.1.4
   - glib=2.64.3
@@ -59,39 +65,41 @@ dependencies:
   - hyperlink=19.0.0
   - icu=64.2
   - idna=2.9
+  - imagecodecs=2020.5.30
   - imagecodecs-lite=2019.12.3
   - imageio=2.8.0
-  - importlib-metadata=1.6.0
-  - importlib_metadata=1.6.0
+  - importlib-metadata=1.6.1
+  - importlib_metadata=1.6.1
   - incremental=17.5.0
   - ipydatawidgets=4.0.1
   - ipykernel=5.3.0
   - ipyscales=0.4.0
   - ipython=7.15.0
   - ipython_genutils=0.2.0
-  - ipyvolume=0.6.0a4
+  - ipyvolume=0.6.0a6
   - ipywebrtc=0.5.0
   - ipywidgets=7.5.1
   - jedi=0.17.0
   - jinja2=2.11.2
   - joblib=0.15.1
   - jpeg=9d
-  - json5=0.9.4
+  - json5=0.9.5
   - jsonschema=3.2.0
   - jupyter=1.0.0
   - jupyter_client=6.1.3
   - jupyter_console=6.1.0
   - jupyter_contrib_core=0.3.3
-  - jupyter_contrib_nbextensions=0.5.1
   - jupyter_core=4.6.3
   - jupyter_highlight_selected_word=0.2.0
   - jupyter_latex_envs=1.4.6
-  - jupyter_nbextensions_configurator=0.4.1
   - jupyterlab=2.1.4
   - jupyterlab_server=1.1.5
+  - jxrlib=1.1
   - kiwisolver=1.2.0
   - krb5=1.17.1
+  - lcms2=2.9
   - ld_impl_linux-64=2.34
+  - libaec=1.0.4
   - libblas=3.8.0
   - libcblas=3.8.0
   - libclang=9.0.1
@@ -104,7 +112,7 @@ dependencies:
   - liblapack=3.8.0
   - libllvm8=8.0.1
   - libllvm9=9.0.1
-  - libopenblas=0.3.9
+  - libopenblas=0.3.10
   - libpng=1.6.37
   - libsodium=1.0.17
   - libssh2=1.9.0
@@ -118,6 +126,7 @@ dependencies:
   - libxkbcommon=0.10.0
   - libxml2=2.9.10
   - libxslt=1.1.33
+  - libzopfli=1.0.3
   - lightgbm=2.3.1
   - linearmodels=4.17
   - llvm-openmp=10.0.0
@@ -129,6 +138,7 @@ dependencies:
   - matplotlib=3.2.1
   - matplotlib-base=3.2.1
   - mistune=0.8.4
+  - mkl=2020.1
   - mock=4.0.2
   - multitasking=0.0.9
   - mypy_extensions=0.4.3
@@ -142,8 +152,9 @@ dependencies:
   - nss=3.47
   - numba=0.49.1
   - numexpr=2.7.1
-  - numpy=1.18.4
+  - numpy=1.18.5
   - olefile=0.46
+  - openjpeg=2.3.1
   - openssl=1.1.1g
   - packaging=20.4
   - pandas=1.0.4
@@ -175,6 +186,7 @@ dependencies:
   - pyasn1=0.4.8
   - pyasn1-modules=0.2.7
   - pycodestyle=2.6.0
+  - pycosat=0.6.3
   - pycparser=2.20
   - pydispatcher=2.0.5
   - pydot=1.4.1
@@ -203,16 +215,19 @@ dependencies:
   - readline=8.0
   - requests=2.23.0
   - retrying=1.3.3
+  - ruamel_yaml=0.15.80
   - scikit-image=0.17.2
   - scikit-learn=0.23.1
   - scipy=1.4.1
   - scrapy=2.1.0
   - seaborn=0.10.1
+  - seaborn-base=0.10.1
   - send2trash=1.5.0
   - service_identity=18.1.0
   - setuptools=47.1.1
   - shap=0.35.0
   - six=1.15.0
+  - snappy=1.1.8
   - soupsieve=2.0.1
   - sqlite=3.31.1
   - statsmodels=0.11.1
@@ -231,10 +246,11 @@ dependencies:
   - traitlets=4.3.3
   - traittypes=0.2.1
   - twisted=20.3.0
+  - typing_extensions=3.7.4.2
   - umap-learn=0.4.4
   - urllib3=1.25.9
   - w3lib=1.22.0
-  - wcwidth=0.2.3
+  - wcwidth=0.2.4
   - webencodings=0.5.1
   - wheel=0.34.2
   - widgetsnbextension=3.5.1
@@ -264,9 +280,19 @@ dependencies:
   - zstd=1.4.4
   - pip:
     - alphalens==0.4.0
+    - arviz==0.8.3
+    - cftime==1.1.3
     - empyrical==0.5.3
+    - h5py==2.10.0
+    - inflection==0.5.0
+    - more-itertools==8.3.0
+    - netcdf4==1.5.3
+    - pymc3==3.8
     - pyqt5-sip==4.19.18
     - pyqtchart==5.12
     - pyqtwebengine==5.12.1
+    - quandl==3.5.0
+    - theano==1.0.4
+    - xarray==0.15.1
 prefix: /home/stefan/.pyenv/versions/miniconda3-latest/envs/ml4t
 
