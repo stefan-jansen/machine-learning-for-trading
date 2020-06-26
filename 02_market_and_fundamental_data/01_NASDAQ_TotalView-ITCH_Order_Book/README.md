@@ -1,4 +1,4 @@
-## 01 Working with Market Data: NASDAQ_TotalView-ITCH Order Book
+## Working with Market Data: NASDAQ_TotalView-ITCH Order Book
 
 While FIX has a dominant large market share, exchanges also offer native protocols. The Nasdaq offers a TotalView ITCH direct data-feed protocol that allows subscribers to track individual orders for equity instruments from placement to execution or cancellation.
 
@@ -42,7 +42,7 @@ For each message, the specification lays out the components and their respective
 | Price                   | 32      | 4       | Price (4)  | The display price of the new order. Refer to Data Types for field processing notes.  |
 | Attribution             | 36      | 4       | Alpha      | Nasdaq Market participant identifier associated with the entered order               |
 
-The notebook [01_build_itch_order_book](01_build_itch_order_book.ipynb) contains the code to
+The notebooks [01_build_itch_order_book](01_parse_itch_order_flow_messages.ipynb), [02_rebuild_nasdaq_order_book](02_rebuild_nasdaq_order_book.ipynb) and [03_normalize_tick_data](03_normalize_tick_data.ipynb) contain the code to
 - download NASDAQ Total View sample tick data,
 - parse the messages from the binary source data
 - reconstruct the order book for a given stock
@@ -54,8 +54,9 @@ The code has been updated to use the latest NASDAQ sample file dated March 27, 2
 Warning: the tick data is around 12GB in size and some processing steps can take several hours on a 4-core i7 CPU with 32GB RAM. 
 
 ### Regularizing tick data
+
 The trade data is indexed by nanoseconds and is very noisy. The bid-ask bounce, for instance, causes the price to oscillate between the bid and ask prices when trade initiation alternates between buy and sell market orders. To improve the noise-signal ratio and improve the statistical properties, we need to resample and regularize the tick data by aggregating the trading activity.
 
 We typically collect the open (first), low, high, and closing (last) price for the aggregated period, alongside the volume-weighted average price (VWAP), the number of shares traded, and the timestamp associated with the data.
 
-The notebook [02_normalize_tick_data](02_normalize_tick_data.ipynb) illustrates how to normalize noisy tick using time and volume bars that use different aggregation methods.
+The notebook [03_normalize_tick_data](03_normalize_tick_data.ipynb) illustrates how to normalize noisy tick using time and volume bars that use different aggregation methods.

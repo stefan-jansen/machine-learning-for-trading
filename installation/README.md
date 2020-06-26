@@ -1,11 +1,50 @@
 # Installation instructions
 
+This book uses (mostly) Python 3.7 and numerous libraries that require installation. The first section covers how use Docker to pull an image that contains the necessary software and create a local container that allows you to run the notebooks without much further ado. The second section describes how to install the packages locally using the [Anaconda](https://www.anaconda.com/) distribution. If you are experienced and work a UNIX-based system, you can also create your own virtual environments and install the libraries required for different notebooks as needed. Then, we address how to work with [Jupyter](https://jupyter.org/) notebooks to view and execute the code examples. Finally, we list additional installation instructions for libraries that require non-python dependencies and discuss how to 
+
+## Run the code using a Docker images
+
+1. Install [Docker Desktop](https://docs.docker.com/desktop/) for [Windows](https://docs.docker.com/docker-for-windows/install/) or [Mac OS](https://docs.docker.com/docker-for-mac/install/).
+    - Review Getting Started guides for [Windows](https://docs.docker.com/docker-for-windows/) or [Mac OS](https://docs.docker.com/docker-for-mac/). Under Preferences, look for Resources to find out how you can increase the memory allocated to the container; the default setting is too low given the size of the data. Increase to at least 4GB.
+2. Clone the starter repo using the following command: `git clone ` and change into the new directory.
+3. [Register](https://www.quandl.com/sign-up) for a (free) personal Quandl account to obtain an API key that you'll need in the next step.  
+3. We'll be using an image based on the Ubuntu 20.04 OS with the Anaconda Python distribution installed. It also contains two conda environments, one to run Zipline and one for everything else. The following command does several things at once:
+    ```docker
+    docker run -it -v $(pwd):/home/manning -e QUANDL_API_KEY=<yourkey> --name liveproject appliedai/manning:starter bash
+    ```
+    - it pulls the image from the Docker Hub account `appliedai` and the repository `manning` with the tag `starter`
+    - creates a local container with the name `liveproject` and runs it in interactive mode,
+    - mounts the current directory containing the starter project files as a volume in the directory `/home/manning` inside the container,
+    - sets the environment variable `QUANDL_API_KEY` with the value of your key (that you need to fill in for `<yourkey>`), and
+    - starts a `bash` terminal inside the container, resulting in a new command prompt.
+4. Now you are running a shell inside the container and can access the `conda environments`.
+    - Run `conda env list` to see that there are a `base`, `ml4t` (default), and a `ml4t-`zipline` environment.
+    - You can switch to another environment using `conda activate <env_name>`. 
+        - However, before doing so the first time, you may get an error message suggesting you run `conda init bash`. After doing so, reload the shell with the command `source .bashrc`. 
+5. To run Zipline backtests, we need to `ingest` data. See the [Beginner Tutorial](https://www.zipline.io/beginner-tutorial.html) for more information. The image has been configured to store the data in a `.zipline` directory in the directory wehre you started the container (which should be the root folder of the project starter code). 
+    - From the command prompt of the container shell, run
+    ```bash
+    conda activate ml4t-zipline
+    zipline ingest
+    ``` 
+   - You should see numerous messages as Zipline processes around 3,000 stock price series
+5. Now we would like to test Zipline and the [juypter](https://jupyter.org/) setup. You can run notebooks using either the traditional or the more recent Jupyter Lab interface; both are available in all `conda` environments. Moreover, you start jupyter from the `base` environment and switch the environment from the notebook due to the `nb_conda_kernels` package (see [docs](https://github.com/Anaconda-Platform/nb_conda_kernels)). To get started, run one of the following two commands:
+    ```bash
+    jupyter notebook --ip 0.0.0.0 --port 8888 --no-browser --allow-root
+    jupyter lab --ip 0.0.0.0 --port 8888 --no-browser --allow-root
+   ```
+    - The terminal will display a few messages and at the end indicate what to paste into your browser to access the jupyter server from the current working directory.
+6. To test Zipline, run the ```zipline_test.ipynb``` notebook. It contains the example from the Zipline tutorial referenced in step 5 and should display the backtest results at the end.
+
+
 # docker run -it -v $(pwd):/home/packt --name ml4t packt bash
 # jupyter lab --ip 0.0.0.0 --port 8888 --no-browser --allow-root
 
-This book uses Python 3.7 and numerous libraries that require installation. The first section covers how to handle this using the [Anaconda](https://www.anaconda.com/) distribution. Then, we address how to work with [Jupyter](https://jupyter.org/) notebooks to view and execute the code examples. Finally, we list additional installation instructions for libraries that require non-python dependencies.
+Zipline: no assets traded; 
+!zipline ingest -b quantopian-quandl
+edit DB (!) 
 
-## How to install the required libaries
+## How to install the required libraries using `conda` environments
 
 The book has been developed using Anaconda's miniconda distribution to facilitate dependency management, in particular on Windows machines. If you are experienced and/or work in a Unix-based environment, feel free to create your own environment using `pip`; the book uses the latest compatible versions as of May 2020 as listed in the various environment files.
 

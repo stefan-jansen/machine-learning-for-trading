@@ -7,7 +7,6 @@ from sklearn.model_selection import (train_test_split,
                                      LeaveOneOut,
                                      LeavePOut,
                                      ShuffleSplit,
-                                     StratifiedKFold,
                                      TimeSeriesSplit)
 
 data = list(range(1, 11))

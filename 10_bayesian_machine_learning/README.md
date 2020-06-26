@@ -11,7 +11,7 @@ More specifically, in this chapter, we will cover:
 - Probabilistic programming with PyMC3
 - Defining and training machine learning models using PyMC3
 - How to run state-of-the-art sampling methods to conduct approximate inference
-- Bayesian ML applications to compute dynamic Sharpe ratios, dynamic pairs trading hedge ratios, and estimate stochastic volatility
+- Bayesian ML applications to compute Sharpe ratios, dynamic pairs trading hedge ratios, and estimate stochastic volatility
 
 ## How Bayesian Machine Learning Works
 
@@ -48,7 +48,7 @@ Practical applications of Bayes’ rule to exactly compute posterior probabiliti
 #### How to keep inference simple: Conjugate Priors
 A prior distribution is conjugate with respect to the likelihood when the resulting posterior is of the same type of distribution as the prior except for different parameters. The conjugacy of prior and likelihood implies a closed-form solution for the posterior that facilitates the update process and avoids the need to use numerical methods to approximate the posterior.
 
-#### How to dynamically estimate the probabilities of asset price moves
+#### Code example: How to dynamically estimate the probabilities of asset price moves
 
 The notebook [updating_conjugate_priors](01_updating_conjugate_priors.ipynb) demonstrates how to use a conjugate prior to update price movement estimates from S&P 500 samples.
 
@@ -81,7 +81,7 @@ The field has become quite dynamic since new languages emerged since Uber open-s
 
 PyMC3 was released in January 2017 to add Hamiltonian MC methods to the Metropolis-Hastings sampler used in PyMC2 (released 2012). PyMC3 uses [Theano](http://www.deeplearning.net/software/theano/) as its computational backend for dynamic C compilation and automatic differentiation. Theano is a matrix-focused and GPU-enabled optimization library developed at Yoshua Bengio’s Montreal Institute for Learning Algorithms (MILA) that inspired TensorFlow. MILA recently ceased to further develop Theano due to the success of newer deep learning libraries (see chapter 16 for details). PyMC4, planned for 2019, will use TensorFlow instead, with presumably limited impact on the API.
 
-### The PyMC3 workflow: predicting a recession
+### The PyMC3 workflow
 
 PyMC3 aims for intuitive and readable, yet powerful syntax that reflects how statisticians describe models. The modeling process generally follows these three steps:
 1) Encode a probability model by defining: 
@@ -101,7 +101,11 @@ PyMC3 aims for intuitive and readable, yet powerful syntax that reflects how sta
 - [Bad Traces, or, Don't Use Metropolis](https://colindcarroll.com/2018/01/01/bad-traces-or-dont-use-metropolis/)
 - PyMC 4 on [GitHub](https://github.com/pymc-devs/pymc4) with design guide and a usage examples.
 
-### The Data: Leading Recession Indicators
+#### Code example: Predicting a recession with PyMC3
+
+The notebook [pymc3_workflow](02_pymc3_workflow.ipynb) illustrates various aspects of the PyMC3 workflow using a simple logistic regression to model the prediction of a recession.
+
+##### The Data: Leading Recession Indicators
 
 We will use a small and simple dataset so we can focus on the workflow. We use the Federal Reserve’s Economic Data (FRED) service (see Chapter 2) to download the US recession dates as defined by the National Bureau of Economic Research. We also source four variables that are commonly used to predict the onset of a recession (Kelley 2019) and available via FRED, namely:
 - The long-term spread of the treasury yield curve, defined as the difference between the ten-year and the three-month Treasury yield.
@@ -109,21 +113,20 @@ We will use a small and simple dataset so we can focus on the workflow. We use t
 - The National Financial Conditions Index (NFCI), and
 - The NFCI nonfinancial leverage subindex.
 
-### Model Definition: Bayesian Logistic Regression
+##### Model Definition: Bayesian Logistic Regression
 
 As discussed in [Linear Models](../07_linear_models), logistic regression estimates a linear relationship between a set of features and a binary outcome, mediated by a sigmoid function to ensure the model produces probabilities. The frequentist approach resulted in point estimates for the parameters that measure the influence of each feature on the probability that a data point belongs to the positive class, with confidence intervals based on assumptions about the parameter distribution. 
 
 Bayesian logistic regression, in contrast, estimates the posterior distribution over the parameters itself. The posterior allows for more robust estimates of what is called a Bayesian credible interval for each parameter with the benefit of more transparency about the model’s uncertainty.
 
-The notebook [bayesian_logistic_regression](02_bayesian_logistic_regression.ipynb) demonstrates the PYMC3 workflow, including
+The notebook [pymc3_workflow](02_pymc3_workflow.ipynb) demonstrates the PYMC3 workflow, including:
 - MAP Inference
 - Markov Chain Monte Carlo Estimate 
     - Metropolis-Hastings
     - NUTS Sampler
 - Variational Inference
 - Model Diagnostics
-    - Energy Plot
-    - Forest Plot
+    - Energy and Forest Plots
     - Posterior Predictive Checks (PPD), and 
     - Credible Intervals (CI)
 - Prediction
@@ -136,20 +139,33 @@ Now that we are familiar with the Bayesian approach to ML and probabilistic prog
 - computing pairs trading hedge ratios using Bayesian linear regression
 - analyzing linear time series models from a Bayesian perspective
 
-Thomas Wiecki, one of the main PyMC3 authors who also leads Data Science at Quantopian has created several examples that the following sections follow and build on. The PyMC3 documentation has many additional tutorials (see GitHub for links).
+### Code Example: Bayesian Sharpe ratio for performance comparison
 
+The notebook [bayesian_sharpe_ratio](03_bayesian_sharpe_ratio.ipynb) illustrates how to define the Sharpe ratio (SR) as a probabilistic model using PyMC3, and how to compare its posterior distributions for different return series. 
+
+The Bayesian estimation for two series offers very rich insights because it provides the complete distributions of the credible values for the effect size, the group SR means and their difference, as well as standard deviations and their difference. The Python implementation is due to Thomas Wiecki and was inspired by the R package BEST (Meredith and Kruschke 2018), see 'Resources' below.
+
+Relevant use cases of a Bayesian SR include the analysis of differences between alternative strategies, or between a strategy’s in-sample return relative to its out-of-sample return (see the notebook bayesian_sharpe_ratio for details). The Bayesian Sharpe ratio is also part of pyfolio’s Bayesian tearsheet.
+
+### Code Example: Bayesian Rolling Regression for Pairs Trading
+
+The last [chapter](../09_time_series_models) introduced pairs trading as a popular trading strategy that relies on the **cointegration** of two or more assets. Given such assets, we need to estimate the hedging ratio to decide on the relative magnitude of long and short positions. A basic approach uses linear regression. 
+
+The notebook [rolling_regression](04_rolling_regression.ipynb) llustrates how Bayesian linear regression tracks changes in the relationship between two assets over time. It follows Thomas Wiecki’s example (see 'Resources' below).
+
+### Code Example: Stochastic Volatility Models
+
+As discussed in the chapter [Time Series Models](../09_time_series_models), asset prices have time-varying volatility. In some periods, returns are highly variable, while in others very stable. 
+
+Stochastic volatility models model this with a latent volatility variable, modeled as a stochastic process. The  No-U-Turn Sampler was introduced using such a model, and the notebook [stochastic_volatility](05_stochastic_volatility.ipynb) illustrates this use case.
+
+### Resources
+
+Thomas Wiecki, one of the main PyMC3 authors who also leads Data Science at Quantopian has created several examples that the following sections follow and build on. The PyMC3 documentation has many additional tutorials.
+
+- PyMC3 [Tutorials](https://docs.pymc.io/nb_tutorials/index.html)
 - [Tackling the Poor Assumptions of Naive Bayes Text Classifiers](http://people.csail.mit.edu/jrennie/papers/icml03-nb.pdf), Rennie, et al, MIT SAIL, 2003
 - [On Discriminative vs Generative Classifiers: A comparison of logistic regression and naive Bayes](https://ai.stanford.edu/~ang/papers/nips01-discriminativegenerative.pdf), Jordan, Ng, 2002
 - [Bayesian estimation supersedes the t test](http://www.indiana.edu/~kruschke/BEST/BEST.pdf), John K. Kruschke, Journal of Experimental Psychology, 2012
 - [Automatic Differentiation Variational Inference](https://arxiv.org/pdf/1603.00788.pdf)
 
-#### Bayesian Rolling Regression for Pairs Trading
-
-The chapter [Time Series Models](../09_time_series_models) introduced pairs trading as a popular algorithmic trading strategy that relies on cointegration of two or more assets. Given such assets, we need to estimate the hedging ratio to decide on the relative magnitude of long and short positions. A basic approach uses linear regression. 
-
-The notebook [linear_regression](04_rolling_regression.ipynb) illustrates how Bayesian linear regression tracks changes in the relationship between two assets over time.
-
-#### Stochastic Volatility Models
-As discussed in the chapter [Time Series Models](../09_time_series_models), asset prices have time-varying volatility. In some periods, returns are highly variable, while in others very stable. 
-
-Stochastic volatility models model this with a latent volatility variable, modeled as a stochastic process. The  No-U-Turn Sampler was introduced using such a model, and the notebook [stochastic_volatility](05_stochastic_volatility.ipynb) illustrates this use case.
