@@ -1,8 +1,16 @@
-# Market & Fundamental Data
+# Market & Fundamental Data: Sources and Techniques
 
-This chapter introduces market and fundamental data sources and the environment in which they are created. Familiarity with various types of orders and the trading infrastructure matters because they affect backtest simulations of a trading strategy. We also illustrate how to use Python to access and work with trading and financial statement data.
+Data has always been an essential driver of trading, and traders have long made efforts to gain an advantage from access to superior information. These efforts date back at least to the rumors that the House of Rothschild benefited handsomely from bond purchases upon advance news about the British victory at Waterloo carried by pigeons across the channel.
+
+Today, investments in faster data access take the shape of the Go West consortium of leading **high-frequency trading** (HFT) firms that connects the Chicago Mercantile Exchange (CME) with Tokyo. The round-trip latency between the CME and the BATS exchanges in New York has dropped to close to the theoretical limit of eight milliseconds as traders compete to exploit arbitrage opportunities. At the same time, regulators and exchanges have started to introduce speed bumps that slow down trading to limit the adverse effects on competition of uneven access to information.
+
+Traditionally, investors mostly relied on **publicly available market and fundamental data**.  Efforts to create or acquire private datasets, for example through proprietary surveys, were limited. Conventional strategies focus on equity fundamentals and build financial models on reported financials, possibly combined with industry or macro data to project earnings per share and stock prices. Alternatively, they leverage technical analysis to extract signals from market data using indicators computed from price and volume information.
+
+**Machine learning (ML) algorithms** promise to exploit market and fundamental data more efficiently than human-defined rules and heuristics, in particular when combined with alternative data, the topic of the next chapter. We will illustrate how to apply ML algorithms ranging from linear models to recurrent neural networks (RNNs) to market and fundamental data and generate tradeable signals.
+
+This chapter introduces market and fundamental data sources and explains how they reflect the environment in which they are created. The details of the **trading environment** matter not only for the proper interpretation of market data but also for the design and execution of your strategy and the implementation of realistic backtesting simulations. We also illustrate how to access and work with trading and financial statement data from various sources using Python. 
  
-In particular, this chapter will cover the following topics:
+In particular, this chapter covers the following topics:
 - How market microstructure shapes market data
 - How to reconstruct the order book from tick data using Nasdaq ITCH 
 - How to summarize tick data using various types of bars
@@ -10,32 +18,47 @@ In particular, this chapter will cover the following topics:
 - How to parse and combine market and fundamental data to create a P/E series
 - How to access various market and fundamental data sources using Python
 
-## How to work with Market Data
+## How market data reflects the trading environment
 
-Market data results from the placement and processing of buy and sell orders in the course of the trading of financial instruments on the many marketplaces. The data reflects the institutional environment of trading venues, including the rules and regulations that govern orders, trade execution, and price formation.
+Market data is the product of how traders place orders for a financial instrument directly or through intermediaries on one of the numerous marketplaces and how they are processed and how prices are set by matching demand and supply. As a result, the data reflects the institutional environment of trading venues, including the rules and regulations that govern orders, trade execution, and price formation. See [Harris](https://global.oup.com/ushe/product/trading-and-exchanges-9780195144703?cc=us&lang=en&) (2003) for a global overview and [Jones](https://www0.gsb.columbia.edu/faculty/cjones/papers/2018.08.31%20US%20Equity%20Market%20Data%20Paper.pdf) (2018) for details on the US market.
 
-Algorithmic traders use ML algorithms to analyze the flow of buy and sell orders and the resulting volume and price statistics to extract trade signals or features that capture insights into, for example, demand-supply dynamics or the behavior of certain market participants.
+Algorithmic traders use algorithms, including ML, to analyze the flow of buy and sell orders and the resulting volume and price statistics to extract trade signals that capture insights into, for example, demand-supply dynamics or the behavior of certain market participants. This section reviews institutional features that impact the simulation of a trading strategy during a backtest before we start working with actual tick data created by one such environment, namely the NASDAQ.
 
-This section reviews institutional features that impact the simulation of a trading strategy during a backtest. Then, we will take a look at how tick data can be reconstructed from the order book source. Next, we will highlight several methods that regularize tick data and aim to maximize the information content. Finally, we will illustrate how to access various market data provider interfaces and highlight several providers.
+### Market microstructure: The nuts and bolts of trading
 
-###  Market microstructure
+Market microstructure studies how the institutional environment affects the trading process and shapes outcomes like the price discovery, bid-ask spreads and quotes, intraday trading behavior, and transaction costs. It is one of the fastest-growing fields of financial research, propelled by the rapid development of algorithmic and electronic trading.  
 
-Market microstructure is the branch of financial economics that investigates the trading process and the organization of related markets. The following references provide insights into institutional details that can be quite complex and diverse across asset classes and their derivatives, trading venues, and geographies, as well as data about the trading activities on various exchanges around the world
+Today, hedge funds sponsor in-house analysts to track the rapidly evolving, complex details and ensure execution at the best possible market prices and design strategies that exploit market frictions. This section provides a brief overview of key concepts, namely different market places and order types, before we dive into the data generated by trading.
 
-- [Trading and Exchanges - Market Microstructure for Practitioners](https://global.oup.com/ushe/product/trading-and-exchanges-9780195144703?cc=us&lang=en&), Larry Harris, Oxford University Press, 2002
+- [Trading and Exchanges - Market Microstructure for Practitioners](https://global.oup.com/ushe/product/trading-and-exchanges-9780195144703?cc=us&lang=en&), Larry Harris, Oxford University Press, 2003
+- [Understanding the Market for Us Equity Market Data](https://www0.gsb.columbia.edu/faculty/cjones/papers/2018.08.31%20US%20Equity%20Market%20Data%20Paper.pdf), Charles Jones, NYSE, 2018 
 - [World Federation of Exchanges](https://www.world-exchanges.org/our-work/statistics)
 - [Econophysics of Order-driven Markets](https://www.springer.com/gp/book/9788847017658), Abergel et al, 2011
     - Presents the ideas and research from various communities (physicists, economists, mathematicians, financial engineers) on the  modelling and analyzing order-driven markets. Of primary interest in these studies are the mechanisms leading to the statistical regularities of price statistics. Results pertaining to other important issues such as market impact, the profitability of trading strategies, or mathematical models for microstructure effects, are also presented.
 
-### Working with Order Book data
-The primary source of market data is the order book, which is continuously updated in real-time throughout the day to reflect all trading activity. Exchanges typically offer this data as a real-time service and may provide some historical data for free. 
+## How to work with high-frequency market data
+
+Two categories of market data cover the thousands of companies listed on US exchanges that are traded under Reg NMS: The consolidated feed combines trade and quote data from each trading venue, whereas each individual exchange offers proprietary products with additional activity information for that particular venue.
+
+In this section, we will first present proprietary order flow data provided by the NASDAQ that represents the actual stream of orders, trades, and resulting prices as they occur on a tick-by-tick basis. Then, we demonstrate how to regularize this continuous stream of data that arrives at irregular intervals into bars of a fixed duration. Finally, we introduce AlgoSeek’s equity minute bar data that contains consolidated trade and quote information. In each case, we illustrate how to work with the data using Python so you can leverage these sources for your trading strategy.
+
+### Working with NASDAQ order book data
+
+The primary source of market data is the order book, which updates in real-time throughout the day to reflect all trading activity. Exchanges typically offer this data as a real-time service for a fee but may provide some historical data for free. 
+
+In the United States, stock markets provide quotes in three tiers, namely Level I, II and III that offer increasingly granular information and capabilities:
+- Level I: real-time bid- and ask-price information, as available from numerous online sources
+- Level II: adds information about bid and ask prices by specific market makers as well as size and time of recent transactions for better insights into the liquidity of a given equity.
+- Level III: adds the ability to enter or change quotes, execute orders, and confirm trades and is only available to market makers and exchange member firms. Access to Level III quotes permits registered brokers to meet best execution requirements.
+
+The trading activity is reflected in numerous messages about orders sent by market participants. These messages typically conform to the electronic Financial Information eXchange (FIX) communications protocol for real-time exchange of securities transactions and market data or a native exchange protocol. 
 
 - [The Limit Order Book](https://arxiv.org/pdf/1012.0349.pdf)
 - [Feature Engineering for Mid-Price Prediction With Deep Learning](https://arxiv.org/abs/1904.05384)
 - [Price jump prediction in Limit Order Book](https://arxiv.org/pdf/1204.1381.pdf)
 - [Handling and visualizing order book data](https://github.com/0b01/recurrent-autoencoder/blob/master/Visualizing%20order%20book.ipynb) by Ricky Han
 
-#### The FIX protocol
+#### How trades are communicated: The FIX protocol
 
 The trading activity is reflected in numerous messages about trade orders sent by market participants. These messages typically conform to the electronic Financial Information eXchange (FIX) communications protocol for real-time exchange of securities transactions and market data or a native exchange protocol. 
 
@@ -44,7 +67,7 @@ The trading activity is reflected in numerous messages about trade orders sent b
 - C++ version: [quickfixengine](http://www.quickfixengine.org/)
 - Interactive Brokers [interface](https://www.interactivebrokers.com/en/index.php?f=4988)
 
-#### Nasdaq TotalView-ITCH data
+#### The NASDAQ TotalView-ITCH data feed
 
 While FIX has a dominant large market share, exchanges also offer native protocols. The Nasdaq offers a TotalView ITCH direct data-feed protocol that allows subscribers to track individual orders for equity instruments from placement to execution or cancellation.
 
@@ -65,7 +88,7 @@ While FIX has a dominant large market share, exchanges also offer native protoco
 
  - Native exchange protocols [around the world](https://en.wikipedia.org/wiki/List_of_electronic_trading_protocols_
  
- #### Resources
+ #### Additional Resources
  
  - [High-frequency trading in a limit order book](https://www.math.nyu.edu/faculty/avellane/HighFrequencyTrading.pdf), Avellaneda and Stoikov, Quantitative Finance, Vol. 8, No. 3, April 2008, 217–224
  - [Using a Simulator to Develop Execution Algorithms](http://www.math.ualberta.ca/~cfrei/PIMS/Almgren5.pdf), Robert Almgren, quantitative brokers, 2016
@@ -86,24 +109,31 @@ There are several options to access market data via API using Python. In this ch
 
 #### Code Examples
 
-The folder [data providers](02_data_providers) contains examples to use various data providers.
+The folder [data providers](03_data_providers) contains examples to use various data providers.
+1. Remote data access using [pandas DataReader](03_data_providers/01_datareader.ipynb)
+2. Downloading market and fundamental data with [yfinance](03_data_providers/02_yfinance_for_yahoo_finance.ipynb)
+3. Parsing Limit Order Tick Data from [LOBSTER](03_data_providers/03_lobster_itch_data.ipynb)
+4. Quandl [API Demo](03_data_providers/04_quandl_demo.ipynb)
+5. Zipline [data access](03_data_providers/05_zipline_data.ipynb)
 
 Relevant sources include:
 
 - Quandl [docs](https://docs.quandl.com/docs) and Python [API](https://www.quandl.com/tools/python﻿)
+- [yfinance](https://github.com/ranaroussi/yfinance)
 - [Quantopian](https://www.quantopian.com/posts)
 - [Zipline](http://www.zipline.io/﻿)
 - [LOBSTER](https://lobsterdata.com/)
 - [The Investor Exchange](https://iextrading.com/﻿)
+- [IEX Cloud](https://iexcloud.io/) financial data infrastructure
 - [Money.net](https://www.money.net/)
 - [Trading Economic](https://tradingeconomics.com/)
 - [Barchart](https://www.barchart.com/)
 - [Alpha Vantage](https://www.alphavantage.co/﻿)
 - [Alpha Trading Labs](https://www.alphatradinglabs.com/)
+- [Tiingo](https://www.tiingo.com/) stock market tools
 
 News
 - [Bloomberg and Reuters lose data share to smaller rivals](https://www.ft.com/content/622855dc-2d31-11e8-9b4b-bc4b9f08f381), FT, 2018
-
 
 ## How to work with Fundamental data
 
@@ -113,7 +143,6 @@ Fundamental data pertains to the economic drivers that determine the value of se
 - For commodities, it includes asset-specific supply-and-demand determinants, such as weather data for crops. 
 
 We will focus on equity fundamentals for the US, where data is easier to access. There are some 13,000+ public companies worldwide that generate 2 million pages of annual reports and 30,000+ hours of earnings calls. In algorithmic trading, fundamental data and features engineered from this data may be used to derive trading signals directly, for example as value indicators, and are an essential input for predictive models, including machine learning models.
-
 
 ### Financial statement data
 
@@ -134,7 +163,6 @@ There are several avenues to track and access fundamental data reported to the S
 - The financial statement (and notes) datasets contain parsed XBRL data from all financial statements and the accompanying notes.
 
 The SEC also publishes log files containing the [internet search traffic](https://www.sec.gov/dera/data/edgar-log-file-data-set.html) for EDGAR filings through SEC.gov, albeit with a six-month delay.
-
 
 #### Building a fundamental data time series
 

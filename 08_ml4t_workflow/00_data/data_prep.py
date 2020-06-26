@@ -16,7 +16,7 @@ from scipy.stats import spearmanr
 
 
 def get_backtest_data():
-    """Combine chapter 7 ridge regression predictions
+    """Combine chapter 7 lasso regression predictions
         with adjusted OHLCV Quandl Wiki data"""
     with pd.HDFStore(DATA_DIR / 'assets.h5') as store:
         prices = (store['quandl/wiki/prices']
@@ -40,4 +40,5 @@ def get_backtest_data():
 
 
 df = get_backtest_data()
+print(df.info())
 df.to_hdf('backtest.h5', 'data')
