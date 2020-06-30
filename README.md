@@ -1,4 +1,4 @@
-# Machine Learning for Trading (2nd edition)
+# Machine Learning for Trading
 
 This book aims to show **how ML can add value to algorithmic trading strategies** in a practical yet comprehensive way. It covers a broad range of ML techniques from linear regression to deep reinforcement learning and demonstrates how to build, backtest and evaluate a trading strategy driven by model predictions.  
 
