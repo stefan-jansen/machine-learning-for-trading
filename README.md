@@ -315,4 +315,20 @@ More specifically,this chapter will cover:
 
 ### 23 Conclusions and Next Steps
 
+In this concluding chapter, we will briefly summarize the key tools, applications, and lessons learned throughout the book to avoid losing sight of the big picture after so much detail. We will then identify areas that we did not cover but would be worthwhile to focus on as you expand on the many machine learning techniques we introduced and become productive in their daily use.
+
+In sum, in this chapter, we will
+- Review key takeaways and lessons learned
+- Point out the next steps to build on the techniques in this book
+- Suggest ways to incorporate ML into your investment process
+
 ### 24 Appendix - Alpha Factor Library
+
+Throughout this book, we emphasized how the smart design of features, including appropriate preprocessing and denoising, is what typically leads to an effective strategy. This appendix synthesizes some of the lessons learned on feature engineering and provides additional information on this important topic.
+
+To this end, we focus on the broad range of indicators implemented by TA-Lib (see [Chapter 4](04_alpha_factor_research)) and the [101 Formulaic Alphas](https://arxiv.org/pdf/1601.00991.pdf) paper (Kakushadze 2016), which presents real-life quantitative trading factors used in production at WorldQant with an average holding period of 0.6-6.4 days. To facilitate replication, we limit the review to indicators that rely on readily available market data.
+
+This chapter covers: 
+- how to compute several dozen technical indicators using TA-Lib and NumPy/pandas.
+- creating the formulaic alphas describe in the above paper
+- evaluating the predictive quality of the results using various metrics from rank correlation and mutual information to feature importance, SHAP values and Alphalens. 
