@@ -108,7 +108,17 @@ backtrader is a popular, flexible, and user-friendly Python library for local ba
 
 ### Key concepts of backtrader’s Cerebro architecture
 
-### How to use backtrader in practice
+Backtrader’s Cerebro (Spanish for “brain”) architecture represents the key components of the backtesting workflow as (extensible) Python objects. These objects interact to facilitate the processing of input data and the computation of factors, formulate and execute a strategy, receive and execute orders, and track and measure performance. A Cerebro instance orchestrates the overall process from collecting inputs, executing the backtest bar-by-bar, and providing results.
+
+The library uses conventions for these interactions that allow you to omit some detail and streamline the backtesting setup. I highly recommend browsing the [documentation](https://www.backtrader.com/docu/) to dive deeper if you plan on using backtrader to develop your own strategies.
+
+![The Cerebro Architechture](../assets/cerebro.png)
+
+### Code Example: How to use backtrader in practice
+
+We are going to demonstrate backtrader using again the daily return predictions by the ridge regression from Chapter 7, Linear Models, as for the vectorized backtest earlier in this chapter. We will create the Cerebro instance, load the data, formulate and add the Strategy, run the backtest, and review the results.
+
+The notebook [backtesting_with_backtrader](03_backtesting_with_backtrader.ipynb) contains the code examples and some additional details.
 
 ### Resources
 
@@ -120,9 +130,6 @@ backtrader is a popular, flexible, and user-friendly Python library for local ba
 
 The open source [Zipline](http://www.zipline.io/index.html) library is an event-driven backtesting system maintained and used in production by the crowd-sourced quantitative investment fund [Quantopian](https://www.quantopian.com/) to facilitate algorithm-development and live-trading. It automates the algorithm's reaction to trade events and provides it with current and historical point-in-time data that avoids look-ahead bias.
 
-In [Chapter 4](../04_alpha_factor_research), we introduced `zipline` to simulate the computation of alpha factors, and in [Chapter 5](../05_strategy_evaluation) we added trades to simulate a simple strategy and measure its performance as well as optimize portfolio holdings using different techniques.
+ [Chapter 4](../04_alpha_factor_research), we introduced `zipline` to simulate the computation of alpha factors, and in [Chapter 5](../05_strategy_evaluation) we added trades to simulate a simple strategy and measure its performance as well as optimize portfolio holdings using different techniques.
 
-The code for this section is in the subdirectory [ml4t_workflow_with_zipline](04_ml4t_workflow_with_zipline):
-- the notebook [backtesting_with_zipline](04_ml4t_workflow_with_zipline/02_backtesting_with_zipline.ipynb) demonstrates the use of the `Pipeline` interface while loading ML predictions from another local (HDF5) data source
-- the notebook [ml4t_with_zipline](04_ml4t_workflow_with_zipline/03_ml4t_with_zipline.ipynb) shows how to train an ML model locally as part of a `Pipeline` using a `CustomFactor` and various technical indicators as features for daily `bundle` data.
-- the notebook [ml4t_quantopian](04_ml4t_workflow_with_zipline/04_ml4t_quantopian.ipynb) shows how to train an ML model on the Quantopian platform to utilize the broad range of data sources available there.
+The code for this section is in the subdirectory [ml4t_workflow_with_zipline](04_ml4t_workflow_with_zipline). Please see the [README](04_ml4t_workflow_with_zipline/README.md) for details.
