@@ -15,9 +15,9 @@ Then, we address how to work with [Jupyter](https://jupyter.org/) notebooks to v
     docker run -it -v $(pwd):/home/packt/ml4t -p 8888:8888 -e QUANDL_API_KEY=<your API key> --name ml4t appliedai/packt:latest bash
     ```
     - it pulls the image from the Docker Hub account `appliedai` and the repository `packt` with the tag `latest`
-    - creates a local container with the name `ml4t` and runs it in interactive mode,
-    - mounts the current directory containing the starter project files as a volume in the directory `/home/packt/ml4t` inside the container,
-    - sets the environment variable `QUANDL_API_KEY` with the value of your key (that you need to fill in for `<yourkey>`), and
+    - creates a local container with the name `ml4t` and runs it in interactive mode, forwarding the port 8888 used by the `jupyter` server
+    - mounts the current directory containing the starter project files as a volume in the directory `/home/packt/ml4t` inside the container
+    - sets the environment variable `QUANDL_API_KEY` with the value of your key (that you need to fill in for `<your API key>`), and
     - starts a `bash` terminal inside the container, resulting in a new command prompt for the user `packt`.
 4. Now you are running a shell inside the container and can access the `conda environments`.
     - Run `conda env list` to see that there are a `base`, `ml4t` (default), and a `ml4t-`zipline` environment.
