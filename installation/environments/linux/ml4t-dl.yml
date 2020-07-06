@@ -102,13 +102,6 @@ dependencies:
   - jsonschema=3.2.0
   - jupyter=1.0.0
   - jupyter_client=6.1.3
-  - jupyter_console=6.1.0
-  - jupyter_contrib_core=0.3.3
-  - jupyter_contrib_nbextensions=0.5.1
-  - jupyter_core=4.6.3
-  - jupyter_highlight_selected_word=0.2.0
-  - jupyter_latex_envs=1.4.6
-  - jupyter_nbextensions_configurator=0.4.1
   - jupyterlab=2.1.5
   - jupyterlab_server=1.1.5
   - jxrlib=1.1
@@ -292,5 +285,4 @@ dependencies:
     - pymdptoolbox==4.0b3
     - toml==0.10.1
     - typing-extensions==3.7.4.2
-prefix: /home/stefan/.pyenv/versions/miniconda3-latest/envs/ml4t-dl
 

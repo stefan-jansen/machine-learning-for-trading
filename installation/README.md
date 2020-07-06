@@ -1,6 +1,8 @@
 # Installation instructions
 
-This book uses (mostly) Python 3.7 and numerous libraries that require installation. The first section covers how use Docker to pull an image that contains the necessary software and create a local container that allows you to run the notebooks without much further ado. The second section describes how to install the packages locally using the [Anaconda](https://www.anaconda.com/) distribution. If you are experienced and work a UNIX-based system, you can also create your own virtual environments and install the libraries required for different notebooks as needed. Then, we address how to work with [Jupyter](https://jupyter.org/) notebooks to view and execute the code examples. Finally, we list additional installation instructions for libraries that require non-python dependencies and discuss how to 
+This book uses (mostly) Python 3.7 and numerous libraries that require installation. The first section covers how use Docker to pull an image that contains the necessary software and create a local container that allows you to run the notebooks. The second section describes how to install the packages locally using the [Anaconda](https://www.anaconda.com/) distribution. If you are experienced and work a UNIX-based system, you can also create your own virtual environments and install the libraries required for different notebooks as needed. 
+
+Then, we address how to work with [Jupyter](https://jupyter.org/) notebooks to view and execute the code examples. Finally, we list additional installation instructions for libraries that require non-python dependencies and discuss how to 
 
 ## Run the code using a Docker images
 
@@ -10,13 +12,13 @@ This book uses (mostly) Python 3.7 and numerous libraries that require installat
 3. [Register](https://www.quandl.com/sign-up) for a (free) personal Quandl account to obtain an API key that you'll need in the next step.  
 3. We'll be using an image based on the Ubuntu 20.04 OS with the Anaconda Python distribution installed. It also contains two conda environments, one to run Zipline and one for everything else. The following command does several things at once:
     ```docker
-    docker run -it -v $(pwd):/home/manning -e QUANDL_API_KEY=<yourkey> --name liveproject appliedai/manning:starter bash
+    docker run -it -v $(pwd):/home/packt/ml4t -p 8888:8888 -e QUANDL_API_KEY=<your API key> --name ml4t appliedai/packt:latest bash
     ```
-    - it pulls the image from the Docker Hub account `appliedai` and the repository `manning` with the tag `starter`
-    - creates a local container with the name `liveproject` and runs it in interactive mode,
-    - mounts the current directory containing the starter project files as a volume in the directory `/home/manning` inside the container,
+    - it pulls the image from the Docker Hub account `appliedai` and the repository `packt` with the tag `latest`
+    - creates a local container with the name `ml4t` and runs it in interactive mode,
+    - mounts the current directory containing the starter project files as a volume in the directory `/home/packt/ml4t` inside the container,
     - sets the environment variable `QUANDL_API_KEY` with the value of your key (that you need to fill in for `<yourkey>`), and
-    - starts a `bash` terminal inside the container, resulting in a new command prompt.
+    - starts a `bash` terminal inside the container, resulting in a new command prompt for the user `packt`.
 4. Now you are running a shell inside the container and can access the `conda environments`.
     - Run `conda env list` to see that there are a `base`, `ml4t` (default), and a `ml4t-`zipline` environment.
     - You can switch to another environment using `conda activate <env_name>`. 
@@ -30,19 +32,12 @@ This book uses (mostly) Python 3.7 and numerous libraries that require installat
    - You should see numerous messages as Zipline processes around 3,000 stock price series
 5. Now we would like to test Zipline and the [juypter](https://jupyter.org/) setup. You can run notebooks using either the traditional or the more recent Jupyter Lab interface; both are available in all `conda` environments. Moreover, you start jupyter from the `base` environment and switch the environment from the notebook due to the `nb_conda_kernels` package (see [docs](https://github.com/Anaconda-Platform/nb_conda_kernels)). To get started, run one of the following two commands:
     ```bash
-    jupyter notebook --ip 0.0.0.0 --port 8888 --no-browser --allow-root
-    jupyter lab --ip 0.0.0.0 --port 8888 --no-browser --allow-root
+    jupyter notebook --ip 0.0.0.0 --no-browser --allow-root
+    jupyter lab --ip 0.0.0.0 --no-browser --allow-root
    ```
+    - There are also `alias` shortcuts for each so you don't have to type them: `nb` for the `jupyter notebook` version, and `lab` for the `jupyter lab` version.
     - The terminal will display a few messages and at the end indicate what to paste into your browser to access the jupyter server from the current working directory.
-6. To test Zipline, run the ```zipline_test.ipynb``` notebook. It contains the example from the Zipline tutorial referenced in step 5 and should display the backtest results at the end.
-
-
-# docker run -it -v $(pwd):/home/packt --name ml4t packt bash
-# jupyter lab --ip 0.0.0.0 --port 8888 --no-browser --allow-root
-
-Zipline: no assets traded; 
-!zipline ingest -b quantopian-quandl
-edit DB (!) 
+6. You can modify any of the environments using the standard conda workflow outlined below; see Docker docs for how to persist containers after making changes.
 
 ## How to install the required libraries using `conda` environments
 
@@ -72,8 +67,7 @@ Here, we will create an environment from a file to ensure you install the versio
 
 | Part(s) | Chapters | File          | Path                                               |
 |---------|----------|---------------|----------------------------------------------------|
-| 1 & 2   | 2-13     | ml4t.yml      | environments/{linux\|macos\|windows}/ml4t.yml      |
-| 3       | 14-16    | ml4t_text.yml | environments/{linux\|macos\|windows}/ml4t_text.yml |
+| 1, 2 & 3  | 2-16     | ml4t.yml      | environments/{linux\|macos\|windows}/ml4t.yml      |
 | 4       | 17-22    | ml4t_dl.yml   | environments/{linux\|macos\|windows}/ml4t_dl.yml   |
 
 To create the environment with the name `ml4t` (specified in the file) for `linux`, just run:
