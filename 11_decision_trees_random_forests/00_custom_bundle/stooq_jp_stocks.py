@@ -10,13 +10,6 @@ import pandas as pd
 pd.set_option('display.expand_frame_repr', False)
 np.random.seed(42)
 
-# create symbolic link to stooq.h5 in ~/.zipline/custom_data directory
-# create symbolic link to stooq_jp_stocks.py in ~/.zipline directory
-# in ~/.zipline/:
-# ln -s ~/projects/machine-learning-for-trading/11_decision_trees_random_forests/00_custom_bundle/stooq_jp_stocks.py .
-# ln -s ~/projects/machine-learning-for-trading/11_decision_trees_random_forests/00_custom_bundle/extension.py .
-# in ~/.zipline/custom_data:
-# ln -s ~/projects/machine-learning-for-trading/11_decision_trees_random_forests/00_custom_bundle/stooq.h5 .
 
 zipline_root = None
 
