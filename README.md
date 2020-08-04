@@ -8,7 +8,7 @@ It is organized in **four parts with 23 chapters** plus appendix that cover:
 - extracting tradeable signals from **financial text data** like SEC filings, earnings call transcripts or financial news
 - using **deep learning** models like CNN and RNN with financial and alternative data, generating synthetic data with generative adversarial networks, and training a trading agent using deep reinforcement learning
 
-This repo contains **over 150 notebooks** that that put the concepts, algorithms and use cases discussed in the book into action. They contain numerous examples that show 
+This repo contains **over 150 notebooks** that put the concepts, algorithms and use cases discussed in the book into action. They contain numerous examples that show 
 - how to work with and extract signals from market, fundamental and alternative text and image date, 
 - how to train and tune models that predict returns for different asset classes and investment horizons, including how to replicate recently published research, and 
 - how to design, backtest, and evaluate trading strategies.
