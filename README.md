@@ -9,7 +9,9 @@ In four parts with **23 chapters plus an appendix**, it covers on **over 800 pag
 - using **deep learning** models like CNN and RNN with market and alternative data, how to generate synthetic data with generative adversarial networks, and training a trading agent using deep reinforcement learning
 
 <p align="center">
+<a href="https://www.amazon.com/Machine-Learning-Algorithmic-Trading-alternative/dp/1839217715?pf_rd_r=GZH2XZ35GB3BET09PCCA&pf_rd_p=c5b6893a-24f2-4a59-9d4b-aff5065c90ec&pd_rd_r=91a679c7-f069-4a6e-bdbb-a2b3f548f0c8&pd_rd_w=2B0Q0&pd_rd_wg=GMY5S&ref_=pd_gw_ci_mcx_mr_hp_d">
 <img src="https://ml4t.s3.amazonaws.com/assets/cover_toc_gh.png" width="75%">
+</a>
 </p>
 
 This repo contains **over 150 notebooks** that put the concepts, algorithms, and use cases discussed in the book into action. They provide numerous examples that show
