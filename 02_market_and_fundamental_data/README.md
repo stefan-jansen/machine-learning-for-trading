@@ -181,7 +181,7 @@ The folder [03_sec_edgar](03_sec_edgar) contains the notebook [edgar_xbrl](03_se
 - [Quantitative Services Group](www.qsg.com)
 
 
-### Efficient data storage with pandas
+## Efficient data storage with pandas
 
 We'll be using many different data sets in this book, and it's worth comparing the main formats for efficiency and performance. In particular, we compare the following:
 

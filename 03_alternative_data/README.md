@@ -26,7 +26,6 @@ Useful references include:
 - [Big data: The next frontier for innovation, competition, and productivity](https://www.mckinsey.com/business-functions/digital-mckinsey/our-insights/big-data-the-next-frontier-for-innovation), McKinsey 2011
 - [McKinsey on Artificial Intelligence](https://www.mckinsey.com/featured-insights/artificial-intelligence)
 
-
 ## Evaluating Alternative Datasets
 
 The ultimate objective of alternative data is to provide an informational advantage in the competitive search for trading signals that produce alpha, namely positive, uncorrelated investment returns. In practice, the signals extracted from alternative datasets can be used on a standalone basis or combined with other signals as part of a quantitative strategy.

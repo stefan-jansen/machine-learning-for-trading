@@ -1,35 +1,39 @@
 # Machine Learning for Trading
 
-This book aims to show **how ML can add value to algorithmic trading strategies** in a practical yet comprehensive way. It covers a broad range of ML techniques from linear regression to deep reinforcement learning and demonstrates how to build, backtest and evaluate a trading strategy driven by model predictions.  
+This book aims to show how ML can add value to algorithmic trading strategies in a practical yet comprehensive way. It covers a broad range of ML techniques from linear regression to deep reinforcement learning and demonstrates how to build, backtest, and evaluate a trading strategy driven by model predictions.  
 
-It is organized in **four parts with 23 chapters** plus appendix that cover: 
+In four parts with **23 chapters plus an appendix**, it covers on **over 800 pages**:
 - important aspects of data sourcing, **financial feature engineering**, and portfolio management, 
-- the design and evaluation of long-short strategies based on fundamental **supervised and unsupervised ML** algorithms
-- extracting tradeable signals from **financial text data** like SEC filings, earnings call transcripts or financial news
-- using **deep learning** models like CNN and RNN with financial and alternative data, generating synthetic data with generative adversarial networks, and training a trading agent using deep reinforcement learning
+- the design and evaluation of long-short **strategies based on supervised and unsupervised ML algorithms**,
+- how to extract tradeable signals from **financial text data** like SEC filings, earnings call transcripts or financial news,
+- using **deep learning** models like CNN and RNN with market and alternative data, how to generate synthetic data with generative adversarial networks, and training a trading agent using deep reinforcement learning
 
-This repo contains **over 150 notebooks** that put the concepts, algorithms and use cases discussed in the book into action. They contain numerous examples that show 
-- how to work with and extract signals from market, fundamental and alternative text and image date, 
+<img src="https://ml4t.s3.amazonaws.com/assets/cover_toc_gh.png" width="75%" align="center">
+
+This repo contains **over 150 notebooks** that put the concepts, algorithms, and use cases discussed in the book into action. They provide numerous examples that show
+- how to work with and extract signals from market, fundamental and alternative text and image data, 
 - how to train and tune models that predict returns for different asset classes and investment horizons, including how to replicate recently published research, and 
 - how to design, backtest, and evaluate trading strategies.
 
-## What to expect
-
-This book aims to equip you with a strategic perspective, conceptual understanding, and practical tools to add value when applying ML to the trading and investment process. To this end, we cover ML as a key element in a process rather than a standalone exercise. Most importantly, we introduce an end-to-end ML for trading (ML4T) workflow that we apply to numerous use cases with relevant data and code examples.
-
-![The ML4T Workflow](assets/ml4t_workflow.png)
-
-The ML4T workflow starts with generating ideas and sourcing data and continues to extracting features, tuning ML models, and designing trading strategies that act on the models’ predictive signals. It also includes the simulation of strategies on historical data using a backtesting engine and the evaluation of their performance.
-
-First and foremost, the book demonstrates how you can extract signals from a diverse set of data sources and design trading strategies for different asset classes using a broad range of supervised, unsupervised, and reinforcement learning algorithms. In addition, it provides relevant mathematical and statistical background to facilitate the tuning of an algorithm or the interpretation of the results. Finally, it includes financial background to enable you to work with market and fundamental data, extract informative features, and manage the performance of a trading strategy.
 
 ## What's new in the second edition
 
-The second edition emphasizes the end-to-end ML4t workflow, reflected in a new chapter on [strategy backtesting](08_ml4t_workflow/README.md), a new [appendix](24_alpha_factor_library/README.md) describing over 100 different alpha factors, and many new practical applications. We have also rewritten most of the existing content for clarity and readability.  
+First and foremost, this [book](https://www.amazon.com/Machine-Learning-Algorithmic-Trading-alternative/dp/1839217715?pf_rd_r=VMKJPZC4N36TTZZCWATP&pf_rd_p=c5b6893a-24f2-4a59-9d4b-aff5065c90ec&pd_rd_r=8f331266-0d21-4c76-a3eb-d2e61d23bb31&pd_rd_w=kVGNF&pd_rd_wg=LYLKH&ref_=pd_gw_ci_mcx_mr_hp_d) demonstrates how you can extract signals from a diverse set of data sources and design trading strategies for different asset classes using a broad range of supervised, unsupervised, and reinforcement learning algorithms. It also provides relevant mathematical and statistical knowledge to facilitate the tuning of an algorithm or the interpretation of the results. Furthermore, it covers the financial background that will help you work with market and fundamental data, extract informative features, and manage the performance of a trading strategy.
 
-The applications now use a broader range of data sources beyond daily US equity prices, including international stocks and ETFs, as well as minute-frequency equity data to demonstrate an intraday strategy. Also, there is now broader coverage of alternative data sources, including SEC filings for sentiment analysis and return forecasts, as well as satellite images to classify land use. 
+From a practical standpoint, the 2nd edition aims to equip you with the conceptual understanding and tools to develop your own ML-based trading strategies. To this end, it frames ML as a critical element in a process rather than a standalone exercise, introducing the end-to-end ML for trading workflow from data sourcing, feature engineering, and model optimization to strategy design and backtesting.
 
-Furthermore, the book replicates several applications recently published in academic papers. Chapter 18 demonstrates how to apply convolutional neural networks to time series converted to image format for return predictions. [Chapter 20](20_autoencoders_for_conditional_risk_factors/README.md) shows how to extract risk factors conditioned on stock characteristics for asset pricing using autoencoders based on [Autoencoder Asset Pricing Models](https://www.aqr.com/Insights/Research/Working-Paper/Autoencoder-Asset-Pricing-Models) by Shihao Gu, Bryan T. Kelly, and Dacheng Xiu (2019), and Chapter 21 shows how to create synthetic training data using generative adversarial networks based on [Time-series Generative Adversarial Networks](https://papers.nips.cc/paper/8789-time-series-generative-adversarial-networks) by Jinsung Yoon, Daniel Jarrett, and Mihaela van der Schaar (2019).
+More specifically, the ML4T workflow starts with generating ideas for a well-defined investment universe, collecting relevant data, and extracting informative features. It also involves designing, tuning, and evaluating ML models suited to the predictive task. Finally, it requires developing trading strategies to act on the models' predictive signals, as well as simulating and evaluating their performance on historical data using a backtesting engine. Once you decide to execute an algorithmic strategy in a real market, you will find yourself iterating over this workflow repeatedly to incorporate new information and a changing environment.
+
+<img src="https://ml4t.s3.amazonaws.com/assets/ml4t_workflow.png" width="75%" align="center">
+
+The second edition's emphasis on the ML4t workflow translates into a new chapter on [strategy backtesting](08_ml4t_workflow), a new [appendix](24_alpha_factor_library) describing over 100 different alpha factors, and many new practical applications. We have also rewritten most of the existing content for clarity and readability. 
+
+The trading applications now use a broader range of data sources beyond daily US equity prices, including international stocks and ETFs. It also demonstrates how to use ML for an intraday strategy with minute-frequency equity data. Furthermore, it extends the coverage of alternative data sources to include SEC filings for sentiment analysis and return forecasts, as well as satellite images to classify land use. 
+
+Another innovation of the second edition is to replicate several trading applications recently published in top journals: 
+- [Chapter 18](18_convolutional_neural_nets) demonstrates how to apply convolutional neural networks to time series converted to image format for return predictions based on [Sezer and Ozbahoglu](https://www.researchgate.net/publication/324802031_Algorithmic_Financial_Trading_with_Deep_Convolutional_Neural_Networks_Time_Series_to_Image_Conversion_Approach) (2018). 
+- [Chapter 20](20_autoencoders_for_conditional_risk_factors) shows how to extract risk factors conditioned on stock characteristics for asset pricing using autoencoders based on [Autoencoder Asset Pricing Models](https://www.aqr.com/Insights/Research/Working-Paper/Autoencoder-Asset-Pricing-Models) by Shihao Gu, Bryan T. Kelly, and Dacheng Xiu (2019), and 
+- [Chapter 21](21_gans_for_synthetic_time_series) shows how to create synthetic training data using generative adversarial networks based on [Time-series Generative Adversarial Networks](https://papers.nips.cc/paper/8789-time-series-generative-adversarial-networks) by Jinsung Yoon, Daniel Jarrett, and Mihaela van der Schaar (2019).
 
 All applications now use the latest available (at the time of writing) software versions such as pandas 1.0 and TensorFlow 2.2. There is also a customized version of Zipline that makes it easy to include machine learning model predictions when designing a trading strategy.
 
@@ -38,24 +42,30 @@ All applications now use the latest available (at the time of writing) software 
 - For instructions on using a Docker image or setting up various `conda` environments to install the packages used in the notebooks, see [here](installation/README.md).
 - To download and preprocess many of the data sources used in this book see [create_datasets](data/create_datasets.ipynb).
 
-# Summary of the Content
+# Outline of the Content
 
-The book has four parts that cover different aspects of the data sourcing and strategy development process, as well as different solutions to various ML4T challenges.
+The book has four parts that address different challenges that arise when sourcing and working with market, fundamental and alternative data sourcing, developing ML solutions to various predictive tasks in the trading context, and designing and evaluating a trading strategy that relies on predictive signals generated by an ML model.
 
 ## Part 1: From Data to Strategy Development
 
-The first part provides a framework for the development of trading strategies driven by machine learning (ML). It focuses on the data that power the ML algorithms and strategies discussed in this book, outlines how ML can be used to derive trading signals, and how to deploy and evaluate strategies as part of a portfolio.
+The first part provides a framework for developing trading strategies driven by machine learning (ML). It focuses on the data that power the ML algorithms and strategies discussed in this book, outlines how to engineer and evaluates features suitable for ML models, and how to manage and measure a portfolio's performance while executing a trading strategy.
 
 ### 01 Machine Learning for Trading: From Idea to Execution
 
-This [chapter](01_machine_learning_for_trading) explores industry trends that have led to the emergence of ML as a source of competitive advantage in the investment industry. We will also look at where ML fits into the investment process to enable algorithmic trading strategies. More specifically, we will be covering the following topics:
+This [chapter](01_machine_learning_for_trading) explores industry trends that have led to the emergence of ML as a source of competitive advantage in the investment industry. We will also look at where ML fits into the investment process to enable algorithmic trading strategies. 
+
+More specifically, it covers the following topics:
 - Key trends behind the rise of ML in the investment industry
 - The design and execution of a trading strategy that leverages ML
 - Popular use cases for ML in trading
 
 ### 02 Market & Fundamental Data: Sources and Techniques
 
-This [chapter](02_market_and_fundamental_data) shows how to work with market and fundamental data sources and describes key aspects of the environment in which they are created. Familiarity with various types of orders and the trading infrastructure matters not only for the interpretation of the data, but also because they affect backtest simulations of a trading strategy. We also illustrate how to use Python to access and work with trading and financial statement data.  In particular, this chapter covers:
+This [chapter](02_market_and_fundamental_data) shows how to work with market and fundamental data and describes critical aspects of the environment that they reflect. For example, familiarity with various order types and the trading infrastructure matter not only for the interpretation of the data but also to correctly design backtest simulations. We also illustrate how to use Python to access and manipulate trading and financial statement data.  
+
+Practical examples demonstrate how to work with trading data from NASDAQ tick data and Algoseek minute bar data with a rich set of attributes capturing the demand-supply dynamic that we will later use for an ML-based intraday strategy. We also cover various data provider APIs and how to source financial statement information from the SEC.
+
+In particular, this chapter covers:
 
 - How market data reflects the structure of the trading environment
 - Working with intraday trade and quotes data at minute frequency
@@ -67,35 +77,38 @@ This [chapter](02_market_and_fundamental_data) shows how to work with market and
 
 ### 03 Alternative Data for Finance: Categories and Use Cases
 
-This [chapter](03_alternative_data) outlines categories and describes criteria to assess the exploding number of alternative data sources and providers. It also demonstrates how to create alternative data sets by scraping websites, for example to collect earnings call transcripts for use with natural language processing (NLP) and sentiment analysis algorithms in the second part of the book. More specifically, this chapter covers:
+This [chapter](03_alternative_data) outlines categories and use cases of alternative data, describes criteria to assess the exploding number of sources and providers, and summarizes the current market landscape. 
 
-- Which new sources of information have been unleashed by the alternative data revolution
-- How individuals, business processes, and sensors generate alternative data
-- Evaluating the burgeoning supply of alternative data used for algorithmic trading
-- Working with alternative data in Python, such as by scraping the internet
+It also demonstrates how to create alternative data sets by scraping websites, such as collecting earnings call transcripts for use with natural language processing (NLP) and sentiment analysis algorithms in the third part of the book.
+ 
+More specifically, this chapter covers:
+
+- Which new sources of signals have emerged during the alternative data revolution
+- How individuals, business, and sensors generate a diverse set of alternative data
 - Important categories and providers of alternative data
-
+- Evaluating how the burgeoning supply of alternative data can be used for trading
+- Working with alternative data in Python, such as by scraping the internet
 
 ### 04 Financial Feature Engineering: How to research Alpha Factors
 
-If you are already familiar with ML, you know that feature engineering is a key ingredient for successful predictions. This is no different in trading. Investment, however, is particularly rich in decades of research into how markets work and which features may work better than others to explain or predict price movements as a result. This [chapter](04_alpha_factor_research) provides an overview as a starting point for your own search for alpha factors.
+If you are already familiar with ML, you know that feature engineering is a crucial ingredient for successful predictions. It matters at least as much in the trading domain, where academic and industry researchers have investigated for decades what drives asset markets and prices, and which features help to explain or predict price movements.
 
-![Alpha Factor Research](assets/alpha_factor_workflow.png)
+<img src="https://ml4t.s3.amazonaws.com/assets/alpha_factor_workflow.png" width="50%" align="center">
 
-This chapter  presents key tools that facilitate the computing and testing alpha factors. We will highlight how the NumPy, pandas and TA-Lib libraries facilitate the manipulation of data and present popular smoothing techniques like the wavelets and the Kalman filter that help reduce noise in data. After reading this chapter you will know about:
-- Which categories of factors exist, why they work, and how to measure them
-- Creating e alpha factors using NumPy, pandas, and TA-Lib
-- How to denoise data using wavelets and the Kalman filter
-- Using e Zipline offline and on Quantopian to test individual and multiple alpha factors
-- How to use Alphalens to evaluate predictive performance and turnover using, among other metrics, the information coefficient (IC)
+This [chapter](04_alpha_factor_research) outlines the key takeaways of this research as a starting point for your own quest for alpha factors. It also presents essential tools to compute and test alpha factors, highlighting how the NumPy, pandas, and TA-Lib libraries facilitate the manipulation of data and present popular smoothing techniques like the wavelets and the Kalman filter that help reduce noise in data. After reading it, you will know about:
+- Which categories of factors exist, why they work, and how to measure them,
+- Creating e alpha factors using NumPy, pandas, and TA-Lib,
+- How to denoise data using wavelets and the Kalman filter,
+- Using e Zipline offline and on Quantopian to test individual and multiple alpha factors,
+- How to use Alphalens to evaluate predictive performance using, among other metrics, the information coefficient.
  
 ### 05 Portfolio Optimization and Performance Evaluation
 
-Alpha factors generate signals that an algorithmic strategy translates into trades, which, in turn, produce long and short positions. The returns and risk of the resulting portfolio determine the success of the strategy.
+Alpha factors generate signals that an algorithmic strategy translates into trades, which, in turn, produce long and short positions. The returns and risk of the resulting portfolio determine whether the strategy meets the investment objectives.
 
-![Algo Trading Flow](assets/algo_trading_workflow.png)
+<img src="https://ml4t.s3.amazonaws.com/assets/algo_trading_workflow.png" width="55%" align="center">
 
-There are several approaches to optimize portfolios that include the application of machine learning (ML) to learn hierarchical relationships among assets and treat their holdings as complements or substitutes with respect to the portfolio risk profile. This chapter covers:
+There are several approaches to optimize portfolios. These include the application of machine learning (ML) to learn hierarchical relationships among assets and treat them as complements or substitutes when designing the portfolio's risk profile. This [chapter](05_strategy_evaluation) covers:
 - How to measure portfolio risk and return
 - Managing portfolio weights using mean-variance optimization and alternatives
 - Using machine learning to optimize asset allocation in a portfolio context
@@ -104,11 +117,13 @@ There are several approaches to optimize portfolios that include the application
 
 ## Part 2: Machine Learning for Trading: Fundamentals
 
-The second part covers the fundamental supervised and unsupervised learning algorithms and illustrates their application to trading strategies. It also introduces the Quantopian platform where you can leverage and combine the data and ML techniques developed in this book to implement algorithmic strategies that execute trades in live markets.
+The second part covers the fundamental supervised and unsupervised learning algorithms and illustrates their application to trading strategies. It also introduces the Quantopian platform that allows you to leverage and combine the data and ML techniques developed in this book to implement algorithmic strategies that execute trades in live markets.
 
 ### 06 The Machine Learning Process
 
-this [chapter](06_machine_learning_process) sets the stage by outlining how to formulate, train, tune and evaluate the predictive performance of ML models as a systematic workflow. It covers:
+This [chapter](06_machine_learning_process) kicks off Part 2 that illustrates how you can use a range of supervised and unsupervised ML models for trading. We will explain each model's assumptions and use cases before we demonstrate relevant applications using various Python libraries. 
+
+There are several aspects that many of these models and their applications have in common. This chapter covers these common aspects so that we can focus on model-specific usage in the following chapters. It sets the stage by outlining how to formulate, train, tune, and evaluate the predictive performance of ML models as a systematic workflow. The content includes:
 
 - How supervised and unsupervised learning from data works
 - Training and evaluating supervised learning models for regression and classification tasks
@@ -119,7 +134,9 @@ this [chapter](06_machine_learning_process) sets the stage by outlining how to f
 
 ### 07 Linear Models: From Risk Factors to Return Forecasts
 
-Linear models are applied to regression and classification problems with the goals of inference and prediction. Numerous asset pricing models developed by academia and industry are based on linear regression. Applications include identifying significant factors that drive asset returns, for example, as a basis for risk management, as predicting returns over various time horizons. Classification problems, on the other hand, include directional price forecasts. [Chapter 07](07_linear_models) covers the following topics:
+Linear models are standard tools for inference and prediction in regression and classification contexts. Numerous widely used asset pricing models rely on linear regression. Regularized models like Ridge and Lasso regression often yield better predictions by limiting the risk of overfitting. Typical regression applications identify risk factors that drive asset returns to manage risks or predict returns. Classification problems, on the other hand, include directional price forecasts.
+
+[Chapter 07](07_linear_models) covers the following topics:
 
 - How linear regression works and which assumptions it makes
 - Training and diagnosing linear regression models
@@ -130,7 +147,12 @@ Linear models are applied to regression and classification problems with the goa
 
 ### 08 The ML4T Workflow: From Model to Strategy Backtesting
 
-The goal of this [chapter](08_ml4t_workflow) is to present an end-to-end perspective on the process of designing, simulating, and evaluating a trading strategy driven by an ML algorithm. To this end, we will demonstrate in more detail how to backtest an ML-driven strategy in a historical market context using the Python libraries backtrader and Zipline. More specifically, after working through this chapter you will be able to:
+This [chapter](08_ml4t_workflow) presents an end-to-end perspective on designing, simulating, and evaluating a trading strategy driven by an ML algorithm. 
+We will demonstrate in detail how to backtest an ML-driven strategy in a historical market context using the Python libraries [backtrader](https://www.backtrader.com/) and [Zipline](https://www.zipline.io/index.html). 
+The ML4T workflow ultimately aims to gather evidence from historical data that helps decide whether to deploy a candidate strategy in a live market and put financial resources at risk. A realistic simulation of your strategy needs to faithfully represent how security markets operate and how trades execute. Also, several methodological aspects require attention to avoid biased results and false discoveries that will lead to poor investment decisions.
+
+More specifically, after working through this chapter you will be able to:
+
 - Plan and implement end-to-end strategy backtesting
 - Understand and avoid critical pitfalls when implementing backtests
 - Discuss the advantages and disadvantages of vectorized vs event-driven backtesting engines
@@ -140,16 +162,15 @@ The goal of this [chapter](08_ml4t_workflow) is to present an end-to-end perspec
 
 ### 09 Time Series Models for Volatility Forecasts and Statistical Arbitrage
 
- This [chapter](09_time_series_models) focuses on models that extract signals from previously observed data to predict future values for the same time series. The time dimension of trading makes the application of time series models to market, fundamental, and alternative data very popular. 
- 
- We present tools to diagnose time series characteristics, including stationarity, and extract features that capture potential patterns. Then it introduces univariate and multivariate time series models and how to apply them to forecast macro data and volatility patterns. It concludes with the concept of cointegration and how to apply it to develop a pairs trading strategy.
-
-In particular, we will cover the following topics:
-- How to use time series analysis to diagnose diagnostic statistics that inform the modeling process
-- How to estimate and diagnose autoregressive and moving-average time series models
-- How to build Autoregressive Conditional Heteroskedasticity (ARCH) models to predict volatility
-- How to build vector autoregressive models
-- How to use cointegration for a pairs trading strategy
+This [chapter](09_time_series_models) focuses on models that extract signals from a time series' history to predict future values for the same time series. 
+Time series models are in widespread use due to the time dimension inherent to trading. It presents tools to diagnose time series characteristics such as stationarity and extract features that capture potentially useful patterns. It also introduces univariate and multivariate time series models to forecast macro data and volatility patterns. 
+Finally, it explains how cointegration identifies common trends across time series and shows how to develop a pairs trading strategy based on this crucial concept. 
+In particular, it covers:
+- How to use time-series analysis to prepare and inform the modeling process
+- Estimating and diagnosing univariate autoregressive and moving-average models
+- Building autoregressive conditional heteroskedasticity (ARCH) models to predict volatility
+- How to build multivariate vector autoregressive models
+- Using cointegration to develop a pairs trading strategy
 
 ### 10 Bayesian ML: Dynamic Sharpe Ratios and Pairs Trading
 
