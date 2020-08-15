@@ -17,11 +17,13 @@ Historically, algorithmic trading used to be more narrowly defined as the automa
 This chapter looks at industry trends that have led to the emergence of ML as a source of competitive advantage in the investment industry. We will also look at where ML fits into the investment process to enable algorithmic trading strategies. 
 
 More specifically, we will be covering the following topics:
- 
+
+#### Table of contents
+
 1. [The rise of ML in the investment industry](#the-rise-of-ml-in-the-investment-industry)
     * [From electronic to high-frequency trading](#from-electronic-to-high-frequency-trading)
     * [Factor investing and smart beta funds](#factor-investing-and-smart-beta-funds)
-    * [Algorithmic pioneers outperform humans and grow in scale](#algorithmic-pioneers-outperform-humans-and-grow-in-scale)
+    * [Algorithmic pioneers outperform humans](#algorithmic-pioneers-outperform-humans)
         - [ML driven funds attract $1 trillion AUM](#ml-driven-funds-attract-1-trillion-aum)
         - [The emergence of quantamental funds](#the-emergence-of-quantamental-funds)
     * [ML and alternative data](#ml-and-alternative-data)
@@ -37,7 +39,7 @@ More specifically, we will be covering the following topics:
         - [Asset allocation](#asset-allocation)
         - [Testing trade ideas](#testing-trade-ideas)
         - [Reinforcement learning](#reinforcement-learning)
-4. [References](#references)
+4. [Resources & References](#resources--references)
     * [Academic Research](#academic-research)
     * [Industry News](#industry-news)
     * [Books](#books)
@@ -80,7 +82,7 @@ Over the past several decades, quantitative factor investing has evolved from a 
 
 The ongoing discovery and successful forecasting of risk factors that, either individually or in combination with other risk factors, significantly impact future asset returns across asset classes is a key driver of the surge in ML in the investment industry and will be a key theme throughout this book.
 
-### Algorithmic pioneers outperform humans and grow in scale
+### Algorithmic pioneers outperform humans
 
 The track record and growth of Assets Under Management (AUM) of firms that spearheaded algorithmic trading has played a key role in generating investor interest and subsequent industry efforts to replicate their success.
 
@@ -100,7 +102,6 @@ Morgan Stanley estimated in 2017 that algorithmic strategies have grown at 15% p
 Two distinct approaches have evolved in active investment management: systematic (or quant) and discretionary investing. Systematic approaches rely on algorithms for a repeatable and data-driven approach to identify investment opportunities across many securities; in contrast, a discretionary approach involves an in-depth analysis of a smaller number of securities. These two approaches are becoming more similar as fundamental managers take more data-science-driven approaches.
 
 Even fundamental traders now arm themselves with quantitative techniques, accounting for $55 billion of systematic assets, according to Barclays. Agnostic to specific companies, quantitative funds trade patterns and dynamics across a wide swath of securities. Quants now account for about 17% of total hedge fund assets, data compiled by Barclays shows.
-
 
 ### ML and alternative data
 
@@ -216,7 +217,7 @@ In Chapter 21, [Generative Adversarial Networks for Synthetic Training Data](../
 Trading takes place in a competitive, interactive marketplace. Reinforcement learning aims to train agents to learn a policy function based on rewards; it is often considered as one of the most promising areas in financial ML. See, e.g. Hendricks and Wilcox (2014) and Nevmyvaka, Feng, and Kearns (2006) for applications to trade execution.
 - In Chapter 22, [Deep Reinforcement Learning: Building a Trading Agent](../22_deep_reinforcement_learning/README.md), we present key reinforcement algorithms like Q-learning to demonstrate the training of reinforcement algorithms for trading using OpenAI's Gym environment.
 
-## References
+## Resources & References
 
 ### Academic Research
 
@@ -224,6 +225,21 @@ Trading takes place in a competitive, interactive marketplace. Reinforcement lea
 - [The relationship between return and market value of common stocks](https://www.sciencedirect.com/science/article/pii/0304405X81900180), Rolf Banz,Journal of Financial Economics, March 1981
 - [The Arbitrage Pricing Theory: Some Empirical Results](https://onlinelibrary.wiley.com/doi/abs/10.1111/j.1540-6261.1981.tb00444.x), Marc Reinganum, Journal of Finance, 1981
 - [The Relationship between Earnings' Yield, Market Value and Return for NYSE Common Stock](https://pdfs.semanticscholar.org/26ab/311756099c8f8c4e528083c9b90ff154f98e.pdf), Sanjoy Basu, Journal of Financial Economics, 1982
+- [Bridging the divide in financial market forecasting: machine learners vs. financial economists](http://www.sciencedirect.com/science/article/pii/S0957417416302585), Expert Systems with Applications, 2016 
+- [Financial Time Series Forecasting with Deep Learning : A Systematic Literature Review: 2005-2019](http://arxiv.org/abs/1911.13288), arXiv:1911.13288 [cs, q-fin, stat], 2019 
+- [Empirical Asset Pricing via Machine Learning](https://doi.org/10.1093/rfs/hhaa009), The Review of Financial Studies, 2020 
+- [The Characteristics that Provide Independent Information about Average U.S. Monthly Stock Returns](http://academic.oup.com/rfs/article/30/12/4389/3091648), The Review of Financial Studies, 2017 
+- [Characteristics are covariances: A unified model of risk and return](http://www.sciencedirect.com/science/article/pii/S0304405X19301151), Journal of Financial Economics, 2019 
+- [Estimation and Inference of Heterogeneous Treatment Effects using Random Forests](https://doi.org/10.1080/01621459.2017.1319839), Journal of the American Statistical Association, 2018 
+- [An Empirical Study of Machine Learning Algorithms for Stock Daily Trading Strategy](https://www.hindawi.com/journals/mpe/2019/7816154/), Mathematical Problems in Engineering, 2019 
+- [Predicting stock market index using fusion of machine learning techniques](http://www.sciencedirect.com/science/article/pii/S0957417414006551), Expert Systems with Applications, 2015 
+- [Predicting stock and stock price index movement using Trend Deterministic Data Preparation and machine learning techniques](http://www.sciencedirect.com/science/article/pii/S0957417414004473), Expert Systems with Applications, 2015 
+- [Deep Learning for Limit Order Books](http://arxiv.org/abs/1601.01987), arXiv:1601.01987 [q-fin], 2016 
+- [Trading via Image Classification](http://arxiv.org/abs/1907.10046), arXiv:1907.10046 [cs, q-fin], 2019 
+- [Algorithmic trading review](http://doi.org/10.1145/2500117), Communications of the ACM, 2013 
+- [Assessing the impact of algorithmic trading on markets: A simulation approach](https://www.econstor.eu/handle/10419/43250), , 2008 
+- [The Efficient Market Hypothesis and Its Critics](http://www.aeaweb.org/articles?id=10.1257/089533003321164958), Journal of Economic Perspectives, 2003 
+- [The Arbitrage Pricing Theory Approach to Strategic Portfolio Planning](https://doi.org/10.2469/faj.v40.n3.14), Financial Analysts Journal, 1984 
 
 ### Industry News
 
@@ -257,6 +273,8 @@ Trading takes place in a competitive, interactive marketplace. Reinforcement lea
 - [Advances in Financial Machine Learning](https://www.wiley.com/en-us/Advances+in+Financial+Machine+Learning-p-9781119482086), Marcos Lopez de Prado, 2018
 - [Quantresearch](http://www.quantresearch.info/index.html) by Marcos López de Prado
 - [Quantitative Trading](http://epchan.blogspot.com/), Ernest Chan
+- [Machine Learning in Finance](https://www.springer.com/gp/book/9783030410674), Dixon, Matthew F., Halperin, Igor, Bilokon, Paul, Springer, 2020
+
 #### Machine Learning
 
 - [Machine Learning](http://www.cs.cmu.edu/~tom/mlbook.html), Tom Mitchell, McGraw Hill, 1997
@@ -268,8 +286,11 @@ Trading takes place in a competitive, interactive marketplace. Reinforcement lea
 
 - [Algorithmic Trading](http://personal.stevens.edu/~syang14/fe670.htm), Prof. Steve Yang, Stevens Institute of Technology
 - [Machine Learning](https://www.coursera.org/learn/machine-learning), Andrew Ng, Coursera
-- [](http://deeplearning.ai/), Andrew Ng
+- [Deep Learning Specialization](http://deeplearning.ai/), Andrew Ng
     - Andrew Ng’s introductory deep learning course
+- Machine Learning for Trading Specialization, [Coursera](https://www.coursera.org/specializations/machine-learning-trading)
+- Machine Learning for Trading, Georgia Tech CS 7646, [Udacity](https://www.udacity.com/course/machine-learning-for-trading--ud501
+- Introduction to Machine Learning for Trading, [Quantinsti](https://quantra.quantinsti.com/course/introduction-to-machine-learning-for-trading)
 
 ### ML Competitions & Trading
 
@@ -283,10 +304,66 @@ Trading takes place in a competitive, interactive marketplace. Reinforcement lea
 ### Python Libraries
 
 - matplotlib [docs]( <https://github.com/matplotlib/matplotlib)
--  numpy [docs](https://github.com/numpy/numpy)
--  pandas [docs](https://github.com/pydata/pandas)
--  scipy [docs](https://github.com/scipy/scipy)
--  seaborn [docs](https://github.com/mwaskom/seaborn)
--  statsmodels [docs](https://github.com/statsmodels/statsmodels)
+- numpy [docs](https://github.com/numpy/numpy)
+- pandas [docs](https://github.com/pydata/pandas)
+- scipy [docs](https://github.com/scipy/scipy)
+- scikit-learn [docs](https://scikit-learn.org/stable/user_guide.html)
+- LightGBM [docs](https://lightgbm.readthedocs.io/en/latest/)
+- CatBoost [docs](https://catboost.ai/docs/concepts/about.html)
+- TensorFlow [docs](https://www.tensorflow.org/guide)
+- PyTorch [docs](https://pytorch.org/docs/stable/index.html)
+- Machine Learning Financial Laboratory (mlfinlab) [docs](https://mlfinlab.readthedocs.io/en/latest/)
+- seaborn [docs](https://github.com/mwaskom/seaborn)
+- statsmodels [docs](https://github.com/statsmodels/statsmodels)
 - [Boosting numpy: Why BLAS Matters](http://markus-beuckelmann.de/blog/boosting-numpy-blas.html)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

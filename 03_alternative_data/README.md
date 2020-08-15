@@ -21,7 +21,8 @@ Today, investors can access macro or company-specific data in real-time that his
 - The number of store visits or purchases permits real-time estimates of company or industry-specific sales or economic activity
 - Satellite images can reveal agricultural yields, or activity at mines or on oil rigs before this information is available elsewhere 
 
-Useful references include:
+### Resources
+
 - [The Digital Universe in 2020](https://www.emc.com/collateral/analyst-reports/idc-the-digital-universe-in-2020.pdf)
 - [Big data: The next frontier for innovation, competition, and productivity](https://www.mckinsey.com/business-functions/digital-mckinsey/our-insights/big-data-the-next-frontier-for-innovation), McKinsey 2011
 - [McKinsey on Artificial Intelligence](https://www.mckinsey.com/featured-insights/artificial-intelligence)
@@ -30,7 +31,7 @@ Useful references include:
 
 The ultimate objective of alternative data is to provide an informational advantage in the competitive search for trading signals that produce alpha, namely positive, uncorrelated investment returns. In practice, the signals extracted from alternative datasets can be used on a standalone basis or combined with other signals as part of a quantitative strategy.
 
-Key reference: 
+### Resources
 
 - [Big Data and AI Strategies](http://valuesimplex.com/articles/JPM.pdf), Kolanovic, M. and Krishnamachari, R., JP Morgan, May 2017
 

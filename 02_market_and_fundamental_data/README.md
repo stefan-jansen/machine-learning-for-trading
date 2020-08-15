@@ -10,15 +10,35 @@ Traditionally, investors mostly relied on **publicly available market and fundam
 
 This chapter introduces market and fundamental data sources and explains how they reflect the environment in which they are created. The details of the **trading environment** matter not only for the proper interpretation of market data but also for the design and execution of your strategy and the implementation of realistic backtesting simulations. We also illustrate how to access and work with trading and financial statement data from various sources using Python. 
  
-In particular, this chapter covers the following topics:
-- How market microstructure shapes market data
-- How to reconstruct the order book from tick data using Nasdaq ITCH 
-- How to summarize tick data using various types of bars
-- How to work with eXtensible Business Reporting Language (XBRL)-encoded electronic filings
-- How to parse and combine market and fundamental data to create a P/E series
-- How to access various market and fundamental data sources using Python
+## Content
 
-## How market data reflects the trading environment
+#### Table of contents
+
+1. [Market data reflects the trading environment](#market-data-reflects-the-trading-environment)
+    * [Market microstructure: The nuts and bolts of trading](#market-microstructure-the-nuts-and-bolts-of-trading)
+2. [Working with high-frequency market data](#working-with-high-frequency-market-data)
+    * [How to work with NASDAQ order book data](#how-to-work-with-nasdaq-order-book-data)
+    * [How trades are communicated: The FIX protocol](#how-trades-are-communicated-the-fix-protocol)
+    * [The NASDAQ TotalView-ITCH data feed](#the-nasdaq-totalview-itch-data-feed)
+        - [Code Example: Parsing and normalizing tick data ](#code-example-parsing-and-normalizing-tick-data-)
+        - [Additional Resources](#additional-resources)
+    * [AlgoSeek minute bars: Equity quote and trade data](#algoseek-minute-bars-equity-quote-and-trade-data)
+        - [From the consolidated feed to minute bars](#from-the-consolidated-feed-to-minute-bars)
+        - [Code Example: How to process AlgoSeek intraday data](#code-example-how-to-process-algoseek-intraday-data)
+3. [API Access to Market Data](#api-access-to-market-data)
+    * [Remote data access using pandas](#remote-data-access-using-pandas)
+    * [Code Examples](#code-examples)
+    * [Data sources](#data-sources)
+    * [Industry News](#industry-news)
+4. [How to work with Fundamental data](#how-to-work-with-fundamental-data)
+    * [Financial statement data](#financial-statement-data)
+    * [Automated processing using XBRL markup](#automated-processing-using-xbrl-markup)
+    * [Code Example: Building a fundamental data time series](#code-example-building-a-fundamental-data-time-series)
+    * [Other fundamental data sources](#other-fundamental-data-sources)
+5. [Efficient data storage with pandas](#efficient-data-storage-with-pandas)
+    * [Code Example](#code-example)
+ 
+## Market data reflects the trading environment
 
 Market data is the product of how traders place orders for a financial instrument directly or through intermediaries on one of the numerous marketplaces and how they are processed and how prices are set by matching demand and supply. As a result, the data reflects the institutional environment of trading venues, including the rules and regulations that govern orders, trade execution, and price formation. See [Harris](https://global.oup.com/ushe/product/trading-and-exchanges-9780195144703?cc=us&lang=en&) (2003) for a global overview and [Jones](https://www0.gsb.columbia.edu/faculty/cjones/papers/2018.08.31%20US%20Equity%20Market%20Data%20Paper.pdf) (2018) for details on the US market.
 
@@ -36,13 +56,13 @@ Today, hedge funds sponsor in-house analysts to track the rapidly evolving, comp
 - [Econophysics of Order-driven Markets](https://www.springer.com/gp/book/9788847017658), Abergel et al, 2011
     - Presents the ideas and research from various communities (physicists, economists, mathematicians, financial engineers) on the  modelling and analyzing order-driven markets. Of primary interest in these studies are the mechanisms leading to the statistical regularities of price statistics. Results pertaining to other important issues such as market impact, the profitability of trading strategies, or mathematical models for microstructure effects, are also presented.
 
-## How to work with high-frequency market data
+## Working with high-frequency market data
 
 Two categories of market data cover the thousands of companies listed on US exchanges that are traded under Reg NMS: The consolidated feed combines trade and quote data from each trading venue, whereas each individual exchange offers proprietary products with additional activity information for that particular venue.
 
 In this section, we will first present proprietary order flow data provided by the NASDAQ that represents the actual stream of orders, trades, and resulting prices as they occur on a tick-by-tick basis. Then, we demonstrate how to regularize this continuous stream of data that arrives at irregular intervals into bars of a fixed duration. Finally, we introduce AlgoSeek’s equity minute bar data that contains consolidated trade and quote information. In each case, we illustrate how to work with the data using Python so you can leverage these sources for your trading strategy.
 
-### Working with NASDAQ order book data
+### How to work with NASDAQ order book data
 
 The primary source of market data is the order book, which updates in real-time throughout the day to reflect all trading activity. Exchanges typically offer this data as a real-time service for a fee but may provide some historical data for free. 
 
@@ -58,7 +78,7 @@ The trading activity is reflected in numerous messages about orders sent by mark
 - [Price jump prediction in Limit Order Book](https://arxiv.org/pdf/1204.1381.pdf)
 - [Handling and visualizing order book data](https://github.com/0b01/recurrent-autoencoder/blob/master/Visualizing%20order%20book.ipynb) by Ricky Han
 
-#### How trades are communicated: The FIX protocol
+### How trades are communicated: The FIX protocol
 
 The trading activity is reflected in numerous messages about trade orders sent by market participants. These messages typically conform to the electronic Financial Information eXchange (FIX) communications protocol for real-time exchange of securities transactions and market data or a native exchange protocol. 
 
@@ -67,14 +87,14 @@ The trading activity is reflected in numerous messages about trade orders sent b
 - C++ version: [quickfixengine](http://www.quickfixengine.org/)
 - Interactive Brokers [interface](https://www.interactivebrokers.com/en/index.php?f=4988)
 
-#### The NASDAQ TotalView-ITCH data feed
+### The NASDAQ TotalView-ITCH data feed
 
 While FIX has a dominant large market share, exchanges also offer native protocols. The Nasdaq offers a TotalView ITCH direct data-feed protocol that allows subscribers to track individual orders for equity instruments from placement to execution or cancellation.
 
 - The ITCH [Specifications](http://www.nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/NQTVITCHspecification.pdf)
 - [Sample Files](ftp://emi.nasdaq.com/ITCH/)
 
-#### Code Examples
+#### Code Example: Parsing and normalizing tick data 
 
 - The folder [NASDAQ TotalView ITCH Order Book](01_NASDAQ_TotalView-ITCH_Order_Book) contains the notebooks to
     - download NASDAQ Total View sample tick data,
@@ -83,13 +103,10 @@ While FIX has a dominant large market share, exchanges also offer native protoco
     - visualize order flow data
     - normalize tick data
 - Binary Data services: the `struct` [module](https://docs.python.org/3/library/struct.html)
-
-#### Other protocols
-
+ 
+#### Additional Resources
+ 
  - Native exchange protocols [around the world](https://en.wikipedia.org/wiki/List_of_electronic_trading_protocols_
- 
- #### Additional Resources
- 
  - [High-frequency trading in a limit order book](https://www.math.nyu.edu/faculty/avellane/HighFrequencyTrading.pdf), Avellaneda and Stoikov, Quantitative Finance, Vol. 8, No. 3, April 2008, 217–224
  - [Using a Simulator to Develop Execution Algorithms](http://www.math.ualberta.ca/~cfrei/PIMS/Almgren5.pdf), Robert Almgren, quantitative brokers, 2016
  - [Backtesting Microstructure Strategies](https://rickyhan.com/jekyll/update/2019/12/22/how-to-simulate-market-microstructure.html), Ricky Han, 2019
@@ -97,17 +114,42 @@ While FIX has a dominant large market share, exchanges also offer native protoco
 - [Simulating and analyzing order book data: The queue-reactive model](https://arxiv.org/pdf/1312.0563.pdf), Huan et al, 2014
 - [How does latent liquidity get revealed in the limit order book?](https://arxiv.org/pdf/1808.09677.pdf), Dall’Amico et al, 2018
 
-### Access to Market Data
+### AlgoSeek minute bars: Equity quote and trade data
+
+AlgoSeek provides historical intraday data at the quality previously available only to institutional investors. The AlgoSeek Equity bars provide a very detailed intraday quote and trade data in a user-friendly format aimed at making it easy to design and backtest intraday ML-driven strategies. As we will see, the data includes not only OHLCV information but also information on the bid-ask spread and the number of ticks with up and down price moves, among others.
+AlgoSeek has been so kind as to provide samples of minute bar data for the NASDAQ 100 stocks from 2013-2017 for demonstration purposes and will make a subset of this data available to readers of this book.
+
+#### From the consolidated feed to minute bars
+
+AlgoSeek minute bars are based on data provided by the Securities Information Processor (SIP) that manages the consolidated feed mentioned at the beginning of this section. You can find the documentation at https://www.algoseek.com/samples/.
+
+Quote and trade data fields
+The minute bar data contain up to 54 fields. There are eight fields for the open, high, low, and close elements of the bar, namely:
+- The timestamp for the bar and the corresponding trade 
+- The price and the size for the prevailing bid-ask quote and the relevant trade
+
+There are also 14 data points with volume information for the bar period:
+- The number of shares and corresponding trades
+- The trade volumes at or below the bid, between the bid quote and the midpoint, at the midpoint, between the midpoint and the ask quote, and at or above the ask, as well as for crosses
+- The number of shares traded with up- or downticks, i.e., when the price rose or fell, as well as when the price did not change, differentiated by the previous direction of price movement
+
+#### Code Example: How to process AlgoSeek intraday data
+
+The directory [algoseek_intraday](02_algoseek_intraday) contains instructions on how to download sample data from AlgoSeek. 
+
+- This information will be made available shortly.
+
+## API Access to Market Data
 
 There are several options to access market data via API using Python. In this chapter, we first present a few sources built into the [`pandas`](https://pandas.pydata.org/) library. Then we briefly introduce the trading platform [Quantopian](https://www.quantopian.com/posts), the data provider [Quandl](https://www.quandl.com/) (acquired by NASDAQ in 12/2018) and the backtesting library [`zipline`](https://github.com/quantopian/zipline) that we will use later in the book, and list several additional options to access various types of market data. The directory [data_providers](02_data_providers) contains several notebooks that illustrate the usage of these options.
 
-#### Remote data access using pandas
+### Remote data access using pandas
 
 - read_html [docs](http://pandas.pydata.org/pandas-docs/stable/generated/pandas.read_html.html?highlight=pandas%20io%20read_html)
 - S&P 500 constituents from [Wikipedia](https://en.wikipedia.org/wiki/List_of_S%26P_500_companies)
 - `pandas-datareader`[docs](https://pandas-datareader.readthedocs.io/en/latest/index.html)
 
-#### Code Examples
+### Code Examples
 
 The folder [data providers](03_data_providers) contains examples to use various data providers.
 1. Remote data access using [pandas DataReader](03_data_providers/01_datareader.ipynb)
@@ -116,7 +158,7 @@ The folder [data providers](03_data_providers) contains examples to use various 
 4. Quandl [API Demo](03_data_providers/04_quandl_demo.ipynb)
 5. Zipline [data access](03_data_providers/05_zipline_data.ipynb)
 
-Relevant sources include:
+### Data sources
 
 - Quandl [docs](https://docs.quandl.com/docs) and Python [API](https://www.quandl.com/tools/python﻿)
 - [yfinance](https://github.com/ranaroussi/yfinance)
@@ -132,7 +174,8 @@ Relevant sources include:
 - [Alpha Trading Labs](https://www.alphatradinglabs.com/)
 - [Tiingo](https://www.tiingo.com/) stock market tools
 
-News
+### Industry News
+
 - [Bloomberg and Reuters lose data share to smaller rivals](https://www.ft.com/content/622855dc-2d31-11e8-9b4b-bc4b9f08f381), FT, 2018
 
 ## How to work with Fundamental data
@@ -150,7 +193,7 @@ The Securities and Exchange Commission (SEC) requires US issuers, that is, liste
 
 Since the early 1990s, the SEC made these filings available through its Electronic Data Gathering, Analysis, and Retrieval (EDGAR) system. They constitute the primary data source for the fundamental analysis of equity and other securities, such as corporate credit, where the value depends on the business prospects and financial health of the issuer. 
 
-#### Automated processing using XBRL markup
+### Automated processing using XBRL markup
 
 Automated analysis of regulatory filings has become much easier since the SEC introduced XBRL, a free, open, and global standard for the electronic representation and exchange of business reports. XBRL is based on XML; it relies on [taxonomies](https://www.sec.gov/dera/data/edgar-log-file-data-set.html) that define the meaning of the elements of a report and map to tags that highlight the corresponding information in the electronic version of the report. One such taxonomy represents the US Generally Accepted Accounting Principles (GAAP).
 
@@ -164,10 +207,9 @@ There are several avenues to track and access fundamental data reported to the S
 
 The SEC also publishes log files containing the [internet search traffic](https://www.sec.gov/dera/data/edgar-log-file-data-set.html) for EDGAR filings through SEC.gov, albeit with a six-month delay.
 
-#### Building a fundamental data time series
+### Code Example: Building a fundamental data time series
 
 The scope of the data in the [Financial Statement and Notes](https://www.sec.gov/dera/data/financial-statement-and-notes-data-set.html) datasets consists of numeric data extracted from the primary financial statements (Balance sheet, income statement, cash flows, changes in equity, and comprehensive income) and footnotes on those statements. The data is available as early as 2009.
-
 
 The folder [03_sec_edgar](03_sec_edgar) contains the notebook [edgar_xbrl](03_sec_edgar/edgar_xbrl.ipynb) to download and parse EDGAR data in XBRL format, and create fundamental metrics like the P/E ratio by combining financial statement and price data.
 
@@ -180,7 +222,6 @@ The folder [03_sec_edgar](03_sec_edgar) contains the notebook [edgar_xbrl](03_se
 - [Northfield Information Services](www.northinfo.com)
 - [Quantitative Services Group](www.qsg.com)
 
-
 ## Efficient data storage with pandas
 
 We'll be using many different data sets in this book, and it's worth comparing the main formats for efficiency and performance. In particular, we compare the following:
@@ -188,5 +229,7 @@ We'll be using many different data sets in this book, and it's worth comparing t
 - CSV: Comma-separated, standard flat text file format.
 - HDF5: Hierarchical data format, developed initially at the National Center for Supercomputing, is a fast and scalable storage format for numerical data, available in pandas using the PyTables library.
 - Parquet: A binary, columnar storage format, part of the Apache Hadoop ecosystem, that provides efficient data compression and encoding and has been developed by Cloudera and Twitter. It is available for pandas through the pyarrow library, led by Wes McKinney, the original author of pandas.
+
+### Code Example
 
 The notebook [storage_benchmark](04_storage_benchmark/storage_benchmark.ipynb) in the directory [04_storage_benchmark](04_storage_benchmark) compares the performance of the preceding libraries.
