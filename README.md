@@ -1,6 +1,6 @@
 # Machine Learning for Trading
 
-This book aims to show how ML can add value to algorithmic trading strategies in a practical yet comprehensive way. It covers a broad range of ML techniques from linear regression to deep reinforcement learning and demonstrates how to build, backtest, and evaluate a trading strategy driven by model predictions.  
+This [book](https://www.amazon.com/Machine-Learning-Algorithmic-Trading-alternative/dp/1839217715?pf_rd_r=GZH2XZ35GB3BET09PCCA&pf_rd_p=c5b6893a-24f2-4a59-9d4b-aff5065c90ec&pd_rd_r=91a679c7-f069-4a6e-bdbb-a2b3f548f0c8&pd_rd_w=2B0Q0&pd_rd_wg=GMY5S&ref_=pd_gw_ci_mcx_mr_hp_d) aims to show how ML can add value to algorithmic trading strategies in a practical yet comprehensive way. It covers a broad range of ML techniques from linear regression to deep reinforcement learning and demonstrates how to build, backtest, and evaluate a trading strategy driven by model predictions.  
 
 In four parts with **23 chapters plus an appendix**, it covers on **over 800 pages**:
 - important aspects of data sourcing, **financial feature engineering**, and portfolio management, 
@@ -19,7 +19,6 @@ This repo contains **over 150 notebooks** that put the concepts, algorithms, and
 - how to train and tune models that predict returns for different asset classes and investment horizons, including how to replicate recently published research, and 
 - how to design, backtest, and evaluate trading strategies.
 
-
 ## What's new in the second edition
 
 First and foremost, this [book](https://www.amazon.com/Machine-Learning-Algorithmic-Trading-alternative/dp/1839217715?pf_rd_r=VMKJPZC4N36TTZZCWATP&pf_rd_p=c5b6893a-24f2-4a59-9d4b-aff5065c90ec&pd_rd_r=8f331266-0d21-4c76-a3eb-d2e61d23bb31&pd_rd_w=kVGNF&pd_rd_wg=LYLKH&ref_=pd_gw_ci_mcx_mr_hp_d) demonstrates how you can extract signals from a diverse set of data sources and design trading strategies for different asset classes using a broad range of supervised, unsupervised, and reinforcement learning algorithms. It also provides relevant mathematical and statistical knowledge to facilitate the tuning of an algorithm or the interpretation of the results. Furthermore, it covers the financial background that will help you work with market and fundamental data, extract informative features, and manage the performance of a trading strategy.
@@ -28,9 +27,11 @@ From a practical standpoint, the 2nd edition aims to equip you with the conceptu
 
 More specifically, the ML4T workflow starts with generating ideas for a well-defined investment universe, collecting relevant data, and extracting informative features. It also involves designing, tuning, and evaluating ML models suited to the predictive task. Finally, it requires developing trading strategies to act on the models' predictive signals, as well as simulating and evaluating their performance on historical data using a backtesting engine. Once you decide to execute an algorithmic strategy in a real market, you will find yourself iterating over this workflow repeatedly to incorporate new information and a changing environment.
 
-<img src="https://ml4t.s3.amazonaws.com/assets/ml4t_workflow.png" width="75%" align="center">
+<p align="center">
+<img src="https://ml4t.s3.amazonaws.com/assets/ml4t_workflow.png" width="75%">
+</p>
 
-The second edition's emphasis on the ML4t workflow translates into a new chapter on [strategy backtesting](08_ml4t_workflow), a new [appendix](24_alpha_factor_library) describing over 100 different alpha factors, and many new practical applications. We have also rewritten most of the existing content for clarity and readability. 
+The [second edition]((https://www.amazon.com/Machine-Learning-Algorithmic-Trading-alternative/dp/1839217715?pf_rd_r=GZH2XZ35GB3BET09PCCA&pf_rd_p=c5b6893a-24f2-4a59-9d4b-aff5065c90ec&pd_rd_r=91a679c7-f069-4a6e-bdbb-a2b3f548f0c8&pd_rd_w=2B0Q0&pd_rd_wg=GMY5S&ref_=pd_gw_ci_mcx_mr_hp_d))'s emphasis on the ML4t workflow translates into a new chapter on [strategy backtesting](08_ml4t_workflow), a new [appendix](24_alpha_factor_library) describing over 100 different alpha factors, and many new practical applications. We have also rewritten most of the existing content for clarity and readability. 
 
 The trading applications now use a broader range of data sources beyond daily US equity prices, including international stocks and ETFs. It also demonstrates how to use ML for an intraday strategy with minute-frequency equity data. Furthermore, it extends the coverage of alternative data sources to include SEC filings for sentiment analysis and return forecasts, as well as satellite images to classify land use. 
 
@@ -48,7 +49,7 @@ All applications now use the latest available (at the time of writing) software 
 
 # Outline of the Content
 
-The book has four parts that address different challenges that arise when sourcing and working with market, fundamental and alternative data sourcing, developing ML solutions to various predictive tasks in the trading context, and designing and evaluating a trading strategy that relies on predictive signals generated by an ML model.
+The [book](https://www.amazon.com/Machine-Learning-Algorithmic-Trading-alternative/dp/1839217715?pf_rd_r=GZH2XZ35GB3BET09PCCA&pf_rd_p=c5b6893a-24f2-4a59-9d4b-aff5065c90ec&pd_rd_r=91a679c7-f069-4a6e-bdbb-a2b3f548f0c8&pd_rd_w=2B0Q0&pd_rd_wg=GMY5S&ref_=pd_gw_ci_mcx_mr_hp_d) has four parts that address different challenges that arise when sourcing and working with market, fundamental and alternative data sourcing, developing ML solutions to various predictive tasks in the trading context, and designing and evaluating a trading strategy that relies on predictive signals generated by an ML model.
 
 ## Part 1: From Data to Strategy Development
 
@@ -69,6 +70,9 @@ This [chapter](02_market_and_fundamental_data) shows how to work with market and
 
 Practical examples demonstrate how to work with trading data from NASDAQ tick data and Algoseek minute bar data with a rich set of attributes capturing the demand-supply dynamic that we will later use for an ML-based intraday strategy. We also cover various data provider APIs and how to source financial statement information from the SEC.
 
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/02_order_book.png " width="50%">
+</p>
 In particular, this chapter covers:
 
 - How market data reflects the structure of the trading environment
@@ -96,8 +100,9 @@ More specifically, this chapter covers:
 ### 04 Financial Feature Engineering: How to research Alpha Factors
 
 If you are already familiar with ML, you know that feature engineering is a crucial ingredient for successful predictions. It matters at least as much in the trading domain, where academic and industry researchers have investigated for decades what drives asset markets and prices, and which features help to explain or predict price movements.
-
-<img src="https://ml4t.s3.amazonaws.com/assets/alpha_factor_workflow.png" width="50%" align="center">
+<p align="center">
+<img src="https://ml4t.s3.amazonaws.com/assets/alpha_factor_workflow.png" width="70%">
+</p>
 
 This [chapter](04_alpha_factor_research) outlines the key takeaways of this research as a starting point for your own quest for alpha factors. It also presents essential tools to compute and test alpha factors, highlighting how the NumPy, pandas, and TA-Lib libraries facilitate the manipulation of data and present popular smoothing techniques like the wavelets and the Kalman filter that help reduce noise in data. After reading it, you will know about:
 - Which categories of factors exist, why they work, and how to measure them,
@@ -109,8 +114,9 @@ This [chapter](04_alpha_factor_research) outlines the key takeaways of this rese
 ### 05 Portfolio Optimization and Performance Evaluation
 
 Alpha factors generate signals that an algorithmic strategy translates into trades, which, in turn, produce long and short positions. The returns and risk of the resulting portfolio determine whether the strategy meets the investment objectives.
-
-<img src="https://ml4t.s3.amazonaws.com/assets/algo_trading_workflow.png" width="55%" align="center">
+<p align="center">
+<img src="https://ml4t.s3.amazonaws.com/assets/algo_trading_workflow.png" width="65%">
+</p>
 
 There are several approaches to optimize portfolios. These include the application of machine learning (ML) to learn hierarchical relationships among assets and treat them as complements or substitutes when designing the portfolio's risk profile. This [chapter](05_strategy_evaluation) covers:
 - How to measure portfolio risk and return
@@ -129,6 +135,10 @@ This [chapter](06_machine_learning_process) kicks off Part 2 that illustrates ho
 
 There are several aspects that many of these models and their applications have in common. This chapter covers these common aspects so that we can focus on model-specific usage in the following chapters. It sets the stage by outlining how to formulate, train, tune, and evaluate the predictive performance of ML models as a systematic workflow. The content includes:
 
+<p align="center">
+<img src="https://ml4t.s3.amazonaws.com/assets/ml_process.png " width="65%">
+</p>
+
 - How supervised and unsupervised learning from data works
 - Training and evaluating supervised learning models for regression and classification tasks
 - How the bias-variance trade-off impacts predictive performance
@@ -139,6 +149,11 @@ There are several aspects that many of these models and their applications have 
 ### 07 Linear Models: From Risk Factors to Return Forecasts
 
 Linear models are standard tools for inference and prediction in regression and classification contexts. Numerous widely used asset pricing models rely on linear regression. Regularized models like Ridge and Lasso regression often yield better predictions by limiting the risk of overfitting. Typical regression applications identify risk factors that drive asset returns to manage risks or predict returns. Classification problems, on the other hand, include directional price forecasts.
+
+<p align="center">
+<img src="https://ml4t.s3.amazonaws.com/assets/07_ridge_path.png" width="65%">
+</p>
+
 
 [Chapter 07](07_linear_models) covers the following topics:
 
@@ -155,6 +170,10 @@ This [chapter](08_ml4t_workflow) presents an end-to-end perspective on designing
 We will demonstrate in detail how to backtest an ML-driven strategy in a historical market context using the Python libraries [backtrader](https://www.backtrader.com/) and [Zipline](https://www.zipline.io/index.html). 
 The ML4T workflow ultimately aims to gather evidence from historical data that helps decide whether to deploy a candidate strategy in a live market and put financial resources at risk. A realistic simulation of your strategy needs to faithfully represent how security markets operate and how trades execute. Also, several methodological aspects require attention to avoid biased results and false discoveries that will lead to poor investment decisions.
 
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/08_zipline.png" width="65%">
+</p>
+
 More specifically, after working through this chapter you will be able to:
 
 - Plan and implement end-to-end strategy backtesting
@@ -169,6 +188,11 @@ More specifically, after working through this chapter you will be able to:
 This [chapter](09_time_series_models) focuses on models that extract signals from a time series' history to predict future values for the same time series. 
 Time series models are in widespread use due to the time dimension inherent to trading. It presents tools to diagnose time series characteristics such as stationarity and extract features that capture potentially useful patterns. It also introduces univariate and multivariate time series models to forecast macro data and volatility patterns. 
 Finally, it explains how cointegration identifies common trends across time series and shows how to develop a pairs trading strategy based on this crucial concept. 
+
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/09_performance.png " width="90%">
+</p>
+
 In particular, it covers:
 - How to use time-series analysis to prepare and inform the modeling process
 - Estimating and diagnosing univariate autoregressive and moving-average models
@@ -178,36 +202,55 @@ In particular, it covers:
 
 ### 10 Bayesian ML: Dynamic Sharpe Ratios and Pairs Trading
 
-This [chapter](10_bayesian_machine_learning) introduces how Bayesian approaches to machine learning add value when developing and evaluating trading strategies due to their different perspective on uncertainty. More specifically, this chapter covers:
+Bayesian statistics allows us to quantify uncertainty about future events and refine estimates in a principled way as new information arrives. This dynamic approach adapts well to the evolving nature of financial markets. 
+Bayesian approaches to ML enable new insights into the uncertainty around statistical metrics, parameter estimates, and predictions. The applications range from more granular risk management to dynamic updates of predictive models that incorporate changes in the market environment. 
 
-- How Bayesian statistics apply to machine learning
-- How to use probabilistic programming with PyMC3
-- How to define and train machine learning models
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/10_rolling_data.png " width="80%">
+</p>
+
+More specifically, this [chapter](10_bayesian_machine_learning) covers: 
+- How Bayesian statistics applies to machine learning
+- Probabilistic programming with PyMC3
+- Defining and training machine learning models using PyMC3
 - How to run state-of-the-art sampling methods to conduct approximate inference
-- How to apply Bayesian machine learning to compute dynamic Sharpe ratios, build Bayesian classifiers, and estimate stochastic volatility
+- Bayesian ML applications to compute dynamic Sharpe ratios, dynamic pairs trading hedge ratios, and estimate stochastic volatility
+
 
 ### 11 Random Forests: A Long-Short Strategy for Japanese Stocks
 
-This [chapter](11_decision_trees_random_forests) shows how decision trees and random forests can be used for trading. We will see how decision trees learn rules from data that encodes non-linear relationships between the input and the output variables. We also  introduce ensemble models that combine multiple individual models to produce a single aggregate prediction with lower prediction-error variance. In short, in this chapter, we will cover:
-- How to use decision trees for regression and classification
-- How to gain insights from decision trees and visualize the decision rules learned from the data
-- Why ensemble models tend to deliver superior results
-- How bootstrap aggregation addresses the overfitting challenges of decision trees
-- How to train, tune, and interpret random forests
+This [chapter](11_decision_trees_random_forests) applies decision trees and random forests to trading. Decision trees learn rules from data that encode nonlinear input-output relationships. We show how to train a decision tree to make predictions for regression and classification problems, visualize and interpret the rules learned by the model, and tune the model's hyperparameters to optimize the bias-variance tradeoff and prevent overfitting.
+
+The second part of the chapter introduces ensemble models that combine multiple decision trees in a randomized fashion to produce a single prediction with a lower error. It concludes with a long-short strategy for Japanese equities based on trading signals generated by a random forest model.
+
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/11_al_train.png " width="80%">
+</p>
+
+In short, this chapter covers:
+- Use decision trees for regression and classification
+- Gain insights from decision trees and visualize the rules learned from the data
+- Understand why ensemble models tend to deliver superior results
+- Use bootstrap aggregation to address the overfitting challenges of decision trees
+- Train, tune, and interpret random forests
+- Employ a random forest to design and evaluate a profitable trading strategy
 
 
 ### 12 Boosting your Trading Strategy
 
-This [chapter](12_gradient_boosting_machines) explores boosting, an alternative tree-based ensemble algorithm that often produces better results. The key difference is that boosting modifies the data that is used to train each tree based on the cumulative errors made by the model before adding the new tree. In contrast to random forests, which train many trees independently from each other using different versions of the training set, boosting proceeds sequentially using reweighted versions of the data. State-of-the-art boosting implementations also adopt the randomization strategies of random forests. 
+Gradient boosting is an alternative tree-based ensemble algorithm that often produces better results than random forests. The critical difference is that boosting modifies the data used to train each tree based on the cumulative errors made by the model. While random forests train many trees independently using random subsets of the data, boosting proceeds sequentially and reweights the data.
+This [chapter](12_gradient_boosting_machines) shows how state-of-the-art libraries achieve impressive performance and apply boosting to both daily and high-frequency data to backtest an intraday trading strategy. 
 
-More specifically, in this chapter we will cover the following topics:
-- How boosting works, and how it compares to bagging
-- How boosting has evolved from adaptive to gradient boosting (GB)
-- How to use and tune AdaBoost and GB models with sklearn
-- How state-of-the-art GB implementations speed up computation
-- How to prevent overfitting of GB models
-- How to build, tune, and evaluate GB models using xgboost, lightgbm, and catboost
-- How to interpret and gain insights from GM models using [SHAP](https://github.com/slundberg/shap) values
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/12_algo_comparison.png " width="70%">
+</p>
+
+More specifically, we will cover the following topics:
+- How does boosting differ from bagging, and how did gradient boosting evolve from adaptive boosting,
+- Design and tune adaptive and gradient boosting models with scikit-learn,
+- Build, optimize, and evaluate gradient boosting models on large datasets with the state-of-the-art implementations XGBoost, LightGBM, and CatBoost,
+- Interpreting and gaining insights from gradient boosting models using [SHAP](https://github.com/slundberg/shap) values, and
+- Using boosting with high-frequency data to design an intraday strategy.
 
 ### 13 Data-Driven Risk Factors and Asset Allocation with Unsupervised Learning
 
@@ -215,96 +258,148 @@ Dimensionality reduction and clustering are the main tasks for unsupervised lear
 - Dimensionality reduction transforms the existing features into a new, smaller set while minimizing the loss of information. A broad range of algorithms exists that differ by how they measure the loss of information, whether they apply linear or non-linear transformations or the constraints they impose on the new feature set. 
 - Clustering algorithms identify and group similar observations or features instead of identifying new features. Algorithms differ in how they define the similarity of observations and their assumptions about the resulting groups.
 
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/13_hrp_clusters.png " width="70%">
+</p>
+
 More specifically, this [chapter](13_unsupervised_learning) covers:
-- how principal and independent component analysis perform linear dimensionality reduction
-- how to apply PCA to identify risk factors and eigen portfolios from asset returns 
-- how to use non-linear manifold learning to summarize high-dimensional data for effective visualization
-- how to use T-SNE and UMAP to explore high-dimensional alternative image data
-- how k-Means, hierarchical, and density-based clustering algorithms work
-- how to apply agglomerative clustering to build robust portfolios according to hierarchical risk parity
+- How principal and independent component analysis (PCA and ICA) perform linear dimensionality reduction
+- Identifying data-driven risk factors and eigenportfolios from asset returns using PCA
+- Effectively visualizing nonlinear, high-dimensional data using manifold learning
+- Using T-SNE and UMAP to explore high-dimensional image data
+- How k-means, hierarchical, and density-based clustering algorithms work
+- Using agglomerative clustering to build robust portfolios with hierarchical risk parity
+
 
 ## Part 3: Natural Language Processing for Trading
 
-Text data are rich in content, yet unstructured in format and hence require more preprocessing so that a machine learning algorithm can extract the potential signal. The key challenge consists in converting text into a numerical format for use by an algorithm, while simultaneously expressing the semantics or meaning of the content. We will cover several techniques that capture nuances of language readily understandable to humans so that they can be used as input for machine learning algorithms.
+Text data are rich in content, yet unstructured in format and hence require more preprocessing so that a machine learning algorithm can extract the potential signal. The critical challenge consists of converting text into a numerical format for use by an algorithm, while simultaneously expressing the semantics or meaning of the content. 
+
+The next three chapters cover several techniques that capture language nuances readily understandable to humans so that machine learning algorithms can also interpret them.
 
 ### 14 Text Data for Trading: Sentiment Analysis
 
-This [chapter](14_working_with_text_data) introduces text feature extraction techniques that focus on individual semantic units, i.e. words or short groups of words called tokens. We will show how to represent documents as vectors of token counts by creating a document-term matrix that in turn serves as input for text classification and sentiment analysis. We will also introduce the Naive Bayes algorithm that is popular for this purpose. 
+Text data is very rich in content but highly unstructured so that it requires more preprocessing to enable an ML algorithm to extract relevant information. A key challenge consists of converting text into a numerical format without losing its meaning.
+This [chapter](14_working_with_text_data) shows how to represent documents as vectors of token counts by creating a document-term matrix that, in turn, serves as input for text classification and sentiment analysis. It also introduces the Naive Bayes algorithm and compares its performance to linear and tree-based models.
 
 In particular, in this chapter covers:
-- What the NLP workflow looks like
-- How to build a multilingual feature extraction pipeline using spaCy and Textblob
-- How to perform NLP tasks like parts-of-speech tagging or named entity recognition
-- How to convert tokens to numbers using the document-term matrix
-- How to classify text using the Naive Bayes model
-- How to perform sentiment analysis
+- What the fundamental NLP workflow looks like
+- How to build a multilingual feature extraction pipeline using spaCy and TextBlob
+- Performing NLP tasks like part-of-speech tagging or named entity recognition
+- Converting tokens to numbers using the document-term matrix
+- Classifying news using the naive Bayes model
+- How to perform sentiment analysis using different ML algorithms
 
 ### 15 Topic Modeling: Summarizing Financial News
 
-This chapter uses unsupervised learning to model latent topics and extract hidden themes from documents. These themes can produce detailed insights into a large body of documents in an automated way. They are very useful to understand the haystack itself and permit the concise tagging of documents because using the degree of association of topics and documents. 
+This [chapter](15_topic_modeling) uses unsupervised learning to model latent topics and extract hidden themes from documents. These themes can generate detailed insights into a large corpus of financial reports.
+Topic models automate the creation of sophisticated, interpretable text features that, in turn, can help extract trading signals from extensive collections of texts. They speed up document review, enable the clustering of similar documents, and produce annotations useful for predictive modeling.
+Applications include identifying critical themes in company disclosures, earnings call transcripts or contracts, and annotation based on sentiment analysis or using returns of related assets. 
 
-Topic models permit the extraction of sophisticated, interpretable text features that can be used in various ways to extract trading signals from large collections of documents. They speed up the review of documents, help identify and cluster similar documents, and can be annotated as a basis for predictive modeling. Applications include the identification of key themes in company disclosures or earnings call transcripts, customer reviews or contracts, annotated using, e.g., sentiment analysis or direct labeling with subsequent asset returns. More specifically, this chapter covers:
-- What topic modeling achieves, why it matters and how it has evolved
-- How Latent Semantic Indexing (LSI) reduces the dimensionality of the DTM
-- How probabilistic Latent Semantic Analysis (pLSA) uses a generative model to extract topics
-- How Latent Dirichlet Allocation (LDA) refines pLSA and why it is the most popular topic model
-- How to visualize and evaluate topic modeling results
-- How to implement LDA using sklearn and gensim
-- How to apply topic modeling to collections of earnings calls and Yelp business reviews
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/15_pyldavis.png " width="60%">
+</p>
+
+
+More specifically, it covers:
+- How topic modeling has evolved, what it achieves, and why it matters
+- Reducing the dimensionality of the DTM using latent semantic indexing
+- Extracting topics with probabilistic latent semantic analysis (pLSA)
+- How latent Dirichlet allocation (LDA) improves pLSA to become the most popular topic model
+- Visualizing and evaluating topic modeling results -
+- Running LDA using scikit-learn and gensim
+- How to apply topic modeling to collections of earnings calls and financial news articles
 
 ### 16 Word embeddings for Earnings Calls and SEC Filings
 
-This chapter introduces uses neural networks to learn a vector representation of individual semantic units like a word or a paragraph. These vectors are dense rather than sparse as in the bag-of-words model and have a few hundred real-valued rather than tens of thousand binary or discrete entries. They are called embeddings because they assign each semantic unit a location in a continuous vector space.
- 
-Embeddings result from training a model to relate tokens to their context with the benefit that simigslar usage implies a similar vector. As a result, the embeddings encode semantic aspects like relationships among words by means of their relative location. They are powerful features for use in the deep learning models that we will introduce in the following chapters. More specifically, in this chapter, we will cover:
-- What word embeddings are, how they work and capture semantic information
-- How to use trained word vectors
-- Which network architectures are useful to train word2vec models
-- How to train a word2vec model using keras, gensim, and TensorFlow
-- How to visualize and evaluate the quality of word vectors
-- How to train a word2vec model using SEC filings
-- How doc2vec extends word2vec
+This [chapter](16_word_embeddings) uses neural networks to learn a vector representation of individual semantic units like a word or a paragraph. These vectors are dense with a few hundred real-valued entries, compared to the higher-dimensional sparse vectors of the bag-of-words model. As a result, these vectors embed or locate each semantic unit in a continuous vector space.
+
+Embeddings result from training a model to relate tokens to their context with the benefit that similar usage implies a similar vector. As a result, they encode semantic aspects like relationships among words through their relative location. They are powerful features that we will use with deep learning models in the following chapters.
+
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/16_w2v_analogies.png " width="80%">
+</p>
+
+ More specifically, in this chapter, we will cover:
+- What word embeddings are and how they capture semantic information
+- How to obtain and use pre-trained word vectors
+- Which network architectures are most effective at training word2vec models
+- How to train a word2vec model using TensorFlow and gensim
+- Visualizing and evaluating the quality of word vectors
+- How to train a word2vec model on SEC filings to predict stock price moves
+- How doc2vec extends word2vec and helps with sentiment analysis
+- Why the transformer’s attention mechanism had such an impact on NLP
+- How to fine-tune pre-trained BERT models on financial data
 
 ## Part 4: Deep & Reinforcement Learning
 
+Part four explains and demonstrates how to leverage deep learning for algorithmic trading. 
+The powerful capabilities of deep learning algorithms to identify patterns in unstructured data make it particularly suitable for alternative data like images and text. 
+
+The sample applications show, for exapmle, how to combine text and price data to predict earnings surprises from SEC filings, generate synthetic time series to expand the amount of training data, and train a trading agent using deep reinforcement learning.
+Several of these applications replicate research recently published in top journals.
+
 ### 17 Deep Learning for Trading
 
-This [chapter](17_deep_learning) presents feedforward neural networks (NN) to demonstrate how to efficiently train large models using backpropagation, and manage the risks of overfitting. It also shows how to use of the frameworks Keras, TensorFlow 2.0, and PyTorch.
+This [chapter](17_deep_learning) presents feedforward neural networks (NN) and demonstrates how to efficiently train large models using backpropagation while managing the risks of overfitting. It also shows how to use TensorFlow 2.0 and PyTorch and how to optimize a NN architecture to generate trading signals.
+In the following chapters, we will build on this foundation to apply various architectures to different investment applications with a focus on alternative data. These include recurrent NN tailored to sequential data like time series or natural language and convolutional NN, particularly well suited to image data. We will also cover deep unsupervised learning, such as how to create synthetic data using Generative Adversarial Networks (GAN). Moreover, we will discuss reinforcement learning to train agents that interactively learn from their environment.
 
-In the following chapters, we will build on this foundation to design and train a variety of architectures suitable for different investment applications with a particular focus on alternative data sources. These include recurrent NN tailored to sequential data like time series or natural language and convolutional NN particularly well suited to image data. We will also cover deep unsupervised learning, including Generative Adversarial Networks (GAN) to create synthetic data and reinforcement learning to train agents that interactively learn from their environment. In particular, this chapter will cover
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/17_pyfolio_out_of_sample.png" width="70%">
+</p>
+
+In particular, this chapter will cover
 - How DL solves AI challenges in complex domains
-- How key innovations have propelled DL to its current popularity
-- How feed-forward networks learn representations from data
-- How to design and train deep neural networks in Python
-- How to implement deep NN using Keras, TensorFlow, and PyTorch
-- How to build and tune a deep NN to predict asset prices
+- Key innovations that have propelled DL to its current popularity
+- How feedforward networks learn representations from data
+- Designing and training deep neural networks (NNs) in Python
+- Implementing deep NNs using Keras, TensorFlow, and PyTorch
+- Building and tuning a deep NN to predict asset returns
+- Designing and backtesting a trading strategy based on deep NN signals
 
 ### 18 CNN for Financial Time Series and Satellite Images
 
-CNNs are named after the linear algebra operation called convolution that replaces the general matrix multiplication typical of feed-forward networks. Research into CNN architectures has proceeded very rapidly and new architectures that improve performance on some benchmark continue to emerge frequently. CNNs are designed to learn hierarchical feature representations from grid-like data. One of their shortcomings is that they do not learn spatial relationships, i.e., the relative positions of these features. In the last section, we will outline how Capsule Networks work that have emerged to overcome these limitations. 
+CNN architectures continue to evolve. This chapter describes building blocks common to successful applications, demonstrates how transfer learning can speed up learning, and how to use CNNs for object detection.
+CNNs can generate trading signals from images or time-series data. Satellite data can anticipate commodity trends via aerial images of agricultural areas, mines, or transport networks. Camera footage can help predict consumer activity; we show how to build a CNN that classifies economic activity in satellite images.
+CNNs can also deliver high-quality time-series classification results by exploiting their structural similarity with images, and we design a strategy based on time-series data formatted like images. 
 
-More specifically, this [chapter](18_convolutional_neural_nets) covers
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/18_eurosat.png " width="60%">
+</p>
 
-- How CNNs use key building blocks to efficiently model grid-like data
-- How to design CNN architectures using Keras and PyTorch
-- How to train, tune and regularize CNN for various data types
-- How to use transfer learning to streamline CNN, even with fewer data
+More specifically, this [chapter](18_convolutional_neural_nets) covers:
+
+- How CNNs employ several building blocks to efficiently model grid-like data
+- Training, tuning and regularizing CNNs for images and time series data using TensorFlow
+- Using transfer learning to streamline CNNs, even with fewer data
+- Designing a trading strategy using return predictions by a CNN trained on time-series data formatted like images
+- How to classify economic activity based on satellite images
 
 ### 19 RNN for Multivariate Time Series and Sentiment Analysis
 
-The major innovation of RNN is that each output is a function of both previous output and new data. As a result, RNN gain the ability to incorporate information on previous observations into the computation it performs on a new feature vector, effectively creating a model with memory. This recurrent formulation enables parameter sharing across a much deeper computational graph that includes cycles. Prominent architectures include Long Short-Term Memory (LSTM) and Gated Recurrent Units (GRU) that aim to overcome the challenge of vanishing gradients associated with learning long-range dependencies, where errors need to be propagated over many connections. 
+Recurrent neural networks (RNNs) compute each output as a function of the previous output and new data, effectively creating a model with memory that shares parameters across a deeper computational graph. Prominent architectures include Long Short-Term Memory (LSTM) and Gated Recurrent Units (GRU) that address the challenges of learning long-range dependencies.
+RNNs are designed to map one or more input sequences to one or more output sequences and are particularly well suited to natural language. They can also be applied to univariate and multivariate time series to predict market or fundamental data. This chapter covers how RNN can model alternative text data using the word embeddings that we covered in Chapter 16 to classify the sentiment expressed in documents.
 
-RNNs have been successfully applied to various tasks that require mapping one or more input sequences to one or more output sequences and are particularly well suited to natural language. RNN can also be applied to univariate and multivariate time series to predict market or fundamental data. This chapter covers how RNN can model alternative text data using the word embeddings that we covered in [Chapter 16](16_word_embeddings) to classify the sentiment expressed in documents. Most specifically, this chapter addresses:
-- How to unroll and analyze the computational graph for an RNN
-- How gated units learn to regulate an RNN’s memory from data to enable long-range dependencies
-- How to design and train RNN for univariate and multivariate time series in Python
-- How to leverage word embeddings for sentiment analysis with RNN
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/19_lstm_reg.png " width="60%">
+</p>
+
+More specifically, this chapter addresses:
+- How recurrent connections allow RNNs to memorize patterns and model a hidden state
+- Unrolling and analyzing the computational graph of RNNs
+- How gated units learn to regulate RNN memory from data to enable long-range dependencies
+- Designing and training RNNs for univariate and multivariate time series in Python
+- How to learn word embeddings or use pretrained word vectors for sentiment analysis with RNNs
+- Building a bidirectional RNN to predict stock returns using custom word embeddings
 
 ### 20 Autoencoders for Conditional Risk Factors and Asset Pricing
 
-This [chapter](20_autoencoders_and_gans) shows how unsupervised learning can leverage deep learning for trading. More specifically, we’ll discuss autoencoders that have been around for decades but recently attracted fresh interest.
+This [chapter](20_autoencoders_for_conditional_risk_factors) shows how to leverage unsupervised deep learning for trading. We also discuss autoencoders, namely, a neural network trained to reproduce the input while learning a new representation encoded by the parameters of a hidden layer. Autoencoders have long been used for nonlinear dimensionality reduction, leveraging the NN architectures we covered in the last three chapters.
+We replicate a recent AQR paper that shows how autoencoders can underpin a trading strategy. We will use a deep neural network that relies on an autoencoder to extract risk factors and predict equity returns, conditioned on a range of equity attributes.
 
-An autoencoder is a neural network trained to reproduce the input while learning a new representation of the data, encoded by the parameters of a hidden layer. Autoencoders have long been used for nonlinear dimensionality reduction and manifold learning (see Chapter 13). A variety of designs leverage the feedforward, convolutional, and recurrent network architectures we covered in the last three chapters. We will see how autoencoders can underpin a trading strategy: we will build a deep neural network that uses an autoencoder to extract risk factors and predict equity returns, conditioned on a range of equity attributes (Gu, Kelly, and Xiu 2020).
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/20_alpha_returns.png " width="60%">
+</p>
 
 More specifically, in this chapter you will learn about:
 - Which types of autoencoders are of practical use and how they work
@@ -313,11 +408,12 @@ More specifically, in this chapter you will learn about:
 
 ### 21 Generative Adversarial Nets for Synthetic Time Series Data
 
-This chapter introduces a second unsupervised deep learning technique after presenting autoencoders in the last chapter. More specifically, we’ll introduce generative adversarial networks (GANs) that were invented by Goodfellow et al. in 2014. Yann LeCun has called GANs the “most exciting idea in AI in the last ten years.” 
+This chapter introduces generative adversarial networks (GAN). GANs train a generator and a discriminator network in a competitive setting so that the generator learns to produce samples that the discriminator cannot distinguish from a given class of training data. The goal is to yield a generative model capable of producing synthetic samples representative of this class.
+While most popular with image data, GANs have also been used to generate synthetic time-series data in the medical domain. Subsequent experiments with financial data explored whether GANs can produce alternative price trajectories useful for ML training or strategy backtests. We replicate the 2019 NeurIPS Time-Series GAN paper to illustrate the approach and demonstrate the results.
 
-A GAN trains two neural nets, called generator and discriminator, in a competitive setting. The generator aims to produce samples that the discriminator is unable to distinguish from a given class of training data. The result is a generative model capable of producing synthetic samples representative of a certain target distribution but artificially and, thus, cheaply created.
-
-GANs have produced an avalanche of research and successful applications in many domains. While originally applied to images, Esteban, Hyland, and Rätsch (2017) applied GANs to the medical domain to generate synthetic time-series data. Experiments with financial data ensued (Koshiyama, Firoozye, and Treleaven 2019; Wiese et al. 2019; Zhou et al. 2018; Fu et al. 2019) to explore whether GANs can generate data that simulate alternative asset price trajectories to train supervised or reinforcement algorithms, or to backtest trading strategies. We will replicate the Time-Series GAN presented at the 2019 NeurIPS by Yoon, Jarrett, and van der Schaar (2019) to illustrate the approach and demonstrate the results.
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/21_timegan_viz.png " width="60%">
+</p>
 
 More specifically, in this chapter you will learn about:
 - How GANs work, why they are useful, and how they could be applied to trading
@@ -326,21 +422,25 @@ More specifically, in this chapter you will learn about:
 
 ### 22 Deep Reinforcement Learning: Building a Trading Agent
 
-Reinforcement Learning (RL) is a computational approach to goal-directed learning performed by an agent that interacts with a typically stochastic environment which the agent has incomplete information about. RL aims to automate how the agent makes decisions to achieve a long-term objective by learning the value of states and actions from a reward signal. The ultimate goal is to derive a policy that encodes behavioral rules and maps states to actions.
+Reinforcement Learning (RL) models goal-directed learning by an agent that interacts with a stochastic environment. RL optimizes the agent's decisions concerning a long-term objective by learning the value of states and actions from a reward signal. The ultimate goal is to derive a policy that encodes behavioral rules and maps states to actions.
+This [chapter](22_deep_reinforcement_learning) shows how to formulate and solve an RL problem. It covers model-based and model-free methods, introduces the OpenAI Gym environment, and combines deep learning with RL to train an agent that navigates a complex environment. Finally, we'll show you how to adapt RL to algorithmic trading by modeling an agent that interacts with the financial market while trying to optimize an objective function.
 
-This [chapter](20_reinforcement_learning) shows how to formulate an RL problem and how to apply various solution methods. It covers model-based and model-free methods, introduces the [OpenAI Gym](https://gym.openai.com/) environment, and combines deep learning with RL to train an agent that navigates a complex environment. Finally, we'll show you how to adapt RL to algorithmic trading by modeling an agent that interacts with the financial market while trying to optimize an objective function. 
+<p align="center">
+<img src=" https://ml4t.s3.amazonaws.com/assets/22_trading_agent_v2.png " width="60%">
+</p>
 
 More specifically,this chapter will cover:
 
-- How to define a Markov Decision Problem (MDP)
-- How to use Value and Policy Iteration to solve an MDP
-- How to apply Q-learning in an environment with discrete states and actions
-- How to build and train a deep Q-learning agent in a continuous environment
-- How to use OpenAI Gym to train an RL trading agent
+- Define a Markov decision problem (MDP)
+- Use value and policy iteration to solve an MDP
+- Apply Q-learning in an environment with discrete states and actions
+- Build and train a deep Q-learning agent in a continuous environment
+- Use the OpenAI Gym to design a custom market environment and train an RL agent to trade stocks
 
 ### 23 Conclusions and Next Steps
 
-In this concluding chapter, we will briefly summarize the key tools, applications, and lessons learned throughout the book to avoid losing sight of the big picture after so much detail. We will then identify areas that we did not cover but would be worthwhile to focus on as you expand on the many machine learning techniques we introduced and become productive in their daily use.
+In this concluding chapter, we will briefly summarize the essential tools, applications, and lessons learned throughout the book to avoid losing sight of the big picture after so much detail.
+We will then identify areas that we did not cover but would be worth focusing on as you expand on the many machine learning techniques we introduced and become productive in their daily use.
 
 In sum, in this chapter, we will
 - Review key takeaways and lessons learned
@@ -349,11 +449,11 @@ In sum, in this chapter, we will
 
 ### 24 Appendix - Alpha Factor Library
 
-Throughout this book, we emphasized how the smart design of features, including appropriate preprocessing and denoising, is what typically leads to an effective strategy. This appendix synthesizes some of the lessons learned on feature engineering and provides additional information on this important topic.
+Throughout this book, we emphasized how the smart design of features, including appropriate preprocessing and denoising, typically leads to an effective strategy. This appendix synthesizes some of the lessons learned on feature engineering and provides additional information on this vital topic.
 
-To this end, we focus on the broad range of indicators implemented by TA-Lib (see [Chapter 4](04_alpha_factor_research)) and the [101 Formulaic Alphas](https://arxiv.org/pdf/1601.00991.pdf) paper (Kakushadze 2016), which presents real-life quantitative trading factors used in production at WorldQant with an average holding period of 0.6-6.4 days. To facilitate replication, we limit the review to indicators that rely on readily available market data.
+To this end, we focus on the broad range of indicators implemented by TA-Lib (see [Chapter 4](04_alpha_factor_research)) and WorldQuant's [101 Formulaic Alphas](https://arxiv.org/pdf/1601.00991.pdf) paper (Kakushadze 2016), which presents real-life quantitative trading factors used in production with an average holding period of 0.6-6.4 days.
 
 This chapter covers: 
-- how to compute several dozen technical indicators using TA-Lib and NumPy/pandas.
-- creating the formulaic alphas describe in the above paper
-- evaluating the predictive quality of the results using various metrics from rank correlation and mutual information to feature importance, SHAP values and Alphalens. 
+- How to compute several dozen technical indicators using TA-Lib and NumPy/pandas,
+- Creating the formulaic alphas describe in the above paper, and
+- Evaluating the predictive quality of the results using various metrics from rank correlation and mutual information to feature importance, SHAP values and Alphalens. 
