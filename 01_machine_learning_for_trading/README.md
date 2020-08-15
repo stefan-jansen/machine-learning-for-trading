@@ -14,12 +14,37 @@ The competition of sophisticated investors in financial markets implies that mak
 
 Historically, algorithmic trading used to be more narrowly defined as the automation of trade execution to minimize the costs offered by the sell-side. This book takes a more comprehensive perspective since the use of algorithms in general and ML, in particular, has come to impact a broader range of activities from generating ideas and extracting signals from data to asset allocation, position-sizing, and testing and evaluating strategies.
 
-This chapter looks at industry trends that have led to the emergence of ML as a source of competitive advantage in the investment industry. We will also look at where ML fits into the investment process to enable algorithmic trading strategies. More specifically, we will be covering the following topics:
+This chapter looks at industry trends that have led to the emergence of ML as a source of competitive advantage in the investment industry. We will also look at where ML fits into the investment process to enable algorithmic trading strategies. 
 
-- Key trends behind the rise of ML in the investment industry
-- The design and execution of a trading strategy that leverages ML
-- Popular use cases for ML in trading
-
+More specifically, we will be covering the following topics:
+ 
+1. [The rise of ML in the investment industry](#the-rise-of-ml-in-the-investment-industry)
+    * [From electronic to high-frequency trading](#from-electronic-to-high-frequency-trading)
+    * [Factor investing and smart beta funds](#factor-investing-and-smart-beta-funds)
+    * [Algorithmic pioneers outperform humans and grow in scale](#algorithmic-pioneers-outperform-humans-and-grow-in-scale)
+        - [ML driven funds attract $1 trillion AUM](#ml-driven-funds-attract-1-trillion-aum)
+        - [The emergence of quantamental funds](#the-emergence-of-quantamental-funds)
+    * [ML and alternative data](#ml-and-alternative-data)
+2. [Designing and executing an ML-driven strategy](#designing-and-executing-an-ml-driven-strategy)
+    * [Sourcing and managing data](#sourcing-and-managing-data)
+    * [From alpha factor research to portfolio management](#from-alpha-factor-research-to-portfolio-management)
+    * [Strategy backtesting](#strategy-backtesting)
+3. [ML for trading in practice: strategies and use cases](#ml-for-trading-in-practice-strategies-and-use-cases)
+    * [The evolution of algorithmic strategies](#the-evolution-of-algorithmic-strategies)
+    * [Use cases of ML for trading](#use-cases-of-ml-for-trading)
+        - [Data mining for feature extraction and insights](#data-mining-for-feature-extraction-and-insights)
+        - [Supervised learning for alpha factor creation and aggregation](#supervised-learning-for-alpha-factor-creation-and-aggregation)
+        - [Asset allocation](#asset-allocation)
+        - [Testing trade ideas](#testing-trade-ideas)
+        - [Reinforcement learning](#reinforcement-learning)
+4. [References](#references)
+    * [Academic Research](#academic-research)
+    * [Industry News](#industry-news)
+    * [Books](#books)
+        - [Machine Learning](#machine-learning)
+    * [Courses](#courses)
+    * [ML Competitions & Trading](#ml-competitions--trading)
+    * [Python Libraries](#python-libraries)
 
 ## The rise of ML in the investment industry
 
