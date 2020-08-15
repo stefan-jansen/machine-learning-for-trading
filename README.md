@@ -100,6 +100,7 @@ More specifically, this chapter covers:
 ### 04 Financial Feature Engineering: How to research Alpha Factors
 
 If you are already familiar with ML, you know that feature engineering is a crucial ingredient for successful predictions. It matters at least as much in the trading domain, where academic and industry researchers have investigated for decades what drives asset markets and prices, and which features help to explain or predict price movements.
+
 <p align="center">
 <img src="https://ml4t.s3.amazonaws.com/assets/alpha_factor_workflow.png" width="70%">
 </p>
@@ -115,7 +116,7 @@ This [chapter](04_alpha_factor_research) outlines the key takeaways of this rese
 
 Alpha factors generate signals that an algorithmic strategy translates into trades, which, in turn, produce long and short positions. The returns and risk of the resulting portfolio determine whether the strategy meets the investment objectives.
 <p align="center">
-<img src="https://ml4t.s3.amazonaws.com/assets/algo_trading_workflow.png" width="65%">
+<img src="https://i.imgur.com/E2h63ZB.png" width="65%">
 </p>
 
 There are several approaches to optimize portfolios. These include the application of machine learning (ML) to learn hierarchical relationships among assets and treat them as complements or substitutes when designing the portfolio's risk profile. This [chapter](05_strategy_evaluation) covers:
@@ -259,7 +260,7 @@ Dimensionality reduction and clustering are the main tasks for unsupervised lear
 - Clustering algorithms identify and group similar observations or features instead of identifying new features. Algorithms differ in how they define the similarity of observations and their assumptions about the resulting groups.
 
 <p align="center">
-<img src=" https://ml4t.s3.amazonaws.com/assets/13_hrp_clusters.png " width="70%">
+<img src="https://i.imgur.com/Rfk7uCM.png" width="70%">
 </p>
 
 More specifically, this [chapter](13_unsupervised_learning) covers:
@@ -297,7 +298,7 @@ Topic models automate the creation of sophisticated, interpretable text features
 Applications include identifying critical themes in company disclosures, earnings call transcripts or contracts, and annotation based on sentiment analysis or using returns of related assets. 
 
 <p align="center">
-<img src=" https://ml4t.s3.amazonaws.com/assets/15_pyldavis.png " width="60%">
+<img src="https://i.imgur.com/VVSnTCa.png" width="60%">
 </p>
 
 
