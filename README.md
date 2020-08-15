@@ -71,7 +71,7 @@ This [chapter](02_market_and_fundamental_data) shows how to work with market and
 Practical examples demonstrate how to work with trading data from NASDAQ tick data and Algoseek minute bar data with a rich set of attributes capturing the demand-supply dynamic that we will later use for an ML-based intraday strategy. We also cover various data provider APIs and how to source financial statement information from the SEC.
 
 <p align="center">
-<img src=" https://github.com/stefan-jansen/machine-learning-for-trading/tree/master/assets/02_order_book.png " width="50%">
+<img src="https://i.imgur.com/enaSo0C.png" title="Order Book" width="50%"/>
 </p>
 In particular, this chapter covers:
 
