@@ -16,9 +16,7 @@ Historically, algorithmic trading used to be more narrowly defined as the automa
 
 This chapter looks at industry trends that have led to the emergence of ML as a source of competitive advantage in the investment industry. We will also look at where ML fits into the investment process to enable algorithmic trading strategies. 
 
-More specifically, we will be covering the following topics:
-
-#### Table of contents
+## Content
 
 1. [The rise of ML in the investment industry](#the-rise-of-ml-in-the-investment-industry)
     * [From electronic to high-frequency trading](#from-electronic-to-high-frequency-trading)

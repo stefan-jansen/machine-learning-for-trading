@@ -4,6 +4,23 @@ The backtesting engine Zipline powers Quantopian’s online research, backtestin
 
 Quantopian first released Zipline in 2012 as version 0.5, and the latest version 1.3 dates from July 2018. Zipline works well with its sister libraries [Alphalens](https://quantopian.github.io/alphalens/index.html), [pyfolio](https://quantopian.github.io/pyfolio/), and [empyrical](http://quantopian.github.io/empyrical/) that we introduced in Chapters 4 and 5 and integrates well with NumPy, pandas and numeric libraries, but may not always support the latest version.
 
+## Content
+
+1. [Installation](#installation)
+2. [Zipline Architecture](#zipline-architecture)
+3. [Exchange calendars and the Pipeline API for robust simulations](#exchange-calendars-and-the-pipeline-api-for-robust-simulations)
+    * [Bundles and friends: Point-in-time data with on-the-fly adjustments](#bundles-and-friends-point-in-time-data-with-on-the-fly-adjustments)
+    * [The Algorithm API: Backtests on a schedule](#the-algorithm-api-backtests-on-a-schedule)
+    * [Known Issues](#known-issues)
+4. [Code Example: How to load your own OHLCV bundles with minute data](#code-example-how-to-load-your-own-ohlcv-bundles-with-minute-data)
+    * [Getting AlgoSeek data ready to be bundled](#getting-algoseek-data-ready-to-be-bundled)
+    * [Writing your custom bundle ingest function](#writing-your-custom-bundle-ingest-function)
+    * [Registering your bundle](#registering-your-bundle)
+    * [Creating and registering a custom TradingCalendar](#creating-and-registering-a-custom-tradingcalendar)
+5. [Code Example: The Pipeline API - Backtesting a machine learning signal](#code-example-the-pipeline-api---backtesting-a-machine-learning-signal)
+6. [Code Example: How to train a model during the backtest](#code-example-how-to-train-a-model-during-the-backtest)
+7. [Code Example: How to use the research environment on Quantopian](#code-example-how-to-use-the-research-environment-on-quantopian)
+
 ## Installation
 
 Please follow the instructions in the [installation](../../installation/) directory to use the patched Zipline version that we'll use for the examples in this book.
@@ -16,7 +33,9 @@ Zipline is designed to operate at the scale of thousands of securities, and each
 
 This section of the book takes a closer look at the key concepts and elements of the architecture shown in the following Figure before demonstrating how to use Zipline to backtest ML-driven models on the data of your choice.
 
-![The Zipline Architechture](../../assets/zipline.png)
+<p align="center">
+<img src="https://i.imgur.com/LZChG64.png" width="75%">
+</p>
 
 ## Exchange calendars and the Pipeline API for robust simulations
 
@@ -46,12 +65,9 @@ Upon completion, the algorithm returns a DataFrame containing portfolio performa
 
 ### Known Issues
 
-Zipline currently requires the presence of Treasury curves and the S&P 500 returns for benchmarking (https://github.com/quantopian/zipline/issues/2480). The latter relies on the IEX API that now requires registration to obtain a key. It is easy to patch Zipline to circumvent this and download data from the Federal Reserve's [FRED](https://fred.stlouisfed.org/series/SP500) service instead. Alternatively, you can move the SPY returns provided in zipline/resources/market_data/SPY_benchmark.csv to your .zipline folder that usually lives in your home directory unless you changed its location (assuming you only run backtests for the provided interval).
-
 [Live trading](https://github.com/zipline-live/zipline) your own systems is only available with Interactive Brokers and not fully supported by Quantopian.
 
 ## Code Example: How to load your own OHLCV bundles with minute data
-
 
 We will use the NASDAQ100 sample provided by AlgoSeek that we introduced in [Chapter 2](../../02_market_and_fundamental_data/02_algoseek_intraday) to demonstrate how to write your own custom bundle for data at **minute frequency**. See [Chapter 11](../../11_decision_trees_random_forests/00_custom_bundle) for an example using daily data on Japanese equities. 
 

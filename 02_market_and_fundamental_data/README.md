@@ -12,8 +12,6 @@ This chapter introduces market and fundamental data sources and explains how the
  
 ## Content
 
-#### Table of contents
-
 1. [Market data reflects the trading environment](#market-data-reflects-the-trading-environment)
     * [Market microstructure: The nuts and bolts of trading](#market-microstructure-the-nuts-and-bolts-of-trading)
 2. [Working with high-frequency market data](#working-with-high-frequency-market-data)

@@ -13,6 +13,30 @@ More specifically, in this chapter, we will cover:
 - How to run state-of-the-art sampling methods to conduct approximate inference
 - Bayesian ML applications to compute Sharpe ratios, dynamic pairs trading hedge ratios, and estimate stochastic volatility
 
+## Content
+
+1. [How Bayesian Machine Learning Works](#how-bayesian-machine-learning-works)
+        - [References](#references)
+    * [How to update assumptions from empirical evidence](#how-to-update-assumptions-from-empirical-evidence)
+    * [Exact Inference: Maximum a Posterior Estimation](#exact-inference-maximum-a-posterior-estimation)
+        - [How to keep inference simple: Conjugate Priors](#how-to-keep-inference-simple-conjugate-priors)
+        - [Code example: How to dynamically estimate the probabilities of asset price moves](#code-example-how-to-dynamically-estimate-the-probabilities-of-asset-price-moves)
+    * [Deterministic and stochastic approximate inference](#deterministic-and-stochastic-approximate-inference)
+2. [Probabilistic Programming with PyMC3](#probabilistic-programming-with-pymc3)
+    * [Bayesian ML with Theano](#bayesian-ml-with-theano)
+    * [The PyMC3 workflow](#the-pymc3-workflow)
+    * [Code example: Predicting a recession with PyMC3](#code-example-predicting-a-recession-with-pymc3)
+    * [The Data: Leading Recession Indicators](#the-data-leading-recession-indicators)
+        - [Model Definition: Bayesian Logistic Regression](#model-definition-bayesian-logistic-regression)
+3. [Bayesian ML for Trading](#bayesian-ml-for-trading)
+    * [Code Example: Bayesian Sharpe ratio for performance comparison](#code-example-bayesian-sharpe-ratio-for-performance-comparison)
+    * [Code Example: Bayesian Rolling Regression for Pairs Trading](#code-example-bayesian-rolling-regression-for-pairs-trading)
+    * [Code Example: Stochastic Volatility Models](#code-example-stochastic-volatility-models)
+4. [Resources](#resources)
+    * [PyMC3](#pymc3)
+    * [Alternative probabilistic programming libraries](#alternative-probabilistic-programming-libraries)
+
+
 ## How Bayesian Machine Learning Works
 
 Classical statistics is said to follow the frequentist approach because it interprets probability as the relative frequency of an event over the long run, i.e. after observing a large number of trials. In the context of probabilities, an event is a combination of one or more elementary outcomes of an experiment, such as any of six equal results in rolls of two dice or an asset price dropping by 10 percent or more on a given day). 
@@ -52,18 +76,18 @@ A prior distribution is conjugate with respect to the likelihood when the result
 
 The notebook [updating_conjugate_priors](01_updating_conjugate_priors.ipynb) demonstrates how to use a conjugate prior to update price movement estimates from S&P 500 samples.
 
-### Approximate Inference: Stochastic vs Deterministic Approaches
+### Deterministic and stochastic approximate inference
 
 For most models of practical relevance, it will not be possible to derive the exact posterior distribution analytically and compute expected values for the latent parameters.
 
 Although for some applications the posterior distribution over unobserved parameters
 will be of interest, most often it is primarily required to evaluate expectations, e.g. to make predictions. In such situations, we can rely on approximate inference:
-- Stochastic techniques based on Markov Chain Monte Carlo (MCMC) sampling have popularized the use of Bayesian methods across many domains. They generally have the property to converge to the exact result. In practice, sampling methods can be computationally demanding and are often limited to small-scale problems. 
+- **Stochastic techniques** based on Markov Chain Monte Carlo (MCMC) sampling have popularized the use of Bayesian methods across many domains. They generally have the property to converge to the exact result. In practice, sampling methods can be computationally demanding and are often limited to small-scale problems. 
     - [A Conceptual Introduction to Hamiltonian Monte Carlo](https://arxiv.org/pdf/1701.02434.pdf), Michael Betancourt, 2018
     - [The No-U-Turn Sampler: Adaptively Setting Path Lengths in Hamiltonian Monte Carlo](https://arxiv.org/abs/1111.4246), Matthew D. Hoffman, Andrew Gelman, 2011
     - [ML, MAP, and Bayesian — The Holy Trinity of Parameter Estimation and Data Prediction](https://engineering.purdue.edu/kak/Trinity.pdf)
 
-- Deterministic methods called variational inference or variational Bayes are based on analytical approximations to the posterior distribution and can scale well to large applications. They make simplifying assumptions, e.g., that the posterior factorizes in a particular way or it has a specific parametric form such as a Gaussian. Hence, they do not generate exact results and can be used as complements to sampling methods.
+- **Deterministic methods** called variational inference or variational Bayes are based on analytical approximations to the posterior distribution and can scale well to large applications. They make simplifying assumptions, e.g., that the posterior factorizes in a particular way or it has a specific parametric form such as a Gaussian. Hence, they do not generate exact results and can be used as complements to sampling methods.
     - [Variational Inference: A Review for Statisticians](https://arxiv.org/pdf/1601.00670.pdf), David Blei et al, 2018
 
 ## Probabilistic Programming with PyMC3
@@ -71,15 +95,10 @@ will be of interest, most often it is primarily required to evaluate expectation
 Probabilistic programming provides a language to describe and fit probability distributions so that we can design, encode and automatically estimate and evaluate complex models. It aims to abstract away some of the computational and analytical complexity to allow us to focus on the conceptually more straightforward and intuitive aspects of Bayesian reasoning and inference.
 The field has become quite dynamic since new languages emerged since Uber open-sourced Pyro (based on PyTorch) and Google more recently added a probability module to TensorFlow. 
 
-- [Probabilistic Programming](http://www.probabilistic-programming.org/wiki/Home) Community Repository with links to papers and software
-- [Stan](https://mc-stan.org/)
-- [Edward](http://edwardlib.org/)
-- [TensorFlow Probability](https://github.com/tensorflow/probability)
-- [Pyro](http://pyro.ai/)
-
 ### Bayesian ML with Theano
 
-PyMC3 was released in January 2017 to add Hamiltonian MC methods to the Metropolis-Hastings sampler used in PyMC2 (released 2012). PyMC3 uses [Theano](http://www.deeplearning.net/software/theano/) as its computational backend for dynamic C compilation and automatic differentiation. Theano is a matrix-focused and GPU-enabled optimization library developed at Yoshua Bengio’s Montreal Institute for Learning Algorithms (MILA) that inspired TensorFlow. MILA recently ceased to further develop Theano due to the success of newer deep learning libraries (see chapter 16 for details). PyMC4, planned for 2019, will use TensorFlow instead, with presumably limited impact on the API.
+- [PyMC3](https://docs.pymc.io/) was released in January 2017 to add Hamiltonian MC methods to the Metropolis-Hastings sampler used in PyMC2 (released 2012). PyMC3 uses [Theano](http://www.deeplearning.net/software/theano/) as its computational backend for dynamic C compilation and automatic differentiation. Theano is a matrix-focused and GPU-enabled optimization library developed at Yoshua Bengio’s Montreal Institute for Learning Algorithms (MILA) that inspired TensorFlow. MILA recently ceased to further develop Theano due to the success of newer deep learning libraries (see chapter 16 for details). 
+- [PyMC4](https://github.com/pymc-devs/pymc4), planned for 2019, will use TensorFlow instead, with presumably limited impact on the API.
 
 ### The PyMC3 workflow
 
@@ -101,11 +120,11 @@ PyMC3 aims for intuitive and readable, yet powerful syntax that reflects how sta
 - [Bad Traces, or, Don't Use Metropolis](https://colindcarroll.com/2018/01/01/bad-traces-or-dont-use-metropolis/)
 - PyMC 4 on [GitHub](https://github.com/pymc-devs/pymc4) with design guide and a usage examples.
 
-#### Code example: Predicting a recession with PyMC3
+### Code example: Predicting a recession with PyMC3
 
 The notebook [pymc3_workflow](02_pymc3_workflow.ipynb) illustrates various aspects of the PyMC3 workflow using a simple logistic regression to model the prediction of a recession.
 
-##### The Data: Leading Recession Indicators
+### The Data: Leading Recession Indicators
 
 We will use a small and simple dataset so we can focus on the workflow. We use the Federal Reserve’s Economic Data (FRED) service (see Chapter 2) to download the US recession dates as defined by the National Bureau of Economic Research. We also source four variables that are commonly used to predict the onset of a recession (Kelley 2019) and available via FRED, namely:
 - The long-term spread of the treasury yield curve, defined as the difference between the ten-year and the three-month Treasury yield.
@@ -113,7 +132,7 @@ We will use a small and simple dataset so we can focus on the workflow. We use t
 - The National Financial Conditions Index (NFCI), and
 - The NFCI nonfinancial leverage subindex.
 
-##### Model Definition: Bayesian Logistic Regression
+#### Model Definition: Bayesian Logistic Regression
 
 As discussed in [Linear Models](../07_linear_models), logistic regression estimates a linear relationship between a set of features and a binary outcome, mediated by a sigmoid function to ensure the model produces probabilities. The frequentist approach resulted in point estimates for the parameters that measure the influence of each feature on the probability that a data point belongs to the positive class, with confidence intervals based on assumptions about the parameter distribution. 
 
@@ -159,7 +178,9 @@ As discussed in the chapter [Time Series Models](../09_time_series_models), asse
 
 Stochastic volatility models model this with a latent volatility variable, modeled as a stochastic process. The  No-U-Turn Sampler was introduced using such a model, and the notebook [stochastic_volatility](05_stochastic_volatility.ipynb) illustrates this use case.
 
-### Resources
+## Resources
+
+### PyMC3
 
 Thomas Wiecki, one of the main PyMC3 authors who also leads Data Science at Quantopian has created several examples that the following sections follow and build on. The PyMC3 documentation has many additional tutorials.
 
@@ -168,4 +189,11 @@ Thomas Wiecki, one of the main PyMC3 authors who also leads Data Science at Quan
 - [On Discriminative vs Generative Classifiers: A comparison of logistic regression and naive Bayes](https://ai.stanford.edu/~ang/papers/nips01-discriminativegenerative.pdf), Jordan, Ng, 2002
 - [Bayesian estimation supersedes the t test](http://www.indiana.edu/~kruschke/BEST/BEST.pdf), John K. Kruschke, Journal of Experimental Psychology, 2012
 - [Automatic Differentiation Variational Inference](https://arxiv.org/pdf/1603.00788.pdf)
+
+### Alternative probabilistic programming libraries
+- [Probabilistic Programming](http://www.probabilistic-programming.org/wiki/Home) Community Repository with links to papers and software
+- [Stan](https://mc-stan.org/)
+- [Edward](http://edwardlib.org/)
+- [TensorFlow Probability](https://github.com/tensorflow/probability)
+- [Pyro](http://pyro.ai/)
 

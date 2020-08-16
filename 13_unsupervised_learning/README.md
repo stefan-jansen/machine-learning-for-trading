@@ -14,17 +14,40 @@ More specifically, this chapter covers:
 - how k-Means, hierarchical, and density-based clustering algorithms work
 - how to apply agglomerative clustering to build robust portfolios according to hierarchical risk parity
 
-## Dimensionality reduction
+## Content
 
-This section covers the curse of dimensionality as well as linear and non-linear dimensionality reduction algorithms.
+1. [Dimensionality reduction](#dimensionality-reduction)
+    * [The curse of dimensionality](#the-curse-of-dimensionality)
+    * [Linear Dimensionality Reduction](#linear-dimensionality-reduction)
+    * [PCA](#pca)
+        - [Code Example](#code-example)
+        - [References](#references)
+    * [PCA for Algorithmic Trading ](#pca-for-algorithmic-trading-)
+        - [References](#references-2)
+    * [ICA](#ica)
+    * [Manifold Learning](#manifold-learning)
+        - [Data](#data)
+    * [Local Linear Embedding](#local-linear-embedding)
+        - [References](#references-3)
+    * [t-distributed stochastic neighbor embedding (t-SNE)](#t-distributed-stochastic-neighbor-embedding-t-sne)
+    * [UMAP](#umap)
+        - [Code Examples](#code-examples)
+2. [Cluster Algorithms](#cluster-algorithms)
+    * [k-Means](#k-means)
+    * [Hierarchical Clustering](#hierarchical-clustering)
+    * [Density-Based Clustering](#density-based-clustering)
+    * [Gaussian Mixture Models](#gaussian-mixture-models)
+    * [Hierarchical Risk Parity](#hierarchical-risk-parity)
+        - [References](#references-4)
 
-### The curse of dimensionality
+
+## Code Example: the curse of dimensionality
 
 The number of dimensions of a dataset matter because each new dimension can add signal concerning an outcome. However, there is also a downside known as the curse of dimensionality: as the number of independent features grows while the number of observations remains constant, the average distance between data points also grows, and the density of the feature space drops exponentially. The implications for machine learning are dramatic because prediction becomes much harder when observations are more distant, i.e., different from each other.
 
 The notebook [curse_of_dimensionality](01_linear_dimensionality_reduction/00_curse_of_dimensionality.ipynb) simulates how the average and minimum distances between data points increase as the number of dimensions grows.
 
-### Linear Dimensionality Reduction
+## Linear Dimensionality Reduction
 
 Linear dimensionality reduction algorithms compute linear combinations that translate, rotate, and rescale the original features to capture significant variation in the data, subject to constraints on the characteristics of the new features.
 
@@ -32,9 +55,11 @@ This section introduces these two algorithms and then illustrates how to apply P
 
 - [Dimension Reduction: A Guided Tour](https://www.microsoft.com/en-us/research/publication/dimension-reduction-a-guided-tour-2/), Chris J.C. Burges, Foundations and Trends in Machine Learning, January 2010
 
-### PCA
+### Code Example: Principal Component Analysis
 
 PCA finds principal components as linear combinations of the existing features and uses these components to represent the original data. The number of components is a hyperparameter that determines the target dimensionality and needs to be equal to or smaller than the number of observations or columns, whichever is smaller.
+
+#### Visualizing key ideas behind PCA 
 
 The notebook [pca_key_ideas](01_linear_dimensionality_reduction/01_pca_key_ideas.ipynb) visualizes principal components in 2D and 3D.
 
@@ -46,34 +71,32 @@ PCA aims to capture most of the variance in the data, to make it easy to recover
 
 The emphasis on the first and second moments align with standard risk/return metrics, but the normality assumption may conflict with the characteristics of market data.
 
-#### Code Example
+#### How the PCA algorithm works
 
 The notebook [the_math_behind_pca](01_linear_dimensionality_reduction/02_the_math_behind_pca.ipynb) illustrate the computation of principal components.
 
-#### References
+### References
 
 - [Mixtures of Probabilistic Principal Component Analysers](http://www.miketipping.com/papers/met-mppca.pdf), Michael E. Tipping and Christopher M. Bishop, Neural Computation 11(2), pp 443–482. MIT Press
 - [Finding Structure with Randomness: Probabilistic Algorithms for Constructing Approximate Matrix Decompositions](http://users.cms.caltech.edu/~jtropp/papers/HMT11-Finding-Structure-SIREV.pdf), N. Halko†, P. G. Martinsson, J. A. Tropp, SIAM REVIEW, Vol. 53, No. 2, pp. 217–288
 - [Relationship between SVD and PCA. How to use SVD to perform PCA?](https://stats.stackexchange.com/questions/134282/relationship-between-svd-and-pca-how-to-use-svd-to-perform-pca), excellent technical CrossValidated StackExchange answer with visualization
 
-### PCA for Algorithmic Trading 
+## PCA for Trading 
 
 PCA is useful for algorithmic trading in several respects, including the data-driven derivation of risk factors by applying PCA to asset returns, and the construction of uncorrelated portfolios based on the principal components of the correlation matrix of asset returns.
-
+ 
+### Code Example: PCA and risk factor models
 In [Chapter 07 - Linear Models](../07_linear_models/02_fama_macbeth.ipynb), we explored risk factor models used in quantitative finance to capture the main drivers of returns. These models explain differences in returns on assets based on their exposure to systematic risk factors and the rewards associated with these factors.
  
 In particular, we explored the Fama-French approach that specifies factors based on prior knowledge about the empirical behavior of average returns, treats these factors as observable, and then estimates risk model coefficients using linear regression. An alternative approach treats risk factors as latent variables and uses factor analytic techniques like PCA to simultaneously estimate the factors and how the drive returns from historical returns.
+- The notebook [pca_and_risk_factor_models](01_linear_dimensionality_reduction/03_pca_and_risk_factor_models.ipynb) demonstrates how this method derives factors in a purely statistical or data-driven way with the advantage of not requiring ex-ante knowledge of the behavior of asset returns.
  
- #### Code Example
- 
-The notebook [pca_and_risk_factor_models](01_linear_dimensionality_reduction/03_pca_and_risk_factor_models.ipynb) demonstrates how this method derives factors in a purely statistical or data-driven way with the advantage of not requiring ex-ante knowledge of the behavior of asset returns.
- 
-#### References
+### References
 
 - [Characteristics Are Covariances: A Unified Model of Risk and Return](http://www.nber.org/2018LTAM/kelly.pdf), Kelly, Pruitt and Su, NBER, 2018
 - [Statistical Arbitrage in the U.S. Equities Market](https://math.nyu.edu/faculty/avellane/AvellanedaLeeStatArb20090616.pdf), Marco Avellaneda and Jeong-Hyun Lee, 2008
 
-### ICA
+### Independent Component Analysis
 
 - [Independent Component Analysis: Algorithms and Applications](https://www.sciencedirect.com/science/article/pii/S0893608000000265), Aapo Hyvärinen and Erkki Oja, Neural Networks, 2000
 - [Independent Components Analysis](http://cs229.stanford.edu/notes/cs229-notes11.pdf), CS229 Lecture Notes, Andrew Ng

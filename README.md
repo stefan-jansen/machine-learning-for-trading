@@ -28,7 +28,7 @@ From a practical standpoint, the 2nd edition aims to equip you with the conceptu
 More specifically, the ML4T workflow starts with generating ideas for a well-defined investment universe, collecting relevant data, and extracting informative features. It also involves designing, tuning, and evaluating ML models suited to the predictive task. Finally, it requires developing trading strategies to act on the models' predictive signals, as well as simulating and evaluating their performance on historical data using a backtesting engine. Once you decide to execute an algorithmic strategy in a real market, you will find yourself iterating over this workflow repeatedly to incorporate new information and a changing environment.
 
 <p align="center">
-<img src="https://ml4t.s3.amazonaws.com/assets/ml4t_workflow.png" width="75%">
+<img src="https://i.imgur.com/kcgItgp.png" width="75%">
 </p>
 
 The [second edition](https://www.amazon.com/Machine-Learning-Algorithmic-Trading-alternative/dp/1839217715?pf_rd_r=GZH2XZ35GB3BET09PCCA&pf_rd_p=c5b6893a-24f2-4a59-9d4b-aff5065c90ec&pd_rd_r=91a679c7-f069-4a6e-bdbb-a2b3f548f0c8&pd_rd_w=2B0Q0&pd_rd_wg=GMY5S&ref_=pd_gw_ci_mcx_mr_hp_d)'s emphasis on the ML4t workflow translates into a new chapter on [strategy backtesting](08_ml4t_workflow), a new [appendix](24_alpha_factor_library) describing over 100 different alpha factors, and many new practical applications. We have also rewritten most of the existing content for clarity and readability. 

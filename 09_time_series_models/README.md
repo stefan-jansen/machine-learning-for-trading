@@ -15,11 +15,41 @@ This chapter covers:
 - How to build vector autoregressive models
 - Using cointegration to develop a pairs trading strategy
 
-## Analytical tools for diagnostics and feature extraction
+## Content
+
+1. [Tools for diagnostics and feature extraction](#tools-for-diagnostics-and-feature-extraction)
+    * [How to decompose time series patterns](#how-to-decompose-time-series-patterns)
+    * [Rolling window statistics and moving averages](#rolling-window-statistics-and-moving-averages)
+    * [How to measure autocorrelation](#how-to-measure-autocorrelation)
+    * [How to diagnose and achieve stationarity](#how-to-diagnose-and-achieve-stationarity)
+    * [How to apply time series transformations](#how-to-apply-time-series-transformations)
+    * [How to diagnose and address unit roots](#how-to-diagnose-and-address-unit-roots)
+    * [Code example: working with time series data](#code-example-working-with-time-series-data)
+    * [Resources](#resources)
+2. [Univariate Time Series Models](#univariate-time-series-models)
+    * [How to build autoregressive models](#how-to-build-autoregressive-models)
+    * [How to build moving average models](#how-to-build-moving-average-models)
+    * [How to build ARIMA models and extensions](#how-to-build-arima-models-and-extensions)
+    * [Code example: forecasting macro fundamentals with ARIMA and SARIMAX models](#code-example-forecasting-macro-fundamentals-with-arima-and-sarimax-models)
+    * [How to use time series models to forecast volatility](#how-to-use-time-series-models-to-forecast-volatility)
+    * [How to build a volatility-forecasting model](#how-to-build-a-volatility-forecasting-model)
+    * [Code examples: volatility forecasts](#code-examples-volatility-forecasts)
+    * [Resources](#resources-2)
+3. [Multivariate Time Series Models](#multivariate-time-series-models)
+    * [The vector autoregressive (VAR) model](#the-vector-autoregressive-var-model)
+    * [Code example: How to use the VAR model for macro fundamentals forecasts](#code-example-how-to-use-the-var-model-for-macro-fundamentals-forecasts)
+    * [Resources](#resources-3)
+4. [Cointegration – time series with a common trend](#cointegration--time-series-with-a-common-trend)
+    * [Pairs trading: Statistical arbitrage with cointegration](#pairs-trading-statistical-arbitrage-with-cointegration)
+    * [Alternative approaches to selecting and trading comoving assets](#alternative-approaches-to-selecting-and-trading-comoving-assets)
+    * [Code example: Pairs trading in practice](#code-example-pairs-trading-in-practice)
+        - [Computing distance-based heuristics to identify cointegrated pairs](#computing-distance-based-heuristics-to-identify-cointegrated-pairs)
+        - [Precomputing the cointegration tests](#precomputing-the-cointegration-tests)
+    * [Resources](#resources-4)
+
+## Tools for diagnostics and feature extraction
 
 Most of the examples in this section use data provided by the Federal Reserve that you can access using the pandas datareader that we introduced in [Chapter 2, Market and Fundamental Data](../02_market_and_fundamental_data). 
-
-The code examples for this section are available in the notebook [](01_stationarity_and_arima.ipynb).
 
 ### How to decompose time series patterns
 
@@ -28,7 +58,7 @@ Time series data typically contains a mix of various patterns that can be decomp
 - `pandas` Time Series and Date functionality [docs](https://pandas.pydata.org/pandas-docs/stable/timeseries.html)
 - [Forecasting - Principles & Practice, Hyndman, R. and Athanasopoulos, G., ch.6 'Time Series Decomposition'](https://otexts.org/fpp2/decomposition.html)
 
-### How to compute rolling window statistics
+### Rolling window statistics and moving averages
 
 The pandas library includes very flexible functionality to define various window types, including rolling, exponentially weighted and expanding windows.
 
@@ -59,23 +89,23 @@ The defining characteristic of a unit-root non-stationary series is long memory:
 
 Statistical unit root tests are a common way to determine objectively whether (additional) differencing is necessary. These are statistical hypothesis tests of stationarity that are designed to determine whether differencing is required.
 
-#### Code examples: Time Series diagnostics
+### Code example: working with time series data
 
 - The notebook [tsa_and_stationarity](01_tsa_and_stationarity.ipynb) illustrates the concepts discussed in this section.
 
+### Resources
+
+- [Analysis of Financial Time Series, 3rd Edition, Ruey S. Tsay](https://www.wiley.com/en-us/Analysis+of+Financial+Time+Series%2C+3rd+Edition-p-9780470414354)
+- [Quantitative Equity Investing: Techniques and Strategies, Frank J. Fabozzi, Sergio M. Focardi, Petter N. Kolm](https://www.wiley.com/en-us/Quantitative+Equity+Investing%3A+Techniques+and+Strategies-p-9780470262474)
+- `statsmodels` Time Series Analysis [docs](https://www.statsmodels.org/dev/tsa.html)
+
 ## Univariate Time Series Models
 
- Univariate time series models relate the value of the time series at the point in time of interest to a linear combination of lagged values of the series and possibly past disturbance terms.
+Univariate time series models relate the value of the time series at the point in time of interest to a linear combination of lagged values of the series and possibly past disturbance terms.
 
 While exponential smoothing models are based on a description of the trend and seasonality in the data, ARIMA models aim to describe the autocorrelations in the data. ARIMA(p, d, q) models require stationarity and leverage two building blocks:
 - Autoregressive (AR) terms consisting of p-lagged values of the time series
 - Moving average (MA) terms that contain q-lagged disturbances
-
-- [Analysis of Financial Time Series, 3rd Edition, Ruey S. Tsay](https://www.wiley.com/en-us/Analysis+of+Financial+Time+Series%2C+3rd+Edition-p-9780470414354)
-
-- [Quantitative Equity Investing: Techniques and Strategies, Frank J. Fabozzi, Sergio M. Focardi, Petter N. Kolm](https://www.wiley.com/en-us/Quantitative+Equity+Investing%3A+Techniques+and+Strategies-p-9780470262474)
-
-- `statsmodels` Time Series Analysis [docs](https://www.statsmodels.org/dev/tsa.html)
 
 ### How to build autoregressive models
 
@@ -91,15 +121,13 @@ Autoregressive integrated moving-average ARIMA(p, d, q) models combine AR(p) and
 
 - statsmodels State-Space Models [docs](https://www.statsmodels.org/dev/statespace.html)
 
-#### Code examples: How to forecast macro fundamentals
+### Code example: forecasting macro fundamentals with ARIMA and SARIMAX models
 
 We will build a SARIMAX model for monthly data on an industrial production time series for the 1988-2017 period. See notebook [arima_models](02_arima_models.ipynb) for implementation details.
 
 ### How to use time series models to forecast volatility
 
 A particularly important area of application for univariate time series models is the prediction of volatility. The volatility of financial time series is usually not constant over time but changes, with bouts of volatility clustering together. Changes in variance create challenges for time series forecasting using the classical ARIMA models.
-
-- NYU Stern [VLAB](https://vlab.stern.nyu.edu/)
 
 ### How to build a volatility-forecasting model
 
@@ -109,12 +137,13 @@ The development of a volatility model for an asset-return series consists of fou
 3. Specify a volatility model if serial correlation effects are significant, and jointly estimate the mean and volatility equations.
 4. Check the fitted model carefully and refine it if necessary.
 
-#### Code examples: volatility forecasts
+### Code examples: volatility forecasts
 
 The notebook [arch_garch_models](03_arch_garch_models.ipynb) demonstrates the usage of the ARCH library to estimate time series models for volatility foreccasting with NASDAQ data.
 
-#### Resources  
+### Resources
 
+- NYU Stern [VLAB](https://vlab.stern.nyu.edu/)
 - ARCH Library
     - [docs](https://arch.readthedocs.io/en/latest/index.html) 
     - [examples](http://nbviewer.jupyter.org/github/bashtage/arch/blob/master/examples/univariate_volatility_modeling.ipynb)
@@ -137,14 +166,16 @@ VAR(p) models also require stationarity, so that the initial steps from univaria
 
 If some or all of the k series are unit-root non-stationary, they may be cointegrated (see next section). This extension of the unit root concept to multiple time series means that a linear combination of two or more series is stationary and, hence, mean-reverting. 
 
-- `statsmodels` Vector Autoregression [docs](https://www.statsmodels.org/dev/vector_ar.html)
-- [Time Series Analysis in Python with statsmodels](https://conference.scipy.org/proceedings/scipy2011/pdfs/statsmodels.pdf), Wes McKinney, Josef Perktold, Skipper Seabold, SciPY Conference 2011
-
-#### Code example: How to use the VAR model for macro fundamentals forecasts
+### Code example: How to use the VAR model for macro fundamentals forecasts
 
 The notebook [vector_autoregressive_model](04_vector_autoregressive_model.ipynb) demonstrates how to use `statsmodels` to estimate a VAR model for macro fundamentals time series.
 
-### Cointegration – time series with a common trend
+### Resources
+
+- `statsmodels` Vector Autoregression [docs](https://www.statsmodels.org/dev/vector_ar.html)
+- [Time Series Analysis in Python with statsmodels](https://conference.scipy.org/proceedings/scipy2011/pdfs/statsmodels.pdf), Wes McKinney, Josef Perktold, Skipper Seabold, SciPY Conference 2011
+
+## Cointegration – time series with a common trend
 
 The concept of an integrated multivariate series is complicated by the fact that all the component series of the process may be individually integrated but the process is not jointly integrated in the sense that one or more linear combinations of the series exist that produce a new stationary series.
 
@@ -168,7 +199,7 @@ In practice, the strategy requires two steps:
 
 Several approaches to the formation and trading phases have emerged from increasingly active research in this area across multiple asset classes over the last several years. The next subsection outlines the key differences before we dive into an example application.
 
-#### Alternative approaches to selecting and trading comoving assets
+### Alternative approaches to selecting and trading comoving assets
 
 A recent comprehensive survey of pairs trading strategies [Statistical Arbitrage Pairs Trading Strategies: Review
 and Outlook](https://www.iwf.rw.fau.de/files/2016/03/09-2015.pdf), Krauss (2017) identifies four different methodologies plus a number of other more recent approaches, including ML-based forecasts:
@@ -179,9 +210,7 @@ and Outlook](https://www.iwf.rw.fau.de/files/2016/03/09-2015.pdf), Krauss (2017)
 - **Stochastic control** approach: Similar to the time-series approach, the goal is to optimize trading rules using stochastic control theory to find value and policy functions to arrive at an optimal portfolio (Liu and Timmermann 2013). We will address this type of approach in Chapter 21, Reinforcement Learning.
 - **Other approaches**: Besides pair identification based on unsupervised learning like principal component analysis (see Chapter 13, Unsupervised Learning) and statistical models like copulas (Patton 2012), machine learning has become popular more recently to identify pairs based on their relative price or return forecasts (Huck 2019). We will cover several ML algorithms that can be used for this purpose and illustrate corresponding multivariate pairs trading strategies in the coming chapters.
 
-See book for references.
-
-#### Code example: Pairs trading in practice
+### Code example: Pairs trading in practice
 
 The **distance approach** identifies pairs using the correlation of (normalized) asset prices or their returns and is simple and orders of magnitude less computationally intensive than cointegration tests. 
 - The notebook [cointegration_tests](05_cointegration_tests.ipynb) illustrates this for a sample of ~150 stocks with four years of daily data: it takes ~30ms to compute the correlation with the returns of an ETF, compared to 18 seconds for a suite of cointegration tests (using statsmodels) - 600x slower.
@@ -198,19 +227,19 @@ This process aims to select cointegrated pairs with lower divergence risk while 
 
 A large number of tests introduce data snooping bias as discussed in Chapter 6, The Machine Learning Workflow: multiple testing is likely to increase the number of false positives that mistakenly reject the null hypothesis of no cointegration. While statistical significance may not be necessary for profitable trading (Chan 2008), a study of commodity pairs (Cummins and Bucca 2012) shows that controlling the familywise error rate to improve the tests’ power according to Romano and Wolf (2010) can lead to better performance.
 
-##### Computing distance-based heuristics to identify cointegrated pairs
+#### Computing distance-based heuristics to identify cointegrated pairs
 
 - The notebook [cointegration_tests](05_cointegration_tests.ipynb) takes a closer look at how predictive various heuristics for the degree of comovement of asset prices are for the result of cointegration tests. The example code uses a sample of 172 stocks and 138 ETFs traded on the NYSE and NASDAQ with daily data from 2010 - 2019 provided by Stooq. 
 
 The securities represent the largest average dollar volume over the sample period in their respective class; highly correlated and stationary assets have been removed. See the notebook [create_datasets](../data/create_datasets.ipynb) in the data folder of the GitHub repository for downloading for instructions on how to obtain the data and the notebook cointegration_tests for the relevant code and additional preprocessing and exploratory details.
 
-##### Precomputing the cointegration tests
+#### Precomputing the cointegration tests
 
 The notebook [statistical_arbitrage_with_cointegrated_pairs](06_statistical_arbitrage_with_cointegrated_pairs.ipynb) implements a statistical arbitrage strategy based on cointegration for the sample of stocks and ETFs and the 2017-2019 period.
 
 It first generates and stores the cointegration tests for all candidate pairs and the resulting trading signals before we backtest a strategy based on these signals given the computational intensity of the process.
 
-#### Resources
+### Resources
 
 - Quantopian offers various resources on pairs trading:
     - [Introduction to Pairs Trading](https://www.quantopian.com/lectures/introduction-to-pairs-trading)

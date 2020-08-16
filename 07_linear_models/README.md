@@ -17,6 +17,28 @@ In practice, linear models are applied to regression and classification problems
 - How logistic regression works
 - Converting a regression into a classification problem
 
+## Content
+
+1. [Linear regression: From inference to prediction](#linear-regression-from-inference-to-prediction)
+2. [The baseline model: Multiple linear regression](#the-baseline-model-multiple-linear-regression)
+    * [Code Example: Simple and multiple linear regression with `statsmodels` and `scikit-learn`](#code-example-simple-and-multiple-linear-regression-with-statsmodels-and-scikit-learn)
+3. [How to build a linear factor model](#how-to-build-a-linear-factor-model)
+    * [From the CAPM to the Fama—French five-factor model](#from-the-capm-to-the-famafrench-five-factor-model)
+    * [Obtaining the risk factors](#obtaining-the-risk-factors)
+    * [Code Example: Fama—Macbeth regression](#code-example-famamacbeth-regression)
+4. [Shrinkage methods: Regularization for linear regression](#shrinkage-methods-regularization-for-linear-regression)
+    * [Hedging against overfitting – regularization in linear models](#hedging-against-overfitting--regularization-in-linear-models)
+    * [Ridge regression](#ridge-regression)
+    * [Lasso regression](#lasso-regression)
+5. [How to predict stock returns with linear regression](#how-to-predict-stock-returns-with-linear-regression)
+    * [Code Examples: inference and prediction for stock returns ](#code-examples-inference-and-prediction-for-stock-returns-)
+6. [Linear classification](#linear-classification)
+    * [The logistic regression model](#the-logistic-regression-model)
+    * [Code Example: how to conduct inference with statsmodels](#code-example-how-to-conduct-inference-with-statsmodels)
+    * [Code examples: how to use logistic regression for prediction](#code-examples-how-to-use-logistic-regression-for-prediction)
+7. [References](#references)
+
+
 ## Linear regression: From inference to prediction
 
 This section introduces the baseline cross-section and panel techniques for linear models and important enhancements that produce accurate estimates when key assumptions are violated. It continues to illustrate these methods by estimating factor models that are ubiquitous in the development of algorithmic trading strategies. Lastly, it focuses on regularization methods.
@@ -33,7 +55,7 @@ This section introduces the model's specification and objective function, method
 - How to diagnose and remedy problems
 - How to run linear regression in practice
 
-### Code Examples
+### Code Example: Simple and multiple linear regression with `statsmodels` and `scikit-learn`
 
 The notebook [linear_regression_intro](01_linear_regression_intro.ipynb) demonstrates the simple and multiple linear regression model, the latter using both OLS and gradient descent based on `statsmodels` and `scikit-learn`. 
 
@@ -58,13 +80,11 @@ The [Fama—French risk factors](http://mba.tuck.dartmouth.edu/pages/faculty/ken
 
 Fama and French make updated risk factor and research portfolio data available through their [website]((http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html)), and you can use the [pandas_datareader](https://pandas-datareader.readthedocs.io/en/latest/) library to obtain the data. 
 
-### Fama—Macbeth regression
+### Code Example: Fama—Macbeth regression
 
 To address the inference problem caused by the correlation of the residuals, Fama and MacBeth proposed a two-step methodology for a cross-sectional regression of returns on factors. The two-stage Fama—Macbeth regression is designed to estimate the premium rewarded for the exposure to a particular risk factor by the market. The two stages consist of:
 - **First stage**: N time-series regression, one for each asset or portfolio, of its excess returns on the factors to estimate the factor loadings.
 - **Second stage**: T cross-sectional regression, one for each time period, to estimate the risk premium.
-
-#### Code Example
 
 The notebook [fama_macbeth](02_fama_macbeth.ipynb) illustrates how to run a Fama-Macbeth regression, including using the [LinearModels](https://bashtage.github.io/linearmodels/doc/) library.
 
@@ -88,18 +108,14 @@ The ridge regression shrinks the regression coefficients by adding a penalty to 
 
 The lasso, known as basis pursuit in signal processing, also shrinks the coefficients by adding a penalty to the sum of squares of the residuals, but the lasso penalty has a slightly different effect. The lasso penalty is the sum of the absolute values of the coefficient vector, which corresponds to its L1 norm.
 
-#### References
-- [An Introduction to Statistical Learning](https://www-bcf.usc.edu/~gareth/ISL/), James, Witten, Hastie and Tibshirani, 2013, chapter 6
-- [Elements of Statistical Learning](https://web.stanford.edu/~hastie/ElemStatLearn/), Hastie, Tibshirani and Friedman (2009), chapter 3.4
-
 ## How to predict stock returns with linear regression
 
 In this section, we will use linear regression with and without shrinkage to predict returns and generate trading signals. To this end, we first create a dataset and then apply the linear regression models discussed in the previous section to illustrate their usage with statsmodels and sklearn.
 
-### Code Examples
+### Code Examples: inference and prediction for stock returns 
 
 - The notebook [preparing_the_model_data](03_preparing_the_model_data.ipynb) selects a universe of US equities and creates several features to predict daily returns.
-- The notebook[statistical_inference_of_stock_returns_with_statsmodels](04_statistical_inference_of_stock_returns_with_statsmodels.ipynb) estimates several linear regression models using OLS and the `statsmodels` library.
+- The notebook [statistical_inference_of_stock_returns_with_statsmodels](04_statistical_inference_of_stock_returns_with_statsmodels.ipynb) estimates several linear regression models using OLS and the `statsmodels` library.
 - The notebook [predicting_stock_returns_with_linear_regression](05_predicting_stock_returns_with_linear_regression.ipynb) shows how to predict daily stock return using linear regression, as well as ridge and lasso models with  `scikit-klearn`.
 - The notebook [evaluating_signals_using_alphalens](06_evaluating_signals_using_alphalens.ipynb) evaluates the model predictions using `alphalens`.
 
@@ -113,11 +129,11 @@ The logistic regression model arises from the desire to model the probabilities 
 
 In this section, we introduce the objective and functional form of the logistic regression model and describe the training method. We then illustrate how to use logistic regression for statistical inference with macro data using statsmodels, and how to predict price movements using the regularized logistic regression implemented by sklearn.
 
-### How to conduct inference with statsmodels
+### Code Example: how to conduct inference with statsmodels
 
 The notebook [logistic_regression_macro_data](07_logistic_regression_macro_data.ipynb)` illustrates how to run a logistic regression on macro data and conduct statistical inference using [statsmodels](https://www.statsmodels.org/stable/index.html).
 
-### How to use logistic regression for prediction
+### Code examples: how to use logistic regression for prediction
 
 The lasso L1 penalty and the ridge L2 penalty can both be used with logistic regression. They have the same shrinkage effect as we have just discussed, and the lasso can again be used for variable selection with any linear regression model.
 

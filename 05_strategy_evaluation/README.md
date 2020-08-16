@@ -16,13 +16,34 @@ As a result, there are several approaches to optimize portfolios that include th
 - Simulating trades and create a portfolio based on alpha factors using Zipline
 - How to evaluate portfolio performance using pyfolio
 
+## Content
+
+1. [How to measure portfolio performance](#how-to-measure-portfolio-performance)
+    * [The (adjusted) Sharpe Ratio](#the-adjusted-sharpe-ratio)
+    * [The fundamental law of active management](#the-fundamental-law-of-active-management)
+2. [How to manage Portfolio Risk & Return](#how-to-manage-portfolio-risk--return)
+    * [The evolution of modern portfolio management](#the-evolution-of-modern-portfolio-management)
+    * [Mean-variance optimization](#mean-variance-optimization)
+        - [Code Examples: Finding the efficient frontier in Python](#code-examples-finding-the-efficient-frontier-in-python)
+    * [Alternatives to mean-variance optimization](#alternatives-to-mean-variance-optimization)
+        - [The 1/N portfolio](#the-1n-portfolio)
+        - [The minimum-variance portfolio](#the-minimum-variance-portfolio)
+        - [The Black-Litterman approach](#the-black-litterman-approach)
+        - [How to size your bets – the Kelly rule](#how-to-size-your-bets--the-kelly-rule)
+        - [Alternatives to MV Optimizatino with Python](#alternatives-to-mv-optimizatino-with-python)
+    * [Hierarchical Risk Parity](#hierarchical-risk-parity)
+3. [Trading and managing a portfolio with `Zipline`](#trading-and-managing-a-portfolio-with-zipline)
+    * [Code Examples: Backtests with trades and portfolio optimization ](#code-examples-backtests-with-trades-and-portfolio-optimization-)
+4. [Measure backtest performance with `pyfolio`](#measure-backtest-performance-with-pyfolio)
+    * [Code Example: `pyfolio` evaluation from a `Zipline` backtest](#code-example-pyfolio-evaluation-from-a-zipline-backtest)
+
 ## How to measure portfolio performance
 
 To evaluate and compare different strategies or to improve an existing strategy, we need metrics that reflect their performance with respect to our objectives. In investment and trading, the most common objectives are the **return and the risk of the investment portfolio**.
 
 The return and risk objectives imply a trade-off: taking more risk may yield higher returns in some circumstances, but also implies greater downside. To compare how different strategies navigate this trade-off, ratios that compute a measure of return per unit of risk are very popular. We’ll discuss the **Sharpe ratio** and the **information ratio** (IR) in turn.
 
-### The Sharpe Ratio
+### The (adjusted) Sharpe Ratio
 
 The ex-ante Sharpe Ratio (SR) compares the portfolio's expected excess portfolio to the volatility of this excess return, measured by its standard deviation. It measures the compensation as the average excess return per unit of risk taken. It can be estimated from data.
 
@@ -46,55 +67,46 @@ The fundamental law is important because it highlights the key drivers of outper
 - [How to Use Security Analysis to Improve Portfolio Selection](https://econpapers.repec.org/article/ucpjnlbus/v_3a46_3ay_3a1973_3ai_3a1_3ap_3a66-86.htm), Jack L Treynor and Fischer Black, Journal of Business, 1973
 - [Portfolio Constraints and the Fundamental Law of Active Management](https://faculty.fuqua.duke.edu/~charvey/Teaching/BA491_2005/Transfer_coefficient.pdf), Clarke et al 2002
 
-## How to build and tes a portfolio with `zipline`
+## How to manage Portfolio Risk & Return
 
-The open source [zipline](http://www.zipline.io/index.html) library is an event-driven backtesting system maintained and used in production by the crowd-sourced quantitative investment fund [Quantopian](https://www.quantopian.com/) to facilitate algorithm-development and live-trading. It automates the algorithm's reaction to trade events and provides it with current and historical point-in-time data that avoids look-ahead bias. [Chapter 8 - The ML4T Workflow](../08_strategy_workflow) has a more detailed, dedicated introduction to backtesting using both `zipline` and `backtrader`. 
+Portfolio management aims to pick and size positions in financial instruments that achieve the desired risk-return trade-off regarding a benchmark. As a portfolio manager, in each period, you select positions that optimize diversification to reduce risks while achieving a target return. Across periods, these positions may require rebalancing to account for changes in weights resulting from price movements to achieve or maintain a target risk profile.
 
-In [Chapter 4](../04_alpha_factor_research), we introduced `zipline` to simulate the computation of alpha factors from trailing cross-sectional market, fundamental, and alternative data. Now we will exploit the alpha factors to derive and act on buy and sell signals. 
+### The evolution of modern portfolio management
 
-We will postpone optimizing the portfolio weights until later in this chapter, and for now, just assign positions of equal value to each holding. 
+Diversification permits us to reduce risks for a given expected return by exploiting how imperfect correlation allows for one asset's gains to make up for another asset's losses. Harry Markowitz invented modern portfolio theory (MPT) in 1952 and provided the mathematical tools to optimize diversification by choosing appropriate portfolio weights.
+ 
+### Mean-variance optimization
 
-The code for this section lives in the following two notebooks: 
-- The notebook [backtest_with_trades](01_backtest_with_trades.ipynb) simulates the trading decisions that build a portfolio based on the simple MeanReversion alpha factor from the last chapter using zipline.
-- The notebook [backtest_with_pf_optimization](02_backtest_with_pf_optimization.ipynb) demonstrates how to use PF optimization as part of a simple strategy backtest. 
-
-### Zipline Installation
-
-- The notebooks in this section rely on the `conda` environment `ml4t-zipline`. For installation, please see instructions provided [here](../installation).
-
-## How to measure performance with `pyfolio`
-
-Pyfolio facilitates the analysis of portfolio performance and risk in-sample and out-of-sample using many standard metrics. It produces tear sheets covering the analysis of returns, positions, and transactions, as well as event risk during periods of market stress using several built-in scenarios, and also includes Bayesian out-of-sample performance analysis.
-
-### Code Examples
-
-The notebook [pyfolio_demo](03_pyfolio_demo.ipynb) illustrates how to extract the `pyfolio` input from the backtest conducted in the previous folder. It then proceeds to calcuate several performance metrics and tear sheets using `pyfolio`
-
-- The notebook relis on the `conda` environment `ml4t-zipline`. For installation, please see instructions provided [here](../installation).
-
-## How to Manage Portfolio Risk & Return
-
+Modern portfolio theory solves for the optimal portfolio weights to minimize volatility for a given expected return, or maximize returns for a given level of volatility. The key requisite inputs are expected asset returns, standard deviations, and the covariance matrix. 
 - [Portfolio Selection](https://www.math.ust.hk/~maykwok/courses/ma362/07F/markowitz_JF.pdf), Harry Markowitz, The Journal of Finance, 1952
 - [The Capital Asset Pricing Model: Theory and Evidence](http://mba.tuck.dartmouth.edu/bespeneckbo/default/AFA611-Eckbo%20web%20site/AFA611-S6B-FamaFrench-CAPM-JEP04.pdf), Eugene F. Fama and Kenneth R. French, Journal of Economic Perspectives, 2004
 
-### Mean-variance optimization
-
-MPT solves for the optimal portfolio weights to minimize volatility for a given expected return, or maximize returns for a given level of volatility. The key requisite input are expected asset returns, standard deviations, and the covariance matrix. 
-
-#### Code Examples
+#### Code Examples: Finding the efficient frontier in Python
 
 We can calculate an efficient frontier using scipy.optimize.minimize and the historical estimates for asset returns, standard deviations, and the covariance matrix. 
-
-The notebook [mean_variance_optimization](04_mean_variance_optimization.ipynb) to compute the efficient frontier in python.
+- The notebook [mean_variance_optimization](04_mean_variance_optimization.ipynb) to compute the efficient frontier in python.
 
 ### Alternatives to mean-variance optimization
 
+The challenges with accurate inputs for the mean-variance optimization problem have led to the adoption of several practical alternatives that constrain the mean, the variance, or both, or omit return estimates that are more challenging, such as the risk parity approach that we discuss later in this section.
+
+#### The 1/N portfolio
+
+Simple portfolios providae useful benchmarks to gauge the added value of complex models that generate the risk of overfitting. The simplest strategy—an equally-weighted portfolio—has been shown to be one of the best performers.
+
+#### The minimum-variance portfolio
+
+Another alternative is the global minimum-variance (GMV) portfolio, which prioritizes the minimization of risk. It is shown in the efficient frontier figure and can be calculated as follows by minimizing the portfolio standard deviation using the mean-variance framework.
+
 #### The Black-Litterman approach
+
+The Global Portfolio Optimization approach of Black and Litterman (1992) combines economic models with statistical learning and is popular because it generates estimates of expected returns that are plausible in many situations.
+The technique assumes that the market is a mean-variance portfolio as implied by the CAPM equilibrium model. It builds on the fact that the observed market capitalization can be considered as optimal weights assigned to each security by the market. Market weights reflect market prices that, in turn, embody the market’s expectations of future returns.
 
 - [Global Portfolio Optimization](http://www.sef.hku.hk/tpg/econ6017/2011/black-litterman-1992.pdf), Black, Fischer; Litterman, Robert
 Financial Analysts Journal, 1992
 
-### How to size your bets – the Kelly rule
+#### How to size your bets – the Kelly rule
 
 The Kelly rule has a long history in gambling because it provides guidance on how much to stake on each of an (infinite) sequence of bets with varying (but favorable) odds to maximize terminal wealth. It was published as A New Interpretation of the Information Rate in 1956 by John Kelly who was a colleague of Claude Shannon's at Bell Labs. He was intrigued by bets placed on candidates at the new quiz show The $64,000 Question, where a viewer on the west coast used the three-hour delay to obtain insider information about the winners. 
 
@@ -105,9 +117,10 @@ Kelly drew a connection to Shannon's information theory to solve for the bet tha
 - [Beat the Market: A Scientific Stock Market System](https://www.researchgate.net/publication/275756748_Beat_the_Market_A_Scientific_Stock_Market_System) , Edward O. Thorp,1967
 - [Quantitative Trading: How to Build Your Own Algorithmic Trading Business](https://www.amazon.com/Quantitative-Trading-Build-Algorithmic-Business/dp/0470284889/ref=sr_1_2?s=books&ie=UTF8&qid=1545525861&sr=1-2), Ernie Chan, 2008
 
-#### Code Example
+#### Alternatives to MV Optimizatino with Python
 
-The notebook [kelly_rule](05_kelly_rule.ipynb) demonstrates the application for the single and multiple asset case. The latter result is also included in the notebook [mean_variance_optimization](04_mean_variance_optimization.ipynb).
+- The notebook [kelly_rule](05_kelly_rule.ipynb) demonstrates the application for the single and multiple asset case. 
+- The latter result is also included in the notebook [mean_variance_optimization](04_mean_variance_optimization.ipynb), along with several other alternative approaches.
 
 ### Hierarchical Risk Parity
 
@@ -120,3 +133,28 @@ Hierarchical Risk Parity (HRP) applies graph theory and machine-learning to buil
 
 - [Building diversified portfolios that outperform out of sample](https://jpm.pm-research.com/content/42/4/59.short), Marcos López de Prado, The Journal of Portfolio Management 42, no. 4 (2016): 59-69.
 - [Hierarchical Clustering Based Asset Allocation](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2840729), Thomas Raffinot, 2016
+
+We demonstrate how to implement HRP and compare it to alternatives in Chapter 13 on [Unsupervised Learning](../13_unsupervised_learning) where we also introduce hierarchical clustering.
+
+## Trading and managing a portfolio with `Zipline`
+
+The open source [zipline](http://www.zipline.io/index.html) library is an event-driven backtesting system maintained and used in production by the crowd-sourced quantitative investment fund [Quantopian](https://www.quantopian.com/) to facilitate algorithm-development and live-trading. It automates the algorithm's reaction to trade events and provides it with current and historical point-in-time data that avoids look-ahead bias. [Chapter 8 - The ML4T Workflow](../08_strategy_workflow) has a more detailed, dedicated introduction to backtesting using both `zipline` and `backtrader`. 
+
+In [Chapter 4](../04_alpha_factor_research), we introduced `zipline` to simulate the computation of alpha factors from trailing cross-sectional market, fundamental, and alternative data. Now we will exploit the alpha factors to derive and act on buy and sell signals. 
+
+### Code Examples: Backtests with trades and portfolio optimization 
+
+The code for this section lives in the following two notebooks: 
+- The notebooks in this section rely on the `conda` environment `ml4t-zipline`. For installation, please see instructions provided [here](../installation).
+- The notebook [backtest_with_trades](01_backtest_with_trades.ipynb) simulates the trading decisions that build a portfolio based on the simple MeanReversion alpha factor from the last chapter using Zipline. We not explicitly optimize the portfolio weights and just assign positions of equal value to each holding.
+- The notebook [backtest_with_pf_optimization](02_backtest_with_pf_optimization.ipynb) demonstrates how to use PF optimization as part of a simple strategy backtest. 
+
+## Measure backtest performance with `pyfolio`
+
+Pyfolio facilitates the analysis of portfolio performance and risk in-sample and out-of-sample using many standard metrics. It produces tear sheets covering the analysis of returns, positions, and transactions, as well as event risk during periods of market stress using several built-in scenarios, and also includes Bayesian out-of-sample performance analysis.
+
+### Code Example: `pyfolio` evaluation from a `Zipline` backtest
+
+The notebook [pyfolio_demo](03_pyfolio_demo.ipynb) illustrates how to extract the `pyfolio` input from the backtest conducted in the previous folder. It then proceeds to calcuate several performance metrics and tear sheets using `pyfolio`
+
+- The notebook relies on the `conda` environment `ml4t-zipline`. For installation, please see instructions provided [here](../installation).
