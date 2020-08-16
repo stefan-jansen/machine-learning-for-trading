@@ -1,16 +1,40 @@
-# Extracting better features: Word Embeddings for SEC Filings
+# Word Embeddings for Earnings Calls and SEC Filings 
 
 This chapter introduces uses neural networks to learn a vector representation of individual semantic units like a word or a paragraph. These vectors are dense rather than sparse as in the bag-of-words model and have a few hundred real-valued rather than tens of thousand binary or discrete entries. They are called embeddings because they assign each semantic unit a location in a continuous vector space.
  
 Embeddings result from training a model to relate tokens to their context with the benefit that similar usage implies a similar vector. As a result, the embeddings encode semantic aspects like relationships among words by means of their relative location. They are powerful features for use in the deep learning models that we will introduce in the following chapters. More specifically, in this chapter, we will cover:
-- What word embeddings are, how they work and capture semantic information
-- How to use trained word vectors
-- Which network architectures are useful to train word2vec models
-- How to train a word2vec model using keras, gensim, and TensorFlow
-- How to visualize and evaluate the quality of word vectors
-- How to train a word2vec model using SEC filings
-- How doc2vec extends word2vec using SEC filings
-- How doc2vec extends word2vec
+- What word embeddings are, how they work, and why they capture semantic information
+- How to obtain and use pre-trained word vectors
+- Which network architectures are most effective at training word2vec models
+- How to train a word2vec model using Keras, Gensim, and TensorFlow
+- Visualizing and evaluating the quality of word vectors
+- How to train a word2vec model on SEC filings to predict stock price moves
+- How doc2vec extends word2vec and can be used for sentiment analysis
+- Why the transformer’s attention mechanism had such an impact on natural language processing
+- How to fine-tune pre-trained BERT models on financial data and extract high-quality embeddings
+
+## Content
+
+1. [How Word Embeddings encode Semantics](#how-word-embeddings-encode-semantics)
+    * [How neural language models learn usage in context](#how-neural-language-models-learn-usage-in-context)
+    * [The word2vec Model: scalable word and phrase embeddings](#the-word2vec-model-scalable-word-and-phrase-embeddings)
+    * [Evaluating embeddings: vector arithmetic and analogies](#evaluating-embeddings-vector-arithmetic-and-analogies)
+2. [Code example: Working with embedding models](#code-example-working-with-embedding-models)
+    * [Working with Global Vectors for Word Representation (GloVe)](#working-with-global-vectors-for-word-representation-glove)
+    * [Evaluating embeddings using analogies](#evaluating-embeddings-using-analogies)
+3. [Code example: training domain-specific embeddings using financial news](#code-example-training-domain-specific-embeddings-using-financial-news)
+    * [Preprocessing financial news: sentence detection and n-grams](#preprocessing-financial-news-sentence-detection-and-n-grams)
+    * [Skip-gram architecture in TensorFlow 2 and visualization with TensorBoard](#skip-gram-architecture-in-tensorflow-2-and-visualization-with-tensorboard)
+    * [How to train embeddings faster with Gensim](#how-to-train-embeddings-faster-with-gensim)
+4. [Code Example: word Vectors from SEC Filings using gensim](#code-example-word-vectors-from-sec-filings-using-gensim)
+    * [Preprocessing: content selection, sentence detection, and n-grams](#preprocessing-content-selection-sentence-detection-and-n-grams)
+    * [Model training and evaluation](#model-training-and-evaluation)
+5. [Code example: sentiment Analysis with Doc2Vec](#code-example-sentiment-analysis-with-doc2vec)
+6. [New Frontiers: Attention, Transformers, and Pretraining](#new-frontiers-attention-transformers-and-pretraining)
+    * [Attention is all you need: transforming natural language generation](#attention-is-all-you-need-transforming-natural-language-generation)
+    * [BERT: Towards a more universal, pretrained language model](#bert-towards-a-more-universal-pretrained-language-model)
+    * [Using pretrained state-of-the-art models](#using-pretrained-state-of-the-art-models)
+7. [Additional Resources](#additional-resources)
 
 ## How Word Embeddings encode Semantics
 
@@ -27,8 +51,8 @@ In contrast, the bag-of-words model uses the entire documents as context and use
 ### The word2vec Model: scalable word and phrase embeddings
 
 A word2vec model is a two-layer neural net that takes a text corpus as input and outputs a set of embedding vectors for words in that corpus. There are two different architectures to efficiently learn word vectors using shallow neural networks.
-- The continuous-bag-of-words (CBOW) model predicts the target word using the average of the context word vectors as input so that their order does not matter. CBOW trains faster and tends to be slightly more accurate for frequent terms, but pays less attention to infrequent words.
-- The skip-gram (SG) model, in contrast, uses the target word to predict words sampled from the context. It works well with small datasets and finds good representations even for rare words or phrases.
+- The **continuous-bag-of-words** (CBOW) model predicts the target word using the average of the context word vectors as input so that their order does not matter. CBOW trains faster and tends to be slightly more accurate for frequent terms, but pays less attention to infrequent words.
+- The **skip-gram** (SG) model, in contrast, uses the target word to predict words sampled from the context. It works well with small datasets and finds good representations even for rare words or phrases.
 
 ### Evaluating embeddings: vector arithmetic and analogies
 
@@ -38,18 +62,14 @@ Just as words can be used in different contexts, they can be related to other wo
 
 The word2vec authors provide a list of several thousand relationships spanning aspects of geography, grammar and syntax, and family relationships to evaluate the quality of embedding vectors (see directory [analogies](data/analogies)).
 
-## Working with embedding models
+## Code example: Working with embedding models
 
 Similar to other unsupervised learning techniques, the goal of learning embedding vectors is to generate features for other tasks like text classification or sentiment analysis.
 There are several options to obtain embedding vectors for a given corpus of documents:
 - Use embeddings learned from a generic large corpus like Wikipedia or Google News
 - Train your own model using documents that reflect a domain of interest
 
-### Using trained word vectors
-
-There are several sources for pre-trained word embeddings. Popular options include Stanford’s GloVE and spaCy’s built-in vectors (see the notebook [using_trained_vectors ](02_using_trained_vectors.ipynb) for details).
-
-#### GloVe: Global Vectors for Word Representation
+### Working with Global Vectors for Word Representation (GloVe)
 
 GloVe is an unsupervised algorithm developed at the Stanford NLP lab that learns vector representations for words from aggregated global word-word co-occurrence statistics (see references). Vectors pre-trained on the following web-scale sources are available:
 - Common Crawl with 42B or 840B tokens and a vocabulary of 1.9M or 2.2M tokens
@@ -68,30 +88,53 @@ The following table shows the accuracy on the word2vec semantics test achieved b
 | adjective-to-adverb      | 992     | 22.58%   | plural                | 1332    | 78.08%   |
 | opposite                 | 756     | 28.57%   | plural-verbs          | 870     | 58.51%   |
 
-### How to train your own word vector embeddings
+There are several sources for pre-trained word embeddings. Popular options include Stanford’s GloVE and spaCy’s built-in vectors.
+- The notebook [using_trained_vectors ](01_using_trained_vectors.ipynb) illustrates how to work with pretrained vectors.
 
-Many tasks require embeddings or domain-specific vocabulary that pre-trained models based on a generic corpus may not represent well or at all. Standard word2vec models are not able to assign vectors to out-of-vocabulary words and instead use a default vector that reduces their predictive value.
+### Evaluating embeddings using analogies
 
-E.g., when working with industry-specific documents, the vocabulary or its usage may change over time as new technologies or products emerge. As a result, the embeddings need to evolve as well. In addition, corporate earnings releases use nuanced language not fully reflected in Glove vectors pre-trained on Wikipedia articles.
+The notebook [evaluating_embeddings](02_evaluating_embeddings.ipynb) demonstrates how to test the quality of word vectors using analogies and other semantic relationships among words.
 
-- [Word embeddings | TensorFlow Core](https://www.tensorflow.org/tutorials/text/word_embeddings)
-- [Visualizing Data using the Embedding Projector in TensorBoard](https://www.tensorflow.org/tensorboard/tensorboard_projector_plugin)
+## Code example: training domain-specific embeddings using financial news
 
-### Bonus: word2vec for translation
+Many tasks require embeddings of domain-specific vocabulary that models pre-trained on a generic corpus may not be able to capture. Standard word2vec models are not able to assign vectors to out-of-vocabulary words and instead use a default vector that reduces their predictive value. 
 
-- [Exploiting Similarities among Languages for Machine Translation](https://arxiv.org/abs/1309.4168), Tomas Mikolov, Quoc V. Le, Ilya Sutskever, arxiv 2013
-- [Word and Phrase Translation with word2vec](https://arxiv.org/abs/1705.03127), Stefan Jansen, arxiv, 2017
+For example, when working with industry-specific documents, the vocabulary or its usage may change over time as new technologies or products emerge. As a result, the embeddings need to evolve as well. In addition, documents like corporate earnings releases use nuanced language that GloVe vectors pre-trained on Wikipedia articles are unlikely to properly reflect.
 
-## Word Vectors from SEC Filings using gensim
+See the [data](../data) directory for instructions on sourcing the financial news dataset.
+
+### Preprocessing financial news: sentence detection and n-grams
+
+The notebook [financial_news_preprocessing](03_financial_news_preprocessing.ipynb) demonstrates how to prepare the source data for our model
+
+### Skip-gram architecture in TensorFlow 2 and visualization with TensorBoard
+
+The notebook [financal_news_word2vec_tensorflow](04_financal_news_word2vec_tensorflow.ipynb) illustrates how to build a word2vec model using the Keras interface of TensorFlow 2 that we will introduce in much more detail in the next chapter. 
+
+### How to train embeddings faster with Gensim
+
+The TensorFlow implementation is very transparent in terms of its architecture, but it is not particularly fast. The natural language processing (NLP) library [gensim](https://radimrehurek.com/gensim/) that we also used for topic modeling in the last chapter, offers better performance and more closely resembles the C-based word2vec implementation provided by the original authors.
+
+The notebook [inancial_news_word2vec_gensim](05_financial_news_word2vec_gensim.ipynb) shows how to learn word vectors more efficiently.
+
+## Code Example: word Vectors from SEC Filings using gensim
 
 In this section, we will learn word and phrase vectors from annual SEC filings using gensim to illustrate the potential value of word embeddings for algorithmic trading. In the following sections, we will combine these vectors as features with price returns to train neural networks to predict equity prices from the content of security filings.
 
-In particular, we use a dataset containing over 22,000 10-K annual reports from the period 2013-2016 that are filed by listed companies and contain both financial information and management commentary (see chapter 3 on Alternative Data). For about half of 11K filings for companies that we have stock prices to label the data for predictive modeling (see references about data source and the notebooks in the folder [sec-filings](sec-filings) for details). 
+In particular, we use a dataset containing over 22,000 10-K annual reports from the period 2013-2016 that are filed by listed companies and contain both financial information and management commentary (see Chapter 3 on [Alternative Data](../03_alternative_data)). For about half of 11K filings for companies that we have stock prices to label the data for predictive modeling (see references about data source and the notebooks in the folder [sec-filings](sec-filings) for details). 
 
 - [2013-2016 Cleaned/Parsed 10-K Filings with the SEC](https://data.world/jumpyaf/2013-2016-cleaned-parsed-10-k-filings-with-the-sec)
 - [Stock Market Predictions with Natural Language Deep Learning](https://www.microsoft.com/developerblog/2017/12/04/predicting-stock-performance-deep-learning/)
 
-## Sentiment Analysis with Doc2Vec
+### Preprocessing: content selection, sentence detection, and n-grams
+
+The notebook [sec_preprocessing](06_sec_preprocessing.ipynb) shows how to parse and tokenize the text using spaCy, similar to the approach in Chapter 14, [Text Data for Trading: Sentiment Analysis](../14_working_with_text_data). 
+
+### Model training and evaluation
+
+The notebook [sec_word2vec](07_sec_word2vec.ipynb) uses gensim's [word2vec](https://radimrehurek.com/gensim/models/word2vec.html) implementation of the skip-gram architecture to learn word vectors for the SEC filings dataset.
+
+## Code example: sentiment Analysis with Doc2Vec
 
 Text classification requires combining multiple word embeddings. A common approach is to average the embedding vectors for each word in the document. This uses information from all embeddings and effectively uses vector addition to arrive at a different location point in the embedding space. However, relevant information about the order of words is lost. 
 
@@ -99,7 +142,7 @@ In contrast, the state-of-the-art generation of embeddings for pieces of text li
 - The distributed bag of words (DBOW) model corresponds to the Word2Vec CBOW model. The document vectors result from training a network on the synthetic task of predicting a target word based on both the context word vectors and the document's doc vector.
 - The distributed memory (DM) model corresponds to the word2wec skipgram architecture. The doc vectors result from training a neural net to predict a target word using the full document’s doc vector.
 
-The notebook [yelp_sentiment](doc2vec/yelp_sentiment.ipynb) applied doc2vec to a random sample of 1mn Yelp reviews with their associated star ratings.
+The notebook [doc2vec_yelp_sentiment](08_doc2vec_yelp_sentiment.ipynb) applies doc2vec to a random sample of 1mn Yelp reviews with their associated star ratings.
 
 ## New Frontiers: Attention, Transformers, and Pretraining
 
@@ -136,7 +179,7 @@ The BERT model builds on two key ideas, namely the transformer architecture desc
 - [Sentence Transformers: Multilingual Sentence Embeddings using BERT / RoBERTa / XLM-RoBERTa & Co. with PyTorch]
      -BERT / RoBERTa / XLM-RoBERTa produces out-of-the-box rather bad sentence embeddings. This repository fine-tunes BERT / RoBERTa / DistilBERT / ALBERT / XLNet with a siamese or triplet network structure to produce semantically meaningful sentence embeddings that can be used in unsupervised scenarios: Semantic textual similarity via cosine-similarity, clustering, semantic search.
 
-### Resources
+## Additional Resources
 
 - [GloVe: Global Vectors for Word Representation](https://github.com/stanfordnlp/GloVe)
 - [Common Crawl Data](http://commoncrawl.org/the-data/)
@@ -144,3 +187,5 @@ The BERT model builds on two key ideas, namely the transformer architecture desc
 - [spaCy word vectors and semantic similarity](https://spacy.io/usage/vectors-similarity)
 - [2013-2016 Cleaned/Parsed 10-K Filings with the SEC](https://data.world/jumpyaf/2013-2016-cleaned-parsed-10-k-filings-with-the-sec)
 - [Stanford Sentiment Tree Bank](https://nlp.stanford.edu/sentiment/treebank.html)
+- [Word embeddings | TensorFlow Core](https://www.tensorflow.org/tutorials/text/word_embeddings)
+- [Visualizing Data using the Embedding Projector in TensorBoard](https://www.tensorflow.org/tensorboard/tensorboard_projector_plugin)

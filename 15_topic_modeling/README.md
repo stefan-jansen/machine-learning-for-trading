@@ -12,6 +12,26 @@ Topic models permit the extraction of sophisticated, interpretable text features
 - How to implement LDA using sklearn and gensim
 - How to apply topic modeling to collections of earnings calls and Yelp business reviews
 
+## Content
+
+1. [Learning latent topics: goals and approaches](#learning-latent-topics-goals-and-approaches)
+2. [Latent semantic indexing (LSI)](#latent-semantic-indexing-lsi)
+    * [Code example: how to implement LSI using scikit-learn](#code-example-how-to-implement-lsi-using-scikit-learn)
+3. [Probabilistic Latent Semantic Analysis (pLSA)](#probabilistic-latent-semantic-analysis-plsa)
+    * [Code example: how to implement pLSA using scikit-learn](#code-example-how-to-implement-plsa-using-scikit-learn)
+4. [Latent Dirichlet Allocation (LDA)](#latent-dirichlet-allocation-lda)
+    * [Code example: the Dirichlet distribution](#code-example-the-dirichlet-distribution)
+    * [How to evaluate LDA topics](#how-to-evaluate-lda-topics)
+    * [Code example: how to implement LDA using scikit-learn](#code-example-how-to-implement-lda-using-scikit-learn)
+    * [How to visualize LDA results using pyLDAvis](#how-to-visualize-lda-results-using-pyldavis)
+    * [Code example: how to implement LDA using gensim](#code-example-how-to-implement-lda-using-gensim)
+    * [References](#references)
+5. [Code example: Modeling topics discussed during earnings calls](#code-example-modeling-topics-discussed-during-earnings-calls)
+6. [Code example: topic modeling with financial news articles](#code-example-topic-modeling-with-financial-news-articles)
+7. [Resources](#resources)
+    * [Applications](#applications)
+    * [Topic Modeling libraries](#topic-modeling-libraries)
+
 ## Learning latent topics: goals and approaches
 
 Initial attempts by topic models to improve on the vector space model (developed in the mid-1970s) applied linear algebra to reduce the dimensionality of the document-term matrix. This approach is similar to the algorithm we discussed as principal component analysis in chapter 12 on unsupervised learning. While effective, it is difficult to evaluate the results of these models absent a benchmark model.
@@ -19,7 +39,6 @@ Initial attempts by topic models to improve on the vector space model (developed
 In response, probabilistic models emerged that assume an explicit document generation process and provide algorithms to reverse engineer this process and recover the underlying topics.
 
 The below table highlights key milestones in the model evolution that we will address in more detail in the following sections.
-
 
 | Model                                         | Year | Description                                                                                                   |
 |-----------------------------------------------|------|---------------------------------------------------------------------------------------------------------------|
@@ -33,7 +52,7 @@ Latent Semantic Analysis set out to improve the results of queries that omitted 
 
 LSI uses linear algebra to find a given number k of latent topics by decomposing the DTM. More specifically, it uses the Singular Value Decomposition (SVD) to find the best lower-rank DTM approximation using k singular values & vectors. In other words, LSI is an application of the unsupervised learning techniques of dimensionality reduction we encountered in chapter 12 (with some additional detail). The authors experimented with hierarchical clustering but found it too restrictive to explicitly model the document-topic and topic-term relationships or capture associations of documents or terms with several topics.
 
-### How to implement LSI using sklearn
+### Code example: how to implement LSI using scikit-learn
 
 The notebook [latent_semantic_indexing](01_latent_semantic_indexing.ipynb) demonstrates how to apply LSI to the BBC new articles we used in the last chapter.
 
@@ -43,26 +62,21 @@ Probabilistic Latent Semantic Analysis (pLSA) takes a statistical perspective on
 
 pLSA explicitly models the probability each co-occurrence of documents d and words w described by the DTM as a mixture of conditionally independent multinomial distributions that involve topics t. The number of topics is a hyperparameter chosen prior to training and is not learned from the data.
 
-### How to implement pLSA using sklearn
+### Code example: how to implement pLSA using scikit-learn
  
 The notebook [probabilistic_latent_analysis](02_probabilistic_latent_analysis.ipynb) demonstrates how to apply LSI to the BBC new articles we used in the last chapter.
 
 - [Relation between PLSA and NMF and Implications](http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.70.8839&rep=rep1&type=pdf), Gaussier, Goutte, 2005
 
-## LDA:
+## Latent Dirichlet Allocation (LDA)
 
 Latent Dirichlet Allocation extends pLSA by adding a generative process for topics.
 It is the most popular topic model because it tends to produce meaningful topics that humans, can relate to, can assign topics to new documents, and is extensible. Variants of LDA models can include metadata like authors, or include image data, or learn hierarchical topics.
 
 LDA is a hierarchical Bayesian model that assumes topics are probability distributions over words, and documents are distributions over topics. More specifically, the model assumes that topics follow a sparse Dirichlet distribution, which implies that documents cover only a small set of topics, and topics use only a small set of words frequently. 
 
-#### References
+### Code example: the Dirichlet distribution
 
-- [David Blei Homepage @ Columbia](http://www.cs.columbia.edu/~blei/)
-- [Introductory Paper](http://www.cs.columbia.edu/~blei/papers/Blei2012.pdf) and [more technical review paper](http://www.cs.columbia.edu/~blei/papers/BleiLafferty2009.pdf)
-- [Blei Lab @ GitHub](https://github.com/Blei-Lab)
-
-### The Dirichlet Distribution
 The Dirichlet distribution produces probability vectors that can be used with discrete distributions. That is, it randomly generates a given number of values that are positive and sum to one. It has a parameter 𝜶 of positive real value that controls the concentration of the probabilities.
 
 The notebook [dirichlet_distribution](03_dirichlet_distribution.ipynb) contains a simulation so you can experiment with different parameter values.
@@ -73,19 +87,9 @@ Unsupervised topic models do not provide a guarantee that the result will be mea
 
 Two options to evaluate results more objectively include perplexity that evaluates the model on unseen documents and topic coherence metrics that aim to evaluate the semantic quality of the uncovered patterns.
 
-#### References
-
-- [Exploring Topic Coherence over many models and many topics](https://www.aclweb.org/anthology/D/D12/D12-1087.pdf)
-- [Paper on various Methods](http://www.aclweb.org/anthology/N10-1012)
-- [Blog Post - Overview](http://qpleple.com/topic-coherence-to-evaluate-topic-models/)
-
-### How to implement LDA using sklearn
+### Code example: how to implement LDA using scikit-learn
 
 The notebook [lda_with_sklearn](04_lda_with_sklearn.ipynb) shows how to apply LDA to the BBC news articles. We use [sklearn.decomposition.LatentDirichletAllocation](http://scikit-learn.org/stable/modules/generated/sklearn.decomposition.LatentDirichletAllocation.html) to train an LDA model with five topics.
-
-#### Code Examples
-
-The notebook `lda_with_sklearn` contains the code examples used in this section.
 
 ### How to visualize LDA results using pyLDAvis
 
@@ -96,34 +100,42 @@ pyLDAvis displays the global relationships among topics while also facilitating 
 - [Talk by the Author](https://speakerdeck.com/bmabey/visualizing-topic-models) and [Paper by (original) Author](http://www.aclweb.org/anthology/W14-3110)
 - [Documentation](http://pyldavis.readthedocs.io/en/latest/index.html)
 
-### How to implement LDA using gensim
+### Code example: how to implement LDA using gensim
 
-Gensim is a specialized NLP library with a fast LDA implementation and many additional features. We will also use it in the next chapter on word vectors (see the notebook [lda_with_gensim](05_lda_with_gensim.ipynb) for details.
+Gensim is a specialized NLP library with a fast LDA implementation and many additional features. We will also use it in the next chapter to learn word vectors (see the notebook [lda_with_gensim](05_lda_with_gensim.ipynb) for details.
 
-### Topic modeling for earnings calls
+### References
 
-In Chapter 3 on [Alternative Data](../03_alternative_data/02_earnings_calls), we learned how to scrape earnings call data from the SeekingAlpha site. In this section, we will illustrate topic modeling on the harvested data. 
+- [David Blei Homepage @ Columbia](http://www.cs.columbia.edu/~blei/)
+- [Introductory Paper](http://www.cs.columbia.edu/~blei/papers/Blei2012.pdf) and [more technical review paper](http://www.cs.columbia.edu/~blei/papers/BleiLafferty2009.pdf)
+- [Blei Lab @ GitHub](https://github.com/Blei-Lab)
+- [Exploring Topic Coherence over many models and many topics](https://www.aclweb.org/anthology/D/D12/D12-1087.pdf)
+- [Paper on various Methods](http://www.aclweb.org/anthology/N10-1012)
+- [Blog Post - Overview](http://qpleple.com/topic-coherence-to-evaluate-topic-models/)
 
-We're using a (small) sample of some 1,000 earnings call transcripts from the second half of 2018. For a practical application, a larger dataset would be highly desirable. 
+## Code example: Modeling topics discussed during earnings calls
 
-The directory [earnings_calls](06_earnings_calls) contains several files with examples mentioned below. See the notebook [lda_earnings_calls](06_earnings_calls/lda_earnings_calls.ipynb) for details on loading, exploring, and preprocessing the data, as well as training and evaluating individual models, and the [run_experiments.py](06_earnings_calls/run_experiments.py)) file for the experiments evaluated in the notebook.
+In Chapter 3 on [Alternative Data](../03_alternative_data/02_earnings_calls), we learned how to scrape earnings call data from the SeekingAlpha site. 
 
-### Topic modeling for Yelp business reviews
+In this section, we will illustrate topic modeling using this source. I’m using a sample of some 700 earnings call transcripts from 2018 and 2019 (see [data](../data) directory). This is a fairly small sample; for a practical application, we would need a larger dataset.  
+ 
+The notebook [lda_earnings_calls](06_lda_earnings_calls.ipynb) contains details on loading, exploring, and preprocessing the data, as well as training and evaluating different models.
 
-The notebook [lda_yelp_reviews](07_yelp/lda_yelp_reviews.ipynb) contains an example of LDA applied to six million business review on yelp. Reviews are a more uniform in length than the statements extracted from the earnings call transcript. After cleaning as above, the 10th and 90th percentile range from 14 to 90 tokens.
+## Code example: topic modeling with financial news articles
 
-## Applications
+The notebook [lda_financial_news](07_lda_financial_news.ipynb) shows how to summarize a large corpus of financial news articles sourced from Reuters and others (see [data](../data) for sources) using LDA.
+
+## Resources
+
+### Applications
 
 - [Applications of Topic Models](https://mimno.infosci.cornell.edu/papers/2017_fntir_tm_applications.pdf), Jordan Boyd-Graber, Yuening Hu, David Minmo, 2017
-
 - [High Quality Topic Extraction from Business News Explains Abnormal Financial Market Volatility](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3675119/pdf/pone.0064846.pdf)
 - [What are You Saying? Using Topic to Detect Financial Misreporting](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2803733)
-
 - [LDA in the browser - javascript implementation](https://github.com/mimno/jsLDA)
 - [David Mimno @ Cornell University](https://mimno.infosci.cornell.edu/)
 
+### Topic Modeling libraries
 
-## Topic Modeling Software
 - [David Blei's List of Open Source Topic Modeling Software](http://www.cs.columbia.edu/~blei/topicmodeling_software.html)
-
 - [Mallet (MAchine Learning for LanguagE Toolkit (in Java)](http://mallet.cs.umass.edu/)

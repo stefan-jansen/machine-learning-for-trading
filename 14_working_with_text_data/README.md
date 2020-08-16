@@ -10,14 +10,37 @@ In the following two chapters, we build on these techniques and use ML algorithm
 
 In particular, in this chapter we will cover:
 - What the fundamental NLP workflow looks like
-- How to build a multilingual feature extraction pipeline using spaCy and Textblob
-- How to perform NLP tasks like part-of-speech tagging or named entity recognition
-- How to convert tokens to numbers using the document-term matrix
-- How to classify text using the Naive Bayes model
+- How to build a multilingual feature extraction pipeline using spaCy and TextBlob
+- Performing NLP tasks like part-of-speech tagging or named entity recognition
+- Converting tokens to numbers using the document-term matrix
+- Classifying text using the naive Bayes model
 - How to perform sentiment analysis
 
+## Content
 
-## How to extract features from text data
+1. [ML with text data - from language to features](#ml-with-text-data---from-language-to-features)
+    * [Challenges of Natural Language Processing](#challenges-of-natural-language-processing)
+    * [Use cases](#use-cases)
+    * [The NLP workflow](#the-nlp-workflow)
+2. [From text to tokens – the NLP pipeline](#from-text-to-tokens--the-nlp-pipeline)
+    * [Code example: NLP pipeline with spaCy and textacy](#code-example-nlp-pipeline-with-spacy-and-textacy)
+        - [Data](#data)
+    * [Code example: NLP with TextBlob](#code-example-nlp-with-textblob)
+3. [Counting tokens – the document-term matrix](#counting-tokens--the-document-term-matrix)
+    * [Code example: document-term matrix with scikit-learn](#code-example-document-term-matrix-with-scikit-learn)
+4. [NLP for trading: text classification and sentiment analysis](#nlp-for-trading-text-classification-and-sentiment-analysis)
+    * [The Naive Bayes classifier](#the-naive-bayes-classifier)
+    * [Code example: news article classification](#code-example-news-article-classification)
+    * [Code examples: sentiment analysis](#code-examples-sentiment-analysis)
+        - [Binary classification: twitter data](#binary-classification-twitter-data)
+        - [Comparing different ML algorithms on large, multiclass Yelp data](#comparing-different-ml-algorithms-on-large-multiclass-yelp-data)
+
+## ML with text data - from language to features
+
+Text data can be extremely valuable given how much information humans communicate and store using natural language. The diverse set of data sources relevant to investment range from formal documents like company statements, contracts, or patents to news, opinion, and analyst research or commentary to various types of social media postings or messages. 
+
+Useful resources include:
+
 - [Speech and Language Processing](https://web.stanford.edu/~jurafsky/slp3/ed3book.pdf), Daniel Jurafsky & James H. Martin, 3rd edition, draft, 2018
 - [Statistical natural language processing and corpus-based computational linguistics](https://nlp.stanford.edu/links/statnlp.html), Annotated list of resources, Stanford University
 - [NLP Data Sources](https://github.com/niderhoff/nlp-datasets)
@@ -33,9 +56,7 @@ NLP is challenging because the effective use of text data for machine learning r
 - entity names can be tricky : ‘Where is A Bug's Life playing?’
 - the need for knowledge about the world: ‘Mary and Sue are sisters’ vs ‘Mary and Sue are mothers’
 
-### Use Cases
-
-Key NLP use cases include:
+### Use cases
 
 | Use Case  | Description  | Examples  |
 |---|---|---|
@@ -51,10 +72,18 @@ Key NLP use cases include:
 | Speech recognition and generation | Speech-to-text, text-to-speech | [Google's Web Speech API demo](https://www.google.com/intl/en/chrome/demos/speech.html), [Vocalware Text-to-Speech demo](https://www.vocalware.com/index/demo) |
 | Question answering | Determine the intent of the question, match query with knowledge base, evaluate hypotheses | [How did Watson beat Jeopardy champion Ken Jennings?](http://blog.ted.com/how-did-supercomputer-watson-beat-jeopardy-champion-ken-jennings-experts-discuss/), [Watson Trivia Challenge](http://www.nytimes.com/interactive/2010/06/16/magazine/watson-trivia-game.html), [The AI Behind Watson](http://www.aaai.org/Magazine/Watson/watson.php)
 
+### The NLP workflow
+
+A key goal for using machine learning from text data for algorithmic trading is to extract signals from documents. A document is an individual sample from a relevant text data source, e.g. a company report, a headline or news article, or a tweet. A corpus, in turn, is a collection of documents.
+The following figure lays out key steps to convert documents into a dataset that can be used to train a supervised machine learning algorithm capable of making actionable predictions.
+
+<p align="center">
+<img src="https://i.imgur.com/LPxpc8D.png" width="90%">
+</p>
+
 ## From text to tokens – the NLP pipeline
 
 The following table summarizes the key tasks of an NLP pipeline:
-
 
 | Feature                     | Description                                                       |
 |-----------------------------|-------------------------------------------------------------------|
@@ -66,23 +95,18 @@ The following table summarizes the key tasks of an NLP pipeline:
 | Named Entity Recognition    | Label "real-world" objects, like persons, companies or locations. |
 | Similarity                  | Evaluate similarity of words, text spans, and documents.          |
 
-
-### NLP pipeline with spaCy and textacy
+### Code example: NLP pipeline with spaCy and textacy
 
 The notebook [nlp_pipeline_with_spaCy](01_nlp_pipeline_with_spaCy.ipynb) demonstrates how to construct an NLP pipeline using the open-source python library [spaCy]((https://spacy.io/)). The [textacy](https://chartbeat-labs.github.io/textacy/index.html) library builds on spaCy and provides easy access to spaCy attributes and additional functionality.
 
 - spaCy [docs](https://spacy.io/) and installation [instructions](https://spacy.io/usage/#installation)
 - textacy relies on `spaCy` to solve additional NLP tasks - see [documentation](https://chartbeat-labs.github.io/textacy/index.html)
 
-#### Code Examples
-
-The code for this section is in the notebook `nlp_pipeline_with_spaCy`
-
 #### Data
 - [BBC Articles](http://mlg.ucd.ie/datasets/bbc.html), use raw text files
 - [TED2013](http://opus.nlpl.eu/TED2013.php), a parallel corpus of TED talk subtitles in 15 langugages
 
-### NLP with TextBlob
+### Code example: NLP with TextBlob
 
 The `TextBlob` library provides a simplified interface for common NLP tasks including part-of-speech tagging, noun phrase extraction, sentiment analysis, classification, translation, and others.
 
@@ -95,13 +119,13 @@ A good alternative is NLTK, a leading platform for building Python programs to w
 
 - Natural Language ToolKit (NLTK) [Documentation](http://www.nltk.org/)
 
-## From tokens to numbers – the document-term matrix
+## Counting tokens – the document-term matrix
 
 This section introduces the bag-of-words model that converts text data into a numeric vector space representation that permits the comparison of documents using their distance. We demonstrate how to create a document-term matrix using the sklearn library.
 
 - [TF-IDF is about what matters](https://planspace.org/20150524-tfidf_is_about_what_matters/)
 
-### Document-term matrix with sklearn
+### Code example: document-term matrix with scikit-learn
 
 The scikit-learn preprocessing module offers two tools to create a document-term matrix. 
 1. The [CountVectorizer](http://scikit-learn.org/stable/modules/generated/sklearn.feature_extraction.text.CountVectorizer.html) uses binary or absolute counts to measure the term frequency tf(d, t) for each document d and token t.
@@ -109,7 +133,7 @@ The scikit-learn preprocessing module offers two tools to create a document-term
 
 The notebook [document_term_matrix](03_document_term_matrix.ipynb) demonstrate usage and configuration.
 
-## Text classification and sentiment analysis
+## NLP for trading: text classification and sentiment analysis
 
 Once text data has been converted into numerical features using the natural language processing techniques discussed in the previous sections, text classification works just like any other classification task.
 
@@ -127,20 +151,21 @@ The Naive Bayes algorithm is very popular for text classification because low co
 
 The model relies on Bayes theorem and the assumption that the various features are independent of each other given the outcome class. In other words, for a given outcome, knowing the value of one feature (e.g. the presence of a token in a document) does not provide any information about the value of another feature.
 
-
-### News article classification
+### Code example: news article classification
 
 We start with an illustration of the Naive Bayes model to classify 2,225 BBC news articles that we know belong to five different categories.
 
 The notebook [text_classification](04_text_classification.ipynb) contains the relevant examples.
 
-### Sentiment Analysis
+### Code examples: sentiment analysis
 
 Sentiment analysis is one of the most popular uses of natural language processing and machine learning for trading because positive or negative perspectives on assets or other price drivers are likely to impact returns. 
 
 Generally, modeling approaches to sentiment analysis rely on dictionaries as the TextBlob library or models trained on outcomes for a specific domain. The latter is preferable because it permits more targeted labeling, e.g. by tying text features to subsequent price changes rather than indirect sentiment scores.
 
-#### Twitter Dataset
+See [data](../data) directory for instructions on obtaining the data.
+
+#### Binary classification: twitter data
 
 We illustrate machine learning for sentiment analysis using a [Twitter dataset](http://cs.stanford.edu/people/alecmgo/trainingandtestdata.zip) with binary polarity labels, and a large Yelp business review dataset with a five-point outcome scale.
 
@@ -148,11 +173,10 @@ The notebook [sentiment_analysis_twitter](05_sentiment_analysis_twitter.ipynb) c
 
 - [Cheng-Caverlee-Lee September 2009 - January 2010 Twitter Scrape](https://archive.org/details/twitter_cikm_2010)
 
-#### Yelp Dataset
+#### Comparing different ML algorithms on large, multiclass Yelp data
 
 To illustrate text processing and classification at larger scale, we also use the [Yelp Dataset](https://www.yelp.com/dataset).
 
 The notebook [sentiment_analysis_yelp](06_sentiment_analysis_yelp.ipynb) contains the relevant example.
 
 - [Yelp Dataset Challenge](https://www.yelp.com/dataset/challenge)
-

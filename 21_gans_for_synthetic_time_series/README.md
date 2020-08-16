@@ -1,94 +1,136 @@
-# Conditional Autoencoders for Asset Pricing and GANs
+# Generative Adversarial Nets for Synthetic Time Series Data
 
-This chapter presents two unsupervised learning techniques that leverage deep learning: autoencoders, which have been around for decades, and Generative Adversarial Networks (GANs), which were introduced by Ian Goodfellow in 2014 and which Yann LeCun has called the most exciting idea in AI in the last ten years. 
-- An autoencoder is a neural network trained to reproduce the input while learning a new representation of the data, encoded by the parameters of a hidden layer. Autoencoders have long been used for nonlinear dimensionality reduction and manifold learning. More recently, autoencoders have been designed as generative models that learn probability distributions over observed and latent variables. A variety of designs leverage the feedforward network, Convolutional Neural Network (CNN), and recurrent neural network (RNN) architectures we covered in the last three chapters.
-- GANs are a recent innovation that train two neural nets—a generator and a discriminator—in a competitive setting. The generator aims to produce samples that the discriminator is unable to distinguish from a given class of training data. The result is a generative model capable of producing new (fake) samples that are representative of a certain target distribution. GANs have produced a wave of research and can be successfully applied in many domains. An example from the medical domain that could potentially be highly relevant for trading is the generation of time-series data that simulates alternative trajectories and can be used to train supervised or reinforcement algorithms.
+This chapter introduces generative adversarial networks (GAN). GANs train a generator and a discriminator network in a competitive setting so that the generator learns to produce samples that the discriminator cannot distinguish from a given class of training data. The goal is to yield a generative model capable of producing synthetic samples representative of this class.
+While most popular with image data, GANs have also been used to generate synthetic time-series data in the medical domain. Subsequent experiments with financial data explored whether GANs can produce alternative price trajectories useful for ML training or strategy backtests. We replicate the 2019 NeurIPS Time-Series GAN paper to illustrate the approach and demonstrate the results.
 
-More specifically, this chapter covers:
+<p align="center">
+<img src="https://i.imgur.com/W1Rp89K.png" width="60%">
+</p>
 
-- Which types of autoencoders are of practical use and how they work
-- How to build and train autoencoders using Python
-- How GANs work, why they're useful, and how they could be applied to trading
-- How to build GANs using Python
+More specifically, in this chapter you will learn about:
+- How GANs work, why they are useful, and how they could be applied to trading
+- Designing and training GANs using TensorFlow 2
+- Generating synthetic financial data to expand the inputs available for training ML models and backtesting
 
-- [Unsupervised Learning](https://cilvr.nyu.edu/lib/exe/fetch.php?media=deeplearning:2016:lecun-20160308-unssupervised-learning-nyu.pdf), Yann LeCun, 2016
+## Content
 
-## How Autoencoders work
+1. [Generative adversarial networks for synthetic data](#generative-adversarial-networks-for-synthetic-data)
+    * [Comparing generative and discriminative models](#comparing-generative-and-discriminative-models)
+    * [Adversarial training: a zero-sum game of trickery](#adversarial-training-a-zero-sum-game-of-trickery)
+2. [Code example: How to build a GAN using TensorFlow 2](#code-example-how-to-build-a-gan-using-tensorflow-2)
+3. [Code example: TimeGAN: Adversarial Training for Synthetic Financial Data](#code-example-timegan-adversarial-training-for-synthetic-financial-data)
+    * [Learning the data generation process across features and time](#learning-the-data-generation-process-across-features-and-time)
+    * [Combining adversarial and supervised training with time-series embedding](#combining-adversarial-and-supervised-training-with-time-series-embedding)
+    * [The four components of the TimeGAN architecture](#the-four-components-of-the-timegan-architecture)
+    * [Implementing TimeGAN using TensorFlow 2](#implementing-timegan-using-tensorflow-2)
+    * [Evaluating the quality of synthetic time-series data](#evaluating-the-quality-of-synthetic-time-series-data)
+4. [Resources](#resources)
+    * [How GAN's work](#how-gans-work)
+    * [Implementation](#implementation)
+    * [The rapid evolution of the GAN architecture zoo](#the-rapid-evolution-of-the-gan-architecture-zoo)
+    * [Applications](#applications)
 
-An autoencoder, in contrast, is a neural network designed exclusively to learn a new representation, that is, an encoding of the input. To this end, the training forces the network to faithfully reproduce the input. Since autoencoders typically use the same data as input and output, they are also considered an instance of self-supervised learning. In the process, the parameters of a hidden layer become the code that represents the input. 
+## Generative adversarial networks for synthetic data
 
-- [Autoencoders](http://www.deeplearningbook.org/contents/autoencoders.html), Ian Goodfellow, Yoshua Bengio and Aaron Courville, Deep Learning Book, Chapter 14, MIT Press 2016
+This book mostly focuses on supervised learning algorithms that receive input data and predict an outcome, which we can compare to the ground truth to evaluate their performance. Such algorithms are also called discriminative models because they learn to differentiate between different output values.
+Generative adversarial networks (GANs) are an instance of generative models like the variational autoencoder we encountered in the [last chapter](../20_autoencoders_for_conditional_risk_factors).
 
-### Nonlinear dimensionality reduction
+### Comparing generative and discriminative models
 
-A traditional use case includes dimensionality reduction, achieved by limiting the size of the hidden layer so that it performs lossy compression. Such an autoencoder is called undercomplete and the purpose is to force it to learn the most salient properties of the data by minimizing a loss function. In addition to feedforward architectures, autoencoders can also use convolutional layers to learn hierarchical feature representations. 
+Discriminative models learn how to differentiate among outcomes y, given input data X. In other words, they learn the probability of the outcome given the data: p(y | X). Generative models, on the other hand, learn the joint distribution of inputs and outcome p(y, X). 
 
-The powerful capabilities of neural networks to represent complex functions require tight limitations of the capacity of the encoder and decoder to force the extraction of a useful signal rather than noise. In other words, when it is too easy for the network to recreate the input, it fails to learn only the most interesting aspects of the data. This challenge is similar to the overfitting phenomenon that frequently occurs when using models with a high capacity for supervised learning. Just as in these settings, regularization can help by adding constraints to the autoencoder that facilitate the learning of a useful representation.
+While generative models can be used as discriminative models using Bayes Rule to compute which class is most likely (see [Chapter 10](../10_bayesian_machine_learning)), it appears often preferable to solve the prediction problem directly rather than by solving the more general generative challenge first.
 
-### Sequence-to-Sequence Autoencoders
+### Adversarial training: a zero-sum game of trickery
 
-Sequence-to-sequence autoencoders are based on RNN components, such as Long Short-Term Memory (LSTM) or Gated Recurrent Units (GRUs). They learn a compressed representation of sequential data and have been applied to video, text, audio, and time-series data.
+The key innovation of GANs is a new way of learning the data-generating probability distribution. The algorithm sets up a competitive, or adversarial game between two neural networks called the generator and the discriminator.
 
-- [A ten-minute introduction to sequence-to-sequence learning in Keras](https://blog.keras.io/a-ten-minute-introduction-to-sequence-to-sequence-learning-in-keras.html), Francois Chollet, September 2017
-- [Unsupervised Learning of Video Representations using LSTMs](https://arxiv.org/abs/1502.04681), Nitish Srivastava, Elman Mansimov, Ruslan Salakhutdinov, 2016
+<p align="center">
+<img src="https://i.imgur.com/0vuUsY0.png" width="80%">
+</p>
 
-### Variational Autoencoders
+## Code example: How to build a GAN using TensorFlow 2
 
-Variational Autoencoders (VAE) are more recent developments focused on generative modeling. More specifically, VAEs are designed to learn a latent variable model for the input data. Note that we encountered latent variables in Chapter 14, Topic Modeling.
+To illustrate the implementation of a generative adversarial network using Python, we use the deep convolutional GAN (DCGAN) example discussed earlier in this section to synthesize images from the fashion MNIST dataset that we first encountered in Chapter 13. 
 
-Hence, VAEs do not let the network learn arbitrary functions as long as it faithfully reproduces the input. Instead, they aim to learn the parameters of a probability distribution that generates the input data. In other words, VAEs are generative models because, if successful, you can generate new data points by sampling from the distribution learned by the VAE.
+The notebook [deep_convolutional_generative_adversarial_network](01_deep_convolutional_generative_adversarial_network.ipynb) illustrates the implementation of a GAN using Python. It uses the Deep Convolutional GAN (DCGAN) example to synthesize images from the fashion MNIST dataset
 
-- [Auto-encoding variational bayes](https://arxiv.org/abs/1312.6114), Diederik P Kingma, Max Welling, 2014
+## Code example: TimeGAN: Adversarial Training for Synthetic Financial Data
 
-## How to build autoencoders using Python
+Generating synthetic time-series data poses specific challenges above and beyond those encountered when designing GANs for images. 
+In addition to the distribution over variables at any given point, such as pixel values or the prices of numerous stocks, a generative model for time-series data should also learn the temporal dynamics that shapes how one sequence of observations follows another (see also discussion in Chapter 9: [Time Series Models for Volatility Forecasts and Statistical Arbitrage](../09_time_series_models)).
 
-The Keras library makes it fairly straightforward to build various types of autoencoders and the following examples are adapted from Keras' tutorials.
+Very recent and promising [research](https://papers.nips.cc/paper/8789-time-series-generative-adversarial-networks.pdf) by Yoon, Jarrett, and van der Schaar, presented at NeurIPS in December 2019, introduces a novel [Time-Series Generative Adversarial Network](https://papers.nips.cc/paper/8789-time-series-generative-adversarial-networks.pdf) (TimeGAN) framework that aims to account for temporal correlations by combining supervised and unsupervised training. 
+The model learns a time-series embedding space while optimizing both supervised and adversarial objectives that encourage it to adhere to the dynamics observed while sampling from historical data during training. 
+The authors test the model on various time series, including historical stock prices, and find that the quality of the synthetic data significantly outperforms that of available alternatives.
 
-- [Building Autoencoders in Keras](https://blog.keras.io/building-autoencoders-in-keras.html)
+### Learning the data generation process across features and time
 
-### Feedforward Autoencoders with Sparsity Constraints
+A successful generative model for time-series data needs to capture both the cross-sectional distribution of features at each point in time and the longitudinal relationships among these features over time. 
+Expressed in the image context we just discussed, the model needs to learn not only what a realistic image looks like, but also how one image evolves from the next as in a video.
 
-The notebook [deep_autoencoders](01_deep_autoencoders.ipynb) illustrates how to implement several of the autoencoder models introduced in the preceding section using Keras. This includes autoencoders using deep feedforward nets and sparsity constraints. 
+### Combining adversarial and supervised training with time-series embedding
 
-### Convolutional & Denoising Autoencoders
+Prior attempts at generating time-series data like the recurrent (conditional) GAN relied on recurrent neural networks (RNN, see Chapter 19, [RNN for Multivariate Time Series and Sentiment Analysis](../19_recurrent_neural_nets)) in the roles of generator and discriminator. 
 
-The notebook [convolutional_denoising_autoencoders](02_convolutional_denoising_autoencoders.ipynb) goes on to demonstrate how to implement convolutionals and denoising autencoders to recover corrupted image inputs.
+TimeGAN explicitly incorporates the autoregressive nature of time series by combining the unsupervised adversarial loss on both real and synthetic sequences familiar from the DCGAN example with a stepwise supervised loss with respect to the original data. 
+The goal is to reward the model for learning the distribution over transitions from one point in time to the next present in the historical data.
 
-### Sequence-to-sequence autoencoders
+### The four components of the TimeGAN architecture
 
-Sequence-to-sequence autoencoders are based on RNN components like long short-term memory (LSTM) or gated recurrent units (GRUs). They learn a compressed representation of sequential data and have been applied to video, text, audio, and time-series data.
+The TimeGAN architecture combines an adversarial network with an autoencoder and has thus four network components as depicted in Figure 21.4:
+Autoencoder: embedding and recovery networks
+Adversarial Network: sequence generator and sequence discriminator components
+<p align="center">
+<img src="https://i.imgur.com/WqoXbr8.png" width="80%">
+</p>
 
-- [Gradient Trader Part 1: The Surprising Usefulness of Autoencoders](https://rickyhan.com/jekyll/update/2017/09/14/autoencoders.html)
-    - [Code examples](https://github.com/0b01/recurrent-autoencoder)
-- [Deep Learning Financial Market Data](http://wp.doc.ic.ac.uk/hipeds/wp-content/uploads/sites/78/2017/01/Steven_Hutt_Deep_Networks_Financial.pdf)
-    - Motivation: Regulators identify prohibited patterns of trading activity detrimental to orderly markets. Financial Exchanges are responsible for maintaining orderly markets. (e.g. Flash Crash and Hound of Hounslow.)
-    - Challenge: Identify prohibited trading patterns quickly and efficiently.
-    Goal: Build a trading pattern search function using Deep Learning. Given a sample trading pattern identify similar patterns in historical LOB data.
-### Variational Autoencoders
+### Implementing TimeGAN using TensorFlow 2
 
-The notebook [variational_autoencoder](03_variational_autoencoder.ipynb) shows how to build a Variational Autoencoder using Keras.
+In this section, we implement the TimeGAN architecture just described. The authors provide sample code using TensorFlow 1 that we port to TensorFlow 2. Building and training TimeGAN requires several steps:
+1. Selecting and preparing real and random time series inputs
+2. Creating the key TimeGAN model components
+3. Defining the various loss functions and train steps used during the three training phases
+4. Running the training loops and logging the results
+5. Generating synthetic time series and evaluating the results
 
-- [Tutorial: What is a variational autoencoder?](https://jaan.io/what-is-variational-autoencoder-vae-tutorial/)
-    - [Variational Autoencoder / Deep Latent Gaussian Model in tensorflow and pytorch](https://github.com/altosaar/variational-autoencoder)
+The notebook [TimeGAN_TF2](02_TimeGAN_TF2.ipynb) shows how to implement these steps.
 
-## Generative Adversarial Networks
+### Evaluating the quality of synthetic time-series data
 
-The supervised learning algorithms that we focused on for most of this book receive input data that's typically complex and predicts a numerical or categorical label that we can compare to the ground truth to evaluate its performance. These algorithms are also called discriminative models because they learn to differentiate between different output classes.
+The TimeGAN authors assess the quality of the generated data with respect to three practical criteria:
+1. **Diversity**: the distribution of the synthetic samples should roughly match that of the real data
+2. **Fidelity**: the sample series should be indistinguishable from the real data, and 
+3. **Usefulness**: the synthetic data should be as useful as their real counterparts for solving a predictive task
 
-The goal of generative models is to produce complex output, such as realistic images, given simple input, which can even be random numbers. They achieve this by modeling a probability distribution over the possible output. This probability distribution can have many dimensions, for example, one for each pixel in an image or its character or token in a document. As a result, the model can generate output that are very likely representative of the class of output. 
+The authors apply three methods to evaluate whether the synthetic data actually exhibits these characteristics:
+1. **Visualization**: for a qualitative diversity assessment of diversity, we use dimensionality reduction (principal components analysis (PCA) and t-SNE, see Chapter 13) to visually inspect how closely the distribution of the synthetic samples resembles that of the original data
+2. **Discriminative Score**: for a quantitative assessment of fidelity, the test error of a time-series classifier such as a 2-layer LSTM (see Chapter 18) let’s us evaluate whether real and synthetic time series can be differentiated or are, in fact, indistinguishable.
+3. **Predictive Score**: for a quantitative measure of usefulness, we can compare the test errors of a sequence prediction model trained on, alternatively, real or synthetic data to predict the next time step for the real data.
+
+The notebook [evaluating_synthetic_data](03_evaluating_synthetic_data.ipynb) contains the relevant code samples.
+
+## Resources
+
+### How GAN's work
 
 - [NIPS 2016 Tutorial: Generative Adversarial Networks](https://arxiv.org/pdf/1701.00160.pdf), Ian Goodfellow, 2017
 - [Why is unsupervised learning important?](https://www.quora.com/Why-is-unsupervised-learning-important), Yoshua Bengio on Quora, 2018
-
-### How GANs work
-
 - [GAN Lab: Understanding Complex Deep Generative Models using Interactive Visual Experimentation](https://www.groundai.com/project/gan-lab-understanding-complex-deep-generative-models-using-interactive-visual-experimentation/), Minsuk Kahng, Nikhil Thorat, Duen Horng (Polo) Chau, Fernanda B. Viégas, and Martin Wattenberg, IEEE Transactions on Visualization and Computer Graphics, 25(1) (VAST 2018), Jan. 2019
     - [GitHub](https://poloclub.github.io/ganlab/)
 - [Generative Adversarial Networks](https://arxiv.org/abs/1406.2661), Ian Goodfellow, et al, 2014
 - [Generative Adversarial Networks: an Overview](https://arxiv.org/pdf/1710.07035.pdf), Antonia Creswell, et al, 2017
 - [Generative Models](https://blog.openai.com/generative-models/), OpenAI Blog
 
-### Evolution of GAN Architectures
+### Implementation
+
+- [Deep Convolutional Generative Adversarial Network](https://www.tensorflow.org/tutorials/generative/dcgan)
+- [CycleGAN](https://www.tensorflow.org/tutorials/generative/cyclegan)
+- [Keras-GAN](https://github.com/eriklindernoren/Keras-GAN), numerous Keras GAN implementations
+- [PyTorch-GAN](https://github.com/eriklindernoren/PyTorch-GAN), numerous PyTorch GAN implementations
+
+
+### The rapid evolution of the GAN architecture zoo
 
 - [Unsupervised Representation Learning with Deep Convolutional Generative Adversarial Networks (DCGAN)](https://arxiv.org/pdf/1511.06434.pdf), Luke Metz et al, 2016
 - [Conditional Generative Adversarial Net](https://arxiv.org/pdf/1411.1784.pdf), Medhi Mirza and Simon Osindero, 2014
@@ -99,7 +141,7 @@ The goal of generative models is to produce complex output, such as realistic im
 - [Learning What and Where to Draw](https://arxiv.org/abs/1610.02454), Scott Reed, et al 2016
 - [Fantastic GANs and where to find them](http://guimperarnau.com/blog/2017/03/Fantastic-GANs-and-where-to-find-them)
 
-### Applications of GANs
+### Applications
 
 - [Real-valued (Medical) Time Series Generation with Recurrent Conditional GANs](https://arxiv.org/abs/1706.02633), Cristóbal Esteban, Stephanie L. Hyland, Gunnar Rätsch, 2016
     - [GitHub Repo](https://github.com/ratschlab/RGAN)
@@ -108,9 +150,5 @@ The goal of generative models is to produce complex output, such as realistic im
 - [GAN — Some cool applications](https://medium.com/@jonathan_hui/gan-some-cool-applications-of-gans-4c9ecca35900), Jonathan Hui, 2018
 - [gans-awesome-applications](https://github.com/nashory/gans-awesome-applications), curated list of awesome GAN applications
 
-### How to build GANs using Python
 
-The notebook [deep_convolutional_generative_adversarial_network](04_deep_convolutional_generative_adversarial_network.ipynb) illustrates the implementation of a GAN using Python. It uses the Deep Convolutional GAN (DCGAN) example to synthesize images from the fashion MNIST dataset
 
-- [Keras-GAN](https://github.com/eriklindernoren/Keras-GAN), numerous Keras GAN implementations
-- [PyTorch-GAN](https://github.com/eriklindernoren/PyTorch-GAN), numerous PyTorch GAN implementations
