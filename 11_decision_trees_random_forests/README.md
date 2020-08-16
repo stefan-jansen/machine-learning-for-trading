@@ -8,14 +8,6 @@ We will illustrate bootstrap aggregation, often called bagging, as one of severa
 
 Then we will proceed and build a long-short trading strategy that uses a Random Forest ensemble to generate profitable signals for large-cap Japanese equities over the last three years. We will source and prepare the stock price data, tune the hyperparameters of a Random Forest model, and backtest trading rules based on the models’ signals. The resulting long-short strategy uses machine learning rather than the cointegration relationship we saw in Chapter 9 on Time Series models to identify and trade baskets of securities whose prices will likely move in opposite directions over a given investment horizon.
 
-In short, after reading this chapter, you will be able to:
-- Use decision trees for regression and classification
-- Gain insights from decision trees and visualize the rules learned from the data
-- Understand why ensemble models tend to deliver superior results
-- Use bootstrap aggregation to address the overfitting challenges of decision trees
-- Train, tune, and interpret random forests
-- Employ a random forest to design and evaluate a profitable trading strategy
-
 ## Content
 
 1. [Decision trees: Learning rules from data](#decision-trees-learning-rules-from-data)

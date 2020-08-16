@@ -15,14 +15,6 @@ There are several aspects that many of these models and their applications have 
 
 We distinguish between unsupervised and supervised learning and outline use cases for algorithmic trading. We contrast supervised regression and classification problems, the use of supervised learning for statistical inference of relationships between input and output data with its use for the prediction of future outputs. We also illustrate how prediction errors are due to the model's bias or variance, or because of a high noise-to-signal ratio in the data. Most importantly, we present methods to diagnose sources of errors like overfitting and improve your model's performance.
 
-In this chapter, we will cover the following topics relevant for applying the ML workflow in practice:
-- How supervised and unsupervised learning from data works
-- Training and evaluating supervised learning models for regression and classification tasks
-- How the bias-variance trade-off impacts predictive performance
-- How to diagnose and address prediction errors due to overfitting
-- Using cross-validation to optimize hyperparameters with a focus on time-series data
-- Why financial data requires additional attention when testing out-of-sample
-
 If you are already quite familiar with ML, feel free to skip ahead and dive right into learning how to use ML models to produce and combine alpha factors for an algorithmic trading strategy.
 
 ## Content

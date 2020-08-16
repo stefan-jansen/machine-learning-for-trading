@@ -6,12 +6,6 @@ The key difference is that boosting, in its original AdaBoost version, modifies 
 
 In this chapter, we will see how boosting has evolved into one of the most successful machine learning algorithms over the last three decades. At the time of writing, it has come to dominate machine learning competitions for structured data (as opposed to high-dimensional images or speech, for example, where the relationship between the input and output is more complex, and deep learning excels at). More specifically, in this chapter we will cover the following topics:
 
-- Understand how boosting differs from bagging and how gradient boosting evolved from adaptive boosting
-- Design and tune adaptive boosting and gradient boosting models with scikit-learn
-- Build, tune, and evaluate gradient boosting models on large datasets using the state-of-the-art implementations XGBoost, LightGBM, and CatBoost
-- Interpret and gain insights from gradient boosting models
-- Use boosting with high-frequency data to design an intraday strategy
-
 ## Content
 
 1. [Getting started: adaptive boosting](#getting-started-adaptive-boosting)

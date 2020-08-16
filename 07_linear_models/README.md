@@ -10,13 +10,6 @@ Linear regression has been known for over 200 years since Legendre and Gauss app
 
 In practice, linear models are applied to regression and classification problems with the goals of inference and prediction. Numerous asset pricing models have been developed by academic and industry researchers that leverage linear regression. Applications include the identification of significant factors that drive asset returns for better risk and performance management, as well as the prediction of returns over various time horizons. Classification problems, on the other hand, include directional price forecasts. In this chapter, we will cover the following topics:
 
-- How linear regression works and which assumptions it makes
-- Training and diagnosing linear regression models
-- Using linear regression to predict stock returns
-- Use regularization to improve the predictive performance
-- How logistic regression works
-- Converting a regression into a classification problem
-
 ## Content
 
 1. [Linear regression: From inference to prediction](#linear-regression-from-inference-to-prediction)

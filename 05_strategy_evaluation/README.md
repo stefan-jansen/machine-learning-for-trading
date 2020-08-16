@@ -10,12 +10,6 @@ Risk management has evolved to become more sophisticated as additional risk fact
 
 As a result, there are several approaches to optimize portfolios that include the application of machine learning (ML) to learn hierarchical relationships among assets and treat their holdings as complements or substitutes with respect to the portfolio risk profile. This chapter will cover the following topics:
 
-- How to measure portfolio risk and return
-- Managing portfolio weights using mean-variance optimization and alternatives
-- Using machine learning to optimize asset allocation in a portfolio context
-- Simulating trades and create a portfolio based on alpha factors using Zipline
-- How to evaluate portfolio performance using pyfolio
-
 ## Content
 
 1. [How to measure portfolio performance](#how-to-measure-portfolio-performance)

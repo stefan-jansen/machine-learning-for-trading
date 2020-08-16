@@ -4,14 +4,6 @@ This chapter uses unsupervised machine learning to extract latent topics from do
 
 Topic models permit the extraction of sophisticated, interpretable text features that can be used in various ways to extract trading signals from large collections of documents. They speed up the review of documents, help identify and cluster similar documents, and can be annotated as a basis for predictive modeling. Applications include the identification of key themes in company disclosures or earnings call transcripts, customer reviews or contracts, annotated using, e.g., sentiment analysis or direct labeling with subsequent asset returns. More specifically, In this chapter, we will cover:
 
-- What topic modeling achieves, why it matters and how it has evolved
-- How Latent Semantic Indexing (LSI) reduces the dimensionality of the DTM
-- How probabilistic Latent Semantic Analysis (pLSA) uses a generative model to extract topics
-- How Latent Dirichlet Allocation (LDA) refines pLSA and why it is the most popular topic model
-- How to visualize and evaluate topic modeling results
-- How to implement LDA using sklearn and gensim
-- How to apply topic modeling to collections of earnings calls and Yelp business reviews
-
 ## Content
 
 1. [Learning latent topics: goals and approaches](#learning-latent-topics-goals-and-approaches)

@@ -7,11 +7,6 @@ While most popular with image data, GANs have also been used to generate synthet
 <img src="https://i.imgur.com/W1Rp89K.png" width="60%">
 </p>
 
-More specifically, in this chapter you will learn about:
-- How GANs work, why they are useful, and how they could be applied to trading
-- Designing and training GANs using TensorFlow 2
-- Generating synthetic financial data to expand the inputs available for training ML models and backtesting
-
 ## Content
 
 1. [Generative adversarial networks for synthetic data](#generative-adversarial-networks-for-synthetic-data)

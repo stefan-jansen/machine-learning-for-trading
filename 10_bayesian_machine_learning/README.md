@@ -6,13 +6,6 @@ Bayesian statistics allows us to quantify uncertainty about future events and re
 
 We will see that Bayesian approaches to machine learning allow for richer insights into the uncertainty around statistical metrics, parameter estimates, and predictions. The applications range from more granular risk management to dynamic updates of predictive models that incorporate changes in the market environment. The Black-Litterman approach to asset allocation (see [Chapter 5, Portfolio Optimization and Performance Evaluation](../05_strategy_evaluation) can be interpreted as a Bayesian model. It computes the expected return of an asset as an average of the market equilibrium and the investor’s views, weighted by each asset’s volatility, cross-asset correlations, and the confidence in each forecast.
 
-More specifically, in this chapter, we will cover:
-- How Bayesian statistics apply to machine learning
-- Probabilistic programming with PyMC3
-- Defining and training machine learning models using PyMC3
-- How to run state-of-the-art sampling methods to conduct approximate inference
-- Bayesian ML applications to compute Sharpe ratios, dynamic pairs trading hedge ratios, and estimate stochastic volatility
-
 ## Content
 
 1. [How Bayesian Machine Learning Works](#how-bayesian-machine-learning-works)

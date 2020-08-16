@@ -4,14 +4,6 @@ Reinforcement Learning (RL) is a computational approach to goal-directed learnin
 
 This chapter shows how to formulate an RL problem and how to apply various solution methods. It covers model-based and model-free methods, introduces the [OpenAI Gym](https://gym.openai.com/) environment, and combines deep learning with RL to train an agent that navigates a complex environment. Finally, we'll show you how to adapt RL to algorithmic trading by modeling an agent that interacts with the financial market while trying to optimize an objective function. 
 
-More specifically,this chapter will cover:
-
-- Define a Markov decision problem (MDP)
-- Use value and policy iteration to solve an MDP
-- Apply Q-learning in an environment with discrete states and actions
-- Build and train a deep Q-learning agent in a continuous environment
-- Use the OpenAI Gym to design a custom market environment and train an RL agent to trade stocks
-
 #### Table of contents
 
 1. [Key elements of a reinforcement learning system](#key-elements-of-a-reinforcement-learning-system)

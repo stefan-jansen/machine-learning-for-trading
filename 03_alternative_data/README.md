@@ -4,14 +4,6 @@ This chapter explains how individuals, business processes, and sensors produce a
 
 It demonstrates the workflow, from acquisition to preprocessing and storage using Python for data obtained through web scraping to set the stage for the application of ML. It concludes by providing examples of sources, providers, and applications.
 
- More specifically, this chapter covers:
-
-- How the alternative data revolution has unleashed new sources of information
-- How individuals, business processes, and sensors generate alternative data
-- How to evaluate the proliferating supply of alternative data used for algorithmic trading
-- How to work with alternative data in Python, such as by scraping the internet
-- Important categories and providers of alternative data
-
 ## Content
 
 1. [The Alternative Data Revolution](#the-alternative-data-revolution)

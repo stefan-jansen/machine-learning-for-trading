@@ -2,13 +2,7 @@
 
 The major innovation of RNN is that each output is a function of both previous output and new data. As a result, RNN gain the ability to incorporate information on previous observations into the computation it performs on a new feature vector, effectively creating a model with memory. This recurrent formulation enables parameter sharing across a much deeper computational graph that includes cycles. Prominent architectures include Long Short-Term Memory (LSTM) and Gated Recurrent Units (GRU) that aim to overcome the challenge of vanishing gradients associated with learning long-range dependencies, where errors need to be propagated over many connections. 
 
-RNNs have been successfully applied to various tasks that require mapping one or more input sequences to one or more output sequences and are particularly well suited to natural language. RNN can also be applied to univariate and multivariate time series to predict market or fundamental data. This chapter covers how RNN can model alternative text data using the word embeddings that we covered in [Chapter 16](16_word_embeddings) to classify the sentiment expressed in documents. Most specifically, this chapter addresses:
-- How recurrent connections allow RNNs to memorize patterns and model a hidden state
-- Unrolling and analyzing the computational graph of RNNs
-- How gated units learn to regulate RNN memory from data to enable long-range dependencies
-- Designing and training RNNs for univariate and multivariate time series in Python
-- How to learn word embeddings or use pretrained word vectors for sentiment analysis with RNNs
-- Building a bidirectional RNN to predict stock returns using custom word embeddings
+RNNs have been successfully applied to various tasks that require mapping one or more input sequences to one or more output sequences and are particularly well suited to natural language. RNN can also be applied to univariate and multivariate time series to predict market or fundamental data. This chapter covers how RNN can model alternative text data using the word embeddings that we covered in [Chapter 16](16_word_embeddings) to classify the sentiment expressed in documents.
 
 ## Content
 

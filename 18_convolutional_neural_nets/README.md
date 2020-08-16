@@ -6,13 +6,6 @@ CNNs are named after the linear algebra operation called convolution that replac
 
 Research into CNN architectures has proceeded very rapidly and new architectures that improve benchmark performance continue to emerge. We will describe a set of building blocks that consistently appears in successful applications and illustrate their application to image data and financial time series. We will also demonstrate how transfer learning can speed up learning by using pre-trained weights for some of the CNN layers.
 
-More specifically, in this chapter, you will learn about:
-- How CNNs employ several building blocks to efficiently model grid-like data
-- Training, tuning and regularizing CNNs for images and time series data using TensorFlow
-- Using transfer learning to streamline CNNs, even with fewer data
-- Designing a trading strategy using return predictions by a CNN trained on time-series data formatted like images
-- How to classify economic activity based on satellite images
-
 ## Content
 
 1. [How CNNs learn to model grid-like data](#how-cnns-learn-to-model-grid-like-data)

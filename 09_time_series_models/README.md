@@ -8,13 +8,6 @@ Time-series models are very popular given the time dimension inherent to trading
 
 We first introduce tools to diagnose time-series characteristics and to extract features that capture potential patterns. Then we introduce univariate and multivariate time-series models and apply them to forecast macro data and volatility patterns. We conclude with the concept of **cointegration** and how to apply it to develop a **pairs trading strategy**.
 
-This chapter covers:
-- How to use time-series analysis to diagnose diagnostic statistics that inform the modeling process
-- Estimate and diagnosing autoregressive and moving-average time-series models
-- Building autoregressive conditional heteroskedasticity (ARCH) models to predict volatility
-- How to build vector autoregressive models
-- Using cointegration to develop a pairs trading strategy
-
 ## Content
 
 1. [Tools for diagnostics and feature extraction](#tools-for-diagnostics-and-feature-extraction)

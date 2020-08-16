@@ -5,13 +5,8 @@ This chapter shows how unsupervised learning can leverage deep learning for trad
 An autoencoder is a neural network trained to reproduce the input while learning a new representation of the data, encoded by the parameters of a hidden layer. 
 Autoencoders have long been used for nonlinear dimensionality reduction and manifold learning (see [Chapter 13](../13_unsupervised_learning)). 
 A variety of designs leverage the feedforward, convolutional, and recurrent network architectures we covered in the last three chapters. 
-We will see how autoencoders can underpin a trading strategy: we will build a deep neural network that uses an [autoencoder to extract risk factors](https://www.aqr.com/Insights/Research/Working-Paper/Autoencoder-Asset-Pricing-Models) and predict equity returns, conditioned on a range of equity attributes (Gu, Kelly, and Xiu 2020).
 
-More specifically, this chapter covers:
-
-- Which types of autoencoders are of practical use and how they work
-- Building and training autoencoders using Python
-- Using autoencoders to extract data-driven risk factors that take into account asset characteristics to predict returns
+We will also see how autoencoders can underpin a trading strategy by building a deep neural network that uses an [autoencoder to extract risk factors](https://www.aqr.com/Insights/Research/Working-Paper/Autoencoder-Asset-Pricing-Models) and predict equity returns, conditioned on a range of equity attributes (Gu, Kelly, and Xiu 2020).
 
 ## Content
 

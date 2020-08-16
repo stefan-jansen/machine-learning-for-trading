@@ -2,16 +2,8 @@
 
 This chapter introduces uses neural networks to learn a vector representation of individual semantic units like a word or a paragraph. These vectors are dense rather than sparse as in the bag-of-words model and have a few hundred real-valued rather than tens of thousand binary or discrete entries. They are called embeddings because they assign each semantic unit a location in a continuous vector space.
  
-Embeddings result from training a model to relate tokens to their context with the benefit that similar usage implies a similar vector. As a result, the embeddings encode semantic aspects like relationships among words by means of their relative location. They are powerful features for use in the deep learning models that we will introduce in the following chapters. More specifically, in this chapter, we will cover:
-- What word embeddings are, how they work, and why they capture semantic information
-- How to obtain and use pre-trained word vectors
-- Which network architectures are most effective at training word2vec models
-- How to train a word2vec model using Keras, Gensim, and TensorFlow
-- Visualizing and evaluating the quality of word vectors
-- How to train a word2vec model on SEC filings to predict stock price moves
-- How doc2vec extends word2vec and can be used for sentiment analysis
-- Why the transformer’s attention mechanism had such an impact on natural language processing
-- How to fine-tune pre-trained BERT models on financial data and extract high-quality embeddings
+Embeddings result from training a model to relate tokens to their context with the benefit that similar usage implies a similar vector. As a result, the embeddings encode semantic aspects like relationships among words by means of their relative location. They are powerful features for use in the deep learning models that we will introduce in the following chapters.
+
 
 ## Content
 

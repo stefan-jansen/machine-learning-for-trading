@@ -8,13 +8,6 @@ This chapter also presents key tools that facilitate the computing and testing a
 
 We also preview how you can use the trading simulator Zipline to evaluate the predictive performance of (traditional) alpha factors. We discuss key alpha factor metrics like the information coefficient and factor turnover. An in-depth introduction to backtesting trading strategies that use machine learning follows in [Chapter 6](../08_ml4t_workflow), which covers the **ML4T workflow** that we will use throughout the book to evaluate trading strategies. 
 
-In particular, this chapter will address the following topics:
-- Which categories of factors exist, why they work, and how to measure them
-- Creating e alpha factors using NumPy, pandas, and TA-Lib
-- How to denoise data using wavelets and the Kalman filter
-- Using e Zipline offline and on Quantopian to test individual and multiple alpha factors
-- How to use Alphalens to evaluate predictive performance and turnover using, among other metrics, the information coefficient (IC)
-
 Please see the [Appendix - Alpha Factor Library](../24_alpha_factor_library) for additional material on this topic, including numerous code examples that compute a broad range of alpha factors.
 
 ## Content

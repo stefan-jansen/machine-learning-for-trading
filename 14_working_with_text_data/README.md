@@ -8,14 +8,6 @@ In this chapter, we will introduce fundamental feature extraction techniques tha
 
 In the following two chapters, we build on these techniques and use ML algorithms like topic modeling and word-vector embeddings to capture the information contained in a broader context. 
 
-In particular, in this chapter we will cover:
-- What the fundamental NLP workflow looks like
-- How to build a multilingual feature extraction pipeline using spaCy and TextBlob
-- Performing NLP tasks like part-of-speech tagging or named entity recognition
-- Converting tokens to numbers using the document-term matrix
-- Classifying text using the naive Bayes model
-- How to perform sentiment analysis
-
 ## Content
 
 1. [ML with text data - from language to features](#ml-with-text-data---from-language-to-features)
