@@ -8,6 +8,7 @@ Then, we address how to work with [Jupyter](https://jupyter.org/) notebooks to v
 
 1. Install [Docker Desktop](https://docs.docker.com/desktop/) for [Windows](https://docs.docker.com/docker-for-windows/install/) or [Mac OS](https://docs.docker.com/docker-for-mac/install/).
     - Review Getting Started guides for [Windows](https://docs.docker.com/docker-for-windows/) or [Mac OS](https://docs.docker.com/docker-for-mac/). Under Preferences, look for Resources to find out how you can increase the memory allocated to the container; the default setting is too low given the size of the data. Increase to at least 4GB.
+    > Several examples are quite memory-intensive, for example the NASDAQ tick data and the SEC filings example in Chapter 2, and will require significantly higher memory allocation. I aim to provide more precise figures shortly. 
 2. Clone the starter repo using the following command: `git clone ` and change into the new directory.
 3. [Register](https://www.quandl.com/sign-up) for a (free) personal Quandl account to obtain an API key that you'll need in the next step.  
 3. We'll be using an image based on the Ubuntu 20.04 OS with the Anaconda Python distribution installed. It also contains two conda environments, one to run Zipline and one for everything else. The following command does several things at once:

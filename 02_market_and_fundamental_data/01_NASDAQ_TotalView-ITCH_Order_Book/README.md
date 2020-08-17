@@ -1,4 +1,4 @@
-## Working with Market Data: NASDAQ_TotalView-ITCH Order Book
+# Working with Market Data: NASDAQ_TotalView-ITCH Order Book
 
 While FIX has a dominant large market share, exchanges also offer native protocols. The Nasdaq offers a TotalView ITCH direct data-feed protocol that allows subscribers to track individual orders for equity instruments from placement to execution or cancellation.
 
@@ -6,7 +6,9 @@ As a result, it allows for the reconstruction of the order book that keeps track
 
 In addition to matching market and limit orders, the Nasdaq also operates auctions or crosses that execute a large number of trades at market opening and closing. Crosses are becoming more important as passive investing continues to grow and traders look for opportunities to execute larger blocks of stock. TotalView also disseminates the Net Order Imbalance Indicator (NOII) for the Nasdaq opening and closing crosses and Nasdaq IPO/Halt cross.
 
-### Parsing Binary ITCH Messages
+> This example requires plenty of memory, likely above 16GB (I'm using 64GB and have not yet checked for the minimum requirement). If you run into capacity constraints, keep in mind that it is not essential for anything else in this book that you are able to run the code. First of all, it aims to demonstrate what kind of data you would be working with in an institutional investment context where the systems would have been built to manage data much larger than this single-day example. 
+
+## Parsing Binary ITCH Messages
 
 The ITCH v5.0 specification declares over 20 message types related to system events, stock characteristics, the placement and modification of limit orders, and trade execution. It also contains information about the net order imbalance before the open and closing cross.
 
@@ -53,7 +55,7 @@ The code has been updated to use the latest NASDAQ sample file dated March 27, 2
 
 Warning: the tick data is around 12GB in size and some processing steps can take several hours on a 4-core i7 CPU with 32GB RAM. 
 
-### Regularizing tick data
+## Regularizing tick data
 
 The trade data is indexed by nanoseconds and is very noisy. The bid-ask bounce, for instance, causes the price to oscillate between the bid and ask prices when trade initiation alternates between buy and sell market orders. To improve the noise-signal ratio and improve the statistical properties, we need to resample and regularize the tick data by aggregating the trading activity.
 
