@@ -44,10 +44,11 @@ Another innovation of the second edition is to replicate several trading applica
 
 All applications now use the latest available (at the time of writing) software versions such as pandas 1.0 and TensorFlow 2.2. There is also a customized version of Zipline that makes it easy to include machine learning model predictions when designing a trading strategy.
 
-## Installation and Data Sources
+## Installation, Data Sources and Bug Reports
 
 - For instructions on using a Docker image or setting up various `conda` environments to install the packages used in the notebooks, see [here](installation/README.md).
 - To download and preprocess many of the data sources used in this book see [create_datasets](data/create_datasets.ipynb).
+> If you have any difficulties installing the environments, downloading the data or running the code, please raise a **GitHub issue** in the repo ([here](https://github.com/stefan-jansen/machine-learning-for-trading/issues)). Working with GitHub issues has been described [here](https://guides.github.com/features/issues/).
 
 # Chapter Summary
 
