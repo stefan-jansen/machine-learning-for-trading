@@ -140,8 +140,10 @@ Now you are running a shell inside the container and can access the various [con
 | Part(s)   | Chapters        | Name         |
 |-----------|-----------------|--------------|
 | 1, 2 & 3  | 2-16, Appendix  | ml4t   |
-| 4         | 17-22           | ml4t-dl  |
-| throughout| NA              | ml4t-zipline|
+| 4         | 17-22*           | ml4t-dl  |
+| all | throughout              | ml4t-zipline
+
+> *the Deep Reinforcement Learning examples require TensorFlow 2.2, which currently is only available via `conda` for GPUC; the notebooks contain instructions for upgrading via `pip`. 
 
 - You can switch to another environment using `conda activate <env_name>`.
 - Alternatively, you can switch from one environment to another from the jupyter notebook or jupyter lab thanks to the [nb_conda_kernels](https://github.com/Anaconda-Platform/nb_conda_kernels) extension (see below).
@@ -211,7 +213,9 @@ Here, we will create environments from files to ensure you install the library v
 |---------------|-----------|-----------------|----------------------------------------------|
 | ml4t          |1, 2 & 3   | 2-16, appendix  |  installation/{linux &#x7c; macos &#x7c; windows}/ml4t.yml    |
 | ml4t-dl       |4          | 17-22           | installation//{linux &#x7c; macos &#x7c; windows}/ml4t_dl.yml   |
-| ml4t-zipline  |throughout | 17-22           |  installation/linux/ml4t_zipline.yml   |
+| ml4t-zipline  | all | throughout           |  installation/linux/ml4t_zipline.yml   |
+
+> *the Deep Reinforcement Learning examples require TensorFlow 2.2, which currently is only available via `conda` for GPUC; the notebooks contain instructions for upgrading via `pip`. 
 
 To create the environment with the name `ml4t` (specified in the file) for `linux`, from the repository's root directory, just run:
 
