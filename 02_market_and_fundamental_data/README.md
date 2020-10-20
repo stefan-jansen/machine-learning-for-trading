@@ -154,7 +154,7 @@ The folder [data providers](03_data_providers) contains examples to use various 
 2. Downloading market and fundamental data with [yfinance](03_data_providers/02_yfinance_demo.ipynb)
 3. Parsing Limit Order Tick Data from [LOBSTER](03_data_providers/03_lobster_itch_data.ipynb)
 4. Quandl [API Demo](03_data_providers/04_quandl_demo.ipynb)
-5. Zipline [data access](03_data_providers/05_zipline_data.ipynb)
+5. Zipline [data access](03_data_providers/05_zipline_data_demo.ipynb)
 
 ### Data sources
 
