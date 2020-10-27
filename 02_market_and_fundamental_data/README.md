@@ -119,7 +119,7 @@ AlgoSeek has been so kind as to provide samples of minute bar data for the NASDA
 
 #### From the consolidated feed to minute bars
 
-AlgoSeek minute bars are based on data provided by the Securities Information Processor (SIP) that manages the consolidated feed mentioned at the beginning of this section. You can find the documentation at https://www.algoseek.com/samples/.
+AlgoSeek minute bars are based on data provided by the Securities Information Processor (SIP) that manages the consolidated feed mentioned at the beginning of this section. You can find the documentation at https://www.algoseek.com/data-drive.html.
 
 Quote and trade data fields
 The minute bar data contain up to 54 fields. There are eight fields for the open, high, low, and close elements of the bar, namely:
@@ -139,22 +139,22 @@ The directory [algoseek_intraday](02_algoseek_intraday) contains instructions on
 
 ## API Access to Market Data
 
-There are several options to access market data via API using Python. In this chapter, we first present a few sources built into the [`pandas`](https://pandas.pydata.org/) library. Then we briefly introduce the trading platform [Quantopian](https://www.quantopian.com/posts), the data provider [Quandl](https://www.quandl.com/) (acquired by NASDAQ in 12/2018) and the backtesting library [`zipline`](https://github.com/quantopian/zipline) that we will use later in the book, and list several additional options to access various types of market data. The directory [data_providers](02_data_providers) contains several notebooks that illustrate the usage of these options.
+There are several options to access market data via API using Python. In this chapter, we first present a few sources built into the [`pandas`](https://pandas.pydata.org/) library. Then we briefly introduce the trading platform [Quantopian](https://www.quantopian.com/posts), the data provider [Quandl](https://www.quandl.com/) (acquired by NASDAQ in 12/2018) and the backtesting library [`zipline`](https://github.com/quantopian/zipline) that we will use later in the book, and list several additional options to access various types of market data. The directory [data_providers](03_data_providers) contains several notebooks that illustrate the usage of these options.
 
 ### Remote data access using pandas
 
-- read_html [docs](http://pandas.pydata.org/pandas-docs/stable/generated/pandas.read_html.html?highlight=pandas%20io%20read_html)
+- read_html [docs](https://pandas.pydata.org/pandas-docs/stable/)
 - S&P 500 constituents from [Wikipedia](https://en.wikipedia.org/wiki/List_of_S%26P_500_companies)
 - `pandas-datareader`[docs](https://pandas-datareader.readthedocs.io/en/latest/index.html)
 
 ### Code Examples
 
 The folder [data providers](03_data_providers) contains examples to use various data providers.
-1. Remote data access using [pandas DataReader](03_data_providers/01_datareader.ipynb)
-2. Downloading market and fundamental data with [yfinance](03_data_providers/02_yfinance_for_yahoo_finance.ipynb)
+1. Remote data access using [pandas DataReader](03_data_providers/01_pandas_datareader_demo.ipynb)
+2. Downloading market and fundamental data with [yfinance](03_data_providers/02_yfinance_demo.ipynb)
 3. Parsing Limit Order Tick Data from [LOBSTER](03_data_providers/03_lobster_itch_data.ipynb)
 4. Quandl [API Demo](03_data_providers/04_quandl_demo.ipynb)
-5. Zipline [data access](03_data_providers/05_zipline_data.ipynb)
+5. Zipline [data access](03_data_providers/05_zipline_data_demo.ipynb)
 
 ### Data sources
 
@@ -209,7 +209,7 @@ The SEC also publishes log files containing the [internet search traffic](https:
 
 The scope of the data in the [Financial Statement and Notes](https://www.sec.gov/dera/data/financial-statement-and-notes-data-set.html) datasets consists of numeric data extracted from the primary financial statements (Balance sheet, income statement, cash flows, changes in equity, and comprehensive income) and footnotes on those statements. The data is available as early as 2009.
 
-The folder [03_sec_edgar](03_sec_edgar) contains the notebook [edgar_xbrl](03_sec_edgar/edgar_xbrl.ipynb) to download and parse EDGAR data in XBRL format, and create fundamental metrics like the P/E ratio by combining financial statement and price data.
+The folder [04_sec_edgar](04_sec_edgar) contains the notebook [edgar_xbrl](04_sec_edgar/edgar_xbrl.ipynb) to download and parse EDGAR data in XBRL format, and create fundamental metrics like the P/E ratio by combining financial statement and price data.
 
 ### Other fundamental data sources
 
@@ -230,4 +230,4 @@ We'll be using many different data sets in this book, and it's worth comparing t
 
 ### Code Example
 
-The notebook [storage_benchmark](04_storage_benchmark/storage_benchmark.ipynb) in the directory [04_storage_benchmark](04_storage_benchmark) compares the performance of the preceding libraries.
+The notebook [storage_benchmark](05_storage_benchmark/storage_benchmark.ipynb) in the directory [05_storage_benchmark](05_storage_benchmark) compares the performance of the preceding libraries.
