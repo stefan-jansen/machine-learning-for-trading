@@ -160,7 +160,10 @@ From the command prompt of the container shell, run
 conda activate ml4t-zipline
 zipline ingest
 ``` 
-You should see numerous messages as Zipline processes around 3,000 stock price series
+You should see numerous messages as Zipline processes around 3,000 stock price series.
+
+> When running a backtest, you will likely encounter an [error](https://github.com/quantopian/zipline/issues/2517) because the current Zipline version requires a country code entry in the exchanges table of the `assets-7.sqlite` database where it stores the asset metadata.
+> The linked [GitHub issue](https://github.com/quantopian/zipline/issues/2517) describes how to address this by opening the [SQLite database](https://sqlitebrowser.org/dl/) and entering `US` in the `country_code` field of the exchanges.
 
 ### Working with notebooks int the Docker container
 
