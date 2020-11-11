@@ -146,4 +146,4 @@ The principal new element is a `CustomFactor` that receives features and returns
 
 ## Code Example: How to use the research environment on Quantopian
 
-The notebook [ml4t_quantopian](04_ml4t_workflow_with_zipline/04_ml4t_quantopian.ipynb) shows how to train an ML model on the Quantopian platform to utilize the broad range of data sources available there.
+The notebook [ml4t_quantopian](04_ml4t_quantopian.ipynb) shows how to train an ML model on the Quantopian platform to utilize the broad range of data sources available there.
