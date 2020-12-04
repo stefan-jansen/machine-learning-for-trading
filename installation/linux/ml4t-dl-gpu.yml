@@ -245,7 +245,6 @@ dependencies:
   - ta-lib-base=0.4.0
   - tensorboard=2.2.2
   - tensorboard-plugin-wit=1.6.0
-  - tensorflow=2.2.0
   - tensorflow-base=2.2.0
   - tensorflow-datasets=1.2.0
   - tensorflow-estimator=2.2.0

@@ -143,7 +143,7 @@ Now you are running a shell inside the container and can access the various [con
 | 4         | 17-22*           | ml4t-dl  |
 | all | throughout              | ml4t-zipline
 
-> *the Deep Reinforcement Learning examples require TensorFlow 2.2, which currently is only available via `conda` for GPUC; the notebooks contain instructions for upgrading via `pip`. 
+> the Deep Reinforcement Learning examples require TensorFlow 2.2, which currently is only available for Linux via `conda` for GPU; the notebooks contain instructions for upgrading via `pip`. Check [here](https://anaconda.org/anaconda/tensorflow) for current CPU and [here](https://anaconda.org/anaconda/tensorflow-gpu) for current GPU version support.
 
 - You can switch to another environment using `conda activate <env_name>`.
 - Alternatively, you can switch from one environment to another from the jupyter notebook or jupyter lab thanks to the [nb_conda_kernels](https://github.com/Anaconda-Platform/nb_conda_kernels) extension (see below).
