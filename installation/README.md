@@ -15,7 +15,7 @@ Docker Desktop is a very popular application for MacOS and Windows machines beca
 
 ### Installing Docker Desktop 
 
-As usual, installation differs for Mac OS X and and Window 10, and requires an additional step for Windows 10 Home to enable virtualization. 
+As usual, installation differs for Mac OS X and Window 10, and requires an additional step for Windows 10 Home to enable virtualization. 
 
 We'll cover installation for each OS separately and then address some setting adjustments necessary in both cases.
 
