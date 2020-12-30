@@ -14,12 +14,12 @@ In four parts with **23 chapters plus an appendix**, it covers on **over 800 pag
 </a>
 </p>
 
-This repo contains **over 150 notebooks** that put the concepts, algorithms, and use cases discussed in the book into action. They provide numerous examples that show
+This repo contains **over 150 notebooks** that put the concepts, algorithms, and use cases discussed in the book into action. They provide numerous examples that show:
 - how to work with and extract signals from market, fundamental and alternative text and image data, 
 - how to train and tune models that predict returns for different asset classes and investment horizons, including how to replicate recently published research, and 
 - how to design, backtest, and evaluate trading strategies.
 
-> We **highly recommend** to review the notebooks while reading the book; they are usually in executed state and often contain additional information that the space constraints of the book did not permit to include. 
+> We **highly recommend** reviewing the notebooks while reading the book; they are usually in an executed state and often contain additional information that we could not include due to the book's space constraints.  
 
 ## What's new in the 2<sup>nd</sup> Edition?
 
@@ -44,13 +44,18 @@ Another innovation of the second edition is to replicate several trading applica
 
 All applications now use the latest available (at the time of writing) software versions such as pandas 1.0 and TensorFlow 2.2. There is also a customized version of Zipline that makes it easy to include machine learning model predictions when designing a trading strategy.
 
-## Installation, Data Sources and Bug Reports
+## Installation instructions, Data Sources and Bug Reports
 
-- For instructions on using a Docker image or setting up various `conda` environments to install the packages used in the notebooks, see [here](installation/README.md).
-- To download and preprocess many of the data sources used in this book see [create_datasets](data/create_datasets.ipynb).
+The code examples rely on a wide range of Python libraries from the data science and finance domains. To facilitate installation, we use [Docker](https://www.docker.com/get-started) to provide containerized [conda](https://docs.conda.io/en/latest/) environments.
+
+- The [installation](installation/README.md) directory contains detailed instructions on setting up and using a Docker image to run the notebooks. It also contains configuration files for setting up various `conda` environments and install the packages used in the notebooks directly on your machine if you prefer (and, dpending on your system, are prepared to go the extra mile).
+- To download and preprocess many of the data sources used in this book, see the instructions in the [README](data/README.md) file alongside various notebooks in the [data](data) directory.
+
 > If you have any difficulties installing the environments, downloading the data or running the code, please raise a **GitHub issue** in the repo ([here](https://github.com/stefan-jansen/machine-learning-for-trading/issues)). Working with GitHub issues has been described [here](https://guides.github.com/features/issues/).
 
-> Update: You can download the **algoseek** data used in the book [here](https://www.algoseek.com/products.html). I will add the preprocessing instructions shortly.
+> **Update**: You can download the **[algoseek](https://www.algoseek.com)** data used in the book [here](https://www.algoseek.com/ml4t-book-data.html). I will add the preprocessing instructions shortly.
+
+> **Update**: The [figures](figures) directory contains color versions of the charts used in the book. 
 
 # Chapter Summary
 
