@@ -6,6 +6,7 @@ channels:
 dependencies:
   - _libgcc_mutex=0.1
   - _openmp_mutex=4.5
+  - autopep8
   - backcall=0.1.0
   - blas=2.16
   - bleach=3.1.5
@@ -116,6 +117,7 @@ dependencies:
   - qtconsole=4.7.4
   - qtpy=1.9.0
   - readline=7.0
+  - seaborn
   - send2trash=1.5.0
   - setuptools=40.4.3
   - simplegeneric=0.8.1
@@ -142,6 +144,7 @@ dependencies:
   - zeromq=4.2.5
   - zict=2.0.0
   - zlib=1.2.11
+  - alphalens
   - pip:
     - alembic==1.4.2
     - bcolz==0.12.1
@@ -174,5 +177,6 @@ dependencies:
     - trading-calendars==1.11.7
     - typing==3.7.4.1
     - urllib3==1.25.9
+    - pyfolio
     - git+https://github.com/stefan-jansen/zipline.git
 

@@ -1,5 +1,6 @@
-# How to process AlgoSeek intraday data
+# How to process AlgoSeek intraday NASDAQ 100 data
 
-You can downlod an intraday sample from [here](https://www.algoseek.com/products.html).
+You can download an intraday sample from algoseek's website [here](https://www.algoseek.com/ml4t-book-data.html). 
 
-This README will soon be updated with instructions on how to download sample data from AlgoSeek.
+Move the unzipped folder into the [data](../../data) directory. It contains around 12GB worth of NASDAQ 100 minute bar data.
+

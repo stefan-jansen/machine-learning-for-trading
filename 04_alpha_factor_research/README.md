@@ -99,7 +99,7 @@ The notebook [kalman_filter_and_wavelets](03_kalman_filter_and_wavelets.ipynb) a
 The open source [zipline](http://www.zipline.io/index.html) library is an event-driven backtesting system maintained and used in production by the crowd-sourced quantitative investment fund [Quantopian](https://www.quantopian.com/) to facilitate algorithm-development and live-trading. It automates the algorithm's reaction to trade events and provides it with current and historical point-in-time data that avoids look-ahead bias.
 
 - [Chapter 8](../08_ml4t_workflow) contains a more comprehensive introduction to Zipline.
-- Please follow the [instructions](../installation) in the `installation` folder.
+- Please follow the [instructions](../installation) in the `installation` folder, including to address **know issues**.
 
 ### Code Example: How to use Zipline to backtest a single-factor strategy
 
