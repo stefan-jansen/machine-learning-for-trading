@@ -10,6 +10,11 @@ import pandas as pd
 pd.set_option('display.expand_frame_repr', False)
 np.random.seed(42)
 
+"""
+This code is based on Algoseek's NASDAQ100 minute-bar trade data.
+Please refer to the README for a brief summary on how you could adapt this code for your purposes.  
+"""
+
 ZIPLINE_ROOT = getenv('ZIPLINE_ROOT')
 if not ZIPLINE_ROOT:
     custom_data_path = Path('~/.zipline/custom_data').expanduser()

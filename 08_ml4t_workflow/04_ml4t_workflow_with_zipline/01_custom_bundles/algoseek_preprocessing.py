@@ -13,6 +13,10 @@ np.random.seed(42)
 
 idx = pd.IndexSlice
 
+"""
+This code is based on Algoseek's NASDAQ100 minute-bar trade data.
+Please refer to the README for a brief summary on how you could adapt this code for your purposes.  
+"""
 
 
 PROJECT_DIR = Path('..', '..')
