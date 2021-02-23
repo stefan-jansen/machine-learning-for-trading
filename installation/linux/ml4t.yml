@@ -367,7 +367,7 @@ dependencies:
     - more-itertools
     - mplfinance
     - pandas-datareader
-    - pyfinance=0.1.3
+    - pyfinance==0.1.3
     - pyfolio
     - pyqt5-sip
     - pyqtchart
