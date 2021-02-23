@@ -5,6 +5,7 @@ __author__ = 'Stefan Jansen'
 from pathlib import Path
 import numpy as np
 import pandas as pd
+from scipy.stats import spearmanr
 
 pd.set_option('display.expand_frame_repr', False)
 np.random.seed(42)
@@ -12,7 +13,6 @@ np.random.seed(42)
 PROJECT_DIR = Path('..', '..')
 
 DATA_DIR = PROJECT_DIR / 'data'
-from scipy.stats import spearmanr
 
 
 def get_backtest_data():
@@ -25,6 +25,8 @@ def get_backtest_data():
                   .swaplevel(axis=0))
 
     with pd.HDFStore(PROJECT_DIR / '07_linear_models/data.h5') as store:
+        print(store.info())
+        exit()
         predictions = store['lasso/predictions']
 
     best_alpha = predictions.groupby('alpha').apply(lambda x: spearmanr(x.actuals, x.predicted)[0]).idxmax()
