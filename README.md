@@ -44,6 +44,8 @@ Another innovation of the second edition is to replicate several trading applica
 
 All applications now use the latest available (at the time of writing) software versions such as pandas 1.0 and TensorFlow 2.2. There is also a customized version of Zipline that makes it easy to include machine learning model predictions when designing a trading strategy.
 
+> Update: release 2.0 updates to Python 3.8, Pandas 1.2, and TensorFlow 1.2, among others; the Zipline backtesting environment with now uses Python 3.6.   
+
 ## Installation instructions, Data Sources and Bug Reports
 
 The code examples rely on a wide range of Python libraries from the data science and finance domains. To facilitate installation, we use [Docker](https://www.docker.com/get-started) to provide containerized [conda](https://docs.conda.io/en/latest/) environments.
