@@ -205,9 +205,13 @@ You can modify any of the environments using the standard conda workflow outline
 
 ## How to install the required libraries using `conda` environments
 
-The code examples have been developed using Anaconda's [miniconda](https://docs.conda.io/en/latest/miniconda.html) distribution to facilitate dependency management, in particular on Windows machines. 
+The code examples use Anaconda's [miniconda](https://docs.conda.io/en/latest/miniconda.html) distribution to facilitate dependency management. 
 
-If you are experienced (and work in a Unix-based environment), feel free to create your own environment using `pip`. You could just install the packages required for the notebooks you are interested in; however, you may find it rather challenging to get the patched Zipline version to work properly.
+If you are experienced (and work in a Unix-based environment), feel free to create your own environment using the provided `.yml` files (however, these are not tested, do not cntain pinned version numbers and should be viewed as a list of directly required libraries without their dependencies (which `conda` will handle). 
+
+You could also just install the packages required for the notebooks you are interested in; the most recent versions (as of March 2021) should work. However, you may find it rather challenging to get the patched Zipline version to work properly.
+
+> The Docker image is intended as the default way of running the code as the notebooks are only tested against the environments it contains. Unfortunately, I'm not able to provide support for debugging your own environments.
 
 ### Install miniconda
 
