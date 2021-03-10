@@ -5,6 +5,9 @@ This book uses (mostly) Python 3.7 and various ML- and trading-related libraries
 > Update: Release 2.0 reduces the number of environments to 2 and bumps the Python version to 3.8 for the main `ml4t` and to 3.6 for the `backtest` environment.
 > Instructions below reflect these changes.
 
+> To update the Docker image to the latest version, run:
+> ```docker pull appliedai/packt:latest```
+
 Depending on your OS, you may have several options to create these environments. These are, in increasing order of complexity:
  1. **Recommended**: use [Docker](https://www.docker.com/) Desktop to pull an image from [Docker Hub](https://www.docker.com/products/docker-hub) and create a local container with the requisite software to run the notebooks. 
  2. Create the [conda environments](https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html) using the provided `.yml` environment files as outlined below. However, the backtesting environment that relies on the [patched](https://github.com/stefan-jansen/zipline) version of `zipline` only exists for **Ubuntu** due to numerous version conflicts. 
@@ -122,8 +125,8 @@ With a single Docker command, we can accomplish several things at once (see the 
 - set the environment variable `QUANDL_API_KEY` with the value of your key (that you need to fill in for `<your API key>`), and
 - start a `bash` terminal inside the container, resulting in a new command prompt for the user `packt`.
 
-1. Open a Terminal or a Powershell window,
-2. Navigate to the directory containing the [ML4T](https://github.com/stefan-jansen/machine-learning-for-trading) code samples that you sourced above,
+1. Open a Terminal or a Powershell window.
+2. Navigate to the directory containing the [ML4T](https://github.com/stefan-jansen/machine-learning-for-trading) code samples that you sourced above.
 3. In the root directory of the local version of the repo, run the following command, taking into account the different path formats required by Mac and Windows:
     - **Mac OS**: you can use the `pwd` command as a shell variable that contains the absolute path to the present working directory (and you could use `$QUANDL_API_KEY` if you created such an environment variable in the previous step):  
         ```docker
@@ -135,7 +138,10 @@ With a single Docker command, we can accomplish several things at once (see the 
      docker run -it -v C:/Users/stefan/Documents/machine-learning-for-trading:/home/packt/ml4t -p 8888:8888 -e QUANDL_API_KEY=<your API key> --name ml4t appliedai/packt:latest bash
      ```              
 4. Run `exit` from the container shell to exit and stop the container. 
-5. To resume working, you can run `docker start -a -i ml4t` from Mac OS terminal or Windows Powershell in the root directory to restart the container and attach it to the host shell in interactive mode (see Docker docs for more detail).                                                                                                                                                                                                                                                                                                                                                                                                  
+5. To resume working, you can run `docker start -a -i ml4t` from Mac OS terminal or Windows Powershell in the root directory to restart the container and attach it to the host shell in interactive mode (see Docker docs for more detail).
+
+> To update the Docker image to the latest version, run:
+> ```docker pull appliedai/packt:latest```
 
 ### Running the notebooks from the container
 
