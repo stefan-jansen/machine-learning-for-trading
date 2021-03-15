@@ -214,7 +214,7 @@ Linear models are standard tools for inference and prediction in regression and 
 ### 08 The ML4T Workflow: From Model to Strategy Backtesting
 
 This [chapter](08_ml4t_workflow) presents an end-to-end perspective on designing, simulating, and evaluating a trading strategy driven by an ML algorithm. 
-We will demonstrate in detail how to backtest an ML-driven strategy in a historical market context using the Python libraries [backtrader](https://www.backtrader.com/) and [Zipline](https://stefan-jansen.github.io/zipline/index.html). 
+We will demonstrate in detail how to backtest an ML-driven strategy in a historical market context using the Python libraries [backtrader](https://www.backtrader.com/) and [Zipline](https://zipline.ml4trading.io/index.html). 
 The ML4T workflow ultimately aims to gather evidence from historical data that helps decide whether to deploy a candidate strategy in a live market and put financial resources at risk. A realistic simulation of your strategy needs to faithfully represent how security markets operate and how trades execute. Also, several methodological aspects require attention to avoid biased results and false discoveries that will lead to poor investment decisions.
 
 <p align="center">

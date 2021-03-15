@@ -159,7 +159,7 @@ We use the environment `ml4t` except for a dozen notebooks related to backtestin
 
 ### Ingesting Zipline data
 
-To run Zipline backtests, we need to `ingest` data. See the [Beginner Tutorial](https://stefan-jansen.github.io/zipline/beginner-tutorial.html) for more information. 
+To run Zipline backtests, we need to `ingest` data. See the [Beginner Tutorial](https://zipline.ml4trading.io/beginner-tutorial.html) for more information. 
 
 The image has been configured to store the data in a `.zipline` directory in the directory where you started the container (which should be the root folder of the starter code you've downloaded above). 
 
