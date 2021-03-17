@@ -122,7 +122,7 @@ The notebook [making_out_of_sample_predictions](08_making_out_of_sample_predicti
 
 ### Defining and backtesting the long-short strategy
 
-The notebook [backtesting_with_zipline](09_backtesting_with_zipline.ipynb) creates a strategy based on the model predictions, simulates its historical performance using [Zipline](https://www.zipline.io/, and evaluates the result using [Pyfolio](https://github.com/quantopian/pyfolio. 
+The notebook [backtesting_with_zipline](09_backtesting_with_zipline.ipynb) creates a strategy based on the model predictions, simulates its historical performance using [Zipline](https://zipline.ml4trading.io/, and evaluates the result using [Pyfolio](https://github.com/quantopian/pyfolio. 
 
 ## A peek into the black box: How to interpret GBM results
 

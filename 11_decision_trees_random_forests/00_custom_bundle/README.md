@@ -1,6 +1,6 @@
 # Custom Bundle for Japanese Stocks sourced from STOOQ
 
-We are going to create a [custom bundle](https://www.Zipline.io/bundles.html#writing-a-new-bundle) for `Zipline` using Japanese equity data; see [download instructions](../../data/create_stooq_data.ipynb) first.  
+We are going to create a [custom bundle](https://zipline.ml4trading.io/bundles.html#writing-a-new-bundle) for `Zipline` using Japanese equity data; see [download instructions](../../data/create_stooq_data.ipynb) first.  
 
 We will take the following steps:
 1. Create several data files containing information on tickers, prices, and adjustments
@@ -25,7 +25,7 @@ The file `stooq_preprocessing` implements these steps and produces the tables in
 
 ## `Zipline` ingest function
 
-The file `stooq_jp_stocks.py` defines a function `stooq_jp_to_bundle(interval='1d')` that returns the `ingest` function required by `Zipline` to produce a custom bundle (see [docs](https://www.zipline.io/bundles.html#writing-a-new-bundle). It needs to have the following signature:
+The file `stooq_jp_stocks.py` defines a function `stooq_jp_to_bundle(interval='1d')` that returns the `ingest` function required by `Zipline` to produce a custom bundle (see [docs](https://zipline.ml4trading.io/bundles.html#writing-a-new-bundle). It needs to have the following signature:
 
 ```python
 ingest(environ,

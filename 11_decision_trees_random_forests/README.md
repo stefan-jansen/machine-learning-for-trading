@@ -114,6 +114,6 @@ Instead of the scikit-learn random forest implementation, we will use the [Light
 
 ### Backtest with Zipline
 
-- The notebook [backtesting_with_zipline](07_backtesting_with_zipline.ipynb) evaluates the model predictions using a long-short strategy simulated using [Zipline](https://www.zipline.io/).
+- The notebook [backtesting_with_zipline](07_backtesting_with_zipline.ipynb) evaluates the model predictions using a long-short strategy simulated using [Zipline](https://zipline.ml4trading.io/).
 
  

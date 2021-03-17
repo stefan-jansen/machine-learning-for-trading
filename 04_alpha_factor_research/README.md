@@ -46,6 +46,7 @@ In an idealized world, categories of risk factors should be independent of each 
 - [The New Palgrave Dictionary of Economics](https://www.palgrave.com/us/book/9780333786765) (2008) by Steven Durlauf and Lawrence Blume, 2nd ed.
 - [Anomalies and Market Efficiency](https://www.nber.org/papers/w9277.pdf) by G. William Schwert25 (Ch. 15 in Handbook of the- "Economics of Finance", by Constantinides, Harris, and Stulz, 2003)
 - [Investor Psychology and Asset Pricing](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=265132), by David Hirshleifer (2001)
+- [Practical advice for analysis of large, complex data sets](https://www.unofficialgoogledatascience.com/2016/10/practical-advice-for-analysis-of-large.html), Patrick Riley, Unofficial Google Data Science Blog
 
 ## Engineering alpha factors that predict returns
 
@@ -96,7 +97,7 @@ The notebook [kalman_filter_and_wavelets](03_kalman_filter_and_wavelets.ipynb) a
 
 ## From signals to trades: backtesting with `Zipline`
 
-The open source [zipline](http://www.zipline.io/index.html) library is an event-driven backtesting system maintained and used in production by the crowd-sourced quantitative investment fund [Quantopian](https://www.quantopian.com/) to facilitate algorithm-development and live-trading. It automates the algorithm's reaction to trade events and provides it with current and historical point-in-time data that avoids look-ahead bias.
+The open source [zipline](https://zipline.ml4trading.io/index.html) library is an event-driven backtesting system maintained and used in production by the crowd-sourced quantitative investment fund [Quantopian](https://www.quantopian.com/) to facilitate algorithm-development and live-trading. It automates the algorithm's reaction to trade events and provides it with current and historical point-in-time data that avoids look-ahead bias.
 
 - [Chapter 8](../08_ml4t_workflow) contains a more comprehensive introduction to Zipline.
 - Please follow the [instructions](../installation) in the `installation` folder, including to address **know issues**.

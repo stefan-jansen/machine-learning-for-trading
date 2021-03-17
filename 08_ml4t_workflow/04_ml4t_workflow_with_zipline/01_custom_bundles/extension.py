@@ -9,6 +9,11 @@ from pytz import timezone
 from trading_calendars import register_calendar
 from trading_calendars.exchange_calendar_xnys import XNYSExchangeCalendar
 
+"""
+This code is based on Algoseek's NASDAQ100 minute-bar trade data. 
+Please refer to the README for a brief summary on how you could adapt this code for your purposes.  
+"""
+
 
 class AlgoSeekCalendar(XNYSExchangeCalendar):
     """

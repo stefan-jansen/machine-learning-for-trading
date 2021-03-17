@@ -44,6 +44,8 @@ Another innovation of the second edition is to replicate several trading applica
 
 All applications now use the latest available (at the time of writing) software versions such as pandas 1.0 and TensorFlow 2.2. There is also a customized version of Zipline that makes it easy to include machine learning model predictions when designing a trading strategy.
 
+> Update: release 2.0 updates to Python 3.8, Pandas 1.2, and TensorFlow 1.2, among others; the Zipline backtesting environment with now uses Python 3.6.   
+
 ## Installation instructions, Data Sources and Bug Reports
 
 The code examples rely on a wide range of Python libraries from the data science and finance domains. To facilitate installation, we use [Docker](https://www.docker.com/get-started) to provide containerized [conda](https://docs.conda.io/en/latest/) environments.
@@ -53,7 +55,7 @@ The code examples rely on a wide range of Python libraries from the data science
 
 > If you have any difficulties installing the environments, downloading the data or running the code, please raise a **GitHub issue** in the repo ([here](https://github.com/stefan-jansen/machine-learning-for-trading/issues)). Working with GitHub issues has been described [here](https://guides.github.com/features/issues/).
 
-> **Update**: You can download the **[algoseek](https://www.algoseek.com)** data used in the book [here](https://www.algoseek.com/ml4t-book-data.html). I will add the preprocessing instructions shortly.
+> **Update**: You can download the **[algoseek](https://www.algoseek.com)** data used in the book [here](https://www.algoseek.com/ml4t-book-data.html). See instructions for preprocessing in [Chapter 2](02_market_and_fundamental_data/02_algoseek_intraday/README.md) and an intraday example with a gradient boosting model in [Chapter 12](12_gradient_boosting_machines/10_intraday_features.ipynb).  
 
 > **Update**: The [figures](figures) directory contains color versions of the charts used in the book. 
 
@@ -212,7 +214,7 @@ Linear models are standard tools for inference and prediction in regression and 
 ### 08 The ML4T Workflow: From Model to Strategy Backtesting
 
 This [chapter](08_ml4t_workflow) presents an end-to-end perspective on designing, simulating, and evaluating a trading strategy driven by an ML algorithm. 
-We will demonstrate in detail how to backtest an ML-driven strategy in a historical market context using the Python libraries [backtrader](https://www.backtrader.com/) and [Zipline](https://www.zipline.io/index.html). 
+We will demonstrate in detail how to backtest an ML-driven strategy in a historical market context using the Python libraries [backtrader](https://www.backtrader.com/) and [Zipline](https://zipline.ml4trading.io/index.html). 
 The ML4T workflow ultimately aims to gather evidence from historical data that helps decide whether to deploy a candidate strategy in a live market and put financial resources at risk. A realistic simulation of your strategy needs to faithfully represent how security markets operate and how trades execute. Also, several methodological aspects require attention to avoid biased results and false discoveries that will lead to poor investment decisions.
 
 <p align="center">

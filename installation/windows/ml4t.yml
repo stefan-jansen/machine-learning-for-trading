@@ -1,67 +1,104 @@
 name: ml4t
 channels:
-  - conda-forge
-  - bashtage
   - defaults
+  - conda-forge
   - anaconda
+  - bashtage
   - quantopian
   - ranaroussi
   - jiayi_anaconda
 dependencies:
+  - arch
   - arviz
   - autopep8
   - beautifulsoup4
+  - blosc
   - bokeh
   - catboost
-  - cloudpickle
   - colorlover
   - conda
   - cython
+  - cytoolz
+  - ffmpeg
   - gensim
   - graphviz
+  - gym
+  - gym-box2d
+  - html5lib
   - hdbscan
+  - hdf5
   - ipykernel
   - ipyvolume
-  - joblib
+  - ipywidgets
   - jupyter
   - jupyterlab
-  - jupyterlab_server
-  - libgfortran=3
-  - libopenblas
   - lightgbm
   - linearmodels
+  - lxml
   - matplotlib
+  - nb_conda
+  - nb_conda_kernels
+  - nbconvert=5.6.1 # avoid warnings on notebook lauch
+  - notebook
   - nltk
+  - numpy
   - pandas
   - pandas-datareader
+  - pillow
+  - pip
+  - plotly
   - pyarrow
   - pydot
   - pyfinance
   - pykalman
   - pyldavis
+  - pytorch
   - pymc3
   - pytables
-  - python
+  - python=3.8
   - python-graphviz
   - pywavelets
-  - scikit-learn=0.23.1
+  - requests
+  - scikit-image
+  - scikit-learn
   - scipy
   - scrapy
   - seaborn
+  - setuptools
   - shap
+  - snappy
   - spacy
   - statsmodels
+  - sympy
   - ta-lib
+  - termcolor
   - textacy
   - textblob
+  - theano
+  - thinc
   - tqdm
-  - yfinance
+  - umap-learn
+  - wheel
+  - widgetsnbextension
+  - wordcloud
+  - xgboost
+  - xlrd
+  - yaml
   - pip:
-    - alphalens==0.4.0
-    - backtrader==1.9.75.123
-    - empyrical==0.5.3
-    - glances==3.1.4.1
-    - pyfolio
-    - quandl==3.5.0
-    - yellowbrick==1.1
-
+      - alphalens
+      - autopep8
+      - backtrader
+      - empyrical
+      - livelossplot
+      - pymdptoolbox
+      - pyqtchart
+      - opencv-python
+      - mplfinance
+      - git+https://github.com/stefan-jansen/pyfolio.git@2676831e7a6e9badb4054695f72ca03d381c4713#egg=pyfolio
+      - PyPortfolioOpt
+      - quandl
+      - tensorboard
+      - tensorflow
+      - tensorflow-datasets
+      - yellowbrick
+      - yfinance

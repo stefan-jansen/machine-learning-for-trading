@@ -66,11 +66,17 @@ This section illustrates the acquisition of alternative data using web scraping,
 
 ### Code Example: Open Table Web Scraping
 
+> Note: different from all other examples, the code that uses Selenium is written to run on a host rather than using the Docker image because it relies on a browser. The code has been tested on Ubuntu and Mac only.
+
 This subfolder [01_opentable](01_opentable) contains the script [opentable_selenium](01_opentable/opentable_selenium.py) to scrape OpenTable data using Scrapy and Selenium.
 
 - [How to View the Source Code of a Web Page in Every Browser](https://www.lifewire.com/view-web-source-code-4151702)
 
 ### Code Example: SeekingAlpha Earnings Transcripts
+
+> Update: unfortunately, seekingalpha has updated their website to use captcha so automatic downloads are no longer possible in the way described here.
+
+> Note: different from all other examples, the code is written to run on a host rather than using the Docker image because it relies on a browser. The code has been tested on Ubuntu and Mac only.
 
 The subfolder [02_earnings_calls](02_earnings_calls) contains the script [sa_selenium](02_earnings_calls/sa_selenium.py) to scrape earnings call transcripts from the [SeekingAlpha](www.seekingalpha.com) website.
 

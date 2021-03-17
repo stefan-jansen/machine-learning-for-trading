@@ -1,6 +1,12 @@
 # Installation instructions
 
-This book uses (mostly) Python 3.7 and various ML- and trading-related libraries available in three different [conda environments](https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html) based on the [Miniconda](https://docs.conda.io/en/latest/miniconda.html) distribution. I developed the content on Ubuntu 20.04 while also testing on Mac OS 10.15 (Catalina). 
+This book uses (mostly) Python 3.7 and various ML- and trading-related libraries available in three different [conda environments](https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html) based on the [Miniconda](https://docs.conda.io/en/latest/miniconda.html) distribution. I developed the content on Ubuntu 20.04 while also testing on Mac OS 10.15 (Catalina).
+
+> Update: Release 2.0 reduces the number of environments to 2 and bumps the Python version to 3.8 for the main `ml4t` and to 3.6 for the `backtest` environment.
+> Instructions below reflect these changes.
+
+> To update the Docker image to the latest version, run:
+> ```docker pull appliedai/packt:latest```
 
 Depending on your OS, you may have several options to create these environments. These are, in increasing order of complexity:
  1. **Recommended**: use [Docker](https://www.docker.com/) Desktop to pull an image from [Docker Hub](https://www.docker.com/products/docker-hub) and create a local container with the requisite software to run the notebooks. 
@@ -82,6 +88,7 @@ Review the [Getting Started](https://docs.docker.com/docker-for-windows/) guide 
 The getting started guides for each OS referenced above describe the Docker Desktop settings.
 
 #### Increasing memory 
+
 - Under Preferences, look for Resources to find out how you can increase the memory allocated to the container; the default setting is too low given the size of the data. Increase to at least 4GB, better 8GB or more.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
 - Several examples are quite memory-intensive, for example the NASDAQ tick data and the SEC filings example in Chapter 2, and will require significantly higher memory allocation.
 
@@ -109,7 +116,7 @@ If you are on a UNIX-based system like Mac OSX, you may want to store the API ke
 
 ### Downloading the Docker image and running the container
 
-We'll be using a Docker [image](https://hub.docker.com/repository/docker/appliedai/packt) based on the Ubuntu 20.04 OS with [Anaconda](https://www.anaconda.com/)'s [miniconda](https://docs.conda.io/en/latest/miniconda.html) Python distribution installed. It comes with three conda environments describe below. 
+We'll be using a Docker [image](https://hub.docker.com/repository/docker/appliedai/packt) based on the Ubuntu 20.04 OS with [Anaconda](https://www.anaconda.com/)'s [miniconda](https://docs.conda.io/en/latest/miniconda.html) Python distribution installed. It comes with two conda environments described below. 
 
 With a single Docker command, we can accomplish several things at once (see the Getting Started guides linked above for more detail):
 - only on the first run: pull the Docker image from the Docker Hub account `appliedai` and the repository `packt` with the tag `latest` 
@@ -118,8 +125,8 @@ With a single Docker command, we can accomplish several things at once (see the 
 - set the environment variable `QUANDL_API_KEY` with the value of your key (that you need to fill in for `<your API key>`), and
 - start a `bash` terminal inside the container, resulting in a new command prompt for the user `packt`.
 
-1. Open a Terminal or a Powershell window,
-2. Navigate to the directory containing the [ML4T](https://github.com/stefan-jansen/machine-learning-for-trading) code samples that you sourced above,
+1. Open a Terminal or a Powershell window.
+2. Navigate to the directory containing the [ML4T](https://github.com/stefan-jansen/machine-learning-for-trading) code samples that you sourced above.
 3. In the root directory of the local version of the repo, run the following command, taking into account the different path formats required by Mac and Windows:
     - **Mac OS**: you can use the `pwd` command as a shell variable that contains the absolute path to the present working directory (and you could use `$QUANDL_API_KEY` if you created such an environment variable in the previous step):  
         ```docker
@@ -131,38 +138,41 @@ With a single Docker command, we can accomplish several things at once (see the 
      docker run -it -v C:/Users/stefan/Documents/machine-learning-for-trading:/home/packt/ml4t -p 8888:8888 -e QUANDL_API_KEY=<your API key> --name ml4t appliedai/packt:latest bash
      ```              
 4. Run `exit` from the container shell to exit and stop the container. 
-5. To resume working, you can run `docker start -a -i ml4t` from Mac OS terminal or Windows Powershell in the root directory to restart the container and attach it to the host shell in interactive mode (see Docker docs for more detail).                                                                                                                                                                                                                                                                                                                                                                                                  
+5. To resume working, you can run `docker start -a -i ml4t` from Mac OS terminal or Windows Powershell in the root directory to restart the container and attach it to the host shell in interactive mode (see Docker docs for more detail).
+
+> To update the Docker image to the latest version, run:
+> ```docker pull appliedai/packt:latest```
 
 ### Running the notebooks from the container
 
-Now you are running a shell inside the container and can access the various [conda environments](https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html). Run `conda env list` to see that there are a `base`, `ml4t` (default), `ml4t-dl` and an `ml4t-zipline` environments that we will use as follows:
+Now you are running a shell inside the container and can access both [conda environments](https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html). Run `conda env list` to see that there are a `base`, `ml4t` (default), and a `backtest` environments.
 
-| Part(s)   | Chapters        | Name         |
-|-----------|-----------------|--------------|
-| 1, 2 & 3  | 2-16, Appendix  | ml4t   |
-| 4         | 17-22*           | ml4t-dl  |
-| all | throughout              | ml4t-zipline
+The `backtest` environment is necessary because the latest version of Zipline 1.4.1 only support Python 3.6 and older versions of various other dependencies that partly also require compilation. I hope to update Zipline in the future to run on Python 3.8 as well.
 
-> the Deep Reinforcement Learning examples require TensorFlow 2.2, which currently is only available for Linux via `conda` for GPU; the notebooks contain instructions for upgrading via `pip`. Check [here](https://anaconda.org/anaconda/tensorflow) for current CPU and [here](https://anaconda.org/anaconda/tensorflow-gpu) for current GPU version support.
+We use the environment `ml4t` except for a dozen notebooks related to backtesting that use Zipline directly inputs generated by Zipline. The noteooks that require the `backtest` environment contain a notification. 
 
-- You can switch to another environment using `conda activate <env_name>`.
-- Alternatively, you can switch from one environment to another from the jupyter notebook or jupyter lab thanks to the [nb_conda_kernels](https://github.com/Anaconda-Platform/nb_conda_kernels) extension (see below).
+> If you want to use a GPU for the deep learning examples, you can run `conda install tensorflow-gpu` if you have the proper [CUDA version](https://www.tensorflow.org/install/source#gpu) installed. 
+> **Alternatively**, you can leverage [TensorFlow's Docker](https://www.tensorflow.org/install/docker) images and install any additional libraries there; the DL examples don't require anything that's overly complicated to install.
+
+- You can switch to another environment using `conda activate <env_name>` or using the Jupyter Notebook or Jupyter Lab Kernel menu thanks to the [nb_conda_kernels](https://github.com/Anaconda-Platform/nb_conda_kernels) extension (see below).
 - You may see an error message suggesting you run `conda init bash`. After doing so, reload the shell with the command `source .bashrc`.
 
 ### Ingesting Zipline data
 
-To run Zipline backtests, we need to `ingest` data. See the [Beginner Tutorial](https://www.zipline.io/beginner-tutorial.html) for more information. 
+To run Zipline backtests, we need to `ingest` data. See the [Beginner Tutorial](https://zipline.ml4trading.io/beginner-tutorial.html) for more information. 
 
 The image has been configured to store the data in a `.zipline` directory in the directory where you started the container (which should be the root folder of the starter code you've downloaded above). 
 
 From the command prompt of the container shell, run
 ```bash
-conda activate ml4t-zipline
+conda activate backtest
 zipline ingest
 ``` 
 You should see numerous messages as Zipline processes around 3,000 stock price series.
 
 #### Known Zipline issues
+
+> I have patched the following country code issue in the [latest Zipline version](https://github.com/stefan-jansen/zipline/commit/b33e5c955a58d888f55101874f45cd141c61d3e1), so you should not have to manually fiddle with the asset database any longer.
 
 When running a backtest, you will likely encounter an [error](https://github.com/quantopian/zipline/issues/2517) because the current Zipline version requires a country code entry in the exchanges table of the `assets-7.sqlite` database where it stores the asset metadata.
 
@@ -180,7 +190,7 @@ In practice, this looks as follows:
 <img src="https://i.imgur.com/mtdiylk.png" title="Modifying QUANDL SQLite - Step 1" width="50%"/>
 </p>
 
-That's all. Unfortunately, you need to repeat this everytime you run `zipline ingest`.
+That's all. Unfortunately, you (had to..) repeat this everytime you run `zipline ingest`.
 
 ### Working with notebooks int the Docker container
 
@@ -201,13 +211,17 @@ You can modify any of the environments using the standard conda workflow outline
 
 ## How to install the required libraries using `conda` environments
 
-The code examples have been developed using Anaconda's [miniconda](https://docs.conda.io/en/latest/miniconda.html) distribution to facilitate dependency management, in particular on Windows machines. 
+The code examples use Anaconda's [miniconda](https://docs.conda.io/en/latest/miniconda.html) distribution to facilitate dependency management. 
 
-If you are experienced (and work in a Unix-based environment), feel free to create your own environment using `pip`. You could just install the packages required for the notebooks you are interested in; however, challenges to get the patched Zipline version to work properly will likely remain.
+If you are experienced (and work in a Unix-based environment), feel free to create your own environment using the provided `.yml` files (however, these are not tested, do not cntain pinned version numbers and should be viewed as a list of directly required libraries without their dependencies (which `conda` will handle). 
+
+You could also just install the packages required for the notebooks you are interested in; the most recent versions (as of March 2021) should work. However, you may find it rather challenging to get the patched Zipline version to work properly.
+
+> The Docker image is intended as the default way of running the code as the notebooks are only tested against the environments it contains. Unfortunately, I'm not able to provide support for debugging your own environments.
 
 ### Install miniconda
 
-The notebooks rely on three different virtual environments based on [miniconda3](https://docs.conda.io/en/latest/miniconda.html) that you need to install first. 
+The notebooks rely on two different virtual environments based on [miniconda3](https://docs.conda.io/en/latest/miniconda.html) that you need to install first. 
 
 You can find detailed instructions for various operating systems [here](https://conda.io/projects/conda/en/latest/user-guide/install/index.html).
 
@@ -227,17 +241,7 @@ e.g.
 conda create --name pandas_environment pandas=1.05
 ```
 
-Here, we will create environments from files to ensure you install the library versions that the code has been tested with. There are separate environment specs for parts 1, 2, 3 and 4 as described in the following table. They differ by operating system and can be found under the respective path.
-
-| Name          |Part(s)    | Chapters        | Path |
-|---------------|-----------|-----------------|----------------------------------------------|
-| ml4t          |1, 2 & 3   | 2-16, appendix  |  installation/{linux &#x7c; macos &#x7c; windows}/ml4t.yml    |
-| ml4t-dl       |4          | 17-22           | installation//{linux &#x7c; macos &#x7c; windows}/ml4t_dl.yml   |
-| ml4t-zipline  | all | throughout           |  installation/linux/ml4t_zipline.yml   |
-
-> *the Deep Reinforcement Learning examples require TensorFlow 2.2, which currently is only available via `conda` for GPUC; the notebooks contain instructions for upgrading via `pip`. 
-
-To create the environment with the name `ml4t` (specified in the file) for `linux`, from the repository's root directory, just run:
+Here, we will create the `ml4t` environment from file to ensure you install the library versions that the code has been tested with. To create the environment with the name `ml4t` (tested on Ubuntu) for `linux`, from the repository's root directory, just run:
 
 ```bash
 conda env create -f installation/linux/ml4t.yml
@@ -248,7 +252,7 @@ or, for Max OS X
 ```bash
 conda env create -f installation/macos/ml4t.yml
 ```
-from the command line in this directory.
+from the command line in this directory. 
 
 ### Activate conda environment
 

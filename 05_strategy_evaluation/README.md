@@ -111,7 +111,7 @@ Kelly drew a connection to Shannon's information theory to solve for the bet tha
 - [Beat the Market: A Scientific Stock Market System](https://www.researchgate.net/publication/275756748_Beat_the_Market_A_Scientific_Stock_Market_System) , Edward O. Thorp,1967
 - [Quantitative Trading: How to Build Your Own Algorithmic Trading Business](https://www.amazon.com/Quantitative-Trading-Build-Algorithmic-Business/dp/0470284889/ref=sr_1_2?s=books&ie=UTF8&qid=1545525861&sr=1-2), Ernie Chan, 2008
 
-#### Alternatives to MV Optimizatino with Python
+#### Alternatives to MV Optimization with Python
 
 - The notebook [kelly_rule](05_kelly_rule.ipynb) demonstrates the application for the single and multiple asset case. 
 - The latter result is also included in the notebook [mean_variance_optimization](04_mean_variance_optimization.ipynb), along with several other alternative approaches.
@@ -132,14 +132,14 @@ We demonstrate how to implement HRP and compare it to alternatives in Chapter 13
 
 ## Trading and managing a portfolio with `Zipline`
 
-The open source [zipline](http://www.zipline.io/index.html) library is an event-driven backtesting system maintained and used in production by the crowd-sourced quantitative investment fund [Quantopian](https://www.quantopian.com/) to facilitate algorithm-development and live-trading. It automates the algorithm's reaction to trade events and provides it with current and historical point-in-time data that avoids look-ahead bias. [Chapter 8 - The ML4T Workflow](../08_strategy_workflow) has a more detailed, dedicated introduction to backtesting using both `zipline` and `backtrader`. 
+The open source [zipline](https://zipline.ml4trading.io/index.html) library is an event-driven backtesting system maintained and used in production by the crowd-sourced quantitative investment fund [Quantopian](https://www.quantopian.com/) to facilitate algorithm-development and live-trading. It automates the algorithm's reaction to trade events and provides it with current and historical point-in-time data that avoids look-ahead bias. [Chapter 8 - The ML4T Workflow](../08_strategy_workflow) has a more detailed, dedicated introduction to backtesting using both `zipline` and `backtrader`. 
 
 In [Chapter 4](../04_alpha_factor_research), we introduced `zipline` to simulate the computation of alpha factors from trailing cross-sectional market, fundamental, and alternative data. Now we will exploit the alpha factors to derive and act on buy and sell signals. 
 
 ### Code Examples: Backtests with trades and portfolio optimization 
 
 The code for this section lives in the following two notebooks: 
-- The notebooks in this section rely on the `conda` environment `ml4t-zipline`. For installation, please see instructions provided [here](../installation).
+- The notebooks in this section use the `conda` environment `backtest`. Please see the installation [instructions](../installation/README.md) for downloading the latest Docker image or alternative ways to set up your environment.
 - The notebook [backtest_with_trades](01_backtest_with_trades.ipynb) simulates the trading decisions that build a portfolio based on the simple MeanReversion alpha factor from the last chapter using Zipline. We not explicitly optimize the portfolio weights and just assign positions of equal value to each holding.
 - The notebook [backtest_with_pf_optimization](02_backtest_with_pf_optimization.ipynb) demonstrates how to use PF optimization as part of a simple strategy backtest. 
 
@@ -151,4 +151,4 @@ Pyfolio facilitates the analysis of portfolio performance and risk in-sample and
 
 The notebook [pyfolio_demo](03_pyfolio_demo.ipynb) illustrates how to extract the `pyfolio` input from the backtest conducted in the previous folder. It then proceeds to calcuate several performance metrics and tear sheets using `pyfolio`
 
-- The notebook relies on the `conda` environment `ml4t-zipline`. For installation, please see instructions provided [here](../installation).
+- This notebook requires the `conda` environment `backtest`. Please see the [installation instructions](../installation/README.md) for running the latest Docker image or alternative ways to set up your environment.

@@ -6,6 +6,8 @@ The data needs to be extracted from the HTML source, barring any legal obstacles
 
 ### Building a dataset of restaurant bookings
 
+> Note: different from all other examples, the code that uses Selenium is written to run on a host rather than using the Docker image because it relies on a browser. The code has been tested on Ubuntu and Mac only.
+
 With the browser automation tool [Selenium](https://www.seleniumhq.org/), you can follow the links to the next pages and quickly build a dataset of over 10,000 restaurants in NYC that you could then update periodically to track a time series.
 
 To set up selenium, run 

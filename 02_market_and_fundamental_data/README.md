@@ -161,7 +161,7 @@ The folder [data providers](03_data_providers) contains examples to use various 
 - Quandl [docs](https://docs.quandl.com/docs) and Python [API](https://www.quandl.com/tools/python﻿)
 - [yfinance](https://github.com/ranaroussi/yfinance)
 - [Quantopian](https://www.quantopian.com/posts)
-- [Zipline](http://www.zipline.io/﻿)
+- [Zipline](https://zipline.ml4trading.io/﻿)
 - [LOBSTER](https://lobsterdata.com/)
 - [The Investor Exchange](https://iextrading.com/﻿)
 - [IEX Cloud](https://iexcloud.io/) financial data infrastructure
