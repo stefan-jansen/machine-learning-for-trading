@@ -2,6 +2,8 @@
 
 This book uses (mostly) Python 3.7 and various ML- and trading-related libraries available in three different [conda environments](https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html) based on the [Miniconda](https://docs.conda.io/en/latest/miniconda.html) distribution. I developed the content on Ubuntu 20.04 while also testing on Mac OS 10.15 (Catalina).
 
+> Update: I have just released a [new Zipline version](https://github.com/stefan-jansen/zipline-reloaded) that runs on Python 3.7-3.9; see [release info](https://github.com/stefan-jansen/zipline-reloaded/releases/tag/2.0.0rc4) and [docs](https://zipline.ml4trading.io/). As a result, the Docker solution will no longer be necessary going forward and I will provide new environment files over the course of April.
+
 > Update: Release 2.0 reduces the number of environments to 2 and bumps the Python version to 3.8 for the main `ml4t` and to 3.6 for the `backtest` environment.
 > Instructions below reflect these changes.
 
