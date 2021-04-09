@@ -50,9 +50,9 @@ class MultipleTimeSeriesCV:
         for train_start, train_end, test_start, test_end in split_idx:
 
             train_idx = dates[(dates[self.date_idx] > days[train_start])
-                              & (dates.date <= days[train_end])].index
-            test_idx = dates[(dates.date > days[test_start])
-                             & (dates.date <= days[test_end])].index
+                              & (dates[self.date_idx] <= days[train_end])].index
+            test_idx = dates[(dates[self.date_idx] > days[test_start])
+                             & (dates[self.date_idx] <= days[test_end])].index
             if self.shuffle:
                 np.random.shuffle(list(train_idx))
             yield train_idx.to_numpy(), test_idx.to_numpy()
