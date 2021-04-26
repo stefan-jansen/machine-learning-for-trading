@@ -56,7 +56,7 @@ To create a [virtual environment](https://docs.conda.io/projects/conda/en/latest
 
 ```bash
 mamba env create -f installation/windows/ml4t.yml 
-mamba env create -f installation/macos/ml4t.yml 
+mamba env create -f installation/macosx/ml4t.yml 
 mamba env create -f installation/linux/ml4t.yml 
 ```
 
@@ -121,8 +121,8 @@ sudo make install
 Assuming you have created and activated a virtual environment, you just need to run (depending on your OS):
 ```bash
 pip install -U pip setuptools wheel
-pip install -r installation/macos/ml4t.txt # or
-pip install -r installation/linux/ml4t.txt
+pip install -r installation/macosx/ml4t.txt # for macOS
+pip install -r installation/linux/ml4t.txt # for Ubuntu
 ```
 
 ## Post-installation instructions
