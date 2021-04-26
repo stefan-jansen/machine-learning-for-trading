@@ -52,12 +52,14 @@ Another innovation of the second edition is to replicate several trading applica
 
 All applications now use the latest available (at the time of writing) software versions such as pandas 1.0 and TensorFlow 2.2. There is also a customized version of Zipline that makes it easy to include machine learning model predictions when designing a trading strategy.
 
-> Update: code sample release 2.0 updates the conda environments provided by the Docker image to Python 3.8, Pandas 1.2, and TensorFlow 1.2, among others; the Zipline backtesting environment with now uses Python 3.6.
-
 
 ## Installation, data sources and bug reports
 
 The code examples rely on a wide range of Python libraries from the data science and finance domains. To facilitate installation, we use [Docker](https://www.docker.com/get-started) to provide containerized [conda](https://docs.conda.io/en/latest/) environments.
+
+> Update April 2021: with the update of [Zipline](https://zipline.ml4trading.io), it is no longer necessary to use Docker. The installation instructions now refer to OS-specific environment files that should simplify your running of the notebooks.
+
+> Update Februar 2021: code sample release 2.0 updates the conda environments provided by the Docker image to Python 3.8, Pandas 1.2, and TensorFlow 1.2, among others; the Zipline backtesting environment with now uses Python 3.6.
 
 - The [installation](installation/README.md) directory contains detailed instructions on setting up and using a Docker image to run the notebooks. It also contains configuration files for setting up various `conda` environments and install the packages used in the notebooks directly on your machine if you prefer (and, depending on your system, are prepared to go the extra mile).
 - To download and preprocess many of the data sources used in this book, see the instructions in the [README](data/README.md) file alongside various notebooks in the [data](data) directory.
