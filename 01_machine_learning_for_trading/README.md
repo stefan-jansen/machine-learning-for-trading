@@ -301,7 +301,7 @@ Trading takes place in a competitive, interactive marketplace. Reinforcement lea
    
 ### Python Libraries
 
-- matplotlib [docs]( <https://github.com/matplotlib/matplotlib)
+- matplotlib [docs](https://github.com/matplotlib/matplotlib)
 - numpy [docs](https://github.com/numpy/numpy)
 - pandas [docs](https://github.com/pydata/pandas)
 - scipy [docs](https://github.com/scipy/scipy)
