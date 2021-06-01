@@ -83,7 +83,7 @@ dependencies:
   - constantly=15.1.0
   - cryptography=3.4.7
   - cssselect=1.1.0
-  - cudatoolkit=11.2.2
+  - cudatoolkit
   - cudnn=8.1.0.77
   - curl=7.76.1
   - cycler=0.10.0
