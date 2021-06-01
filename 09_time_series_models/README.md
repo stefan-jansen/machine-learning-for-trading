@@ -241,5 +241,5 @@ It first generates and stores the cointegration tests for all candidate pairs an
     - [Pairs Trading Basics: Correlation, Cointegration And Strategy](https://blog.quantinsti.com/pairs-trading-basics/)
 - Additional blog posts include:
     - [Pairs Trading using Data-Driven Techniques: Simple Trading Strategies Part 3](https://medium.com/auquan/pairs-trading-data-science-7dbedafcfe5a)
-    - [Pairs Trading Johansen & Kalman](https://letianquant.com/kalman-filter-pairs-trading.htmln)
+    - [Pairs Trading Johansen & Kalman](https://letianzj.github.io/kalman-filter-pairs-trading.html)
     - [Copulas](https://twiecki.io/blog/2018/05/03/copulas/) by Thomas Wiecki
