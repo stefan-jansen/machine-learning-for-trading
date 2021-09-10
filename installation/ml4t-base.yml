@@ -8,11 +8,13 @@ channels:
   - ranaroussi
   - powerai
   - fastai
+  - jiayi_anaconda
 dependencies:
   - arch
   - alphalens-reloaded
   - arviz
   - autopep8
+  - backtrader
   - beautifulsoup4
   - bokeh
   - catboost
@@ -43,7 +45,7 @@ dependencies:
   - nltk
   - numpy
   - opencv-python-headless
-  - pandas
+  - pandas<1.3
   - pandas-datareader
   - pillow
   - pip
@@ -89,7 +91,6 @@ dependencies:
   - yfinance
   - zipline-reloaded
   - pip:
-      - backtrader
       - livelossplot
       - pymdptoolbox
       - PyPortfolioOpt
