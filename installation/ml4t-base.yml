@@ -45,6 +45,7 @@ dependencies:
   - nltk
   - numpy
   - opencv-python-headless
+  - openpyxl
   - pandas<1.3
   - pandas-datareader
   - pillow

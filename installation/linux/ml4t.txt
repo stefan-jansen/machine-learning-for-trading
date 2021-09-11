@@ -142,6 +142,7 @@ numexpr==2.7.3
 numpy==1.20.3
 oauthlib==3.1.1
 opencv-python==4.5.3.56
+openpyxl
 opt-einsum==3.3.0
 osqp==0.6.2.post0
 packaging==21.0
