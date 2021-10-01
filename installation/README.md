@@ -1,6 +1,6 @@
 # Installation instructions
 
-> Update September 10, 2021: New environment files `ml4t-base.[txt, yml]` for OS-agnostic `pip` (Linux, MacOS) and `conda` (Linux, MacOS, Windows) installs available that include the latest [Zipline](https://github.com/stefan-jansen/zipline-reloaded), [Alphalens](https://github.com/stefan-jansen/alphalens-reloaded) and [Pyfolio](https://github.com/stefan-jansen/pyfolio-reloaded) versions. 
+> Update September 10, 2021: New OS-agnostic environment files `ml4t-base.[txt, yml]` for `pip` (Linux, MacOS) and `conda` (Linux, MacOS, Windows) installs available that include the latest [Zipline](https://github.com/stefan-jansen/zipline-reloaded), [Alphalens](https://github.com/stefan-jansen/alphalens-reloaded) and [Pyfolio](https://github.com/stefan-jansen/pyfolio-reloaded) versions. These files are OS-agnostic because they include only the main libraries and not OS-specific dependencies, leaving the selection of the latest compatible versions and OS-specific depencies to your package manager of choice.   
 
 > Update April 25, 2021: The [new Zipline version](https://github.com/stefan-jansen/zipline-reloaded) permits running the backtest notebooks without Docker on all operating systems; the installation instructions now refer to Windows/MacOS/Linux environment files.  
 
