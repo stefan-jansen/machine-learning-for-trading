@@ -9,6 +9,7 @@ channels:
   - powerai
   - fastai
   - jiayi_anaconda
+  - districtdatalabs
 dependencies:
   - arch
   - alphalens-reloaded
