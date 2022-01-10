@@ -1,5 +1,7 @@
 # Installation instructions
 
+> There is still incomplete support for MacOS using M1/Silicone chips. Some packages compatible with new architecture are only available via `conda`/`mamba`, others only via `pip`. As a result, there is no single installation script yet - I hope to be able to simplify this as the support across the PyData ecosystem matures. For now, please create separate `conda`/`pip`-based environments to install packages as needed and supported.
+ 
 > Update September 10, 2021: New OS-agnostic environment files `ml4t-base.[txt, yml]` for `pip` (Linux, MacOS) and `conda` (Linux, MacOS, Windows) installs available that include the latest [Zipline](https://github.com/stefan-jansen/zipline-reloaded), [Alphalens](https://github.com/stefan-jansen/alphalens-reloaded) and [Pyfolio](https://github.com/stefan-jansen/pyfolio-reloaded) versions. These files are OS-agnostic because they include only the main libraries and not OS-specific dependencies, leaving the selection of the latest compatible versions and OS-specific depencies to your package manager of choice.   
 
 > Update April 25, 2021: The [new Zipline version](https://github.com/stefan-jansen/zipline-reloaded) permits running the backtest notebooks without Docker on all operating systems; the installation instructions now refer to Windows/MacOS/Linux environment files.  
