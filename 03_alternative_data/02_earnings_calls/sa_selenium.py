@@ -12,6 +12,7 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from furl import furl
 from selenium import webdriver
+import calendar
 
 transcript_path = Path('transcripts')
 
@@ -28,49 +29,46 @@ def store_result(meta, participants, content):
 
 def parse_html(html):
     """Main html parser function"""
-    date_pattern = re.compile(r'(\d{2})-(\d{2})-(\d{2})')
+    date_pattern = re.compile(r'(^\w+).\s(\d{2}),\s(\d{4})')
     quarter_pattern = re.compile(r'(\bQ\d\b)')
     soup = BeautifulSoup(html, 'lxml')
 
     meta, participants, content = {}, [], []
-    h1 = soup.find('h1', itemprop='headline')
+    h1 = soup.find('h1', attrs={"data-test-id": "post-title"})
     if h1 is None:
         return
     h1 = h1.text
     meta['company'] = h1[:h1.find('(')].strip()
     meta['symbol'] = h1[h1.find('(') + 1:h1.find(')')]
 
-    title = soup.find('div', class_='title')
-    if title is None:
-        return
-    title = title.text
-    print(title)
-    match = date_pattern.search(title)
-    if match:
-        m, d, y = match.groups()
-        meta['month'] = int(m)
-        meta['day'] = int(d)
-        meta['year'] = int(y)
-
-    match = quarter_pattern.search(title)
+    match = quarter_pattern.search(h1)
     if match:
         meta['quarter'] = match.group(0)
+    
+    data_span = soup.find('span', attrs={"data-test-id": "post-date"})
+    if data_span is not None:
+        date_string = data_span.text
+        match = date_pattern.search(date_string)
+        if match:
+            m, d, y = match.groups()
+            meta['month'] = int(list(calendar.month_abbr).index(m))
+            meta['day'] = int(d)
+            meta['year'] = int(y)
 
     qa = 0
-    speaker_types = ['Executives', 'Analysts']
+    speaker_types = ['Executive', 'Analysts', 'President']
     for header in [p.parent for p in soup.find_all('strong')]:
+        checks = [soup.find(name='p', string=re.compile(r'(' + header.text + ' - ' + speaker_type + ').*')) is not None
+                  for speaker_type in speaker_types]
         text = header.text.strip()
         if text.lower().startswith('copyright'):
             continue
         elif text.lower().startswith('question-and'):
             qa = 1
             continue
-        elif any([type in text for type in speaker_types]):
-            for participant in header.find_next_siblings('p'):
-                if participant.find('strong'):
-                    break
-                else:
-                    participants.append([text, participant.text])
+        elif any(checks):
+            if header.text not in [p[1] for p in participants]:
+                participants.append([speaker_types[checks.index(True)], header.text])
         else:
             p = []
             for participant in header.find_next_siblings('p'):
@@ -90,7 +88,7 @@ page = 1
 driver = webdriver.Firefox()
 while next_page:
     print(f'Page: {page}')
-    url = f'{SA_URL}/earnings/earnings-call-transcripts/{page}'
+    url = f'{SA_URL}/earnings/earnings-call-transcripts?page={page}'
     driver.get(urljoin(SA_URL, url))
     sleep(8 + (random() - .5) * 2)
     response = driver.page_source
@@ -113,4 +111,4 @@ while next_page:
                 sleep(8 + (random() - .5) * 2)
 
 driver.close()
-# pd.Series(articles).to_csv('articles.csv')
+
