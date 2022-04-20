@@ -189,11 +189,11 @@ An alternative approach converts a time series of alpha factors into a two-dimen
 
 #### Creating the 2D time series of financial indicators
 
-The notebook [engineer_cnn_features](05_engineer_cnn_features.ipynb) creates technical indicators at different intervals.
+The notebook [engineer_cnn_features](05_cnn_for_trading_feature_engineering.ipynb) creates technical indicators at different intervals.
 
 #### Select and cluster the most relevant features
  
-The notebook [convert_cnn_features_to_image_format](06_convert_cnn_features_to_image_format.ipynb) selects the 15 most relevant features from the 20 candidates to fill the 15⨉15 input grid and then applies hierarchical clustering.
+The notebook [convert_cnn_features_to_image_format](06_cnn_for_trading_features_to_clustered_image_format.ipynb) selects the 15 most relevant features from the 20 candidates to fill the 15⨉15 input grid and then applies hierarchical clustering.
 
 #### Create and train a convolutional neural network
 
