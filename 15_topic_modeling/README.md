@@ -121,7 +121,7 @@ The notebook [lda_financial_news](07_lda_financial_news.ipynb) shows how to summ
 
 ### Applications
 
-- [Applications of Topic Models](https://mimno.infosci.cornell.edu/papers/2017_fntir_tm_applications.pdf), Jordan Boyd-Graber, Yuening Hu, David Minmo, 2017
+- [Applications of Topic Models](https://mimno.infosci.cornell.edu/papers/2017_fntir_tm_applications.pdf), Jordan Boyd-Graber, Yuening Hu, David Mimno, 2017
 - [High Quality Topic Extraction from Business News Explains Abnormal Financial Market Volatility](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3675119/pdf/pone.0064846.pdf)
 - [What are You Saying? Using Topic to Detect Financial Misreporting](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2803733)
 - [LDA in the browser - javascript implementation](https://github.com/mimno/jsLDA)

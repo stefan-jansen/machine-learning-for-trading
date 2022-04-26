@@ -95,7 +95,7 @@ Additional options include:
 
 ### How to Leverage GPU Optimization
 
-All popular Deep Learning libraries support the use of GPU, and some also allow for parallel training on multiple GPU. The most common types of GPU are produced by NVIDA, and configuration requires installation and setup of the CUDA environment. The process continues to evolve and can be somewhat challenging depending on your computational environment. 
+All popular Deep Learning libraries support the use of GPU, and some also allow for parallel training on multiple GPU. The most common types of GPU are produced by NVIDIA, and configuration requires installation and setup of the CUDA environment. The process continues to evolve and can be somewhat challenging depending on your computational environment. 
 
 A more straightforward way to leverage GPU is via the the Docker virtualization platform. There are numerous images available that you can run in local container managed by Docker that circumvents many of the driver and version conflicts that you may otherwise encounter. Tensorflow provides docker images on its website that can also be used with Keras. 
 
