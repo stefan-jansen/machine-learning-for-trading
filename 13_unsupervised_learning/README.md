@@ -131,7 +131,7 @@ The manifold hypothesis emphasizes that high-dimensional data often lies on or n
 
 ### Code Example: what a manifold looks like 
 
-The notebook [manifold_learning_intro](02_manifold_learning/01_manifold_learning_intro.ipynb) contains several exampoles, including the two-dimensional swiss roll that illustrates the topological structure of manifolds. 
+The notebook [manifold_learning_intro](02_manifold_learning/01_manifold_learning_intro.ipynb) contains several examples, including the two-dimensional swiss roll that illustrates the topological structure of manifolds. 
 
 ### Code Example: Local Linear Embedding
 

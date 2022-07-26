@@ -76,7 +76,7 @@ The most prominent challenge to backtest validity, including to published result
 
 De Lopez Prado and David Bailey derived a deflated SR to compute the probability that the SR is statistically significant while controlling for the inflationary effect of multiple testing, non-normal returns, and shorter sample lengths.
 
-The pyton script [deflated_sharpe_ratio](01_multiple_testing/deflated_sharpe_ratio.py) in the directory [multiple_testing](01_multiple_testing) contains the Python implementation with references for the derivation of the related formulas.
+The python script [deflated_sharpe_ratio](01_multiple_testing/deflated_sharpe_ratio.py) in the directory [multiple_testing](01_multiple_testing) contains the Python implementation with references for the derivation of the related formulas.
 
 ### References
 

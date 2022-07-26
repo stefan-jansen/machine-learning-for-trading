@@ -101,13 +101,13 @@ The notebook [financial_news_preprocessing](03_financial_news_preprocessing.ipyn
 
 ### Skip-gram architecture in TensorFlow 2 and visualization with TensorBoard
 
-The notebook [financal_news_word2vec_tensorflow](04_financal_news_word2vec_tensorflow.ipynb) illustrates how to build a word2vec model using the Keras interface of TensorFlow 2 that we will introduce in much more detail in the next chapter. 
+The notebook [financial_news_word2vec_tensorflow](04_financial_news_word2vec_tensorflow.ipynb) illustrates how to build a word2vec model using the Keras interface of TensorFlow 2 that we will introduce in much more detail in the next chapter. 
 
 ### How to train embeddings faster with Gensim
 
 The TensorFlow implementation is very transparent in terms of its architecture, but it is not particularly fast. The natural language processing (NLP) library [gensim](https://radimrehurek.com/gensim/) that we also used for topic modeling in the last chapter, offers better performance and more closely resembles the C-based word2vec implementation provided by the original authors.
 
-The notebook [inancial_news_word2vec_gensim](05_financial_news_word2vec_gensim.ipynb) shows how to learn word vectors more efficiently.
+The notebook [financial_news_word2vec_gensim](05_financial_news_word2vec_gensim.ipynb) shows how to learn word vectors more efficiently.
 
 ## Code Example: word Vectors from SEC Filings using gensim
 
