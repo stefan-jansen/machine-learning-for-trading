@@ -163,7 +163,7 @@ Relevant use cases of a Bayesian SR include the analysis of differences between 
 
 The last [chapter](../09_time_series_models) introduced pairs trading as a popular trading strategy that relies on the **cointegration** of two or more assets. Given such assets, we need to estimate the hedging ratio to decide on the relative magnitude of long and short positions. A basic approach uses linear regression. 
 
-The notebook [rolling_regression](04_rolling_regression.ipynb) llustrates how Bayesian linear regression tracks changes in the relationship between two assets over time. It follows Thomas Wiecki’s example (see 'Resources' below).
+The notebook [rolling_regression](04_rolling_regression.ipynb) illustrates how Bayesian linear regression tracks changes in the relationship between two assets over time. It follows Thomas Wiecki’s example (see 'Resources' below).
 
 ### Code Example: Stochastic Volatility Models
 

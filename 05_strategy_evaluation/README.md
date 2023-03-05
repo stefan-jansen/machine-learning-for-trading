@@ -24,7 +24,7 @@ As a result, there are several approaches to optimize portfolios that include th
         - [The minimum-variance portfolio](#the-minimum-variance-portfolio)
         - [The Black-Litterman approach](#the-black-litterman-approach)
         - [How to size your bets – the Kelly rule](#how-to-size-your-bets--the-kelly-rule)
-        - [Alternatives to MV Optimizatino with Python](#alternatives-to-mv-optimizatino-with-python)
+        - [Alternatives to MV Optimization with Python](#alternatives-to-mv-optimization-with-python)
     * [Hierarchical Risk Parity](#hierarchical-risk-parity)
 3. [Trading and managing a portfolio with `Zipline`](#trading-and-managing-a-portfolio-with-zipline)
     * [Code Examples: Backtests with trades and portfolio optimization ](#code-examples-backtests-with-trades-and-portfolio-optimization-)
@@ -86,7 +86,7 @@ The challenges with accurate inputs for the mean-variance optimization problem h
 
 #### The 1/N portfolio
 
-Simple portfolios providae useful benchmarks to gauge the added value of complex models that generate the risk of overfitting. The simplest strategy—an equally-weighted portfolio—has been shown to be one of the best performers.
+Simple portfolios provide useful benchmarks to gauge the added value of complex models that generate the risk of overfitting. The simplest strategy—an equally-weighted portfolio—has been shown to be one of the best performers.
 
 #### The minimum-variance portfolio
 
@@ -123,7 +123,7 @@ This novel approach developed by [Marcos Lopez de Prado](http://www.quantresearc
 - concentration, and 
 - underperformance. 
 
-Hierarchical Risk Parity (HRP) applies graph theory and machine-learning to build a diversified portfolio based on the information contained in the covariance matrix. However, unlike quadratic optimizers, HRP does not require the invertibility of the covariance matrix. In fact, HRP can compute a portfolio on an ill-degenerated or even a singular covariance matrix—an impossible feat for quadratic optimizers. Monte Carlo experiments show that HRP delivers lower out-ofsample variance than CLA, even though minimum variance is CLA’s optimization objective. HRP also produces less risky portfolios out of sample compared to traditional risk parity methods. We will discuss HRP in more detail in [Chapter 13](../13_unsupervised_learning) when we discuss applications of unsupervised learning, including hiearchical clustering, to trading.
+Hierarchical Risk Parity (HRP) applies graph theory and machine-learning to build a diversified portfolio based on the information contained in the covariance matrix. However, unlike quadratic optimizers, HRP does not require the invertibility of the covariance matrix. In fact, HRP can compute a portfolio on an ill-degenerated or even a singular covariance matrix—an impossible feat for quadratic optimizers. Monte Carlo experiments show that HRP delivers lower out-of-sample variance than CLA, even though minimum variance is CLA’s optimization objective. HRP also produces less risky portfolios out of sample compared to traditional risk parity methods. We will discuss HRP in more detail in [Chapter 13](../13_unsupervised_learning) when we discuss applications of unsupervised learning, including hierarchical clustering, to trading.
 
 - [Building diversified portfolios that outperform out of sample](https://jpm.pm-research.com/content/42/4/59.short), Marcos López de Prado, The Journal of Portfolio Management 42, no. 4 (2016): 59-69.
 - [Hierarchical Clustering Based Asset Allocation](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2840729), Thomas Raffinot, 2016
@@ -149,6 +149,6 @@ Pyfolio facilitates the analysis of portfolio performance and risk in-sample and
 
 ### Code Example: `pyfolio` evaluation from a `Zipline` backtest
 
-The notebook [pyfolio_demo](03_pyfolio_demo.ipynb) illustrates how to extract the `pyfolio` input from the backtest conducted in the previous folder. It then proceeds to calcuate several performance metrics and tear sheets using `pyfolio`
+The notebook [pyfolio_demo](03_pyfolio_demo.ipynb) illustrates how to extract the `pyfolio` input from the backtest conducted in the previous folder. It then proceeds to calculate several performance metrics and tear sheets using `pyfolio`
 
 - This notebook requires the `conda` environment `backtest`. Please see the [installation instructions](../installation/README.md) for running the latest Docker image or alternative ways to set up your environment.

@@ -30,7 +30,7 @@ In the process, the parameters of a hidden layer h become the code that represen
 For a good overview, see Chapter 14 in Deep Learning:
 - [Autoencoders](http://www.deeplearningbook.org/contents/autoencoders.html), Ian Goodfellow, Yoshua Bengio and Aaron Courville, Deep Learning Book, MIT Press 2016
 
-The TensorFlow's Keras interfacte makes it fairly straightforward to build various types of autoencoders and the following examples are adapted from Keras' tutorials.
+The TensorFlow's Keras interface makes it fairly straightforward to build various types of autoencoders and the following examples are adapted from Keras' tutorials.
 
 - [Building Autoencoders in Keras](https://blog.keras.io/building-autoencoders-in-keras.html)
 
@@ -44,7 +44,7 @@ The notebook [deep_autoencoders](01_deep_autoencoders.ipynb) illustrates how to 
 
 As discussed in Chapter 18, [CNNs: Time Series as Images and Satellite Image Classification](../18_convolutional_neural_nets), fully-connected feedforward architectures are not well suited to capture local correlations typical to data with a grid-like structure. Instead, autoencoders can also use convolutional layers to learn a hierarchical feature representation. Convolutional autoencoders leverage convolutions and parameter sharing to learn hierarchical patterns and features irrespective of their location, translation, or changes in size.
 
-The notebook [convolutional_denoising_autoencoders](02_convolutional_denoising_autoencoders.ipynb) goes on to demonstrate how to implement convolutional and denoising autencoders to recover corrupted image inputs.
+The notebook [convolutional_denoising_autoencoders](02_convolutional_denoising_autoencoders.ipynb) goes on to demonstrate how to implement convolutional and denoising autoencoders to recover corrupted image inputs.
 
 ### Seq2seq autoencoders to extract time-series features for trading
 

@@ -96,7 +96,7 @@ The notebook [nlp_pipeline_with_spaCy](01_nlp_pipeline_with_spaCy.ipynb) demonst
 
 #### Data
 - [BBC Articles](http://mlg.ucd.ie/datasets/bbc.html), use raw text files
-- [TED2013](http://opus.nlpl.eu/TED2013.php), a parallel corpus of TED talk subtitles in 15 langugages
+- [TED2013](http://opus.nlpl.eu/TED2013.php), a parallel corpus of TED talk subtitles in 15 languages
 
 ### Code example: NLP with TextBlob
 
