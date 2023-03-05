@@ -1,5 +1,9 @@
 # Installation instructions
 
+It is not necessary to try and install all libraries at once because this increases the likeliihood of encountering version conflicts. Instead, we recommend that you install the libraries required for a specific chapter as you go along.
+
+> Update March 2022: `zipline-reloaded`, `pyfolio-reloaded`, `alphalens-reloaded`, and `empyrical-reloaded` are now available on the `conda-forge` channel. The channel `ml4t` only contains outdated versions and will soon be removed.
+
 > There is still incomplete support for MacOS using M1/Silicone chips. Some packages compatible with new architecture are only available via `conda`/`mamba`, others only via `pip`. As a result, there is no single installation script yet - I hope to be able to simplify this as the support across the PyData ecosystem matures. For now, please create separate `conda`/`pip`-based environments to install packages as needed and supported.
  
 > Update September 10, 2021: New OS-agnostic environment files `ml4t-base.[txt, yml]` for `pip` (Linux, MacOS) and `conda` (Linux, MacOS, Windows) installs available that include the latest [Zipline](https://github.com/stefan-jansen/zipline-reloaded), [Alphalens](https://github.com/stefan-jansen/alphalens-reloaded) and [Pyfolio](https://github.com/stefan-jansen/pyfolio-reloaded) versions. These files are OS-agnostic because they include only the main libraries and not OS-specific dependencies, leaving the selection of the latest compatible versions and OS-specific depencies to your package manager of choice.   
