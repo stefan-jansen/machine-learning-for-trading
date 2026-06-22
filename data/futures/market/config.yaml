@@ -1,0 +1,305 @@
+# DataBento Futures Download Configuration
+#
+# This file configures the futures data download from DataBento.
+# Run with: python data/futures/download.py
+#
+# Design principles:
+# - Idempotent: Running multiple times only downloads missing data
+# - Incremental: Readers can extend data by updating end_date
+# - Hive-partitioned: Data stored by product/year for efficient updates
+#
+# Cost estimate: ~$0.58 per product per 10 years hourly x 3 tenors
+# Total for 30 products x 15 years x 3 tenors = ~$75
+
+# DataBento dataset and schema
+dataset: "GLBX.MDP3"  # CME Globex
+schema: "ohlcv-1h"     # Hourly OHLCV (not daily - UTC alignment issues)
+
+# Roll methodology: volume-based (.v.) vs calendar-based (.c.)
+# Volume roll switches when previous day's volume shows next contract > current
+# This is more realistic for trading (you know yesterday's volume at today's open)
+roll_type: "v"  # "v" = volume, "c" = calendar
+
+# Continuous contract positions to download
+# 0 = front month, 1 = second month, 2 = third month
+tenors: [0, 1, 2]
+
+# Default date range (can be overridden per product)
+default_start: "2011-01-01"
+default_end: "2025-12-31"
+
+# Storage configuration
+# Hive partitioning: futures/continuous/product={PRODUCT}/year={YEAR}/data.parquet
+storage:
+  format: "parquet"
+  partitioning: "hive"  # Enables easy incremental updates by year
+  compression: "zstd"
+
+# Product universe - 30 products for core pack
+# Organized by category with notes on data availability
+products:
+  # ============================================================================
+  # EQUITY INDEX (4 products)
+  # Quarterly expiration (H, M, U, Z) - reliable term structure
+  # ============================================================================
+  ES:
+    name: "E-mini S&P 500"
+    category: "equity_index"
+    start: "2011-01-01"  # Full history available
+
+  NQ:
+    name: "E-mini NASDAQ-100"
+    category: "equity_index"
+    start: "2011-01-01"
+
+  YM:
+    name: "E-mini Dow"
+    category: "equity_index"
+    start: "2011-01-01"
+
+  RTY:
+    name: "E-mini Russell 2000"
+    category: "equity_index"
+    start: "2011-01-01"
+
+  # ============================================================================
+  # TREASURIES (4 products)
+  # Quarterly expiration - deep liquidity, excellent term structure
+  # ============================================================================
+  ZN:
+    name: "10-Year T-Note"
+    category: "treasury"
+    start: "2011-01-01"
+
+  ZB:
+    name: "30-Year T-Bond"
+    category: "treasury"
+    start: "2011-01-01"
+
+  ZF:
+    name: "5-Year T-Note"
+    category: "treasury"
+    start: "2011-01-01"
+
+  ZT:
+    name: "2-Year T-Note"
+    category: "treasury"
+    start: "2011-01-01"
+
+  # ============================================================================
+  # ENERGY (4 products)
+  # Monthly expiration - deep liquidity, strong term structure
+  # ============================================================================
+  CL:
+    name: "WTI Crude Oil"
+    category: "energy"
+    start: "2011-01-01"
+
+  NG:
+    name: "Natural Gas"
+    category: "energy"
+    start: "2011-01-01"
+
+  HO:
+    name: "Heating Oil"
+    category: "energy"
+    start: "2011-01-01"
+
+  RB:
+    name: "RBOB Gasoline"
+    category: "energy"
+    start: "2011-01-01"
+
+  # ============================================================================
+  # METALS (4 products)
+  # Bi-monthly or quarterly - good liquidity
+  # Note: Skipping PA (Palladium) due to inconsistent liquidity
+  # ============================================================================
+  GC:
+    name: "Gold"
+    category: "metals"
+    start: "2011-01-01"
+
+  SI:
+    name: "Silver"
+    category: "metals"
+    start: "2011-01-01"
+
+  HG:
+    name: "Copper"
+    category: "metals"
+    start: "2011-01-01"
+
+  PL:
+    name: "Platinum"
+    category: "metals"
+    start: "2011-01-01"
+
+  # ============================================================================
+  # CURRENCIES (6 products)
+  # Quarterly expiration - highly liquid
+  # Note: Dropping 6M (Mexican Peso) for core pack
+  # ============================================================================
+  6E:
+    name: "Euro FX"
+    category: "fx"
+    start: "2011-01-01"
+
+  6J:
+    name: "Japanese Yen"
+    category: "fx"
+    start: "2011-01-01"
+
+  6B:
+    name: "British Pound"
+    category: "fx"
+    start: "2011-01-01"
+
+  6A:
+    name: "Australian Dollar"
+    category: "fx"
+    start: "2011-01-01"
+
+  6C:
+    name: "Canadian Dollar"
+    category: "fx"
+    start: "2011-01-01"
+
+  6S:
+    name: "Swiss Franc"
+    category: "fx"
+    start: "2011-01-01"
+
+  # ============================================================================
+  # AGRICULTURE (5 products)
+  # Monthly expiration with specific contract months
+  # ============================================================================
+  ZC:
+    name: "Corn"
+    category: "grains"
+    start: "2011-01-01"
+
+  ZS:
+    name: "Soybeans"
+    category: "grains"
+    start: "2011-01-01"
+
+  ZW:
+    name: "Wheat"
+    category: "grains"
+    start: "2011-01-01"
+
+  ZM:
+    name: "Soybean Meal"
+    category: "grains"
+    start: "2011-01-01"
+
+  ZL:
+    name: "Soybean Oil"
+    category: "grains"
+    start: "2011-01-01"
+
+  # ============================================================================
+  # LIVESTOCK (3 products)
+  # Bi-monthly - moderate liquidity
+  # ============================================================================
+  LE:
+    name: "Live Cattle"
+    category: "livestock"
+    start: "2011-01-01"
+
+  HE:
+    name: "Lean Hogs"
+    category: "livestock"
+    start: "2011-01-01"
+
+  GF:
+    name: "Feeder Cattle"
+    category: "livestock"
+    start: "2011-01-01"
+
+# ============================================================================
+# EXTENSION PACK (optional - shorter history)
+# These are NOT in the core 30 products but can be added by readers
+# ============================================================================
+extension_products:
+  BTC:
+    name: "Bitcoin"
+    category: "crypto"
+    start: "2017-12-18"  # CME Bitcoin futures launch date
+    note: "Shorter history - handle panel gaps carefully"
+
+  ETH:
+    name: "Ether"
+    category: "crypto"
+    start: "2021-02-08"  # CME Ether futures launch date
+    note: "Shortest history - use for extension exercises only"
+
+  SR3:
+    name: "3-Month SOFR"
+    category: "rates"
+    start: "2018-05-07"  # SOFR futures launch
+    note: "Replaced Eurodollar (GE) in 2023"
+
+  PA:
+    name: "Palladium"
+    category: "metals"
+    start: "2011-01-01"
+    note: "Less liquid than other metals - third month often sparse"
+
+  6M:
+    name: "Mexican Peso"
+    category: "fx"
+    start: "2011-01-01"
+    note: "Less liquid than major FX pairs"
+
+  LBR:
+    name: "Random Length Lumber"
+    category: "lumber"
+    start: "2011-01-01"
+    note: "Volatile, specification changes - use with caution"
+
+# ============================================================================
+# INDIVIDUAL CONTRACTS (for roll demonstration)
+# ============================================================================
+# Individual contracts are downloaded separately for ES and CL only
+# to demonstrate roll mechanics. See databento_individual.py
+individual:
+  schema: "ohlcv-1h"
+  stype_in: "raw_symbol"
+  output_dir: "futures/individual"
+
+  products:
+    ES:
+      name: "E-mini S&P 500"
+      months: [3, 6, 9, 12]  # H, M, U, Z (quarterly)
+      download_window_months: 6
+
+    CL:
+      name: "Crude Oil"
+      months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]  # Monthly
+      download_window_months: 2
+
+  years: [2024, 2025]
+
+# ============================================================================
+# OUTPUT STRUCTURE
+# ============================================================================
+# After download, data is organized as:
+#
+# $ML4T_DATA_PATH/futures/
+# |-- continuous/                  # Hourly OHLCV, Hive partitioned
+# |   |-- product={PRODUCT}/
+# |       |-- year={YEAR}/
+# |           |-- data.parquet    # V0, V1, V2 stacked
+# |
+# |-- individual/                  # For roll demonstration
+# |   |-- ES/
+# |       |-- data.parquet
+# |   |-- CL/
+# |       |-- data.parquet
+# |
+# |-- definitions.parquet          # Contract specifications
+# |
+# |-- _archive/                    # Deprecated daily data
+#     |-- continuous_daily.parquet

@@ -1,0 +1,105 @@
+# ML4T Prediction Markets Configuration
+# =======================================
+# Curated prediction market events for alternative data analysis
+# Kalshi (CFTC-regulated, USD) + Polymarket (crypto, USDC)
+#
+# No API keys required for read access.
+#
+# Usage:
+#   python data/prediction_markets/download.py
+#   python data/prediction_markets/download.py --provider kalshi
+#   python data/prediction_markets/download.py --list
+
+prediction_markets:
+  start: '2026-01-01'
+  end: '2026-12-31'
+  storage_path: prediction_markets
+  generate_profile: true
+
+  outputs:
+    kalshi_file: kalshi_events.parquet
+    polymarket_file: polymarket_events.parquet
+    metadata_file: prediction_markets_metadata.parquet
+
+  kalshi:
+    provider: kalshi
+    # Economic event series — the bread and butter of Kalshi
+    series:
+      - ticker: KXFED
+        description: "Federal Reserve rate decisions"
+        category: monetary_policy
+      - ticker: KXINFL
+        description: "CPI inflation monthly prints"
+        category: inflation
+      - ticker: KXUNEMPLOY
+        description: "Unemployment rate monthly"
+        category: employment
+      - ticker: KXGDP
+        description: "GDP quarterly growth"
+        category: growth
+      - ticker: KXSPX
+        description: "S&P 500 price levels"
+        category: equity_markets
+      - ticker: KXBTC
+        description: "Bitcoin price levels"
+        category: crypto_markets
+
+  polymarket:
+    provider: polymarket
+    # Non-political, financially relevant events only
+    # Political markets are excluded per content policy
+    #
+    # Coverage levers (each can be overridden on the CLI — see
+    # `python data/prediction_markets/download.py --help`):
+    #   categories                  — which trading-event buckets to search
+    #   max_markets_per_category    — total markets retained per category
+    #   search_results_per_query    — search-result depth per query before
+    #                                 the per-category cap kicks in
+    categories:
+      - economics
+      - crypto
+      - science
+      - technology
+    max_markets_per_category: 1
+    search_results_per_query: 5
+    search_terms:
+      economics:
+        - fed
+        - inflation
+        - cpi
+        - gdp
+        - recession
+      crypto:
+        - bitcoin
+        - ethereum
+        - solana
+      science:
+        - spacex
+        - nasa
+      technology:
+        - openai
+        - tesla
+    excluded_tags:
+      - politics
+      - elections
+      - political
+      - congress
+      - senate
+      - governor
+    excluded_keywords:
+      - trump
+      - biden
+      - republican
+      - democrat
+      - deport
+      - abortion
+      - guilty
+      - impeach
+      - senate
+      - governor
+      - election
+      - president
+    # Curated slugs for deterministic downloads.
+    # If none are configured, the downloader falls back to category search
+    # using the current Gamma/CLOB-backed Polymarket provider.
+    curated_slugs: []

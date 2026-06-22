@@ -1,0 +1,602 @@
+# ML4T 3rd Edition — CI Test Workflow
+#
+# Tests notebooks inside pre-built Docker images (ml4t/ml4t:latest).
+# This ensures CI tests exactly what readers will use.
+#
+# Architecture:
+#   - All notebook tests run inside Docker containers (not native Python)
+#   - Incremental: dorny/paths-filter only tests changed chapters
+#   - Pre-built images from Docker Hub (built by docker-publish.yml)
+#   - Special images for py312 (signatory/gensim/tfcausalimpact), Neo4j, benchmarks
+#
+# Trigger policy:
+#   - PR: incremental (path-filtered, only changed chapters)
+#   - Weekly: full suite on schedule (Monday 6 AM UTC)
+#   - After Docker Publish: full suite (workflow_run trigger)
+#   - Manual: workflow_dispatch with optional run_all flag
+#   - Push to main: NOT triggered (conserves minutes)
+
+name: Tests
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'   # Weekly Monday 6 AM UTC
+  workflow_run:
+    workflows: ["Docker Publish"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_all:
+        description: "Run all tests (ignore path filters)"
+        type: boolean
+        default: false
+      test_filter:
+        description: "pytest -k filter (e.g. 'us_equities_panel or nasdaq100' to run only those)"
+        type: string
+        default: ""
+
+env:
+  ML4T_DATA_PATH: ${{ github.workspace }}/test-data/data
+  ML4T_OUTPUT_DIR: /tmp/ml4t-test-output
+  MPLBACKEND: Agg
+  PLOTLY_RENDERER: json
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Detect which paths changed and build dynamic matrices
+  # ---------------------------------------------------------------------------
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      chapter_matrix: ${{ steps.build.outputs.chapter_matrix }}
+      case_matrix: ${{ steps.build.outputs.case_matrix }}
+      run_py312: ${{ steps.build.outputs.run_py312 }}
+      run_neo4j: ${{ steps.build.outputs.run_neo4j }}
+      run_benchmark: ${{ steps.build.outputs.run_benchmark }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            shared:
+              - 'utils/**'
+              - 'data/**'
+              - 'tests/**'
+              - 'pyproject.toml'
+              - '.github/workflows/test.yml'
+              - 'matplotlibrc'
+            ch01:
+              - '01_process_is_edge/**'
+            ch02-03:
+              - '02_financial_data_universe/**'
+              - '03_market_microstructure/**'
+              - 'data/**'
+            ch04:
+              - '04_fundamental_alternative_data/**'
+            ch05:
+              - '05_synthetic_data/**'
+            ch06-07:
+              - '06_strategy_definition/**'
+              - '07_defining_the_learning_task/**'
+            ch08-09:
+              - '08_financial_features/**'
+              - '09_model_based_features/**'
+            ch10:
+              - '10_text_feature_engineering/**'
+            ch11-12:
+              - '11_ml_pipeline/**'
+              - '12_gradient_boosting/**'
+            ch13:
+              - '13_dl_time_series/**'
+            ch14-15:
+              - '14_latent_factors/**'
+              - '15_causal_estimation/**'
+            ch16-17:
+              - '16_strategy_simulation/**'
+              - '17_portfolio_construction/**'
+            ch18-20:
+              - '18_transaction_costs/**'
+              - '19_risk_management/**'
+              - '20_strategy_synthesis/**'
+            ch21:
+              - '21_rl_execution_hedging/**'
+            ch22:
+              - '22_rag_financial_research/**'
+            ch23:
+              - '23_knowledge_graphs/**'
+            ch24:
+              - '24_autonomous_agents/**'
+            ch25:
+              - '25_live_trading/**'
+            ch26:
+              - '26_mlops_governance/**'
+            cs-etfs:
+              - 'case_studies/etfs/**'
+            cs-crypto:
+              - 'case_studies/crypto_perps_funding/**'
+            cs-nasdaq:
+              - 'case_studies/nasdaq100_microstructure/**'
+            cs-sp500eoa:
+              - 'case_studies/sp500_equity_option_analytics/**'
+            cs-firmchar:
+              - 'case_studies/us_firm_characteristics/**'
+            cs-fx:
+              - 'case_studies/fx_pairs/**'
+            cs-futures:
+              - 'case_studies/cme_futures/**'
+            cs-sp500opt:
+              - 'case_studies/sp500_options/**'
+            cs-usequity:
+              - 'case_studies/us_equities_panel/**'
+
+      - name: Build dynamic matrices
+        id: build
+        run: |
+          shared="${{ steps.filter.outputs.shared }}"
+          schedule="${{ github.event_name == 'schedule' }}"
+          after_docker="${{ github.event_name == 'workflow_run' }}"
+          run_all="${{ github.event.inputs.run_all }}"
+          all="false"
+          if [[ "$shared" == "true" ]] || [[ "$schedule" == "true" ]] || [[ "$run_all" == "true" ]] || [[ "$after_docker" == "true" ]]; then
+            all="true"
+          fi
+
+          # --- Chapter matrix (all chapters including Ch01 and Ch05) ---
+          chapters="[]"
+          add_ch() { chapters=$(echo "$chapters" | jq -c --arg n "$1" --arg f "$2" '. + [{"name":$n,"filter":$f}]'); }
+
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch01 }}" == "true" ]]; then
+            add_ch "ch01" "01_process"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch02-03 }}" == "true" ]]; then
+            add_ch "ch02-03" "02_financial or 03_market"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch04 }}" == "true" ]]; then
+            add_ch "ch04" "04_fundamental"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch05 }}" == "true" ]]; then
+            add_ch "ch05" "05_synthetic"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch06-07 }}" == "true" ]]; then
+            add_ch "ch06-07" "06_strategy or 07_defining"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch08-09 }}" == "true" ]]; then
+            add_ch "ch08-09" "08_financial or 09_model"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch10 }}" == "true" ]]; then
+            add_ch "ch10" "10_text"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch11-12 }}" == "true" ]]; then
+            add_ch "ch11-12" "11_ml_pipeline or 12_gradient"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch13 }}" == "true" ]]; then
+            add_ch "ch13" "13_dl_time"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch14-15 }}" == "true" ]]; then
+            add_ch "ch14-15" "14_latent or 15_causal"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch16-17 }}" == "true" ]]; then
+            add_ch "ch16-17" "16_strategy or 17_portfolio"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch18-20 }}" == "true" ]]; then
+            add_ch "ch18-20" "18_transaction or 19_risk or 20_strategy"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch21 }}" == "true" ]]; then
+            add_ch "ch21" "21_rl"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch22 }}" == "true" ]]; then
+            add_ch "ch22" "22_rag"
+          fi
+          # Ch23 skipped — requires Neo4j service (tested in test-neo4j when ready)
+          # if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch23 }}" == "true" ]]; then
+          #   add_ch "ch23" "23_knowledge"
+          # fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch24 }}" == "true" ]]; then
+            add_ch "ch24" "24_autonomous"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch25 }}" == "true" ]]; then
+            add_ch "ch25" "25_live"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch26 }}" == "true" ]]; then
+            add_ch "ch26" "26_mlops"
+          fi
+
+          echo "chapter_matrix=$chapters" >> "$GITHUB_OUTPUT"
+
+          # --- Py312 flag ---
+          run_py312="false"
+          if [[ "$all" == "true" ]] \
+             || [[ "${{ steps.filter.outputs.ch05 }}" == "true" ]] \
+             || [[ "${{ steps.filter.outputs.ch08-09 }}" == "true" ]] \
+             || [[ "${{ steps.filter.outputs.ch10 }}" == "true" ]] \
+             || [[ "${{ steps.filter.outputs.ch14-15 }}" == "true" ]] \
+             || [[ "${{ steps.filter.outputs.ch21 }}" == "true" ]]; then
+            run_py312="true"
+          fi
+          echo "run_py312=$run_py312" >> "$GITHUB_OUTPUT"
+
+          # --- Neo4j flag (needs populated Neo4j — skip until infra is ready) ---
+          run_neo4j="false"
+          echo "run_neo4j=$run_neo4j" >> "$GITHUB_OUTPUT"
+
+          # --- Benchmark flag (disabled — QuestDB container fails health check in CI) ---
+          run_benchmark="false"
+          echo "run_benchmark=$run_benchmark" >> "$GITHUB_OUTPUT"
+
+          # --- Case study matrix ---
+          cases="[]"
+          add_cs() { cases=$(echo "$cases" | jq -c --arg cs "$1" '. + [{"case-study":$cs}]'); }
+
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-etfs }}" == "true" ]]; then
+            add_cs "etfs"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-crypto }}" == "true" ]]; then
+            add_cs "crypto_perps_funding"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-nasdaq }}" == "true" ]]; then
+            add_cs "nasdaq100_microstructure"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-sp500eoa }}" == "true" ]]; then
+            add_cs "sp500_equity_option_analytics"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-firmchar }}" == "true" ]]; then
+            add_cs "us_firm_characteristics"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-fx }}" == "true" ]]; then
+            add_cs "fx_pairs"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-futures }}" == "true" ]]; then
+            add_cs "cme_futures"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-sp500opt }}" == "true" ]]; then
+            add_cs "sp500_options"
+          fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-usequity }}" == "true" ]]; then
+            add_cs "us_equities_panel"
+          fi
+
+          echo "case_matrix=$cases" >> "$GITHUB_OUTPUT"
+
+          echo "Chapters: $chapters"
+          echo "Cases: $cases"
+          echo "Py312: $run_py312"
+          echo "Neo4j: $run_neo4j"
+          echo "Benchmark: $run_benchmark"
+
+  # ---------------------------------------------------------------------------
+  # Lint (always runs, fast)
+  # ---------------------------------------------------------------------------
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "latest"
+      - name: Ruff check
+        run: uvx ruff@0.15.8 check utils/ data/ tests/
+      - name: Ruff format
+        run: uvx ruff@0.15.8 format --check utils/ data/ tests/
+
+  # ---------------------------------------------------------------------------
+  # Chapter notebook tests — inside Docker (ml4t/ml4t:latest)
+  #
+  # Runs the same Python 3.14 environment that readers use.
+  # Notebooks needing signatory/gensim/esig/tfcausalimpact are skipped here,
+  # tested in test-py312 instead.
+  # ---------------------------------------------------------------------------
+  test-chapters:
+    name: ${{ matrix.name }}
+    timeout-minutes: 60
+    needs: [lint, changes]
+    if: needs.changes.outputs.chapter_matrix != '[]'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.chapter_matrix) }}
+
+    runs-on: ubuntu-latest
+    container:
+      image: ml4t/ml4t:latest
+
+    steps:
+      - name: Install git (for checkout inside container)
+        run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
+
+      - uses: actions/checkout@v6
+
+      - name: Checkout test data
+        uses: actions/checkout@v6
+        with:
+          repository: ml4t/third-edition-test-data
+          path: test-data
+          ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
+          lfs: false
+
+      - name: Seed case study intermediates
+        run: |
+          mkdir -p $ML4T_OUTPUT_DIR
+          if [ -d test-data/intermediates ]; then
+            cp -r test-data/intermediates/* $ML4T_OUTPUT_DIR/
+            echo "Seeded $(du -sh $ML4T_OUTPUT_DIR | cut -f1) of intermediates"
+          fi
+          # Ch20 outputs go to repo dir (get_chapter_dir doesn't redirect)
+          if [ -d test-data/intermediates/ch20_synthesis/output ]; then
+            mkdir -p 20_strategy_synthesis/output
+            cp test-data/intermediates/ch20_synthesis/output/* 20_strategy_synthesis/output/
+            echo "Seeded Ch20 synthesis outputs"
+          fi
+          # Ch24/11 research_operator: artifacts dir is gitignored in this repo;
+          # source them from test-data into the notebook dir.
+          if [ -d test-data/data/autonomous_agents/operator_artifacts ]; then
+            mkdir -p 24_autonomous_agents/operator_artifacts
+            cp test-data/data/autonomous_agents/operator_artifacts/*.json \
+              24_autonomous_agents/operator_artifacts/
+            echo "Seeded ch24/11 operator artifacts"
+          fi
+
+      - name: Run chapter notebooks (${{ matrix.name }})
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          TEST_FILTER_INPUT: ${{ github.event.inputs.test_filter }}
+          MATRIX_FILTER: ${{ matrix.filter }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          FILTER="${TEST_FILTER_INPUT:-$MATRIX_FILTER}"
+          python -m pytest tests/test_chapter_notebooks.py \
+            -v --tb=short \
+            -k "$FILTER"
+
+  # ---------------------------------------------------------------------------
+  # Case study pipeline tests — inside Docker (ml4t/ml4t:latest)
+  # ---------------------------------------------------------------------------
+  test-case-studies:
+    name: cs-${{ matrix.case-study }}
+    timeout-minutes: 90
+    needs: [lint, changes]
+    if: needs.changes.outputs.case_matrix != '[]'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.case_matrix) }}
+
+    runs-on: ubuntu-latest
+    container:
+      image: ml4t/ml4t:latest
+
+    steps:
+      - name: Install git
+        run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
+
+      - uses: actions/checkout@v6
+
+      - name: Checkout test data
+        uses: actions/checkout@v6
+        with:
+          repository: ml4t/third-edition-test-data
+          path: test-data
+          ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
+          lfs: false
+
+      - name: Seed case study intermediates
+        run: |
+          mkdir -p $ML4T_OUTPUT_DIR
+          if [ -d test-data/intermediates ]; then
+            cp -r test-data/intermediates/* $ML4T_OUTPUT_DIR/
+            echo "Seeded $(du -sh $ML4T_OUTPUT_DIR | cut -f1) of intermediates"
+          fi
+
+      - name: Run pipeline (${{ matrix.case-study }})
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          TEST_FILTER_INPUT: ${{ github.event.inputs.test_filter }}
+          MATRIX_CASE_STUDY: ${{ matrix.case-study }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          FILTER="${TEST_FILTER_INPUT:-$MATRIX_CASE_STUDY}"
+          python -m pytest tests/test_case_studies.py \
+            -v --tb=short \
+            -k "$FILTER"
+
+  # ---------------------------------------------------------------------------
+  # Py312 Docker image (Python 3.12: gensim, signatory, esig, pfhedge,
+  # tfcausalimpact, plus notebooks affected by the Py3.14 torch CUDA bug)
+  # ---------------------------------------------------------------------------
+  test-py312:
+    timeout-minutes: 45
+    needs: [lint, changes]
+    if: needs.changes.outputs.run_py312 == 'true'
+
+    runs-on: ubuntu-latest
+    container:
+      image: ml4t/ml4t-py312:latest
+
+    steps:
+      - name: Install git
+        run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
+
+      - uses: actions/checkout@v6
+
+      - name: Checkout test data
+        uses: actions/checkout@v6
+        with:
+          repository: ml4t/third-edition-test-data
+          path: test-data
+          ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
+          lfs: false
+
+      - name: Run py312 notebooks
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m pytest tests/test_docker_notebooks.py \
+            -v --tb=short \
+            -k "03_sigcwgan or 06_path_signatures or 12_wasserstein \
+                or 01_word2vec or 02_asset_embeddings or 03_sentiment_evolution \
+                or 01_timegan or 07_dp_gan \
+                or 10_shap_nlp_sentiment or 06_conditional_autoencoder \
+                or 06_fed_announcement_bsts \
+                or deep_hedging_pfhedge"
+
+  # ---------------------------------------------------------------------------
+  # Neo4j Docker service (Ch23 Knowledge Graphs)
+  # ---------------------------------------------------------------------------
+  test-neo4j:
+    timeout-minutes: 30
+    needs: [lint, changes]
+    if: needs.changes.outputs.run_neo4j == 'true'
+
+    runs-on: ubuntu-latest
+    container:
+      image: ml4t/ml4t:latest
+      env:
+        NEO4J_URI: bolt://neo4j:7687
+        NEO4J_USER: neo4j
+        NEO4J_PASSWORD: password
+
+    services:
+      neo4j:
+        image: neo4j:2026.02.2
+        env:
+          NEO4J_AUTH: neo4j/password
+        ports:
+          - 7474:7474
+          - 7687:7687
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p password 'RETURN 1;'"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
+
+    steps:
+      - name: Install git
+        run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
+
+      - uses: actions/checkout@v6
+
+      - name: Checkout test data
+        uses: actions/checkout@v6
+        with:
+          repository: ml4t/third-edition-test-data
+          path: test-data
+          ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
+          lfs: false
+
+      - name: Run Ch23 Knowledge Graph notebooks (pipeline order)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          # Run in dependency order: upstream notebooks generate data for downstream
+          python -m pytest tests/test_docker_notebooks.py -v --tb=short \
+            -k "08_8k_event_extraction" && \
+          python -m pytest tests/test_docker_notebooks.py -v --tb=short \
+            -k "02_supply_chain_kg_construction" && \
+          python -m pytest tests/test_docker_notebooks.py -v --tb=short \
+            -k "07_dynamic_kg_temporal or 03_graph_rag_qa or 05_institutional_holdings_kg \
+                or 09_knowledge_graph_features"
+
+  # ---------------------------------------------------------------------------
+  # Benchmark Docker image (Ch02 storage benchmarks + database services)
+  # ---------------------------------------------------------------------------
+  test-benchmark:
+    timeout-minutes: 30
+    needs: [lint, changes]
+    if: needs.changes.outputs.run_benchmark == 'true'
+
+    runs-on: ubuntu-latest
+    container:
+      image: ml4t/ml4t-benchmark:latest
+      env:
+        CLICKHOUSE_HOST: clickhouse
+        CLICKHOUSE_PORT: "8123"
+        QUESTDB_HOST: questdb
+        QUESTDB_HTTP_PORT: "9000"
+        TIMESCALE_HOST: timescaledb
+        TIMESCALE_PORT: "5432"
+        TIMESCALE_PASSWORD: benchmark
+        INFLUXDB_HOST: influxdb
+        INFLUXDB_PORT: "8086"
+        INFLUXDB_ORG: ml4t
+        INFLUXDB_TOKEN: benchmark-token
+        INFLUXDB_BUCKET: market_data
+
+    services:
+      timescaledb:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_PASSWORD: benchmark
+          POSTGRES_DB: ml4t
+          POSTGRES_USER: postgres
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      clickhouse:
+        image: clickhouse/clickhouse-server:latest
+        env:
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: ""
+        options: >-
+          --health-cmd "wget --spider -q http://localhost:8123/ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      questdb:
+        image: questdb/questdb:latest
+        env:
+          QDB_METRICS_ENABLED: "true"
+        options: >-
+          --health-cmd "curl -sf http://localhost:9003/status || curl -sf http://localhost:9000/exec?query=SELECT%201"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
+
+      influxdb:
+        image: influxdb:2.7
+        env:
+          DOCKER_INFLUXDB_INIT_MODE: setup
+          DOCKER_INFLUXDB_INIT_USERNAME: admin
+          DOCKER_INFLUXDB_INIT_PASSWORD: benchmark123
+          DOCKER_INFLUXDB_INIT_ORG: ml4t
+          DOCKER_INFLUXDB_INIT_BUCKET: market_data
+          DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: benchmark-token
+        options: >-
+          --health-cmd "curl -f http://localhost:8086/health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Install git
+        run: |
+          apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null 2>&1 || true
+
+      - uses: actions/checkout@v6
+
+      - name: Checkout test data
+        uses: actions/checkout@v6
+        with:
+          repository: ml4t/third-edition-test-data
+          path: test-data
+          ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
+          lfs: false
+
+      - name: Run Ch02 database benchmark notebooks
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m pytest tests/test_docker_notebooks.py \
+            -v --tb=short \
+            -k "18_storage_benchmark_database or 20_storage_benchmark_database"

@@ -1,0 +1,299 @@
+[project]
+name = "ml4t"
+version = "3.0.0"
+description = "Machine Learning for Algorithmic Trading — 3rd Edition"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "MIT"
+authors = [{ name = "Stefan Jansen" }]
+
+dependencies = [
+    # ===================
+    # Core Data Science
+    # ===================
+    "numpy>=1.26",
+    # scipy<1.18: 1.18 removed the private scipy.cluster.hierarchy._LINKAGE_METHODS
+    # that PyPortfolioOpt 1.6.0 (latest) still references for HRP linkage validation
+    # (Ch17 08_library_comparison). Lift once pypfopt ships a scipy>=1.18 fix.
+    "scipy>=1.12,<1.18",
+    "pandas>=2.2",
+    "polars>=1.0",
+    "pyarrow>=15.0",
+    # ===================
+    # Visualization
+    # ===================
+    "plotly>=5.20",
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+    "kaleido==0.2.1",
+    # ===================
+    # Machine Learning
+    # ===================
+    "scikit-learn>=1.4",
+    "xgboost>=3.1",
+    "lightgbm>=4.6",
+    "catboost>=1.2.8",
+    "optuna>=3.6",
+    "optuna-integration[lightgbm]>=4.8",
+    "shap>=0.45",
+    "tabpfn>=2.0",
+    "gymnasium>=1.2",
+    "stable-baselines3>=2.7",
+    # ===================
+    # ML4T Libraries (PyPI, pre-release)
+    # ===================
+    "ml4t-data>=0.1.0b13",
+    "ml4t-diagnostic>=0.1.0b21",
+    "ml4t-engineer>=0.1.0b8",
+    "ml4t-backtest>=0.1.0b20",
+    "ml4t-live>=0.1.0b3",
+    # ===================
+    # Deep Learning
+    # ===================
+    "torch>=2.2",
+    "pytorch-lightning>=2.2",
+    "torchdiffeq>=0.2",
+    # torchode (Lienen & Günnemann 2022) would offer per-sample adaptive
+    # integration in Ch5 NB04 but its torchtyping dependency is incompatible
+    # with torch>=2.10, so the notebook uses torchdiffeq instead.
+    "transformers>=4.40,<5",
+    "sentencepiece>=0.2",
+    "sentence-transformers>=2.6",
+    "einops>=0.7",
+    "granite-tsfm>=0.3",
+    "chronos-forecasting>=1.4",
+    # ===================
+    # Time Series
+    # ===================
+    "statsmodels>=0.14",
+    "arch>=8.0",
+    "pmdarima>=2.0",
+    "sktime>=0.30",
+    "darts>=0.28",
+    "statsforecast>=1.7",
+    "hmmlearn>=0.3",
+    "filterpy>=1.4",
+    "pykalman>=0.11",
+    "pywavelets>=1.6",
+    "ruptures>=1.1",
+    # ===================
+    # Causal Inference
+    # ===================
+    "dowhy>=0.11",
+    "econml>=0.15",
+    "causalml>=0.15",
+    "tigramite>=5.2",
+    # tfcausalimpact (BSTS, Ch15 NB06): py312 image only — requires Python <3.13.
+    # See envs/py312/pyproject.toml; pycausalimpact (ARIMA, 2020-dead) removed.
+    "causal-learn>=0.1",
+    "linearmodels>=6.0",
+    # ===================
+    # NLP / Text
+    # ===================
+    # gensim: word2vec/Doc2Vec only (Ch10 NB01-02). No Python 3.14 support.
+    # Use Docker: docker compose --profile word2vec run --rm word2vec python ...
+    "datasets>=2.19",
+    "evaluate>=0.4",
+    # ===================
+    # Portfolio / Finance
+    # ===================
+    "PyPortfolioOpt>=1.5",
+    "riskfolio-lib>=6.0",
+    "skfolio>=0.3",
+    "vectorbt>=0.26",
+    # ===================
+    # Data Sources
+    # ===================
+    "yfinance>=0.2",
+    "edgartools>=5.9",
+    # sec-edgar-api: removed — no notebook imports it (they use edgartools).
+    # sec-edgar-api 1.1.0 is broken with pyrate-limiter 4.x anyway.
+    "secedgar>=0.6",
+    "iex-parser>=1.7",
+    "beautifulsoup4>=4.12",
+    "cot-reports>=0.1",
+    "databento>=0.47.0",
+    "gdown>=5.1",
+    "oandapyV20>=0.7",
+    # ===================
+    # Technical Analysis
+    # ===================
+    "ta-lib>=0.6.8",
+    "ta>=0.11",
+    # ===================
+    # Synthetic Data
+    # ===================
+    "be-great>=0.0.5",
+    "opacus>=1.4",
+    # signatory/esig: separate env (envs/py312/). Only Ch5 NB03, Ch9 NB06/12.
+    # ===================
+    # Strategy
+    # ===================
+    "exchange-calendars>=4.5",
+    # ===================
+    # Utilities
+    # ===================
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+    "rich>=13.7",
+    "requests>=2.31",
+    "nest-asyncio>=1.6",
+    "neo4j>=5.28",
+    "thefuzz>=0.22",
+    "rapidfuzz>=3.6",
+    "psutil>=5.9",
+    "sympy>=1.12",
+    "openpyxl>=3.1",
+    "numba>=0.59",
+    "papermill>=2.6",
+    # ===================
+    # Jupyter
+    # ===================
+    "jupyter>=1.0",
+    "notebook>=7.0",
+    "jupytext>=1.16",
+    "jupyterlab>=4.1",
+    "ipython>=8.22",
+    "anywidget>=0.9",
+    "nbconvert>=7.16",
+    "nbformat>=5.10",
+    # ===================
+    # File Formats
+    # ===================
+    "tables>=3.10",
+    "duckdb>=1.0",
+    "mlflow>=3.10.1",
+    "arviz>=0.23.4,<1.0",
+    "feast>=0.61",
+    "pymc>=5.25.1",
+    "pyvis>=0.3.2",
+    "llama-index-core>=0.14.20",
+    "llama-index-embeddings-huggingface>=0.7.0",
+    "chromadb>=1.5.5",
+    "pfhedge>=0.22.0",
+    "ml4t-models>=0.1.0a4",
+    "llama-index-vector-stores-chroma>=0.5.5",
+    "llama-index-llms-openai>=0.7.7",
+    # Ch24 Autonomous Agents (required at notebook runtime; Docker installs
+    # main deps only, so these must not live in an optional-dependencies group)
+    "crewai>=0.86",
+    # litellm enters transitively via crewai. Pin the security floor directly:
+    # crewai's newest 0.x (0.118) caps litellm <1.83, which carries proxy-server
+    # CVEs (GHSA OIDC bypass / proxy-config priv-esc). The book only uses litellm
+    # as a client lib, but we keep the patched line anyway; this floor holds
+    # crewai at 0.95 (last 0.x allowing litellm>=1.83). crewai 1.x needs
+    # chromadb<1.2, which conflicts with the Ch22 RAG stack.
+    "litellm>=1.83.0",
+    "langgraph>=0.2",
+    "google-genai>=0.3",
+    # Anthropic is the first provider in the Ch24 agent auto-detect cascade
+    # (agent_providers.create_llm_client). It is a runtime dependency, not a
+    # dev tool — readers with ANTHROPIC_API_KEY set need it in the Docker image.
+    "anthropic>=0.89.0",
+]
+
+[project.optional-dependencies]
+# Database benchmark extras (requires Docker for servers)
+db-benchmark = [
+    "arcticdb>=4.5",
+    "clickhouse-connect>=0.7",
+    "psycopg2-binary>=2.9",
+    "influxdb-client>=1.45",
+    "questdb>=2.0",
+]
+# Bayesian modeling
+bayesian = [
+    "pymc>=5.14",
+    "arviz>=0.18,<1.0",
+]
+# MLOps (Ch26)
+mlops = [
+    "feast>=0.61",
+    "mlflow>=2.16",
+]
+# Live Trading (Ch25)
+live = [
+    "ib_insync>=0.9",
+    "python-okx>=0.3",
+    "alpaca-py>=0.33",
+]
+# Development tools
+dev = [
+    "pytest>=8.0",
+    "pytest-rerunfailures>=15.0",
+    "jupytext>=1.16",
+    "pre-commit>=3.6",
+    "ruff>=0.8",
+]
+
+[tool.uv]
+# ml4t-engineer only has pre-release versions on PyPI
+prerelease = "if-necessary-or-explicit"
+
+# Force protobuf >= 5.0 for Python 3.14 compatibility.
+# protobuf 4.x has a C extension metaclass bug on Python 3.14.
+# opentelemetry-proto 1.27.0 pins protobuf<5; override until it upgrades.
+override-dependencies = [
+    "protobuf>=5.0",
+]
+
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+]
+
+[tool.setuptools.packages.find]
+include = ["utils", "data", "case_studies"]
+namespaces = false
+
+# Auto-loaded at interpreter startup to put numbered chapter dirs on sys.path
+# (see sitecustomize.py). Shipped as a top-level module so both the editable
+# install (local) and a wheel install resolve it.
+[tool.setuptools]
+py-modules = ["sitecustomize"]
+
+[tool.ruff]
+line-length = 100
+# Vendored upstream code (MIT-licensed PatchTST reference) — don't lint/modify.
+extend-exclude = ["**/_reference/**"]
+# Keep at py312 even though requires-python is >=3.14. With
+# target-version = "py314", ruff/pyupgrade rewrites `except (A, B):`
+# to PEP 758's unparenthesized `except A | B:` form. Until our minimum
+# runtime support and reader tooling catches up to py314, we pin py312
+# so ruff preserves the parenthesized tuple-catch form.
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = [
+    "E501",  # Line length handled by formatter
+    "E402",  # Module level import not at top - OK for notebooks
+    "F401",  # Imported but unused - OK for conditional imports in notebooks
+    "F811",  # Redefinition of unused variable - OK in notebook cells
+    "B006",  # Mutable argument defaults - common pattern in notebooks
+    "B007",  # Loop variable not used - intentional in some cases
+    "B018",  # Useless expression - intentional in notebooks to display output
+    "B905",  # zip without strict= - bare zip reads cleaner in teaching code
+    "F822",  # Undefined in __all__ - forward declarations
+    "E741",  # Ambiguous variable names (l, I, O) - common in math/ML code
+    "F841",  # Local variable assigned but never used - common in exploratory notebooks
+    "SIM102", # Use single if statement - readability preference
+    "SIM105", # contextlib.suppress over try/except/pass - explicit form clearer
+    "SIM108", # Use ternary operator - readability preference
+    "SIM113", # Use enumerate - readability preference
+    "SIM118", # Use `key in dict` - both forms acceptable
+]
+
+[tool.jupytext]
+formats = "ipynb,py:percent"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short -p no:torchtyping"

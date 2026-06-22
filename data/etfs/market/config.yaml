@@ -1,0 +1,171 @@
+# ML4T ETF Data Configuration
+# ============================
+# 100 diversified ETFs as CANDIDATE POOL across 9 categories
+# Yahoo Finance data source (free, no API key required)
+#
+# IMPORTANT: This is the CANDIDATE universe. The strategy definition
+# process (Chapter 6) filters this down based on:
+# - Liquidity ($50M/day minimum)
+# - History (10+ years preferred)
+# - Correlation clustering (distinct return drivers)
+# - Effective bets analysis
+#
+# Products: 100 curated ETFs
+# Date range: 2006-01-01 to 2025-12-31 (20 years)
+# Estimated cost: Free
+#
+# Usage:
+#   from data.loaders import load_etfs
+#   etf_data = load_etfs()
+
+etfs:
+  provider: yahoo
+  start: '2006-01-01'
+  end: '2025-12-31'
+  frequency: daily
+  storage_path: etfs/market
+
+  # 100 ETF Candidate Universe across 9 categories
+  # Design rationale:
+  # - Comprehensive coverage for universe engineering demonstration
+  # - Includes overlapping exposures to show correlation clustering
+  # - Final strategy universe will be ~80 ETFs after filtering
+  # - No leveraged/inverse ETFs
+  # - No crypto ETFs (separate case study)
+
+  tickers:
+    us_equity_broad:
+      description: "US broad market ETFs - large, mid, small cap, equal weight"
+      symbols:
+        - SPY   # SPDR S&P 500
+        - QQQ   # Invesco QQQ (NASDAQ-100)
+        - IWM   # iShares Russell 2000
+        - DIA   # SPDR Dow Jones Industrial
+        - VTI   # Vanguard Total Stock Market
+        - MDY   # SPDR S&P MidCap 400
+        - IJR   # iShares Core S&P Small-Cap
+        - RSP   # Invesco S&P 500 Equal Weight
+        - IVW   # iShares S&P 500 Growth
+        - IVE   # iShares S&P 500 Value
+
+    us_equity_style:
+      description: "US equity style and factor ETFs - value, growth, quality, momentum, dividend"
+      symbols:
+        - VTV   # Vanguard Value
+        - VUG   # Vanguard Growth
+        - MTUM  # iShares MSCI USA Momentum Factor
+        - QUAL  # iShares MSCI USA Quality Factor
+        - VLUE  # iShares MSCI USA Value Factor
+        - USMV  # iShares MSCI USA Min Vol Factor
+        - DVY   # iShares Select Dividend
+        - SDY   # SPDR S&P Dividend
+        - VIG   # Vanguard Dividend Appreciation
+        - SCHD  # Schwab US Dividend Equity
+
+    us_sectors:
+      description: "SPDR sector ETFs plus real estate"
+      symbols:
+        - XLB   # Materials
+        - XLC   # Communication Services
+        - XLE   # Energy
+        - XLF   # Financials
+        - XLI   # Industrials
+        - XLK   # Technology
+        - XLP   # Consumer Staples
+        - XLU   # Utilities
+        - XLV   # Health Care
+        - XLY   # Consumer Discretionary
+        - XLRE  # Real Estate (sector SPDR)
+        - VNQ   # Vanguard Real Estate
+        - IYR   # iShares US Real Estate
+
+    international_developed:
+      description: "International developed markets - broad and country-specific"
+      symbols:
+        - EFA   # iShares MSCI EAFE (Developed ex-US)
+        - VEA   # Vanguard FTSE Developed Markets
+        - VGK   # Vanguard FTSE Europe
+        - IEFA  # iShares Core MSCI EAFE
+        - ACWI  # iShares MSCI ACWI (All Country World)
+        - ACWX  # iShares MSCI ACWI ex US
+        - EWJ   # iShares MSCI Japan
+        - EWG   # iShares MSCI Germany
+        - EWU   # iShares MSCI United Kingdom
+        - EWT   # iShares MSCI Taiwan
+        - EWH   # iShares MSCI Hong Kong
+        - EWQ   # iShares MSCI France
+        - EWL   # iShares MSCI Switzerland
+        - EWN   # iShares MSCI Netherlands
+        - EWI   # iShares MSCI Italy
+        - EWP   # iShares MSCI Spain
+        - EWC   # iShares MSCI Canada
+        - EWA   # iShares MSCI Australia
+
+    emerging_markets:
+      description: "Emerging markets - broad and country-specific"
+      symbols:
+        - EEM   # iShares MSCI Emerging Markets
+        - VWO   # Vanguard FTSE Emerging Markets
+        - IEMG  # iShares Core MSCI Emerging Markets
+        - FXI   # iShares China Large-Cap
+        - MCHI  # iShares MSCI China
+        - EWZ   # iShares MSCI Brazil
+        - EWY   # iShares MSCI South Korea
+        - EWW   # iShares MSCI Mexico
+        - INDA  # iShares MSCI India
+        - EZA   # iShares MSCI South Africa
+        - THD   # iShares MSCI Thailand
+
+    fixed_income:
+      description: "Bond ETFs across duration, credit, and geographic spectrum"
+      symbols:
+        - AGG   # iShares Core US Aggregate Bond
+        - BND   # Vanguard Total Bond Market
+        - BNDX  # Vanguard Total International Bond
+        - TLT   # iShares 20+ Year Treasury Bond
+        - IEF   # iShares 7-10 Year Treasury Bond
+        - SHY   # iShares 1-3 Year Treasury Bond
+        - GOVT  # iShares US Treasury Bond
+        - BIL   # SPDR Bloomberg 1-3 Month T-Bill
+        - LQD   # iShares iBoxx Investment Grade Corporate
+        - VCSH  # Vanguard Short-Term Corporate Bond
+        - HYG   # iShares iBoxx High Yield Corporate
+        - JNK   # SPDR Bloomberg High Yield Bond
+        - TIP   # iShares TIPS Bond
+        - EMB   # iShares J.P. Morgan USD Emerging Markets Bond
+        - MUB   # iShares National Muni Bond
+
+    commodities:
+      description: "Commodity ETFs - precious metals, energy, broad baskets"
+      symbols:
+        - GLD   # SPDR Gold Shares
+        - IAU   # iShares Gold Trust
+        - SLV   # iShares Silver Trust
+        - PPLT  # Aberdeen Physical Platinum Shares
+        - USO   # United States Oil Fund
+        - UNG   # United States Natural Gas Fund
+        - DBC   # Invesco DB Commodity Index
+        - GSG   # iShares S&P GSCI Commodity-Indexed
+        - DBA   # Invesco DB Agriculture Fund
+
+    specialty:
+      description: "Sector-specific and thematic ETFs"
+      symbols:
+        - IBB   # iShares Biotechnology
+        - XBI   # SPDR S&P Biotech
+        - SMH   # VanEck Semiconductor
+        - SOXX  # iShares Semiconductor
+        - KRE   # SPDR S&P Regional Banking
+        - XME   # SPDR S&P Metals & Mining
+        - OIH   # VanEck Oil Services
+        - XRT   # SPDR S&P Retail
+        - ITB   # iShares US Home Construction
+        - ITA   # iShares US Aerospace & Defense
+
+    currency:
+      description: "Currency ETFs for FX exposure"
+      symbols:
+        - UUP   # Invesco DB US Dollar Index Bullish Fund
+        - FXE   # Invesco CurrencyShares Euro Trust
+        - FXY   # Invesco CurrencyShares Japanese Yen Trust
+        - FXB   # Invesco CurrencyShares British Pound Trust

@@ -1,0 +1,76 @@
+# ML4T Crypto Data Configuration
+# ============================
+# Crypto premium index for funding rate case study
+# Binance Public provider (no API key required)
+#
+# Products: 20 major crypto perpetual futures
+# Date range: 2021-01-01 to 2025-12-31 (premium index data available from ~2021)
+# Interval: 8h (funding rate settlement interval)
+# Estimated cost: Free
+#
+# Usage:
+#   from ml4t.data.crypto.downloader import CryptoDataManager
+#
+#   # Initialize with config
+#   manager = CryptoDataManager.from_config("config/crypto.yaml")
+#
+#   # Download all data
+#   manager.download_premium_index()
+#
+#   # Load data for analysis
+#   premium_data = manager.load_premium_index()
+
+# Crypto premium index for funding rate case study
+# Uses Binance Public provider (no API key required)
+crypto:
+  provider: binance_public
+  market: futures
+  start: '2020-01-01'  # Extended history from Jan 2020 (BTC/ETH/major alts)
+  end: '2025-12-31'
+  interval: 8h  # Funding rate settlement interval
+  storage_path: crypto/market
+  generate_profile: true
+  outputs:
+    premium_file: premium_index_8h.parquet
+    perps_file_template: perps_{frequency}.parquet
+    perps_frequencies:
+      - 1h
+  perps:
+    market: futures
+    start: '2020-01-01'
+    end: '2025-12-31'
+    frequencies:
+      - 1h
+
+  symbols:
+    major:
+      description: "Major perpetual futures for premium index analysis"
+      symbols:
+        - BTCUSDT
+        - ETHUSDT
+        - BNBUSDT
+        - SOLUSDT
+        - XRPUSDT
+        - DOGEUSDT
+        - ADAUSDT
+        - AVAXUSDT
+        - DOTUSDT
+
+
+    defi:
+      description: "DeFi tokens with active perpetual markets"
+      symbols:
+        - LINKUSDT
+        - UNIUSDT
+        - AAVEUSDT
+        - MKRUSDT
+        - COMPUSDT
+
+    layer1:
+      description: "Layer 1 blockchain tokens"
+      symbols:
+        - ATOMUSDT
+        - NEARUSDT
+        - APTUSDT
+        - SUIUSDT
+        - INJUSDT

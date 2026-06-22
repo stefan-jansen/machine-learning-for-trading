@@ -1,0 +1,558 @@
+# CME Futures Product Specifications
+#
+# Static product-level configuration for 36 CME futures products.
+# Used for:
+# - Contract symbol generation
+# - Expiration date inference
+# - P&L calculation (multiplier)
+# - Position sizing (tick_size)
+#
+# No Databento API call needed - this is static reference data.
+#
+# Sources:
+# - CME Group contract specifications
+# - Databento unit_of_measure_qty field (where available)
+#
+# initial_margin_pct / maintenance_margin_pct:
+#   Per-product percentage-of-notional initial and maintenance margin,
+#   wired through ContractSpec.margin_pct -> Broker.margin_pct_schedule
+#   (ml4t-backtest >= 0.1.0b18). The dollar margin tracks price changes
+#   naturally while the rate stays constant; only the rate needs to be
+#   re-anchored when CME publishes a new SPAN schedule.
+#
+#   Derivation (per product, where available):
+#     maintenance_pct = first-row CSV maintenance$
+#                       / (multiplier x front-month close on 2025-12-31)
+#     initial_pct     = 1.10 x maintenance_pct  (CME SPAN convention)
+#
+#   Source for CSV maintenance$:
+#     reference/outrightrates.csv (CME outright rates download, 2026-05-16)
+#     Covers 22 of 36 products. Missing from CSV: equity-index e-minis
+#     (ES/NQ/YM/RTY), energy front-month (CL/NG/HO/RB), lumber (LBR),
+#     palladium (PA), and Mexican peso (6M); for these we fall back to a
+#     per-category SPAN-style approximation (5% equity_index, 8% energy,
+#     8% lumber, 5% metals for PA, 2% fx for 6M). 14 products use fallback.
+#
+#   Front-month prices come from
+#     data/futures/market/continuous/daily/continuous_daily.parquet (tenor=0).
+#   See `case_studies/utils/backtest_loaders.py::load_contract_specs_from_yaml`
+#   for the YAML->ContractSpec wiring.
+
+products:
+  # ============================================================================
+  # EQUITY INDEX FUTURES
+  # Quarterly: H (Mar), M (Jun), U (Sep), Z (Dec)
+  # Expiration: 3rd Friday of contract month @ 9:30 ET
+  # ============================================================================
+  ES:
+    name: "E-mini S&P 500"
+    exchange: "CME"
+    category: "equity_index"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "3rd_friday"
+    multiplier: 50.0          # $50 per index point
+    tick_size: 0.25           # Minimum price increment
+    tick_value: 12.50         # $50 * 0.25 = $12.50
+    initial_margin_pct: 0.05      # category fallback (not in CME outrightrates.csv)
+    maintenance_margin_pct: 0.04545  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  NQ:
+    name: "E-mini NASDAQ-100"
+    exchange: "CME"
+    category: "equity_index"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "3rd_friday"
+    multiplier: 20.0          # $20 per index point
+    tick_size: 0.25
+    tick_value: 5.00
+    initial_margin_pct: 0.05      # category fallback (not in CME outrightrates.csv)
+    maintenance_margin_pct: 0.04545  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  YM:
+    name: "E-mini Dow"
+    exchange: "CBOT"
+    category: "equity_index"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "3rd_friday"
+    multiplier: 5.0           # $5 per index point
+    tick_size: 1.0
+    tick_value: 5.00
+    initial_margin_pct: 0.05      # category fallback (not in CME outrightrates.csv)
+    maintenance_margin_pct: 0.04545  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  RTY:
+    name: "E-mini Russell 2000"
+    exchange: "CME"
+    category: "equity_index"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "3rd_friday"
+    multiplier: 50.0          # $50 per index point
+    tick_size: 0.1
+    tick_value: 5.00
+    initial_margin_pct: 0.05      # category fallback (not in CME outrightrates.csv)
+    maintenance_margin_pct: 0.04545  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  # ============================================================================
+  # TREASURY FUTURES
+  # Quarterly: H, M, U, Z
+  # Expiration: Last business day of contract month
+  # ============================================================================
+  ZN:
+    name: "10-Year T-Note"
+    exchange: "CBOT"
+    category: "treasury"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "last_business_day"
+    multiplier: 100000.0      # $100,000 notional
+    tick_size: 0.015625       # 1/64 of a point
+    tick_value: 15.625
+    initial_margin_pct: 0.01831      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.01665  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  ZB:
+    name: "30-Year T-Bond"
+    exchange: "CBOT"
+    category: "treasury"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "last_business_day"
+    multiplier: 100000.0
+    tick_size: 0.03125        # 1/32 of a point
+    tick_value: 31.25
+    initial_margin_pct: 0.03514      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.03195  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  ZF:
+    name: "5-Year T-Note"
+    exchange: "CBOT"
+    category: "treasury"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "last_business_day"
+    multiplier: 100000.0
+    tick_size: 0.0078125      # 1/128 of a point
+    tick_value: 7.8125
+    initial_margin_pct: 0.01257      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.01142  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  ZT:
+    name: "2-Year T-Note"
+    exchange: "CBOT"
+    category: "treasury"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "last_business_day"
+    multiplier: 200000.0      # $200,000 notional
+    tick_size: 0.0078125
+    tick_value: 15.625
+    initial_margin_pct: 0.00632      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.00575  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  # ============================================================================
+  # ENERGY FUTURES
+  # Monthly: All 12 months (F, G, H, J, K, M, N, Q, U, V, X, Z)
+  # ============================================================================
+  CL:
+    name: "WTI Crude Oil"
+    exchange: "NYMEX"
+    category: "energy"
+    contract_months: ["F", "G", "H", "J", "K", "M", "N", "Q", "U", "V", "X", "Z"]
+    expiry_rule: "3bd_before_25th_prior_month"  # Complex rule
+    multiplier: 1000.0        # 1,000 barrels
+    tick_size: 0.01
+    tick_value: 10.00
+    initial_margin_pct: 0.08      # category fallback (not in CME outrightrates.csv)
+    maintenance_margin_pct: 0.07273  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  NG:
+    name: "Natural Gas"
+    exchange: "NYMEX"
+    category: "energy"
+    contract_months: ["F", "G", "H", "J", "K", "M", "N", "Q", "U", "V", "X", "Z"]
+    expiry_rule: "3bd_before_1st"
+    multiplier: 10000.0       # 10,000 MMBtu
+    tick_size: 0.001
+    tick_value: 10.00
+    initial_margin_pct: 0.08      # category fallback (not in CME outrightrates.csv)
+    maintenance_margin_pct: 0.07273  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  HO:
+    name: "Heating Oil"
+    exchange: "NYMEX"
+    category: "energy"
+    contract_months: ["F", "G", "H", "J", "K", "M", "N", "Q", "U", "V", "X", "Z"]
+    expiry_rule: "last_business_day_prior_month"
+    multiplier: 42000.0       # 42,000 gallons
+    tick_size: 0.0001
+    tick_value: 4.20
+    initial_margin_pct: 0.08      # category fallback (not in CME outrightrates.csv)
+    maintenance_margin_pct: 0.07273  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  RB:
+    name: "RBOB Gasoline"
+    exchange: "NYMEX"
+    category: "energy"
+    contract_months: ["F", "G", "H", "J", "K", "M", "N", "Q", "U", "V", "X", "Z"]
+    expiry_rule: "last_business_day_prior_month"
+    multiplier: 42000.0       # 42,000 gallons
+    tick_size: 0.0001
+    tick_value: 4.20
+    initial_margin_pct: 0.08      # category fallback (not in CME outrightrates.csv)
+    maintenance_margin_pct: 0.07273  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  # ============================================================================
+  # METALS FUTURES
+  # Monthly (varies by product)
+  # ============================================================================
+  GC:
+    name: "Gold"
+    exchange: "COMEX"
+    category: "metals"
+    contract_months: ["G", "J", "M", "Q", "V", "Z"]  # Feb, Apr, Jun, Aug, Oct, Dec
+    expiry_rule: "3rd_last_business_day"
+    multiplier: 100.0         # 100 troy ounces
+    tick_size: 0.10
+    tick_value: 10.00
+    initial_margin_pct: 0.06911      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.06283  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  SI:
+    name: "Silver"
+    exchange: "COMEX"
+    category: "metals"
+    contract_months: ["H", "K", "N", "U", "Z"]  # Mar, May, Jul, Sep, Dec
+    expiry_rule: "3rd_last_business_day"
+    multiplier: 5000.0        # 5,000 troy ounces
+    tick_size: 0.005
+    tick_value: 25.00
+    initial_margin_pct: 0.12437      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.11307  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  HG:
+    name: "Copper"
+    exchange: "COMEX"
+    category: "metals"
+    contract_months: ["H", "K", "N", "U", "Z"]
+    expiry_rule: "3rd_last_business_day"
+    multiplier: 25000.0       # 25,000 pounds
+    tick_size: 0.0005
+    tick_value: 12.50
+    initial_margin_pct: 0.09225      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.08386  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  PL:
+    name: "Platinum"
+    exchange: "NYMEX"
+    category: "metals"
+    contract_months: ["F", "J", "N", "V"]  # Jan, Apr, Jul, Oct
+    expiry_rule: "4th_last_business_day"
+    multiplier: 50.0          # 50 troy ounces
+    tick_size: 0.10
+    tick_value: 5.00
+    initial_margin_pct: 0.11053      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.10048  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  PA:
+    name: "Palladium"
+    exchange: "NYMEX"
+    category: "metals"
+    contract_months: ["H", "M", "U", "Z"]  # Mar, Jun, Sep, Dec
+    expiry_rule: "4th_last_business_day"
+    multiplier: 100.0         # 100 troy ounces
+    tick_size: 0.05
+    tick_value: 5.00
+    initial_margin_pct: 0.05      # metals SPAN approximation; fraction of notional, anchored 2026-05-16
+    maintenance_margin_pct: 0.04545  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  # ============================================================================
+  # CURRENCY FUTURES
+  # Quarterly: H, M, U, Z
+  # Expiration: 9:16 AM Chicago, 2 business days before 3rd Wednesday
+  # ============================================================================
+  6E:
+    name: "Euro FX"
+    exchange: "CME"
+    category: "fx"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "2bd_before_3rd_wednesday"
+    multiplier: 125000.0      # €125,000
+    tick_size: 0.00005
+    tick_value: 6.25
+    initial_margin_pct: 0.01792      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.01629  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  6J:
+    name: "Japanese Yen"
+    exchange: "CME"
+    category: "fx"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "2bd_before_3rd_wednesday"
+    multiplier: 12500000.0    # ¥12,500,000
+    tick_size: 0.0000005
+    tick_value: 6.25
+    initial_margin_pct: 0.03557      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.03233  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  6B:
+    name: "British Pound"
+    exchange: "CME"
+    category: "fx"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "2bd_before_3rd_wednesday"
+    multiplier: 62500.0       # £62,500
+    tick_size: 0.0001
+    tick_value: 6.25
+    initial_margin_pct: 0.02483      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.02258  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  6A:
+    name: "Australian Dollar"
+    exchange: "CME"
+    category: "fx"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "2bd_before_3rd_wednesday"
+    multiplier: 100000.0      # A$100,000
+    tick_size: 0.0001
+    tick_value: 10.00
+    initial_margin_pct: 0.03121      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.02837  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  6C:
+    name: "Canadian Dollar"
+    exchange: "CME"
+    category: "fx"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "2bd_before_3rd_wednesday"
+    multiplier: 100000.0      # C$100,000
+    tick_size: 0.00005
+    tick_value: 5.00
+    initial_margin_pct: 0.01351      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.01229  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  6S:
+    name: "Swiss Franc"
+    exchange: "CME"
+    category: "fx"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "2bd_before_3rd_wednesday"
+    multiplier: 125000.0      # CHF125,000
+    tick_size: 0.0001
+    tick_value: 12.50
+    initial_margin_pct: 0.02766      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.02515  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  6M:
+    name: "Mexican Peso"
+    exchange: "CME"
+    category: "fx"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "2bd_before_3rd_wednesday"
+    multiplier: 500000.0      # MXN500,000
+    tick_size: 0.00001
+    tick_value: 5.00
+    initial_margin_pct: 0.02      # fx SPAN approximation; fraction of notional, anchored 2026-05-16
+    maintenance_margin_pct: 0.01818  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  # ============================================================================
+  # INTEREST RATE FUTURES
+  # ============================================================================
+  SR3:
+    name: "3-Month SOFR"
+    exchange: "CME"
+    category: "rates"
+    contract_months: ["H", "M", "U", "Z"]
+    expiry_rule: "3rd_wednesday"
+    multiplier: 2500.0        # $2,500 per basis point
+    tick_size: 0.0025
+    tick_value: 6.25
+    initial_margin_pct: 0.00092      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.00083  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  # ============================================================================
+  # AGRICULTURE FUTURES
+  # ============================================================================
+  ZC:
+    name: "Corn"
+    exchange: "CBOT"
+    category: "grains"
+    contract_months: ["H", "K", "N", "U", "Z"]  # Mar, May, Jul, Sep, Dec
+    expiry_rule: "business_day_before_15th"
+    multiplier: 5000.0        # 5,000 bushels
+    tick_size: 0.25
+    tick_value: 12.50
+    initial_margin_pct: 0.04869      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.04427  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  ZS:
+    name: "Soybeans"
+    exchange: "CBOT"
+    category: "grains"
+    contract_months: ["F", "H", "K", "N", "Q", "U", "X"]  # Jan, Mar, May, Jul, Aug, Sep, Nov
+    expiry_rule: "business_day_before_15th"
+    multiplier: 5000.0        # 5,000 bushels
+    tick_size: 0.25
+    tick_value: 12.50
+    initial_margin_pct: 0.04148      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.03771  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  ZW:
+    name: "Wheat"
+    exchange: "CBOT"
+    category: "grains"
+    contract_months: ["H", "K", "N", "U", "Z"]
+    expiry_rule: "business_day_before_15th"
+    multiplier: 5000.0        # 5,000 bushels
+    tick_size: 0.25
+    tick_value: 12.50
+    initial_margin_pct: 0.07976      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.07251  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  ZM:
+    name: "Soybean Meal"
+    exchange: "CBOT"
+    category: "grains"
+    contract_months: ["F", "H", "K", "N", "Q", "U", "V", "Z"]
+    expiry_rule: "business_day_before_15th"
+    multiplier: 100.0         # 100 short tons
+    tick_size: 0.10
+    tick_value: 10.00
+    initial_margin_pct: 0.0564      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.05127  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  ZL:
+    name: "Soybean Oil"
+    exchange: "CBOT"
+    category: "grains"
+    contract_months: ["F", "H", "K", "N", "Q", "U", "V", "Z"]
+    expiry_rule: "business_day_before_15th"
+    multiplier: 60000.0       # 60,000 pounds
+    tick_size: 0.01
+    tick_value: 6.00
+    initial_margin_pct: 0.07795      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.07086  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  # ============================================================================
+  # LIVESTOCK FUTURES
+  # ============================================================================
+  LE:
+    name: "Live Cattle"
+    exchange: "CME"
+    category: "livestock"
+    contract_months: ["G", "J", "M", "Q", "V", "Z"]  # Feb, Apr, Jun, Aug, Oct, Dec
+    expiry_rule: "last_business_day"
+    multiplier: 40000.0       # 40,000 pounds
+    tick_size: 0.025
+    tick_value: 10.00
+    initial_margin_pct: 0.03939      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.03581  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  HE:
+    name: "Lean Hogs"
+    exchange: "CME"
+    category: "livestock"
+    contract_months: ["G", "J", "K", "M", "N", "Q", "V", "Z"]
+    expiry_rule: "10th_business_day"
+    multiplier: 40000.0       # 40,000 pounds
+    tick_size: 0.025
+    tick_value: 10.00
+    initial_margin_pct: 0.05465      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.04968  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  GF:
+    name: "Feeder Cattle"
+    exchange: "CME"
+    category: "livestock"
+    contract_months: ["F", "H", "J", "K", "Q", "U", "V", "X"]
+    expiry_rule: "last_thursday"
+    multiplier: 50000.0       # 50,000 pounds
+    tick_size: 0.025
+    tick_value: 12.50
+    initial_margin_pct: 0.03828      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.0348  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  # ============================================================================
+  # LUMBER FUTURES
+  # ============================================================================
+  LBR:
+    name: "Random Length Lumber"
+    exchange: "CME"
+    category: "lumber"
+    contract_months: ["F", "H", "K", "N", "U", "X"]  # Jan, Mar, May, Jul, Sep, Nov
+    expiry_rule: "business_day_before_16th"
+    multiplier: 27500.0       # 27,500 board feet
+    tick_size: 0.50
+    tick_value: 13.75
+    initial_margin_pct: 0.08      # category fallback (not in CME outrightrates.csv)
+    maintenance_margin_pct: 0.07273  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  # ============================================================================
+  # CRYPTOCURRENCY FUTURES
+  # Monthly
+  # ============================================================================
+  BTC:
+    name: "Bitcoin"
+    exchange: "CME"
+    category: "crypto"
+    contract_months: ["F", "G", "H", "J", "K", "M", "N", "Q", "U", "V", "X", "Z"]
+    expiry_rule: "last_friday"
+    multiplier: 5.0           # 5 Bitcoin
+    tick_size: 5.0
+    tick_value: 25.00
+    initial_margin_pct: 0.20911      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.1901  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+  ETH:
+    name: "Ether"
+    exchange: "CME"
+    category: "crypto"
+    contract_months: ["F", "G", "H", "J", "K", "M", "N", "Q", "U", "V", "X", "Z"]
+    expiry_rule: "last_friday"
+    multiplier: 50.0          # 50 Ether
+    tick_size: 0.5
+    tick_value: 25.00
+    initial_margin_pct: 0.22382      # CSV-derived (median front-month of outrightrates.csv / multiplier × 2025-12-31 close)
+    maintenance_margin_pct: 0.20347  # initial / 1.10 (CME SPAN convention)
+    currency: "USD"
+
+# ============================================================================
+# CME MONTH CODES REFERENCE
+# ============================================================================
+# F = January    G = February   H = March      J = April
+# K = May        M = June       N = July       Q = August
+# U = September  V = October    X = November   Z = December
+#
+# Year codes: Single digit (0-9) representing 202X or 201X
+# ESH5 = March 2025 E-mini S&P 500
+# CLZ6 = December 2026 WTI Crude Oil

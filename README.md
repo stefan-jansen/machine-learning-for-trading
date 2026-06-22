@@ -162,11 +162,12 @@ the workflow:
 
 ---
 
-An introduction and a closing chapter bookend six workflow-aligned parts.
+An introduction and a closing chapter bookend six workflow-aligned parts. Chapter titles link to their guides as
+each part is published; the rest are added part by part over the coming weeks.
 
 ## Introduction
 
-### 1. The Process Is Your Edge
+### [1. The Process Is Your Edge](01_process_is_edge/)
 
 Why process discipline beats model sophistication. Introduces the ML4T workflow as a research-to-production system,
 regime detection on factor returns and macro indicators, and the evidence boundary that separates exploration from
@@ -177,25 +178,25 @@ confirmation.
 The markets, instruments, and infrastructure the rest of the book builds on: a taxonomy of sources, raw exchange
 messages turned into feature-ready bars, point-in-time fundamentals, and synthetic histories for robust validation.
 
-### 2. The Financial Data Universe
+### [2. The Financial Data Universe](02_financial_data_universe/)
 
 A taxonomy of market, fundamental, and alternative data. Surveys eight asset classes, quantifies survivorship bias,
 benchmarks storage formats (Parquet, DuckDB, kdb+, TimescaleDB), and establishes the data-quality framework used
 throughout the book.
 
-### 3. Market Microstructure
+### [3. Market Microstructure](03_market_microstructure/)
 
 From raw exchange messages to feature-ready bars. Parses NASDAQ ITCH, reconstructs limit order books from multiple
 data sources, validates Lee-Ready trade classification, and compares bar-sampling methods — dollar bars deliver the
 best return normality.
 
-### 4. Fundamental and Alternative Data
+### [4. Fundamental and Alternative Data](04_fundamental_alternative_data/)
 
 Point-in-time pipelines for SEC EDGAR filings, entity resolution across identifier systems, macro and commodity
 fundamentals, and alternative-data evaluation — including on-chain crypto fundamentals and prediction markets
 (Kalshi, Polymarket).
 
-### 5. Synthetic Financial Data
+### [5. Synthetic Financial Data](05_synthetic_data/)
 
 Generating alternative market histories for robust validation. Implements TimeGAN, Tail-GAN, Sig-CWGAN,
 Diffusion-TS, and LLM-based tabular generation, evaluated through a fidelity–utility–privacy framework.
@@ -345,6 +346,57 @@ breakers, feature stores, experiment tracking, and the MLOps infrastructure fina
 
 The systematic philosophy, quant career paths, learning resources, research frontiers, and how to build your own
 edge. The closing bookend to Chapter 1: the process is the edge.
+
+---
+
+## Quick Start
+
+Run everything **from the repository root**. Clone and set up with Docker or a local `uv` environment:
+
+```bash
+git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
+cd machine-learning-for-trading
+cp .env.example .env
+
+docker compose pull ml4t # Option A — Docker (recommended)
+pip install uv && uv sync # Option B — local with uv
+```
+
+See the **[installation guide](docs/installation.md)** for platform-specific setup (Linux, Windows WSL2, macOS) and GPU
+instructions.
+
+**Download data.** Most notebooks need datasets; start with the free ones (no API keys):
+
+```bash
+uv run python data/download_all.py --free-only
+```
+
+The **[data guide](data/README.md)** documents every dataset, API-key setup, the loaders, and storage tiers (≈70 MB
+free tier up to ≈7 GB full).
+
+**Run notebooks.** Notebooks are paired [Jupytext](https://jupytext.readthedocs.io/) files (`.py` source + generated
+`.ipynb`). Run a quick smoke test, or open Jupyter Lab:
+
+```bash
+uv run python 01_process_is_edge/factor_regimes.py
+docker compose up -d ml4t # then open http://localhost:8888
+```
+
+See the guide to **[running notebooks](docs/running-notebooks.md)** for Papermill parameters and the experiment
+workflow.
+
+### Docker images
+
+Most notebooks run on the default **ml4t** image; a few need a specialized one, and each such notebook says so in its
+preamble. Full details in the **[Docker environments guide](envs/README.md)**.
+
+| Image        | Covers                                                           | When you need it        |
+|--------------|------------------------------------------------------------------|-------------------------|
+| `ml4t`       | All 27 chapters + 9 case studies (CPU)                           | Default for everything  |
+| `ml4t-gpu`   | Same `ml4t` image, run with the NVIDIA runtime (`--profile gpu`) | Deep-learning chapters  |
+| `ml4t-py312` | Python 3.12 for signatory, esig, gensim, pfhedge, tfcausalimpact | ~10 notebooks           |
+| `benchmark`  | Database clients (TimescaleDB, ClickHouse, QuestDB, InfluxDB)    | Ch02 storage benchmarks |
+| `rapids`     | RAPIDS cuML + LightGBM CUDA (build locally)                      | One Ch12 GPU benchmark  |
 
 ---
 

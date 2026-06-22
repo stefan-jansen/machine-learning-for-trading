@@ -1,0 +1,48 @@
+[project]
+name = "ml4t-benchmark"
+version = "3.0.0"
+description = "ML4T 3rd Edition - Storage Benchmark (ARM64 compatible)"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# ARM64-compatible benchmark environment
+# Excludes ArcticDB (no Linux ARM64 wheels on PyPI)
+# For ArcticDB benchmarks, use benchmark-full on x86 systems
+
+dependencies = [
+    # Core data processing
+    "numpy>=1.26",
+    "polars>=1.0",
+    "pandas>=2.2",
+
+    # Visualization
+    "plotly>=5.20",
+    "kaleido>=0.2,<1.0",
+    "matplotlib>=3.8",
+
+    # Jupyter
+    "jupyter>=1.0",
+    "notebook>=7.0",
+    "jupyterlab>=4.1",
+    "anywidget>=0.9",
+
+    # File-based storage (ARM64 compatible)
+    "pyarrow>=15.0",
+    "duckdb>=1.0",
+    "tables>=3.9",       # HDF5/PyTables
+
+    # Database clients (ARM64 compatible)
+    "clickhouse-connect>=0.7",
+    "psycopg[binary]>=3.1",
+    "psycopg2-binary>=2.9",
+    "influxdb-client>=1.45",
+    "questdb>=2.0",
+
+    # Utilities
+    "python-dotenv>=1.0",
+    "tqdm>=4.66",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"

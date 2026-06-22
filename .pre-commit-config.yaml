@@ -1,0 +1,50 @@
+# Pre-commit hooks for ML4T Technical Review
+# Install: pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.8
+    hooks:
+      - id: ruff
+        args: [--fix]
+        types: [python]
+        exclude: \.ipynb$
+      - id: ruff-format
+        types: [python]
+        exclude: \.ipynb$
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: \.md$
+      - id: end-of-file-fixer
+        exclude: \.md$
+      - id: check-yaml
+      - id: check-toml
+
+  - repo: local
+    hooks:
+      # Compile-time syntax check. ast.parse misses errors raised only at
+      # compile time (duplicate kwargs, await outside async, return at module
+      # level, etc.) — `python -m py_compile` invokes the full compile()
+      # path and catches them. Cheap; runs on every staged Python file.
+      - id: py-compile
+        name: python -m py_compile (catches duplicate kwargs etc.)
+        language: system
+        entry: python3 -m py_compile
+        types: [python]
+        exclude: \.ipynb$
+
+      # Sync gate: a stamped notebook must be its CURRENT .py executed in a
+      # production run. Fails if any provenance-stamped .ipynb is stale (its
+      # paired .py changed since execution) or was committed from a TEST-mode
+      # run. Unstamped notebooks are advisory only (gradual adoption). See
+      # scripts/notebook_provenance.py.
+      - id: notebook-sync
+        name: notebook provenance sync gate
+        language: system
+        entry: python3 scripts/notebook_provenance.py check
+        pass_filenames: false
+        always_run: true

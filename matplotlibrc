@@ -1,0 +1,101 @@
+# ML4T Matplotlib Configuration
+# ==============================
+# Automatically loaded when running from repo root (Docker or local).
+# Matplotlib checks cwd for matplotlibrc before user/system configs.
+#
+# See utils/style.py for color palette definitions (COLORS dict) and
+# the SERIES_SLOTS / gray_context / save_dual helpers used by notebooks.
+
+# Figure
+# Canonical Packt embed width: 5.833"  (derived from the Chapter01
+# template demo — Packt scales all figures to this width in the typeset
+# manuscript). Rendering matplotlib natively at this width means in-figure
+# text at S pt prints at S pt on the page — no scale-conversion needed.
+# Heights for multi-panel layouts: see utils.style.FIGSIZE.
+figure.dpi: 100
+figure.figsize: 5.833, 3.4
+figure.facecolor: FAFAF9
+figure.constrained_layout.use: True
+savefig.dpi: 300
+savefig.bbox: tight
+savefig.pad_inches: 0.05
+
+# Axes — clean, no in-figure title, subplot titles left-aligned and small
+axes.facecolor: FAFAF9
+axes.edgecolor: 334155
+axes.labelcolor: 334155
+axes.titlecolor: 334155
+axes.linewidth: 0.75
+axes.spines.top: False
+axes.spines.right: False
+axes.titlesize: 10
+axes.titleweight: normal
+axes.titlelocation: left
+axes.titlepad: 6
+axes.labelsize: 9
+axes.labelpad: 4
+axes.grid: False
+axes.axisbelow: True
+axes.prop_cycle: cycler('color', ['0a1628', 'D4A84B', 'C87533', '1a2d4a', '10b981', 'ef4444'])
+
+# Grid (disabled by default; enable per-axes via ax.grid(axis='y') when needed)
+grid.color: e8e8e6
+grid.alpha: 0.6
+grid.linewidth: 0.5
+grid.linestyle: --
+
+# Ticks
+xtick.color: 334155
+ytick.color: 334155
+xtick.labelsize: 8
+ytick.labelsize: 8
+xtick.major.pad: 3
+ytick.major.pad: 3
+xtick.major.size: 3
+ytick.major.size: 3
+xtick.major.width: 0.6
+ytick.major.width: 0.6
+xtick.direction: out
+ytick.direction: out
+
+# Lines (fine, not fat — Stefan: "lines should be not fat, but fine")
+lines.linewidth: 1.4
+lines.markersize: 4
+lines.markeredgewidth: 0
+
+# Legend
+legend.frameon: False
+legend.fontsize: 8
+legend.loc: best
+legend.handlelength: 2.0
+
+# Font — Source Sans 3 matches Packt F0-Figure block font when installed;
+# DejaVu Sans is matplotlib's bundled fallback (always available).
+font.family: sans-serif
+font.sans-serif: Source Sans 3, DejaVu Sans, Helvetica, Arial, sans-serif
+font.size: 9
+text.color: 334155
+
+# Patches (bars, histograms)
+patch.linewidth: 0.5
+patch.edgecolor: e8e8e6
+
+# Scatter
+scatter.marker: o
+scatter.edgecolors: face
+
+# Histogram
+hist.bins: 50
+
+# Boxplot
+boxplot.boxprops.color: 0a1628
+boxplot.whiskerprops.color: 0a1628
+boxplot.capprops.color: 0a1628
+boxplot.medianprops.color: D4A84B
+boxplot.flierprops.markerfacecolor: 0a1628
+boxplot.flierprops.markeredgecolor: 0a1628
+
+# Diverging / sequential colormaps used book-wide (set explicitly in code).
+# Diverging:  RdBu_r   — for signed loadings, correlations
+# Sequential: cividis  — for magnitude / probability (colorblind-safe)
+image.cmap: cividis

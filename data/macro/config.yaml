@@ -1,0 +1,104 @@
+# ML4T Macro Data Configuration
+# ============================
+# Macro indicators for regime filtering and cross-asset analysis
+# FRED provider (requires free FRED_API_KEY)
+#
+# Products: Treasury yields, rates, volatility, labor, inflation, growth
+# Date range: 2000-01-01 to 2025-12-31 (26 years)
+# Estimated cost: Free (requires FRED API key from https://fred.stlouisfed.org)
+#
+# Usage:
+#   from ml4t.data.macro.downloader import MacroDataManager
+#
+#   # Initialize with config
+#   manager = MacroDataManager.from_config("config/macro.yaml")
+#
+#   # Download all data
+#   manager.download_treasury_yields()
+#
+#   # Load data for analysis
+#   yields = manager.load_treasury_yields()
+
+macro:
+  provider: fred
+  start: '2000-01-01'
+  end: '2025-12-31'
+  storage_path: macro
+  generate_profile: true
+  outputs:
+    aligned_file: fred_macro.parquet
+    raw_file: fred_macro_raw.parquet
+    metadata_file: fred_macro_metadata.parquet
+
+  series:
+    daily:
+      description: "Daily rates and volatility indicators"
+      symbols:
+        - DFF
+        - DGS1
+        - DGS2
+        - DGS3
+        - DGS5
+        - DGS7
+        - DGS10
+        - DGS20
+        - DGS30
+        - T10Y2Y
+        - VIXCLS
+
+    weekly:
+      description: "Weekly labor and Federal Reserve balance sheet indicators"
+      symbols:
+        - ICSA
+        - WALCL
+
+    monthly:
+      description: "Monthly inflation, labor, production, and money supply indicators"
+      symbols:
+        - CPIAUCSL
+        - CPILFESL
+        - PCEPI
+        - UNRATE
+        - PAYEMS
+        - CIVPART
+        - INDPRO
+        - M2SL
+
+    quarterly:
+      description: "Quarterly growth indicators"
+      symbols:
+        - GDP
+        - GDPC1
+
+  descriptions:
+    DFF: "Fed Funds Rate"
+    DGS1: "1-Year Treasury Constant Maturity"
+    DGS2: "2-Year Treasury Constant Maturity"
+    DGS3: "3-Year Treasury Constant Maturity"
+    DGS5: "5-Year Treasury Constant Maturity"
+    DGS7: "7-Year Treasury Constant Maturity"
+    DGS10: "10-Year Treasury Constant Maturity"
+    DGS20: "20-Year Treasury Constant Maturity"
+    DGS30: "30-Year Treasury Constant Maturity"
+    T10Y2Y: "10Y-2Y Treasury spread"
+    VIXCLS: "VIX Volatility Index"
+    ICSA: "Initial Jobless Claims"
+    WALCL: "Fed Balance Sheet"
+    CPIAUCSL: "CPI All Urban Consumers"
+    CPILFESL: "Core CPI"
+    PCEPI: "PCE Price Index"
+    UNRATE: "Unemployment Rate"
+    PAYEMS: "Non-Farm Payrolls"
+    CIVPART: "Labor Force Participation"
+    INDPRO: "Industrial Production"
+    M2SL: "M2 Money Stock"
+    GDP: "Nominal GDP"
+    GDPC1: "Real GDP"
+
+  derived:
+    - name: YIELD_CURVE_SLOPE
+      formula: DGS10 - DGS2
+      description: "10Y-2Y spread for regime detection (>0.5% = risk-on)"
+    - name: YIELD_CURVE_5_10
+      formula: DGS10 - DGS5
+      description: "10Y-5Y spread for additional regime context"

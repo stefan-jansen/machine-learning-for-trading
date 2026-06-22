@@ -1,0 +1,64 @@
+# ML4T FX Data Configuration
+# ==========================
+# Foreign exchange pairs for cross-asset and FX momentum strategies
+# Source: OANDA (requires free API key)
+#
+# Products: 20 major and cross FX pairs
+# Date range: 2011-01-01 to 2025-12-31
+# Frequencies: Daily, 4-hourly
+#
+# Usage:
+#   python downloads/fx_pairs.py                    # Daily data (default)
+#   python downloads/fx_pairs.py --frequency 4h    # 4-hourly data
+#   python downloads/fx_pairs.py --pair EURUSD     # Single pair
+#   python downloads/fx_pairs.py --dry-run         # Preview
+
+fx:
+  provider: oanda
+  start: '2011-01-01'
+  end: '2025-12-31'
+  frequencies:
+    - daily
+    - 4h
+  storage_path: fx/market
+  generate_profile: true
+  outputs:
+    file_template: '{frequency}.parquet'
+    partition_dir_template: ohlcv_{frequency}
+
+  pairs:
+    majors:
+      description: "G10 major pairs against USD"
+      pairs:
+        - EURUSD
+        - GBPUSD
+        - USDJPY
+        - USDCHF
+
+    commodity:
+      description: "Commodity currency pairs"
+      pairs:
+        - AUDUSD
+        - USDCAD
+        - NZDUSD
+
+    crosses:
+      description: "Major cross pairs (non-USD)"
+      pairs:
+        # EUR crosses
+        - EURGBP
+        - EURJPY
+        - EURCHF
+        - EURCAD
+        - EURAUD
+        # GBP crosses
+        - GBPJPY
+        - GBPCHF
+        - GBPAUD
+        # JPY crosses
+        - AUDJPY
+        - CHFJPY
+        - CADJPY
+        - NZDJPY
+        # Commodity cross
+        - AUDNZD

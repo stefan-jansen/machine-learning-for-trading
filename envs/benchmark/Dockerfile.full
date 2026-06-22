@@ -1,0 +1,72 @@
+# ML4T Benchmark Environment (Full)
+# Storage benchmarks with ALL database clients including ArcticDB
+#
+# WARNING: Requires x86_64 architecture
+# Apple Silicon users: Use `benchmark` profile instead, or build with:
+#   docker compose build --platform linux/amd64 benchmark-full
+#
+# Usage:
+#   docker compose --profile benchmark-full build benchmark-full
+#   docker compose --profile benchmark-full run --rm benchmark-full python 02_financial_data_universe/18_storage_benchmark_database.py
+
+FROM python:3.14-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    libhdf5-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv for fast package management
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Create non-root user
+RUN useradd -m -s /bin/bash ml4t
+
+# Create venv
+RUN python -m venv /opt/ml4t
+
+# Copy and install dependencies
+WORKDIR /build
+COPY envs/benchmark/pyproject.full.toml /build/pyproject.toml
+
+# Install dependencies (includes ArcticDB)
+RUN /opt/ml4t/bin/pip install --no-cache-dir pip setuptools wheel && \
+    /opt/ml4t/bin/pip install --no-cache-dir /build
+
+WORKDIR /app
+ENV PATH="/opt/ml4t/bin:$PATH"
+ENV PYTHONPATH="/app"
+
+# Jupyter configuration
+ENV JUPYTER_ENABLE_LAB=yes
+RUN mkdir -p /etc/jupyter && \
+    echo "c.ServerApp.token = ''" >> /etc/jupyter/jupyter_server_config.py && \
+    echo "c.ServerApp.password = ''" >> /etc/jupyter/jupyter_server_config.py && \
+    echo "c.ServerApp.allow_origin = '*'" >> /etc/jupyter/jupyter_server_config.py
+
+# Status script
+RUN echo '#!/bin/bash\n\
+echo "============================================"\n\
+echo "ML4T Benchmark Environment (Full)"\n\
+echo "============================================"\n\
+echo "Platform: $(uname -s) $(uname -m)"\n\
+echo ""\n\
+echo "All benchmarks available:"\n\
+echo "  - Parquet (PyArrow)"\n\
+echo "  - DuckDB"\n\
+echo "  - HDF5 (PyTables)"\n\
+echo "  - ArcticDB"\n\
+echo "  - ClickHouse"\n\
+echo "  - TimescaleDB"\n\
+echo "  - QuestDB"\n\
+echo "  - InfluxDB"\n\
+echo "============================================"' > /usr/local/bin/benchmark-status && chmod +x /usr/local/bin/benchmark-status
+
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--no-browser"]

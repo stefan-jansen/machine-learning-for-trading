@@ -1,0 +1,349 @@
+# ML4T 3rd Edition — Docker Compose Configuration
+#
+# QUICK START (pre-built images from Docker Hub):
+#   docker compose pull ml4t         # Pull pre-built image (~12 GB amd64, ~3 GB arm64)
+#   docker compose up ml4t           # Start Jupyter Lab at http://localhost:8888
+#
+# To build locally instead:
+#   docker compose build ml4t        # Build from Dockerfile (slow, ~45 min)
+#
+# PLATFORM SUPPORT:
+#   - Linux x86_64:     All services work, GPU optional
+#   - Windows x86_64:   All services via Docker Desktop (WSL2), GPU via WSL2+nvidia-toolkit
+#   - macOS Intel:      All services except GPU
+#   - Apple Silicon:    ml4t + benchmark (native arm64); ml4t-py312 not available (see below)
+#
+# IMAGES ON DOCKER HUB (docker.io/ml4t/):
+#   ml4t:latest           — All chapters, Python 3.14, PyTorch CUDA 12.8 (amd64+arm64)
+#   ml4t-py312:latest     — Python 3.12: signatory, esig, gensim, tfcausalimpact (amd64 only)
+#   ml4t-benchmark:latest — Storage benchmarks: DuckDB, HDF5, DB clients (amd64+arm64)
+#
+# WHICH IMAGE DO I NEED?
+#   Most readers: ml4t only (covers Ch01-Ch27 + case studies)
+#   Ch05 NB01/03/07, Ch09 NB06/12, Ch10 NB01-03, Ch12 NB10, Ch14 NB06, Ch15 NB06, Ch21 deep_hedging:
+#       ml4t-py312 (x86 only, Apple Silicon: see .ipynb outputs)
+#   Ch02 storage benchmarks: benchmark + database services
+#   Ch12 GBM GPU benchmark: rapids (requires NVIDIA GPU)
+#
+# See docs/installation.md for detailed setup instructions
+
+x-common: &common
+  user: "${UID:-1000}:${GID:-1000}"
+  volumes:
+    - .:/app:rw
+    - ${ML4T_DATA_PATH:-./data}:/data:ro
+  environment:
+    - ML4T_DATA_PATH=/data
+    - ML4T_PATH=/app
+    - TEST=${TEST:-0}
+    - NEO4J_URI=${NEO4J_URI:-bolt://neo4j:7687}
+    - NEO4J_USER=${NEO4J_USER:-neo4j}
+    - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
+    - NUMBA_CACHE_DIR=/tmp/numba_cache
+    - MPLCONFIGDIR=/tmp/matplotlib
+    - POLARS_FMT_MAX_ROWS=20
+    - POLARS_FMT_STR_LEN=50
+    - VIRTUAL_ENV=/opt/ml4t
+    - UV_PROJECT_ENVIRONMENT=/opt/ml4t
+    - PATH=/opt/ml4t/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games
+  env_file:
+    - path: .env
+      required: false
+  working_dir: /app
+  stdin_open: true
+  tty: true
+
+services:
+  # ============================================
+  # ML4T MAIN (All Chapters)
+  # Works on all platforms including Apple Silicon
+  # ============================================
+  ml4t:
+    <<: *common
+    image: ml4t/ml4t:latest
+    build:
+      context: .
+      dockerfile: envs/ml4t/Dockerfile
+    container_name: ml4t-review
+    ports:
+      - "8888:8888"
+    command: ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
+
+  # ============================================
+  # ML4T GPU (NVIDIA only — Linux/Windows x86)
+  # Same as ml4t but with GPU passthrough
+  # ============================================
+  ml4t-gpu:
+    <<: *common
+    image: ml4t/ml4t:latest
+    build:
+      context: .
+      dockerfile: envs/ml4t/Dockerfile
+    container_name: ml4t-review-gpu
+    ports:
+      - "8889:8888"
+    command: ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
+    profiles: ["gpu"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ============================================
+  # BENCHMARK (ARM64 Compatible)
+  # Storage benchmarks: Parquet, DuckDB, HDF5, database clients
+  # Excludes ArcticDB (no ARM64 wheels)
+  # Works on Apple Silicon
+  # ============================================
+  benchmark:
+    <<: *common
+    image: ml4t/ml4t-benchmark:latest
+    build:
+      context: .
+      dockerfile: envs/benchmark/Dockerfile
+    container_name: ml4t-benchmark
+    ports:
+      - "8887:8888"
+    profiles: ["benchmark"]
+    environment:
+      - ML4T_DATA_PATH=/data
+      - ML4T_PATH=/app
+      - TEST=${TEST:-0}
+      # Database connections (when running with database services)
+      - CLICKHOUSE_HOST=ml4t-clickhouse
+      - CLICKHOUSE_PORT=8123
+      - QUESTDB_HOST=ml4t-questdb
+      - QUESTDB_HTTP_PORT=9000
+      - TIMESCALE_HOST=ml4t-timescaledb
+      - TIMESCALE_PORT=5432
+      - TIMESCALE_PASSWORD=benchmark
+      - INFLUXDB_HOST=ml4t-influxdb
+      - INFLUXDB_PORT=8086
+      - INFLUXDB_ORG=ml4t
+      - INFLUXDB_TOKEN=benchmark-token
+      - INFLUXDB_BUCKET=market_data
+      - POSTGRES_HOST=ml4t-postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=benchmark
+      - POSTGRES_DB=ml4t
+
+  # ============================================
+  # BENCHMARK FULL (x86 Only)
+  # All benchmarks including ArcticDB
+  # WARNING: Does not work on Apple Silicon
+  # ============================================
+  benchmark-full:
+    <<: *common
+    build:
+      context: .
+      dockerfile: envs/benchmark/Dockerfile.full
+      # Force x86 build (required for ArcticDB)
+      platforms:
+        - linux/amd64
+    container_name: ml4t-benchmark-full
+    ports:
+      - "8887:8888"
+    profiles: ["benchmark-full"]
+    environment:
+      - ML4T_DATA_PATH=/data
+      - ML4T_PATH=/app
+      - TEST=${TEST:-0}
+      # Database connections
+      - CLICKHOUSE_HOST=ml4t-clickhouse
+      - CLICKHOUSE_PORT=8123
+      - QUESTDB_HOST=ml4t-questdb
+      - QUESTDB_HTTP_PORT=9000
+      - TIMESCALE_HOST=ml4t-timescaledb
+      - TIMESCALE_PORT=5432
+      - TIMESCALE_PASSWORD=benchmark
+      - INFLUXDB_HOST=ml4t-influxdb
+      - INFLUXDB_PORT=8086
+      - INFLUXDB_ORG=ml4t
+      - INFLUXDB_TOKEN=benchmark-token
+      - INFLUXDB_BUCKET=market_data
+      - POSTGRES_HOST=ml4t-postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=benchmark
+      - POSTGRES_DB=ml4t
+
+  # ============================================
+  # RAPIDS GBM BENCHMARK (NVIDIA GPU Required)
+  # Ch12 GBM library benchmark: RAPIDS cuML XGBoost, LightGBM CUDA,
+  # CatBoost GPU, plus CPU baselines. Single-purpose image.
+  # Start with: docker compose --profile rapids run --rm rapids python 12_gradient_boosting/02_gbm_comparison.py
+  # ============================================
+  rapids:
+    <<: *common
+    build:
+      context: .
+      dockerfile: envs/rapids/Dockerfile
+      platforms:
+        - linux/amd64
+    container_name: ml4t-rapids
+    profiles: ["rapids"]
+    user: root
+    entrypoint: []
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ============================================
+  # PY312 (Python 3.12, x86 Only)
+  # For packages without Python 3.14 support: gensim, signatory, esig, pfhedge,
+  # tfcausalimpact, plus notebooks hitting the Python 3.14 torch CUDA import bug.
+  # Covers: Ch05 NB01/03/07, Ch09 NB06/12, Ch10 NB01-03, Ch12 NB10, Ch14 NB06,
+  # Ch15 NB06, Ch21 deep_hedging.
+  # Start with: docker compose --profile py312 run --rm py312 python ...
+  # Apple Silicon: there is no native arm64 image (signatory/esig/gensim have no
+  # arm64 wheels). Either read the committed .ipynb outputs for the notebooks
+  # above, or run the amd64 image under Rosetta emulation (slow, no GPU):
+  #   DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose --profile py312 run --rm py312 python ...
+  # ============================================
+  py312:
+    <<: *common
+    image: ml4t/ml4t-py312:latest
+    build:
+      context: .
+      dockerfile: envs/py312/Dockerfile
+      platforms:
+        - linux/amd64
+    container_name: ml4t-py312
+    profiles: ["py312"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ============================================
+  # KNOWLEDGE GRAPH (Neo4j Community Edition)
+  # Start with: docker compose --profile kg up -d neo4j
+  # ============================================
+  neo4j:
+    image: neo4j:2026.02.2
+    container_name: ml4t-neo4j
+    profiles: ["kg"]
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=${NEO4J_AUTH:-neo4j/password}
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p password 'RETURN 1;'"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # ============================================
+  # Database Services (for benchmarks)
+  # Start with: docker compose --profile databases up -d
+  # ============================================
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: ml4t-timescaledb
+    environment:
+      - POSTGRES_PASSWORD=benchmark
+      - POSTGRES_DB=ml4t
+      - POSTGRES_USER=postgres
+    ports:
+      - "5437:5432"
+    profiles: ["benchmark", "benchmark-full", "databases"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16
+    container_name: ml4t-postgres
+    environment:
+      - POSTGRES_PASSWORD=benchmark
+      - POSTGRES_DB=ml4t
+      - POSTGRES_USER=postgres
+    ports:
+      - "5436:5432"
+    profiles: ["benchmark", "benchmark-full", "databases"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: ml4t-clickhouse
+    environment:
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+    ports:
+      - "8123:8123"
+    profiles: ["benchmark", "benchmark-full", "databases"]
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  questdb:
+    image: questdb/questdb:latest
+    container_name: ml4t-questdb
+    ports:
+      - "9000:9000"
+      - "9009:9009"
+    profiles: ["benchmark", "benchmark-full", "databases"]
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: ml4t-influxdb
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=benchmark123
+      - DOCKER_INFLUXDB_INIT_ORG=ml4t
+      - DOCKER_INFLUXDB_INIT_BUCKET=market_data
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=benchmark-token
+    ports:
+      - "8086:8086"
+    profiles: ["benchmark", "benchmark-full", "databases"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  default:
+    name: ml4t-review-network
+
+volumes:
+  neo4j_data:
+  neo4j_logs:

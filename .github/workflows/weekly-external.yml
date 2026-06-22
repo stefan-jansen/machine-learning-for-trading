@@ -1,0 +1,171 @@
+# ML4T 3rd Edition — Weekly External Workflow (Tier 2)
+#
+# Runs notebooks tagged `tier: weekly` in tests/overrides.yaml — these have
+# external dependencies (IB Gateway, OKX, chromadb, real LLM APIs, real HTTP)
+# that aren't available in the per-commit Tier 1 workflow.
+#
+# Routing: ML4T_TEST_TIER=weekly env var → conftest tier-skip allows weekly NBs
+# to run (per-commit run skips them automatically with the inverse rule).
+#
+# Today most still skip via existing `skip: true` because the underlying
+# infrastructure (IB Gateway, OKX, etc.) isn't provisioned yet. The job's
+# purpose is to exercise the routing/flake-retry/issue-opening plumbing so
+# that when fixtures land (Steps 4-9 of the test-infra coverage plan) the
+# weekly job auto-picks them up with no workflow change.
+#
+# Failure handling: any failing NB opens a `weekly-flake` issue (idempotent
+# by NB id in title); pytest-rerunfailures retries flaky NBs per-NB based on
+# `reruns: N` in overrides.yaml.
+
+name: Weekly External
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Monday 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      test_filter:
+        description: "Optional pytest -k filter to narrow scope"
+        type: string
+        default: ""
+
+env:
+  ML4T_TEST_TIER: weekly
+  ML4T_DATA_PATH: ${{ github.workspace }}/test-data/data
+  ML4T_OUTPUT_DIR: /tmp/ml4t-test-output
+  MPLBACKEND: Agg
+  PLOTLY_RENDERER: json
+
+jobs:
+  weekly-chapters:
+    name: weekly-chapters
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: ml4t/ml4t:latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Install git
+        run: apt-get update -qq && apt-get install -y -qq git git-lfs openssh-client >/dev/null
+
+      - uses: actions/checkout@v6
+
+      - name: Checkout test data
+        uses: actions/checkout@v6
+        with:
+          repository: ml4t/third-edition-test-data
+          path: test-data
+          ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
+          lfs: false
+
+      - name: Seed case study intermediates
+        run: |
+          mkdir -p $ML4T_OUTPUT_DIR
+          if [ -d test-data/intermediates ]; then
+            cp -r test-data/intermediates/* $ML4T_OUTPUT_DIR/
+          fi
+
+      - name: Run weekly chapter notebooks
+        id: pytest_chapters
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          TEST_FILTER_INPUT: ${{ github.event.inputs.test_filter }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          EDGAR_IDENTITY: ${{ secrets.EDGAR_IDENTITY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+          OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+          OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
+        run: |
+          set +e
+          FILTER_ARGS=""
+          if [ -n "${TEST_FILTER_INPUT:-}" ]; then
+            FILTER_ARGS="-k ${TEST_FILTER_INPUT}"
+          fi
+          python -m pytest tests/test_chapter_notebooks.py tests/test_case_studies.py \
+            -v --tb=short -m weekly $FILTER_ARGS \
+            --junitxml=junit-weekly.xml
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Upload junit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-weekly
+          path: junit-weekly.xml
+          retention-days: 30
+
+      - name: Open issues for failed notebooks
+        if: always() && steps.pytest_chapters.outputs.exit_code != '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+            let xml;
+            try {
+              xml = fs.readFileSync('junit-weekly.xml', 'utf8');
+            } catch (e) {
+              core.info('No junit-weekly.xml found; nothing to file.');
+              return;
+            }
+
+            // Crude but dependency-free junit parse: pull <testcase ...> blocks
+            // and check each for a child <failure> or <error>.
+            const testcaseRe = /<testcase\b[^>]*>([\s\S]*?)<\/testcase>|<testcase\b[^>]*\/>/g;
+            const attrRe = (name) => new RegExp(`${name}="([^"]*)"`);
+            const failures = [];
+            let m;
+            while ((m = testcaseRe.exec(xml)) !== null) {
+              const block = m[0];
+              const body = m[1] || '';
+              if (!/<failure\b|<error\b/.test(body)) continue;
+              const nameMatch = block.match(attrRe('name'));
+              const classMatch = block.match(attrRe('classname'));
+              if (nameMatch) {
+                failures.push({
+                  name: nameMatch[1],
+                  classname: classMatch ? classMatch[1] : '',
+                });
+              }
+            }
+            core.info(`Found ${failures.length} failing testcases.`);
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            for (const f of failures) {
+              const nbId = f.name.replace(/^test_[a-z_]+\[/, '').replace(/\]$/, '');
+              const title = `weekly-flake: ${nbId}`;
+              // Search for existing open issue with same title to dedupe.
+              const q = `repo:${owner}/${repo} is:issue is:open in:title "weekly-flake: ${nbId}"`;
+              const existing = await github.rest.search.issuesAndPullRequests({ q });
+              if (existing.data.total_count > 0) {
+                const num = existing.data.items[0].number;
+                core.info(`Existing issue #${num} for ${nbId}; commenting.`);
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: num,
+                  body: `Failed again in weekly run: ${runUrl}`,
+                });
+              } else {
+                core.info(`Opening new issue for ${nbId}.`);
+                await github.rest.issues.create({
+                  owner, repo, title,
+                  body: `Weekly external workflow failed for \`${nbId}\`.\n\n` +
+                        `Run: ${runUrl}\n\n` +
+                        `Test class: \`${f.classname}\`\n\n` +
+                        `Dedupes by NB id — comments will append on subsequent failures.`,
+                  labels: ['weekly-flake'],
+                });
+              }
+            }
+
+      - name: Fail job if pytest failed
+        if: steps.pytest_chapters.outputs.exit_code != '0'
+        run: |
+          echo "Weekly pytest exited with code ${{ steps.pytest_chapters.outputs.exit_code }}"
+          exit 1

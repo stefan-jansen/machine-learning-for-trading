@@ -1,0 +1,71 @@
+[project]
+name = "ml4t-py312"
+version = "3.0.0"
+description = "ML4T 3rd Edition - Python 3.12 image for packages without 3.14 wheels (gensim, signatory, esig, pfhedge, tfcausalimpact)"
+requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
+
+dependencies = [
+    # Core
+    "numpy>=1.26",
+    "scipy>=1.12",
+    "pandas>=2.2.3,<3.0",
+    "polars>=1.38",
+    "pyarrow>=15.0",
+    # Visualization
+    "plotly>=5.20,<7",
+    "kaleido>=0.2,<1.0",
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+    # ML
+    "scikit-learn>=1.6",
+    "torch>=2.2,<2.11",
+    "torchdiffeq>=0.2",
+    "lightgbm>=4.3",
+    "shap>=0.45",
+    "opacus>=1.4",
+    "pfhedge>=0.23",
+    "ml4t-diagnostic>=0.1.0b19",
+    # Bayesian (arviz/pymc for uncertainty features, pycausalimpact for ARIMA event studies)
+    "arviz>=0.18,<1.0",
+    "pymc>=5.14",
+    "pycausalimpact>=0.1.1",
+    # NLP (gensim needs Python <3.14)
+    "gensim>=4.3",
+    "transformers>=4.40,<5",
+    "accelerate>=0.26.0",
+    "datasets>=2.19",
+    "evaluate>=0.4",
+    "sentencepiece>=0.2.1",
+    # Storage
+    "tables>=3.11",
+    # Utilities
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+    "requests>=2.31",
+    "nest-asyncio>=1.6",
+    # Jupyter
+    "jupyter>=1.0",
+    "notebook>=7.0",
+    "jupytext>=1.16",
+    "jupyterlab>=4.1",
+    "ipython>=8.22",
+    "anywidget>=0.9",
+    "nbconvert>=7.16",
+    "nbformat>=5.10",
+    # Testing
+    "pytest>=9.0",
+    "papermill>=2.6",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.jupytext]
+formats = "ipynb,py:percent"
