@@ -316,13 +316,14 @@ def main():
     parser.add_argument(
         "--force", action="store_true", help="Force re-download even if data exists"
     )
-    # Default to repo's data directory (this script lives in code/data/)
-    repo_root = Path(__file__).parent.parent
+    # Default to None so resolve_data_dir() applies the documented precedence:
+    # explicit --data-path > ML4T_DATA_PATH env var > <repo>/data. A non-None
+    # default here would be treated as an explicit CLI arg and override the env var.
     parser.add_argument(
         "--data-path",
         type=Path,
-        default=repo_root / "data",
-        help="Data storage location (default: <repo>/data/)",
+        default=None,
+        help="Data storage location (default: ML4T_DATA_PATH, else <repo>/data/)",
     )
     args = parser.parse_args()
 
