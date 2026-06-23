@@ -170,7 +170,7 @@ def main() -> None:
     if args.dry_run:
         print_dry_run_notice()
 
-    from ml4t.data.providers.binance_bulk import BinanceBulkProvider
+    from ml4t.data.providers.binance_public import BinancePublicProvider
 
     config = load_section(args.config, "crypto")
     data_root = resolve_data_dir(args.data_path)
@@ -220,7 +220,7 @@ def main() -> None:
 
     if download_perps_flag:
         perps_output = storage_path / perps_template.format(frequency="1h")
-        provider = BinanceBulkProvider(market=str(perps_cfg.get("market", "futures")))
+        provider = BinancePublicProvider(market=str(perps_cfg.get("market", "futures")))
         start_date = perps_start
         if args.update and not args.force:
             incremental_start = get_update_start(perps_output, perps_end, interval_hours=1)
@@ -268,7 +268,7 @@ def main() -> None:
 
     if download_premium_flag:
         premium_output = storage_path / premium_file
-        provider = BinanceBulkProvider(market=str(config.get("market", "futures")))
+        provider = BinancePublicProvider(market=str(config.get("market", "futures")))
         start_date = premium_start
         if args.update and not args.force:
             incremental_start = get_update_start(premium_output, premium_end, interval_hours=8)
