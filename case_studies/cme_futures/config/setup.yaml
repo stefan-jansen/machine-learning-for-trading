@@ -1,0 +1,206 @@
+strategy_id: cme_futures
+setup_version: v1
+
+# 30 CME products grouped by sector. Tickers are CME root symbols.
+universe:
+  product_groups:
+    equity_index:
+      - ES   # E-mini S&P 500
+      - NQ   # E-mini Nasdaq-100
+      - YM   # E-mini Dow Jones Industrial Average
+      - RTY  # E-mini Russell 2000
+    treasuries:
+      - ZN   # 10-year T-Note
+      - ZB   # 30-year T-Bond
+      - ZF   # 5-year T-Note
+      - ZT   # 2-year T-Note
+    energy:
+      - CL   # WTI Crude Oil
+      - NG   # Henry Hub Natural Gas
+      - HO   # NY Harbor ULSD (heating oil)
+      - RB   # RBOB Gasoline
+    metals:
+      - GC   # Gold
+      - SI   # Silver
+      - HG   # Copper
+      - PL   # Platinum
+    currencies:
+      - 6E   # Euro / US Dollar
+      - 6J   # Japanese Yen / US Dollar
+      - 6B   # British Pound / US Dollar
+      - 6A   # Australian Dollar / US Dollar
+      - 6C   # Canadian Dollar / US Dollar
+      - 6S   # Swiss Franc / US Dollar
+    agriculture:
+      - ZC   # Corn
+      - ZS   # Soybeans
+      - ZW   # Wheat (Chicago SRW)
+      - ZM   # Soybean Meal
+      - ZL   # Soybean Oil
+    livestock:
+      - LE   # Live Cattle
+      - HE   # Lean Hogs
+      - GF   # Feeder Cattle
+  n_products: 30
+
+decision:
+  cadence: weekly_friday_close
+  snapshot: settlement_price
+  execution_delay: monday_open
+
+# Engine-level execution defaults. Single source of truth — Ch16-19 notebooks
+# read these via get_backtest_config(); never declare a local INITIAL_CASH
+# or share_type constant. Changing values here invalidates every existing
+# backtest_hash for this case study (cash + share_type are spec-hash inputs).
+#
+# ``initial_cash`` is sized so the full 30-product CME universe can fill
+# positions under integer-share rules across the top_k_grid (5, 10) in
+# long-short mode. The binding constraint is the high-notional equity-
+# index e-minis: at top_k=10 long-short the per-position dollar budget
+# is 5% × cash, and integer-rounding zeros out any product whose notional
+# exceeds that budget. ES holdout notional ≈ $347k and NQ ≈ $513k drive
+# the floor: $10M (per-position $500k) clears ES in the holdout and NQ
+# in the validation window. NQ in the very-late holdout (Dec 2025,
+# notional $513k) still integer-rounds out for that one product at
+# top_k=10 LS — a residual integer-share footnote documented in the
+# README "Margin model" section.
+#
+# Per-product initial+maintenance margin (futures_specs.yaml::
+# {initial,maintenance}_margin_pct → ContractSpec.margin_pct) is wired
+# through Engine.from_config(contract_specs=...); the engine auto-
+# populates the broker's margin_pct_schedule so the margin draw scales
+# with each bar's notional rather than the account-wide 50% default.
+# allow_leverage is set in config/backtest/base.yaml.
+#
+# ``allocator_lookback`` is the bars-of-underlying-price window applied
+# uniformly to every moment-based allocator (inverse_vol, risk_parity, hrp,
+# mvo_ledoit_wolf). CME daily settlement bars → 63 ≈ 3 months. Keeps
+# allocators comparable.
+execution:
+  initial_cash: 10_000_000       # sized for full 30-product universe at top_k_grid
+  share_type: integer            # Futures contracts are integer
+  allocator_lookback: 63         # 3 months of daily CME settlement bars
+
+mapping:
+  class: long_short_carry_rank
+  position_state_space: long_short
+  entry_logic: rank_by_carry_or_momentum
+  sizing: equal_risk_or_notional
+
+costs:
+  class: material
+  components: [commission, spread, roll_slippage]
+  commission_per_contract: 2.0
+  spread_ticks:
+    liquid: 1
+    illiquid: 2
+
+backtest:
+  rebalance:
+    # A rebalance is skipped when the per-asset weight change is below
+    # min_weight_change AND the resulting trade notional is below
+    # min_trade_value. The benchmark profile disables thresholds so that
+    # full-universe equal-weight (1/N per asset) rebalances at all.
+    default:
+      min_weight_change: 0.005
+      min_trade_value: 100.0
+    benchmark:
+      min_weight_change: 0.0
+      min_trade_value: 0.0
+  sweep:
+    # Iteration controls per stage. ``signal: 0`` means "all predictions";
+    # downstream stages take the top-N from the upstream stage's rank-1.
+    # Notebooks read these via get_top_n_predictions(case_study, stage).
+    top_n_predictions:
+      signal: 0                 # all signal predictions (eq-weight baseline)
+      allocation_cheap: 0       # score_weighted, inverse_vol — all signal preds
+      allocation_expensive: 10  # risk_parity, mvo_ledoit_wolf, hrp — top-10 by signal Sharpe
+      cost_sensitivity: 1       # top-1 of {signal+allocation} per label
+      risk_overlay: 1           # top-1 of {signal+allocation} per label
+    # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
+    expensive_allocators_skip: false
+    # Allocators routed through ``allocation_expensive`` (top-10 by signal Sharpe).
+    # All others (equal_weight, score_weighted, inverse_vol) take the cheap path.
+    expensive_allocators: [risk_parity, mvo_ledoit_wolf, hrp, conformal_weighted]
+    # Ch16 signal-stage selection. Long-short equal-weight top-k on both
+    # label horizons; long-short is enforced at the backtest config level
+    # (allow_short_selling=true).
+    # 30-product universe with long_short=True: top_k=20 selects 20 longs ∪
+    # 20 shorts (40 positions) from 30 products → degenerate (collapses to
+    # ~zero trades). Cap at 10 = floor(30/3) to keep selections non-degenerate.
+    top_k_grid:
+      fwd_ret_5d:  [5, 10]
+      fwd_ret_21d: [5, 10]
+    # Ch17 portfolio: reuses top_k_grid above and sweeps over allocators.
+    # Moment-based allocators (IV/RP/HRP/MVO_LW) all use the CS-level
+    # ``execution.allocator_lookback`` — no per-allocator vol_window /
+    # lookback fields. No max-weight cap.
+    allocators:
+      - {name: equal_weight,    method: equal_weight}
+      - {name: score_weighted,  method: score_weighted}
+      - {name: inverse_vol,     method: inverse_vol}
+      - {name: risk_parity,     method: risk_parity}
+      - {name: mvo_ledoit_wolf, method: mvo_ledoit_wolf}
+      - {name: hrp,             method: hrp}
+      - {name: conformal_weighted, method: conformal_weighted}
+    # Ch18 cost sensitivity (bps; commission + exchange fees + slippage
+    # combined).
+    cost_grid_bps: [0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 50]
+    # Ch19 risk overlays.
+    risk_controls:
+      position:
+        - {name: stop_loss_3pct,  type: stop_loss,     threshold: 0.03}
+        - {name: stop_loss_5pct,  type: stop_loss,     threshold: 0.05}
+        - {name: stop_loss_10pct, type: stop_loss,     threshold: 0.10}
+        - {name: stop_loss_15pct, type: stop_loss,     threshold: 0.15}
+        - {name: trailing_1pct,   type: trailing_stop, threshold: 0.01}
+        - {name: trailing_2pct,   type: trailing_stop, threshold: 0.02}
+        - {name: trailing_3pct,   type: trailing_stop, threshold: 0.03}
+        - {name: trailing_5pct,   type: trailing_stop, threshold: 0.05}
+        - {name: trailing_10pct,  type: trailing_stop, threshold: 0.10}
+        - {name: trailing_15pct,  type: trailing_stop, threshold: 0.15}
+        - {name: trailing_20pct,  type: trailing_stop, threshold: 0.20}
+        - {name: time_exit_10,    type: time_exit,     bars: 10}
+        - {name: time_exit_20,    type: time_exit,     bars: 20}
+        - {name: time_exit_40,    type: time_exit,     bars: 40}
+
+evaluation:
+  n_splits: 5
+  train_size: 8Y
+  val_size: 1Y
+  holdout_start: '2024-01-01'
+  holdout_end: '2025-12-31'
+  calendar: CME
+  periods_per_year: 252  # CME 5d/wk
+
+labels:
+  primary: fwd_ret_5d
+  buffer: 5D
+  variants:
+    - fwd_ret_21d
+  variant_buffers:
+    fwd_ret_21d: 21D
+  # Vectorized-backtest thinning step per label: number of schedule slots
+  # to advance per trade so holding periods don't overlap. Authored from
+  # (schedule cadence, label horizon); add an entry here for any new label.
+  rebalance_step:
+    fwd_ret_5d: 1   # weekly_friday schedule, 5d horizon <= 7d gap
+    fwd_ret_21d: 3  # weekly_friday schedule, 21d horizon -> ceil(21/7) = 3
+
+modeling:
+  gbm:
+    libraries: [lightgbm]
+    preset: default
+    device: gpu
+  latent_factors:
+    persistent_entities: true
+    model_kwargs:
+      sdf:
+        checkpoint_epochs: [256, 512, 768, 1024, 1280]
+        beta_checkpoint_epochs: [256]
+        beta_default_checkpoint: 256
+
+causal:
+  treatment: carry_pct
+  confounders: [vol_21d, momentum_composite, carry_rank]
+  method: walk_forward_dml

@@ -1,0 +1,177 @@
+strategy_id: us_firm_characteristics
+setup_version: v1
+
+universe:
+  min_price_usd: 5
+  min_adv_usd: 1000000
+  exclusions: [ADRs, REITs, financials]
+  identifiers: anonymized_permno_based
+  note: Filters applied by the data provider before anonymization; cannot be independently verified.
+
+decision:
+  cadence: monthly_month_end
+  snapshot: month_end_close
+  execution_delay: next_bar_open
+  characteristic_lag: 6_months
+
+# Engine-level execution defaults. Single source of truth — Ch16-19 notebooks
+# read these via get_backtest_config(); never declare a local INITIAL_CASH
+# or share_type constant. Changing values here invalidates every existing
+# backtest_hash for this case study (cash + share_type are spec-hash inputs).
+#
+# Moment-based allocators (inverse_vol, risk_parity, hrp, mvo_ledoit_wolf)
+# are EXCLUDED for this case study. US firm characteristics is a returns-only
+# cross-sectional panel keyed by integer firm IDs (no continuous per-symbol
+# price series), so a per-symbol trailing volatility or covariance is not
+# well-defined: firms enter and exit, and 12 monthly observations cannot
+# support a covariance over a top-50 cross-section. Under that data the
+# moment allocators either degenerate to equal weight (mvo/hrp hit their
+# observation-count guards and fall back) or produce numbers from a
+# covariance estimate the data cannot justify (inverse_vol, risk_parity).
+# Only lookback-free allocators (equal_weight, score_weighted,
+# conformal_weighted) are swept and eligible for carrier selection.
+# ``allocator_lookback`` below is retained only because get_backtest_config()
+# requires the key; it is unused while no moment allocator is configured.
+#
+# Cash defaults to 1_000_000 rather than 100_000: monthly-cadence
+# long-short portfolios at top_k=50 carry ~$10K per leg per name at the
+# 100k tier — below realistic round-trip granularity for institutional
+# US equity. 1M keeps the spec-implied position sizes (notional per name
+# / fixed-cost ratio) in a regime the backtest engine resolves cleanly.
+execution:
+  initial_cash: 1_000_000        # Monthly long-short top_k=50 needs $1M to size cleanly
+  share_type: integer            # US equities trade in whole shares
+  allocator_lookback: 12         # 1 year of monthly bars
+
+mapping:
+  class: long_short_decile_rebalance
+  position_state_space: long_short
+  entry_logic: decile_sort_long_top_short_bottom
+  sizing: equal_weight_within_decile
+
+costs:
+  class: material
+  components: [spread, commission, market_impact, borrow_cost]
+  per_leg_cost_bps_range: [5, 20]
+  borrow_cost_note: Long-short requires borrow for the short leg.
+  era_note: Pre-2001 spreads 15-30 bps; post-2001 (decimalization) 5-15 bps.
+
+evaluation:
+  n_splits: 10
+  train_size: 10Y
+  val_size: 1Y
+  holdout_start: '2016-01-01'
+  holdout_end: '2016-12-31'
+  calendar: null  # Monthly returns; calendar-aware splitting needs daily frequency.
+  periods_per_year: 12
+
+labels:
+  primary: fwd_ret_1m
+  buffer: 1M
+  variants:
+    - fwd_ret_1m_win
+    - fwd_class_1m
+  variant_buffers:
+    fwd_ret_1m_win: 1M
+    fwd_class_1m: 1M
+  # Vectorized-backtest thinning step per label: number of schedule slots
+  # to advance per trade so holding periods don't overlap. Authored from
+  # (schedule cadence, label horizon); add an entry here for any new label.
+  rebalance_step:
+    fwd_ret_1m: 1
+    fwd_ret_1m_win: 1
+    fwd_class_1m: 1
+  # Continuous return that each classification label is derived from.
+  # IC for classification predictions is computed against this column;
+  # AUC/accuracy/log_loss are computed against the binary label itself.
+  classification_eval_label:
+    fwd_class_1m: fwd_ret_1m
+
+backtest:
+  rebalance:
+    # Per-asset rebalance thresholds. A rebalance is skipped when the
+    # per-asset weight change is below min_weight_change AND the resulting
+    # trade notional is below min_trade_value. At top_k=50 the equal-weight
+    # per-asset weight is 1/50 = 2%, comfortably above the 0.5% threshold.
+    default:
+      min_weight_change: 0.005
+      min_trade_value: 100.0
+    benchmark:
+      min_weight_change: 0.0
+      min_trade_value: 0.0
+  sweep:
+    # Iteration controls per stage. ``signal: 0`` means "all predictions";
+    # downstream stages take the top-N from the upstream stage's rank-1.
+    # Notebooks read these via get_top_n_predictions(case_study, stage).
+    top_n_predictions:
+      signal: 0                 # all signal predictions (eq-weight baseline)
+      allocation_cheap: 0       # score_weighted — all signal preds
+      allocation_expensive: 10  # conformal_weighted — top-10 by signal Sharpe
+      cost_sensitivity: 1       # top-1 of {signal+allocation} per label
+      risk_overlay: 1           # top-1 of {signal+allocation} per label
+    # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
+    expensive_allocators_skip: false
+    # Allocators routed through ``allocation_expensive`` (top-10 by signal Sharpe).
+    # All others (equal_weight, score_weighted) take the cheap path.
+    expensive_allocators: [conformal_weighted]
+    # Ch16 backtest is equal-weight sized within the selected set. The
+    # selection rule is one of: top-k (rank), percentile band (long-only
+    # cutoff), or quantile buckets (e.g. quintile long-short — combines
+    # with the long-short mapping). Only top_k_grid is active here;
+    # uncomment percentile_grid / quantile_grid to add other selection axes
+    # for any label.
+    top_k_grid:
+      fwd_ret_1m:     [5, 10, 20, 50]
+      fwd_ret_1m_win: [5, 10, 20, 50]
+      fwd_class_1m:   [5, 10, 20, 50]
+    # percentile_grid:
+    #   fwd_ret_1m: [80, 90, 95]
+    # quantile_grid:
+    #   fwd_ret_1m: [5, 10]
+    # Ch17 portfolio: reuses top_k_grid above and sweeps over allocators.
+    # Only lookback-free allocators are listed — moment-based allocators
+    # (inverse_vol, risk_parity, hrp, mvo_ledoit_wolf) are excluded because
+    # this returns-only firm-characteristics panel has no per-symbol price
+    # series to estimate volatility or covariance from (see the execution
+    # block above). No max-weight cap.
+    allocators:
+      - {name: equal_weight,    method: equal_weight}
+      - {name: score_weighted,  method: score_weighted}
+      - {name: conformal_weighted, method: conformal_weighted}
+    # Ch18 cost sensitivity (bps regime).
+    cost_grid_bps: [0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 50]
+    # Ch19 risk overlays.
+    risk_controls:
+      position:
+        - {name: stop_loss_3pct,  type: stop_loss,     threshold: 0.03}
+        - {name: stop_loss_5pct,  type: stop_loss,     threshold: 0.05}
+        - {name: stop_loss_10pct, type: stop_loss,     threshold: 0.10}
+        - {name: stop_loss_15pct, type: stop_loss,     threshold: 0.15}
+        - {name: trailing_1pct,   type: trailing_stop, threshold: 0.01}
+        - {name: trailing_2pct,   type: trailing_stop, threshold: 0.02}
+        - {name: trailing_3pct,   type: trailing_stop, threshold: 0.03}
+        - {name: trailing_5pct,   type: trailing_stop, threshold: 0.05}
+        - {name: trailing_10pct,  type: trailing_stop, threshold: 0.10}
+        - {name: trailing_15pct,  type: trailing_stop, threshold: 0.15}
+        - {name: trailing_20pct,  type: trailing_stop, threshold: 0.20}
+        - {name: time_exit_10,    type: time_exit,     bars: 10}
+        - {name: time_exit_20,    type: time_exit,     bars: 20}
+        - {name: time_exit_40,    type: time_exit,     bars: 40}
+
+modeling:
+  gbm:
+    libraries: [lightgbm]
+    preset: default
+    device: gpu
+  latent_factors:
+    persistent_entities: false
+    model_kwargs:
+      sdf:
+        checkpoint_epochs: [256, 512, 768, 1024, 1280]
+        beta_checkpoint_epochs: [256]
+        beta_default_checkpoint: 256
+
+causal:
+  treatment: r12_2
+  confounders: [Beta, IdioVol, LME, Variance]
+  method: walk_forward_dml

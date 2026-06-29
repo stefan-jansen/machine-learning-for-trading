@@ -16,14 +16,24 @@ strategy you can actually run, and keep running, in a live market.
   and [six production Python libraries](https://ml4trading.io/libraries/)
   that facilitate substantial parts of the workflow.
 
-> For the first time, we are offering [live cohort courses](https://ml4trading.io/courses/), plus free lightning
-> lessons on [multi-agent systems](https://maven.com/p/6c2609/build-multi-agent-systems-you-can-audit) and
-> [From Trading Idea to Validated Strategy](https://maven.com/p/7a8c60/from-trading-idea-to-validated-strategy?utm_medium=ll_share_link&utm_source=instructor)
-> are coming up on **June 24, 2026**.
-
 <p align="center">
   <a href="https://amzn.to/4eigy2F"><img src="assets/cover.jpeg" width="45%" alt="Machine Learning for Trading, 3rd Edition"></a>
 </p>
+
+## 🎓 New: Live Courses & Lightning Lessons
+
+For the first time, the third edition comes with **live, cohort-based courses** and free lightning lessons
+taught by Stefan on [Maven](https://maven.com/stefan-jansen) — full schedule on the
+[courses page](https://ml4trading.io/courses/).
+
+- **▶ [Machine Learning for Trading: From Research to Production](https://maven.com/stefan-jansen/research-to-production)**
+  — the flagship live cohort: take a research idea all the way to a deployed, monitored strategy, working through the
+  book's end-to-end workflow with direct feedback. **The first cohort starts Monday, July 6, 2026 — enrollment closes
+  Friday, July 3.**
+- **[Getting Stuff Done with Coding Agents](https://maven.com/p/8394ac/getting-stuff-done-with-coding-agents?utm_medium=ll_share_link&utm_source=instructor)**
+  — a free lightning lesson on putting coding agents to work.
+- **[Building Multi-Agent Forecasting Systems](https://maven.com/stefan-jansen/forecasting-agents)**
+  — the next live cohort: design auditable multi-agent systems for financial research.
 
 ---
 
@@ -206,30 +216,30 @@ Diffusion-TS, and LLM-based tabular generation, evaluated through a fidelity–u
 Define the trading problem, then turn data into model-ready signals: research design, labels, features, and the
 evaluation that determines what any model can learn.
 
-### 6. Strategy Research Framework
+### [6. Strategy Research Framework](06_strategy_definition/)
 
 Defining the trading game before building models: universe rules, decision schedule, cost model, evaluation
 protocol, and run logging. Introduces the nine case studies and the walk-forward cross-validation discipline that
 anchors Chapters 7–20.
 
-### 7. Defining the Learning Task
+### [7. Defining the Learning Task](07_defining_the_learning_task/)
 
 Label engineering (forward returns, triple-barrier, trend scanning), univariate feature evaluation (information
 coefficients, quantile analysis, feasibility screens), multiple-testing control (BH-FDR, Deflated Sharpe Ratio),
 and causal plausibility checks.
 
-### 8. Financial Feature Engineering
+### [8. Financial Feature Engineering](08_financial_features/)
 
 Five feature families from price data (momentum, reversal, volatility, liquidity, microstructure), structural and
 cross-instrument features (yield curve, term structure, relative value), contextual features (macro regime, calendar,
 sentiment), and feature selection with robustness testing.
 
-### 9. Model-Based Feature Extraction
+### [9. Model-Based Feature Extraction](09_model_based_features/)
 
 Features from fitted models: stationarity diagnostics, Kalman filters, Fourier and wavelet spectral features, GARCH
 volatility, and HMM regime probabilities — with point-in-time correctness enforced throughout.
 
-### 10. Text Feature Engineering
+### [10. Text Feature Engineering](10_text_feature_engineering/)
 
 From bag-of-words through transformers: TF-IDF, Word2Vec and GloVe embeddings, LSTM sequence models, FinBERT
 sentiment, financial NER fine-tuning, and news-return signal construction.
@@ -405,14 +415,10 @@ preamble. Full details in the **[Docker environments guide](envs/README.md)**.
 New chapters and notebooks are added over the coming weeks. ⭐ Watch or star the repo to follow along, and subscribe to
 the twice-weekly [**Insights** newsletter](https://insights.ml4trading.io/).
 
-**Free Lightning Lessons — Wednesday, June 24, 2026:**
-
-- [Build Multi-Agent Systems You Can Audit](https://maven.com/p/6c2609/build-multi-agent-systems-you-can-audit) — 15:00 UTC
-- [From Trading Idea to Validated Strategy](https://maven.com/p/7a8c60/from-trading-idea-to-validated-strategy?utm_medium=ll_share_link&utm_source=instructor) — 16:00 UTC
-
-The live cohort course
+The flagship live cohort course
 [**Machine Learning for Trading: From Research to Production**](https://maven.com/stefan-jansen/research-to-production)
-starts **July 6, 2026** and works through this workflow live, with direct feedback.
+starts **Monday, July 6, 2026** — **enrollment closes Friday, July 3**. See the
+**Live Courses & Lightning Lessons** section above for the full schedule.
 
 **Looking for the second edition?** It is complete and stable on the `second-edition` branch —
 `git checkout second-edition`, and everything is exactly where the book describes it.

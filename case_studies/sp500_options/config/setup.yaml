@@ -1,0 +1,209 @@
+strategy_id: sp500_options
+setup_version: v1
+
+universe:
+  underlying: sp500_constituents
+  strategy: atm_straddle
+
+decision:
+  entry_cadence: weekly_friday
+  entry_time: friday_close
+  execution_delay: monday_open
+  holding_period_days: 10
+  exit_time: 10_days_after_entry_or_expiry
+  hedge_cadence: daily_close
+
+# Read by case_studies.utils.backtest_runner: delta_threshold drives the
+# per-position rehedge trigger in the HTM cohort engine.
+hedging_protocol:
+  hedge_instrument: underlying_stock
+  hedge_frequency: daily_close
+  delta_threshold: 0.1
+  gamma_hedging: false
+  vega_hedging: false
+
+# Engine-level execution defaults. Single source of truth — Ch16-19 notebooks
+# read these via get_backtest_config(); never declare a local INITIAL_CASH
+# or share_type constant. Changing values here invalidates every existing
+# backtest_hash for this case study (cash + share_type are spec-hash inputs).
+#
+# sp500_options runs through the HTM daily-MTM cohort path (_run_htm_daily_mtm)
+# for ret_to_expiry and the simple vectorized path (_run_vectorized) for
+# other labels; neither engages the integer-contract execution engine, so
+# ``initial_cash`` and ``share_type`` are recorded for spec-hash provenance
+# but do not constrain position sizing. The HTM path allocates fractional
+# weights across n_roll concurrent cohorts; SPX-option-notional vs. cash
+# is not a binding constraint in this CS.
+#
+# ``allocator_lookback`` is the bars-of-underlying-price window applied
+# uniformly to every moment-based allocator (inverse_vol, risk_parity, hrp,
+# mvo_ledoit_wolf). Daily underlying SPX returns → 63 ≈ 3 months. Option
+# contracts cycle in/out of the per-expiry universe within the window;
+# moment-based allocators include them anyway so the cross-method
+# comparison is honest — early-window imputation effects are part of the
+# observed concentration profile and not hidden behind a method filter.
+execution:
+  initial_cash: 100_000          # IBKR retail cohort default (not enforced by HTM path)
+  share_type: integer            # Recorded for spec-hash; HTM path uses fractional cohort weights
+  allocator_lookback: 63         # 3 months of daily underlying SPX bars
+
+mapping:
+  class: systematic_straddle_sell
+  position_state_space: short_straddle_hedged
+  entry_logic: sell_atm_straddle_weekly
+  sizing: fixed_vega_notional
+
+costs:
+  class: dominant
+  components:
+    option_spread:
+      description: Bid-ask spread on straddle.
+      estimate_pct_of_premium: [2.0, 5.0]
+      note: ATM options have wide spreads relative to premium.
+    hedge_spread:
+      description: Bid-ask spread on underlying stock per hedge rebalance.
+      estimate_bps_of_notional: 0.5
+      hedges_per_holding: 10
+    commission:
+      description: Per-contract option commission and per-share equity commission.
+      option_per_contract: 0.65
+      equity_per_share: 0.005
+    margin_opportunity_cost:
+      description: Capital tied up in margin (15-20% of notional, ~5% annual opportunity cost).
+      margin_pct_of_notional: [15, 20]
+      opportunity_cost_annual_pct: 5.0
+  cost_dominance_note: Total costs often exceed the expected VRP edge.
+
+backtest:
+  rebalance:
+    # A rebalance is skipped when the per-asset weight change is below
+    # min_weight_change AND the resulting trade notional is below
+    # min_trade_value. The benchmark profile disables thresholds so that
+    # full-universe equal-weight (1/N per asset) rebalances at all.
+    default:
+      min_weight_change: 0.005
+      min_trade_value: 100.0
+    benchmark:
+      min_weight_change: 0.0
+      min_trade_value: 0.0
+  sweep:
+    # Canonical strategy universe. sp500_options trades only the liquid
+    # quintile (bottom 20% half-spread per rebalance date) — the option
+    # round-trip cost on the full S&P 500 ATM straddle surface consumes
+    # the VRP edge (O'Donovan & Yu 2024). The full-universe variant is
+    # NOT a sweep candidate for the canonical rank-1 selector; it lives
+    # only in the Ch18 ``htm_cost_cascade`` comparison table below, where
+    # it serves to show the cost story (full universe → uneconomic;
+    # liquid quintile → marginal-but-positive after costs).
+    # Read by case_studies.utils.sweep_config.get_universe_filters_for.
+    universe_filter: liquid
+    # Iteration controls per stage. ``signal: 0`` means "all predictions";
+    # downstream stages take the top-N from the upstream stage's rank-1.
+    # Notebooks read these via get_top_n_predictions(case_study, stage).
+    top_n_predictions:
+      signal: 0                 # all signal predictions (eq-weight baseline)
+      allocation_cheap: 0       # score_weighted, inverse_vol — all signal preds
+      allocation_expensive: 10  # risk_parity, mvo_ledoit_wolf, hrp — top-10 by signal Sharpe
+      cost_sensitivity: 1       # top-1 of {signal+allocation} per label
+      risk_overlay: 1           # top-1 of {signal+allocation} per label
+    # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
+    expensive_allocators_skip: false
+    # Allocators routed through ``allocation_expensive`` (top-10 by signal Sharpe).
+    # All others (equal_weight, score_weighted, inverse_vol) take the cheap path.
+    expensive_allocators: [risk_parity, mvo_ledoit_wolf, hrp]
+    # Ch16 signal-stage selection. Long-only equal-weight top-k: the short
+    # straddle sign convention is handled by the label construction, not
+    # by long_short=True.
+    top_k_grid:
+      # sp500_options effectively has one label: `ret_to_expiry`. The
+      # 5d/10d/dh_5d/dh_10d labels were dropped 2026-05-17 because the
+      # vectorized backtest path treats their 5d/10d forward returns as
+      # daily returns, inflating Sharpes (e.g. fwd_ret_10d Sharpe ~6.5)
+      # to non-credible levels. A proper 10d short-vol comparison would
+      # need a fixed-holding cost model (entry + exit half-spread + 2x
+      # commission), not the HTM single-entry-leg cost. See
+      # .agents/issues/2026-05-17-sp500-options-legacy-10d-5d-labels-cleanup.md
+      ret_to_expiry:   [5, 10, 20]
+    # Ch17 portfolio: reuses top_k_grid above and sweeps over allocators.
+    # Moment-based allocators (IV/RP/HRP/MVO_LW) use the CS-level
+    # ``execution.allocator_lookback`` on the underlying SPX series; option
+    # contracts cycling in/out of the per-expiry universe are part of the
+    # observed concentration profile, not hidden behind a method filter.
+    allocators:
+      - {name: equal_weight,    method: equal_weight}
+      - {name: score_weighted,  method: score_weighted}
+      - {name: inverse_vol,     method: inverse_vol}
+      - {name: risk_parity,     method: risk_parity}
+      - {name: mvo_ledoit_wolf, method: mvo_ledoit_wolf}
+      - {name: hrp,             method: hrp}
+    # Ch18 cost analysis is the three-rung hold-to-maturity cascade
+    # (O'Donovan & Yu 2024, anchored to Muravyev & Pearson 2020). The
+    # standard cost_grid_bps regime does not apply: HTM avoids the
+    # exit-leg spread entirely and only pays a fraction of the quoted
+    # option half-spread on entry. The cascade rungs (rung-2 = full
+    # universe; rung-3 = bottom-quintile half-spread "liquid" subset) are
+    # dispatched inline by Ch18 cost notebooks and do not flow through the
+    # standard run_backtest cost sweep.
+    htm_cost_cascade:
+      # Entry-cost fractions of the quoted option half-spread. 0.203 is the
+      # best-case algo-execution anchor (Heston et al. 2023 "algo" case, from
+      # Muravyev-Pearson 2020's $0.026/$0.128 ATM ratio); 0.75 approximates the
+      # population-average effective/quoted ratio; 1.0 = full quote crossed.
+      cost_fractions: [0.203, 0.5, 0.75, 1.0]
+      # Universes (rung dispatch): full = rung-2, liquid = rung-3.
+      universes: [full, liquid]
+      # Liquid-universe selection: bottom 20% half-spread per rebalance date.
+      # Stricter than O'Donovan & Yu (2024), who retain the bottom four deciles
+      # (~40%, approximating Heston et al.'s "spread < 10%" filter); our quintile
+      # is the tighter-spread half of their set.
+      liquid_quantile: 0.20
+      # Concentration for the cascade (single top_k; not swept).
+      top_k: 20
+
+evaluation:
+  n_splits: 2
+  train_size: 2Y
+  val_size: 1Y
+  holdout_start: '2021-01-01'
+  holdout_end: '2021-12-31'
+  calendar: NYSE
+  periods_per_year: 252  # NYSE 5d/wk (daily MTM over overlapping weekly cohorts)
+
+labels:
+  primary: ret_to_expiry
+  buffer: 35D
+  # Legacy 5d/10d/dh_5d/dh_10d variants were dropped from the sweep
+  # 2026-05-17; the label-computation notebook (`02_labels.py`) still
+  # demonstrates how they are constructed, but they no longer drive
+  # backtests, cohort_metrics, or rank-1 selection. See
+  # .agents/issues/2026-05-17-sp500-options-legacy-10d-5d-labels-cleanup.md
+  variants: []
+  # Diagnostic-only label buffers: variants below are NOT in the sweep
+  # but their parquets are still computed by 02_labels.py for EDA NBs
+  # (e.g. 90_ic_diagnostic uses fwd_ret_dh_10d for IV-decay analysis).
+  # Listing the buffer here keeps `resolve_label_buffer` from raising
+  # without re-introducing the variant into the sweep / cohort_metrics.
+  variant_buffers:
+    fwd_ret_dh_10d: 10D
+  # Vectorized-backtest thinning step per label: number of schedule slots
+  # to advance per trade so holding periods don't overlap.
+  #
+  # The primary label `ret_to_expiry` uses a multi-cohort daily-MTM
+  # backtest path (5 concurrent cohorts at 1/5 capital each; weekly entry
+  # at ~30-day DTE) that accrues per-cohort daily premium + hedge P&L with
+  # transaction costs. The rebalance_step value below is the design-time
+  # constant for the (weekly_friday, 30-day DTE) pair and is used by any
+  # non-equal-weight allocation step that runs before the HTM dispatch.
+  rebalance_step:
+    ret_to_expiry: 5    # weekly_friday schedule, ~30d DTE -> ceil(30/7) = 5
+
+modeling:
+  gbm:
+    libraries: [lightgbm]
+    preset: default
+    device: gpu
+
+causal:
+  treatment: vrp_21d
+  confounders: [rv_21d, vrp_mom_5d, spread_pctl]
+  method: walk_forward_dml

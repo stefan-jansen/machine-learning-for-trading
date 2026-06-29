@@ -1,0 +1,163 @@
+strategy_id: fx_pairs
+setup_version: v1
+
+universe:
+  symbols:
+    - AUD_JPY
+    - AUD_NZD
+    - AUD_USD
+    - CAD_JPY
+    - CHF_JPY
+    - EUR_AUD
+    - EUR_CAD
+    - EUR_CHF
+    - EUR_GBP
+    - EUR_JPY
+    - EUR_USD
+    - GBP_AUD
+    - GBP_CHF
+    - GBP_JPY
+    - GBP_USD
+    - NZD_JPY
+    - NZD_USD
+    - USD_CAD
+    - USD_CHF
+    - USD_JPY
+  n_assets: 20
+
+decision:
+  cadence: daily_ny_close
+  snapshot: ny_5pm_close
+  execution_delay: next_bar_open
+
+# Engine-level execution defaults. Single source of truth — Ch16-19 notebooks
+# read these via get_backtest_config(); never declare a local INITIAL_CASH
+# or share_type constant. Changing values here invalidates every existing
+# backtest_hash for this case study (cash + share_type are spec-hash inputs).
+#
+# ``allocator_lookback`` is the bars-of-underlying-price window applied
+# uniformly to every moment-based allocator (inverse_vol, risk_parity, hrp,
+# mvo_ledoit_wolf). FX pairs has daily OANDA bars → 63 ≈ 3 months. Keeps
+# allocators comparable — MVO is not granted a longer covariance window than
+# IV by default.
+execution:
+  initial_cash: 100_000          # IBKR retail cohort default
+  share_type: integer            # FX traded in units of base currency, integer share semantics
+  allocator_lookback: 63         # 3 months of daily OANDA bars
+
+mapping:
+  class: long_short_rank_rebalance
+  position_state_space: long_short
+  entry_logic: rank_by_momentum_or_carry
+  sizing: equal_weight
+
+costs:
+  class: material
+  components: [spread, swap_points]
+  spread_bps:
+    major_pairs: [1, 3]
+    cross_pairs: [3, 8]
+
+backtest:
+  rebalance:
+    # A rebalance is skipped when the per-asset weight change is below
+    # min_weight_change AND the resulting trade notional is below
+    # min_trade_value. The benchmark profile disables thresholds so that
+    # full-universe equal-weight (1/N per asset) rebalances at all.
+    default:
+      min_weight_change: 0.005
+      min_trade_value: 100.0
+    benchmark:
+      min_weight_change: 0.0
+      min_trade_value: 0.0
+  sweep:
+    # Iteration controls per stage. ``signal: 0`` means "all predictions";
+    # downstream stages take the top-N from the upstream stage's rank-1.
+    # Notebooks read these via get_top_n_predictions(case_study, stage).
+    top_n_predictions:
+      signal: 0                 # all signal predictions (eq-weight baseline)
+      allocation_cheap: 0       # score_weighted, inverse_vol — all signal preds
+      allocation_expensive: 10  # risk_parity, mvo_ledoit_wolf, hrp — top-10 by signal Sharpe
+      cost_sensitivity: 1       # top-1 of {signal+allocation} per label
+      risk_overlay: 1           # top-1 of {signal+allocation} per label
+    # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
+    expensive_allocators_skip: false
+    # Allocators routed through ``allocation_expensive`` (top-10 by signal Sharpe).
+    # All others (equal_weight, score_weighted, inverse_vol) take the cheap path.
+    expensive_allocators: [risk_parity, mvo_ledoit_wolf, hrp, conformal_weighted]
+    # Ch16 signal-stage selection. Long-short equal-weight top-k on all
+    # three label horizons; long-short is enforced at the backtest config
+    # level (allow_short_selling=true).
+    top_k_grid:
+      fwd_ret_1d:  [5, 10]
+      fwd_ret_5d:  [5, 10]
+      fwd_ret_21d: [5, 10]
+    # Ch17 portfolio: reuses top_k_grid above and sweeps over allocators.
+    # Moment-based allocators (IV/RP/HRP/MVO_LW) all use the CS-level
+    # ``execution.allocator_lookback`` — no per-allocator vol_window / lookback
+    # fields. No max-weight cap: each allocator expresses its natural
+    # concentration profile so the cross-method comparison is honest.
+    allocators:
+      - {name: equal_weight,    method: equal_weight}
+      - {name: score_weighted,  method: score_weighted}
+      - {name: inverse_vol,     method: inverse_vol}
+      - {name: risk_parity,     method: risk_parity}
+      - {name: mvo_ledoit_wolf, method: mvo_ledoit_wolf}
+      - {name: hrp,             method: hrp}
+      - {name: conformal_weighted, method: conformal_weighted}
+    # Ch18 cost sensitivity (bps; spread is the dominant cost component,
+    # captured here as combined commission + slippage in bps).
+    cost_grid_bps: [0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 50]
+    # Ch19 risk overlays.
+    risk_controls:
+      position:
+        - {name: stop_loss_3pct,  type: stop_loss,     threshold: 0.03}
+        - {name: stop_loss_5pct,  type: stop_loss,     threshold: 0.05}
+        - {name: stop_loss_10pct, type: stop_loss,     threshold: 0.10}
+        - {name: stop_loss_15pct, type: stop_loss,     threshold: 0.15}
+        - {name: trailing_1pct,   type: trailing_stop, threshold: 0.01}
+        - {name: trailing_2pct,   type: trailing_stop, threshold: 0.02}
+        - {name: trailing_3pct,   type: trailing_stop, threshold: 0.03}
+        - {name: trailing_5pct,   type: trailing_stop, threshold: 0.05}
+        - {name: trailing_10pct,  type: trailing_stop, threshold: 0.10}
+        - {name: trailing_15pct,  type: trailing_stop, threshold: 0.15}
+        - {name: trailing_20pct,  type: trailing_stop, threshold: 0.20}
+        - {name: time_exit_10,    type: time_exit,     bars: 10}
+        - {name: time_exit_20,    type: time_exit,     bars: 20}
+        - {name: time_exit_40,    type: time_exit,     bars: 40}
+
+evaluation:
+  n_splits: 8
+  train_size: P5Y
+  val_size: P1Y
+  holdout_start: '2024-01-01'
+  holdout_end: '2025-12-31'
+  calendar: FX
+  periods_per_year: 252  # FX 5d/wk
+
+labels:
+  primary: fwd_ret_1d
+  buffer: 1D
+  variants:
+    - fwd_ret_5d
+    - fwd_ret_21d
+  variant_buffers:
+    fwd_ret_5d: 5D
+    fwd_ret_21d: 21D
+  # Vectorized-backtest thinning step per label: number of schedule slots
+  # to advance per trade so holding periods don't overlap.
+  rebalance_step:
+    fwd_ret_1d: 1
+    fwd_ret_5d: 5
+    fwd_ret_21d: 21
+
+modeling:
+  gbm:
+    libraries: [lightgbm]
+    preset: default
+    device: gpu
+
+causal:
+  treatment: mom_skip_recent
+  confounders: [vol_gk_21d, vol_gk_63d, zscore_21d]
+  method: walk_forward_dml

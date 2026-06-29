@@ -1,0 +1,468 @@
+strategy_id: nasdaq100_microstructure
+setup_version: v1
+
+universe:
+  symbols:
+    - AAL
+    - AAPL
+    - ADBE
+    - ADI
+    - ADP
+    - ADSK
+    - AEP
+    - ALGN
+    - ALXN
+    - AMAT
+    - AMD
+    - AMGN
+    - AMZN
+    - ANSS
+    - ASML
+    - ATVI
+    - AVGO
+    - BIDU
+    - BIIB
+    - BKNG
+    - BMRN
+    - CDNS
+    - CDW
+    - CERN
+    - CHKP
+    - CHTR
+    - CMCSA
+    - COST
+    - CPRT
+    - CSCO
+    - CSGP
+    - CSX
+    - CTAS
+    - CTSH
+    - CTXS
+    - DLTR
+    - DOCU
+    - DXCM
+    - EA
+    - EBAY
+    - EXC
+    - EXPE
+    - FAST
+    - FB
+    - FISV
+    - FOX
+    - FOXA
+    - GILD
+    - GOOG
+    - GOOGL
+    - IDXX
+    - ILMN
+    - INCY
+    - INTC
+    - INTU
+    - ISRG
+    - JD
+    - KDP
+    - KHC
+    - KLAC
+    - LBTYA
+    - LBTYK
+    - LRCX
+    - LULU
+    - MAR
+    - MCHP
+    - MDLZ
+    - MELI
+    - MNST
+    - MRNA
+    - MRVL
+    - MSFT
+    - MTCH
+    - MU
+    - MXIM
+    - NFLX
+    - NTAP
+    - NTES
+    - NVDA
+    - NXPI
+    - OKTA
+    - ORLY
+    - PAYX
+    - PCAR
+    - PDD
+    - PEP
+    - PTON
+    - PYPL
+    - QCOM
+    - REGN
+    - ROST
+    - SBUX
+    - SGEN
+    - SIRI
+    - SNPS
+    - SPLK
+    - SWKS
+    - TEAM
+    - TMUS
+    - TSLA
+    - TTWO
+    - TXN
+    - UAL
+    - ULTA
+    - VRSK
+    - VRSN
+    - VRTX
+    - WBA
+    - WDAY
+    - WDC
+    - WLTW
+    - XEL
+    - XLNX
+    - ZM
+  n_assets: 114
+  eligibility_rule: nasdaq100_membership
+  # Cost-feasible universe: the cheapest-to-trade names by round-trip cost,
+  # frozen per split. Provenance: _build_cost_feasible_universe.py
+  # (round-trip proxy 2*(per_share/mean_price)*1e4 + 2*median_half_spread_bps).
+  # The validation list is profiled on quote bars strictly before the
+  # validation window (2020-01-01 -> 2020-06-30); the holdout list from the
+  # pre-holdout liquidity profile (< 2021-07-01). No look-ahead. Selected via
+  # strategy.signal.universe_filter='cost_feasible'; the split-specific list is
+  # chosen at backtest time by resolving the prediction set's split (NOT a
+  # spec-hash input — like the 'liquid' filter, the hash carries only the
+  # filter name). The full 114 universe collapses out of sample (featured
+  # config holdout -0.42) while the cost-feasible universe is positive; the
+  # screen is load-bearing. See 16_costs.py for the full-vs-screened contrast.
+  cost_feasible:
+    validation:
+      - AAPL
+      - MSFT
+      - FB
+      - SBUX
+      - PEP
+      - ATVI
+      - INTC
+      - PYPL
+      - MDLZ
+      - AMD
+      - QCOM
+      - TXN
+      - GILD
+      - MU
+      - NVDA
+      - AMAT
+      - CSCO
+      - TMUS
+      - WBA
+      - COST
+      - JD
+      - CSX
+      - XEL
+      - CMCSA
+      - EXC
+      - EBAY
+      - MNST
+      - FISV
+      - FAST
+      - EA
+      - CTSH
+      - NFLX
+      - XLNX
+      - AMZN
+      - ADBE
+      - PAYX
+      - CDNS
+      - AMGN
+      - MXIM
+      - BIDU
+      - PCAR
+      - CERN
+      - UAL
+      - ADP
+      - KHC
+      - FOXA
+      - WDC
+      - TSLA
+      - FOX
+      - CTXS
+    holdout:
+      - AAPL
+      - MSFT
+      - FB
+      - SBUX
+      - PEP
+      - GILD
+      - AMD
+      - QCOM
+      - INTC
+      - MDLZ
+      - ATVI
+      - AMAT
+      - MU
+      - PYPL
+      - AEP
+      - TXN
+      - JD
+      - CSX
+      - MRVL
+      - COST
+      - TMUS
+      - CMCSA
+      - EBAY
+      - CSCO
+      - NVDA
+      - XEL
+      - FISV
+      - WBA
+      - EXC
+      - FAST
+      - TSLA
+      - CTSH
+      - MXIM
+      - ADI
+      - AMZN
+      - NFLX
+      - AMGN
+      - EA
+      - PAYX
+      - CERN
+      - ADBE
+      - ADP
+      - KHC
+      - CDNS
+      - XLNX
+      - MNST
+      - KDP
+      - BIDU
+      - DLTR
+      - UAL
+
+decision:
+  bar_frequency: 15_minute
+  decision_snapshot: bar_close
+  execution_delay: 1_bar
+  execution_price_assumption: next_bar_open_or_vwap
+
+# Engine-level execution defaults. Single source of truth — Ch16-19 notebooks
+# read these via get_backtest_config(); never declare a local INITIAL_CASH
+# or share_type constant. Changing values here invalidates every existing
+# backtest_hash for this case study.
+#
+# Spec-hash inputs (each invalidates every backtest_hash on change):
+#   - execution.initial_cash
+#   - execution.share_type
+#   - execution.allocator_lookback (CS-level fallback for moment allocators)
+#   - per-allocator overrides in backtest.sweep.allocators
+#
+# ``allocator_lookback`` is the bars-of-underlying-price window applied
+# uniformly to every moment-based allocator. 15-min bars (26 bars/day);
+# 520 bars ≈ 20 trading days ≈ 1 month of intraday coverage. ``periods_per_year``
+# annualizes Sharpe at daily-equivalent grain (252); allocator windows are
+# measured in raw 15-min bars regardless.
+#
+# Expensive allocators (RP/HRP/MVO_LW) are dropped via expensive_allocators_skip
+# below — covariance estimation at 15-min cadence is prohibitive and
+# empirically degenerate. MVO_LW carries no per-allocator lookback override
+# here for that reason; revisit if expensive allocators are reintroduced
+# (a 6-month equivalent at 15-min would need ~3,300 bars).
+#
+# ``initial_cash`` restored to 1_000_000 (2026-05-16) — the 2026-05-15 SSOT
+# migration drop to 100k caused catastrophic degenerate output here
+# (avg Sharpe -11 across 339 signal runs; integer-share rounding × the
+# nasdaq-100 high-priced tail (BKNG≈$5k, MSTR/NFLX/AVGO $700-1.5k)). See
+# memory/feedback_2026_05_15_equity_sizing_invalidated.md.
+execution:
+  initial_cash: 1_000_000        # restores prior validated state
+  share_type: integer            # US equities trade in whole shares
+  allocator_lookback: 520        # ~20 trading days of 15-min bars
+
+mapping:
+  class: intraday_rank_and_trade
+  position_state_space: long_short
+  entry_logic: rank_or_threshold
+  sizing: dollar_neutral_or_beta_neutral
+
+costs:
+  class: dominant
+  # Per-share commission plus measured per-asset half-spread slippage from
+  # AlgoSeek NBBO close quotes over the training window. Integer share
+  # sizing. The asset_spreads_source parquet is loaded by the backtest
+  # cost-preset builder and joined per symbol; default_half_spread_usd is
+  # the universe p75 fallback for symbols not in the profile.
+  model: per_share_plus_spread
+  per_share: 0.0035   # IBKR Pro Tiered top tier (<=300K shares/mo)
+  minimum: 0.0
+  asset_spreads_source: liquidity_profile.parquet
+  asset_spreads_column: median_half_spread_usd
+  default_half_spread_usd: 0.025
+  spread_convention: half_spread
+  source: AlgoSeek minute-bar NBBO close quotes, training window 2020-01-02 to 2021-07-01.
+  friction_floor_bps: 5
+
+backtest:
+  rebalance:
+    # A rebalance is skipped when the per-asset weight change is below
+    # min_weight_change AND the resulting trade notional is below
+    # min_trade_value. The benchmark profile disables thresholds so that
+    # full-universe equal-weight (1/N per asset) rebalances at all.
+    default:
+      min_weight_change: 0.005
+      min_trade_value: 100.0
+    benchmark:
+      min_weight_change: 0.0
+      min_trade_value: 0.0
+  sweep:
+    # Canonical strategy universe. The 15-min round-trip cost on the
+    # cost-expensive tail of the 114-name panel consumes the intraday edge:
+    # the featured config collapses out of sample on the full universe
+    # (holdout -0.42) but is positive on the cost-feasible subset (the
+    # cheapest-to-trade names, frozen per split — see universe.cost_feasible).
+    # The full-universe variant is NOT a canonical rank-1 / cohort / DSR
+    # candidate; it lives only in the 16_costs.py full-vs-screened comparison,
+    # mirroring sp500_options' liquid screen. Read by
+    # case_studies.utils.sweep_config.get_universe_filters_for.
+    universe_filter: cost_feasible
+    # Iteration controls per stage. ``signal: 0`` means "all predictions";
+    # downstream stages take the top-N from the upstream stage's rank-1.
+    # Notebooks read these via get_top_n_predictions(case_study, stage).
+    top_n_predictions:
+      signal: 0                 # all signal predictions (eq-weight baseline)
+      allocation_cheap: 0       # score_weighted, inverse_vol — all signal preds
+      allocation_expensive: 0   # nasdaq has no expensive allocators (see expensive_allocators below)
+      cost_sensitivity: 1       # top-1 of {signal+allocation} per label
+      risk_overlay: 1           # top-1 of {signal+allocation} per label
+    # No expensive allocators on nasdaq. At 15-min frequency the 1.3M-bar
+    # panel makes covariance estimation on the rebalance schedule
+    # prohibitive; empirically every expensive allocator (risk_parity,
+    # mvo_ledoit_wolf, hrp) produces deeply negative Sharpes (-7 to -10)
+    # on every nasdaq label and equal_weight ties at the top. The 15-min
+    # cadence is a costs-dominated regime where signal-stage selection
+    # carries the entire story.
+    expensive_allocators_skip: true
+    expensive_allocators: []
+    # Ch16 signal-stage selection. Long-short equal-weight top-k on the
+    # 15-min schedule across four labels (5m/15m/60m continuous + 15m
+    # direction). The classification label fwd_dir_15m is a first-class
+    # signal alongside the continuous labels and carries the same top_k
+    # grid.
+    top_k_grid:
+      fwd_ret_5m:  [5, 10, 20]
+      fwd_ret_15m: [5, 10, 20]
+      fwd_ret_60m: [5, 10, 20]
+      fwd_dir_15m: [5, 10, 20]
+    # Ch17 portfolio: reuses top_k_grid above and sweeps over allocators.
+    # Cheap tier only on nasdaq (see ``expensive_allocators`` above).
+    # No max_weight cap on inverse_vol — see
+    # memory/feedback_max_weight_caps_intentionally_absent.md (would force
+    # equal-weight at top_k=5 and defeat the moment-allocator comparison).
+    allocators:
+      - {name: equal_weight,    method: equal_weight}
+      - {name: score_weighted,  method: score_weighted}
+      - {name: inverse_vol,     method: inverse_vol}
+    # Ch18 cost sensitivity (bps regime).
+    cost_grid_bps: [0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 50]
+    # Companion per-share cost regime: dollars per share half-spread. Swept
+    # alongside cost_grid_bps for CSes whose declared cost model is
+    # per_share_plus_spread. Values: 0¢, 0.5¢, 1¢, 2.5¢, 5¢, 10¢.
+    cost_grid_half_spread_usd: [0.0, 0.005, 0.01, 0.025, 0.05, 0.10]
+    # Alternative rebalance cadences explored by Ch18's cadence × cost
+    # heatmap (16_costs.py Section 4). The first entry must be the CS's
+    # default cadence (``decision.bar_frequency``). Each cadence reuses the
+    # ``cost_grid_half_spread_usd`` grid above. Tokens are the same cadence
+    # vocabulary recognized by the engine; the notebook pulls the list from
+    # here, never hardcoded.
+    cadence_sweep: [15_minute, 30_minute, 1_hour, 4_hour]
+    # nasdaq100 v4 slot-mechanism sweep (Ch16 signal stage replacement).
+    #
+    # Adds two selection methods to the canonical Ch16 expansion:
+    #   - slot_persistent_signal_exit: per-symbol rolling-percentile entry,
+    #     fixed weight-per-slot allocation (slots ARE the allocation —
+    #     Ch17 allocator stage is skipped for these rows), max-hold +
+    #     optional signal-exit (rolling lower quantile crossover) for
+    #     position lifecycle. See case_studies/utils/slot_strategy.py for
+    #     the mechanism. Sub-params live under selection_method_config in
+    #     the flattened scheme dict.
+    #   - eq_w_topk: the canonical equal-weight top-K baseline, kept as
+    #     a within-sweep comparison. Direction grid covers long_only,
+    #     long_short.
+    #
+    # slot × long_short is intentionally dropped — slot books are
+    # single-direction by construction (one symbol cannot occupy a long
+    # AND short slot simultaneously). The cross-asset long-short story
+    # belongs to eq_w_topk / quintile_long_short.
+    #
+    # Per-prediction cardinality:
+    #   slot:      long_q(3) × max_slots(3) × hold_bars(3) × exit_signal_q(4)
+    #              × bars_per_day_grid(1) = 108 (long_only only)
+    #   eq_w_topk: top_k(3) × direction(2) = 6
+    # ~114 per prediction × ~12 representative preds ≈ ~1,400 backtests
+    # for the signal stage on val (less than the original 2,800 estimate
+    # because slot × long_short is dropped).
+    signal_nasdaq100:
+      selection_method: [slot_persistent_signal_exit, eq_w_topk]
+      long_q: [0.90, 0.95, 0.99]
+      direction: [long_only, long_short]
+      max_slots: [5, 10, 20]
+      hold_bars: [8, 16, 32]              # 2h, 4h, 8h at 15-min grid
+      exit_signal_q: [null, 0.30, 0.50, 0.70]  # null disables signal-exit
+      pred_freshness_max_min: 14          # variant-A: freshest 1m pred per 15m bar
+      bars_per_day_grid: [14]             # 15m only; 1m cadence failed comprehensively
+      top_k_grid: [5, 10, 20]
+      lookback_days: 21
+    # Ch19 risk overlays.
+    risk_controls:
+      position:
+        - {name: stop_loss_3pct,  type: stop_loss,     threshold: 0.03}
+        - {name: stop_loss_5pct,  type: stop_loss,     threshold: 0.05}
+        - {name: stop_loss_10pct, type: stop_loss,     threshold: 0.10}
+        - {name: stop_loss_15pct, type: stop_loss,     threshold: 0.15}
+        - {name: trailing_1pct,   type: trailing_stop, threshold: 0.01}
+        - {name: trailing_2pct,   type: trailing_stop, threshold: 0.02}
+        - {name: trailing_3pct,   type: trailing_stop, threshold: 0.03}
+        - {name: trailing_5pct,   type: trailing_stop, threshold: 0.05}
+        - {name: trailing_10pct,  type: trailing_stop, threshold: 0.10}
+        - {name: trailing_15pct,  type: trailing_stop, threshold: 0.15}
+        - {name: trailing_20pct,  type: trailing_stop, threshold: 0.20}
+        - {name: time_exit_10,    type: time_exit,     bars: 10}
+        - {name: time_exit_20,    type: time_exit,     bars: 20}
+        - {name: time_exit_40,    type: time_exit,     bars: 40}
+
+evaluation:
+  n_splits: 2
+  train_size: 6M
+  val_size: 6M
+  holdout_start: '2021-07-01'
+  holdout_end: '2021-12-31'
+  calendar: NYSE
+  periods_per_year: 252  # NYSE 5d/wk (daily MTM despite intraday signal cadence)
+
+labels:
+  primary: fwd_ret_15m
+  buffer: 15min
+  variants:
+    - fwd_ret_5m
+    - fwd_ret_60m
+    - fwd_dir_15m
+  variant_buffers:
+    fwd_ret_5m: 5min
+    fwd_ret_60m: 60min
+    fwd_dir_15m: 15min
+  # Vectorized-backtest thinning step per label: number of schedule slots
+  # to advance per trade so holding periods don't overlap.
+  rebalance_step:
+    fwd_ret_15m: 1
+    fwd_ret_5m: 1
+    fwd_ret_60m: 4   # 15min schedule, 60min horizon -> ceil(60/15) = 4
+    fwd_dir_15m: 1
+  # Continuous return that each classification label is derived from.
+  classification_eval_label:
+    fwd_dir_15m: fwd_ret_15m
+
+modeling:
+  gbm:
+    libraries: [lightgbm]
+    preset: default
+    device: cpu
+
+causal:
+  treatment: signed_vol_share
+  confounders: [rel_spread_close, rv_5m, r1m]
+  method: walk_forward_dml

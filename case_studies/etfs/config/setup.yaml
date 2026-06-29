@@ -1,0 +1,286 @@
+strategy_id: etfs
+setup_version: v1
+
+universe:
+  assets:
+    - ACWI
+    - ACWX
+    - AGG
+    - BIL
+    - BND
+    - BNDX
+    - DBA
+    - DBC
+    - DIA
+    - DVY
+    - EEM
+    - EFA
+    - EMB
+    - EWA
+    - EWC
+    - EWG
+    - EWH
+    - EWI
+    - EWJ
+    - EWL
+    - EWN
+    - EWP
+    - EWQ
+    - EWT
+    - EWU
+    - EWW
+    - EWY
+    - EWZ
+    - EZA
+    - FXB
+    - FXE
+    - FXI
+    - FXY
+    - GLD
+    - GOVT
+    - GSG
+    - HYG
+    - IAU
+    - IBB
+    - IEF
+    - IEFA
+    - IEMG
+    - IJR
+    - INDA
+    - ITA
+    - ITB
+    - IVE
+    - IVW
+    - IWM
+    - IYR
+    - JNK
+    - KRE
+    - LQD
+    - MCHI
+    - MDY
+    - MTUM
+    - MUB
+    - OIH
+    - PPLT
+    - QQQ
+    - QUAL
+    - RSP
+    - SCHD
+    - SDY
+    - SHY
+    - SLV
+    - SMH
+    - SOXX
+    - SPY
+    - THD
+    - TIP
+    - TLT
+    - UNG
+    - USMV
+    - USO
+    - UUP
+    - VCSH
+    - VEA
+    - VGK
+    - VIG
+    - VLUE
+    - VNQ
+    - VTI
+    - VTV
+    - VUG
+    - VWO
+    - XBI
+    - XLB
+    - XLC
+    - XLE
+    - XLF
+    - XLI
+    - XLK
+    - XLP
+    - XLRE
+    - XLU
+    - XLV
+    - XLY
+    - XME
+    - XRT
+  n_assets: 100
+  eligibility_rule: point_in_time_adv_10m_annual
+  eligibility_file: eligibility.csv
+  eligibility_note: The 100 ETFs were selected backward-looking (survivorship bias). The $10M ADV threshold is not inflation-adjusted. See eligibility.csv for point-in-time (asset, year) membership.
+
+decision:
+  cadence: monthly_month_end
+  snapshot: close
+  execution_delay: next_bar_open
+
+# Engine-level execution defaults. Single source of truth — Ch16-19 notebooks
+# read these via get_backtest_config(); never declare a local INITIAL_CASH
+# or share_type constant. Changing values here invalidates every existing
+# backtest_hash for this case study (cash + share_type are spec-hash inputs).
+#
+# ``allocator_lookback`` is the bars-of-underlying-price window applied
+# uniformly to every moment-based allocator (inverse_vol, risk_parity, hrp,
+# mvo_ledoit_wolf). One value per CS keeps allocators comparable — MVO is
+# not granted a longer covariance window than IV by default. Bars are
+# counted on the price DataFrame the allocator consumes, not the rebalance
+# cadence: ETFs has daily Yahoo OHLCV → 63 ≈ 3 months. Conformal-prediction
+# allocators have separate calibration windows handled in ``conformal.py``.
+execution:
+  initial_cash: 100_000          # IBKR retail-cohort default; matches per-share fee tier
+  share_type: integer            # ETFs trade in whole shares
+  allocator_lookback: 63         # 3 months of daily Yahoo OHLCV
+
+mapping:
+  class: long_only_rank_and_rebalance
+  position_state_space: long_only
+  entry_logic: rank_selection_top_n
+  sizing: equal_weight
+
+costs:
+  class: material
+  # Per-share commission plus tier-based half-spread slippage. Yahoo daily
+  # OHLCV does not carry bid/ask, so spreads are tier-assigned from industry
+  # knowledge: penny half-spread for the most liquid mega-ETFs and 2c
+  # default for the rest. Integer share sizing.
+  model: per_share_plus_spread
+  per_share: 0.0035   # IBKR Pro Tiered top tier (<=300K shares/mo)
+  minimum: 0.0
+  asset_spreads:
+    SPY: 0.005
+    QQQ: 0.005
+    IWM: 0.005
+    EFA: 0.005
+    EEM: 0.005
+    DIA: 0.005
+    VTI: 0.005
+    XLK: 0.01
+    XLF: 0.01
+    XLV: 0.01
+    XLE: 0.01
+    XLY: 0.01
+    XLI: 0.01
+    XLP: 0.01
+    XLU: 0.01
+    XLB: 0.01
+    XLRE: 0.01
+    XLC: 0.01
+  default_half_spread_usd: 0.02  # 2c for sector/regional/thematic ETFs
+  spread_convention: half_spread
+  source: Industry-knowledge tiers; Yahoo daily OHLCV has no bid/ask.
+
+labels:
+  primary: fwd_ret_21d
+  buffer: 21D
+  variants:
+    - fwd_ret_5d
+  variant_buffers:
+    fwd_ret_5d: 5D
+  # Vectorized-backtest thinning step per label: number of schedule slots
+  # to advance per trade so holding periods don't overlap. Authored from
+  # (schedule cadence, label horizon); add an entry here for any new label.
+  rebalance_step:
+    fwd_ret_21d: 1  # monthly_month_end schedule, 21d horizon <= 30d gap
+    fwd_ret_5d: 1   # monthly_month_end schedule, 5d horizon <= 30d gap
+
+backtest:
+  rebalance:
+    # A rebalance is skipped when the per-asset weight change is below
+    # min_weight_change AND the resulting trade notional is below
+    # min_trade_value. The benchmark profile disables thresholds so that
+    # full-universe equal-weight (1/N per asset) rebalances at all.
+    default:
+      min_weight_change: 0.005
+      min_trade_value: 100.0
+    benchmark:
+      min_weight_change: 0.0
+      min_trade_value: 0.0
+  sweep:
+    # Iteration controls per stage. ``signal: 0`` means "all predictions";
+    # downstream stages take the top-N from the upstream stage's rank-1.
+    # Notebooks read these via get_top_n_predictions(case_study, stage).
+    top_n_predictions:
+      signal: 0                 # all signal predictions (eq-weight baseline)
+      allocation_cheap: 0       # score_weighted, inverse_vol — all signal preds
+      allocation_expensive: 10  # risk_parity, mvo_ledoit_wolf, hrp — top-10 by signal Sharpe
+      cost_sensitivity: 1       # top-1 of {signal+allocation} per label
+      risk_overlay: 1           # top-1 of {signal+allocation} per label
+    # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
+    expensive_allocators_skip: false
+    # Allocators routed through ``allocation_expensive`` (top-10 by signal Sharpe).
+    # All others (equal_weight, score_weighted, inverse_vol) take the cheap path.
+    expensive_allocators: [risk_parity, mvo_ledoit_wolf, hrp, conformal_weighted]
+    # Ch16 signal-stage selection. Long-only equal-weight top-k. Percentile
+    # and quantile axes are commented out; uncomment to add them for any
+    # label and the loader will synthesize the schemes automatically.
+    top_k_grid:
+      fwd_ret_21d: [10, 20]
+      fwd_ret_5d:  [10, 20]
+    # percentile_grid:
+    #   fwd_ret_21d: [80, 90, 95]
+    # quantile_grid:
+    #   fwd_ret_21d: [5, 10]
+    # Ch17 portfolio: reuses top_k_grid above and sweeps over allocators.
+    # Moment-based allocators (IV/RP/HRP/MVO_LW) all use the CS-level
+    # ``execution.allocator_lookback`` — no per-allocator vol_window / lookback
+    # fields. No max-weight cap: each allocator expresses its natural
+    # concentration profile so the cross-method comparison is honest. MVO uses
+    # Ledoit-Wolf shrinkage as its covariance regularizer; IV/RP/HRP have
+    # method-inherent diversification; score_weighted is reported unconstrained.
+    allocators:
+      - {name: equal_weight,    method: equal_weight}
+      - {name: score_weighted,  method: score_weighted}
+      - {name: inverse_vol,     method: inverse_vol}
+      - {name: risk_parity,     method: risk_parity}
+      - {name: mvo_ledoit_wolf, method: mvo_ledoit_wolf}
+      - {name: hrp,             method: hrp}
+      - {name: conformal_weighted, method: conformal_weighted}
+    # Ch18 cost sensitivity (bps regime).
+    cost_grid_bps: [0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 50]
+    # Companion per-share cost regime: dollars per share half-spread. Swept
+    # alongside cost_grid_bps for CSes whose declared cost model is
+    # per_share_plus_spread. Values: 0¢, 0.5¢, 1¢, 2.5¢, 5¢, 10¢.
+    cost_grid_half_spread_usd: [0.0, 0.005, 0.01, 0.025, 0.05, 0.10]
+    # Ch19 risk overlays.
+    risk_controls:
+      position:
+        - {name: stop_loss_3pct,  type: stop_loss,     threshold: 0.03}
+        - {name: stop_loss_5pct,  type: stop_loss,     threshold: 0.05}
+        - {name: stop_loss_10pct, type: stop_loss,     threshold: 0.10}
+        - {name: stop_loss_15pct, type: stop_loss,     threshold: 0.15}
+        - {name: trailing_1pct,   type: trailing_stop, threshold: 0.01}
+        - {name: trailing_2pct,   type: trailing_stop, threshold: 0.02}
+        - {name: trailing_3pct,   type: trailing_stop, threshold: 0.03}
+        - {name: trailing_5pct,   type: trailing_stop, threshold: 0.05}
+        - {name: trailing_10pct,  type: trailing_stop, threshold: 0.10}
+        - {name: trailing_15pct,  type: trailing_stop, threshold: 0.15}
+        - {name: trailing_20pct,  type: trailing_stop, threshold: 0.20}
+        - {name: time_exit_10,    type: time_exit,     bars: 10}
+        - {name: time_exit_20,    type: time_exit,     bars: 20}
+        - {name: time_exit_40,    type: time_exit,     bars: 40}
+
+evaluation:
+  n_splits: 8
+  train_size: 10Y
+  val_size: 1Y
+  holdout_start: '2024-01-01'
+  holdout_end: '2025-12-31'
+  calendar: NYSE
+  periods_per_year: 252  # NYSE 5d/wk
+
+modeling:
+  gbm:
+    libraries: [lightgbm]
+    preset: default
+    device: gpu
+  latent_factors:
+    persistent_entities: true
+    model_kwargs:
+      sdf:
+        checkpoint_epochs: [256, 512, 768, 1024, 1280]
+        beta_checkpoint_epochs: [256]
+        beta_default_checkpoint: 256
+
+causal:
+  treatment: skip_recent_6_1
+  confounders: [vol_21d, vol_126d, regime, yield_curve_slope]
+  method: walk_forward_dml

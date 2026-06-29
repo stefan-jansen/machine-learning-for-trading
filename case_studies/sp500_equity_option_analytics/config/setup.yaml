@@ -1,0 +1,189 @@
+strategy_id: sp500_equity_option_analytics
+setup_version: v1
+
+universe:
+  n_assets: 633
+  eligibility_rule: sp500_with_options
+
+decision:
+  cadence: weekly_friday_close
+  snapshot: friday_16:00_et
+  execution_delay: monday_open
+  iv_feature_lag: 1_day
+
+# Engine-level execution defaults. Single source of truth — Ch16-19 notebooks
+# read these via get_backtest_config(); never declare a local INITIAL_CASH
+# or share_type constant. Changing values here invalidates every existing
+# backtest_hash for this case study.
+#
+# Spec-hash inputs (each invalidates every backtest_hash on change):
+#   - execution.initial_cash
+#   - execution.share_type
+#   - execution.allocator_lookback (CS-level fallback for moment allocators)
+#   - per-allocator overrides in backtest.sweep.allocators
+#
+# ``allocator_lookback`` is the bars-of-underlying-price window applied
+# uniformly to every moment-based allocator. Daily S&P 500 equity bars
+# → 63 ≈ 3 months. ``mvo_ledoit_wolf`` carries an explicit per-allocator
+# override below (126 bars ≈ 6 months) so N/K shrinkage degeneracy doesn't
+# collapse it to identity-target at top_k=20.
+#
+# ``initial_cash`` restored to 1_000_000 (2026-05-16) — the 2026-05-15 SSOT
+# migration drop to 100k caused near-zero rebalancing here (min num_trades
+# = 27 over 4y daily on 500-name × top_k=20: at $5k/name budget × integer
+# rounding × the S&P high-priced tail, the engine almost never trades).
+# See memory/feedback_2026_05_15_equity_sizing_invalidated.md.
+execution:
+  initial_cash: 1_000_000        # restores prior validated state
+  share_type: integer            # US equities trade in whole shares
+  allocator_lookback: 63         # 3 months of daily bars (IV/RP/HRP fallback)
+
+mapping:
+  class: long_only_rank_and_rebalance
+  position_state_space: long_only
+  entry_logic: rank_by_iv_signal
+  sizing: equal_weight
+
+costs:
+  class: material
+  model: percentage          # Loader path: bps regime via per_leg_cost_bps_range midpoint.
+  components: [spread, commission, market_impact]
+  per_leg_cost_bps_range: [3, 10]
+  round_trip_cost_bps: 13    # Midpoint of per_leg_cost_bps_range (6.5 bps × 2 legs).
+  # per_share is the commission rate for the exploratory per-share
+  # cost-sensitivity regime (read by Ch18 16_costs.py and the run_sweep
+  # planner). IBKR Pro Tiered top tier. NOT used in the headline bps
+  # regime — bps regime is the production cost model.
+  per_share: 0.0035
+  note: Trades equities (not options); S&P 500 names are liquid and weekly rebalancing keeps turnover moderate.
+
+backtest:
+  rebalance:
+    # A rebalance is skipped when the per-asset weight change is below
+    # min_weight_change AND the resulting trade notional is below
+    # min_trade_value. The benchmark profile disables thresholds so that
+    # full-universe equal-weight (1/N per asset) rebalances at all.
+    default:
+      min_weight_change: 0.005
+      min_trade_value: 100.0
+    benchmark:
+      min_weight_change: 0.0
+      min_trade_value: 0.0
+  sweep:
+    # Iteration controls per stage. ``signal: 0`` means "all predictions";
+    # downstream stages take the top-N from the upstream stage's rank-1.
+    # Notebooks read these via get_top_n_predictions(case_study, stage).
+    top_n_predictions:
+      signal: 0                 # all signal predictions (eq-weight baseline)
+      allocation_cheap: 0       # score_weighted, inverse_vol — all signal preds
+      allocation_expensive: 10  # risk_parity, mvo_ledoit_wolf, hrp — top-10 by signal Sharpe
+      cost_sensitivity: 1       # top-1 of {signal+allocation} per label
+      risk_overlay: 1           # top-1 of {signal+allocation} per label
+    # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
+    expensive_allocators_skip: false
+    # Allocators routed through ``allocation_expensive`` (top-10 by signal Sharpe).
+    # All others (equal_weight, score_weighted, inverse_vol) take the cheap path.
+    expensive_allocators: [risk_parity, mvo_ledoit_wolf, hrp, conformal_weighted]
+    # Ch16 signal-stage selection. Long-only equal-weight top-k for every
+    # label.
+    top_k_grid:
+      fwd_ret_5d:           [5, 10, 20]
+      fwd_ret_10d:          [5, 10, 20]
+      fwd_ret_risk_adj_5d:  [5, 10, 20]
+      fwd_dir_5d:           [5, 10, 20]
+      fwd_dir_10d:          [5, 10, 20]
+    # Ch17 portfolio: reuses top_k_grid above and sweeps over allocators.
+    # Moment-based allocators (IV/RP/HRP) use the CS-level
+    # ``execution.allocator_lookback`` (63 bars). ``mvo_ledoit_wolf`` gets
+    # an explicit 126-bar override (6 months) so N/K ≥ 2.5 at top_k=20 and
+    # Ledoit-Wolf shrinkage doesn't collapse to identity-target.
+    # No max_weight cap — see memory/feedback_max_weight_caps_intentionally_absent.md
+    # (the prior 0.40 cap was already the loosened-from-0.20 workaround;
+    # restoring it would push moment allocators back toward equal-weight).
+    allocators:
+      - {name: equal_weight,    method: equal_weight}
+      - {name: score_weighted,  method: score_weighted}
+      - {name: inverse_vol,     method: inverse_vol}
+      - {name: risk_parity,     method: risk_parity}
+      - {name: mvo_ledoit_wolf, method: mvo_ledoit_wolf, lookback: 126}
+      - {name: hrp,             method: hrp}
+      - {name: conformal_weighted, method: conformal_weighted}
+    # Ch18 cost sensitivity (bps regime — headline). A companion per-share
+    # regime is run from Ch18 cost notebooks for regime comparison; for
+    # sp500_eoa it is exploratory only because flat-default half-spread on
+    # split-adjusted prices conflates split adjustment with realized
+    # friction.
+    cost_grid_bps: [0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 50]
+    # Companion per-share half-spread grid (USD per share). Swept alongside
+    # cost_grid_bps by the planner. Values: 0¢, 0.5¢, 1¢, 2.5¢, 5¢, 10¢.
+    cost_grid_half_spread_usd: [0.0, 0.005, 0.01, 0.025, 0.05, 0.10]
+    # Ch19 risk overlays.
+    risk_controls:
+      position:
+        - {name: stop_loss_3pct,  type: stop_loss,     threshold: 0.03}
+        - {name: stop_loss_5pct,  type: stop_loss,     threshold: 0.05}
+        - {name: stop_loss_10pct, type: stop_loss,     threshold: 0.10}
+        - {name: stop_loss_15pct, type: stop_loss,     threshold: 0.15}
+        - {name: trailing_1pct,   type: trailing_stop, threshold: 0.01}
+        - {name: trailing_2pct,   type: trailing_stop, threshold: 0.02}
+        - {name: trailing_3pct,   type: trailing_stop, threshold: 0.03}
+        - {name: trailing_5pct,   type: trailing_stop, threshold: 0.05}
+        - {name: trailing_10pct,  type: trailing_stop, threshold: 0.10}
+        - {name: trailing_15pct,  type: trailing_stop, threshold: 0.15}
+        - {name: trailing_20pct,  type: trailing_stop, threshold: 0.20}
+        - {name: time_exit_10,    type: time_exit,     bars: 10}
+        - {name: time_exit_20,    type: time_exit,     bars: 20}
+        - {name: time_exit_40,    type: time_exit,     bars: 40}
+
+evaluation:
+  n_splits: 2
+  train_size: 2Y
+  val_size: 1Y
+  holdout_start: '2021-01-01'
+  holdout_end: '2021-12-31'
+  calendar: NYSE
+  periods_per_year: 252  # NYSE 5d/wk
+
+labels:
+  primary: fwd_ret_5d
+  buffer: 10D
+  variants:
+    - fwd_ret_10d
+    - fwd_ret_risk_adj_5d
+    - fwd_dir_5d
+    - fwd_dir_10d
+  variant_buffers:
+    fwd_ret_10d: 10D
+    fwd_ret_risk_adj_5d: 5D
+    fwd_dir_5d: 5D
+    fwd_dir_10d: 10D
+  # Vectorized-backtest thinning step per label: number of schedule slots
+  # to advance per trade so holding periods don't overlap.
+  rebalance_step:
+    fwd_ret_5d: 1            # ceil(5 / 5) on the weekly_friday schedule
+    fwd_ret_10d: 2           # ceil(10 / 5)
+    fwd_ret_risk_adj_5d: 1   # ceil(5 / 5)
+    fwd_dir_5d: 1            # ceil(5 / 5)
+    fwd_dir_10d: 2           # ceil(10 / 5)
+  # Continuous return that each classification label is derived from.
+  classification_eval_label:
+    fwd_dir_5d: fwd_ret_5d
+    fwd_dir_10d: fwd_ret_10d
+
+modeling:
+  gbm:
+    libraries: [lightgbm]
+    preset: default
+    device: gpu
+  latent_factors:
+    persistent_entities: true
+    model_kwargs:
+      sdf:
+        checkpoint_epochs: [256, 512, 768, 1024, 1280]
+        beta_checkpoint_epochs: [256]
+        beta_default_checkpoint: 256
+
+causal:
+  treatment: ivrv_spread
+  confounders: [rv_20, mom_21d, skew_rr_30_25d]
+  method: walk_forward_dml

@@ -1,0 +1,179 @@
+strategy_id: crypto_perps_funding
+setup_version: v1
+
+universe:
+  symbols:
+    - AAVEUSDT
+    - ADAUSDT
+    - APTUSDT
+    - ATOMUSDT
+    - AVAXUSDT
+    - BNBUSDT
+    - BTCUSDT
+    - COMPUSDT
+    - DOGEUSDT
+    - DOTUSDT
+    - ETHUSDT
+    - INJUSDT
+    - LINKUSDT
+    - MKRUSDT
+    - NEARUSDT
+    - SOLUSDT
+    - SUIUSDT
+    - UNIUSDT
+    - XRPUSDT
+  n_assets: 19
+  eligibility_rule: top_perps_by_volume
+  panel_note: Unbalanced panel; assets enter at listing date (no backfill).
+
+decision:
+  cadence: 8_hour_funding_aligned
+  snapshot: pre_funding_timestamp
+  execution_delay: at_funding_timestamp
+
+# Engine-level execution defaults. Single source of truth — Ch16-19 notebooks
+# read these via get_backtest_config(); never declare a local INITIAL_CASH
+# or share_type constant. Changing values here invalidates every existing
+# backtest_hash for this case study (cash + share_type are spec-hash inputs).
+#
+# ``allocator_lookback`` is the bars-of-underlying-price window applied
+# uniformly to every moment-based allocator (inverse_vol, risk_parity, hrp,
+# mvo_ledoit_wolf). Crypto perps trade 8-hourly (3 bars/day); 240 bars
+# ≈ 80 days of underlying coverage. CS-level ``periods_per_year=365``
+# annualizes Sharpe at daily-equivalent grain; allocator windows are
+# measured in raw 8h bars regardless.
+execution:
+  initial_cash: 100_000          # IBKR retail-equivalent cohort default
+  share_type: fractional         # Crypto perps trade in fractional contracts
+  allocator_lookback: 240        # ~80 days of 8-hourly bars
+
+mapping:
+  class: long_short_funding_aligned
+  position_state_space: long_short
+  entry_logic: threshold_or_rank_based
+  sizing: equal_weight_or_risk_parity
+
+costs:
+  class: material
+  components: [taker_fee, maker_fee]
+  # Headline tier used by Ch18 spread-estimation and the cost-comparison
+  # analytics in 12_model_analysis. Majors (BTC, ETH, BNB, SOL, XRP) clear
+  # with maker fees at the tight spread; alts pay taker.
+  fee_schedule:
+    taker_bps: 4
+    maker_bps: 2
+
+backtest:
+  rebalance:
+    # A rebalance is skipped when the per-asset weight change is below
+    # min_weight_change AND the resulting trade notional is below
+    # min_trade_value. The benchmark profile disables thresholds so that
+    # full-universe equal-weight (1/N per asset) rebalances at all.
+    default:
+      min_weight_change: 0.005
+      min_trade_value: 100.0
+    benchmark:
+      min_weight_change: 0.0
+      min_trade_value: 0.0
+  sweep:
+    # Iteration controls per stage. ``signal: 0`` means "all predictions";
+    # downstream stages take the top-N from the upstream stage's rank-1.
+    # Notebooks read these via get_top_n_predictions(case_study, stage).
+    top_n_predictions:
+      signal: 0                 # all signal predictions (eq-weight baseline)
+      allocation_cheap: 0       # score_weighted, inverse_vol — all signal preds
+      allocation_expensive: 10  # risk_parity, mvo_ledoit_wolf, hrp — top-10 by signal Sharpe
+      cost_sensitivity: 1       # top-1 of {signal+allocation} per label
+      risk_overlay: 1           # top-1 of {signal+allocation} per label
+    # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
+    expensive_allocators_skip: false
+    # Allocators routed through ``allocation_expensive`` (top-10 by signal Sharpe).
+    # All others (equal_weight, score_weighted, inverse_vol) take the cheap path.
+    expensive_allocators: [risk_parity, mvo_ledoit_wolf, hrp, conformal_weighted]
+    # Ch16 signal-stage selection. Long-short by construction. With only
+    # ~20 perps, every label exercises both top-k and quintile axes.
+    top_k_grid:
+      fwd_ret_8h:    [5, 10]
+      fwd_ret_24h:   [5, 10]
+      fwd_dir_8h:    [5, 10]
+      fwd_dir_8h_3c: [5, 10]
+    quantile_grid:
+      fwd_ret_8h:    [5]
+      fwd_ret_24h:   [5]
+      fwd_dir_8h:    [5]
+      fwd_dir_8h_3c: [5]
+    # Ch17 portfolio: reuses top_k_grid above and sweeps over allocators.
+    # Moment-based allocators (IV/RP/HRP/MVO_LW) all use the CS-level
+    # ``execution.allocator_lookback`` (240 8-hourly bars). No max-weight cap.
+    allocators:
+      - {name: equal_weight,    method: equal_weight}
+      - {name: score_weighted,  method: score_weighted}
+      - {name: inverse_vol,     method: inverse_vol}
+      - {name: risk_parity,     method: risk_parity}
+      - {name: mvo_ledoit_wolf, method: mvo_ledoit_wolf}
+      - {name: hrp,             method: hrp}
+      - {name: conformal_weighted, method: conformal_weighted}
+    # Ch18 cost sensitivity (bps).
+    cost_grid_bps: [0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 50]
+    # Ch19 risk overlays.
+    risk_controls:
+      position:
+        - {name: stop_loss_3pct,  type: stop_loss,     threshold: 0.03}
+        - {name: stop_loss_5pct,  type: stop_loss,     threshold: 0.05}
+        - {name: stop_loss_10pct, type: stop_loss,     threshold: 0.10}
+        - {name: stop_loss_15pct, type: stop_loss,     threshold: 0.15}
+        - {name: trailing_1pct,   type: trailing_stop, threshold: 0.01}
+        - {name: trailing_2pct,   type: trailing_stop, threshold: 0.02}
+        - {name: trailing_3pct,   type: trailing_stop, threshold: 0.03}
+        - {name: trailing_5pct,   type: trailing_stop, threshold: 0.05}
+        - {name: trailing_10pct,  type: trailing_stop, threshold: 0.10}
+        - {name: trailing_15pct,  type: trailing_stop, threshold: 0.15}
+        - {name: trailing_20pct,  type: trailing_stop, threshold: 0.20}
+        - {name: time_exit_10,    type: time_exit,     bars: 10}
+        - {name: time_exit_20,    type: time_exit,     bars: 20}
+        - {name: time_exit_40,    type: time_exit,     bars: 40}
+
+evaluation:
+  n_splits: 2
+  train_size: 2Y
+  val_size: 1Y
+  holdout_start: '2024-01-01'
+  holdout_end: '2025-12-31'
+  calendar: crypto
+  periods_per_year: 365  # crypto 7d/wk
+
+labels:
+  primary: fwd_ret_8h
+  buffer: 8H
+  variants:
+    - fwd_ret_24h
+    - fwd_dir_8h
+    - fwd_dir_8h_3c
+  variant_buffers:
+    fwd_ret_24h: 24H
+    fwd_dir_8h: 8H
+    fwd_dir_8h_3c: 8H
+  # Vectorized-backtest thinning step per label: number of schedule slots
+  # to advance per trade so holding periods don't overlap.
+  rebalance_step:
+    fwd_ret_8h: 1
+    fwd_ret_24h: 3   # 8h schedule, 24h horizon -> ceil(24/8) = 3
+    fwd_dir_8h: 1
+    fwd_dir_8h_3c: 1
+  # Continuous return that each classification label is derived from.
+  # IC for classification predictions is computed against this column;
+  # AUC/accuracy/log_loss are computed against the binary label itself.
+  classification_eval_label:
+    fwd_dir_8h: fwd_ret_8h
+    fwd_dir_8h_3c: fwd_ret_8h
+
+modeling:
+  gbm:
+    libraries: [lightgbm]
+    preset: default
+    device: gpu
+
+causal:
+  treatment: premium_zscore_14d
+  confounders: [price_vol_14d, funding_rate, premium_dev_mean_14d]
+  method: walk_forward_dml
