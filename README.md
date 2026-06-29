@@ -22,18 +22,19 @@ strategy you can actually run, and keep running, in a live market.
 
 ## 🎓 New: Live Courses & Lightning Lessons
 
-For the first time, the third edition comes with **live, cohort-based courses** and free lightning lessons
-taught by Stefan on [Maven](https://maven.com/stefan-jansen) — full schedule on the
+For the first time, the third edition comes with a **live cohort course**, hands-on **workshops**, and free
+**lightning lessons** taught by Stefan on [Maven](https://maven.com/stefan-jansen) — full schedule on the
 [courses page](https://ml4trading.io/courses/).
 
 - **▶ [Machine Learning for Trading: From Research to Production](https://maven.com/stefan-jansen/research-to-production)**
-  — the flagship live cohort: take a research idea all the way to a deployed, monitored strategy, working through the
-  book's end-to-end workflow with direct feedback. **The first cohort starts Monday, July 6, 2026 — enrollment closes
-  Friday, July 3.**
+  — the flagship live cohort course: take a research idea all the way to a deployed, monitored strategy, working
+  through the book's end-to-end workflow with direct feedback. **The first cohort starts Monday, July 6, 2026 —
+  enrollment closes Friday, July 3.**
 - **[Getting Stuff Done with Coding Agents](https://maven.com/p/8394ac/getting-stuff-done-with-coding-agents?utm_medium=ll_share_link&utm_source=instructor)**
   — a free lightning lesson on putting coding agents to work.
 - **[Building Multi-Agent Forecasting Systems](https://maven.com/stefan-jansen/forecasting-agents)**
-  — the next live cohort: design auditable multi-agent systems for financial research.
+  — a hands-on workshop on engineering the forecasting-agent loop: building auditable, debate-driven multi-agent
+  systems for financial research.
 
 ---
 
@@ -139,20 +140,6 @@ multiple-testing errors. Each category links to its full set; a few skills show 
 - [Workflows](https://ml4trading.io/skills/): 5 skills covering factor research, model validation, and production
   readiness.
 - [Production](https://ml4trading.io/skills/): 2 skills, live trading and monitoring & alerting.
-
-### Courses
-
-[Cohort-based courses](https://ml4trading.io/courses/) on [Maven](https://maven.com/stefan-jansen) that work through
-the material live, with direct feedback:
-
-- [Machine Learning for Trading: From Research to Production](https://maven.com/stefan-jansen/research-to-production):
-  take a research idea all the way to a deployed, monitored strategy.
-- [Building Multi-Agent Forecasting Systems](https://maven.com/stefan-jansen/forecasting-agents):
-  design auditable multi-agent systems for financial research.
-
-Each course runs as a scheduled cohort; the links above always point to the next one, where you can enroll or join the
-waitlist. *Stay current between cohorts with the
-twice-weekly [**Insights** newsletter](https://insights.ml4trading.io/).*
 
 ---
 
@@ -414,11 +401,6 @@ preamble. Full details in the **[Docker environments guide](envs/README.md)**.
 
 New chapters and notebooks are added over the coming weeks. ⭐ Watch or star the repo to follow along, and subscribe to
 the twice-weekly [**Insights** newsletter](https://insights.ml4trading.io/).
-
-The flagship live cohort course
-[**Machine Learning for Trading: From Research to Production**](https://maven.com/stefan-jansen/research-to-production)
-starts **Monday, July 6, 2026** — **enrollment closes Friday, July 3**. See the
-**Live Courses & Lightning Lessons** section above for the full schedule.
 
 **Looking for the second edition?** It is complete and stable on the `second-edition` branch —
 `git checkout second-edition`, and everything is exactly where the book describes it.
