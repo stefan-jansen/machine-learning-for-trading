@@ -36,6 +36,10 @@ For the first time, the third edition comes with a **live cohort course**, hands
   — a hands-on workshop on engineering the forecasting-agent loop: building auditable, debate-driven multi-agent
   systems for financial research.
 
+<p align="center">
+  <a href="https://youtu.be/Ksxv9QVZSOo"><img src="assets/course-trailer.jpg" width="60%" alt="Watch the course overview: Machine Learning for Trading — From Research to Production"></a>
+</p>
+
 ---
 
 ## What's New in the Third Edition
