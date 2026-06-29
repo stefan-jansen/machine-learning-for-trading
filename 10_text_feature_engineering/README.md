@@ -2,9 +2,11 @@
 
 The chapter establishes the baseline methods that made large-scale financial text analysis possible: lexicons, bag-of-words, and TF-IDF. It matters because it shows both why these methods remain useful and why they are not enough for modern trading use cases: they are fast, interpretable, and domain-adaptable, but they cannot represent context, synonymy, negation, or changing meaning across uses.
 
-![Evolution of NLP feature engineering](../assets/chapter_figures/figure_10_1_nlp_feature_engineering_evolution.jpeg)
+<p align="center">
+  <img src="../assets/chapter_figures/figure_10_1_nlp_feature_engineering_evolution.jpeg" width="760" alt="Evolution of NLP feature engineering">
+</p>
 
-*Financial text features have moved from dictionaries and bag-of-words toward contextual Transformer representations such as BERT and FinBERT.*
+<p align="center"><em>Financial text features have moved from dictionaries and bag-of-words toward contextual Transformer representations such as BERT and FinBERT.</em></p>
 
 ## Learning Objectives
 

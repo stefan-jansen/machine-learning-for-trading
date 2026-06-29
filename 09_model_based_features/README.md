@@ -2,9 +2,11 @@
 
 The chapter reframes diagnostics as more than preprocessing checks. Stationarity tests, break diagnostics, and fractional differencing become feature generators in their own right, helping the reader think about persistence, structural instability, and memory preservation as inputs to downstream models rather than as one-time gates before modeling begins. It matters because many financial series are only usable once we understand what kind of temporal object they are and how much transformation is justified.
 
-![Hidden Markov model regime architecture](../assets/chapter_figures/figure_9_3_hmm_architecture.jpeg)
+<p align="center">
+  <img src="../assets/chapter_figures/figure_9_3_hmm_architecture.jpeg" width="760" alt="Hidden Markov model regime architecture">
+</p>
 
-*Regime models turn latent market states into filtered probabilities that can be used as features without looking into the future.*
+<p align="center"><em>Regime models turn latent market states into filtered probabilities that can be used as features without looking into the future.</em></p>
 
 ## Learning Objectives
 

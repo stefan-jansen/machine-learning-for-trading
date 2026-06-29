@@ -2,9 +2,11 @@
 
 The chapter establishes the chapter's core claim: a trading strategy is not just a signal or model, but an executable decision process that has to be defined at decision time and evaluated as if it were live. It distinguishes the live trading loop from the research loop and shows why disciplined iteration matters if historical testing is supposed to say anything about future behavior. The case studies make the workflow concrete across asset classes, cadences, and market structures, so readers see early that the same research logic must survive very different implementation environments.
 
-![Live trading loop and research loop](../assets/chapter_figures/figure_6_1_research_loop.jpeg)
+<p align="center">
+  <img src="../assets/chapter_figures/figure_6_1_research_loop.jpeg" width="760" alt="Live trading loop and research loop">
+</p>
 
-*The chapter separates the live trading loop from the research loop. The live loop runs on a fixed cadence; the research loop improves the pipeline under a fixed setup and evaluation protocol.*
+<p align="center"><em>The chapter separates the live trading loop from the research loop. The live loop runs on a fixed cadence; the research loop improves the pipeline under a fixed setup and evaluation protocol.</em></p>
 
 ## Learning Objectives
 
