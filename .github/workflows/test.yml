@@ -149,7 +149,20 @@ jobs:
 
           # --- Chapter matrix (all chapters including Ch01 and Ch05) ---
           chapters="[]"
-          add_ch() { chapters=$(echo "$chapters" | jq -c --arg n "$1" --arg f "$2" '. + [{"name":$n,"filter":$f}]'); }
+          # Public-subset scoping: include a chapter only if at least one of its
+          # NN_* directories is actually present. The public repo ships chapters
+          # incrementally (beat by beat), so this auto-scopes the matrix to what
+          # is shipped — no per-beat workflow edits, and unshipped chapters can't
+          # fail with "no tests collected".
+          add_ch() {
+            local n="$1" f="$2" p
+            for p in $(echo "$f" | grep -oE '[0-9]{2}_' || true); do
+              if compgen -G "${p}*" >/dev/null 2>&1; then
+                chapters=$(echo "$chapters" | jq -c --arg n "$n" --arg f "$f" '. + [{"name":$n,"filter":$f}]')
+                return
+              fi
+            done
+          }
 
           if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch01 }}" == "true" ]]; then
             add_ch "ch01" "01_process"
@@ -231,7 +244,14 @@ jobs:
 
           # --- Case study matrix ---
           cases="[]"
-          add_cs() { cases=$(echo "$cases" | jq -c --arg cs "$1" '. + [{"case-study":$cs}]'); }
+          # Public repo ships case-study CONFIG but gates RESULTS. Only run a
+          # case study's pipeline test if its results registry is actually
+          # present — currently none are, so case-study jobs stay skipped.
+          add_cs() {
+            if [ -f "case_studies/$1/run_log/registry.db" ]; then
+              cases=$(echo "$cases" | jq -c --arg cs "$1" '. + [{"case-study":$cs}]')
+            fi
+          }
 
           if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-etfs }}" == "true" ]]; then
             add_cs "etfs"

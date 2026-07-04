@@ -72,19 +72,20 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
           TEST_FILTER_INPUT: ${{ github.event.inputs.test_filter }}
+          # NO-SPEND POLICY: only FREE providers are wired here. Billed APIs
+          # (OpenAI, OKX authenticated, Databento) are intentionally NOT passed,
+          # so any notebook needing them skips rather than incurs a charge.
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           EDGAR_IDENTITY: ${{ secrets.EDGAR_IDENTITY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
-          OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
-          OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
           set +e
           FILTER_ARGS=""
           if [ -n "${TEST_FILTER_INPUT:-}" ]; then
             FILTER_ARGS="-k ${TEST_FILTER_INPUT}"
           fi
-          python -m pytest tests/test_chapter_notebooks.py tests/test_case_studies.py \
+          # Public repo: chapter notebooks only. Case-study pipeline tests need
+          # gated results/registries that aren't shipped, so they're excluded.
+          python -m pytest tests/test_chapter_notebooks.py \
             -v --tb=short -m weekly $FILTER_ARGS \
             --junitxml=junit-weekly.xml
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
