@@ -79,14 +79,16 @@ jobs:
           EDGAR_IDENTITY: ${{ secrets.EDGAR_IDENTITY }}
         run: |
           set +e
-          FILTER_ARGS=""
+          # Build -k as an array so a multi-word filter (e.g. "foo or bar")
+          # stays a single pytest argument instead of being word-split.
+          FILTER_ARGS=()
           if [ -n "${TEST_FILTER_INPUT:-}" ]; then
-            FILTER_ARGS="-k ${TEST_FILTER_INPUT}"
+            FILTER_ARGS=(-k "${TEST_FILTER_INPUT}")
           fi
           # Public repo: chapter notebooks only. Case-study pipeline tests need
           # gated results/registries that aren't shipped, so they're excluded.
           python -m pytest tests/test_chapter_notebooks.py \
-            -v --tb=short -m weekly $FILTER_ARGS \
+            -v --tb=short -m weekly "${FILTER_ARGS[@]}" \
             --junitxml=junit-weekly.xml
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
         continue-on-error: true

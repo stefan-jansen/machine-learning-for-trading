@@ -244,11 +244,16 @@ jobs:
 
           # --- Case study matrix ---
           cases="[]"
-          # Public repo ships case-study CONFIG but gates RESULTS. Only run a
-          # case study's pipeline test if its results registry is actually
-          # present — currently none are, so case-study jobs stay skipped.
+          # Public repo ships case-study CONFIG but gates the pipeline code.
+          # test_case_studies.py auto-discovers stages by globbing
+          # case_studies/<cs>/[0-9][0-9]*.py, and the results registry is seeded
+          # from the test-data repo at run time (NOT shipped to this repo). So
+          # gate on the same signal the test collects: enroll a case study only
+          # once its pipeline notebooks are shipped here — currently only
+          # config/setup.yaml ships, so case-study jobs stay skipped. Future
+          # beats that ship the notebooks auto-enroll, no workflow edits.
           add_cs() {
-            if [ -f "case_studies/$1/run_log/registry.db" ]; then
+            if compgen -G "case_studies/$1/[0-9][0-9]*.py" >/dev/null 2>&1; then
               cases=$(echo "$cases" | jq -c --arg cs "$1" '. + [{"case-study":$cs}]')
             fi
           }
