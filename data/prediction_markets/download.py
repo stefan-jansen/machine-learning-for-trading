@@ -524,7 +524,12 @@ def main() -> None:
     # Kalshi (CFTC-regulated) and Polymarket restrict access by jurisdiction, so
     # "list markets" can fail at the network layer from some regions even though
     # the endpoints are up. This dataset is optional; note it rather than failing.
-    if summary.get("kalshi") == "no data" and summary.get("polymarket") == "no data":
+    # Fire the note whenever nothing was retrieved from the providers actually
+    # attempted (success sets *_rows; a bare "kalshi"/"polymarket" key means that
+    # provider was tried and returned no data), covering the single-provider case.
+    retrieved_any = "kalshi_rows" in summary or "polymarket_rows" in summary
+    no_data_reported = summary.get("kalshi") == "no data" or summary.get("polymarket") == "no data"
+    if no_data_reported and not retrieved_any:
         print(
             "\nNote: no prediction-market data was retrieved. Kalshi and Polymarket "
             "geo-restrict API access, so this can happen outside their supported "
