@@ -1,0 +1,100 @@
+# ML4T 3rd Edition — Container first-contact smoke (Phase 2b)
+#
+# Runs the reader's ACTUAL first command through docker compose, in the reader's
+# real image, and proves the free-data download can write to /data. This is the
+# only layer that catches compose/mount/env regressions like #361 (the `/data`
+# read-only mount) — a unit test can't, because it never composes the container.
+#
+# Cost control: the ml4t image is ~12 GB, so per-PR we run this ONLY when the
+# compose/env surface changes (docker-compose.yml, envs/**). The download-script
+# *logic* is covered deterministically by the native `test-unit` job on every PR
+# (tests/test_download_helpers.py et al.) and the static mount contract by
+# tests/test_compose_mounts.py — neither needs the image. The weekly run exercises
+# the full path regardless and files an issue if the reader's first contact breaks.
+
+name: Container Smoke
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Monday 06:00 UTC
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker-compose.yml'
+      - 'envs/**'
+      - '.github/workflows/container-smoke.yml'
+  workflow_dispatch:
+
+jobs:
+  container-smoke:
+    name: container-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: First-contact download in the composed container
+        id: smoke
+        env:
+          # Point the compose data mount at a workspace dir we own, so we can
+          # assert the downloaded files actually land on the host side of the
+          # bind mount (proves the mount is writable AND correctly wired).
+          ML4T_DATA_PATH: ${{ github.workspace }}/_smoke_data
+        run: |
+          set -o pipefail
+          mkdir -p "$ML4T_DATA_PATH"
+
+          # The reader's real first command, scoped to a single symbol so the
+          # pull is tiny. --user root mirrors the documented in-container
+          # download invocation and still fails hard on a read-only mount (even
+          # root cannot write to a `:ro` bind), so this catches the #361 class.
+          docker compose run --rm --user root ml4t \
+            python data/etfs/market/download.py --symbol SPY 2>&1 | tee smoke.log
+
+          echo "----- assertions -----"
+          # 1. No read-only-mount failure (the #361 signature).
+          if grep -qi "Read-only file system" smoke.log; then
+            echo "FAIL: container hit a read-only /data mount (#361 regression)"
+            exit 1
+          fi
+          # 2. The download actually populated the host side of the /data mount.
+          out="$ML4T_DATA_PATH/etfs/market/etf_universe.parquet"
+          if [ ! -f "$out" ]; then
+            echo "FAIL: expected $out on the host mount, but it is missing"
+            echo "Contents of $ML4T_DATA_PATH:"
+            find "$ML4T_DATA_PATH" -maxdepth 3 -print || true
+            exit 1
+          fi
+          echo "OK: $out present ($(du -h "$out" | cut -f1)) — /data mount is writable and wired"
+
+      - name: Open issue on weekly failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const title = 'container-smoke: first-contact download failed';
+            const q = `repo:${owner}/${repo} is:issue is:open in:title "${title}"`;
+            const existing = await github.rest.search.issuesAndPullRequests({ q });
+            if (existing.data.total_count > 0) {
+              const num = existing.data.items[0].number;
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: num,
+                body: `Failed again in the weekly container smoke: ${runUrl}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner, repo, title,
+                body: `The weekly container first-contact smoke failed.\n\n` +
+                      `The reader's \`docker compose run … data/etfs/market/download.py --symbol SPY\` ` +
+                      `did not populate \`/data\` in the composed \`ml4t\` container.\n\n` +
+                      `This is the #361 class (compose mount / env wiring). Run: ${runUrl}`,
+                labels: ['weekly-flake'],
+              });
+            }

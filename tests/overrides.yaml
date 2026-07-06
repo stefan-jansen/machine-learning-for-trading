@@ -34,14 +34,16 @@
 02_financial_data_universe/15_survivorship_bias_detection:
   timeout: 300
 02_financial_data_universe/16_provider_comparison:
-  skip: true
-  skip_reason: "YahooFinanceProvider.fetch_ohlcv() makes network calls \u2014 CI has no guaranteed internet"
+  # Live Yahoo Finance pulls. Runs in the weekly tier (GitHub runners have
+  # internet); flake-retried on transient network hiccups. Phase 3's drift smoke
+  # is the early-warning if Yahoo itself changes.
   tier: weekly
+  reruns: 2
   timeout: 300
 02_financial_data_universe/17_complete_pipeline:
-  skip: true
-  skip_reason: "YahooFinanceProvider.fetch_ohlcv() makes network calls \u2014 CI has no guaranteed internet"
+  # Live Yahoo Finance pulls. See 16_provider_comparison.
   tier: weekly
+  reruns: 2
   timeout: 300
 02_financial_data_universe/18_data_management:
   timeout: 300

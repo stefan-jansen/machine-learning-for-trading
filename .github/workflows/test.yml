@@ -317,7 +317,11 @@ jobs:
   # path is invisible to them — this is how the in-container free-data download
   # bug (#361) reached readers. These tests exercise that logic directly:
   # path resolution / output placement, download_all dispatch modes, the
-  # firm-characteristics archive flatten, and download-script registry drift.
+  # firm-characteristics archive flatten, download-script registry drift, the
+  # compose /data-mount contract (static regression-lock for #361), and the
+  # drift-coverage ratchet (every free dataset keeps a live external smoke).
+  # The networked container smoke (Phase 2b) and live drift pulls (Phase 3) run
+  # in container-smoke.yml / weekly-external.yml, not here.
   # ---------------------------------------------------------------------------
   test-unit:
     runs-on: ubuntu-latest
@@ -350,6 +354,8 @@ jobs:
             tests/test_firm_characteristics_extract.py \
             tests/test_download_all_dispatch.py \
             tests/test_download_scripts_registry.py \
+            tests/test_compose_mounts.py \
+            tests/test_download_coverage.py \
             -v --tb=short
 
   # ---------------------------------------------------------------------------

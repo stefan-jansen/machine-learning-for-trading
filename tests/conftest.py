@@ -389,6 +389,12 @@ def pytest_configure(config):
         "To execute locally, set ML4T_TEST_TIER=on_demand alongside `pytest -m on_demand`; "
         "without the env var, matching items are collected but skipped.",
     )
+    config.addinivalue_line(
+        "markers",
+        "drift: live external drift smoke (Phase 3) — one tiny real pull per free "
+        "data source. Network-bound; runs only in the scheduled weekly-external "
+        "workflow's `drift` job, never per-PR.",
+    )
 
 
 def pytest_collection_modifyitems(items):

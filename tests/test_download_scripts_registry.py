@@ -18,6 +18,23 @@ import data.download_all as da
 
 DATA_DIR = Path(da.__file__).parent
 
+# The free datasets a reader gets with ``download_all.py --free-only`` (no API
+# key, or a free key). Single source of truth: the registry ratchet below pins
+# that these ship, and ``tests/test_download_coverage.py`` (Phase 4) pins that
+# each keeps a live drift smoke — so a newly shipped free dataset can't land
+# without both a registry entry and an external-drift test.
+FREE_TIER_SCRIPTS = (
+    "etfs/market/download.py",
+    "crypto/market/download.py",
+    "prediction_markets/download.py",
+    "futures/positioning/cot_download.py",
+    "factors/ff_download.py",
+    "factors/aqr_download.py",
+    "equities/firm_characteristics/download.py",
+    "macro/download.py",
+    "fx/market/download.py",
+)
+
 
 def _discovered_download_scripts() -> set[str]:
     """All download scripts on disk, as paths relative to ``data/``."""
@@ -47,18 +64,7 @@ def test_every_download_script_is_registered():
 
 def test_free_tier_scripts_present():
     """The free datasets a reader gets with `download_all.py --free-only` all ship."""
-    free_tier = [
-        "etfs/market/download.py",
-        "crypto/market/download.py",
-        "prediction_markets/download.py",
-        "futures/positioning/cot_download.py",
-        "factors/ff_download.py",
-        "factors/aqr_download.py",
-        "equities/firm_characteristics/download.py",
-        "macro/download.py",
-        "fx/market/download.py",
-    ]
-    missing = [p for p in free_tier if not (DATA_DIR / p).is_file()]
+    missing = [p for p in FREE_TIER_SCRIPTS if not (DATA_DIR / p).is_file()]
     assert not missing, f"free-tier download scripts missing: {missing}"
 
 

@@ -172,3 +172,125 @@ jobs:
         run: |
           echo "Weekly pytest exited with code ${{ steps.pytest_chapters.outputs.exit_code }}"
           exit 1
+
+  # ---------------------------------------------------------------------------
+  # Phase 3 — live external drift smoke.
+  #
+  # One tiny REAL pull per free data source (tests/test_external_drift.py, marked
+  # `drift`). Catches upstream provider/schema drift: when a source moves,
+  # renames a file, or changes its payload shape, the matching test fails and we
+  # file a deduped issue. No billed APIs — key-gated sources (FRED, OANDA) skip
+  # when their free key is absent; geo-restricted sources (Kalshi/Polymarket)
+  # skip when blocked. Flake-tolerant via pytest-rerunfailures when available.
+  # ---------------------------------------------------------------------------
+  weekly-drift:
+    name: weekly-drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: ml4t/ml4t:latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Install git
+        run: apt-get update -qq && apt-get install -y -qq git >/dev/null
+
+      - uses: actions/checkout@v6
+
+      - name: Run external drift smoke
+        id: pytest_drift
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          # NO-SPEND POLICY: only FREE keys. Billed APIs stay unset → their
+          # drift tests skip rather than charge.
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          EDGAR_IDENTITY: ${{ secrets.EDGAR_IDENTITY }}
+        run: |
+          set +e
+          # utils.config requires a .env file to exist; create a minimal one and
+          # point the data path at the repo's own data/ dir (no test-data here).
+          printf 'ML4T_PATH=%s\nML4T_DATA_PATH=%s/data\n' \
+            "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE" > .env
+          # Flake tolerance only if pytest-rerunfailures is installed in the image.
+          RERUN_ARGS=""
+          if python -c "import pytest_rerunfailures" 2>/dev/null; then
+            RERUN_ARGS="--reruns 2 --reruns-delay 30"
+          fi
+          python -m pytest tests/test_external_drift.py -m drift \
+            -v --tb=short $RERUN_ARGS \
+            --junitxml=junit-drift.xml
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Upload junit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-drift
+          path: junit-drift.xml
+          retention-days: 30
+
+      - name: Open issues for drifted sources
+        if: always() && steps.pytest_drift.outputs.exit_code != '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let xml;
+            try {
+              xml = fs.readFileSync('junit-drift.xml', 'utf8');
+            } catch (e) {
+              core.info('No junit-drift.xml found; nothing to file.');
+              return;
+            }
+
+            // Dependency-free junit parse: <testcase> blocks with a child
+            // <failure>/<error> are real drift (skips are not failures).
+            const testcaseRe = /<testcase\b[^>]*>([\s\S]*?)<\/testcase>|<testcase\b[^>]*\/>/g;
+            const attrRe = (name) => new RegExp(`${name}="([^"]*)"`);
+            const failures = [];
+            let m;
+            while ((m = testcaseRe.exec(xml)) !== null) {
+              const block = m[0];
+              const body = m[1] || '';
+              if (!/<failure\b|<error\b/.test(body)) continue;
+              const nameMatch = block.match(attrRe('name'));
+              if (nameMatch) failures.push(nameMatch[1]);
+            }
+            core.info(`Found ${failures.length} drifted source(s).`);
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            for (const name of failures) {
+              // test_etf_yahoo_reachable -> etf_yahoo
+              const source = name.replace(/^test_/, '').replace(/_reachable$/, '');
+              const title = `external-drift: ${source}`;
+              const q = `repo:${owner}/${repo} is:issue is:open in:title "external-drift: ${source}"`;
+              const existing = await github.rest.search.issuesAndPullRequests({ q });
+              if (existing.data.total_count > 0) {
+                const num = existing.data.items[0].number;
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: num,
+                  body: `Drifted again in the weekly run: ${runUrl}`,
+                });
+              } else {
+                await github.rest.issues.create({
+                  owner, repo, title,
+                  body: `The weekly external drift smoke failed for \`${name}\`.\n\n` +
+                        `An upstream free data source appears to have moved, renamed a ` +
+                        `file, or changed its payload schema.\n\n` +
+                        `Run: ${runUrl}\n\n` +
+                        `Dedupes by source — comments append on subsequent failures.`,
+                  labels: ['external-drift', 'weekly-flake'],
+                });
+              }
+            }
+
+      - name: Fail job if drift smoke failed
+        if: steps.pytest_drift.outputs.exit_code != '0'
+        run: |
+          echo "Drift smoke exited with code ${{ steps.pytest_drift.outputs.exit_code }}"
+          exit 1
