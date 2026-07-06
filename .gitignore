@@ -135,6 +135,9 @@ case_studies/*/backtest/
 case_studies/*/strategy/
 case_studies/*/evaluation/
 case_studies/*/exploration/
+case_studies/*/config/exploration/
+case_studies/*/config/cv_config.json
+case_studies/*/eligibility.csv
 case_studies/*/registry.db
 case_studies/*/results/
 case_studies/*/*_v1_contaminated/
