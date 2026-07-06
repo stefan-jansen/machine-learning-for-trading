@@ -33,8 +33,15 @@ the original paper:
 
 ## Download
 
+This is the largest free dataset in the book: ~1.5 GB pulled from the
+authors' Google Drive folder (RetChar.csv alone is ~1.1 GB), followed by
+a CSV → parquet conversion. How long it takes depends on your bandwidth
+and disk speed — usually a few minutes, but treat that as indicative, not
+a guarantee. Per-file progress is printed as it runs. A single command
+downloads *and* converts — no separate `--convert` pass is needed.
+
 ```bash
-# Pull raw CSVs + NPZ arrays (~1.1 GB over the network)
+# Download the ~1.5 GB folder and convert to parquet in one step
 uv run python data/equities/firm_characteristics/download.py
 
 # Verify what's already on disk, do not refetch
@@ -43,10 +50,13 @@ uv run python data/equities/firm_characteristics/download.py --check
 # Force a re-download even if files exist
 uv run python data/equities/firm_characteristics/download.py --force
 
-# Convert the raw CSVs to the canonical firm_characteristics_*.parquet
-# files that the loader consumes (run once after a fresh download)
+# Re-run only the CSV → parquet conversion (files already downloaded)
 uv run python data/equities/firm_characteristics/download.py --convert
 ```
+
+It is also fetched automatically as part of `data/download_all.py`. To
+skip it there (e.g. on a metered or space-constrained connection), pass
+`--skip-firm-characteristics`.
 
 Output layout under `$ML4T_DATA_PATH/equities/firm_characteristics/`:
 

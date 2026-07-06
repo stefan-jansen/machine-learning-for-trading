@@ -137,19 +137,25 @@ def extract_zip(zip_path: Path, extract_dir: Path) -> bool:
             temp_dir.mkdir(parents=True, exist_ok=True)
             zf.extractall(temp_dir)
 
-            # Flatten nested structure
-            # Original structure might be: data/char/Char_train.npz
-            # We want: char/Char_train.npz
+            # Flatten nested structure. The published archives wrap their
+            # contents in a single top-level directory (e.g. datasets/char/...
+            # or data/char/...); we want char/... directly under extract_dir.
             for root, _dirs, files in os.walk(temp_dir):
                 root_path = Path(root)
                 rel_root = root_path.relative_to(temp_dir)
-
-                # Skip the top-level 'data' directory if it exists
                 parts = rel_root.parts
-                if parts and parts[0] == "data":
+
+                # Skip macOS archive cruft (__MACOSX/... resource forks)
+                if parts and parts[0] == "__MACOSX":
+                    continue
+
+                # Strip a redundant top-level wrapper directory
+                if parts and parts[0] in ("data", "datasets"):
                     rel_root = Path(*parts[1:]) if len(parts) > 1 else Path(".")
 
                 for file in files:
+                    if file == ".DS_Store":
+                        continue
                     src = root_path / file
                     if rel_root == Path("."):
                         dst = extract_dir / file
@@ -271,11 +277,17 @@ def main():
             print(f"\n[FAIL] Missing {len(missing)} files")
             return 1
 
-    # If all files exist and not forcing, exit
+    # If all source files exist and not forcing, skip download but ensure the
+    # parquet outputs exist (convert only if missing — the CSV read is ~1.1 GB).
     if not missing and not args.force:
-        print("\n[OK] All files already downloaded!")
+        print("\n[OK] All source files already downloaded!")
         print("  Use --force to re-download")
-        return 0
+        all_parquet = (
+            data_dir / "equities" / "firm_characteristics" / "firm_characteristics_all.parquet"
+        )
+        if all_parquet.exists():
+            return 0
+        return 0 if convert_to_parquet(data_dir) else 1
 
     # Try automatic download
     print("\nAttempting automatic download...")
@@ -290,10 +302,11 @@ def main():
 
     # Method 1: Download entire folder (more reliable than single-file IDs)
     print(f"Downloading from Google Drive folder: {GDRIVE_FOLDER_URL}")
+    print("  ~1.5 GB across 4 files (RetChar.csv ~1.1 GB) — per-file progress below.")
     try:
-        gdown.download_folder(
-            GDRIVE_FOLDER_URL, output=str(academic_dir), quiet=False, remaining_ok=True
-        )
+        # NOTE: no remaining_ok kwarg — it was removed in gdown 6.x and passing it
+        # raises TypeError, which silently aborts the (working) folder download.
+        gdown.download_folder(GDRIVE_FOLDER_URL, output=str(academic_dir), quiet=False)
     except Exception as e:
         print(f"Folder download failed: {e}")
 
@@ -313,11 +326,11 @@ def main():
     print("\nDownloading additional academic data files...")
     download_additional_files(academic_dir)
 
-    # Verify
+    # Verify, then convert RetChar.csv -> parquet splits
     found, missing = verify_files(academic_dir)
     if not missing:
         print("\n[OK] Download and extraction complete!")
-        return 0
+        return 0 if convert_to_parquet(data_dir) else 1
 
     # Method 2: Fall back to single-file download
     print("\nFolder download incomplete, trying single-file download...")
@@ -329,7 +342,7 @@ def main():
         if not missing:
             print("\n[OK] Download and extraction complete!")
             zip_path.unlink(missing_ok=True)
-            return 0
+            return 0 if convert_to_parquet(data_dir) else 1
 
     print(f"\nWARNING: {len(missing)} files still missing after download attempts")
     print_manual_instructions(academic_dir)

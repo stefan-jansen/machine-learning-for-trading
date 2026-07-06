@@ -153,14 +153,22 @@ def download_aqr_factors(data_path: Path):
 
 
 def download_firm_characteristics(data_path: Path):
-    """Download Chen-Pelger-Zhu firm characteristics (free, from GitHub)."""
+    """Download Chen-Pelger-Zhu firm characteristics (free academic dataset).
+
+    The download script fetches the ~1.5 GB Google Drive folder and converts
+    RetChar.csv to parquet in one step (no separate --convert pass needed).
+    """
     print("\n" + "=" * 60)
-    print("FIRM CHARACTERISTICS (Free - GitHub)")
+    print("FIRM CHARACTERISTICS (Free - Chen-Pelger-Zhu academic dataset)")
+    print("=" * 60)
+    print("  Largest free dataset: ~1.5 GB download (RetChar.csv is ~1.1 GB)")
+    print("  followed by a ~1.1 GB CSV -> parquet conversion.")
+    print("  Duration depends on your bandwidth (typically a few minutes).")
+    print("  Per-file download progress is shown below.")
+    print("  Skip with:  python data/download_all.py --skip-firm-characteristics")
     print("=" * 60)
 
-    return run_download_script(
-        "firm_characteristics.py", ["--data-path", str(data_path), "--convert"]
-    )
+    return run_download_script("firm_characteristics.py", ["--data-path", str(data_path)])
 
 
 def download_us_equities(data_path: Path):
@@ -316,6 +324,11 @@ def main():
     parser.add_argument(
         "--force", action="store_true", help="Force re-download even if data exists"
     )
+    parser.add_argument(
+        "--skip-firm-characteristics",
+        action="store_true",
+        help="Skip the large (~1.5 GB) firm-characteristics academic dataset",
+    )
     # Default to None so resolve_data_dir() applies the documented precedence:
     # explicit --data-path > ML4T_DATA_PATH env var > <repo>/data. A non-None
     # default here would be treated as an explicit CLI arg and override the env var.
@@ -348,6 +361,14 @@ def main():
     else:
         mode = "core"
     print(f"Mode:        {mode}")
+
+    # Heads-up on the one large free dataset so readers know what's coming.
+    if mode in ("core", "free-only", "all") and not args.skip_firm_characteristics:
+        print(
+            "\nHeads-up: this run includes the firm-characteristics academic dataset\n"
+            "          (~1.5 GB download + a ~1.1 GB CSV -> parquet conversion).\n"
+            "          Skip it with:  --skip-firm-characteristics"
+        )
 
     # Create data directory
     data_path.mkdir(parents=True, exist_ok=True)
@@ -391,7 +412,15 @@ def main():
     print("=" * 60)
     results["Fama-French"] = download_ff_factors(data_path)
     results["AQR"] = download_aqr_factors(data_path)
-    results["Firm Characteristics"] = download_firm_characteristics(data_path)
+    if args.skip_firm_characteristics:
+        print("\n" + "=" * 60)
+        print("FIRM CHARACTERISTICS - skipped (--skip-firm-characteristics)")
+        print("=" * 60)
+        print("  ~1.5 GB academic dataset (Chen-Pelger-Zhu). Fetch it later with:")
+        print("    python data/equities/firm_characteristics/download.py")
+        print("=" * 60)
+    else:
+        results["Firm Characteristics"] = download_firm_characteristics(data_path)
 
     # === FREE WITH API KEY ===
     if not args.free_only:

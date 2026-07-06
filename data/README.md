@@ -77,10 +77,15 @@ download URL and instructions will be published before launch.
 
 ## Download Commands
 
+> **Times below are rough, indicative estimates only.** Actual duration
+> depends on your bandwidth, the providers' current rate limits, and disk
+> speed — treat them as ballpark, not guarantees.
+
 ### Free Datasets (No API Keys)
 
 ```bash
-# All free datasets at once
+# All free datasets at once (includes the ~1.5 GB firm-characteristics
+# dataset; add --skip-firm-characteristics to leave it out)
 uv run python data/download_all.py --free-only
 
 # Individual datasets (from repo root)
@@ -88,7 +93,7 @@ uv run python data/etfs/market/download.py                           # ~30s
 uv run python data/crypto/market/download.py                         # ~10-15 min (see note)
 uv run python data/factors/ff_download.py                     # ~5s
 uv run python data/factors/aqr_download.py                    # ~5s
-uv run python data/equities/firm_characteristics/download.py  # ~3 min (1.1 GB)
+uv run python data/equities/firm_characteristics/download.py  # ~1.5 GB, largest free dataset; downloads + converts (minutes, bandwidth-dependent)
 uv run python data/futures/positioning/cot_download.py                    # ~2-3 min (CFTC CoT)
 ```
 
