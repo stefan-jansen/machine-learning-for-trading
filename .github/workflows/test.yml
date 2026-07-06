@@ -310,6 +310,41 @@ jobs:
         run: uvx ruff@0.15.8 format --check utils/ data/ tests/
 
   # ---------------------------------------------------------------------------
+  # Fast native unit tests — download-script logic (no Docker, no network,
+  # no test-data, no secrets). Seconds per PR.
+  #
+  # Notebook tests run against pre-seeded data, so the data/**/download.py code
+  # path is invisible to them — this is how the in-container free-data download
+  # bug (#361) reached readers. These tests exercise that logic directly:
+  # path resolution / output placement, download_all dispatch modes, the
+  # firm-characteristics archive flatten, and download-script registry drift.
+  # ---------------------------------------------------------------------------
+  test-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "latest"
+      - name: Install minimal test deps
+        # Just the import surface of the download-logic tests (utils/downloading
+        # + data/download_all + firm-char extract_zip). Intentionally NOT the
+        # full project env (no torch/ml4t-*) so this stays a fast per-commit gate.
+        run: |
+          uv venv --python 3.14
+          uv pip install pytest polars pyyaml python-dotenv plotly
+      - name: Run download-logic unit tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          .venv/bin/python -m pytest \
+            tests/test_download_helpers.py \
+            tests/test_firm_characteristics_extract.py \
+            tests/test_download_all_dispatch.py \
+            tests/test_download_scripts_registry.py \
+            -v --tb=short
+
+  # ---------------------------------------------------------------------------
   # Chapter notebook tests — inside Docker (ml4t/ml4t:latest)
   #
   # Runs the same Python 3.14 environment that readers use.
