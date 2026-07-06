@@ -336,10 +336,13 @@ jobs:
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
+          # Override the workflow-level test-data path: this job checks out no
+          # test-data. utils.config validates ML4T_DATA_PATH exists at import and
+          # reads the env var ahead of .env, so point both at the repo's own dirs.
+          ML4T_PATH: ${{ github.workspace }}
+          ML4T_DATA_PATH: ${{ github.workspace }}/data
         run: |
-          # utils.config validates that ML4T_DATA_PATH exists at import time.
-          # Point it at the repo's own data/ dir — these tests need no test-data,
-          # only that the import succeeds.
+          # utils.config also requires a .env file to exist; create a minimal one.
           printf 'ML4T_PATH=%s\nML4T_DATA_PATH=%s/data\n' \
             "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE" > .env
           .venv/bin/python -m pytest \
