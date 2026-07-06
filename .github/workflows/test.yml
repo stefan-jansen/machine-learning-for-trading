@@ -337,6 +337,11 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
+          # utils.config validates that ML4T_DATA_PATH exists at import time.
+          # Point it at the repo's own data/ dir — these tests need no test-data,
+          # only that the import succeeds.
+          printf 'ML4T_PATH=%s\nML4T_DATA_PATH=%s/data\n' \
+            "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE" > .env
           .venv/bin/python -m pytest \
             tests/test_download_helpers.py \
             tests/test_firm_characteristics_extract.py \
