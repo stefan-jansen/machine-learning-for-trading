@@ -31,7 +31,10 @@ x-common: &common
   user: "${UID:-1000}:${GID:-1000}"
   volumes:
     - .:/app:rw
-    - ${ML4T_DATA_PATH:-./data}:/data:ro
+    # Read-write so the in-container download workflow (data/download_all.py)
+    # can populate /data. ML4T_DATA_PATH=/data below points every downloader
+    # here; a read-only mount makes each write fail with "Read-only file system".
+    - ${ML4T_DATA_PATH:-./data}:/data:rw
   environment:
     - ML4T_DATA_PATH=/data
     - ML4T_PATH=/app

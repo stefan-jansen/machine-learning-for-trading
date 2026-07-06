@@ -8,6 +8,7 @@ from datetime import date
 from pathlib import Path
 
 import polars as pl
+import yaml
 
 from utils.downloading import (
     create_base_parser,
@@ -58,9 +59,15 @@ def main() -> None:
 
     data_root = resolve_data_dir(args.data_path)
     manager = ETFDataManager.from_config(args.config)
-    manager.config.storage_path = resolve_storage_path(
-        data_root, str(manager.config.storage_path), "etfs"
-    )
+    # ETFDataManager.from_config() absolutizes storage_path against the repo
+    # directory, which ignores ML4T_DATA_PATH; passing that absolute path back
+    # through resolve_storage_path is a no-op (it preserves absolute paths). Read
+    # the raw (relative) config value and re-resolve under the selected data root
+    # so ETF data lands alongside every other dataset — $ML4T_DATA_PATH/etfs/market
+    # — the same pattern the crypto/fx downloaders use.
+    with open(args.config) as config_file:
+        configured_storage = (yaml.safe_load(config_file) or {}).get("etfs", {}).get("storage_path")
+    manager.config.storage_path = resolve_storage_path(data_root, configured_storage, "etfs")
 
     if args.symbol:
         manager.config.tickers = {
