@@ -81,3 +81,28 @@ to match the book's canonical schema.
 - **Ch8**: `04_fundamentals_macro_calendar.py`.
 - **Ch16**: `01_backtest_first_principles.py`, `06_framework_parity.py`.
 - **Ch18**: `02_spread_estimation.py`, `03_market_impact_calibration.py`.
+
+## Optional FXMacroData Download
+
+`fxmacrodata_download.py` can add release-aware macro data for FX research:
+announcements, release calendars, FX spot history, COT positioning, commodities,
+market sessions, and risk sentiment. Set `FXMACRODATA_API_KEY` or `FXMD_API_KEY`
+for authenticated access.
+
+```bash
+uv run python data/macro/fxmacrodata_download.py \
+  --endpoint announcements \
+  --currency usd \
+  --indicator policy_rate \
+  --output $ML4T_DATA_PATH/macro/fxmacrodata_usd_policy_rate.parquet
+
+uv run python data/macro/fxmacrodata_download.py \
+  --endpoint forex \
+  --currency eur \
+  --quote usd \
+  --output $ML4T_DATA_PATH/macro/fxmacrodata_eurusd.parquet
+```
+
+Use this as an optional complement to the FRED downloader when a notebook or
+case study needs point-in-time economic releases, FX rates, positioning, or
+cross-asset context rather than only FRED time series.
