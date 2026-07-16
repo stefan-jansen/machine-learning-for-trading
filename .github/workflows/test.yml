@@ -342,9 +342,16 @@ jobs:
         with:
           version: "latest"
       - name: Install guard deps
-        run: uv pip install --system jupytext==1.19.3 pytest nbformat
+        # jupytext only: check_notebook_pair_sync.py shells out to the `jupytext`
+        # binary, so it must be on PATH. Deliberately not the project env — this
+        # stays a ~1-minute gate.
+        run: |
+          uv venv --python 3.14
+          uv pip install jupytext==1.19.3 pytest nbformat
       - name: Notebook pairs open in JupyterLab (#372 regression gate)
-        run: python scripts/check_notebook_pair_sync.py
+        run: |
+          source .venv/bin/activate
+          python scripts/check_notebook_pair_sync.py
       # test_no_machine_specific_paths is deselected, not skipped: it is RED today
       # (97 `/home/stefan/...` leaks across 46 notebooks, incl. shipped Ch1
       # factor_regimes). The leaks are in outputs — cosmetic, not breakage — so
@@ -355,6 +362,7 @@ jobs:
       # line. Tracked so it cannot be quietly forgotten.
       - name: Notebook output hygiene
         run: |
+          source .venv/bin/activate
           python -m pytest tests/test_notebook_output_hygiene.py -q \
             --deselect tests/test_notebook_output_hygiene.py::test_no_machine_specific_paths_in_committed_notebooks
 
