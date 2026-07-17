@@ -822,6 +822,111 @@ def register_paired_metrics(
 
 
 # ---------------------------------------------------------------------------
+# Registration: Selection-bias cohort metrics (cohort_metrics table)
+# ---------------------------------------------------------------------------
+
+
+# Identity + meta columns that the caller supplies out-of-band; every other
+# key in a cohort's ``metrics`` dict is a bare cohort_metrics column name
+# (matching the flat dict returned by ``compute_cohort_metrics``).
+_COHORT_META_COLS = ("leader_hash", "k_variants", "periods_per_year", "computed_at")
+
+
+def register_cohort_metrics(
+    case_study: str,
+    cohorts: list[dict],
+    *,
+    prune_dangling: bool = True,
+    case_dir: Path | None = None,
+) -> int:
+    """Persist selection-bias cohort rows to ``cohort_metrics``.
+
+    Each entry in ``cohorts`` is a dict with keys ``cohort_type``, ``stage``,
+    ``label``, ``family`` and ``metrics`` — the last being the flat dict
+    returned by :func:`case_studies.utils.uncertainty.compute_cohort_metrics`,
+    which carries ``leader_hash``, ``k_variants``, ``periods_per_year`` and the
+    DSR / RAS / reality-check / PBO columns. Rows are keyed by the
+    ``(cohort_type, stage, label, family)`` identity (matching
+    ``idx_cohort_unique``); an existing row with that identity is replaced.
+
+    When ``prune_dangling`` is set (default), cohort rows whose ``leader_hash``
+    no longer maps to a ``backtest_runs`` row are removed after the writes, so a
+    post-rerun leader shift cannot leave a stale leader row behind.
+
+    Returns the number of dangling rows pruned.
+    """
+    if case_dir is None:
+        case_dir = _case_dir(case_study)
+
+    db = _open_registry(case_dir)
+    try:
+        for c in cohorts:
+            metrics = dict(c["metrics"])  # copy — we pop meta keys below
+            leader_hash = metrics.pop("leader_hash")
+            k_variants = metrics.pop("k_variants")
+            ppy = metrics.pop("periods_per_year")
+            computed_at = metrics.pop("computed_at", None) or _utc_now()
+
+            cohort_type = c["cohort_type"]
+            stage = c.get("stage")
+            label = c["label"]
+            family = c.get("family")
+
+            cols = [
+                "cohort_type",
+                "stage",
+                "label",
+                "family",
+                "leader_hash",
+                "k_variants",
+                "periods_per_year",
+                "computed_at",
+            ]
+            vals: list[object] = [
+                cohort_type,
+                stage,
+                label,
+                family,
+                leader_hash,
+                k_variants,
+                ppy,
+                computed_at,
+            ]
+            for k, v in metrics.items():
+                cols.append(k)
+                vals.append(v)
+
+            # Explicit REPLACE semantics on the identity index (DELETE + INSERT).
+            db.execute(
+                """
+                DELETE FROM cohort_metrics
+                WHERE cohort_type = ?
+                  AND COALESCE(stage, '') = COALESCE(?, '')
+                  AND label = ?
+                  AND COALESCE(family, '') = COALESCE(?, '')
+                """,
+                (cohort_type, stage, label, family),
+            )
+            placeholders = ",".join("?" * len(vals))
+            db.execute(
+                f"INSERT INTO cohort_metrics ({','.join(cols)}) VALUES ({placeholders})",
+                vals,
+            )
+
+        n_pruned = 0
+        if prune_dangling:
+            cur = db.execute(
+                "DELETE FROM cohort_metrics "
+                "WHERE leader_hash NOT IN (SELECT backtest_hash FROM backtest_runs)"
+            )
+            n_pruned = cur.rowcount or 0
+        db.commit()
+        return n_pruned
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # Registration: Causal-DML runs (dedicated causal_runs table)
 # ---------------------------------------------------------------------------
 

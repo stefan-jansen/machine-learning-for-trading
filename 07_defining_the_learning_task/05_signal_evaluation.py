@@ -87,7 +87,7 @@ SEED = 42
 OUTPUT_DIR = Path("07_defining_the_learning_task/output")
 START_DATE = "2006-01-01"
 MAX_SYMBOLS = 0
-N_PERMUTATIONS = 200
+N_PERMUTATIONS = 1000
 DECAY_HORIZONS = (1, 2, 3, 5, 7, 10, 15, 21, 42)
 N_SPLITS = 8
 
@@ -894,6 +894,7 @@ for i, (train_dates, test_dates) in enumerate(splits):
 # %%
 # Slice eval_df per fold (forward returns computed in §2)
 fold_results = []
+evaluated_dates: list = []  # every date inside a test window — needed for a like-for-like IC
 
 for fold_idx, (train_dates, test_dates) in enumerate(splits):
     test_data = eval_df.filter(pl.col("timestamp").is_in(test_dates))
@@ -933,6 +934,7 @@ for fold_idx, (train_dates, test_dates) in enumerate(splits):
     else:
         fold_mono = float("nan")
 
+    evaluated_dates.extend(test_dates)
     fold_results.append(
         {
             "fold": fold_idx + 1,
@@ -1025,77 +1027,127 @@ fig.show()
 # %% [markdown]
 # ### Interpretation: Full-Sample vs Fold-Level IC
 #
-# Both numbers below are cross-sectional means (per-date Spearman, then averaged);
-# they differ only in whether the dates come from the full sample or from disjoint
-# out-of-sample folds:
+# The obvious move is to read the full-sample IC against the fold-level mean and
+# call the difference an aggregation effect — the folds are out of sample, so a
+# gap looks like the honest shrinkage of an optimistic full-sample number.
 #
-# | Approach | IC | Interpretation |
-# |----------|-----|----------------|
-# | Full-sample cross-sectional | Mean per-date IC over all dates | Optimistic; uses every period |
-# | Fold-level mean | Mean per-date IC averaged across OOS folds | More realistic estimate |
-# | Fold-level std | Variation across folds | Measures stability |
+# That reading is only available if both statistics cover the **same dates**.
+# Ours do not. The full-sample IC averages every date in the panel. The fold-level
+# mean averages only dates inside a test window, and with `min_train_pct=0.3` and
+# eight 63-day folds those windows are roughly 500 consecutive dates near the
+# front of the sample. The two numbers describe different periods, so their
+# difference cannot be attributed to aggregation — or to leakage, which the folds
+# structurally cannot produce, since each fold's IC only ever touches its own test
+# dates.
 #
-# **Warning signs**:
-# - Fold IC varies wildly (high std) → regime-dependent signal
-# - Many folds with IC ≤ 0 → unreliable signal
-# - Full-sample IC >> Fold mean → possible overfitting
+# The way out is a third number: the same cross-sectional IC, restricted to
+# exactly the dates the folds evaluated. It splits the gap into two parts we can
+# name separately:
+#
+# | Comparison | Isolates |
+# |------------|----------|
+# | Fold-date IC vs full-sample IC | **Period** — is this window unrepresentative? |
+# | Fold-level mean vs fold-date IC | **Aggregation** — does averaging folds change anything? |
 
 # %%
-# Compare full-sample vs fold-level (both cross-sectional means)
+# The like-for-like statistic: same per-date Spearman, restricted to fold dates
+fold_window = eval_df.filter(pl.col("timestamp").is_in(evaluated_dates))
+fold_window_ics = []
+for date_df in fold_window.partition_by("timestamp"):
+    if len(date_df) < 10:
+        continue
+    corr, _ = spearmanr(date_df["factor"].to_numpy(), date_df["fwd_21d"].to_numpy())
+    if not np.isnan(corr):
+        fold_window_ics.append(corr)
+fold_window_ic = float(np.mean(fold_window_ics))
+
 full_sample_ic = result.ic.get("21D", float("nan"))
+n_all_dates = eval_df["timestamp"].n_unique()
+n_fold_dates = len(fold_window_ics)
 
-print("\n=== Full-Sample vs Fold-Level Comparison ===")
-print(f"Full-sample cross-sectional IC: {full_sample_ic:.4f}")
-print(f"Fold-level mean IC:             {fold_ic_mean:.4f}")
-print(f"Difference:                     {full_sample_ic - fold_ic_mean:.4f}")
+print("\n=== Like-for-Like IC Comparison (21D) ===")
+print(f"Full-sample cross-sectional IC ({n_all_dates:,} dates): {full_sample_ic:>8.4f}")
+print(f"Same statistic, fold dates only ({n_fold_dates:,} dates): {fold_window_ic:>8.4f}")
+print(f"Fold-level mean IC              ({n_fold_dates:,} dates): {fold_ic_mean:>8.4f}")
+print("\n--- Decomposition of the full-sample vs fold-level gap ---")
+print(
+    f"Period effect      (fold-date IC - full-sample IC): {fold_window_ic - full_sample_ic:>8.4f}"
+)
+print(f"Aggregation effect (fold mean    - fold-date IC):   {fold_ic_mean - fold_window_ic:>8.4f}")
 
-if abs(full_sample_ic - fold_ic_mean) > 0.01:
-    print("\n[WARNING] Significant difference between full-sample and fold-level IC.")
-    print("   This may indicate regime effects or data leakage.")
+fold_span = f"{min(evaluated_dates)} to {max(evaluated_dates)}"
+coverage_pct = 100 * n_fold_dates / n_all_dates
+print(f"\nFolds evaluate {fold_span} — {coverage_pct:.0f}% of the panel's dates.")
+if abs(fold_window_ic - full_sample_ic) > abs(fold_ic_mean - fold_window_ic):
+    print("[READ] The gap is a period effect: this window is not the average window.")
+    print("       It says nothing about overfitting, and nothing about leakage.")
 else:
-    print("\n[PASS] Full-sample and fold-level IC are consistent.")
+    print("[READ] The gap survives on identical dates, so it is an aggregation effect.")
 
 # %% [markdown]
 # ## 7.1 Within-Time Permutation Test
 #
 # The text (Section 7.3) recommends a **within-time permutation test** as a
-# null-distribution benchmark: shuffle asset-label assignments within each
-# cross-section, breaking the feature-label pairing while preserving cross-sectional
-# dependence. If the observed IC exceeds the permutation distribution, the feature
-# ranks the right assets — not just any assets.
+# null-distribution benchmark: break the feature-label pairing while preserving the
+# structure of the data, then ask how often chance alone reproduces the observed IC.
+# Two details decide whether the answer means anything.
+#
+# **The null must cover the same dates as the observed statistic.** A null built
+# from every date in the panel is a distribution of a mean over ~5,000 dates; our
+# observed statistic is a mean over ~500. The mean of a larger sample is mechanically
+# less dispersed, so such a null is too narrow by roughly $\sqrt{5000/500} \approx 3$
+# and would reject almost anything. We therefore permute only the fold dates.
+#
+# **The null must preserve temporal dependence.** Shuffling assets independently on
+# each date implies the per-date ICs are independent, so the null mean's standard
+# error shrinks like $\sigma/\sqrt{n_{\text{dates}}}$. Our labels are 21-day forward
+# returns sampled daily: consecutive dates share 20 of 21 days of return, so both the
+# returns and the per-date ICs are strongly autocorrelated, and the true standard
+# error is much larger. Independent within-date shuffling would understate it by
+# roughly an order of magnitude.
+#
+# The repair is a **block permutation**. We draw one asset relabeling per block of 21
+# sessions — the label horizon — and hold it fixed across the block. Within a block
+# each asset's return path stays intact, so the autocorrelation the observed IC
+# inherits also lives in the null; across blocks the relabelings are independent.
+# The null then answers the right question: *given how persistent this data is, how
+# often does a random assignment rank this well over this window?*
 
 # %%
-# Permutation test: shuffle labels within each date, recompute IC
-# Pre-compute group indices for vectorized permutation (avoids slow per-date Python loop)
+# Block permutation: one asset relabeling per BLOCK_SESSIONS, restricted to fold dates
 rng = np.random.default_rng(SEED)
 n_permutations = N_PERMUTATIONS
+BLOCK_SESSIONS = 21  # label horizon — blocks must be at least as long as the overlap
 
-dates_arr = eval_df["timestamp"].to_numpy()
-factors_arr = eval_df["factor"].to_numpy()
-returns_arr = eval_df["fwd_21d"].to_numpy()
+perm_df = fold_window.sort(["timestamp", "symbol"])
+dates_arr = perm_df["timestamp"].to_numpy()
+factors_arr = perm_df["factor"].to_numpy()
+returns_arr = perm_df["fwd_21d"].to_numpy()
+symbol_codes = perm_df["symbol"].cast(pl.Categorical).to_physical().to_numpy()
+n_symbols = int(symbol_codes.max()) + 1
 unique_dates_perm = np.unique(dates_arr)
 
-# Build date group indices once (avoid repeated masking)
-date_groups = []
-for d in unique_dates_perm:
-    idx = np.where(dates_arr == d)[0]
-    if len(idx) >= 10:
-        date_groups.append(idx)
+# Group rows by date; within a date, rows are already in symbol order
+date_groups = [np.where(dates_arr == d)[0] for d in unique_dates_perm]
+date_groups = [idx for idx in date_groups if len(idx) >= 10]
 
-# Pre-compute factor ranks per date (ranks don't change across permutations)
+# Ranks are invariant to relabeling, so pre-compute both sides once
 factor_ranks_by_group = [rankdata(factors_arr[idx]) for idx in date_groups]
+return_ranks_by_group = [rankdata(returns_arr[idx]) for idx in date_groups]
+symbols_by_group = [symbol_codes[idx] for idx in date_groups]
 
 # %%
 permuted_ics = []
 for _ in range(n_permutations):
-    # Shuffle returns within each date, compute rank correlation
     ic_per_date = []
-    for i, idx in enumerate(date_groups):
-        shuffled = rng.permutation(returns_arr[idx])
-        # Spearman = Pearson of ranks
-        r_ranks = rankdata(shuffled)
-        f_ranks = factor_ranks_by_group[i]
-        n = len(f_ranks)
+    block_keys = None
+    for i, f_ranks in enumerate(factor_ranks_by_group):
+        # New relabeling only when a block boundary is crossed
+        if i % BLOCK_SESSIONS == 0:
+            block_keys = rng.permutation(n_symbols)
+        # Same key vector across the block => same asset->asset mapping across the block
+        order = np.argsort(block_keys[symbols_by_group[i]], kind="stable")
+        r_ranks = return_ranks_by_group[i][order]
         corr = np.corrcoef(f_ranks, r_ranks)[0, 1]
         if not np.isnan(corr):
             ic_per_date.append(corr)
@@ -1103,16 +1155,22 @@ for _ in range(n_permutations):
         permuted_ics.append(np.mean(ic_per_date))
 
 permuted_ics = np.array(permuted_ics)
-observed_ic_mean = fold_ic_mean  # Use fold-level mean as the observed statistic
+# Observed statistic and null are now the same estimator on the same dates
+observed_ic_mean = fold_window_ic
 
-# p-value: fraction of permuted ICs >= observed
-p_value_perm = np.mean(permuted_ics >= observed_ic_mean)
+# (r + 1) / (B + 1): a permutation p-value can never be exactly zero — the observed
+# assignment is itself one of the arrangements under the null
+n_at_least = int(np.sum(permuted_ics >= observed_ic_mean))
+p_value_perm = (n_at_least + 1) / (len(permuted_ics) + 1)
 
-print("=== Within-Time Permutation Test ===\n")
+print("=== Within-Time Block Permutation Test ===\n")
+print(
+    f"Dates: {len(factor_ranks_by_group):,} (fold windows only, block = {BLOCK_SESSIONS} sessions)"
+)
 print(f"Observed mean IC: {observed_ic_mean:.4f}")
 print(f"Permutation null — mean: {permuted_ics.mean():.4f}, std: {permuted_ics.std():.4f}")
 print(f"Permutation p-value (one-sided): {p_value_perm:.4f}")
-print(f"Permutations: {n_permutations}")
+print(f"Permutations: {n_permutations} (finest resolvable p = {1 / (n_permutations + 1):.4f})")
 
 # %%
 # Visualize permutation distribution vs observed IC
@@ -1134,8 +1192,8 @@ fig.add_vline(
     annotation_text=f"Observed IC={observed_ic_mean:.4f}",
 )
 fig.update_layout(
-    title="Observed IC sits far outside the within-time permutation null",
-    xaxis_title="Mean IC (permuted)",
+    title="Within its own window, the factor ranks better than a dependence-aware null",
+    xaxis_title="Mean IC (block-permuted, fold dates only)",
     yaxis_title="Count",
     height=350,
     showlegend=False,
@@ -1143,10 +1201,34 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# **Interpretation**: The permutation test asks whether the observed IC could arise
-# from a random assignment of labels to assets within each cross-section. A p-value
-# near zero confirms that the feature genuinely ranks the right assets at each
-# decision time — the signal is not an artifact of cross-sectional dependence.
+# **Interpretation**: over the fold window, the observed IC sits outside every block
+# permutation, so the factor ranked ETFs better than chance *in 2012-2014*. That is
+# the only claim the test supports, and it is worth being precise about why.
+#
+# Read it against §3, which scored the same factor at IC 0.0008 with a HAC
+# $t = 0.19$ over the full sample. These are not opposing verdicts about one
+# quantity — they are two different windows, as the decomposition above showed: the
+# entire full-sample-vs-fold gap was a period effect, with aggregation contributing
+# 0.0000. The factor worked in the folds' two years and does nothing over twenty.
+# The folds are not a verdict on the signal; they are a verdict on 2012-2014.
+#
+# Two lessons generalize past this factor:
+#
+# - **A window that flatters the signal is the default outcome, not a surprise.**
+#   `min_train_pct=0.3` with eight 63-day folds evaluates the first 10% of the
+#   panel and never scores 2014 onward. A fold scheme that leaves most of the
+#   sample unevaluated cannot support a claim about the sample.
+# - **A null must be as dependent as the data.** Independent within-date shuffling
+#   put the null's standard deviation near 0.0015; blocking at the label horizon
+#   puts it near 0.0145 — roughly ten times wider, on identical dates. The first
+#   null would have called almost any factor significant, which is what a null this
+#   narrow always does.
+#
+# The rest of the evidence points the other way, and §4 already showed it: the
+# full-sample quintile spread is **negative** at every horizon and monotonicity is
+# -90%, meaning Q1 out-earns Q5. Cross-sectional 21-day ETF momentum is a
+# **reversal** signal over this panel. A single favorable window does not overturn
+# that; it illustrates how easily a fold scheme can hide it.
 
 # %% [markdown]
 # ## 8. Factor Scorecard Output

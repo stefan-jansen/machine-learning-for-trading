@@ -25,7 +25,12 @@ dependencies = [
     "plotly>=5.20",
     "matplotlib>=3.8",
     "seaborn>=0.13",
-    "kaleido==0.2.1",
+    # kaleido>=1.0: 0.2.1 bundled its own Chromium but drives the deprecated
+    # plotly.io.kaleido.scope.* API, which plotly 6.x emits DeprecationWarnings for
+    # (support removed after Sept 2025). 1.x drives a system/self-provisioned Chrome
+    # (kaleido_get_chrome) and is warning-clean. Static PNG export is used only at
+    # figure-production time; reader-runtime kaleido calls (nb 21) already try/except.
+    "kaleido>=1.3",
     # ===================
     # Machine Learning
     # ===================

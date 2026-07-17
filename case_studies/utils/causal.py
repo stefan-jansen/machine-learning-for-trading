@@ -118,6 +118,7 @@ def manual_dml_timeseries(
     model_t=None,
     return_residuals: bool = False,
     hac_maxlags: int | None = None,
+    horizon: int | None = None,
 ) -> dict:
     """Walk-forward DML with embargo for temporal data.
 
@@ -144,7 +145,16 @@ def manual_dml_timeseries(
     return_residuals : bool
         If True, include residual arrays in result dict.
     hac_maxlags : int or None
-        HAC (Newey-West) bandwidth. If None, uses cube-root rule: max(1, int(n**(1/3))).
+        HAC (Newey-West) bandwidth. If given, used verbatim. If None, resolved
+        from `horizon` (see below).
+    horizon : int or None
+        Label horizon in observation periods. Overlapping h-period forward
+        returns induce MA(h-1) structure, so the HAC bandwidth must satisfy
+        L >= h - 1. When `hac_maxlags` is None, the bandwidth is
+        `max(horizon - 1, cube-root-of-n)` if `horizon` is given, else the
+        cube-root rule alone. Pass this for any overlapping label of horizon
+        >= ~10 periods, or the standard error is understated and the
+        t-statistic overstated.
 
     Returns
     -------
@@ -216,7 +226,11 @@ def manual_dml_timeseries(
     # Must include intercept: cross-fitting residuals may have non-zero mean
     # when training data varies across folds (expanding window).
     if hac_maxlags is None:
-        hac_maxlags = max(1, int(n_valid ** (1 / 3)))
+        auto = max(1, int(n_valid ** (1 / 3)))
+        # Overlapping h-period labels need L >= h-1; the cube-root rule is
+        # horizon-blind and under-lags long-horizon overlapping returns.
+        hac_maxlags = max(horizon - 1, auto) if horizon else auto
+        hac_maxlags = min(hac_maxlags, max(1, n_valid // 2))
 
     T_const = sm.add_constant(T_v)
     ols_iid = OLS(Y_v, T_const).fit()
@@ -284,6 +298,7 @@ def run_dml_analysis(
     block_size: int = 21,
     seed: int = 42,
     hac_maxlags: int | None = None,
+    horizon: int | None = None,
 ) -> dict:
     """Full DML analysis pipeline: naive OLS, DML, and refutation tests.
 
@@ -308,7 +323,15 @@ def run_dml_analysis(
     seed : int
         Random seed.
     hac_maxlags : int or None
-        HAC bandwidth. If None, uses cube-root rule.
+        HAC bandwidth passed through to the second stage. If None, resolved
+        from `horizon`.
+    horizon : int or None
+        Label horizon in observation periods, forwarded to the second-stage
+        HAC regression so the Newey-West bandwidth satisfies L >= horizon - 1.
+        Pass it for overlapping labels (horizon >= ~10) — e.g.
+        `horizon=embargo_from_buffer(mds.label_buffer)`. When both `horizon`
+        and `hac_maxlags` are None, the bandwidth falls back to the
+        horizon-blind cube-root rule and a warning is emitted.
 
     Returns
     -------
@@ -329,6 +352,17 @@ def run_dml_analysis(
         raise ValueError(f"Treatment '{treatment_col}' has near-zero variance")
     if df[outcome_col].std() < 1e-10:
         raise ValueError(f"Outcome '{outcome_col}' has near-zero variance")
+
+    if hac_maxlags is None and horizon is None:
+        import warnings
+
+        warnings.warn(
+            "run_dml_analysis: no horizon or hac_maxlags given; the second-stage "
+            "HAC bandwidth falls back to the horizon-blind cube-root rule, which "
+            "under-lags overlapping labels of horizon >= ~10 and overstates the "
+            "t-statistic. Pass horizon=embargo_from_buffer(mds.label_buffer).",
+            stacklevel=2,
+        )
 
     _dml_started_at = datetime.now(UTC).isoformat()
     _dml_t0 = time.perf_counter()
@@ -353,6 +387,7 @@ def run_dml_analysis(
         embargo=embargo,
         return_residuals=True,
         hac_maxlags=hac_maxlags,
+        horizon=horizon,
     )
 
     # Confounding bias
@@ -416,7 +451,7 @@ def format_dml_summary(results: dict) -> str:
         "DML ANALYSIS SUMMARY",
         "=" * 60,
         f"Observations: {results['n_obs']:,}",
-        f"HAC bandwidth: {hac_lags} lags (cube-root rule)",
+        f"HAC bandwidth: {hac_lags} lags (max of horizon-1 and cube-root)",
         "",
         f"Naive OLS effect:  {results['naive_effect']:.6f}",
         f"DML effect:        {dml['theta']:.6f}",

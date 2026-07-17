@@ -325,8 +325,7 @@ backtest:
     # Notebooks read these via get_top_n_predictions(case_study, stage).
     top_n_predictions:
       signal: 0                 # all signal predictions (eq-weight baseline)
-      allocation_cheap: 0       # score_weighted, inverse_vol — all signal preds
-      allocation_expensive: 0   # nasdaq has no expensive allocators (see expensive_allocators below)
+      allocation: 10            # top-10 model configs by equal-weight baseline Sharpe
       cost_sensitivity: 1       # top-1 of {signal+allocation} per label
       risk_overlay: 1           # top-1 of {signal+allocation} per label
     # No expensive allocators on nasdaq. At 15-min frequency the 1.3M-bar
@@ -337,7 +336,6 @@ backtest:
     # cadence is a costs-dominated regime where signal-stage selection
     # carries the entire story.
     expensive_allocators_skip: true
-    expensive_allocators: []
     # Ch16 signal-stage selection. Long-short equal-weight top-k on the
     # 15-min schedule across four labels (5m/15m/60m continuous + 15m
     # direction). The classification label fwd_dir_15m is a first-class
@@ -349,7 +347,8 @@ backtest:
       fwd_ret_60m: [5, 10, 20]
       fwd_dir_15m: [5, 10, 20]
     # Ch17 portfolio: reuses top_k_grid above and sweeps over allocators.
-    # Cheap tier only on nasdaq (see ``expensive_allocators`` above).
+    # Nasdaq runs only the three fast allocators — the moment-based ones are
+    # too slow at intraday frequency (``expensive_allocators_skip: true``).
     # No max_weight cap on inverse_vol — see
     # memory/feedback_max_weight_caps_intentionally_absent.md (would force
     # equal-weight at top_k=5 and defeat the moment-allocator comparison).

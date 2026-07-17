@@ -285,13 +285,24 @@ CIStatus = Literal["excludes_zero_strong", "straddles_zero", "no_data"]
 GateStatus = Literal["pass", "fail", "no_data"]
 
 
+def _missing(x: float | None) -> bool:
+    """True when a bound/estimate carries no information.
+
+    NaN reaches these gates whenever a paired bootstrap could not be computed
+    (no pair row in ``backtest_paired_metrics``). It must be treated exactly
+    like ``None``: every comparison against NaN is False, so an unguarded NaN
+    silently falls through to ``pass``.
+    """
+    return x is None or not np.isfinite(x)
+
+
 def ci_status(lo: float | None, hi: float | None) -> CIStatus:
     """Three-tier CI continuum used uniformly across spine §3 / §6 / §7.
 
     `no_data` is reserved for missing CI bounds (upstream bootstrap not run
     or registry NULLs); it is *not* a low-credibility classification.
     """
-    if lo is None or hi is None:
+    if _missing(lo) or _missing(hi):
         return "no_data"
     if lo > 0 or hi < 0:
         return "excludes_zero_strong"
@@ -303,7 +314,7 @@ def gate1_validation_sharpe_geq_zero(sharpe_ci_lo: float | None) -> GateStatus:
 
     Returns ``no_data`` when the CI lower bound is missing.
     """
-    if sharpe_ci_lo is None:
+    if _missing(sharpe_ci_lo):
         return "no_data"
     return "pass" if sharpe_ci_lo >= 0 else "fail"
 
@@ -319,7 +330,7 @@ def gate2_holdout_diff_not_excludes_zero_negatively(
     point estimate is negative. ``no_data`` when the diff CI status is
     ``no_data`` or ``sharpe_diff`` is missing.
     """
-    if diff_ci_status == "no_data" or sharpe_diff is None:
+    if diff_ci_status == "no_data" or _missing(sharpe_diff):
         return "no_data"
     if diff_ci_status == "excludes_zero_strong" and sharpe_diff < 0:
         return "fail"

@@ -239,28 +239,6 @@ class BenchmarkResult:
 # =============================================================================
 
 
-def drop_os_caches() -> bool:
-    """Drop OS page caches for accurate cold-cache benchmarking.
-
-    Requires sudo access. Returns True if successful, False otherwise.
-    On Linux: sync; echo 3 > /proc/sys/vm/drop_caches
-    """
-    import subprocess
-
-    try:
-        # Sync first to flush dirty pages
-        subprocess.run(["sync"], check=True, timeout=30)
-        # Drop caches (requires sudo or appropriate permissions)
-        result = subprocess.run(
-            ["sudo", "-n", "sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"],
-            capture_output=True,
-            timeout=10,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
 def time_operation(func, n_runs: int = TIMING_RUNS, warmup: bool = True) -> tuple[float, Any]:
     """Time a function with warm-up and percentile tracking.
 
@@ -311,30 +289,95 @@ def time_operation(func, n_runs: int = TIMING_RUNS, warmup: bool = True) -> tupl
     return mean_time, result
 
 
-def time_cold_cache(func, drop_caches: bool = True) -> tuple[float, Any]:
-    """Time a single cold-cache read operation.
+# -----------------------------------------------------------------------------
+# TIMING POLICY
+# -----------------------------------------------------------------------------
+# One policy, applied to every format and every engine in the chapter §2.4
+# benchmarks. Mixing policies within a single comparison makes the resulting
+# chart meaningless, so all call sites go through `time_write` / `time_read`
+# rather than passing ad-hoc n_runs/warmup arguments to `time_operation`.
+#
+#   Writes -> single shot, no warm-up, against freshly created storage, with
+#             any durability wait (WAL flush, async ingestion) INSIDE the timed
+#             region. Bulk load is a once-per-dataset operation; repeating it
+#             would either append duplicate rows on the append-only engines or
+#             require a teardown that is not part of the operation being timed.
+#
+#   Reads   -> mean of TIMING_RUNS runs after one untimed warm-up run.
+#             These are WARM-CACHE numbers, on both the OS page cache and each
+#             server's own buffer pool, and they are reported as such. A client
+#             cannot drop a database server's caches, so a "cold" client-side
+#             read would be cold for the file formats and warm for the servers:
+#             neither cold nor comparable. Warm-cache timing flatters
+#             memory-mapped formats (Feather) and every engine with a buffer
+#             pool; the notebooks state this where the results are interpreted.
 
-    For fair comparison of file formats, drops OS page caches before reading.
-    This ensures memory-mapped formats (Feather) don't benefit from cached pages.
+
+def time_write(func) -> tuple[float, Any]:
+    """Time a bulk write under the chapter's write policy: one cold shot.
 
     Args:
-        func: Function to time (should be a file read operation)
-        drop_caches: Whether to drop OS caches first (requires sudo)
+        func: Write function. Must create its own storage and include any
+            durability wait, so the timed region ends when the data is durable
+            and queryable.
 
     Returns:
-        (time, result): Execution time and result
+        (time_seconds, result)
     """
-    if drop_caches:
-        cache_dropped = drop_os_caches()
-        if not cache_dropped:
-            print("Warning: Could not drop OS caches (requires sudo)")
-
     gc.collect()
-    start = time.perf_counter()
-    result = func()
-    elapsed = time.perf_counter() - start
+    return time_operation(func, n_runs=1, warmup=False)
 
-    return elapsed, result
+
+def time_read(func, n_runs: int | None = None) -> tuple[float, Any]:
+    """Time a read/aggregation/join under the chapter's read policy: warm mean.
+
+    Args:
+        func: Read function, which must force materialization of its result.
+        n_runs: Timing runs after the untimed warm-up (default: TIMING_RUNS).
+
+    Returns:
+        (mean_time_seconds, result)
+    """
+    gc.collect()
+    return time_operation(func, n_runs=n_runs or TIMING_RUNS, warmup=True)
+
+
+def wait_until_rows_visible(
+    count_func, expected_rows: int, timeout: float = 60.0, poll_seconds: float = 0.05
+) -> int:
+    """Block until an asynchronously-ingesting engine reports `expected_rows`.
+
+    QuestDB (ILP + WAL) and InfluxDB acknowledge a write before the rows are
+    queryable. Call this INSIDE the timed write so that their durability cost
+    lands on the same side of the timed region as the synchronous engines
+    (PostgreSQL/TimescaleDB), which pay it inline. Replaces a fixed sleep, which
+    both under-counts slow ingestion and over-counts fast ingestion.
+
+    Args:
+        count_func: Callable returning the row count currently visible.
+        expected_rows: Row count to wait for.
+        timeout: Seconds to wait before failing.
+        poll_seconds: Delay between polls.
+
+    Returns:
+        The visible row count once it reaches `expected_rows`.
+
+    Raises:
+        TimeoutError: If the rows never become visible. Never returns a short
+            count: a silently-incomplete ingest would produce a fast, wrong
+            write time and a wrong read count downstream.
+    """
+    deadline = time.perf_counter() + timeout
+    visible = 0
+    while time.perf_counter() < deadline:
+        visible = count_func()
+        if visible >= expected_rows:
+            return visible
+        time.sleep(poll_seconds)
+    raise TimeoutError(
+        f"Only {visible:,} of {expected_rows:,} rows visible after {timeout:.0f}s; "
+        "ingestion did not complete."
+    )
 
 
 def validate_result(
@@ -540,6 +583,39 @@ def save_chart(fig: go.Figure, name: str) -> None:
 # =============================================================================
 
 
+# Regular US equity session: 09:30-16:00 ET inclusive of the opening minute,
+# i.e. 390 one-minute bars per trading day.
+SESSION_OPEN_MINUTE = 9 * 60 + 30
+SESSION_BARS = 390
+SESSION_START_DATE = "2024-01-02"  # first business day of 2024
+
+
+def session_minute_grid(n_rows: int, start_date: str = SESSION_START_DATE) -> np.ndarray:
+    """Build `n_rows` one-minute bar timestamps laid out over trading sessions.
+
+    Bars run 09:30-16:00 on consecutive business days, so the grid carries the
+    overnight and weekend gaps a real minute panel has. This matters for the
+    benchmarks in two ways: a calendar-day range query selects a realistic
+    fraction of the panel, and resampling minute bars to daily bars is a real
+    reduction rather than a near-identity.
+
+    Args:
+        n_rows: Number of bars to generate.
+        start_date: First session date (rolled forward to a business day).
+
+    Returns:
+        numpy datetime64[us] array of length `n_rows`, strictly increasing.
+    """
+    n_sessions = int(np.ceil(n_rows / SESSION_BARS))
+    session_days = np.busday_offset(
+        np.datetime64(start_date, "D"), np.arange(n_sessions), roll="forward"
+    )
+    session_open = session_days.astype("datetime64[m]") + np.timedelta64(SESSION_OPEN_MINUTE, "m")
+    bar_offsets = np.arange(SESSION_BARS, dtype="timedelta64[m]")
+    grid = (session_open[:, np.newaxis] + bar_offsets[np.newaxis, :]).ravel()
+    return grid[:n_rows].astype("datetime64[us]")
+
+
 def generate_ohlcv_data(
     n_symbols: int = N_SYMBOLS,
     n_rows: int = N_ROWS_PER_SYMBOL,
@@ -547,15 +623,23 @@ def generate_ohlcv_data(
 ) -> pl.DataFrame:
     """Generate realistic synthetic OHLCV panel data (fully vectorized).
 
-    Creates a panel dataset with multiple symbols and time-series bars.
-    OHLCV constraints are enforced: H >= max(O,C), L <= min(O,C).
+    Creates a panel of one-minute bars for `n_symbols` symbols over consecutive
+    regular trading sessions (390 bars per session). OHLCV constraints are
+    enforced: H >= max(O,C), L <= min(O,C).
+
+    All symbols share one session grid, which is what a synchronized bar panel
+    looks like: every symbol prints a bar for the same minute of the same
+    session. That shared grid, and the low-cardinality symbol column, are
+    genuine properties of bar panels rather than artifacts of the generator, and
+    the dictionary/delta encoding they enable is part of what the format
+    comparison is measuring.
 
     This implementation is fully vectorized using numpy arrays, enabling
     generation of 10M+ rows in seconds (required for XL/XXL scales).
 
     Args:
         n_symbols: Number of unique symbols
-        n_rows: Number of rows per symbol
+        n_rows: Number of one-minute bars per symbol
         seed: Random seed for reproducibility
 
     Returns:
@@ -564,12 +648,8 @@ def generate_ohlcv_data(
     np.random.seed(seed)
     total_rows = n_symbols * n_rows
 
-    # Generate all timestamps at once (vectorized)
-    base_time = np.datetime64("2024-01-01T00:00:00", "us")
-    minute_offsets = np.arange(n_rows, dtype="timedelta64[m]")
-    single_symbol_times = base_time + minute_offsets
-
-    # Tile timestamps for all symbols
+    # One session-aware minute grid, shared by every symbol (see docstring).
+    single_symbol_times = session_minute_grid(n_rows)
     timestamps = np.tile(single_symbol_times, n_symbols)
 
     # Generate symbol array (repeat each symbol n_rows times)

@@ -1822,6 +1822,11 @@ case_studies/nasdaq100_microstructure/10_dl_tcn:
     N_EPOCHS: 1
   timeout: 600
 case_studies/nasdaq100_microstructure/11_dl_patchtst:
+  # Needs CUDA: MAX_SYMBOLS=5 of a 15-minute panel is ~26x the rows of the
+  # daily-frequency patchtst notebooks, which share these parameters and
+  # finish in under 180s. On CPU this overruns any sane cell timeout (measured
+  # 625s against a 600s budget); on GPU it completes in 155s.
+  gpu: true
   parameters:
     BATCH_SIZE: 32
     LOOKBACK: 24

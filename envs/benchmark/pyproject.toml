@@ -38,6 +38,13 @@ dependencies = [
     "influxdb-client>=1.45",
     "questdb>=2.0",
 
+    # kdb+/PyKX — the notebook drives an external q process over IPC. The wheel
+    # ships q itself; a licence is NOT baked into this image (it is personal and
+    # must never be published). Mount ~/.kx and ~/.pykx at runtime and set QLIC —
+    # docker-compose.yml does this for the `benchmark` service. Without a licence
+    # the notebook skips kdb+ and says so.
+    "pykx>=4.0",
+
     # Utilities
     "python-dotenv>=1.0",
     "tqdm>=4.66",

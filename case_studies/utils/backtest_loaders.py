@@ -648,10 +648,27 @@ _PRICE_CONFIG = {
     "cme_futures": {
         "entity_col": "product",
         "time_col": "session_date",
-        "close_col": "close",
+        "close_col": "adj_close",
         "ohlcv": True,
         "loader": "cme_futures",
-        "drop_cols": ["bar_count", "session_start", "session_end"],
+        # Backtest fills ride the roll-adjusted series (continuous PnL); rename
+        # adj_* → bare OHLC and drop the raw term-structure series + roll multiplier.
+        "rename_cols": {
+            "adj_open": "open",
+            "adj_high": "high",
+            "adj_low": "low",
+            "adj_close": "close",
+        },
+        "drop_cols": [
+            "raw_open",
+            "raw_high",
+            "raw_low",
+            "raw_close",
+            "cum_ratio",
+            "bar_count",
+            "session_start",
+            "session_end",
+        ],
         "filter": {"tenor": 0},  # Front-month only
     },
     "sp500_options": {

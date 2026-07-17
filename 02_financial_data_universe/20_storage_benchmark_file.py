@@ -16,7 +16,7 @@
 # %% [markdown]
 # # File-Format Storage Benchmark
 #
-# **Docker image**: `benchmark`
+# **Environment**: the locked environment (`uv run`) — see Prerequisites below.
 #
 # **Purpose**: Compare CSV, Parquet, Feather (Arrow IPC), and HDF5 on the same
 # 1 M-row OHLCV panel along three axes — write time, read time (with forced
@@ -25,8 +25,8 @@
 #
 # **Learning objectives**:
 # 1. Generate a deterministic OHLCV benchmark panel at the L scale that
-#    chapter §2.4 cites (100 symbols × 10,000 daily rows = 1,000,000 rows).
-# 2. Time write and read for each format with `gc.collect()` between runs.
+#    chapter §2.4 cites (100 symbols × 10,000 one-minute bars = 1,000,000 rows).
+# 2. Time write and read for each format under one stated timing policy.
 # 3. Force materialization on Feather / HDF5 reads so memory-mapped or lazy
 #    reads don't masquerade as instant.
 # 4. Quantify the columnar-projection win (read 2 columns vs 9).
@@ -34,9 +34,18 @@
 #
 # **Book reference**: §2.4 — file-based storage benchmarks.
 #
-# **Prerequisites**: PyTables (HDF5 backend) is only present in the
-# `benchmark` Docker image. Run locally with `uv run`, or via
-# `docker compose --profile benchmark run --rm benchmark python …`.
+# **Prerequisites**: PyTables (the HDF5 backend) ships in the locked
+# environment, so `uv run python 02_financial_data_universe/20_storage_benchmark_file.py`
+# from the repo root is all this notebook needs — no database services, unlike
+# `21_storage_benchmark_database`.
+#
+# > **Which environment produced the numbers**: the locked environment
+# > (`uv sync`, i.e. `uv.lock`), which is what §2.4 reports. The `benchmark`
+# > Docker image currently resolves a *newer* pandas than `uv.lock` pins, and
+# > pandas' newer string dtype makes PyTables store the low-cardinality
+# > `symbol` column about 8 bytes/row wider — enough to move the HDF5 file
+# > from ~71 MB to ~79 MB for the identical panel. CSV, Parquet, and Feather
+# > are unaffected. Run this notebook under `uv run` to reproduce §2.4.
 
 # %% [markdown]
 # ## Setup
@@ -50,7 +59,7 @@ import time
 
 # %% tags=["parameters"]
 # Production scale follows chapter §2.4 prose ("L scale, ~1 M OHLCV rows,
-# 100 MB in-memory"). Override via Papermill for CI: BENCHMARK_SCALE = "S".
+# 64 MB in-memory in Polars"). Override via Papermill for CI: BENCHMARK_SCALE = "S".
 BENCHMARK_SCALE = "L"
 
 # %%
@@ -78,7 +87,8 @@ from utils.storage_benchmarks import (
     force_materialize_polars,
     generate_ohlcv_data,
     save_benchmark_results,
-    time_operation,
+    time_read,
+    time_write,
     validate_result,
 )
 from utils.style import COLORS
@@ -87,11 +97,36 @@ OUTPUT_DIR = get_output_dir(2, "storage_benchmark")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # %% [markdown]
+# ## Timing Policy
+#
+# Every number below follows one policy, applied identically to all four
+# formats. A comparison that mixes policies across the things it compares is
+# not a comparison, so this is stated up front rather than left in the call
+# sites:
+#
+# - **Writes** (`time_write`) — a single shot, no warm-up run. Writing the
+#   panel is a once-per-dataset operation, so that is what we time.
+# - **Reads** (`time_read`) — the mean of `TIMING_RUNS` runs after one untimed
+#   warm-up run. **These are warm-cache numbers.** The file has just been
+#   written and re-read repeatedly, so it sits in the OS page cache.
+#
+# Warm-cache reads are the honest description of the *repeated-access* pattern
+# a research loop actually has, but they flatter memory-mapped formats: Feather
+# maps pages that are already resident, so its read number below is close to a
+# best case. A first read of a cold file off disk narrows the gap to Parquet,
+# and on a network or object store the compressed format usually wins outright
+# because it moves fewer bytes. Rankings here are for warm, local, repeated
+# reads — the caveat that §2.4 attaches to these figures.
+
+# %% [markdown]
 # ## 1. Generate the Benchmark Panel
 #
 # `generate_ohlcv_data` returns a deterministic OHLCV panel: per-symbol random
 # walks under a fixed seed so format comparisons aren't muddled by data drift
-# across runs. At L scale that's 100 symbols × 10,000 rows = 1 M total rows.
+# across runs. At L scale that's 100 symbols × 10,000 one-minute bars =
+# 1 M total rows, laid out over 26 regular trading sessions (390 bars each), so
+# the panel carries the overnight and weekend gaps real minute data has. All
+# symbols share the session grid, as they do in any synchronized bar panel.
 
 # %%
 ohlcv_df = generate_ohlcv_data(n_symbols=N_SYMBOLS, n_rows=N_ROWS_PER_SYMBOL)
@@ -132,8 +167,7 @@ results: list[BenchmarkResult] = []
 # %%
 csv_path = BENCHMARK_DIR / f"ohlcv_{ACTIVE_SCALE.lower()}.csv"
 
-gc.collect()
-write_time, _ = time_operation(lambda: ohlcv_df.write_csv(csv_path))
+write_time, _ = time_write(lambda: ohlcv_df.write_csv(csv_path))
 csv_size = csv_path.stat().st_size
 results.append(BenchmarkResult("CSV", "write", write_time, csv_size, total_rows))
 
@@ -142,8 +176,7 @@ def read_csv_materialized() -> pl.DataFrame:
     return force_materialize_polars(pl.read_csv(csv_path))
 
 
-gc.collect()
-read_time, csv_result = time_operation(read_csv_materialized)
+read_time, csv_result = time_read(read_csv_materialized)
 validate_result(csv_result, total_rows, "CSV read")
 results.append(BenchmarkResult("CSV", "read", read_time, csv_size, total_rows))
 
@@ -152,8 +185,7 @@ def read_csv_columnar() -> pl.DataFrame:
     return force_materialize_polars(pl.read_csv(csv_path, columns=["close", "volume"]))
 
 
-gc.collect()
-columnar_time, _ = time_operation(read_csv_columnar)
+columnar_time, _ = time_read(read_csv_columnar)
 results.append(BenchmarkResult("CSV", "columnar_read", columnar_time, csv_size, total_rows))
 
 # %% [markdown]
@@ -166,8 +198,7 @@ results.append(BenchmarkResult("CSV", "columnar_read", columnar_time, csv_size, 
 # %%
 parquet_path = BENCHMARK_DIR / f"ohlcv_{ACTIVE_SCALE.lower()}.parquet"
 
-gc.collect()
-write_time, _ = time_operation(lambda: ohlcv_df.write_parquet(parquet_path))
+write_time, _ = time_write(lambda: ohlcv_df.write_parquet(parquet_path))
 parquet_size = parquet_path.stat().st_size
 results.append(BenchmarkResult("Parquet", "write", write_time, parquet_size, total_rows))
 
@@ -176,8 +207,7 @@ def read_parquet_materialized() -> pl.DataFrame:
     return force_materialize_polars(pl.read_parquet(parquet_path))
 
 
-gc.collect()
-read_time, parquet_result = time_operation(read_parquet_materialized)
+read_time, parquet_result = time_read(read_parquet_materialized)
 validate_result(parquet_result, total_rows, "Parquet read")
 results.append(BenchmarkResult("Parquet", "read", read_time, parquet_size, total_rows))
 
@@ -186,8 +216,7 @@ def read_parquet_columnar() -> pl.DataFrame:
     return force_materialize_polars(pl.read_parquet(parquet_path, columns=["close", "volume"]))
 
 
-gc.collect()
-columnar_time, _ = time_operation(read_parquet_columnar)
+columnar_time, _ = time_read(read_parquet_columnar)
 results.append(BenchmarkResult("Parquet", "columnar_read", columnar_time, parquet_size, total_rows))
 
 # %% [markdown]
@@ -201,8 +230,7 @@ results.append(BenchmarkResult("Parquet", "columnar_read", columnar_time, parque
 # %%
 feather_path = BENCHMARK_DIR / f"ohlcv_{ACTIVE_SCALE.lower()}.feather"
 
-gc.collect()
-write_time, _ = time_operation(lambda: ohlcv_df.write_ipc(feather_path))
+write_time, _ = time_write(lambda: ohlcv_df.write_ipc(feather_path))
 feather_size = feather_path.stat().st_size
 results.append(BenchmarkResult("Feather", "write", write_time, feather_size, total_rows))
 
@@ -216,8 +244,7 @@ def read_feather_materialized() -> pl.DataFrame:
     return force_materialize_polars(pl.read_ipc(feather_path))
 
 
-gc.collect()
-read_time, feather_result = time_operation(read_feather_materialized)
+read_time, feather_result = time_read(read_feather_materialized)
 validate_result(feather_result, total_rows, "Feather read")
 results.append(BenchmarkResult("Feather", "read", read_time, feather_size, total_rows))
 
@@ -226,8 +253,7 @@ def read_feather_columnar() -> pl.DataFrame:
     return force_materialize_polars(pl.read_ipc(feather_path, columns=["close", "volume"]))
 
 
-gc.collect()
-columnar_time, _ = time_operation(read_feather_columnar)
+columnar_time, _ = time_read(read_feather_columnar)
 results.append(BenchmarkResult("Feather", "columnar_read", columnar_time, feather_size, total_rows))
 
 # %% [markdown]
@@ -246,8 +272,7 @@ def write_hdf5() -> None:
         store["ohlcv"] = ohlcv_pandas
 
 
-gc.collect()
-write_time, _ = time_operation(write_hdf5)
+write_time, _ = time_write(write_hdf5)
 hdf5_size = hdf5_path.stat().st_size
 results.append(BenchmarkResult("HDF5", "write", write_time, hdf5_size, total_rows))
 
@@ -258,8 +283,7 @@ def read_hdf5_materialized() -> pd.DataFrame:
     return force_materialize_pandas(df)
 
 
-gc.collect()
-read_time, hdf5_result = time_operation(read_hdf5_materialized)
+read_time, hdf5_result = time_read(read_hdf5_materialized)
 validate_result(hdf5_result, total_rows, "HDF5 read")
 results.append(BenchmarkResult("HDF5", "read", read_time, hdf5_size, total_rows))
 # Fixed-format HDF5 has no column projection — record the full-read time

@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -643,11 +643,11 @@ print(f"Assessment: {'PROCEED' if feasibility_ratio > 1.0 else 'KILL -- edge too
 # - **KC1 (IC floor)**: IC < 0.01 with t-stat < 2.0 across all lookback horizons
 #   (3M-12M). Gate: Chapter 8 feature evaluation.
 # - **KC2 (edge-cost)**: Edge-to-cost ratio < 1.0x after realistic transaction
-#   costs. Gate: Chapter 7 label evaluation / Chapter 17 backtest. B.4 above
+#   costs. Gate: Chapter 7 label evaluation / Chapter 16 backtest. B.4 above
 #   tests this gate on raw return magnitudes before the model is even trained.
 # - **KC3 (EW underperformance)**: Equal-weight benchmark posts a higher Sharpe
 #   and lower max drawdown than the strategy across all test folds. Gate:
-#   Chapter 17 backtest.
+#   Chapter 16 backtest.
 
 # %% [markdown]
 # ### C.3 Mapping Class
@@ -659,7 +659,7 @@ print(f"Assessment: {'PROCEED' if feasibility_ratio > 1.0 else 'KILL -- edge too
 # construction, and (c) it isolates the ranking signal from short-side
 # complexity. Equal-weight is the minimal-assumption sizing rule---it avoids
 # introducing a secondary optimization (risk-parity, inverse-vol) that would
-# confound evaluation of the ranking signal itself. Chapter 18 explores
+# confound evaluation of the ranking signal itself. Chapter 17 explores
 # alternative weighting schemes via the `backtest.sweep.allocators` grid in
 # `setup.yaml`.
 
@@ -919,7 +919,7 @@ print(f"Written: {report_path}")
 #    weekly tested as a variant via `labels.variants: [fwd_ret_5d]`.
 # 4. **Mapping**: Long-only equal-weight top-N as simplest credible baseline;
 #    alternative allocators sweep in `setup.yaml::backtest.sweep.allocators`
-#    (explored in Chapter 17--18).
+#    (explored in Chapter 17).
 # 5. **Evaluation**: 8 walk-forward folds with verified holdout separation
 #    (`evaluation.holdout_start` enforced).
 # 6. **Kill conditions**: KC2 (edge-to-cost > 1.0x) already cleared---feasibility

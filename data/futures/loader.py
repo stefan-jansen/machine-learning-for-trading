@@ -50,11 +50,17 @@ def load_cme_futures(
     Returns:
         DataFrame with futures prices.
 
-        Daily columns: session_date, product, tenor, open, high, low,
-        close, volume, bar_count, session_start, session_end.
+        Daily columns: session_date, product, tenor, adj_open, adj_high,
+        adj_low, adj_close, raw_open, raw_high, raw_low, raw_close, cum_ratio,
+        volume, bar_count, session_start, session_end. There is no bare
+        ``close``: use ``adj_close`` for returns / momentum / volatility /
+        labels (roll-continuous) and ``raw_close`` for carry / term structure
+        / roll yield / notional / costs (contemporaneous traded levels);
+        ``adj_close == raw_close * cum_ratio``.
 
         Hourly columns: ts_event, product, tenor, open, high, low,
-        close, volume.
+        close, volume. (Hourly bars are per-contract and not roll-adjusted,
+        so they keep bare OHLC.)
 
     Example:
         >>> # Daily data (default) — most notebooks use this

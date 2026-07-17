@@ -180,13 +180,15 @@ ENV PYTHONPATH="/app"
 # - NVIDIA_VISIBLE_DEVICES
 # - LD_LIBRARY_PATH (for libnvidia-ml.so, etc.)
 
-# Jupyter configuration - disable token authentication
+# Jupyter runs without a token so the reader's first command is the only step.
+# That is safe only because docker-compose.yml publishes 8888 on 127.0.0.1 alone.
+# Origin and XSRF checks stay ON: loopback does not stop a page the reader browses
+# from POSTing to localhost:8888, and with no token those checks are the only thing
+# standing between a visited web page and code execution on the reader's machine.
 ENV JUPYTER_ENABLE_LAB=yes
 RUN mkdir -p /etc/jupyter && \
     echo "c.ServerApp.token = ''" >> /etc/jupyter/jupyter_server_config.py && \
-    echo "c.ServerApp.password = ''" >> /etc/jupyter/jupyter_server_config.py && \
-    echo "c.ServerApp.allow_origin = '*'" >> /etc/jupyter/jupyter_server_config.py && \
-    echo "c.ServerApp.disable_check_xsrf = True" >> /etc/jupyter/jupyter_server_config.py
+    echo "c.ServerApp.password = ''" >> /etc/jupyter/jupyter_server_config.py
 
 # NOTE: jupyterlab-plotly extension is required for Plotly widget rendering
 # It is installed automatically by plotly pip package - do NOT delete it

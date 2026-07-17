@@ -259,14 +259,33 @@ def _infer_horizon_from_label(label: str | None) -> int:
     `fwd_ret_5d` -> 5, `fwd_dir_21d` -> 21, `fwd_class_1m` -> 21,
     `fwd_carry_8h` -> 1 (one 8h bar). Defaults to 1 when label is missing.
     Callers should always pass `label=` so the HAC lag matches horizon-1.
+
+    Some deployed labels carry no `<number><unit>` token. `ret_to_expiry`
+    (S&P 500 options, hold-to-expiry) overlaps ~35 trading days per its
+    `buffer: 35D` setup — resolving it to 1 silently under-lags the HAC
+    bandwidth (this was the Ch13 §13.9 exposure). It is resolved by name here.
+    Any *other* non-parsing label triggers a warning and a conservative
+    fallback of 1; the caller should pass an explicit horizon at the call site.
     """
     if not label:
         return 1
     import re
 
     s = label.lower()
+    # Named horizons for labels that do not carry a <number><unit> token.
+    if "to_expiry" in s:
+        return 35
     m = re.search(r"(\d+)\s*([dhwm])", s)
     if not m:
+        import warnings
+
+        warnings.warn(
+            f"_infer_horizon_from_label: label {label!r} has no <number><unit> "
+            "token and is not a named horizon; defaulting to horizon=1, which "
+            "under-lags the HAC bandwidth for any overlapping label. Pass an "
+            "explicit horizon at the call site.",
+            stacklevel=2,
+        )
         return 1
     n = int(m.group(1))
     unit = m.group(2)

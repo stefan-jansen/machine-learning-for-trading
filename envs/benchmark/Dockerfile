@@ -45,14 +45,37 @@ RUN python -m venv /opt/ml4t
 # Copy and install dependencies
 WORKDIR /build
 COPY envs/benchmark/pyproject.toml /build/
+COPY pyproject.toml uv.lock /build/root/
+
+# Derive a fully-pinned constraint from uv.lock so this image reproduces the
+# locked environment readers get from `uv sync` (single source of truth:
+# uv.lock), the same way envs/ml4t/Dockerfile does. Without it the resolve below
+# free-resolves to the latest compatible release at build time and drifts off
+# the lock — e.g. it landed pandas 3.0.2 where the lock pins 2.3.3, and pandas 3
+# stores the `symbol` column ~8 bytes/row wider in PyTables, moving Ch2's HDF5
+# benchmark from 71 MB to 79 MB for the identical panel and making §2.4's number
+# unreproducible in the very image the notebook told readers to use.
+# Only packages the lock knows about are pinned; this image's own extras (the
+# database clients, pykx) are absent from the lock and resolve freely.
+# kaleido is excluded: this image deliberately caps it at <1.0 (1.x needs a
+# Chrome runtime this image does not carry — the notebooks' fig.write_image call
+# is wrapped in try/except for exactly that reason), while the lock pins 1.3.0.
+# It only affects static image export, never a benchmark number, so the image's
+# cap wins and the constraint stays out of its way.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+RUN cd /build/root && uv export --frozen --no-emit-project --no-hashes --format requirements-txt \
+      | grep -iE '^[a-z0-9._-]+==' \
+      | grep -viE '^kaleido==' \
+      > /tmp/locked-constraints.txt
 
 # Install all dependencies in one go. We deliberately do NOT have a fallback
 # that strips questdb on failure — a successful build must include every
 # database client declared in pyproject.toml so users never hit a runtime
 # `ModuleNotFoundError`.
 RUN /opt/ml4t/bin/pip install --no-cache-dir pip setuptools wheel && \
-    /opt/ml4t/bin/pip install --no-cache-dir /build && \
-    /opt/ml4t/bin/pip install --no-cache-dir "pytest>=8.0" "pytest-timeout>=2.3" "papermill>=2.6" "jupytext>=1.16"
+    /opt/ml4t/bin/pip install --no-cache-dir -c /tmp/locked-constraints.txt /build && \
+    /opt/ml4t/bin/pip install --no-cache-dir -c /tmp/locked-constraints.txt \
+        "pytest>=8.0" "pytest-timeout>=2.3" "papermill>=2.6" "jupytext>=1.16"
 
 WORKDIR /app
 ENV PATH="/opt/ml4t/bin:$PATH"
@@ -60,10 +83,11 @@ ENV PYTHONPATH="/app"
 
 # Jupyter configuration
 ENV JUPYTER_ENABLE_LAB=yes
+# Token-less, like envs/ml4t/Dockerfile: safe only because compose binds the
+# published port to 127.0.0.1. Origin/XSRF checks stay on - see that file.
 RUN mkdir -p /etc/jupyter && \
     echo "c.ServerApp.token = ''" >> /etc/jupyter/jupyter_server_config.py && \
-    echo "c.ServerApp.password = ''" >> /etc/jupyter/jupyter_server_config.py && \
-    echo "c.ServerApp.allow_origin = '*'" >> /etc/jupyter/jupyter_server_config.py
+    echo "c.ServerApp.password = ''" >> /etc/jupyter/jupyter_server_config.py
 
 # Platform detection script
 RUN echo '#!/bin/bash\n\

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -71,12 +72,40 @@ def prediction_hash_from_parts(
     return compute_hash(f"{training_hash}|{cp}|{split}")
 
 
+# Provenance keys under ``backtest_config.metadata`` that must NOT enter the
+# backtest hash: they record where/how a run was launched, not the strategy's
+# identity. ``preset_path`` is an absolute filesystem path — ``/home/.../base.yaml``
+# on the host vs ``/app/.../base.yaml`` in Docker — so including it made the hash
+# non-portable: re-running a sweep from a different path recomputed every hash and
+# silently duplicated the registry. Stripping it here keeps ``spec_json`` (stored
+# separately) fully intact for provenance while making the hash path-independent.
+_HASH_EXCLUDED_METADATA = ("preset_path",)
+
+
+def _hashable_strategy_spec(strategy_spec: dict) -> dict:
+    """Copy of *strategy_spec* with non-portable provenance stripped for hashing."""
+    spec = copy.deepcopy(strategy_spec)
+    backtest_config = spec.get("backtest_config")
+    if isinstance(backtest_config, dict):
+        metadata = backtest_config.get("metadata")
+        if isinstance(metadata, dict):
+            for key in _HASH_EXCLUDED_METADATA:
+                metadata.pop(key, None)
+    return spec
+
+
 def backtest_hash_from_parts(
     prediction_hash: str,
     strategy_spec: dict,
 ) -> str:
-    """Compute backtest_hash from prediction_hash + strategy spec."""
-    return compute_hash(f"{prediction_hash}|{canonical_json(strategy_spec)}")
+    """Compute backtest_hash from prediction_hash + strategy spec.
+
+    Non-portable provenance (see ``_HASH_EXCLUDED_METADATA``) is stripped before
+    hashing so the same strategy hashes identically regardless of where it runs.
+    """
+    return compute_hash(
+        f"{prediction_hash}|{canonical_json(_hashable_strategy_spec(strategy_spec))}"
+    )
 
 
 # ---------------------------------------------------------------------------

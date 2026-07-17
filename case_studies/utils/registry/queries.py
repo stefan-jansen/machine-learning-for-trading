@@ -713,6 +713,7 @@ def resolve_best_predictions(
     stage: str = "signal",
     chapter_filter: str | None = None,
     case_dir: Path | None = None,
+    checkpoints_per_config: int = 1,
 ):
     """Return top-N prediction hashes ranked by backtest Sharpe at a given stage.
 
@@ -733,13 +734,17 @@ def resolve_best_predictions(
         holdout predictions over validation, which produces NULL
         allocation/cost/risk rows in chapter prose.
     top_n : int
-        Number of top predictions to return.
+        Number of top model configs to return. The unit is a distinct
+        ``(family, config_name)``, not a prediction: with
+        ``checkpoints_per_config > 1`` the frame holds more than ``top_n`` rows.
     stage : str
         Pipeline stage to filter by: "signal", "allocation", etc.
     chapter_filter : str, optional
         Chapter-based filter (e.g. "ch16"). Converted to stage internally.
     case_dir : Path, optional
         Override case study directory.
+    checkpoints_per_config : int
+        How many checkpoints each advancing config contributes, best first.
 
     Returns
     -------
@@ -757,15 +762,17 @@ def resolve_best_predictions(
         logger.warning("No registry.db found for '%s'", case_study)
         return pl.DataFrame(schema=_BEST_PREDICTIONS_SCHEMA)
 
-    # Find top-N distinct model configs, each represented by its best checkpoint.
+    # Find top-N distinct model configs, each represented by its best
+    # ``checkpoints_per_config`` checkpoints.
     #
     # A single model config (e.g., latent_factors/sae) may have many prediction
     # hashes — one per checkpoint epoch. Without dedup, the top-N list can be
     # dominated by checkpoints of a single model, hiding model diversity.
     #
-    # Two-stage approach:
-    #   1. Inner: best Sharpe per (family, config_name) — one row per distinct config
-    #   2. Outer: rank configs, take top_n, resolve back to the actual prediction_hash
+    # Three-stage approach:
+    #   1. per_prediction: best Sharpe per prediction_hash
+    #   2. top_configs:    rank (family, config_name) by their best Sharpe, take top_n
+    #   3. ranked:         within each advancing config, keep its best N checkpoints
     #
     # Prefer stage column; fall back to spec_json LIKE for un-migrated DBs.
     stage_clause, stage_params = _stage_filter_clause(stage, chapter_filter)
@@ -778,6 +785,7 @@ def resolve_best_predictions(
         split_clause = "AND p.split = ?"
         params.append(split)
     params.append(str(top_n))
+    params.append(str(max(1, int(checkpoints_per_config))))
 
     query = f"""
         WITH per_prediction AS (
@@ -803,14 +811,25 @@ def resolve_best_predictions(
               {split_clause}
             GROUP BY p.prediction_hash
         ),
-        best_per_config AS (
-            -- Best checkpoint per (family, config_name): one row per distinct model
-            SELECT *,
-                ROW_NUMBER() OVER (
-                    PARTITION BY family, config_name
-                    ORDER BY sharpe DESC, checkpoint_value DESC
-                ) AS rn
+        top_configs AS (
+            -- The advancing model configs, ranked by their best checkpoint's Sharpe
+            SELECT family, config_name
             FROM per_prediction
+            GROUP BY family, config_name
+            ORDER BY MAX(sharpe) DESC
+            LIMIT ?
+        ),
+        ranked AS (
+            -- Rank checkpoints within each advancing config, best first
+            SELECT pp.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY pp.family, pp.config_name
+                    ORDER BY pp.sharpe DESC, pp.checkpoint_value DESC
+                ) AS rn
+            FROM per_prediction pp
+            JOIN top_configs tc
+              ON pp.family = tc.family
+             AND pp.config_name IS tc.config_name
         )
         SELECT
             prediction_hash,
@@ -821,10 +840,9 @@ def resolve_best_predictions(
             split,
             checkpoint_value,
             sharpe
-        FROM best_per_config
-        WHERE rn = 1
+        FROM ranked
+        WHERE rn <= CAST(? AS INTEGER)
         ORDER BY sharpe DESC
-        LIMIT ?
     """
 
     df = _query_table(case_dir, query, tuple(params))

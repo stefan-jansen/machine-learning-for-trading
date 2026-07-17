@@ -69,7 +69,7 @@ services:
       dockerfile: envs/ml4t/Dockerfile
     container_name: ml4t-review
     ports:
-      - "8888:8888"
+      - "127.0.0.1:8888:8888"
     command: ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
 
   # ============================================
@@ -84,7 +84,7 @@ services:
       dockerfile: envs/ml4t/Dockerfile
     container_name: ml4t-review-gpu
     ports:
-      - "8889:8888"
+      - "127.0.0.1:8889:8888"
     command: ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
     profiles: ["gpu"]
     deploy:
@@ -109,12 +109,29 @@ services:
       dockerfile: envs/benchmark/Dockerfile
     container_name: ml4t-benchmark
     ports:
-      - "8887:8888"
+      - "127.0.0.1:8887:8888"
     profiles: ["benchmark"]
+    # Re-declares the x-common volumes because a service-level `volumes:` key
+    # replaces the anchor's rather than extending it.
+    volumes:
+      - .:/app:rw
+      - ${ML4T_DATA_PATH:-./data}:/data:rw
+      # kdb+/PyKX licence + q binary, mounted read-only from the host at RUNTIME.
+      # Never baked into the image: the licence is personal and must not ship in
+      # a published image. If you have no kdb+ licence these resolve to empty
+      # directories, PyKX finds no licence, and 21_storage_benchmark_database
+      # skips kdb+ and says so. Get a free personal edition from
+      # https://kx.com/kdb-personal-edition-download/ and unpack it to ~/.kx.
+      - ${KX_HOME:-${HOME}/.kx}:/home/ml4t/.kx:ro
+      - ${PYKX_HOME:-${HOME}/.pykx}:/home/ml4t/.pykx:ro
     environment:
       - ML4T_DATA_PATH=/data
       - ML4T_PATH=/app
       - TEST=${TEST:-0}
+      # q resolves its licence from QLIC, not from the file's presence on disk;
+      # without this q starts and immediately fails "no license loaded".
+      - QLIC=/home/ml4t/.kx
+      - QHOME=/home/ml4t/.kx/q
       # Database connections (when running with database services)
       - CLICKHOUSE_HOST=ml4t-clickhouse
       - CLICKHOUSE_PORT=8123
@@ -149,7 +166,7 @@ services:
         - linux/amd64
     container_name: ml4t-benchmark-full
     ports:
-      - "8887:8888"
+      - "127.0.0.1:8887:8888"
     profiles: ["benchmark-full"]
     environment:
       - ML4T_DATA_PATH=/data
@@ -238,8 +255,8 @@ services:
     container_name: ml4t-neo4j
     profiles: ["kg"]
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
     environment:
       - NEO4J_AUTH=${NEO4J_AUTH:-neo4j/password}
     volumes:
@@ -263,7 +280,7 @@ services:
       - POSTGRES_DB=ml4t
       - POSTGRES_USER=postgres
     ports:
-      - "5437:5432"
+      - "127.0.0.1:5437:5432"
     profiles: ["benchmark", "benchmark-full", "databases"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -279,7 +296,7 @@ services:
       - POSTGRES_DB=ml4t
       - POSTGRES_USER=postgres
     ports:
-      - "5436:5432"
+      - "127.0.0.1:5436:5432"
     profiles: ["benchmark", "benchmark-full", "databases"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -295,7 +312,7 @@ services:
       - CLICKHOUSE_USER=default
       - CLICKHOUSE_PASSWORD=
     ports:
-      - "8123:8123"
+      - "127.0.0.1:8123:8123"
     profiles: ["benchmark", "benchmark-full", "databases"]
     deploy:
       resources:
@@ -311,8 +328,8 @@ services:
     image: questdb/questdb:latest
     container_name: ml4t-questdb
     ports:
-      - "9000:9000"
-      - "9009:9009"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9009:9009"
     profiles: ["benchmark", "benchmark-full", "databases"]
     deploy:
       resources:
@@ -335,7 +352,7 @@ services:
       - DOCKER_INFLUXDB_INIT_BUCKET=market_data
       - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=benchmark-token
     ports:
-      - "8086:8086"
+      - "127.0.0.1:8086:8086"
     profiles: ["benchmark", "benchmark-full", "databases"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8086/health"]

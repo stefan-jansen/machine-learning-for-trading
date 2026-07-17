@@ -199,25 +199,26 @@ def get_allocator_lookback(case_study: str) -> int:
 
 
 _STAGE_DEFAULTS = {
-    "signal": 0,  # 0 = all predictions
-    "allocation": 10,  # legacy uniform-allocator key (notebooks pre-tier-split)
-    "allocation_cheap": 0,  # post-tier-split: cheap allocators see all signal preds
-    "allocation_expensive": 10,  # post-tier-split: expensive allocators see top-10 by signal Sharpe
+    "signal": 0,  # 0 = all predictions (equal-weight baseline)
+    "allocation": 10,  # top-10 model configs by baseline Sharpe
     "cost_sensitivity": 1,  # top-1 of {signal+allocation} per label
     "risk_overlay": 1,  # top-1 of {signal+allocation} per label
 }
 
-_DEFAULT_EXPENSIVE_ALLOCATORS: tuple[str, ...] = ("risk_parity", "mvo_ledoit_wolf", "hrp")
+_DEFAULT_CHECKPOINTS_PER_CONFIG = 1
 
 
 def get_top_n_predictions(case_study: str, stage: str) -> int:
     """Return the top-N predictions to feed into ``stage`` from the upstream stage.
 
     Reads ``backtest.sweep.top_n_predictions[stage]`` with safe fallbacks.
-    ``stage`` is one of ``signal | allocation | allocation_cheap | allocation_expensive
-    | cost_sensitivity | risk_overlay``. Unknown stage names raise ``ValueError``
-    rather than ``KeyError`` so the stack trace clearly distinguishes a typo'd
-    lookup from a missing key in the YAML.
+    ``stage`` is one of ``signal | allocation | cost_sensitivity | risk_overlay``.
+    Unknown stage names raise ``ValueError`` rather than ``KeyError`` so the stack
+    trace clearly distinguishes a typo'd lookup from a missing key in the YAML.
+
+    For ``allocation`` the unit counted is a *model config* — one ``(family,
+    config_name)`` pair — not a prediction. See ``get_checkpoints_per_config``
+    for how many checkpoints each advancing config contributes.
     """
     if stage not in _STAGE_DEFAULTS:
         raise ValueError(f"unknown stage {stage!r}; expected one of {sorted(_STAGE_DEFAULTS)}")
@@ -225,24 +226,22 @@ def get_top_n_predictions(case_study: str, stage: str) -> int:
     return int(block.get(stage, _STAGE_DEFAULTS[stage]))
 
 
+def get_checkpoints_per_config(case_study: str) -> int:
+    """Return how many checkpoints each advancing model config contributes.
+
+    Reads ``backtest.sweep.checkpoints_per_config``. The default of 1 means a
+    config enters the allocation sweep through its single best checkpoint, so
+    a long checkpoint sweep of one model cannot crowd out other model families.
+    """
+    value = load_sweep(case_study).get("checkpoints_per_config")
+    if value is None:
+        return _DEFAULT_CHECKPOINTS_PER_CONFIG
+    return int(value)
+
+
 def get_expensive_allocators_skip(case_study: str) -> bool:
     """Return whether MVO/HRP should be skipped at Ch17 (intraday escape hatch)."""
     return bool(load_sweep(case_study).get("expensive_allocators_skip", False))
-
-
-def get_expensive_allocators(case_study: str) -> tuple[str, ...]:
-    """Return the allocator names routed through the ``allocation_expensive`` tier.
-
-    Reads ``backtest.sweep.expensive_allocators`` from setup.yaml. Falls back
-    to the canonical default ``(risk_parity, mvo_ledoit_wolf, hrp)`` if the
-    key is missing (legacy setup.yaml without the tier split). Allocators
-    not in this list are routed through ``allocation_cheap`` and see all
-    signal-stage predictions.
-    """
-    block = load_sweep(case_study).get("expensive_allocators")
-    if block is None:
-        return _DEFAULT_EXPENSIVE_ALLOCATORS
-    return tuple(str(a) for a in block)
 
 
 def get_cost_grid_half_spread_usd(case_study: str) -> list[float]:
@@ -539,8 +538,10 @@ def get_signal_nasdaq100_schemes_for(
     _required: dict[str, list] = {"direction": directions}
     if "slot_persistent_signal_exit" in methods:
         _required.update(
-            long_q=long_qs, max_slots=max_slots_grid,
-            hold_bars=hold_bars_grid, bars_per_day_grid=bpd_grid,
+            long_q=long_qs,
+            max_slots=max_slots_grid,
+            hold_bars=hold_bars_grid,
+            bars_per_day_grid=bpd_grid,
         )
     if "eq_w_topk" in methods:
         _required["top_k_grid"] = top_k_grid

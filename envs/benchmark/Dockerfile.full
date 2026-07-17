@@ -46,10 +46,11 @@ ENV PYTHONPATH="/app"
 
 # Jupyter configuration
 ENV JUPYTER_ENABLE_LAB=yes
+# Token-less, like envs/ml4t/Dockerfile: safe only because compose binds the
+# published port to 127.0.0.1. Origin/XSRF checks stay on - see that file.
 RUN mkdir -p /etc/jupyter && \
     echo "c.ServerApp.token = ''" >> /etc/jupyter/jupyter_server_config.py && \
-    echo "c.ServerApp.password = ''" >> /etc/jupyter/jupyter_server_config.py && \
-    echo "c.ServerApp.allow_origin = '*'" >> /etc/jupyter/jupyter_server_config.py
+    echo "c.ServerApp.password = ''" >> /etc/jupyter/jupyter_server_config.py
 
 # Status script
 RUN echo '#!/bin/bash\n\

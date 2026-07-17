@@ -269,6 +269,90 @@ def format_pct_axis(ax: Axes, axis: Literal["x", "y", "both"] = "y") -> None:
         ax.xaxis.set_major_formatter(formatter)
 
 
+def add_message_title(
+    ax: Axes,
+    message: str,
+    subtitle: str | None = None,
+    source: str | None = None,
+) -> None:
+    """Left-aligned takeaway title (a claim, not a label), optional subtitle + source note.
+
+    `message` should state the finding ("Momentum decays beyond a 12-month hold"), not
+    label the axes. `subtitle` carries the qualifier the title omits (metric, universe,
+    frequency, period); `source` is a small bottom-left note. No figure number — the
+    publisher captions separately.
+    """
+    ax.set_title(
+        message,
+        loc="left",
+        color=COLORS["blue"],
+        fontweight="semibold",
+        pad=15 if subtitle else 8,
+    )
+    if subtitle:
+        ax.annotate(
+            subtitle,
+            xy=(0, 1),
+            xycoords="axes fraction",
+            xytext=(0, 4),
+            textcoords="offset points",
+            ha="left",
+            va="bottom",
+            fontsize=9,
+            color=COLORS["neutral"],
+        )
+    if source:
+        ax.figure.text(
+            0.01, 0.005, source, ha="left", va="bottom", fontsize=8, color=COLORS["neutral"]
+        )
+
+
+def label_line_ends(ax: Axes, xpad_points: int = 4, expand_right: float = 0.10) -> None:
+    """Direct-label each labeled line at its last finite point; use instead of a legend.
+
+    Preferred over a legend for <=5 series. Expands the right margin to fit labels.
+    Do not also call ``ax.legend()``. Each label inherits its line's color, so the chart
+    stays legible in grayscale (position + color, no legend lookup).
+    """
+    x0, x1 = ax.get_xlim()
+    ax.set_xlim(x0, x1 + (x1 - x0) * expand_right)
+    for line in ax.get_lines():
+        label = line.get_label()
+        if not label or label.startswith("_"):
+            continue
+        x = np.asarray(line.get_xdata(), dtype=float)
+        y = np.asarray(line.get_ydata(), dtype=float)
+        m = np.isfinite(x) & np.isfinite(y)
+        if not m.any():
+            continue
+        ax.annotate(
+            label,
+            xy=(x[m][-1], y[m][-1]),
+            xytext=(xpad_points, 0),
+            textcoords="offset points",
+            va="center",
+            ha="left",
+            color=line.get_color(),
+            fontsize=9,
+            annotation_clip=False,
+        )
+
+
+def zero_line(ax: Axes, at: float = 0.0, axis: Literal["x", "y"] = "y") -> None:
+    """Thin neutral reference line (zero, benchmark=1.0, mean, threshold) behind the data."""
+    draw = ax.axhline if axis == "y" else ax.axvline
+    draw(at, color=COLORS["neutral"], linewidth=0.8, linestyle="--", zorder=0.5)
+
+
+def upper_triangle_mask(corr: object) -> np.ndarray:
+    """Boolean mask hiding the redundant upper triangle of a symmetric matrix.
+
+    For correlation/covariance heatmaps: ``sns.heatmap(corr, mask=upper_triangle_mask(corr),
+    vmin=-1, vmax=1, center=0, cmap=...)``.
+    """
+    return np.triu(np.ones_like(np.asarray(corr), dtype=bool), k=1)
+
+
 # =============================================================================
 # PLOTLY TEMPLATE (optional — only used if Plotly is installed)
 # =============================================================================
@@ -331,6 +415,11 @@ def _register_plotly_template() -> None:
         )
     )
     pio.templates["ml4t"] = template
+    # Make it the default so every Plotly figure inherits the ML4T font,
+    # backgrounds, gridlines, and colorway — the palette applies repo-wide
+    # without each notebook having to opt in (matplotlib gets this via
+    # matplotlibrc; this is the Plotly equivalent).
+    pio.templates.default = "ml4t"
 
 
 # Auto-register Plotly template on import
@@ -786,6 +875,10 @@ __all__ = [
     "annotate_peak",
     "add_regime_shading",
     "format_pct_axis",
+    "add_message_title",
+    "label_line_ends",
+    "zero_line",
+    "upper_triangle_mask",
     # Book-specific
     "ML4T_STYLE",
     "HAS_PLOTLY",

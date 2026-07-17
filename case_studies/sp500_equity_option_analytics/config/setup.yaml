@@ -75,15 +75,12 @@ backtest:
     # Notebooks read these via get_top_n_predictions(case_study, stage).
     top_n_predictions:
       signal: 0                 # all signal predictions (eq-weight baseline)
-      allocation_cheap: 0       # score_weighted, inverse_vol — all signal preds
-      allocation_expensive: 10  # risk_parity, mvo_ledoit_wolf, hrp — top-10 by signal Sharpe
+      allocation: 10            # top-10 model configs by equal-weight baseline Sharpe
       cost_sensitivity: 1       # top-1 of {signal+allocation} per label
       risk_overlay: 1           # top-1 of {signal+allocation} per label
     # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
     expensive_allocators_skip: false
-    # Allocators routed through ``allocation_expensive`` (top-10 by signal Sharpe).
     # All others (equal_weight, score_weighted, inverse_vol) take the cheap path.
-    expensive_allocators: [risk_parity, mvo_ledoit_wolf, hrp, conformal_weighted]
     # Ch16 signal-stage selection. Long-only equal-weight top-k for every
     # label.
     top_k_grid:

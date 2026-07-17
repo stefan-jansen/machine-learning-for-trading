@@ -298,7 +298,10 @@ def _load_base_target_frame(
             .sort(["product", "position", "timestamp"])
             .with_columns(
                 (
-                    (pl.col("close") / pl.col("close").shift(1).over(["product", "position"])).log()
+                    (
+                        pl.col("adj_close")
+                        / pl.col("adj_close").shift(1).over(["product", "position"])
+                    ).log()
                 ).alias(BASE_TARGET_COL)
             )
             .select(["timestamp", "product", "position", BASE_TARGET_COL])

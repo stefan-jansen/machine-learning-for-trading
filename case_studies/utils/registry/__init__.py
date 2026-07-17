@@ -93,6 +93,7 @@ from .registration import (
     register_backtest_fold_metrics,
     register_backtest_metrics,
     register_backtest_run,
+    register_cohort_metrics,
     register_epoch_checkpoint,
     register_fold_metrics,
     register_paired_metrics,
@@ -146,6 +147,7 @@ __all__ = [
     "register_backtest_metrics",
     "register_backtest_fold_metrics",
     "register_paired_metrics",
+    "register_cohort_metrics",
     # completeness
     "TrainingRunStatus",
     "BacktestRunStatus",
