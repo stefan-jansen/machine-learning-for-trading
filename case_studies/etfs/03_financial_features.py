@@ -43,10 +43,12 @@
 import itertools
 import os
 import warnings
+from datetime import date
 
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
+import yaml
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats
 from ml4t.engineer.features.momentum import adx, aroon, cci, macd, rsi, stochastic
@@ -669,12 +671,22 @@ print(f"  {len(features):,} rows, {features['symbol'].n_unique()} assets")
 labels = pl.read_parquet(CASE_DIR / "labels" / "fwd_ret_21d.parquet")
 label_col = "fwd_ret_21d"
 
+# Holdout boundary: feature evaluation is a development decision, so the
+# sealed holdout (setup.yaml `evaluation.holdout_start`; see the rule in
+# 06_strategy_definition/02_cv_foundations) must not inform which features
+# look predictive. The label parquet spans the full sample, so restrict the
+# joined evaluation panel to train+validation rows — mirroring the
+# baseline-IC scoping in `02_labels`.
+setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+holdout_start = setup["evaluation"]["holdout_start"]
+
 eval_df = features.join(
     labels.select(["timestamp", "symbol", label_col]), on=["timestamp", "symbol"], how="inner"
-)
+).filter(pl.col("timestamp") < date.fromisoformat(holdout_start))
 print(
     f"Evaluation set: {len(eval_df):,} rows "
-    f"({eval_df['timestamp'].n_unique():,} dates x {eval_df['symbol'].n_unique()} assets)"
+    f"({eval_df['timestamp'].n_unique():,} dates x {eval_df['symbol'].n_unique()} assets, "
+    f"train+val only, < {holdout_start})"
 )
 
 # %% [markdown]
