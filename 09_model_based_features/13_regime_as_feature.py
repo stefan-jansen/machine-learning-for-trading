@@ -198,9 +198,14 @@ hmm_model = GaussianHMM(
 )
 hmm_model.fit(X_hmm)
 
-# Get regime predictions using filtered (causal) probabilities
-df["regime"] = hmm_model.predict(X_hmm)
+# Filtered (causal) probabilities; hard states are their argmax so both are
+# consistent and use only past/current observations. We deliberately do NOT
+# use `hmm_model.predict(X_hmm)`: that is Viterbi global decoding, which
+# conditions on the entire sample (including future observations) and must
+# not feed test-time expert routing (see 11_hmm_regimes, which saves
+# argmax-of-filtered states for the same reason).
 regime_probs = compute_filtered_probs(hmm_model, X_hmm)
+df["regime"] = regime_probs.argmax(axis=1)
 
 # Label states by volatility (ensure consistent labeling)
 regime_vols = df.groupby("regime")["volatility"].mean()
@@ -257,8 +262,10 @@ X_base = df[base_features].values
 X_regime = df[regime_features].values
 y = df["target"].values
 
-# Time-series cross-validation
-tscv = TimeSeriesSplit(n_splits=N_SPLITS)
+# Time-series cross-validation. gap=5 purges the 5 bars whose forward-return
+# target (shift(-5).rolling(5)) overlaps the test fold — see the label-buffer
+# (purge) discussion in 06_strategy_definition/02_cv_foundations.
+tscv = TimeSeriesSplit(n_splits=N_SPLITS, gap=5)
 
 # Scale features
 scaler_base = StandardScaler()

@@ -57,12 +57,14 @@
 """Feature Selection and Deduplication — reduce feature candidates to a focused production-ready set."""
 
 import warnings
+from datetime import date
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import seaborn as sns
 import statsmodels.api as sm
+import yaml
 from ml4t.diagnostic.metrics import pooled_ic
 from scipy.cluster.hierarchy import fcluster, leaves_list, linkage
 from scipy.spatial.distance import squareform
@@ -101,9 +103,24 @@ if not FEATURES_PATH.exists():
 features_df = pl.read_parquet(FEATURES_PATH)
 prices_df = load_etfs()
 
-# Apply date filter
-features_df = features_df.filter(pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
-prices_df = prices_df.filter(pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
+# Holdout boundary: feature selection is a development decision, and the
+# sealed holdout (setup.yaml `evaluation.holdout_start`; see the rule in
+# 06_strategy_definition/02_cv_foundations) must not inform it. Every step
+# below — IC ranking, BH-FDR, stability selection, ML importance — sees only
+# pre-holdout rows, and the forward-return labels computed from the filtered
+# prices never span into the holdout.
+setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
+
+# Apply date filters: development window only ([START_DATE, HOLDOUT_START))
+features_df = features_df.filter(
+    (pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
+    & (pl.col("timestamp") < HOLDOUT_START)
+)
+prices_df = prices_df.filter(
+    (pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
+    & (pl.col("timestamp") < HOLDOUT_START)
+)
 
 if MAX_SYMBOLS > 0:
     top_symbols = (
@@ -127,6 +144,7 @@ labels_df = (
 
 print(f"Features: {features_df.shape}")
 print(f"Labels: {labels_df.shape}")
+print(f"Development window: {START_DATE} to {HOLDOUT_START} (holdout sealed)")
 
 # %% tags=[]
 all_feature_cols = [c for c in features_df.columns if c not in ["timestamp", "symbol"]]

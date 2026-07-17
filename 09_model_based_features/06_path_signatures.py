@@ -177,12 +177,15 @@ def create_paths_and_targets(
         targets: Forward returns
         dates: End dates for each window
     """
-    # Compute returns and normalize prices
+    # Compute returns and normalize prices.
+    # NOTE: any volume channel added to the path must be normalized causally
+    # (expanding or rolling stats) — a full-sample z-score like
+    # (volume - volume.mean()) / volume.std() would leak future volume into
+    # every window.
     symbol_df = symbol_df.sort("timestamp")
     symbol_df = symbol_df.with_columns(
         ret=pl.col("close").pct_change(),
         log_ret=pl.col("close").log().diff(),
-        norm_vol=(pl.col("volume") - pl.col("volume").mean()) / pl.col("volume").std(),
     ).drop_nulls()
 
     # Compute forward returns for targets
@@ -390,21 +393,31 @@ print(f"Lag features dimension: {lag_features.shape[1]}")
 # 3. Combined (signatures + lags)
 
 # %%
-# Split data temporally (avoid look-ahead)
+# Split data temporally (avoid look-ahead). Adjacent samples come from
+# overlapping windows: consecutive paths share up to `window_size - 1` rows and
+# each target spans `horizon` rows beyond its window, so we purge
+# `window_size + horizon - 1` samples at each split boundary to keep
+# train/val/test informationally disjoint (the label-buffer rule from
+# 06_strategy_definition/02_cv_foundations).
+PURGE = WINDOW_SIZE + FORECAST_HORIZON - 1
 train_size = int(0.7 * len(paths))
 val_size = int(0.15 * len(paths))
 
+val_start = train_size + PURGE
+val_end = val_start + val_size
+test_start = val_end + PURGE
+
 X_lag_train = lag_features[:train_size]
-X_lag_val = lag_features[train_size : train_size + val_size]
-X_lag_test = lag_features[train_size + val_size :]
+X_lag_val = lag_features[val_start:val_end]
+X_lag_test = lag_features[test_start:]
 
 X_sig_train = logsignatures[:train_size]
-X_sig_val = logsignatures[train_size : train_size + val_size]
-X_sig_test = logsignatures[train_size + val_size :]
+X_sig_val = logsignatures[val_start:val_end]
+X_sig_test = logsignatures[test_start:]
 
 y_train = targets[:train_size]
-y_val = targets[train_size : train_size + val_size]
-y_test = targets[train_size + val_size :]
+y_val = targets[val_start:val_end]
+y_test = targets[test_start:]
 
 # Combined features
 X_comb_train = np.hstack([X_lag_train, X_sig_train])

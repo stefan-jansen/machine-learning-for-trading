@@ -899,7 +899,8 @@ plt.show()
 # %% [markdown]
 # ## Save Regime Features
 #
-# Save regime states for downstream chapters (Ch12 GBM, Ch18 portfolio).
+# Save regime states as a chapter demonstration artifact (see the caveat below
+# for why case-study pipelines must not read it).
 # The cross-join below broadcasts SPY-derived regime states to all symbols
 # in the case study universe - a simplification appropriate for market-level
 # regime features. Per-asset regime models would require individual HMM fits.
@@ -913,6 +914,14 @@ plt.show()
 # strictly live pipeline re-fits the model walk-forward; here we keep a single fit
 # for clarity, and the filtered inference is the part that most affects backtest
 # realism.
+#
+# Because of that parameter-level look-ahead, the artifact filename carries a
+# `_fullsample_demo` suffix: it is a chapter demonstration and **must not be
+# consumed by case-study or holdout-evaluated pipelines** — its EM parameters
+# saw the sealed holdout period. The lookahead-safe version of these features
+# (HMM refit per CV fold, filtered probabilities extracted per fold) is built
+# in `case_studies/etfs/04_model_based_features.py`; downstream chapters should
+# read that per-fold artifact instead.
 
 # %%
 MODEL_DIR = CASE_DIR / "models" / "time_series"
@@ -968,9 +977,11 @@ regime_df = regime_df.select(
     ]
 )
 
-output_path = MODEL_DIR / "regime_states.parquet"
+# `_fullsample_demo`: EM parameters saw the full sample (see caveat above) —
+# not for case-study/holdout-evaluated consumption.
+output_path = MODEL_DIR / "regime_states_fullsample_demo.parquet"
 regime_df.write_parquet(output_path)
-print(f"Saved regime states: {regime_df.shape}")
+print(f"Saved regime states (full-sample demo): {regime_df.shape}")
 
 # %% [markdown]
 # ## Key Takeaways

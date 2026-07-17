@@ -52,9 +52,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
+import yaml
 from ml4t.diagnostic.metrics import pooled_ic
 from plotly.subplots import make_subplots
 
+from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS  # activates the ml4t Plotly template on import
 
@@ -76,9 +78,22 @@ from data import load_etfs
 
 etfs = load_etfs()
 
+# Sealed-holdout boundary (setup.yaml `evaluation.holdout_start`). Parameter
+# sweeps and robustness diagnostics are development decisions; the sealed
+# holdout must not inform them (see the rule in
+# 06_strategy_definition/02_cv_foundations). Clamp the analysis window so an
+# END_DATE override can never reach into the holdout — every IC below (sweep,
+# RAS, regime-conditional, implementation variants) sees only pre-holdout data.
+setup = yaml.safe_load((get_case_study_dir("etfs") / "config" / "setup.yaml").read_text())
+HOLDOUT_START = setup["evaluation"]["holdout_start"]
+end_date = min(
+    datetime.strptime(END_DATE, "%Y-%m-%d"),
+    datetime.strptime(HOLDOUT_START, "%Y-%m-%d"),
+)
+
 etfs_filtered = etfs.filter(
     (pl.col("timestamp") >= datetime.strptime(START_DATE, "%Y-%m-%d"))
-    & (pl.col("timestamp") < datetime.strptime(END_DATE, "%Y-%m-%d"))
+    & (pl.col("timestamp") < end_date)
 ).sort(["symbol", "timestamp"])
 
 print(f"ETF data: {len(etfs_filtered):,} rows")
