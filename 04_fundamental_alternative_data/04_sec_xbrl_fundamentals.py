@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -294,24 +294,57 @@ fig.show()
 # For backtesting, use `announcement_date` to avoid lookahead bias. The
 # **as-of query** pattern returns only data that was publicly available on
 # a given date.
+#
+# The two dimensions do two different jobs, and it is worth being precise about which
+# does what. `announcement_date` decides *admissibility*: a row is usable only if the
+# market already knew it. `fiscal_quarter_end` decides *recency*: among the rows that
+# pass, the one describing the most recent period is the one you want. Sorting by
+# `announcement_date` and taking the last row conflates the two — it returns the
+# most-recently-*announced* row, which is not the freshest quarter whenever an old
+# quarter is announced late. That is not a hypothetical here: the filing-lag tail above
+# (p75 = 395 days) is exactly this, because the Frames API attributes fiscal-Q4 facts to
+# the next year's 10-K. Sort by `fiscal_quarter_end`, filter on `announcement_date`.
 
 
 # %%
 def query_fundamentals_as_of(df: pl.DataFrame, as_of_date: str) -> pl.DataFrame:
-    """Return latest known fundamentals as of a specific date (PIT-correct)."""
+    """Return latest known fundamentals as of a specific date (PIT-correct).
+
+    Admissibility is set by `announcement_date` (what the market knew); recency is set
+    by `fiscal_quarter_end` (which period the fact describes).
+    """
     query_date = pl.lit(as_of_date).str.to_date()
     return (
         df.filter(pl.col("announcement_date") <= query_date)
-        .sort(["symbol", "announcement_date"])
+        .sort(["symbol", "fiscal_quarter_end"])
         .group_by("symbol")
         .last()
     )
 
 
 # %% [markdown]
-# ### Demonstration: Correct vs Incorrect Queries
+# A row with no `announcement_date` has no knowledge time, so it can never be shown to
+# be admissible and the filter drops it. That is the right call, but a silent one: the
+# coverage it costs is worth stating out loud before relying on the panel.
 
 # %%
+n_null = fundamentals["announcement_date"].is_null().sum()
+print(
+    f"Rows with no announcement_date: {n_null} of {fundamentals.height} "
+    f"({n_null / fundamentals.height:.1%}) — never admissible to a PIT query."
+)
+
+
+# %% [markdown]
+# ### Demonstration: Correct vs Incorrect Queries
+#
+# Both queries below run on the rows that carry a knowledge time. Restricting the
+# comparison to a single universe is what makes it a clean read on lookahead bias: if
+# the correct query dropped the null-`announcement_date` rows and the lookahead one kept
+# them, the mismatch count would mix the coverage gap into the answer.
+
+# %%
+pit_panel = fundamentals.filter(pl.col("announcement_date").is_not_null())
 as_of_date = "2023-06-30"
 print(f"As of {as_of_date}, the latest quarter known to the market for each symbol:")
 
@@ -319,7 +352,7 @@ print(f"As of {as_of_date}, the latest quarter known to the market for each symb
 # **Correct** — filter on `announcement_date <= as_of`:
 
 # %%
-known_correct = query_fundamentals_as_of(fundamentals, as_of_date)
+known_correct = query_fundamentals_as_of(pit_panel, as_of_date)
 cols = [
     c
     for c in ["symbol", "fiscal_quarter_end", "announcement_date", "netincomeloss"]
@@ -334,7 +367,7 @@ known_correct.select(cols).head(5)
 # %%
 query_date = pl.lit(as_of_date).str.to_date()
 known_wrong = (
-    fundamentals.filter(pl.col("fiscal_quarter_end") <= query_date)
+    pit_panel.filter(pl.col("fiscal_quarter_end") <= query_date)
     .sort(["symbol", "fiscal_quarter_end"])
     .group_by("symbol")
     .last()
@@ -364,5 +397,6 @@ mismatches
 # 1. The SEC XBRL Frames API is sufficient to assemble a cross-sectional fundamentals panel without a vendor subscription. The default downloader output covers 20 large-cap US equities × 49 quarters × 11 us-gaap concepts (240 rows in this snapshot).
 # 2. Coverage is concept-dependent. `assets` is reported by 92.3% of company × quarter cells in this universe; `revenues` is sparse for AAPL/MSFT/banks because they file under post-ASC-606 concepts.
 # 3. Filing-lag stats expose two regimes: the median filing lands ~33 days after fiscal-quarter end (typical 10-Q timing), but the upper quartile starts at 395 days and the max reaches 781 days — that long tail is dominated by amended/restated filings returned by the XBRL Frames API.
-# 4. Always filter on `announcement_date` for backtesting. In this 20-symbol panel, querying as of 2023-06-30 by `fiscal_quarter_end` would inject lookahead bias for 11 of 20 symbols — using Q2 2023 fundamentals that were not actually filed until August 2023.
-# 5. The downloader and loader are the production interface; this notebook is a sanity-check + bitemporal-query template that downstream feature-engineering notebooks (Ch8) consume.
+# 4. Always filter on `announcement_date` for backtesting, and sort by `fiscal_quarter_end` to pick the winner. Filtering on the wrong column injects lookahead bias: querying as of 2023-06-30 by `fiscal_quarter_end` picks a fresher quarter than was available for 11 of the 16 symbols with admissible data — Q2 2023 fundamentals that were not filed until August 2023. Sorting on the wrong column is the subtler error: `announcement_date` selects the most-recently-announced row, which walks *backwards* in fiscal time whenever a restatement or a late-attributed Q4 fact lands, so the "PIT-correct" query would return a stale quarter right after every 10-K.
+# 5. Knowledge time can be missing: 36 of 240 rows (15%) carry no `announcement_date` and are therefore never admissible to a PIT query. Report that coverage gap rather than letting the filter drop it silently.
+# 6. The downloader and loader are the production interface; this notebook is a sanity-check + bitemporal-query template that downstream feature-engineering notebooks (Ch8) consume.

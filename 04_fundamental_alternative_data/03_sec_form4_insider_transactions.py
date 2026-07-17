@@ -52,7 +52,7 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-import re
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 
@@ -105,7 +105,13 @@ for f in downloaded[:3]:
 # ---
 # ## Part 2: Parsing Form 4 Transactions
 #
-# Form 4 filings are XML documents. We parse them to extract structured data.
+# Form 4 filings are XML documents, so we parse them with an XML parser rather than
+# regular expressions. The distinction is not stylistic: each filing holds a
+# `<nonDerivativeTable>` (common stock) and a `<derivativeTable>` (options), and each
+# table holds one transaction block per trade. A document-wide regex has no notion of
+# those boundaries — it happily pairs the code from one block with the price from the
+# next, and reads straight across from one table into the other. Walking the tree keeps
+# every field anchored to the transaction it belongs to.
 #
 # ### Key XML Elements
 #
@@ -114,67 +120,64 @@ for f in downloaded[:3]:
 # | `<issuerName>` | Company name |
 # | `<rptOwnerName>` | Insider name |
 # | `<officerTitle>` | Position (CEO, CFO, Director, etc.) |
+# | `<nonDerivativeTransaction>` | One common-stock trade (the block we iterate over) |
 # | `<transactionCode>` | Trade type (P=Purchase, S=Sale, etc.) |
 # | `<transactionShares>` | Number of shares |
 # | `<transactionPricePerShare>` | Price per share |
+# | `<transactionAcquiredDisposedCode>` | Direction: A=acquired, D=disposed |
 
 
 # %%
-def extract_value(text: str) -> str | None:
-    """Extract value from XML <value> tag."""
-    match = re.search(r"<value>(.+?)</value>", text)
-    return match.group(1).strip() if match else None
+def find_text(element: ET.Element, path: str) -> str | None:
+    """Return the stripped text at `path` below `element`, or None if absent/empty."""
+    found = element.find(path)
+    if found is None or found.text is None:
+        return None
+    return found.text.strip() or None
 
 
 # %% [markdown]
 # ### Parse a Complete Form 4 Filing
 # Extract header info (issuer, owner, title) and all non-derivative transactions.
+# Derivative (option) transactions live in a separate table and are skipped here.
 
 
 # %%
 def parse_form4(file_path: Path) -> dict:
     """Parse a Form 4 filing and return structured data."""
-    content = file_path.read_text(errors="ignore")
-
-    # Extract header info
-    issuer = re.search(r"<issuerName>(.+?)</issuerName>", content)
-    owner = re.search(r"<rptOwnerName>(.+?)</rptOwnerName>", content)
-    title = re.search(r"<officerTitle>(.+?)</officerTitle>", content)
+    root = ET.parse(file_path).getroot()
 
     header = {
-        "issuer": issuer.group(1).strip() if issuer else "N/A",
-        "owner": owner.group(1).strip() if owner else "N/A",
-        "title": title.group(1).strip() if title else "N/A",
+        "issuer": find_text(root, ".//issuerName") or "N/A",
+        "owner": find_text(root, ".//rptOwnerName") or "N/A",
+        "title": find_text(root, ".//officerTitle") or "N/A",
     }
 
-    # Extract non-derivative transactions
-    transactions = re.findall(
-        r"<transactionCode>(.+?)</transactionCode>.*?"
-        r"<transactionDate>(.+?)</transactionDate>.*?"
-        r"<transactionShares>(.+?)</transactionShares>.*?"
-        r"<transactionPricePerShare>(.+?)</transactionPricePerShare>",
-        content,
-        re.DOTALL,
-    )
-
+    # One block per common-stock trade; every field is read from within that block.
     tx_list = []
-    for code, date_str, shares_str, price_str in transactions:
-        date_value = extract_value(date_str)
-        shares_value = extract_value(shares_str)
-        price_value = extract_value(price_str)
+    for tx in root.findall(".//nonDerivativeTransaction"):
+        code = find_text(tx, "transactionCoding/transactionCode")
+        date_value = find_text(tx, "transactionDate/value")
+        shares_value = find_text(tx, "transactionAmounts/transactionShares/value")
+        price_value = find_text(tx, "transactionAmounts/transactionPricePerShare/value")
+        direction = find_text(tx, "transactionAmounts/transactionAcquiredDisposedCode/value")
 
-        if all([code, date_value, shares_value]):
-            try:
-                tx_list.append(
-                    {
-                        "code": code.strip(),
-                        "timestamp": datetime.strptime(date_value, "%Y-%m-%d").date(),
-                        "shares": float(shares_value),
-                        "price": float(price_value) if price_value and price_value != "D" else 0.0,
-                    }
-                )
-            except (ValueError, TypeError):
-                continue
+        if not all([code, date_value, shares_value]):
+            continue
+        try:
+            tx_list.append(
+                {
+                    "code": code,
+                    "timestamp": datetime.strptime(date_value, "%Y-%m-%d").date(),
+                    "shares": float(shares_value),
+                    # Gifts and some planned dispositions file no price; treat as 0.0
+                    # and keep them out of dollar totals downstream.
+                    "price": float(price_value) if price_value else 0.0,
+                    "direction": direction or "N/A",
+                }
+            )
+        except (ValueError, TypeError):
+            continue
 
     return {"header": header, "transactions": tx_list}
 
@@ -263,8 +266,11 @@ summary = (
 
 # %% [markdown]
 # The two panels below tell different stories. By *filing count*, sales are the most common
-# insider event; by *share volume*, a smaller number of open-market purchases dominates —
-# the first sign that trade frequency and economic weight are not the same thing.
+# insider event; by *share volume*, two equity grants outweigh all 95 other transactions put
+# together — the first sign that trade frequency and economic weight are not the same thing.
+# Note what the volume panel does *not* mean: a grant is compensation, not a conviction
+# trade. It is the largest bar here and the least informative one, which is exactly why the
+# transaction code has to gate any feature built on this panel.
 
 # %%
 # Highlight the leading (largest-volume) category; keep the rest neutral.
@@ -292,7 +298,7 @@ fig.update_yaxes(autorange="reversed")
 fig.update_xaxes(title_text="Filings", row=1, col=1)
 fig.update_xaxes(title_text="Shares", row=1, col=2)
 fig.update_layout(
-    title="TSLA insiders sell more often, but purchases move far more shares",
+    title="TSLA insiders sell most often, but two grants move the most shares",
     showlegend=False,
     height=340,
 )
@@ -305,11 +311,13 @@ fig.show()
 # We now aggregate open-market purchases (P) and sales (S) by individual insider to see who
 # is transacting and in what dollar amount.
 #
-# Form 4 occasionally reports a sale with `price = 0.0` as a placeholder (for example, a
-# planned disposition whose executed price is filed separately). Summing those rows into a
-# dollar total would conflate priced trades with unreported ones, so we keep them apart:
-# `total_value` is computed only on rows with a positive price, while `placeholder_trades`
-# and `placeholder_shares` track the share volume reported without a price.
+# Form 4 does not always file a price: gifts carry none, and a planned disposition may have
+# its executed price filed separately. Summing those rows into a dollar total would conflate
+# priced trades with unreported ones, so we keep them apart: `total_value` is computed only
+# on rows with a positive price, while `placeholder_trades` and `placeholder_shares` track
+# any share volume reported without one. Every P/S row in this TSLA sample happens to carry
+# a price, so the placeholder columns are all zero here — the guard matters on wider
+# universes, and a silent `shares * price` product would hide the gap when it appears.
 
 # %%
 market_trades = df.filter(pl.col("code").is_in(["P", "S"]))
@@ -333,10 +341,9 @@ by_owner
 
 # %% [markdown]
 # Charting the priced dollar value per insider makes the asymmetry unmistakable: a single
-# buyer accounts for essentially all of the open-market purchase value, while the sellers -
-# even added together - transact an order of magnitude less. Bars are colored by direction;
-# Kimbal Musk's lone reported sale carried no filed price, so it registers as a placeholder
-# with zero priced value.
+# buyer accounts for essentially all of the open-market purchase value ($1.0B), while the
+# sellers - even added together - transact roughly a sixth of that. Bars are colored by
+# direction.
 
 # %%
 # One horizontal bar per insider, ordered by priced dollar value, colored by direction.
@@ -366,8 +373,8 @@ fig.show()
 # ---
 # ## Key Takeaways
 #
-# 1. Form 4 filings are XML documents with a small, stable schema (`issuerName`, `rptOwnerName`, `officerTitle`, and one or more transaction blocks). A handful of regular expressions extract them into a flat panel.
-# 2. The transaction-code dictionary is the load-bearing piece: open-market purchases (P) and sales (S) are the only signals tied directly to insider conviction; option exercises (M/X), grants (A), tax payments (F), and gifts (G) are noise unless explicitly modelled.
-# 3. Aggregating by insider × transaction type surfaces the dollar-weighted activity pattern — in the TSLA sample, Elon Musk's 12 purchases dwarf the cumulative selling activity of every other reporter.
+# 1. Form 4 filings are XML documents with a small, stable schema (`issuerName`, `rptOwnerName`, `officerTitle`, and one or more transaction blocks). Parse them with an XML parser and iterate over the `<nonDerivativeTransaction>` blocks: the block is the unit that keeps code, date, shares, and price attached to the same trade, and it is what separates common stock from the options in `<derivativeTable>`. A document-wide regex has no such boundaries and will silently interleave fields across trades.
+# 2. The transaction-code dictionary is the load-bearing piece: open-market purchases (P) and sales (S) are the only signals tied directly to insider conviction; option exercises (M/X), grants (A), tax payments (F), and gifts (G) are noise unless explicitly modelled. The share-volume panel makes the point concretely — the two biggest bars are a grant and a disposition, neither of which reflects a view on price.
+# 3. Aggregating by insider × transaction type surfaces the dollar-weighted activity pattern — in the TSLA sample, Elon Musk's 25 purchases ($1.0B) dwarf the cumulative selling activity of every other reporter (~$152M).
 # 4. **For ML features**: net insider buying/selling ratio, purchase-to-sale dollar ratio, and cluster detection (multiple insiders transacting together) are the natural primitives built on top of this DataFrame.
 # 5. For interactive single-company workflows, prefer EdgarTools ([`02_sec_filing_explorer`](02_sec_filing_explorer.ipynb)); use the bulk download path here when scaling to many issuers.
