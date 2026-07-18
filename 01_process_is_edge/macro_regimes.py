@@ -992,7 +992,7 @@ silhouette_compare.style.format("{:.3f}")
 # - **Macro indicators line up with realised volatility**: The four regimes' mean
 #   annualised volatility runs from 12.0% (Expansion, 77 months) to 16.0% (Crisis,
 #   4 months), with Tightening at 15.0% and Recovery at 15.2%. The Crisis cell
-#   covers only 4 months on this 2002-2024 panel, so the 16.0% figure is an
+#   covers only 4 months on this 2003-2026 panel, so the 16.0% figure is an
 #   anecdotal upper bound rather than a regime-level statistic.
 # - **Extended indicators improve cluster quality**: The 25-indicator model achieves
 #   higher silhouette (0.42) than the 4-indicator model (0.25), but the core model
