@@ -1433,13 +1433,13 @@ print(f"Smallest-gap (or pandas-faster) categories at this scale: {', '.join(_bo
 # scale* and the takeaways printed above name this run's top-2 / bottom-2
 # categories so the prose stays in sync with the actual numbers:
 #
-# - At **S (10K rows)** fixed Python overhead compresses the gap but does not
-#   erase it: Polars still leads every category on average and is faster on the
-#   large majority of individual operations. The margins are widest on strings
-#   and joins and narrowest on the simpler rolling/window/groupby/filter
-#   operations, where a handful of individual ops dip below parity — those are
-#   the only places pandas wins. The cell above prints this run's top-2 and
-#   bottom-2 categories so the prose tracks the actual numbers.
+# - At **S (10K rows)** fixed Python overhead compresses the gap. Polars keeps a
+#   large, reliable lead on the string, join, and lazy categories, where there is
+#   enough work to amortize its setup cost. On the lighter groupby, window, filter,
+#   and rolling operations that overhead is a bigger share of the runtime, so
+#   Polars' margin is smallest and least stable there and individual categories can
+#   land on either side of parity from run to run. The cell above prints this run's
+#   top-2 and bottom-2 categories so the prose tracks the actual numbers.
 # - At **L / XL (≥1M rows)** Polars' parallelization widens the gap on string,
 #   groupby, join, and lazy operations; the narrow-margin categories at S pull
 #   further ahead as parallelization amortizes the Python overhead.
