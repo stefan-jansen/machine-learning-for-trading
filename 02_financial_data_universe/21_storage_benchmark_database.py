@@ -1673,6 +1673,12 @@ if results:
         ("range_query", f"Range query ({RANGE_QUERY_DAYS}-day window)", COLORS["slate"]),
         ("asof_join", "ASOF join", COLORS["amber"]),
     ]
+    # Full scan / range query span ~30-40x across engines, so a log x-axis keeps
+    # every bar legible. ASOF join runs on the three engines that support it, and
+    # they sit within ~2x of each other; on a log axis a bar starts at the axis
+    # floor, so a 2x spread would read as ~3x bar length. A linear axis makes bar
+    # length proportional to time (honest) and preserves kdb+'s ASOF showcase.
+    _LOG_OPS = {"read", "range_query"}
 
     fig = make_subplots(
         rows=1,
@@ -1692,23 +1698,34 @@ if results:
                 orientation="h",
                 marker_color=color,
                 text=[f"{t:.3f}s" for t in op_data["time_s"].to_list()],
-                textposition="outside",
+                # "auto" keeps the longest bar's label inside the bar so it does
+                # not overrun into the neighbouring panel's y-axis labels; short
+                # bars still get an outside label.
+                textposition="auto",
+                cliponaxis=False,
             ),
             row=1,
             col=col,
         )
+        if op in _LOG_OPS:
+            fig.update_xaxes(
+                title_text="Seconds (log, lower is better)", type="log", row=1, col=col
+            )
+        else:
+            fig.update_xaxes(title_text="Seconds (lower is better)", type="linear", row=1, col=col)
 
     fig.update_layout(
         title_text=f"Database Comparison ({ACTIVE_SCALE} scale, {total_rows:,} rows, warm reads)",
         height=500,
+        # Fixed width so the three panels have room to breathe in the embedded
+        # PNG; the default ~700px crowds eight engines and their value labels.
+        width=1050,
         showlegend=False,
         paper_bgcolor=COLORS["bg_light"],
         plot_bgcolor=COLORS["bg_light"],
         # Wider right margin so the 'X.XXXs' value labels don't crop.
         margin=dict(l=90, r=90, t=80, b=50),
     )
-    # Log scale: timings span orders of magnitude across engines.
-    fig.update_xaxes(title_text="Seconds (log, lower is better)", type="log")
     fig.show()
 
 # %%
