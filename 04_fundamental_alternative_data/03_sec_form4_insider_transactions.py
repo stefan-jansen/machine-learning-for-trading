@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -266,7 +266,7 @@ summary = (
 
 # %% [markdown]
 # The two panels below tell different stories. By *filing count*, sales are the most common
-# insider event; by *share volume*, two equity grants outweigh all 95 other transactions put
+# insider event; by *share volume*, two equity grants outweigh all 96 other transactions put
 # together — the first sign that trade frequency and economic weight are not the same thing.
 # Note what the volume panel does *not* mean: a grant is compensation, not a conviction
 # trade. It is the largest bar here and the least informative one, which is exactly why the
