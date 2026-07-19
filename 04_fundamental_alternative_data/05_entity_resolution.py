@@ -758,13 +758,15 @@ def batch_resolve(
     return pl.DataFrame(results)
 
 
-# Resolve alternative data
+# Resolve alternative data. Keep the applied cutoff in one constant so the
+# threshold line on the score histogram below always reflects the value used here.
+MATCH_THRESHOLD = 70
 alt_data_to_resolve = alt_data_companies
 resolved_alt_data = batch_resolve(
     alt_data_to_resolve,
     "raw_company_name",
     reference_securities["company_name"].to_list(),
-    threshold=70,
+    threshold=MATCH_THRESHOLD,
 )
 
 resolved_alt_data.select(
@@ -797,7 +799,10 @@ fig = px.histogram(
 )
 fig.update_yaxes(title_text="Number of names")
 fig.add_vline(
-    x=75, line_dash="dash", line_color=COLORS["negative"], annotation_text="Threshold (75)"
+    x=MATCH_THRESHOLD,
+    line_dash="dash",
+    line_color=COLORS["negative"],
+    annotation_text=f"Threshold ({MATCH_THRESHOLD})",
 )
 fig.show()
 
