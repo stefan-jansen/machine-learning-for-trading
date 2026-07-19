@@ -184,7 +184,7 @@ fig = px.line(
     monthly_counts.to_pandas(),
     x="timestamp",
     y="len",
-    title="Coverage grew from ~430 stocks in 1967 to ~2,800 in 2016",
+    title="Coverage peaked at ~2,800 stocks in 2005, then eased to ~1,900 by 2016",
     labels={"len": "Stocks in cross-section", "timestamp": "Date"},
     color_discrete_sequence=[COLORS["blue"]],
 )
@@ -313,10 +313,15 @@ fig.show()
 # of monthly ICs; for comparison we also keep the i.i.d. t-statistic.
 
 # %%
-# Step 1: Compute IC (correlation with returns) for each characteristic, per month
+# Step 1: Compute IC (correlation with returns) for each characteristic, per month.
+# Sort by timestamp before dropping it: the Newey-West HAC t-stat below reads this
+# as a time series, so the monthly ICs must be in chronological order. group_by emits
+# groups in a non-deterministic order, which would scramble the autocovariance the HAC
+# correction is built on (and make the t-stat non-reproducible run to run).
 monthly_ics = (
     df.group_by("timestamp")
     .agg([pl.corr(col, "ret").alias(col) for col in feature_cols])
+    .sort("timestamp")
     .drop("timestamp")
 )
 
