@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -224,7 +224,11 @@ fig.update_layout(
 fig.show()
 
 total_cells = len(symbols) * len(quarters)
-filled_cells = sum(sum(row) for row in matrix)
+# Count symbol-quarter CELLS that carry at least one assets value, not the number of
+# filings: six cells hold two rows (an original plus an amended/restated filing that maps
+# to the same calendar quarter, the "2" cells above), and summing the counts would credit
+# those as extra coverage.
+filled_cells = sum(1 for row in matrix for v in row if v > 0)
 print(f"`assets` coverage: {filled_cells}/{total_cells} ({100 * filled_cells / total_cells:.1f}%)")
 
 # %% [markdown]
@@ -395,7 +399,7 @@ mismatches
 # ## Key Takeaways
 #
 # 1. The SEC XBRL Frames API is sufficient to assemble a cross-sectional fundamentals panel without a vendor subscription. The default downloader output covers 20 large-cap US equities × 49 quarters × 11 us-gaap concepts (240 rows in this snapshot).
-# 2. Coverage is concept-dependent. `assets` is reported by 92.3% of company × quarter cells in this universe; `revenues` is sparse for AAPL/MSFT/banks because they file under post-ASC-606 concepts.
+# 2. Coverage is concept-dependent. `assets` fills 90.0% of company × quarter cells in this universe (234 of 260); `revenues` is sparse for AAPL/MSFT/banks because they file under post-ASC-606 concepts.
 # 3. Filing-lag stats expose two regimes: the median filing lands ~33 days after fiscal-quarter end (typical 10-Q timing), but the upper quartile starts at 395 days and the max reaches 781 days — that long tail is dominated by amended/restated filings returned by the XBRL Frames API.
 # 4. Always filter on `announcement_date` for backtesting, and sort by `fiscal_quarter_end` to pick the winner. Filtering on the wrong column injects lookahead bias: querying as of 2023-06-30 by `fiscal_quarter_end` picks a fresher quarter than was available for 11 of the 16 symbols with admissible data — Q2 2023 fundamentals that were not filed until August 2023. Sorting on the wrong column is the subtler error: `announcement_date` selects the most-recently-announced row, which walks *backwards* in fiscal time whenever a restatement or a late-attributed Q4 fact lands, so the "PIT-correct" query would return a stale quarter right after every 10-K.
 # 5. Knowledge time can be missing: 36 of 240 rows (15%) carry no `announcement_date` and are therefore never admissible to a PIT query. Report that coverage gap rather than letting the filter drop it silently.
