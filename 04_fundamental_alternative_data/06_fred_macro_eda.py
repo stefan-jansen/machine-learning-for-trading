@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -113,18 +113,20 @@ yields_recent = yields.filter(pl.col(date_col) >= pl.lit("2020-01-01").str.to_da
 yields_pd = yields_recent.to_pandas()
 
 # %%
+# Build the whole chart in one cell. Splitting the traces and the layout across cells
+# auto-displays a title-less, annotation-less intermediate before the finished figure
+# (the last trace-adding statement returns the figure and renders it). 2Y in copper vs
+# 10Y in blue stay distinguishable where the curve inverts and the lines cross.
 fig = go.Figure()
-
 fig.add_trace(
     go.Scatter(
         x=yields_pd[date_col],
         y=yields_pd["dgs2"],
         mode="lines",
         name="2-Year Treasury",
-        line=dict(color=COLORS["slate"], width=1.5),
+        line=dict(color=COLORS["copper"], width=1.5),
     )
 )
-
 fig.add_trace(
     go.Scatter(
         x=yields_pd[date_col],
@@ -134,34 +136,20 @@ fig.add_trace(
         line=dict(color=COLORS["blue"], width=1.5),
     )
 )
-
-# %%
-# Add rate hike annotations
-events = [
-    ("2022-03-16", "Fed Hike Cycle Begins", 0.5),
-    ("2023-07-26", "Peak Rate 5.25-5.50%", 5.5),
-]
-for date, label, y_pos in events:
+for date, label, y_pos in [
+    ("2022-03-16", "Fed hike cycle begins", 0.5),
+    ("2023-07-26", "Peak rate 5.25-5.50%", 5.5),
+]:
     fig.add_annotation(
-        x=date,
-        y=y_pos,
-        text=label,
-        showarrow=True,
-        arrowhead=2,
-        arrowsize=1,
-        ax=30,
-        ay=-30,
+        x=date, y=y_pos, text=label, showarrow=True, arrowhead=2, arrowsize=1, ax=30, ay=-30
     )
-
 fig.update_layout(
-    title="Treasury Yields: 2-Year and 10-Year",
+    title="Both Treasury yields climbed from near zero to about 5% through the 2022-23 hikes",
     xaxis_title="Date",
     yaxis_title="Yield (%)",
-    template="plotly_white",
     height=400,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
 )
-
 fig.show()
 
 print("\nKey insight: When 2Y > 10Y, the yield curve is 'inverted', which has")
@@ -185,12 +173,13 @@ print(f"Historical mean: {vix['vixcls'].mean():.1f}")
 print(f"Historical max: {vix['vixcls'].max():.1f} (crisis peak)")
 
 # %%
-# Visualize VIX with crisis annotations
+# Whole figure in one cell so only the finished chart renders (the hline calls below
+# return the figure and would otherwise auto-display a title-less intermediate). The
+# right margin leaves room for the regime-threshold labels so they are not clipped.
 vix_recent = vix.filter(pl.col(date_col) >= pl.lit("2020-01-01").str.to_date())
 vix_pd = vix_recent.to_pandas()
 
 fig = go.Figure()
-
 fig.add_trace(
     go.Scatter(
         x=vix_pd[date_col],
@@ -199,15 +188,14 @@ fig.add_trace(
         name="VIX",
         line=dict(color=COLORS["amber"], width=1.5),
         fill="tozeroy",
-        fillcolor="rgba(139, 69, 19, 0.1)",
+        fillcolor="rgba(212, 168, 75, 0.15)",  # translucent COLORS["amber"]
     )
 )
-
 # Regime thresholds
 fig.add_hline(
     y=20,
     line_dash="dash",
-    line_color="gray",
+    line_color=COLORS["neutral"],
     annotation_text="Normal (<20)",
     annotation_position="right",
 )
@@ -218,35 +206,20 @@ fig.add_hline(
     annotation_text="Elevated (>30)",
     annotation_position="right",
 )
-
-# %%
-# Crisis events
-crisis_events = [
-    ("2020-03-16", "COVID Crash", 82),
-    ("2022-01-24", "Fed Taper Tantrum", 38),
-    ("2023-03-13", "SVB Collapse", 29),
-]
-for date, label, y_pos in crisis_events:
-    fig.add_annotation(
-        x=date,
-        y=y_pos,
-        text=label,
-        showarrow=True,
-        arrowhead=2,
-        ax=0,
-        ay=-30,
-    )
-
-# %%
+for date, label, y_pos in [
+    ("2020-03-16", "COVID crash", 82),
+    ("2022-01-24", "Fed taper tantrum", 38),
+    ("2023-03-13", "SVB collapse", 29),
+]:
+    fig.add_annotation(x=date, y=y_pos, text=label, showarrow=True, arrowhead=2, ax=0, ay=-30)
 fig.update_layout(
-    title="VIX Volatility Index Through Recent Crises",
+    title="VIX spiked near 82 in the 2020 COVID crash, then held mostly below 30",
     xaxis_title="Date",
     yaxis_title="VIX Index",
-    template="plotly_white",
     height=400,
     showlegend=False,
+    margin=dict(r=110),
 )
-
 fig.show()
 
 print("\nRegime thresholds:")
@@ -276,13 +249,11 @@ print(
 slope_recent = slope.filter(pl.col(date_col) >= pl.lit("2020-01-01").str.to_date())
 slope_pd = slope_recent.to_pandas()
 
-# Create color array for positive/negative
-colors = [COLORS["slate"] if v >= 0 else COLORS["amber"] for v in slope_pd["t10y2y"]]
-
 # %%
+# Whole figure in one cell so only the finished chart renders (the hline call returns
+# the figure and would otherwise auto-display a title-less intermediate); the right
+# margin keeps the inversion-line label on-plot.
 fig = go.Figure()
-
-# Main spread line
 fig.add_trace(
     go.Scatter(
         x=slope_pd[date_col],
@@ -292,8 +263,7 @@ fig.add_trace(
         line=dict(color=COLORS["blue"], width=1.5),
     )
 )
-
-# Shade inversion periods
+# Shade inversion periods (spread < 0)
 inverted = slope_pd[slope_pd["t10y2y"] < 0]
 if len(inverted) > 0:
     fig.add_trace(
@@ -302,32 +272,27 @@ if len(inverted) > 0:
             y=inverted["t10y2y"],
             mode="none",
             fill="tozeroy",
-            fillcolor="rgba(139, 69, 19, 0.3)",
+            fillcolor="rgba(200, 117, 51, 0.3)",  # translucent COLORS["copper"]
             name="Inversion",
             showlegend=True,
         )
     )
-
-# Zero line (inversion threshold)
 fig.add_hline(
     y=0,
     line_dash="solid",
-    line_color="red",
+    line_color=COLORS["negative"],
     line_width=2,
-    annotation_text="Inversion Line",
+    annotation_text="Inversion line",
     annotation_position="right",
 )
-
-# %%
 fig.update_layout(
-    title="Yield Curve Spread (10Y minus 2Y): Inversion Episodes Shaded",
+    title="The 10Y-2Y spread stayed inverted from mid-2022 into 2024, reaching -1.08 pts",
     xaxis_title="Date",
     yaxis_title="Spread (percentage points)",
-    template="plotly_white",
     height=400,
+    margin=dict(r=110),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
 )
-
 fig.show()
 
 print("Inversion statistics (since 2020):")
@@ -394,7 +359,7 @@ fig.add_trace(
         y=recent["dgs2"],
         mode="lines",
         name="2Y",
-        line=dict(color=COLORS["slate"]),
+        line=dict(color=COLORS["copper"]),
     ),
     row=1,
     col=1,
@@ -420,12 +385,12 @@ fig.add_trace(
         name="10Y-2Y",
         line=dict(color=COLORS["blue"]),
         fill="tozeroy",
-        fillcolor="rgba(46, 64, 87, 0.1)",
+        fillcolor="rgba(26, 45, 74, 0.12)",  # translucent COLORS["slate"]
     ),
     row=2,
     col=1,
 )
-fig.add_hline(y=0, line_dash="dash", line_color="red", row=2, col=1)
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["negative"], row=2, col=1)
 
 # Panel 3: VIX
 fig.add_trace(
@@ -436,19 +401,18 @@ fig.add_trace(
         name="VIX",
         line=dict(color=COLORS["amber"]),
         fill="tozeroy",
-        fillcolor="rgba(139, 69, 19, 0.1)",
+        fillcolor="rgba(212, 168, 75, 0.15)",  # translucent COLORS["amber"]
     ),
     row=3,
     col=1,
 )
-fig.add_hline(y=20, line_dash="dash", line_color="gray", row=3, col=1)
+fig.add_hline(y=20, line_dash="dash", line_color=COLORS["neutral"], row=3, col=1)
 
 fig.update_layout(
     height=650,
-    title_text="Macro Regime Dashboard: Yields, Curve Slope, and VIX",
+    title_text="Yields, curve inversion, and VIX all track the 2022-24 tightening cycle",
     showlegend=True,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-    template="plotly_white",
 )
 
 fig.update_yaxes(title_text="Yield (%)", row=1, col=1)
