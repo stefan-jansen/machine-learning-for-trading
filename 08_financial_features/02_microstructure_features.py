@@ -46,7 +46,7 @@
 # is missing rather than substituting a synthetic toy panel.
 
 # %%
-"""Microstructure Features — compute trade-based liquidity and order flow features from tick data."""
+"""Microstructure Features - compute trade-based liquidity and order flow features from tick data."""
 
 from __future__ import annotations
 
@@ -58,6 +58,11 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from utils.reproducibility import set_global_seeds
+
+# Importing utils.style registers and activates the ML4T Plotly template (house
+# palette, fonts, white plot background) repo-wide; without it these figures fall
+# back to the default Plotly template (blue-tinted background, matplotlib colorway).
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
 
@@ -72,10 +77,10 @@ set_global_seeds(SEED)
 # ## 1. Data Loading with Availability Check
 #
 # Microstructure analysis requires high-frequency data. The loader raises
-# a clear error if ITCH is missing — no silent fallback to synthetic data.
+# a clear error if ITCH is missing - no silent fallback to synthetic data.
 
 # %%
-# Load real ITCH trade data — the notebook fails loudly if the data is
+# Load real ITCH trade data - the notebook fails loudly if the data is
 # missing rather than silently substituting a synthetic toy panel.
 
 from data import load_nasdaq_itch
@@ -228,7 +233,7 @@ features_df.select(["timestamp", "close", "kyle_lambda", "amihud", "roll_spread"
 # %% [markdown]
 # ### 3.1 Kyle Lambda (Price Impact)
 #
-# High Kyle λ means prices move significantly per unit of volume — the market
+# High Kyle λ means prices move significantly per unit of volume - the market
 # is **illiquid** and trades have high impact.
 #
 # $$\lambda = \frac{\text{Cov}(\Delta P, V)}{\text{Var}(V)}$$
@@ -263,7 +268,7 @@ fig.add_trace(
     row=2,
     col=1,
 )
-fig.add_hline(y=0, line_dash="dash", line_color="gray", row=2, col=1)
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=2, col=1)
 
 fig.update_layout(height=500, title=f"Kyle Lambda - {FOCUS_STOCK}")
 fig.show()
@@ -322,7 +327,7 @@ print(f"Kyle λ / Amihud correlation: {corr:.3f}")
 # **Important**: Without exchange-provided buy/sell labels we estimate the side
 # of each trade with the **tick rule** (Lee-Ready), classifying it buyer- or
 # seller-initiated from the sign of the price change. That classification has to
-# happen at the **trade** level, before aggregation — which is why
+# happen at the **trade** level, before aggregation - which is why
 # `aggregate_to_bars` splits `buy_volume`/`sell_volume` there. Applying the tick
 # rule to a *bar's* single close would collapse OFI to the sign of that bar's
 # own return (+/-1), a tautology rather than a flow measure. This is the concrete
@@ -331,7 +336,9 @@ print(f"Kyle λ / Amihud correlation: {corr:.3f}")
 
 # %%
 # OFI visualization
-ofi_colors = ["#1f77b4" if x > 0 else "#ff7f0e" for x in features_df["ofi"].to_list()[-n:]]
+ofi_colors = [
+    COLORS["blue"] if x > 0 else COLORS["amber"] for x in features_df["ofi"].to_list()[-n:]
+]
 
 fig = make_subplots(
     rows=2,
@@ -360,7 +367,7 @@ fig.add_trace(
     row=2,
     col=1,
 )
-fig.add_hline(y=0, line_dash="dash", line_color="gray", row=2, col=1)
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=2, col=1)
 
 fig.update_layout(height=500, title=f"Order Flow Imbalance - {FOCUS_STOCK}")
 fig.show()
@@ -400,7 +407,7 @@ alpha_df = features_df.with_columns(
 alpha_df = alpha_df.drop_nulls(["ofi", "returns", "fwd_return"])
 
 # Same-bar OFI vs same-bar return: mechanically strong because a bar with a buy
-# imbalance is usually an up bar — using it as a signal peeks at the outcome.
+# imbalance is usually an up bar - using it as a signal peeks at the outcome.
 corr_same = alpha_df.select(pl.corr("ofi", "returns")).item()
 # Same OFI against the NEXT bar's return: the honest, tradable predictive content.
 corr_pred = alpha_df.select(pl.corr("ofi", "fwd_return")).item()
@@ -411,7 +418,7 @@ print(f"  OFI vs next-bar return:           {corr_pred:+.4f} (honest, tradable)"
 
 # %% [markdown]
 # **Interpretation**: The contemporaneous correlation is typically much larger
-# than the lagged correlation — this gap is the signature of look-ahead bias.
+# than the lagged correlation - this gap is the signature of look-ahead bias.
 # Any strategy that uses same-bar OFI to trade same-bar returns is
 # implicitly assuming you know the future. The lagged correlation is the
 # realistic signal strength. With limited intraday data (few bars per stock),
@@ -434,7 +441,7 @@ print(f"  OFI vs next-bar return:           {corr_pred:+.4f} (honest, tradable)"
 #
 # ### Order Book Spread: A State Feature
 #
-# The bid-ask spread is a **state** property — the current top of book.
+# The bid-ask spread is a **state** property - the current top of book.
 # You cannot compute it from order **flow** (arrivals) because:
 #
 # 1. Cancellations remove orders but aren't in arrival flow
@@ -459,7 +466,7 @@ print("This notebook focuses on trade-based features (flow only).")
 # The z-scores below use **full-sample** mean and standard deviation across the
 # entire history of each metric. The resulting composite is an *ex-post*
 # characterization of how the three illiquidity measures combine on this
-# sample — useful for the dashboard and the qualitative comparison that
+# sample - useful for the dashboard and the qualitative comparison that
 # follows. It is **not** a lookahead-safe feature: each daily z-score depends
 # on the global mean and variance computed over future as well as past data,
 # so using `illiquidity_score` directly as a regression feature would leak
@@ -484,7 +491,7 @@ for feat in liquidity_features:
         std_val = 1.0
     features_df = features_df.with_columns(
         ((pl.col(feat) - mean_val) / std_val).alias(f"{feat}_z")
-    )  # Full-sample z-score — use rolling in production
+    )  # Full-sample z-score - use rolling in production
 
 # Composite illiquidity score
 features_df = features_df.with_columns(
@@ -518,7 +525,7 @@ fig.add_trace(
         y=features_df["illiquidity_score"].to_list()[-n:],
         name="Illiquidity",
         fill="tozeroy",
-        line=dict(color="red"),
+        line=dict(color=COLORS["negative"]),
     ),
     row=2,
     col=1,
@@ -538,12 +545,12 @@ fig.add_trace(
         x=features_df["timestamp"].to_list()[-n:],
         y=features_df["trade_intensity"].to_list()[-n:],
         name="Intensity",
-        line=dict(color="purple"),
+        line=dict(color=COLORS["copper"]),
     ),
     row=4,
     col=1,
 )
-fig.add_hline(y=1.0, line_dash="dash", line_color="gray", row=4, col=1)
+fig.add_hline(y=1.0, line_dash="dash", line_color=COLORS["neutral"], row=4, col=1)
 
 fig.update_layout(height=700, title=f"Microstructure Dashboard - {FOCUS_STOCK}", showlegend=False)
 fig.show()
@@ -583,7 +590,7 @@ summary
 # %% [markdown]
 # **Interpretation**: Cross-stock liquidity differences inform **position sizing**.
 # Illiquid names require smaller positions to avoid market impact. Note that
-# Kyle lambda and Amihud can rank stocks differently — Kyle lambda captures
+# Kyle lambda and Amihud can rank stocks differently - Kyle lambda captures
 # directional price-volume covariance while Amihud measures absolute return per
 # dollar traded. Using multiple liquidity proxies provides a more robust picture
 # than relying on any single measure. In production, these features feed the
@@ -618,5 +625,5 @@ summary
 #
 # ### Next Notebooks
 #
-# - `03_structural_cross_instrument_features` — Cross-asset, carry, options-implied (§8.3)
-# - `04_fundamentals_macro_calendar` — Fundamentals, macro, calendar (§8.4)
+# - `03_structural_cross_instrument_features` - Cross-asset, carry, options-implied (§8.3)
+# - `04_fundamentals_macro_calendar` - Fundamentals, macro, calendar (§8.4)
