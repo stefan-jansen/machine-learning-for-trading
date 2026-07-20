@@ -60,7 +60,8 @@ products:
   RTY:
     name: "E-mini Russell 2000"
     category: "equity_index"
-    start: "2011-01-01"
+    start: "2017-07-01"  # CME relaunch: E-mini Russell 2000 listed on Globex 2017-07-10
+    note: "Traded on ICE before mid-2017; no GLBX.MDP3 history exists prior to the relaunch"
 
   # ============================================================================
   # TREASURIES (4 products)
