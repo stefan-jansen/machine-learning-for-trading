@@ -342,8 +342,8 @@ else:
 # %% [markdown]
 # ## 5. Representative Features Across Case Studies
 #
-# A sample of each case study's feature space — the first few feature names in
-# schema order — to illustrate the engineered inputs. This is an inventory view,
+# A sample of each case study's feature space - the first few feature names in
+# schema order - to illustrate the engineered inputs. This is an inventory view,
 # not an IC ranking (per-feature IC is computed in each case study's evaluation
 # notebook).
 
@@ -456,9 +456,9 @@ if evaluated and "breadth_data" in dir() and breadth_data:
 #
 # The notebook aggregates whatever is present in each case study's
 # `data/features/financial.parquet` and the model registry. The substantive
-# findings — which feature families have predictive content for which label
+# findings - which feature families have predictive content for which label
 # and horizon, how many features survive HAC + BH-FDR, and how breadth
-# interacts with IC magnitude — are produced by the per-case-study evaluation
+# interacts with IC magnitude - are produced by the per-case-study evaluation
 # notebooks (`13_model_analysis.py` in each case study). This summary
 # notebook is a cross-case-study inventory and presentation layer; it does
 # not itself compute IC or run multiple-testing correction.
