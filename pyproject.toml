@@ -48,7 +48,7 @@ dependencies = [
     # ML4T Libraries (PyPI, pre-release)
     # ===================
     "ml4t-data>=0.1.0b15",
-    "ml4t-diagnostic>=0.1.0b22",
+    "ml4t-diagnostic>=0.1.0b23",
     "ml4t-engineer>=0.1.0b8",
     "ml4t-backtest>=0.1.0b20",
     "ml4t-live>=0.1.0b3",
