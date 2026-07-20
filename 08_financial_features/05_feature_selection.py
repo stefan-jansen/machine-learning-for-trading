@@ -182,9 +182,14 @@ analysis = features_df.join(
 print(f"Analysis dataset: {analysis.shape}")
 
 # %% tags=[]
-# Compute cross-sectional IC per date
-ic_by_date = analysis.group_by("timestamp").agg(
-    [pl.corr(col, "fwd_return_1m", method="spearman").alias(col) for col in all_feature_cols]
+# Compute cross-sectional IC per date. Sort by timestamp: ``group_by`` does not
+# preserve order, and the Newey-West HAC t-stat below regresses each feature's
+# daily IC series on a constant with an autocovariance correction, which is only
+# meaningful on a chronologically ordered series.
+ic_by_date = (
+    analysis.group_by("timestamp")
+    .agg([pl.corr(col, "fwd_return_1m", method="spearman").alias(col) for col in all_feature_cols])
+    .sort("timestamp")
 )
 
 # Summary statistics. The daily IC series is serially correlated (overlapping
@@ -268,8 +273,11 @@ ic_pd = ic_df.to_pandas().sort_values("ic_abs", ascending=True)
 colors = [COLORS["positive"] if ic > 0 else COLORS["negative"] for ic in ic_pd["ic"]]
 ax.barh(ic_pd["feature"], ic_pd["ic"], color=colors)
 ax.axvline(0, color="black", linewidth=0.5)
-ax.axvline(0.02, color="orange", linestyle="--", alpha=0.7, label="IC threshold (0.02)")
-ax.axvline(-0.02, color="orange", linestyle="--", alpha=0.7)
+# Reference line at the |IC| threshold used for the final selection in §6, so
+# the ranking chart and the selection step agree (features kept in §6 sit at or
+# beyond this line).
+ax.axvline(0.01, color="orange", linestyle="--", alpha=0.7, label="IC threshold (0.01)")
+ax.axvline(-0.01, color="orange", linestyle="--", alpha=0.7)
 ax.set_xlabel("Information Coefficient (Spearman)")
 ax.set_title("Feature IC Ranking")
 ax.legend()
