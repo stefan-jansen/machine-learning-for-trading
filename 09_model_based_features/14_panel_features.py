@@ -662,7 +662,9 @@ if all_signals:
     output_path = MODEL_DIR / "pairs_trading_signals.parquet"
     combined_signals.write_parquet(output_path)
 
-    print(f"\n[OK] Saved pairs trading signals to {output_path}")
+    # Show a repo-root-relative path so the output carries no machine-specific prefix.
+    display_path = output_path.relative_to(get_case_study_dir("etfs").parents[1])
+    print(f"\n[OK] Saved pairs trading signals to {display_path}")
     print(f"  Shape: {combined_signals.shape}")
     print(f"  Pairs: {combined_signals['pair'].unique().to_list()}")
     print(
