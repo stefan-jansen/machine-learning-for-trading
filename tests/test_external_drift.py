@@ -106,15 +106,25 @@ def test_fama_french_reachable():
     _assert_schema(df, {"timestamp", "Mkt-RF", "SMB", "HML", "RF"}, "fama_french")
 
 
-def test_aqr_reachable():
-    """AQR factor source — quality-minus-junk panel reachable (wide country panel)."""
+def test_aqr_reachable(tmp_path):
+    """AQR factor source — live download of the monthly QMJ workbook still parses.
+
+    Unlike the other providers, ``AQRFactorProvider`` splits the live pull from
+    the local read: ``download()`` fetches the Excel workbook from aqr.com, and
+    ``__init__``/``fetch`` only read a pre-populated data directory. Mirror
+    ``data/factors/aqr_download.py`` — a tiny one-dataset download into a temp
+    dir, then read it back — so this smoke actually exercises AQR's website. A
+    moved/renamed workbook or layout change surfaces here; a bare ``fetch`` would
+    only read an ambient local cache and never touch the network.
+    """
     from ml4t.data.providers.aqr import AQRFactorProvider
 
-    provider = AQRFactorProvider()
+    # No date filter: the monthly QMJ panel is already small, and the provider's
+    # date-string filter path is brittle. We only need reachability + that the
+    # Excel workbook still parses to a timestamped frame.
+    AQRFactorProvider.download(output_path=tmp_path, datasets=["qmj_factors"])
+    provider = AQRFactorProvider(data_path=tmp_path)
     try:
-        # No date filter: the provider's date-string filter path is brittle and
-        # the monthly QMJ panel is already small. We only need reachability +
-        # that the Excel workbook still parses to a timestamped frame.
         df = provider.fetch("qmj_factors")
     finally:
         provider.close()
