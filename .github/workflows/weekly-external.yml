@@ -79,16 +79,18 @@ jobs:
           EDGAR_IDENTITY: ${{ secrets.EDGAR_IDENTITY }}
         run: |
           set +e
-          # Build -k as an array so a multi-word filter (e.g. "foo or bar")
-          # stays a single pytest argument instead of being word-split.
-          FILTER_ARGS=()
+          # Build -k via positional params so a multi-word filter (e.g.
+          # "foo or bar") stays a single pytest argument instead of being
+          # word-split. POSIX sh has no arrays and this container's default
+          # shell is dash, so "$@" is the portable stand-in for an array.
+          set --
           if [ -n "${TEST_FILTER_INPUT:-}" ]; then
-            FILTER_ARGS=(-k "${TEST_FILTER_INPUT}")
+            set -- -k "${TEST_FILTER_INPUT}"
           fi
           # Public repo: chapter notebooks only. Case-study pipeline tests need
           # gated results/registries that aren't shipped, so they're excluded.
           python -m pytest tests/test_chapter_notebooks.py \
-            -v --tb=short -m weekly "${FILTER_ARGS[@]}" \
+            -v --tb=short -m weekly "$@" \
             --junitxml=junit-weekly.xml
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
         continue-on-error: true
