@@ -402,16 +402,111 @@ def run_tabm_cv(
             pending_configs.append(cfg)
 
         if not pending_configs:
-            print("All configs already complete — nothing to do.")
+            # Every config is already registered: rebuild the full result from
+            # the frozen registry instead of returning empty. A cached / reader /
+            # frozen-registry checkout then renders the authoritative registry
+            # numbers in sections 4-8 with no GPU work and no registry write.
+            # The train/register path on a genuine cache MISS is unchanged - a
+            # miss lands in pending_configs above and trains as before. This
+            # centralizes the notebook-side cached fallback proven in
+            # cme_futures/08 and etfs/08 so every caller inherits it identically.
+            from case_studies.utils.registry import (
+                compute_fold_metrics_from_predictions,
+                load_prediction_metrics,
+                read_predictions,
+            )
+
+            print("All configs already registered - rebuilding result from frozen registry.")
+            grid, curves, pred_frames = [], [], []
+            for cfg in configs:
+                spec = build_training_spec(
+                    cfg["family"],
+                    cfg["config_name"],
+                    label_col,
+                    n_folds=len(splits),
+                    n_epochs=cfg.get("n_epochs"),
+                )
+                thash = training_hash_from_spec(spec)
+                psets = load_prediction_sets(
+                    case_study, training_hash=thash, split=prediction_split
+                )
+                if psets.is_empty():
+                    print(
+                        f"  {cfg['config_name']}: no registered {prediction_split} predictions - skipped"
+                    )
+                    continue
+                cfg_curve = []
+                for prow in psets.sort("checkpoint_value").iter_rows(named=True):
+                    m = load_prediction_metrics(case_study, prediction_hash=prow["prediction_hash"])
+                    ic = float(m["ic_mean"][0]) if not m.is_empty() else float("nan")
+                    ic_sd = (
+                        float(m["ic_std"][0])
+                        if (not m.is_empty() and m["ic_std"][0] is not None)
+                        else 0.0
+                    )
+                    ep = int(prow["checkpoint_value"])
+                    cfg_curve.append(
+                        {"config": cfg["config_name"], "epoch": ep, "ic_mean": ic, "ic_std": ic_sd}
+                    )
+                    pred_frames.append(
+                        read_predictions(case_study, prow["prediction_hash"]).with_columns(
+                            pl.lit(cfg["config_name"]).alias("config"), pl.lit(ep).alias("epoch")
+                        )
+                    )
+                if not cfg_curve:
+                    continue
+                best_cp = max(cfg_curve, key=lambda c: c["ic_mean"])
+                grid.append(
+                    {
+                        "config_name": cfg["config_name"],
+                        "best_epoch": best_cp["epoch"],
+                        "best_ic": best_cp["ic_mean"],
+                        "elapsed_s": 0.0,
+                    }
+                )
+                curves.extend(cfg_curve)
+
+            if not grid:
+                print("All configs already complete - nothing to do.")
+                return {
+                    "grid_results": [],
+                    "best_config_name": None,
+                    "best_epoch": 0,
+                    "best_ic": float("nan"),
+                    "predictions": pl.DataFrame(),
+                    "all_predictions": pl.DataFrame(),
+                    "fold_metrics": pl.DataFrame(),
+                    "all_learning_curves": pl.DataFrame(),
+                    "training_log": pl.DataFrame(),
+                }
+
+            grid.sort(
+                key=lambda r: r["best_ic"] if not np.isnan(r["best_ic"]) else -999,
+                reverse=True,
+            )
+            all_preds = pl.concat(pred_frames) if pred_frames else pl.DataFrame()
+            best = grid[0]
             return {
-                "grid_results": [],
-                "best_config_name": None,
-                "best_epoch": 0,
-                "best_ic": float("nan"),
-                "predictions": pl.DataFrame(),
-                "all_predictions": pl.DataFrame(),
-                "fold_metrics": pl.DataFrame(),
-                "all_learning_curves": pl.DataFrame(),
+                "grid_results": grid,
+                "best_config_name": best["config_name"],
+                "best_epoch": best["best_epoch"],
+                "best_ic": best["best_ic"],
+                "predictions": (
+                    all_preds.filter(
+                        (pl.col("config") == best["config_name"])
+                        & (pl.col("epoch") == best["best_epoch"])
+                    )
+                    if all_preds.height
+                    else all_preds
+                ),
+                "all_predictions": all_preds,
+                "fold_metrics": compute_fold_metrics_from_predictions(
+                    all_preds,
+                    best["config_name"],
+                    best["best_epoch"],
+                    date_col=date_col,
+                ),
+                "all_learning_curves": pl.DataFrame(curves) if curves else pl.DataFrame(),
                 "training_log": pl.DataFrame(),
             }
         configs = pending_configs
