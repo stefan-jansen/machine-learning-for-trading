@@ -31,7 +31,7 @@
 # ## Key Principle
 #
 # Slow features update infrequently (quarterly, monthly, or by schedule) but
-# condition daily decisions. The binding constraint is **data integrity** —
+# condition daily decisions. The binding constraint is **data integrity** -
 # ensuring each observation reflects only what was knowable at decision time.
 #
 # ## Data Policy
@@ -41,7 +41,7 @@
 # ## References
 #
 # - Fama and French (1992, 1993): Value, size, profitability factors
-# - Cochrane (2011): "Presidential Address: Discount Rates" — factor zoo
+# - Cochrane (2011): "Presidential Address: Discount Rates" - factor zoo
 # - Harvey, Liu, and Zhu (2016): "...and the Cross-Section of Expected Returns"
 #
 # ## Case Study Mapping
@@ -53,7 +53,7 @@
 # | S&P 500 Equity+Options (`sp500_equity_option_analytics`) | Macro + VIX regime |
 
 # %%
-"""Slow Features and Context: Fundamentals, Macro, Calendar — contextual features that condition faster signals."""
+"""Slow Features and Context: Fundamentals, Macro, Calendar - contextual features that condition faster signals."""
 
 from __future__ import annotations
 
@@ -96,7 +96,7 @@ CALENDAR_START_DATE = "2015-01-01"
 #
 # `load_fundamentals()` reads SEC XBRL filings. XBRL publishes accounting numbers
 # (book equity, earnings, operating cash flow, capex) but does **not** publish
-# market capitalization — that comes from market prices on the announcement
+# market capitalization - that comes from market prices on the announcement
 # date. To keep the value-factor cells below executable on the XBRL output
 # alone, this notebook approximates `market_cap = 2 × book_value`. This is a
 # **scaffolding** value: it lets the downstream `compute_value_factors()` cell
@@ -140,7 +140,7 @@ def load_fundamentals() -> pl.DataFrame:
     # `assets` preserves its lowercase concept name; alias for downstream code.
     df = df.with_columns(
         [
-            # Market cap approximation — SCAFFOLDING only (XBRL has no market cap)
+            # Market cap approximation - SCAFFOLDING only (XBRL has no market cap)
             (pl.col("book_value") * 2.0).alias("market_cap"),
             pl.col("assets").alias("total_assets"),
         ]
@@ -356,7 +356,9 @@ for ad in ann_dates:
 lo, hi = viz_aligned["roe"].min(), viz_aligned["roe"].max()
 pad = (hi - lo) * 0.25
 fig.update_layout(
+    # width holds the full 19pt title (template default) on one line without clipping.
     height=420,
+    width=960,
     title=f"Between filings ROE holds flat, stepping only on announcement dates ({viz_symbol})",
     showlegend=False,
 )
@@ -485,7 +487,7 @@ print(f"Macro features: {len(macro_features.columns)} columns")
 # %% [markdown]
 # **Interpretation**: Z-scored macro data measures whether the current indicator
 # level is unusual relative to its recent history. A VIX z-score of +2 means
-# fear is elevated relative to the last 21 or 63 days — this conditions how
+# fear is elevated relative to the last 21 or 63 days - this conditions how
 # momentum and carry signals perform.
 
 # %% [markdown]
@@ -650,6 +652,7 @@ fig.add_hline(y=2, line_dash="dash", line_color=COLORS["neutral"], row=2, col=1)
 fig.add_hline(y=-2, line_dash="dash", line_color=COLORS["neutral"], row=2, col=1)
 fig.update_layout(
     height=560,
+    width=920,
     title="The yield-curve slope, EMA-smoothed and restated as a regime-relative z-score",
     showlegend=False,
 )
@@ -800,6 +803,7 @@ fig.add_trace(
 )
 fig.update_layout(
     height=520,
+    width=840,
     title="Cyclical encoding places December and January adjacent on the unit circle",
 )
 fig.update_xaxes(title_text="month_cos", range=[-1.6, 1.6], zeroline=True)
@@ -918,6 +922,7 @@ fig.add_trace(
 fig.add_hline(y=H_MAX, line_dash="dash", line_color=COLORS["copper"])
 fig.update_layout(
     height=420,
+    width=960,
     title="Days-to-earnings counts down to zero at each announcement, then resets - AAPL",
     showlegend=False,
 )
@@ -926,7 +931,7 @@ fig.update_yaxes(title_text="Trading days to next earnings (capped at H_max)")
 fig.show()
 
 # %% [markdown]
-# **Interpretation**: Time-to-event serves as a **state variable** — a label
+# **Interpretation**: Time-to-event serves as a **state variable** - a label
 # that partitions trading days into discrete proximity windows
 # (pre-2d, pre-5d, normal, far). These windows feed downstream signal × state
 # interactions (see `06_robustness_sensitivity` for the IC-conditioning
@@ -961,5 +966,5 @@ fig.show()
 #
 # ### Next Notebooks
 #
-# - `05_feature_selection` — Feature selection and deduplication (§8.6)
-# - `06_robustness_sensitivity` — Regime conditioning, interactions (§8.6)
+# - `05_feature_selection` - Feature selection and deduplication (§8.6)
+# - `06_robustness_sensitivity` - Regime conditioning, interactions (§8.6)
