@@ -865,15 +865,7 @@ fig.add_trace(
 )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=4, col=1)
 
-# The ml4t template renders subplot titles larger and in blue, which reads backwards
-# against the main title; force the panel labels smaller and in body color so the
-# hierarchy runs main title -> panel label (same fix as case_study_feature_summary).
-fig.update_annotations(font={"size": 13, "color": COLORS["slate"]})
-fig.update_layout(
-    height=700,
-    title={"text": f"Options-Implied Features - {viz_symbol}", "font": {"size": 19}},
-    showlegend=False,
-)
+fig.update_layout(height=700, title=f"Options-Implied Features - {viz_symbol}", showlegend=False)
 fig.update_yaxes(title_text="IV", row=1, col=1)
 fig.update_yaxes(title_text="RR 25d", row=2, col=1)
 fig.update_yaxes(title_text="Short/Long", row=3, col=1)

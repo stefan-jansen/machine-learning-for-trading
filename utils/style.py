@@ -373,7 +373,16 @@ def _register_plotly_template() -> None:
             paper_bgcolor=COLORS["bg_light"],
             plot_bgcolor="white",
             title=dict(
-                font=dict(size=14, color=COLORS["blue"]),
+                # 19, not 14, so the figure title outranks panel labels. Plotly's
+                # make_subplots writes subplot_titles as annotations with an explicit
+                # size of 16, and an explicit value beats anything the template sets in
+                # annotationdefaults - so a 14pt title rendered SMALLER than the labels
+                # of the panels beneath it, inverting the hierarchy on every subplot
+                # figure in the repo. Raising the title is the only fix that works from
+                # the template alone; notebooks bind make_subplots before importing this
+                # module, so wrapping it here would come too late.
+                # Hierarchy is now title 19 > panel label 16 > body 11.
+                font=dict(size=19, color=COLORS["blue"]),
                 x=0.5,
                 xanchor="center",
             ),

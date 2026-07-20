@@ -24,7 +24,7 @@
 #
 # This notebook demonstrates the **core feature families** derived from a single
 # asset's price and volume history. These are the workhorse features of most
-# quantitative strategies — available for every tradeable instrument.
+# quantitative strategies - available for every tradeable instrument.
 #
 # ## Learning Objectives
 #
@@ -52,7 +52,7 @@
 # All examples use **real ETF data** (no synthetic data).
 
 # %%
-"""Price and Volume Feature Families — core feature families derived from a single asset's price and volume history."""
+"""Price and Volume Feature Families - core feature families derived from a single asset's price and volume history."""
 
 from __future__ import annotations
 
@@ -359,7 +359,8 @@ fig.update_yaxes(title_text="Distance ($)", row=2, col=1)
 fig.update_yaxes(title_text="Distance (ATR units)", row=3, col=1)
 fig.update_xaxes(title_text="Date", row=3, col=1)
 fig.update_layout(
-    height=600, title="Volatility-scaling standardizes MA distance for cross-asset comparison"
+    height=600,
+    title="Volatility-scaling standardizes MA distance for cross-asset comparison",
 )
 fig.show()
 
@@ -429,13 +430,13 @@ reversal_df.select(["timestamp", "close", "ret_1d", "reversal_1d"]).tail(10)
 #
 # This extends the vol-scaled MA distance from §3.1 with different parameters
 # and interpretation. Where §3.1 uses SMA(21)/ATR(21) to measure *current*
-# deviation, here MA(50)/ATR(14) captures *directional persistence* — how
+# deviation, here MA(50)/ATR(14) captures *directional persistence* - how
 # far price has trended away from a slower anchor.
 #
 # $$\text{dist\_to\_ma\_atr} = \frac{P_t - MA_{50}}{ATR_{14}}$$
 #
 # ATR is used here for normalization (price-denominated), not as a volatility
-# estimator — see §4 for the distinction.
+# estimator - see §4 for the distinction.
 
 # %%
 dist_ma_df = spy.with_columns(
@@ -486,7 +487,7 @@ vol_df = spy.with_columns(
     pl.col("close").pct_change().alias("ret"),
 ).with_columns(
     [
-        # Close-to-close (annualized) — note: realized_volatility expects returns, not prices
+        # Close-to-close (annualized) - note: realized_volatility expects returns, not prices
         realized_volatility("ret", period=21, annualize=True).alias("vol_cc_21"),
         # Yang-Zhang (most efficient)
         yang_zhang_volatility("open", "high", "low", "close", period=21, annualize=True).alias(
@@ -504,11 +505,11 @@ vol_df.select(["timestamp", "close", "vol_cc_21", "vol_yz_21"]).tail(10)
 # Range-based estimators use OHLC data for much higher efficiency than
 # close-to-close. Key formulas:
 #
-# **Parkinson (1980)** — uses high-low range only:
+# **Parkinson (1980)** - uses high-low range only:
 #
 # $$\hat{\sigma}^2_P = \frac{1}{4 \ln 2} (\ln H_t - \ln L_t)^2$$
 #
-# **Garman-Klass (1980)** — adds open-close information:
+# **Garman-Klass (1980)** - adds open-close information:
 #
 # $$\hat{\sigma}^2_{GK} = 0.5 (\ln H_t - \ln L_t)^2 - (2\ln 2 - 1)(\ln C_t - \ln O_t)^2$$
 #
@@ -546,13 +547,13 @@ vol_compare_df = spy.with_columns(
     pl.col("close").pct_change().alias("ret"),
 ).with_columns(
     [
-        # Close-to-close — realized_volatility expects returns, not prices
+        # Close-to-close - realized_volatility expects returns, not prices
         realized_volatility("ret", period=21, annualize=True).alias("vol_cc"),
-        # Parkinson (manual — works on OHLC directly)
+        # Parkinson (manual - works on OHLC directly)
         parkinson_vol(period=21).alias("vol_parkinson"),
-        # Garman-Klass (manual — works on OHLC directly)
+        # Garman-Klass (manual - works on OHLC directly)
         garman_klass_vol(period=21).alias("vol_gk"),
-        # Yang-Zhang (library — works on OHLC directly, most efficient)
+        # Yang-Zhang (library - works on OHLC directly, most efficient)
         yang_zhang_volatility("open", "high", "low", "close", period=21, annualize=True).alias(
             "vol_yz"
         ),
@@ -610,7 +611,7 @@ fig.show()
 # %%
 import matplotlib.pyplot as plt
 
-# Prepare data — use full history for a window that includes a volatility spike
+# Prepare data - use full history for a window that includes a volatility spike
 vol_plot = vol_compare_df.drop_nulls(subset=["vol_cc", "vol_parkinson", "vol_gk", "vol_yz"])
 
 fig_mpl, ax = plt.subplots(figsize=(12, 5))
@@ -659,7 +660,7 @@ vol_plot.select(
 # %% [markdown]
 # ### 4.3 Volatility-of-Volatility (Vol-of-Vol)
 #
-# Second moment of volatility — useful for detecting unstable regimes.
+# Second moment of volatility - useful for detecting unstable regimes.
 
 # %%
 from ml4t.engineer.features.volatility import volatility_of_volatility
@@ -701,7 +702,7 @@ vol_state_df = (
         ]
     )
     .with_columns(
-        # Vol ratio: short/long — >1 means expansion, <1 contraction
+        # Vol ratio: short/long - >1 means expansion, <1 contraction
         (pl.col("vol_short") / pl.col("vol_long").clip(1e-10, None)).alias("vol_ratio"),
     )
 )
@@ -763,7 +764,7 @@ regime_ind_df.select(
 # below 1 indicates mean-reversion. This is the Lo-MacKinlay (1988) test as a
 # rolling feature.
 #
-# **Fractal Efficiency**: Measures path efficiency — 1 means price moves in a
+# **Fractal Efficiency**: Measures path efficiency - 1 means price moves in a
 # straight line (trend), 0 means random wandering.
 #
 # **Note**: These are *rolling-window* regime indicators derived purely from price.
@@ -860,7 +861,10 @@ fig.update_yaxes(title_text="Price ($)", row=1, col=1)
 fig.update_yaxes(title_text="Rel. volume (×avg)", row=2, col=1)
 fig.update_yaxes(title_text="Volume z-score", row=3, col=1)
 fig.update_xaxes(title_text="Date", row=3, col=1)
-fig.update_layout(height=600, title="Relative volume and z-scores isolate trading-activity spikes")
+fig.update_layout(
+    height=600,
+    title="Relative volume and z-scores isolate trading-activity spikes",
+)
 fig.show()
 
 # %% [markdown]
@@ -901,7 +905,7 @@ vwap_df.select(["timestamp", "close", "vwap_5d", "vwap_distance"]).tail(10)
 
 # %% [markdown]
 # **Interpretation**: Positive VWAP distance means the close is above the
-# volume-weighted average — buying pressure exceeded selling pressure over the
+# volume-weighted average - buying pressure exceeded selling pressure over the
 # lookback. Negative indicates the opposite. For intraday strategies this is a
 # key mean-reversion anchor; for daily data it proxies volume-weighted trend.
 
@@ -953,7 +957,7 @@ print(f"Cross-sectional ranks for {sample_date}:")
 #
 # The text's spec-table formula: cumulative return divided by realized volatility,
 # then cross-sectional percentile rank. Vol-scaling penalizes momentum driven by
-# high volatility — a stock that rose 10% with 40% vol is less compelling than one
+# high volatility - a stock that rose 10% with 40% vol is less compelling than one
 # that rose 10% with 15% vol.
 #
 # $$\text{Vol-Scaled Mom} = \frac{r_{21d}}{\sigma_{21d}}$$
@@ -989,7 +993,7 @@ print(f"Vol-scaled cross-sectional momentum ({sample_date}):")
 )
 
 # %% [markdown]
-# **Interpretation**: Vol-scaling reshuffles the ranking — high-momentum assets
+# **Interpretation**: Vol-scaling reshuffles the ranking - high-momentum assets
 # with elevated volatility drop, while steady trending assets rise. This is the
 # same intuition as the Sharpe ratio applied cross-sectionally.
 
@@ -1044,7 +1048,7 @@ print(f"Cross-sectional z-scores for {sample_date}:")
 # 3. **Look-ahead in ranks**: Ranking before data was available
 #
 # **Safe Pattern**: Always use `.over("timestamp")` for cross-sectional
-# operations — this guarantees that each date's statistics use only
+# operations - this guarantees that each date's statistics use only
 # contemporaneous data:
 #
 # ```python
@@ -1171,6 +1175,6 @@ ffd_df.select(["timestamp", "close", "close_ffd_05", "close_ffd_10"]).tail(10)
 #
 # ### Next Notebooks
 #
-# - `02_microstructure_features` — Trade-based features (§8.2)
-# - `03_structural_cross_instrument_features` — Carry, cross-asset, options (§8.3)
-# - `04_fundamentals_macro_calendar` — Fundamentals, macro, calendar (§8.4)
+# - `02_microstructure_features` - Trade-based features (§8.2)
+# - `03_structural_cross_instrument_features` - Carry, cross-asset, options (§8.3)
+# - `04_fundamentals_macro_calendar` - Fundamentals, macro, calendar (§8.4)
