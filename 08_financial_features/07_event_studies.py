@@ -535,6 +535,15 @@ if len(result["daily_aar"]) > 0:
 # Decomposing the CAAR into its per-day contributions shows *where* the abnormal
 # return is earned. Bars significant at the 5% level (|t| > 1.96) are drawn in the
 # primary color; insignificant days are muted; the event day is highlighted.
+#
+# The event day carries by far the largest single contribution (AAR +0.74%, t = 8.8),
+# and every day after it is indistinguishable from zero. The days *before* it are not:
+# day -3 (t = 2.0) and day -1 (t = 3.1) are both significant, and the CAAR has already
+# reached +0.56% by day -1, 43% of its day-0 level. Read that run-up as mechanical
+# rather than as a finding: an event here is a new 20-day closing high, so a symbol
+# cannot enter the sample without having risen over the preceding days. Section 7
+# returns to this - when you select events by a price condition, part of the pre-event
+# CAAR is the condition, not the signal.
 
 # %%
 if len(result["daily_aar"]) > 0:
@@ -553,10 +562,11 @@ if len(result["daily_aar"]) > 0:
     fig = go.Figure()
     fig.add_trace(go.Bar(x=days, y=aar_pct, marker_color=bar_colors, name="AAR"))
     fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"])
-    fig.add_vline(x=0, line_dash="dash", line_color=COLORS["amber"])
+    # No event-day vline here: the amber bar already marks day 0, and the line only shows
+    # as stray dashes above and below the bar that occludes it.
 
     fig.update_layout(
-        title="The abnormal return is earned on the breakout day; surrounding days are noise",
+        title="The breakout day dominates; the run-up into it is significant, the fade after is not",
         xaxis_title="Trading days relative to event",
         yaxis_title="Average abnormal return (%)",
         height=400,
@@ -697,8 +707,11 @@ if len(result["event_cars"]) > 0:
 
 # %% [markdown]
 # **Interpretation**: A right-skewed CAR distribution with a statistically significant
-# positive mean suggests that momentum breakouts are followed by genuine abnormal
-# returns -- not just a few outlier events. If the distribution were bimodal or
+# positive mean tells us the aggregate effect is broad-based rather than the work of a
+# few outlier events. It does not tell us the effect is tradable: this CAR spans the
+# whole [-5, +10] window, so it includes the pre-event run-up the event definition
+# builds in. The event-day AAR (+0.74%) is the part that is not mechanical. If the
+# distribution were bimodal or
 # heavily skewed by a handful of events, the aggregate CAAR would be unreliable
 # for strategy design. The mean/median comparison also matters: if the median is
 # near zero but the mean is positive, a few large events drive the result.
@@ -706,7 +719,14 @@ if len(result["event_cars"]) > 0:
 # %% [markdown]
 # ## 6. Event Study Heatmap
 #
-# Visualize abnormal returns across events and days to identify patterns.
+# Visualize abnormal returns across events and days to identify patterns. The grid shows
+# the 30 earliest events of the 122 analyzed, in chronological order, so the rows stay
+# legible; the aggregate statistics above use all of them.
+#
+# The per-event view is a useful corrective to the CAAR chart. On the event day 73% of
+# these events are positive against 53% on other days, but the typical event-day move is
+# only +0.20% - and the widest swings in the grid happen away from day 0. The aggregate
+# effect is built from a consistent tilt across many events, not from a few dramatic ones.
 
 # %%
 if len(result["abnormal_returns"]) > 0:
@@ -752,16 +772,30 @@ if len(result["abnormal_returns"]) > 0:
     fig.add_vline(x=0, line_dash="dash", line_color=COLORS["amber"], line_width=2)
 
     fig.update_layout(
-        title="Event-day abnormal returns stand out across individual breakout events",
+        title="The event-day effect is a consistent tilt, not a dramatic move in any one event",
         xaxis_title="Trading days relative to event",
         yaxis_title="Event (date + symbol)",
         height=600,
+        # Event ids are 14 characters ("2018-04-18_IWM"); the default left margin clips them.
+        margin=dict(l=140),
     )
 
     fig.show()
 
 # %% [markdown]
 # ## 7. Caveats and Best Practices
+#
+# ### Event Definition and Pre-Event Drift
+#
+# When events are selected by a price condition - here, a new 20-day closing high - the
+# pre-event window is contaminated by construction: a symbol cannot qualify without
+# having risen into the event. That is visible above, where the CAAR reaches +0.56% by
+# day -1 (43% of its day-0 value) with days -3 and -1 individually significant. Read
+# that run-up as a property of the selection rule, not as evidence of a predictable
+# abnormal return you could have traded. Solutions:
+# - Report the event-day and post-event windows separately from the run-up
+# - Define events on information arriving at a point in time (announcements, filings)
+# - End the pre-event window before the selection condition can bind
 #
 # ### Event Clustering
 #
