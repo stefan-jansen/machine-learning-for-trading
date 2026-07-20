@@ -17,7 +17,7 @@
 # # Robustness and Sensitivity Analysis
 #
 # **Chapter 8: Feature Engineering**
-# **Section Reference**: 8.6 — Combining Features and Controlling Search
+# **Section Reference**: 8.6 - Combining Features and Controlling Search
 #
 # **Docker image**: `ml4t`
 #
@@ -41,7 +41,7 @@
 # All examples use **real ETF data**.
 
 # %%
-"""Robustness and Sensitivity Analysis — parameter sweeps, regime conditioning, and signal interaction features."""
+"""Robustness and Sensitivity Analysis - parameter sweeps, regime conditioning, and signal interaction features."""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ etfs = load_etfs()
 # sweeps and robustness diagnostics are development decisions; the sealed
 # holdout must not inform them (see the rule in
 # 06_strategy_definition/02_cv_foundations). Clamp the analysis window so an
-# END_DATE override can never reach into the holdout — every IC below (sweep,
+# END_DATE override can never reach into the holdout - every IC below (sweep,
 # RAS, regime-conditional, implementation variants) sees only pre-holdout data.
 setup = yaml.safe_load((get_case_study_dir("etfs") / "config" / "setup.yaml").read_text())
 HOLDOUT_START = setup["evaluation"]["holdout_start"]
@@ -389,7 +389,7 @@ if sweep_results and robustness:
 # ### RAS Correction for Parameter Snooping
 #
 # After sweeping N parameter combinations, the best IC is upward-biased.
-# RAS corrects for correlation-aware multiple testing — nearby parameters
+# RAS corrects for correlation-aware multiple testing - nearby parameters
 # produce correlated IC estimates and count as fewer independent tests.
 
 # %%
@@ -547,9 +547,9 @@ if spy_vol is not None:
         ic_range = max(ic_values) - min(ic_values)
         print(f"\nIC range across regimes: {ic_range:.4f}")
         if ic_range > 0.04:
-            print("IC range > 0.04 across regimes — interaction features are warranted")
+            print("IC range > 0.04 across regimes - interaction features are warranted")
         else:
-            print("IC range <= 0.04 across regimes — signal does not depend on regime")
+            print("IC range <= 0.04 across regimes - signal does not depend on regime")
 
 # %% [markdown]
 # ### Conditional IC Distribution by Regime
@@ -736,7 +736,7 @@ if spy_vol is not None and len(interact_df) > 252:
 # %% [markdown]
 # The gated signal avoids the worst IC drawdowns during high-volatility
 # episodes, at the cost of fewer active days (reduced breadth). Whether
-# gating improves net performance depends on the IC gain vs breadth loss —
+# gating improves net performance depends on the IC gain vs breadth loss -
 # a question for the modeling chapters (Ch11–12).
 
 # %% [markdown]
@@ -887,4 +887,4 @@ print("=" * 50)
 # 5. **Interactions multiply search**: Signal × state combinations must
 #    enter the searched-set accounting from §7.4
 #
-# **Next**: `07_event_studies` — event-based signal validation
+# **Next**: `07_event_studies` - event-based signal validation
