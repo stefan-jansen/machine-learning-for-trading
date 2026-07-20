@@ -255,10 +255,10 @@ extension_products:
     note: "Less liquid than major FX pairs"
 
   LBR:
-    name: "Random Length Lumber"
+    name: "Lumber"
     category: "lumber"
-    start: "2011-01-01"
-    note: "Volatile, specification changes - use with caution"
+    start: "2022-08-01"  # CME Lumber (LBR) launched 2022-08-08; replaced Random Length Lumber (LBS)
+    note: "New physically-delivered Lumber contract; no GLBX.MDP3 history before Aug 2022. Volatile - use with caution"
 
 # ============================================================================
 # INDIVIDUAL CONTRACTS (for roll demonstration)
