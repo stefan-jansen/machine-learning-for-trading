@@ -4342,7 +4342,7 @@ requires-dist = [
     { name = "ml4t-backtest", specifier = ">=0.1.0b20" },
     { name = "ml4t-data", specifier = ">=0.1.0b15" },
     { name = "ml4t-diagnostic", specifier = ">=0.1.0b23" },
-    { name = "ml4t-engineer", specifier = ">=0.1.0b8" },
+    { name = "ml4t-engineer", specifier = ">=0.1.0b10" },
     { name = "ml4t-live", specifier = ">=0.1.0b3" },
     { name = "ml4t-models", specifier = ">=0.1.0a4" },
     { name = "mlflow", specifier = ">=3.10.1" },
@@ -4500,7 +4500,7 @@ wheels = [
 
 [[package]]
 name = "ml4t-engineer"
-version = "0.1.0b8"
+version = "0.1.0b10"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "matplotlib" },
@@ -4518,9 +4518,9 @@ dependencies = [
     { name = "statsmodels" },
     { name = "structlog" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ef/84/18dd1f2d1f2921a11dd30acc3891c4dd28e8750cd8c8fd9ee56ab7a1fbf4/ml4t_engineer-0.1.0b8.tar.gz", hash = "sha256:3f9bd6049bf4086e27ba9a60fe5dfb6c720bdd6f6d28c51c58f78c77acd252ce", size = 539956, upload-time = "2026-05-05T21:29:40.287Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fa/06/a237d311f95fc5814c388e41dbe8f2a12e65f088e93f96745b65a5e8b2f1/ml4t_engineer-0.1.0b10.tar.gz", hash = "sha256:0265225e1dc4200b8a837c692b758fe86ff06d1d4539647e74f599574c529c58", size = 544606, upload-time = "2026-07-20T13:15:09.516Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/58/6d/2fd9b0cdcafae12b586232532a30864b72784a77b98c493bd4dcd0d3ae58/ml4t_engineer-0.1.0b8-py3-none-any.whl", hash = "sha256:1f00a140617db8b2977930d760434bdc874bb2f614a65943540a35872fee77e9", size = 363098, upload-time = "2026-05-05T21:29:38.347Z" },
+    { url = "https://files.pythonhosted.org/packages/14/2f/ac113185f6c8224f6d091b36f8a72342cc00ae1c158ba00448bbb50c0401/ml4t_engineer-0.1.0b10-py3-none-any.whl", hash = "sha256:6e19e5b6412c6914db0c93fc98f19f834c5ee013027f620727e03e3839cd06a1", size = 365611, upload-time = "2026-07-20T13:15:07.576Z" },
 ]
 
 [[package]]
