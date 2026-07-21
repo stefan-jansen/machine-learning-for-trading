@@ -56,11 +56,15 @@ def _save_fold_extras(path: Path, fold_extras: list[dict]) -> None:
     path.write_text(json.dumps(fold_extras, default=_numpy_serializer, indent=1))
 
 
-def load_fold_extras(case_study_id: str, model_name: str) -> list[dict] | None:
+def load_fold_extras(case_study_id: str, training_hash: str) -> list[dict] | None:
     from utils.paths import get_case_study_dir
 
     extras_path = (
-        get_case_study_dir(case_study_id) / "run_log" / "training" / model_name / "fold_extras.json"
+        get_case_study_dir(case_study_id)
+        / "run_log"
+        / "training"
+        / training_hash
+        / "fold_extras.json"
     )
     if not extras_path.exists():
         return None
@@ -78,7 +82,8 @@ def _load_registered_latent_factor(
     prediction_split: str,
     temporal_feature_assembly: str | None,
     macro_context_spec: dict[str, Any] | None,
-) -> tuple[pl.DataFrame, pl.DataFrame] | None:
+    input_data_spec: dict[str, Any] | None,
+) -> tuple[str, pl.DataFrame, pl.DataFrame] | None:
     """Load a complete latent-factor result without rewriting the registry."""
     from case_studies.utils.registry.queries import read_predictions
     from case_studies.utils.registry.store import _case_dir, _open_registry
@@ -109,6 +114,8 @@ def _load_registered_latent_factor(
                 ):
                     continue
                 if not _macro_context_matches(spec, macro_context_spec):
+                    continue
+                if input_data_spec is not None and spec.get("input_data") != input_data_spec:
                     continue
                 if int(spec.get("params", {}).get("n_factors", -1)) != int(n_factors):
                     continue
@@ -158,7 +165,7 @@ def _load_registered_latent_factor(
         orient="row",
     )
     predictions = [read_predictions(case_study_id, value) for value in prediction_hashes]
-    return metrics_df, pl.concat(predictions) if predictions else pl.DataFrame()
+    return training_hash, metrics_df, pl.concat(predictions) if predictions else pl.DataFrame()
 
 
 def run_latent_factor_cv(
@@ -186,6 +193,7 @@ def run_latent_factor_cv(
     prediction_split: str = "validation",
     macro_panel: pl.DataFrame | None = None,
     macro_context_spec: dict[str, Any] | None = None,
+    input_data_spec: dict[str, Any] | None = None,
     persistent_entities: bool = True,
     checkpoint_selection_policy: str | None = None,
     reporting_epoch: int | None = None,
@@ -283,9 +291,10 @@ def run_latent_factor_cv(
                 prediction_split=prediction_split,
                 temporal_feature_assembly=model_temporal_feature_assembly,
                 macro_context_spec=model_macro_context,
+                input_data_spec=input_data_spec,
             )
             if registered is not None:
-                metrics_df, preds_df = registered
+                training_hash, metrics_df, preds_df = registered
                 best_epoch, mean_ic = _select_reporting_epoch(
                     metrics_df,
                     checkpoint_selection_policy=metric_policy["checkpoint_selection_policy"],
@@ -305,7 +314,7 @@ def run_latent_factor_cv(
                 )
                 all_predictions[model_name] = preds_df
                 fold_metrics[model_name] = metrics_df
-                all_extras[model_name] = load_fold_extras(case_study_id, model_name) or []
+                all_extras[model_name] = load_fold_extras(case_study_id, training_hash) or []
                 log(f"  {model_name}: loaded registry (best IC={mean_ic:+.4f})")
                 continue
         if (
@@ -337,7 +346,7 @@ def run_latent_factor_cv(
             )
             all_predictions[model_name] = preds_df
             fold_metrics[model_name] = metrics_df
-            all_extras[model_name] = load_fold_extras(case_study_id, model_name) or []
+            all_extras[model_name] = []
             log(f"  {model_name}: loaded cache (best IC={mean_ic:+.4f})")
             continue
 
@@ -538,19 +547,12 @@ def run_latent_factor_cv(
             preds_df.write_parquet(model_dir / "predictions.parquet")
             fold_ics_df.write_parquet(model_dir / "fold_metrics.parquet")
 
-        if case_study_id and state[model_name]["fold_extras"]:
-            from utils.paths import get_case_study_dir
-
-            extras_dir = get_case_study_dir(case_study_id) / "run_log" / "training" / model_name
-            extras_dir.mkdir(parents=True, exist_ok=True)
-            _save_fold_extras(extras_dir / "fold_extras.json", state[model_name]["fold_extras"])
-
         if case_study_id and preds_df.height > 0:
             model_temporal_feature_assembly = (
                 temporal_feature_assembly if model_name != "pca" else None
             )
             model_macro_context = macro_context_spec if model_name == "sdf" else None
-            _register_model_predictions(
+            training_hash = _register_model_predictions(
                 case_study_id=case_study_id,
                 model_name=model_name,
                 label_col=label_col,
@@ -569,7 +571,16 @@ def run_latent_factor_cv(
                 preds_df=preds_df,
                 temporal_feature_assembly=model_temporal_feature_assembly,
                 macro_context_spec=model_macro_context,
+                input_data_spec=input_data_spec,
             )
+            if state[model_name]["fold_extras"]:
+                from utils.paths import get_case_study_dir
+
+                extras_dir = (
+                    get_case_study_dir(case_study_id) / "run_log" / "training" / training_hash
+                )
+                extras_dir.mkdir(parents=True, exist_ok=True)
+                _save_fold_extras(extras_dir / "fold_extras.json", state[model_name]["fold_extras"])
 
         log(f"    -> best epoch={best_epoch}, IC={mean_ic:+.4f} ({elapsed:.1f}s)")
         gc.collect()
@@ -1074,7 +1085,8 @@ def _register_model_predictions(
     preds_df: pl.DataFrame,
     temporal_feature_assembly: str | None,
     macro_context_spec: dict[str, Any] | None,
-) -> None:
+    input_data_spec: dict[str, Any] | None,
+) -> str:
     from case_studies.utils.registry import (
         build_training_spec,
         register_prediction_set,
@@ -1111,6 +1123,7 @@ def _register_model_predictions(
         fold_extras=fold_extras,
         temporal_feature_assembly=temporal_feature_assembly,
         macro_context_spec=macro_context_spec,
+        input_data_spec=input_data_spec,
     )
 
     training_hash = register_training_run(
@@ -1138,6 +1151,7 @@ def _register_model_predictions(
             eval_col=eval_col,
             metrics={"ic_mean": ic_mean},
         )
+    return training_hash
 
 
 def _apply_latent_factor_runtime_spec(
@@ -1149,6 +1163,7 @@ def _apply_latent_factor_runtime_spec(
     fold_extras: list[dict[str, Any]],
     temporal_feature_assembly: str | None = None,
     macro_context_spec: dict[str, Any] | None = None,
+    input_data_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved = dict(spec)
     params = dict(resolved.get("params", {}))
@@ -1205,6 +1220,8 @@ def _apply_latent_factor_runtime_spec(
         resolved["temporal_feature_assembly"] = temporal_feature_assembly
     if macro_context_spec is not None:
         resolved["macro_context"] = macro_context_spec
+    if input_data_spec is not None:
+        resolved["input_data"] = input_data_spec
     resolved["params"] = params
     return resolved
 
