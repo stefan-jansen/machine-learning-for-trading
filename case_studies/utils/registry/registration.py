@@ -45,6 +45,7 @@ def register_training_run(
     case_dir: Path | None = None,
     started_at: str | None = None,
     elapsed_s: float | None = None,
+    runtime_provenance: dict | None = None,
 ) -> str:
     """Register a training run. Returns training_hash.
 
@@ -64,6 +65,8 @@ def register_training_run(
         ISO timestamp when training started.
     elapsed_s : float, optional
         Wall-clock seconds for the training run.
+    runtime_provenance : dict, optional
+        Execution environment recorded separately from the portable hash.
     """
     if case_dir is None:
         case_dir = _case_dir(case_study)
@@ -75,6 +78,8 @@ def register_training_run(
     # Write spec.json (authoritative identity artifact)
     train_dir = _training_dir(case_dir, t_hash)
     _save_json(train_dir / "spec.json", spec)
+    if runtime_provenance is not None:
+        _save_json(train_dir / "runtime.json", runtime_provenance)
 
     # Insert into DB
     db = _open_registry(case_dir)
@@ -84,8 +89,8 @@ def register_training_run(
             INSERT OR REPLACE INTO training_runs
             (training_hash, family, label, config_name,
              spec_json, created_at, git_commit, entry_point,
-             started_at, elapsed_s)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             started_at, elapsed_s, runtime_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 t_hash,
@@ -98,6 +103,7 @@ def register_training_run(
                 entry_point,
                 started_at,
                 elapsed_s,
+                canonical_json(runtime_provenance) if runtime_provenance is not None else None,
             ),
         )
         db.commit()

@@ -153,6 +153,7 @@ _SKIP_PARAMS: dict[str, set[str]] = {
 _BEST_GPU: dict[str, str | None] = {}
 
 DEFAULT_GBM_CPU_THREADS = 8
+GBM_DEFAULT_MAX_BIN = 63
 
 
 def _best_gpu_device(library: str) -> str | None:
@@ -190,11 +191,12 @@ def lightgbm_runtime_params(
     num_threads: int = DEFAULT_GBM_CPU_THREADS,
     seed: int = RANDOM_SEED,
 ) -> dict[str, Any]:
-    """Return the execution parameters that must participate in a GBM run hash.
+    """Return explicit LightGBM execution provenance.
 
     CPU is the reproducible reader default. A GPU request fails when the
     installed LightGBM build cannot provide CUDA instead of silently training
-    a different CPU model.
+    a different CPU model. These values configure execution and are recorded
+    next to the portable training identity; they do not enter its hash.
     """
     normalized = device.lower()
     if normalized == "cpu":
@@ -224,6 +226,26 @@ def lightgbm_runtime_params(
     raise ValueError(f"Unsupported LightGBM device: {device!r}")
 
 
+def resolve_gbm_execution_config(config: dict[str, Any]) -> tuple[str, int, int]:
+    """Resolve a declared GBM backend without deriving model parameters from hardware."""
+    device = str(config.get("device", "cpu")).lower()
+    if device == "gpu":
+        device = "cuda"
+    if device not in {"cpu", "cuda"}:
+        raise ValueError(f"Unsupported LightGBM device: {device!r}")
+
+    if "max_bin" not in config:
+        raise ValueError("modeling.gbm.max_bin must be declared explicitly")
+    max_bin = int(config["max_bin"])
+    if max_bin < 2:
+        raise ValueError("modeling.gbm.max_bin must be at least 2")
+
+    num_threads = int(config.get("num_threads", DEFAULT_GBM_CPU_THREADS))
+    if num_threads < 1:
+        raise ValueError("modeling.gbm.num_threads must be at least 1")
+    return device, max_bin, num_threads
+
+
 def gbm_checkpoint_iterations(config: dict[str, Any]) -> tuple[int, ...]:
     """Return the exact checkpoint surface implied by one GBM config."""
     n_iterations = int(config.get("max_iterations", 500))
@@ -242,7 +264,6 @@ def build_gbm_training_spec(
     label_col: str,
     n_folds: int,
     max_bin: int,
-    runtime_params: dict[str, Any],
     feature_names: list[str],
     splits: list[dict[str, Any]],
     eval_label_col: str | None,
@@ -251,11 +272,10 @@ def build_gbm_training_spec(
     seed: int,
     train_sample_frac: float = 1.0,
 ) -> dict[str, Any]:
-    """Build the single complete identity used for GBM lookup and registration."""
+    """Build the portable declared identity used for GBM lookup and registration."""
     from case_studies.utils.registry import build_training_spec
 
     identity_params = {
-        **runtime_params,
         "class_values": list(class_values) if class_values is not None else None,
         "eval_label_col": eval_label_col,
         "feature_names": list(feature_names),
@@ -905,8 +925,9 @@ def train_gbm_config(
     params["metric"] = "None"
     params["verbosity"] = params.get("verbosity", -1)
 
-    # Device and reproducibility settings are explicit run inputs. They must
-    # also be included in the registry spec by the caller.
+    # Runtime settings are recorded as provenance by the caller. Numerical
+    # model parameters such as max_bin are declared separately in the hashed
+    # training spec and never inferred from this runtime backend.
     params.update(lightgbm_runtime_params(device, num_threads=num_threads, seed=seed))
     if max_bin is not None:
         params["max_bin"] = max_bin
@@ -1168,7 +1189,6 @@ def register_gbm_result(
             n_folds=n_folds,
             max_bin=max_bin,
             checkpoint_interval=cfg.get("checkpoint_interval", 50),
-            extra_params=runtime_params,
             train_sample_frac=train_sample_frac,
         )
     else:
@@ -1191,6 +1211,7 @@ def register_gbm_result(
         spec=spec,
         entry_point=entry_point,
         elapsed_s=result.get("elapsed_s"),
+        runtime_provenance=runtime_params,
     )
 
     # Best-checkpoint predictions as a DataFrame
