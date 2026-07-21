@@ -77,7 +77,7 @@ import seaborn as sns
 from tqdm.auto import tqdm
 
 from data import load_mbo_data
-from utils.paths import get_output_dir
+from utils.paths import display_path, get_output_dir
 from utils.reproducibility import set_global_seeds
 
 # %% tags=["parameters"]
@@ -592,16 +592,16 @@ def compute_markouts(
     result = bars.clone().with_columns(pl.col("timestamp").dt.date().alias("session_date"))
 
     for h in horizons:
-        # Standard markout: price change from now to h minutes ahead
+        # Standard markout: quote-midpoint change from now to h minutes ahead
         result = result.with_columns(
-            (pl.col("mid_price").shift(-h).over("session_date") / pl.col("mid_price") - 1).alias(
+            (pl.col("mid_quote").shift(-h).over("session_date") / pl.col("mid_quote") - 1).alias(
                 f"markout_{h}"
             )
         )
 
         # Latency-adjusted: assumes 1-bar execution delay
-        p1 = pl.col("mid_price").shift(-latency_bars).over("session_date")
-        p2 = pl.col("mid_price").shift(-h).over("session_date")
+        p1 = pl.col("mid_quote").shift(-latency_bars).over("session_date")
+        p2 = pl.col("mid_quote").shift(-h).over("session_date")
         result = result.with_columns((p2 / p1 - 1).alias(f"markout_{h}_adj"))
 
         # Executable markout: a long pays the ask at decision time and exits at
@@ -641,10 +641,10 @@ if multi_day is not None and len(multi_day) > 0:
     print("-" * 55)
 
     interpretations = {
-        1: "Very short-term momentum",
-        5: "Short-term persistence",
-        10: "Medium-term (weak)",
-        30: "Longer-term (negligible)",
+        1: "Negligible reversal",
+        5: "Negligible momentum",
+        10: "Negligible reversal",
+        30: "Negligible reversal",
     }
 
     for h in [1, 5, 10, 30]:
@@ -655,8 +655,8 @@ if multi_day is not None and len(multi_day) > 0:
 
 # %% [markdown]
 # Pearson correlation between OFI(t-1) and forward markouts is small and mixed
-# in sign on this slice: about +0.004 at 1 minute, +0.001 at 5 minutes, −0.009
-# at 10 minutes, and −0.010 at 30 minutes. These correlations are computed on
+# in sign on this slice: about -0.011 at 1 minute, +0.001 at 5 minutes, -0.014
+# at 10 minutes, and -0.013 at 30 minutes. These correlations are computed on
 # the **minute-bar** panel printed above (a few thousand regular-trading-hours
 # bars across the ten days run here), not on the underlying tick stream. At that
 # bar count $1/\sqrt{n}$ is of order $10^{-2}$, and the forward-return windows
@@ -731,7 +731,7 @@ if multi_day is not None and len(multi_day) > 0:
 # - The bottom (heavy-selling) decile mean is slightly positive and the top
 #   (heavy-buying) decile mean is among the most negative — the opposite of a
 #   momentum read.
-# - The top-minus-bottom spread is about −1.9 bps: negative and, like the
+# - The top-minus-bottom spread is about -1.8 bps: negative and, like the
 #   near-zero correlations above, within sampling noise of zero.
 #
 # A decile spread that is within noise and on the order of round-trip execution
@@ -851,7 +851,7 @@ if multi_day is not None and len(multi_day) > 0:
 if multi_day is not None and len(multi_day) > 0:
     output_file = OUTPUT_DIR / f"{SYMBOL}_minute_bars.parquet"
     multi_day.write_parquet(output_file)
-    print(f"Saved: {output_file}")
+    print(f"Saved: {display_path(output_file)}")
     print(f"Shape: {multi_day.shape}")
 
 # %% [markdown]
@@ -860,8 +860,8 @@ if multi_day is not None and len(multi_day) > 0:
 # ### 1. OFI ↔ Forward-Return Correlation
 #
 # On this ten-day, regular-trading-hours slice the correlation of OFI(t-1) with
-# forward returns is small and mixed in sign (about +0.004 at 1 minute, +0.001
-# at 5 minutes, −0.009 at 10 minutes, −0.010 at 30 minutes). The per-observation
+# forward returns is small and mixed in sign (about -0.011 at 1 minute, +0.001
+# at 5 minutes, -0.014 at 10 minutes, and -0.013 at 30 minutes). The per-observation
 # magnitudes are tiny relative to the dispersion of returns, and the estimates
 # sit within about one standard error of zero, so the sign is not something to
 # trade on — the reading is no reliable linear relationship, neither momentum
@@ -869,11 +869,11 @@ if multi_day is not None and len(multi_day) > 0:
 #
 # ### 2. Horizon Dependence
 #
-# The correlations flip from marginally positive at 1-5 minutes to marginally
-# negative at 10-30 minutes, but every value is within one standard error of
-# zero. This notebook does not separate any horizon dependence into a permanent
-# vs transient component; it reports the unconditional correlation at each
-# horizon, all within sampling noise here.
+# The correlations are negative at 1, 10, and 30 minutes and near zero at 5
+# minutes, but every value is within one standard error of zero. This notebook
+# does not separate horizon dependence into permanent and transient components;
+# it reports the unconditional correlation at each horizon, all within sampling
+# noise here.
 #
 # ### 3. Three Markout Types, Not Latency Alpha
 #
@@ -886,7 +886,7 @@ if multi_day is not None and len(multi_day) > 0:
 #
 # ### 4. Practical Alpha Is Limited
 #
-# The top-minus-bottom OFI decile spread is about −1.9 bps on this slice — within
+# The top-minus-bottom OFI decile spread is about -1.8 bps on this slice - within
 # noise and on the order of round-trip transaction costs. There is no standalone
 # edge here: the decile means alternate sign with no tail structure, matching the
 # near-zero correlations. OFI is more useful as a **filter** (avoid trading against
