@@ -40,6 +40,7 @@ def _install_cache(
             {
                 "prediction_hash": prediction_hash,
                 "checkpoint_value": epoch,
+                "checkpoint_kind": "epoch",
             }
         )
     monkeypatch.setattr(
@@ -301,6 +302,50 @@ def test_cached_replay_requires_the_exact_checkpoint_set(
             entity_col="symbol",
             eval_col="eval_actual",
             expected_checkpoints=(25, 50, 75, 100),
+            expected_keys=frame.select("timestamp", "symbol", "fold_id"),
+        )
+
+
+@pytest.mark.parametrize("defect", ["null_checkpoint", "wrong_kind"])
+def test_cached_replay_rejects_contradictory_checkpoint_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    defect: str,
+) -> None:
+    frame = _cache_frame()
+    _install_cache(monkeypatch, tmp_path, {25: frame})
+    if defect == "null_checkpoint":
+        prediction_sets = pl.DataFrame(
+            {
+                "prediction_hash": ["prediction-25", "ignored-final"],
+                "checkpoint_value": [25, None],
+                "checkpoint_kind": ["epoch", "final"],
+            }
+        )
+    else:
+        prediction_sets = pl.DataFrame(
+            {
+                "prediction_hash": ["prediction-25"],
+                "checkpoint_value": [25],
+                "checkpoint_kind": ["final"],
+            }
+        )
+    monkeypatch.setattr(
+        registry,
+        "load_prediction_sets",
+        lambda *_args, **_kwargs: prediction_sets,
+    )
+
+    with pytest.raises(ValueError, match="checkpoint"):
+        tabular_dl._load_cached_tabm_config(
+            case_study="probe",
+            training_spec={"family": "tabular_dl", "label": "label", "seed": 42},
+            config_name="tabm_probe",
+            prediction_split="validation",
+            date_col="timestamp",
+            entity_col="symbol",
+            eval_col="eval_actual",
+            expected_checkpoints=(25,),
             expected_keys=frame.select("timestamp", "symbol", "fold_id"),
         )
 

@@ -367,7 +367,22 @@ def _load_cached_tabm_config(
         training_hash=training_hash,
         split=prediction_split,
     )
-    checkpoint_values = prediction_sets["checkpoint_value"].drop_nulls().to_list()
+    required_metadata = {"prediction_hash", "checkpoint_value", "checkpoint_kind"}
+    missing_metadata = required_metadata - set(prediction_sets.columns)
+    if missing_metadata:
+        raise ValueError(
+            f"Cached {config_name} checkpoint metadata is missing {sorted(missing_metadata)}"
+        )
+    if prediction_sets.height != len(expected_checkpoints):
+        raise ValueError(
+            f"Cached {config_name} checkpoints row count {prediction_sets.height} does not match "
+            f"expected {len(expected_checkpoints)}"
+        )
+    if prediction_sets["checkpoint_value"].null_count():
+        raise ValueError(f"Cached {config_name} has a null checkpoint value")
+    if prediction_sets.filter(pl.col("checkpoint_kind") != "epoch").height:
+        raise ValueError(f"Cached {config_name} contains a non-epoch checkpoint")
+    checkpoint_values = prediction_sets["checkpoint_value"].to_list()
     observed_checkpoints = tuple(sorted(int(value) for value in checkpoint_values))
     if len(observed_checkpoints) != len(set(observed_checkpoints)):
         raise ValueError(f"Cached {config_name} has duplicate checkpoints")

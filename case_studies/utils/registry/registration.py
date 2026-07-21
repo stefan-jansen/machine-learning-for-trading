@@ -64,10 +64,6 @@ def register_training_run(
         ISO timestamp when training started.
     elapsed_s : float, optional
         Wall-clock seconds for the training run.
-    training_spec : dict, optional
-        Prebuilt identity used by cache lookup. When supplied, registration
-        validates its family, config, label, and fold count and stores this
-        exact spec instead of rebuilding it.
     """
     if case_dir is None:
         case_dir = _case_dir(case_study)
@@ -209,6 +205,10 @@ def register_epoch_checkpoint(
         ISO timestamp when this config's training started.
     elapsed_s : float, optional
         Wall-clock seconds for this config's training.
+    training_spec : dict, optional
+        Prebuilt identity used by cache lookup. When supplied, registration
+        validates its family, config, label, and fold count and stores this
+        exact spec instead of rebuilding it.
 
     Returns
     -------
