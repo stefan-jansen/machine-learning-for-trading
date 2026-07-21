@@ -117,18 +117,42 @@ def _attribute_root(node: ast.expr) -> str | None:
     return node.id if isinstance(node, ast.Name) else None
 
 
-def _expects_matplotlib_png(source: str) -> bool:
+def _parse_cell(source: str) -> ast.Module | None:
     sanitized = "\n".join(
         "pass" if line.lstrip().startswith(("%", "!")) else line for line in source.splitlines()
     )
     try:
-        tree = ast.parse(sanitized)
+        return ast.parse(sanitized)
     except SyntaxError:
+        return None
+
+
+def _matplotlib_helper_names(notebook: dict) -> set[str]:
+    helpers = set()
+    for cell in notebook.get("cells", []):
+        tree = _parse_cell("".join(cell.get("source", [])))
+        if tree is None:
+            continue
+        for definition in (node for node in tree.body if isinstance(node, ast.FunctionDef)):
+            calls = [node for node in ast.walk(definition) if isinstance(node, ast.Call)]
+            if any(
+                isinstance(call.func, ast.Attribute)
+                and _attribute_root(call.func) in {"plt", "ax", "axes", "matplotlib", "sns"}
+                for call in calls
+            ):
+                helpers.add(definition.name)
+    return helpers
+
+
+def _expects_matplotlib_png(source: str, helpers: set[str] | None = None) -> bool:
+    tree = _parse_cell(source)
+    if tree is None:
         return "plt.show(" in source
 
     collector = _TopLevelCallCollector()
     collector.visit(tree)
     calls = collector.calls
+    helpers = helpers or set()
     uses_matplotlib = any(
         isinstance(call.func, ast.Attribute)
         and _attribute_root(call.func) in {"plt", "ax", "axes", "matplotlib"}
@@ -151,7 +175,10 @@ def _expects_matplotlib_png(source: str) -> bool:
         )
         for call in calls
     )
-    return calls_show or creates_plot
+    calls_matplotlib_helper = any(
+        isinstance(call.func, ast.Name) and call.func.id in helpers for call in calls
+    )
+    return calls_show or creates_plot or calls_matplotlib_helper
 
 
 def _missing_matplotlib_outputs() -> dict[str, int]:
@@ -159,11 +186,12 @@ def _missing_matplotlib_outputs() -> dict[str, int]:
     offenders: dict[str, int] = {}
     for nb_path in _iter_notebooks():
         notebook = json.loads(nb_path.read_text(encoding="utf-8"))
+        helpers = _matplotlib_helper_names(notebook)
         count = 0
         for cell in notebook.get("cells", []):
             if cell.get("cell_type") != "code":
                 continue
-            if not _expects_matplotlib_png("".join(cell.get("source", []))):
+            if not _expects_matplotlib_png("".join(cell.get("source", [])), helpers):
                 continue
             has_png = any(
                 "image/png" in output.get("data", {}) for output in cell.get("outputs", [])
@@ -203,9 +231,17 @@ def test_matplotlib_detector_covers_common_display_patterns() -> None:
     assert _expects_matplotlib_png("plt.figure()\nplt.plot(x, y)")
     assert not _expects_matplotlib_png("def build():\n    return plt.subplots()")
     assert not _expects_matplotlib_png("fig.update_layout(title='Plotly')\nfig.show()")
+    assert _expects_matplotlib_png("chart = plot_splits(data)\nchart.show()", {"plot_splits"})
 
 
 KNOWN_BARE_PLOTLY_JSON = {"case_studies/etfs/03_financial_features.ipynb": 3}
+
+
+def _is_bare_plotly_bundle(bundle: dict) -> bool:
+    payload = bundle.get("application/json")
+    is_plotly = isinstance(payload, dict) and "data" in payload and "layout" in payload
+    has_rendered_plot = "application/vnd.plotly.v1+json" in bundle or "image/png" in bundle
+    return is_plotly and not has_rendered_plot
 
 
 def _bare_plotly_json_outputs() -> dict[str, int]:
@@ -214,14 +250,10 @@ def _bare_plotly_json_outputs() -> dict[str, int]:
         notebook = json.loads(nb_path.read_text(encoding="utf-8"))
         count = 0
         for cell in notebook.get("cells", []):
-            data = [output.get("data", {}) for output in cell.get("outputs", [])]
-            has_bare_json = any("application/json" in bundle for bundle in data)
-            has_rendered_plot = any(
-                "application/vnd.plotly.v1+json" in bundle or "image/png" in bundle
-                for bundle in data
-            )
-            if has_bare_json and not has_rendered_plot:
-                count += 1
+            for output in cell.get("outputs", []):
+                bundle = output.get("data", {})
+                if _is_bare_plotly_bundle(bundle):
+                    count += 1
         if count:
             offenders[str(nb_path.relative_to(REPO_ROOT))] = count
     return offenders
@@ -245,6 +277,16 @@ def test_known_bare_plotly_json_list_has_no_stale_entries() -> None:
     assert not stale, "Remove repaired notebooks from KNOWN_BARE_PLOTLY_JSON:\n  " + "\n  ".join(
         stale
     )
+
+
+def test_plotly_detector_validates_each_bundle_and_ignores_generic_json() -> None:
+    plotly = {"application/json": {"data": [], "layout": {}}}
+    generic = {"application/json": {"records": []}}
+    rendered = {**plotly, "image/png": "encoded"}
+    assert _is_bare_plotly_bundle(plotly)
+    assert not _is_bare_plotly_bundle(generic)
+    assert not _is_bare_plotly_bundle(rendered)
+    assert not _is_bare_plotly_bundle({"image/png": "unrelated"})
 
 
 # Notebooks still carrying the fossil, all in chapters not yet shipped to readers
