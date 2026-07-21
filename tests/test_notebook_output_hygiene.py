@@ -132,21 +132,26 @@ _PLT_FIGURE_METHODS = {
     "angle_spectrum",
     "arrow",
     "axhline",
+    "axhspan",
     "axline",
     "axvline",
+    "axvspan",
     "axes",
     "bar",
     "barbs",
     "barh",
     "boxplot",
     "broken_barh",
+    "bxp",
     "cohere",
     "contour",
     "contourf",
     "csd",
+    "ecdf",
     "errorbar",
     "eventplot",
     "figure",
+    "figimage",
     "fill",
     "fill_between",
     "fill_betweenx",
@@ -181,12 +186,14 @@ _PLT_FIGURE_METHODS = {
     "streamplot",
     "subplots",
     "subplot",
+    "subplot2grid",
     "subplot_mosaic",
     "table",
     "tricontour",
     "tricontourf",
     "tripcolor",
     "triplot",
+    "violin",
     "violinplot",
     "vlines",
     "xcorr",
@@ -195,6 +202,7 @@ _AXES_FIGURE_METHODS = _PLT_FIGURE_METHODS - {
     "axes",
     "figure",
     "subplot",
+    "subplot2grid",
     "subplots",
     "subplot_mosaic",
 } | {
@@ -269,7 +277,18 @@ def _matplotlib_helper_names(notebook: dict) -> set[str]:
         for definition in (node for node in tree.body if isinstance(node, ast.FunctionDef)):
             calls = [node for node in ast.walk(definition) if isinstance(node, ast.Call)]
             args = definition.args
-            axes_receivers = {arg.arg for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+            parameters = (*args.posonlyargs, *args.args, *args.kwonlyargs)
+            axes_receivers = {
+                arg.arg
+                for arg in parameters
+                if arg.arg.lower() in {"ax", "axs", "axes", "axis"}
+                or (
+                    arg.annotation is not None
+                    and isinstance(arg.annotation, ast.Name | ast.Attribute)
+                    and getattr(arg.annotation, "id", getattr(arg.annotation, "attr", ""))
+                    in {"Axes", "PolarAxes"}
+                )
+            }
             if args.vararg is not None:
                 axes_receivers.add(args.vararg.arg)
             if args.kwarg is not None:
@@ -358,6 +377,7 @@ def test_matplotlib_detector_covers_common_display_patterns() -> None:
     assert _expects_matplotlib_png("canvas, axes = plt.subplots(); canvas.show()")
     assert _expects_matplotlib_png("plt.figure()\nplt.plot(x, y)")
     assert _expects_matplotlib_png("plt.hexbin(x, y)")
+    assert _expects_matplotlib_png("plt.ecdf(values)")
     assert _expects_matplotlib_png("plt.pcolor(values)")
     assert _expects_matplotlib_png("plt.stairs(values)")
     assert _expects_matplotlib_png("plt.polar(theta, radius)")
@@ -392,6 +412,9 @@ def test_matplotlib_detector_covers_common_display_patterns() -> None:
         ]
     }
     assert _matplotlib_helper_names(axes_helpers) == {"chart", "panels"}
+
+    method_collision = {"cells": [{"source": ["def initialize(array):\n    array.fill(0)\n"]}]}
+    assert _matplotlib_helper_names(method_collision) == set()
 
 
 KNOWN_BARE_PLOTLY_JSON = {"case_studies/etfs/03_financial_features.ipynb": 3}
