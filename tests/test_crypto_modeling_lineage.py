@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from case_studies.utils.registry import (
+    build_training_spec,
     modeling_input_fingerprint,
     training_hash_from_spec,
 )
@@ -51,3 +52,17 @@ def test_crypto_training_hash_changes_with_modeling_artifact(tmp_path) -> None:
     assert first != second
     assert training_hash_from_spec(old_spec) != training_hash_from_spec(first_spec)
     assert training_hash_from_spec(first_spec) != training_hash_from_spec(second_spec)
+
+
+def test_crypto_hybrid_registry_uses_output_presets(tmp_path, monkeypatch) -> None:
+    """Hybrid execution must resolve presets beside the isolated case output."""
+    preset = tmp_path / "config" / "ols" / "ols.yaml"
+    preset.parent.mkdir(parents=True)
+    preset.write_text("model_class: LinearRegression\nparams: {}\n")
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
+
+    spec = build_training_spec("linear", "ols", "fwd_ret_8h", n_folds=2)
+
+    assert spec["config_name"] == "ols"
+    assert spec["family"] == "linear"
+    assert spec["n_folds"] == 2

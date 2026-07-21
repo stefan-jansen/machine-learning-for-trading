@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,11 @@ _CONFIG_DIR: Path | None = None
 def _get_config_dir() -> Path:
     """Resolve shared config directory (lazy, cached)."""
     global _CONFIG_DIR
+    output_root = os.environ.get("ML4T_OUTPUT_DIR")
+    if output_root:
+        output_config = Path(output_root) / "config"
+        if output_config.is_dir():
+            return output_config
     if _CONFIG_DIR is None:
         from utils.paths import REPO_ROOT
 
