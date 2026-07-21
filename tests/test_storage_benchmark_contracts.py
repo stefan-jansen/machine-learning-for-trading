@@ -22,16 +22,25 @@ def _function_source(name: str) -> str:
     return segment
 
 
-def test_server_write_timers_create_storage_and_indexes() -> None:
+def test_write_timers_exclude_schema_setup_but_include_ingestion() -> None:
     sqlite = _function_source("write_sqlite")
+    duckdb = _function_source("write_duckdb")
     postgres = _function_source("write_postgres")
     timescale = _function_source("write_timescaledb")
 
-    assert "idx_timestamp ON ohlcv(timestamp)" in sqlite
-    assert "DROP TABLE" in postgres and "CREATE TABLE" in postgres
-    assert "idx_pg_timestamp ON ohlcv_benchmark(timestamp)" in postgres
-    assert "DROP TABLE" in timescale and "CREATE TABLE" in timescale
-    assert "create_hypertable" in timescale
+    for function in (sqlite, duckdb, postgres, timescale):
+        assert "DROP TABLE" not in function
+        assert "CREATE TABLE" not in function
+        assert "CREATE INDEX" not in function
+    assert 'if_exists="append"' in sqlite
+    assert "INSERT INTO ohlcv" in duckdb
+    assert "execute_values" in postgres
+    assert "execute_values" in timescale
+
+    source = NOTEBOOK.read_text()
+    assert "CREATE INDEX idx_timestamp ON ohlcv(timestamp)" in source
+    assert "CREATE INDEX idx_pg_timestamp ON ohlcv_benchmark(timestamp)" in source
+    assert "create_hypertable" in source
 
 
 def test_kdb_operations_use_timed_transfer_and_persisted_table() -> None:
@@ -41,7 +50,7 @@ def test_kdb_operations_use_timed_transfer_and_persisted_table() -> None:
 
     assert "kx.toq(ohlcv_pandas)" in write
     assert 'q["ohlcv"]' in write
-    assert "shutil.rmtree" in write
+    assert "shutil.rmtree" not in write
     assert "get tbl" in range_query and "KDB_TBL_HANDLE" in range_query
     assert "get tbl" in aggregation and "KDB_TBL_HANDLE" in aggregation
 
@@ -54,6 +63,7 @@ def test_range_queries_prune_at_every_scale_and_detect_over_return() -> None:
     assert "total_rows + 1" in source
     assert "range_expected_rows + 1" in source
     assert "agg_expected_rows + 1" in source
+    assert source.count("tolerance=0") >= 3
 
 
 def test_benchmark_ci_uses_reduced_scale_and_explicit_timeout() -> None:
@@ -103,3 +113,8 @@ def test_optional_database_imports_tolerate_runtime_incompatibility() -> None:
     }
 
     assert {"ImportError", "Exception"} <= caught
+
+    full_manifest = (REPO_ROOT / "envs" / "benchmark" / "pyproject.full.toml").read_text()
+    compose = (REPO_ROOT / "docker-compose.yml").read_text()
+    assert '"protobuf>=5,<7"' in full_manifest
+    assert "ARCTICDB_REQUIRED=1" in compose

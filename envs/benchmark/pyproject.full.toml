@@ -32,6 +32,7 @@ dependencies = [
 
     # ArcticDB (x86 only - no Linux ARM64 wheels on PyPI)
     "arcticdb>=4.5",
+    "protobuf>=5,<7",
 
     # Database clients
     "clickhouse-connect>=0.7",

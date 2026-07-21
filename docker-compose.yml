@@ -179,6 +179,7 @@ services:
       - ML4T_PATH=/app
       - TEST=${TEST:-0}
       - QLIC=/home/ml4t/.kx
+      - ARCTICDB_REQUIRED=1
       # Database connections
       - CLICKHOUSE_HOST=ml4t-clickhouse
       - CLICKHOUSE_PORT=8123

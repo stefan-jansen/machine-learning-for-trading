@@ -40,7 +40,7 @@
 #
 # 1. **Write** - Bulk insert performance
 # 2. **Read** - Full table scan
-# 3. **Range Query** - 7-day time window (backtesting workflow)
+# 3. **Range Query** - partial time window (backtesting workflow)
 # 4. **OHLCV Aggregation** - Resample minute bars to daily bars
 # 5. **ASOF Join** - Trade-quote alignment (critical for microstructure)
 #
@@ -51,10 +51,11 @@
 # stated here and enforced by the `time_write` / `time_read` helpers rather
 # than by per-call arguments:
 #
-# - **Writes** (`time_write`) - a single shot, no warm-up, against a table
-#   created fresh for the run. Bulk load happens once per dataset, so that is
-#   what we time. Repeating it would append duplicate rows on the append-only
-#   engines, or require a teardown that is not part of the write.
+# - **Writes** (`time_write`) - a single bulk load, no warm-up, into a fresh,
+#   empty schema provisioned before the clock starts. The timed region includes
+#   client serialization, transfer, index maintenance, persistence, and the
+#   wait until rows are queryable. Schema creation and teardown are untimed for
+#   every engine.
 # - **Durability inside the timed region.** PostgreSQL and TimescaleDB commit
 #   synchronously, so their flush cost is inside the timed call. QuestDB (ILP
 #   + WAL) and InfluxDB acknowledge before the rows are queryable, so they
@@ -224,6 +225,8 @@ except ImportError:
     print("○ ArcticDB: Not installed (x86-only — use the benchmark-full image)")
 except Exception as exc:
     HAS_ARCTICDB = False
+    if os.environ.get("ARCTICDB_REQUIRED") == "1":
+        raise RuntimeError(f"ArcticDB is required but failed to import: {exc}") from exc
     print(f"○ ArcticDB: Runtime unavailable ({type(exc).__name__}: {exc})")
 
 # %%
@@ -489,15 +492,17 @@ print("=" * 70)
 
 benchmark_status["SQLite"]["tested"] = True
 sqlite_path = BENCHMARK_DIR / f"ohlcv_{ACTIVE_SCALE.lower()}.db"
+if sqlite_path.exists():
+    sqlite_path.unlink()
+with contextlib.closing(sqlite3.connect(sqlite_path)) as conn:
+    ohlcv_pandas.head(0).to_sql("ohlcv", conn, if_exists="replace", index=False)
+    conn.execute("CREATE INDEX idx_timestamp ON ohlcv(timestamp)")
 
 
 # Write
 def write_sqlite():
-    if sqlite_path.exists():
-        sqlite_path.unlink()
     with contextlib.closing(sqlite3.connect(sqlite_path)) as conn:
-        ohlcv_pandas.to_sql("ohlcv", conn, if_exists="replace", index=False)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON ohlcv(timestamp)")
+        ohlcv_pandas.to_sql("ohlcv", conn, if_exists="append", index=False)
 
 
 write_time, _ = time_write(write_sqlite)
@@ -605,15 +610,16 @@ parquet_path = BENCHMARK_DIR / f"ohlcv_{ACTIVE_SCALE.lower()}.parquet"
 
 # Save to Parquet for DuckDB's preferred workflow
 ohlcv_df.write_parquet(parquet_path)
+if duckdb_path.exists():
+    duckdb_path.unlink()
+with duckdb.connect(str(duckdb_path)) as conn:
+    conn.execute("CREATE TABLE ohlcv AS SELECT * FROM read_parquet(?) LIMIT 0", [str(parquet_path)])
 
 
 # Write DuckDB native
 def write_duckdb():
-    if duckdb_path.exists():
-        duckdb_path.unlink()
-    conn = duckdb.connect(str(duckdb_path))
-    conn.execute("CREATE TABLE ohlcv AS SELECT * FROM read_parquet(?)", [str(parquet_path)])
-    conn.close()
+    with duckdb.connect(str(duckdb_path)) as conn:
+        conn.execute("INSERT INTO ohlcv SELECT * FROM read_parquet(?)", [str(parquet_path)])
 
 
 write_time, _ = time_write(write_duckdb)
@@ -994,7 +1000,7 @@ if HAS_QUESTDB:
         return questdb_query("SELECT * FROM ohlcv_benchmark", limit=f"1,{total_rows + 1}")
 
     qdb_read_time, qdb_result = time_read(read_questdb, n_runs=min(3, TIMING_RUNS))
-    validate_result(qdb_result, total_rows, "QuestDB read")
+    validate_result(qdb_result, total_rows, "QuestDB read", tolerance=0)
     results.append(BenchmarkResult("QuestDB", "read", qdb_read_time, qdb_size, total_rows))
 
     # Range query
@@ -1007,7 +1013,7 @@ if HAS_QUESTDB:
         return questdb_query(sql, limit=f"1,{range_expected_rows + 1}")
 
     qdb_range_time, qdb_range_result = time_read(questdb_range_query, n_runs=min(3, TIMING_RUNS))
-    validate_result(qdb_range_result, range_expected_rows, "QuestDB range query")
+    validate_result(qdb_range_result, range_expected_rows, "QuestDB range query", tolerance=0)
     results.append(
         BenchmarkResult(
             "QuestDB", "range_query", qdb_range_time, 0, len(qdb_range_result["dataset"])
@@ -1027,7 +1033,7 @@ if HAS_QUESTDB:
         )
 
     qdb_agg_time, qdb_agg_result = time_read(questdb_ohlcv, n_runs=min(3, TIMING_RUNS))
-    validate_result(qdb_agg_result, agg_expected_rows, "QuestDB aggregation")
+    validate_result(qdb_agg_result, agg_expected_rows, "QuestDB aggregation", tolerance=0)
     qdb_agg_rows = len(qdb_agg_result["dataset"])
     results.append(BenchmarkResult("QuestDB", "aggregation", qdb_agg_time, 0, qdb_agg_rows))
 
@@ -1069,24 +1075,24 @@ if HAS_TIMESCALEDB:
     cur = conn.cursor()
 
     cur.execute("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;")
+    cur.execute("DROP TABLE IF EXISTS ohlcv_benchmark CASCADE;")
+    cur.execute("""
+        CREATE TABLE ohlcv_benchmark (
+            timestamp TIMESTAMPTZ NOT NULL, symbol TEXT NOT NULL,
+            open DOUBLE PRECISION, high DOUBLE PRECISION, low DOUBLE PRECISION,
+            close DOUBLE PRECISION, volume BIGINT, vwap DOUBLE PRECISION,
+            num_trades INTEGER
+        );
+    """)
+    cur.execute(
+        "SELECT create_hypertable('ohlcv_benchmark', 'timestamp', "
+        "chunk_time_interval => INTERVAL '1 day');"
+    )
 
 # %%
 if HAS_TIMESCALEDB:
     # Write
     def write_timescaledb():
-        cur.execute("DROP TABLE IF EXISTS ohlcv_benchmark CASCADE;")
-        cur.execute("""
-            CREATE TABLE ohlcv_benchmark (
-                timestamp TIMESTAMPTZ NOT NULL, symbol TEXT NOT NULL,
-                open DOUBLE PRECISION, high DOUBLE PRECISION, low DOUBLE PRECISION,
-                close DOUBLE PRECISION, volume BIGINT, vwap DOUBLE PRECISION,
-                num_trades INTEGER
-            );
-        """)
-        cur.execute(
-            "SELECT create_hypertable('ohlcv_benchmark', 'timestamp', "
-            "chunk_time_interval => INTERVAL '1 day');"
-        )
         data = [
             (
                 row["timestamp"],
@@ -1197,20 +1203,21 @@ if HAS_POSTGRES:
     )
     pg_conn.autocommit = True
     pg_cur = pg_conn.cursor()
+    pg_cur.execute("DROP TABLE IF EXISTS ohlcv_benchmark CASCADE;")
+    pg_cur.execute("""
+        CREATE TABLE ohlcv_benchmark (
+            timestamp TIMESTAMPTZ NOT NULL, symbol TEXT NOT NULL,
+            open DOUBLE PRECISION, high DOUBLE PRECISION, low DOUBLE PRECISION,
+            close DOUBLE PRECISION, volume BIGINT, vwap DOUBLE PRECISION,
+            num_trades INTEGER
+        );
+    """)
+    pg_cur.execute("CREATE INDEX idx_pg_timestamp ON ohlcv_benchmark(timestamp);")
 
 # %%
 if HAS_POSTGRES:
     # Write
     def write_postgres():
-        pg_cur.execute("DROP TABLE IF EXISTS ohlcv_benchmark CASCADE;")
-        pg_cur.execute("""
-            CREATE TABLE ohlcv_benchmark (
-                timestamp TIMESTAMPTZ NOT NULL, symbol TEXT NOT NULL,
-                open DOUBLE PRECISION, high DOUBLE PRECISION, low DOUBLE PRECISION,
-                close DOUBLE PRECISION, volume BIGINT, vwap DOUBLE PRECISION,
-                num_trades INTEGER
-            );
-        """)
         data = [
             (
                 row["timestamp"],
@@ -1232,7 +1239,6 @@ if HAS_POSTGRES:
         """,
             data,
         )
-        pg_cur.execute("CREATE INDEX idx_pg_timestamp ON ohlcv_benchmark(timestamp);")
 
     pg_write_time, _ = time_write(write_postgres)
     pg_cur.execute("SELECT pg_total_relation_size('ohlcv_benchmark');")
@@ -1555,11 +1561,11 @@ if HAS_PYKX:
         # here as explicit `:path symbols rather than joined inside q.
         KDB_DB_HANDLE = kx.SymbolAtom(f":{KDB_DIR}")
         KDB_TBL_HANDLE = kx.SymbolAtom(f":{KDB_DIR}/ohlcv/")
+        if KDB_DIR.exists():
+            shutil.rmtree(KDB_DIR)
+        KDB_DIR.mkdir(parents=True, exist_ok=True)
 
         def write_pykx():
-            if KDB_DIR.exists():
-                shutil.rmtree(KDB_DIR)
-            KDB_DIR.mkdir(parents=True, exist_ok=True)
             kdb_ohlcv = kx.toq(ohlcv_pandas)
             q["ohlcv"] = kdb_ohlcv
             # `.Q.en` enumerates the symbol column against the sym file, which a
@@ -1773,9 +1779,10 @@ if results:
 print("\n### BENCHMARK COVERAGE")
 tested = [k for k, v in benchmark_status.items() if v["tested"]]
 expected = [k for k, v in benchmark_status.items() if v["expected"]]
-print(f"Tested: {len(tested)}/{len(expected)} databases")
+print(f"Tested: {len(tested)}/{len(expected)} expected databases")
 for db in sorted(benchmark_status.keys()):
-    status = "[OK]" if benchmark_status[db]["tested"] else "[FAIL]"
+    state = benchmark_status[db]
+    status = "[OK]" if state["tested"] else "[FAIL]" if state["expected"] else "[SKIP]"
     cat = benchmark_status[db]["category"]
     print(f"  {status} {db} ({cat})")
 
