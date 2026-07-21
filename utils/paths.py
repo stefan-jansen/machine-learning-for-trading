@@ -30,6 +30,7 @@ Usage:
     OUTPUT_DIR = get_output_dir(7, "benchmark_results")
 """
 
+import os
 from pathlib import Path
 
 # =============================================================================
@@ -120,7 +121,7 @@ CHAPTER_STAGES: dict[int, str] = {
 
 
 def display_path(path: Path | str) -> str:
-    """Return `path` relative to REPO_ROOT when possible, else as-is.
+    """Return a portable display form for repository and configured-root paths.
 
     Use in `print(...)` statements inside notebooks so the committed cell
     output never bakes in machine-specific absolute paths (e.g. `/home/<user>/...`).
@@ -129,7 +130,19 @@ def display_path(path: Path | str) -> str:
     try:
         return str(p.relative_to(REPO_ROOT))
     except ValueError:
-        return str(p)
+        pass
+
+    if p.is_absolute():
+        for variable in ("ML4T_CHAPTER_OUTPUT_DIR", "ML4T_OUTPUT_DIR", "ML4T_DATA_PATH"):
+            configured_root = os.environ.get(variable)
+            if not configured_root:
+                continue
+            try:
+                relative = p.relative_to(Path(configured_root).expanduser().resolve())
+            except ValueError:
+                continue
+            return str(Path(f"<{variable}>") / relative)
+    return str(p)
 
 
 def get_chapter_dir(chapter: int | str) -> Path:

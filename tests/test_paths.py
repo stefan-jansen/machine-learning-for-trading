@@ -14,10 +14,35 @@ from utils.paths import (
     CHAPTERS,
     REPO_ROOT,
     STRATEGY_IDS,
+    display_path,
     get_case_study_dir,
     get_chapter_dir,
     get_output_dir,
 )
+
+# -----------------------------------------------------------------------------
+# display_path
+# -----------------------------------------------------------------------------
+
+
+def test_display_path_makes_repository_path_relative() -> None:
+    assert display_path(REPO_ROOT / "case_studies" / "etfs") == "case_studies/etfs"
+
+
+def test_display_path_redacts_configured_output_root(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
+
+    path = tmp_path / "etfs" / "run_log" / "latent_factors.log"
+    assert display_path(path) == "<ML4T_OUTPUT_DIR>/etfs/run_log/latent_factors.log"
+
+
+def test_display_path_preserves_unrelated_and_relative_paths(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path / "output"))
+    unrelated = tmp_path / "other" / "artifact.txt"
+
+    assert display_path(unrelated) == str(unrelated)
+    assert display_path("relative/artifact.txt") == "relative/artifact.txt"
+
 
 # -----------------------------------------------------------------------------
 # Registry invariants
