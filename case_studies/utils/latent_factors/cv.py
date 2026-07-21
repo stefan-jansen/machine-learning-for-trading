@@ -370,6 +370,8 @@ def run_latent_factor_cv(
         fold_metrics[model_name] = fold_ics_df
         all_extras[model_name] = state[model_name]["fold_extras"]
 
+        _require_ipca_convergence(model_name, state[model_name]["fold_extras"])
+
         model_dir = model_dirs[model_name]
         if model_dir is not None:
             model_dir.mkdir(parents=True, exist_ok=True)
@@ -423,6 +425,20 @@ def run_latent_factor_cv(
         "fold_metrics": fold_metrics,
         "fold_extras": all_extras,
     }
+
+
+def _require_ipca_convergence(
+    model_name: str,
+    fold_extras: list[dict[str, Any]],
+) -> None:
+    if model_name != "ipca":
+        return
+    failed = [int(extra["fold_id"]) for extra in fold_extras if not extra.get("converged", False)]
+    if failed:
+        raise RuntimeError(
+            "IPCA did not converge for folds "
+            f"{failed}; refusing to register predictions from an incomplete ALS fit"
+        )
 
 
 def _prepare_fold_inputs(

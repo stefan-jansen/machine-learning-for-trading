@@ -294,6 +294,15 @@ def test_ipca_wrapper_defers_to_library_iteration_default() -> None:
     assert default == IPCAConfig().max_iter
 
 
+def test_ipca_nonconvergence_blocks_registration() -> None:
+    from case_studies.utils.latent_factors.cv import _require_ipca_convergence
+
+    _require_ipca_convergence("cae", [{"fold_id": 0, "converged": False}])
+    _require_ipca_convergence("ipca", [{"fold_id": 0, "converged": True}])
+    with pytest.raises(RuntimeError, match=r"folds \[1\].*refusing to register"):
+        _require_ipca_convergence("ipca", [{"fold_id": 1, "converged": False}])
+
+
 def test_rebalance_scoring_thins_to_declared_schedule() -> None:
     from case_studies.utils.latent_factors.cv import _compute_frame_ic, _score_prediction_frame
 
