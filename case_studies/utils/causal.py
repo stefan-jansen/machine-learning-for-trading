@@ -108,6 +108,38 @@ def block_permute(
     return np.concatenate(result)
 
 
+def block_permute_panel_time(
+    arr: np.ndarray,
+    time_values: np.ndarray,
+    block_size: int,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    """Permute complete time blocks without splitting a panel timestamp."""
+    arr = np.asarray(arr)
+    time_index = pd.Index(time_values)
+    if len(time_index) != len(arr):
+        raise ValueError("time_values must have the same length as arr")
+    if not time_index.is_monotonic_increasing:
+        raise ValueError("time_values must be sorted")
+    if rng is None:
+        rng = np.random.default_rng()
+
+    time_codes, unique_times = pd.factorize(time_index, sort=False)
+    n_blocks = len(unique_times) // block_size
+    if n_blocks < 2:
+        return arr.copy()
+
+    blocks = [
+        np.flatnonzero((time_codes >= start) & (time_codes < start + block_size))
+        for start in range(0, n_blocks * block_size, block_size)
+    ]
+    indices = [blocks[index] for index in rng.permutation(n_blocks)]
+    remainder = np.flatnonzero(time_codes >= n_blocks * block_size)
+    if len(remainder):
+        indices.append(remainder)
+    return arr[np.concatenate(indices)]
+
+
 def manual_dml_timeseries(
     Y: np.ndarray,
     T: np.ndarray,
@@ -119,6 +151,7 @@ def manual_dml_timeseries(
     return_residuals: bool = False,
     hac_maxlags: int | None = None,
     horizon: int | None = None,
+    time_values: np.ndarray | pd.Series | None = None,
 ) -> dict:
     """Walk-forward DML with embargo for temporal data.
 
@@ -155,6 +188,10 @@ def manual_dml_timeseries(
         cube-root rule alone. Pass this for any overlapping label of horizon
         >= ~10 periods, or the standard error is understated and the
         t-statistic overstated.
+    time_values : array-like, optional
+        Sorted timestamp for each row. When supplied, folds and the embargo are
+        measured in unique timestamps so a panel date is never split across
+        train and validation samples.
 
     Returns
     -------
@@ -170,18 +207,30 @@ def manual_dml_timeseries(
     Y_res = np.full(n, np.nan)
     T_res = np.full(n, np.nan)
 
-    fold_size = n // (n_folds + 1)
+    if time_values is None:
+        time_codes = np.arange(n)
+        n_periods = n
+    else:
+        time_index = pd.Index(time_values)
+        if len(time_index) != n:
+            raise ValueError("time_values must have the same length as Y, T, and X")
+        if not time_index.is_monotonic_increasing:
+            raise ValueError("time_values must be sorted")
+        time_codes, unique_times = pd.factorize(time_index, sort=False)
+        n_periods = len(unique_times)
+
+    fold_size = n_periods // (n_folds + 1)
 
     for fold in range(n_folds):
         train_end = (fold + 1) * fold_size
         test_start = train_end + embargo
-        test_end = min(test_start + fold_size, n)
+        test_end = min(test_start + fold_size, n_periods)
 
         if test_end <= test_start:
             continue
 
-        train_idx = np.arange(0, train_end)
-        test_idx = np.arange(test_start, test_end)
+        train_idx = np.flatnonzero(time_codes < train_end)
+        test_idx = np.flatnonzero((time_codes >= test_start) & (time_codes < test_end))
 
         if len(train_idx) < 50 or len(test_idx) < 10:
             continue
@@ -239,18 +288,34 @@ def manual_dml_timeseries(
     # HC0 standard error
     se_iid = np.sqrt(ols_iid.cov_HC0[1, 1])
 
-    # HAC (Newey-West) standard error with frequency-adaptive bandwidth
+    # HAC standard error with frequency-adaptive bandwidth. For panels,
+    # Driscoll-Kraay aggregates the score by timestamp before applying the
+    # kernel, so a lag means one period rather than one entity row.
     se_hac = se_iid
     try:
-        ols_hac = OLS(Y_v, T_const).fit(cov_type="HAC", cov_kwds={"maxlags": hac_maxlags})
+        if time_values is None:
+            cov_type = "HAC"
+            cov_kwds = {"maxlags": hac_maxlags}
+            inference_df = n_valid - 2
+        else:
+            valid_time_codes = time_codes[valid]
+            cov_type = "hac-groupsum"
+            cov_kwds = {
+                "time": valid_time_codes,
+                "maxlags": hac_maxlags,
+                "use_correction": "hac",
+            }
+            inference_df = len(np.unique(valid_time_codes)) - 2
+        ols_hac = OLS(Y_v, T_const).fit(cov_type=cov_type, cov_kwds=cov_kwds)
         cov = ols_hac.cov_params()
         se_hac = np.sqrt(cov.iloc[1, 1] if hasattr(cov, "iloc") else cov[1, 1])
     except Exception:
-        pass  # Fall back to HC0 standard errors on numerical failure
+        inference_df = n_valid - 2
+        # Fall back to HC0 standard errors on numerical failure.
 
     t_stat_hac = theta / se_hac if se_hac > 0 else np.nan
     p_value_hac = (
-        2 * (1 - stats.t.cdf(abs(t_stat_hac), df=n_valid - 2))
+        2 * (1 - stats.t.cdf(abs(t_stat_hac), df=inference_df))
         if not np.isnan(t_stat_hac)
         else np.nan
     )
@@ -299,6 +364,7 @@ def run_dml_analysis(
     seed: int = 42,
     hac_maxlags: int | None = None,
     horizon: int | None = None,
+    time_col: str | None = None,
 ) -> dict:
     """Full DML analysis pipeline: naive OLS, DML, and refutation tests.
 
@@ -332,6 +398,10 @@ def run_dml_analysis(
         `horizon=embargo_from_buffer(mds.label_buffer)`. When both `horizon`
         and `hac_maxlags` are None, the bandwidth falls back to the
         horizon-blind cube-root rule and a warning is emitted.
+    time_col : str or None
+        Timestamp column for panel data. When supplied, every cross-fitting
+        fold, embargo, placebo block, and HAC lag is defined in complete
+        timestamps rather than panel rows.
 
     Returns
     -------
@@ -343,11 +413,16 @@ def run_dml_analysis(
     """
     # Input validation
     n = len(df)
-    min_rows = (n_folds + 1) * 50 + n_folds * embargo
-    if n < min_rows:
+    time_values = df[time_col].values if time_col is not None else None
+    n_periods = int(df[time_col].nunique()) if time_col is not None else n
+    min_periods = (n_folds + 1) * 50 + n_folds * embargo
+    if n_periods < min_periods:
         raise ValueError(
-            f"Need at least {min_rows} rows for {n_folds}-fold CV with embargo={embargo}, got {n}"
+            f"Need at least {min_periods} time periods for {n_folds}-fold CV "
+            f"with embargo={embargo}, got {n_periods}"
         )
+    if time_values is not None and not pd.Index(time_values).is_monotonic_increasing:
+        raise ValueError(f"Timestamp column '{time_col}' must be sorted")
     if df[treatment_col].std() < 1e-10:
         raise ValueError(f"Treatment '{treatment_col}' has near-zero variance")
     if df[outcome_col].std() < 1e-10:
@@ -388,6 +463,7 @@ def run_dml_analysis(
         return_residuals=True,
         hac_maxlags=hac_maxlags,
         horizon=horizon,
+        time_values=time_values,
     )
 
     # Confounding bias
@@ -398,13 +474,20 @@ def run_dml_analysis(
     # Block permutation refutation
     placebo_effects = []
     for _ in range(n_placebo):
-        T_perm = block_permute(T, block_size, rng=rng)
+        T_perm = (
+            block_permute_panel_time(T, time_values, block_size, rng=rng)
+            if time_values is not None
+            else block_permute(T, block_size, rng=rng)
+        )
         perm_result = manual_dml_timeseries(
             Y,
             T_perm,
             X,
             n_folds=min(3, n_folds),
             embargo=embargo,
+            hac_maxlags=hac_maxlags,
+            horizon=horizon,
+            time_values=time_values,
         )
         if not np.isnan(perm_result["theta"]):
             placebo_effects.append(perm_result["theta"])
@@ -494,6 +577,11 @@ def register_causal_run(
     confounder_cols: list[str] | None = None,
     n_folds: int = 5,
     embargo: int = 0,
+    time_col: str | None = None,
+    block_size: int | None = None,
+    n_placebo: int | None = None,
+    seed: int | None = None,
+    horizon: int | None = None,
     notebook: str = "causal_dml",
     case_dir=None,
     started_at: str | None = None,
@@ -529,6 +617,16 @@ def register_causal_run(
     causal_params = {"treatment": treatment_col, "embargo": embargo}
     if confounder_cols:
         causal_params["confounders"] = confounder_cols
+    if time_col is not None:
+        causal_params["time_col"] = time_col
+    if block_size is not None:
+        causal_params["block_size"] = block_size
+    if n_placebo is not None:
+        causal_params["n_placebo"] = n_placebo
+    if seed is not None:
+        causal_params["seed"] = seed
+    if horizon is not None:
+        causal_params["horizon"] = horizon
 
     spec = build_training_spec(
         "causal_dml",
