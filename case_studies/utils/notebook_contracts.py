@@ -32,13 +32,16 @@ def degenerate_prediction_sql(prediction_hash_column: str = "p.prediction_hash")
     prediction sets must never be selected for backtesting or any follow-on
     leaderboard.
 
-    Returns a fragment beginning with ``" AND "`` suitable for appending to a
-    WHERE clause; takes no bound parameters. Pass the column expression naming
-    ``prediction_hash`` in the surrounding query (default ``p.prediction_hash``).
+    Returns a fragment beginning with ``" AND "`` for direct use after an
+    existing ``WHERE`` predicate. Callers that assemble a predicate list may
+    remove that prefix before joining conditions. Pass the column expression
+    naming ``prediction_hash`` in the surrounding query (default
+    ``p.prediction_hash``); the fragment takes no bound parameters.
     """
     return (
-        f" AND {prediction_hash_column} NOT IN "
-        "(SELECT prediction_hash FROM fold_metrics WHERE ic IS NULL)"
+        " AND NOT EXISTS ("
+        "SELECT 1 FROM fold_metrics AS fm "
+        f"WHERE fm.prediction_hash = {prediction_hash_column} AND fm.ic IS NULL)"
     )
 
 
