@@ -1,0 +1,4 @@
+n_epochs: 50
+checkpoint_interval: 5
+params:
+  n_factors: 5

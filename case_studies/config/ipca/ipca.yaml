@@ -1,0 +1,3 @@
+checkpoint_interval: 0
+params:
+  n_factors: 5

@@ -1,0 +1,5 @@
+checkpoint_interval: 50
+max_iterations: 500
+params:
+  objective: binary
+  seed: 42

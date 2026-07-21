@@ -1,0 +1,15 @@
+checkpoint_interval: 50
+max_iterations: 500
+params:
+  bagging_fraction: 0.8
+  bagging_freq: 1
+  feature_fraction: 0.7
+  lambda_l1: 0.5
+  lambda_l2: 5.0
+  learning_rate: 0.05
+  max_depth: -1
+  min_child_samples: 50
+  num_class: 5
+  num_leaves: 63
+  objective: multiclass
+  seed: 42
