@@ -128,36 +128,99 @@ def _parse_cell(source: str) -> ast.Module | None:
 
 
 _PLT_FIGURE_METHODS = {
+    "acorr",
+    "angle_spectrum",
     "bar",
     "barh",
     "boxplot",
+    "broken_barh",
+    "cohere",
     "contour",
     "contourf",
+    "csd",
     "errorbar",
+    "eventplot",
     "figure",
+    "fill",
     "fill_between",
+    "fill_betweenx",
+    "hexbin",
     "hist",
+    "hist2d",
     "imshow",
+    "loglog",
+    "magnitude_spectrum",
     "matshow",
     "pcolormesh",
+    "phase_spectrum",
     "pie",
     "plot",
+    "plot_date",
+    "psd",
+    "quiver",
     "scatter",
+    "semilogx",
+    "semilogy",
+    "specgram",
+    "spy",
+    "stackplot",
     "stem",
     "step",
+    "streamplot",
     "subplots",
+    "tricontour",
+    "tricontourf",
+    "tripcolor",
+    "triplot",
+    "violinplot",
+    "xcorr",
+}
+_SNS_FIGURE_METHODS = {
+    "barplot",
+    "boxenplot",
+    "boxplot",
+    "catplot",
+    "clustermap",
+    "countplot",
+    "displot",
+    "distplot",
+    "ecdfplot",
+    "FacetGrid",
+    "heatmap",
+    "histplot",
+    "jointplot",
+    "kdeplot",
+    "lmplot",
+    "lineplot",
+    "pairplot",
+    "pointplot",
+    "regplot",
+    "relplot",
+    "residplot",
+    "rugplot",
+    "scatterplot",
+    "stripplot",
+    "swarmplot",
     "violinplot",
 }
-_SNS_NON_RENDERING_METHODS = {"color_palette", "set_context", "set_style", "set_theme"}
 
 
 def _call_produces_matplotlib_figure(call: ast.Call) -> bool:
     if not isinstance(call.func, ast.Attribute):
         return False
     root = _attribute_root(call.func)
-    return (root == "plt" and call.func.attr in _PLT_FIGURE_METHODS) or (
-        root == "sns" and call.func.attr not in _SNS_NON_RENDERING_METHODS
+    method = call.func.attr
+    return (
+        (root == "plt" and method in _PLT_FIGURE_METHODS)
+        or (root in {"ax", "axes"} and method in _PLT_FIGURE_METHODS - {"figure", "subplots"})
+        or (root == "sns" and method in _SNS_FIGURE_METHODS)
     )
+
+
+def _top_level_call_starts_figure(call: ast.Call) -> bool:
+    if not isinstance(call.func, ast.Attribute):
+        return False
+    return _attribute_root(call.func) in {"plt", "sns"} and _call_produces_matplotlib_figure(call)
 
 
 def _matplotlib_helper_names(notebook: dict) -> set[str]:
@@ -193,7 +256,10 @@ def _expects_matplotlib_png(source: str, helpers: set[str] | None = None) -> boo
         and (_attribute_root(call.func) == "plt" or uses_matplotlib)
         for call in calls
     )
-    creates_plot = any(_call_produces_matplotlib_figure(call) for call in calls)
+    # An ``ax`` call can intentionally continue a figure created in a prior cell.
+    # Require that cell's eventual ``show`` instead of demanding a PNG from every
+    # intermediate mutation. Axes calls inside plotting helpers remain detected.
+    creates_plot = any(_top_level_call_starts_figure(call) for call in calls)
     calls_matplotlib_helper = any(
         isinstance(call.func, ast.Name) and call.func.id in helpers for call in calls
     )
@@ -248,7 +314,12 @@ def test_matplotlib_detector_covers_common_display_patterns() -> None:
     assert _expects_matplotlib_png("ax.plot(x, y); plt.show()")
     assert _expects_matplotlib_png("canvas, axes = plt.subplots(); canvas.show()")
     assert _expects_matplotlib_png("plt.figure()\nplt.plot(x, y)")
+    assert _expects_matplotlib_png("plt.hexbin(x, y)")
+    assert _expects_matplotlib_png("ax.stackplot(x, y); plt.show()")
+    assert _expects_matplotlib_png("sns.scatterplot(data=frame, x='x', y='y')")
     assert not _expects_matplotlib_png("def build():\n    return plt.subplots()")
+    assert not _expects_matplotlib_png("sns.despine()\nsns.set_palette('deep')")
+    assert not _expects_matplotlib_png("penguins = sns.load_dataset('penguins')")
     assert not _expects_matplotlib_png("fig.update_layout(title='Plotly')\nfig.show()")
     assert _expects_matplotlib_png("chart = plot_splits(data)\nchart.show()", {"plot_splits"})
 
@@ -257,12 +328,16 @@ def test_matplotlib_detector_covers_common_display_patterns() -> None:
             {
                 "source": [
                     "def configure():\n    sns.set_theme()\n\n"
-                    "def cleanup():\n    plt.close('all')\n"
+                    "def cleanup():\n    plt.close('all')\n\n"
+                    "def load():\n    return sns.load_dataset('penguins')\n"
                 ]
             }
         ]
     }
     assert _matplotlib_helper_names(non_rendering) == set()
+
+    axes_helper = {"cells": [{"source": ["def chart(ax, x, y):\n    ax.plot(x, y)\n"]}]}
+    assert _matplotlib_helper_names(axes_helper) == {"chart"}
 
 
 KNOWN_BARE_PLOTLY_JSON = {"case_studies/etfs/03_financial_features.ipynb": 3}

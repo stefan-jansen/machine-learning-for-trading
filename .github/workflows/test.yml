@@ -413,6 +413,7 @@ jobs:
             tests/test_download_scripts_registry.py \
             tests/test_compose_mounts.py \
             tests/test_download_coverage.py \
+            tests/test_databento_mbo_markouts.py \
             -v --tb=short
 
   # ---------------------------------------------------------------------------
