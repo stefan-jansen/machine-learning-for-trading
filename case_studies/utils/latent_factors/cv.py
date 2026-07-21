@@ -520,6 +520,8 @@ def run_latent_factor_cv(
 
         model_dir = save_dir / model_name if save_dir is not None else None
         model_dirs[model_name] = model_dir
+        model_temporal_feature_assembly = temporal_feature_assembly if model_name != "pca" else None
+        model_temporal_feature_digest = temporal_feature_digest if model_name != "pca" else None
         if use_cache and not force_retrain and case_study_id:
             training_spec, expected_checkpoints = _build_expected_latent_training_spec(
                 model_name=model_name,
@@ -535,8 +537,8 @@ def run_latent_factor_cv(
                 input_digest=input_digest,
                 macro_digest=macro_digest,
                 runtime_spec=runtime_spec,
-                temporal_feature_assembly=temporal_feature_assembly,
-                temporal_feature_digest=temporal_feature_digest,
+                temporal_feature_assembly=model_temporal_feature_assembly,
+                temporal_feature_digest=model_temporal_feature_digest,
             )
             registered = _load_registered_latent_factor(
                 case_study_id,
@@ -804,6 +806,10 @@ def run_latent_factor_cv(
             _save_fold_extras(extras_dir / "fold_extras.json", state[model_name]["fold_extras"])
 
         if case_study_id and preds_df.height > 0:
+            model_temporal_feature_assembly = (
+                temporal_feature_assembly if model_name != "pca" else None
+            )
+            model_temporal_feature_digest = temporal_feature_digest if model_name != "pca" else None
             _register_model_predictions(
                 case_study_id=case_study_id,
                 model_name=model_name,
@@ -826,8 +832,8 @@ def run_latent_factor_cv(
                 input_digest=input_digest,
                 macro_digest=macro_digest,
                 runtime_spec=runtime_spec,
-                temporal_feature_assembly=temporal_feature_assembly,
-                temporal_feature_digest=temporal_feature_digest,
+                temporal_feature_assembly=model_temporal_feature_assembly,
+                temporal_feature_digest=model_temporal_feature_digest,
             )
 
         log(f"    -> best epoch={best_epoch}, IC={mean_ic:+.4f} ({elapsed:.1f}s)")
