@@ -65,6 +65,91 @@ def load_fold_extras(case_study_id: str, model_name: str) -> list[dict] | None:
     return json.loads(extras_path.read_text())
 
 
+def _load_registered_latent_factor(
+    case_study_id: str,
+    *,
+    model_name: str,
+    label_col: str,
+    n_factors: int,
+    n_epochs: int,
+    entry_point: str,
+    prediction_split: str,
+) -> tuple[pl.DataFrame, pl.DataFrame] | None:
+    """Load a complete latent-factor result without rewriting the registry."""
+    from case_studies.utils.registry.queries import read_predictions
+    from case_studies.utils.registry.store import _case_dir, _open_registry
+
+    case_dir = _case_dir(case_study_id)
+    if not (case_dir / "run_log" / "registry.db").exists():
+        return None
+
+    db = _open_registry(case_dir)
+    try:
+
+        def _candidates(use_entry_point: bool) -> list[str]:
+            query = (
+                "SELECT training_hash, spec_json FROM training_runs "
+                "WHERE family='latent_factors' AND config_name=? AND label=?"
+            )
+            params: list[Any] = [model_name, label_col]
+            if use_entry_point:
+                query += " AND entry_point=?"
+                params.append(entry_point)
+            query += " ORDER BY created_at DESC"
+            matched: list[str] = []
+            for training_hash, spec_json in db.execute(query, params).fetchall():
+                spec = json.loads(spec_json)
+                if int(spec.get("params", {}).get("n_factors", -1)) != int(n_factors):
+                    continue
+                spec_epochs = spec.get("n_epochs")
+                if spec_epochs is not None and int(spec_epochs) != int(n_epochs):
+                    continue
+                complete = db.execute(
+                    "SELECT COUNT(*) FROM prediction_sets p "
+                    "JOIN prediction_metrics m USING(prediction_hash) "
+                    "WHERE p.training_hash=? AND p.split=? AND m.ic_mean IS NOT NULL",
+                    (training_hash, prediction_split),
+                ).fetchone()
+                if complete and complete[0] > 0:
+                    matched.append(training_hash)
+            return matched
+
+        candidates = _candidates(use_entry_point=True)
+        if not candidates:
+            candidates = _candidates(use_entry_point=False)
+            if len(candidates) != 1:
+                return None
+        training_hash = candidates[0]
+
+        metric_rows = db.execute(
+            "SELECT p.checkpoint_value, fm.fold_id, fm.ic "
+            "FROM fold_metrics fm JOIN prediction_sets p USING(prediction_hash) "
+            "WHERE p.training_hash=? AND p.split=? AND fm.ic IS NOT NULL",
+            (training_hash, prediction_split),
+        ).fetchall()
+        prediction_hashes = [
+            row[0]
+            for row in db.execute(
+                "SELECT prediction_hash FROM prediction_sets "
+                "WHERE training_hash=? AND split=? ORDER BY checkpoint_value",
+                (training_hash, prediction_split),
+            ).fetchall()
+        ]
+    finally:
+        db.close()
+
+    if not metric_rows or not prediction_hashes:
+        return None
+
+    metrics_df = pl.DataFrame(
+        metric_rows,
+        schema={"epoch": pl.Int64, "fold_id": pl.Int64, "ic_mean": pl.Float64},
+        orient="row",
+    )
+    predictions = [read_predictions(case_study_id, value) for value in prediction_hashes]
+    return metrics_df, pl.concat(predictions) if predictions else pl.DataFrame()
+
+
 def run_latent_factor_cv(
     panel_data: dict | None,
     splits: list[dict[str, Any]],
@@ -166,6 +251,40 @@ def run_latent_factor_cv(
 
         model_dir = save_dir / model_name if save_dir is not None else None
         model_dirs[model_name] = model_dir
+        if use_cache and not force_retrain and case_study_id:
+            registered = _load_registered_latent_factor(
+                case_study_id,
+                model_name=model_name,
+                label_col=label_col,
+                n_factors=n_factors,
+                n_epochs=n_epochs,
+                entry_point=notebook,
+                prediction_split=prediction_split,
+            )
+            if registered is not None:
+                metrics_df, preds_df = registered
+                best_epoch, mean_ic = _select_reporting_epoch(
+                    metrics_df,
+                    checkpoint_selection_policy=metric_policy["checkpoint_selection_policy"],
+                    reporting_epoch=metric_policy["reporting_epoch"],
+                )
+                model_results.append(
+                    {
+                        "model_name": model_name,
+                        "mean_ic": round(mean_ic, 4),
+                        "best_epoch": best_epoch,
+                        "n_folds": int(metrics_df["fold_id"].n_unique())
+                        if metrics_df.height > 0
+                        else 0,
+                        "elapsed_s": 0.0,
+                        "started_at": None,
+                    }
+                )
+                all_predictions[model_name] = preds_df
+                fold_metrics[model_name] = metrics_df
+                all_extras[model_name] = load_fold_extras(case_study_id, model_name) or []
+                log(f"  {model_name}: loaded registry (best IC={mean_ic:+.4f})")
+                continue
         if (
             use_cache
             and not force_retrain
@@ -207,6 +326,20 @@ def run_latent_factor_cv(
             "fold_extras": [],
         }
         log(f"  {model_name} (K={n_factors}):")
+
+    if not active_models:
+        model_results.sort(key=lambda row: row["mean_ic"], reverse=True)
+        best = model_results[0] if model_results else {"model_name": "none", "mean_ic": 0.0}
+        log(f"  Best: {best['model_name']} (IC={best['mean_ic']:+.4f})")
+        log_file.close()
+        return {
+            "model_results": model_results,
+            "best_model": best["model_name"],
+            "best_ic": best["mean_ic"],
+            "all_predictions": all_predictions,
+            "fold_metrics": fold_metrics,
+            "fold_extras": all_extras,
+        }
 
     need_pca_inputs = "pca" in active_models
 
