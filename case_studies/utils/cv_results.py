@@ -176,8 +176,12 @@ def rebuild_cv_result_from_registry(
             missing_configs.append(cfg["config_name"])
             continue
 
+        prediction_sets = prediction_sets.sort(["checkpoint_value", "prediction_hash"]).unique(
+            "checkpoint_value", keep="first", maintain_order=True
+        )
+
         config_has_metrics = False
-        for prediction_set in prediction_sets.sort("checkpoint_value").iter_rows(named=True):
+        for prediction_set in prediction_sets.iter_rows(named=True):
             prediction_hash = prediction_set["prediction_hash"]
             metrics = load_prediction_metrics(case_study, prediction_hash=prediction_hash)
             if metrics.is_empty() or metrics["ic_mean"][0] is None:

@@ -146,6 +146,52 @@ def test_full_coverage_checkpoint_beats_higher_partial_ic() -> None:
     assert result["full_coverage_days"] == 2016
 
 
+def test_registry_rebuild_deduplicates_checkpoint_prediction_sets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cv_results,
+        "build_training_spec",
+        lambda family, config_name, label, **kwargs: {"config_name": config_name},
+    )
+    monkeypatch.setattr(cv_results, "training_hash_from_spec", lambda spec: spec["config_name"])
+    monkeypatch.setattr(
+        cv_results,
+        "load_prediction_sets",
+        lambda *args, **kwargs: pl.DataFrame(
+            {
+                "prediction_hash": ["duplicate-b", "duplicate-a"],
+                "checkpoint_value": [10, 10],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        cv_results,
+        "load_prediction_metrics",
+        lambda *args, **kwargs: pl.DataFrame(
+            {"ic_mean": [0.03], "ic_std": [0.01], "ic_n_days": [3.0]}
+        ),
+    )
+    monkeypatch.setattr(
+        cv_results,
+        "read_predictions",
+        lambda case_study, prediction_hash: _predictions("model", 10).drop("config", "epoch"),
+    )
+
+    result = cv_results.rebuild_cv_result_from_registry(
+        "example",
+        [{"family": "deep_learning", "config_name": "model", "n_epochs": 10}],
+        label_col="target",
+        n_folds=1,
+        prediction_split="validation",
+        date_col="timestamp",
+        entity_col="symbol",
+    )
+
+    assert result["all_learning_curves"].height == 1
+    assert result["all_predictions"].height == 15
+
+
 def test_combining_cached_and_fresh_results_keeps_both_configs() -> None:
     cached = cv_results.assemble_cv_result(
         [{"config": "cached", "epoch": 5, "ic_mean": 0.04, "ic_n_days": 3}],
