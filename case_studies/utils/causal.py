@@ -582,6 +582,8 @@ def register_causal_run(
     n_placebo: int | None = None,
     seed: int | None = None,
     horizon: int | None = None,
+    max_samples: int | None = None,
+    development_end: str | None = None,
     notebook: str = "causal_dml",
     case_dir=None,
     started_at: str | None = None,
@@ -627,6 +629,10 @@ def register_causal_run(
         causal_params["seed"] = seed
     if horizon is not None:
         causal_params["horizon"] = horizon
+    if max_samples is not None:
+        causal_params["max_samples"] = max_samples
+    if development_end is not None:
+        causal_params["development_end"] = development_end
 
     spec = build_training_spec(
         "causal_dml",
