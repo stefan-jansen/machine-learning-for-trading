@@ -14,9 +14,17 @@ JUPYTER_RUNTIME_CONFIGS = (*JUPYTER_DOCKERFILES, "docker-compose.yml")
 
 UNSAFE_JUPYTER_PATTERNS = (
     re.compile(r"\b(?:ServerApp|NotebookApp)\.allow_origin\s*=\s*['\"]\*['\"]"),
-    re.compile(r"\b(?:ServerApp|NotebookApp)\.disable_check_xsrf\s*=\s*True\b"),
+    re.compile(r"\b(?:ServerApp|NotebookApp)\.allow_origin_pat\s*=\s*['\"]\^?\.\*\$?['\"]"),
+    re.compile(
+        r"\b(?:ServerApp|NotebookApp)\.disable_check_xsrf\s*=\s*(?:true|1|yes|on)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"--(?:ServerApp|NotebookApp)\.allow_origin(?:=|\s+)['\"]?\*"),
-    re.compile(r"--(?:ServerApp|NotebookApp)\.disable_check_xsrf(?:=|\s+)True\b"),
+    re.compile(r"--(?:ServerApp|NotebookApp)\.allow_origin_pat(?:=|\s+)['\"]?\^?\.\*\$?"),
+    re.compile(
+        r"--(?:ServerApp|NotebookApp)\.disable_check_xsrf(?:=|\s+)(?:true|1|yes|on)\b",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -48,6 +56,9 @@ c.ServerApp.allow_origin = 'http://127.0.0.1:8888'
     unsafe = """
 c.ServerApp.disable_check_xsrf = True
 jupyter lab --ServerApp.allow_origin='*'
+c.ServerApp.allow_origin_pat = '.*'
+jupyter lab --ServerApp.disable_check_xsrf=true
+jupyter lab --NotebookApp.disable_check_xsrf=1
 """
     assert _unsafe_jupyter_lines(safe) == []
-    assert len(_unsafe_jupyter_lines(unsafe)) == 2
+    assert len(_unsafe_jupyter_lines(unsafe)) == 5

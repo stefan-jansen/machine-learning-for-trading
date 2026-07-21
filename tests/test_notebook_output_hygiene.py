@@ -112,7 +112,7 @@ class _TopLevelCallCollector(ast.NodeVisitor):
 
 
 def _attribute_root(node: ast.expr) -> str | None:
-    while isinstance(node, ast.Attribute):
+    while isinstance(node, ast.Attribute | ast.Subscript):
         node = node.value
     return node.id if isinstance(node, ast.Name) else None
 
@@ -130,7 +130,13 @@ def _parse_cell(source: str) -> ast.Module | None:
 _PLT_FIGURE_METHODS = {
     "acorr",
     "angle_spectrum",
+    "arrow",
+    "axhline",
+    "axline",
+    "axvline",
+    "axes",
     "bar",
+    "barbs",
     "barh",
     "boxplot",
     "broken_barh",
@@ -147,33 +153,59 @@ _PLT_FIGURE_METHODS = {
     "hexbin",
     "hist",
     "hist2d",
+    "hlines",
     "imshow",
     "loglog",
     "magnitude_spectrum",
     "matshow",
+    "pcolor",
+    "pcolorfast",
     "pcolormesh",
     "phase_spectrum",
     "pie",
     "plot",
     "plot_date",
+    "polar",
     "psd",
     "quiver",
+    "quiverkey",
     "scatter",
     "semilogx",
     "semilogy",
     "specgram",
     "spy",
     "stackplot",
+    "stairs",
     "stem",
     "step",
     "streamplot",
     "subplots",
+    "subplot",
+    "subplot_mosaic",
+    "table",
     "tricontour",
     "tricontourf",
     "tripcolor",
     "triplot",
     "violinplot",
+    "vlines",
     "xcorr",
+}
+_AXES_FIGURE_METHODS = _PLT_FIGURE_METHODS - {
+    "axes",
+    "figure",
+    "subplot",
+    "subplots",
+    "subplot_mosaic",
+} | {
+    "bar3d",
+    "contour3D",
+    "plot3D",
+    "plot_surface",
+    "plot_trisurf",
+    "plot_wireframe",
+    "scatter3D",
+    "stem3D",
 }
 _SNS_FIGURE_METHODS = {
     "barplot",
@@ -189,10 +221,13 @@ _SNS_FIGURE_METHODS = {
     "heatmap",
     "histplot",
     "jointplot",
+    "JointGrid",
     "kdeplot",
     "lmplot",
     "lineplot",
     "pairplot",
+    "PairGrid",
+    "palplot",
     "pointplot",
     "regplot",
     "relplot",
@@ -205,14 +240,16 @@ _SNS_FIGURE_METHODS = {
 }
 
 
-def _call_produces_matplotlib_figure(call: ast.Call) -> bool:
+def _call_produces_matplotlib_figure(
+    call: ast.Call, axes_receivers: set[str] | None = None
+) -> bool:
     if not isinstance(call.func, ast.Attribute):
         return False
     root = _attribute_root(call.func)
     method = call.func.attr
     return (
         (root == "plt" and method in _PLT_FIGURE_METHODS)
-        or (root in {"ax", "axes"} and method in _PLT_FIGURE_METHODS - {"figure", "subplots"})
+        or (root in (axes_receivers or set()) and method in _AXES_FIGURE_METHODS)
         or (root == "sns" and method in _SNS_FIGURE_METHODS)
     )
 
@@ -231,7 +268,13 @@ def _matplotlib_helper_names(notebook: dict) -> set[str]:
             continue
         for definition in (node for node in tree.body if isinstance(node, ast.FunctionDef)):
             calls = [node for node in ast.walk(definition) if isinstance(node, ast.Call)]
-            if any(_call_produces_matplotlib_figure(call) for call in calls):
+            args = definition.args
+            axes_receivers = {arg.arg for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+            if args.vararg is not None:
+                axes_receivers.add(args.vararg.arg)
+            if args.kwarg is not None:
+                axes_receivers.add(args.kwarg.arg)
+            if any(_call_produces_matplotlib_figure(call, axes_receivers) for call in calls):
                 helpers.add(definition.name)
     return helpers
 
@@ -315,8 +358,14 @@ def test_matplotlib_detector_covers_common_display_patterns() -> None:
     assert _expects_matplotlib_png("canvas, axes = plt.subplots(); canvas.show()")
     assert _expects_matplotlib_png("plt.figure()\nplt.plot(x, y)")
     assert _expects_matplotlib_png("plt.hexbin(x, y)")
+    assert _expects_matplotlib_png("plt.pcolor(values)")
+    assert _expects_matplotlib_png("plt.stairs(values)")
+    assert _expects_matplotlib_png("plt.polar(theta, radius)")
     assert _expects_matplotlib_png("ax.stackplot(x, y); plt.show()")
     assert _expects_matplotlib_png("sns.scatterplot(data=frame, x='x', y='y')")
+    assert _expects_matplotlib_png("sns.palplot(palette)")
+    assert _expects_matplotlib_png("sns.PairGrid(frame)")
+    assert _expects_matplotlib_png("sns.JointGrid(data=frame, x='x', y='y')")
     assert not _expects_matplotlib_png("def build():\n    return plt.subplots()")
     assert not _expects_matplotlib_png("sns.despine()\nsns.set_palette('deep')")
     assert not _expects_matplotlib_png("penguins = sns.load_dataset('penguins')")
@@ -336,8 +385,13 @@ def test_matplotlib_detector_covers_common_display_patterns() -> None:
     }
     assert _matplotlib_helper_names(non_rendering) == set()
 
-    axes_helper = {"cells": [{"source": ["def chart(ax, x, y):\n    ax.plot(x, y)\n"]}]}
-    assert _matplotlib_helper_names(axes_helper) == {"chart"}
+    axes_helpers = {
+        "cells": [
+            {"source": ["def chart(axis, x, y):\n    axis.plot(x, y)\n"]},
+            {"source": ["def panels(axes, x, y):\n    axes[0].plot(x, y)\n"]},
+        ]
+    }
+    assert _matplotlib_helper_names(axes_helpers) == {"chart", "panels"}
 
 
 KNOWN_BARE_PLOTLY_JSON = {"case_studies/etfs/03_financial_features.ipynb": 3}
