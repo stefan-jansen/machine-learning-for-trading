@@ -251,6 +251,49 @@ def test_prediction_frame_preserves_temporal_timestamp_dtype() -> None:
     ]
 
 
+def test_ipca_solver_controls_change_training_identity() -> None:
+    from case_studies.utils.latent_factors.cv import _apply_latent_factor_runtime_spec
+    from case_studies.utils.registry.specs import training_hash_from_spec
+
+    base = {
+        "config_name": "ipca",
+        "family": "latent_factors",
+        "label": "fwd_ret_21d",
+        "n_folds": 8,
+        "params": {"n_factors": 5},
+        "seed": 42,
+    }
+    old = _apply_latent_factor_runtime_spec(
+        spec=base,
+        n_factors=5,
+        n_epochs=50,
+        model_kwargs={"max_iter": 100},
+        fold_extras=[],
+    )
+    corrected = _apply_latent_factor_runtime_spec(
+        spec=base,
+        n_factors=5,
+        n_epochs=50,
+        model_kwargs={"max_iter": 10_000},
+        fold_extras=[],
+    )
+
+    assert old["params"]["max_iter"] == 100
+    assert corrected["params"]["max_iter"] == 10_000
+    assert training_hash_from_spec(old) != training_hash_from_spec(corrected)
+
+
+def test_ipca_wrapper_defers_to_library_iteration_default() -> None:
+    import inspect
+
+    from ml4t.models.configs import IPCAConfig
+
+    from case_studies.utils.latent_factors.ipca import run_ipca_fold
+
+    default = inspect.signature(run_ipca_fold).parameters["max_iter"].default
+    assert default == IPCAConfig().max_iter
+
+
 def test_rebalance_scoring_thins_to_declared_schedule() -> None:
     from case_studies.utils.latent_factors.cv import _compute_frame_ic, _score_prediction_frame
 
