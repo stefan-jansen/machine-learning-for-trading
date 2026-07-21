@@ -26,7 +26,11 @@ from sanitize_notebook_paths import (  # noqa: E402
     sanitize_notebook_text,
     source_home_path_leaks,
 )
-from strip_empty_cell_tags import paired_py_has_fossil, strip_text  # noqa: E402
+from strip_empty_cell_tags import (  # noqa: E402
+    notebook_targets,
+    paired_py_has_fossil,
+    strip_text,
+)
 
 
 def test_no_machine_specific_paths_in_committed_notebooks() -> None:
@@ -193,9 +197,14 @@ def test_no_empty_cell_tags_in_committed_notebooks() -> None:
     assert not offenders, (
         "Notebooks carry empty `tags: []` cell metadata their paired .py lacks, so "
         "JupyterLab shows a 'File Load Error' instead of the notebook (cf. public "
-        "#372). Run `uv run python scripts/strip_empty_cell_tags.py` to fix:\n  "
-        + "\n  ".join(offenders)
+        "#372). Pass only the listed paths to "
+        "`uv run python scripts/strip_empty_cell_tags.py`:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_empty_tag_stripper_accepts_explicit_notebook_targets() -> None:
+    relative = "01_process_is_edge/factor_regimes.ipynb"
+    assert notebook_targets([relative]) == [REPO_ROOT / relative]
 
 
 def test_known_desynced_list_has_no_stale_entries() -> None:

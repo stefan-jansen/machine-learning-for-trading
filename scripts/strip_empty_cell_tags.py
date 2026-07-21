@@ -33,6 +33,7 @@ Idempotent: running twice is a no-op. A companion test
 Usage:
     uv run python scripts/strip_empty_cell_tags.py            # rewrite in place
     uv run python scripts/strip_empty_cell_tags.py --check    # report only, exit 1 if dirty
+    uv run python scripts/strip_empty_cell_tags.py path/to/notebook.ipynb
 """
 
 from __future__ import annotations
@@ -77,14 +78,38 @@ def paired_py_has_fossil(nb: Path) -> bool:
     return py.exists() and "tags=[]" in py.read_text(encoding="utf-8", errors="replace")
 
 
+def notebook_targets(requested: list[str]) -> list[Path]:
+    """Resolve an optional explicit notebook list within the repository."""
+    if not requested:
+        return _iter_notebooks()
+
+    targets = []
+    for raw in requested:
+        candidate = Path(raw)
+        path = (
+            (REPO_ROOT / candidate).resolve()
+            if not candidate.is_absolute()
+            else candidate.resolve()
+        )
+        if not path.is_relative_to(REPO_ROOT) or path.suffix != ".ipynb" or not path.is_file():
+            raise ValueError(f"not a repository notebook: {raw}")
+        targets.append(path)
+    return sorted(set(targets))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true", help="report only; exit 1 if any found")
+    ap.add_argument("notebooks", nargs="*", help="optional repo-relative notebooks to process")
     args = ap.parse_args()
 
     dirty: list[tuple[Path, int]] = []
     skipped = 0
-    for nb in _iter_notebooks():
+    try:
+        targets = notebook_targets(args.notebooks)
+    except ValueError as exc:
+        ap.error(str(exc))
+    for nb in targets:
         if paired_py_has_fossil(nb):
             skipped += 1
             continue
