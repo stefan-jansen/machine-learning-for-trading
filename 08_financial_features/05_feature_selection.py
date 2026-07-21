@@ -72,7 +72,7 @@ from scipy.spatial.distance import squareform
 warnings.filterwarnings("ignore")
 
 from data import load_etfs
-from utils.paths import get_case_study_dir, get_output_dir
+from utils.paths import display_path, get_case_study_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
 
@@ -80,6 +80,7 @@ from utils.style import COLORS
 START_DATE = "2006-01-01"
 N_BOOTSTRAP = 50
 MAX_SYMBOLS = 0
+IC_THRESHOLD = 0.01
 SEED = 42
 
 # %% tags=[]
@@ -276,8 +277,14 @@ ax.axvline(0, color="black", linewidth=0.5)
 # Reference line at the |IC| threshold used for the final selection in §6, so
 # the ranking chart and the selection step agree (features kept in §6 sit at or
 # beyond this line).
-ax.axvline(0.01, color="orange", linestyle="--", alpha=0.7, label="IC threshold (0.01)")
-ax.axvline(-0.01, color="orange", linestyle="--", alpha=0.7)
+ax.axvline(
+    IC_THRESHOLD,
+    color="orange",
+    linestyle="--",
+    alpha=0.7,
+    label=f"IC threshold ({IC_THRESHOLD:g})",
+)
+ax.axvline(-IC_THRESHOLD, color="orange", linestyle="--", alpha=0.7)
 ax.set_xlabel("Information Coefficient (Spearman)")
 ax.set_title("Feature IC Ranking")
 ax.legend()
@@ -494,7 +501,6 @@ if ic_pvalues:
 
 # %% tags=[]
 # IC filtering applied to the cluster representatives from §4
-IC_THRESHOLD = 0.01
 kept_after_ic = [f for f in representatives if abs(ic_scores[f]) >= IC_THRESHOLD]
 
 print(f"IC Filtering of representatives (|IC| >= {IC_THRESHOLD}):")
@@ -712,7 +718,7 @@ selected_df.write_parquet(OUTPUT_DIR / "selected_features.parquet")
 filtered_features = features_df.select(["timestamp", "symbol"] + final_features)
 filtered_features.write_parquet(OUTPUT_DIR / "features_selected.parquet")
 
-print(f"Saved selected features to {OUTPUT_DIR}")
+print(f"Saved selected features to {display_path(OUTPUT_DIR)}")
 print(f"  - selected_features.parquet: {len(final_features)} features")
 print(f"  - features_selected.parquet: {filtered_features.shape}")
 
