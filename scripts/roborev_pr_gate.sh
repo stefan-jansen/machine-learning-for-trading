@@ -12,31 +12,72 @@ fi
 
 repo_root=$("$GIT_BIN" rev-parse --show-toplevel)
 cd "$repo_root"
-branch=$("$GIT_BIN" branch --show-current)
 
-if [[ -z "$branch" ]]; then
-    printf 'RoboRev PR gate requires a named branch.\n' >&2
-    exit 1
-fi
-if [[ "$branch" == "$BASE_BRANCH" ]]; then
-    printf 'Direct pushes from %s are not allowed; use a PR branch.\n' "$BASE_BRANCH" >&2
-    exit 1
-fi
+zero_sha=$(printf '0%.0s' {1..40})
+declare -a updates=()
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [[ -z "${local_ref:-}" ]] && continue
+    updates+=("$local_ref $local_sha $remote_ref $remote_sha")
+done
 
-printf 'Running RoboRev branch review for %s against %s...\n' "$branch" "$BASE_BRANCH"
-"$ROBOREV_BIN" review \
-    --branch \
-    --base "$BASE_BRANCH" \
-    --agent codex \
-    --panel none \
-    --min-severity low \
-    --wait
-
-open_reviews=$("$ROBOREV_BIN" fix --open --list --branch "$branch")
-if grep -q '^Job #[0-9]' <<< "$open_reviews"; then
-    printf '%s\n' "$open_reviews" >&2
-    printf 'Push blocked: resolve every open RoboRev finding first.\n' >&2
-    exit 1
+if (( ${#updates[@]} == 0 )); then
+    branch=$("$GIT_BIN" branch --show-current)
+    if [[ -z "$branch" ]]; then
+        printf 'RoboRev PR gate requires a named branch.\n' >&2
+        exit 1
+    fi
+    updates+=("refs/heads/$branch $("$GIT_BIN" rev-parse "refs/heads/$branch") refs/heads/$branch $zero_sha")
 fi
 
-printf 'RoboRev PR gate passed: no open findings on %s.\n' "$branch"
+declare -a branches=()
+declare -A seen=()
+for update in "${updates[@]}"; do
+    read -r local_ref local_sha remote_ref remote_sha <<< "$update"
+    if [[ "$remote_ref" == "refs/heads/$BASE_BRANCH" ]]; then
+        printf 'Direct pushes to %s are not allowed; use a PR branch.\n' "$BASE_BRANCH" >&2
+        exit 1
+    fi
+    if [[ "$local_sha" == "$zero_sha" || "$remote_ref" == refs/tags/* ]]; then
+        continue
+    fi
+    if [[ "$local_ref" != refs/heads/* || "$remote_ref" != refs/heads/* ]]; then
+        printf 'Unsupported pre-push ref update: %s -> %s\n' "$local_ref" "$remote_ref" >&2
+        exit 1
+    fi
+
+    branch=${local_ref#refs/heads/}
+    current_sha=$("$GIT_BIN" rev-parse "$local_ref")
+    if [[ "$current_sha" != "$local_sha" ]]; then
+        printf 'Local ref changed before review: %s\n' "$local_ref" >&2
+        exit 1
+    fi
+    if [[ -z "${seen[$branch]:-}" ]]; then
+        branches+=("$branch")
+        seen[$branch]=1
+    fi
+done
+
+if (( ${#branches[@]} == 0 )); then
+    printf 'RoboRev PR gate: no branch updates require review.\n'
+    exit 0
+fi
+
+for branch in "${branches[@]}"; do
+    printf 'Running RoboRev branch review for %s against %s...\n' "$branch" "$BASE_BRANCH"
+    "$ROBOREV_BIN" review \
+        --branch "$branch" \
+        --base "$BASE_BRANCH" \
+        --agent codex \
+        --panel none \
+        --min-severity low \
+        --wait
+
+    open_reviews=$("$ROBOREV_BIN" fix --open --list --branch "$branch")
+    if grep -q '^Job #[0-9]' <<< "$open_reviews"; then
+        printf '%s\n' "$open_reviews" >&2
+        printf 'Push blocked: resolve every open RoboRev finding first.\n' >&2
+        exit 1
+    fi
+
+    printf 'RoboRev PR gate passed: no open findings on %s.\n' "$branch"
+done

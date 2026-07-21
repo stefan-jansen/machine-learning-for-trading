@@ -24,6 +24,7 @@ def _fake_environment(tmp_path: Path, *, branch: str, open_review: bool) -> dict
     bin_dir.mkdir()
     hooks.mkdir()
 
+    fake_sha = "a" * 40
     _write_executable(
         bin_dir / "git",
         f"""#!/usr/bin/env bash
@@ -31,6 +32,7 @@ set -euo pipefail
 case "$1 $2" in
   "rev-parse --show-toplevel") printf '%s\\n' "{tmp_path}" ;;
   "rev-parse --git-path") printf '%s\\n' "{hooks}/pre-push" ;;
+  "rev-parse refs/heads/"*) printf '%s\\n' "{fake_sha}" ;;
   "branch --show-current") printf '%s\\n' "{branch}" ;;
   *) printf 'unexpected git invocation: %s\\n' "$*" >&2; exit 2 ;;
 esac
@@ -58,37 +60,94 @@ fi
     return env
 
 
+def _branch_update(branch: str, remote_branch: str | None = None) -> str:
+    fake_sha = "a" * 40
+    old_sha = "b" * 40
+    remote_branch = remote_branch or branch
+    return f"refs/heads/{branch} {fake_sha} refs/heads/{remote_branch} {old_sha}\n"
+
+
 def test_gate_passes_after_branch_review_with_no_open_findings(tmp_path: Path) -> None:
     env = _fake_environment(tmp_path, branch="feature", open_review=False)
 
-    result = subprocess.run([GATE], env=env, text=True, capture_output=True, check=False)
+    result = subprocess.run(
+        [GATE],
+        env=env,
+        input=_branch_update("feature"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
     assert result.returncode == 0
     assert "PR gate passed" in result.stdout
     invocations = (tmp_path / "roborev.log").read_text()
-    assert "review --branch --base main --agent codex --panel none --min-severity low --wait" in (
-        invocations
-    )
+    assert "review --branch feature --base main --agent codex --panel none" in (invocations)
     assert "fix --open --list --branch feature" in invocations
 
 
 def test_gate_blocks_every_open_severity(tmp_path: Path) -> None:
     env = _fake_environment(tmp_path, branch="feature", open_review=True)
 
-    result = subprocess.run([GATE], env=env, text=True, capture_output=True, check=False)
+    result = subprocess.run(
+        [GATE],
+        env=env,
+        input=_branch_update("feature"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
     assert result.returncode == 1
     assert "resolve every open RoboRev finding" in result.stderr
 
 
-def test_gate_rejects_direct_main_push(tmp_path: Path) -> None:
-    env = _fake_environment(tmp_path, branch="main", open_review=False)
+def test_gate_rejects_explicit_push_to_main(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="feature", open_review=False)
 
-    result = subprocess.run([GATE], env=env, text=True, capture_output=True, check=False)
+    result = subprocess.run(
+        [GATE],
+        env=env,
+        input=_branch_update("feature", "main"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
     assert result.returncode == 1
-    assert "Direct pushes from main are not allowed" in result.stderr
+    assert "Direct pushes to main are not allowed" in result.stderr
     assert not (tmp_path / "roborev.log").exists()
+
+
+def test_gate_skips_tag_and_deletion_updates(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="main", open_review=False)
+    zeros = "0" * 40
+    sha = "a" * 40
+    updates = (
+        f"refs/tags/v1 {sha} refs/tags/v1 {zeros}\n(delete) {zeros} refs/heads/old-feature {sha}\n"
+    )
+
+    result = subprocess.run(
+        [GATE], env=env, input=updates, text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0
+    assert "no branch updates require review" in result.stdout
+    assert not (tmp_path / "roborev.log").exists()
+
+
+def test_gate_reviews_every_branch_in_multi_ref_push(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="feature-a", open_review=False)
+    updates = _branch_update("feature-a") + _branch_update("feature-b")
+
+    result = subprocess.run(
+        [GATE], env=env, input=updates, text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0
+    invocations = (tmp_path / "roborev.log").read_text()
+    assert "review --branch feature-a" in invocations
+    assert "review --branch feature-b" in invocations
 
 
 def test_installer_is_idempotent_and_refuses_foreign_hook(tmp_path: Path) -> None:
