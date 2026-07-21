@@ -276,6 +276,9 @@ modeling:
   latent_factors:
     persistent_entities: true
     model_kwargs:
+      ipca:
+        max_iter: 10000
+        tol: 0.00001
       sdf:
         checkpoint_epochs: [256, 512, 768, 1024, 1280]
         beta_checkpoint_epochs: [256]
