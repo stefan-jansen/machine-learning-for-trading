@@ -152,6 +152,8 @@ _SKIP_PARAMS: dict[str, set[str]] = {
 # OpenCL ("gpu") is NEVER used — it is slower and produces misleading benchmarks.
 _BEST_GPU: dict[str, str | None] = {}
 
+DEFAULT_GBM_CPU_THREADS = 8
+
 
 def _best_gpu_device(library: str) -> str | None:
     """Return "cuda" if library supports CUDA on this system, else None.
@@ -180,6 +182,46 @@ def _best_gpu_device(library: str) -> str | None:
         except Exception:
             _BEST_GPU[library] = None
     return _BEST_GPU[library]
+
+
+def lightgbm_runtime_params(
+    device: str,
+    *,
+    num_threads: int = DEFAULT_GBM_CPU_THREADS,
+    seed: int = RANDOM_SEED,
+) -> dict[str, Any]:
+    """Return the execution parameters that must participate in a GBM run hash.
+
+    CPU is the reproducible reader default. A GPU request fails when the
+    installed LightGBM build cannot provide CUDA instead of silently training
+    a different CPU model.
+    """
+    normalized = device.lower()
+    if normalized == "cpu":
+        if num_threads < 1:
+            raise ValueError("num_threads must be at least 1")
+        return {
+            "device_type": "cpu",
+            "deterministic": True,
+            "force_col_wise": True,
+            "num_threads": int(num_threads),
+            "seed": int(seed),
+            "data_random_seed": int(seed),
+            "feature_fraction_seed": int(seed),
+            "bagging_seed": int(seed),
+            "drop_seed": int(seed),
+            "extra_seed": int(seed),
+            "objective_seed": int(seed),
+        }
+    if normalized in ("cuda", "gpu"):
+        gpu_device = _best_gpu_device("lightgbm")
+        if gpu_device is None:
+            raise RuntimeError(
+                "LightGBM CUDA was requested but is unavailable. "
+                "Use device='cpu' or install a CUDA-enabled LightGBM build."
+            )
+        return {"device_type": gpu_device}
+    raise ValueError(f"Unsupported LightGBM device: {device!r}")
 
 
 # Library-specific defaults (not in canonical config)
@@ -560,7 +602,8 @@ def train_gbm_config(
     fold_data: list[dict[str, Any]],
     *,
     feature_names: list[str],
-    device: str = "cuda",
+    device: str = "cpu",
+    num_threads: int = DEFAULT_GBM_CPU_THREADS,
     max_bin: int | None = None,
     entity_col: str = "symbol",
     date_col: str = "timestamp",
@@ -582,7 +625,9 @@ def train_gbm_config(
     feature_names : list[str]
         For feature importance extraction.
     device : str
-        "cpu" or "cuda"/"gpu".
+        "cpu" or "cuda"/"gpu". GPU requests fail when CUDA is unavailable.
+    num_threads : int
+        Fixed LightGBM CPU thread count. Included in deterministic execution.
     max_bin : int, optional
         Override max_bin (GPU typically needs 63).
     entity_col, date_col : str
@@ -612,11 +657,9 @@ def train_gbm_config(
     params["metric"] = "None"
     params["verbosity"] = params.get("verbosity", -1)
 
-    # Device setup
-    if device in ("cuda", "gpu"):
-        gpu_dev = _best_gpu_device("lightgbm")
-        if gpu_dev:
-            params["device"] = gpu_dev
+    # Device and reproducibility settings are explicit run inputs. They must
+    # also be included in the registry spec by the caller.
+    params.update(lightgbm_runtime_params(device, num_threads=num_threads))
     if max_bin is not None:
         params["max_bin"] = max_bin
 
@@ -838,6 +881,7 @@ def register_gbm_result(
     entity_col: str = "symbol",
     train_sample_frac: float = 1.0,
     prediction_split: str = "validation",
+    runtime_params: dict[str, Any] | None = None,
 ) -> str:
     """Register a single GBM config's result to the registry.
 
@@ -870,6 +914,7 @@ def register_gbm_result(
         n_folds=n_folds,
         max_bin=max_bin,
         checkpoint_interval=cfg.get("checkpoint_interval", 50),
+        extra_params=runtime_params,
         train_sample_frac=train_sample_frac,
     )
     t_hash = register_training_run(

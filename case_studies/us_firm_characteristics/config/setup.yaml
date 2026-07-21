@@ -162,7 +162,10 @@ modeling:
   gbm:
     libraries: [lightgbm]
     preset: default
-    device: gpu
+    # CPU is the reader-facing reproducible path. The shared GBM runner adds
+    # deterministic LightGBM settings and hashes this fixed thread count.
+    device: cpu
+    num_threads: 8
   latent_factors:
     persistent_entities: true
     model_kwargs:
