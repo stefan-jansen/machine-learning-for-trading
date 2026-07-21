@@ -135,10 +135,13 @@ def test_macro_alignment_never_backfills_from_future() -> None:
         }
     )
 
-    aligned, features = align_macro_to_dates(macro, dates)
+    with pytest.raises(ValueError, match="unavailable on or before"):
+        align_macro_to_dates(macro, dates)
+
+    aligned, features = align_macro_to_dates(macro, dates[1:])
 
     assert features == ["rate"]
-    assert aligned[:, 0].tolist() == [0.0, 1.0, 2.0]
+    assert aligned[:, 0].tolist() == [1.0, 2.0]
 
 
 def test_macro_panel_applies_allowlist_and_availability_lag(

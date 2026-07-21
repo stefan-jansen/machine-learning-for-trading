@@ -11,6 +11,7 @@ import polars as pl
 import yaml
 
 from case_studies.utils.latent_factors import EXPENSIVE_MODELS, run_latent_factor_cv
+from case_studies.utils.latent_factors.macro_context import load_configured_macro_context
 from data import load_macro
 from utils.modeling import load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
@@ -29,6 +30,7 @@ class LatentFactorCaseStudyContext:
     setup_model_kwargs: dict[str, dict[str, Any]]
     persistent_entities: bool
     macro_panel: pl.DataFrame | None
+    macro_context_spec: dict[str, Any] | None
     dataset: pl.DataFrame
     feature_names: list[str]
     task_type: str
@@ -85,7 +87,23 @@ def load_case_study_context(
     device = str(lf_setup.get("device", "cpu"))
     num_threads = int(lf_setup.get("num_threads", 8))
     deterministic_algorithms = bool(lf_setup.get("deterministic_algorithms", True))
-    macro_panel = _load_macro_panel(lf_setup) if use_macro else None
+    macro_context_config = lf_setup.get("macro_context")
+    if use_macro and macro_context_config:
+        macro_panel, macro_context_spec = load_configured_macro_context(macro_context_config)
+    elif use_macro:
+        macro_panel, macro_context_spec = _load_macro_panel(lf_setup), None
+    else:
+        macro_panel, macro_context_spec = (
+            None,
+            {
+                "policy": "disabled",
+                "version": "v1",
+                "series": [],
+                "availability_lag_days": 0,
+                "alignment": "none",
+                "input_digest": None,
+            },
+        )
 
     modeling_dataset = load_modeling_dataset(
         case_study_id, resolved_primary, max_symbols=max_symbols
@@ -102,6 +120,7 @@ def load_case_study_context(
         setup_model_kwargs=setup_kwargs,
         persistent_entities=persistent_entities,
         macro_panel=macro_panel,
+        macro_context_spec=macro_context_spec,
         dataset=modeling_dataset.dataset,
         feature_names=modeling_dataset.feature_names,
         task_type=modeling_dataset.task_type,
@@ -192,6 +211,7 @@ def run_case_study_model(
         date_col=context.date_col,
         entity_col=context.entity_col,
         macro_panel=context.macro_panel if macro_panel is None else macro_panel,
+        macro_context_spec=context.macro_context_spec,
         persistent_entities=context.persistent_entities,
         device=context.device,
         num_threads=context.num_threads,
@@ -267,6 +287,7 @@ def run_case_study_variants(
             # without this the variant SDF runs would silently degrade to a
             # macro-less fit while the primary uses the full panel.
             macro_panel=context.macro_panel,
+            macro_context_spec=context.macro_context_spec,
             persistent_entities=context.persistent_entities,
             device=context.device,
             num_threads=context.num_threads,

@@ -275,6 +275,23 @@ modeling:
     device: gpu
   latent_factors:
     persistent_entities: true
+    macro_context:
+      policy: fred_market_state_close_lagged
+      version: v1
+      series:
+        - dgs1
+        - dgs2
+        - dgs3
+        - dgs5
+        - dgs7
+        - dgs10
+        - dgs20
+        - dgs30
+        - vixcls
+        - YIELD_CURVE_SLOPE
+        - YIELD_CURVE_5_10
+      availability_lag_days: 1
+      alignment: backward_asof
     model_kwargs:
       ipca:
         max_iter: 10000
