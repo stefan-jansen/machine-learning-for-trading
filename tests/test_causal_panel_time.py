@@ -33,6 +33,7 @@ def test_panel_dml_splits_and_embargo_use_complete_dates() -> None:
     assert valid_counts.loc[pd.Timestamp("2020-02-11")] == 0
     assert valid_counts.loc[pd.Timestamp("2020-02-12")] == 2
     assert set(valid_counts.unique()) <= {0, 2}
+    assert result["hac_maxlags"] == 4
 
 
 def test_panel_block_permutation_keeps_complete_dates_together() -> None:
