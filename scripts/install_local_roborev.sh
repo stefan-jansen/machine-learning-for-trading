@@ -35,7 +35,7 @@ printf '%s\n' \
     '# ml4t roborev pre-push hook v1' \
     'set -euo pipefail' \
     'repo_root=$(git rev-parse --show-toplevel)' \
-    'exec "$repo_root/scripts/roborev_pr_gate.sh"' > "$tmp_hook"
+    'exec "$repo_root/scripts/roborev_pr_gate.sh" "$@"' > "$tmp_hook"
 chmod +x "$tmp_hook"
 mv "$tmp_hook" "$hook_path"
 trap - EXIT

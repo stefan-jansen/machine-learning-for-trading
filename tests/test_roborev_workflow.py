@@ -25,6 +25,7 @@ def _fake_environment(tmp_path: Path, *, branch: str, open_review: bool) -> dict
     hooks.mkdir()
 
     fake_sha = "a" * 40
+    base_sha = "c" * 40
     _write_executable(
         bin_dir / "git",
         f"""#!/usr/bin/env bash
@@ -33,7 +34,9 @@ case "$1 $2" in
   "rev-parse --show-toplevel") printf '%s\\n' "{tmp_path}" ;;
   "rev-parse --git-path") printf '%s\\n' "{hooks}/pre-push" ;;
   "rev-parse refs/heads/"*) printf '%s\\n' "{fake_sha}" ;;
+  "rev-parse FETCH_HEAD") printf '%s\\n' "{base_sha}" ;;
   "rev-parse HEAD") printf '%s\\n' "{fake_sha}" ;;
+  "fetch --quiet") : ;;
   "branch --show-current") printf '%s\\n' "{branch}" ;;
   "symbolic-ref --quiet") printf '%s\\n' "{branch}" ;;
   *) printf 'unexpected git invocation: %s\\n' "$*" >&2; exit 2 ;;
@@ -84,7 +87,8 @@ def test_gate_passes_after_branch_review_with_no_open_findings(tmp_path: Path) -
     assert result.returncode == 0
     assert "PR gate passed" in result.stdout
     invocations = (tmp_path / "roborev.log").read_text()
-    assert "review --branch=feature --base main --agent codex --panel none" in (invocations)
+    assert "review --branch=feature --base " + "c" * 40 in invocations
+    assert "--agent codex --panel none" in invocations
     assert "fix --open --list --branch feature" in invocations
 
 
@@ -165,6 +169,55 @@ def test_gate_reviews_explicit_head_refspec(tmp_path: Path) -> None:
     assert result.returncode == 0
     invocations = (tmp_path / "roborev.log").read_text()
     assert "review --branch=feature" in invocations
+
+
+def test_gate_fetches_named_remote_base(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="feature", open_review=False)
+    git_log = tmp_path / "git.log"
+    original_git = Path(env["ML4T_GIT_BIN"])
+    content = original_git.read_text().replace(
+        'case "$1 $2" in', f'printf \'%s\\n\' "$*" >> "{git_log}"\ncase "$1 $2" in'
+    )
+    _write_executable(original_git, content)
+
+    result = subprocess.run(
+        [GATE, "upstream", "unused-url"],
+        env=env,
+        input=_branch_update("feature"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "fetch --quiet --no-tags upstream main" in git_log.read_text()
+
+
+def test_gate_blocks_when_branch_changes_during_review(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="feature", open_review=False)
+    git_bin = Path(env["ML4T_GIT_BIN"])
+    counter = tmp_path / "ref-count"
+    content = git_bin.read_text().replace(
+        f'"rev-parse refs/heads/"*) printf \'%s\\n\' "{"a" * 40}" ;;',
+        '"rev-parse refs/heads/"*) '
+        f'count=$(cat "{counter}" 2>/dev/null || printf 0); '
+        f'printf \'%s\' "$((count + 1))" > "{counter}"; '
+        f"if (( count >= 2 )); then printf '%s\\n' \"{'d' * 40}\"; "
+        f"else printf '%s\\n' \"{'a' * 40}\"; fi ;;",
+    )
+    _write_executable(git_bin, content)
+
+    result = subprocess.run(
+        [GATE],
+        env=env,
+        input=_branch_update("feature"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "Local ref changed during review" in result.stderr
 
 
 @pytest.mark.parametrize("zero_sha", ["0" * 40, "0" * 64])

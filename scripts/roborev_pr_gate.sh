@@ -4,6 +4,7 @@ set -euo pipefail
 ROBOREV_BIN="${ML4T_ROBOREV_BIN:-roborev}"
 GIT_BIN="${ML4T_GIT_BIN:-git}"
 BASE_BRANCH="${ML4T_ROBOREV_BASE_BRANCH:-main}"
+REMOTE_NAME="${1:-origin}"
 
 if ! command -v "$ROBOREV_BIN" >/dev/null 2>&1; then
     printf 'RoboRev executable not found: %s\n' "$ROBOREV_BIN" >&2
@@ -30,6 +31,7 @@ fi
 
 declare -a branches=()
 declare -A seen=()
+declare -A branch_shas=()
 for update in "${updates[@]}"; do
     read -r local_ref local_sha remote_ref remote_sha <<< "$update"
     if [[ "$remote_ref" == "refs/heads/$BASE_BRANCH" ]]; then
@@ -64,6 +66,7 @@ for update in "${updates[@]}"; do
     if [[ -z "${seen[$branch]:-}" ]]; then
         branches+=("$branch")
         seen[$branch]=1
+        branch_shas[$branch]=$local_sha
     fi
 done
 
@@ -72,15 +75,31 @@ if (( ${#branches[@]} == 0 )); then
     exit 0
 fi
 
+"$GIT_BIN" fetch --quiet --no-tags "$REMOTE_NAME" "$BASE_BRANCH"
+remote_base_sha=$("$GIT_BIN" rev-parse FETCH_HEAD)
+
 for branch in "${branches[@]}"; do
+    reviewed_sha=${branch_shas[$branch]}
+    current_sha=$("$GIT_BIN" rev-parse "refs/heads/$branch")
+    if [[ "$current_sha" != "$reviewed_sha" ]]; then
+        printf 'Local ref changed before review: refs/heads/%s\n' "$branch" >&2
+        exit 1
+    fi
+
     printf 'Running RoboRev branch review for %s against %s...\n' "$branch" "$BASE_BRANCH"
     "$ROBOREV_BIN" review \
         --branch="$branch" \
-        --base "$BASE_BRANCH" \
+        --base "$remote_base_sha" \
         --agent codex \
         --panel none \
         --min-severity low \
         --wait
+
+    current_sha=$("$GIT_BIN" rev-parse "refs/heads/$branch")
+    if [[ "$current_sha" != "$reviewed_sha" ]]; then
+        printf 'Local ref changed during review: refs/heads/%s\n' "$branch" >&2
+        exit 1
+    fi
 
     open_reviews=$("$ROBOREV_BIN" fix --open --list --branch "$branch")
     if grep -q '^Job #[0-9]' <<< "$open_reviews"; then
