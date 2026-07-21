@@ -13,23 +13,29 @@ from case_studies.utils.backtest_loaders import (
 from utils.modeling import load_modeling_dataset
 
 
-def test_modeling_splits_use_label_clock_before_feature_join(
+def test_crypto_modeling_splits_use_label_clock_before_feature_join(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import utils.modeling as modeling
 
-    case_dir = tmp_path / "split_source"
+    case_dir = tmp_path / "crypto_perps_funding"
     (case_dir / "config").mkdir(parents=True)
     (case_dir / "features").mkdir()
     (case_dir / "labels").mkdir()
-    (case_dir / "config" / "setup.yaml").write_text("labels: {}\n")
+    (case_dir / "config" / "setup.yaml").write_text(
+        "labels:\n  primary: fwd_ret_8h\n  buffer: 8H\n"
+    )
 
     full_ts = pl.datetime_range(datetime(2020, 1, 1), datetime(2021, 1, 3), "1d", eager=True)
     warm_ts = full_ts.filter(full_ts >= datetime(2021, 1, 1))
     pl.DataFrame(
-        {"timestamp": full_ts, "symbol": ["AAA"] * len(full_ts), "target": [0.1] * len(full_ts)}
-    ).write_parquet(case_dir / "labels" / "target.parquet")
+        {
+            "timestamp": full_ts,
+            "symbol": ["AAA"] * len(full_ts),
+            "fwd_ret_8h": [0.1] * len(full_ts),
+        }
+    ).write_parquet(case_dir / "labels" / "fwd_ret_8h.parquet")
     pl.DataFrame(
         {"timestamp": warm_ts, "symbol": ["AAA"] * len(warm_ts), "feature": [1.0] * len(warm_ts)}
     ).write_parquet(case_dir / "features" / "financial.parquet")
@@ -52,7 +58,7 @@ def test_modeling_splits_use_label_clock_before_feature_join(
     monkeypatch.setattr(modeling, "generate_cv_splits", capture_splits)
     monkeypatch.setattr(modeling, "make_wf_config", lambda *_args, **_kwargs: None)
 
-    result = modeling.load_modeling_dataset("split_source", "target")
+    result = modeling.load_modeling_dataset("crypto_perps_funding", "fwd_ret_8h")
 
     assert result.dataset["timestamp"].min() == datetime(2021, 1, 1)
     assert captured["minimum"] == datetime(2020, 1, 1)
