@@ -124,21 +124,29 @@ def prepare_panel_data(
     eval_returns = (
         np.full((n_dates, n_entities), np.nan, dtype=np.float32) if eval_label_col else None
     )
-    entity_to_idx = {entity: idx for idx, entity in enumerate(entities)}
+    date_values = np.asarray(dates, dtype="datetime64[ns]")
+    entity_values = np.asarray(entities, dtype=object)
+    date_idx = np.searchsorted(date_values, df[date_col].to_numpy())
+    entity_idx = np.searchsorted(entity_values, df[entity_col].to_numpy())
 
-    groups = df.partition_by(date_col, maintain_order=True)
-    for date_idx, group in enumerate(groups):
-        for row in group.iter_rows(named=True):
-            entity_idx = entity_to_idx.get(row[entity_col])
-            if entity_idx is None:
-                continue
-            chars[date_idx, entity_idx] = np.asarray(
-                [row.get(feature, np.nan) for feature in feature_names],
-                dtype=np.float32,
+    chars[date_idx, entity_idx] = (
+        df.select(feature_names)
+        .to_numpy()
+        .astype(
+            np.float32,
+            copy=False,
+        )
+    )
+    returns[date_idx, entity_idx] = df[label_col].to_numpy().astype(np.float32, copy=False)
+    if eval_returns is not None:
+        eval_returns[date_idx, entity_idx] = (
+            df[eval_label_col]
+            .to_numpy()
+            .astype(
+                np.float32,
+                copy=False,
             )
-            returns[date_idx, entity_idx] = np.float32(row.get(label_col, np.nan))
-            if eval_returns is not None:
-                eval_returns[date_idx, entity_idx] = np.float32(row.get(eval_label_col, np.nan))
+        )
 
     macro = None
     macro_features: list[str] | None = None
@@ -149,8 +157,8 @@ def prepare_panel_data(
         "chars": chars,
         "returns": returns,
         "eval_returns": eval_returns,
-        "dates": np.asarray(dates, dtype="datetime64[ns]"),
-        "entities": np.asarray(entities, dtype=object),
+        "dates": date_values,
+        "entities": entity_values,
         "entity_col": entity_col,
         "macro": macro,
         "macro_features": macro_features,

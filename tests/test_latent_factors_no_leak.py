@@ -265,6 +265,52 @@ def test_pca_only_fold_preparation_skips_ragged_panel(
     assert inputs["pca"]["returns_train"].shape == (12, 1)
 
 
+def test_persistent_panel_bulk_assignment_preserves_sparse_alignment() -> None:
+    from case_studies.utils.latent_factors.panel import prepare_panel_data
+
+    timestamps = pl.date_range(
+        datetime(2020, 1, 1),
+        datetime(2020, 1, 12),
+        interval="1d",
+        eager=True,
+    ).to_list()
+    rows = [
+        {"timestamp": timestamp, "symbol": "A", "x": 100.0 + idx, "label": idx / 10}
+        for idx, timestamp in enumerate(timestamps)
+    ]
+    rows.extend(
+        {
+            "timestamp": timestamp,
+            "symbol": "B",
+            "x": 200.0 + idx,
+            "label": idx / 5,
+        }
+        for idx, timestamp in enumerate(timestamps[1:], start=1)
+    )
+    dataset = pl.DataFrame(rows[::-1])
+
+    panel = prepare_panel_data(
+        dataset,
+        feature_names=["x"],
+        label_col="label",
+        date_col="timestamp",
+        entity_col="symbol",
+        eligibility_dataset=dataset,
+    )
+
+    assert panel["entities"].tolist() == ["A", "B"]
+    assert np.allclose(
+        panel["chars"][:2, :, 0],
+        np.asarray([[100.0, np.nan], [101.0, 201.0]], dtype=np.float32),
+        equal_nan=True,
+    )
+    assert np.allclose(
+        panel["returns"][:2],
+        np.asarray([[0.0, np.nan], [0.1, 0.2]], dtype=np.float32),
+        equal_nan=True,
+    )
+
+
 def test_cae_validation_batch_receives_validation_returns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
