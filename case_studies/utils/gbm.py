@@ -750,7 +750,7 @@ def train_gbm_config(
                 preds = raw_preds
             ic_frame = pl.DataFrame(
                 {
-                    "date": fd["dates"],
+                    "timestamp": fd["dates"],
                     "symbol": fd["entities"],
                     "y_true": fd["y_eval"] if fd.get("y_eval") is not None else fd["y_val"],
                     "y_pred": preds,
@@ -761,7 +761,7 @@ def train_gbm_config(
                 ic_frame,
                 pred_col="y_pred",
                 ret_col="y_true",
-                date_col="date",
+                date_col="timestamp",
                 entity_col="symbol",
                 min_obs=5,
             )["ic_mean"]
@@ -804,7 +804,7 @@ def train_gbm_config(
         ic_target = e["y_eval"] if e.get("y_eval") is not None else e["y_true"]
         frame = pl.DataFrame(
             {
-                "date": e["dates"],
+                "timestamp": e["dates"],
                 "symbol": e["entities"],
                 "y_true": ic_target,
                 "y_pred": e["y_pred"],
@@ -815,7 +815,7 @@ def train_gbm_config(
             frame,
             pred_col="y_pred",
             ret_col="y_true",
-            date_col="date",
+            date_col="timestamp",
             entity_col="symbol",
             min_obs=5,
         )["ic_mean"]
