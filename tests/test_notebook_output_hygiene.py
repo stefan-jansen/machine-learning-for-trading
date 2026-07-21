@@ -127,6 +127,39 @@ def _parse_cell(source: str) -> ast.Module | None:
         return None
 
 
+_PLT_FIGURE_METHODS = {
+    "bar",
+    "barh",
+    "boxplot",
+    "contour",
+    "contourf",
+    "errorbar",
+    "figure",
+    "fill_between",
+    "hist",
+    "imshow",
+    "matshow",
+    "pcolormesh",
+    "pie",
+    "plot",
+    "scatter",
+    "stem",
+    "step",
+    "subplots",
+    "violinplot",
+}
+_SNS_NON_RENDERING_METHODS = {"color_palette", "set_context", "set_style", "set_theme"}
+
+
+def _call_produces_matplotlib_figure(call: ast.Call) -> bool:
+    if not isinstance(call.func, ast.Attribute):
+        return False
+    root = _attribute_root(call.func)
+    return (root == "plt" and call.func.attr in _PLT_FIGURE_METHODS) or (
+        root == "sns" and call.func.attr not in _SNS_NON_RENDERING_METHODS
+    )
+
+
 def _matplotlib_helper_names(notebook: dict) -> set[str]:
     helpers = set()
     for cell in notebook.get("cells", []):
@@ -135,11 +168,7 @@ def _matplotlib_helper_names(notebook: dict) -> set[str]:
             continue
         for definition in (node for node in tree.body if isinstance(node, ast.FunctionDef)):
             calls = [node for node in ast.walk(definition) if isinstance(node, ast.Call)]
-            if any(
-                isinstance(call.func, ast.Attribute)
-                and _attribute_root(call.func) in {"plt", "ax", "axes", "matplotlib", "sns"}
-                for call in calls
-            ):
+            if any(_call_produces_matplotlib_figure(call) for call in calls):
                 helpers.add(definition.name)
     return helpers
 
@@ -164,17 +193,7 @@ def _expects_matplotlib_png(source: str, helpers: set[str] | None = None) -> boo
         and (_attribute_root(call.func) == "plt" or uses_matplotlib)
         for call in calls
     )
-    creates_plot = any(
-        isinstance(call.func, ast.Attribute)
-        and (
-            (_attribute_root(call.func) == "plt" and call.func.attr in {"figure", "subplots"})
-            or (
-                _attribute_root(call.func) == "sns"
-                and call.func.attr not in {"color_palette", "set_context", "set_style", "set_theme"}
-            )
-        )
-        for call in calls
-    )
+    creates_plot = any(_call_produces_matplotlib_figure(call) for call in calls)
     calls_matplotlib_helper = any(
         isinstance(call.func, ast.Name) and call.func.id in helpers for call in calls
     )
@@ -232,6 +251,18 @@ def test_matplotlib_detector_covers_common_display_patterns() -> None:
     assert not _expects_matplotlib_png("def build():\n    return plt.subplots()")
     assert not _expects_matplotlib_png("fig.update_layout(title='Plotly')\nfig.show()")
     assert _expects_matplotlib_png("chart = plot_splits(data)\nchart.show()", {"plot_splits"})
+
+    non_rendering = {
+        "cells": [
+            {
+                "source": [
+                    "def configure():\n    sns.set_theme()\n\n"
+                    "def cleanup():\n    plt.close('all')\n"
+                ]
+            }
+        ]
+    }
+    assert _matplotlib_helper_names(non_rendering) == set()
 
 
 KNOWN_BARE_PLOTLY_JSON = {"case_studies/etfs/03_financial_features.ipynb": 3}
