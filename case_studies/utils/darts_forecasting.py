@@ -18,7 +18,7 @@ from darts import TimeSeries
 from darts.models import NBEATSModel, TSMixerModel
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
-from case_studies.utils.registry import compute_fold_metrics_from_predictions
+from case_studies.utils.cv_results import assemble_cv_result
 from utils.modeling import RANDOM_SEED, seed_everything
 
 SUPPORTED_DARTS_ARCHITECTURES = {"nbeats", "tsmixer"}
@@ -309,6 +309,7 @@ def _load_base_target_frame(
         join_keys = [date_col, "product"]
         if "position" in dataset_pd.columns:
             join_keys.append("position")
+        assert isinstance(target_df, pl.DataFrame)
         return target_df.to_pandas(), join_keys
 
     if case_study == "us_equities_panel":
@@ -564,6 +565,7 @@ def run_darts_cv(
             epoch_rows: list[dict[str, Any]] = []
             checkpoint_frames: list[pl.DataFrame] = []
             checkpoint_ics: dict[int, float] = {}
+            checkpoint_n_days: dict[int, int] = {}
             n_val_points = 0
             incr_dir = save_dir / "_incremental" if save_dir is not None else None
             log_dir = save_dir / "_incremental_logs" if save_dir is not None else None
@@ -631,7 +633,7 @@ def run_darts_cv(
                     _flush_darts_fold_preds(incr_dir, config_name, split["fold"], checkpoint_frames)
 
                 _entity = entity_col if entity_col in checkpoint_preds.columns else None
-                ic = cross_sectional_ic(
+                ic_result = cross_sectional_ic(
                     checkpoint_preds,
                     checkpoint_preds,
                     pred_col="y_score",
@@ -640,8 +642,10 @@ def run_darts_cv(
                     entity_col=_entity,
                     method="spearman",
                     min_obs=5,
-                )["ic_mean"]
+                )
+                ic = float(ic_result["ic_mean"])
                 checkpoint_ics[epochs_trained] = ic
+                checkpoint_n_days[epochs_trained] = int(ic_result["n_periods"])
                 for row in reversed(epoch_rows):
                     if row["epoch"] == epochs_trained:
                         row["ic"] = round(ic, 4)
@@ -670,7 +674,15 @@ def run_darts_cv(
                 print(f"    no validation predictions generated ({elapsed:.1f}s)")
                 continue
 
-            fold_best_epoch = max(checkpoint_ics, key=checkpoint_ics.get)
+            full_fold_coverage = max(checkpoint_n_days.values())
+            fold_best_epoch = max(
+                (
+                    epoch
+                    for epoch, n_days in checkpoint_n_days.items()
+                    if n_days == full_fold_coverage
+                ),
+                key=lambda epoch: checkpoint_ics[epoch],
+            )
             fold_best_ic = checkpoint_ics[fold_best_epoch]
             for row in epoch_rows:
                 row["n_val"] = n_val_points
@@ -681,49 +693,61 @@ def run_darts_cv(
             training_log.extend(epoch_rows)
             print(f"    fold best epoch={fold_best_epoch}, IC={fold_best_ic:+.4f} ({elapsed:.1f}s)")
 
-        epoch_scores: list[tuple[int, float, float]] = []
+        epoch_scores: list[tuple[int, float, float, int]] = []
         if cfg_prediction_frames:
             cfg_all_preds = pl.concat(cfg_prediction_frames)
+            expected_fold_ids = sorted(cfg_all_preds["fold_id"].unique().to_list())
             for epoch in sorted(cfg_all_preds["epoch"].unique().to_list()):
                 ep_df = cfg_all_preds.filter(pl.col("epoch") == epoch)
                 fold_ids = sorted(ep_df["fold_id"].unique().to_list())
+                if fold_ids != expected_fold_ids:
+                    continue
                 fold_epoch_ics = []
+                fold_n_days = []
                 for fold_id in fold_ids:
                     fold_df = ep_df.filter(pl.col("fold_id") == fold_id)
                     _entity = entity_col if entity_col in fold_df.columns else None
-                    fold_epoch_ics.append(
-                        cross_sectional_ic(
-                            fold_df,
-                            fold_df,
-                            pred_col="y_score",
-                            ret_col="y_true",
-                            date_col=date_col,
-                            entity_col=_entity,
-                            method="spearman",
-                            min_obs=5,
-                        )["ic_mean"]
+                    ic_result = cross_sectional_ic(
+                        fold_df,
+                        fold_df,
+                        pred_col="y_score",
+                        ret_col="y_true",
+                        date_col=date_col,
+                        entity_col=_entity,
+                        method="spearman",
+                        min_obs=5,
                     )
+                    fold_epoch_ics.append(float(ic_result["ic_mean"]))
+                    fold_n_days.append(int(ic_result["n_periods"]))
                 ic_mean = float(np.nanmean(fold_epoch_ics))
                 ic_std = float(np.nanstd(fold_epoch_ics)) if len(fold_epoch_ics) > 1 else 0.0
+                ic_n_days = sum(fold_n_days)
                 learning_rows.append(
                     {
                         "config": config_name,
                         "epoch": epoch,
                         "ic_mean": ic_mean,
                         "ic_std": ic_std,
+                        "ic_n_days": ic_n_days,
                     }
                 )
-                epoch_scores.append((epoch, ic_mean, ic_std))
+                epoch_scores.append((epoch, ic_mean, ic_std, ic_n_days))
 
         if epoch_scores:
-            best_epoch, best_ic, best_ic_std = max(epoch_scores, key=lambda item: item[1])
+            full_coverage = max(item[3] for item in epoch_scores)
+            eligible_scores = [item for item in epoch_scores if item[3] == full_coverage]
+            best_epoch, best_ic, best_ic_std, best_ic_n_days = max(
+                eligible_scores, key=lambda item: item[1]
+            )
         else:
             best_epoch, best_ic, best_ic_std = n_epochs, float("nan"), 0.0
+            best_ic_n_days = 0
         config_results.append(
             {
                 "config_name": config_name,
                 "best_epoch": best_epoch,
                 "best_ic": best_ic,
+                "ic_n_days": best_ic_n_days,
                 "input_chunk_length": input_chunk_length,
                 "elapsed_s": elapsed_total,
                 "started_at": started_at,
@@ -737,27 +761,18 @@ def run_darts_cv(
     if not config_results:
         raise RuntimeError("Darts run produced no config results.")
 
-    config_results.sort(
-        key=lambda row: row["best_ic"] if not np.isnan(row["best_ic"]) else -999,
-        reverse=True,
-    )
-    best_result = config_results[0]
-    best_config_name = best_result["config_name"]
-    best_epoch = best_result["best_epoch"]
-    best_ic = best_result["best_ic"]
-
     all_predictions = pl.concat(prediction_frames) if prediction_frames else pl.DataFrame()
-    predictions = (
-        all_predictions.filter(
-            (pl.col("config") == best_config_name) & (pl.col("epoch") == best_epoch)
-        )
-        .with_columns(pl.lit(best_config_name).alias("model_id"))
-        .drop("config", "epoch")
-        if all_predictions.height > 0
-        else pl.DataFrame()
-    )
     learning_curves = pl.DataFrame(learning_rows) if learning_rows else pl.DataFrame()
     training_log_df = pl.DataFrame(training_log) if training_log else pl.DataFrame()
+    result = assemble_cv_result(
+        learning_curves,
+        all_predictions,
+        date_col=date_col,
+        entity_col=entity_col,
+        metadata={row["config_name"]: row for row in config_results},
+        training_log=training_log_df,
+    )
+    predictions = result["predictions"]
 
     if save_dir is not None:
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -776,9 +791,9 @@ def run_darts_cv(
             cfg = next(c for c in configs if c["config_name"] == cfg_name)
             cfg_preds = all_predictions.filter(
                 (pl.col("config") == cfg_name) & (pl.col("epoch") == row["best_epoch"])
-            )
+            ).drop("config", "epoch")
             cfg_curves = learning_curves.filter(pl.col("config") == cfg_name)
-            _register_dl_config(
+            training_hash = _register_dl_config(
                 case_study=case_study,
                 label=label_col,
                 config_name=cfg_name,
@@ -795,20 +810,26 @@ def run_darts_cv(
                 elapsed_s=row.get("elapsed_s"),
                 prediction_split=prediction_split,
             )
+            from case_studies.utils.registry import register_prediction_set
 
-    return {
-        "grid_results": config_results,
-        "best_config_name": best_config_name,
-        "best_epoch": best_epoch,
-        "best_ic": best_ic,
-        "predictions": predictions,
-        "all_predictions": all_predictions,
-        "fold_metrics": compute_fold_metrics_from_predictions(
-            all_predictions,
-            best_config_name,
-            best_epoch,
-            date_col=date_col,
-        ),
-        "all_learning_curves": learning_curves,
-        "training_log": training_log_df,
-    }
+            curve_ic = {
+                int(curve["epoch"]): float(curve["ic_mean"])
+                for curve in cfg_curves.iter_rows(named=True)
+            }
+            for epoch in sorted(curve_ic):
+                if epoch == row["best_epoch"]:
+                    continue
+                epoch_preds = all_predictions.filter(
+                    (pl.col("config") == cfg_name) & (pl.col("epoch") == epoch)
+                ).drop("config", "epoch")
+                register_prediction_set(
+                    case_study,
+                    training_hash=training_hash,
+                    checkpoint_value=epoch,
+                    checkpoint_kind="epoch",
+                    split=prediction_split,
+                    predictions=epoch_preds,
+                    metrics={"ic_mean": curve_ic[epoch]},
+                )
+
+    return result

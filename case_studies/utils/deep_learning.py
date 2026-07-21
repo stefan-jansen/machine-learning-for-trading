@@ -35,7 +35,11 @@ import torch.nn as nn
 from ml4t.diagnostic.metrics import cross_sectional_ic
 from torch.utils.data import DataLoader
 
-from case_studies.utils.registry import compute_fold_metrics_from_predictions
+from case_studies.utils.cv_results import (
+    assemble_cv_result,
+    combine_cv_results,
+    rebuild_cv_result_from_registry,
+)
 from case_studies.utils.registry.store import (
     _save_parquet,
     flush_fold_predictions,
@@ -507,6 +511,8 @@ def run_dl_cv(
             "Pass save_dir=CASE_DIR / 'run_log' / 'training' / 'deep_learning'"
         )
 
+    cached_result = None
+
     # Filter out configs whose training_hash is already complete (unless
     # force_retrain). Fold-major training can't skip individual configs
     # mid-fold, so the filter happens BEFORE the fold loop starts.
@@ -519,6 +525,7 @@ def run_dl_cv(
         )
 
         pending_configs = []
+        cached_configs = []
         for cfg in configs:
             try:
                 spec = build_training_spec(
@@ -540,6 +547,7 @@ def run_dl_cv(
                     print(
                         f"  SKIP {cfg['config_name']:25s}  ({status.summary()}, split={prediction_split})"
                     )
+                    cached_configs.append(cfg)
                     continue
                 if status.complete and not split_complete:
                     print(
@@ -551,23 +559,24 @@ def run_dl_cv(
                 print(f"  WARN: skip-check failed for {cfg['config_name']}: {exc}")
             pending_configs.append(cfg)
 
+        if cached_configs:
+            cached_result = rebuild_cv_result_from_registry(
+                case_study,
+                cached_configs,
+                label_col=label_col,
+                n_folds=len(splits),
+                prediction_split=prediction_split,
+                date_col=date_col,
+                entity_col=entity_col,
+            )
         if not pending_configs:
-            print("All configs already complete — nothing to do.")
-            return {
-                "grid_results": [],
-                "best_config_name": None,
-                "best_epoch": 0,
-                "best_ic": float("nan"),
-                "predictions": pl.DataFrame(),
-                "all_predictions": pl.DataFrame(),
-                "fold_metrics": pl.DataFrame(),
-                "all_learning_curves": pl.DataFrame(),
-                "training_log": pl.DataFrame(),
-            }
+            print("All configs already complete - rebuilt results from the registry.")
+            assert cached_result is not None
+            return cached_result
         configs = pending_configs
 
     if uses_darts_backend(configs):
-        return run_darts_cv(
+        fresh_result = run_darts_cv(
             dataset_pd,
             splits,
             configs=configs,
@@ -583,11 +592,17 @@ def run_dl_cv(
             notebook=notebook,
             prediction_split=prediction_split,
         )
+        if cached_result is not None:
+            return combine_cv_results(
+                [cached_result, fresh_result],
+                date_col=date_col,
+                entity_col=entity_col,
+            )
+        return fresh_result
 
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested for deep learning, but CUDA is unavailable")
     torch_device = torch.device(device)
-    expected_fold_ids = [int(split["fold"]) for split in splits]
     if selected_folds:
         selected = {int(fold) for fold in selected_folds}
         splits = [split for split in splits if int(split["fold"]) in selected]
@@ -619,6 +634,7 @@ def run_dl_cv(
         }
 
     n_valid_folds = 0
+    expected_fold_ids: list[int] = []
 
     _has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
 
@@ -668,6 +684,7 @@ def run_dl_cv(
         n_train_seq = len(train_ds)
         n_val_seq = len(val_ds)
         n_valid_folds += 1
+        expected_fold_ids.append(int(split["fold"]))
         print("    datasets ready")
 
         # Train ALL configs on this fold before freeing fold data
@@ -849,7 +866,7 @@ def run_dl_cv(
             else pl.DataFrame()
         )
 
-        epoch_scores: list[tuple[int, float, float]] = []
+        epoch_scores: list[tuple[int, float, float, int]] = []
         if cfg_preds.height > 0:
             for epoch in sorted(cfg_preds["epoch"].unique().to_list()):
                 ep_df = cfg_preds.filter(pl.col("epoch") == epoch)
@@ -863,29 +880,36 @@ def run_dl_cv(
                 )
                 ic_mean = float(metrics["ic_mean"])
                 ic_std = float(metrics["ic_std"])
+                ic_n_days = int(metrics["ic_n_days"])
                 all_curves.append(
                     {
                         "config": config_name,
                         "epoch": epoch,
                         "ic_mean": ic_mean,
                         "ic_std": ic_std,
-                        "ic_n_days": int(metrics["ic_n_days"]),
+                        "ic_n_days": ic_n_days,
                     }
                 )
                 complete_prediction_frames.append(ep_df)
-                epoch_scores.append((epoch, ic_mean, ic_std))
+                epoch_scores.append((epoch, ic_mean, ic_std, ic_n_days))
 
         if epoch_scores:
-            best_cp, best_ic_val, _best_ic_std = max(epoch_scores, key=lambda item: item[1])
+            full_coverage = max(item[3] for item in epoch_scores)
+            eligible_scores = [item for item in epoch_scores if item[3] == full_coverage]
+            best_cp, best_ic_val, _best_ic_std, best_ic_n_days = max(
+                eligible_scores, key=lambda item: item[1]
+            )
         else:
             best_cp = 0
             best_ic_val = float("nan")
+            best_ic_n_days = 0
 
         config_results.append(
             {
                 "config_name": config_name,
                 "best_epoch": best_cp,
                 "best_ic": best_ic_val,
+                "ic_n_days": best_ic_n_days,
                 "elapsed_s": acc["elapsed_s"],
                 "started_at": acc["started_at"],
             }
@@ -936,7 +960,8 @@ def run_dl_cv(
                         prediction_split=prediction_split,
                         identity_params=identity_params,
                     )
-                    for epoch, epoch_ic, _epoch_std in epoch_scores:
+                    epoch_ic = {epoch: ic for epoch, ic, _std, _days in epoch_scores}
+                    for epoch, _ic, _epoch_std, _days in epoch_scores:
                         if epoch == best_cp:
                             continue
                         epoch_preds = cfg_preds.filter(pl.col("epoch") == epoch).drop(
@@ -949,7 +974,7 @@ def run_dl_cv(
                             checkpoint_kind="epoch",
                             split=prediction_split,
                             predictions=epoch_preds,
-                            metrics={"ic_mean": epoch_ic},
+                            metrics={"ic_mean": epoch_ic[epoch]},
                         )
                     print(
                         f"    registered {config_name} incrementally "
@@ -961,35 +986,28 @@ def run_dl_cv(
     del config_acc
     gc.collect()
 
-    config_results.sort(
-        key=lambda r: r["best_ic"] if not np.isnan(r["best_ic"]) else -999, reverse=True
-    )
-    best_result = config_results[0]
-    best_config_name = best_result["config_name"]
-    best_epoch = best_result["best_epoch"]
-    best_ic = best_result["best_ic"]
-
-    print(f"\n  Best: {best_config_name} @ epoch {best_epoch} (IC={best_ic:+.4f})")
-
     complete_predictions = (
         pl.concat(complete_prediction_frames, how="diagonal_relaxed")
         if complete_prediction_frames
         else pl.DataFrame()
     )
 
-    # Extract best-config predictions at best epoch
-    if complete_predictions.height > 0:
-        best_preds_df = complete_predictions.filter(
-            (pl.col("config") == best_config_name) & (pl.col("epoch") == best_epoch)
-        )
-        predictions = best_preds_df.with_columns(
-            pl.lit(best_config_name).alias("model_id"),
-        ).drop("config", "epoch")
-    else:
-        predictions = pl.DataFrame()
-
     learning_curves = pl.DataFrame(all_curves) if all_curves else pl.DataFrame()
     training_log_df = pl.DataFrame(training_log) if training_log else pl.DataFrame()
+    fresh_result = assemble_cv_result(
+        learning_curves,
+        complete_predictions,
+        date_col=date_col,
+        entity_col=entity_col,
+        metadata={row["config_name"]: row for row in config_results},
+        training_log=training_log_df,
+    )
+    predictions = fresh_result["predictions"]
+
+    print(
+        f"\n  Best: {fresh_result['best_config_name']} @ epoch "
+        f"{fresh_result['best_epoch']} (IC={fresh_result['best_ic']:+.4f})"
+    )
 
     # Save final outputs
     if save_dir is not None:
@@ -1008,19 +1026,10 @@ def run_dl_cv(
     # aggregation loop above (right after each config's best_epoch is computed).
     # The old batched registration block was removed to avoid duplicate writes.
 
-    return {
-        "grid_results": config_results,
-        "best_config_name": best_config_name,
-        "best_epoch": best_epoch,
-        "best_ic": best_ic,
-        "predictions": predictions,
-        "all_predictions": complete_predictions,
-        "fold_metrics": compute_fold_metrics_from_predictions(
-            complete_predictions,
-            best_config_name,
-            best_epoch,
+    if cached_result is not None:
+        return combine_cv_results(
+            [cached_result, fresh_result],
             date_col=date_col,
-        ),
-        "all_learning_curves": learning_curves,
-        "training_log": training_log_df,
-    }
+            entity_col=entity_col,
+        )
+    return fresh_result
