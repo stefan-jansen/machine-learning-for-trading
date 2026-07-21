@@ -13,8 +13,8 @@ Each test scans every tracked ``.ipynb`` and names the script that fixes it.
 
 from __future__ import annotations
 
+import ast
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -80,20 +80,78 @@ def test_path_sanitizer_does_not_rewrite_cell_source() -> None:
     assert source_home_path_leaks(json.dumps(notebook)) == [0]
 
 
-KNOWN_MISSING_MATPLOTLIB = frozenset(
-    {
-        "01_process_is_edge/macro_regimes.ipynb",
-        "03_market_microstructure/03_itch_lob_analysis.ipynb",
-        "03_market_microstructure/06_itch_intraday_patterns.ipynb",
-        "03_market_microstructure/07_itch_stylized_facts.ipynb",
-        "03_market_microstructure/17_databento_bar_sampling.ipynb",
-        "06_strategy_definition/03_case_study_overview.ipynb",
-        "09_model_based_features/06_path_signatures.ipynb",
-        "09_model_based_features/11_hmm_regimes.ipynb",
-        "09_model_based_features/13_regime_as_feature.ipynb",
-        "case_studies/etfs/04_model_based_features.ipynb",
-    }
-)
+KNOWN_MISSING_MATPLOTLIB = {
+    "03_market_microstructure/03_itch_lob_analysis.ipynb": 1,
+    "03_market_microstructure/17_databento_bar_sampling.ipynb": 1,
+    "09_model_based_features/06_path_signatures.ipynb": 1,
+    "09_model_based_features/11_hmm_regimes.ipynb": 5,
+    "09_model_based_features/13_regime_as_feature.ipynb": 2,
+    "case_studies/etfs/04_model_based_features.ipynb": 1,
+}
+
+
+class _TopLevelCallCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.calls: list[ast.Call] = []
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self.calls.append(node)
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+
+def _attribute_root(node: ast.expr) -> str | None:
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _expects_matplotlib_png(source: str) -> bool:
+    sanitized = "\n".join(
+        "pass" if line.lstrip().startswith(("%", "!")) else line for line in source.splitlines()
+    )
+    try:
+        tree = ast.parse(sanitized)
+    except SyntaxError:
+        return "plt.show(" in source
+
+    collector = _TopLevelCallCollector()
+    collector.visit(tree)
+    calls = collector.calls
+    uses_matplotlib = any(
+        isinstance(call.func, ast.Attribute)
+        and _attribute_root(call.func) in {"plt", "ax", "axes", "matplotlib"}
+        for call in calls
+    )
+    calls_show = any(
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == "show"
+        and (_attribute_root(call.func) == "plt" or uses_matplotlib)
+        for call in calls
+    )
+    creates_plot = any(
+        isinstance(call.func, ast.Attribute)
+        and (
+            (_attribute_root(call.func) == "plt" and call.func.attr in {"figure", "subplots"})
+            or (
+                _attribute_root(call.func) == "sns"
+                and call.func.attr not in {"color_palette", "set_context", "set_style", "set_theme"}
+            )
+        )
+        for call in calls
+    )
+    return calls_show or creates_plot
 
 
 def _missing_matplotlib_outputs() -> dict[str, int]:
@@ -105,12 +163,7 @@ def _missing_matplotlib_outputs() -> dict[str, int]:
         for cell in notebook.get("cells", []):
             if cell.get("cell_type") != "code":
                 continue
-            source = "".join(cell.get("source", []))
-            calls_plt_show = bool(re.search(r"(?m)^\s*plt\.show\s*\(", source))
-            calls_matplotlib_fig_show = bool(re.search(r"(?m)^\s*fig\.show\s*\(", source)) and (
-                "ax." in source or "plt." in source
-            )
-            if not (calls_plt_show or calls_matplotlib_fig_show):
+            if not _expects_matplotlib_png("".join(cell.get("source", []))):
                 continue
             has_png = any(
                 "image/png" in output.get("data", {}) for output in cell.get("outputs", [])
@@ -124,19 +177,73 @@ def _missing_matplotlib_outputs() -> dict[str, int]:
 
 def test_no_new_missing_matplotlib_outputs() -> None:
     offenders = _missing_matplotlib_outputs()
-    new = sorted(set(offenders) - KNOWN_MISSING_MATPLOTLIB)
-    assert not new, (
+    regressions = sorted(
+        path for path, count in offenders.items() if count > KNOWN_MISSING_MATPLOTLIB.get(path, 0)
+    )
+    assert not regressions, (
         "Notebooks call Matplotlib show without an embedded image/png output. "
-        "Execute committed notebooks with the default renderers:\n  " + "\n  ".join(new)
+        "Execute committed notebooks with the default renderers:\n  " + "\n  ".join(regressions)
     )
 
 
 def test_known_missing_matplotlib_list_has_no_stale_entries() -> None:
     offenders = _missing_matplotlib_outputs()
-    stale = sorted(KNOWN_MISSING_MATPLOTLIB - set(offenders))
+    stale = sorted(
+        path for path, count in KNOWN_MISSING_MATPLOTLIB.items() if offenders.get(path, 0) < count
+    )
     assert not stale, (
         "These notebooks now embed every Matplotlib figure. Remove them from "
         "KNOWN_MISSING_MATPLOTLIB:\n  " + "\n  ".join(stale)
+    )
+
+
+def test_matplotlib_detector_covers_common_display_patterns() -> None:
+    assert _expects_matplotlib_png("ax.plot(x, y); plt.show()")
+    assert _expects_matplotlib_png("canvas, axes = plt.subplots(); canvas.show()")
+    assert _expects_matplotlib_png("plt.figure()\nplt.plot(x, y)")
+    assert not _expects_matplotlib_png("def build():\n    return plt.subplots()")
+    assert not _expects_matplotlib_png("fig.update_layout(title='Plotly')\nfig.show()")
+
+
+KNOWN_BARE_PLOTLY_JSON = {"case_studies/etfs/03_financial_features.ipynb": 3}
+
+
+def _bare_plotly_json_outputs() -> dict[str, int]:
+    offenders: dict[str, int] = {}
+    for nb_path in _iter_notebooks():
+        notebook = json.loads(nb_path.read_text(encoding="utf-8"))
+        count = 0
+        for cell in notebook.get("cells", []):
+            data = [output.get("data", {}) for output in cell.get("outputs", [])]
+            has_bare_json = any("application/json" in bundle for bundle in data)
+            has_rendered_plot = any(
+                "application/vnd.plotly.v1+json" in bundle or "image/png" in bundle
+                for bundle in data
+            )
+            if has_bare_json and not has_rendered_plot:
+                count += 1
+        if count:
+            offenders[str(nb_path.relative_to(REPO_ROOT))] = count
+    return offenders
+
+
+def test_no_new_bare_plotly_json_outputs() -> None:
+    offenders = _bare_plotly_json_outputs()
+    regressions = sorted(
+        path for path, count in offenders.items() if count > KNOWN_BARE_PLOTLY_JSON.get(path, 0)
+    )
+    assert not regressions, "Plotly output is bare JSON and will not render:\n  " + "\n  ".join(
+        regressions
+    )
+
+
+def test_known_bare_plotly_json_list_has_no_stale_entries() -> None:
+    offenders = _bare_plotly_json_outputs()
+    stale = sorted(
+        path for path, count in KNOWN_BARE_PLOTLY_JSON.items() if offenders.get(path, 0) < count
+    )
+    assert not stale, "Remove repaired notebooks from KNOWN_BARE_PLOTLY_JSON:\n  " + "\n  ".join(
+        stale
     )
 
 
