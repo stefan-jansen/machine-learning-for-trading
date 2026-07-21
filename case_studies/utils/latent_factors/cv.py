@@ -590,6 +590,7 @@ def run_latent_factor_cv(
         log(f"  {model_name} (K={n_factors}):")
 
     need_pca_inputs = "pca" in active_models
+    need_ragged_inputs = any(model_name != "pca" for model_name in active_models)
 
     for split in splits:
         if not active_models:
@@ -605,15 +606,19 @@ def run_latent_factor_cv(
             eval_label_col=eval_label_col,
             macro_panel=macro_panel,
             need_pca_inputs=need_pca_inputs,
+            need_ragged_inputs=need_ragged_inputs,
         )
         if fold_inputs is None:
             log(f"    Fold {split['fold']}: skipped (insufficient train/validation dates)")
             continue
 
+        display_input = fold_inputs["ragged"] or fold_inputs["pca"]
+        input_kind = "ragged" if fold_inputs["ragged"] is not None else "persistent"
         log(
-            f"    Fold {split['fold']}: ragged train={fold_inputs['ragged']['n_train_periods']}, "
-            f"val={fold_inputs['ragged']['n_val_periods']}, "
-            f"max_N={fold_inputs['ragged']['chars_train'].shape[1]}"
+            f"    Fold {split['fold']}: {input_kind} "
+            f"train={display_input['n_train_periods']}, "
+            f"val={display_input['n_val_periods']}, "
+            f"max_N={display_input['chars_train'].shape[1]}"
         )
 
         for model_name in active_models:
@@ -886,6 +891,7 @@ def _prepare_fold_inputs(
     eval_label_col: str | None,
     macro_panel: pl.DataFrame | None,
     need_pca_inputs: bool,
+    need_ragged_inputs: bool = True,
 ) -> dict[str, Any] | None:
     fold_dataset = _filter_dataset_window(
         dataset,
@@ -893,50 +899,53 @@ def _prepare_fold_inputs(
         start=split["train_start"],
         end=split["val_end"],
     )
-    ragged_panel = prepare_ragged_panel_data(
-        fold_dataset,
-        feature_names=feature_names,
-        label_col=label_col,
-        date_col=date_col,
-        entity_col=entity_col,
-        eval_label_col=eval_label_col,
-        macro_panel=macro_panel,
-    )
-    ragged_panel["chars"] = rank_normalize_cross_section(ragged_panel["chars"])
+    ragged_inputs = None
+    if need_ragged_inputs:
+        ragged_panel = prepare_ragged_panel_data(
+            fold_dataset,
+            feature_names=feature_names,
+            label_col=label_col,
+            date_col=date_col,
+            entity_col=entity_col,
+            eval_label_col=eval_label_col,
+            macro_panel=macro_panel,
+        )
+        ragged_panel["chars"] = rank_normalize_cross_section(ragged_panel["chars"])
 
-    ragged_train_mask = _date_mask(ragged_panel["dates"], split["train_start"], split["train_end"])
-    ragged_val_mask = _date_mask(ragged_panel["dates"], split["val_start"], split["val_end"])
-    n_train_periods = int(ragged_train_mask.sum())
-    n_val_periods = int(ragged_val_mask.sum())
-    if n_train_periods < 10 or n_val_periods < 3:
-        return None
-
-    ragged_inputs = {
-        "chars_train": ragged_panel["chars"][ragged_train_mask],
-        "returns_train": ragged_panel["returns"][ragged_train_mask],
-        "chars_val": ragged_panel["chars"][ragged_val_mask],
-        "returns_val": ragged_panel["returns"][ragged_val_mask],
-        "factor_returns_train": (
-            ragged_panel["eval_returns"][ragged_train_mask]
-            if ragged_panel.get("eval_returns") is not None
-            else None
-        ),
-        "eval_returns_val": (
-            ragged_panel["eval_returns"][ragged_val_mask]
-            if ragged_panel.get("eval_returns") is not None
-            else None
-        ),
-        "val_dates": ragged_panel["dates"][ragged_val_mask],
-        "val_entities": ragged_panel["entities"][ragged_val_mask],
-        "macro_train": ragged_panel["macro"][ragged_train_mask]
-        if ragged_panel.get("macro") is not None
-        else None,
-        "macro_val": ragged_panel["macro"][ragged_val_mask]
-        if ragged_panel.get("macro") is not None
-        else None,
-        "n_train_periods": n_train_periods,
-        "n_val_periods": n_val_periods,
-    }
+        ragged_train_mask = _date_mask(
+            ragged_panel["dates"], split["train_start"], split["train_end"]
+        )
+        ragged_val_mask = _date_mask(ragged_panel["dates"], split["val_start"], split["val_end"])
+        ragged_inputs = {
+            "chars_train": ragged_panel["chars"][ragged_train_mask],
+            "returns_train": ragged_panel["returns"][ragged_train_mask],
+            "chars_val": ragged_panel["chars"][ragged_val_mask],
+            "returns_val": ragged_panel["returns"][ragged_val_mask],
+            "factor_returns_train": (
+                ragged_panel["eval_returns"][ragged_train_mask]
+                if ragged_panel.get("eval_returns") is not None
+                else None
+            ),
+            "eval_returns_val": (
+                ragged_panel["eval_returns"][ragged_val_mask]
+                if ragged_panel.get("eval_returns") is not None
+                else None
+            ),
+            "val_dates": ragged_panel["dates"][ragged_val_mask],
+            "val_entities": ragged_panel["entities"][ragged_val_mask],
+            "macro_train": (
+                ragged_panel["macro"][ragged_train_mask]
+                if ragged_panel.get("macro") is not None
+                else None
+            ),
+            "macro_val": (
+                ragged_panel["macro"][ragged_val_mask]
+                if ragged_panel.get("macro") is not None
+                else None
+            ),
+            "n_train_periods": int(ragged_train_mask.sum()),
+            "n_val_periods": int(ragged_val_mask.sum()),
+        }
 
     persistent_inputs = None
     if need_pca_inputs:
@@ -985,6 +994,12 @@ def _prepare_fold_inputs(
             "n_train_periods": int(persistent_train_mask.sum()),
             "n_val_periods": int(persistent_val_mask.sum()),
         }
+
+    available_input = ragged_inputs or persistent_inputs
+    if available_input is None:
+        raise ValueError("At least one latent-factor input representation is required")
+    if available_input["n_train_periods"] < 10 or available_input["n_val_periods"] < 3:
+        return None
 
     return {"ragged": ragged_inputs, "pca": persistent_inputs}
 

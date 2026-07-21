@@ -217,6 +217,54 @@ def test_pca_entity_eligibility_is_learned_from_train_only() -> None:
     assert inputs["ragged"]["returns_val"].shape == (3, 2)
 
 
+def test_pca_only_fold_preparation_skips_ragged_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from case_studies.utils.latent_factors import cv
+
+    timestamps = pl.date_range(
+        datetime(2020, 1, 1),
+        datetime(2020, 1, 15),
+        interval="1d",
+        eager=True,
+    ).to_list()
+    dataset = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["A"] * len(timestamps),
+            "feature": range(len(timestamps)),
+            "label": [value / 100 for value in range(len(timestamps))],
+        }
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("PCA-only folds must not build the ragged panel")
+
+    monkeypatch.setattr(cv, "prepare_ragged_panel_data", fail_if_called)
+    inputs = cv._prepare_fold_inputs(
+        dataset=dataset,
+        split={
+            "fold": 0,
+            "train_start": timestamps[0],
+            "train_end": timestamps[11],
+            "val_start": timestamps[12],
+            "val_end": timestamps[-1],
+        },
+        feature_names=["feature"],
+        label_col="label",
+        date_col="timestamp",
+        entity_col="symbol",
+        eval_label_col=None,
+        macro_panel=None,
+        need_pca_inputs=True,
+        need_ragged_inputs=False,
+    )
+
+    assert inputs is not None
+    assert inputs["ragged"] is None
+    assert inputs["pca"]["returns_train"].shape == (12, 1)
+
+
 def test_cae_validation_batch_receives_validation_returns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
