@@ -233,12 +233,20 @@ def align_macro_to_dates(
     if not feature_cols:
         return np.zeros((len(dates), 0), dtype=np.float32), []
 
-    date_frame = pl.DataFrame({date_col: list(dates)}).sort(date_col)
-    aligned = (
-        date_frame.join_asof(macro.sort(date_col), on=date_col, strategy="backward")
-        .fill_null(strategy="backward")
-        .fill_null(strategy="forward")
+    date_frame = (
+        pl.DataFrame(pl.Series(date_col, dates))
+        .with_columns(pl.col(date_col).cast(macro.schema[date_col]))
+        .sort(date_col)
     )
+    aligned = date_frame.join_asof(
+        macro.sort(date_col), on=date_col, strategy="backward"
+    ).fill_null(strategy="forward")
+    null_counts = aligned.select(feature_cols).null_count().row(0)
+    if any(null_counts):
+        missing = [name for name, count in zip(feature_cols, null_counts, strict=True) if count]
+        raise ValueError(
+            f"Macro context is unavailable on or before the first requested date for: {missing}"
+        )
     return aligned.select(feature_cols).to_numpy().astype(np.float32), feature_cols
 
 

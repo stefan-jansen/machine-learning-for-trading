@@ -77,6 +77,7 @@ def _load_registered_latent_factor(
     entry_point: str,
     prediction_split: str,
     temporal_feature_assembly: str | None,
+    macro_context_spec: dict[str, Any] | None,
 ) -> tuple[pl.DataFrame, pl.DataFrame] | None:
     """Load a complete latent-factor result without rewriting the registry."""
     from case_studies.utils.registry.queries import read_predictions
@@ -106,6 +107,8 @@ def _load_registered_latent_factor(
                     temporal_feature_assembly is not None
                     and spec.get("temporal_feature_assembly") != temporal_feature_assembly
                 ):
+                    continue
+                if not _macro_context_matches(spec, macro_context_spec):
                     continue
                 if int(spec.get("params", {}).get("n_factors", -1)) != int(n_factors):
                     continue
@@ -182,6 +185,7 @@ def run_latent_factor_cv(
     class_values: list | None = None,
     prediction_split: str = "validation",
     macro_panel: pl.DataFrame | None = None,
+    macro_context_spec: dict[str, Any] | None = None,
     persistent_entities: bool = True,
     checkpoint_selection_policy: str | None = None,
     reporting_epoch: int | None = None,
@@ -267,6 +271,7 @@ def run_latent_factor_cv(
         model_dir = save_dir / model_name if save_dir is not None else None
         model_dirs[model_name] = model_dir
         model_temporal_feature_assembly = temporal_feature_assembly if model_name != "pca" else None
+        model_macro_context = macro_context_spec if model_name == "sdf" else None
         if use_cache and not force_retrain and case_study_id:
             registered = _load_registered_latent_factor(
                 case_study_id,
@@ -277,6 +282,7 @@ def run_latent_factor_cv(
                 entry_point=notebook,
                 prediction_split=prediction_split,
                 temporal_feature_assembly=model_temporal_feature_assembly,
+                macro_context_spec=model_macro_context,
             )
             if registered is not None:
                 metrics_df, preds_df = registered
@@ -306,6 +312,7 @@ def run_latent_factor_cv(
             use_cache
             and not force_retrain
             and model_dir is not None
+            and model_macro_context is None
             and (model_dir / "predictions.parquet").exists()
             and (model_dir / "fold_metrics.parquet").exists()
         ):
@@ -542,6 +549,7 @@ def run_latent_factor_cv(
             model_temporal_feature_assembly = (
                 temporal_feature_assembly if model_name != "pca" else None
             )
+            model_macro_context = macro_context_spec if model_name == "sdf" else None
             _register_model_predictions(
                 case_study_id=case_study_id,
                 model_name=model_name,
@@ -560,6 +568,7 @@ def run_latent_factor_cv(
                 fold_ics_df=fold_ics_df,
                 preds_df=preds_df,
                 temporal_feature_assembly=model_temporal_feature_assembly,
+                macro_context_spec=model_macro_context,
             )
 
         log(f"    -> best epoch={best_epoch}, IC={mean_ic:+.4f} ({elapsed:.1f}s)")
@@ -1061,6 +1070,7 @@ def _register_model_predictions(
     fold_ics_df: pl.DataFrame,
     preds_df: pl.DataFrame,
     temporal_feature_assembly: str | None,
+    macro_context_spec: dict[str, Any] | None,
 ) -> None:
     from case_studies.utils.registry import (
         build_training_spec,
@@ -1096,6 +1106,7 @@ def _register_model_predictions(
         model_kwargs=model_kwargs,
         fold_extras=fold_extras,
         temporal_feature_assembly=temporal_feature_assembly,
+        macro_context_spec=macro_context_spec,
     )
 
     training_hash = register_training_run(
@@ -1133,6 +1144,7 @@ def _apply_latent_factor_runtime_spec(
     model_kwargs: dict[str, Any],
     fold_extras: list[dict[str, Any]],
     temporal_feature_assembly: str | None = None,
+    macro_context_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved = dict(spec)
     params = dict(resolved.get("params", {}))
@@ -1187,5 +1199,17 @@ def _apply_latent_factor_runtime_spec(
     resolved.update(runtime_fields)
     if temporal_feature_assembly is not None:
         resolved["temporal_feature_assembly"] = temporal_feature_assembly
+    if macro_context_spec is not None:
+        resolved["macro_context"] = macro_context_spec
     resolved["params"] = params
     return resolved
+
+
+def _macro_context_matches(
+    registered_spec: dict[str, Any],
+    expected_macro_context: dict[str, Any] | None,
+) -> bool:
+    """Require exact macro identity when the caller declares one."""
+    if expected_macro_context is None:
+        return True
+    return registered_spec.get("macro_context") == expected_macro_context
