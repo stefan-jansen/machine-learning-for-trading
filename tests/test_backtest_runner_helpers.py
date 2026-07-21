@@ -134,6 +134,19 @@ def test_target_weights_are_deterministic_across_input_order() -> None:
     assert _target_weights_by_timestamp(weights.reverse()) == expected
 
 
+def test_target_weights_reject_duplicate_keys() -> None:
+    timestamp = datetime(2024, 1, 2)
+    weights = pl.DataFrame(
+        {
+            "timestamp": [timestamp, timestamp],
+            "symbol": ["A", "A"],
+            "weight": [0.5, -0.5],
+        }
+    )
+    with pytest.raises(ValueError, match="duplicate timestamp-symbol"):
+        _target_weights_by_timestamp(weights)
+
+
 def test_apply_universe_filter_collapses_intraday_to_date_grain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

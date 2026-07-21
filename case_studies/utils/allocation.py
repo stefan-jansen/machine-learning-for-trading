@@ -31,11 +31,15 @@ def _select_top_bottom(
         cs_rank=pl.col(score_col).rank(method="ordinal", descending=True).over(time_col),
         n_assets=pl.col(score_col).count().over(time_col),
     )
+    effective_k = pl.min_horizontal(pl.lit(top_k), pl.col("n_assets") // 2)
     if long_short:
         selected = ranked.filter(
-            (pl.col("cs_rank") <= top_k) | (pl.col("cs_rank") > pl.col("n_assets") - top_k)
+            (pl.col("cs_rank") <= effective_k)
+            | (pl.col("cs_rank") > pl.col("n_assets") - effective_k)
         ).with_columns(
-            side=pl.when(pl.col("cs_rank") <= top_k).then(pl.lit("long")).otherwise(pl.lit("short"))
+            side=pl.when(pl.col("cs_rank") <= effective_k)
+            .then(pl.lit("long"))
+            .otherwise(pl.lit("short"))
         )
     else:
         selected = ranked.filter(pl.col("cs_rank") <= top_k).with_columns(side=pl.lit("long"))

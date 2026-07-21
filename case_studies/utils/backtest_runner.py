@@ -257,6 +257,11 @@ class BacktestRunResult:
 
 def _target_weights_by_timestamp(weights: pl.DataFrame) -> dict[datetime, dict[str, float]]:
     """Build deterministic timestamp and symbol ordered engine targets."""
+    duplicate_count = weights.select(pl.struct("timestamp", "symbol").is_duplicated().sum()).item()
+    if duplicate_count:
+        raise ValueError(
+            f"Target weights contain {duplicate_count} duplicate timestamp-symbol rows"
+        )
     targets: dict[datetime, dict[str, float]] = {}
     for row in weights.sort("timestamp", "symbol").iter_rows(named=True):
         timestamp = row["timestamp"]

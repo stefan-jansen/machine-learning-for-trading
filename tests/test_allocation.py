@@ -23,6 +23,8 @@ rebalance timestamps.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import numpy as np
 import polars as pl
 import pytest
@@ -353,3 +355,29 @@ def test_inverse_vol_accepts_ret_column_directly(synthetic_panel) -> None:
     out = compute_inverse_vol_weights(predictions, ret_prices, top_k=4)
     _assert_long_only_sums_to_1(out)
     _assert_top_k_selected(out, top_k=4)
+
+
+def test_long_short_top_k_is_capped_to_disjoint_sides() -> None:
+    """A 19-asset top-10 request must produce 9 disjoint names per side."""
+    from case_studies.utils.signals import build_target_weights
+
+    timestamp = datetime(2024, 1, 2)
+    predictions = pl.DataFrame(
+        {
+            "timestamp": [timestamp] * 19,
+            "symbol": [f"S{i:02d}" for i in range(19)],
+            "y_score": [float(i + 1) for i in range(19)],
+        }
+    )
+    weights = build_target_weights(
+        predictions,
+        method="score_weighted_top_k",
+        top_k=10,
+        long_short=True,
+    )
+
+    assert weights.height == 18
+    assert weights.select(pl.struct("timestamp", "symbol").is_duplicated().any()).item() is False
+    assert weights.filter(pl.col("weight") > 0).height == 9
+    assert weights.filter(pl.col("weight") < 0).height == 9
+    assert weights.filter(pl.col("symbol") == "S09").is_empty()
