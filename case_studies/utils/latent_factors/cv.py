@@ -266,6 +266,7 @@ def run_latent_factor_cv(
 
         model_dir = save_dir / model_name if save_dir is not None else None
         model_dirs[model_name] = model_dir
+        model_temporal_feature_assembly = temporal_feature_assembly if model_name != "pca" else None
         if use_cache and not force_retrain and case_study_id:
             registered = _load_registered_latent_factor(
                 case_study_id,
@@ -275,7 +276,7 @@ def run_latent_factor_cv(
                 n_epochs=n_epochs,
                 entry_point=notebook,
                 prediction_split=prediction_split,
-                temporal_feature_assembly=temporal_feature_assembly,
+                temporal_feature_assembly=model_temporal_feature_assembly,
             )
             if registered is not None:
                 metrics_df, preds_df = registered
@@ -538,6 +539,9 @@ def run_latent_factor_cv(
             _save_fold_extras(extras_dir / "fold_extras.json", state[model_name]["fold_extras"])
 
         if case_study_id and preds_df.height > 0:
+            model_temporal_feature_assembly = (
+                temporal_feature_assembly if model_name != "pca" else None
+            )
             _register_model_predictions(
                 case_study_id=case_study_id,
                 model_name=model_name,
@@ -555,7 +559,7 @@ def run_latent_factor_cv(
                 fold_extras=state[model_name]["fold_extras"],
                 fold_ics_df=fold_ics_df,
                 preds_df=preds_df,
-                temporal_feature_assembly=temporal_feature_assembly,
+                temporal_feature_assembly=model_temporal_feature_assembly,
             )
 
         log(f"    -> best epoch={best_epoch}, IC={mean_ic:+.4f} ({elapsed:.1f}s)")
