@@ -224,6 +224,63 @@ def lightgbm_runtime_params(
     raise ValueError(f"Unsupported LightGBM device: {device!r}")
 
 
+def gbm_checkpoint_iterations(config: dict[str, Any]) -> tuple[int, ...]:
+    """Return the exact checkpoint surface implied by one GBM config."""
+    n_iterations = int(config.get("max_iterations", 500))
+    checkpoint_interval = int(config.get("checkpoint_interval", 50))
+    if n_iterations < 1 or checkpoint_interval < 1:
+        raise ValueError("max_iterations and checkpoint_interval must be positive")
+    checkpoints = list(range(checkpoint_interval, n_iterations + 1, checkpoint_interval))
+    if not checkpoints or checkpoints[-1] != n_iterations:
+        checkpoints.append(n_iterations)
+    return tuple(checkpoints)
+
+
+def build_gbm_training_spec(
+    config: dict[str, Any],
+    *,
+    label_col: str,
+    n_folds: int,
+    max_bin: int,
+    runtime_params: dict[str, Any],
+    feature_names: list[str],
+    splits: list[dict[str, Any]],
+    eval_label_col: str | None,
+    task_type: str,
+    class_values: list | None,
+    seed: int,
+    train_sample_frac: float = 1.0,
+) -> dict[str, Any]:
+    """Build the single complete identity used for GBM lookup and registration."""
+    from case_studies.utils.registry import build_training_spec
+
+    identity_params = {
+        **runtime_params,
+        "class_values": list(class_values) if class_values is not None else None,
+        "eval_label_col": eval_label_col,
+        "feature_names": list(feature_names),
+        "splits": [
+            {
+                key: str(split[key]) if key != "fold" else int(split[key])
+                for key in ("fold", "train_start", "train_end", "val_start", "val_end")
+            }
+            for split in splits
+        ],
+        "task_type": task_type,
+    }
+    return build_training_spec(
+        config.get("family", "gbm"),
+        config["config_name"],
+        label_col,
+        n_folds=n_folds,
+        max_bin=max_bin,
+        checkpoint_interval=config.get("checkpoint_interval", 50),
+        seed=seed,
+        extra_params=identity_params,
+        train_sample_frac=train_sample_frac,
+    )
+
+
 # Library-specific defaults (not in canonical config)
 _LIB_DEFAULTS: dict[str, dict[str, Any]] = {
     "xgboost": {"tree_method": "hist", "random_state": RANDOM_SEED, "verbosity": 0, "n_jobs": -1},
@@ -613,6 +670,179 @@ def prepare_gbm_folds(
     return folds
 
 
+def _checkpoint_metrics_from_predictions(
+    predictions: list[dict[str, Any]],
+    checkpoints: list[int] | tuple[int, ...],
+) -> dict[int, dict[str, float]]:
+    """Score each checkpoint on one complete per-decision-time IC series."""
+    metrics: dict[int, dict[str, float]] = {}
+    for checkpoint in checkpoints:
+        frames = []
+        for entry in predictions:
+            if entry["n_trees"] != checkpoint:
+                continue
+            target = entry["y_eval"] if entry.get("y_eval") is not None else entry["y_true"]
+            frames.append(
+                pl.DataFrame(
+                    {
+                        "timestamp": entry["dates"],
+                        "symbol": entry["entities"],
+                        "y_true": target,
+                        "y_pred": entry["y_pred"],
+                    }
+                )
+            )
+        if not frames:
+            raise ValueError(f"Checkpoint {checkpoint} has no validation predictions")
+        complete = pl.concat(frames)
+        metric = cross_sectional_ic(
+            complete,
+            complete,
+            pred_col="y_pred",
+            ret_col="y_true",
+            date_col="timestamp",
+            entity_col="symbol",
+            min_obs=5,
+        )
+        metrics[int(checkpoint)] = {
+            "ic_mean": float(metric["ic_mean"]),
+            "ic_std": float(metric.get("ic_std", 0.0)),
+        }
+    return metrics
+
+
+def load_cached_gbm_config(
+    *,
+    case_study: str,
+    training_spec: dict[str, Any],
+    config_name: str,
+    prediction_split: str,
+    date_col: str,
+    entity_col: str,
+    eval_col: str | None,
+    expected_iterations: tuple[int, ...],
+    expected_keys: pl.DataFrame,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Replay one complete GBM config or reject an incomplete cache."""
+    from case_studies.utils.registry import (
+        get_training_dir,
+        load_prediction_metrics,
+        load_prediction_sets,
+        prediction_dir,
+        training_hash_from_spec,
+    )
+
+    training_hash = training_hash_from_spec(training_spec)
+    prediction_sets = load_prediction_sets(
+        case_study,
+        training_hash=training_hash,
+        split=prediction_split,
+    )
+    required_metadata = {"prediction_hash", "checkpoint_value", "checkpoint_kind"}
+    missing_metadata = required_metadata - set(prediction_sets.columns)
+    if missing_metadata:
+        raise ValueError(f"Cached {config_name} metadata is missing {sorted(missing_metadata)}")
+    if prediction_sets.height != 1:
+        raise ValueError(f"Cached {config_name} must contain exactly one prediction set")
+    row = prediction_sets.row(0, named=True)
+    if row["checkpoint_kind"] != "iteration" or row["checkpoint_value"] is None:
+        raise ValueError(f"Cached {config_name} has invalid iteration checkpoint metadata")
+
+    curves_path = get_training_dir(case_study, training_spec) / "learning_curves.parquet"
+    if not curves_path.exists():
+        raise ValueError(f"Cached {config_name} is missing learning curves")
+    curves = pl.read_parquet(curves_path)
+    required_curve_cols = {"config", "iteration", "ic_mean", "ic_std"}
+    missing_curve_cols = required_curve_cols - set(curves.columns)
+    if missing_curve_cols:
+        raise ValueError(
+            f"Cached {config_name} learning curves are missing {sorted(missing_curve_cols)}"
+        )
+    if curves.height != len(expected_iterations):
+        raise ValueError(
+            f"Cached {config_name} learning curves have incomplete checkpoint coverage"
+        )
+    if curves.select(pl.col(list(required_curve_cols)).null_count()).row(0) != (0,) * len(
+        required_curve_cols
+    ):
+        raise ValueError(f"Cached {config_name} learning curves contain nulls")
+    observed_iterations = tuple(sorted(int(value) for value in curves["iteration"].to_list()))
+    if (
+        observed_iterations != expected_iterations
+        or curves["iteration"].n_unique() != curves.height
+    ):
+        raise ValueError(f"Cached {config_name} learning curves have invalid checkpoints")
+    if set(curves["config"].unique().to_list()) != {config_name}:
+        raise ValueError(f"Cached {config_name} learning curves contain another config")
+    best = curves.sort("ic_mean", descending=True).row(0, named=True)
+    if int(row["checkpoint_value"]) != int(best["iteration"]):
+        raise ValueError(f"Cached {config_name} prediction checkpoint is not the curve leader")
+
+    artifact_path = prediction_dir(case_study, row["prediction_hash"]) / "predictions.parquet"
+    if not artifact_path.exists():
+        raise FileNotFoundError(artifact_path)
+    predictions = pl.read_parquet(artifact_path)
+    required_prediction_cols = {date_col, entity_col, "fold", "prediction", "actual"}
+    if eval_col:
+        required_prediction_cols.add(eval_col)
+    missing_prediction_cols = required_prediction_cols - set(predictions.columns)
+    if missing_prediction_cols:
+        raise ValueError(
+            f"Cached {config_name} predictions are missing {sorted(missing_prediction_cols)}"
+        )
+    if predictions.select(pl.col(list(required_prediction_cols)).null_count()).row(0) != (0,) * len(
+        required_prediction_cols
+    ):
+        raise ValueError(f"Cached {config_name} predictions contain nulls")
+    key_cols = [date_col, entity_col, "fold"]
+    actual_keys = predictions.select(key_cols)
+    if actual_keys.n_unique() != predictions.height:
+        raise ValueError(f"Cached {config_name} predictions contain duplicate keys")
+    if not actual_keys.sort(key_cols).equals(expected_keys.select(key_cols).sort(key_cols)):
+        raise ValueError(f"Cached {config_name} prediction key or fold coverage is incomplete")
+
+    target_col = eval_col or "actual"
+    metric = cross_sectional_ic(
+        predictions,
+        predictions,
+        pred_col="prediction",
+        ret_col=target_col,
+        date_col=date_col,
+        entity_col=entity_col,
+        min_obs=5,
+    )
+    registry_metrics = load_prediction_metrics(case_study, prediction_hash=row["prediction_hash"])
+    if registry_metrics.height != 1:
+        raise ValueError(f"Cached {config_name} has invalid prediction metrics")
+    comparisons = {
+        "curve mean": (float(best["ic_mean"]), float(metric["ic_mean"])),
+        "curve std": (float(best["ic_std"]), float(metric.get("ic_std", 0.0))),
+        "registry mean": (float(registry_metrics["ic_mean"][0]), float(metric["ic_mean"])),
+        "registry std": (
+            float(registry_metrics["ic_std"][0]),
+            float(metric.get("ic_std", 0.0)),
+        ),
+    }
+    mismatches = {
+        name: values
+        for name, values in comparisons.items()
+        if not np.isclose(values[0], values[1], atol=1e-12, rtol=0.0)
+    }
+    if mismatches:
+        raise ValueError(f"Cached {config_name} metric mismatch: {mismatches}")
+
+    result = {
+        "config_name": config_name,
+        "best_iter": int(best["iteration"]),
+        "best_ic": float(metric["ic_mean"]),
+        "best_ic_std": float(metric.get("ic_std", 0.0)),
+        "elapsed_s": 0.0,
+        "learning_curves": curves.to_dicts(),
+        "cached": True,
+    }
+    return result, curves.to_dicts()
+
+
 def train_gbm_config(
     config: dict[str, Any],
     fold_data: list[dict[str, Any]],
@@ -668,7 +898,6 @@ def train_gbm_config(
 
     config_name = config["config_name"]
     num_boost_round = config.get("max_iterations", 500)
-    checkpoint_interval = config.get("checkpoint_interval", 50)
     is_classification = task_type == "classification" and class_values
 
     # Build LightGBM params from preset
@@ -686,9 +915,7 @@ def train_gbm_config(
     if is_classification and class_values and len(class_values) > 2:
         params["num_class"] = len(class_values)
 
-    checkpoints = list(range(checkpoint_interval, num_boost_round + 1, checkpoint_interval))
-    if not checkpoints or checkpoints[-1] != num_boost_round:
-        checkpoints.append(num_boost_round)
+    checkpoints = list(gbm_checkpoint_iterations(config))
 
     t0 = time.perf_counter()
     checkpoint_ics: dict[int, list[float]] = {cp: [] for cp in checkpoints}
@@ -780,12 +1007,12 @@ def train_gbm_config(
 
         del dtrain, model
 
-    # Best checkpoint by mean IC
-    best_cp = max(
-        checkpoints, key=lambda cp: np.mean(checkpoint_ics[cp]) if checkpoint_ics[cp] else -1
-    )
-    best_ic = float(np.mean(checkpoint_ics[best_cp])) if checkpoint_ics[best_cp] else 0.0
-    best_ic_std = float(np.std(checkpoint_ics[best_cp])) if checkpoint_ics[best_cp] else 0.0
+    # Select on the complete per-decision-time IC series. Averaging fold means
+    # would give folds equal weight even when they contain different month counts.
+    checkpoint_metrics = _checkpoint_metrics_from_predictions(all_preds, checkpoints)
+    best_cp = max(checkpoints, key=lambda cp: checkpoint_metrics[cp]["ic_mean"])
+    best_ic = float(checkpoint_metrics[best_cp]["ic_mean"])
+    best_ic_std = float(checkpoint_metrics[best_cp]["ic_std"])
     elapsed = time.perf_counter() - t0
 
     # Learning curves
@@ -793,8 +1020,8 @@ def train_gbm_config(
         {
             "config": config_name,
             "iteration": cp,
-            "ic_mean": float(np.mean(checkpoint_ics[cp])) if checkpoint_ics[cp] else 0.0,
-            "ic_std": float(np.std(checkpoint_ics[cp])) if checkpoint_ics[cp] else 0.0,
+            "ic_mean": float(checkpoint_metrics[cp]["ic_mean"]),
+            "ic_std": float(checkpoint_metrics[cp]["ic_std"]),
         }
         for cp in checkpoints
     ]
@@ -840,6 +1067,7 @@ def train_gbm_config(
         "best_ic_std": best_ic_std,
         "elapsed_s": elapsed,
         "checkpoint_ics": checkpoint_ics,
+        "checkpoint_metrics": checkpoint_metrics,
         "learning_curves": curves,
         "predictions": all_preds,
         "fold_metrics": fold_metrics,
@@ -906,6 +1134,7 @@ def register_gbm_result(
     task_type: str = "regression",
     class_values: list | None = None,
     eval_col: str | None = None,
+    training_spec: dict[str, Any] | None = None,
 ) -> str:
     """Register a single GBM config's result to the registry.
 
@@ -931,16 +1160,32 @@ def register_gbm_result(
         register_training_run,
     )
 
-    spec = build_training_spec(
-        cfg["family"],
-        cfg["config_name"],
-        label_col,
-        n_folds=n_folds,
-        max_bin=max_bin,
-        checkpoint_interval=cfg.get("checkpoint_interval", 50),
-        extra_params=runtime_params,
-        train_sample_frac=train_sample_frac,
-    )
+    if training_spec is None:
+        spec = build_training_spec(
+            cfg["family"],
+            cfg["config_name"],
+            label_col,
+            n_folds=n_folds,
+            max_bin=max_bin,
+            checkpoint_interval=cfg.get("checkpoint_interval", 50),
+            extra_params=runtime_params,
+            train_sample_frac=train_sample_frac,
+        )
+    else:
+        spec = dict(training_spec)
+        expected_identity = {
+            "family": cfg["family"],
+            "config_name": cfg["config_name"],
+            "label": label_col,
+            "n_folds": n_folds,
+        }
+        mismatches = {
+            key: (spec.get(key), value)
+            for key, value in expected_identity.items()
+            if spec.get(key) != value
+        }
+        if mismatches:
+            raise ValueError(f"training_spec disagrees with registration inputs: {mismatches}")
     t_hash = register_training_run(
         case_study_id,
         spec=spec,
@@ -979,6 +1224,8 @@ def register_gbm_result(
             class_values=class_values,
             eval_col=resolved_eval_col,
             label=label_col,
+            checkpoint_value=int(result["best_iter"]),
+            checkpoint_kind="iteration",
         )
 
     # Save learning curves and fold metrics to registry training dir
