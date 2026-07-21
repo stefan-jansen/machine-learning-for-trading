@@ -39,6 +39,8 @@ _MODEL_RUNNERS = {
     "sae": run_sae_fold,
 }
 
+TEMPORAL_FEATURE_ASSEMBLY = "fold_scoped_v1"
+
 
 def _numpy_serializer(obj: Any) -> Any:
     if isinstance(obj, np.ndarray):
@@ -115,6 +117,8 @@ def _build_expected_latent_training_spec(
     input_digest: str,
     macro_digest: str | None,
     runtime_spec: dict[str, Any],
+    temporal_feature_assembly: str | None = None,
+    temporal_feature_digest: str | None = None,
 ) -> tuple[dict[str, Any], tuple[int, ...]]:
     """Build the exact identity expected from the registration path."""
     from case_studies.utils.registry import build_training_spec
@@ -167,6 +171,8 @@ def _build_expected_latent_training_spec(
         input_digest=input_digest,
         macro_digest=macro_digest,
         runtime_spec=runtime_spec,
+        temporal_feature_assembly=temporal_feature_assembly,
+        temporal_feature_digest=temporal_feature_digest,
     )
     return expected, checkpoints
 
@@ -399,6 +405,9 @@ def run_latent_factor_cv(
     device: str = "cpu",
     num_threads: int = 8,
     deterministic_algorithms: bool = True,
+    temporal_by_fold: pd.DataFrame | None = None,
+    temporal_keys: list[str] | None = None,
+    temporal_feature_names: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run walk-forward latent factor CV from the raw dated dataset."""
     del panel_data
@@ -436,6 +445,19 @@ def run_latent_factor_cv(
         eval_label_col=eval_label_col,
         date_col=date_col,
         entity_col=entity_col,
+    )
+    has_fold_temporal = bool(
+        temporal_by_fold is not None and temporal_keys and temporal_feature_names
+    )
+    temporal_feature_assembly = TEMPORAL_FEATURE_ASSEMBLY if has_fold_temporal else None
+    temporal_feature_digest = (
+        _frame_digest(
+            pl.from_pandas(
+                temporal_by_fold.loc[:, ["fold", *temporal_keys, *temporal_feature_names]]
+            )
+        )
+        if has_fold_temporal
+        else None
     )
     metric_policy = _resolve_metric_policy(
         case_study_id=case_study_id,
@@ -513,6 +535,8 @@ def run_latent_factor_cv(
                 input_digest=input_digest,
                 macro_digest=macro_digest,
                 runtime_spec=runtime_spec,
+                temporal_feature_assembly=temporal_feature_assembly,
+                temporal_feature_digest=temporal_feature_digest,
             )
             registered = _load_registered_latent_factor(
                 case_study_id,
@@ -607,6 +631,9 @@ def run_latent_factor_cv(
             macro_panel=macro_panel,
             need_pca_inputs=need_pca_inputs,
             need_ragged_inputs=need_ragged_inputs,
+            temporal_by_fold=temporal_by_fold,
+            temporal_keys=temporal_keys,
+            temporal_feature_names=temporal_feature_names,
         )
         if fold_inputs is None:
             log(f"    Fold {split['fold']}: skipped (insufficient train/validation dates)")
@@ -799,6 +826,8 @@ def run_latent_factor_cv(
                 input_digest=input_digest,
                 macro_digest=macro_digest,
                 runtime_spec=runtime_spec,
+                temporal_feature_assembly=temporal_feature_assembly,
+                temporal_feature_digest=temporal_feature_digest,
             )
 
         log(f"    -> best epoch={best_epoch}, IC={mean_ic:+.4f} ({elapsed:.1f}s)")
@@ -826,7 +855,7 @@ def run_latent_factor_cv(
 def _frame_digest(frame: pl.DataFrame) -> str:
     """Return a stable digest of an ordered Polars frame and its schema."""
     columns = list(frame.columns)
-    key_cols = [column for column in ("timestamp", "symbol") if column in columns]
+    key_cols = [column for column in ("fold", "timestamp", "symbol") if column in columns]
     ordered = frame.sort(key_cols) if key_cols else frame
     row_hashes = ordered.hash_rows(seed=42).to_numpy()
     schema = [(column, str(ordered.schema[column])) for column in columns]
@@ -908,7 +937,18 @@ def _prepare_fold_inputs(
     macro_panel: pl.DataFrame | None,
     need_pca_inputs: bool,
     need_ragged_inputs: bool = True,
+    temporal_by_fold: pd.DataFrame | None = None,
+    temporal_keys: list[str] | None = None,
+    temporal_feature_names: list[str] | None = None,
 ) -> dict[str, Any] | None:
+    if temporal_by_fold is not None and temporal_keys and temporal_feature_names:
+        dataset = _replace_fold_temporal_features(
+            dataset=dataset,
+            temporal_by_fold=temporal_by_fold,
+            temporal_keys=temporal_keys,
+            temporal_feature_names=temporal_feature_names,
+            fold_id=int(split["fold"]),
+        )
     fold_dataset = _filter_dataset_window(
         dataset,
         date_col=date_col,
@@ -1018,6 +1058,41 @@ def _prepare_fold_inputs(
         return None
 
     return {"ragged": ragged_inputs, "pca": persistent_inputs}
+
+
+def _replace_fold_temporal_features(
+    *,
+    dataset: pl.DataFrame,
+    temporal_by_fold: pd.DataFrame,
+    temporal_keys: list[str],
+    temporal_feature_names: list[str],
+    fold_id: int,
+) -> pl.DataFrame:
+    """Replace the schema-placeholder columns with one fold's learned features."""
+    fold_temporal_pd = temporal_by_fold.loc[temporal_by_fold["fold"] == fold_id].drop(
+        columns=["fold"]
+    )
+    if fold_temporal_pd.empty:
+        raise ValueError(f"No temporal features found for fold {fold_id}")
+
+    fold_temporal = pl.from_pandas(fold_temporal_pd)
+    casts = {
+        key: dataset.schema[key]
+        for key in temporal_keys
+        if fold_temporal.schema[key] != dataset.schema[key]
+    }
+    if casts:
+        fold_temporal = fold_temporal.cast(casts)
+    fold_temporal = fold_temporal.unique(subset=temporal_keys, keep="last")
+
+    missing = sorted(set(temporal_feature_names) - set(fold_temporal.columns))
+    if missing:
+        raise ValueError(f"Fold {fold_id} temporal data is missing features: {missing}")
+    return dataset.drop(temporal_feature_names, strict=False).join(
+        fold_temporal.select([*temporal_keys, *temporal_feature_names]),
+        on=temporal_keys,
+        how="left",
+    )
 
 
 def _filter_dataset_window(
@@ -1331,6 +1406,8 @@ def _register_model_predictions(
     input_digest: str,
     macro_digest: str | None,
     runtime_spec: dict[str, Any],
+    temporal_feature_assembly: str | None = None,
+    temporal_feature_digest: str | None = None,
 ) -> None:
     from case_studies.utils.registry import (
         build_training_spec,
@@ -1383,6 +1460,8 @@ def _register_model_predictions(
         input_digest=input_digest,
         macro_digest=macro_digest,
         runtime_spec=runtime_spec,
+        temporal_feature_assembly=temporal_feature_assembly,
+        temporal_feature_digest=temporal_feature_digest,
     )
 
     training_hash = register_training_run(
@@ -1429,6 +1508,8 @@ def _apply_latent_factor_runtime_spec(
     input_digest: str,
     macro_digest: str | None,
     runtime_spec: dict[str, Any],
+    temporal_feature_assembly: str | None = None,
+    temporal_feature_digest: str | None = None,
 ) -> dict[str, Any]:
     resolved = dict(spec)
     params = dict(resolved.get("params", {}))
@@ -1495,5 +1576,10 @@ def _apply_latent_factor_runtime_spec(
                 runtime_fields[field] = first_extra[field]
 
     resolved.update(runtime_fields)
+    if (temporal_feature_assembly is None) != (temporal_feature_digest is None):
+        raise ValueError("Fold-scoped temporal identity requires both assembly and input digest")
+    if temporal_feature_assembly is not None:
+        resolved["temporal_feature_assembly"] = temporal_feature_assembly
+        resolved["temporal_feature_digest"] = temporal_feature_digest
     resolved["params"] = params
     return resolved
