@@ -4344,7 +4344,7 @@ requires-dist = [
     { name = "ml4t-diagnostic", specifier = ">=0.1.0b23" },
     { name = "ml4t-engineer", specifier = ">=0.1.0b10" },
     { name = "ml4t-live", specifier = ">=0.1.0b3" },
-    { name = "ml4t-models", specifier = ">=0.1.0a4" },
+    { name = "ml4t-models", specifier = ">=0.1.0a6" },
     { name = "mlflow", specifier = ">=3.10.1" },
     { name = "mlflow", marker = "extra == 'mlops'", specifier = ">=2.16" },
     { name = "nbconvert", specifier = ">=7.16" },
@@ -4541,14 +4541,14 @@ wheels = [
 
 [[package]]
 name = "ml4t-models"
-version = "0.1.0a4"
+version = "0.1.0a6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a9/96/2337409c964f4be7a782fe2d2fb73f2f158389d3dc5b62b8f23e09d52782/ml4t_models-0.1.0a4.tar.gz", hash = "sha256:9213e203751db9fa78bcf66a7d6aae4800b6803b95df69e848c5ece709b2033f", size = 62487, upload-time = "2026-05-23T04:22:28.032Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cf/bc/2881ba099d50a3b7ce12bb083b203f8ddd5417e509f737e087b0c5ce9be0/ml4t_models-0.1.0a6.tar.gz", hash = "sha256:c70374f7c5313004a0c56c6b04fd2960ca5f8dd5a371fb95b642fb7283169a5f", size = 64335, upload-time = "2026-07-21T09:39:41.443Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/40/ae/d6274a7f63633c88e309061e397aab8e93ff96a542502a460eea1197a720/ml4t_models-0.1.0a4-py3-none-any.whl", hash = "sha256:345e9aeae604090b601f6b66d79692bd95eee698131b51accd1099395a3d0646", size = 78806, upload-time = "2026-05-23T04:22:26.162Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/8a/efdd016fb760b1b8d4d34179b1115ea4f333ea4bb83ec8ba8a8b39fe794e/ml4t_models-0.1.0a6-py3-none-any.whl", hash = "sha256:2b40392096fa95a113e347f1c0c282b6876ca6df25877aafd1b65bb9f2bcd8ba", size = 79392, upload-time = "2026-07-21T09:39:40.073Z" },
 ]
 
 [[package]]

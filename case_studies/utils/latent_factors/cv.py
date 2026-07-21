@@ -1429,6 +1429,17 @@ def _apply_latent_factor_runtime_spec(
     params["macro_digest"] = macro_digest
     params["runtime"] = dict(runtime_spec)
 
+    # IPCA solver controls are part of the configured training identity. If
+    # omitted, changing the ALS budget or tolerances reuses the historical
+    # training hash and overwrites its prediction artifact in place.
+    solver_fields = ("max_iter", "tol", "factor_ridge", "gamma_ridge")
+    first_extra = fold_extras[0] if fold_extras else {}
+    for field in solver_fields:
+        if field in model_kwargs:
+            params[field] = model_kwargs[field]
+        elif field in first_extra:
+            params[field] = first_extra[field]
+
     runtime_fields: dict[str, Any] = {}
     if n_epochs:
         runtime_fields["n_epochs"] = n_epochs
@@ -1450,7 +1461,6 @@ def _apply_latent_factor_runtime_spec(
             runtime_fields[field] = model_kwargs[field]
 
     if fold_extras:
-        first_extra = fold_extras[0]
         for field in (
             "checkpoint_epochs",
             "n_epochs_unc",
