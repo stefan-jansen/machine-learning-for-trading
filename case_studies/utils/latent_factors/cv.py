@@ -971,8 +971,12 @@ def _prepare_fold_inputs(
     )
     ragged_inputs = None
     if need_ragged_inputs:
+        ragged_dataset = fold_dataset
+        if macro_panel is not None:
+            macro_start = macro_panel.select(pl.col(date_col).min()).item()
+            ragged_dataset = ragged_dataset.filter(pl.col(date_col) >= macro_start)
         ragged_panel = prepare_ragged_panel_data(
-            fold_dataset,
+            ragged_dataset,
             feature_names=feature_names,
             label_col=label_col,
             date_col=date_col,
