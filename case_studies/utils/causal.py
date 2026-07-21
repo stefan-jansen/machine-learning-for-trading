@@ -275,11 +275,14 @@ def manual_dml_timeseries(
     # Must include intercept: cross-fitting residuals may have non-zero mean
     # when training data varies across folds (expanding window).
     if hac_maxlags is None:
-        auto = max(1, int(n_valid ** (1 / 3)))
+        n_inference_periods = (
+            len(np.unique(time_codes[valid])) if time_values is not None else n_valid
+        )
+        auto = max(1, int(n_inference_periods ** (1 / 3)))
         # Overlapping h-period labels need L >= h-1; the cube-root rule is
         # horizon-blind and under-lags long-horizon overlapping returns.
         hac_maxlags = max(horizon - 1, auto) if horizon else auto
-        hac_maxlags = min(hac_maxlags, max(1, n_valid // 2))
+        hac_maxlags = min(hac_maxlags, max(1, n_inference_periods // 2))
 
     T_const = sm.add_constant(T_v)
     ols_iid = OLS(Y_v, T_const).fit()
