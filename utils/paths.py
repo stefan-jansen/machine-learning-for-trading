@@ -121,7 +121,7 @@ CHAPTER_STAGES: dict[int, str] = {
 
 
 def display_path(path: Path | str) -> str:
-    """Return a reader-safe display path for notebook output.
+    """Return a portable, reader-safe display path for notebook output.
 
     Use in `print(...)` statements inside notebooks so the committed cell
     output never bakes in machine-specific absolute paths (e.g. `/home/<user>/...`).
@@ -130,14 +130,19 @@ def display_path(path: Path | str) -> str:
     try:
         return str(p.relative_to(REPO_ROOT))
     except ValueError:
-        output_root = os.environ.get("ML4T_OUTPUT_DIR")
-        if output_root:
+        pass
+
+    if p.is_absolute():
+        for variable in ("ML4T_CHAPTER_OUTPUT_DIR", "ML4T_OUTPUT_DIR", "ML4T_DATA_PATH"):
+            configured_root = os.environ.get(variable)
+            if not configured_root:
+                continue
             try:
-                relative = p.relative_to(Path(output_root).resolve())
-                return str(Path("$ML4T_OUTPUT_DIR") / relative)
+                relative = p.relative_to(Path(configured_root).expanduser().resolve())
             except ValueError:
-                pass
-        return str(p)
+                continue
+            return str(Path(f"<{variable}>") / relative)
+    return str(p)
 
 
 def get_chapter_dir(chapter: int | str) -> Path:
