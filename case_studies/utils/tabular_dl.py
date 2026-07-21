@@ -274,14 +274,6 @@ def _train_tabm_fold(
 from case_studies.utils.registry.store import flush_fold_predictions
 
 
-def _load_incremental_preds(incr_dir: Path) -> pl.DataFrame:
-    """Reassemble all predictions from incremental fold saves."""
-    parquet_files = sorted(incr_dir.glob("*.parquet"))
-    if not parquet_files:
-        return pl.DataFrame()
-    return pl.concat([pl.read_parquet(f) for f in parquet_files])
-
-
 def _load_incremental_preds_for_config(incr_dir: Path, config_name: str) -> pl.DataFrame:
     """Reassemble one config's predictions from its per-fold incremental saves."""
     parquet_files = sorted(incr_dir.glob(f"{config_name}_fold*.parquet"))
