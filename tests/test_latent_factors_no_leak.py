@@ -1181,12 +1181,13 @@ def test_latent_cv_replaces_placeholder_with_fold_temporal_features(
             "fwd_ret": [0.01, 0.02, 0.03] * len(dates),
         }
     )
+    fold_rows = len(dates) * len(symbols)
     temporal_by_fold = pl.DataFrame(
         {
-            "timestamp": [date for date in dates for _ in symbols],
-            "symbol": symbols * len(dates),
-            "fold": [1] * (len(dates) * len(symbols)),
-            "temporal_feature": [3.0, 2.0, 1.0] * len(dates),
+            "timestamp": [date for date in dates for _ in symbols] * 2,
+            "symbol": symbols * len(dates) * 2,
+            "fold": [1] * fold_rows + [2] * fold_rows,
+            "temporal_feature": [3.0, 2.0, 1.0] * len(dates) + [10.0, 20.0, 30.0] * len(dates),
         }
     ).to_pandas()
     split = {
@@ -1211,23 +1212,32 @@ def test_latent_cv_replaces_placeholder_with_fold_temporal_features(
         return np.zeros_like(returns_val), {"converged": True}
 
     monkeypatch.setitem(cv._MODEL_RUNNERS, "ipca", capture_fold)
-    cv.run_latent_factor_cv(
-        panel_data=None,
-        splits=[split],
-        models=["ipca"],
-        n_factors=2,
-        use_cache=False,
-        dataset=dataset,
-        feature_names=["base_feature", "temporal_feature"],
-        label_col="fwd_ret",
-        date_col="timestamp",
-        entity_col="symbol",
-        temporal_by_fold=temporal_by_fold,
-        temporal_keys=["timestamp", "symbol"],
-        temporal_feature_names=["temporal_feature"],
-    )
 
-    assert captured["chars_train"][0, :, 1].tolist() == pytest.approx([0.5, 0.0, -0.5])
+    def run(temporal_features) -> np.ndarray:
+        cv.run_latent_factor_cv(
+            panel_data=None,
+            splits=[split],
+            models=["ipca"],
+            n_factors=2,
+            use_cache=False,
+            dataset=dataset,
+            feature_names=["base_feature", "temporal_feature"],
+            label_col="fwd_ret",
+            date_col="timestamp",
+            entity_col="symbol",
+            temporal_by_fold=temporal_features,
+            temporal_keys=["timestamp", "symbol"],
+            temporal_feature_names=["temporal_feature"],
+        )
+        return captured["chars_train"].copy()
+
+    original = run(temporal_by_fold)
+    perturbed = temporal_by_fold.copy()
+    perturbed.loc[perturbed["fold"] == 2, "temporal_feature"] += 10_000.0
+    after_later_fold_perturbation = run(perturbed)
+
+    assert original[0, :, 1].tolist() == pytest.approx([0.5, 0.0, -0.5])
+    assert np.array_equal(original, after_later_fold_perturbation)
 
 
 def test_fold_temporal_assembly_changes_training_identity() -> None:
