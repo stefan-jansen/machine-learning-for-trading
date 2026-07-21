@@ -284,11 +284,15 @@ def precompute_weights(
     *,
     label: str = "",
     case_study: str = "",
+    prediction_hash: str | None = None,
 ) -> pl.DataFrame:
     """Compute allocation weights from a strategy spec, without running the engine.
 
     Use this to avoid redundant MVO/HRP computation in Ch19 risk sweeps
     where the same allocation weights are tested with different risk overlays.
+
+    ``prediction_hash`` is required for conformal allocation because its
+    calibration widths are stored beside the corresponding predictions.
 
     Returns
     -------
@@ -311,6 +315,7 @@ def precompute_weights(
             cadence=cadence,
             label=label,
             case_study=case_study,
+            prediction_hash=prediction_hash,
         )
     return weights
 

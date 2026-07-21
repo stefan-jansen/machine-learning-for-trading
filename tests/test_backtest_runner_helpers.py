@@ -147,6 +147,37 @@ def test_target_weights_reject_duplicate_keys() -> None:
         _target_weights_by_timestamp(weights)
 
 
+def test_precompute_weights_forwards_prediction_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    import case_studies.utils.backtest_runner as br
+
+    timestamp = datetime(2024, 1, 2)
+    predictions = pl.DataFrame({"timestamp": [timestamp], "symbol": ["BTC"], "y_score": [0.1]})
+    base_weights = pl.DataFrame({"timestamp": [timestamp], "symbol": ["BTC"], "weight": [1.0]})
+    captured = {}
+
+    monkeypatch.setattr(br, "build_target_weights_from_config", lambda *_args: base_weights)
+
+    def fake_apply(*_args, **kwargs):
+        captured.update(kwargs)
+        return base_weights
+
+    monkeypatch.setattr(br, "_apply_allocation", fake_apply)
+    result = br.precompute_weights(
+        predictions,
+        {
+            "signal": {"method": "equal_weight_top_k"},
+            "allocation": {"method": "conformal_weighted"},
+        },
+        pl.DataFrame(),
+        label="fwd_ret_24h",
+        case_study="crypto_perps_funding",
+        prediction_hash="current_mae_pit",
+    )
+
+    assert result.equals(base_weights)
+    assert captured["prediction_hash"] == "current_mae_pit"
+
+
 def test_apply_universe_filter_collapses_intraday_to_date_grain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
