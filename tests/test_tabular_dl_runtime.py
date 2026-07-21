@@ -10,6 +10,46 @@ import pytest
 from case_studies.utils import registry, tabular_dl
 
 
+def _cache_frame(*, include_eval: bool = True) -> pl.DataFrame:
+    frame = pl.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2020-04-01"), pd.Timestamp("2020-05-01")],
+            "symbol": [1, 2],
+            "y_true": [0.0, 1.0],
+            "y_score": [0.1, 0.2],
+            "fold_id": [0, 1],
+        }
+    )
+    if include_eval:
+        frame = frame.with_columns(pl.Series("eval_actual", [-0.1, 0.3]))
+    return frame
+
+
+def _install_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    frames: dict[int, pl.DataFrame],
+) -> None:
+    rows = []
+    for epoch, frame in frames.items():
+        prediction_hash = f"prediction-{epoch}"
+        target = tmp_path / prediction_hash
+        target.mkdir()
+        frame.write_parquet(target / "predictions.parquet")
+        rows.append(
+            {
+                "prediction_hash": prediction_hash,
+                "checkpoint_value": epoch,
+            }
+        )
+    monkeypatch.setattr(
+        registry,
+        "load_prediction_sets",
+        lambda *_args, **_kwargs: pl.DataFrame(rows),
+    )
+    monkeypatch.setattr(registry, "prediction_dir", lambda _case_study, value: tmp_path / value)
+
+
 def _classification_frame() -> pd.DataFrame:
     timestamps = pd.date_range("2020-01-01", periods=5, freq="MS")
     rows = []
@@ -135,6 +175,164 @@ def test_runtime_spec_records_strict_determinism() -> None:
         "num_threads": 8,
         "seed": 17,
     }
+
+
+def test_tabm_training_identity_covers_every_effective_input() -> None:
+    config = {
+        "family": "tabular_dl",
+        "config_name": "tabm_s",
+        "n_epochs": 100,
+        "batch_size": 4096,
+        "checkpoint_interval": 25,
+    }
+    runtime = tabular_dl.tabm_runtime_spec("cpu", seed=42)
+    baseline = tabular_dl._build_tabm_training_spec(
+        config,
+        label_col="fwd_class_1m",
+        n_folds=10,
+        feature_names=["value", "size"],
+        eval_label_col="fwd_ret_1m",
+        task_type="classification",
+        class_values=[0, 1],
+        runtime_spec=runtime,
+        seed=42,
+    )
+    variants = [
+        {**config, "batch_size": 2048},
+        {**config, "n_epochs": 75},
+        {**config, "checkpoint_interval": 15},
+    ]
+    specs = [
+        tabular_dl._build_tabm_training_spec(
+            variant,
+            label_col="fwd_class_1m",
+            n_folds=10,
+            feature_names=["value", "size"],
+            eval_label_col="fwd_ret_1m",
+            task_type="classification",
+            class_values=[0, 1],
+            runtime_spec=runtime,
+            seed=42,
+        )
+        for variant in variants
+    ]
+    specs.extend(
+        [
+            tabular_dl._build_tabm_training_spec(
+                config,
+                label_col="fwd_class_1m",
+                n_folds=10,
+                feature_names=["value", "quality"],
+                eval_label_col="fwd_ret_1m",
+                task_type="classification",
+                class_values=[0, 1],
+                runtime_spec=runtime,
+                seed=42,
+            ),
+            tabular_dl._build_tabm_training_spec(
+                config,
+                label_col="fwd_class_1m",
+                n_folds=10,
+                feature_names=["value", "size"],
+                eval_label_col="fwd_ret_3m",
+                task_type="classification",
+                class_values=[0, 1],
+                runtime_spec=runtime,
+                seed=42,
+            ),
+            tabular_dl._build_tabm_training_spec(
+                config,
+                label_col="fwd_class_1m",
+                n_folds=10,
+                feature_names=["value", "size"],
+                eval_label_col="fwd_ret_1m",
+                task_type="classification",
+                class_values=[0, 1],
+                runtime_spec=tabular_dl.tabm_runtime_spec("cpu", seed=17),
+                seed=17,
+            ),
+        ]
+    )
+
+    baseline_hash = registry.training_hash_from_spec(baseline)
+    assert all(registry.training_hash_from_spec(spec) != baseline_hash for spec in specs)
+    assert baseline["params"]["batch_size"] == 4096
+    assert baseline["params"]["eval_label_col"] == "fwd_ret_1m"
+    assert baseline["params"]["feature_names"] == ["value", "size"]
+    assert baseline["params"]["task_type"] == "classification"
+    assert baseline["seed"] == 42
+
+
+def test_cached_classification_fails_closed_without_eval_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    frame = _cache_frame(include_eval=False)
+    _install_cache(monkeypatch, tmp_path, {25: frame})
+
+    with pytest.raises(ValueError, match="eval_actual"):
+        tabular_dl._load_cached_tabm_config(
+            case_study="probe",
+            training_spec={"family": "tabular_dl", "label": "label", "seed": 42},
+            config_name="tabm_probe",
+            prediction_split="validation",
+            date_col="timestamp",
+            entity_col="symbol",
+            eval_col="eval_actual",
+            expected_checkpoints=(25,),
+            expected_keys=frame.select("timestamp", "symbol", "fold_id"),
+        )
+
+
+def test_cached_replay_requires_the_exact_checkpoint_set(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    frame = _cache_frame()
+    _install_cache(monkeypatch, tmp_path, {25: frame})
+
+    with pytest.raises(ValueError, match="checkpoints"):
+        tabular_dl._load_cached_tabm_config(
+            case_study="probe",
+            training_spec={"family": "tabular_dl", "label": "label", "seed": 42},
+            config_name="tabm_probe",
+            prediction_split="validation",
+            date_col="timestamp",
+            entity_col="symbol",
+            eval_col="eval_actual",
+            expected_checkpoints=(25, 50, 75, 100),
+            expected_keys=frame.select("timestamp", "symbol", "fold_id"),
+        )
+
+
+@pytest.mark.parametrize("defect", ["duplicate", "coverage", "schema"])
+def test_cached_replay_rejects_invalid_prediction_panels(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    defect: str,
+) -> None:
+    expected = _cache_frame()
+    frame = expected
+    if defect == "duplicate":
+        frame = pl.concat([expected, expected.head(1)])
+    elif defect == "coverage":
+        frame = expected.head(1)
+    else:
+        frame = expected.rename({"timestamp": "date"})
+    _install_cache(monkeypatch, tmp_path, {25: frame})
+
+    with pytest.raises(ValueError, match="schema|duplicate|coverage"):
+        tabular_dl._load_cached_tabm_config(
+            case_study="probe",
+            training_spec={"family": "tabular_dl", "label": "label", "seed": 42},
+            config_name="tabm_probe",
+            prediction_split="validation",
+            date_col="timestamp",
+            entity_col="symbol",
+            eval_col="eval_actual",
+            expected_checkpoints=(25,),
+            expected_keys=expected.select("timestamp", "symbol", "fold_id"),
+        )
 
 
 def test_complete_registry_replays_predictions_instead_of_returning_empty(

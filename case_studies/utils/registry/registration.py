@@ -64,6 +64,10 @@ def register_training_run(
         ISO timestamp when training started.
     elapsed_s : float, optional
         Wall-clock seconds for the training run.
+    training_spec : dict, optional
+        Prebuilt identity used by cache lookup. When supplied, registration
+        validates its family, config, label, and fold count and stores this
+        exact spec instead of rebuilding it.
     """
     if case_dir is None:
         case_dir = _case_dir(case_study)
@@ -131,6 +135,7 @@ def register_epoch_checkpoint(
     task_type: str = "regression",
     class_values: list | None = None,
     eval_col: str | None = None,
+    training_spec: dict | None = None,
 ) -> str:
     """Shared 'one-config-per-epoch-checkpoint' registration path.
 
@@ -214,22 +219,41 @@ def register_epoch_checkpoint(
         f"register_epoch_checkpoint: family must be 'deep_learning' or 'tabular_dl', got {family!r}"
     )
 
+    if training_spec is not None:
+        spec = dict(training_spec)
+        expected_identity = {
+            "family": family,
+            "config_name": config_name,
+            "label": label,
+            "n_folds": n_folds,
+        }
+        mismatches = {
+            key: (spec.get(key), value)
+            for key, value in expected_identity.items()
+            if spec.get(key) != value
+        }
+        if mismatches:
+            raise ValueError(f"training_spec disagrees with registration inputs: {mismatches}")
+    else:
+        spec = None
+
     try:
         # Main path: preset loaded from disk is authoritative.
         # extra_params is deliberately NOT passed here — doing so would
         # merge architecture/lookback into spec["params"] and change the
         # training_hash vs. historical runs that already populated the
         # preset's own params from disk.
-        spec = build_training_spec(
-            family,
-            config_name,
-            label,
-            n_folds=n_folds,
-            n_epochs=n_epochs,
-            feature_sets=feature_sets,
-            checkpoint_interval=checkpoint_interval,
-            extra_params=spec_extra_params,
-        )
+        if spec is None:
+            spec = build_training_spec(
+                family,
+                config_name,
+                label,
+                n_folds=n_folds,
+                n_epochs=n_epochs,
+                feature_sets=feature_sets,
+                checkpoint_interval=checkpoint_interval,
+                extra_params=spec_extra_params,
+            )
     except FileNotFoundError:
         # Fallback for unknown config_name (no preset on disk).
         spec = {
