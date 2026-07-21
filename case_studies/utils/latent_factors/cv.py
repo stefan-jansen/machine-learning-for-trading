@@ -1461,6 +1461,7 @@ def _register_model_predictions(
             "label": label_col,
             "library": "pytorch",
             "n_epochs": n_epochs,
+            "n_folds": n_folds,
             "params": {"n_factors": n_factors},
             "seed": 42,
         }
