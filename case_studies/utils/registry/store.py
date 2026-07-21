@@ -702,6 +702,9 @@ def flush_fold_predictions(
     y_val: np.ndarray,
     date_col: str,
     entity_col: str,
+    *,
+    eval_actual: np.ndarray | None = None,
+    eval_col: str = "eval_actual",
 ) -> None:
     """Write one fold's checkpoint predictions to parquet for crash safety.
 
@@ -732,6 +735,8 @@ def flush_fold_predictions(
                 "epoch": np.full(n, ep, dtype=np.int32),
             }
         )
+        if eval_actual is not None:
+            df = df.with_columns(pl.Series(eval_col, eval_actual.astype(np.float64)))
         frames.append(df)
 
     if frames:

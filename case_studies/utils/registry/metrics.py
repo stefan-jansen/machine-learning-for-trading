@@ -614,6 +614,7 @@ def compute_fold_metrics_from_predictions(
     best_epoch: int,
     date_col: str = "timestamp",
     entity_col: str = "symbol",
+    eval_col: str | None = None,
 ):
     """Compute per-fold cross-sectional IC from a registered predictions table.
 
@@ -635,6 +636,7 @@ def compute_fold_metrics_from_predictions(
     if best_preds.height == 0:
         return pl.DataFrame()
 
+    actual_col = eval_col if eval_col and eval_col in best_preds.columns else "y_true"
     rows = []
     for fold_id in sorted(best_preds["fold_id"].unique().to_list()):
         fold_df = best_preds.filter(pl.col("fold_id") == fold_id)
@@ -643,7 +645,7 @@ def compute_fold_metrics_from_predictions(
             fold_df,
             fold_df,
             pred_col="y_score",
-            ret_col="y_true",
+            ret_col=actual_col,
             date_col=date_col,
             entity_col=_entity,
             method="spearman",

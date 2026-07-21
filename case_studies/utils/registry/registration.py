@@ -126,6 +126,11 @@ def register_epoch_checkpoint(
     started_at: str | None = None,
     elapsed_s: float | None = None,
     prediction_split: str = "validation",
+    checkpoint_interval: int | None = None,
+    spec_extra_params: dict | None = None,
+    task_type: str = "regression",
+    class_values: list | None = None,
+    eval_col: str | None = None,
 ) -> str:
     """Shared 'one-config-per-epoch-checkpoint' registration path.
 
@@ -222,6 +227,8 @@ def register_epoch_checkpoint(
             n_folds=n_folds,
             n_epochs=n_epochs,
             feature_sets=feature_sets,
+            checkpoint_interval=checkpoint_interval,
+            extra_params=spec_extra_params,
         )
     except FileNotFoundError:
         # Fallback for unknown config_name (no preset on disk).
@@ -232,7 +239,10 @@ def register_epoch_checkpoint(
             "label": label,
             "library": library,
             "n_folds": n_folds,
-            "params": dict(extra_params) if extra_params else {},
+            "params": {
+                **(dict(extra_params) if extra_params else {}),
+                **(dict(spec_extra_params) if spec_extra_params else {}),
+            },
             "seed": 42,
         }
         if n_epochs is not None:
@@ -265,6 +275,10 @@ def register_epoch_checkpoint(
         split=prediction_split,
         predictions=predictions,
         metrics={"ic_mean": ic_mean},
+        task_type=task_type,
+        class_values=class_values,
+        eval_col=eval_col,
+        label=label,
     )
     return t_hash
 
