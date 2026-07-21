@@ -23,6 +23,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from sanitize_notebook_paths import (  # noqa: E402
     _iter_notebooks,
     sanitize_notebook_text,
+    source_home_path_leaks,
 )
 from strip_empty_cell_tags import paired_py_has_fossil, strip_text  # noqa: E402
 
@@ -31,6 +32,11 @@ def test_no_machine_specific_paths_in_committed_notebooks() -> None:
     offenders: list[str] = []
     for nb in _iter_notebooks():
         raw = nb.read_text(encoding="utf-8")
+        source_indexes = source_home_path_leaks(raw)
+        if source_indexes:
+            offenders.append(
+                f"{nb.relative_to(REPO_ROOT)} (machine path in source cells {source_indexes})"
+            )
         _, n = sanitize_notebook_text(raw)
         if n:
             offenders.append(f"{nb.relative_to(REPO_ROOT)} ({n})")
@@ -66,6 +72,7 @@ def test_path_sanitizer_does_not_rewrite_cell_source() -> None:
     assert count == 1
     assert clean_notebook["cells"][0]["source"] == notebook["cells"][0]["source"]
     assert clean_notebook["cells"][0]["outputs"][0]["text"] == ["data/file.parquet\n"]
+    assert source_home_path_leaks(json.dumps(notebook)) == [0]
 
 
 # Notebooks still carrying the fossil, all in chapters not yet shipped to readers

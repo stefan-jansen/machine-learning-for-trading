@@ -46,6 +46,7 @@ REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 SKIP_PARTS = {"_reference", ".venv", ".git"}
+MACHINE_HOME_PATTERN = re.compile(r"/home/[^/]+/")
 
 
 def _iter_notebooks() -> list[Path]:
@@ -65,6 +66,18 @@ def sanitize_text(text: str) -> tuple[str, int]:
         text, k = pat.subn(new, text)
         n += k
     return text, n
+
+
+def source_home_path_leaks(text: str) -> list[int]:
+    """Return cell indexes containing a machine-specific home path in source."""
+    notebook = json.loads(text)
+    offenders = []
+    for index, cell in enumerate(notebook.get("cells", [])):
+        source = cell.get("source", [])
+        source_text = "".join(source) if isinstance(source, list) else str(source)
+        if MACHINE_HOME_PATTERN.search(source_text):
+            offenders.append(index)
+    return offenders
 
 
 def _sanitize_value(value: object) -> tuple[object, int]:
@@ -113,6 +126,18 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true", help="report only; exit 1 if any leak found")
     args = ap.parse_args()
+
+    source_offenders: list[tuple[Path, list[int]]] = []
+    for nb in _iter_notebooks():
+        indexes = source_home_path_leaks(nb.read_text(encoding="utf-8"))
+        if indexes:
+            source_offenders.append((nb.relative_to(REPO_ROOT), indexes))
+
+    if source_offenders:
+        print("machine-specific home paths require manual source edits:", file=sys.stderr)
+        for rel, indexes in source_offenders:
+            print(f"  {rel}: cells {indexes}", file=sys.stderr)
+        return 2
 
     dirty: list[tuple[Path, int]] = []
     for nb in _iter_notebooks():
