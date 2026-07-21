@@ -13,13 +13,17 @@ Each test scans every tracked ``.ipynb`` and names the script that fixes it.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from sanitize_notebook_paths import _iter_notebooks, sanitize_text  # noqa: E402
+from sanitize_notebook_paths import (  # noqa: E402
+    _iter_notebooks,
+    sanitize_notebook_text,
+)
 from strip_empty_cell_tags import paired_py_has_fossil, strip_text  # noqa: E402
 
 
@@ -27,7 +31,7 @@ def test_no_machine_specific_paths_in_committed_notebooks() -> None:
     offenders: list[str] = []
     for nb in _iter_notebooks():
         raw = nb.read_text(encoding="utf-8")
-        _, n = sanitize_text(raw)
+        _, n = sanitize_notebook_text(raw)
         if n:
             offenders.append(f"{nb.relative_to(REPO_ROOT)} ({n})")
     assert not offenders, (
@@ -35,6 +39,33 @@ def test_no_machine_specific_paths_in_committed_notebooks() -> None:
         "outputs/metadata. Run `uv run python scripts/sanitize_notebook_paths.py` "
         "to fix:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_path_sanitizer_does_not_rewrite_cell_source() -> None:
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "source": ['path = "/home/reader/ml4t/code/data/file.parquet"\n'],
+                "metadata": {},
+                "outputs": [
+                    {
+                        "output_type": "stream",
+                        "name": "stdout",
+                        "text": ["/home/reader/ml4t/code/data/file.parquet\n"],
+                    }
+                ],
+            }
+        ],
+        "metadata": {},
+    }
+
+    clean, count = sanitize_notebook_text(json.dumps(notebook))
+    clean_notebook = json.loads(clean)
+
+    assert count == 1
+    assert clean_notebook["cells"][0]["source"] == notebook["cells"][0]["source"]
+    assert clean_notebook["cells"][0]["outputs"][0]["text"] == ["data/file.parquet\n"]
 
 
 # Notebooks still carrying the fossil, all in chapters not yet shipped to readers

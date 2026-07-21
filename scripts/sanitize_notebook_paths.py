@@ -8,8 +8,9 @@ rewrites them in place:
 * repo-internal paths -> repo-relative (matching ``utils.paths.display_path``)
 * anything else under ``~/ml4t`` -> a ``~``-prefixed generic path
 
-It edits the raw ``.ipynb`` text (no JSON reserialization) so the only diff is
-the replaced substrings — formatting, key order and outputs are untouched.
+It parses the ``.ipynb`` and only traverses notebook metadata, cell metadata,
+and cell outputs. Cell source is never rewritten, including intentional Docker
+paths such as ``/app``. The canonical one-space JSON format is preserved.
 
 Idempotent: running twice is a no-op. A companion test
 (``tests/test_notebook_output_hygiene.py``) fails CI if any leak survives.
@@ -22,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -65,6 +67,48 @@ def sanitize_text(text: str) -> tuple[str, int]:
     return text, n
 
 
+def _sanitize_value(value: object) -> tuple[object, int]:
+    if isinstance(value, str):
+        return sanitize_text(value)
+    if isinstance(value, list):
+        clean = []
+        count = 0
+        for item in value:
+            new_item, item_count = _sanitize_value(item)
+            clean.append(new_item)
+            count += item_count
+        return clean, count
+    if isinstance(value, dict):
+        clean = {}
+        count = 0
+        for key, item in value.items():
+            new_item, item_count = _sanitize_value(item)
+            clean[key] = new_item
+            count += item_count
+        return clean, count
+    return value, 0
+
+
+def sanitize_notebook_text(text: str) -> tuple[str, int]:
+    """Sanitize notebook outputs and metadata without touching cell source."""
+    notebook = json.loads(text)
+    count = 0
+
+    notebook["metadata"], item_count = _sanitize_value(notebook.get("metadata", {}))
+    count += item_count
+    for cell in notebook.get("cells", []):
+        if "metadata" in cell:
+            cell["metadata"], item_count = _sanitize_value(cell["metadata"])
+            count += item_count
+        if "outputs" in cell:
+            cell["outputs"], item_count = _sanitize_value(cell["outputs"])
+            count += item_count
+
+    if not count:
+        return text, 0
+    return json.dumps(notebook, indent=1, ensure_ascii=False) + "\n", count
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true", help="report only; exit 1 if any leak found")
@@ -73,7 +117,7 @@ def main() -> int:
     dirty: list[tuple[Path, int]] = []
     for nb in _iter_notebooks():
         raw = nb.read_text(encoding="utf-8")
-        new, n = sanitize_text(raw)
+        new, n = sanitize_notebook_text(raw)
         if n:
             dirty.append((nb.relative_to(REPO_ROOT), n))
             if not args.check:
