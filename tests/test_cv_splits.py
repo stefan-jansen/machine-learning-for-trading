@@ -189,11 +189,14 @@ def test_generate_cv_splits_etfs_embargo_respects_label_buffer(etfs_splits) -> N
         assert gap >= pd.Timedelta(days=21), s  # at minimum 21 calendar days
 
 
-def test_generate_cv_splits_etfs_val_before_holdout(etfs_splits) -> None:
-    """All validation windows end strictly before the holdout_start (2024-01-01)."""
+def test_generate_cv_splits_etfs_val_before_holdout(etfs_splits, etfs_daily_frame) -> None:
+    """Every 21-session validation label ends before the holdout."""
     holdout_start = pd.Timestamp("2024-01-01")
+    timestamps = etfs_daily_frame.select("timestamp").to_series().to_pandas()
+    holdout_pos = int(pd.DatetimeIndex(timestamps).searchsorted(holdout_start, side="left"))
     for s in etfs_splits:
-        assert s["val_end"] < holdout_start, s
+        val_end_pos = int(pd.DatetimeIndex(timestamps).searchsorted(s["val_end"], side="left"))
+        assert val_end_pos + 21 < holdout_pos, s
 
 
 def test_generate_cv_splits_etfs_train_size_10y(etfs_splits) -> None:
@@ -225,6 +228,21 @@ def test_generate_cv_splits_crypto_respects_8h_buffer_and_no_calendar() -> None:
         # because step is in 8-hour bars).
         gap = s["val_start"] - s["train_end"]
         assert gap >= pd.Timedelta(hours=8), s
+        assert s["val_end"] + pd.Timedelta(hours=8) < pd.Timestamp("2024-01-01"), s
+
+
+def test_generate_cv_splits_crypto_purges_variant_endpoint_at_holdout() -> None:
+    ts = pd.date_range("2019-01-01", "2023-12-31 16:00", freq="8h")
+    df = pl.DataFrame({"timestamp": pl.Series(ts)})
+
+    splits = generate_cv_splits(
+        df,
+        case_study_id="crypto_perps_funding",
+        label_buffer="24H",
+    )
+
+    assert splits[0]["val_end"] == pd.Timestamp("2023-12-30 16:00")
+    assert splits[0]["val_end"] + pd.Timedelta(hours=24) < pd.Timestamp("2024-01-01")
 
 
 # -----------------------------------------------------------------------------

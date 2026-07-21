@@ -90,6 +90,38 @@ def _normalize_label_buffer(s: str) -> str:
     return s
 
 
+def _purge_holdout_touching_validation(
+    val_idx: np.ndarray,
+    timestamps: pd.DatetimeIndex,
+    *,
+    holdout_start: str | None,
+    label_buffer: str,
+    calendar_id: str | None,
+) -> np.ndarray:
+    """Exclude validation signals whose label endpoint reaches the holdout."""
+    if not holdout_start or label_buffer in {"", "0D", "0H"}:
+        return val_idx
+
+    boundary = pd.Timestamp(holdout_start)
+    if timestamps.tz is not None:
+        boundary = (
+            boundary.tz_localize(timestamps.tz)
+            if boundary.tzinfo is None
+            else boundary.tz_convert(timestamps.tz)
+        )
+    elif boundary.tzinfo is not None:
+        boundary = boundary.tz_localize(None)
+
+    trading_day_match = re.fullmatch(r"(\d+)D", label_buffer)
+    if calendar_id is not None and trading_day_match:
+        horizon = int(trading_day_match.group(1))
+        holdout_pos = int(timestamps.searchsorted(boundary, side="left"))
+        return val_idx[val_idx < holdout_pos - horizon]
+
+    cutoff = boundary - pd.Timedelta(label_buffer)
+    return val_idx[timestamps[val_idx] < cutoff]
+
+
 def load_evaluation_config(case_study_id: str) -> dict[str, Any]:
     """Read the evaluation section from setup.yaml.
 
@@ -325,6 +357,18 @@ def generate_cv_splits(
 
     splits = []
     for fold_i, (train_idx, val_idx) in enumerate(cv.split(ts_df)):
+        val_idx = _purge_holdout_touching_validation(
+            val_idx,
+            ts_index,
+            holdout_start=eval_config.get("holdout_start"),
+            label_buffer=label_buffer,
+            calendar_id=calendar_id,
+        )
+        if len(val_idx) == 0:
+            raise ValueError(
+                f"Fold {fold_i} has no validation timestamps after purging labels that "
+                "touch the holdout boundary"
+            )
         splits.append(
             {
                 "fold": fold_i,
