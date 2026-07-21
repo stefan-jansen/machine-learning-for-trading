@@ -463,6 +463,7 @@ def prepare_gbm_folds(
     temporal_feature_names: list[str] | None = None,
     train_sample_frac: float = 1.0,
     eval_label_col: str | None = None,
+    seed: int = RANDOM_SEED,
 ) -> list[dict[str, Any]]:
     """Prepare CV fold data for GBM training.
 
@@ -502,6 +503,8 @@ def prepare_gbm_folds(
     eval_label_col : str, optional
         Continuous return used for classification IC. The discrete label
         remains the fitting target and is retained as ``y_val``.
+    seed : int
+        Base seed for optional within-fold training subsampling.
 
     Returns
     -------
@@ -576,7 +579,7 @@ def prepare_gbm_folds(
         # Seed is tied to fold_id for reproducibility.
         if 0.0 < train_sample_frac < 1.0 and len(X_train) > 0:
             n_keep = max(1, int(len(X_train) * train_sample_frac))
-            rng = np.random.default_rng(RANDOM_SEED + fold_id)
+            rng = np.random.default_rng(seed + fold_id)
             keep_idx = rng.choice(len(X_train), size=n_keep, replace=False)
             keep_idx.sort()  # preserve row order
             X_train = X_train[keep_idx]
@@ -617,6 +620,7 @@ def train_gbm_config(
     feature_names: list[str],
     device: str = "cpu",
     num_threads: int = DEFAULT_GBM_CPU_THREADS,
+    seed: int = RANDOM_SEED,
     max_bin: int | None = None,
     entity_col: str = "symbol",
     date_col: str = "timestamp",
@@ -641,6 +645,8 @@ def train_gbm_config(
         "cpu" or "cuda"/"gpu". GPU requests fail when CUDA is unavailable.
     num_threads : int
         Fixed LightGBM CPU thread count. Included in deterministic execution.
+    seed : int
+        Seed applied to every LightGBM stochastic mechanism.
     max_bin : int, optional
         Override max_bin (GPU typically needs 63).
     entity_col, date_col : str
@@ -672,7 +678,7 @@ def train_gbm_config(
 
     # Device and reproducibility settings are explicit run inputs. They must
     # also be included in the registry spec by the caller.
-    params.update(lightgbm_runtime_params(device, num_threads=num_threads))
+    params.update(lightgbm_runtime_params(device, num_threads=num_threads, seed=seed))
     if max_bin is not None:
         params["max_bin"] = max_bin
 
