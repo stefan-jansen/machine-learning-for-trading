@@ -399,6 +399,10 @@ For running notebooks without a display (e.g., on a server or in CI):
 MPLBACKEND=Agg PLOTLY_RENDERER=json uv run python notebook.py
 ```
 
+Use that command only for running the `.py` without a display. When committing an
+executed `.ipynb`, leave both renderer variables unset so Matplotlib and Plotly
+figures are embedded; `tests/test_notebook_output_hygiene.py` enforces this.
+
 ---
 
 ## Troubleshooting

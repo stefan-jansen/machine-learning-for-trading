@@ -14,6 +14,7 @@ Each test scans every tracked ``.ipynb`` and names the script that fixes it.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -73,6 +74,66 @@ def test_path_sanitizer_does_not_rewrite_cell_source() -> None:
     assert clean_notebook["cells"][0]["source"] == notebook["cells"][0]["source"]
     assert clean_notebook["cells"][0]["outputs"][0]["text"] == ["data/file.parquet\n"]
     assert source_home_path_leaks(json.dumps(notebook)) == [0]
+
+
+KNOWN_MISSING_MATPLOTLIB = frozenset(
+    {
+        "01_process_is_edge/macro_regimes.ipynb",
+        "03_market_microstructure/03_itch_lob_analysis.ipynb",
+        "03_market_microstructure/06_itch_intraday_patterns.ipynb",
+        "03_market_microstructure/07_itch_stylized_facts.ipynb",
+        "03_market_microstructure/17_databento_bar_sampling.ipynb",
+        "06_strategy_definition/03_case_study_overview.ipynb",
+        "09_model_based_features/06_path_signatures.ipynb",
+        "09_model_based_features/11_hmm_regimes.ipynb",
+        "09_model_based_features/13_regime_as_feature.ipynb",
+        "case_studies/etfs/04_model_based_features.ipynb",
+    }
+)
+
+
+def _missing_matplotlib_outputs() -> dict[str, int]:
+    """Return notebooks with rendered Matplotlib calls but no embedded PNG."""
+    offenders: dict[str, int] = {}
+    for nb_path in _iter_notebooks():
+        notebook = json.loads(nb_path.read_text(encoding="utf-8"))
+        count = 0
+        for cell in notebook.get("cells", []):
+            if cell.get("cell_type") != "code":
+                continue
+            source = "".join(cell.get("source", []))
+            calls_plt_show = bool(re.search(r"(?m)^\s*plt\.show\s*\(", source))
+            calls_matplotlib_fig_show = bool(re.search(r"(?m)^\s*fig\.show\s*\(", source)) and (
+                "ax." in source or "plt." in source
+            )
+            if not (calls_plt_show or calls_matplotlib_fig_show):
+                continue
+            has_png = any(
+                "image/png" in output.get("data", {}) for output in cell.get("outputs", [])
+            )
+            if not has_png:
+                count += 1
+        if count:
+            offenders[str(nb_path.relative_to(REPO_ROOT))] = count
+    return offenders
+
+
+def test_no_new_missing_matplotlib_outputs() -> None:
+    offenders = _missing_matplotlib_outputs()
+    new = sorted(set(offenders) - KNOWN_MISSING_MATPLOTLIB)
+    assert not new, (
+        "Notebooks call Matplotlib show without an embedded image/png output. "
+        "Execute committed notebooks with the default renderers:\n  " + "\n  ".join(new)
+    )
+
+
+def test_known_missing_matplotlib_list_has_no_stale_entries() -> None:
+    offenders = _missing_matplotlib_outputs()
+    stale = sorted(KNOWN_MISSING_MATPLOTLIB - set(offenders))
+    assert not stale, (
+        "These notebooks now embed every Matplotlib figure. Remove them from "
+        "KNOWN_MISSING_MATPLOTLIB:\n  " + "\n  ".join(stale)
+    )
 
 
 # Notebooks still carrying the fossil, all in chapters not yet shipped to readers
