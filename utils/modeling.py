@@ -493,8 +493,11 @@ def load_modeling_dataset(
             f"case_studies/{case_study_id}/config/setup.yaml. "
             f"Add buffer to labels.buffer (primary) or labels.variant_buffers (variants)."
         )
+    # Fold identity belongs to the label contract. Deriving boundaries from the
+    # feature-joined frame lets warm-up nulls or feature availability shift the
+    # calendar and makes model selection disagree with canonical_window().
     splits = generate_cv_splits(
-        dataset,
+        labels,
         case_study_id=case_study_id,
         label_buffer=label_buffer,
         date_col=date_col,
