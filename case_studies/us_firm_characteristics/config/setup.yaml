@@ -166,6 +166,10 @@ modeling:
     # deterministic LightGBM settings and hashes this fixed thread count.
     device: cpu
     num_threads: 8
+  tabular_dl:
+    models: [tabm]
+    device: cpu
+    num_threads: 8
   latent_factors:
     persistent_entities: true
     model_kwargs:
