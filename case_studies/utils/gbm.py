@@ -462,6 +462,7 @@ def prepare_gbm_folds(
     temporal_keys: list[str] | None = None,
     temporal_feature_names: list[str] | None = None,
     train_sample_frac: float = 1.0,
+    eval_label_col: str | None = None,
 ) -> list[dict[str, Any]]:
     """Prepare CV fold data for GBM training.
 
@@ -498,6 +499,9 @@ def prepare_gbm_folds(
         Seed is tied to fold_id for reproducibility. Use < 1.0 for
         memory/compute-constrained runs on large datasets (e.g.,
         nasdaq100 minute bars). Default 1.0.
+    eval_label_col : str, optional
+        Continuous return used for classification IC. The discrete label
+        remains the fitting target and is retained as ``y_val``.
 
     Returns
     -------
@@ -541,6 +545,7 @@ def prepare_gbm_folds(
             y_train = train_rows[label_col].values.astype(np.float32)
             X_val = val_rows[feature_names].values.astype(np.float32)
             y_val = val_rows[label_col].values.astype(np.float32)
+            y_eval = val_rows[eval_label_col].values.astype(np.float32) if eval_label_col else None
             val_dates = val_rows[date_col].values
             del train_rows, val_rows
         else:
@@ -548,6 +553,11 @@ def prepare_gbm_folds(
             y_train = dataset_pd.loc[train_mask, label_col].values.astype(np.float32)
             X_val = dataset_pd.loc[val_mask, feature_names].values.astype(np.float32)
             y_val = dataset_pd.loc[val_mask, label_col].values.astype(np.float32)
+            y_eval = (
+                dataset_pd.loc[val_mask, eval_label_col].values.astype(np.float32)
+                if eval_label_col
+                else None
+            )
             val_dates = dataset_pd.loc[val_mask, date_col].values
 
         # Drop NaN labels
@@ -555,6 +565,8 @@ def prepare_gbm_folds(
         vv = ~np.isnan(y_val)
         X_train, y_train = X_train[tv], y_train[tv]
         X_val, y_val = X_val[vv], y_val[vv]
+        if y_eval is not None:
+            y_eval = y_eval[vv]
         val_dates = val_dates[vv]
         val_entities = (
             dataset_pd.loc[val_mask, entity_col].values[vv] if entity_series is not None else None
@@ -587,6 +599,7 @@ def prepare_gbm_folds(
                 "X_val": X_val,
                 "y_val": y_val,
                 "y_val_lgb": y_val_lgb,
+                "y_eval": y_eval,
                 "dates": val_dates,
                 "entities": val_entities,
                 "n_train": len(X_train),
@@ -733,7 +746,7 @@ def train_gbm_config(
                 {
                     "date": fd["dates"],
                     "symbol": fd["entities"],
-                    "y_true": fd["y_val"],
+                    "y_true": fd["y_eval"] if fd.get("y_eval") is not None else fd["y_val"],
                     "y_pred": preds,
                 }
             )
@@ -752,6 +765,7 @@ def train_gbm_config(
                     "dates": fd["dates"],
                     "entities": fd["entities"],
                     "y_true": fd["y_val"],
+                    "y_eval": fd.get("y_eval"),
                     "y_pred": preds,
                     "fold": fd["fold"],
                     "n_trees": cp,
@@ -781,11 +795,12 @@ def train_gbm_config(
 
     # Per-fold metrics at best checkpoint
     def _fold_ic(e: dict[str, Any]) -> float:
+        ic_target = e["y_eval"] if e.get("y_eval") is not None else e["y_true"]
         frame = pl.DataFrame(
             {
                 "date": e["dates"],
                 "symbol": e["entities"],
-                "y_true": e["y_true"],
+                "y_true": ic_target,
                 "y_pred": e["y_pred"],
             }
         )
@@ -882,6 +897,9 @@ def register_gbm_result(
     train_sample_frac: float = 1.0,
     prediction_split: str = "validation",
     runtime_params: dict[str, Any] | None = None,
+    task_type: str = "regression",
+    class_values: list | None = None,
+    eval_col: str | None = None,
 ) -> str:
     """Register a single GBM config's result to the registry.
 
@@ -930,18 +948,18 @@ def register_gbm_result(
         pred_rows = []
         for e in best_preds:
             n = len(e["y_pred"])
-            pred_rows.append(
-                pl.DataFrame(
-                    {
-                        date_col: e["dates"],
-                        entity_col: e["entities"] if e["entities"] is not None else ["unknown"] * n,
-                        "fold": [e["fold"]] * n,
-                        "prediction": e["y_pred"],
-                        "actual": e["y_true"],
-                    }
-                )
-            )
+            data = {
+                date_col: e["dates"],
+                entity_col: e["entities"] if e["entities"] is not None else ["unknown"] * n,
+                "fold": [e["fold"]] * n,
+                "prediction": e["y_pred"],
+                "actual": e["y_true"],
+            }
+            if e.get("y_eval") is not None:
+                data["eval_actual"] = e["y_eval"]
+            pred_rows.append(pl.DataFrame(data))
         pred_df = pl.concat(pred_rows).to_pandas()
+        resolved_eval_col = eval_col or ("eval_actual" if task_type == "classification" else None)
         register_prediction_set(
             case_study_id,
             t_hash,
@@ -951,6 +969,10 @@ def register_gbm_result(
                 "ic_mean": result["best_ic"],
                 "ic_std": result["best_ic_std"],
             },
+            task_type=task_type,
+            class_values=class_values,
+            eval_col=resolved_eval_col,
+            label=label_col,
         )
 
     # Save learning curves and fold metrics to registry training dir
