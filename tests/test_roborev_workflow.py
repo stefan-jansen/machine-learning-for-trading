@@ -33,7 +33,9 @@ case "$1 $2" in
   "rev-parse --show-toplevel") printf '%s\\n' "{tmp_path}" ;;
   "rev-parse --git-path") printf '%s\\n' "{hooks}/pre-push" ;;
   "rev-parse refs/heads/"*) printf '%s\\n' "{fake_sha}" ;;
+  "rev-parse HEAD") printf '%s\\n' "{fake_sha}" ;;
   "branch --show-current") printf '%s\\n' "{branch}" ;;
+  "symbolic-ref --quiet") printf '%s\\n' "{branch}" ;;
   *) printf 'unexpected git invocation: %s\\n' "$*" >&2; exit 2 ;;
 esac
 """,
@@ -148,6 +150,36 @@ def test_gate_reviews_every_branch_in_multi_ref_push(tmp_path: Path) -> None:
     invocations = (tmp_path / "roborev.log").read_text()
     assert "review --branch feature-a" in invocations
     assert "review --branch feature-b" in invocations
+
+
+def test_gate_reviews_explicit_head_refspec(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="feature", open_review=False)
+    sha = "a" * 40
+    old_sha = "b" * 40
+    update = f"HEAD {sha} refs/heads/feature {old_sha}\n"
+
+    result = subprocess.run(
+        [GATE], env=env, input=update, text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0
+    invocations = (tmp_path / "roborev.log").read_text()
+    assert "review --branch feature" in invocations
+
+
+@pytest.mark.parametrize("zero_sha", ["0" * 40, "0" * 64])
+def test_gate_skips_sha1_and_sha256_deletions(tmp_path: Path, zero_sha: str) -> None:
+    env = _fake_environment(tmp_path, branch="feature", open_review=False)
+    old_sha = "b" * len(zero_sha)
+    update = f"(delete) {zero_sha} refs/heads/old-feature {old_sha}\n"
+
+    result = subprocess.run(
+        [GATE], env=env, input=update, text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0
+    assert "no branch updates require review" in result.stdout
+    assert not (tmp_path / "roborev.log").exists()
 
 
 def test_installer_is_idempotent_and_refuses_foreign_hook(tmp_path: Path) -> None:

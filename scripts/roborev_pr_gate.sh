@@ -13,7 +13,6 @@ fi
 repo_root=$("$GIT_BIN" rev-parse --show-toplevel)
 cd "$repo_root"
 
-zero_sha=$(printf '0%.0s' {1..40})
 declare -a updates=()
 while read -r local_ref local_sha remote_ref remote_sha; do
     [[ -z "${local_ref:-}" ]] && continue
@@ -26,7 +25,7 @@ if (( ${#updates[@]} == 0 )); then
         printf 'RoboRev PR gate requires a named branch.\n' >&2
         exit 1
     fi
-    updates+=("refs/heads/$branch $("$GIT_BIN" rev-parse "refs/heads/$branch") refs/heads/$branch $zero_sha")
+    updates+=("refs/heads/$branch $("$GIT_BIN" rev-parse "refs/heads/$branch") refs/heads/$branch 0")
 fi
 
 declare -a branches=()
@@ -37,15 +36,26 @@ for update in "${updates[@]}"; do
         printf 'Direct pushes to %s are not allowed; use a PR branch.\n' "$BASE_BRANCH" >&2
         exit 1
     fi
-    if [[ "$local_sha" == "$zero_sha" || "$remote_ref" == refs/tags/* ]]; then
+    if [[ "$local_sha" =~ ^0+$ || "$remote_ref" == refs/tags/* ]]; then
         continue
     fi
-    if [[ "$local_ref" != refs/heads/* || "$remote_ref" != refs/heads/* ]]; then
+    if [[ "$remote_ref" != refs/heads/* ]]; then
         printf 'Unsupported pre-push ref update: %s -> %s\n' "$local_ref" "$remote_ref" >&2
         exit 1
     fi
 
-    branch=${local_ref#refs/heads/}
+    if [[ "$local_ref" == refs/heads/* ]]; then
+        branch=${local_ref#refs/heads/}
+    elif [[ "$local_ref" == "HEAD" ]]; then
+        branch=$("$GIT_BIN" symbolic-ref --quiet --short HEAD) || {
+            printf 'Cannot review HEAD from a detached checkout.\n' >&2
+            exit 1
+        }
+    else
+        printf 'Unsupported pre-push source ref: %s\n' "$local_ref" >&2
+        exit 1
+    fi
+
     current_sha=$("$GIT_BIN" rev-parse "$local_ref")
     if [[ "$current_sha" != "$local_sha" ]]; then
         printf 'Local ref changed before review: %s\n' "$local_ref" >&2
