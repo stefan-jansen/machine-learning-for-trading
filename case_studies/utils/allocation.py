@@ -49,7 +49,7 @@ def _filter_prices_to_prediction_assets(
 ) -> pl.DataFrame:
     """Pre-filter prices to only assets in predictions (performance optimization)."""
     pred_assets = predictions[asset_col].unique()
-    return prices_df.filter(pl.col(asset_col).is_in(pred_assets))
+    return prices_df.filter(pl.col(asset_col).is_in(pred_assets.implode()))
 
 
 def _returns_from_prices(
@@ -395,7 +395,7 @@ def compute_mvo_weights(
         )
         recent_dates = recent[time_col].unique().sort()
         if len(recent_dates) > lookback:
-            recent = recent.filter(pl.col(time_col).is_in(recent_dates.tail(lookback)))
+            recent = recent.filter(pl.col(time_col).is_in(recent_dates.tail(lookback).implode()))
         window_rets = (
             recent.pivot(on="symbol", index=time_col, values="ret").sort(time_col).drop(time_col)
         )
@@ -549,7 +549,9 @@ def compute_hrp_weights(
 
             recent_dates = recent[time_col].unique().sort()
             if len(recent_dates) > vol_window:
-                recent = recent.filter(pl.col(time_col).is_in(recent_dates.tail(vol_window)))
+                recent = recent.filter(
+                    pl.col(time_col).is_in(recent_dates.tail(vol_window).implode())
+                )
 
             # Pivot to wide format — drop assets with insufficient coverage
             pivot = recent.pivot(on="symbol", index=time_col, values="ret").drop(time_col)
