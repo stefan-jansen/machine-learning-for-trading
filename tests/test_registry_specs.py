@@ -20,6 +20,7 @@ from case_studies.utils.registry.specs import (
     HASH_LENGTH,
     _validate_spec,
     backtest_hash_from_parts,
+    build_training_spec,
     canonical_json,
     compute_hash,
     prediction_hash_from_parts,
@@ -236,3 +237,17 @@ def test_training_hash_regression_pin_for_canonical_spec() -> None:
     expected = hashlib.sha256(content.encode()).hexdigest()[:12]
 
     assert training_hash_from_spec(spec) == expected
+
+
+def test_pca_preset_preserves_shipped_registry_identity() -> None:
+    spec = build_training_spec(
+        "latent_factors",
+        "pca",
+        "fwd_ret_5d",
+        n_folds=5,
+        n_epochs=50,
+    )
+
+    assert spec["library"] == "sklearn"
+    assert spec["params"] == {"n_factors": 5}
+    assert training_hash_from_spec(spec) == "c59b8988c8c7"
