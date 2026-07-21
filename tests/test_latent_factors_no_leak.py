@@ -884,6 +884,7 @@ def test_latent_registry_cache_replays_exact_complete_surface(
     tmp_path,
 ) -> None:
     from case_studies.utils.latent_factors.cv import _load_registered_latent_factor
+    from case_studies.utils.registry import training_hash_from_spec
 
     training_spec, expected_keys = _install_latent_registry_cache(monkeypatch, tmp_path)
     result = _load_registered_latent_factor(
@@ -899,7 +900,8 @@ def test_latent_registry_cache_replays_exact_complete_surface(
     )
 
     assert result is not None
-    metrics, predictions = result
+    training_hash, metrics, predictions = result
+    assert training_hash == training_hash_from_spec(training_spec)
     assert metrics.shape == (4, 3)
     assert predictions.shape == (20, 6)
 

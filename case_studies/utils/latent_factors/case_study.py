@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from hashlib import sha256
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -13,6 +15,7 @@ import yaml
 from case_studies.utils.latent_factors import EXPENSIVE_MODELS, run_latent_factor_cv
 from case_studies.utils.latent_factors.macro_context import load_configured_macro_context
 from data import load_macro
+from utils.artifact_specs import load_feature_spec, load_label_spec, resolve_storage_path
 from utils.modeling import load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
 
@@ -31,6 +34,7 @@ class LatentFactorCaseStudyContext:
     persistent_entities: bool
     macro_panel: pl.DataFrame | None
     macro_context_spec: dict[str, Any] | None
+    input_data_spec: dict[str, Any]
     dataset: pl.DataFrame
     feature_names: list[str]
     task_type: str
@@ -108,6 +112,7 @@ def load_case_study_context(
     modeling_dataset = load_modeling_dataset(
         case_study_id, resolved_primary, max_symbols=max_symbols
     )
+    input_data_spec = _training_input_identity(case_study_id, resolved_primary)
     splits = modeling_dataset.splits[:max_folds] if max_folds else modeling_dataset.splits
 
     return LatentFactorCaseStudyContext(
@@ -121,6 +126,7 @@ def load_case_study_context(
         persistent_entities=persistent_entities,
         macro_panel=macro_panel,
         macro_context_spec=macro_context_spec,
+        input_data_spec=input_data_spec,
         dataset=modeling_dataset.dataset,
         feature_names=modeling_dataset.feature_names,
         task_type=modeling_dataset.task_type,
@@ -189,6 +195,7 @@ def run_case_study_model(
     use_cache: bool,
     force_retrain: bool,
     macro_panel: pl.DataFrame | None = None,
+    reporting_epoch: int | None = None,
 ) -> dict[str, Any]:
     return run_latent_factor_cv(
         panel_data=None,
@@ -212,6 +219,7 @@ def run_case_study_model(
         entity_col=context.entity_col,
         macro_panel=context.macro_panel if macro_panel is None else macro_panel,
         macro_context_spec=context.macro_context_spec,
+        input_data_spec=context.input_data_spec,
         persistent_entities=context.persistent_entities,
         device=context.device,
         num_threads=context.num_threads,
@@ -219,6 +227,7 @@ def run_case_study_model(
         temporal_by_fold=context.temporal_by_fold,
         temporal_keys=context.temporal_keys,
         temporal_feature_names=context.temporal_feature_names,
+        reporting_epoch=reporting_epoch,
     )
 
 
@@ -231,6 +240,7 @@ def run_case_study_variants(
     n_epochs: int,
     use_cache: bool,
     force_retrain: bool,
+    reporting_epoch: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     from utils.modeling import ConfigError
 
@@ -249,6 +259,7 @@ def run_case_study_variants(
         modeling_dataset = load_modeling_dataset(
             context.case_study_id, variant_label, max_symbols=context.max_symbols
         )
+        input_data_spec = _training_input_identity(context.case_study_id, variant_label)
         # Honour the same max_folds truncation the primary run uses, so a
         # `max_folds=2` smoke test does not silently retrain variants on the
         # full split set.
@@ -288,6 +299,7 @@ def run_case_study_variants(
             # macro-less fit while the primary uses the full panel.
             macro_panel=context.macro_panel,
             macro_context_spec=context.macro_context_spec,
+            input_data_spec=input_data_spec,
             persistent_entities=context.persistent_entities,
             device=context.device,
             num_threads=context.num_threads,
@@ -295,8 +307,55 @@ def run_case_study_variants(
             temporal_by_fold=modeling_dataset.temporal_by_fold,
             temporal_keys=modeling_dataset.temporal_keys,
             temporal_feature_names=modeling_dataset.temporal_feature_names,
+            reporting_epoch=reporting_epoch,
         )
     return results
+
+
+def _training_input_identity(case_study_id: str, label: str) -> dict[str, Any]:
+    """Return portable content identity for every materialized modeling input."""
+    case_dir = get_case_study_dir(case_study_id)
+    inputs = {
+        "financial": resolve_storage_path(
+            case_study_id,
+            load_feature_spec(case_study_id, "financial"),
+            "features/financial.parquet",
+        ),
+        "label": resolve_storage_path(
+            case_study_id,
+            load_label_spec(case_study_id, label),
+            f"labels/{label}.parquet",
+        ),
+        "setup": case_dir / "config" / "setup.yaml",
+    }
+    temporal_path = resolve_storage_path(
+        case_study_id,
+        load_feature_spec(case_study_id, "model_based"),
+        "features/model_based.parquet",
+    )
+    if temporal_path.exists():
+        inputs["model_based"] = temporal_path
+
+    missing = [role for role, path in inputs.items() if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"Missing training inputs for identity: {sorted(missing)}")
+
+    files = [
+        {"role": role, "sha256": f"sha256:{_sha256_file(path)}"}
+        for role, path in sorted(inputs.items())
+    ]
+    aggregate = sha256(
+        "\n".join(f"{item['role']}={item['sha256']}" for item in files).encode()
+    ).hexdigest()
+    return {"version": "v1", "files": files, "input_digest": f"sha256:{aggregate}"}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as source:
+        while block := source.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _normalize_model_kwargs(model_kwargs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
