@@ -23,6 +23,7 @@ import pytest
 from case_studies.utils.backtest_runner import (
     _MAX_NULL_RATE,
     _align_symbol_dtype,
+    _target_weights_by_timestamp,
     apply_universe_filter,
     run_plumbing_test,
     substitute_continuous_return_for_classification,
@@ -116,6 +117,21 @@ def test_align_symbol_dtype_int_source_to_string_target() -> None:
     other = pl.DataFrame({"symbol": [1, 2]}, schema={"symbol": pl.UInt32})
     out = _align_symbol_dtype(target, other, case_study="x", target_side="t", other_side="o")
     assert out.schema["symbol"] == pl.Utf8
+
+
+def test_target_weights_are_deterministic_across_input_order() -> None:
+    timestamp = datetime(2024, 1, 2)
+    weights = pl.DataFrame(
+        {
+            "timestamp": [timestamp, timestamp, timestamp],
+            "symbol": ["C", "A", "B"],
+            "weight": [0.2, 0.5, 0.3],
+        }
+    )
+
+    expected = {timestamp: {"A": 0.5, "B": 0.3, "C": 0.2}}
+    assert _target_weights_by_timestamp(weights) == expected
+    assert _target_weights_by_timestamp(weights.reverse()) == expected
 
 
 def test_apply_universe_filter_collapses_intraday_to_date_grain(

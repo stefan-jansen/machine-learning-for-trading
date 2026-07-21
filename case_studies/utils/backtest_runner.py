@@ -255,6 +255,18 @@ class BacktestRunResult:
     execution_mode: str = "engine"
 
 
+def _target_weights_by_timestamp(weights: pl.DataFrame) -> dict[datetime, dict[str, float]]:
+    """Build deterministic timestamp and symbol ordered engine targets."""
+    targets: dict[datetime, dict[str, float]] = {}
+    for row in weights.sort("timestamp", "symbol").iter_rows(named=True):
+        timestamp = row["timestamp"]
+        if timestamp not in targets:
+            targets[timestamp] = {}
+        if row["weight"] != 0:
+            targets[timestamp][row["symbol"]] = row["weight"]
+    return targets
+
+
 # ---------------------------------------------------------------------------
 # Weight precomputation (for risk sweep reuse)
 # ---------------------------------------------------------------------------
@@ -1074,13 +1086,7 @@ def _run_engine(
     apply_calendar_session_enforcement(config, calendar)
 
     # Pre-compute weight dict from DataFrame
-    weight_dict: dict[datetime, dict[str, float]] = {}
-    for row in weights.iter_rows(named=True):
-        ts = row["timestamp"]
-        if ts not in weight_dict:
-            weight_dict[ts] = {}
-        if row["weight"] != 0:
-            weight_dict[ts][row["symbol"]] = row["weight"]
+    weight_dict = _target_weights_by_timestamp(weights)
 
     # Resolve calendar-aware rebalance schedule, then thin by the label's
     # non-overlapping step from setup.yaml::labels.rebalance_step. Mirrors
