@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -349,7 +349,7 @@ print(
 
 # %%
 pit_panel = fundamentals.filter(pl.col("announcement_date").is_not_null())
-as_of_date = "2023-06-30"
+as_of_date = "2023-12-01"
 print(f"As of {as_of_date}, the latest quarter known to the market for each symbol:")
 
 # %% [markdown]
@@ -379,8 +379,22 @@ known_wrong = (
 known_wrong.select(cols).head(5)
 
 # %% [markdown]
-# Comparing the two — every row here is a symbol the lookahead-biased approach
-# would have used a fresher quarter than was actually available:
+# **Stale-period biased** - filter correctly on knowledge time, but sort on
+# `announcement_date`. A late filing for an older fiscal period can then displace
+# a newer quarter that was already known.
+
+# %%
+known_stale = (
+    pit_panel.filter(pl.col("announcement_date") <= query_date)
+    .sort(["symbol", "announcement_date"])
+    .group_by("symbol")
+    .last()
+)
+known_stale.select(cols).head(5)
+
+# %% [markdown]
+# Comparing the two shows every symbol for which the biased query selects a
+# different quarter, including symbols with no admissible filing at all:
 
 # %%
 correct_dates = known_correct.select(["symbol", "fiscal_quarter_end"]).rename(
@@ -389,11 +403,25 @@ correct_dates = known_correct.select(["symbol", "fiscal_quarter_end"]).rename(
 wrong_dates = known_wrong.select(["symbol", "fiscal_quarter_end"]).rename(
     {"fiscal_quarter_end": "wrong_qtr"}
 )
-mismatches = correct_dates.join(wrong_dates, on="symbol").filter(
-    pl.col("correct_qtr") != pl.col("wrong_qtr")
+mismatches = wrong_dates.join(correct_dates, on="symbol", how="left").filter(
+    pl.col("correct_qtr").is_null() | (pl.col("correct_qtr") != pl.col("wrong_qtr"))
 )
 print(f"{len(mismatches)} symbols where lookahead bias would change the chosen quarter:")
 mismatches
+
+# %% [markdown]
+# The same comparison isolates the sort-key error while holding the admissibility
+# filter fixed:
+
+# %%
+stale_dates = known_stale.select(["symbol", "fiscal_quarter_end"]).rename(
+    {"fiscal_quarter_end": "stale_qtr"}
+)
+stale_mismatches = correct_dates.join(stale_dates, on="symbol").filter(
+    pl.col("correct_qtr") != pl.col("stale_qtr")
+)
+print(f"{len(stale_mismatches)} symbols where the wrong sort selects a stale quarter:")
+stale_mismatches
 
 # %% [markdown]
 # ## Key Takeaways
@@ -401,6 +429,6 @@ mismatches
 # 1. The SEC XBRL Frames API is sufficient to assemble a cross-sectional fundamentals panel without a vendor subscription. The default downloader output covers 20 large-cap US equities × 49 quarters × 11 us-gaap concepts (240 rows in this snapshot).
 # 2. Coverage is concept-dependent. `assets` fills 90.0% of company × quarter cells in this universe (234 of 260); `revenues` is sparse for AAPL/MSFT/banks because they file under post-ASC-606 concepts.
 # 3. Filing-lag stats expose two regimes: the median filing lands ~33 days after fiscal-quarter end (typical 10-Q timing), but the upper quartile starts at 395 days and the max reaches 781 days — that long tail is dominated by amended/restated filings returned by the XBRL Frames API.
-# 4. Always filter on `announcement_date` for backtesting, and sort by `fiscal_quarter_end` to pick the winner. Filtering on the wrong column injects lookahead bias: querying as of 2023-06-30 by `fiscal_quarter_end` picks a fresher quarter than was available for 11 of the 16 symbols with admissible data — Q2 2023 fundamentals that were not filed until August 2023. Sorting on the wrong column is the subtler error: `announcement_date` selects the most-recently-announced row, which walks *backwards* in fiscal time whenever a restatement or a late-attributed Q4 fact lands, so the "PIT-correct" query would return a stale quarter right after every 10-K.
+# 4. Always filter on `announcement_date` for backtesting, and sort by `fiscal_quarter_end` to pick the winner. As of 2023-12-01, filtering on fiscal time selects a not-yet-known quarter for 2 symbols; sorting on announcement time selects a stale quarter for 2 symbols (AAPL and V).
 # 5. Knowledge time can be missing: 36 of 240 rows (15%) carry no `announcement_date` and are therefore never admissible to a PIT query. Report that coverage gap rather than letting the filter drop it silently.
 # 6. The downloader and loader are the production interface; this notebook is a sanity-check + bitemporal-query template that downstream feature-engineering notebooks (Ch8) consume.
