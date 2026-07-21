@@ -24,6 +24,7 @@ import yaml
 from case_studies.utils.latent_factors.macro_context import load_configured_macro_context
 from case_studies.utils.latent_factors.panel import align_macro_to_dates
 from case_studies.utils.registry import training_hash_from_spec
+from data import load_macro_initial_release
 from utils.downloading import load_dotenv
 
 SAFE_SERIES = [
@@ -135,6 +136,56 @@ def _revision_dates(series_id: str, api_key: str) -> tuple[list[str], int]:
     return revised, len(comparable)
 
 
+def _audit_materialized_initial_releases(api_key: str) -> None:
+    local = load_macro_initial_release()
+    coverage_start = local["timestamp"].min().isoformat()
+    failures: dict[str, list[str]] = {}
+    for series_id in FRED_SOURCE_SERIES:
+        print(f"initial-release identity audit started: {series_id}", flush=True)
+        official = _initial_release_observations(series_id, api_key)
+        column = series_id.lower()
+        comparable = local.select(["timestamp", column]).filter(
+            pl.col("timestamp") >= pl.lit(coverage_start).str.to_date()
+        )
+        official_on_local_dates = {
+            date: float(value) for date, value in official.items() if date >= coverage_start
+        }
+        differing = [
+            timestamp.isoformat()
+            for timestamp, value in comparable.iter_rows()
+            if timestamp.isoformat() in official_on_local_dates
+            and value != official_on_local_dates[timestamp.isoformat()]
+        ]
+        if differing:
+            failures[series_id] = differing
+            print(
+                f"initial-release identity FAIL: {series_id} differs on {len(differing)} dates",
+                flush=True,
+            )
+        else:
+            print(
+                f"initial-release identity PASS: {series_id} matches "
+                f"{len(official_on_local_dates)} official observations",
+                flush=True,
+            )
+
+    slope_error = local.select(
+        (pl.col("YIELD_CURVE_SLOPE") - (pl.col("dgs10") - pl.col("dgs2"))).abs().max()
+    ).item()
+    five_ten_error = local.select(
+        (pl.col("YIELD_CURVE_5_10") - (pl.col("dgs10") - pl.col("dgs5"))).abs().max()
+    ).item()
+    if slope_error != 0.0 or five_ten_error != 0.0:
+        raise RuntimeError(
+            "Materialized yield-curve spreads do not exactly match their initial-release inputs"
+        )
+    if failures:
+        raise RuntimeError(f"Initial-release identity gate failed: {failures}")
+    print(
+        "derived spread PASS: both spreads exactly inherit initial-release DGS inputs", flush=True
+    )
+
+
 def _audit_official_timing(api_key: str, setup: dict[str, Any]) -> None:
     with _urlopen(H15_RELEASE_URL) as response:
         h15_text = response.read().decode(errors="replace").lower()
@@ -220,29 +271,34 @@ def main() -> int:
     print(f"input digest: {identity['input_digest']}", flush=True)
 
     _audit_official_timing(api_key, setup)
-    revision_failures: dict[str, list[str]] = {}
-    for series_id in FRED_SOURCE_SERIES:
-        print(f"vintage audit started: {series_id}", flush=True)
-        revisions, n_compared = _revision_dates(series_id, api_key)
-        if revisions:
-            revision_failures[series_id] = revisions
-            print(
-                f"vintage audit FAIL: {series_id} changed on {len(revisions)} dates: "
-                f"{','.join(revisions)}",
-                flush=True,
+    if macro_config["source"] == "alfred_initial_release":
+        _audit_materialized_initial_releases(api_key)
+    else:
+        revision_failures: dict[str, list[str]] = {}
+        for series_id in FRED_SOURCE_SERIES:
+            print(f"vintage audit started: {series_id}", flush=True)
+            revisions, n_compared = _revision_dates(series_id, api_key)
+            if revisions:
+                revision_failures[series_id] = revisions
+                print(
+                    f"vintage audit FAIL: {series_id} changed on {len(revisions)} dates: "
+                    f"{','.join(revisions)}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"vintage audit PASS: {series_id} initial and latest values match "
+                    f"on {n_compared} ALFRED-covered dates",
+                    flush=True,
+                )
+        if revision_failures:
+            failed = ", ".join(
+                f"{series_id}={len(dates)}" for series_id, dates in revision_failures.items()
             )
-        else:
-            print(
-                f"vintage audit PASS: {series_id} initial and latest values match "
-                f"on {n_compared} ALFRED-covered dates",
-                flush=True,
-            )
-    if revision_failures:
-        failed = ", ".join(
-            f"{series_id}={len(dates)}" for series_id, dates in revision_failures.items()
+            raise RuntimeError(f"Non-revision gate failed: {failed}")
+        print(
+            "derived spread PASS: both yield-curve spreads inherit audited DGS inputs", flush=True
         )
-        raise RuntimeError(f"Non-revision gate failed: {failed}")
-    print("derived spread PASS: both yield-curve spreads inherit audited DGS inputs", flush=True)
 
     base_spec = _read_base_spec(args.case_dir, args.base_training_hash)
     prospective_spec = {**base_spec, "macro_context": identity}

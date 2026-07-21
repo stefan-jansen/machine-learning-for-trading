@@ -636,6 +636,9 @@ def _prepare_fold_inputs(
         start=split["train_start"],
         end=split["val_end"],
     )
+    if macro_panel is not None:
+        macro_start = macro_panel.select(pl.col(date_col).min()).item()
+        fold_dataset = fold_dataset.filter(pl.col(date_col) >= macro_start)
     ragged_panel = prepare_ragged_panel_data(
         fold_dataset,
         feature_names=feature_names,

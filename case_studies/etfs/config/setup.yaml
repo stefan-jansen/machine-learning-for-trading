@@ -276,7 +276,8 @@ modeling:
   latent_factors:
     persistent_entities: true
     macro_context:
-      policy: fred_market_state_close_lagged
+      source: alfred_initial_release
+      policy: alfred_initial_release_close_lagged
       version: v1
       series:
         - dgs1

@@ -30,7 +30,8 @@ EXPECTED_ETF_SERIES = [
 
 def _config() -> dict:
     return {
-        "policy": "fred_market_state_close_lagged",
+        "source": "alfred_initial_release",
+        "policy": "alfred_initial_release_close_lagged",
         "version": "v1",
         "series": ["dgs1", "vixcls"],
         "availability_lag_days": 1,
@@ -43,6 +44,7 @@ def test_etf_sdf_uses_exact_safe_market_state_series() -> None:
     macro_config = setup["modeling"]["latent_factors"]["macro_context"]
 
     assert macro_config["series"] == EXPECTED_ETF_SERIES
+    assert macro_config["source"] == "alfred_initial_release"
     assert macro_config["availability_lag_days"] == 1
     assert macro_config["alignment"] == "backward_asof"
 
@@ -63,18 +65,20 @@ def test_configured_macro_context_lags_and_hashes_selected_input(
         return raw.select(["timestamp", *series])
 
     monkeypatch.setattr(
-        "case_studies.utils.latent_factors.macro_context.load_macro", fake_load_macro
+        "case_studies.utils.latent_factors.macro_context.load_macro_initial_release",
+        fake_load_macro,
     )
     panel, identity = load_configured_macro_context(_config())
 
     assert panel.columns == ["timestamp", "dgs1", "vixcls"]
     assert panel["timestamp"].to_list() == [date(2024, 1, 3), date(2024, 1, 4)]
     assert identity["series"] == ["dgs1", "vixcls"]
+    assert identity["coverage_start"] == "2024-01-03"
     assert identity["input_digest"].startswith("sha256:")
 
     changed = raw.with_columns(pl.col("revised_series") * 10)
     monkeypatch.setattr(
-        "case_studies.utils.latent_factors.macro_context.load_macro",
+        "case_studies.utils.latent_factors.macro_context.load_macro_initial_release",
         lambda *, series: changed.select(["timestamp", *series]),
     )
     _, unchanged_identity = load_configured_macro_context(_config())
@@ -82,7 +86,7 @@ def test_configured_macro_context_lags_and_hashes_selected_input(
 
     changed_selected = raw.with_columns(pl.col("dgs1") + 0.01)
     monkeypatch.setattr(
-        "case_studies.utils.latent_factors.macro_context.load_macro",
+        "case_studies.utils.latent_factors.macro_context.load_macro_initial_release",
         lambda *, series: changed_selected.select(["timestamp", *series]),
     )
     _, changed_identity = load_configured_macro_context(_config())
