@@ -54,6 +54,9 @@ from .completeness import (
     training_run_status,
 )
 
+# --- lineage ---
+from .lineage import modeling_input_fingerprint
+
 # --- metrics ---
 from .metrics import (
     compute_backtest_fold_metrics,
@@ -133,6 +136,7 @@ __all__ = [
     "backtest_hash_from_parts",
     "load_preset",
     "build_training_spec",
+    "modeling_input_fingerprint",
     # store
     "REGISTRY_SCHEMA_SQL",
     "VALID_STAGES",
