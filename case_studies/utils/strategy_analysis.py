@@ -64,26 +64,82 @@ UNIVERSE_RESTRICTIONS: dict[str, str] = {
 }
 
 
-# Per-CS carrier pin: case_study -> validation backtest_hash (prefix) to deploy as
-# the canonical carrier when the cross-stage val rank-1 is statistically tied with a
-# more diversified / more precisely-estimated configuration. This is a documented
-# a-priori (validation-time) tie-break, NOT a holdout-based selection.
-#
-# us_firm_characteristics: validation Sharpe ties at ~2.75 between
-#   A = leaves_7_mae / score_weighted (cross-stage rank-1, 2.7589) and
-#   B = default_huber / equal_weight  (signal-stage rank-1, 2.7542).
-# Block-bootstrap Sharpe CIs (backtest_metrics): B [2.33, 3.37] width 1.04 vs
-# A [2.10, 3.57] width 1.46 — B is estimated ~29% more precisely (lower vol, 50
-# equal-weight names vs 10 score-weighted). B is also far more diversified (holdout
-# MaxDD -8.6% vs -34%). Both criteria are validation-time, so B is pinned as the
-# deployed carrier. The pinned row is default_huber/equal_weight t50 at the
-# allocation stage; regenerate by re-querying the validation allocation rank-1 with
-# config_name='default_huber' AND allocation.method='equal_weight' if the sweep is
-# rebuilt. Keep in sync with 20_strategy_synthesis/01_aggregate_synthesis.py, which
-# imports this dict to pin the §20.5 / Figure 20.7 allocator-comparison spine.
-CARRIER_PINS: dict[str, str] = {
-    "us_firm_characteristics": "e676e1989e1f",
-}
+# Per-CS validation-time carrier pins. Avoid pins based on holdout behavior.
+CARRIER_PINS: dict[str, str] = {}
+
+
+def rank_returns_on_common_support(
+    returns_by_hash: dict[str, pl.DataFrame], *, periods_per_year: int
+) -> pl.DataFrame:
+    """Rank backtests after restricting every return series to exact common support."""
+    if not returns_by_hash:
+        raise ValueError("No return series supplied for common-support ranking")
+
+    normalized: dict[str, pl.DataFrame] = {}
+    common_timestamps: set[Any] | None = None
+    for backtest_hash, frame in returns_by_hash.items():
+        return_col = next(
+            (name for name in ("daily_return", "return", "returns") if name in frame.columns),
+            None,
+        )
+        if "timestamp" not in frame.columns or return_col is None:
+            raise ValueError(
+                f"{backtest_hash}: expected timestamp plus a return column; got {frame.columns}"
+            )
+        selected = frame.select("timestamp", pl.col(return_col).alias("daily_return")).sort(
+            "timestamp"
+        )
+        if selected["timestamp"].n_unique() != selected.height:
+            raise ValueError(f"{backtest_hash}: duplicate timestamps in daily returns")
+        normalized[backtest_hash] = selected
+        timestamps = set(selected["timestamp"].to_list())
+        common_timestamps = (
+            timestamps if common_timestamps is None else common_timestamps & timestamps
+        )
+
+    if common_timestamps is None or len(common_timestamps) < 2:
+        raise ValueError("Backtest candidates have fewer than two common timestamps")
+
+    from case_studies.utils.backtest_runner import compute_portfolio_metrics
+
+    common = sorted(common_timestamps)
+    rows: list[dict[str, Any]] = []
+    for backtest_hash, frame in normalized.items():
+        aligned = frame.filter(pl.col("timestamp").is_in(common)).sort("timestamp")
+        if aligned["timestamp"].to_list() != common:
+            raise ValueError(f"{backtest_hash}: failed exact common-support alignment")
+        metrics = compute_portfolio_metrics(
+            aligned["daily_return"].to_numpy(),
+            periods_per_year=periods_per_year,
+            uncertainty=False,
+            trim_leading_zeros=False,
+        )
+        rows.append(
+            {
+                "backtest_hash": backtest_hash,
+                "sharpe": float(metrics["sharpe"]),
+                "n_periods": aligned.height,
+                "start": common[0],
+                "end": common[-1],
+            }
+        )
+    return pl.DataFrame(rows).sort("sharpe", descending=True)
+
+
+def rank_backtests_on_common_support(
+    case_study: str, backtest_hashes: list[str], *, periods_per_year: int
+) -> pl.DataFrame:
+    """Load registered returns and rank them on their exact timestamp intersection."""
+    from utils.paths import get_case_study_dir
+
+    backtest_root = get_case_study_dir(case_study) / "run_log" / "backtest"
+    returns_by_hash: dict[str, pl.DataFrame] = {}
+    for backtest_hash in backtest_hashes:
+        path = backtest_root / backtest_hash / "daily_returns.parquet"
+        if not path.exists():
+            raise FileNotFoundError(f"Missing registered return artifact: {path}")
+        returns_by_hash[backtest_hash] = pl.read_parquet(path)
+    return rank_returns_on_common_support(returns_by_hash, periods_per_year=periods_per_year)
 
 
 def select_holdout_self_backtest(
@@ -153,10 +209,11 @@ def select_holdout_self_backtest(
 def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
     """Resolve the canonical val rank-1 + matching holdout for a case study.
 
-    Cross-stage val rank-1 = max(sharpe) over stage IN (signal, allocation,
-    risk_overlay) on split='validation', with LABEL_RESTRICTIONS applied for
-    case studies that have one. Holdout match is by training_hash on the
-    rank-1's prediction set. Use this in every strategy_analysis notebook
+    Cross-stage validation rank-1 is selected over stage IN (signal,
+    allocation, risk_overlay) with LABEL_RESTRICTIONS applied where defined.
+    When a ``walk_forward_v2`` conformal candidate is present, every candidate
+    is re-ranked on exact common timestamp support. Holdout match is by
+    training_hash on the rank-1's prediction set. Use this in every strategy_analysis notebook
     rather than hardcoding hashes — hardcoded hashes go stale every time the
     sweep is rebuilt, and queries that forget LABEL_RESTRICTIONS surface the
     diagnostic-variant rows (sp500_options' fwd_ret_10d Sharpe ≈ 9.7) as
@@ -180,7 +237,7 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
     base_select = """
         SELECT b.backtest_hash, b.prediction_hash, b.stage,
                t.training_hash, t.family, t.config_name, t.label,
-               bm.sharpe
+               bm.sharpe, b.spec_json
         FROM backtest_runs b
         JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
         JOIN prediction_sets p ON p.prediction_hash = b.prediction_hash
@@ -224,20 +281,59 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
         val_sql += (
             " ORDER BY bm.sharpe DESC,"
             " (json_extract(b.spec_json, '$.strategy.allocation') IS NULL) DESC,"
-            " b.backtest_hash ASC LIMIT 1"
+            " b.backtest_hash ASC"
         )
 
     db = sqlite3.connect(str(db_path))
     try:
-        val = db.execute(val_sql, params).fetchone()
-        if val is None:
+        candidates = db.execute(val_sql, params).fetchall()
+        if not candidates:
             raise RuntimeError(
                 f"No validation rank-1 candidate for {case_study} (label_filter={label_filter})"
             )
-        (val_bh, val_ph, val_stage, train_h, family, config_name, label, val_sharpe) = val
-
     finally:
         db.close()
+
+    def _is_strict_conformal(row: tuple[Any, ...]) -> bool:
+        strategy = json.loads(row[8]).get("strategy", {})
+        allocation = strategy.get("allocation") or {}
+        return (
+            allocation.get("method") == "conformal_weighted"
+            and allocation.get("calibration_version") == "walk_forward_v2"
+        )
+
+    strict_conformal_present = any(_is_strict_conformal(row) for row in candidates)
+    if strict_conformal_present:
+        candidates = [
+            row
+            for row in candidates
+            if (json.loads(row[8]).get("strategy", {}).get("allocation") or {}).get("method")
+            != "conformal_weighted"
+            or _is_strict_conformal(row)
+        ]
+        from case_studies.utils.uncertainty import periods_per_year_from_setup
+
+        common_ranking = rank_backtests_on_common_support(
+            case_study,
+            [row[0] for row in candidates],
+            periods_per_year=int(periods_per_year_from_setup(case_study)),
+        )
+        rank_rows = {row["backtest_hash"]: row for row in common_ranking.iter_rows(named=True)}
+        val = next(row for row in candidates if row[0] == common_ranking["backtest_hash"][0])
+        val_sharpe = float(common_ranking["sharpe"][0])
+        comparison_n_periods: int | None = int(common_ranking["n_periods"][0])
+        comparison_start = common_ranking["start"][0]
+        comparison_end = common_ranking["end"][0]
+        if any(rank_rows[row[0]]["n_periods"] != comparison_n_periods for row in candidates):
+            raise RuntimeError("Common-support ranking produced unequal n_periods")
+    else:
+        val = candidates[0]
+        val_sharpe = float(val[7])
+        comparison_n_periods = None
+        comparison_start = None
+        comparison_end = None
+
+    (val_bh, val_ph, val_stage, train_h, family, config_name, label, _, _) = val
 
     # Match holdout by strategy spec to the val rank-1 backtest, so an
     # experimental side-channel allocator (e.g., conformal_weighted) on
@@ -267,6 +363,9 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
         "val_prediction_hash": val_ph,
         "val_stage": val_stage,
         "val_sharpe": val_sharpe,
+        "comparison_n_periods": comparison_n_periods,
+        "comparison_start": comparison_start,
+        "comparison_end": comparison_end,
         "training_hash": train_h,
         "family": family,
         "config_name": config_name,

@@ -781,6 +781,9 @@ def run_backtest(
         prediction_hash=prediction_hash,
         initial_cash=initial_cash,
     )
+    from case_studies.utils.conformal import ensure_conformal_calibration_identity
+
+    strategy_spec = ensure_conformal_calibration_identity(strategy_spec)
     # Re-source initial_cash from the canonical spec. ensure_backtest_spec's
     # idempotent-canonical branch preserves an existing backtest_config.cash.initial
     # (typically $100K from setup.yaml) without overwriting it from the function
@@ -1901,7 +1904,21 @@ def _apply_allocation(
         from case_studies.utils.conformal import load_conformal_widths
 
         alpha = float(alloc_spec.get("alpha", 0.20))
-        widths = load_conformal_widths(case_study, prediction_hash, alpha=alpha)
+        min_calibration_n = int(alloc_spec.get("min_calibration_n", 30))
+        calibration_version = str(alloc_spec.get("calibration_version", "walk_forward_v2"))
+        widths = load_conformal_widths(
+            case_study,
+            prediction_hash,
+            alpha=alpha,
+            min_calibration_n=min_calibration_n,
+            calibration_version=calibration_version,
+        )
+        supported_timestamps = widths.select("timestamp").unique()
+        rebal_preds = rebal_preds.join(supported_timestamps, on="timestamp", how="inner")
+        if rebal_preds.is_empty():
+            raise ValueError(
+                "conformal_weighted: no prediction timestamps have prior-only calibration"
+            )
         floor_q = float(alloc_spec.get("floor_quantile", 0.01))
         result = compute_conformal_weights(
             rebal_preds,
