@@ -75,7 +75,7 @@ fi
 for branch in "${branches[@]}"; do
     printf 'Running RoboRev branch review for %s against %s...\n' "$branch" "$BASE_BRANCH"
     "$ROBOREV_BIN" review \
-        --branch "$branch" \
+        --branch="$branch" \
         --base "$BASE_BRANCH" \
         --agent codex \
         --panel none \

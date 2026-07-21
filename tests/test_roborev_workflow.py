@@ -84,7 +84,7 @@ def test_gate_passes_after_branch_review_with_no_open_findings(tmp_path: Path) -
     assert result.returncode == 0
     assert "PR gate passed" in result.stdout
     invocations = (tmp_path / "roborev.log").read_text()
-    assert "review --branch feature --base main --agent codex --panel none" in (invocations)
+    assert "review --branch=feature --base main --agent codex --panel none" in (invocations)
     assert "fix --open --list --branch feature" in invocations
 
 
@@ -148,8 +148,8 @@ def test_gate_reviews_every_branch_in_multi_ref_push(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     invocations = (tmp_path / "roborev.log").read_text()
-    assert "review --branch feature-a" in invocations
-    assert "review --branch feature-b" in invocations
+    assert "review --branch=feature-a" in invocations
+    assert "review --branch=feature-b" in invocations
 
 
 def test_gate_reviews_explicit_head_refspec(tmp_path: Path) -> None:
@@ -164,7 +164,7 @@ def test_gate_reviews_explicit_head_refspec(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     invocations = (tmp_path / "roborev.log").read_text()
-    assert "review --branch feature" in invocations
+    assert "review --branch=feature" in invocations
 
 
 @pytest.mark.parametrize("zero_sha", ["0" * 40, "0" * 64])
