@@ -45,7 +45,7 @@ RUN python -m venv /opt/ml4t
 # Copy and install dependencies
 WORKDIR /build
 COPY envs/benchmark/pyproject.toml /build/
-COPY pyproject.toml uv.lock /build/root/
+COPY pyproject.toml uv.lock /lock/
 
 # Derive a fully-pinned constraint from uv.lock so this image reproduces the
 # locked environment readers get from `uv sync` (single source of truth:
@@ -55,15 +55,15 @@ COPY pyproject.toml uv.lock /build/root/
 # stores the `symbol` column ~8 bytes/row wider in PyTables, moving Ch2's HDF5
 # benchmark from 71 MB to 79 MB for the identical panel and making §2.4's number
 # unreproducible in the very image the notebook told readers to use.
-# Only packages the lock knows about are pinned; this image's own extras (the
-# database clients, pykx) are absent from the lock and resolve freely.
+# The lock pins the shared database clients, including clickhouse-connect,
+# duckdb, influxdb-client, psycopg2-binary, questdb, and tables. Image-only
+# extras such as pykx and psycopg v3 resolve from this environment's constraints.
 # kaleido is excluded: this image deliberately caps it at <1.0 (1.x needs a
 # Chrome runtime this image does not carry — the notebooks' fig.write_image call
 # is wrapped in try/except for exactly that reason), while the lock pins 1.3.0.
 # It only affects static image export, never a benchmark number, so the image's
 # cap wins and the constraint stays out of its way.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-RUN cd /build/root && uv export --frozen --no-emit-project --no-hashes --format requirements-txt \
+RUN cd /lock && uv export --frozen --no-emit-project --no-hashes --format requirements-txt \
       | grep -iE '^[a-z0-9._-]+==' \
       | grep -viE '^kaleido==' \
       > /tmp/locked-constraints.txt

@@ -56,6 +56,9 @@
 02_financial_data_universe/21_storage_benchmark_database:
   docker_env: benchmark
   requires_import: duckdb
+  timeout: 900
+  parameters:
+    BENCHMARK_SCALE: "S"
 03_market_microstructure/01_itch_parser:
   skip: true
   skip_reason: "Requires ~5GB raw ITCH binary download \u2014 tested locally only"

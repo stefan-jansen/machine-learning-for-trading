@@ -222,6 +222,9 @@ try:
 except ImportError:
     HAS_ARCTICDB = False
     print("○ ArcticDB: Not installed (x86-only — use the benchmark-full image)")
+except Exception as exc:
+    HAS_ARCTICDB = False
+    print(f"○ ArcticDB: Runtime unavailable ({type(exc).__name__}: {exc})")
 
 # %%
 # === Check Server Databases ===
@@ -321,6 +324,8 @@ Q_BINARY: Path | None = None
 # Check multiple locations for q binary (host install or Docker mount)
 Q_BINARY_LOCATIONS = [
     Path.home() / ".kx" / "bin" / "q",  # Standard location
+    Path.home() / ".kx" / "q" / "l64" / "q",  # Personal-edition archive layout
+    Path.home() / ".kx" / "l64" / "q",  # q directory mounted directly
     Path("/opt/kx/bin/q"),  # Alternative system location
 ]
 KX_LICENSE_DIRS = [Path.home() / ".pykx", Path.home() / ".kx"]
@@ -360,6 +365,8 @@ else:
         print(f"[OK] PyKX/kdb+ {kx.__version__}: Available (IPC mode, licence {KX_LICENSE_FILE})")
     except ImportError:
         print("○ PyKX/kdb+: Not installed (optional — `uv pip install pykx`)")
+    except Exception as exc:
+        print(f"○ PyKX/kdb+: Licence or runtime unavailable ({type(exc).__name__}: {exc})")
 
 # %%
 # Availability summary
@@ -413,31 +420,51 @@ results: list[BenchmarkResult] = []
 # answer the *same* question and can be validated against the same expected
 # row count:
 #
-# - **Range query**: the first 7 calendar days of the panel — the slice a
-#   backtest walks. Against session-aware minute bars this covers 5 trading
-#   sessions, a real fraction of the panel rather than a full scan.
+# - **Range query**: roughly the first 20% of trading sessions — the slice a
+#   backtest walks. For a single-session test panel, use the first 20% of bars.
+#   This keeps the query a real pruning test at every benchmark scale.
 # - **Aggregation**: minute bars resampled to **daily** bars. Every engine
 #   buckets by day; bucketing minute data by minute would be a near-identity
 #   for the engines that did it and a real reduction for the ones that didn't,
 #   which is not a comparison.
 
 # %%
-RANGE_QUERY_DAYS = 7
+RANGE_QUERY_FRACTION = 0.2
 
 range_start = ohlcv_df["timestamp"].min()
-range_end = range_start + timedelta(days=RANGE_QUERY_DAYS)
+session_starts = (
+    ohlcv_df.group_by(pl.col("timestamp").dt.date().alias("session"))
+    .agg(pl.col("timestamp").min().alias("start"))
+    .sort("start")["start"]
+)
+n_sessions = len(session_starts)
+if n_sessions > 1:
+    range_session_count = max(1, int(n_sessions * RANGE_QUERY_FRACTION))
+    range_end = session_starts[min(range_session_count, n_sessions - 1)]
+else:
+    unique_timestamps = ohlcv_df["timestamp"].unique().sort()
+    cutoff = min(max(1, int(len(unique_timestamps) * RANGE_QUERY_FRACTION)), len(unique_timestamps))
+    range_end = (
+        unique_timestamps[cutoff]
+        if cutoff < len(unique_timestamps)
+        else unique_timestamps[-1] + timedelta(minutes=1)
+    )
 range_expected_rows = ohlcv_df.filter(
     (pl.col("timestamp") >= range_start) & (pl.col("timestamp") < range_end)
 ).height
+range_fraction = range_expected_rows / total_rows
+range_duration = range_end - range_start
+range_window_label = (
+    f"{range_duration.days}-day window" if range_duration.days else f"{range_fraction:.0%} panel"
+)
 agg_expected_rows = ohlcv_df.select(
     pl.struct("symbol", pl.col("timestamp").dt.truncate("1d")).n_unique()
 ).item()
 
-n_sessions = ohlcv_df.select(pl.col("timestamp").dt.date().n_unique()).item()
 print(f"Panel spans {n_sessions} trading sessions: {range_start} → {ohlcv_df['timestamp'].max()}")
 print(
     f"Range query  : {range_start} ≤ timestamp < {range_end} "
-    f"→ {range_expected_rows:,} rows ({range_expected_rows / total_rows:.1%} of panel)"
+    f"→ {range_expected_rows:,} rows ({range_fraction:.1%} of panel)"
 )
 print(f"Aggregation  : minute bars → {agg_expected_rows:,} daily bars")
 
@@ -470,7 +497,7 @@ def write_sqlite():
         sqlite_path.unlink()
     with contextlib.closing(sqlite3.connect(sqlite_path)) as conn:
         ohlcv_pandas.to_sql("ohlcv", conn, if_exists="replace", index=False)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_symbol_timestamp ON ohlcv(symbol, timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON ohlcv(timestamp)")
 
 
 write_time, _ = time_write(write_sqlite)
@@ -495,8 +522,8 @@ results.append(BenchmarkResult("SQLite", "read", read_time, sqlite_size, total_r
 # %% [markdown]
 # ### SQLite Range Query
 #
-# SQLite stores the timestamps as ISO-8601 text, which sorts lexicographically,
-# so the string bounds below use the covering `(symbol, timestamp)` index.
+# SQLite stores timestamps as ISO-8601 text, which sorts lexicographically. The
+# timestamp-only index supports this all-symbol range predicate directly.
 
 
 # %%
@@ -964,7 +991,7 @@ if HAS_QUESTDB:
     # Read — explicit limit so the endpoint returns the whole table, then
     # validated like every other engine's read.
     def read_questdb():
-        return questdb_query("SELECT * FROM ohlcv_benchmark", limit=f"1,{total_rows}")
+        return questdb_query("SELECT * FROM ohlcv_benchmark", limit=f"1,{total_rows + 1}")
 
     qdb_read_time, qdb_result = time_read(read_questdb, n_runs=min(3, TIMING_RUNS))
     validate_result(qdb_result, total_rows, "QuestDB read")
@@ -977,7 +1004,7 @@ if HAS_QUESTDB:
             f"WHERE timestamp >= '{range_start.isoformat()}' "
             f"AND timestamp < '{range_end.isoformat()}'"
         )
-        return questdb_query(sql, limit=f"1,{range_expected_rows}")
+        return questdb_query(sql, limit=f"1,{range_expected_rows + 1}")
 
     qdb_range_time, qdb_range_result = time_read(questdb_range_query, n_runs=min(3, TIMING_RUNS))
     validate_result(qdb_range_result, range_expected_rows, "QuestDB range query")
@@ -996,7 +1023,7 @@ if HAS_QUESTDB:
                    last(close) as close, sum(volume) as volume
             FROM ohlcv_benchmark SAMPLE BY 1d ALIGN TO CALENDAR
             """,
-            limit=f"1,{agg_expected_rows}",
+            limit=f"1,{agg_expected_rows + 1}",
         )
 
     qdb_agg_time, qdb_agg_result = time_read(questdb_ohlcv, n_runs=min(3, TIMING_RUNS))
@@ -1042,22 +1069,24 @@ if HAS_TIMESCALEDB:
     cur = conn.cursor()
 
     cur.execute("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;")
-    cur.execute("DROP TABLE IF EXISTS ohlcv_benchmark CASCADE;")
-    cur.execute("""
-        CREATE TABLE ohlcv_benchmark (
-            timestamp TIMESTAMPTZ NOT NULL, symbol TEXT NOT NULL,
-            open DOUBLE PRECISION, high DOUBLE PRECISION, low DOUBLE PRECISION,
-            close DOUBLE PRECISION, volume BIGINT, vwap DOUBLE PRECISION, num_trades INTEGER
-        );
-    """)
-    cur.execute(
-        "SELECT create_hypertable('ohlcv_benchmark', 'timestamp', chunk_time_interval => INTERVAL '1 day');"
-    )
 
 # %%
 if HAS_TIMESCALEDB:
     # Write
     def write_timescaledb():
+        cur.execute("DROP TABLE IF EXISTS ohlcv_benchmark CASCADE;")
+        cur.execute("""
+            CREATE TABLE ohlcv_benchmark (
+                timestamp TIMESTAMPTZ NOT NULL, symbol TEXT NOT NULL,
+                open DOUBLE PRECISION, high DOUBLE PRECISION, low DOUBLE PRECISION,
+                close DOUBLE PRECISION, volume BIGINT, vwap DOUBLE PRECISION,
+                num_trades INTEGER
+            );
+        """)
+        cur.execute(
+            "SELECT create_hypertable('ohlcv_benchmark', 'timestamp', "
+            "chunk_time_interval => INTERVAL '1 day');"
+        )
         data = [
             (
                 row["timestamp"],
@@ -1169,20 +1198,19 @@ if HAS_POSTGRES:
     pg_conn.autocommit = True
     pg_cur = pg_conn.cursor()
 
-    pg_cur.execute("DROP TABLE IF EXISTS ohlcv_benchmark CASCADE;")
-    pg_cur.execute("""
-        CREATE TABLE ohlcv_benchmark (
-            timestamp TIMESTAMPTZ NOT NULL, symbol TEXT NOT NULL,
-            open DOUBLE PRECISION, high DOUBLE PRECISION, low DOUBLE PRECISION,
-            close DOUBLE PRECISION, volume BIGINT, vwap DOUBLE PRECISION, num_trades INTEGER
-        );
-    """)
-    pg_cur.execute("CREATE INDEX idx_pg_symbol_timestamp ON ohlcv_benchmark(symbol, timestamp);")
-
 # %%
 if HAS_POSTGRES:
     # Write
     def write_postgres():
+        pg_cur.execute("DROP TABLE IF EXISTS ohlcv_benchmark CASCADE;")
+        pg_cur.execute("""
+            CREATE TABLE ohlcv_benchmark (
+                timestamp TIMESTAMPTZ NOT NULL, symbol TEXT NOT NULL,
+                open DOUBLE PRECISION, high DOUBLE PRECISION, low DOUBLE PRECISION,
+                close DOUBLE PRECISION, volume BIGINT, vwap DOUBLE PRECISION,
+                num_trades INTEGER
+            );
+        """)
         data = [
             (
                 row["timestamp"],
@@ -1204,6 +1232,7 @@ if HAS_POSTGRES:
         """,
             data,
         )
+        pg_cur.execute("CREATE INDEX idx_pg_timestamp ON ohlcv_benchmark(timestamp);")
 
     pg_write_time, _ = time_write(write_postgres)
     pg_cur.execute("SELECT pg_total_relation_size('ohlcv_benchmark');")
@@ -1513,10 +1542,6 @@ if HAS_PYKX:
         benchmark_status["kdb+/PyKX"]["tested"] = True
         print(f"Connected to q {q('.z.K').py()} ({q('.z.k').py()})")
 
-        # Convert data to kdb+ format via IPC
-        kdb_ohlcv = kx.toq(ohlcv_pandas)
-        q["ohlcv"] = kdb_ohlcv
-
         # Write — persist a splayed table to disk.
         #
         # This used to time `-8!` (in-memory IPC serialization) and call it a
@@ -1526,17 +1551,20 @@ if HAS_PYKX:
         # splayed table is the comparable operation — it is what a kdb+ shop
         # actually does to persist a table, and it ends with the data on disk.
         KDB_DIR = BENCHMARK_DIR / f"kdb_{ACTIVE_SCALE.lower()}"
-        if KDB_DIR.exists():
-            shutil.rmtree(KDB_DIR)
-        KDB_DIR.mkdir(parents=True, exist_ok=True)
         # PyKX converts a Python str to a q SYMBOL, so the file handles are built
         # here as explicit `:path symbols rather than joined inside q.
         KDB_DB_HANDLE = kx.SymbolAtom(f":{KDB_DIR}")
         KDB_TBL_HANDLE = kx.SymbolAtom(f":{KDB_DIR}/ohlcv/")
 
         def write_pykx():
+            if KDB_DIR.exists():
+                shutil.rmtree(KDB_DIR)
+            KDB_DIR.mkdir(parents=True, exist_ok=True)
+            kdb_ohlcv = kx.toq(ohlcv_pandas)
+            q["ohlcv"] = kdb_ohlcv
             # `.Q.en` enumerates the symbol column against the sym file, which a
-            # splayed table requires; the whole persist is inside the timed region.
+            # splayed table requires. Conversion, IPC transfer, and persistence
+            # all sit inside the timed region, matching the other server writes.
             return q("{[dir;tbl] tbl set .Q.en[dir; ohlcv]}", KDB_DB_HANDLE, KDB_TBL_HANDLE)
 
         pykx_write_time, _ = time_write(write_pykx)
@@ -1565,7 +1593,8 @@ if HAS_PYKX and benchmark_status["kdb+/PyKX"]["tested"]:
         # Range query
         def pykx_range_query():
             return q(
-                "{[s;e] select from ohlcv where timestamp >= s, timestamp < e}",
+                "{[tbl;s;e] select from get tbl where timestamp >= s, timestamp < e}",
+                KDB_TBL_HANDLE,
                 kx.TimestampAtom(range_start),
                 kx.TimestampAtom(range_end),
             )
@@ -1601,9 +1630,9 @@ if HAS_PYKX and benchmark_status["kdb+/PyKX"]["tested"]:
         # Aggregation — daily buckets, matching every other engine
         def pykx_ohlcv():
             return q(
-                "{select o:first open, h:max high, l:min low, c:last close, v:sum volume "
-                "by symbol, bar:`date$timestamp from x}",
-                kdb_ohlcv,
+                "{[tbl] select o:first open, h:max high, l:min low, c:last close, "
+                "v:sum volume by symbol, bar:`date$timestamp from get tbl}",
+                KDB_TBL_HANDLE,
             )
 
         pykx_agg_time, pykx_agg_result = time_read(pykx_ohlcv)
@@ -1670,7 +1699,7 @@ if results:
     # stated at the top, so the bars are comparable.
     _panels = [
         ("read", "Full scan", COLORS["blue"]),
-        ("range_query", f"Range query ({RANGE_QUERY_DAYS}-day window)", COLORS["slate"]),
+        ("range_query", f"Range query ({range_window_label})", COLORS["slate"]),
         ("asof_join", "ASOF join", COLORS["amber"]),
     ]
     # Full scan / range query span ~30-40x across engines, so a log x-axis keeps
@@ -1772,7 +1801,7 @@ if results:
 # %% [markdown]
 # ## Key Takeaways
 #
-# The engine names below are deliberately absent: which engine wins each
+# No ranking below is asserted for a specific engine: which engine wins each
 # operation is printed by the cell above, from this run's own results, on your
 # hardware. What generalizes is the shape of the answer, not the ordering:
 #
@@ -1781,10 +1810,10 @@ if results:
 #    minute panel far faster than row-oriented engines (SQLite, PostgreSQL),
 #    which must touch every column of every row to answer a query about two.
 # 2. **A range query is a different question from a scan**, and it is the one a
-#    backtest asks. The `RANGE_QUERY_DAYS`-day window above touches roughly a
-#    fifth of the panel, so engines that prune by time partition or use a
-#    time-ordered index separate from those that scan and filter. Ranking
-#    engines on full scans alone would hide that.
+#    backtest asks. The window above reports the fraction of the panel it
+#    touches, so engines that prune by time partition or use a time-ordered
+#    index separate from those that scan and filter. Ranking engines on full
+#    scans alone would hide that.
 # 3. **Ingest rate and durability are one number, not two.** The write times
 #    here all end when the data is queryable, which is why the engines that
 #    acknowledge early (QuestDB ILP, InfluxDB) do not look free.

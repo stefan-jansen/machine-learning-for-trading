@@ -120,10 +120,12 @@ services:
       # Never baked into the image: the licence is personal and must not ship in
       # a published image. If you have no kdb+ licence these resolve to empty
       # directories, PyKX finds no licence, and 21_storage_benchmark_database
-      # skips kdb+ and says so. Get a free personal edition from
-      # https://kx.com/kdb-personal-edition-download/ and unpack it to ~/.kx.
-      - ${KX_HOME:-${HOME}/.kx}:/home/ml4t/.kx:ro
-      - ${PYKX_HOME:-${HOME}/.pykx}:/home/ml4t/.pykx:ro
+      # skips kdb+ and says so. Set KX_HOME/PYKX_HOME to opt in; the defaults
+      # are an existing repo directory so Docker never creates root-owned host
+      # directories. Get a free personal edition from
+      # https://kx.com/kdb-personal-edition-download/.
+      - ${KX_HOME:-./envs/benchmark}:/home/ml4t/.kx:ro
+      - ${PYKX_HOME:-./envs/benchmark}:/home/ml4t/.pykx:ro
     environment:
       - ML4T_DATA_PATH=/data
       - ML4T_PATH=/app
@@ -131,7 +133,6 @@ services:
       # q resolves its licence from QLIC, not from the file's presence on disk;
       # without this q starts and immediately fails "no license loaded".
       - QLIC=/home/ml4t/.kx
-      - QHOME=/home/ml4t/.kx/q
       # Database connections (when running with database services)
       - CLICKHOUSE_HOST=ml4t-clickhouse
       - CLICKHOUSE_PORT=8123
@@ -168,10 +169,16 @@ services:
     ports:
       - "127.0.0.1:8887:8888"
     profiles: ["benchmark-full"]
+    volumes:
+      - .:/app:rw
+      - ${ML4T_DATA_PATH:-./data}:/data:rw
+      - ${KX_HOME:-./envs/benchmark}:/home/ml4t/.kx:ro
+      - ${PYKX_HOME:-./envs/benchmark}:/home/ml4t/.pykx:ro
     environment:
       - ML4T_DATA_PATH=/data
       - ML4T_PATH=/app
       - TEST=${TEST:-0}
+      - QLIC=/home/ml4t/.kx
       # Database connections
       - CLICKHOUSE_HOST=ml4t-clickhouse
       - CLICKHOUSE_PORT=8123
