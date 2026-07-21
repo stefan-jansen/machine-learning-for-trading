@@ -37,6 +37,8 @@ _MODEL_RUNNERS = {
     "sae": run_sae_fold,
 }
 
+TEMPORAL_FEATURE_ASSEMBLY = "fold_scoped_v1"
+
 
 def _numpy_serializer(obj: Any) -> Any:
     if isinstance(obj, np.ndarray):
@@ -74,6 +76,7 @@ def _load_registered_latent_factor(
     n_epochs: int,
     entry_point: str,
     prediction_split: str,
+    temporal_feature_assembly: str | None,
 ) -> tuple[pl.DataFrame, pl.DataFrame] | None:
     """Load a complete latent-factor result without rewriting the registry."""
     from case_studies.utils.registry.queries import read_predictions
@@ -99,6 +102,11 @@ def _load_registered_latent_factor(
             matched: list[str] = []
             for training_hash, spec_json in db.execute(query, params).fetchall():
                 spec = json.loads(spec_json)
+                if (
+                    temporal_feature_assembly is not None
+                    and spec.get("temporal_feature_assembly") != temporal_feature_assembly
+                ):
+                    continue
                 if int(spec.get("params", {}).get("n_factors", -1)) != int(n_factors):
                     continue
                 spec_epochs = spec.get("n_epochs")
@@ -180,6 +188,9 @@ def run_latent_factor_cv(
     score_dates: str = "auto",
     score_cadence: str | None = None,
     score_rebalance_step: int | None = None,
+    temporal_by_fold: pd.DataFrame | None = None,
+    temporal_keys: list[str] | None = None,
+    temporal_feature_names: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run walk-forward latent factor CV from the raw dated dataset."""
     del panel_data
@@ -190,6 +201,10 @@ def run_latent_factor_cv(
         )
 
     model_kwargs = model_kwargs or {}
+    has_fold_temporal = bool(
+        temporal_by_fold is not None and temporal_keys and temporal_feature_names
+    )
+    temporal_feature_assembly = TEMPORAL_FEATURE_ASSEMBLY if has_fold_temporal else None
     metric_policy = _resolve_metric_policy(
         case_study_id=case_study_id,
         label_col=label_col,
@@ -260,6 +275,7 @@ def run_latent_factor_cv(
                 n_epochs=n_epochs,
                 entry_point=notebook,
                 prediction_split=prediction_split,
+                temporal_feature_assembly=temporal_feature_assembly,
             )
             if registered is not None:
                 metrics_df, preds_df = registered
@@ -355,6 +371,9 @@ def run_latent_factor_cv(
             eval_label_col=eval_label_col,
             macro_panel=macro_panel,
             need_pca_inputs=need_pca_inputs,
+            temporal_by_fold=temporal_by_fold,
+            temporal_keys=temporal_keys,
+            temporal_feature_names=temporal_feature_names,
         )
         if fold_inputs is None:
             log(f"    Fold {split['fold']}: skipped (insufficient train/validation dates)")
@@ -536,6 +555,7 @@ def run_latent_factor_cv(
                 fold_extras=state[model_name]["fold_extras"],
                 fold_ics_df=fold_ics_df,
                 preds_df=preds_df,
+                temporal_feature_assembly=temporal_feature_assembly,
             )
 
         log(f"    -> best epoch={best_epoch}, IC={mean_ic:+.4f} ({elapsed:.1f}s)")
@@ -585,7 +605,18 @@ def _prepare_fold_inputs(
     eval_label_col: str | None,
     macro_panel: pl.DataFrame | None,
     need_pca_inputs: bool,
+    temporal_by_fold: pd.DataFrame | None = None,
+    temporal_keys: list[str] | None = None,
+    temporal_feature_names: list[str] | None = None,
 ) -> dict[str, Any] | None:
+    if temporal_by_fold is not None and temporal_keys and temporal_feature_names:
+        dataset = _replace_fold_temporal_features(
+            dataset=dataset,
+            temporal_by_fold=temporal_by_fold,
+            temporal_keys=temporal_keys,
+            temporal_feature_names=temporal_feature_names,
+            fold_id=int(split["fold"]),
+        )
     fold_dataset = _filter_dataset_window(
         dataset,
         date_col=date_col,
@@ -679,6 +710,41 @@ def _prepare_fold_inputs(
         }
 
     return {"ragged": ragged_inputs, "pca": persistent_inputs}
+
+
+def _replace_fold_temporal_features(
+    *,
+    dataset: pl.DataFrame,
+    temporal_by_fold: pd.DataFrame,
+    temporal_keys: list[str],
+    temporal_feature_names: list[str],
+    fold_id: int,
+) -> pl.DataFrame:
+    """Replace the schema-placeholder columns with one fold's learned features."""
+    fold_temporal_pd = temporal_by_fold.loc[temporal_by_fold["fold"] == fold_id].drop(
+        columns=["fold"]
+    )
+    if fold_temporal_pd.empty:
+        raise ValueError(f"No temporal features found for fold {fold_id}")
+
+    fold_temporal = pl.from_pandas(fold_temporal_pd)
+    casts = {
+        key: dataset.schema[key]
+        for key in temporal_keys
+        if fold_temporal.schema[key] != dataset.schema[key]
+    }
+    if casts:
+        fold_temporal = fold_temporal.cast(casts)
+    fold_temporal = fold_temporal.unique(subset=temporal_keys, keep="last")
+
+    missing = sorted(set(temporal_feature_names) - set(fold_temporal.columns))
+    if missing:
+        raise ValueError(f"Fold {fold_id} temporal data is missing features: {missing}")
+    return dataset.drop(temporal_feature_names, strict=False).join(
+        fold_temporal.select([*temporal_keys, *temporal_feature_names]),
+        on=temporal_keys,
+        how="left",
+    )
 
 
 def _filter_dataset_window(
@@ -990,6 +1056,7 @@ def _register_model_predictions(
     fold_extras: list[dict[str, Any]],
     fold_ics_df: pl.DataFrame,
     preds_df: pl.DataFrame,
+    temporal_feature_assembly: str | None,
 ) -> None:
     from case_studies.utils.registry import (
         build_training_spec,
@@ -1024,6 +1091,7 @@ def _register_model_predictions(
         n_epochs=n_epochs,
         model_kwargs=model_kwargs,
         fold_extras=fold_extras,
+        temporal_feature_assembly=temporal_feature_assembly,
     )
 
     training_hash = register_training_run(
@@ -1060,6 +1128,7 @@ def _apply_latent_factor_runtime_spec(
     n_epochs: int,
     model_kwargs: dict[str, Any],
     fold_extras: list[dict[str, Any]],
+    temporal_feature_assembly: str | None = None,
 ) -> dict[str, Any]:
     resolved = dict(spec)
     params = dict(resolved.get("params", {}))
@@ -1112,5 +1181,7 @@ def _apply_latent_factor_runtime_spec(
                 runtime_fields[field] = first_extra[field]
 
     resolved.update(runtime_fields)
+    if temporal_feature_assembly is not None:
+        resolved["temporal_feature_assembly"] = temporal_feature_assembly
     resolved["params"] = params
     return resolved

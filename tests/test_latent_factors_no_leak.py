@@ -415,3 +415,109 @@ def test_case_study_default_scores_ic_at_every_prediction_timestamp() -> None:
     assert policy["score_dates"] == "all"
     assert policy["score_cadence"] == ""
     assert policy["score_rebalance_step"] == 1
+
+
+def test_latent_cv_replaces_placeholder_with_fold_temporal_features(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from case_studies.utils.latent_factors import cv
+
+    dates = pl.date_range(
+        datetime(2020, 1, 1),
+        datetime(2020, 1, 15),
+        interval="1d",
+        eager=True,
+    )
+    symbols = ["A", "B", "C"]
+    dataset = pl.DataFrame(
+        {
+            "timestamp": [date for date in dates for _ in symbols],
+            "symbol": symbols * len(dates),
+            "base_feature": [0.0, 1.0, 2.0] * len(dates),
+            # load_modeling_dataset joins fold 0 as a schema placeholder.
+            "temporal_feature": [1.0, 2.0, 3.0] * len(dates),
+            "fwd_ret": [0.01, 0.02, 0.03] * len(dates),
+        }
+    )
+    temporal_by_fold = pl.DataFrame(
+        {
+            "timestamp": [date for date in dates for _ in symbols],
+            "symbol": symbols * len(dates),
+            "fold": [1] * (len(dates) * len(symbols)),
+            "temporal_feature": [3.0, 2.0, 1.0] * len(dates),
+        }
+    ).to_pandas()
+    split = {
+        "fold": 1,
+        "train_start": datetime(2020, 1, 1),
+        "train_end": datetime(2020, 1, 12),
+        "val_start": datetime(2020, 1, 13),
+        "val_end": datetime(2020, 1, 15),
+    }
+
+    captured: dict[str, np.ndarray] = {}
+
+    def capture_fold(
+        chars_train: np.ndarray,
+        returns_train: np.ndarray,
+        chars_val: np.ndarray,
+        returns_val: np.ndarray,
+        n_factors: int,
+    ) -> tuple[np.ndarray, dict[str, object]]:
+        del returns_train, chars_val, n_factors
+        captured["chars_train"] = chars_train.copy()
+        return np.zeros_like(returns_val), {"converged": True}
+
+    monkeypatch.setitem(cv._MODEL_RUNNERS, "ipca", capture_fold)
+    cv.run_latent_factor_cv(
+        panel_data=None,
+        splits=[split],
+        models=["ipca"],
+        n_factors=2,
+        use_cache=False,
+        dataset=dataset,
+        feature_names=["base_feature", "temporal_feature"],
+        label_col="fwd_ret",
+        date_col="timestamp",
+        entity_col="symbol",
+        temporal_by_fold=temporal_by_fold,
+        temporal_keys=["timestamp", "symbol"],
+        temporal_feature_names=["temporal_feature"],
+    )
+
+    assert captured["chars_train"][0, :, 1].tolist() == pytest.approx([0.5, 0.0, -0.5])
+
+
+def test_fold_temporal_assembly_changes_training_identity() -> None:
+    from case_studies.utils.latent_factors.cv import (
+        TEMPORAL_FEATURE_ASSEMBLY,
+        _apply_latent_factor_runtime_spec,
+    )
+    from case_studies.utils.registry.specs import training_hash_from_spec
+
+    base = {
+        "config_name": "ipca",
+        "family": "latent_factors",
+        "label": "fwd_ret_21d",
+        "n_folds": 8,
+        "params": {"n_factors": 5},
+        "seed": 42,
+    }
+    placeholder = _apply_latent_factor_runtime_spec(
+        spec=base,
+        n_factors=5,
+        n_epochs=50,
+        model_kwargs={},
+        fold_extras=[],
+    )
+    fold_scoped = _apply_latent_factor_runtime_spec(
+        spec=base,
+        n_factors=5,
+        n_epochs=50,
+        model_kwargs={},
+        fold_extras=[],
+        temporal_feature_assembly=TEMPORAL_FEATURE_ASSEMBLY,
+    )
+
+    assert fold_scoped["temporal_feature_assembly"] == TEMPORAL_FEATURE_ASSEMBLY
+    assert training_hash_from_spec(placeholder) != training_hash_from_spec(fold_scoped)

@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+import pandas as pd
 import polars as pl
 import yaml
 
@@ -36,6 +37,9 @@ class LatentFactorCaseStudyContext:
     date_col: str
     entity_col: str
     splits: list[dict[str, Any]]
+    temporal_by_fold: pd.DataFrame | None
+    temporal_keys: list[str]
+    temporal_feature_names: list[str]
     max_symbols: int = 0
     max_folds: int = 0
 
@@ -100,6 +104,9 @@ def load_case_study_context(
         date_col=modeling_dataset.date_col,
         entity_col=modeling_dataset.entity_cols[0] if modeling_dataset.entity_cols else "symbol",
         splits=splits,
+        temporal_by_fold=modeling_dataset.temporal_by_fold,
+        temporal_keys=modeling_dataset.temporal_keys,
+        temporal_feature_names=modeling_dataset.temporal_feature_names,
         max_symbols=max_symbols,
         max_folds=max_folds,
     )
@@ -152,6 +159,9 @@ def run_case_study_model(
         entity_col=context.entity_col,
         macro_panel=context.macro_panel if macro_panel is None else macro_panel,
         persistent_entities=context.persistent_entities,
+        temporal_by_fold=context.temporal_by_fold,
+        temporal_keys=context.temporal_keys,
+        temporal_feature_names=context.temporal_feature_names,
     )
 
 
@@ -221,6 +231,9 @@ def run_case_study_variants(
             # macro-less fit while the primary uses the full panel.
             macro_panel=context.macro_panel,
             persistent_entities=context.persistent_entities,
+            temporal_by_fold=modeling_dataset.temporal_by_fold,
+            temporal_keys=modeling_dataset.temporal_keys,
+            temporal_feature_names=modeling_dataset.temporal_feature_names,
         )
     return results
 
