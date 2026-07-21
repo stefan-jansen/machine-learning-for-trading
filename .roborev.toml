@@ -1,0 +1,4 @@
+agent = "codex"
+review_min_severity = "low"
+post_commit_review = "commit"
+auto_close_passing_reviews = true
