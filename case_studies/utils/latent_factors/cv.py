@@ -1088,7 +1088,10 @@ def _resolve_metric_policy(
 
     score_mode = score_dates
     if score_mode == "auto":
-        score_mode = lf_setup.get("score_dates") or ("rebalance" if case_study_id else "all")
+        # IC is defined at every prediction timestamp, then averaged. Portfolio
+        # rebalance cadence belongs to the downstream backtest and must not
+        # thin the model-evaluation series or checkpoint-selection metric.
+        score_mode = lf_setup.get("score_dates") or "all"
     if score_mode not in {"all", "rebalance"}:
         raise ValueError(f"score_dates must be 'auto', 'all', or 'rebalance'; got {score_dates!r}")
 

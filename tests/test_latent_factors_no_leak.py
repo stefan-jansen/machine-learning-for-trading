@@ -1139,3 +1139,21 @@ def test_rebalance_scoring_thins_to_declared_schedule() -> None:
         datetime(2024, 1, 31),
         datetime(2024, 2, 29),
     ]
+
+
+def test_case_study_default_scores_ic_at_every_prediction_timestamp() -> None:
+    from case_studies.utils.latent_factors.cv import _resolve_metric_policy
+
+    policy = _resolve_metric_policy(
+        case_study_id="etfs",
+        label_col="fwd_ret_21d",
+        checkpoint_selection_policy=None,
+        reporting_epoch=None,
+        score_dates="auto",
+        score_cadence=None,
+        score_rebalance_step=None,
+    )
+
+    assert policy["score_dates"] == "all"
+    assert policy["score_cadence"] == ""
+    assert policy["score_rebalance_step"] == 1
