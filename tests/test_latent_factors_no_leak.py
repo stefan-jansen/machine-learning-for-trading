@@ -170,6 +170,53 @@ def test_macro_panel_applies_allowlist_and_availability_lag(
     assert panel["timestamp"].to_list() == [datetime(2020, 2, 1)]
 
 
+def test_pca_entity_eligibility_is_learned_from_train_only() -> None:
+    """Validation coverage must not decide which entities enter the PCA panel."""
+    from case_studies.utils.latent_factors.cv import _prepare_fold_inputs
+
+    train_dates = pl.date_range(
+        datetime(2020, 1, 1),
+        datetime(2020, 1, 12),
+        interval="1d",
+        eager=True,
+    ).to_list()
+    val_dates = pl.date_range(
+        datetime(2020, 1, 13),
+        datetime(2020, 1, 15),
+        interval="1d",
+        eager=True,
+    ).to_list()
+
+    rows: list[dict[str, object]] = []
+    for idx, timestamp in enumerate(train_dates + val_dates):
+        rows.append({"timestamp": timestamp, "symbol": "A", "feature": idx, "label": idx / 100})
+    for idx, timestamp in enumerate(train_dates[:9] + val_dates):
+        rows.append({"timestamp": timestamp, "symbol": "B", "feature": idx, "label": idx / 100})
+
+    inputs = _prepare_fold_inputs(
+        dataset=pl.DataFrame(rows),
+        split={
+            "fold": 0,
+            "train_start": train_dates[0],
+            "train_end": train_dates[-1],
+            "val_start": val_dates[0],
+            "val_end": val_dates[-1],
+        },
+        feature_names=["feature"],
+        label_col="label",
+        date_col="timestamp",
+        entity_col="symbol",
+        eval_label_col=None,
+        macro_panel=None,
+        need_pca_inputs=True,
+    )
+
+    assert inputs is not None
+    assert inputs["pca"]["returns_train"].shape == (12, 1)
+    assert set(inputs["pca"]["val_entities"].ravel()) == {"A"}
+    assert inputs["ragged"]["returns_val"].shape == (3, 2)
+
+
 def test_cae_validation_batch_receives_validation_returns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

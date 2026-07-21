@@ -940,12 +940,19 @@ def _prepare_fold_inputs(
 
     persistent_inputs = None
     if need_pca_inputs:
+        train_dataset = _filter_dataset_window(
+            fold_dataset,
+            date_col=date_col,
+            start=split["train_start"],
+            end=split["train_end"],
+        )
         persistent_panel = prepare_panel_data(
             fold_dataset,
             feature_names=feature_names,
             label_col=label_col,
             date_col=date_col,
             entity_col=entity_col,
+            eligibility_dataset=train_dataset,
             eval_label_col=eval_label_col,
         )
         persistent_train_mask = _date_mask(

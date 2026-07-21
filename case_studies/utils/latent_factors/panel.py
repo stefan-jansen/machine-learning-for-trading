@@ -81,19 +81,26 @@ def prepare_panel_data(
     label_col: str,
     date_col: str,
     entity_col: str,
+    *,
+    eligibility_dataset: pl.DataFrame,
     max_entities: int = 0,
     min_coverage: float = 0.5,
     eval_label_col: str | None = None,
     macro_panel: pl.DataFrame | None = None,
 ) -> dict[str, Any]:
-    """Build a persistent-entity panel for stable-ID models such as PCA."""
+    """Build a persistent-entity panel with eligibility learned from training data."""
     df = _sort_panel_frame(dataset, date_col=date_col, entity_col=entity_col)
+    eligibility_df = _sort_panel_frame(
+        eligibility_dataset,
+        date_col=date_col,
+        entity_col=entity_col,
+    )
 
-    n_dates_total = df[date_col].n_unique()
+    n_dates_total = eligibility_df[date_col].n_unique()
     min_dates = max(int(n_dates_total * min_coverage), 10)
 
     eligible = (
-        df.group_by(entity_col)
+        eligibility_df.group_by(entity_col)
         .len()
         .filter(pl.col("len") >= min_dates)
         .sort(["len", entity_col], descending=[True, False])
