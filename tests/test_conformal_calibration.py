@@ -189,7 +189,7 @@ def test_common_support_ranking_uses_identical_timestamps() -> None:
             ],
             "daily_return": [0.02, 0.00, 0.01],
         }
-    )
+    ).with_columns(pl.col("timestamp").cast(pl.Datetime("ms")))
 
     ranked = rank_returns_on_common_support({"full": full, "strict": strict}, periods_per_year=252)
 

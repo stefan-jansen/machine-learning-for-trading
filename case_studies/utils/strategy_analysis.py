@@ -86,8 +86,10 @@ def rank_returns_on_common_support(
             raise ValueError(
                 f"{backtest_hash}: expected timestamp plus a return column; got {frame.columns}"
             )
-        selected = frame.select("timestamp", pl.col(return_col).alias("daily_return")).sort(
-            "timestamp"
+        selected = (
+            frame.select("timestamp", pl.col(return_col).alias("daily_return"))
+            .with_columns(pl.col("timestamp").cast(pl.Datetime("ns")))
+            .sort("timestamp")
         )
         if selected["timestamp"].n_unique() != selected.height:
             raise ValueError(f"{backtest_hash}: duplicate timestamps in daily returns")
@@ -103,10 +105,12 @@ def rank_returns_on_common_support(
     from case_studies.utils.backtest_runner import compute_portfolio_metrics
 
     common = sorted(common_timestamps)
+    common_frame = pl.DataFrame({"timestamp": common}, schema={"timestamp": pl.Datetime("ns")})
+    common_ns = common_frame["timestamp"].cast(pl.Int64).to_list()
     rows: list[dict[str, Any]] = []
     for backtest_hash, frame in normalized.items():
-        aligned = frame.filter(pl.col("timestamp").is_in(common)).sort("timestamp")
-        if aligned["timestamp"].to_list() != common:
+        aligned = frame.join(common_frame, on="timestamp", how="inner").sort("timestamp")
+        if aligned["timestamp"].cast(pl.Int64).to_list() != common_ns:
             raise ValueError(f"{backtest_hash}: failed exact common-support alignment")
         metrics = compute_portfolio_metrics(
             aligned["daily_return"].to_numpy(),
