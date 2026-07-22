@@ -929,6 +929,7 @@ def _register_model_predictions(
     spec = _apply_latent_factor_runtime_spec(
         spec=spec,
         n_factors=n_factors,
+        n_epochs=n_epochs,
         model_kwargs=model_kwargs,
         fold_extras=fold_extras,
         feature_names=feature_names,

@@ -195,6 +195,90 @@ def test_latent_input_digest_is_order_stable_and_value_sensitive() -> None:
     assert changed != digest
 
 
+def test_latent_registration_builds_complete_training_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from case_studies.utils import registry
+    from case_studies.utils.latent_factors.cv import _register_model_predictions
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        registry,
+        "build_training_spec",
+        lambda *_args, **_kwargs: {
+            "family": "latent_factors",
+            "config_name": "cae",
+            "label": "return",
+            "seed": 42,
+        },
+    )
+
+    def capture_training_run(_case_study_id: str, *, spec, **_kwargs) -> str:
+        captured["spec"] = spec
+        return "training-hash"
+
+    monkeypatch.setattr(registry, "register_training_run", capture_training_run)
+    monkeypatch.setattr(
+        registry,
+        "register_prediction_set",
+        lambda *_args, **_kwargs: "prediction-hash",
+    )
+
+    _register_model_predictions(
+        case_study_id="probe",
+        model_name="cae",
+        label_col="return",
+        n_epochs=50,
+        n_factors=5,
+        notebook="08b_conditional_autoencoder",
+        prediction_split="validation",
+        task_type="regression",
+        class_values=None,
+        eval_label_col=None,
+        started_at="2026-07-21T00:00:00+00:00",
+        elapsed=1.0,
+        model_kwargs={"checkpoint_interval": 5},
+        fold_extras=[],
+        fold_ics_df=pl.DataFrame({"fold_id": [0], "epoch": [0], "ic_mean": [0.1]}),
+        preds_df=pl.DataFrame(
+            {
+                "timestamp": [datetime(2021, 1, 1)],
+                "symbol": ["A"],
+                "y_true": [0.1],
+                "y_score": [0.2],
+                "fold_id": [0],
+                "config_name": ["cae"],
+                "epoch": [0],
+            }
+        ),
+        feature_names=["value"],
+        splits=[
+            {
+                "fold": 0,
+                "train_start": datetime(2020, 1, 1),
+                "train_end": datetime(2020, 12, 31),
+                "val_start": datetime(2021, 1, 1),
+                "val_end": datetime(2021, 12, 31),
+            }
+        ],
+        input_digest="input-a",
+        macro_digest=None,
+        runtime_spec={
+            "device": "cuda",
+            "deterministic_algorithms": True,
+            "cublas_workspace_config": ":4096:8",
+            "num_threads": 8,
+            "seed": 42,
+        },
+    )
+
+    spec = captured["spec"]
+    assert isinstance(spec, dict)
+    assert spec["n_epochs"] == 50
+    assert spec["checkpoint_interval"] == 5
+    assert spec["params"]["input_digest"] == "input-a"
+
+
 @pytest.mark.gpu
 def test_cae_predictions_independent_of_validation_returns() -> None:
     """End-to-end regression: perturbing validation returns must not change predictions.
