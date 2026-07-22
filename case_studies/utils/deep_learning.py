@@ -476,7 +476,11 @@ def run_dl_cv(
         fold_metrics: pl.DataFrame — per-fold cross-sectional IC for best config
         all_learning_curves: pl.DataFrame — IC × epoch × config
     """
-    from case_studies.utils.darts_forecasting import run_darts_cv, uses_darts_backend
+    from case_studies.utils.darts_forecasting import (
+        darts_training_identity,
+        run_darts_cv,
+        uses_darts_backend,
+    )
 
     if register and save_dir is None:
         raise ValueError(
@@ -487,6 +491,14 @@ def run_dl_cv(
     def identity_params(cfg: dict[str, Any]) -> dict[str, Any] | None:
         if input_data_spec is None:
             return None
+        if uses_darts_backend([cfg]):
+            return darts_training_identity(
+                cfg,
+                label_col,
+                case_study=case_study,
+                input_data_spec=input_data_spec,
+                max_train_sequences=max_train_sequences,
+            )
         return {
             "batch_size": cfg.get("batch_size", 2048),
             "input_data_spec": input_data_spec,
