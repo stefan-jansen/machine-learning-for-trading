@@ -211,6 +211,17 @@ def test_backtest_hash_invariant_under_strategy_key_order() -> None:
     assert backtest_hash_from_parts("p", a) == backtest_hash_from_parts("p", b)
 
 
+def test_backtest_hash_excludes_runtime_config_object() -> None:
+    planned = {
+        "version": 2,
+        "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 10}},
+        "backtest_config": {"cash": {"initial": 100_000.0}},
+    }
+    runtime = {**planned, "_runtime_backtest_config": object()}
+
+    assert backtest_hash_from_parts("pred", runtime) == backtest_hash_from_parts("pred", planned)
+
+
 # -----------------------------------------------------------------------------
 # Regression pin — the exact hash for a canonical spec
 # -----------------------------------------------------------------------------

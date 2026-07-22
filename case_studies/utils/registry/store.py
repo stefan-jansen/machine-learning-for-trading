@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS training_runs (
     git_commit        TEXT,
     entry_point       TEXT,
     started_at        TEXT,
-    elapsed_s         REAL
+    elapsed_s         REAL,
+    runtime_json      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_training_family_label ON training_runs(family, label);
@@ -384,14 +385,16 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
     tables = {
         row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     }
-    if "backtest_runs" not in tables:
+    if not tables:
         return  # Fresh DB — schema script will create everything
 
     # Migration 1: add stage column to backtest_runs
-    cols = {row[1] for row in db.execute("PRAGMA table_info(backtest_runs)").fetchall()}
-    if "stage" not in cols:
-        db.execute("ALTER TABLE backtest_runs ADD COLUMN stage TEXT")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_backtest_stage ON backtest_runs(stage)")
+    cols: set[str] = set()
+    if "backtest_runs" in tables:
+        cols = {row[1] for row in db.execute("PRAGMA table_info(backtest_runs)").fetchall()}
+        if "stage" not in cols:
+            db.execute("ALTER TABLE backtest_runs ADD COLUMN stage TEXT")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_backtest_stage ON backtest_runs(stage)")
 
     # Migration 2: add runtime columns to training_runs
     if "training_runs" in tables:
@@ -400,12 +403,15 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
             db.execute("ALTER TABLE training_runs ADD COLUMN started_at TEXT")
         if "elapsed_s" not in tr_cols:
             db.execute("ALTER TABLE training_runs ADD COLUMN elapsed_s REAL")
+        if "runtime_json" not in tr_cols:
+            db.execute("ALTER TABLE training_runs ADD COLUMN runtime_json TEXT")
 
     # Migration 2b: add runtime columns to backtest_runs
-    if "started_at" not in cols:
-        db.execute("ALTER TABLE backtest_runs ADD COLUMN started_at TEXT")
-    if "elapsed_s" not in cols:
-        db.execute("ALTER TABLE backtest_runs ADD COLUMN elapsed_s REAL")
+    if "backtest_runs" in tables:
+        if "started_at" not in cols:
+            db.execute("ALTER TABLE backtest_runs ADD COLUMN started_at TEXT")
+        if "elapsed_s" not in cols:
+            db.execute("ALTER TABLE backtest_runs ADD COLUMN elapsed_s REAL")
 
     # Migration 3: tall → wide metric tables
     if "prediction_metrics" in tables:
@@ -702,6 +708,9 @@ def flush_fold_predictions(
     y_val: np.ndarray,
     date_col: str,
     entity_col: str,
+    *,
+    eval_actual: np.ndarray | None = None,
+    eval_col: str = "eval_actual",
 ) -> None:
     """Write one fold's checkpoint predictions to parquet for crash safety.
 
@@ -732,6 +741,8 @@ def flush_fold_predictions(
                 "epoch": np.full(n, ep, dtype=np.int32),
             }
         )
+        if eval_actual is not None:
+            df = df.with_columns(pl.Series(eval_col, eval_actual.astype(np.float64)))
         frames.append(df)
 
     if frames:

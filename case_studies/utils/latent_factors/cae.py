@@ -28,6 +28,7 @@ def run_cae_fold(
     lr: float = 1e-3,
     task_type: TaskType = "regression",
     seed: int = 42,
+    device: str = "cpu",
     log_fn=print,
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
     """Train the CAE and emit forecasts from the requested checkpoint grid."""
@@ -49,4 +50,5 @@ def run_cae_fold(
         lr=lr,
         task_type=task_type,
         seed=seed,
+        device=device,
     )

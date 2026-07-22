@@ -45,6 +45,7 @@ def register_training_run(
     case_dir: Path | None = None,
     started_at: str | None = None,
     elapsed_s: float | None = None,
+    runtime_provenance: dict | None = None,
 ) -> str:
     """Register a training run. Returns training_hash.
 
@@ -64,6 +65,8 @@ def register_training_run(
         ISO timestamp when training started.
     elapsed_s : float, optional
         Wall-clock seconds for the training run.
+    runtime_provenance : dict, optional
+        Execution environment recorded separately from the portable hash.
     """
     if case_dir is None:
         case_dir = _case_dir(case_study)
@@ -75,6 +78,8 @@ def register_training_run(
     # Write spec.json (authoritative identity artifact)
     train_dir = _training_dir(case_dir, t_hash)
     _save_json(train_dir / "spec.json", spec)
+    if runtime_provenance is not None:
+        _save_json(train_dir / "runtime.json", runtime_provenance)
 
     # Insert into DB
     db = _open_registry(case_dir)
@@ -84,8 +89,8 @@ def register_training_run(
             INSERT OR REPLACE INTO training_runs
             (training_hash, family, label, config_name,
              spec_json, created_at, git_commit, entry_point,
-             started_at, elapsed_s)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             started_at, elapsed_s, runtime_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 t_hash,
@@ -98,6 +103,7 @@ def register_training_run(
                 entry_point,
                 started_at,
                 elapsed_s,
+                canonical_json(runtime_provenance) if runtime_provenance is not None else None,
             ),
         )
         db.commit()
@@ -126,6 +132,12 @@ def register_epoch_checkpoint(
     started_at: str | None = None,
     elapsed_s: float | None = None,
     prediction_split: str = "validation",
+    checkpoint_interval: int | None = None,
+    spec_extra_params: dict | None = None,
+    task_type: str = "regression",
+    class_values: list | None = None,
+    eval_col: str | None = None,
+    training_spec: dict | None = None,
 ) -> str:
     """Shared 'one-config-per-epoch-checkpoint' registration path.
 
@@ -199,6 +211,10 @@ def register_epoch_checkpoint(
         ISO timestamp when this config's training started.
     elapsed_s : float, optional
         Wall-clock seconds for this config's training.
+    training_spec : dict, optional
+        Prebuilt identity used by cache lookup. When supplied, registration
+        validates its family, config, label, and fold count and stores this
+        exact spec instead of rebuilding it.
 
     Returns
     -------
@@ -209,20 +225,41 @@ def register_epoch_checkpoint(
         f"register_epoch_checkpoint: family must be 'deep_learning' or 'tabular_dl', got {family!r}"
     )
 
+    if training_spec is not None:
+        spec = dict(training_spec)
+        expected_identity = {
+            "family": family,
+            "config_name": config_name,
+            "label": label,
+            "n_folds": n_folds,
+        }
+        mismatches = {
+            key: (spec.get(key), value)
+            for key, value in expected_identity.items()
+            if spec.get(key) != value
+        }
+        if mismatches:
+            raise ValueError(f"training_spec disagrees with registration inputs: {mismatches}")
+    else:
+        spec = None
+
     try:
         # Main path: preset loaded from disk is authoritative.
         # extra_params is deliberately NOT passed here — doing so would
         # merge architecture/lookback into spec["params"] and change the
         # training_hash vs. historical runs that already populated the
         # preset's own params from disk.
-        spec = build_training_spec(
-            family,
-            config_name,
-            label,
-            n_folds=n_folds,
-            n_epochs=n_epochs,
-            feature_sets=feature_sets,
-        )
+        if spec is None:
+            spec = build_training_spec(
+                family,
+                config_name,
+                label,
+                n_folds=n_folds,
+                n_epochs=n_epochs,
+                feature_sets=feature_sets,
+                checkpoint_interval=checkpoint_interval,
+                extra_params=spec_extra_params,
+            )
     except FileNotFoundError:
         # Fallback for unknown config_name (no preset on disk).
         spec = {
@@ -232,7 +269,10 @@ def register_epoch_checkpoint(
             "label": label,
             "library": library,
             "n_folds": n_folds,
-            "params": dict(extra_params) if extra_params else {},
+            "params": {
+                **(dict(extra_params) if extra_params else {}),
+                **(dict(spec_extra_params) if spec_extra_params else {}),
+            },
             "seed": 42,
         }
         if n_epochs is not None:
@@ -265,6 +305,10 @@ def register_epoch_checkpoint(
         split=prediction_split,
         predictions=predictions,
         metrics={"ic_mean": ic_mean},
+        task_type=task_type,
+        class_values=class_values,
+        eval_col=eval_col,
+        label=label,
     )
     return t_hash
 

@@ -73,8 +73,6 @@ IMAGE_OVERRIDES: dict[str, str] = {
     # py312 (Python 3.12 image — packages without 3.14 wheels)
     "signatory": "py312",
     "gensim": "py312",
-    "pfhedge": "py312",
-    "causalimpact": "py312",  # tfcausalimpact (TFP BSTS); Ch15/06 — caps at py<3.13
     # benchmark (Ch2/Ch3 storage-layer comparison — database clients)
     "arcticdb": "benchmark",
     "clickhouse_connect": "benchmark",
@@ -85,14 +83,7 @@ IMAGE_OVERRIDES: dict[str, str] = {
     "questdb": "benchmark",
     "tables": "benchmark",
     # optional — broker / market-data SDKs readers may skip
-    "alpaca": "optional",
-    "ib_async": "optional",
-    "okx": "optional",
     "databento": "optional",
-    "voyageai": "optional",
-    # optional — notebooks guard these with try/except ImportError and
-    # provide a fallback path. Readers can install on demand.
-    "openai": "optional",  # Ch22/02, Ch24/agents — alternative LLM provider
 }
 
 VALID_IMAGES: tuple[str, ...] = ("ml4t", "py312", "benchmark", "rapids", "optional")

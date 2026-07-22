@@ -1,0 +1,9 @@
+batch_size: 2048
+checkpoint_interval: 5
+n_epochs: 100
+params:
+  architecture: lstm
+  dropout: 0.1
+  hidden_size: 128
+  lookback: 60
+  n_layers: 2

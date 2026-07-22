@@ -1,0 +1,2 @@
+model_class: LinearRegression
+params: {}

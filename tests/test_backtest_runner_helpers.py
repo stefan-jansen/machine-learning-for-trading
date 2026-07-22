@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
@@ -23,12 +24,59 @@ from case_studies.utils.backtest_runner import (
     _MAX_NULL_RATE,
     _align_symbol_dtype,
     apply_universe_filter,
+    run_plumbing_test,
     substitute_continuous_return_for_classification,
 )
 
 
 def test_max_null_rate_constant_default() -> None:
     assert _MAX_NULL_RATE == 0.10
+
+
+def test_vectorized_plumbing_test_runs_random_scores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import case_studies.utils.backtest_runner as br
+
+    spec = {
+        "version": 2,
+        "strategy": {"rebalance": {"mode": "vectorized"}},
+        "backtest_config": {},
+    }
+    predictions = pl.DataFrame(
+        {
+            "timestamp": [datetime(2024, 1, 1), datetime(2024, 1, 1)],
+            "symbol": ["A", "B"],
+            "y_score": [0.8, 0.2],
+            "y_true": [0.1, -0.1],
+        }
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(br, "get_backtest_config", lambda _: object())
+    monkeypatch.setattr(br, "ensure_backtest_spec", lambda *args, **kwargs: args[2])
+
+    def fake_run_backtest(*args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(metrics={"sharpe": 0.25})
+
+    monkeypatch.setattr(br, "run_backtest", fake_run_backtest)
+
+    observed = run_plumbing_test(
+        "demo",
+        pl.DataFrame(),
+        spec,
+        predictions=predictions,
+        label="fwd_ret_1m",
+        seed=7,
+    )
+
+    randomized = captured["predictions"]
+    assert isinstance(randomized, pl.DataFrame)
+    assert observed == 0.25
+    assert captured["register"] is False
+    assert randomized["y_true"].to_list() == predictions["y_true"].to_list()
+    assert randomized["y_score"].to_list() != predictions["y_score"].to_list()
 
 
 def test_align_symbol_dtype_same_dtype_passthrough() -> None:

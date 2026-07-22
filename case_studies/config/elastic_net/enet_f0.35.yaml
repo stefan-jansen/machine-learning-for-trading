@@ -1,0 +1,6 @@
+# Data-driven L1/L2 grid: alpha = 0.35 x alpha_max(l1_ratio) per fold.
+model_class: ElasticNet
+params:
+  alpha_frac: 0.35
+  l1_ratio: 0.5
+  max_iter: 5000

@@ -1,0 +1,6 @@
+checkpoint_interval: 50
+max_iterations: 500
+params:
+  num_class: 5
+  objective: multiclass
+  seed: 42

@@ -236,8 +236,8 @@ def align_macro_to_dates(
     date_frame = pl.DataFrame({date_col: list(dates)}).sort(date_col)
     aligned = (
         date_frame.join_asof(macro.sort(date_col), on=date_col, strategy="backward")
-        .fill_null(strategy="backward")
         .fill_null(strategy="forward")
+        .fill_null(0.0)
     )
     return aligned.select(feature_cols).to_numpy().astype(np.float32), feature_cols
 

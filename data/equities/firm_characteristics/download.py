@@ -3,7 +3,8 @@
 Download Chen-Pelger-Zhu (2020) academic asset pricing dataset.
 
 This dataset contains ~1.2M stock-month observations with 46 firm characteristics
-and monthly returns. Data is fully anonymized (no stock identifiers).
+and monthly returns. The released tensors retain persistent anonymous firm axes
+within each published train, validation, and test block.
 
 Source: https://github.com/jasonzy121/Deep_Learning_Asset_Pricing
 Paper: "Deep Learning in Asset Pricing" (Chen, Pelger, Zhu, 2020)
@@ -18,9 +19,9 @@ Data structure:
     ├── RetChar.csv           # 1.1GB - Stock returns + 46 characteristics
     ├── Macro.csv             # 1.8MB - 178 macroeconomic indicators
     ├── char/                 # Pre-split characteristic numpy arrays
-    │   ├── Char_train.npz    # 1967-1989 (~70%)
-    │   ├── Char_valid.npz    # 1990-1999 (~15%)
-    │   └── Char_test.npz     # 2000-2016 (~15%)
+    │   ├── Char_train.npz    # 1967-1986
+    │   ├── Char_valid.npz    # 1987-1991
+    │   └── Char_test.npz     # 1992-2016
     ├── macro/                # Pre-split macro numpy arrays
     │   ├── macro_train.npz
     │   ├── macro_valid.npz
@@ -74,7 +75,7 @@ ADDITIONAL_FILES = {
     "SDF-Time-Series.xlsx": {
         "url": "https://www.dropbox.com/scl/fi/6wgeg4ztoi5vu680x01eq/SDF-Time-Series.xlsx?rlkey=ehy8zaz2fh6tyq43hpf64gczh&e=1&dl=1",
         "size": 240_633,  # ~241KB
-        "description": "SDF time series data (Pelger) — used for Ch14 latent factor validation",
+        "description": "SDF time series data (Pelger) - used for Ch14 latent factor validation",
     },
 }
 
@@ -200,6 +201,19 @@ def verify_files(data_dir: Path) -> tuple[list[str], list[str]]:
     return found, missing
 
 
+def _parquet_has_persistent_symbols(path: Path) -> bool:
+    """Return whether an existing parquet satisfies the identity-preserving schema."""
+    if not path.exists():
+        return False
+    import polars as pl
+
+    try:
+        names = set(pl.scan_parquet(path).collect_schema().names())
+    except Exception:
+        return False
+    return {"symbol", "timestamp", "split"}.issubset(names)
+
+
 def print_manual_instructions(data_dir: Path) -> None:
     """Print manual download instructions."""
     print("\n" + "=" * 70)
@@ -278,15 +292,17 @@ def main():
             return 1
 
     # If all source files exist and not forcing, skip download but ensure the
-    # parquet outputs exist (convert only if missing — the CSV read is ~1.1 GB).
+    # parquet outputs exist (convert only if missing; the CSV read is ~1.1 GB).
     if not missing and not args.force:
         print("\n[OK] All source files already downloaded!")
         print("  Use --force to re-download")
         all_parquet = (
             data_dir / "equities" / "firm_characteristics" / "firm_characteristics_all.parquet"
         )
-        if all_parquet.exists():
+        if _parquet_has_persistent_symbols(all_parquet):
             return 0
+        if all_parquet.exists():
+            print("  Existing parquet predates persistent-symbol recovery; regenerating.")
         return 0 if convert_to_parquet(data_dir) else 1
 
     # Try automatic download
@@ -302,9 +318,9 @@ def main():
 
     # Method 1: Download entire folder (more reliable than single-file IDs)
     print(f"Downloading from Google Drive folder: {GDRIVE_FOLDER_URL}")
-    print("  ~1.5 GB across 4 files (RetChar.csv ~1.1 GB) — per-file progress below.")
+    print("  ~1.5 GB across 4 files (RetChar.csv ~1.1 GB); per-file progress below.")
     try:
-        # NOTE: no remaining_ok kwarg — it was removed in gdown 6.x and passing it
+        # NOTE: no remaining_ok kwarg; it was removed in gdown 6.x and passing it
         # raises TypeError, which silently aborts the (working) folder download.
         gdown.download_folder(GDRIVE_FOLDER_URL, output=str(academic_dir), quiet=False)
     except Exception as e:
@@ -349,68 +365,74 @@ def main():
     return 1
 
 
-def convert_to_parquet(data_dir: Path) -> bool:
-    """Convert RetChar.csv to parquet format with train/test splits.
+def _characteristic_frame(npz_path: Path, split: str, symbol_offset: int):
+    """Flatten one published tensor while preserving its anonymous firm axis."""
+    import numpy as np
+    import polars as pl
 
-    Split boundaries match Chen-Pelger-Zhu paper:
-    - train: 1967-1989 (~70%)
-    - valid: 1990-1999 (~15%) - merged into test for simplicity
-    - test: 2000-2016 (~15%)
+    with np.load(npz_path) as archive:
+        dates = archive["date"]
+        variables = [str(name) for name in archive["variable"]]
+        data = archive["data"]
+
+    if data.ndim != 3 or data.shape[0] != len(dates) or data.shape[2] != len(variables):
+        raise ValueError(f"Unexpected characteristic tensor shape in {npz_path}: {data.shape}")
+    if not variables or variables[0] != "ret":
+        raise ValueError(f"Expected 'ret' as the first variable in {npz_path}: {variables[:3]}")
+
+    valid = data[:, :, 0] != -99.99
+    date_index, firm_index = np.nonzero(valid)
+    values = data[valid]
+    frame = pl.DataFrame(values, schema=variables, orient="row")
+    return frame.with_columns(
+        pl.Series("symbol", symbol_offset + firm_index, dtype=pl.UInt32),
+        pl.Series("timestamp", dates[date_index].astype(str)).str.to_date("%Y%m%d"),
+        pl.lit(split).alias("split"),
+    ).select("symbol", "timestamp", *variables, "split")
+
+
+def convert_to_parquet(data_dir: Path) -> bool:
+    """Convert the published tensors to canonical, identity-preserving Parquet files.
+
+    The CSV omits firm identifiers, but each NPZ block has a fixed anonymous firm
+    axis. Axis positions are persistent within a block. The archive publishes no
+    mapping between blocks, so offsets keep their identifier namespaces disjoint.
     """
     import polars as pl
 
     dl_dir = data_dir / "equities" / "firm_characteristics" / "dl_asset_pricing"
+    char_dir = dl_dir / "char"
     output_dir = data_dir / "equities" / "firm_characteristics"
+    split_specs = (
+        ("train", char_dir / "Char_train.npz", 0),
+        ("valid", char_dir / "Char_valid.npz", 1_000_000),
+        ("test", char_dir / "Char_test.npz", 2_000_000),
+    )
 
-    retchar_path = dl_dir / "RetChar.csv"
-    if not retchar_path.exists():
-        print(f"ERROR: RetChar.csv not found at {retchar_path}")
+    missing = [path for _, path, _ in split_specs if not path.exists()]
+    if missing:
+        print("ERROR: Required characteristic tensors are missing:")
+        for path in missing:
+            print(f"  {path}")
         return False
 
-    print("\nConverting RetChar.csv to parquet format...")
-    print(f"  Reading {retchar_path}...")
-
-    # Read CSV - has columns: DATE, RET, and 46 characteristic columns
-    df = pl.read_csv(retchar_path)
-    print(f"  Loaded {len(df):,} rows, {len(df.columns)} columns")
-
-    # Date is in YYYYMMDD format (integer)
-    df = df.with_columns(
-        pl.col("Date").cast(pl.Utf8).str.to_date("%Y%m%d").alias("date"),
-        pl.col("Date").cast(pl.Utf8).str.slice(0, 4).cast(pl.Int32).alias("year"),
-    )
-
-    # Create splits
-    train_df = df.filter(pl.col("year") < 1990)
-    test_df = df.filter(pl.col("year") >= 2000)
-
-    # Drop helper columns
-    train_df = train_df.drop(["Date", "year"])
-    test_df = test_df.drop(["Date", "year"])
-    all_df = df.drop(["Date", "year"])
-
-    # Save parquet files
+    print("\nConverting identity-preserving characteristic tensors to parquet...")
     output_dir.mkdir(parents=True, exist_ok=True)
+    split_paths: list[Path] = []
+    split_counts: dict[str, int] = {}
+    for split, npz_path, symbol_offset in split_specs:
+        print(f"  Reading {npz_path}...")
+        frame = _characteristic_frame(npz_path, split, symbol_offset)
+        path = output_dir / f"firm_characteristics_{split}.parquet"
+        frame.write_parquet(path)
+        split_paths.append(path)
+        split_counts[split] = len(frame)
+        print(f"    {split}: {len(frame):,} rows ({path.stat().st_size / 1e6:.1f} MB)")
 
-    train_path = output_dir / "firm_characteristics_train.parquet"
-    test_path = output_dir / "firm_characteristics_test.parquet"
     all_path = output_dir / "firm_characteristics_all.parquet"
-
-    train_df.write_parquet(train_path)
-    test_df.write_parquet(test_path)
-    all_df.write_parquet(all_path)
-
-    print("  Created:")
-    print(
-        f"    firm_characteristics_train.parquet: {len(train_df):,} rows ({train_path.stat().st_size / 1e6:.1f} MB)"
-    )
-    print(
-        f"    firm_characteristics_test.parquet: {len(test_df):,} rows ({test_path.stat().st_size / 1e6:.1f} MB)"
-    )
-    print(
-        f"    firm_characteristics_all.parquet: {len(all_df):,} rows ({all_path.stat().st_size / 1e6:.1f} MB)"
-    )
-
+    pl.concat([pl.scan_parquet(path) for path in split_paths]).sink_parquet(all_path)
+    all_count = sum(split_counts.values())
+    print(f"    all: {all_count:,} rows ({all_path.stat().st_size / 1e6:.1f} MB)")
     return True
 
 

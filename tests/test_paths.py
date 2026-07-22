@@ -14,6 +14,7 @@ from utils.paths import (
     CHAPTERS,
     REPO_ROOT,
     STRATEGY_IDS,
+    display_path,
     get_case_study_dir,
     get_chapter_dir,
     get_output_dir,
@@ -22,6 +23,19 @@ from utils.paths import (
 # -----------------------------------------------------------------------------
 # Registry invariants
 # -----------------------------------------------------------------------------
+
+
+def test_display_path_uses_repo_relative_path(monkeypatch) -> None:
+    monkeypatch.delenv("ML4T_OUTPUT_DIR", raising=False)
+
+    assert display_path(REPO_ROOT / "case_studies" / "etfs") == "case_studies/etfs"
+
+
+def test_display_path_masks_isolated_output_root(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
+
+    path = tmp_path / "etfs" / "run_log" / "latent_factors.log"
+    assert display_path(path) == "$ML4T_OUTPUT_DIR/etfs/run_log/latent_factors.log"
 
 
 def test_chapters_registry_covers_1_through_27() -> None:

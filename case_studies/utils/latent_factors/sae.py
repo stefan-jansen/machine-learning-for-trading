@@ -31,6 +31,8 @@ def run_sae_fold(
     alpha: float = 1.0,
     aux_weight: float = 1.0,
     task_type: TaskType = "regression",
+    seed: int = 42,
+    device: str = "cpu",
     log_fn=print,
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
     """Train the SAE and emit predictions on the requested checkpoint grid."""
@@ -56,4 +58,6 @@ def run_sae_fold(
         alpha=alpha,
         aux_weight=aux_weight,
         task_type=task_type,
+        seed=seed,
+        device=device,
     )

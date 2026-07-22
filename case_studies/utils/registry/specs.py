@@ -85,6 +85,7 @@ _HASH_EXCLUDED_METADATA = ("preset_path",)
 def _hashable_strategy_spec(strategy_spec: dict) -> dict:
     """Copy of *strategy_spec* with non-portable provenance stripped for hashing."""
     spec = copy.deepcopy(strategy_spec)
+    spec.pop("_runtime_backtest_config", None)
     backtest_config = spec.get("backtest_config")
     if isinstance(backtest_config, dict):
         metadata = backtest_config.get("metadata")
