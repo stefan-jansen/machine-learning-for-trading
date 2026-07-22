@@ -521,6 +521,7 @@ def run_dl_cv(
                 {
                     "batch_size": cfg.get("batch_size", 2048),
                     "input_data_spec": input_data_spec,
+                    "lookback": cfg.get("params", {}).get("lookback", 60),
                     "max_train_sequences": max_train_sequences,
                 }
             )
@@ -949,61 +950,57 @@ def run_dl_cv(
             f"  {config_name}: best_epoch={best_cp}, IC={best_ic_val:+.4f} ({acc['elapsed_s']:.1f}s)"
         )
 
-        # Incremental registration: persist this config as soon as aggregation
-        # completes. If the notebook is interrupted here, completed configs are
-        # already in the registry. (Fold-major training means ALL configs reach
-        # this point together, but registration is still moved out of the old
-        # batched block at the end.)
+        # Incremental registration: persist every complete checkpoint as soon as
+        # aggregation finishes. Registering only the raw-IC peak would prevent a
+        # reader from applying the checkpoint-level coverage guard when that peak
+        # has undefined daily IC on part of the validation surface.
         if register and case_study and epoch_scores and cfg_preds.height > 0:
-            cfg_best_preds = cfg_preds.filter(pl.col("epoch") == best_cp).drop("config", "epoch")
-            if cfg_best_preds.height > 0:
-                try:
-                    from case_studies.utils.registry import register_prediction_set
+            try:
+                from case_studies.utils.registry import register_prediction_set
 
-                    arch = _resolve_arch_name(config_name)
-                    cfg_curves_df = pl.DataFrame(
-                        [c for c in all_curves if c["config"] == config_name]
+                arch = _resolve_arch_name(config_name)
+                cfg_curves_df = pl.DataFrame([c for c in all_curves if c["config"] == config_name])
+                epoch_ic = {epoch: ic for epoch, ic, _std, _days in epoch_scores}
+                epochs = sorted(cfg_preds["epoch"].unique().to_list())
+                first_ep = best_cp if best_cp in epochs else epochs[0]
+                first_slice = cfg_preds.filter(pl.col("epoch") == first_ep).drop("config", "epoch")
+                t_hash = _register_dl_config(
+                    case_study=case_study,
+                    label=label_col,
+                    config_name=config_name,
+                    architecture=arch,
+                    n_epochs=cfg.get("n_epochs"),
+                    best_epoch=int(first_ep),
+                    lookback=lookback,
+                    n_folds=len(splits),
+                    ic_mean=epoch_ic.get(first_ep, best_ic_val),
+                    predictions=first_slice,
+                    notebook=notebook,
+                    learning_curves=cfg_curves_df if cfg_curves_df.height > 0 else None,
+                    started_at=acc.get("started_at"),
+                    elapsed_s=acc.get("elapsed_s"),
+                    prediction_split=prediction_split,
+                    identity_params=_config_identity_params(cfg),
+                )
+                for epoch, _ic, _epoch_std, _days in epoch_scores:
+                    if epoch == first_ep:
+                        continue
+                    epoch_preds = cfg_preds.filter(pl.col("epoch") == epoch).drop("config", "epoch")
+                    register_prediction_set(
+                        case_study,
+                        training_hash=t_hash,
+                        checkpoint_value=int(epoch),
+                        checkpoint_kind="epoch",
+                        split=prediction_split,
+                        predictions=epoch_preds,
+                        metrics={"ic_mean": epoch_ic[epoch]},
                     )
-                    t_hash = _register_dl_config(
-                        case_study=case_study,
-                        label=label_col,
-                        config_name=config_name,
-                        architecture=arch,
-                        n_epochs=cfg.get("n_epochs"),
-                        best_epoch=best_cp,
-                        lookback=lookback,
-                        n_folds=len(splits),
-                        ic_mean=best_ic_val,
-                        predictions=cfg_best_preds,
-                        notebook=notebook,
-                        learning_curves=cfg_curves_df if cfg_curves_df.height > 0 else None,
-                        started_at=acc.get("started_at"),
-                        elapsed_s=acc.get("elapsed_s"),
-                        prediction_split=prediction_split,
-                        identity_params=_config_identity_params(cfg),
-                    )
-                    epoch_ic = {epoch: ic for epoch, ic, _std, _days in epoch_scores}
-                    for epoch, _ic, _epoch_std, _days in epoch_scores:
-                        if epoch == best_cp:
-                            continue
-                        epoch_preds = cfg_preds.filter(pl.col("epoch") == epoch).drop(
-                            "config", "epoch"
-                        )
-                        register_prediction_set(
-                            case_study,
-                            training_hash=t_hash,
-                            checkpoint_value=int(epoch),
-                            checkpoint_kind="epoch",
-                            split=prediction_split,
-                            predictions=epoch_preds,
-                            metrics={"ic_mean": epoch_ic[epoch]},
-                        )
-                    print(
-                        f"    registered {config_name} incrementally "
-                        f"({len(epoch_scores)} per-epoch slices)"
-                    )
-                except Exception as exc:
-                    print(f"    WARN: incremental registration failed for {config_name}: {exc}")
+                print(
+                    f"    registered {config_name} incrementally "
+                    f"({len(epoch_scores)} per-epoch slices)"
+                )
+            except Exception as exc:
+                print(f"    WARN: incremental registration failed for {config_name}: {exc}")
 
     del config_acc
     gc.collect()
