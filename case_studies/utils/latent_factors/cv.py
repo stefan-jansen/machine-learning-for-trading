@@ -84,7 +84,7 @@ def _expected_latent_checkpoints(
             checkpoint_interval=model_kwargs.get("checkpoint_interval", 5),
             checkpoint_epochs=model_kwargs.get("checkpoint_epochs"),
         )
-        return tuple(([0] if model_name == "cae" else []) + physical)
+        return tuple(physical)
     if model_name == "sdf":
         n_epochs_unc = int(model_kwargs.get("n_epochs_unc", 256))
         n_epochs_cond = int(model_kwargs.get("n_epochs_cond", 1024))
@@ -93,7 +93,7 @@ def _expected_latent_checkpoints(
             checkpoint_interval=model_kwargs.get("checkpoint_interval"),
             checkpoint_epochs=model_kwargs.get("checkpoint_epochs"),
         )
-        labels = {-3, -2, -1, 0}
+        labels: set[int] = set()
         labels.update(epoch for epoch in physical if epoch <= n_epochs_unc)
         labels.update(n_epochs_unc + epoch for epoch in physical if epoch <= n_epochs_cond)
         return tuple(sorted(labels))
@@ -1255,6 +1255,16 @@ def _register_model_predictions(
     )
 
     n_folds = int(fold_ics_df["fold_id"].n_unique()) if fold_ics_df.height > 0 else 0
+    registered_checkpoints = _expected_latent_checkpoints(
+        model_name,
+        n_epochs=n_epochs,
+        model_kwargs=model_kwargs,
+    )
+    registered_extras = (
+        [{**fold_extras[0], "checkpoint_epochs": list(registered_checkpoints)}]
+        if fold_extras
+        else []
+    )
     try:
         spec = build_training_spec(
             "latent_factors",
@@ -1280,7 +1290,7 @@ def _register_model_predictions(
         n_factors=n_factors,
         n_epochs=n_epochs,
         model_kwargs=model_kwargs,
-        fold_extras=fold_extras,
+        fold_extras=registered_extras,
         feature_names=feature_names,
         splits=splits,
         task_type=task_type,
@@ -1300,8 +1310,10 @@ def _register_model_predictions(
     )
     eval_col = "eval_actual" if eval_label_col else None
 
-    for epoch in sorted(preds_df["epoch"].unique().to_list()):
+    for epoch in registered_checkpoints:
         epoch_preds = preds_df.filter(pl.col("epoch") == epoch)
+        if epoch_preds.height == 0:
+            raise ValueError(f"Missing registered checkpoint {epoch} for {model_name}")
         epoch_metrics = fold_ics_df.filter(pl.col("epoch") == epoch)
         ic_mean = float(epoch_metrics["ic_mean"].mean()) if epoch_metrics.height > 0 else 0.0
         register_prediction_set(

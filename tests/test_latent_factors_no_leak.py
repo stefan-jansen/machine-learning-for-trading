@@ -306,17 +306,18 @@ def test_latent_registration_builds_complete_training_identity(
         return "training-hash"
 
     monkeypatch.setattr(registry, "register_training_run", capture_training_run)
-    monkeypatch.setattr(
-        registry,
-        "register_prediction_set",
-        lambda *_args, **_kwargs: "prediction-hash",
-    )
+
+    def capture_prediction_set(*_args, checkpoint_value=None, **_kwargs) -> str:
+        captured.setdefault("checkpoints", []).append(checkpoint_value)
+        return "prediction-hash"
+
+    monkeypatch.setattr(registry, "register_prediction_set", capture_prediction_set)
 
     _register_model_predictions(
         case_study_id="probe",
         model_name="cae",
         label_col="return",
-        n_epochs=50,
+        n_epochs=5,
         n_factors=5,
         notebook="08b_conditional_autoencoder",
         prediction_split="validation",
@@ -326,17 +327,17 @@ def test_latent_registration_builds_complete_training_identity(
         started_at="2026-07-21T00:00:00+00:00",
         elapsed=1.0,
         model_kwargs={"checkpoint_interval": 5},
-        fold_extras=[],
-        fold_ics_df=pl.DataFrame({"fold_id": [0], "epoch": [0], "ic_mean": [0.1]}),
+        fold_extras=[{"checkpoint_epochs": [0, 5]}],
+        fold_ics_df=pl.DataFrame({"fold_id": [0, 0], "epoch": [0, 5], "ic_mean": [0.1, 0.2]}),
         preds_df=pl.DataFrame(
             {
-                "timestamp": [datetime(2021, 1, 1)],
-                "symbol": ["A"],
-                "y_true": [0.1],
-                "y_score": [0.2],
-                "fold_id": [0],
-                "config_name": ["cae"],
-                "epoch": [0],
+                "timestamp": [datetime(2021, 1, 1), datetime(2021, 1, 1)],
+                "symbol": ["A", "A"],
+                "y_true": [0.1, 0.1],
+                "y_score": [0.2, 0.3],
+                "fold_id": [0, 0],
+                "config_name": ["cae", "cae"],
+                "epoch": [0, 5],
             }
         ),
         feature_names=["value"],
@@ -362,9 +363,11 @@ def test_latent_registration_builds_complete_training_identity(
 
     spec = captured["spec"]
     assert isinstance(spec, dict)
-    assert spec["n_epochs"] == 50
+    assert spec["n_epochs"] == 5
     assert spec["checkpoint_interval"] == 5
+    assert spec["checkpoint_epochs"] == [5]
     assert spec["params"]["input_digest"] == "input-a"
+    assert captured["checkpoints"] == [5]
 
 
 @pytest.mark.gpu
