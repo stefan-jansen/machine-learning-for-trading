@@ -457,3 +457,48 @@ def test_complete_registry_replays_predictions_instead_of_returning_empty(
     assert result["best_config_name"] == "tabm_probe"
     assert result["predictions"].height == 5
     assert result["grid_results"][0]["cached"] is True
+
+
+def test_saved_artifact_message_does_not_leak_absolute_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    predictions = pl.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2020-04-01")],
+            "symbol": [1],
+            "y_true": [0.1],
+            "y_score": [0.2],
+            "fold_id": [0],
+            "config": ["tabm_probe"],
+            "epoch": [25],
+        }
+    )
+    monkeypatch.setattr(
+        tabular_dl,
+        "compute_fold_metrics_from_predictions",
+        lambda *_args, **_kwargs: pl.DataFrame(),
+    )
+
+    tabular_dl._assemble_tabm_results(
+        config_results=[
+            {
+                "config_name": "tabm_probe",
+                "best_epoch": 25,
+                "best_ic": 0.1,
+                "elapsed_s": 0.0,
+            }
+        ],
+        all_predictions=predictions,
+        curve_rows=[],
+        training_rows=[],
+        save_dir=tmp_path / "private" / "fwd_ret_1m",
+        date_col="timestamp",
+        entity_col="symbol",
+        eval_col=None,
+    )
+
+    output = capsys.readouterr().out
+    assert str(tmp_path) not in output
+    assert "Saved TabM artifacts for fwd_ret_1m" in output

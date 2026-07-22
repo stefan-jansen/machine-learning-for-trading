@@ -507,7 +507,7 @@ def _assemble_tabm_results(
             curves.write_parquet(save_dir / "learning_curves.parquet")
         if training_log.height:
             training_log.write_parquet(save_dir / "training_log.parquet")
-        print(f"  Saved to {save_dir}")
+        print(f"  Saved TabM artifacts for {save_dir.name}")
 
     return {
         "grid_results": ranked,
