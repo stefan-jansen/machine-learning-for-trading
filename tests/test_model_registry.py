@@ -363,6 +363,9 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
     if case_study == "etfs" and notebook_path.stem == "09_dl_lstm":
         parameters["N_EPOCHS"] = 6
         parameters["MAX_SYMBOLS"] = 6
+    if case_study == "etfs" and notebook_path.stem == "10_dl_tsmixer":
+        parameters["N_EPOCHS"] = 2
+        parameters["MAX_SYMBOLS"] = 6
 
     # Latent factor models need a wider cross-section for factor extraction
     stage_match_p = _STAGE_RE.match(stage)
@@ -445,6 +448,24 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
                 finally:
                     db.close()
                 assert {5, 6}.issubset(checkpoints), checkpoints
+            if case_study == "etfs" and notebook_path.stem == "10_dl_tsmixer":
+                db = sqlite3.connect(str(registry_db))
+                try:
+                    checkpoints = {
+                        row[0]
+                        for row in db.execute(
+                            """
+                            SELECT ps.checkpoint_value
+                            FROM prediction_sets ps
+                            JOIN training_runs tr USING (training_hash)
+                            WHERE tr.entry_point = 'dl_tsmixer'
+                              AND ps.split = 'validation'
+                            """
+                        )
+                    }
+                finally:
+                    db.close()
+                assert {1, 2}.issubset(checkpoints), checkpoints
         elif len(runs) > 0:
             print(
                 f"\n  Registry OK: {len(runs)} training_runs with "

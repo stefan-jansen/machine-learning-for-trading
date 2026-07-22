@@ -2,6 +2,11 @@
 
 from pathlib import Path
 
+from case_studies.utils.darts_forecasting import (
+    _resolve_chunk_lengths,
+    darts_training_identity,
+    select_full_coverage_checkpoint,
+)
 from case_studies.utils.latent_factors import case_study
 from case_studies.utils.latent_factors import cv as latent_cv
 from case_studies.utils.registry.specs import build_training_spec, training_hash_from_spec
@@ -166,3 +171,49 @@ def test_sequence_training_hash_binds_input_and_sampling_identity() -> None:
         for identity in identities
     }
     assert len(hashes) == len(identities)
+
+
+def test_darts_identity_uses_configured_lookback_and_horizon(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "case_studies.utils.darts_forecasting.darts_base_target_identity",
+        lambda _case_study: {"dataset": "etfs.parquet", "sha256": "sha256:target"},
+    )
+    cfg = {
+        "batch_size": 2048,
+        "params": {"architecture": "tsmixer", "lookback": 60},
+    }
+
+    assert _resolve_chunk_lengths(cfg, 21) == (60, 21)
+    identity = darts_training_identity(
+        cfg,
+        "fwd_ret_21d",
+        case_study="etfs",
+        input_data_spec={"input_digest": "sha256:first"},
+        max_train_sequences=0,
+    )
+
+    assert identity == {
+        "batch_size": 2048,
+        "base_target_data_spec": {
+            "dataset": "etfs.parquet",
+            "sha256": "sha256:target",
+        },
+        "input_chunk_length": 60,
+        "input_data_spec": {"input_digest": "sha256:first"},
+        "lookback": 60,
+        "max_train_sequences": 0,
+        "output_chunk_length": 21,
+    }
+
+
+def test_darts_checkpoint_selection_excludes_partial_peak() -> None:
+    curve = [
+        {"epoch": 5, "ic_mean": 0.02, "ic_n_days": 2016.0},
+        {"epoch": 10, "ic_mean": 0.20, "ic_n_days": 2015.0},
+    ]
+
+    peak, full_days, partial_epochs = select_full_coverage_checkpoint(curve)
+
+    assert peak["epoch"] == 5
+    assert full_days == 2016.0
+    assert partial_epochs == [10]

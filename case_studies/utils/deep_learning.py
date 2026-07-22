@@ -504,7 +504,11 @@ def run_dl_cv(
         fold_metrics: pl.DataFrame — per-fold cross-sectional IC for best config
         all_learning_curves: pl.DataFrame — IC × epoch × config
     """
-    from case_studies.utils.darts_forecasting import run_darts_cv, uses_darts_backend
+    from case_studies.utils.darts_forecasting import (
+        darts_training_identity,
+        run_darts_cv,
+        uses_darts_backend,
+    )
 
     if register and save_dir is None:
         raise ValueError(
@@ -517,14 +521,27 @@ def run_dl_cv(
     def _config_identity_params(cfg: dict[str, Any]) -> dict[str, Any] | None:
         params = dict(identity_params or {})
         if input_data_spec is not None:
-            params.update(
-                {
-                    "batch_size": cfg.get("batch_size", 2048),
-                    "input_data_spec": input_data_spec,
-                    "lookback": cfg.get("params", {}).get("lookback", 60),
-                    "max_train_sequences": max_train_sequences,
-                }
-            )
+            if uses_darts_backend([cfg]):
+                if case_study is None:
+                    raise ValueError("Darts identity requires case_study")
+                params.update(
+                    darts_training_identity(
+                        cfg,
+                        label_col,
+                        case_study=case_study,
+                        input_data_spec=input_data_spec,
+                        max_train_sequences=max_train_sequences,
+                    )
+                )
+            else:
+                params.update(
+                    {
+                        "batch_size": cfg.get("batch_size", 2048),
+                        "input_data_spec": input_data_spec,
+                        "lookback": cfg.get("params", {}).get("lookback", 60),
+                        "max_train_sequences": max_train_sequences,
+                    }
+                )
         return params or None
 
     from case_studies.utils.registry import build_training_spec
