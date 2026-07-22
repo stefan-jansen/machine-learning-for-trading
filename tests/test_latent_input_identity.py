@@ -85,3 +85,78 @@ def test_gbm_training_hash_binds_modeling_input_identity() -> None:
     assert first["params"]["input_data_spec"] == first_input
     assert second["params"]["input_data_spec"] == second_input
     assert training_hash_from_spec(first) != training_hash_from_spec(second)
+
+
+def test_tabm_training_hash_binds_input_and_batch_identity() -> None:
+    common = {
+        "family": "tabular_dl",
+        "config_name": "tabm_s",
+        "label": "fwd_ret_21d",
+        "n_folds": 8,
+        "n_epochs": 100,
+    }
+    first = build_training_spec(
+        **common,
+        extra_params={
+            "batch_size": 4096,
+            "input_data_spec": {"input_digest": "sha256:first"},
+        },
+    )
+    changed_input = build_training_spec(
+        **common,
+        extra_params={
+            "batch_size": 4096,
+            "input_data_spec": {"input_digest": "sha256:second"},
+        },
+    )
+    changed_batch = build_training_spec(
+        **common,
+        extra_params={
+            "batch_size": 2048,
+            "input_data_spec": {"input_digest": "sha256:first"},
+        },
+    )
+
+    hashes = {
+        training_hash_from_spec(first),
+        training_hash_from_spec(changed_input),
+        training_hash_from_spec(changed_batch),
+    }
+    assert len(hashes) == 3
+
+
+def test_sequence_training_hash_binds_input_and_sampling_identity() -> None:
+    common = {
+        "family": "deep_learning",
+        "config_name": "lstm_h64",
+        "label": "fwd_ret_21d",
+        "n_folds": 8,
+        "n_epochs": 100,
+    }
+    identities = [
+        {
+            "batch_size": 2048,
+            "input_data_spec": {"input_digest": "sha256:first"},
+            "max_train_sequences": 0,
+        },
+        {
+            "batch_size": 1024,
+            "input_data_spec": {"input_digest": "sha256:first"},
+            "max_train_sequences": 0,
+        },
+        {
+            "batch_size": 2048,
+            "input_data_spec": {"input_digest": "sha256:second"},
+            "max_train_sequences": 0,
+        },
+        {
+            "batch_size": 2048,
+            "input_data_spec": {"input_digest": "sha256:first"},
+            "max_train_sequences": 100_000,
+        },
+    ]
+    hashes = {
+        training_hash_from_spec(build_training_spec(**common, extra_params=identity))
+        for identity in identities
+    }
+    assert len(hashes) == len(identities)

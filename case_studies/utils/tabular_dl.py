@@ -102,6 +102,7 @@ def _build_tabm_training_spec(
     runtime_spec: dict[str, Any],
     seed: int,
     splits: list[dict[str, Any]] | None = None,
+    input_data_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the single identity used for TabM lookup and registration."""
     params = dict(config.get("params", {}))
@@ -122,6 +123,8 @@ def _build_tabm_training_spec(
             "task_type": task_type,
         }
     )
+    if input_data_spec is not None:
+        params["input_data_spec"] = input_data_spec
     return {
         "checkpoint_interval": int(config.get("checkpoint_interval", 25)),
         "config_name": config["config_name"],
@@ -644,6 +647,7 @@ def run_tabm_cv(
     prediction_split: str = "validation",
     seed: int = RANDOM_SEED,
     num_threads: int = 8,
+    input_data_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Walk-forward tabular DL CV with epoch-checkpoint IC evaluation.
 
@@ -748,6 +752,7 @@ def run_tabm_cv(
             runtime_spec=runtime_spec,
             seed=seed,
             splits=splits,
+            input_data_spec=input_data_spec,
         )
         for cfg in configs
     }

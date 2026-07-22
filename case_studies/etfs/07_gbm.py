@@ -259,6 +259,18 @@ for cfg in configs:
         prediction_split=PREDICTION_SPLIT,
         input_data_spec=input_data_spec,
     )
+    _registered_splits = load_prediction_sets(
+        CASE_STUDY_ID,
+        training_hash=_training_hash,
+        split=PREDICTION_SPLIT,
+    )
+    if not _registered_splits.is_empty():
+        _registered_metrics = load_prediction_metrics(
+            CASE_STUDY_ID,
+            prediction_hash=_registered_splits["prediction_hash"][0],
+        )
+        if not _registered_metrics.is_empty() and "ic_n_days" in _registered_metrics.columns:
+            result["ic_n_days"] = float(_registered_metrics["ic_n_days"][0])
 
 # %% [markdown]
 # ## 4. Grid Results

@@ -382,7 +382,7 @@ def _register_dl_config(
     started_at: str | None = None,
     elapsed_s: float | None = None,
     prediction_split: str = "validation",
-    identity_params: dict | None = None,
+    identity_params: dict[str, Any] | None = None,
 ) -> str:
     """Register a single DL config — thin delegate to register_epoch_checkpoint."""
     from case_studies.utils.registry import register_epoch_checkpoint
@@ -458,7 +458,8 @@ def run_dl_cv(
     temporal_feature_names: list[str] | None = None,
     force_retrain: bool = False,
     prediction_split: str = "validation",
-    identity_params: dict | None = None,
+    identity_params: dict[str, Any] | None = None,
+    input_data_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Walk-forward DL CV with epoch-checkpoint IC evaluation.
 
@@ -513,12 +514,37 @@ def run_dl_cv(
 
     cached_result = None
 
+    def _config_identity_params(cfg: dict[str, Any]) -> dict[str, Any] | None:
+        params = dict(identity_params or {})
+        if input_data_spec is not None:
+            params.update(
+                {
+                    "batch_size": cfg.get("batch_size", 2048),
+                    "input_data_spec": input_data_spec,
+                    "max_train_sequences": max_train_sequences,
+                }
+            )
+        return params or None
+
+    from case_studies.utils.registry import build_training_spec
+
+    training_specs = {
+        cfg["config_name"]: build_training_spec(
+            cfg["family"],
+            cfg["config_name"],
+            label_col,
+            n_folds=len(splits),
+            n_epochs=cfg.get("n_epochs"),
+            extra_params=_config_identity_params(cfg),
+        )
+        for cfg in configs
+    }
+
     # Filter out configs whose training_hash is already complete (unless
     # force_retrain). Fold-major training can't skip individual configs
     # mid-fold, so the filter happens BEFORE the fold loop starts.
     if register and case_study and not force_retrain:
         from case_studies.utils.registry import (
-            build_training_spec,
             load_prediction_sets,
             training_hash_from_spec,
             training_run_status,
@@ -528,14 +554,7 @@ def run_dl_cv(
         cached_configs = []
         for cfg in configs:
             try:
-                spec = build_training_spec(
-                    cfg["family"],
-                    cfg["config_name"],
-                    label_col,
-                    n_folds=len(splits),
-                    n_epochs=cfg.get("n_epochs"),
-                    extra_params=identity_params,
-                )
+                spec = training_specs[cfg["config_name"]]
                 status = training_run_status(case_study, spec)
                 split_rows = load_prediction_sets(
                     case_study,
@@ -568,6 +587,7 @@ def run_dl_cv(
                 prediction_split=prediction_split,
                 date_col=date_col,
                 entity_col=entity_col,
+                training_specs=training_specs,
             )
         if not pending_configs:
             print("All configs already complete - rebuilt results from the registry.")
@@ -591,6 +611,8 @@ def run_dl_cv(
             case_study=case_study,
             notebook=notebook,
             prediction_split=prediction_split,
+            identity_params=identity_params,
+            input_data_spec=input_data_spec,
         )
         if cached_result is not None:
             return combine_cv_results(
@@ -958,7 +980,7 @@ def run_dl_cv(
                         started_at=acc.get("started_at"),
                         elapsed_s=acc.get("elapsed_s"),
                         prediction_split=prediction_split,
-                        identity_params=identity_params,
+                        identity_params=_config_identity_params(cfg),
                     )
                     epoch_ic = {epoch: ic for epoch, ic, _std, _days in epoch_scores}
                     for epoch, _ic, _epoch_std, _days in epoch_scores:

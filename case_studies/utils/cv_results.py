@@ -152,6 +152,7 @@ def rebuild_cv_result_from_registry(
     date_col: str,
     entity_col: str,
     require_full_coverage: bool = True,
+    training_specs: Mapping[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Rebuild the training-path result contract without training or writes."""
     curves: list[dict[str, Any]] = []
@@ -159,12 +160,16 @@ def rebuild_cv_result_from_registry(
     missing_configs: list[str] = []
 
     for cfg in configs:
-        spec = build_training_spec(
-            cfg["family"],
-            cfg["config_name"],
-            label_col,
-            n_folds=n_folds,
-            n_epochs=cfg.get("n_epochs"),
+        spec = (
+            training_specs[cfg["config_name"]]
+            if training_specs is not None
+            else build_training_spec(
+                cfg["family"],
+                cfg["config_name"],
+                label_col,
+                n_folds=n_folds,
+                n_epochs=cfg.get("n_epochs"),
+            )
         )
         training_hash = training_hash_from_spec(spec)
         prediction_sets = load_prediction_sets(

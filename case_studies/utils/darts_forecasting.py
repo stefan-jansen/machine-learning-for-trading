@@ -492,6 +492,8 @@ def run_darts_cv(
     case_study: str | None,
     notebook: str | None,
     prediction_split: str = "validation",
+    identity_params: dict[str, Any] | None = None,
+    input_data_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run Darts-backed global forecasting models and emit standard DL artifacts."""
     if case_study is None:
@@ -503,6 +505,18 @@ def run_darts_cv(
         raise ValueError("register=True requires save_dir for Darts prediction artifacts.")
 
     from case_studies.utils.deep_learning import _register_dl_config
+
+    def _config_identity_params(cfg: dict[str, Any]) -> dict[str, Any] | None:
+        params = dict(identity_params or {})
+        if input_data_spec is not None:
+            params.update(
+                {
+                    "batch_size": cfg.get("batch_size", 2048),
+                    "input_data_spec": input_data_spec,
+                    "max_train_sequences": max_train_sequences,
+                }
+            )
+        return params or None
 
     label_horizon = _parse_label_horizon(label_col)
     dataset_pd = _attach_base_target(dataset_pd.copy(), case_study, date_col)
@@ -809,6 +823,7 @@ def run_darts_cv(
                 started_at=row.get("started_at"),
                 elapsed_s=row.get("elapsed_s"),
                 prediction_split=prediction_split,
+                identity_params=_config_identity_params(cfg),
             )
             from case_studies.utils.registry import register_prediction_set
 
