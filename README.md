@@ -16,10 +16,9 @@ strategy you can actually run, and keep running, in a live market.
   and [six production Python libraries](https://ml4trading.io/libraries/)
   that facilitate substantial parts of the workflow.
 
-> For the first time, we are offering [live cohort courses](https://ml4trading.io/courses/), plus free lightning
-> lessons on [multi-agent systems](https://maven.com/p/6c2609/build-multi-agent-systems-you-can-audit) and
-> [From Trading Idea to Validated Strategy](https://maven.com/p/7a8c60/from-trading-idea-to-validated-strategy?utm_medium=ll_share_link&utm_source=instructor)
-> are coming up on **June 24, 2026**.
+> **Free reader's guide:** Join [Navigate ML for Trading, 3rd Edition](https://maven.com/p/c6e0e7/navigate-ml-for-trading-3rd-edition)
+> on **July 30, 2026 at 11:00 AM ET** for a 30-minute map of the book, case studies, code, and companion resources.
+> See all current [courses and workshops](https://maven.com/stefan-jansen).
 
 <p align="center">
   <a href="https://amzn.to/4eigy2F"><img src="assets/cover.jpeg" width="45%" alt="Machine Learning for Trading, 3rd Edition"></a>
@@ -137,12 +136,12 @@ the material live, with direct feedback:
 
 - [Machine Learning for Trading: From Research to Production](https://maven.com/stefan-jansen/research-to-production):
   take a research idea all the way to a deployed, monitored strategy.
-- [Building Multi-Agent Forecasting Systems](https://maven.com/stefan-jansen/forecasting-agents):
+- [Engineering a Multi-Agent Forecasting System](https://maven.com/stefan-jansen/agent-engineering):
   design auditable multi-agent systems for financial research.
 
 Each course runs as a scheduled cohort; the links above always point to the next one, where you can enroll or join the
 waitlist. *Stay current between cohorts with the
-twice-weekly [**Insights** newsletter](https://insights.ml4trading.io/).*
+[**Insights** newsletter](https://insights.ml4trading.io/).*
 
 ---
 
