@@ -416,8 +416,13 @@ def run_latent_factor_cv(
         eval_label_col=eval_label_col,
         date_col=date_col,
         entity_col=entity_col,
+        splits=splits,
     )
-    macro_digest = _frame_digest(macro_panel) if macro_panel is not None else None
+    macro_digest = (
+        _frame_digest(_filter_dataset_for_splits(macro_panel, splits=splits, date_col=date_col))
+        if macro_panel is not None
+        else None
+    )
     expected_prediction_keys = _expected_latent_prediction_keys(
         dataset,
         splits=splits,
@@ -825,11 +830,43 @@ def _latent_input_digest(
     eval_label_col: str | None,
     date_col: str,
     entity_col: str,
+    splits: list[dict[str, Any]],
 ) -> str:
     columns = [date_col, entity_col, *feature_names, label_col]
     if eval_label_col:
         columns.append(eval_label_col)
+    dataset = _filter_dataset_for_splits(dataset, splits=splits, date_col=date_col)
     return _frame_digest(dataset.select(columns))
+
+
+def _filter_dataset_for_splits(
+    dataset: pl.DataFrame,
+    *,
+    splits: list[dict[str, Any]],
+    date_col: str,
+) -> pl.DataFrame:
+    """Keep only rows used by at least one declared train or validation window."""
+    filter_col = pl.col(date_col)
+    if (
+        hasattr(dataset[date_col].dtype, "time_zone")
+        and dataset[date_col].dtype.time_zone is not None
+    ):
+        filter_col = filter_col.dt.replace_time_zone(None)
+
+    used = pl.lit(False)
+    for split in splits:
+        train = filter_col.is_between(
+            _to_naive_timestamp(split["train_start"]),
+            _to_naive_timestamp(split["train_end"]),
+            closed="both",
+        )
+        validation = filter_col.is_between(
+            _to_naive_timestamp(split["val_start"]),
+            _to_naive_timestamp(split["val_end"]),
+            closed="both",
+        )
+        used = used | train | validation
+    return dataset.filter(used)
 
 
 def _prepare_fold_inputs(

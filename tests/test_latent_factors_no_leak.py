@@ -251,6 +251,15 @@ def test_latent_input_digest_is_order_stable_and_value_sensitive() -> None:
             "return": [0.2, 0.1],
         }
     )
+    splits = [
+        {
+            "fold": 0,
+            "train_start": datetime(2021, 1, 1),
+            "train_end": datetime(2021, 1, 1),
+            "val_start": datetime(2021, 2, 1),
+            "val_end": datetime(2021, 2, 1),
+        }
+    ]
 
     digest = _latent_input_digest(
         frame,
@@ -259,6 +268,7 @@ def test_latent_input_digest_is_order_stable_and_value_sensitive() -> None:
         eval_label_col=None,
         date_col="timestamp",
         entity_col="symbol",
+        splits=splits,
     )
     reordered = _latent_input_digest(
         frame.reverse(),
@@ -267,6 +277,7 @@ def test_latent_input_digest_is_order_stable_and_value_sensitive() -> None:
         eval_label_col=None,
         date_col="timestamp",
         entity_col="symbol",
+        splits=splits,
     )
     changed = _latent_input_digest(
         frame.with_columns(
@@ -277,10 +288,102 @@ def test_latent_input_digest_is_order_stable_and_value_sensitive() -> None:
         eval_label_col=None,
         date_col="timestamp",
         entity_col="symbol",
+        splits=splits,
     )
 
     assert reordered == digest
     assert changed != digest
+
+
+def test_latent_input_digest_excludes_sealed_holdout() -> None:
+    from case_studies.utils import registry
+    from case_studies.utils.latent_factors.cv import (
+        _apply_latent_factor_runtime_spec,
+        _latent_input_digest,
+    )
+
+    timestamps = [datetime(2020, month, 1) for month in range(1, 7)]
+    frame = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["A"] * len(timestamps),
+            "value": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "return": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+        }
+    )
+    splits = [
+        {
+            "fold": 0,
+            "train_start": datetime(2020, 1, 1),
+            "train_end": datetime(2020, 3, 1),
+            "val_start": datetime(2020, 4, 1),
+            "val_end": datetime(2020, 5, 1),
+        }
+    ]
+    digest_kwargs = {
+        "feature_names": ["value"],
+        "label_col": "return",
+        "eval_label_col": None,
+        "date_col": "timestamp",
+        "entity_col": "symbol",
+        "splits": splits,
+    }
+    digest = _latent_input_digest(frame, **digest_kwargs)
+    holdout_changed = _latent_input_digest(
+        frame.with_columns(
+            pl.when(pl.col("timestamp") > datetime(2020, 5, 1))
+            .then(999.0)
+            .otherwise(pl.col(column))
+            .alias(column)
+            for column in ("value", "return")
+        ),
+        **digest_kwargs,
+    )
+    development_changed = _latent_input_digest(
+        frame.with_columns(
+            pl.when(pl.col("timestamp") == datetime(2020, 2, 1))
+            .then(999.0)
+            .otherwise(pl.col("value"))
+            .alias("value")
+        ),
+        **digest_kwargs,
+    )
+
+    spec_kwargs = {
+        "spec": {
+            "family": "latent_factors",
+            "config_name": "cae",
+            "label": "return",
+            "seed": 42,
+        },
+        "n_factors": 5,
+        "n_epochs": 50,
+        "model_kwargs": {"checkpoint_interval": 5},
+        "fold_extras": [],
+        "feature_names": ["value"],
+        "splits": splits,
+        "task_type": "regression",
+        "class_values": None,
+        "eval_label_col": None,
+        "macro_digest": None,
+        "runtime_spec": {
+            "device": "cuda",
+            "deterministic_algorithms": True,
+            "cublas_workspace_config": ":4096:8",
+            "num_threads": 8,
+            "seed": 42,
+        },
+    }
+    training_hash = registry.training_hash_from_spec(
+        _apply_latent_factor_runtime_spec(**spec_kwargs, input_digest=digest)
+    )
+    holdout_training_hash = registry.training_hash_from_spec(
+        _apply_latent_factor_runtime_spec(**spec_kwargs, input_digest=holdout_changed)
+    )
+
+    assert holdout_changed == digest
+    assert holdout_training_hash == training_hash
+    assert development_changed != digest
 
 
 def test_latent_registration_builds_complete_training_identity(
