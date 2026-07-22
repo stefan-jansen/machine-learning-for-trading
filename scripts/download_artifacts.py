@@ -21,6 +21,7 @@ import hashlib
 import os
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tarfile
@@ -199,6 +200,16 @@ def _verify_run_log(run_log: Path) -> None:
         raise ValueError("Installed registry failed SQLite integrity checks")
 
 
+def _set_tree_writable(root: Path, *, writable: bool) -> None:
+    paths = [root, *root.rglob("*")]
+    for path in paths:
+        mode = path.stat().st_mode
+        if writable:
+            path.chmod(mode | stat.S_IWUSR)
+        else:
+            path.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+
+
 def install_artifact_archive(
     archive: Path,
     cs_id: str,
@@ -231,6 +242,7 @@ def install_artifact_archive(
         staged = stage_parent / "case_studies" / cs_id / "run_log"
         _verify_run_log(staged)
         staged.rename(ready)
+        _set_tree_writable(ready, writable=False)
 
         if target.exists():
             target.rename(previous)
@@ -241,10 +253,12 @@ def install_artifact_archive(
                 previous.rename(target)
             raise
         if previous.exists():
+            _set_tree_writable(previous, writable=True)
             shutil.rmtree(previous, ignore_errors=True)
         return target
     finally:
         if ready.exists():
+            _set_tree_writable(ready, writable=True)
             shutil.rmtree(ready)
         shutil.rmtree(stage_parent, ignore_errors=True)
 
@@ -311,7 +325,7 @@ def main():
             print(f"  {cs:40s} [{status}]")
         return
 
-    cs_list = [args.cs] if args.cs else CASE_STUDIES
+    cs_list = [args.cs] if args.cs else [cs for cs in CASE_STUDIES if cs in ARTIFACT_SHA256]
 
     # Validate
     for cs in cs_list:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import sqlite3
+import stat
 import tarfile
 from pathlib import Path
 
@@ -105,5 +106,6 @@ def test_verified_bundle_replaces_baseline_atomically(tmp_path: Path) -> None:
     assert installed == existing
     assert not (existing / "sentinel").exists()
     assert (existing / "predictions/abc/predictions.parquet").read_bytes() == b"stored predictions"
+    assert not (existing / "registry.db").stat().st_mode & stat.S_IWUSR
     with sqlite3.connect(existing / "registry.db") as connection:
         assert connection.execute("SELECT value FROM release_probe").fetchone() == ("accepted",)

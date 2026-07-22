@@ -6,8 +6,10 @@ importable library code the notebooks build on lives in [`utils/`](../utils).
 
 - **`verify_installation.py`** — run this first, right after installing: it imports
   the core dependencies and reports whether CUDA, matplotlib, and Plotly are working.
-- **`download_artifacts.py`** — pulls the pre-computed model predictions and backtest
-  results so the Chapter 11–20 case-study notebooks run without retraining from scratch.
+- **`download_artifacts.py`** - verifies and installs the released registries, model files,
+  predictions, and backtests for cached Chapter 11-20 execution.
+- **`create_experiment.py`** - copies an installed read-only run log into a writable,
+  `ML4T_OUTPUT_DIR`-isolated experiment.
 - **`sync_notebooks.py`** — regenerates a notebook's `.ipynb` from its Jupytext `.py`
   source (or the reverse); pass `--check` to only report which pairs have drifted.
 - **`sanitize_notebook_paths.py`** — strips machine-specific absolute paths out of

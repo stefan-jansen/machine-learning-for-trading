@@ -467,7 +467,7 @@ def load_backtest_predictions(
 ) -> BacktestPredictions:
     """Load and normalize prediction artifacts for backtesting.
 
-    The model registry (``registry.db`` / ``models.db``) is the source of truth.
+    The model registry (``registry.db``) is the source of truth.
     Predictions are loaded from content-addressed run directories
     (``run_log/models/runs/{hash}/`` or ``models/runs/{hash}/``), keyed by
     the registry's ``model_runs`` table.

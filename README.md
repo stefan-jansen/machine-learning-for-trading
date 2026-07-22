@@ -381,8 +381,8 @@ Docker readers run this in the Jupyter Lab terminal (**File → New → Terminal
 The **[data guide](data/README.md)** documents every dataset, API-key setup, the loaders, and storage tiers (≈70 MB
 free tier up to ≈7 GB full).
 
-**(Optional) pre-computed results.** To explore the Ch11–20 case-study results without retraining, download the model
-artifacts:
+**(Optional) pre-computed results.** To explore the seven released Ch11-20 case studies without
+retraining, download their verified registries, predictions, model files, and backtest artifacts:
 
 ```bash
 uv run python scripts/download_artifacts.py

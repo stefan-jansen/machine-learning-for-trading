@@ -557,11 +557,9 @@ megabytes for the smaller ones.
 
 ## Distribution as release artifacts
 
-Most readers will not retrain every model from scratch. The run logs and
-prediction artifacts are bundled and published as **release artifacts** so that
-all downstream analysis — Chapters 11-20 insight notebooks, backtests,
-portfolio construction, risk overlays, strategy synthesis — runs on the same
-inputs the book reports on.
+Most readers will not retrain every model from scratch. Each release bundle contains the accepted
+registry plus every registered training, prediction, and backtest artifact for that case study. This
+lets Chapters 11-20 consume the same stored inputs without mixing registry vintages.
 
 After installing the repo, run:
 
@@ -569,10 +567,15 @@ After installing the repo, run:
 uv run python scripts/download_artifacts.py
 ```
 
-This downloads the bundled `registry.db` files plus the prediction parquets
-needed by the insight and backtest notebooks, and unpacks them into
-`case_studies/{case_study}/run_log/`. From that point, any of the
-Chapter 11-20 notebooks can be opened and run end-to-end without retraining.
+The downloader verifies the archive checksum, every internal artifact checksum, SQLite integrity,
+and foreign keys before installing `case_studies/{case_study}/run_log/`. It installs the run log as a
+read-only baseline. Create a writable experiment before adding runs:
+
+```bash
+uv run python scripts/create_experiment.py \
+  --cs etfs \
+  --output /tmp/ml4t-etf-experiment
+```
 
 To download artifacts for a single case study:
 
@@ -580,5 +583,5 @@ To download artifacts for a single case study:
 uv run python scripts/download_artifacts.py --cs etfs
 ```
 
-The full installation procedure — Python environment, datasets, run-log
-artifacts — is documented in `INSTALL.md` at the repo root.
+The full installation and experiment procedures are documented in
+[`docs/running-notebooks.md`](../docs/running-notebooks.md).

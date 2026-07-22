@@ -16,36 +16,6 @@ Nine case studies thread through Chapters 6--20, applying the same ML4T workflow
 | 8 | [S&P 500 Options](sp500_options/) | S&P 500 equity options | Daily | S&P 500 straddles | fwd_ret_dh_10d |
 | 9 | [US Equities Panel](us_equities_panel/) | Broad US equities | Daily | ~3,200 stocks | fwd_ret_1d |
 
-## Results Summary
-
-Chapter 20 synthesizes the cross-case-study evidence. The table below summarizes the pipeline outcome for each case study's best model on its primary label.
-
-| # | Case Study | Best IC | Signal Sharpe | Holdout Sharpe | Decay |
-|---|------------|---------|---------------|----------------|-------|
-| 1 | ETFs | +0.041 (TabM) | +0.74 (CAE) | +0.33 | -55% |
-| 2 | Crypto Perps | +0.030 (LSTM) | +0.80 (GBM) | -1.17 | -247% |
-| 3 | NASDAQ-100 | +0.008 (GBM) | +4.22 (GBM) | +2.05 | -51% |
-| 4 | S&P 500 Eq+Opt | +0.073 (CAE) | +1.10 (NLinear) | +0.46 | -58% |
-| 5 | US Firm Chars | +0.070 (GBM) | +3.03 (GBM) | +2.52 | -17% |
-| 6 | FX Pairs | +0.045 (GBM) | +0.19 (GBM) | +0.28 | +45% |
-| 7 | CME Futures | +0.043 (GBM) | +0.61 (GBM) | +0.30 | -50% |
-| 8 | S&P 500 Options | +0.068 (GBM) | N/A | -1.05 | N/A |
-| 9 | US Equities | +0.031 (GBM) | +1.76 (GBM) | +0.20 | -89% |
-
-## What Each Case Study Teaches
-
-| Case Study | Unique Teaching Point |
-|------------|----------------------|
-| ETFs | IC-Sharpe disconnect: IC champion (TabM) is not the Sharpe champion (CAE). Portfolio construction dominates prediction quality. |
-| Crypto Perps | Only case where DL leads on IC. Complete holdout failure from 2024-2025 regime shift. |
-| NASDAQ-100 | Weakest IC in the book produces highest Sharpe — frequency multiplication via intraday breadth. Cadence is the binding constraint. |
-| S&P 500 Eq+Opt | Highest single-family IC in the book (CAE +0.073) but checkpoint-fragile (-0.070 to +0.073). Multi-source feature integration. |
-| US Firm Chars | Strongest integrated result. Classification dominates regression. Winsorization = 9x IC improvement. Capacity is the binding constraint. |
-| FX Pairs | Only holdout that improved (+45%). Signal in the most efficient market on earth. Fragile above 15 bps. |
-| CME Futures | Data quality teaching case: back-adjustment method flips linear models from positive to negative IC. Strongest nonlinearity diagnostic. |
-| S&P 500 Options | The failure that teaches the most: real ML signal (IC +0.068) but 1,091 bps median spread overwhelms the edge. Shows why equity-style cost models fail for options. |
-| US Equities | Broadest universe (3,200 stocks, 16 CV folds). Strongest latent factor result (IPCA +0.074 at 21d). But 89% holdout decay — needs feature/label iteration. |
-
 ## Pipeline Stages
 
 Each case study follows the same chapter progression. Notebooks are numbered sequentially, with each number mapping to a chapter:
@@ -106,21 +76,23 @@ case_studies/{id}/
 +-- 01_feasibility_analysis.py / .ipynb       # Numbered notebook sequence
 +-- 02_labels.py / .ipynb
 +-- ...
-+-- results/                   # Compact JSON summaries (committed)
-+-- data/                      # Labels and features (gitignored)
-|   +-- labels/
-|   +-- features/
-+-- run_log/                   # Model registry + runs (gitignored)
-|   +-- models.db
-|   +-- models/{hash}/         # Content-addressed per-run artifacts
-+-- strategy/                  # Backtest outputs (gitignored)
++-- labels/                    # Generated learning targets (gitignored)
++-- features/                  # Generated financial and temporal features
++-- evaluation/                # Generated feature diagnostics
++-- run_log/                   # Downloaded or generated result state
+|   +-- registry.db            # Result and provenance source of truth
+|   +-- training/{hash}/       # Specs, coefficients, boosters, checkpoints
+|   +-- predictions/{hash}/    # Stored prediction arrays
+|   +-- backtest/{hash}/       # Returns, trades, weights, and configs
 ```
 
 ## Reproducibility
 
 - `config/setup.yaml` defines the trading setup, cost model, and evaluation protocol
-- `results/*.json` are compact, committed summaries for editorial review
 - `run_log/` implements the Chapter 6.7 run log: every model run is content-addressed by its config hash
-- Generated artifacts (`data/`, `run_log/`, `strategy/`) are gitignored but reproducible by running the notebook sequence
+- `run_log/registry.db` is the only result source of truth; legacy result JSON files are not used
+- `scripts/download_artifacts.py` installs the accepted run log and stored artifacts without retraining
+- `scripts/create_experiment.py` creates a writable copy for new configurations and backtests
 
-For a detailed explanation of the run log — content-addressed hashing, the three-level entity model, the database schema, and the querying API — see **[RUN_LOG.md](RUN_LOG.md)**.
+For the schema and querying API, see **[RUN_LOG.md](RUN_LOG.md)**. For reproduction and
+experimentation steps, see **[Running Notebooks](../docs/running-notebooks.md#case-study-notebooks)**.
