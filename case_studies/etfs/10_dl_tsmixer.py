@@ -29,7 +29,7 @@
 # cached checkout.
 #
 # **Learning Objectives**:
-# - Read TSMixer walk-forward checkpoint results from the frozen registry
+# - Read TSMixer walk-forward checkpoint results from the configured registry
 # - Tune the checkpoint (epoch count) on validation via the shared grid, holdout sealed
 # - Place TSMixer against the linear and GBM baselines on the same cross-section
 # - Assess whether shared nonlinear sequence modeling lifts IC above those baselines
@@ -130,7 +130,7 @@ print(f"Entities: {n_entities}")
 # %% [markdown]
 # ## 2. Prior Baselines
 #
-# The linear (Ch11) and GBM (Ch12) leaders are read from the frozen registry for
+# The linear (Ch11) and GBM (Ch12) leaders are read from the configured registry for
 # the same label and validation split, rather than re-run here. They are the
 # reference the TSMixer result has to clear.
 
@@ -151,12 +151,12 @@ for name, ic in prior_baselines.items():
 # %% [markdown]
 # ## 3. TSMixer Checkpoints
 #
-# The results registry (`run_log/registry.db`) is the frozen source of truth for
+# The configured results registry (`run_log/registry.db`) is the source of truth for
 # this case study. The TSMixer config was trained walk-forward with
 # cross-sectional IC evaluated at checkpoints, and each checkpoint is stored as a
 # prediction set with its validation IC. Here we read those checkpoints back from
 # the registry rather than retraining: on a cached checkout no GPU work happens
-# and the frozen registry is never rewritten. Only a config with no registered
+# and the registry is not rewritten. Only a config with no registered
 # validation predictions (a fresh reader who deleted the registry) triggers a
 # `run_dl_cv` train.
 
@@ -165,9 +165,9 @@ dl_configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "deep_learning")
 dl_configs = [c for c in dl_configs if c["params"].get("architecture") == MODEL]
 
 # Apply Papermill overrides. N_EPOCHS is part of the training spec hash, so it
-# selects which registered run to read: the frozen registry was built at
+# selects which registered run to read: the current registry contains the run at
 # N_EPOCHS=100, and changing it here would miss the cache and trigger a fresh GPU
-# train that rewrites the registry. The defaults below match the frozen run, so
+# train that rewrites the registry. The defaults below match the registered run, so
 # these are no-ops on a cached checkout.
 for cfg in dl_configs:
     if cfg.get("n_epochs", 100) != N_EPOCHS:
@@ -193,7 +193,7 @@ expected_validation_days = sum(
 
 # %%
 def _rebuild_from_registry(cfg: dict) -> dict | None:
-    """Rebuild one config's checkpoint curve + peak IC from the frozen registry.
+    """Rebuild one config's checkpoint curve and peak IC from the configured registry.
 
     Returns None if the config has no complete registered validation set (a fresh
     reader who deleted the registry), in which case it is queued for training.
@@ -288,9 +288,9 @@ for cfg in dl_configs:
     else:
         to_train.append(cfg)
 
-# Uncached configs (none on the frozen registry) train via run_dl_cv, which
+# Uncached configs (none in the configured registry) train via run_dl_cv, which
 # writes the registry. On a cached checkout `to_train` is empty, so no GPU work
-# runs and the frozen registry stays byte-identical.
+# runs and the registry stays byte-identical.
 if to_train:
     print(f"\nTraining {len(to_train)} uncached config(s)...")
     run_dl_cv(
