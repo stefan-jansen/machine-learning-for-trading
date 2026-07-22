@@ -213,21 +213,42 @@ def _rebuild_from_registry(cfg: dict) -> dict | None:
     if not status.complete or psets.is_empty():
         return None
 
+    interval = int(cfg.get("checkpoint_interval", cfg.get("n_epochs", N_EPOCHS)))
+    total_epochs = int(cfg.get("n_epochs", N_EPOCHS))
+    expected_epochs = list(range(interval, total_epochs + 1, interval))
+    if not expected_epochs or expected_epochs[-1] != total_epochs:
+        expected_epochs.append(total_epochs)
+    actual_epochs = sorted(int(value) for value in psets["checkpoint_value"].to_list())
+    if actual_epochs != expected_epochs:
+        return None
+
     curve = []
-    for row in psets.iter_rows(named=True):
-        m = load_prediction_metrics(CASE_STUDY_ID, prediction_hash=row["prediction_hash"])
-        if m.is_empty():
-            continue
-        nd = m["ic_n_days"][0]
-        curve.append(
-            {
-                "config": cfg["config_name"],
-                "epoch": int(row["checkpoint_value"]),
-                "ic_mean": float(m["ic_mean"][0]),
-                "ic_n_days": float(nd) if nd is not None else float("nan"),
-                "prediction_hash": row["prediction_hash"],
-            }
-        )
+    with sqlite3.connect(CASE_DIR / "run_log" / "registry.db") as connection:
+        for row in psets.iter_rows(named=True):
+            prediction_hash = row["prediction_hash"]
+            prediction_path = (
+                CASE_DIR / "run_log" / "predictions" / prediction_hash / "predictions.parquet"
+            )
+            fold_count = connection.execute(
+                "SELECT COUNT(*) FROM fold_metrics WHERE prediction_hash = ?",
+                (prediction_hash,),
+            ).fetchone()[0]
+            m = load_prediction_metrics(CASE_STUDY_ID, prediction_hash=prediction_hash)
+            if m.is_empty() or not prediction_path.exists() or fold_count != len(splits):
+                return None
+            nd = m["ic_n_days"][0]
+            daily_ic = m["ic_mean_daily"][0]
+            if nd is None or daily_ic is None:
+                return None
+            curve.append(
+                {
+                    "config": cfg["config_name"],
+                    "epoch": int(row["checkpoint_value"]),
+                    "ic_mean": float(daily_ic),
+                    "ic_n_days": float(nd),
+                    "prediction_hash": prediction_hash,
+                }
+            )
     curve.sort(key=lambda c: c["epoch"])
 
     _finite = [c["ic_n_days"] for c in curve if np.isfinite(c["ic_n_days"])]
