@@ -143,6 +143,7 @@ case_studies/*/*_v1_contaminated/
 # registry.db is SSOT but too large for git (43-180 MB per case study)
 # Regenerated from pipeline runs; not needed for readers
 case_studies/*/run_log/
+case_studies/*/run_log
 
 # Model checkpoints (from training notebooks)
 **/trainer_great/
