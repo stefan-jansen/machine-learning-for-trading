@@ -4,7 +4,7 @@ from pathlib import Path
 
 from case_studies.utils.latent_factors import case_study
 from case_studies.utils.latent_factors import cv as latent_cv
-from case_studies.utils.registry.specs import training_hash_from_spec
+from case_studies.utils.registry.specs import build_training_spec, training_hash_from_spec
 
 
 def test_feature_content_enters_latent_training_hash(tmp_path: Path, monkeypatch) -> None:
@@ -51,3 +51,37 @@ def test_fold_extras_are_scoped_by_training_hash(tmp_path: Path, monkeypatch) ->
 
     assert latent_cv.load_fold_extras("etfs", "training-a") == [{"fold_id": 0, "converged": True}]
     assert latent_cv.load_fold_extras("etfs", "training-b") == [{"fold_id": 0, "converged": False}]
+
+
+def test_gbm_training_hash_binds_modeling_input_identity() -> None:
+    first_input = {
+        "version": "v1",
+        "files": [{"role": "financial", "sha256": "sha256:first"}],
+        "input_digest": "sha256:first",
+    }
+    second_input = {
+        "version": "v1",
+        "files": [{"role": "financial", "sha256": "sha256:second"}],
+        "input_digest": "sha256:second",
+    }
+    common = {
+        "family": "gbm",
+        "config_name": "leaves_7_mae",
+        "label": "fwd_ret_21d",
+        "n_folds": 8,
+        "max_bin": 63,
+        "checkpoint_interval": 50,
+    }
+
+    first = build_training_spec(
+        **common,
+        extra_params={"input_data_spec": first_input},
+    )
+    second = build_training_spec(
+        **common,
+        extra_params={"input_data_spec": second_input},
+    )
+
+    assert first["params"]["input_data_spec"] == first_input
+    assert second["params"]["input_data_spec"] == second_input
+    assert training_hash_from_spec(first) != training_hash_from_spec(second)

@@ -838,6 +838,7 @@ def register_gbm_result(
     entity_col: str = "symbol",
     train_sample_frac: float = 1.0,
     prediction_split: str = "validation",
+    input_data_spec: dict[str, Any] | None = None,
 ) -> str:
     """Register a single GBM config's result to the registry.
 
@@ -871,6 +872,7 @@ def register_gbm_result(
         max_bin=max_bin,
         checkpoint_interval=cfg.get("checkpoint_interval", 50),
         train_sample_frac=train_sample_frac,
+        extra_params={"input_data_spec": input_data_spec} if input_data_spec else None,
     )
     t_hash = register_training_run(
         case_study_id,

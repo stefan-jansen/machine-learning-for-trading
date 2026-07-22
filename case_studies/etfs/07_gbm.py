@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -30,7 +30,8 @@
 #
 # **Book Reference**: Chapter 12, Section 12.8 (Case Study Results)
 #
-# **Prerequisites**: `03_financial_features.py`, `04_temporal.py`, [`06_linear`](06_linear.ipynb)
+# **Prerequisites**: `03_financial_features.py`, `04_model_based_features.py`,
+# [`06_linear`](06_linear.ipynb)
 
 # %%
 """GBM Grid Search - config-driven regularization profiles × loss functions."""
@@ -41,17 +42,20 @@ import numpy as np
 import plotly.graph_objects as go
 import polars as pl
 import yaml
+from IPython.display import Markdown, display
 
 from case_studies.utils.gbm import (
     prepare_gbm_folds,
     register_gbm_result,
     train_gbm_config,
 )
+from case_studies.utils.latent_factors.case_study import _training_input_identity
 from case_studies.utils.registry import (
     build_training_spec,
     get_training_dir,
     load_prediction_metrics,
     load_prediction_sets,
+    load_training_runs,
     training_hash_from_spec,
     training_run_status,
 )
@@ -97,6 +101,7 @@ print(f"Case study: {CASE_STUDY_ID} | Device: {DEVICE} | max_bin: {MAX_BIN}")
 
 # %%
 mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
+input_data_spec = _training_input_identity(CASE_STUDY_ID, PRIMARY_LABEL)
 
 dataset = mds.dataset
 feature_names = mds.feature_names
@@ -107,6 +112,7 @@ splits = mds.splits[: MAX_FOLDS or None]
 
 print(f"Dataset: {len(dataset):,} rows × {len(feature_names)} features")
 print(f"Label: {label_col} | Task: {mds.task_type} | Folds: {len(splits)}")
+print(f"Input digest: {input_data_spec['input_digest']}")
 
 # %%
 configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, family="gbm")
@@ -163,6 +169,7 @@ for cfg in configs:
         max_bin=MAX_BIN,
         checkpoint_interval=cfg.get("checkpoint_interval", 50),
         train_sample_frac=TRAIN_SAMPLE_FRAC,
+        extra_params={"input_data_spec": input_data_spec},
     )
     train_dir = get_training_dir(CASE_STUDY_ID, spec)
 
@@ -250,6 +257,7 @@ for cfg in configs:
         entity_col=entity_col,
         train_sample_frac=TRAIN_SAMPLE_FRAC,
         prediction_split=PREDICTION_SPLIT,
+        input_data_spec=input_data_spec,
     )
 
 # %% [markdown]
@@ -269,8 +277,8 @@ for cfg in configs:
 # IC on those validation dates, so its IC is measured on fewer days (`ic_n_days`
 # below the full-coverage maximum) and is not comparable to a full-coverage IC.
 # Such configs are listed separately and excluded from the ranking and the winner.
-# On the frozen registry all 15 GBM configs are full-coverage, so the guard is
-# inert here - it hardens the notebook against a future partial-coverage config.
+# The guard is active whenever a configuration produces fewer defined daily IC
+# observations than the maximum available in the current registry.
 
 # %%
 results.sort(key=lambda r: r["best_ic"] if np.isfinite(r["best_ic"]) else -np.inf, reverse=True)
@@ -460,33 +468,90 @@ if all_curves.height > 0:
 
 # %%
 print(f"All {len(results)} configs registered.")
-# %%
 
-# %% [markdown]
-# ## 7. Key Takeaways
-#
-# - **Shallow trees with MAE loss lead.** `leaves_7_mae` is the full-coverage
-#   winner at validation IC $\approx +0.044$ (peak at 100 trees), and the MAE-loss
-#   configs occupy the top of the ranking. Squared-error and Huber losses, and the
-#   deepest trees (`leaves_63`), trail down to $\approx +0.016$. On a 99-symbol
-#   cross-section the outlier-robust MAE objective and aggressive regularization
-#   (few leaves, few trees) transfer better than high-capacity settings.
-# - **GBM modestly edges the linear leader, not decisively.** The best GBM
-#   ($\approx +0.044$) is a hair above the full-coverage linear leader, Ridge at
-#   $\alpha = 10^6$ ($\approx +0.042$ from [`06_linear`](06_linear.ipynb)). The
-#   gain from non-linearity is real but small: the cross-asset signal is largely
-#   linear, and the HMM stress state does not open up non-linear splits that lift
-#   IC by much. Both models sit in the same $+0.04$ neighborhood.
-# - **Capacity overfits the folds.** The learning curves peak early (the winner at
-#   100 trees) and decay - added trees fit fold-specific noise, not transferable
-#   cross-sectional structure. Tree count is tuned on the validation folds via the
-#   shared checkpoint grid, the analogue of early stopping; the holdout is untouched.
-#
-# The narrow GBM-over-linear edge motivates the move to temporal models in Ch13:
-# TSMixer captures lead-lag dynamics across the 9 asset classes (e.g., TLT leading
-# equity volatility), a form of structure that neither linear models nor a
-# cross-sectional GBM can exploit.
-#
-# **Next**: [`08_tabular_dl`](08_tabular_dl.ipynb) tests TabM as a bridge between linear and
-# sequence models; [`10_dl_tsmixer`](10_dl_tsmixer.ipynb) applies channel-mixing to the
-# cross-asset temporal structure.
+# Read the current full-coverage linear leader for a live model-family comparison.
+_linear_rows = []
+for _run in load_training_runs(CASE_STUDY_ID, family="linear", label=label_col).to_dicts():
+    _predictions = load_prediction_sets(
+        CASE_STUDY_ID,
+        training_hash=_run["training_hash"],
+        split=PREDICTION_SPLIT,
+    )
+    if _predictions.is_empty():
+        continue
+    _metrics = load_prediction_metrics(
+        CASE_STUDY_ID,
+        prediction_hash=_predictions["prediction_hash"][0],
+    )
+    if _metrics.is_empty():
+        continue
+    _linear_rows.append(
+        {
+            "config_name": _run["config_name"],
+            "ic": float(_metrics["ic_mean_daily"][0]),
+            "n_days": int(_metrics["ic_n_days"][0]),
+        }
+    )
+
+_linear_full_days = max((row["n_days"] for row in _linear_rows), default=0)
+_linear_full = [row for row in _linear_rows if row["n_days"] == _linear_full_days]
+_linear_best = max(_linear_full, key=lambda row: row["ic"], default=None)
+
+_backend = "unknown"
+if best is not None:
+    _winner_config = next(cfg for cfg in configs if cfg["config_name"] == best["config_name"])
+    _winner_spec = build_training_spec(
+        "gbm",
+        best["config_name"],
+        label_col,
+        n_folds=len(fold_data),
+        max_bin=MAX_BIN,
+        checkpoint_interval=_winner_config.get("checkpoint_interval", 50),
+        train_sample_frac=TRAIN_SAMPLE_FRAC,
+        extra_params={"input_data_spec": input_data_spec},
+    )
+    _booster = get_training_dir(CASE_STUDY_ID, _winner_spec) / "boosters" / "fold_0.txt"
+    if _booster.exists():
+        _booster_text = _booster.read_text()
+        for _candidate in ("cuda", "gpu", "cpu"):
+            if f"[device_type: {_candidate}]" in _booster_text:
+                _backend = _candidate.upper()
+                break
+
+# %%
+if best is not None:
+    _linear_sentence = "The current registry contains no comparable full-coverage linear fit."
+    if _linear_best is not None:
+        _delta = best["best_ic"] - _linear_best["ic"]
+        _linear_sentence = (
+            f"It exceeds the full-coverage linear leader `{_linear_best['config_name']}` "
+            f"(IC {_linear_best['ic']:+.3f}) by {_delta:+.3f}."
+        )
+    _partial_sentence = (
+        f" {len(partial_cov)} configurations are excluded from the ranking because they "
+        f"produce fewer than {int(_full_days)} defined daily IC observations."
+        if partial_cov
+        else " All configurations have full daily coverage."
+    )
+    display(
+        Markdown(
+            f"""
+## 7. Key Takeaways
+
+- **A shallow MAE tree leads.** `{best["config_name"]}` is the full-coverage winner at
+  validation IC {best["best_ic"]:+.3f}, peaking at {best["best_iter"]} trees. The wider grid
+  shows that neither loss alone nor extra depth guarantees better validation rankings.
+- **The non-linear increment is positive but modest.** {_linear_sentence}
+- **Coverage and early overfitting matter.**{_partial_sentence} Tree count is selected on the
+  shared validation checkpoint grid; the holdout remains untouched.
+- **Execution provenance.** The saved winning boosters report the `{_backend}` LightGBM backend.
+
+The next notebooks test whether TabM and sequence models capture structure that a
+cross-sectional GBM cannot exploit.
+
+**Next**: [`08_tabular_dl`](08_tabular_dl.ipynb) tests TabM as a bridge between linear and
+sequence models; [`10_dl_tsmixer`](10_dl_tsmixer.ipynb) tests channel mixing on the
+cross-asset temporal structure.
+"""
+        )
+    )
