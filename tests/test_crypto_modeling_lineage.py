@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import polars as pl
+import pytest
+
+from case_studies.utils import deep_learning
 from case_studies.utils.registry import (
     build_training_spec,
     modeling_input_fingerprint,
@@ -66,3 +70,84 @@ def test_crypto_hybrid_registry_uses_output_presets(tmp_path, monkeypatch) -> No
     assert spec["config_name"] == "ols"
     assert spec["family"] == "linear"
     assert spec["n_folds"] == 2
+
+
+def test_crypto_dl_cuda_request_fails_closed(monkeypatch) -> None:
+    """A CUDA-requested sequence model must never continue on CPU."""
+    monkeypatch.setattr(deep_learning.torch.cuda, "is_available", lambda: False)
+
+    with pytest.raises(RuntimeError, match="CUDA"):
+        deep_learning.run_dl_cv(
+            None,
+            [],
+            configs=[],
+            n_features=0,
+            feature_names=[],
+            label_col="fwd_ret_8h",
+            date_col="timestamp",
+            device="cuda",
+        )
+
+
+def test_crypto_dl_registration_keeps_current_lineage(tmp_path, monkeypatch) -> None:
+    """A sequence-model checkpoint must retain the current input identity."""
+    captured = {}
+    preset = tmp_path / "config/lstm/lstm_h64.yaml"
+    preset.parent.mkdir(parents=True)
+    preset.write_text(
+        "library: pytorch\nn_epochs: 2\nparams:\n  architecture: lstm\n  lookback: 3\n"
+    )
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
+
+    def capture_training_run(_case_study_id, *, spec, **_kwargs):
+        captured["spec"] = spec
+        return training_hash_from_spec(spec)
+
+    monkeypatch.setattr(
+        "case_studies.utils.registry.registration.register_training_run",
+        capture_training_run,
+    )
+    monkeypatch.setattr(
+        "case_studies.utils.registry.registration.register_prediction_set",
+        lambda *_args, **_kwargs: None,
+    )
+
+    deep_learning._register_dl_config(
+        case_study="crypto_perps_funding",
+        label="fwd_ret_8h",
+        config_name="lstm_h64",
+        architecture="lstm",
+        n_epochs=2,
+        best_epoch=1,
+        lookback=3,
+        n_folds=2,
+        ic_mean=0.0,
+        predictions=[],
+        identity_params={"device": "cuda", "input_fingerprint": "current-lineage"},
+    )
+
+    assert captured["spec"]["params"]["device"] == "cuda"
+    assert captured["spec"]["params"]["input_fingerprint"] == "current-lineage"
+
+
+def test_crypto_dl_checkpoint_metric_equal_weights_decision_times() -> None:
+    """Sequence checkpoints must weight each decision timestamp equally."""
+    first = datetime(2023, 1, 1, tzinfo=UTC)
+    second = datetime(2023, 1, 2, tzinfo=UTC)
+    frame = pl.DataFrame(
+        {
+            "timestamp": [first] * 5 + [second] * 10,
+            "symbol": [f"a{i}" for i in range(5)] + [f"b{i}" for i in range(10)],
+            "y_score": [float(i) for i in range(5)] + [float(i) for i in range(10)],
+            "y_true": [float(i) for i in range(5)] + [float(9 - i) for i in range(10)],
+        }
+    )
+
+    metrics = deep_learning._decision_time_checkpoint_metrics(
+        frame,
+        date_col="timestamp",
+        entity_col="symbol",
+    )
+
+    assert metrics["ic_n_days"] == 2
+    assert metrics["ic_mean"] == pytest.approx(0.0, abs=1e-12)

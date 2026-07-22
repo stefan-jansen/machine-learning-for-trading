@@ -378,6 +378,7 @@ def _register_dl_config(
     started_at: str | None = None,
     elapsed_s: float | None = None,
     prediction_split: str = "validation",
+    identity_params: dict | None = None,
 ) -> str:
     """Register a single DL config — thin delegate to register_epoch_checkpoint."""
     from case_studies.utils.registry import register_epoch_checkpoint
@@ -399,7 +400,31 @@ def _register_dl_config(
         started_at=started_at,
         elapsed_s=elapsed_s,
         prediction_split=prediction_split,
+        spec_extra_params=identity_params,
     )
+
+
+def _decision_time_checkpoint_metrics(
+    frame: pl.DataFrame,
+    *,
+    date_col: str,
+    entity_col: str,
+) -> dict[str, float | int]:
+    """Score one pooled checkpoint with equal weight per decision timestamp."""
+    stats = cross_sectional_ic(
+        frame,
+        frame,
+        pred_col="y_score",
+        ret_col="y_true",
+        date_col=date_col,
+        entity_col=entity_col,
+        min_obs=5,
+    )
+    return {
+        "ic_mean": float(stats["ic_mean"]),
+        "ic_std": float(stats["ic_std"]),
+        "ic_n_days": int(stats["n_periods"]),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +454,7 @@ def run_dl_cv(
     temporal_feature_names: list[str] | None = None,
     force_retrain: bool = False,
     prediction_split: str = "validation",
+    identity_params: dict | None = None,
 ) -> dict[str, Any]:
     """Walk-forward DL CV with epoch-checkpoint IC evaluation.
 
@@ -501,6 +527,7 @@ def run_dl_cv(
                     label_col,
                     n_folds=len(splits),
                     n_epochs=cfg.get("n_epochs"),
+                    extra_params=identity_params,
                 )
                 status = training_run_status(case_study, spec)
                 split_rows = load_prediction_sets(
@@ -557,7 +584,9 @@ def run_dl_cv(
             prediction_split=prediction_split,
         )
 
-    torch_device = torch.device(device if torch.cuda.is_available() else "cpu")
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested for deep learning, but CUDA is unavailable")
+    torch_device = torch.device(device)
     expected_fold_ids = [int(split["fold"]) for split in splits]
     if selected_folds:
         selected = {int(fold) for fold in selected_folds}
@@ -827,29 +856,20 @@ def run_dl_cv(
                 fold_ids = sorted(ep_df["fold_id"].unique().to_list())
                 if fold_ids != expected_fold_ids:
                     continue
-                fold_ics = []
-                for fold_id in expected_fold_ids:
-                    fold_df = ep_df.filter(pl.col("fold_id") == fold_id)
-                    _entity = entity_col if entity_col in fold_df.columns else None
-                    ic = cross_sectional_ic(
-                        fold_df,
-                        fold_df,
-                        pred_col="y_score",
-                        ret_col="y_true",
-                        date_col=date_col,
-                        entity_col=_entity,
-                        method="spearman",
-                        min_obs=5,
-                    )["ic_mean"]
-                    fold_ics.append(ic)
-                ic_mean = float(np.nanmean(fold_ics))
-                ic_std = float(np.nanstd(fold_ics)) if len(fold_ics) > 1 else 0.0
+                metrics = _decision_time_checkpoint_metrics(
+                    ep_df,
+                    date_col=date_col,
+                    entity_col=entity_col,
+                )
+                ic_mean = float(metrics["ic_mean"])
+                ic_std = float(metrics["ic_std"])
                 all_curves.append(
                     {
                         "config": config_name,
                         "epoch": epoch,
                         "ic_mean": ic_mean,
                         "ic_std": ic_std,
+                        "ic_n_days": int(metrics["ic_n_days"]),
                     }
                 )
                 complete_prediction_frames.append(ep_df)
@@ -888,29 +908,17 @@ def run_dl_cv(
         # already in the registry. (Fold-major training means ALL configs reach
         # this point together, but registration is still moved out of the old
         # batched block at the end.)
-        if register and case_study and epoch_scores:
-            cfg_best_preds = None
-            for frame in complete_prediction_frames:
-                if (
-                    frame.height > 0
-                    and "config" in frame.columns
-                    and frame["config"].unique().to_list() == [config_name]
-                ):
-                    # Filter to the best epoch for this config
-                    bep_df = frame.filter(pl.col("epoch") == best_cp)
-                    if bep_df.height > 0:
-                        cfg_best_preds = (
-                            bep_df
-                            if cfg_best_preds is None
-                            else pl.concat([cfg_best_preds, bep_df], how="diagonal_relaxed")
-                        )
-            if cfg_best_preds is not None and cfg_best_preds.height > 0:
+        if register and case_study and epoch_scores and cfg_preds.height > 0:
+            cfg_best_preds = cfg_preds.filter(pl.col("epoch") == best_cp).drop("config", "epoch")
+            if cfg_best_preds.height > 0:
                 try:
+                    from case_studies.utils.registry import register_prediction_set
+
                     arch = _resolve_arch_name(config_name)
                     cfg_curves_df = pl.DataFrame(
                         [c for c in all_curves if c["config"] == config_name]
                     )
-                    _register_dl_config(
+                    t_hash = _register_dl_config(
                         case_study=case_study,
                         label=label_col,
                         config_name=config_name,
@@ -926,8 +934,27 @@ def run_dl_cv(
                         started_at=acc.get("started_at"),
                         elapsed_s=acc.get("elapsed_s"),
                         prediction_split=prediction_split,
+                        identity_params=identity_params,
                     )
-                    print(f"    registered {config_name} incrementally")
+                    for epoch, epoch_ic, _epoch_std in epoch_scores:
+                        if epoch == best_cp:
+                            continue
+                        epoch_preds = cfg_preds.filter(pl.col("epoch") == epoch).drop(
+                            "config", "epoch"
+                        )
+                        register_prediction_set(
+                            case_study,
+                            training_hash=t_hash,
+                            checkpoint_value=int(epoch),
+                            checkpoint_kind="epoch",
+                            split=prediction_split,
+                            predictions=epoch_preds,
+                            metrics={"ic_mean": epoch_ic},
+                        )
+                    print(
+                        f"    registered {config_name} incrementally "
+                        f"({len(epoch_scores)} per-epoch slices)"
+                    )
                 except Exception as exc:
                     print(f"    WARN: incremental registration failed for {config_name}: {exc}")
 
