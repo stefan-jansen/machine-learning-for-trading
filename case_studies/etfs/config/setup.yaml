@@ -209,8 +209,8 @@ backtest:
     checkpoints_per_config: 2
     # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
     expensive_allocators_skip: false
-    # All others (equal_weight, score_weighted, inverse_vol) take the cheap path.
-    # Ch16 signal-stage selection. Long-only equal-weight top-k. Percentile
+    # All other alternative allocators take the cheap path.
+    # Ch16 equal-weight baseline selection. Long-only top-k. Percentile
     # and quantile axes are commented out; uncomment to add them for any
     # label and the loader will synthesize the schemes automatically.
     top_k_grid:
@@ -227,8 +227,8 @@ backtest:
     # concentration profile so the cross-method comparison is honest. MVO uses
     # Ledoit-Wolf shrinkage as its covariance regularizer; IV/RP/HRP have
     # method-inherent diversification; score_weighted is reported unconstrained.
+    # Equal weight is the Ch16 baseline and is not repeated here.
     allocators:
-      - {name: equal_weight,    method: equal_weight}
       - {name: score_weighted,  method: score_weighted}
       - {name: inverse_vol,     method: inverse_vol}
       - {name: risk_parity,     method: risk_parity}
