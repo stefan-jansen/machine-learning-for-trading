@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 import numpy as np
@@ -9,6 +10,93 @@ import polars as pl
 import pytest
 
 from case_studies.utils.latent_factors.panel import compute_managed_portfolios
+
+
+def _install_latent_registry_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    *,
+    corrupt_daily_std: bool = False,
+) -> tuple[dict, pl.DataFrame]:
+    from case_studies.utils import registry
+    from case_studies.utils.latent_factors.cv import _normalize_prediction_keys
+
+    training_spec = {
+        "config_name": "cae",
+        "family": "latent_factors",
+        "label": "return",
+        "n_epochs": 5,
+        "params": {"input_digest": "input-a"},
+        "seed": 42,
+    }
+    training_hash = registry.training_hash_from_spec(training_spec)
+    timestamps = [datetime(2020, 4, 1)] * 5 + [datetime(2020, 5, 1)] * 5
+    base = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": list(range(5)) * 2,
+            "y_true": list(range(5)) * 2,
+            "y_score": list(range(5)) + list(reversed(range(5))),
+            "fold_id": [0] * 5 + [1] * 5,
+        }
+    )
+    prediction_rows = []
+    metrics_by_hash = {}
+    for epoch in (0, 5):
+        prediction_hash = f"prediction-{epoch}"
+        frame = base.with_columns(pl.lit(epoch).alias("epoch"))
+        target = tmp_path / prediction_hash
+        target.mkdir()
+        frame.write_parquet(target / "predictions.parquet")
+        prediction_rows.append(
+            {
+                "prediction_hash": prediction_hash,
+                "checkpoint_value": epoch,
+                "checkpoint_kind": "epoch",
+            }
+        )
+        from ml4t.diagnostic.metrics import cross_sectional_ic
+
+        metric = cross_sectional_ic(
+            frame,
+            frame,
+            pred_col="y_score",
+            ret_col="y_true",
+            date_col="timestamp",
+            entity_col="symbol",
+            method="spearman",
+            min_obs=5,
+        )
+        metrics_by_hash[prediction_hash] = pl.DataFrame(
+            {
+                "ic_mean_daily": [float(metric["ic_mean"])],
+                "ic_std_daily": [float(metric["ic_std"]) + (0.25 if corrupt_daily_std else 0.0)],
+            }
+        )
+
+    monkeypatch.setattr(
+        registry,
+        "load_training_runs",
+        lambda *_args, **_kwargs: pl.DataFrame(
+            {
+                "training_hash": [training_hash],
+                "spec_json": [json.dumps(training_spec)],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        registry,
+        "load_prediction_sets",
+        lambda *_args, **_kwargs: pl.DataFrame(prediction_rows),
+    )
+    monkeypatch.setattr(
+        registry,
+        "load_prediction_metrics",
+        lambda *_args, prediction_hash=None, **_kwargs: metrics_by_hash[prediction_hash],
+    )
+    monkeypatch.setattr(registry, "prediction_dir", lambda _case_study, value: tmp_path / value)
+    expected_keys = _normalize_prediction_keys(base, "timestamp", "symbol")
+    return training_spec, expected_keys
 
 
 def test_managed_portfolios_are_cross_sectionally_shared() -> None:
@@ -402,7 +490,7 @@ def test_reporting_epoch_defaults_to_last_checkpoint() -> None:
     assert mean_ic == pytest.approx(0.025)
 
 
-def test_reporting_epoch_prefers_validation_best_checkpoint_zero() -> None:
+def test_reporting_epoch_excludes_validation_selected_checkpoint_zero_by_default() -> None:
     from case_studies.utils.latent_factors.cv import _select_reporting_epoch
 
     metrics = pl.DataFrame(
@@ -419,8 +507,102 @@ def test_reporting_epoch_prefers_validation_best_checkpoint_zero() -> None:
         reporting_epoch=None,
     )
 
+    assert epoch == 10
+    assert mean_ic == pytest.approx(0.025)
+
+
+def test_reporting_epoch_allows_explicit_checkpoint_zero() -> None:
+    from case_studies.utils.latent_factors.cv import _select_reporting_epoch
+
+    metrics = pl.DataFrame(
+        {
+            "fold_id": [0, 0, 1, 1],
+            "epoch": [0, 10, 0, 10],
+            "ic_mean": [0.04, 0.03, 0.05, 0.02],
+        }
+    )
+
+    epoch, mean_ic = _select_reporting_epoch(
+        metrics,
+        checkpoint_selection_policy="fixed",
+        reporting_epoch=0,
+    )
+
     assert epoch == 0
     assert mean_ic == pytest.approx(0.045)
+
+
+def test_latent_registry_cache_replays_exact_complete_surface(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from case_studies.utils.latent_factors.cv import _load_registered_latent_factor
+
+    training_spec, expected_keys = _install_latent_registry_cache(monkeypatch, tmp_path)
+    result = _load_registered_latent_factor(
+        "probe",
+        model_name="cae",
+        training_spec=training_spec,
+        prediction_split="validation",
+        expected_checkpoints=(0, 5),
+        expected_keys=expected_keys,
+        date_col="timestamp",
+        entity_col="symbol",
+        eval_label_col=None,
+    )
+
+    assert result is not None
+    metrics, predictions = result
+    assert metrics.shape == (4, 3)
+    assert predictions.shape == (20, 6)
+
+
+def test_latent_registry_cache_rejects_corrupted_daily_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from case_studies.utils.latent_factors.cv import _load_registered_latent_factor
+
+    training_spec, expected_keys = _install_latent_registry_cache(
+        monkeypatch,
+        tmp_path,
+        corrupt_daily_std=True,
+    )
+
+    with pytest.raises(ValueError, match="daily metric mismatch"):
+        _load_registered_latent_factor(
+            "probe",
+            model_name="cae",
+            training_spec=training_spec,
+            prediction_split="validation",
+            expected_checkpoints=(0, 5),
+            expected_keys=expected_keys,
+            date_col="timestamp",
+            entity_col="symbol",
+            eval_label_col=None,
+        )
+
+
+def test_latent_registry_cache_requires_exact_checkpoint_surface(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from case_studies.utils.latent_factors.cv import _load_registered_latent_factor
+
+    training_spec, expected_keys = _install_latent_registry_cache(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="checkpoint count"):
+        _load_registered_latent_factor(
+            "probe",
+            model_name="cae",
+            training_spec=training_spec,
+            prediction_split="validation",
+            expected_checkpoints=(0, 5, 10),
+            expected_keys=expected_keys,
+            date_col="timestamp",
+            entity_col="symbol",
+            eval_label_col=None,
+        )
 
 
 def test_prediction_frame_preserves_temporal_timestamp_dtype() -> None:
