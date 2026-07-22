@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -357,7 +357,8 @@ if best:
 #
 # Validation IC at each epoch checkpoint. The full-coverage winner is highlighted
 # in amber; any partial-coverage checkpoint excluded from selection is drawn in
-# copper. Each point is labeled with the number of validation days behind its IC.
+# copper. Coverage labels appear only where they identify the selected or an
+# excluded checkpoint.
 
 # %%
 _curve = sorted(best["curve"], key=lambda c: c["epoch"]) if best else []
@@ -380,7 +381,10 @@ if _curve:
             mode="lines+markers+text",
             line=dict(color=COLORS["silver_muted"], width=1.5),
             marker=dict(color=_mk_color, size=_mk_size, line=dict(color="white", width=1)),
-            text=[f"{d:.0f}d" for d in _nd],
+            text=[
+                f"{d:.0f}d" if epoch == best_epoch or d < _full_days else ""
+                for epoch, d in zip(_epochs, _nd, strict=True)
+            ],
             textposition="top center",
             showlegend=False,
         )
@@ -397,7 +401,6 @@ if _curve:
             f"Epoch {best_epoch} leads on the {_full_days:.0f}-day validation surface"
             f" (IC {best_ic:+.3f}){_partial_note}"
         ),
-        template="plotly_white",
         height=500,
         width=1000,
         margin=dict(t=70),
@@ -439,7 +442,6 @@ fig_cmp.update_layout(
         f"LSTM trails both baselines: IC {best_ic:+.3f} "
         f"below Ridge {ridge_ic:+.3f} and GBM {gbm_ic:+.3f}"
     ),
-    template="plotly_white",
     height=500,
     width=1000,
     margin=dict(t=70),
@@ -554,7 +556,7 @@ if MC_DROPOUT:
 
         low_frame = pl.DataFrame(
             {
-                "date": val_dates[low_unc],
+                "timestamp": val_dates[low_unc],
                 "symbol": val_entities[low_unc],
                 "y_true": y_val_seq[low_unc],
                 "y_pred": mean_pred[low_unc],
@@ -565,13 +567,13 @@ if MC_DROPOUT:
             low_frame,
             pred_col="y_pred",
             ret_col="y_true",
-            date_col="date",
+            date_col="timestamp",
             entity_col="symbol",
             min_obs=5,
         )["ic_mean"]
         high_frame = pl.DataFrame(
             {
-                "date": val_dates[high_unc],
+                "timestamp": val_dates[high_unc],
                 "symbol": val_entities[high_unc],
                 "y_true": y_val_seq[high_unc],
                 "y_pred": mean_pred[high_unc],
@@ -582,7 +584,7 @@ if MC_DROPOUT:
             high_frame,
             pred_col="y_pred",
             ret_col="y_true",
-            date_col="date",
+            date_col="timestamp",
             entity_col="symbol",
             min_obs=5,
         )["ic_mean"]
