@@ -144,9 +144,15 @@ def _build_expected_latent_training_spec(
         n_epochs=n_epochs,
         model_kwargs=model_kwargs,
     )
-    fold_extras = (
-        [{"checkpoint_epochs": list(checkpoints)}] if model_name in {"cae", "sae", "sdf"} else []
-    )
+    fold_extras: list[dict[str, Any]] = []
+    if model_name in {"cae", "sae", "sdf"}:
+        expected_extra: dict[str, Any] = {"checkpoint_epochs": list(checkpoints)}
+        if model_name == "sdf":
+            expected_extra["output_mode"] = model_kwargs.get("output_mode", "beta_network")
+            expected_extra["expected_return_mapper"] = model_kwargs.get(
+                "expected_return_mapper", "linear"
+            )
+        fold_extras = [expected_extra]
     expected = _apply_latent_factor_runtime_spec(
         spec=spec,
         n_factors=n_factors,

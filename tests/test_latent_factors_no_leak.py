@@ -386,6 +386,59 @@ def test_latent_input_digest_excludes_sealed_holdout() -> None:
     assert development_changed != digest
 
 
+def test_sdf_expected_spec_includes_library_output_defaults() -> None:
+    from case_studies.utils import registry
+    from case_studies.utils.latent_factors.cv import _build_expected_latent_training_spec
+
+    model_kwargs = {
+        "n_epochs_unc": 256,
+        "n_epochs_moment": 64,
+        "n_epochs_cond": 1024,
+        "checkpoint_epochs": [256, 512, 768, 1024, 1280],
+        "beta_n_epochs": 256,
+        "beta_checkpoint_epochs": [256],
+        "beta_default_checkpoint": 256,
+    }
+    splits = [
+        {
+            "fold": 0,
+            "train_start": datetime(2020, 1, 1),
+            "train_end": datetime(2020, 12, 31),
+            "val_start": datetime(2021, 1, 1),
+            "val_end": datetime(2021, 12, 31),
+        }
+    ]
+    spec, checkpoints = _build_expected_latent_training_spec(
+        model_name="sdf",
+        label_col="return",
+        n_factors=5,
+        n_epochs=50,
+        model_kwargs=model_kwargs,
+        feature_names=["value"],
+        splits=splits,
+        task_type="regression",
+        class_values=None,
+        eval_label_col=None,
+        input_digest="input-a",
+        macro_digest="macro-a",
+        runtime_spec={
+            "device": "cuda",
+            "deterministic_algorithms": True,
+            "cublas_workspace_config": ":4096:8",
+            "num_threads": 8,
+            "seed": 42,
+        },
+    )
+    actual = dict(spec)
+    actual["output_mode"] = "beta_network"
+    actual["expected_return_mapper"] = "linear"
+
+    assert checkpoints == (256, 512, 768, 1024, 1280)
+    assert spec["output_mode"] == "beta_network"
+    assert spec["expected_return_mapper"] == "linear"
+    assert registry.training_hash_from_spec(spec) == registry.training_hash_from_spec(actual)
+
+
 def test_latent_registration_builds_complete_training_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
