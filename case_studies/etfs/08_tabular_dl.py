@@ -219,9 +219,22 @@ def _rebuild_from_registry(cfg: dict) -> dict | None:
             }
         )
     curve.sort(key=lambda c: c["epoch"])
+    if not curve:
+        return None
+
+    # Compare checkpoints only on their maximum available validation coverage.
+    # Otherwise a partial checkpoint can win because its IC omits dates where
+    # near-constant predictions make the cross-sectional correlation undefined.
+    finite_days = [c["ic_n_days"] for c in curve if np.isfinite(c["ic_n_days"])]
+    if finite_days:
+        max_days = max(finite_days)
+        eligible = [c for c in curve if c["ic_n_days"] == max_days]
+    else:
+        eligible = curve
+
     # Peak-checkpoint selection: the tree-count analogue is the epoch count, tuned
     # on validation over the shared 25-epoch grid. Holdout is never touched here.
-    peak = max(curve, key=lambda c: c["ic_mean"])
+    peak = max(eligible, key=lambda c: c["ic_mean"])
     return {
         "config_name": cfg["config_name"],
         "best_epoch": peak["epoch"],
@@ -251,7 +264,7 @@ for cfg in tabdl_configs:
 # runs and the registry stays byte-identical.
 if to_train:
     print(f"\nTraining {len(to_train)} uncached config(s)...")
-    fresh = run_tabm_cv(
+    run_tabm_cv(
         dataset_pd,
         splits,
         configs=to_train,
@@ -272,22 +285,15 @@ if to_train:
         temporal_feature_names=mds.temporal_feature_names,
         input_data_spec=input_data_spec,
     )
-    for r in fresh["grid_results"]:
-        grid_results.append(
-            {
-                "config_name": r["config_name"],
-                "best_epoch": r["best_epoch"],
-                "best_ic": r["best_ic"],
-                "ic_n_days": float("nan"),
-                "best_prediction_hash": None,
-                "curve": [
-                    c
-                    for c in fresh["all_learning_curves"].to_dicts()
-                    if c["config"] == r["config_name"]
-                ],
-                "cached": False,
-            }
-        )
+    for cfg in to_train:
+        rebuilt = _rebuild_from_registry(cfg)
+        if rebuilt is None:
+            raise RuntimeError(
+                f"Training completed but registered checkpoints are incomplete for "
+                f"{cfg['config_name']}"
+            )
+        rebuilt["cached"] = False
+        grid_results.append(rebuilt)
 
 # %% [markdown]
 # ## 4. Grid Results
