@@ -52,7 +52,6 @@ KNOWN_DESYNCED = frozenset(
         "case_studies/etfs/11b_ipca.ipynb",
         "case_studies/etfs/11c_conditional_autoencoder.ipynb",
         "case_studies/etfs/11d_stochastic_discount_factor.ipynb",
-        "case_studies/etfs/11e_supervised_autoencoder.ipynb",
         "case_studies/fx_pairs/06_linear.ipynb",
         "case_studies/nasdaq100_microstructure/05_evaluation.ipynb",
         "case_studies/sp500_equity_option_analytics/05_evaluation.ipynb",
