@@ -81,7 +81,7 @@ def load_case_study_context(
     device = str(lf_setup.get("device", "cpu"))
     num_threads = int(lf_setup.get("num_threads", 8))
     deterministic_algorithms = bool(lf_setup.get("deterministic_algorithms", True))
-    macro_panel = load_macro() if use_macro else None
+    macro_panel = _load_macro_panel(lf_setup) if use_macro else None
 
     modeling_dataset = load_modeling_dataset(
         case_study_id, resolved_primary, max_symbols=max_symbols
@@ -112,6 +112,31 @@ def load_case_study_context(
         num_threads=num_threads,
         deterministic_algorithms=deterministic_algorithms,
     )
+
+
+def _load_macro_panel(lf_setup: dict[str, Any]) -> pl.DataFrame:
+    """Load the configured point-in-time macro surface."""
+    configured_series = lf_setup.get("macro_series")
+    if configured_series is not None:
+        if not isinstance(configured_series, list) or not configured_series:
+            raise ValueError("modeling.latent_factors.macro_series must be a non-empty list")
+        if not all(isinstance(name, str) and name for name in configured_series):
+            raise ValueError("Every latent-factor macro series must be a non-empty string")
+
+    macro_panel = load_macro(series=configured_series)
+    if configured_series is not None:
+        missing = sorted(set(configured_series) - set(macro_panel.columns))
+        if missing:
+            raise ValueError(f"Configured latent-factor macro series are unavailable: {missing}")
+
+    availability_lag_days = int(lf_setup.get("macro_availability_lag_days", 0))
+    if availability_lag_days < 0:
+        raise ValueError("macro_availability_lag_days cannot be negative")
+    if availability_lag_days:
+        macro_panel = macro_panel.with_columns(
+            pl.col("timestamp") + pl.duration(days=availability_lag_days)
+        )
+    return macro_panel
 
 
 def configured_models(

@@ -9,7 +9,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from case_studies.utils.latent_factors.panel import compute_managed_portfolios
+from case_studies.utils.latent_factors.panel import align_macro_to_dates, compute_managed_portfolios
 
 
 def _install_latent_registry_cache(
@@ -124,6 +124,50 @@ def test_managed_portfolios_use_current_date_only() -> None:
     changed = np.abs(portfolios_a - portfolios_b).max(axis=(1, 2))
     assert changed[4] > 0.0
     assert np.all(changed[np.arange(len(changed)) != 4] == 0.0)
+
+
+def test_macro_alignment_never_backfills_from_future() -> None:
+    dates = [datetime(2019, 12, 31), datetime(2020, 1, 31), datetime(2020, 2, 29)]
+    macro = pl.DataFrame(
+        {
+            "timestamp": [datetime(2020, 1, 15), datetime(2020, 2, 15)],
+            "rate": [1.0, 2.0],
+        }
+    )
+
+    aligned, features = align_macro_to_dates(macro, dates)
+
+    assert features == ["rate"]
+    assert aligned[:, 0].tolist() == [0.0, 1.0, 2.0]
+
+
+def test_macro_panel_applies_allowlist_and_availability_lag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from case_studies.utils.latent_factors import case_study
+
+    captured: dict[str, object] = {}
+
+    def fake_load_macro(*, series=None):
+        captured["series"] = series
+        return pl.DataFrame(
+            {
+                "timestamp": [datetime(2020, 1, 31)],
+                "dgs10": [1.5],
+                "vixcls": [15.0],
+            }
+        )
+
+    monkeypatch.setattr(case_study, "load_macro", fake_load_macro)
+    panel = case_study._load_macro_panel(
+        {
+            "macro_series": ["dgs10", "vixcls"],
+            "macro_availability_lag_days": 1,
+        }
+    )
+
+    assert captured["series"] == ["dgs10", "vixcls"]
+    assert panel["timestamp"].to_list() == [datetime(2020, 2, 1)]
 
 
 def test_cae_validation_batch_receives_validation_returns(
