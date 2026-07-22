@@ -2038,6 +2038,8 @@ def run_plumbing_test(
     prices: pl.DataFrame,
     strategy_spec: dict,
     *,
+    predictions: pl.DataFrame | None = None,
+    label: str | None = None,
     n_assets: int | None = None,
     top_k: int = 20,
     seed: int = 42,
@@ -2062,23 +2064,27 @@ def run_plumbing_test(
     rebal_spec = strategy.get("rebalance", {})
 
     if rebal_spec["mode"] == "vectorized":
-        # Generate random weights
-        timestamps = prices["timestamp"].unique().sort()
-        symbols = prices["symbol"].unique().sort().to_list()
+        if predictions is None or label is None:
+            raise ValueError("Vectorized plumbing tests require predictions and label")
+
+        random_predictions = normalize_prediction_columns(predictions)
         rng = np.random.default_rng(seed)
-
-        rows = []
-        k = min(top_k, len(symbols))
-        for ts in timestamps:
-            selected = rng.choice(symbols, size=k, replace=False)
-            w = 1.0 / k
-            for s in selected:
-                rows.append({"timestamp": ts, "symbol": s, "weight": w})
-
-        random_weights = pl.DataFrame(rows)
-        # Need y_true for vectorized path — use prices to get returns
-        # This is a simplified plumbing test for vectorized
-        return 0.0  # Vectorized plumbing test is in the notebook
+        random_predictions = random_predictions.with_columns(
+            pl.Series("y_score", rng.standard_normal(random_predictions.height))
+        )
+        result = run_backtest(
+            case_study,
+            "plumbing_test",
+            strategy_spec,
+            prices=prices,
+            predictions=random_predictions,
+            label=label,
+            register=False,
+            initial_cash=initial_cash,
+            calendar=calendar,
+            contract_specs=contract_specs,
+        )
+        return float(result.metrics["sharpe"])
 
     # Engine plumbing test
     from ml4t.backtest import DataFeed, Engine, RebalanceConfig, Strategy, TargetWeightExecutor
