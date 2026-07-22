@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -41,8 +41,9 @@
 # [`09_dl_lstm`](09_dl_lstm.ipynb) (for baselines)
 
 # %%
-"""TSMixer - etfs deep learning, results read from the frozen registry."""
+"""TSMixer - ETF deep learning with registered walk-forward checkpoints."""
 
+import sqlite3
 import warnings
 
 import numpy as np
@@ -53,7 +54,12 @@ import yaml
 
 import utils.style  # noqa: F401 - activates the ML4T Plotly template
 from case_studies.utils.analytics import load_best_ic_per_family
+from case_studies.utils.darts_forecasting import (
+    darts_training_identity,
+    select_full_coverage_checkpoint,
+)
 from case_studies.utils.deep_learning import run_dl_cv
+from case_studies.utils.latent_factors.case_study import _training_input_identity
 from case_studies.utils.registry import (
     build_training_spec,
     load_prediction_metrics,
@@ -101,6 +107,7 @@ print(f"Device: {device_str} | Epochs: {N_EPOCHS} | Lookback: {LOOKBACK}")
 
 # %%
 mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
+input_data_spec = _training_input_identity(CASE_STUDY_ID, PRIMARY_LABEL)
 
 dataset = mds.dataset
 feature_names = mds.feature_names
@@ -114,6 +121,7 @@ n_features = len(feature_names)
 
 print(f"Dataset: {len(dataset):,} rows x {n_features} features")
 print(f"Label: {label_col} | Entity: {entity_col} | Folds: {len(splits)}")
+print(f"Input digest: {input_data_spec['input_digest']}")
 
 dataset_pd = dataset.to_pandas()
 n_entities = dataset_pd[entity_col].nunique()
@@ -173,6 +181,15 @@ print(f"Grid: {len(dl_configs)} config x {len(splits)} folds (checkpoints read f
 for cfg in dl_configs:
     print(f"  {cfg['config_name']}: {cfg['params'].get('architecture', '?')}")
 
+expected_fold_ids = sorted(int(split["fold"]) for split in splits)
+expected_validation_days = sum(
+    dataset_pd.loc[
+        (dataset_pd[date_col] >= split["val_start"]) & (dataset_pd[date_col] <= split["val_end"]),
+        date_col,
+    ].nunique()
+    for split in splits
+)
+
 
 # %%
 def _rebuild_from_registry(cfg: dict) -> dict | None:
@@ -181,12 +198,20 @@ def _rebuild_from_registry(cfg: dict) -> dict | None:
     Returns None if the config has no complete registered validation set (a fresh
     reader who deleted the registry), in which case it is queued for training.
     """
+    identity_params = darts_training_identity(
+        cfg,
+        label_col,
+        case_study=CASE_STUDY_ID,
+        input_data_spec=input_data_spec,
+        max_train_sequences=0,
+    )
     spec = build_training_spec(
         cfg["family"],
         cfg["config_name"],
         label_col,
         n_folds=len(splits),
         n_epochs=cfg.get("n_epochs"),
+        extra_params=identity_params,
     )
     status = training_run_status(CASE_STUDY_ID, spec)
     t_hash = training_hash_from_spec(spec)
@@ -194,25 +219,49 @@ def _rebuild_from_registry(cfg: dict) -> dict | None:
     if not status.complete or psets.is_empty():
         return None
 
+    interval = int(cfg.get("checkpoint_interval", cfg.get("n_epochs", N_EPOCHS)))
+    total_epochs = int(cfg.get("n_epochs", N_EPOCHS))
+    expected_epochs = list(range(interval, total_epochs + 1, interval))
+    if not expected_epochs or expected_epochs[-1] != total_epochs:
+        expected_epochs.append(total_epochs)
+    actual_epochs = sorted(int(value) for value in psets["checkpoint_value"].to_list())
+    if actual_epochs != expected_epochs:
+        return None
+
     curve = []
-    for row in psets.iter_rows(named=True):
-        m = load_prediction_metrics(CASE_STUDY_ID, prediction_hash=row["prediction_hash"])
-        if m.is_empty():
-            continue
-        nd = m["ic_n_days"][0]
-        curve.append(
-            {
-                "config": cfg["config_name"],
-                "epoch": int(row["checkpoint_value"]),
-                "ic_mean": float(m["ic_mean"][0]),
-                "ic_n_days": float(nd) if nd is not None else float("nan"),
-                "prediction_hash": row["prediction_hash"],
-            }
-        )
+    with sqlite3.connect(CASE_DIR / "run_log" / "registry.db") as connection:
+        for row in psets.iter_rows(named=True):
+            prediction_hash = row["prediction_hash"]
+            prediction_path = (
+                CASE_DIR / "run_log" / "predictions" / prediction_hash / "predictions.parquet"
+            )
+            fold_ids = [
+                int(item[0])
+                for item in connection.execute(
+                    "SELECT fold_id FROM fold_metrics WHERE prediction_hash = ? ORDER BY fold_id",
+                    (prediction_hash,),
+                ).fetchall()
+            ]
+            m = load_prediction_metrics(CASE_STUDY_ID, prediction_hash=prediction_hash)
+            if m.is_empty() or not prediction_path.exists() or fold_ids != expected_fold_ids:
+                return None
+            nd = m["ic_n_days"][0]
+            daily_ic = m["ic_mean_daily"][0]
+            if nd is None or daily_ic is None:
+                return None
+            curve.append(
+                {
+                    "config": cfg["config_name"],
+                    "epoch": int(row["checkpoint_value"]),
+                    "ic_mean": float(daily_ic),
+                    "ic_n_days": float(nd),
+                    "prediction_hash": prediction_hash,
+                }
+            )
     curve.sort(key=lambda c: c["epoch"])
-    # Peak-checkpoint selection on validation: the epoch-count analogue of early
-    # stopping, scanning the shared checkpoint grid. The holdout is never touched.
-    peak = max(curve, key=lambda c: c["ic_mean"])
+    peak, full_days, partial_epochs = select_full_coverage_checkpoint(curve)
+    if full_days != expected_validation_days:
+        return None
     return {
         "config_name": cfg["config_name"],
         "best_epoch": peak["epoch"],
@@ -220,6 +269,8 @@ def _rebuild_from_registry(cfg: dict) -> dict | None:
         "ic_n_days": peak["ic_n_days"],
         "best_prediction_hash": peak["prediction_hash"],
         "curve": curve,
+        "full_days": full_days,
+        "partial_epochs": partial_epochs,
         "cached": True,
     }
 
@@ -242,7 +293,7 @@ for cfg in dl_configs:
 # runs and the frozen registry stays byte-identical.
 if to_train:
     print(f"\nTraining {len(to_train)} uncached config(s)...")
-    fresh = run_dl_cv(
+    run_dl_cv(
         dataset_pd,
         splits,
         feature_names=feature_names,
@@ -261,23 +312,17 @@ if to_train:
         temporal_by_fold=mds.temporal_by_fold,
         temporal_keys=mds.temporal_keys,
         temporal_feature_names=mds.temporal_feature_names,
+        input_data_spec=input_data_spec,
     )
-    for r in fresh["grid_results"]:
-        grid_results.append(
-            {
-                "config_name": r["config_name"],
-                "best_epoch": r["best_epoch"],
-                "best_ic": r["best_ic"],
-                "ic_n_days": float("nan"),
-                "best_prediction_hash": None,
-                "curve": [
-                    c
-                    for c in fresh["all_learning_curves"].to_dicts()
-                    if c["config"] == r["config_name"]
-                ],
-                "cached": False,
-            }
-        )
+    for cfg in to_train:
+        rebuilt = _rebuild_from_registry(cfg)
+        if rebuilt is None:
+            raise RuntimeError(
+                f"Training completed but registered checkpoints are incomplete for "
+                f"{cfg['config_name']}"
+            )
+        rebuilt["cached"] = False
+        grid_results.append(rebuilt)
 
 # %% [markdown]
 # ## 4. Winner and Baselines
