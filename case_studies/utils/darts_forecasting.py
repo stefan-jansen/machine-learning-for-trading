@@ -491,6 +491,7 @@ def run_darts_cv(
     case_study: str | None,
     notebook: str | None,
     prediction_split: str = "validation",
+    input_data_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run Darts-backed global forecasting models and emit standard DL artifacts."""
     if case_study is None:
@@ -794,6 +795,15 @@ def run_darts_cv(
                 started_at=row.get("started_at"),
                 elapsed_s=row.get("elapsed_s"),
                 prediction_split=prediction_split,
+                identity_params=(
+                    {
+                        "batch_size": cfg.get("batch_size", 2048),
+                        "input_data_spec": input_data_spec,
+                        "max_train_sequences": max_train_sequences,
+                    }
+                    if input_data_spec is not None
+                    else None
+                ),
             )
 
     return {

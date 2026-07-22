@@ -15,6 +15,7 @@ import json
 
 import pytest
 
+from case_studies.utils.registry import registration
 from case_studies.utils.registry.specs import (
     DEFAULT_SEED,
     HASH_LENGTH,
@@ -225,3 +226,37 @@ def test_training_hash_regression_pin_for_canonical_spec() -> None:
     expected = hashlib.sha256(content.encode()).hexdigest()[:12]
 
     assert training_hash_from_spec(spec) == expected
+
+
+def test_epoch_registration_merges_identity_params_on_preset_path(monkeypatch) -> None:
+    captured = {}
+
+    def capture_training_run(case_study, *, spec, **kwargs):
+        captured["case_study"] = case_study
+        captured["spec"] = spec
+        return training_hash_from_spec(spec)
+
+    monkeypatch.setattr(registration, "register_training_run", capture_training_run)
+    monkeypatch.setattr(registration, "register_prediction_set", lambda *args, **kwargs: "pred")
+
+    result = registration.register_epoch_checkpoint(
+        "etfs",
+        family="tabular_dl",
+        library="tabm",
+        config_name="tabm_s",
+        label="fwd_ret_21d",
+        n_folds=8,
+        n_epochs=100,
+        best_epoch=50,
+        ic_mean=0.01,
+        predictions=None,
+        identity_params={
+            "batch_size": 4096,
+            "input_data_spec": {"input_digest": "sha256:input"},
+        },
+    )
+
+    assert captured["case_study"] == "etfs"
+    assert captured["spec"]["params"]["batch_size"] == 4096
+    assert captured["spec"]["params"]["input_data_spec"]["input_digest"] == "sha256:input"
+    assert result == training_hash_from_spec(captured["spec"])

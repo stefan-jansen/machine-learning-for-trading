@@ -120,6 +120,7 @@ def register_epoch_checkpoint(
     ic_mean: float,
     predictions,
     extra_params: dict | None = None,
+    identity_params: dict | None = None,
     learning_curves=None,
     feature_sets: list[str] | None = None,
     entry_point: str | None = None,
@@ -186,6 +187,9 @@ def register_epoch_checkpoint(
         spec would change existing training_hashes. Used by the
         deep_learning family to carry ``architecture`` and
         ``lookback`` as fallback-only hints.
+    identity_params : dict, optional
+        Parameters that define the physical training input or execution and
+        must enter the training hash on both preset and fallback paths.
     learning_curves : polars.DataFrame, optional
         Per-epoch IC curves for this config. Written to
         ``<training_dir>/learning_curves.parquet`` via ``_save_parquet``
@@ -222,6 +226,7 @@ def register_epoch_checkpoint(
             n_folds=n_folds,
             n_epochs=n_epochs,
             feature_sets=feature_sets,
+            extra_params=identity_params,
         )
     except FileNotFoundError:
         # Fallback for unknown config_name (no preset on disk).
@@ -232,7 +237,10 @@ def register_epoch_checkpoint(
             "label": label,
             "library": library,
             "n_folds": n_folds,
-            "params": dict(extra_params) if extra_params else {},
+            "params": {
+                **(extra_params or {}),
+                **(identity_params or {}),
+            },
             "seed": 42,
         }
         if n_epochs is not None:

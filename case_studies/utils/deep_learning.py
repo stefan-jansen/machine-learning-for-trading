@@ -378,6 +378,7 @@ def _register_dl_config(
     started_at: str | None = None,
     elapsed_s: float | None = None,
     prediction_split: str = "validation",
+    identity_params: dict[str, Any] | None = None,
 ) -> str:
     """Register a single DL config — thin delegate to register_epoch_checkpoint."""
     from case_studies.utils.registry import register_epoch_checkpoint
@@ -394,6 +395,7 @@ def _register_dl_config(
         ic_mean=ic_mean,
         predictions=predictions,
         extra_params={"architecture": architecture, "lookback": lookback},
+        identity_params=identity_params,
         learning_curves=learning_curves,
         entry_point=notebook,
         started_at=started_at,
@@ -429,6 +431,7 @@ def run_dl_cv(
     temporal_feature_names: list[str] | None = None,
     force_retrain: bool = False,
     prediction_split: str = "validation",
+    input_data_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Walk-forward DL CV with epoch-checkpoint IC evaluation.
 
@@ -481,6 +484,15 @@ def run_dl_cv(
             "Pass save_dir=CASE_DIR / 'run_log' / 'training' / 'deep_learning'"
         )
 
+    def identity_params(cfg: dict[str, Any]) -> dict[str, Any] | None:
+        if input_data_spec is None:
+            return None
+        return {
+            "batch_size": cfg.get("batch_size", 2048),
+            "input_data_spec": input_data_spec,
+            "max_train_sequences": max_train_sequences,
+        }
+
     # Filter out configs whose training_hash is already complete (unless
     # force_retrain). Fold-major training can't skip individual configs
     # mid-fold, so the filter happens BEFORE the fold loop starts.
@@ -501,6 +513,7 @@ def run_dl_cv(
                     label_col,
                     n_folds=len(splits),
                     n_epochs=cfg.get("n_epochs"),
+                    extra_params=identity_params(cfg),
                 )
                 status = training_run_status(case_study, spec)
                 split_rows = load_prediction_sets(
@@ -555,6 +568,7 @@ def run_dl_cv(
             case_study=case_study,
             notebook=notebook,
             prediction_split=prediction_split,
+            input_data_spec=input_data_spec,
         )
 
     torch_device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -926,6 +940,7 @@ def run_dl_cv(
                         started_at=acc.get("started_at"),
                         elapsed_s=acc.get("elapsed_s"),
                         prediction_split=prediction_split,
+                        identity_params=identity_params(cfg),
                     )
                     print(f"    registered {config_name} incrementally")
                 except Exception as exc:

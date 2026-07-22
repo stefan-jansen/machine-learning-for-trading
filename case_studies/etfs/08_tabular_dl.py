@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -23,17 +23,18 @@
 # above the linear and GBM baselines from `06_linear` and `07_gbm`.
 #
 # **Learning Objectives**:
-# - Read TabM walk-forward checkpoint results from the frozen results registry
+# - Read TabM walk-forward checkpoint results from the results registry
 # - Compare TabM configurations (small/medium/large) on cross-asset ETF features
 # - Tune the checkpoint (epoch count) on validation via a shared grid, holdout sealed
 # - Place tabular DL against the linear and GBM baselines on the same cross-section
 #
 # **Book Reference**: Chapter 12, Section 12.3 (Deep Learning Alternatives)
 #
-# **Prerequisites**: `03_financial_features.py`, `04_temporal.py`, [`05_evaluation`](05_evaluation.ipynb)
+# **Prerequisites**: `03_financial_features.py`, `04_model_based_features.py`,
+# [`05_evaluation`](05_evaluation.ipynb)
 
 # %%
-"""Tabular DL Grid Search - TabM via walk-forward CV, results from the frozen registry."""
+"""Tabular DL Grid Search - TabM via walk-forward CV and the results registry."""
 
 import sqlite3
 import warnings
@@ -43,7 +44,9 @@ import plotly.graph_objects as go
 import polars as pl
 import torch
 import yaml
+from IPython.display import Markdown, display
 
+from case_studies.utils.latent_factors.case_study import _training_input_identity
 from case_studies.utils.registry import (
     build_training_spec,
     load_prediction_metrics,
@@ -96,6 +99,7 @@ print(f"Retrain epoch budget: {N_EPOCHS} | Batch: {BATCH_SIZE} (used only for un
 
 # %%
 mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
+input_data_spec = _training_input_identity(CASE_STUDY_ID, PRIMARY_LABEL)
 
 dataset = mds.dataset
 feature_names = mds.feature_names
@@ -109,6 +113,7 @@ n_features = len(feature_names)
 
 print(f"Dataset: {len(dataset):,} rows × {n_features} features")
 print(f"Label: {label_col} | Date: {date_col} | Entity: {entity_col}")
+print(f"Input digest: {input_data_spec['input_digest']}")
 for s in splits:
     print(
         f"  Fold {s['fold']}: train {str(s['train_start'])[:10]}\u2192{str(s['train_end'])[:10]}  "
@@ -164,18 +169,18 @@ for cfg in tabdl_configs:
 # %% [markdown]
 # ## 3. Load Registered Checkpoints
 #
-# The results registry (`run_log/registry.db`) is the frozen source of truth for
+# The results registry (`run_log/registry.db`) is the source of truth for
 # this case study. Each config was trained walk-forward with cross-sectional IC
 # evaluated at 25-epoch checkpoints, and every checkpoint is stored as a
 # prediction set with its validation IC. Here we read those checkpoints back from
 # the registry rather than retraining: on a cached checkout no GPU work happens
-# and the frozen registry is never rewritten. Only a config with no registered
+# and the registry is never rewritten. Only a config with no registered
 # validation predictions triggers a fresh `run_tabm_cv` train.
 
 
 # %%
 def _rebuild_from_registry(cfg: dict) -> dict | None:
-    """Rebuild one config's checkpoint curve + peak IC from the frozen registry.
+    """Rebuild one config's checkpoint curve and peak IC from the registry.
 
     Returns None if the config has no complete registered validation set (a
     fresh reader who deleted the registry), in which case it is queued for
@@ -187,6 +192,10 @@ def _rebuild_from_registry(cfg: dict) -> dict | None:
         label_col,
         n_folds=len(splits),
         n_epochs=cfg.get("n_epochs"),
+        extra_params={
+            "batch_size": cfg.get("batch_size", BATCH_SIZE),
+            "input_data_spec": input_data_spec,
+        },
     )
     status = training_run_status(CASE_STUDY_ID, spec)
     t_hash = training_hash_from_spec(spec)
@@ -237,9 +246,9 @@ for cfg in tabdl_configs:
     else:
         to_train.append(cfg)
 
-# Uncached configs (none on the frozen registry) train via run_tabm_cv, which
+# Uncached configs train via run_tabm_cv, which
 # writes the registry. On a cached checkout `to_train` is empty, so no GPU work
-# runs and the frozen registry stays byte-identical.
+# runs and the registry stays byte-identical.
 if to_train:
     print(f"\nTraining {len(to_train)} uncached config(s)...")
     fresh = run_tabm_cv(
@@ -261,6 +270,7 @@ if to_train:
         temporal_by_fold=mds.temporal_by_fold,
         temporal_keys=mds.temporal_keys,
         temporal_feature_names=mds.temporal_feature_names,
+        input_data_spec=input_data_spec,
     )
     for r in fresh["grid_results"]:
         grid_results.append(
@@ -294,8 +304,7 @@ if to_train:
 # a config that collapses to near-constant predictions on some folds produces no
 # cross-sectional IC on those validation dates, so its IC is measured on fewer
 # days (`ic_n_days` below the full-coverage maximum) and is not comparable. Such
-# configs are listed separately and excluded from the winner. On the frozen
-# registry all three TabM configs are full-coverage, so the guard is inert here.
+# configs are listed separately and excluded from the winner.
 
 # %%
 grid_results.sort(
@@ -346,23 +355,38 @@ def _family_leader(family: str) -> tuple[str, float]:
     """Max peak-checkpoint validation IC for another model family, from the registry."""
     con = sqlite3.connect(CASE_DIR / "run_log" / "registry.db")
     try:
-        q = """
+        metric_columns = {
+            row[1] for row in con.execute("PRAGMA table_info(prediction_metrics)").fetchall()
+        }
+        coverage_clause = ""
+        if "ic_n_days" in metric_columns:
+            coverage_clause = """
+              AND (pm.ic_n_days IS NULL OR pm.ic_n_days = (
+                  SELECT MAX(pm2.ic_n_days) FROM prediction_metrics pm2
+                  JOIN prediction_sets ps2 ON ps2.prediction_hash = pm2.prediction_hash
+                  JOIN training_runs t2 ON t2.training_hash = ps2.training_hash
+                  WHERE t2.family = t.family AND t2.label = t.label
+                    AND ps2.split = ps.split))
+            """
+        q = (
+            """
         SELECT t.config_name, MAX(pm.ic_mean) AS mic
         FROM training_runs t
         JOIN prediction_sets ps ON ps.training_hash = t.training_hash
         JOIN prediction_metrics pm ON pm.prediction_hash = ps.prediction_hash
         WHERE t.family = ? AND t.label = ? AND ps.split = ?
-          AND (pm.ic_n_days IS NULL OR pm.ic_n_days = (
-              SELECT MAX(pm2.ic_n_days) FROM prediction_metrics pm2
-              JOIN prediction_sets ps2 ON ps2.prediction_hash = pm2.prediction_hash
-              JOIN training_runs t2 ON t2.training_hash = ps2.training_hash
-              WHERE t2.family = t.family AND t2.label = t.label AND ps2.split = ps.split))
+        """
+            + coverage_clause
+            + """
         GROUP BY t.config_name ORDER BY mic DESC LIMIT 1
         """
+        )
         row = con.execute(q, (family, label_col, PREDICTION_SPLIT)).fetchone()
     finally:
         con.close()
-    return (row[0], float(row[1])) if row else ("n/a", float("nan"))
+    return (
+        (row[0], float(row[1])) if row is not None and row[1] is not None else ("n/a", float("nan"))
+    )
 
 
 gbm_leader, gbm_ic = _family_leader("gbm")
@@ -426,11 +450,8 @@ fig_ic.show()
 # ## 5. Learning Curves
 #
 # Validation IC at each 25-epoch checkpoint traces how each config trains. The
-# winner is highlighted; the vertical line marks its selected epoch count. Only
-# `tabm_l` separates from the pack, jumping after 100 epochs to peak at 125;
-# `tabm_s` peaks early near 75 and drifts down, and `tabm_m` never clears the
-# other two. Capacity does not order cleanly here - the medium config is the
-# weakest of the three.
+# winner is highlighted; the vertical line marks its selected epoch count. The
+# live registry determines whether capacity improves the validation ranking.
 
 # %%
 all_curves = pl.DataFrame([c for r in grid_results for c in r["curve"]])
@@ -464,7 +485,7 @@ if all_curves.height > 0:
             annotation_position="top",
         )
     fig_lc.update_layout(
-        title="TabM validation IC by checkpoint: the large ensemble leads the family",
+        title=f"TabM validation IC by checkpoint: {best_name} leads the family",
         template="plotly_white",
         height=520,
         width=1000,
@@ -495,11 +516,12 @@ if all_curves.height > 0:
 # ## 6. Winner Fold Metrics
 #
 # The winner's validation IC is the mean of its per-fold cross-sectional IC.
-# Reading the fold breakdown from the frozen registry shows how uneven that
+# Reading the fold breakdown from the registry shows how uneven that
 # average is: the headline IC rests on a few strong folds and turns negative on
 # the last two, a sign the tabular-DL edge is not stable across the walk-forward.
 
 # %%
+_fold_ics = []
 if best and best.get("best_prediction_hash"):
     con = sqlite3.connect(CASE_DIR / "run_log" / "registry.db")
     try:
@@ -513,7 +535,8 @@ if best and best.get("best_prediction_hash"):
     print(f"Per-fold validation IC ({best_name} @ epoch {best_epoch}):")
     for fold_id, ic, n_ent in fold_rows:
         print(f"  Fold {fold_id}: IC={ic:+.4f}  n_entities={int(n_ent)}")
-    _fold_mean = float(np.mean([r[1] for r in fold_rows])) if fold_rows else float("nan")
+    _fold_ics = [float(r[1]) for r in fold_rows]
+    _fold_mean = float(np.mean(_fold_ics)) if _fold_ics else float("nan")
     print(f"\n  Mean fold IC: {_fold_mean:+.4f}  (registered peak IC: {best_ic:+.4f})")
 
 # %% [markdown]
@@ -534,34 +557,38 @@ if best and best.get("best_prediction_hash"):
     print(f"Registered checkpoints across the grid: {all_curves.height}")
     print(f"Winner set rows in registry: {_winner_set.height}")
 
-# %% [markdown]
-# ## 8. Key Takeaways
-#
-# - **Tabular DL underperforms both baselines here.** The best TabM config,
-#   `tabm_l`, tops the family at validation IC $\approx +0.034$ (peak near 125
-#   epochs), but that is below the GBM leader (`leaves_7_mae`, $\approx +0.044$
-#   from [`07_gbm`](07_gbm.ipynb)) and the full-coverage linear leader (Ridge at
-#   $\alpha = 10^6$, $\approx +0.042$ from [`06_linear`](06_linear.ipynb)). On this
-#   cross-section the neural ensemble's learned interactions do not lift IC above a
-#   shallow-tree GBM or a heavily regularized linear model.
-# - **The largest config wins, but capacity is not monotonic.** `tabm_l`
-#   ($\approx +0.034$) leads, yet `tabm_s` ($\approx +0.018$) beats the mid-sized
-#   `tabm_m` ($\approx +0.009$), so more members do not reliably buy more IC on this
-#   cross-section. Even the best config sits well below the linear and tree
-#   baselines: the whole family is weak here.
-# - **The edge is fold-fragile.** The winner's IC is carried by a few folds and
-#   goes negative on the last two, so the $+0.034$ is not a stable cross-sectional
-#   signal. The epoch count is tuned on the validation folds via the shared
-#   checkpoint grid, the analogue of early stopping; the holdout is untouched.
-#
-# For flat-feature models the ETF cross-asset signal is largely linear and
-# already captured by Ridge and a shallow GBM. That motivates the temporal models
-# in Ch13: sequence architectures can exploit lead-lag structure across the 9
-# asset classes that no cross-sectional flat-feature model can see.
-#
-# **Next**: [`09_dl_lstm`](09_dl_lstm.ipynb) tests whether sequential memory captures
-# momentum regime transitions that flat-feature models miss.
-# **Book**: Chapter 12.3 discusses when tabular DL does and does not beat GBMs.
+# %%
+if best is not None:
+    _ranking = ", ".join(f"`{row['config_name']}` {row['best_ic']:+.3f}" for row in full_cov)
+    _baseline_parts = []
+    if np.isfinite(gbm_ic):
+        _baseline_parts.append(f"GBM `{gbm_leader}` {gbm_ic:+.3f}")
+    if np.isfinite(lin_ic):
+        _baseline_parts.append(f"linear `{lin_leader}` {lin_ic:+.3f}")
+    _baselines = " and ".join(_baseline_parts) or "no comparable registered baseline"
+    _negative_folds = sum(ic < 0 for ic in _fold_ics)
+    display(
+        Markdown(
+            f"""
+## 8. Key Takeaways
+
+- **Tabular DL trails the flat-feature baselines.** `{best_name}` leads the family at
+  validation IC {best_ic:+.3f}, peaking at epoch {best_epoch}, versus {_baselines}.
+- **Capacity does not order performance.** The current ranking is {_ranking}; a larger
+  ensemble does not reliably improve cross-sectional IC.
+- **The result varies across folds.** {_negative_folds} of {len(_fold_ics)} winner folds have
+  negative IC. Epoch count is selected on the shared validation checkpoint grid, and the
+  holdout remains untouched.
+
+The next notebooks test whether sequence models capture temporal structure that a
+flat-feature model cannot exploit.
+
+**Next**: [`09_dl_lstm`](09_dl_lstm.ipynb) tests whether sequential memory captures
+momentum regime transitions that flat-feature models miss. Chapter 12.3 discusses when
+tabular DL does and does not beat GBMs.
+"""
+        )
+    )
 
 # %%
 print(f"\n{'=' * 60}")
