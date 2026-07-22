@@ -107,6 +107,16 @@ def _normalize_within_sides(
     return pl.concat(parts, how="diagonal_relaxed")
 
 
+def _fill_missing_vol_at_decision_time(
+    selected: pl.DataFrame,
+    time_col: str,
+) -> pl.DataFrame:
+    """Fill unavailable asset volatility from the current cross-section only."""
+    return selected.with_columns(
+        pl.col("vol").fill_null(pl.col("vol").median().over(time_col)).fill_null(1.0)
+    )
+
+
 def _cap_weights(
     df: pl.DataFrame,
     max_weight: float,
@@ -300,8 +310,8 @@ def compute_inverse_vol_weights(
         _prices, vol_window, time_col, target_dtype=predictions[time_col].dtype
     )
 
-    selected = selected.join(vol, on=[time_col, "symbol"], how="left").with_columns(
-        pl.col("vol").fill_null(pl.col("vol").median())
+    selected = _fill_missing_vol_at_decision_time(
+        selected.join(vol, on=[time_col, "symbol"], how="left"), time_col
     )
 
     result = _normalize_within_sides(selected, time_col)
@@ -327,8 +337,8 @@ def compute_risk_parity_weights(
         _prices, vol_window, time_col, target_dtype=predictions[time_col].dtype
     )
 
-    selected = selected.join(vol, on=[time_col, "symbol"], how="left").with_columns(
-        pl.col("vol").fill_null(pl.col("vol").median())
+    selected = _fill_missing_vol_at_decision_time(
+        selected.join(vol, on=[time_col, "symbol"], how="left"), time_col
     )
 
     # Risk-parity approximation: w_i proportional to 1 / vol_i^1.5

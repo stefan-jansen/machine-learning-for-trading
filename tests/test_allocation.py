@@ -219,6 +219,47 @@ def test_risk_parity_deterministic(synthetic_panel) -> None:
     assert a.sort("timestamp", "symbol").equals(b.sort("timestamp", "symbol"))
 
 
+@pytest.mark.parametrize(
+    "allocator",
+    [compute_inverse_vol_weights, compute_risk_parity_weights],
+)
+def test_volatility_fallback_never_uses_future_prediction_timestamps(allocator) -> None:
+    """Appending future decisions must not change already emitted weights."""
+    dates = pl.date_range(pl.date(2024, 1, 1), pl.date(2024, 1, 6), "1d", eager=True)
+    prices = pl.DataFrame(
+        {
+            "timestamp": list(dates) * 2 + list(dates[2:]),
+            "symbol": ["A"] * 6 + ["B"] * 6 + ["C"] * 4,
+            "ret": [0.01, -0.01, 0.01, -0.01, 0.01, -0.01]
+            + [0.05, -0.05, 0.05, -0.05, 0.05, -0.05]
+            + [0.20, -0.20, 0.20, -0.20],
+        }
+    )
+    early = pl.DataFrame(
+        {
+            "timestamp": [dates[2]] * 3,
+            "symbol": ["A", "B", "C"],
+            "y_score": [3.0, 2.0, 1.0],
+        }
+    )
+    future = pl.DataFrame(
+        {
+            "timestamp": [dates[-1]] * 3,
+            "symbol": ["A", "B", "C"],
+            "y_score": [3.0, 2.0, 1.0],
+        }
+    )
+
+    prefix = allocator(early, prices, top_k=3, vol_window=3).sort("timestamp", "symbol")
+    full = (
+        allocator(pl.concat([early, future]), prices, top_k=3, vol_window=3)
+        .filter(pl.col("timestamp") == dates[2])
+        .sort("timestamp", "symbol")
+    )
+
+    assert prefix.equals(full)
+
+
 # -----------------------------------------------------------------------------
 # compute_hrp_weights
 # -----------------------------------------------------------------------------
