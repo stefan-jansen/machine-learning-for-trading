@@ -152,6 +152,12 @@ def test_sequence_training_hash_binds_input_and_sampling_identity() -> None:
         {
             "batch_size": 2048,
             "input_data_spec": {"input_digest": "sha256:first"},
+            "lookback": 30,
+            "max_train_sequences": 0,
+        },
+        {
+            "batch_size": 2048,
+            "input_data_spec": {"input_digest": "sha256:first"},
             "max_train_sequences": 100_000,
         },
     ]

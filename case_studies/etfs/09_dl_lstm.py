@@ -15,15 +15,13 @@
 # %% [markdown]
 # # LSTM for ETF Cross-Asset Momentum
 #
-# The LSTM tests whether temporal gating improves on the linear baseline
-# for 21-day ETF return prediction. Unlike TSMixer, LSTM processes each ETF's
-# feature history independently - it cannot learn cross-asset lead-lag
-# relationships (e.g., TLT leading equity volatility shifts). This makes it a
-# controlled baseline: any improvement over Ridge must come from temporal
-# dynamics within individual feature histories, not from cross-asset interactions.
+# The LSTM tests whether temporal gating improves on the linear baseline for
+# 21-day ETF return prediction. It processes each ETF's feature history as a
+# sequence, providing a direct test of whether learned temporal state adds value
+# beyond the engineered lookback features.
 #
 # **Learning Objectives**:
-# - Read the LSTM walk-forward checkpoint results from the frozen results registry
+# - Read the LSTM walk-forward checkpoints from the results registry
 # - Tune the checkpoint (epoch count) on validation, holdout sealed, under a
 #   full-coverage guard that excludes fold-collapsed checkpoints
 # - Determine whether temporal gating captures signal beyond linear lookback features
@@ -34,7 +32,7 @@
 # **Prerequisites**: [`06_linear`](06_linear.ipynb), [`07_gbm`](07_gbm.ipynb) (comparison baselines)
 
 # %%
-"""LSTM - etfs deep learning, checkpoints read from the frozen registry."""
+"""LSTM - ETF deep learning with registered walk-forward checkpoints."""
 
 import sqlite3
 import warnings
@@ -44,6 +42,7 @@ import plotly.graph_objects as go
 import polars as pl
 import torch
 import yaml
+from IPython.display import Markdown, display
 
 from case_studies.utils.analytics import load_best_ic_per_family
 from case_studies.utils.deep_learning import (
@@ -51,6 +50,7 @@ from case_studies.utils.deep_learning import (
     create_model,
     run_dl_cv,
 )
+from case_studies.utils.latent_factors.case_study import _training_input_identity
 from case_studies.utils.registry import (
     build_training_spec,
     load_prediction_metrics,
@@ -99,6 +99,7 @@ print(f"Device: {device_str} | Epochs: {N_EPOCHS} | Lookback: {LOOKBACK}")
 
 # %%
 mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
+input_data_spec = _training_input_identity(CASE_STUDY_ID, PRIMARY_LABEL)
 
 dataset = mds.dataset
 feature_names = mds.feature_names
@@ -112,6 +113,7 @@ n_features = len(feature_names)
 
 print(f"Dataset: {len(dataset):,} rows × {n_features} features")
 print(f"Label: {label_col} | Entity: {entity_col} | Folds: {len(splits)}")
+print(f"Input digest: {input_data_spec['input_digest']}")
 
 dataset_pd = dataset.to_pandas()
 n_entities = dataset_pd[entity_col].nunique()
@@ -144,12 +146,12 @@ else:
 # %% [markdown]
 # ## 3. LSTM
 #
-# The results registry (`run_log/registry.db`) is the frozen source of truth for
-# this case study. The single LSTM config (`lstm_h64`) was trained walk-forward
+# The results registry (`run_log/registry.db`) is the source of truth for this
+# case study. The single LSTM config (`lstm_h64`) is trained walk-forward
 # with cross-sectional IC evaluated at epoch checkpoints, and every checkpoint is
 # stored as a validation prediction set with its IC. Here we read those
 # checkpoints back from the registry rather than retraining: on a cached checkout
-# no GPU work happens and the frozen registry is never rewritten. Only a config
+# no GPU work happens and the registry is never rewritten. Only a config
 # with no registered validation predictions triggers a fresh `run_dl_cv` train.
 
 # %%
@@ -157,10 +159,9 @@ dl_configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "deep_learning")
 dl_configs = [c for c in dl_configs if c["params"].get("architecture") == MODEL]
 
 # Apply Papermill training overrides. N_EPOCHS / BATCH_SIZE / lookback are part of
-# the training-spec hash, so they select which registered run to read: the frozen
-# registry was built at N_EPOCHS=100, and changing it would miss the cache and
-# trigger a fresh GPU train that rewrites the registry. Keep defaults for a cached
-# read; overrides only bite in test mode on an uncached checkout.
+# the training-spec hash, so they select which registered run to read. Changing
+# them selects a different training identity. Keep defaults for the production
+# reader; overrides only apply in isolated tests or an explicitly authorized run.
 for cfg in dl_configs:
     if cfg.get("n_epochs", 100) != N_EPOCHS:
         cfg["n_epochs"] = N_EPOCHS
@@ -179,7 +180,7 @@ for cfg in dl_configs:
 
 # %%
 def _rebuild_from_registry(cfg: dict) -> dict | None:
-    """Rebuild one config's checkpoint curve + peak IC from the frozen registry.
+    """Rebuild one config's checkpoint curve and peak IC from the registry.
 
     Returns None if the config has no complete registered validation set (a fresh
     reader who deleted the registry), in which case it is queued for training.
@@ -199,6 +200,12 @@ def _rebuild_from_registry(cfg: dict) -> dict | None:
         label_col,
         n_folds=len(splits),
         n_epochs=cfg.get("n_epochs"),
+        extra_params={
+            "batch_size": cfg.get("batch_size", BATCH_SIZE),
+            "input_data_spec": input_data_spec,
+            "lookback": cfg["params"].get("lookback", LOOKBACK),
+            "max_train_sequences": 0,
+        },
     )
     status = training_run_status(CASE_STUDY_ID, spec)
     t_hash = training_hash_from_spec(spec)
@@ -258,12 +265,12 @@ for cfg in dl_configs:
     else:
         to_train.append(cfg)
 
-# Uncached configs (none on the frozen registry) train via run_dl_cv, which writes
-# the registry. On a cached checkout `to_train` is empty, so run_dl_cv is never
-# called, no GPU work runs, and the frozen registry stays byte-identical.
+# Uncached configs train via run_dl_cv, which writes the registry. On a cached
+# checkout `to_train` is empty, so run_dl_cv is never called, no GPU work runs,
+# and the registry stays byte-identical.
 if to_train:
     print(f"\nTraining {len(to_train)} uncached config(s)...")
-    fresh = run_dl_cv(
+    run_dl_cv(
         dataset_pd,
         splits,
         feature_names=feature_names,
@@ -282,24 +289,17 @@ if to_train:
         temporal_by_fold=mds.temporal_by_fold,
         temporal_keys=mds.temporal_keys,
         temporal_feature_names=mds.temporal_feature_names,
+        input_data_spec=input_data_spec,
     )
-    for r in fresh["grid_results"]:
-        _fresh_curve = [
-            c for c in fresh["all_learning_curves"].to_dicts() if c["config"] == r["config_name"]
-        ]
-        grid_results.append(
-            {
-                "config_name": r["config_name"],
-                "best_epoch": r["best_epoch"],
-                "best_ic": r["best_ic"],
-                "ic_n_days": float("nan"),
-                "best_prediction_hash": None,
-                "curve": _fresh_curve,
-                "full_days": float("nan"),
-                "partial_epochs": [],
-                "cached": False,
-            }
-        )
+    for cfg in to_train:
+        rebuilt = _rebuild_from_registry(cfg)
+        if rebuilt is None:
+            raise RuntimeError(
+                f"Training completed but registered checkpoints are incomplete for "
+                f"{cfg['config_name']}"
+            )
+        rebuilt["cached"] = False
+        grid_results.append(rebuilt)
 
 # %% [markdown]
 # ## 4. Grid Results & Full-Coverage Guard
@@ -312,9 +312,8 @@ if to_train:
 # A full-coverage guard (mirroring `06_linear`, `07_gbm`, `13_model_analysis`)
 # excludes any checkpoint whose predictions collapse on some folds: such a
 # checkpoint scores on fewer validation days (`ic_n_days` below the full-coverage
-# maximum) and its IC is not comparable to a full-coverage IC. Here the epoch-25
-# checkpoint is partial-coverage, so despite a higher raw IC it is excluded, and
-# the full-coverage winner is the epoch-10 checkpoint.
+# maximum) and its IC is not comparable to a full-coverage IC. The table below
+# makes the comparison surface explicit for every run.
 
 # %%
 grid_results.sort(
@@ -340,7 +339,7 @@ best_name = best["config_name"] if best else None
 best_epoch = best["best_epoch"] if best else 0
 best_ic = best["best_ic"] if best else float("nan")
 
-# Report the config's per-checkpoint curve so the excluded partial checkpoint is
+# Report the config's per-checkpoint curve so any excluded partial checkpoint is
 # visible next to the selected full-coverage winner.
 if best:
     print(f"Config: {best_name}   full-coverage validation days = {int(_full_days)}")
@@ -357,10 +356,8 @@ if best:
 # ## 5. Learning Curves
 #
 # Validation IC at each epoch checkpoint. The full-coverage winner is highlighted
-# in amber; the partial-coverage checkpoint (excluded from selection) is drawn in
-# copper. Each point is labeled with the number of validation days behind its IC,
-# making the coverage guard visible: the epoch-25 checkpoint's higher raw IC rests
-# on fewer days than the epoch-10 winner.
+# in amber; any partial-coverage checkpoint excluded from selection is drawn in
+# copper. Each point is labeled with the number of validation days behind its IC.
 
 # %%
 _curve = sorted(best["curve"], key=lambda c: c["epoch"]) if best else []
@@ -391,13 +388,14 @@ if _curve:
     fig_lc.add_vline(
         x=best_epoch,
         line=dict(color=COLORS["amber"], width=1, dash="dot"),
-        annotation_text=f"full-cov winner @ epoch {best_epoch}",
-        annotation_position="top left",
+    )
+    _partial_note = (
+        f"; partial epochs {best['partial_epochs']} excluded" if best["partial_epochs"] else ""
     )
     fig_lc.update_layout(
         title=(
-            f"The higher epoch-25 IC is partial-coverage: "
-            f"the full-coverage winner is epoch {best_epoch} (IC {best_ic:+.3f})"
+            f"Epoch {best_epoch} leads on the {_full_days:.0f}-day validation surface"
+            f" (IC {best_ic:+.3f}){_partial_note}"
         ),
         template="plotly_white",
         height=500,
@@ -462,8 +460,8 @@ print(f"LSTM - Ridge delta:      {dl_delta:+.4f}")
 # ## 7. Winner Fold Metrics & Registered Predictions
 #
 # The winner's validation IC is the mean of its per-fold cross-sectional IC. The
-# fold breakdown, read from the frozen registry, shows the modest average is
-# uneven - carried by a few folds and negative on two - and the winner's
+# fold breakdown, read from the registry, shows whether the average is stable
+# across time, and the winner's
 # prediction set is already persisted for the backtest to read directly. No
 # retraining or re-saving happens on a cached checkout.
 
@@ -482,6 +480,7 @@ if best and best.get("best_prediction_hash"):
     for fold_id, ic, n_ent in fold_rows:
         print(f"  Fold {fold_id}: IC={ic:+.4f}  n_entities={int(n_ent)}")
     _fold_mean = float(np.mean([r[1] for r in fold_rows])) if fold_rows else float("nan")
+    _negative_folds = sum(r[1] < 0 for r in fold_rows)
     print(f"\n  Mean fold IC: {_fold_mean:+.4f}  (registered peak IC: {best_ic:+.4f})")
     print(f"  Winner prediction_hash: {best['best_prediction_hash']}")
 
@@ -599,28 +598,29 @@ else:
 
 # %% [markdown]
 # ## 9. Key Takeaways
-#
-# - **LSTM does not beat the flat-feature baselines here.** Its full-coverage
-#   winner is the **epoch-10** checkpoint at validation IC $\approx +0.030$, below
-#   both the Ridge leader ($\approx +0.042$ from [`06_linear`](06_linear.ipynb))
-#   and the GBM leader (`leaves_7_mae`, $\approx +0.044$ from
-#   [`07_gbm`](07_gbm.ipynb)). Without cross-asset channel mixing the LSTM treats
-#   each ETF's feature history independently and cannot learn the lead-lag
-#   relationships that are TSMixer's strength; on this panel most temporal
-#   structure in monthly ETF returns is already captured by the linear lookback
-#   features engineered in Ch8.
-# - **The higher raw IC at epoch 25 is a coverage artifact, not a better model.**
-#   That checkpoint scores $+0.052$ but on only 1{,}536 of the 2{,}016 full-coverage
-#   validation days - its predictions collapse to near-constant on some folds, so
-#   the IC is measured on a different, smaller set of days and is not comparable.
-#   The full-coverage guard excludes it, which is why the reported winner is the
-#   lower but full-coverage epoch-10 checkpoint.
-# - **The edge is fold-fragile and does not generalize.** The epoch-10 validation
-#   IC is the mean of uneven per-fold ICs, negative on two of the eight folds.
-#   On the sealed 2024-2025 holdout the frozen LSTM checkpoint posts a **negative**
-#   IC ($\approx -0.032$, evaluated once in [`13_model_analysis`](13_model_analysis.ipynb)),
-#   so even the modest validation signal does not survive out of sample.
-#
-# **Next**: [`10_dl_tsmixer`](10_dl_tsmixer.ipynb) tests whether explicit cross-asset feature mixing
-# captures the lead-lag structure that LSTM misses.
-# **Book**: Chapter 13, Section 13.8 (Case Study Results).
+
+# %%
+_coverage_text = (
+    f"All {len(_curve)} checkpoints cover {_full_days:.0f} validation dates."
+    if best and not best["partial_epochs"]
+    else f"Partial checkpoints {best['partial_epochs']} were excluded before selection."
+)
+display(
+    Markdown(
+        f"""
+- **The LSTM does not beat the flat-feature baselines here.** Its full-coverage winner is epoch
+  **{best_epoch}** at validation IC **{best_ic:+.3f}**, below Ridge **{ridge_ic:+.3f}** and GBM
+  **{gbm_ic:+.3f}**. This run provides no evidence that learned temporal state adds value beyond
+  the engineered lookback features.
+- **Coverage is comparable across the checkpoint choice.** {_coverage_text} The full-coverage
+  guard remains necessary because a collapsed checkpoint can otherwise look better by omitting
+  dates with undefined cross-sectional IC.
+- **The weak average is time-unstable.** The selected checkpoint is negative in
+  **{_negative_folds} of {len(fold_rows)}** validation folds. The sealed holdout remains untouched;
+  it should be evaluated only after the development-stage winner is fixed.
+
+**Next**: [`10_dl_tsmixer`](10_dl_tsmixer.ipynb) tests an alternative sequence architecture.
+**Book**: Chapter 13, Section 13.8 (Case Study Results).
+"""
+    )
+)
