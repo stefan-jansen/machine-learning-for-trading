@@ -1,0 +1,41 @@
+{
+  "case_study": "crypto_perps_funding",
+  "label": "fwd_ret_24h",
+  "method": "daily_cross_sectional_mean_close_pct_change",
+  "periods_per_year": 365,
+  "n_symbols_in_universe": 19,
+  "sharpe": 0.205491,
+  "cagr": -0.00334,
+  "vol": 0.425758,
+  "n_periods": 2103,
+  "ts_min": "2022-01-30 00:00:00",
+  "ts_max": "2025-12-31 00:00:00",
+  "by_period": {
+    "overall": {
+      "sharpe": 0.200699,
+      "cagr": -0.004866,
+      "vol": 0.422442,
+      "n_periods": 4294
+    },
+    "validation": {
+      "sharpe": 0.205491,
+      "cagr": -0.00334,
+      "vol": 0.425758,
+      "n_periods": 2103
+    },
+    "holdout": {
+      "sharpe": 0.195995,
+      "cagr": -0.006328,
+      "vol": 0.419333,
+      "n_periods": 2191
+    },
+    "validation_window": [
+      "2022-01-30 00:00:00",
+      "2023-12-31 16:00:00"
+    ],
+    "holdout_window": [
+      "2024-01-01 00:00:00",
+      "2025-12-31 00:00:00"
+    ]
+  }
+}

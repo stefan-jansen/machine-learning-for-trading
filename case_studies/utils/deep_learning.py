@@ -613,6 +613,32 @@ def run_dl_cv(
             return cached_result
         configs = pending_configs
 
+    if register and case_study and force_retrain:
+        from case_studies.utils.registry import (
+            build_training_spec,
+            clear_prediction_sets,
+            training_hash_from_spec,
+        )
+
+        for cfg in configs:
+            spec = build_training_spec(
+                cfg["family"],
+                cfg["config_name"],
+                label_col,
+                n_folds=len(splits),
+                n_epochs=cfg.get("n_epochs"),
+            )
+            removed = clear_prediction_sets(
+                case_study,
+                training_hash_from_spec(spec),
+                split=prediction_split,
+            )
+            if removed["prediction_sets"]:
+                print(
+                    f"  cleared {removed['prediction_sets']} prior {prediction_split} "
+                    f"checkpoint(s) for {cfg['config_name']}"
+                )
+
     if uses_darts_backend(configs):
         fresh_result = run_darts_cv(
             dataset_pd,
@@ -631,6 +657,9 @@ def run_dl_cv(
             prediction_split=prediction_split,
             identity_params=identity_params,
             input_data_spec=input_data_spec,
+            temporal_by_fold=temporal_by_fold,
+            temporal_keys=temporal_keys,
+            temporal_feature_names=temporal_feature_names,
         )
         if cached_result is not None:
             return combine_cv_results(

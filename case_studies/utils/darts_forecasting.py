@@ -492,6 +492,32 @@ def _prepare_fold_series(
     return series
 
 
+def _overlay_fold_temporal_features(
+    dataset_pd: pd.DataFrame,
+    split: dict[str, Any],
+    date_col: str,
+    temporal_by_fold,
+    temporal_keys: list[str] | None,
+    temporal_feature_names: list[str] | None,
+) -> pd.DataFrame:
+    """Return the requested fold with its training-fitted temporal features."""
+    if temporal_by_fold is None or not temporal_keys or not temporal_feature_names:
+        return dataset_pd
+    from utils.modeling import _replace_temporal_columns
+
+    fold_mask = (dataset_pd[date_col] >= split["train_start"]) & (
+        dataset_pd[date_col] <= split["val_end"]
+    )
+    return _replace_temporal_columns(
+        dataset_pd,
+        fold_mask,
+        temporal_by_fold,
+        temporal_keys,
+        temporal_feature_names,
+        split["fold"],
+    )
+
+
 def _predict_fold(
     model,
     fold_series: list[_FoldSeries],
@@ -561,6 +587,9 @@ def run_darts_cv(
     prediction_split: str = "validation",
     identity_params: dict[str, Any] | None = None,
     input_data_spec: dict[str, Any] | None = None,
+    temporal_by_fold=None,
+    temporal_keys: list[str] | None = None,
+    temporal_feature_names: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run Darts-backed global forecasting models and emit standard DL artifacts."""
     if case_study is None:
@@ -594,6 +623,7 @@ def run_darts_cv(
     learning_rows: list[dict[str, Any]] = []
     training_log: list[dict[str, Any]] = []
     prediction_frames: list[pl.DataFrame] = []
+    has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
 
     for cfg in configs:
         config_name = cfg["config_name"]
@@ -615,8 +645,20 @@ def run_darts_cv(
         for split in splits:
             fold_seed = cfg_seed + split["fold"]
             seed_everything(fold_seed)
+            fold_dataset = (
+                _overlay_fold_temporal_features(
+                    dataset_pd,
+                    split,
+                    date_col,
+                    temporal_by_fold,
+                    temporal_keys,
+                    temporal_feature_names,
+                )
+                if has_fold_temporal
+                else dataset_pd
+            )
             fold_series = _prepare_fold_series(
-                dataset_pd,
+                fold_dataset,
                 split,
                 feature_names,
                 label_col,

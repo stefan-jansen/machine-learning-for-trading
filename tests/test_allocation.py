@@ -23,7 +23,7 @@ rebalance timestamps.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import numpy as np
 import polars as pl
@@ -258,6 +258,87 @@ def test_volatility_fallback_never_uses_future_prediction_timestamps(allocator) 
     )
 
     assert prefix.equals(full)
+
+
+@pytest.mark.parametrize(
+    "allocator",
+    [compute_inverse_vol_weights, compute_risk_parity_weights],
+)
+def test_missing_vol_fill_is_point_in_time(allocator) -> None:
+    start = date(2020, 1, 1)
+    early = start + timedelta(days=2)
+    late = start + timedelta(days=5)
+    symbols = ["A", "B", "C"]
+    predictions = pl.DataFrame(
+        {
+            "timestamp": [early] * 3 + [late] * 3,
+            "symbol": symbols + symbols,
+            "y_score": [3.0, 2.0, 1.0] * 2,
+        }
+    )
+
+    def prices(perturb_future: bool) -> pl.DataFrame:
+        returns = {
+            "A": [None, 0.01, 0.02, 0.03, -0.02, 0.01],
+            "B": [0.01, 0.03, -0.01, 0.02, 0.01, -0.02],
+            "C": [-0.02, 0.01, 0.04, -0.01, 0.02, 0.03],
+        }
+        if perturb_future:
+            returns["B"][3:] = [0.60, -0.55, 0.70]
+            returns["C"][3:] = [-0.40, 0.50, -0.65]
+        rows = [
+            {"timestamp": start + timedelta(days=index), "symbol": symbol, "ret": values[index]}
+            for symbol, values in returns.items()
+            for index in range(6)
+            if values[index] is not None
+        ]
+        return pl.DataFrame(rows)
+
+    def early_weights(price_frame: pl.DataFrame) -> np.ndarray:
+        return (
+            allocator(predictions, price_frame, top_k=3, vol_window=3)
+            .filter(pl.col("timestamp") == early)
+            .sort("symbol")["weight"]
+            .to_numpy()
+        )
+
+    base = early_weights(prices(False))
+    future_perturbed = early_weights(prices(True))
+    np.testing.assert_allclose(base, future_perturbed, atol=1e-15, rtol=0.0)
+
+
+@pytest.mark.parametrize(
+    "allocator",
+    [
+        compute_inverse_vol_weights,
+        compute_risk_parity_weights,
+        compute_mvo_weights,
+        compute_hrp_weights,
+    ],
+)
+def test_future_price_rows_do_not_change_prior_weights(allocator, synthetic_panel) -> None:
+    predictions, prices = synthetic_panel
+    decision_time = predictions["timestamp"].min()
+    perturbed = prices.with_columns(
+        pl.when(pl.col("timestamp") > decision_time)
+        .then(pl.col("close") * (1 + pl.col("symbol").str.slice(1).cast(pl.Int64)))
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+
+    def decision_weights(price_frame: pl.DataFrame) -> pl.DataFrame:
+        return (
+            allocator(predictions, price_frame, top_k=4)
+            .filter(pl.col("timestamp") == decision_time)
+            .sort("symbol")
+        )
+
+    baseline = decision_weights(prices)
+    future_changed = decision_weights(perturbed)
+    assert baseline["symbol"].to_list() == future_changed["symbol"].to_list()
+    np.testing.assert_allclose(
+        baseline["weight"].to_numpy(), future_changed["weight"].to_numpy(), atol=1e-12, rtol=0.0
+    )
 
 
 # -----------------------------------------------------------------------------

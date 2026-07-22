@@ -19,7 +19,7 @@
 # **Docker image**: `ml4t`
 #
 # **Chapter 7: Defining the Learning Task**
-# **Section Reference**: 7.5 — From Correlation to Causality
+# **Section Reference**: 7.5 - From Correlation to Causality
 #
 # ## Purpose
 #
@@ -35,15 +35,15 @@
 # We begin with a **feature × horizon scan** that expands on the ETF results from
 # [`07_multiple_testing`](07_multiple_testing.ipynb), where no feature survived BH-FDR at a 5-day horizon.
 # The scan reveals that long-lookback momentum features (126d+) carry significant
-# cross-sectional information at monthly horizons — confirming the well-established
+# cross-sectional information at monthly horizons - confirming the well-established
 # academic finding (Jegadeesh and Titman 1993, Asness et al. 2013). We then apply
 # the three diagnostic checks to two features selected from the scan:
 #
 # - **12-1 Momentum** (12-month return skipping the most recent month): survives
-#   triage with actionable caveats — it carries genuine cross-sectional information
+#   triage with actionable caveats - it carries genuine cross-sectional information
 #   (strongest at lag 0), does not predict Treasury returns, but concentrates in
 #   low-volatility regimes.
-# - **Short-term reversal** (negated 1-day return): fails triage — no significant
+# - **Short-term reversal** (negated 1-day return): fails triage - no significant
 #   IC at the 21-day horizon, consistent with a microstructure effect that does not
 #   translate to monthly predictability.
 #
@@ -84,6 +84,7 @@ from scipy import stats
 
 from data import load_etfs, load_macro
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS  # importing utils.style activates the ml4t Plotly template
 
 warnings.filterwarnings("ignore")
 
@@ -339,7 +340,7 @@ for feat_label in feat_labels:
         ic_val = match["ic"][0] if len(match) > 0 else np.nan
         row_z.append(t_val if not np.isnan(t_val) else 0)
         sig = "*" if abs(t_val) > 2 else ""
-        row_text.append(f"IC={ic_val:.3f}<br>t={t_val:.1f}{sig}" if not np.isnan(t_val) else "—")
+        row_text.append(f"IC={ic_val:.3f}<br>t={t_val:.1f}{sig}" if not np.isnan(t_val) else " - ")
     z_matrix.append(row_z)
     text_matrix.append(row_text)
 
@@ -373,7 +374,7 @@ fig.show()
 # **Findings from the scan:**
 #
 # 1. **5-day horizon**: 252d momentum ($t = 3.4$), 12-1 momentum ($t = 3.7$), and
-#    1-day reversal ($t = 3.0$) reach HAC $|t| > 2$ — 3 of 10 features. The two
+#    1-day reversal ($t = 3.0$) reach HAC $|t| > 2$ - 3 of 10 features. The two
 #    momentum terms persist across horizons; the reversal hit is a short-horizon
 #    effect that the mechanism checks below flag as unstable.
 # 2. **21-day horizon**: The same two features remain significant (12-1 at $t = 2.6$,
@@ -385,7 +386,7 @@ fig.show()
 #    strongest at the monthly horizon rather than the quarterly one.
 # 4. **Short-term features**: 5d reversal and the vol ratio show no signal at any
 #    horizon, and 1d reversal is significant only at the 5d horizon ($t = 3.0$)
-#    before failing the mechanism checks below — the microstructure reversal
+#    before failing the mechanism checks below - the microstructure reversal
 #    effect does not translate into stable cross-sectional predictability here.
 #
 # The pattern is consistent with well-established findings on cross-asset momentum:
@@ -439,7 +440,7 @@ FEATURES = {
 #
 # Negated 1-day return. The hypothesized mechanism is microstructure-driven mean
 # reversion: temporary price dislocations reverse within days. At a 21-day
-# horizon, this mechanism should have no power — the effect decays too quickly.
+# horizon, this mechanism should have no power - the effect decays too quickly.
 #
 # ```
 #       Microstructure Friction
@@ -459,7 +460,7 @@ FEATURES = {
 # **REVISE is the expected outcome, not failure.** In efficient markets,
 # cross-sectional ICs are small ($\sim$0.03–0.05) and HAC-adjusted significance is
 # conservative. Few single features will cleanly pass all three bivariate
-# checks. The diagnostic information — *where* and *when* a feature works —
+# checks. The diagnostic information - *where* and *when* a feature works -
 # matters more than the triage label.
 
 # %% [markdown]
@@ -556,7 +557,7 @@ def run_timing_placebo(
     sig_0 = abs(t_0) > 2.0 if not np.isnan(t_0) else False
 
     # Check for IC increasing at DISTANT lags (>= 42d, well beyond any lookback).
-    # Only flag if the increase is substantial — noise at nearby lags doesn't count.
+    # Only flag if the increase is substantial - noise at nearby lags doesn't count.
     distant = [(lag_vals[i], abs(ics[i])) for i in range(1, len(ics)) if lag_vals[i] >= 42]
     ic_increases = any(abs_ic > abs(ic_0) * 1.5 for _, abs_ic in distant)
 
@@ -766,7 +767,7 @@ def run_regime_heterogeneity(
             msg = f"IC sign stable but magnitude varies {magnitude_ratio:.1f}x"
     elif has_significant_opposite and not unc_sig:
         result = "STOP"
-        msg = "IC flips sign (HAC sig.) and unconditional IC ≈ 0 — aggregation artifact"
+        msg = "IC flips sign (HAC sig.) and unconditional IC ≈ 0 - aggregation artifact"
     elif has_significant_opposite and unc_sig:
         result = "CAUTION"
         msg = "IC flips sign (HAC sig.) but unconditional IC is itself significant"
@@ -807,7 +808,7 @@ lag_df, result, msg = run_timing_placebo(
     lags=[0, 5, 21, 42, 63, 126, 252],
 )
 timing["mom_12_1"] = {"lag_df": lag_df, "result": result, "msg": msg}
-print(f"{FEATURES['mom_12_1']}: {result} — {msg}")
+print(f"{FEATURES['mom_12_1']}: {result} - {msg}")
 
 # 1-day Reversal: fine-grained grid for short lookback (1d)
 lag_df, result, msg = run_timing_placebo(
@@ -816,7 +817,7 @@ lag_df, result, msg = run_timing_placebo(
     lags=[0, 1, 2, 5, 10, 21],
 )
 timing["rev_1d"] = {"lag_df": lag_df, "result": result, "msg": msg}
-print(f"{FEATURES['rev_1d']}: {result} — {msg}")
+print(f"{FEATURES['rev_1d']}: {result} - {msg}")
 
 # %%
 # Side-by-side timing placebo visualization
@@ -833,7 +834,7 @@ for i, feat_col in enumerate(FEATURES):
         go.Bar(
             x=[f"+{lag}d" for lag in lag_df["lag"].to_list()],
             y=lag_df["ic"].to_list(),
-            marker_color="#2166ac",
+            marker_color=COLORS["blue"],
             showlegend=False,
         ),
         row=1,
@@ -851,10 +852,10 @@ fig.show()
 # 12-1 momentum IC is strongest at lag 0 (IC = 0.053) and decays gradually to
 # IC ≈ 0.034 at lag 252d. The persistence is partly mechanical: with a 231-day
 # lookback, shifted features share most of their input data with the original.
-# The key diagnostic is that IC peaks at lag 0 — the most recent version of the
-# feature is the most informative — and even the fully stale version (lag 252d,
+# The key diagnostic is that IC peaks at lag 0 - the most recent version of the
+# feature is the most informative - and even the fully stale version (lag 252d,
 # beyond the lookback) retains some residual predictability. Reversal IC is near
-# zero at all lags — there is no timely information to decay.
+# zero at all lags - there is no timely information to decay.
 
 # %% [markdown]
 # ### 8.2 Shared-Driver Check
@@ -885,7 +886,7 @@ for feat_col in FEATURES:
 # 12-1 momentum passes both checks: its cross-sectional mean does not
 # significantly predict Treasury returns (HAC $t$ = 0.2), and its IC is well
 # above the permutation null ($p < 0.001$). Reversal's Treasury IC is also
-# near zero, but the permutation test does not reject ($p$ = 0.38) — its
+# near zero, but the permutation test does not reject ($p$ = 0.38) - its
 # unconditional IC is indistinguishable from shuffled noise.
 
 # %% [markdown]
@@ -899,7 +900,7 @@ for feat_col in FEATURES:
 
 # %%
 # Tercile cutoffs; results are qualitatively similar with median splits or
-# quartiles — the key diagnostic is sign stability, not exact boundaries.
+# quartiles - the key diagnostic is sign stability, not exact boundaries.
 VIX_LOW_THRESHOLD = 15
 VIX_HIGH_THRESHOLD = 22
 
@@ -910,7 +911,7 @@ for feat_col in FEATURES:
         sub, feat_col, vix_low=VIX_LOW_THRESHOLD, vix_high=VIX_HIGH_THRESHOLD
     )
     cond[feat_col] = {"regimes": regime_results, "result": result, "msg": msg}
-    print(f"\n{FEATURES[feat_col]}: {result} — {msg}")
+    print(f"\n{FEATURES[feat_col]}: {result} - {msg}")
     for r in regime_results:
         print(f"  {r['regime']:10s}: IC={r['ic']:+.4f} (HAC t={r['t_hac']:+.2f}, n={r['n']:,})")
 
@@ -928,7 +929,7 @@ for i, feat_col in enumerate(FEATURES):
     ic_unc = baseline[feat_col]["ic"]
     x_labels = [r["regime"] for r in regimes] + ["Unconditional"]
     y_values = [r["ic"] for r in regimes] + [ic_unc]
-    colors = ["#2166ac"] * len(regimes) + ["#f97316"]
+    colors = [COLORS["blue"]] * len(regimes) + [COLORS["amber"]]
 
     fig.add_trace(
         go.Bar(x=x_labels, y=y_values, marker_color=colors, showlegend=False),
@@ -953,7 +954,7 @@ FIGURE_7_10_FEATURES = {"mom_12_1": "12-1 Momentum", "rev_1d": "1-day Reversal"}
 
 
 def _figure_7_10_timing(df: pl.DataFrame, feature_col: str) -> np.ndarray:
-    # shift().over("symbol") is order-sensitive — sort chronologically within
+    # shift().over("symbol") is order-sensitive - sort chronologically within
     # symbol first so the lagged value aligns with the correct earlier row.
     df = df.sort(["symbol", "timestamp"])
     lag_ics = []
@@ -1027,8 +1028,8 @@ print(f"Wrote publication figure artifact: {figure_7_10_artifact}")
 #
 # Reversal shows a significant sign flip: negative IC in low-VIX (HAC $t$ = −2.6)
 # and positive IC in high-VIX (HAC $t$ = 2.5), producing a near-zero unconditional
-# IC. This is a textbook aggregation artifact — the feature encodes opposite
-# information depending on volatility state — and earns STOP.
+# IC. This is a textbook aggregation artifact - the feature encodes opposite
+# information depending on volatility state - and earns STOP.
 #
 # **Important**: this check cannot distinguish confounding from genuine effect
 # modification. A feature whose IC varies by regime may be confounded *or* may
@@ -1038,7 +1039,7 @@ print(f"Wrote publication figure artifact: {figure_7_10_artifact}")
 # %% [markdown]
 # ## 9. Collider Bias: A Synthetic Demonstration
 #
-# We place this simulation here — after the three main checks — because its
+# We place this simulation here - after the three main checks - because its
 # purpose is different: it illustrates a DAG concept from Section 2 rather
 # than diagnosing a specific feature. Readers who want to reinforce the DAG
 # vocabulary before running the checks can read this section first.
@@ -1077,7 +1078,7 @@ print(
             "spearman_rho": [f"{rho_uncond:.4f}", f"{rho_cond:.4f}"],
             "interpretation": [
                 "X and Y are independent (as generated)",
-                "Spurious negative correlation — collider bias",
+                "Spurious negative correlation - collider bias",
             ],
         }
     )
@@ -1143,13 +1144,13 @@ for feat_col, feat_label in FEATURES.items():
     print(f"{feat_label}: {decision} ({n_pass}/3 passed, checks={results})")
 
 # %% [markdown]
-# **Interpretation**: 12-1 momentum earns REVISE or PROCEED — it carries timely
+# **Interpretation**: 12-1 momentum earns REVISE or PROCEED - it carries timely
 # cross-sectional information (timing check) that does not predict unrelated
 # Treasury returns (shared-driver check). The regime heterogeneity check reveals
 # that the effect attenuates in high-VIX markets, an actionable finding that
 # motivates regime-conditional modeling in later chapters.
 #
-# 1-day reversal earns STOP — no signal at the 21-day horizon, no regime
+# 1-day reversal earns STOP - no signal at the 21-day horizon, no regime
 # drives a significant IC, and its IC is indistinguishable from the permutation
 # null. The framework correctly rejects a non-signal.
 #
@@ -1200,14 +1201,14 @@ for feat_col, feat_label in FEATURES.items():
 #
 # 5. **Regime heterogeneity** reveals whether IC varies across market states but
 #    cannot distinguish confounding from genuine effect modification. Momentum's
-#    IC attenuated in high-VIX markets (5x magnitude variation) — consistent with
-#    the "momentum crash" phenomenon — while maintaining sign across regimes.
+#    IC attenuated in high-VIX markets (5x magnitude variation) - consistent with
+#    the "momentum crash" phenomenon - while maintaining sign across regimes.
 #    Reversal showed a significant sign flip: an aggregation artifact where
 #    opposite-sign regime ICs cancel to near-zero unconditional IC.
 #
 # 6. **No feature is guaranteed to pass all checks**. The triage framework produces
 #    nuanced decisions: STOP (abandon), REVISE (investigate), or PROCEED (continue).
-#    12-1 momentum earned REVISE, not PROCEED — a realistic outcome that motivates
+#    12-1 momentum earned REVISE, not PROCEED - a realistic outcome that motivates
 #    regime-aware modeling in later chapters. Reversal earned STOP, correctly
 #    redirecting effort away from an uninformative feature.
 #

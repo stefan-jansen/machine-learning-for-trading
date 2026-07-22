@@ -53,7 +53,7 @@ from case_studies.utils.latent_factors.case_study import (
     load_case_study_context,
     run_case_study_model,
 )
-from case_studies.utils.latent_factors.library_bridge import _PREFERRED_DEVICE
+from case_studies.utils.latent_factors.library_bridge import preferred_latent_device
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, add_message_title, zero_line
 
@@ -81,8 +81,9 @@ REPORTING_CHECKPOINT = 50
 HORIZON = 21
 set_global_seeds(SEED)
 
-assert ("cuda" if torch.cuda.is_available() else "cpu") == _PREFERRED_DEVICE
-print(f"Preferred SAE device: {_PREFERRED_DEVICE}")
+PREFERRED_DEVICE = preferred_latent_device()
+assert ("cuda" if torch.cuda.is_available() else "cpu") == PREFERRED_DEVICE
+print(f"Preferred SAE device: {PREFERRED_DEVICE}")
 
 # %% [markdown]
 # ## Establish the evaluation contract
@@ -113,6 +114,7 @@ assert context.macro_context_spec is not None
 assert context.macro_context_spec["policy"] == "disabled"
 assert context.temporal_by_fold is not None
 assert context.temporal_feature_names
+assert context.device == PREFERRED_DEVICE
 
 pl.DataFrame(
     {
@@ -121,7 +123,7 @@ pl.DataFrame(
         "folds": [len(context.splits)],
         "input_version": [context.input_data_spec["version"]],
         "modeling_input_digest": [context.input_data_spec["input_digest"]],
-        "preferred_device": [_PREFERRED_DEVICE],
+        "preferred_device": [PREFERRED_DEVICE],
     }
 )
 
@@ -150,7 +152,7 @@ assert model_result["best_epoch"] == REPORTING_CHECKPOINT
 assert result["fold_metrics"][MODEL_NAME]["fold_id"].n_unique() == len(context.splits)
 
 execution_mode = (
-    "registry cache" if model_result["elapsed_s"] == 0.0 else f"new {_PREFERRED_DEVICE} fit"
+    "registry cache" if model_result["elapsed_s"] == 0.0 else f"new {PREFERRED_DEVICE} fit"
 )
 pl.DataFrame(result["model_results"]).with_columns(pl.lit(execution_mode).alias("execution_mode"))
 

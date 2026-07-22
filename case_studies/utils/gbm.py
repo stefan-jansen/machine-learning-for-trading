@@ -1157,6 +1157,8 @@ def register_gbm_result(
     eval_col: str | None = None,
     training_spec: dict[str, Any] | None = None,
     input_data_spec: dict[str, Any] | None = None,
+    extra_params: dict[str, Any] | None = None,
+    replace_existing: bool = False,
 ) -> str:
     """Register a single GBM config's result to the registry.
 
@@ -1177,12 +1179,20 @@ def register_gbm_result(
 
     from case_studies.utils.registry import (
         build_training_spec,
+        clear_prediction_sets,
         get_training_dir,
         register_prediction_set,
         register_training_run,
+        training_hash_from_spec,
     )
 
     if training_spec is None:
+        spec_extra = dict(extra_params or {})
+        if input_data_spec is not None:
+            existing_input = spec_extra.get("input_data_spec")
+            if existing_input is not None and existing_input != input_data_spec:
+                raise ValueError("extra_params and input_data_spec disagree")
+            spec_extra["input_data_spec"] = input_data_spec
         spec = build_training_spec(
             cfg["family"],
             cfg["config_name"],
@@ -1191,7 +1201,7 @@ def register_gbm_result(
             max_bin=max_bin,
             checkpoint_interval=cfg.get("checkpoint_interval", 50),
             train_sample_frac=train_sample_frac,
-            extra_params={"input_data_spec": input_data_spec} if input_data_spec else None,
+            extra_params=spec_extra or None,
         )
     else:
         spec = dict(training_spec)
@@ -1213,6 +1223,9 @@ def register_gbm_result(
             and spec.get("params", {}).get("input_data_spec") != input_data_spec
         ):
             raise ValueError("training_spec disagrees with input_data_spec")
+    expected_hash = training_hash_from_spec(spec)
+    if replace_existing:
+        clear_prediction_sets(case_study_id, expected_hash, split=prediction_split)
     t_hash = register_training_run(
         case_study_id,
         spec=spec,
@@ -1220,6 +1233,8 @@ def register_gbm_result(
         elapsed_s=result.get("elapsed_s"),
         runtime_provenance=runtime_params,
     )
+    if t_hash != expected_hash:
+        raise RuntimeError(f"registered GBM hash drifted: expected {expected_hash}, got {t_hash}")
 
     # Best-checkpoint predictions as a DataFrame
     best_preds = [e for e in result["predictions"] if e["n_trees"] == result["best_iter"]]

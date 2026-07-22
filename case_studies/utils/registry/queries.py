@@ -13,6 +13,7 @@ from ..notebook_contracts import (
     degenerate_prediction_sql,
     excluded_family_sql,
     filter_active_model_rows,
+    full_coverage_prediction_sql,
 )
 from .specs import canonical_json
 from .store import (
@@ -120,24 +121,35 @@ def load_prediction_sets(
     *,
     training_hash: str | None = None,
     split: str | None = None,
+    current_execution_only: bool = False,
     case_dir: Path | None = None,
 ):
-    """Load prediction sets, optionally filtered."""
+    """Load prediction sets, optionally filtered to the current training execution."""
     if case_dir is None:
         case_dir = _case_dir(case_study)
 
-    query = "SELECT * FROM prediction_sets"
+    if current_execution_only:
+        query = (
+            "SELECT p.* FROM prediction_sets p "
+            "JOIN training_runs t ON t.training_hash = p.training_hash"
+        )
+        prefix = "p."
+    else:
+        query = "SELECT * FROM prediction_sets"
+        prefix = ""
     conditions = []
     params: list[str] = []
     if training_hash:
-        conditions.append("training_hash = ?")
+        conditions.append(f"{prefix}training_hash = ?")
         params.append(training_hash)
     if split:
-        conditions.append("split = ?")
+        conditions.append(f"{prefix}split = ?")
         params.append(split)
+    if current_execution_only:
+        conditions.append("p.created_at >= COALESCE(t.started_at, t.created_at)")
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY created_at DESC"
+    query += f" ORDER BY {prefix}created_at DESC"
 
     return _query_table(case_dir, query, tuple(params))
 
@@ -712,6 +724,7 @@ def resolve_best_predictions(
     top_n: int = 10,
     stage: str = "signal",
     chapter_filter: str | None = None,
+    universe_filter: str | None = None,
     case_dir: Path | None = None,
     checkpoints_per_config: int = 1,
 ):
@@ -784,6 +797,10 @@ def resolve_best_predictions(
     if split:
         split_clause = "AND p.split = ?"
         params.append(split)
+    universe_clause = ""
+    if universe_filter:
+        universe_clause = "AND json_extract(b.spec_json, '$.strategy.signal.universe_filter') = ?"
+        params.append(universe_filter)
     params.append(str(top_n))
     params.append(str(max(1, int(checkpoints_per_config))))
 
@@ -804,11 +821,14 @@ def resolve_best_predictions(
             JOIN backtest_runs b ON bm.backtest_hash = b.backtest_hash
             JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
             JOIN training_runs t ON p.training_hash = t.training_hash
+            JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
             WHERE t.label = ?
               {stage_clause}
               {exclude_clause}
               {degenerate_clause}
+              {full_coverage_prediction_sql("p", "t", "pm")}
               {split_clause}
+              {universe_clause}
             GROUP BY p.prediction_hash
         ),
         top_configs AS (
@@ -961,10 +981,12 @@ def resolve_best_backtest_runs(
         JOIN backtest_runs b ON bm.backtest_hash = b.backtest_hash
         JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
         JOIN training_runs t ON p.training_hash = t.training_hash
+        JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
         WHERE t.label = ?
           {exclude_clause}
           {stage_clause}
           {degenerate_clause}
+          {full_coverage_prediction_sql("p", "t", "pm")}
           {split_clause}
         ORDER BY bm.sharpe DESC
         LIMIT ?

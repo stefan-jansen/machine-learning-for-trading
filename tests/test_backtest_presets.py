@@ -6,6 +6,7 @@ import polars as pl
 
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices
 from case_studies.utils.backtest_presets import (
+    SP500_OPTIONS_SCHEDULE_CONTRACT,
     cost_view,
     ensure_backtest_spec,
     is_backtest_spec,
@@ -145,6 +146,7 @@ def test_sp500_options_short_only_engine_spec_preserves_explicit_feed() -> None:
 
     cfg = spec["backtest_config"]
     assert spec["strategy"]["rebalance"]["mode"] == "engine"
+    assert spec["strategy"]["signal"]["schedule_contract"] == SP500_OPTIONS_SCHEDULE_CONTRACT
     assert cfg["account"]["allow_short_selling"] is True
     assert cfg["execution"]["execution_price"] == "quote_side"
     assert cfg["execution"]["mark_price"] == "price"

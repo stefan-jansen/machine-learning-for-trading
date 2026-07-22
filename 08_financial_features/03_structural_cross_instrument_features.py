@@ -47,7 +47,7 @@
 # All examples use **real data**: CME futures, ETFs, and S&P 500 options.
 
 # %%
-"""Structural and Cross-Instrument Features - carry, cross-asset, and options-implied feature families."""
+"""Structural and Cross-Instrument Features — carry, cross-asset, and options-implied feature families."""
 
 from __future__ import annotations
 
@@ -95,8 +95,8 @@ def ensure_df(df: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame:
 #
 # $$\text{carry}_{t,c} = \frac{F_{t,c}^{\text{near}} - F_{t,c}^{\text{far}}}{F_{t,c}^{\text{near}}} \times \frac{365}{\Delta T}$$
 #
-# - Positive carry (backwardation): near > far - earn by holding
-# - Negative carry (contango): near < far - pay to hold
+# - Positive carry (backwardation): near > far — earn by holding
+# - Negative carry (contango): near < far — pay to hold
 
 # %% [markdown]
 # ## 1.1 Load Futures Data
@@ -180,8 +180,8 @@ for product in PRODUCTS:
 #
 # With three tenors we can also extract slope and curvature:
 #
-# - **Slope**: $(F_0 - F_2) / F_0$ - overall term structure direction
-# - **Curvature**: $F_0 - 2 \cdot F_1 + F_2$ - butterfly shape
+# - **Slope**: $(F_0 - F_2) / F_0$ — overall term structure direction
+# - **Curvature**: $F_0 - 2 \cdot F_1 + F_2$ — butterfly shape
 
 
 # %%
@@ -232,7 +232,7 @@ carry_smooth = carry_df.sort(["product", "session_date"]).with_columns(
 fig = make_subplots(
     rows=2,
     cols=2,
-    subplot_titles=[f"{p} - Annualized Roll Yield" for p in PRODUCTS],
+    subplot_titles=[f"{p} — Annualized Roll Yield" for p in PRODUCTS],
     vertical_spacing=0.12,
     horizontal_spacing=0.08,
 )
@@ -276,7 +276,7 @@ fig.show()
 # ### Book Figure: Cross-Sectional Roll Yield Snapshot
 #
 # Load all CME products and plot a single-date snapshot of annualized roll yield
-# sorted by magnitude - the canonical carry signal from §8.3.
+# sorted by magnitude — the canonical carry signal from §8.3.
 
 # %%
 import matplotlib.pyplot as plt
@@ -356,7 +356,7 @@ SECTOR_GRAYS = {
 
 # %%
 # Build the figure in one cell so the bars, regime annotations, and sector
-# legend render together (inline flushes a figure at cell end - splitting the
+# legend render together (inline flushes a figure at cell end — splitting the
 # legend into a later cell would display the bars before it is attached).
 products = snapshot["product"].to_list()
 yields = snapshot["roll_yield_ann"].to_list()
@@ -440,15 +440,12 @@ spy_ret = ca_returns.filter(pl.col("symbol") == "SPY").select(
     pl.col("timestamp"), pl.col("ret").alias("market_ret")
 )
 
-# Join market returns to all ETFs. Polars does not guarantee that a join preserves
-# row order, and `beta_to_market` returns a plain rolling expression, so the sort and
-# the `.over("symbol")` below are what keep each 63-day window inside one symbol.
-# Without them the window silently walks across symbol boundaries.
-ca_with_market = ca_returns.join(spy_ret, on="timestamp", how="inner").sort(["symbol", "timestamp"])
+# Join market returns to all ETFs
+ca_with_market = ca_returns.join(spy_ret, on="timestamp", how="inner")
 
 # Rolling 63-day beta
 beta_df = ca_with_market.with_columns(
-    beta_to_market("ret", "market_ret", window=63).over("symbol").alias("beta_63d")
+    beta_to_market("ret", "market_ret", window=63).alias("beta_63d")
 )
 
 # Show latest cross-section
@@ -493,7 +490,7 @@ print(f"\nRaw vs Residual 21d Momentum ({latest}):")
 # %% [markdown]
 # **Interpretation**: High-beta ETFs (XLK, QQQ) often show strong raw momentum
 # that is largely market-driven. Residual momentum isolates the ETF-specific
-# component - more useful for rotation strategies.
+# component — more useful for rotation strategies.
 
 # %% [markdown]
 # ## 2.4 Lead-Lag Correlations
@@ -644,7 +641,7 @@ atm_iv.head(5)
 # %% [markdown]
 # ## 3.3 Risk Reversal (25-Delta Skew)
 #
-# The risk reversal measures directional skew - the price of downside protection
+# The risk reversal measures directional skew — the price of downside protection
 # relative to upside:
 #
 # $$\mathrm{RR}_{25\delta} = IV_{25\delta,\,\mathrm{put}} - IV_{25\delta,\,\mathrm{call}}$$
@@ -753,7 +750,7 @@ term_df.head(5)
 #
 # $$\text{VRP}_t = IV_{30,\text{atm}} - RV_{20}$$
 #
-# The VRP is typically positive - volatility sellers earn a premium for bearing
+# The VRP is typically positive — volatility sellers earn a premium for bearing
 # risk. When unusually wide ($>$ 5 vol points), selling volatility has higher
 # expected return. When compressed ($<$ 1 point), the premium is priced out.
 
@@ -817,8 +814,7 @@ fig = make_subplots(
     cols=1,
     shared_xaxes=True,
     subplot_titles=[
-        # The symbol is named once in the main title; repeating it per panel is noise.
-        "ATM IV (30d)",
+        f"{viz_symbol} — ATM IV (30d)",
         "Risk Reversal (25δ)",
         "IV Term Slope",
         "Variance Risk Premium (IV − RV)",
@@ -865,7 +861,7 @@ fig.add_trace(
 )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=4, col=1)
 
-fig.update_layout(height=700, title=f"Options-Implied Features - {viz_symbol}", showlegend=False)
+fig.update_layout(height=700, title=f"Options-Implied Features — {viz_symbol}", showlegend=False)
 fig.update_yaxes(title_text="IV", row=1, col=1)
 fig.update_yaxes(title_text="RR 25d", row=2, col=1)
 fig.update_yaxes(title_text="Short/Long", row=3, col=1)
@@ -874,7 +870,7 @@ fig.show()
 
 # %% [markdown]
 # **Interpretation**:
-# - ATM IV spikes during market stress (COVID crash, etc.) - a key state variable
+# - ATM IV spikes during market stress (COVID crash, etc.) — a key state variable
 # - Positive risk reversal indicates elevated put demand (crash fear)
 # - Term slope > 1 = inverted term structure (near-term event risk)
 # - VRP > 0 is normal; extreme VRP signals attractive vol-selling opportunities
@@ -914,12 +910,12 @@ fig.show()
 # ## Practical Takeaways
 #
 # 1. **Carry varies by asset class**: in the snapshot above, CL trades closer to
-#    backwardation while GC is closer to contango - consistent with the
+#    backwardation while GC is closer to contango — consistent with the
 #    asset-specific drivers (supply tightness vs cost-of-carry) discussed in §8.3
 # 2. **Residual momentum isolates idiosyncratic return**: subtracting
 #    $\beta_{t,a} r_{t,m}$ removes the market component from each ETF's return.
 #    Whether residual momentum has higher IC than raw momentum is evaluated in
-#    the `etfs` case study (Chapter 11+) - this notebook only demonstrates the
+#    the `etfs` case study (Chapter 11+) — this notebook only demonstrates the
 #    construction
 # 3. **Options-implied features are state, not signal**: use them to condition
 #    faster signals
@@ -928,7 +924,7 @@ fig.show()
 #
 # ## Next Notebooks
 #
-# - `04_fundamentals_macro_calendar` - Fundamentals, macro, calendar encodings
-# - `case_studies/cme_futures` - Full 30-product futures pipeline
-# - `case_studies/sp500_equity_option_analytics` - Full equity + options pipeline
-# - `case_studies/sp500_options` - Options straddle strategy pipeline
+# - `04_fundamentals_macro_calendar` — Fundamentals, macro, calendar encodings
+# - `case_studies/cme_futures` — Full 30-product futures pipeline
+# - `case_studies/sp500_equity_option_analytics` — Full equity + options pipeline
+# - `case_studies/sp500_options` — Options straddle strategy pipeline

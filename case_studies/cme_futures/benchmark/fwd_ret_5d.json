@@ -1,0 +1,41 @@
+{
+  "case_study": "cme_futures",
+  "label": "fwd_ret_5d",
+  "method": "daily_cross_sectional_mean_close_pct_change",
+  "periods_per_year": 252,
+  "n_symbols_in_universe": null,
+  "sharpe": 0.575106,
+  "cagr": 0.055188,
+  "vol": 0.102594,
+  "n_periods": 1289,
+  "ts_min": "2019-01-07 00:00:00",
+  "ts_max": "2025-12-31 00:00:00",
+  "by_period": {
+    "overall": {
+      "sharpe": 0.612558,
+      "cagr": 0.055893,
+      "vol": 0.0964,
+      "n_periods": 1806
+    },
+    "validation": {
+      "sharpe": 0.575106,
+      "cagr": 0.055188,
+      "vol": 0.102594,
+      "n_periods": 1289
+    },
+    "holdout": {
+      "sharpe": 0.749397,
+      "cagr": 0.057652,
+      "vol": 0.078957,
+      "n_periods": 517
+    },
+    "validation_window": [
+      "2019-01-07 00:00:00",
+      "2023-12-29 00:00:00"
+    ],
+    "holdout_window": [
+      "2024-01-02 00:00:00",
+      "2025-12-31 00:00:00"
+    ]
+  }
+}

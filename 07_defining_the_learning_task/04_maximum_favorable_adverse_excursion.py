@@ -56,13 +56,13 @@
 #
 # ## Prerequisites
 #
-# - `03_label_methods` — defines the triple-barrier label whose parameters
+# - `03_label_methods` - defines the triple-barrier label whose parameters
 #   this notebook empirically justifies.
 # - Familiarity with OHLCV bar data and ATR (true range with Wilder smoothing).
 # - Polars `max_horizontal` / `min_horizontal` and forward-shifted columns.
 
 # %%
-"""Maximum Favorable and Adverse Excursion — ATR-normalized trade path analysis for barrier calibration."""
+"""Maximum Favorable and Adverse Excursion - ATR-normalized trade path analysis for barrier calibration."""
 
 from __future__ import annotations
 
@@ -297,7 +297,7 @@ def compute_percentiles(series: pl.Series, percentiles: list[float]) -> dict[flo
 # ### 2.1 Library ATR: ml4t-engineer
 #
 # The manual `compute_atr()` above teaches Wilder's smoothing. `ml4t-engineer`
-# provides the same algorithm with edge-case handling and panel data support —
+# provides the same algorithm with edge-case handling and panel data support -
 # a modern Python alternative to TA-Lib's `ATR()` function.
 
 # %% [markdown]
@@ -601,7 +601,7 @@ if spy_mfe_mae is not None:
 
     fig = go.Figure()
 
-    # Scatter plot — larger markers, lower opacity for print clarity
+    # Scatter plot - larger markers, lower opacity for print clarity
     fig.add_trace(
         go.Scatter(
             x=sample["mae_pct"].to_numpy(),
@@ -760,7 +760,7 @@ if spy is not None:
 # **Key findings:**
 #
 # 1. ETF daily ATR averages ~1.3% → 2xATR take profit captures majority of moves
-# 2. Crypto 8h MFE/MAE medians are ~0.9% — tight barriers match the funding rate cycle
+# 2. Crypto 8h MFE/MAE medians are ~0.9% - tight barriers match the funding rate cycle
 # 3. Regime matters: High vol periods have ~2x wider excursions than low vol
 # 4. ATR-scaled barriers recommended for daily; fixed OK for high-frequency
 
@@ -841,7 +841,7 @@ if SAVE_OUTPUT:
 #
 # The manual implementation above analyzes one horizon at a time.
 # `ml4t-diagnostic` provides `analyze_excursions()` for multi-horizon analysis
-# in a single call — useful for comparing barrier widths across holding periods.
+# in a single call - useful for comparing barrier widths across holding periods.
 
 # %%
 if spy is not None:
@@ -853,7 +853,7 @@ if spy is not None:
         percentiles=[25, 50, 75, 90],
     )
 
-    print(f"Multi-Horizon Excursion Analysis (SPY) — observations: {result.n_samples:,}")
+    print(f"Multi-Horizon Excursion Analysis (SPY) - observations: {result.n_samples:,}")
 
     multi_horizon_rows = [
         {

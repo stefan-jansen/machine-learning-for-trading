@@ -35,7 +35,7 @@ from ml4t.diagnostic.metrics import cross_sectional_ic
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 
-from case_studies.utils.registry import compute_fold_metrics_from_predictions
+from case_studies.utils.registry import clear_prediction_sets, compute_fold_metrics_from_predictions
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -648,6 +648,7 @@ def run_tabm_cv(
     seed: int = RANDOM_SEED,
     num_threads: int = 8,
     input_data_spec: dict[str, Any] | None = None,
+    identity_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Walk-forward tabular DL CV with epoch-checkpoint IC evaluation.
 
@@ -710,6 +711,8 @@ def run_tabm_cv(
             "register=True requires save_dir for incremental prediction saves. "
             "Pass save_dir=CASE_DIR / 'run_log' / 'training' / 'tabular_dl'"
         )
+    if input_data_spec is not None and identity_params is not None:
+        raise ValueError("Pass either input_data_spec or legacy identity_params, not both")
 
     runtime_spec = tabm_runtime_spec(device, seed=seed, num_threads=num_threads)
     torch_device = _configure_torch_runtime(runtime_spec)
@@ -740,22 +743,37 @@ def run_tabm_cv(
     )
     if expected_keys.n_unique(subset=[date_col, entity_col, "fold_id"]) != expected_keys.height:
         raise ValueError("validation data contains duplicate timestamp/entity/fold keys")
-    training_specs = {
-        cfg["config_name"]: _build_tabm_training_spec(
-            cfg,
-            label_col=label_col,
-            n_folds=len(splits),
-            feature_names=feature_names,
-            eval_label_col=eval_label_col,
-            task_type=task_type,
-            class_values=class_values,
-            runtime_spec=runtime_spec,
-            seed=seed,
-            splits=splits,
-            input_data_spec=input_data_spec,
-        )
-        for cfg in configs
-    }
+    if identity_params is not None:
+        from case_studies.utils.registry import build_training_spec
+
+        training_specs = {
+            cfg["config_name"]: build_training_spec(
+                cfg.get("family", "tabular_dl"),
+                cfg["config_name"],
+                label_col,
+                n_folds=len(splits),
+                n_epochs=cfg.get("n_epochs"),
+                extra_params=identity_params,
+            )
+            for cfg in configs
+        }
+    else:
+        training_specs = {
+            cfg["config_name"]: _build_tabm_training_spec(
+                cfg,
+                label_col=label_col,
+                n_folds=len(splits),
+                feature_names=feature_names,
+                eval_label_col=eval_label_col,
+                task_type=task_type,
+                class_values=class_values,
+                runtime_spec=runtime_spec,
+                seed=seed,
+                splits=splits,
+                input_data_spec=input_data_spec,
+            )
+            for cfg in configs
+        }
     cached_results: list[dict[str, Any]] = []
     cached_prediction_frames: list[pl.DataFrame] = []
     cached_curves: list[dict[str, Any]] = []
@@ -921,6 +939,26 @@ def run_tabm_cv(
 
     for cfg in configs:
         config_name = cfg["config_name"]
+        if register and case_study and force_retrain:
+            from case_studies.utils.registry import build_training_spec, training_hash_from_spec
+
+            spec = build_training_spec(
+                cfg["family"],
+                config_name,
+                label_col,
+                n_folds=len(splits),
+                n_epochs=cfg.get("n_epochs"),
+            )
+            removed = clear_prediction_sets(
+                case_study,
+                training_hash_from_spec(spec),
+                split=prediction_split,
+            )
+            if removed["prediction_sets"]:
+                print(
+                    f"  cleared {removed['prediction_sets']} prior {prediction_split} "
+                    f"checkpoint(s) for {config_name}"
+                )
         cfg_params = dict(cfg.get("params", {}))
         cfg_n_epochs = cfg.get("n_epochs", 200)
         cfg_batch_size = cfg.get("batch_size", 4096)

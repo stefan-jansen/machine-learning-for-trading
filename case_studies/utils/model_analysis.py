@@ -50,12 +50,11 @@ def load_metrics_from_registry(
 ) -> pl.DataFrame:
     """Load pre-computed IC metrics directly from the registry.
 
-    Much faster than loading raw predictions — queries prediction_metrics
+    Much faster than loading raw predictions - queries prediction_metrics
     table which stores ic_mean/ic_std computed during training runs.
 
-    Returns DataFrame with columns:
-        family, config_name, label, checkpoint_value, checkpoint_kind,
-        ic_mean, ic_std
+    Returns one row per prediction set, including its exact training and
+    prediction hashes alongside the model identity and metrics.
     """
     case_dir = get_case_study_dir(case_study_id)
     db_path = case_dir / "run_log" / "registry.db"
@@ -101,14 +100,21 @@ def load_metrics_from_registry(
         if has_daily
         else "pm.ic_mean IS NOT NULL"
     )
+    primary_select = (
+        "COALESCE(pm.ic_mean_daily, pm.ic_mean) AS ic_mean"
+        if has_daily
+        else "pm.ic_mean AS ic_mean"
+    )
     query = f"""
         SELECT
+            t.training_hash,
+            p.prediction_hash,
             t.family,
             t.config_name,
             t.label,
             p.checkpoint_value,
             p.checkpoint_kind,
-            pm.ic_mean,
+            {primary_select},
             pm.ic_std{extra_cols}
         FROM prediction_metrics pm
         JOIN prediction_sets p ON pm.prediction_hash = p.prediction_hash
@@ -134,6 +140,8 @@ def load_metrics_from_registry(
         return pl.DataFrame()
 
     schema: dict[str, Any] = {
+        "training_hash": pl.Utf8,
+        "prediction_hash": pl.Utf8,
         "family": pl.Utf8,
         "config_name": pl.Utf8,
         "label": pl.Utf8,
@@ -147,15 +155,6 @@ def load_metrics_from_registry(
 
     df = pl.DataFrame(rows, schema=schema, orient="row")
 
-    # Deduplicate (some configs have multiple training runs) — keep best.
-    agg_exprs = [pl.col("ic_mean").mean(), pl.col("ic_std").mean()]
-    for c in unc_cols:
-        agg_exprs.append(pl.col(c).mean())
-
-    df = df.group_by(["family", "config_name", "label", "checkpoint_value", "checkpoint_kind"]).agg(
-        agg_exprs
-    )
-
     return df.sort("ic_mean", descending=True)
 
 
@@ -166,9 +165,8 @@ def load_fold_metrics_from_registry(
 ) -> pl.DataFrame:
     """Load per-fold IC metrics from the fold_metrics registry table.
 
-    Returns DataFrame with columns:
-        family, config_name, label, checkpoint_value, fold_id, ic, ic_std,
-        n_entities, rmse, mae
+    Returns DataFrame with the exact training and prediction hashes plus
+    family, config, label, checkpoint, fold, and fold metrics.
     """
     case_dir = get_case_study_dir(case_study_id)
     db_path = case_dir / "run_log" / "registry.db"
@@ -186,10 +184,12 @@ def load_fold_metrics_from_registry(
         return pl.DataFrame()
 
     # Only select columns that exist on `fold_metrics` per the live schema
-    # (prediction-side fold_metrics has no n_periods / n_obs — those live on
+    # (prediction-side fold_metrics has no n_periods / n_obs - those live on
     # backtest_fold_metrics). Older callers selected them and crashed.
     query = """
         SELECT
+            t.training_hash,
+            p.prediction_hash,
             t.family,
             t.config_name,
             t.label,
@@ -224,6 +224,8 @@ def load_fold_metrics_from_registry(
     df = pl.DataFrame(
         rows,
         schema={
+            "training_hash": pl.Utf8,
+            "prediction_hash": pl.Utf8,
             "family": pl.Utf8,
             "config_name": pl.Utf8,
             "label": pl.Utf8,
@@ -238,9 +240,10 @@ def load_fold_metrics_from_registry(
         orient="row",
     )
 
-    # Deduplicate reruns: keep latest per (config, label, checkpoint, fold)
+    # The registry key is (prediction_hash, fold_id). Preserve prediction
+    # identity so downstream joins cannot combine separate executions.
     df = df.unique(
-        subset=["family", "config_name", "label", "checkpoint_value", "fold_id"],
+        subset=["prediction_hash", "fold_id"],
         keep="last",
     )
 
@@ -253,7 +256,7 @@ def load_all_metrics(
 ) -> pl.DataFrame:
     """Load pre-computed IC metrics from the registry.
 
-    Fast path for leaderboard and learning curves — no raw prediction loading.
+    Fast path for leaderboard and learning curves - no raw prediction loading.
     """
     result = load_metrics_from_registry(case_study_id, label=label)
     if result.height == 0:
@@ -264,6 +267,8 @@ def load_all_metrics(
 
 def best_model_per_family_fast(
     metrics: pl.DataFrame,
+    *,
+    ic_col: str = "ic_mean_daily",
 ) -> pl.DataFrame:
     """Find the best (config, checkpoint) per family from pre-computed metrics.
 
@@ -271,13 +276,15 @@ def best_model_per_family_fast(
     """
     if metrics.height == 0:
         return metrics
+    if ic_col not in metrics.columns:
+        raise ValueError(f"Selection metric {ic_col!r} is not present")
 
     return (
-        metrics.filter(pl.col("ic_mean").is_not_null())
-        .sort("ic_mean", descending=True)
+        metrics.filter(pl.col(ic_col).is_not_null())
+        .sort(ic_col, descending=True)
         .group_by("family")
         .first()
-        .sort("ic_mean", descending=True)
+        .sort(ic_col, descending=True)
     )
 
 
@@ -289,6 +296,7 @@ def best_model_per_family_fast(
 def load_predictions(
     case_study_id: str,
     *,
+    prediction_hash: str | None = None,
     family: str | None = None,
     label: str | None = None,
     config_name: str | None = None,
@@ -305,6 +313,9 @@ def load_predictions(
     ----------
     family : str, optional
         Model family (e.g., 'linear', 'gbm'). Strongly recommended.
+    prediction_hash : str, optional
+        Exact registered prediction row. When supplied, other filters remain
+        consistency checks rather than a substitute for row identity.
     label : str, optional
         Target label (e.g., 'fwd_ret_21d').
     config_name : str, optional
@@ -354,6 +365,9 @@ def load_predictions(
     if config_name is not None:
         query += " AND t.config_name = ?"
         params.append(config_name)
+    if prediction_hash is not None:
+        query += " AND p.prediction_hash = ?"
+        params.append(prediction_hash)
     if checkpoint_value is not None:
         query += " AND p.checkpoint_value = ?"
         params.append(checkpoint_value)
@@ -429,7 +443,7 @@ def model_summary_table(
     cross-sectional IC pooled across folds together with naive, HAC and block
     bootstrap intervals from :func:`compute_ic_uncertainty`. The fold-level
     `ic_mean` / `ic_std` are still emitted for backward compatibility but
-    SHOULD NOT be used as the primary uncertainty estimate — N≈8–16 folds is
+    SHOULD NOT be used as the primary uncertainty estimate - N≈8-16 folds is
     too small a sample.
 
     Parameters
@@ -751,14 +765,16 @@ def prediction_correlation_matrix(
     for lbl in labels[1:]:
         merged = merged.join(model_preds[lbl], on=[date_col, entity_col], how="inner")
 
-    # Compute pairwise Spearman correlation via polars rank + pearson
-    ranked = merged.select([pl.col(lbl).rank().alias(lbl) for lbl in labels])
+    # Rank within each decision time, correlate cross-sectionally, then give
+    # each decision time equal weight in the reported mean correlation.
     n = len(labels)
     corr = np.eye(n)
-    # Use polars corr for each pair (avoids scipy UDF overhead)
     for i in range(n):
         for j in range(i + 1, n):
-            r = ranked.select(pl.corr(labels[i], labels[j])).item()
+            daily = merged.group_by(date_col).agg(
+                pl.corr(pl.col(labels[i]).rank(), pl.col(labels[j]).rank()).alias("rho")
+            )
+            r = daily["rho"].drop_nulls().mean()
             if r is not None:
                 corr[i, j] = r
                 corr[j, i] = r

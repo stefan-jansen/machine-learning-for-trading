@@ -1,0 +1,30 @@
+{
+  "case_study_id": "etfs",
+  "computed_at_utc": "2026-05-15T05:21:04.200190+00:00",
+  "data_period": {
+    "start": "2006-01-01",
+    "end": "2025-12-31"
+  },
+  "universe": {
+    "n_assets_declared": 100,
+    "n_eligible_per_fold_min": 88,
+    "n_eligible_per_fold_max": 96
+  },
+  "return_distribution_abs_pct": {
+    "daily_median": 0.561864982214455,
+    "weekly_median": 1.298803590132147,
+    "monthly_median": 2.8457325730875116
+  },
+  "cost_exceedance_at_20bps_pct": {
+    "daily": 76.56143079976708,
+    "weekly": 88.607997048757,
+    "monthly": 94.26885421789083
+  },
+  "feasibility_ratio_monthly_at_20bps": 14.228662865437558,
+  "walk_forward": {
+    "n_folds_generated": 8,
+    "n_splits_declared": 8,
+    "holdout_start": "2024-01-01",
+    "last_test_end": "2023-12-29"
+  }
+}

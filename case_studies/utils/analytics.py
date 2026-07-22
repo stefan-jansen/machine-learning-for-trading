@@ -193,6 +193,14 @@ def load_model_ic(
 
         params.append(split)
 
+        # Registries predating the daily-uncertainty backfill have no
+        # ``ic_mean_daily`` column at all, so probe before referencing it.
+        with sqlite3.connect(str(db_path)) as probe_con:
+            pm_cols = {row[1] for row in probe_con.execute("PRAGMA table_info(prediction_metrics)")}
+        ic_expr = (
+            "COALESCE(pm.ic_mean_daily, pm.ic_mean)" if "ic_mean_daily" in pm_cols else "pm.ic_mean"
+        )
+
         sql = f"""
             SELECT
                 t.family,
@@ -201,7 +209,11 @@ def load_model_ic(
                 p.split,
                 p.checkpoint_value,
                 p.prediction_hash,
-                pm.ic_mean,
+                -- Daily-pooled IC is the statistic the HAC interval, `13_model_analysis`,
+                -- and the book's Table 14.3 all report; `ic_mean` is the legacy fold-mean
+                -- kept only as a fallback for rows predating the daily backfill. Ranking on
+                -- the legacy column while quoting the daily interval mixes two statistics.
+                {ic_expr} AS ic_mean,
                 pm.ic_std
             FROM training_runs t
             JOIN prediction_sets p ON t.training_hash = p.training_hash
@@ -209,7 +221,7 @@ def load_model_ic(
             WHERE 1=1 {family_clause}
               AND p.split = ?
               {degenerate_prediction_sql("p.prediction_hash")}
-            ORDER BY pm.ic_mean DESC NULLS LAST
+            ORDER BY ic_mean DESC NULLS LAST
         """
         df = _query(db_path, sql, tuple(params))
         if len(df) > 0:

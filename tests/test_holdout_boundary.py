@@ -28,6 +28,8 @@ HOLDOUT_SCOPED_NOTEBOOKS = [
     ("08_financial_features/05_feature_selection.py", "ic_by_date"),
     ("08_financial_features/06_robustness_sensitivity.py", "def compute_momentum_ic_series"),
     ("case_studies/etfs/03_financial_features.py", "ic_matrix = np.full"),
+    ("case_studies/etfs/02_labels.py", "def compute_ic_by_date"),
+    ("case_studies/etfs/05_evaluation.py", "ic_series_data = {feat"),
 ]
 
 
@@ -97,3 +99,79 @@ def test_selected_features_artifact_stops_before_holdout() -> None:
         f"features_selected.parquet extends to {max_date}, at/after the sealed "
         f"holdout start {holdout_start} — feature selection saw holdout data"
     )
+
+
+def test_crypto_dml_seals_the_label_endpoint_and_hashes_current_inputs() -> None:
+    """The DML sample and cache identity must bind the corrected 8-hour lineage."""
+    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "11_causal_dml.py").read_text()
+
+    assert 'ESTIMATOR_CONTRACT = "panel_time_v3"' in source
+    assert "modeling_input_fingerprint(" in source
+    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
+    assert "holdout_cutoff - label_horizon" in source
+    assert "max() + LABEL_HORIZON >= HOLDOUT_CUTOFF" in source
+
+
+def test_crypto_gbm_requires_cuda_and_hashes_current_inputs() -> None:
+    """The corrected GBM grid must be GPU-only and content-addressed."""
+    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "07_gbm.py").read_text()
+
+    assert 'TRAIN_DEVICE = "cuda"' in source
+    assert "modeling_input_fingerprint(" in source
+    assert '"device": TRAIN_DEVICE' in source
+    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
+    assert source.count("extra_params=IDENTITY_PARAMS") == 2
+    assert "CPU fallback" not in source
+
+
+@pytest.mark.parametrize("notebook", ["06_linear.py", "07_gbm.py"])
+def test_crypto_model_guard_uses_active_24h_label_buffer(notebook: str) -> None:
+    """Crypto model guards must purge the endpoint for the selected label horizon."""
+    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / notebook).read_text()
+    setup = yaml.safe_load(
+        (REPO_ROOT / "case_studies/crypto_perps_funding/config/setup.yaml").read_text()
+    )
+
+    assert setup["labels"]["variant_buffers"]["fwd_ret_24h"] == "24H"
+    assert "pd.Timedelta(mds.label_buffer)" in source
+    assert 'split["val_end"] + label_horizon < holdout_start' in source
+    assert 'split["val_end"] + timedelta(hours=8)' not in source
+
+
+def test_crypto_tabm_requires_cuda_and_hashes_current_inputs() -> None:
+    """The corrected TabM grid must be GPU-only and content-addressed."""
+    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "08_tabular_dl.py").read_text()
+
+    assert 'TRAIN_DEVICE = "cuda"' in source
+    assert "modeling_input_fingerprint(" in source
+    assert '"device": TRAIN_DEVICE' in source
+    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
+    assert source.count("extra_params=IDENTITY_PARAMS") == 2
+    assert "identity_params=IDENTITY_PARAMS" in source
+    assert "current CPU" not in source
+
+
+def test_crypto_lstm_requires_cuda_and_hashes_current_inputs() -> None:
+    """The corrected LSTM run must be GPU-only and content-addressed."""
+    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "09_dl_lstm.py").read_text()
+
+    assert 'TRAIN_DEVICE = "cuda"' in source
+    assert "modeling_input_fingerprint(" in source
+    assert '"device": TRAIN_DEVICE' in source
+    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
+    assert "extra_params=IDENTITY_PARAMS" in source
+    assert "identity_params=IDENTITY_PARAMS" in source
+    assert "current CPU" not in source
+
+
+def test_crypto_tcn_requires_cuda_and_hashes_current_inputs() -> None:
+    """The corrected TCN run must be GPU-only and content-addressed."""
+    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "10_dl_tcn.py").read_text()
+
+    assert 'TRAIN_DEVICE = "cuda"' in source
+    assert "modeling_input_fingerprint(" in source
+    assert '"device": TRAIN_DEVICE' in source
+    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
+    assert source.count("extra_params=IDENTITY_PARAMS") == 2
+    assert "identity_params=IDENTITY_PARAMS" in source
+    assert "current CPU" not in source

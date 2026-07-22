@@ -1,0 +1,18 @@
+account:
+  allow_short_selling: true
+  allow_leverage: true
+execution:
+  execution_price: open
+  execution_mode: next_bar
+commission:
+  model: percentage
+  rate: 0.0005
+slippage:
+  model: percentage
+  rate: 0.0002
+calendar:
+  calendar: CME
+  timezone: UTC
+  data_frequency: daily
+metadata:
+  case_study: cme_futures

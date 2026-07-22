@@ -36,12 +36,14 @@ from utils.artifact_specs import (
     load_feature_spec,
     load_label_spec,
     resolve_label_buffer,
+    resolve_label_horizon,
     resolve_market_semantics,
     resolve_storage_path,
 )
 from utils.cv_splits import generate_cv_splits, make_wf_config
 
 RANDOM_SEED = 42
+MIN_TEMPORAL_DATE_COVERAGE = 0.95  # Allow short calendar-edge gaps, not missing windows.
 
 
 def seed_everything(seed: int = RANDOM_SEED) -> None:
@@ -500,8 +502,16 @@ def load_modeling_dataset(
         labels,
         case_study_id=case_study_id,
         label_buffer=label_buffer,
+        outcome_horizon=resolve_label_horizon(case_study_id, primary_label, setup),
         date_col=date_col,
     )
+    if temporal_by_fold_pd is not None:
+        validate_temporal_fold_coverage(
+            dataset,
+            temporal,
+            splits,
+            date_col=date_col,
+        )
 
     # WalkForwardConfig for library integration
     # Normalize month-based buffers to days (pd.Timedelta rejects 'M' as ambiguous)
@@ -832,6 +842,76 @@ def resolve_linear_params(
 # ---------------------------------------------------------------------------
 # CV fold preparation
 # ---------------------------------------------------------------------------
+
+
+def validate_temporal_fold_coverage(
+    dataset: pl.DataFrame | pd.DataFrame,
+    temporal_by_fold: pl.DataFrame | pd.DataFrame,
+    splits: list[dict[str, Any]],
+    *,
+    date_col: str,
+    min_date_coverage: float = MIN_TEMPORAL_DATE_COVERAGE,
+) -> None:
+    """Fail when a fold-specific temporal artifact does not cover a CV window.
+
+    Coverage is measured on unique decision timestamps rather than entity keys.
+    Temporal model fitting may legitimately skip individual symbols, whose
+    missing values are imputed downstream, but a missing date range indicates
+    that artifact fold IDs or windows do not match the canonical CV splits.
+    """
+    if not 0 < min_date_coverage <= 1:
+        raise ValueError("min_date_coverage must be in (0, 1]")
+
+    if isinstance(dataset, pl.DataFrame):
+        dataset_dates = dataset.select(date_col).unique()[date_col].to_pandas()
+    else:
+        dataset_dates = dataset[date_col].drop_duplicates()
+    if isinstance(temporal_by_fold, pl.DataFrame):
+        temporal_pd = temporal_by_fold.select([date_col, "fold"]).unique().to_pandas()
+    else:
+        temporal_pd = temporal_by_fold[[date_col, "fold"]].drop_duplicates()
+
+    dataset_index = pd.DatetimeIndex(pd.to_datetime(dataset_dates, utc=True)).unique()
+    temporal_pd = temporal_pd.copy()
+    temporal_pd[date_col] = pd.to_datetime(temporal_pd[date_col], utc=True)
+    available_folds = set(temporal_pd["fold"].dropna().astype(int).unique())
+    failures: list[str] = []
+
+    for split in splits:
+        fold_id = int(split["fold"])
+        if fold_id not in available_folds:
+            failures.append(f"fold {fold_id}: artifact fold is missing")
+            continue
+
+        fold_dates = pd.DatetimeIndex(
+            temporal_pd.loc[temporal_pd["fold"] == fold_id, date_col].unique()
+        )
+        for window, start_key, end_key in (
+            ("train", "train_start", "train_end"),
+            ("validation", "val_start", "val_end"),
+        ):
+            start = pd.Timestamp(split[start_key])
+            end = pd.Timestamp(split[end_key])
+            start = start.tz_localize("UTC") if start.tzinfo is None else start.tz_convert("UTC")
+            end = end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC")
+            expected = dataset_index[(dataset_index >= start) & (dataset_index <= end)]
+            if len(expected) == 0:
+                failures.append(f"fold {fold_id} {window}: dataset window is empty")
+                continue
+            covered = int(expected.isin(fold_dates).sum())
+            coverage = covered / len(expected)
+            if coverage < min_date_coverage:
+                failures.append(
+                    f"fold {fold_id} {window}: temporal date coverage "
+                    f"{covered}/{len(expected)} ({coverage:.1%})"
+                )
+
+    if failures:
+        detail = "; ".join(failures)
+        raise ValueError(
+            "Fold-specific temporal artifact is not aligned with the canonical CV splits: "
+            f"{detail}. Regenerate the artifact with generate_cv_splits or migrate its fold IDs."
+        )
 
 
 def _replace_temporal_columns(

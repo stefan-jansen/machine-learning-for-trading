@@ -1,0 +1,26 @@
+account:
+  allow_short_selling: true
+execution:
+  execution_price: quote_side
+  mark_price: price
+  execution_mode: next_bar
+commission:
+  model: percentage
+  rate: 0.0005
+slippage:
+  model: percentage
+  rate: 0.0002
+calendar:
+  calendar: NYSE
+  timezone: UTC
+  data_frequency: daily
+feed:
+  timestamp_col: timestamp
+  entity_col: symbol
+  price_col: instr_mid
+  close_col: close
+  bid_col: instr_bid
+  ask_col: instr_ask
+  mid_col: instr_mid
+metadata:
+  case_study: sp500_options

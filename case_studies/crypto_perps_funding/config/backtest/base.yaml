@@ -1,0 +1,17 @@
+account:
+  allow_short_selling: true
+execution:
+  execution_price: price
+  execution_mode: same_bar
+commission:
+  model: percentage
+  rate: 0.0004
+slippage:
+  model: percentage
+  rate: 0.0001
+calendar:
+  calendar: crypto
+  timezone: UTC
+  data_frequency: irregular
+metadata:
+  case_study: crypto_perps_funding

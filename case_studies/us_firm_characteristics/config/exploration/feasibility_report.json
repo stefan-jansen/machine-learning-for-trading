@@ -1,0 +1,63 @@
+{
+  "case_study_id": "us_firm_characteristics",
+  "computed_at_utc": "2026-05-18T00:58:24.779612+00:00",
+  "data_period": {
+    "start": "1990-01-01",
+    "end": "2016-12-31"
+  },
+  "universe": {
+    "avg_stocks_per_month": 2483,
+    "n_months": 324,
+    "min_stocks_per_month": 1933,
+    "max_stocks_per_month": 2826,
+    "n_stocks_per_fold_min": 2061,
+    "n_stocks_per_fold_max": 2752,
+    "characteristic_coverage_mean": 1.0,
+    "low_coverage_count": 0
+  },
+  "return_distribution_abs_pct": {
+    "median_pre_decimal": 7.451300000000001,
+    "median_post_decimal": 6.7775,
+    "median_pooled": 7.0563
+  },
+  "cost_exceedance_pct": {
+    "above_20bps": 98.53524604229577,
+    "above_60bps": 93.72427588291188
+  },
+  "era_dependent_costs": {
+    "decimalization_date": "2001-01-29",
+    "pre_decimal_rt_bps_mid": 45.0,
+    "post_decimal_rt_bps_mid": 20.0,
+    "horizon_table": [
+      {
+        "era": "Pre-decimal (1990 -- 2001-01-28)",
+        "n_stock_months": 339015,
+        "median_pct": 7.451300000000001,
+        "mean_pct": 11.192863759125702,
+        "p75_pct": 14.485249999999999,
+        "p95_pct": 33.35838999999999,
+        "pct_above_rt_cost": 94.69374511452295,
+        "rt_cost_bps": 45.0
+      },
+      {
+        "era": "Post-decimal (2001-01-29 onward)",
+        "n_stock_months": 441867,
+        "median_pct": 6.7775,
+        "mean_pct": 10.224993585626445,
+        "p75_pct": 13.097449999999998,
+        "p95_pct": 30.82122999999996,
+        "pct_above_rt_cost": 98.05869186882026,
+        "rt_cost_bps": 20.0
+      }
+    ]
+  },
+  "feasibility_ratio_monthly_at_20bps": 35.2815,
+  "walk_forward": {
+    "n_folds_generated": 10,
+    "n_splits_declared": 10,
+    "validation_start_year": 2006,
+    "holdout_start": "2016-01-01",
+    "holdout_end": "2016-12-31",
+    "last_test_end": "2015-12-31"
+  }
+}

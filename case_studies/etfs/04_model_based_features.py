@@ -62,6 +62,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
+import seaborn as sns
 import yaml
 from arch import arch_model
 from hmmlearn.hmm import GaussianHMM
@@ -72,6 +73,7 @@ from sklearn.cluster import KMeans
 from data import load_etfs
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.paths import get_case_study_dir
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
 
@@ -259,13 +261,22 @@ def compute_filtered_probs(model: GaussianHMM, X: np.ndarray) -> np.ndarray:
 def derive_regime_features(
     timestamps: pl.Series,
     filtered_probs: np.ndarray,
-    states: np.ndarray,
     order: np.ndarray,
 ) -> pl.DataFrame:
-    """Derive regime features from HMM output for a single fold window."""
-    states_sorted, filtered_sorted = relabel_states(states, filtered_probs, order)
+    """Derive regime features from HMM output for a single fold window.
 
-    regime_prob_stress = filtered_sorted[:, 1]  # P(high-vol state)
+    All three features derive from the FILTERED posterior (causal). The regime
+    state that drives duration is the argmax of the filtered probability, NOT the
+    Viterbi path (``model.predict``): Viterbi is the global MAP sequence over the
+    whole window, so a validation-period state would depend on future
+    observations and leak into ``regime_log_duration``.
+    """
+    filtered_sorted = filtered_probs[:, order]
+
+    regime_prob_stress = filtered_sorted[:, 1]  # P(high-vol state), filtered
+
+    # Causal regime state: argmax of the filtered 2-state posterior.
+    states_sorted = (regime_prob_stress >= 0.5).astype(int)
 
     # Transition: absolute 1-day change in stress probability
     regime_transition = np.abs(np.diff(regime_prob_stress, prepend=regime_prob_stress[0]))
@@ -343,7 +354,7 @@ spy_cum = spy_full.with_columns(cum_ret=(pl.col("close") / pl.col("close").first
 fig_regime, ax = plt.subplots(figsize=(12, 5))
 dates = spy_cum["timestamp"].to_numpy()
 cum_ret = spy_cum["cum_ret"].to_numpy()
-ax.plot(dates, cum_ret, linewidth=0.8, color="0.3")
+ax.plot(dates, cum_ret, linewidth=0.9, color=COLORS["blue"])
 
 # Shade stressed periods
 stressed = states_sorted_ill == 1
@@ -354,13 +365,20 @@ for i in range(len(stressed)):
         start = dates[i]
         in_stress = True
     elif not stressed[i] and in_stress:
-        ax.axvspan(start, dates[i], alpha=0.15, color="red", linewidth=0)
+        ax.axvspan(start, dates[i], alpha=0.15, color=COLORS["negative"], linewidth=0)
         in_stress = False
 if in_stress:
-    ax.axvspan(start, dates[-1], alpha=0.15, color="red", linewidth=0)
+    ax.axvspan(start, dates[-1], alpha=0.15, color=COLORS["negative"], linewidth=0)
 
-ax.set_ylabel("Cumulative Return (%)")
-ax.set_title("SPY with HMM Stress Regimes (full-sample illustrative)")
+ax.set_xlabel("Date")
+ax.set_ylabel("SPY cumulative return (%)")
+ax.set_title(
+    "The HMM's high-volatility state (shaded) captures the major selloffs: 2008, 2020, 2022",
+    loc="left",
+    color=COLORS["blue"],
+    fontweight="semibold",
+)
+sns.despine()
 fig_regime.tight_layout()
 plt.show()
 
@@ -421,9 +439,8 @@ for fold in all_folds:
     X_fold = spy_fold.select(["log_ret", "vol_21d"]).to_numpy()
 
     filtered = compute_filtered_probs(best_fold_model, X_fold)
-    states = best_fold_model.predict(X_fold)
 
-    regime_df = derive_regime_features(spy_fold["timestamp"], filtered, states, order)
+    regime_df = derive_regime_features(spy_fold["timestamp"], filtered, order)
     regime_df = regime_df.with_columns(pl.lit(fold_idx).alias("fold"))
 
     hmm_fold_results.append(regime_df)
@@ -785,7 +802,7 @@ FEATURES_DIR = CASE_DIR / "features"
 FEATURES_DIR.mkdir(parents=True, exist_ok=True)
 temporal.write_parquet(FEATURES_DIR / "model_based.parquet")
 print(
-    f"Saved: {FEATURES_DIR / 'model_based.parquet'} "
+    f"Saved: features/model_based.parquet "
     f"({len(temporal):,} rows, {len(temporal_cols)} features + fold column)"
 )
 
@@ -793,16 +810,19 @@ print(
 # ## Incremental Evaluation
 #
 # Evaluate feature quality using **validation-period data only** from each
-# fold. We compute cross-sectional Spearman IC for per-asset features and
-# time-series IC for date-level features.
+# **CV** fold. We compute cross-sectional Spearman IC for per-asset features and
+# time-series IC for date-level features. The holdout fold is deliberately
+# EXCLUDED from this development-time readout -- its features are saved for the
+# final out-of-sample evaluation, but letting the holdout inform feature-quality
+# expectations here would break the seal (mirrors the scoping in 02/03).
 
 # %%
 labels = pl.read_parquet(CASE_DIR / "labels" / "fwd_ret_21d.parquet")
 label_col = "fwd_ret_21d"
 
-# Only evaluate on validation periods (not training periods)
+# Only evaluate on validation periods of the CV folds (exclude the holdout fold)
 val_rows = []
-for fold in all_folds:
+for fold in cv_splits:
     fold_idx = fold["fold"]
     val_start = fold["val_start"]
     val_end = fold["val_end"]
@@ -898,6 +918,30 @@ temporal_eval = pl.DataFrame(
 
 print("\nModel-Based Feature Evaluation (validation periods only):")
 print(temporal_eval)
+
+# %%
+# Visualize the IC table: bars sorted by IC, signed by color. No error bars --
+# the two IC types carry different uncertainty scales (date-level = time-series
+# robust_ic bootstrap SE; per-asset garch = daily cross-sectional IC dispersion),
+# so a shared error-bar axis would mislead; exact t/p are in the printed table.
+te = temporal_eval.sort("ic")
+feats = te["feature"].to_list()
+ics = te["ic"].to_numpy()
+bar_colors = [COLORS["blue"] if v >= 0 else COLORS["copper"] for v in ics]
+
+fig_ic, ax = plt.subplots(figsize=(9, max(3.0, 0.4 * len(feats))))
+ax.barh(feats, ics, color=bar_colors)
+ax.axvline(0, color=COLORS["neutral"], linewidth=0.8)
+ax.set_xlabel("IC (validation periods; per-asset = cross-sectional, date-level = time-series)")
+ax.set_title(
+    "Regime-stress and fractional-differencing features carry real IC (up to |0.20|)",
+    loc="left",
+    color=COLORS["blue"],
+    fontweight="semibold",
+)
+sns.despine()
+fig_ic.tight_layout()
+plt.show()
 
 # %% [markdown]
 # **Interpretation**: GARCH conditional volatility is evaluated via

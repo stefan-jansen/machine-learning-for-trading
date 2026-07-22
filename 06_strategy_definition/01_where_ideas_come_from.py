@@ -66,12 +66,10 @@
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
+import polars as pl
 
 from data import load_etfs
-from utils.style import COLORS, apply_ml4t_style
-
-apply_ml4t_style("light")
+from utils.style import COLORS, add_message_title
 
 # %% tags=["parameters"]
 # Production defaults — Papermill injects overrides for CI
@@ -89,14 +87,20 @@ MIN_NAMES = 30  # minimum eligible ETFs in a month to include it
 # returns are total returns.
 
 # %%
-prices = (
-    load_etfs().to_pandas().pivot(index="timestamp", columns="symbol", values="close").sort_index()
+prices = load_etfs().select("timestamp", "symbol", "close")
+monthly = (
+    prices.sort("timestamp")
+    .group_by_dynamic("timestamp", every="1mo", group_by="symbol")
+    .agg(pl.col("close").last())
+    .with_columns(pl.col("timestamp").dt.month_end())
+    .sort(["symbol", "timestamp"])
 )
-monthly = prices.resample("ME").last()
 
-print(f"Daily panel:   {prices.shape[0]:>4} days x {prices.shape[1]} ETFs")
-print(f"Monthly panel: {monthly.shape[0]:>4} months x {monthly.shape[1]} ETFs")
-print(f"Span:          {monthly.index.min():%Y-%m} to {monthly.index.max():%Y-%m}")
+n_days, n_symbols = prices["timestamp"].n_unique(), prices["symbol"].n_unique()
+span = monthly["timestamp"]
+print(f"Daily panel:   {n_days:>4} days x {n_symbols} ETFs")
+print(f"Monthly panel: {span.n_unique():>4} months x {n_symbols} ETFs")
+print(f"Span:          {span.min():%Y-%m} to {span.max():%Y-%m}")
 
 # %% [markdown]
 # ## 2. The signal and the outcome
@@ -112,8 +116,10 @@ print(f"Span:          {monthly.index.min():%Y-%m} to {monthly.index.max():%Y-%m
 # research framework (§6.3–§6.5).
 
 # %%
-momentum = monthly.shift(SKIP) / monthly.shift(LOOKBACK) - 1
-forward_ret = monthly.shift(-1) / monthly - 1
+monthly = monthly.with_columns(
+    momentum=(pl.col("close").shift(SKIP) / pl.col("close").shift(LOOKBACK) - 1).over("symbol"),
+    fwd_ret=(pl.col("close").shift(-1) / pl.col("close") - 1).over("symbol"),
+)
 
 # %% [markdown]
 # ## 3. The simplest test: sort into quintiles, look at forward returns
@@ -142,84 +148,85 @@ forward_ret = monthly.shift(-1) / monthly - 1
 #   (event-like)?
 
 # %%
-records = []
-bench = {}
-for date in momentum.index:
-    sig = momentum.loc[date].dropna()
-    fwd = forward_ret.loc[date].dropna()
-    common = sig.index.intersection(fwd.index)
-    if len(common) < MIN_NAMES:
-        continue
-    sig, fwd = sig[common], fwd[common]
-    # rank-then-qcut so ties never collapse a bucket
-    quintile = pd.qcut(sig.rank(method="first"), N_QUANTILES, labels=range(1, N_QUANTILES + 1))
-    bench[date] = fwd.mean()  # equal-weight universe = the benchmark this month
-    for etf in common:
-        records.append((date, etf, sig[etf], fwd[etf], int(quintile[etf])))
-
-panel = pd.DataFrame(records, columns=["date", "etf", "momentum", "fwd_ret", "quintile"])
-benchmark = pd.Series(bench, name="bench").sort_index()  # monthly equal-weight universe return
-print(f"Cross-sectional observations: {len(panel):,} over {panel.date.nunique()} months")
-
-
-def pct_monthly(r: pd.Series) -> float:
-    """Mean forward 1-month return, in percent."""
-    return r.mean() * 100
-
-
-def bps_monthly(r: pd.Series) -> float:
-    """Mean forward 1-month return, in basis points."""
-    return r.mean() * 1e4
-
-
-# Monthly equal-weight bucket portfolios, then the same buckets NET of the benchmark.
-# We report at the native monthly horizon: the sort ranks once a month and holds for
-# one month, so a monthly return is the honest unit. Annualizing a single-month
-# cross-sectional sort by ^12 would assume the edge recurs every month for a year —
-# which the by-era split below shows it does not.
-bucket = panel.groupby(["date", "quintile"])["fwd_ret"].mean().unstack("quintile")
-bucket_net = bucket.sub(benchmark, axis=0)
+# Eligible cross-section: both signal and outcome present, in months with >= MIN_NAMES
+# names. Sorting by (timestamp, momentum, symbol) breaks any signal ties by symbol so the
+# rank is stable; the quintile then replicates pandas' `qcut` on the rank via its
+# quantile edges (1 + 0.2k(n-1)), so buckets stay balanced and no tie collapses one.
+elig = (
+    monthly.drop_nulls(["momentum", "fwd_ret"])
+    .filter(pl.len().over("timestamp") >= MIN_NAMES)
+    .sort(["timestamp", "momentum", "symbol"])
+)
+rank = pl.col("momentum").rank("ordinal").over("timestamp")
+n_names = pl.len().over("timestamp")
+quintile = pl.lit(1)
+for k in (1, 2, 3, 4):
+    quintile = quintile + (rank > 1 + 0.2 * k * (n_names - 1)).cast(pl.Int32)
+elig = elig.with_columns(quintile=quintile)
 qs = list(range(1, N_QUANTILES + 1))
-gross = pd.Series({q: pct_monthly(bucket[q]) for q in qs})  # %/month
-net_bps = pd.Series({q: bps_monthly(bucket_net[q]) for q in qs})  # bps/month
+print(f"Cross-sectional observations: {elig.height:,} over {elig['timestamp'].n_unique()} months")
 
-print(f"\nBenchmark (equal-weight universe): {pct_monthly(benchmark):.2f}% / month")
+# %%
+# Monthly equal-weight bucket portfolios and the equal-weight benchmark, then each averaged
+# across months. We report at the native monthly horizon: the sort ranks once a month and
+# holds for one month, so a monthly return is the honest unit. Annualizing a single-month
+# cross-sectional sort by ^12 would assume the edge recurs every month — which the by-era
+# split below shows it does not.
+benchmark = elig.group_by("timestamp").agg(bench=pl.col("fwd_ret").mean())
+buckets = elig.group_by(["timestamp", "quintile"]).agg(ret=pl.col("fwd_ret").mean())
+wide = (
+    buckets.pivot(values="ret", index="timestamp", on="quintile")
+    .join(benchmark, on="timestamp")
+    .sort("timestamp")
+)
+
+bench_pct = benchmark["bench"].mean() * 100  # %/month
+gross = [wide[str(q)].mean() * 100 for q in qs]  # %/month, quintile 1..5
+net_bps = [(wide[str(q)] - wide["bench"]).mean() * 1e4 for q in qs]  # bps/month, net of benchmark
+
+print(f"\nBenchmark (equal-weight universe): {bench_pct:.2f}% / month")
 print("Forward 1-month return by momentum quintile:")
-print(pd.DataFrame({"gross_%/mo": gross.round(3), "net_bps/mo": net_bps.round(1)}))
+print(
+    pl.DataFrame(
+        {
+            "quintile": qs,
+            "gross_%/mo": [round(g, 3) for g in gross],
+            "net_bps/mo": [round(b, 1) for b in net_bps],
+        }
+    )
+)
 
 # The top-minus-bottom spread is identical gross or net — the benchmark cancels.
-spread_bps = bps_monthly(bucket[N_QUANTILES]) - bps_monthly(bucket[1])
-long_short = (bucket[N_QUANTILES] - bucket[1]).dropna()  # tradable Q5-Q1, dollar-neutral
-ls_t = long_short.mean() / long_short.std() * np.sqrt(len(long_short))
+long_short = (wide["5"] - wide["1"]).drop_nulls()  # tradable Q5-Q1, dollar-neutral
+spread_bps = net_bps[-1] - net_bps[0]
+ls_t = long_short.mean() / long_short.std() * np.sqrt(long_short.len())
 print(f"\nTop-minus-bottom spread: {spread_bps:.0f} bps / month (same gross or net)")
 print(
-    f"Tradable long-short (Q5-Q1): {bps_monthly(long_short):.0f} bps / month, "
-    f"t = {ls_t:.2f} (n = {len(long_short)}) — before costs"
+    f"Tradable long-short (Q5-Q1): {long_short.mean() * 1e4:.0f} bps / month, "
+    f"t = {ls_t:.2f} (n = {long_short.len()}) — before costs"
 )
 
 # %%
 fig, (axg, axn) = plt.subplots(1, 2, figsize=(11, 4.6))
 labels = [str(q) for q in qs]
 
-bg = axg.bar(labels, gross.values, color=COLORS["slate"], width=0.68)
+bg = axg.bar(labels, gross, color=COLORS["slate"], width=0.68)
 bg[-1].set_color(COLORS["amber"])
-axg.axhline(pct_monthly(benchmark), ls="--", lw=1, color="grey")
-axg.set_title("Raw (gross): every bucket rides the market up", loc="left")
+axg.axhline(bench_pct, ls="--", lw=1, color="grey")
+add_message_title(axg, "Raw (gross): every bucket rides the market up")
 axg.set_xlabel("Momentum quintile")
 axg.set_ylabel("Forward 1-month return, %")
-for x, q in zip(labels, qs):
-    v = gross[q]
+for x, v in zip(labels, gross):
     axg.text(x, v + 0.02, f"{v:.2f}", ha="center", va="bottom", fontsize=10)
 axg.margins(y=0.16)
 
-bn = axn.bar(labels, net_bps.values, color=COLORS["slate"], width=0.68)
+bn = axn.bar(labels, net_bps, color=COLORS["slate"], width=0.68)
 bn[-1].set_color(COLORS["amber"])
 axn.axhline(0, ls="--", lw=1, color="grey")
-axn.set_title("Net of the market: the momentum tilt", loc="left")
+add_message_title(axn, "Net of the market: the momentum tilt")
 axn.set_xlabel("Momentum quintile  (1 = worst  →  5 = best)")
 axn.set_ylabel("Net of market, bps / month")
-for x, q in zip(labels, qs):
-    v = net_bps[q]
+for x, v in zip(labels, net_bps):
     axn.text(
         x,
         v + (0.8 if v >= 0 else -0.8),
@@ -252,38 +259,43 @@ plt.show()
 # everyone learns to read the same price history.
 
 # %%
-era_of = pd.Series(
-    np.where(bucket_net.index < pd.Timestamp("2016-01-01"), "2006–2015", "2016–2025"),
-    index=bucket_net.index,
+wide_era = wide.with_columns(
+    era=pl.when(pl.col("timestamp") < pl.date(2016, 1, 1))
+    .then(pl.lit("2006–2015"))
+    .otherwise(pl.lit("2016–2025"))
 )
 rows = []
 for era in ["2006–2015", "2016–2025"]:
-    m = era_of == era
-    q1, q5 = bps_monthly(bucket_net.loc[m, 1]), bps_monthly(bucket_net.loc[m, N_QUANTILES])
-    ls_e = (bucket.loc[m, N_QUANTILES] - bucket.loc[m, 1]).dropna()
+    e = wide_era.filter(pl.col("era") == era)
+    q1 = (e["1"] - e["bench"]).mean() * 1e4
+    q5 = (e["5"] - e["bench"]).mean() * 1e4
+    ls_e = (e["5"] - e["1"]).drop_nulls()
     rows.append(
         {
             "era": era,
             "Q1_net_bps": round(q1),
             "Q5_net_bps": round(q5),
             "spread_bps": round(q5 - q1),
-            "ls_t": round(ls_e.mean() / ls_e.std() * np.sqrt(len(ls_e)), 2),
-            "months": int(m.sum()),
+            "ls_t": round(ls_e.mean() / ls_e.std() * np.sqrt(ls_e.len()), 2),
+            "months": e.height,
         }
     )
-era_tbl = pd.DataFrame(rows).set_index("era")
+era_tbl = pl.DataFrame(rows)
 print(era_tbl)
 
 # %%
 fig, ax = plt.subplots(figsize=(9, 5))
-eras = era_tbl.index.tolist()
+eras = era_tbl["era"].to_list()
+q1_bps, q5_bps, spreads = (
+    era_tbl["Q1_net_bps"].to_list(),
+    era_tbl["Q5_net_bps"].to_list(),
+    era_tbl["spread_bps"].to_list(),
+)
 x = np.arange(len(eras))
 w = 0.38
-ax.bar(x - w / 2, era_tbl["Q1_net_bps"], w, label="Worst quintile (Q1)", color=COLORS["slate"])
-ax.bar(x + w / 2, era_tbl["Q5_net_bps"], w, label="Best quintile (Q5)", color=COLORS["amber"])
-for xi, (q1, q5, sp) in enumerate(
-    zip(era_tbl["Q1_net_bps"], era_tbl["Q5_net_bps"], era_tbl["spread_bps"])
-):
+ax.bar(x - w / 2, q1_bps, w, label="Worst quintile (Q1)", color=COLORS["slate"])
+ax.bar(x + w / 2, q5_bps, w, label="Best quintile (Q5)", color=COLORS["amber"])
+for xi, (q1, q5, sp) in enumerate(zip(q1_bps, q5_bps, spreads)):
     ax.text(
         xi - w / 2, q1, f"{q1:.0f}", ha="center", va="bottom" if q1 >= 0 else "top", fontsize=10
     )
@@ -295,7 +307,7 @@ ax.axhline(0, lw=0.8, color="grey")
 ax.set_xticks(x)
 ax.set_xticklabels(eras)
 ax.set_ylabel("Forward 1-month return, net of market, bps / month")
-ax.set_title("Net of the market: the spread collapses across eras", loc="left")
+add_message_title(ax, "Net of the market: the spread collapses across eras")
 ax.legend(frameon=False, loc="lower right")
 ax.margins(y=0.2)
 fig.tight_layout()
@@ -320,15 +332,27 @@ plt.show()
 # winners, so we trade little.
 
 # %%
-autocorrs = []
-dates = momentum.index
-for prev, curr in zip(dates[:-1], dates[1:]):
-    a, b = momentum.loc[prev].dropna(), momentum.loc[curr].dropna()
-    common = a.index.intersection(b.index)
-    if len(common) < MIN_NAMES:
-        continue
-    autocorrs.append(a[common].corr(b[common], method="spearman"))
-print(f"Mean month-over-month rank autocorrelation: {np.mean(autocorrs):.3f}")
+# Spearman rank correlation = Pearson correlation of the ranks. For each pair of adjacent
+# months we join on the symbols present in both, require >= MIN_NAMES, and average the
+# per-pair correlations.
+mom = monthly.select("timestamp", "symbol", "momentum").drop_nulls("momentum")
+months = mom["timestamp"].unique().sort().to_list()
+month_index = {t: i for i, t in enumerate(months)}
+mom = mom.with_columns(mi=pl.col("timestamp").replace_strict(month_index, return_dtype=pl.Int32))
+this_month = mom.select("symbol", "momentum", "mi")
+prev_month = mom.select(
+    "symbol", pl.col("momentum").alias("mom_prev"), (pl.col("mi") + 1).alias("mi")
+)
+pairs = (
+    this_month.join(prev_month, on=["symbol", "mi"])
+    .filter(pl.len().over("mi") >= MIN_NAMES)
+    .with_columns(
+        r_curr=pl.col("momentum").rank("average").over("mi"),
+        r_prev=pl.col("mom_prev").rank("average").over("mi"),
+    )
+)
+autocorr = pairs.group_by("mi").agg(rho=pl.corr("r_curr", "r_prev"))["rho"].mean()
+print(f"Mean month-over-month rank autocorrelation: {autocorr:.3f}")
 print("(High → the ranking is persistent → turnover and costs are modest.)")
 
 # %% [markdown]

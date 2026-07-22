@@ -1,0 +1,52 @@
+{
+  "artifact_source": "benchmark_suite.py real-data rerun (250 US equities x 20yr daily, 1998-2018)",
+  "scenario_id": "multi_250_20yr",
+  "scenario_label": "250 assets, 20 years daily",
+  "data_source": "real",
+  "cached": true,
+  "limitations": [
+    "Canonical target-share daily ranking benchmark (long top 25 / short bottom 25), not the case-study weight adapters.",
+    "Backtrader matches the canonical benchmark to floating-point noise on trade count and terminal value.",
+    "Zipline reaches exact trade-count parity with a small terminal-value residual."
+  ],
+  "results": [
+    {
+      "engine_id": "zipline",
+      "engine_label": "Zipline Reloaded",
+      "profile": "zipline_strict",
+      "status": "done",
+      "ml4t_framework_id": "ml4t-zipline-strict",
+      "reference_framework_id": "zipline",
+      "ml4t_num_trades": 226723,
+      "reference_num_trades": 226723,
+      "trade_gap": 0,
+      "trade_gap_pct": 0.0,
+      "ml4t_final_value": 720044.0004815969,
+      "reference_final_value": 720032.799999999,
+      "final_value_gap_abs": 11.200481597916223,
+      "final_value_gap_pct": 1.5555515801386045e-05,
+      "ml4t_runtime_sec": 36.614616364007816,
+      "reference_runtime_sec": 279.36291834700387,
+      "runtime_speedup": 7.629819620931977
+    },
+    {
+      "engine_id": "backtrader",
+      "engine_label": "Backtrader",
+      "profile": "backtrader_strict",
+      "status": "done",
+      "ml4t_framework_id": "ml4t-backtrader-strict",
+      "reference_framework_id": "backtrader",
+      "ml4t_num_trades": 226535,
+      "reference_num_trades": 226535,
+      "trade_gap": 0,
+      "trade_gap_pct": 0.0,
+      "ml4t_final_value": 746797.2146090574,
+      "reference_final_value": 746797.2146090583,
+      "final_value_gap_abs": 9.313225746154785e-10,
+      "final_value_gap_pct": 1.247088977297562e-15,
+      "ml4t_runtime_sec": 52.769607479916885,
+      "reference_runtime_sec": 364.07655423705,
+      "runtime_speedup": 6.8993606665657055
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "case_study": "nasdaq100_microstructure",
+  "label": "fwd_ret_60m",
+  "method": "daily_cross_sectional_mean_close_pct_change",
+  "periods_per_year": 252,
+  "n_symbols_in_universe": 111,
+  "sharpe": 0.35416,
+  "cagr": 0.012699,
+  "vol": 0.037632,
+  "n_periods": 6557,
+  "ts_min": "2020-06-30 14:45:00",
+  "ts_max": "2021-12-30 15:45:00",
+  "by_period": {
+    "overall": {
+      "sharpe": 0.295867,
+      "cagr": 0.009602,
+      "vol": 0.034287,
+      "n_periods": 9859
+    },
+    "validation": {
+      "sharpe": 0.35416,
+      "cagr": 0.012699,
+      "vol": 0.037632,
+      "n_periods": 6557
+    },
+    "holdout": {
+      "sharpe": 0.144699,
+      "cagr": 0.00348,
+      "vol": 0.026416,
+      "n_periods": 3302
+    },
+    "validation_window": [
+      "2020-06-30 14:45:00",
+      "2021-06-30 15:45:00"
+    ],
+    "holdout_window": [
+      "2021-07-01 09:30:00",
+      "2021-12-30 15:45:00"
+    ]
+  }
+}

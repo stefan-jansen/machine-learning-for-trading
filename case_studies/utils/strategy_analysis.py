@@ -1,6 +1,6 @@
 """Strategy analysis figure helpers and assessment writer.
 
-Companion to ``BacktestExplorer`` — produces the figures and structured
+Companion to ``BacktestExplorer`` - produces the figures and structured
 artifacts for each case study's ``strategy_analysis.py`` notebook.
 
 Usage::
@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
+from case_studies.utils.carrier_pins import CARRIER_PINS
 from case_studies.utils.notebook_contracts import degenerate_prediction_sql
 
 # ---------------------------------------------------------------------------
@@ -37,13 +38,13 @@ from case_studies.utils.notebook_contracts import degenerate_prediction_sql
 # Per-CS whitelist of labels eligible to anchor the registered strategy. The
 # only entry today is sp500_options, restricted to ret_to_expiry because the
 # four legacy diagnostic variants (fwd_ret_5d, fwd_ret_10d, fwd_ret_dh_5d,
-# fwd_ret_dh_10d) were dropped from the sweep + registry 2026-05-17 — they
+# fwd_ret_dh_10d) were dropped from the sweep + registry 2026-05-17 - they
 # went through the vectorized backtest path which treats their 5d/10d
 # forward returns as daily returns, inflating Sharpes (e.g. fwd_ret_10d
 # allocation Sharpe ~6.5) to non-credible levels. ret_to_expiry runs through
 # the HTM daily-MTM cohort path and is the only label with an honest cost
 # model for this CS. Mirrors the canonical definition in
-# 20_strategy_synthesis/holdout.py::LABEL_RESTRICTIONS — keep these in sync.
+# 20_strategy_synthesis/holdout.py::LABEL_RESTRICTIONS - keep these in sync.
 LABEL_RESTRICTIONS: dict[str, frozenset[str]] = {
     "sp500_options": frozenset({"ret_to_expiry"}),
 }
@@ -51,21 +52,23 @@ LABEL_RESTRICTIONS: dict[str, frozenset[str]] = {
 
 # Per-CS canonical universe pin: case_study -> strategy.signal.universe_filter
 # value eligible to anchor the registered rank-1. sp500_options trades only the
-# liquid (bottom-quintile half-spread) subset — the full-universe round-trip
+# liquid (bottom-quintile half-spread) subset - the full-universe round-trip
 # option spread consumes the variance-risk-premium edge, so full-universe rows
 # are excluded from rank-1 selection (the full universe is retained only for the
 # Ch18 htm_cost_cascade comparison, never as the deployed carrier). Without this
 # pin, full-universe allocation backtests registered by the standard sweep
 # (e.g. the 2026-05-31 L1-grid rollout) leak into rank-1 by raw Sharpe and
 # orphan the liquid-lineage holdout. Mirrored in 20_strategy_synthesis/holdout.py
-# (select_best_models) — keep in sync.
+# (select_best_models) - keep in sync.
 UNIVERSE_RESTRICTIONS: dict[str, str] = {
     "sp500_options": "liquid",
 }
 
 
-# Per-CS validation-time carrier pins. Avoid pins based on holdout behavior.
-CARRIER_PINS: dict[str, str] = {}
+# Carrier choices are owner-controlled in ``carrier_pins`` and use validation
+# information only. The corrected S&P 500 options carrier is the liquid-universe
+# cross-stage rank-1. Two alternative allocator rows tie its Sharpe exactly, so
+# the deterministic tie-break preserves the simpler equal-weight baseline spec.
 
 
 def rank_returns_on_common_support(
@@ -158,7 +161,7 @@ def select_holdout_self_backtest(
     rank-1 strategy on the holdout prediction set. Matching by strategy
     spec (rather than by max-Sharpe over candidates sharing the
     ``training_hash``) keeps the lookup robust against experimental
-    side-channel allocators — most importantly ``conformal_weighted`` —
+    side-channel allocators - most importantly ``conformal_weighted`` -
     that may share the holdout pred set but diverge from val rank-1's
     allocator method. Without this guard, an allocator variant whose
     holdout Sharpe happens to exceed the canonical lineage's silently
@@ -218,7 +221,7 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
     When a ``walk_forward_v2`` conformal candidate is present, every candidate
     is re-ranked on exact common timestamp support. Holdout match is by
     training_hash on the rank-1's prediction set. Use this in every strategy_analysis notebook
-    rather than hardcoding hashes — hardcoded hashes go stale every time the
+    rather than hardcoding hashes - hardcoded hashes go stale every time the
     sweep is rebuilt, and queries that forget LABEL_RESTRICTIONS surface the
     diagnostic-variant rows (sp500_options' fwd_ret_10d Sharpe ≈ 9.7) as
     bogus rank-1 candidates.
@@ -251,8 +254,8 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
     if carrier_pin:
         # Documented a-priori carrier pin: resolve directly to the pinned
         # validation backtest rather than the max-Sharpe cross-stage rank-1.
-        # See CARRIER_PINS for the rationale (statistical tie broken on CI
-        # width + diversification at validation time).
+        # The owner-controlled pin is a validation-time choice. Current-lineage
+        # carrier decisions are deferred until all model producers finish.
         val_sql = base_select + (
             " WHERE b.backtest_hash LIKE ?"
             " AND p.split = 'validation'"
@@ -276,7 +279,7 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
         if universe_pin:
             val_sql += " AND json_extract(b.spec_json, '$.strategy.signal.universe_filter') = ?"
             params = params + (universe_pin,)
-        # Tie-break: among rows with identical Sharpe (e.g. the signal-stage
+        # Tie-break: among rows with identical Sharpe (e.g. the equal-weight baseline
         # equal-weight selection and its economically identical equal_weight
         # allocation-stage re-run, which share a prediction), prefer the
         # signal-only spec (no allocation block). That is the spec the holdout
@@ -537,7 +540,7 @@ def plot_ic_vs_sharpe(
     ew_sharpe: float | None = None,
     ax: plt.Axes | None = None,
 ) -> plt.Figure:
-    """IC vs signal-stage Sharpe scatter with annotations.
+    """IC vs equal-weight baseline Sharpe scatter with annotations.
 
     Parameters
     ----------
@@ -552,7 +555,7 @@ def plot_ic_vs_sharpe(
     -------
     plt.Figure
     """
-    # Load all signal-stage backtests
+    # Load all equal-weight baseline backtests
     all_bt = explorer.best(stage="signal", top_n=9999)
     if all_bt.is_empty():
         fig, ax = plt.subplots()
@@ -759,7 +762,7 @@ def plot_sharpe_waterfall(
                 stacklevel=2,
             )
 
-    # value labels — always above the upper edge so they don't overlap a CI bar
+    # value labels - always above the upper edge so they don't overlap a CI bar
     for i, (bar, val) in enumerate(zip(bars, sharpes, strict=False)):
         # Only use ci_hi as the anchor when the CI actually brackets the
         # point estimate (see ci_brackets_point above); otherwise the
@@ -1235,11 +1238,11 @@ def compute_cost_bps(setup: dict) -> float:
     """Per-leg cost in bps from a case-study setup.yaml.
 
     Precedence:
-    1. ``costs.per_leg_cost_bps_range`` — average of the declared range.
-    2. ``costs.fee_schedule`` + ``costs.cost_tiers`` — tier-weighted average
+    1. ``costs.per_leg_cost_bps_range`` - average of the declared range.
+    2. ``costs.fee_schedule`` + ``costs.cost_tiers`` - tier-weighted average
        of taker/maker fees (tiered structures e.g. crypto).
-    3. ``costs.fee_schedule`` with only taker_bps/maker_bps — simple average.
-    4. Fallback ``10.0`` — explicit last resort.
+    3. ``costs.fee_schedule`` with only taker_bps/maker_bps - simple average.
+    4. Fallback ``10.0`` - explicit last resort.
 
     setup.yaml is authoritative. The fallback (10.0) is hit only when the
     case study does not declare any cost structure; flag such a case study
@@ -1247,7 +1250,7 @@ def compute_cost_bps(setup: dict) -> float:
 
     Note on crypto (precedence 3 today): the `cost_tiers` block that
     formerly produced a tier-weighted ~3.47 bps was removed in commit
-    `2b3bff1a` (setup.yaml reader-cleanup pass) — the majors/alts
+    `2b3bff1a` (setup.yaml reader-cleanup pass) - the majors/alts
     breakdown lives in the inline YAML comment now, not as machine-
     readable data. The simple (taker+maker)/2 = 3.0 bps headline is
     intentional under the post-cleanup config; if a future revision
@@ -1360,10 +1363,10 @@ def compute_operating_profile(lineage: dict, setup: dict) -> pl.DataFrame:
 
     rows = [
         {"property": "Trading cadence", "value": cadence},
-        {"property": "Portfolio concentration (top_k)", "value": str(top_k) if top_k else "—"},
-        {"property": "Allocator", "value": (allocator or "—").replace("_", " ")},
-        {"property": "Cost assumption", "value": f"{cost_bps} bps/leg" if cost_bps else "—"},
-        {"property": "Worst drawdown", "value": f"{worst_dd:.1%}" if worst_dd else "—"},
+        {"property": "Portfolio concentration (top_k)", "value": str(top_k) if top_k else "-"},
+        {"property": "Allocator", "value": (allocator or "-").replace("_", " ")},
+        {"property": "Cost assumption", "value": f"{cost_bps} bps/leg" if cost_bps else "-"},
+        {"property": "Worst drawdown", "value": f"{worst_dd:.1%}" if worst_dd else "-"},
     ]
 
     return pl.DataFrame(rows)
@@ -1502,7 +1505,7 @@ def build_all_synthesis(
                     "n_folds": row.get("n_predictions", 0),
                 }
 
-        # --- backtest: signal-stage champion ---
+        # --- backtest: equal-weight baseline champion ---
         cs_bt = bt_df.filter(pl.col("case_study") == display)
         backtest_dict: dict[str, Any] = {}
         if not cs_bt.is_empty():
@@ -1587,7 +1590,7 @@ def build_all_synthesis(
 
         # --- costs ---
         # A pinned CS MUST carry cost/risk on its spine prediction; falling back
-        # to None here would pool full-universe rows — the exact cost-defeat-demo
+        # to None here would pool full-universe rows - the exact cost-defeat-demo
         # leak the pin prevents. Fail loudly rather than leak silently.
         skip_cost_risk = False
         if cs in pin_cost_risk_to_spine and spine_pred is None:
@@ -1600,7 +1603,7 @@ def build_all_synthesis(
             # Test-mode escape hatch: the pinned carrier is registered out-of-band
             # (e.g. nasdaq's cost-feasible ensemble), so an isolated test registry
             # has no carrier rows to resolve a spine from. Mark cost/risk
-            # not-applicable rather than pooling full-universe rows — the same leak
+            # not-applicable rather than pooling full-universe rows - the same leak
             # the hard raise prevents in production (where allow_missing_spine=False).
             skip_cost_risk = True
         cost_risk_pred = spine_pred if cs in pin_cost_risk_to_spine else None

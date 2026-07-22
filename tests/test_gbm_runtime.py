@@ -568,7 +568,7 @@ def test_gbm_registration_uses_the_lookup_spec_and_iteration_checkpoint(
 
     def capture_training(_case_study, *, spec, **_kwargs):
         captured["spec"] = spec
-        return "training"
+        return registry.training_hash_from_spec(spec)
 
     monkeypatch.setattr(registry, "register_training_run", capture_training)
 

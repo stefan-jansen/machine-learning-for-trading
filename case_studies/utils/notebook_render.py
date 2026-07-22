@@ -34,7 +34,10 @@ from case_studies.utils.analytics import (
     _query,
     _registry_path,
 )
-from case_studies.utils.notebook_contracts import degenerate_prediction_sql
+from case_studies.utils.notebook_contracts import (
+    degenerate_prediction_sql,
+    full_coverage_prediction_sql,
+)
 from utils.style import COLORS
 
 # ---------------------------------------------------------------------------
@@ -240,6 +243,7 @@ def selection_adjusted_leader_table(
         JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
         JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
         JOIN training_runs t ON p.training_hash = t.training_hash
+        JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
         LEFT JOIN cohort_metrics cm
                ON cm.cohort_type = 'family'
               AND cm.stage = b.stage
@@ -250,6 +254,7 @@ def selection_adjusted_leader_table(
           {label_clause}
           AND bm.sharpe IS NOT NULL
           {degenerate_prediction_sql("p.prediction_hash")}
+          {full_coverage_prediction_sql("p", "t", "pm")}
     """
     rows = _query(db, sql, tuple(params))
     if rows.is_empty():
@@ -651,11 +656,12 @@ def conformal_coverage_diagnostic(
     """Per-family inductive split-conformal coverage at nominal levels.
 
     For each family's rank-1 validation config (by ``ic_mean_daily``), loads
-    OOF predictions and uses **fold 0** as a calibration set to derive a
-    symmetric absolute-residual quantile, then measures empirical coverage
-    on the remaining folds at each nominal level. Interval width is reported
-    as a fraction of the actuals' standard deviation, so families with
-    different return scales are comparable.
+    OOF predictions and uses the earliest validation fold as a calibration
+    set to derive a symmetric absolute-residual quantile, then measures
+    empirical coverage on later folds at each nominal level. Numeric fold ids
+    are not chronological under backward walk-forward splitting. Interval
+    width is reported as a fraction of the actuals' standard deviation, so
+    families with different return scales are comparable.
 
     Returns columns:
         family, config_name, nominal_level,
@@ -678,7 +684,8 @@ def conformal_coverage_diagnostic(
             t.family,
             t.config_name,
             p.prediction_hash,
-            pm.ic_mean_daily
+            pm.ic_mean_daily,
+            pm.ic_n_days
         FROM training_runs t
         JOIN prediction_sets p ON t.training_hash = p.training_hash
         JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
@@ -692,7 +699,14 @@ def conformal_coverage_diagnostic(
         return pl.DataFrame()
 
     leaders = (
-        rows.sort("ic_mean_daily", descending=True, nulls_last=True).group_by("family").first()
+        rows.with_columns(pl.col("ic_n_days").max().over("family").alias("_family_days"))
+        .filter(
+            pl.col("ic_n_days").is_not_null(),
+            pl.col("ic_n_days") == pl.col("_family_days"),
+        )
+        .sort("ic_mean_daily", descending=True, nulls_last=True)
+        .group_by("family")
+        .first()
     )
 
     pred_dir = db.parent / "predictions"
@@ -718,7 +732,7 @@ def conformal_coverage_diagnostic(
         if "y_true" not in df.columns or "y_score" not in df.columns:
             continue
         df = df.drop_nulls(["y_true", "y_score"])
-        if df.height == 0 or "fold_id" not in df.columns:
+        if df.height == 0 or "fold_id" not in df.columns or "timestamp" not in df.columns:
             continue
 
         df = df.with_columns((pl.col("y_true") - pl.col("y_score")).abs().alias("abs_resid"))
@@ -726,12 +740,18 @@ def conformal_coverage_diagnostic(
         if not np.isfinite(scale) or scale == 0:
             continue
 
-        fold_ids = sorted(df["fold_id"].unique().to_list())
-        if len(fold_ids) < 2:
+        fold_windows = (
+            df.group_by("fold_id")
+            .agg(pl.col("timestamp").min().alias("validation_start"))
+            .sort("validation_start")
+        )
+        if fold_windows.height < 2:
             continue
 
-        cal = df.filter(pl.col("fold_id") == fold_ids[0])
-        tst = df.filter(pl.col("fold_id").is_in(fold_ids[1:]))
+        calibration_fold = fold_windows["fold_id"][0]
+        test_folds = fold_windows["fold_id"][1:].to_list()
+        cal = df.filter(pl.col("fold_id") == calibration_fold)
+        tst = df.filter(pl.col("fold_id").is_in(test_folds))
         if cal.height < 30 or tst.height < 30:
             continue
 

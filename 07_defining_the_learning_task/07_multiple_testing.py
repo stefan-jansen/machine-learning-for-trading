@@ -43,13 +43,13 @@
 #
 # ## Prerequisites
 #
-# - `06_ic_inference` — provides per-factor HAC inference whose p-values feed
+# - `06_ic_inference` - provides per-factor HAC inference whose p-values feed
 #   the BH/Holm/Rademacher corrections here.
 # - Familiarity with the family-wise error rate (FWER) and false discovery
 #   rate (FDR), and with the Sharpe ratio's distribution under selection.
 
 # %%
-"""Multiple Testing — Bonferroni, FDR, and deflated Sharpe corrections for strategy evaluation."""
+"""Multiple Testing - Bonferroni, FDR, and deflated Sharpe corrections for strategy evaluation."""
 
 from __future__ import annotations
 
@@ -79,6 +79,7 @@ from scipy import stats
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS  # importing utils.style activates the ml4t Plotly template
 
 warnings.filterwarnings("ignore")
 
@@ -192,7 +193,7 @@ fig.add_trace(
         x=observed_ics,
         nbinsx=25,
         name="Factor ICs",
-        marker_color="#1f77b4",
+        marker_color=COLORS["blue"],
         opacity=0.7,
     )
 )
@@ -200,22 +201,21 @@ fig.add_trace(
 fig.add_vline(
     x=best_ic,
     line_dash="dash",
-    line_color="#f97316",
+    line_color=COLORS["amber"],
     annotation_text=f"Selected: {best_ic:.4f}",
 )
 
 fig.add_vline(
     x=0,
     line_dash="dot",
-    line_color="gray",
+    line_color=COLORS["neutral"],
     annotation_text="True IC = 0",
 )
 
 fig.update_layout(
-    title="Factor IC Distribution (All Noise Factors)",
+    title="Selecting the best of 100 pure-noise factors manufactures a positive IC",
     xaxis_title="Mean IC",
     yaxis_title="Count",
-    template="plotly_white",
     height=350,
 )
 
@@ -354,13 +354,13 @@ fig.add_trace(
         x=p_values,
         nbinsx=20,
         name="P-values",
-        marker_color="#1f77b4",
+        marker_color=COLORS["blue"],
     ),
     row=1,
     col=1,
 )
 
-fig.add_vline(x=0.05, line_dash="dash", line_color="#f97316", row=1, col=1)
+fig.add_vline(x=0.05, line_dash="dash", line_color=COLORS["amber"], row=1, col=1)
 
 # BH procedure visualization
 sorted_idx = np.argsort(p_values)
@@ -374,7 +374,7 @@ fig.add_trace(
         y=sorted_p,
         mode="markers",
         name="Sorted p-values",
-        marker=dict(size=5, color="#1f77b4"),
+        marker=dict(size=5, color=COLORS["blue"]),
     ),
     row=1,
     col=2,
@@ -386,13 +386,16 @@ fig.add_trace(
         y=bh_threshold,
         mode="lines",
         name="BH threshold",
-        line=dict(dash="dash", color="#f97316"),
+        line=dict(dash="dash", color=COLORS["amber"]),
     ),
     row=1,
     col=2,
 )
 
-fig.update_layout(height=350, template="plotly_white")
+fig.update_layout(
+    height=350,
+    title_text="BH-FDR keeps discoveries below the rank-scaled threshold line",
+)
 fig.update_xaxes(title_text="P-Value", row=1, col=1)
 fig.update_yaxes(title_text="Count", row=1, col=1)
 fig.update_xaxes(title_text="Rank", row=1, col=2)
@@ -406,7 +409,7 @@ fig.show()
 # BH controls **FDR** (the expected proportion of false discoveries among rejections).
 # Holm-Bonferroni controls **FWER** (the probability of making *any* false discovery).
 #
-# Use FWER when even one false positive is unacceptable — e.g., deploying a new
+# Use FWER when even one false positive is unacceptable - e.g., deploying a new
 # strategy that incurs real capital risk.
 
 # %%
@@ -460,7 +463,7 @@ print(
 )
 
 # %% [markdown]
-# A ratio near 100% means factors are nearly independent — the full multiple-testing
+# A ratio near 100% means factors are nearly independent - the full multiple-testing
 # penalty applies. A ratio well below 100% signals correlation among candidates,
 # meaning the effective hypothesis count is lower than the nominal count.
 
@@ -644,7 +647,7 @@ fig.add_trace(
     go.Histogram(
         x=t_stats[~true_mask],
         name="Noise factors",
-        marker_color="gray",
+        marker_color=COLORS["neutral"],
         opacity=0.6,
         nbinsx=30,
     ),
@@ -656,7 +659,7 @@ fig.add_trace(
     go.Histogram(
         x=t_stats[true_mask],
         name="True factors",
-        marker_color="#2166ac",
+        marker_color=COLORS["blue"],
         opacity=0.8,
         nbinsx=15,
     ),
@@ -665,7 +668,7 @@ fig.add_trace(
 )
 
 # Threshold lines with annotations
-for thresh, label, color in [(2.0, "t=2.0", "#f97316"), (3.0, "t=3.0", "#2166ac")]:
+for thresh, label, color in [(2.0, "t=2.0", COLORS["amber"]), (3.0, "t=3.0", COLORS["blue"])]:
     for sign in [1, -1]:
         fig.add_vline(x=sign * thresh, line_dash="dash", line_color=color, row=1, col=1)
     fig.add_annotation(
@@ -682,18 +685,18 @@ for thresh, label, color in [(2.0, "t=2.0", "#f97316"), (3.0, "t=3.0", "#2166ac"
         col=1,
     )
 
-# Method comparison — colorblind-safe blue/orange
+# Method comparison - colorblind-safe blue/orange
 methods = ["Naive (t>2)", "Harvey (t>3)", "BH-FDR", "Holm-Bonf"]
 tp_counts = [naive_tp, harvey_tp, bh_tp, holm_tp]
 fp_counts = [naive_fp, harvey_fp, bh_fp, holm_fp]
 
 fig.add_trace(
-    go.Bar(x=methods, y=tp_counts, name="True Positives", marker_color="#2166ac"),
+    go.Bar(x=methods, y=tp_counts, name="True Positives", marker_color=COLORS["blue"]),
     row=1,
     col=2,
 )
 fig.add_trace(
-    go.Bar(x=methods, y=fp_counts, name="False Positives", marker_color="#f97316"),
+    go.Bar(x=methods, y=fp_counts, name="False Positives", marker_color=COLORS["amber"]),
     row=1,
     col=2,
 )
@@ -701,14 +704,18 @@ fig.add_trace(
 fig.add_hline(
     y=n_true,
     line_dash="dot",
-    line_color="gray",
+    line_color=COLORS["neutral"],
     row=1,
     col=2,
     annotation_text=f"N true = {n_true}",
     annotation_position="top left",
 )
 
-fig.update_layout(height=400, template="plotly_white", barmode="stack")
+fig.update_layout(
+    height=400,
+    barmode="stack",
+    title_text="Stricter thresholds trade true discoveries for fewer false positives",
+)
 fig.update_xaxes(title_text="t-Statistic (HAC)", row=1, col=1)
 fig.update_yaxes(title_text="Count", row=1, col=1)
 fig.update_yaxes(title_text="Count", row=1, col=2)
@@ -848,7 +855,7 @@ else:
 #
 # The synthetic simulations above use known ground truth to verify the
 # corrections work. Now we apply the same pipeline to real features on
-# the ETF universe — the same data used in notebooks 05, 06, and 08.
+# the ETF universe - the same data used in notebooks 05, 06, and 08.
 #
 # We compute 13 candidate features (momentum at 6 lookbacks, reversal
 # at 3 horizons, realized volatility, and volume ratios) and test each
@@ -993,7 +1000,7 @@ sort_idx = np.argsort(etf_p)
 sorted_names = [etf_test_results[i]["feature"] for i in sort_idx]
 sorted_ics = [etf_test_results[i]["ic"] for i in sort_idx]
 sorted_bh = [bool(etf_bh["rejected"][i]) for i in sort_idx]
-colors_etf = ["#2166ac" if b else "lightgray" for b in sorted_bh]
+colors_etf = [COLORS["amber"] if b else COLORS["neutral"] for b in sorted_bh]
 
 fig = go.Figure(
     go.Bar(
@@ -1003,18 +1010,17 @@ fig = go.Figure(
         marker_color=colors_etf,
     )
 )
-fig.add_vline(x=0, line_dash="dash", line_color="gray")
+fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
 fig.update_layout(
-    title="ETF Feature IC — no feature survives BH-FDR at alpha=0.05",
+    title="ETF Feature IC - no feature survives BH-FDR at alpha=0.05",
     xaxis_title="Mean IC (HAC)",
     height=400,
-    template="plotly_white",
 )
 fig.show()
 
 # %% [markdown]
 # The Rademacher ratio is well below 100%, reflecting the high correlation
-# among momentum variants — testing 6 lookbacks is not 6 independent trials.
+# among momentum variants - testing 6 lookbacks is not 6 independent trials.
 # Even with this milder effective penalty, most features do not survive BH-FDR
 # correction after HAC inference.
 #
@@ -1035,7 +1041,7 @@ fig.show()
 # auditable.
 
 # %%
-# Build structured output — base report with naive and Harvey thresholds
+# Build structured output - base report with naive and Harvey thresholds
 discovery_report = {
     "n_factors_tested": n_factors_zoo,
     "n_true_factors": n_true,
@@ -1109,7 +1115,7 @@ n_days = N_DAYS_DSR
 
 strategy_returns = [rng_dsr.standard_normal(n_days) * 0.01 for _ in range(n_strategies)]
 
-# Apply DSR to all strategies — picks best and adjusts
+# Apply DSR to all strategies - picks best and adjusts
 dsr_result = deflated_sharpe_ratio(strategy_returns, frequency="daily")
 
 print(
@@ -1238,7 +1244,7 @@ display(mintrl_df)
 # %% [markdown]
 # **Interpretation**: A strategy with Sharpe 1.0 needs ~2.7 years of daily data
 # for significance. With `variance_trials=0` the FWER correction collapses to
-# the single-test case — all N columns are identical. In practice, when strategy
+# the single-test case - all N columns are identical. In practice, when strategy
 # Sharpe ratios vary (`variance_trials > 0`), larger N increases the required
 # track record because the expected best-by-chance Sharpe grows with N.
 #

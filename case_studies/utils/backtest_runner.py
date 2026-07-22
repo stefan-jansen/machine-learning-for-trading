@@ -285,14 +285,15 @@ def precompute_weights(
     label: str = "",
     case_study: str = "",
     prediction_hash: str | None = None,
+    conformal_widths: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Compute allocation weights from a strategy spec, without running the engine.
 
     Use this to avoid redundant MVO/HRP computation in Ch19 risk sweeps
     where the same allocation weights are tested with different risk overlays.
 
-    ``prediction_hash`` is required for conformal allocation because its
-    calibration widths are stored beside the corresponding predictions.
+    ``prediction_hash`` is required for the ``conformal_weighted`` allocation
+    method (it loads that prediction's conformal widths); other methods ignore it.
 
     Returns
     -------
@@ -316,6 +317,7 @@ def precompute_weights(
             label=label,
             case_study=case_study,
             prediction_hash=prediction_hash,
+            conformal_widths=conformal_widths,
         )
     return weights
 
@@ -1828,6 +1830,7 @@ def _apply_allocation(
     label: str = "",
     case_study: str = "",
     prediction_hash: str | None = None,
+    conformal_widths: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Post-process signal weights with an allocation method.
 
@@ -1922,13 +1925,15 @@ def _apply_allocation(
         alpha = float(alloc_spec.get("alpha", 0.20))
         min_calibration_n = int(alloc_spec.get("min_calibration_n", 30))
         calibration_version = str(alloc_spec.get("calibration_version", "walk_forward_v2"))
-        widths = load_conformal_widths(
-            case_study,
-            prediction_hash,
-            alpha=alpha,
-            min_calibration_n=min_calibration_n,
-            calibration_version=calibration_version,
-        )
+        widths = conformal_widths
+        if widths is None:
+            widths = load_conformal_widths(
+                case_study,
+                prediction_hash,
+                alpha=alpha,
+                min_calibration_n=min_calibration_n,
+                calibration_version=calibration_version,
+            )
         supported_timestamps = widths.select("timestamp").unique()
         rebal_preds = rebal_preds.join(supported_timestamps, on="timestamp", how="inner")
         if rebal_preds.is_empty():

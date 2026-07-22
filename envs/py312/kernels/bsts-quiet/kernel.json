@@ -1,0 +1,10 @@
+{
+  "argv": [
+    "/opt/bsts/bin/python",
+    "/app/envs/py312/bsts_kernel.py",
+    "-f",
+    "{connection_file}"
+  ],
+  "display_name": "Python 3.12 (BSTS, quiet)",
+  "language": "python"
+}

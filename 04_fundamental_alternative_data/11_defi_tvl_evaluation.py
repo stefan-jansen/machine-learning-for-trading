@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -215,9 +215,9 @@ fig = go.Figure(
         x=horizon_labels,
         y=signal_labels,
         colorscale=[
-            [0.0, "#C62828"],  # negative IC (red)
-            [0.5, "#F5F5F5"],  # zero IC (neutral)
-            [1.0, "#2E7D32"],  # positive IC (green)
+            [0.0, COLORS["negative"]],  # negative IC (red)
+            [0.5, COLORS["silver"]],  # zero IC (neutral)
+            [1.0, COLORS["positive"]],  # positive IC (green)
         ],
         zmid=0,  # Center colorscale at 0
         text=[[f"{v:.3f}" for v in row] for row in ic_matrix],
@@ -303,7 +303,7 @@ fig.add_trace(
         name="Rolling IC",
         line=dict(color=COLORS["slate"], width=1.5),
         fill="tozeroy",
-        fillcolor="rgba(4, 138, 129, 0.2)",
+        fillcolor="rgba(26, 45, 74, 0.15)",
     )
 )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
@@ -608,7 +608,7 @@ fig.add_trace(
             "bar": {"color": COLORS["blue"]},
             "steps": [
                 {"range": [0, 2], "color": COLORS["negative"]},
-                {"range": [2, 5], "color": "#FFC107"},
+                {"range": [2, 5], "color": COLORS["amber"]},
                 {"range": [5, 10], "color": COLORS["positive"]},
             ],
             "threshold": {
@@ -633,7 +633,7 @@ fig.add_trace(
             "bar": {"color": COLORS["slate"]},
             "steps": [
                 {"range": [0, 50], "color": COLORS["negative"]},
-                {"range": [50, 75], "color": "#FFC107"},
+                {"range": [50, 75], "color": COLORS["amber"]},
                 {"range": [75, 100], "color": COLORS["positive"]},
             ],
         },
@@ -651,7 +651,7 @@ fig.add_trace(
         name="Rolling IC",
         line=dict(color=COLORS["slate"], width=2),
         fill="tozeroy",
-        fillcolor="rgba(4, 138, 129, 0.2)",
+        fillcolor="rgba(26, 45, 74, 0.15)",
         showlegend=False,
     ),
     row=2,

@@ -24,7 +24,7 @@
 # ## Purpose
 #
 # This notebook provides a **standardized diagnostic survey** across all ML4T datasets.
-# No cleaning is performed—just assessment. The output is a "health report" identifying
+# No cleaning is performed - just assessment. The output is a "health report" identifying
 # which datasets need active preprocessing versus which are already in good shape.
 #
 # ## Learning Objectives
@@ -74,6 +74,7 @@ from data import (
     load_fx_pairs,
     load_us_equities,
 )
+from utils.style import COLORS  # importing utils.style activates the ml4t Plotly template
 
 warnings.filterwarnings("ignore")
 # Suppress chatty INFO logs from ml4t.diagnostic so output cells stay focused on results.
@@ -378,24 +379,27 @@ def coverage_heatmap(
     period_labels = [str(p)[:7] for p in periods]  # YYYY-MM format
     matrix = pivot_df.drop("period").to_numpy()
 
-    # Create heatmap
+    # Create heatmap - present bars are filled (blue), missing periods stay white, so the
+    # listing/delisting staircase reads as "where do we have data" rather than the reverse.
     fig = go.Figure(
         data=go.Heatmap(
             z=matrix,
             x=symbols,
             y=period_labels,
-            colorscale=[[0, "#2166ac"], [1, "#f7f7f7"]],  # Blue=missing, White=present
+            colorscale=[[0, "white"], [1, COLORS["blue"]]],
             showscale=False,
             hovertemplate="Symbol: %{x}<br>Period: %{y}<br>Has data: %{z}<extra></extra>",
         )
     )
 
+    # Cap the pixel height so a multi-decade monthly panel renders as a readable block
+    # instead of an unusable vertical strip (588 months × 15px would be > 8000px tall).
     fig.update_layout(
         title=title,
         xaxis_title="Symbol",
         yaxis_title="Period",
-        height=max(400, len(periods) * 15),
-        width=max(600, len(symbols) * 15),
+        height=min(800, max(400, len(periods) * 15)),
+        width=min(900, max(600, len(symbols) * 15)),
     )
 
     return fig
@@ -933,8 +937,9 @@ if us_equities is not None:
 # %% [markdown]
 # ### Coverage Heatmap: US Equities
 #
-# Visualize data availability across time and assets. The staircase pattern
-# along the edges reflects new listings (lower-left) and delistings (upper-right).
+# Visualize data availability across time and assets. Shaded cells mark months
+# with data; white marks gaps. The staircase pattern along the edges reflects
+# new listings (lower-left) and delistings (upper-right).
 
 # %%
 if us_equities is not None:
@@ -943,7 +948,7 @@ if us_equities is not None:
         time_col="timestamp",
         symbol_col="symbol",
         value_col="close",
-        title="US Equities: Monthly Data Coverage",
+        title="US equities is survivorship-free: assets enter and exit as they list and delist",
         max_symbols=50,
     )
     fig.update_layout(
@@ -1122,7 +1127,7 @@ if fx_pairs is not None:
 # (plus `ret`, `timestamp`, and a `split` indicator). Coverage is engineered
 # upstream: rows that fail the source paper's data-availability rules are
 # dropped before the panel is published, so the columns themselves arrive
-# dense — but the *firm-month* footprint shrinks substantially relative to a
+# dense - but the *firm-month* footprint shrinks substantially relative to a
 # raw CRSP–Compustat join.
 
 # %%
@@ -1249,7 +1254,7 @@ if "etfs" in diagnostic_results:
 # %% [markdown]
 # SPY daily returns strongly reject normality ($p \approx 0$), driven by
 # excess kurtosis (fat tails). This confirms that robust scaling and
-# winsorization — not standard z-scoring — are appropriate for financial
+# winsorization - not standard z-scoring - are appropriate for financial
 # returns. See `02_preprocessing_pipeline` for winsorization in practice.
 
 # %% [markdown]
@@ -1272,7 +1277,7 @@ if "etfs" in diagnostic_results:
     print(f"SPY Returns - Consensus: {return_stat.consensus}")
 
 # %% [markdown]
-# Prices are non-stationary (unit root), returns are stationary — the
+# Prices are non-stationary (unit root), returns are stationary - the
 # expected result. This validates the standard practice of using returns
 # (or differences) rather than levels as model inputs. Chapter 9 covers
 # formal time series analysis including ADF, KPSS, and Phillips-Perron tests.
@@ -1283,16 +1288,16 @@ if "etfs" in diagnostic_results:
 # Based on the diagnostic survey, the datasets fall into two groups:
 #
 # **Ready for direct use** (no structural cleaning needed):
-# - **ETFs** — complete OHLCV coverage; outlier flags reflect Yahoo adjustment artifacts.
-# - **Crypto perpetuals and premium** — complete coverage, 8-hour-aligned timestamps.
-# - **CME futures** — session-aligned bars across 30 products with no null closes.
-# - **Firm Characteristics** — column-level coverage is complete by construction;
+# - **ETFs** - complete OHLCV coverage; outlier flags reflect Yahoo adjustment artifacts.
+# - **Crypto perpetuals and premium** - complete coverage, 8-hour-aligned timestamps.
+# - **CME futures** - session-aligned bars across 30 products with no null closes.
+# - **Firm Characteristics** - column-level coverage is complete by construction;
 #   downstream models inherit the source paper's coverage rule.
 #
 # **Require active preprocessing** (see `02_preprocessing_pipeline`):
-# 1. **US Equities** — penny-stock filter (1.4% of rows below $1), extreme-return
+# 1. **US Equities** - penny-stock filter (1.4% of rows below $1), extreme-return
 #    handling (837 rows above 100% daily moves), and 2,739 price-spike bars.
-# 2. **FX Pairs** — of 11,344 weekend timestamps, 11,339 are legitimate Sunday
+# 2. **FX Pairs** - of 11,344 weekend timestamps, 11,339 are legitimate Sunday
 #    reopen bars (at or after 21:00 UTC) that belong in the panel; only 5
 #    Saturday or Sunday-daytime bars are anomalies to filter before the
 #    spot-vs-forward analytics in §7.2.
@@ -1303,8 +1308,8 @@ if "etfs" in diagnostic_results:
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Index integrity** is fundamental — time monotonicity and uniqueness must pass
-# 2. **Coverage varies by dataset** — firm characteristics has natural sparsity; OHLCV should be complete
+# 1. **Index integrity** is fundamental - time monotonicity and uniqueness must pass
+# 2. **Coverage varies by dataset** - firm characteristics has natural sparsity; OHLCV should be complete
 # 3. **Domain violations** (negative prices/volume) indicate data quality issues
 # 4. **Extreme returns** in US equities often signal corporate actions (splits, delistings)
 # 5. **Calendar alignment** matters for FX (weekends) and crypto (24/7)

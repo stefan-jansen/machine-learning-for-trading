@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -58,7 +58,7 @@
 # - **TVL/Market Cap**: Valuation ratio for crypto ecosystems
 
 # %%
-"""On-Chain Fundamentals: DeFi TVL as Alternative Data — source and analyze DeFi TVL for crypto trading signals."""
+"""On-Chain Fundamentals: DeFi TVL as Alternative Data - source and analyze DeFi TVL for crypto trading signals."""
 
 import warnings
 
@@ -69,12 +69,13 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from data import load_coingecko_ohlcv, load_defillama_chain_tvl
+from utils.style import COLORS  # activates the ml4t Plotly template on import
 
 print("On-Chain Fundamentals: DeFi TVL Analysis")
 
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+# Production defaults - Papermill injects overrides for CI
 
 # %% [markdown]
 # ---
@@ -89,7 +90,7 @@ print("On-Chain Fundamentals: DeFi TVL Analysis")
 # - **Yield opportunities**: TVL often correlates with yield farming activity
 # - **Risk appetite**: TVL drawdowns often precede broader crypto corrections
 #
-# ### Why TVL Matters for Trading — Working Hypotheses
+# ### Why TVL Matters for Trading - Working Hypotheses
 #
 # The mapping below is the conventional starting story; Sections 7 and 8
 # put each hypothesis under empirical scrutiny over the joined window.
@@ -116,7 +117,7 @@ print("On-Chain Fundamentals: DeFi TVL Analysis")
 #
 # The loaders raise `DataNotFoundError` with the exact command if the
 # file is missing, so there is no hidden network or synthetic-data
-# fallback — if a chain is not on disk, the reader knows exactly what
+# fallback - if a chain is not on disk, the reader knows exactly what
 # to run.
 
 # %%
@@ -153,7 +154,7 @@ chain_data.tail(5)
 # %%
 # ETH prices come from the same canonical downloader
 # (python data/crypto/onchain/download.py --dataset coingecko).
-# Free-tier window is the trailing 365 days — re-run the downloader to
+# Free-tier window is the trailing 365 days - re-run the downloader to
 # refresh. For longer history, use a provider with a paid tier.
 # CoinGecko's free tier appends a live intraday snapshot for the current
 # day on top of that day's 00:00 daily bar, so the final calendar day can
@@ -171,7 +172,7 @@ print(f"Window: {eth_prices['timestamp'].min()} → {eth_prices['timestamp'].max
 # ## Section 4: Merge TVL and Price Data
 #
 # The CoinGecko free-tier window of 365 trailing days bounds the joined
-# dataset. The TVL series itself goes back to 2017 — substituting a paid
+# dataset. The TVL series itself goes back to 2017 - substituting a paid
 # price feed (or the longer Binance / Kraken history loaded in
 # `02_crypto_perps_funding`) extends the analysis to the full TVL history.
 
@@ -210,7 +211,14 @@ fig = make_subplots(
 )
 
 fig.add_trace(
-    go.Scatter(x=combined["timestamp"], y=combined["tvl_bn"], name="TVL ($B)", fill="tozeroy"),
+    go.Scatter(
+        x=combined["timestamp"],
+        y=combined["tvl_bn"],
+        name="TVL ($B)",
+        line=dict(color=COLORS["blue"]),
+        fill="tozeroy",
+        fillcolor="rgba(10, 22, 40, 0.15)",
+    ),
     row=1,
     col=1,
 )
@@ -220,13 +228,17 @@ fig.add_trace(
         x=combined["timestamp"],
         y=combined["eth_price"],
         name="ETH Price",
-        line=dict(color="#ff7f0e"),
+        line=dict(color=COLORS["amber"]),
     ),
     row=2,
     col=1,
 )
 
-fig.update_layout(title="DeFi TVL vs ETH Price", height=600, showlegend=True)
+fig.update_layout(
+    title="DeFi TVL and ETH price rose and fell together over the trailing year",
+    height=600,
+    showlegend=True,
+)
 fig.update_yaxes(title_text="TVL (Billions USD)", row=1, col=1)
 fig.update_yaxes(title_text="ETH Price (USD)", row=2, col=1)
 fig.show()
@@ -236,7 +248,13 @@ chain_cols = [
     c for c in combined.columns if c.startswith("tvl_") and c not in {"tvl_bn", "tvl_usd"}
 ]
 recent = combined.filter(pl.col("timestamp") > pl.col("timestamp").max() - pl.duration(days=30))
-chain_totals = {col.replace("tvl_", "").title(): recent[col].mean() / 1e9 for col in chain_cols}
+# Proper display names (acronyms like BSC survive .title(), which would print "Bsc").
+chain_names = {c.lower(): c for c in chains}
+chain_totals = {
+    chain_names.get(col.replace("tvl_", ""), col.replace("tvl_", "").title()): recent[col].mean()
+    / 1e9
+    for col in chain_cols
+}
 
 fig = go.Figure(
     data=[
@@ -244,10 +262,13 @@ fig = go.Figure(
             labels=list(chain_totals.keys()),
             values=list(chain_totals.values()),
             hole=0.4,
+            marker=dict(
+                colors=[COLORS["blue"], COLORS["amber"], COLORS["copper"], COLORS["slate"]]
+            ),
         )
     ]
 )
-fig.update_layout(title="Ethereum Dominates DeFi TVL — Trailing 30-Day Average")
+fig.update_layout(title="Ethereum Dominates DeFi TVL - Trailing 30-Day Average")
 fig.show()
 
 # %% [markdown]
@@ -340,7 +361,11 @@ fig = go.Figure(
             y=regime_returns["avg_fwd_return"],
             text=[f"{r:.1%}" if r is not None else "N/A" for r in regime_returns["avg_fwd_return"]],
             textposition="auto",
-            marker_color=["#2ca02c", "#7f7f7f", "#d62728"],
+            # Color by the sign of the average forward return (green = positive, red = negative)
+            marker_color=[
+                COLORS["positive"] if (r is not None and r > 0) else COLORS["negative"]
+                for r in regime_returns["avg_fwd_return"]
+            ],
         )
     ]
 )
@@ -437,14 +462,14 @@ features.tail(1).select(
 #    (about +0.07). Treat the regime table in Section 1 as a hypothesis
 #    template, not a verified rule.
 # 5. **TVL belongs in the feature set, not the conclusion.** It is one
-#    cross-asset signal — combine with price-based momentum, funding,
+#    cross-asset signal - combine with price-based momentum, funding,
 #    and macro features before drawing trading conclusions.
 #
 # ## Next Steps
 #
-# - `11_defi_tvl_evaluation.py` — formal alpha/decay/cost evaluation of
+# - `11_defi_tvl_evaluation.py` - formal alpha/decay/cost evaluation of
 #   TVL signals, mapped to the Chapter 4 alt-data framework.
-# - Chapter 8 — feature engineering for crypto including on-chain
+# - Chapter 8 - feature engineering for crypto including on-chain
 #   composite scores.
-# - Chapter 12 — gradient-boosted models that ingest TVL features for
+# - Chapter 12 - gradient-boosted models that ingest TVL features for
 #   crypto trading.

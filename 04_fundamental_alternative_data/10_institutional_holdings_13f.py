@@ -52,14 +52,14 @@
 # - **Upstream**: `data/equities/positioning/13f_download.py --mode bulk`
 #   (SEC quarterly data sets)
 # - **Parallel**: `data/equities/positioning/13f_download.py` (default
-#   per-cik mode — curated list, multi-quarter history, used by Ch22/23)
+#   per-cik mode - curated list, multi-quarter history, used by Ch22/23)
 # - **Downstream**: Ch8 `institutional_flow_features.py`; Ch22 NB 07;
 #   Ch23 knowledge-graph notebooks
 #
 # **Data source**: https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets
 
 # %%
-"""Institutional Holdings from SEC 13F Bulk Data — analyze top managers and ownership networks."""
+"""Institutional Holdings from SEC 13F Bulk Data - analyze top managers and ownership networks."""
 
 import plotly.express as px
 import polars as pl
@@ -69,7 +69,7 @@ from utils.paths import get_output_dir
 from utils.style import COLORS  # importing utils.style activates the ml4t Plotly template
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+# Production defaults - Papermill injects overrides for CI
 QUARTER = "2024Q3"  # SEC filing-window label (Sep 1 – Nov 30 2024 in this case)
 TOP_N = 500  # Top managers to analyze by reported 13F value
 MIN_SHARED_MANAGERS = 5  # Co-ownership edge threshold
@@ -114,7 +114,7 @@ print(f"Filing window: {holdings['filing_date'].min()} → {holdings['filing_dat
 # %% [markdown]
 # ## 2. Identify Top Managers by Reported 13F Value
 #
-# A manager may appear more than once in a filing window — the bulk zip
+# A manager may appear more than once in a filing window - the bulk zip
 # captures both originals and amendments, and occasionally spans two
 # report periods (holdings reported for Q2 filed in September; for Q3
 # filed in November). We keep the latest accession per manager per
@@ -179,7 +179,7 @@ top_holdings.head(5)
 # ## 4. Most Widely Held Stocks
 #
 # Which issuers appear in the most top-manager portfolios? Breadth is a
-# rough proxy for crowding — stocks held by many institutional managers
+# rough proxy for crowding - stocks held by many institutional managers
 # can face coordinated selling pressure during risk-off episodes.
 
 # %%
@@ -322,7 +322,7 @@ co_ownership.sort("shared_managers", descending=True).head(10)
 #
 # If you are trading on "what are top managers accumulating?", the bulk
 # file is already stale by publication. Professional systems poll EDGAR
-# and parse filings within minutes — this is standard practice, not
+# and parse filings within minutes - this is standard practice, not
 # front-running, since the information is public the instant it's
 # submitted.
 #
@@ -332,8 +332,8 @@ co_ownership.sort("shared_managers", descending=True).head(10)
 #
 # | Mode | Source | Scope | Use case |
 # | --- | --- | --- | --- |
-# | `--mode per-cik` (default) | SEC JSON submissions API + per-filing XML | Curated institution list × N recent quarters | Ch22/23 — named-manager history |
-# | `--mode bulk` | SEC quarterly zip | All ~7K filers × one quarter | This notebook — full cross-section |
+# | `--mode per-cik` (default) | SEC JSON submissions API + per-filing XML | Curated institution list × N recent quarters | Ch22/23 - named-manager history |
+# | `--mode bulk` | SEC quarterly zip | All ~7K filers × one quarter | This notebook - full cross-section |
 #
 # Both modes write the same canonical schema, so downstream code does
 # not need to know which ingestion path produced the data.

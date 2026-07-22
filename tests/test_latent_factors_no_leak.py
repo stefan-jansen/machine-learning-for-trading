@@ -1050,6 +1050,126 @@ def test_ipca_nonconvergence_blocks_registration() -> None:
         _require_ipca_convergence("ipca", [{"fold_id": 1, "converged": False}])
 
 
+def _mock_ipca_fold_inputs(fold_id: int) -> dict[str, object]:
+    values = np.arange(5, dtype=np.float32)[None, :]
+    dates = np.array([datetime(2024, 1, 31)], dtype=object)
+    entities = np.array([["A", "B", "C", "D", "E"]], dtype=object)
+    return {
+        "ragged": {
+            "chars_train": np.full((2, 5, 1), fold_id, dtype=np.float32),
+            "returns_train": np.ones((2, 5), dtype=np.float32),
+            "chars_val": np.zeros((1, 5, 1), dtype=np.float32),
+            "returns_val": values,
+            "factor_returns_train": None,
+            "eval_returns_val": None,
+            "val_dates": dates,
+            "val_entities": entities,
+            "macro_train": None,
+            "macro_val": None,
+            "n_train_periods": 2,
+            "n_val_periods": 1,
+        },
+        "pca": None,
+    }
+
+
+def test_parallel_ipca_folds_are_bounded_and_assembled_in_fold_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import threading
+    import time
+
+    from threadpoolctl import threadpool_info
+
+    from case_studies.utils.latent_factors import cv
+
+    thread_names: list[str] = []
+    blas_threads: list[int] = []
+
+    def prepare(*, split, **kwargs):
+        del kwargs
+        return _mock_ipca_fold_inputs(int(split["fold"]))
+
+    def fit(chars_train, returns_train, chars_val, returns_val, n_factors):
+        del returns_train, chars_val, n_factors
+        fold_id = int(chars_train[0, 0, 0])
+        time.sleep(0.01 * (3 - fold_id))
+        thread_names.append(threading.current_thread().name)
+        blas_threads.append(
+            next(item["num_threads"] for item in threadpool_info() if item["user_api"] == "blas")
+        )
+        return returns_val.copy(), {
+            "iterations": fold_id + 1,
+            "converged": True,
+        }
+
+    monkeypatch.setattr(cv, "_prepare_fold_inputs", prepare)
+    monkeypatch.setitem(cv._MODEL_RUNNERS, "ipca", fit)
+    monkeypatch.setattr(cv, "_latent_input_digest", lambda *args, **kwargs: "test-input")
+    monkeypatch.setattr(
+        cv, "_expected_latent_prediction_keys", lambda *args, **kwargs: pl.DataFrame()
+    )
+    result = cv.run_latent_factor_cv(
+        panel_data=None,
+        splits=[{"fold": 2}, {"fold": 0}, {"fold": 1}],
+        models=["ipca"],
+        n_factors=1,
+        use_cache=False,
+        save_dir=tmp_path,
+        dataset=pl.DataFrame(),
+        feature_names=["feature"],
+        label_col="label",
+        fold_workers=3,
+    )
+
+    assert [row["fold_id"] for row in result["fold_extras"]["ipca"]] == [0, 1, 2]
+    assert result["fold_metrics"]["ipca"]["fold_id"].to_list() == [0, 1, 2]
+    assert len(set(thread_names)) == 3
+    assert blas_threads == [1, 1, 1]
+
+
+def test_parallel_ipca_nonconvergence_writes_no_fold_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from case_studies.utils.latent_factors import cv
+
+    def prepare(*, split, **kwargs):
+        del kwargs
+        return _mock_ipca_fold_inputs(int(split["fold"]))
+
+    def fit(chars_train, returns_train, chars_val, returns_val, n_factors):
+        del returns_train, chars_val, n_factors
+        fold_id = int(chars_train[0, 0, 0])
+        return returns_val.copy(), {
+            "iterations": 10_000,
+            "converged": fold_id != 1,
+        }
+
+    monkeypatch.setattr(cv, "_prepare_fold_inputs", prepare)
+    monkeypatch.setitem(cv._MODEL_RUNNERS, "ipca", fit)
+    monkeypatch.setattr(cv, "_latent_input_digest", lambda *args, **kwargs: "test-input")
+    monkeypatch.setattr(
+        cv, "_expected_latent_prediction_keys", lambda *args, **kwargs: pl.DataFrame()
+    )
+    with pytest.raises(RuntimeError, match=r"folds \[1\].*refusing to register"):
+        cv.run_latent_factor_cv(
+            panel_data=None,
+            splits=[{"fold": 0}, {"fold": 1}],
+            models=["ipca"],
+            n_factors=1,
+            use_cache=False,
+            save_dir=tmp_path,
+            dataset=pl.DataFrame(),
+            feature_names=["feature"],
+            label_col="label",
+            fold_workers=2,
+        )
+
+    assert not (tmp_path / "ipca").exists()
+
+
 def test_rebalance_scoring_thins_to_declared_schedule() -> None:
     from case_studies.utils.latent_factors.cv import _compute_frame_ic, _score_prediction_frame
 

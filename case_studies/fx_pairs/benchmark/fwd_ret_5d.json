@@ -1,0 +1,41 @@
+{
+  "case_study": "fx_pairs",
+  "label": "fwd_ret_5d",
+  "method": "daily_cross_sectional_mean_close_pct_change",
+  "periods_per_year": 252,
+  "n_symbols_in_universe": 20,
+  "sharpe": 0.173971,
+  "cagr": 0.005746,
+  "vol": 0.036841,
+  "n_periods": 2063,
+  "ts_min": "2016-01-06 00:00:00",
+  "ts_max": "2025-12-31 00:00:00",
+  "by_period": {
+    "overall": {
+      "sharpe": 0.305163,
+      "cagr": 0.010404,
+      "vol": 0.036049,
+      "n_periods": 2582
+    },
+    "validation": {
+      "sharpe": 0.173971,
+      "cagr": 0.005746,
+      "vol": 0.036841,
+      "n_periods": 2063
+    },
+    "holdout": {
+      "sharpe": 0.894058,
+      "cagr": 0.029132,
+      "vol": 0.032718,
+      "n_periods": 519
+    },
+    "validation_window": [
+      "2016-01-06 00:00:00",
+      "2023-12-29 00:00:00"
+    ],
+    "holdout_window": [
+      "2024-01-02 00:00:00",
+      "2025-12-31 00:00:00"
+    ]
+  }
+}

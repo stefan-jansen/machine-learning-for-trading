@@ -95,11 +95,11 @@ def _purge_holdout_touching_validation(
     timestamps: pd.DatetimeIndex,
     *,
     holdout_start: str | None,
-    label_buffer: str,
+    outcome_horizon: str,
     calendar_id: str | None,
 ) -> np.ndarray:
     """Exclude validation signals whose label endpoint reaches the holdout."""
-    if not holdout_start or label_buffer in {"", "0D", "0H"}:
+    if not holdout_start or outcome_horizon in {"", "0D", "0H"}:
         return val_idx
 
     boundary = pd.Timestamp(holdout_start)
@@ -112,13 +112,13 @@ def _purge_holdout_touching_validation(
     elif boundary.tzinfo is not None:
         boundary = boundary.tz_localize(None)
 
-    trading_day_match = re.fullmatch(r"(\d+)D", label_buffer)
+    trading_day_match = re.fullmatch(r"(\d+)D", outcome_horizon)
     if calendar_id is not None and trading_day_match:
         horizon = int(trading_day_match.group(1))
         holdout_pos = int(timestamps.searchsorted(boundary, side="left"))
         return val_idx[val_idx < holdout_pos - horizon]
 
-    cutoff = boundary - pd.Timedelta(label_buffer)
+    cutoff = boundary - pd.Timedelta(outcome_horizon)
     return val_idx[timestamps[val_idx] < cutoff]
 
 
@@ -234,6 +234,7 @@ def generate_cv_splits(
     case_study_id: str | None = None,
     setup_path: Path | None = None,
     label_buffer: str = "0D",
+    outcome_horizon: str | None = None,
     date_col: str = "timestamp",
     *,
     cv_config: dict[str, Any] | None = None,
@@ -256,6 +257,9 @@ def generate_cv_splits(
     label_buffer : str, default "0D"
         Gap between train_end and val_start sized to the label horizon.
         Determined by the label being trained on (e.g., "21D" for fwd_ret_21d).
+    outcome_horizon : str, optional
+        Forward-outcome horizon used to seal validation before holdout. This may
+        be shorter than a deliberately conservative train-to-validation buffer.
     date_col : str, default "timestamp"
         Name of the date/timestamp column.
     cv_config : dict, optional
@@ -277,6 +281,7 @@ def generate_cv_splits(
 
     # Normalize label buffer (strip ISO prefix, convert M → days)
     label_buffer = _normalize_label_buffer(label_buffer)
+    outcome_horizon = _normalize_label_buffer(outcome_horizon or label_buffer)
 
     # Load evaluation config
     if cv_config is not None:
@@ -361,7 +366,7 @@ def generate_cv_splits(
             val_idx,
             ts_index,
             holdout_start=eval_config.get("holdout_start"),
-            label_buffer=label_buffer,
+            outcome_horizon=outcome_horizon,
             calendar_id=calendar_id,
         )
         if len(val_idx) == 0:

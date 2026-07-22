@@ -224,6 +224,30 @@ def test_backtest_hash_excludes_runtime_config_object() -> None:
     assert backtest_hash_from_parts("pred", runtime) == backtest_hash_from_parts("pred", planned)
 
 
+def test_backtest_hash_normalizes_default_long_only_direction() -> None:
+    implicit = {"strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 5}}}
+    explicit = {
+        "strategy": {
+            "signal": {
+                "method": "equal_weight_top_k",
+                "top_k": 5,
+                "direction": "long_only",
+            }
+        }
+    }
+    short = {
+        "strategy": {
+            "signal": {
+                "method": "equal_weight_top_k",
+                "top_k": 5,
+                "direction": "short_only",
+            }
+        }
+    }
+    assert backtest_hash_from_parts("p", implicit) == backtest_hash_from_parts("p", explicit)
+    assert backtest_hash_from_parts("p", implicit) != backtest_hash_from_parts("p", short)
+
+
 # -----------------------------------------------------------------------------
 # Regression pin — the exact hash for a canonical spec
 # -----------------------------------------------------------------------------
@@ -238,6 +262,22 @@ def test_training_hash_regression_pin_for_canonical_spec() -> None:
     expected = hashlib.sha256(content.encode()).hexdigest()[:12]
 
     assert training_hash_from_spec(spec) == expected
+
+
+def test_legacy_input_lineage_remains_part_of_certified_registry_identity() -> None:
+    lineage = {"fingerprint": "certified", "artifacts": {"features": {"sha256": "abc"}}}
+    spec = build_training_spec(
+        "linear",
+        "ols",
+        "fwd_ret_5d",
+        n_folds=2,
+        input_lineage=lineage,
+    )
+
+    assert spec["input_lineage"] == lineage
+    assert training_hash_from_spec(spec) != training_hash_from_spec(
+        build_training_spec("linear", "ols", "fwd_ret_5d", n_folds=2)
+    )
 
 
 def test_pca_preset_preserves_shipped_registry_identity() -> None:

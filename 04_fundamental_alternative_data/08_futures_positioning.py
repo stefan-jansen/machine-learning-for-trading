@@ -315,8 +315,7 @@ fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=2, col=1)
 
 fig.update_layout(
     height=600,
-    title="ES Leveraged Money: Net Positioning and 52-Week Z-Score",
-    template="plotly_white",
+    title="Hedge funds held persistently net-short E-mini S&P 500 positioning after 2022",
     showlegend=False,
 )
 fig.update_yaxes(title_text="Net Contracts", row=1, col=1)
@@ -500,8 +499,7 @@ for i, (df, name, color) in enumerate(
 # %%
 fig.update_layout(
     height=700,
-    title="Speculator Positioning Z-Scores Across Asset Classes",
-    template="plotly_white",
+    title="Speculator positioning extremes rarely line up across asset classes",
     showlegend=False,
 )
 fig.update_yaxes(title_text="Z-Score", range=[-4, 4])
@@ -536,7 +534,7 @@ fig.add_trace(
         y=es_pd["asset_mgr_net"],
         mode="lines",
         name="Asset Managers",
-        line=dict(color=COLORS["slate"], width=2),
+        line=dict(color=COLORS["copper"], width=2),
     )
 )
 fig.add_trace(
@@ -553,8 +551,7 @@ fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
 
 fig.update_layout(
     height=450,
-    title="ES Net Positioning by Trader Category",
-    template="plotly_white",
+    title="Asset managers stay net long E-mini S&P 500 while dealers hold the offsetting short",
     xaxis_title="Report Date",
     yaxis_title="Net Contracts",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),

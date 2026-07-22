@@ -1,0 +1,71 @@
+{
+  "artifact_source": "genuine LEAN (Docker, reproduced) vs ml4t-backtest[lean] on real case-study weights",
+  "cached": true,
+  "scenario_label": "3 case studies, daily rebalancing",
+  "comparison_surface": "sorted daily fill multiset (timestamp, asset, side, quantity, 4-decimal price)",
+  "limitations": [
+    "Raw trade-log row order can differ because same-day fills are emitted in different asset iteration order; parity is asserted on the decoded daily fill multiset plus terminal portfolio value, not on callback row order.",
+    "LEAN fill-forwards missing daily bars, so a name dropped from the target universe is liquidated at the next real bar; ml4t reproduces this."
+  ],
+  "results": [
+    {
+      "case_study": "etfs",
+      "label": "fwd_ret_21d",
+      "cost_bps": 10.0,
+      "lean_final_value": 1119459.5398322002,
+      "ml4t_final_value": 1119459.5398322036,
+      "final_value_gap_usd": 3.4924596548080444e-09,
+      "final_value_gap_pct": 3.1086244689504383e-15,
+      "lean_fills": 10701,
+      "ml4t_fills": 10701,
+      "fill_gap": 0,
+      "sorted_fill_multiset_match": true,
+      "raw_row_order_match": false,
+      "ml4t_runtime_sec": 0.297,
+      "lean_runtime_sec": null
+    },
+    {
+      "case_study": "sp500_equity_option_analytics",
+      "label": "fwd_ret_5d",
+      "cost_bps": 7.0,
+      "lean_final_value": 991275.917466,
+      "ml4t_final_value": 991275.9174659989,
+      "final_value_gap_usd": -1.0477378964424133e-09,
+      "final_value_gap_pct": -1.1102230246251565e-15,
+      "lean_fills": 1848,
+      "ml4t_fills": 1848,
+      "fill_gap": 0,
+      "sorted_fill_multiset_match": true,
+      "raw_row_order_match": false,
+      "ml4t_runtime_sec": 0.061,
+      "lean_runtime_sec": null
+    },
+    {
+      "case_study": "us_equities_panel",
+      "label": "fwd_ret_5d",
+      "cost_bps": 11.999999999999998,
+      "lean_final_value": 1228617.37595028,
+      "ml4t_final_value": 1228617.3759501765,
+      "final_value_gap_usd": -1.0360963642597198e-07,
+      "final_value_gap_pct": -8.43769498715119e-14,
+      "lean_fills": 35103,
+      "ml4t_fills": 35103,
+      "fill_gap": 0,
+      "sorted_fill_multiset_match": true,
+      "raw_row_order_match": false,
+      "ml4t_runtime_sec": 1.534,
+      "lean_runtime_sec": null
+    }
+  ],
+  "summary": {
+    "n_case_studies": 3,
+    "matched_case_studies": 3,
+    "all_fill_multisets_match": true,
+    "max_abs_final_value_gap_usd": 1.0360963642597198e-07
+  },
+  "sources": [
+    "ml4t-backtest/validation/lean/workspace/chapter16_{etfs,sp500_equity_option_analytics,us_equities_panel}/ (LEAN reference run)",
+    "ml4t-backtest/src/ml4t/backtest/_validation/lean_runner.py (LEAN orchestration primitives)",
+    "third_edition/agents/work/ch16_engine_parity/ml4t_lean_casestudy.py (ml4t[lean] reconstruction)"
+  ]
+}

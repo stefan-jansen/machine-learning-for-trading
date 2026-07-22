@@ -74,8 +74,14 @@ def _detect_id_col(columns: list[str]) -> str:
     )
 
 
-def _predictions_dir(case_study: str, prediction_hash: str) -> Path:
-    return get_case_study_dir(case_study) / "run_log" / "predictions" / prediction_hash
+def _predictions_dir(
+    case_study: str,
+    prediction_hash: str,
+    *,
+    case_dir: Path | None = None,
+) -> Path:
+    resolved_case_dir = case_dir or get_case_study_dir(case_study)
+    return resolved_case_dir / "run_log" / "predictions" / prediction_hash
 
 
 def _write_widths(path: Path, new_widths: pl.DataFrame, alpha: float) -> None:
@@ -124,6 +130,7 @@ def compute_conformal_widths(
     alpha: float = DEFAULT_ALPHA,
     min_calibration_n: int = DEFAULT_MIN_CALIBRATION_N,
     write: bool = True,
+    case_dir: Path | None = None,
 ) -> pl.DataFrame:
     """Compute and optionally persist strict walk-forward conformal widths.
 
@@ -144,7 +151,7 @@ def compute_conformal_widths(
       * no fold yields any entity meeting ``min_calibration_n`` after the
         prior-fold (or fallback) filter.
     """
-    pred_dir = _predictions_dir(case_study, prediction_hash)
+    pred_dir = _predictions_dir(case_study, prediction_hash, case_dir=case_dir)
     pred_path = pred_dir / "predictions.parquet"
     if not pred_path.exists():
         raise FileNotFoundError(f"predictions.parquet not found: {pred_path}")

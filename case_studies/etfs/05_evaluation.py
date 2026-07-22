@@ -27,13 +27,14 @@
 #
 # **Book Reference**: Chapter 8, Section 8.5 (Feature Evaluation)
 #
-# **Prerequisites**: `03_financial_features.py` and `04_temporal.py` must have run
-# (produces `features/financial.parquet` and `features/model_based.parquet`).
+# **Prerequisites**: `03_financial_features.py` and `04_model_based_features.py` must
+# have run (produce `features/financial.parquet` and `features/model_based.parquet`).
 
 # %%
 """Feature Evaluation - ETFs case study."""
 
 import warnings
+from datetime import date
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
@@ -71,6 +72,11 @@ IC_THRESHOLD = 0.01  # Monthly horizon
 # We load the pre-computed feature matrices and labels, then join into a single
 # evaluation panel. Temporal features include both date-level (HMM regime, FFD)
 # and per-symbol (GARCH) features, so we join on `[date, symbol]`.
+#
+# The panel is then **sealed to the training+validation window**: because the
+# triage here promotes features for downstream modeling, the holdout must not
+# inform feature evaluation. We purge on the 21-day label endpoint, so no
+# pre-holdout date whose forward label reaches into the holdout survives.
 
 # %%
 # Load features (normalize date column type to pl.Date for consistent joins)
@@ -111,6 +117,32 @@ temporal_cols = [c for c in temporal.columns if c not in ("timestamp", "symbol")
 # Join: features + temporal (on [date, symbol]) + labels
 eval_panel = features.join(temporal, on=JOIN_COLS, how="left")
 eval_panel = eval_panel.join(label_df, on=JOIN_COLS, how="inner")
+
+# Seal the holdout. Feature evaluation is a development decision — the triage
+# ledger below promotes features for downstream modeling — so the sealed holdout
+# (setup.yaml `evaluation.holdout_start`) must not inform which features look
+# predictive. Purge on the LABEL endpoint, not the signal date: a pre-holdout
+# date whose 21-day forward label reaches into the holdout would leak holdout
+# prices into the IC ranking, BH-FDR, and triage. The label calendar is dense
+# (built from the full price panel before eligibility gating), so the endpoint is
+# computed there. Same purge as the 02_labels baseline IC and the 03 selection IC.
+holdout_start_dt = date.fromisoformat(setup_config["evaluation"]["holdout_start"])
+LABEL_HORIZON = HAC_MAXLAGS  # fwd_ret_21d: forward window whose endpoint must clear the holdout
+last_signal_date = (
+    label_df.select("timestamp")
+    .unique()
+    .sort("timestamp")
+    .with_columns(pl.col("timestamp").shift(-LABEL_HORIZON).alias("_label_end"))
+    .filter(pl.col("_label_end") < holdout_start_dt)["timestamp"]
+    .max()
+)
+n_before_seal = len(eval_panel)
+eval_panel = eval_panel.filter(pl.col("timestamp") <= last_signal_date)
+print(
+    f"Holdout sealed: {n_before_seal:,} -> {len(eval_panel):,} rows "
+    f"(labels end < {setup_config['evaluation']['holdout_start']}; "
+    f"last signal date {last_signal_date})"
+)
 
 all_feature_cols = financial_cols + temporal_cols
 
@@ -783,11 +815,15 @@ for f in proceed_features:
 # ### Quality Gate Verdict
 #
 # **Fit for modeling.** The triage promotes a broad set of features to PROCEED,
-# concentrated in the momentum and risk-adjusted momentum families. IC magnitudes
-# are moderate (0.03--0.04 range), consistent with monthly-horizon cross-sectional
-# equity signals over a 100-ETF universe. Date-level regime and macro features
-# are excluded from cross-sectional IC but carry forward as conditioning variables
-# for tree-based and interaction models in Ch11+.
+# concentrated in the volatility and momentum families. Standalone predictive
+# power is modest and thin: only one feature (`dist_52w_low`, IC 0.07) survives
+# BH-FDR correction, and naive significance overstates the FDR-confirmed count
+# by roughly an order of magnitude. The strongest signals — 52-week-low distance,
+# realized-volatility, and NATR — reach |IC| in the 0.05--0.07 range, with most
+# promoted features between 0.01 and 0.05, consistent with monthly-horizon
+# cross-sectional equity signals over a 100-ETF universe. Date-level regime and
+# macro features are excluded from cross-sectional IC but carry forward as
+# conditioning variables for tree-based and interaction models in Ch11+.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -808,5 +844,5 @@ for f in proceed_features:
 #    highly correlated. Downstream modeling should cluster or select
 #    representative features from each family.
 #
-# **Next**: `05_linear.py` (Ch11) uses the triage ledger and promoted
-# features for ridge/lasso baseline modeling.
+# **Next**: `06_linear.py` (Ch11) trains ridge/lasso baselines on the promoted
+# features, loading the full modeling dataset via `load_modeling_dataset`.

@@ -1,0 +1,17 @@
+account:
+  allow_short_selling: true
+execution:
+  execution_price: open
+  execution_mode: next_bar
+commission:
+  model: percentage
+  rate: 0.00075
+slippage:
+  model: percentage
+  rate: 0.0005
+calendar:
+  calendar: NYSE
+  timezone: UTC
+  data_frequency: daily
+metadata:
+  case_study: us_equities_panel

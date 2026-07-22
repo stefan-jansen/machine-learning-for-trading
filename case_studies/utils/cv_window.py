@@ -48,19 +48,17 @@ def _load_setup_yaml(case_study: str) -> dict | None:
     return yaml.safe_load(setup_path.read_text())
 
 
-@lru_cache(maxsize=128)
-def _fold_splits(case_study: str, label: str) -> tuple[tuple[int, date, date], ...] | None:
-    """All CV folds as ((fold_id, val_start, val_end), ...) — same source canonical_window uses.
+def _derive_modeling_splits(case_study: str, label: str) -> list[dict] | None:
+    """Derive complete canonical modeling folds from the label timeline.
 
-    Returns tuple-of-tuples (immutable, hashable) for lru_cache friendliness.
-    ``None`` when the label artifact itself is missing (no folds derivable).
-    Misconfiguration — missing ``label_buffer`` for a label that *does*
-    have a parquet — raises ``ValueError`` with the same actionable hint
+    Returns ``None`` when the label artifact itself is missing (no folds derivable).
+    Misconfiguration - missing ``label_buffer`` for a label that *does*
+    have a parquet - raises ``ValueError`` with the same actionable hint
     as :func:`utils.modeling.load_modeling_dataset` (loud-fail contract:
     config drift must surface as an error, not silently degrade to a
     predictions-min/max fallback downstream).
 
-    Reads only the label parquet's time column to derive folds —
+    Reads only the label parquet's time column to derive folds.
     ``generate_cv_splits`` is calendar-aware and uses only unique
     timestamps (see its docstring). Schema is introspected to pick
     ``timestamp`` else ``date`` (matching ``load_us_equities`` /
@@ -71,7 +69,12 @@ def _fold_splits(case_study: str, label: str) -> tuple[tuple[int, date, date], .
 
     import polars as pl
 
-    from utils.artifact_specs import load_label_spec, resolve_label_buffer, resolve_storage_path
+    from utils.artifact_specs import (
+        load_label_spec,
+        resolve_label_buffer,
+        resolve_label_horizon,
+        resolve_storage_path,
+    )
     from utils.cv_splits import generate_cv_splits
 
     logger = logging.getLogger(__name__)
@@ -118,10 +121,39 @@ def _fold_splits(case_study: str, label: str) -> tuple[tuple[int, date, date], .
         ts_df,
         case_study_id=case_study,
         label_buffer=label_buffer,
+        outcome_horizon=resolve_label_horizon(case_study, label, setup),
         date_col=date_col,
     )
-    out = tuple((i, _to_date(s["val_start"]), _to_date(s["val_end"])) for i, s in enumerate(splits))
-    return out if out else None
+    return splits or None
+
+
+@lru_cache(maxsize=128)
+def _fold_splits(case_study: str, label: str) -> tuple[tuple[int, date, date], ...] | None:
+    """All CV folds as ``((fold_id, val_start, val_end), ...)``."""
+    splits = _derive_modeling_splits(case_study, label)
+    if splits is None:
+        return None
+    return tuple(
+        (int(split["fold"]), _to_date(split["val_start"]), _to_date(split["val_end"]))
+        for split in splits
+    )
+
+
+def modeling_fold_boundaries(case_study: str, label: str) -> list[dict] | None:
+    """Return complete train and validation boundaries for feature producers."""
+    splits = _derive_modeling_splits(case_study, label)
+    if splits is None:
+        return None
+    return [
+        {
+            "fold": int(split["fold"]),
+            "train_start": _to_date(split["train_start"]),
+            "train_end": _to_date(split["train_end"]),
+            "val_start": _to_date(split["val_start"]),
+            "val_end": _to_date(split["val_end"]),
+        }
+        for split in splits
+    ]
 
 
 def _validation_window_for_label(case_study: str, label: str) -> tuple[date, date] | None:

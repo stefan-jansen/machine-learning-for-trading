@@ -13,6 +13,7 @@ import polars as pl
 import yaml
 
 from case_studies.utils.latent_factors import EXPENSIVE_MODELS, run_latent_factor_cv
+from case_studies.utils.latent_factors.library_bridge import preferred_latent_device
 from case_studies.utils.latent_factors.macro_context import load_configured_macro_context
 from data import load_macro
 from utils.artifact_specs import load_feature_spec, load_label_spec, resolve_storage_path
@@ -88,7 +89,7 @@ def load_case_study_context(
     setup_kwargs = _normalize_model_kwargs(lf_setup.get("model_kwargs", {}))
     model_kwargs = _merge_model_kwargs(preset_kwargs, setup_kwargs)
     persistent_entities = bool(lf_setup.get("persistent_entities", True))
-    device = str(lf_setup.get("device", "cpu"))
+    device = str(lf_setup.get("device", preferred_latent_device()))
     num_threads = int(lf_setup.get("num_threads", 8))
     deterministic_algorithms = bool(lf_setup.get("deterministic_algorithms", True))
     macro_context_config = lf_setup.get("macro_context")
@@ -196,6 +197,7 @@ def run_case_study_model(
     force_retrain: bool,
     macro_panel: pl.DataFrame | None = None,
     reporting_epoch: int | None = None,
+    fold_workers: int = 1,
 ) -> dict[str, Any]:
     return run_latent_factor_cv(
         panel_data=None,
@@ -228,6 +230,7 @@ def run_case_study_model(
         temporal_keys=context.temporal_keys,
         temporal_feature_names=context.temporal_feature_names,
         reporting_epoch=reporting_epoch,
+        fold_workers=fold_workers,
     )
 
 
@@ -241,6 +244,7 @@ def run_case_study_variants(
     use_cache: bool,
     force_retrain: bool,
     reporting_epoch: int | None = None,
+    fold_workers: int = 1,
 ) -> dict[str, dict[str, Any]]:
     from utils.modeling import ConfigError
 
@@ -308,6 +312,7 @@ def run_case_study_variants(
             temporal_keys=modeling_dataset.temporal_keys,
             temporal_feature_names=modeling_dataset.temporal_feature_names,
             reporting_epoch=reporting_epoch,
+            fold_workers=fold_workers,
         )
     return results
 

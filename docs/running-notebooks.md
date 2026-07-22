@@ -39,7 +39,7 @@ subset requires a non-default profile such as `py312`, `benchmark`, or `rapids`.
 | Ch10 `01_word2vec`, `02_asset_embeddings`, `03_sentiment_evolution` | gensim (no Python 3.14 wheel) | py312 |
 | Ch12 `10_shap_nlp_sentiment` | torch CUDA bug on 3.14 + shap | py312 |
 | Ch14 `06_conditional_autoencoder` | torch CUDA bug on 3.14 + shap | py312 |
-| Ch15 `06_fed_announcement_bsts` | tfcausalimpact (TFP BSTS, py<3.13) | py312 |
+| Ch15 `06_fed_announcement_bsts` | tfcausalimpact (TFP BSTS, isolated `/opt/bsts/bin/python`) | py312 |
 | Ch21 `05_deep_hedging_pfhedge` | pfhedge (unmaintained, numpy<2) | py312 |
 | Ch02 `21_storage_benchmark_database` | requires benchmark image + database services | benchmark |
 | Ch12 `02_gbm_comparison` (GPU section) | RAPIDS cuML, LightGBM CUDA | rapids |

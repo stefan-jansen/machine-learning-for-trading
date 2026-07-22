@@ -1,0 +1,30 @@
+[project]
+name = "ml4t-bsts"
+version = "3.0.0"
+description = "Isolated TensorFlow Probability BSTS runtime for Chapter 15"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy==1.26.4",
+    "pandas==2.2.0",
+    "polars>=1.38,<2.0",
+    "pyarrow>=15.0",
+    "matplotlib>=3.8",
+    "plotly>=5.20,<7",
+    "tfcausalimpact==0.0.18",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "jupytext>=1.16",
+    "nbconvert>=7.16",
+    "ipykernel>=6.29",
+    "papermill>=2.6",
+    "pytest>=9.0",
+    "pytest-timeout>=2.3",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

@@ -28,6 +28,14 @@ from ml4t.models.types import CrossSectionBatch, PersistentPanelBatch
 from case_studies.utils.latent_factors.common import TaskType, summarize_predictions
 
 
+def preferred_latent_device() -> str:
+    """Return the fastest available Torch device for latent-factor fitting."""
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+_PREFERRED_DEVICE = preferred_latent_device()
+
+
 def configure_latent_torch_runtime(
     device: str,
     *,

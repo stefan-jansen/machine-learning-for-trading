@@ -42,13 +42,13 @@
 #
 # ## Prerequisites
 #
-# - `02_preprocessing_pipeline` — for split-aware preprocessing concepts that
+# - `02_preprocessing_pipeline` - for split-aware preprocessing concepts that
 #   underpin fold-aware IC evaluation in §7.
-# - `03_label_methods` — supplies the forward-return labels used as `y_true`.
+# - `03_label_methods` - supplies the forward-return labels used as `y_true`.
 # - Familiarity with rank correlations (Spearman) and walk-forward CV.
 
 # %%
-"""Signal Evaluation — IC analysis, quintile spreads, and classification diagnostics for alpha signals."""
+"""Signal Evaluation - IC analysis, quintile spreads, and classification diagnostics for alpha signals."""
 
 from __future__ import annotations
 
@@ -154,7 +154,7 @@ print("Factor summary:")
 display(factor_df.select("factor").describe())
 
 # %%
-# Pre-compute forward returns — reused in fold-aware (§7) and binary (§9) sections
+# Pre-compute forward returns - reused in fold-aware (§7) and binary (§9) sections
 eval_df = (
     factor_df.join(prices_df, on=["timestamp", "symbol"], how="inner")
     .sort(["symbol", "timestamp"])
@@ -195,11 +195,11 @@ daily_coverage = (
 print("=== Correctness Screen: Coverage ===\n")
 print(f"Overall coverage: {coverage:.1%}")
 print(
-    f"Per-date coverage — min: {daily_coverage['coverage'].min():.1%}, "
+    f"Per-date coverage - min: {daily_coverage['coverage'].min():.1%}, "
     f"median: {daily_coverage['coverage'].median():.1%}, "
     f"max: {daily_coverage['coverage'].max():.1%}"
 )
-print("\nNote: Coverage < 100% is expected — momentum requires 21 days of history,")
+print("\nNote: Coverage < 100% is expected - momentum requires 21 days of history,")
 print("so new listings lack factor values during their first 21 trading days.")
 
 # %%
@@ -227,7 +227,7 @@ print(f"Min change rate (worst asset): {min_change_rate:.1%}")
 if median_change_rate > 0.9:
     print("[PASS] Factor updates daily as expected for a price-derived signal.")
 else:
-    print("[WARNING] Some assets show stale factor values — investigate data gaps.")
+    print("[WARNING] Some assets show stale factor values - investigate data gaps.")
 
 # %% [markdown]
 # ## 3. Information Coefficient (IC) Analysis
@@ -285,15 +285,15 @@ ic_summary
 #
 # The library exposes both, and the distinction matters for ranking strategies:
 #
-# - **`pooled_ic`** — one global Spearman correlation across **all (date, asset)**
+# - **`pooled_ic`** - one global Spearman correlation across **all (date, asset)**
 #   observations.  Conflates *which days were good* with *which assets ranked
 #   correctly within a day*; sensitive to time-series mean shifts in returns.
-# - **`cross_sectional_ic`** — Spearman per date, then mean across dates.  Measures
+# - **`cross_sectional_ic`** - Spearman per date, then mean across dates.  Measures
 #   only the daily ranking skill that a long-short strategy can monetise, and exposes
 #   IC IR / t-stat / p-value on the per-date series.
 #
 # Chapter 14 standardises on the cross-sectional convention. The two can disagree
-# materially on the same data — pooled may inflate or deflate magnitude depending
+# materially on the same data - pooled may inflate or deflate magnitude depending
 # on the regime structure of returns.
 
 # %%
@@ -340,13 +340,13 @@ print(
 #
 # - $T \approx 2{,}500$ daily IC values (about ten years) with
 #   $\sigma_{\text{IC}} = 0.05$ gives $\text{SE} = 0.001$ and a 95% CI
-#   of $[0.018, 0.022]$ — comfortably above zero.
+#   of $[0.018, 0.022]$ - comfortably above zero.
 # - The same $T$ with $\sigma_{\text{IC}} = 0.30$ gives $\text{SE} = 0.006$
-#   and a CI of $[0.008, 0.032]$ — above zero, but the band is wide
+#   and a CI of $[0.008, 0.032]$ - above zero, but the band is wide
 #   enough that the central value carries little information about the
 #   tail behaviour of the signal.
 # - $T \approx 250$ with $\sigma_{\text{IC}} = 0.30$ gives $\text{SE} = 0.019$
-#   and a CI of $[-0.017, 0.057]$ — indistinguishable from zero.
+#   and a CI of $[-0.017, 0.057]$ - indistinguishable from zero.
 #
 # Reporting a daily-mean IC therefore requires the CI (or the
 # $t$-statistic) alongside, and ideally the dispersion of the daily
@@ -360,7 +360,7 @@ print(
 #
 # | $\bar{\text{IC}}$ | Typical interpretation (conditional on $T$ and $\sigma_{\text{IC}}$) |
 # |---|---|
-# | < 0.02 | At or below the daily-IC noise floor on multi-year samples — the SE alone often spans this range. |
+# | < 0.02 | At or below the daily-IC noise floor on multi-year samples - the SE alone often spans this range. |
 # | 0.02 – 0.04 | Detectable on 5–10 year samples with the dispersions seen in published studies; net P&L is a separate cost question. |
 # | 0.04 – 0.06 | Comparable to documented equity-factor effects (month-on-month momentum, short-term reversal). |
 # | 0.06 – 0.10 | Above most factor-zoo benchmarks; the cross-validation question is whether the magnitude survives expanding-window evaluation. |
@@ -426,7 +426,7 @@ fig.show()
 
 # %%
 # Collect (native timestamp, IC) pairs and sort on the actual timestamp dtype
-# rather than its string form — lexicographic sorting of stringified dates is
+# rather than its string form - lexicographic sorting of stringified dates is
 # only correct for zero-padded ISO output and would silently reorder the series
 # under any other rendering.
 ic_pairs: list[tuple[object, float]] = []
@@ -626,7 +626,7 @@ fig.show()
 # to estimate the signal's useful life.
 
 # %%
-# Compute IC across a finer horizon grid (single call — batches all horizons)
+# Compute IC across a finer horizon grid (single call - batches all horizons)
 decay_horizons = DECAY_HORIZONS
 
 decay_result = analyze_signal(
@@ -654,7 +654,7 @@ fig.add_trace(
 )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
 
-# First horizon at which IC falls below half its peak — diagnostic only.
+# First horizon at which IC falls below half its peak - diagnostic only.
 # When IC reverses sign rather than decays monotonically (as is common for
 # short-horizon reversal signals), label the crossing as "IC falls below
 # half-peak" rather than "half-life" to avoid implying smooth decay.
@@ -681,7 +681,7 @@ fig.show()
 
 # %% [markdown]
 # **Interpretation**: The horizon-IC curve is the tool for choosing a rebalancing
-# frequency — for a cleanly decaying signal you rebalance near where IC peaks and
+# frequency - for a cleanly decaying signal you rebalance near where IC peaks and
 # stop before it fades. This 21-day ETF momentum factor does *not* show that clean
 # decay: every horizon IC sits within ±0.006 and none is statistically distinct
 # from zero, with the short horizons even mildly negative (weak reversal) before
@@ -894,7 +894,7 @@ for i, (train_dates, test_dates) in enumerate(splits):
 # %%
 # Slice eval_df per fold (forward returns computed in §2)
 fold_results = []
-evaluated_dates: list = []  # every date inside a test window — needed for a like-for-like IC
+evaluated_dates: list = []  # every date inside a test window - needed for a like-for-like IC
 
 for fold_idx, (train_dates, test_dates) in enumerate(splits):
     test_data = eval_df.filter(pl.col("timestamp").is_in(test_dates))
@@ -1028,7 +1028,7 @@ fig.show()
 # ### Interpretation: Full-Sample vs Fold-Level IC
 #
 # The obvious move is to read the full-sample IC against the fold-level mean and
-# call the difference an aggregation effect — the folds are out of sample, so a
+# call the difference an aggregation effect - the folds are out of sample, so a
 # gap looks like the honest shrinkage of an optimistic full-sample number.
 #
 # That reading is only available if both statistics cover the **same dates**.
@@ -1036,7 +1036,7 @@ fig.show()
 # mean averages only dates inside a test window, and with `min_train_pct=0.3` and
 # eight 63-day folds those windows are roughly 500 consecutive dates near the
 # front of the sample. The two numbers describe different periods, so their
-# difference cannot be attributed to aggregation — or to leakage, which the folds
+# difference cannot be attributed to aggregation - or to leakage, which the folds
 # structurally cannot produce, since each fold's IC only ever touches its own test
 # dates.
 #
@@ -1046,8 +1046,8 @@ fig.show()
 #
 # | Comparison | Isolates |
 # |------------|----------|
-# | Fold-date IC vs full-sample IC | **Period** — is this window unrepresentative? |
-# | Fold-level mean vs fold-date IC | **Aggregation** — does averaging folds change anything? |
+# | Fold-date IC vs full-sample IC | **Period** - is this window unrepresentative? |
+# | Fold-level mean vs fold-date IC | **Aggregation** - does averaging folds change anything? |
 
 # %%
 # The like-for-like statistic: same per-date Spearman, restricted to fold dates
@@ -1077,7 +1077,7 @@ print(f"Aggregation effect (fold mean    - fold-date IC):   {fold_ic_mean - fold
 
 fold_span = f"{min(evaluated_dates)} to {max(evaluated_dates)}"
 coverage_pct = 100 * n_fold_dates / n_all_dates
-print(f"\nFolds evaluate {fold_span} — {coverage_pct:.0f}% of the panel's dates.")
+print(f"\nFolds evaluate {fold_span} - {coverage_pct:.0f}% of the panel's dates.")
 if abs(fold_window_ic - full_sample_ic) > abs(fold_ic_mean - fold_window_ic):
     print("[READ] The gap is a period effect: this window is not the average window.")
     print("       It says nothing about overfitting, and nothing about leakage.")
@@ -1107,7 +1107,7 @@ else:
 # roughly an order of magnitude.
 #
 # The repair is a **block permutation**. We draw one asset relabeling per block of 21
-# sessions — the label horizon — and hold it fixed across the block. Within a block
+# sessions - the label horizon - and hold it fixed across the block. Within a block
 # each asset's return path stays intact, so the autocorrelation the observed IC
 # inherits also lives in the null; across blocks the relabelings are independent.
 # The null then answers the right question: *given how persistent this data is, how
@@ -1117,7 +1117,7 @@ else:
 # Block permutation: one asset relabeling per BLOCK_SESSIONS, restricted to fold dates
 rng = np.random.default_rng(SEED)
 n_permutations = N_PERMUTATIONS
-BLOCK_SESSIONS = 21  # label horizon — blocks must be at least as long as the overlap
+BLOCK_SESSIONS = 21  # label horizon - blocks must be at least as long as the overlap
 
 perm_df = fold_window.sort(["timestamp", "symbol"])
 dates_arr = perm_df["timestamp"].to_numpy()
@@ -1158,7 +1158,7 @@ permuted_ics = np.array(permuted_ics)
 # Observed statistic and null are now the same estimator on the same dates
 observed_ic_mean = fold_window_ic
 
-# (r + 1) / (B + 1): a permutation p-value can never be exactly zero — the observed
+# (r + 1) / (B + 1): a permutation p-value can never be exactly zero - the observed
 # assignment is itself one of the arrangements under the null
 n_at_least = int(np.sum(permuted_ics >= observed_ic_mean))
 p_value_perm = (n_at_least + 1) / (len(permuted_ics) + 1)
@@ -1168,7 +1168,7 @@ print(
     f"Dates: {len(factor_ranks_by_group):,} (fold windows only, block = {BLOCK_SESSIONS} sessions)"
 )
 print(f"Observed mean IC: {observed_ic_mean:.4f}")
-print(f"Permutation null — mean: {permuted_ics.mean():.4f}, std: {permuted_ics.std():.4f}")
+print(f"Permutation null - mean: {permuted_ics.mean():.4f}, std: {permuted_ics.std():.4f}")
 print(f"Permutation p-value (one-sided): {p_value_perm:.4f}")
 print(f"Permutations: {n_permutations} (finest resolvable p = {1 / (n_permutations + 1):.4f})")
 
@@ -1207,7 +1207,7 @@ fig.show()
 #
 # Read it against §3, which scored the same factor at IC 0.0008 with a HAC
 # $t = 0.19$ over the full sample. These are not opposing verdicts about one
-# quantity — they are two different windows, as the decomposition above showed: the
+# quantity - they are two different windows, as the decomposition above showed: the
 # entire full-sample-vs-fold gap was a period effect, with aggregation contributing
 # 0.0000. The factor worked in the folds' two years and does nothing over twenty.
 # The folds are not a verdict on the signal; they are a verdict on 2012-2014.
@@ -1220,7 +1220,7 @@ fig.show()
 #   sample unevaluated cannot support a claim about the sample.
 # - **A null must be as dependent as the data.** Independent within-date shuffling
 #   put the null's standard deviation near 0.0015; blocking at the label horizon
-#   puts it near 0.0145 — roughly ten times wider, on identical dates. The first
+#   puts it near 0.0145 - roughly ten times wider, on identical dates. The first
 #   null would have called almost any factor significant, which is what a null this
 #   narrow always does.
 #
@@ -1331,7 +1331,7 @@ _fps_cum = np.cumsum(1 - _yt_sorted)
 fpr = np.concatenate([[0.0], _fps_cum / _n_neg])
 tpr = np.concatenate([[0.0], _tps_cum / _n_pos])
 # Thresholds aligned with fpr/tpr via the same _order index; no re-sort.
-# Ties are not collapsed (unlike sklearn) — at 466k unique-or-near-unique
+# Ties are not collapsed (unlike sklearn) - at 466k unique-or-near-unique
 # float scores the AUC difference is sub-1e-6.
 roc_thresholds = np.concatenate([[np.inf], _score_sorted])
 
@@ -1348,13 +1348,13 @@ print(f"  PR AUC:  {pr_auc:.3f}")
 
 # Interpretation
 if roc_auc > 0.55:
-    print("  Interpretation: AUC above 0.55 — score ranks positives above negatives")
+    print("  Interpretation: AUC above 0.55 - score ranks positives above negatives")
 elif roc_auc > 0.52:
     print(
-        "  Interpretation: AUC in (0.52, 0.55] — small ranking signal; tradeability not evaluated here"
+        "  Interpretation: AUC in (0.52, 0.55] - small ranking signal; tradeability not evaluated here"
     )
 else:
-    print("  Interpretation: AUC at or near 0.5 — score does not separate the two classes")
+    print("  Interpretation: AUC at or near 0.5 - score does not separate the two classes")
 
 # %%
 # Visualize ROC and PR curves (print-ready, colorblind-safe)

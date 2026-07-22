@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -41,7 +41,7 @@
 # - **Related**: [`13_polymarket_prediction_markets`](13_polymarket_prediction_markets.ipynb) (crypto-based alternative)
 
 # %%
-"""Kalshi Prediction Markets — build event probability indicators from regulated binary contracts."""
+"""Kalshi Prediction Markets - build event probability indicators from regulated binary contracts."""
 
 import warnings
 
@@ -56,7 +56,7 @@ from utils.paths import get_output_dir
 from utils.style import COLORS
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+# Production defaults - Papermill injects overrides for CI
 
 # %% [markdown]
 # ## 1. Kalshi Contract Structure
@@ -77,7 +77,7 @@ from utils.style import COLORS
 # `KXFED-27APR-T4.25` decodes as:
 # - **KXFED**: Federal Funds Rate series
 # - **27APR**: April 2027 FOMC meeting
-# - **T4.25**: threshold — contract pays \$1 if rate is **above** 4.25%
+# - **T4.25**: threshold - contract pays \$1 if rate is **above** 4.25%
 #
 # The `close` price is the implied probability (0–1) that the rate will
 # exceed the threshold at that meeting.
@@ -195,7 +195,7 @@ price_range = (
 top_contracts = price_range.head(3)["symbol"].to_list()
 
 fig = go.Figure()
-palette = [COLORS["blue"], COLORS["amber"], COLORS["slate"]]
+palette = [COLORS["blue"], COLORS["amber"], COLORS["copper"]]
 
 for sym, color in zip(top_contracts, palette, strict=False):
     data = df.filter(pl.col("symbol") == sym).sort("timestamp").to_pandas()
@@ -210,11 +210,10 @@ for sym, color in zip(top_contracts, palette, strict=False):
     )
 
 fig.update_layout(
-    title="Fed Rate Probability Evolution (Kalshi)",
+    title="Battleground Fed-rate thresholds hover near even odds while far thresholds stay pinned",
     xaxis_title="Date",
     yaxis_title="Implied Probability",
     yaxis=dict(tickformat=".0%", range=[0, 1.05]),
-    template="plotly_white",
     height=400,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
 )
@@ -223,7 +222,7 @@ fig.show()
 
 # %% [markdown]
 # The contracts with rate thresholds near the current rate show the most
-# price movement — these are the "battleground" levels where the market
+# price movement - these are the "battleground" levels where the market
 # is genuinely uncertain. Contracts far from the current rate trade near
 # 0 or 1 with little movement.
 
@@ -270,8 +269,7 @@ for i, (meeting, symbols) in enumerate(sorted(meetings.items()), 1):
 
 fig.update_layout(
     height=250 * len(meetings),
-    title_text="Rate Threshold Probabilities by Meeting",
-    template="plotly_white",
+    title_text="Each FOMC meeting's threshold ladder maps the market's full rate distribution",
 )
 
 fig.show()
@@ -308,10 +306,9 @@ activity
 ad = activity.to_pandas()
 fig = go.Figure(go.Bar(x=ad["symbol"], y=ad["daily_prob_vol"], marker_color=COLORS["blue"]))
 fig.update_layout(
-    title="Daily Probability Volatility by Contract",
+    title="Near-the-money Fed thresholds carry the most daily probability movement",
     xaxis_title="Contract",
     yaxis_title="Std. of daily probability change",
-    template="plotly_white",
     height=400,
 )
 fig.update_xaxes(tickangle=-45)
@@ -383,10 +380,9 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title=f"ML Feature Distributions — {active_sym}",
+    title=f"Probability momentum and z-score center near zero for {active_sym}",
     height=350,
     showlegend=False,
-    template="plotly_white",
 )
 
 fig.show()
@@ -417,10 +413,9 @@ quality_df
 qd = quality_df.to_pandas()
 fig = go.Figure(go.Bar(x=qd["symbol"], y=qd["price_range"], marker_color=COLORS["blue"]))
 fig.update_layout(
-    title="Close-Price Range by Contract (cleaned)",
+    title="After repair, close-price range concentrates in near-the-money thresholds",
     xaxis_title="Contract",
     yaxis_title="Close price range",
-    template="plotly_white",
     height=400,
 )
 fig.update_xaxes(tickangle=-45)
@@ -451,7 +446,7 @@ print(f"Saved {len(kalshi_features)} observations to {output_file}")
 #    the market's probability estimate for the event, no transformation needed
 #
 # 2. **Threshold structure**: Multiple contracts per meeting create a full
-#    probability distribution over rate outcomes — richer than a single forecast
+#    probability distribution over rate outcomes - richer than a single forecast
 #
 # 3. **Feature engineering**: Momentum, volatility, and z-score of probability
 #    paths provide regime-detection signals for rate-sensitive strategies

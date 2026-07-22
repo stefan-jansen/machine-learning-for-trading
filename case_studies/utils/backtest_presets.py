@@ -292,6 +292,10 @@ def ensure_backtest_spec(
     """
     if is_backtest_spec(strategy_spec):
         spec = deepcopy(strategy_spec)
+        if case_study == "sp500_options":
+            spec.setdefault("strategy", {}).setdefault("signal", {}).setdefault(
+                "schedule_contract", SP500_OPTIONS_SCHEDULE_CONTRACT
+            )
         spec.setdefault(
             "chapter", spec.get("backtest_config", {}).get("metadata", {}).get("chapter")
         )
@@ -351,6 +355,8 @@ def ensure_backtest_spec(
         "signal": deepcopy(strategy_spec.get("signal", {})),
         "rebalance": rebalance,
     }
+    if case_study == "sp500_options":
+        strategy["signal"].setdefault("schedule_contract", SP500_OPTIONS_SCHEDULE_CONTRACT)
     if "allocation" in strategy_spec:
         strategy["allocation"] = deepcopy(strategy_spec["allocation"])
     if "risk" in strategy_spec:
@@ -389,6 +395,8 @@ _COST_PASSTHROUGH_KEYS = (
     "spread_convention",
 )
 
+SP500_OPTIONS_SCHEDULE_CONTRACT = "last_available_session_per_iso_week_v1"
+
 
 def _costs_block_from_case_config(
     case_config: CaseStudyBacktestConfig,
@@ -424,8 +432,12 @@ def build_backtest_spec(
     min_weight_change: float | None = None,
     min_trade_value: float | None = None,
 ) -> dict[str, Any]:
+    resolved_signal = deepcopy(signal)
+    if case_study == "sp500_options":
+        resolved_signal.setdefault("schedule_contract", SP500_OPTIONS_SCHEDULE_CONTRACT)
+
     strategy_spec: dict[str, Any] = {
-        "signal": deepcopy(signal),
+        "signal": resolved_signal,
         "execution": {
             "mode": (
                 execution_mode
