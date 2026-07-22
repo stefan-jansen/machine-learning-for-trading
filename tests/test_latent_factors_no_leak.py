@@ -75,6 +75,126 @@ def test_cae_validation_batch_receives_validation_returns(
     assert np.array_equal(captured["validation_returns"], returns_val)
 
 
+def test_latent_cuda_request_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from case_studies.utils.latent_factors import library_bridge
+
+    monkeypatch.setattr(library_bridge.torch.cuda, "is_available", lambda: False)
+
+    with pytest.raises(RuntimeError, match="CUDA was requested"):
+        library_bridge.configure_latent_torch_runtime(
+            "cuda",
+            seed=42,
+            num_threads=8,
+            deterministic_algorithms=True,
+        )
+
+
+def test_latent_training_identity_includes_input_splits_and_runtime() -> None:
+    from case_studies.utils import registry
+    from case_studies.utils.latent_factors.cv import _apply_latent_factor_runtime_spec
+
+    kwargs = {
+        "spec": {
+            "family": "latent_factors",
+            "config_name": "cae",
+            "label": "return",
+            "seed": 42,
+        },
+        "n_factors": 5,
+        "n_epochs": 50,
+        "model_kwargs": {"checkpoint_interval": 5},
+        "fold_extras": [],
+        "feature_names": ["value", "size"],
+        "splits": [
+            {
+                "fold": 0,
+                "train_start": datetime(2020, 1, 1),
+                "train_end": datetime(2020, 12, 31),
+                "val_start": datetime(2021, 1, 1),
+                "val_end": datetime(2021, 12, 31),
+            }
+        ],
+        "task_type": "regression",
+        "class_values": None,
+        "eval_label_col": None,
+        "input_digest": "input-a",
+        "macro_digest": None,
+        "runtime_spec": {
+            "device": "cuda",
+            "deterministic_algorithms": True,
+            "cublas_workspace_config": ":4096:8",
+            "num_threads": 8,
+            "seed": 42,
+        },
+    }
+    spec = _apply_latent_factor_runtime_spec(**kwargs)
+    params = spec["params"]
+
+    assert params["feature_names"] == ["value", "size"]
+    assert params["input_digest"] == "input-a"
+    assert params["runtime"]["device"] == "cuda"
+    assert params["splits"][0]["val_end"] == "2021-12-31T00:00:00"
+
+    baseline_hash = registry.training_hash_from_spec(spec)
+    for field, value in (
+        ("input_digest", "input-b"),
+        ("feature_names", ["size", "value"]),
+    ):
+        changed = _apply_latent_factor_runtime_spec(**{**kwargs, field: value})
+        assert registry.training_hash_from_spec(changed) != baseline_hash
+
+    changed_runtime = _apply_latent_factor_runtime_spec(
+        **{
+            **kwargs,
+            "runtime_spec": {**kwargs["runtime_spec"], "device": "cpu"},
+        }
+    )
+    assert registry.training_hash_from_spec(changed_runtime) != baseline_hash
+
+
+def test_latent_input_digest_is_order_stable_and_value_sensitive() -> None:
+    from case_studies.utils.latent_factors.cv import _latent_input_digest
+
+    frame = pl.DataFrame(
+        {
+            "timestamp": [datetime(2021, 2, 1), datetime(2021, 1, 1)],
+            "symbol": ["B", "A"],
+            "value": [2.0, 1.0],
+            "return": [0.2, 0.1],
+        }
+    )
+
+    digest = _latent_input_digest(
+        frame,
+        feature_names=["value"],
+        label_col="return",
+        eval_label_col=None,
+        date_col="timestamp",
+        entity_col="symbol",
+    )
+    reordered = _latent_input_digest(
+        frame.reverse(),
+        feature_names=["value"],
+        label_col="return",
+        eval_label_col=None,
+        date_col="timestamp",
+        entity_col="symbol",
+    )
+    changed = _latent_input_digest(
+        frame.with_columns(
+            pl.when(pl.col("symbol") == "A").then(9.0).otherwise(pl.col("value")).alias("value")
+        ),
+        feature_names=["value"],
+        label_col="return",
+        eval_label_col=None,
+        date_col="timestamp",
+        entity_col="symbol",
+    )
+
+    assert reordered == digest
+    assert changed != digest
+
+
 @pytest.mark.gpu
 def test_cae_predictions_independent_of_validation_returns() -> None:
     """End-to-end regression: perturbing validation returns must not change predictions.

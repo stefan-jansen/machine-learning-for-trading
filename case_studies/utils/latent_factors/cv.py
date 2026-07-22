@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import inspect
 import json
 import time
@@ -19,6 +20,7 @@ from ml4t.diagnostic.metrics import cross_sectional_ic
 from case_studies.utils.backtest_loaders import get_rebalance_step, thin_to_rebalance_dates
 from case_studies.utils.latent_factors.cae import run_cae_fold
 from case_studies.utils.latent_factors.ipca import run_ipca_fold
+from case_studies.utils.latent_factors.library_bridge import configure_latent_torch_runtime
 from case_studies.utils.latent_factors.panel import (
     prepare_panel_data,
     prepare_ragged_panel_data,
@@ -95,6 +97,9 @@ def run_latent_factor_cv(
     score_dates: str = "auto",
     score_cadence: str | None = None,
     score_rebalance_step: int | None = None,
+    device: str = "cpu",
+    num_threads: int = 8,
+    deterministic_algorithms: bool = True,
 ) -> dict[str, Any]:
     """Run walk-forward latent factor CV from the raw dated dataset."""
     del panel_data
@@ -105,6 +110,21 @@ def run_latent_factor_cv(
         )
 
     model_kwargs = model_kwargs or {}
+    runtime_spec = configure_latent_torch_runtime(
+        device,
+        seed=random_state if random_state is not None else RANDOM_SEED,
+        num_threads=num_threads,
+        deterministic_algorithms=deterministic_algorithms,
+    )
+    input_digest = _latent_input_digest(
+        dataset,
+        feature_names=feature_names,
+        label_col=label_col,
+        eval_label_col=eval_label_col,
+        date_col=date_col,
+        entity_col=entity_col,
+    )
+    macro_digest = _frame_digest(macro_panel) if macro_panel is not None else None
     metric_policy = _resolve_metric_policy(
         case_study_id=case_study_id,
         label_col=label_col,
@@ -243,6 +263,7 @@ def run_latent_factor_cv(
                 kwargs["n_epochs"] = n_epochs
             if model_name in {"cae", "sae", "sdf"}:
                 kwargs["log_fn"] = log
+                kwargs["device"] = runtime_spec["device"]
             if model_name == "sae":
                 kwargs["task_type"] = task_type
                 if (
@@ -266,7 +287,9 @@ def run_latent_factor_cv(
                 # Preset overrides defaults but must not stomp on parameters the
                 # caller explicitly passed via the cv-level signature (e.g.
                 # n_epochs for cae/sae) — Papermill smoke tests rely on this.
-                explicit = {"n_epochs"} if model_name in {"cae", "sae"} else set()
+                explicit = {"device"}
+                if model_name in {"cae", "sae"}:
+                    explicit.add("n_epochs")
                 kwargs.update(
                     {
                         key: value
@@ -401,6 +424,11 @@ def run_latent_factor_cv(
                 fold_extras=state[model_name]["fold_extras"],
                 fold_ics_df=fold_ics_df,
                 preds_df=preds_df,
+                feature_names=feature_names,
+                splits=splits,
+                input_digest=input_digest,
+                macro_digest=macro_digest,
+                runtime_spec=runtime_spec,
             )
 
         log(f"    -> best epoch={best_epoch}, IC={mean_ic:+.4f} ({elapsed:.1f}s)")
@@ -423,6 +451,33 @@ def run_latent_factor_cv(
         "fold_metrics": fold_metrics,
         "fold_extras": all_extras,
     }
+
+
+def _frame_digest(frame: pl.DataFrame) -> str:
+    """Return a stable digest of an ordered Polars frame and its schema."""
+    columns = list(frame.columns)
+    key_cols = [column for column in ("timestamp", "symbol") if column in columns]
+    ordered = frame.sort(key_cols) if key_cols else frame
+    row_hashes = ordered.hash_rows(seed=42).to_numpy()
+    schema = [(column, str(ordered.schema[column])) for column in columns]
+    digest = hashlib.sha256(json.dumps(schema, separators=(",", ":")).encode())
+    digest.update(row_hashes.tobytes())
+    return digest.hexdigest()
+
+
+def _latent_input_digest(
+    dataset: pl.DataFrame,
+    *,
+    feature_names: list[str],
+    label_col: str,
+    eval_label_col: str | None,
+    date_col: str,
+    entity_col: str,
+) -> str:
+    columns = [date_col, entity_col, *feature_names, label_col]
+    if eval_label_col:
+        columns.append(eval_label_col)
+    return _frame_digest(dataset.select(columns))
 
 
 def _prepare_fold_inputs(
@@ -838,6 +893,11 @@ def _register_model_predictions(
     fold_extras: list[dict[str, Any]],
     fold_ics_df: pl.DataFrame,
     preds_df: pl.DataFrame,
+    feature_names: list[str],
+    splits: list[dict[str, Any]],
+    input_digest: str,
+    macro_digest: str | None,
+    runtime_spec: dict[str, Any],
 ) -> None:
     from case_studies.utils.registry import (
         build_training_spec,
@@ -869,9 +929,16 @@ def _register_model_predictions(
     spec = _apply_latent_factor_runtime_spec(
         spec=spec,
         n_factors=n_factors,
-        n_epochs=n_epochs,
         model_kwargs=model_kwargs,
         fold_extras=fold_extras,
+        feature_names=feature_names,
+        splits=splits,
+        task_type=task_type,
+        class_values=class_values,
+        eval_label_col=eval_label_col,
+        input_digest=input_digest,
+        macro_digest=macro_digest,
+        runtime_spec=runtime_spec,
     )
 
     training_hash = register_training_run(
@@ -908,10 +975,32 @@ def _apply_latent_factor_runtime_spec(
     n_epochs: int,
     model_kwargs: dict[str, Any],
     fold_extras: list[dict[str, Any]],
+    feature_names: list[str],
+    splits: list[dict[str, Any]],
+    task_type: str,
+    class_values: list | None,
+    eval_label_col: str | None,
+    input_digest: str,
+    macro_digest: str | None,
+    runtime_spec: dict[str, Any],
 ) -> dict[str, Any]:
     resolved = dict(spec)
     params = dict(resolved.get("params", {}))
     params.setdefault("n_factors", n_factors)
+    params["feature_names"] = list(feature_names)
+    params["splits"] = [
+        {
+            key: value.isoformat() if hasattr(value, "isoformat") else value
+            for key, value in split.items()
+        }
+        for split in splits
+    ]
+    params["task_type"] = task_type
+    params["class_values"] = list(class_values) if class_values is not None else None
+    params["eval_label_col"] = eval_label_col
+    params["input_digest"] = input_digest
+    params["macro_digest"] = macro_digest
+    params["runtime"] = dict(runtime_spec)
 
     runtime_fields: dict[str, Any] = {}
     if n_epochs:

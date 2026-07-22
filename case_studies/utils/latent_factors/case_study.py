@@ -38,6 +38,9 @@ class LatentFactorCaseStudyContext:
     splits: list[dict[str, Any]]
     max_symbols: int = 0
     max_folds: int = 0
+    device: str = "cpu"
+    num_threads: int = 8
+    deterministic_algorithms: bool = True
 
     def model_kwargs_for_label(self, label: str) -> dict[str, dict[str, Any]]:
         """Return preset+setup-merged model_kwargs for a specific label.
@@ -75,6 +78,9 @@ def load_case_study_context(
     setup_kwargs = _normalize_model_kwargs(lf_setup.get("model_kwargs", {}))
     model_kwargs = _merge_model_kwargs(preset_kwargs, setup_kwargs)
     persistent_entities = bool(lf_setup.get("persistent_entities", True))
+    device = str(lf_setup.get("device", "cpu"))
+    num_threads = int(lf_setup.get("num_threads", 8))
+    deterministic_algorithms = bool(lf_setup.get("deterministic_algorithms", True))
     macro_panel = load_macro() if use_macro else None
 
     modeling_dataset = load_modeling_dataset(
@@ -102,6 +108,9 @@ def load_case_study_context(
         splits=splits,
         max_symbols=max_symbols,
         max_folds=max_folds,
+        device=device,
+        num_threads=num_threads,
+        deterministic_algorithms=deterministic_algorithms,
     )
 
 
@@ -152,6 +161,9 @@ def run_case_study_model(
         entity_col=context.entity_col,
         macro_panel=context.macro_panel if macro_panel is None else macro_panel,
         persistent_entities=context.persistent_entities,
+        device=context.device,
+        num_threads=context.num_threads,
+        deterministic_algorithms=context.deterministic_algorithms,
     )
 
 
@@ -221,6 +233,9 @@ def run_case_study_variants(
             # macro-less fit while the primary uses the full panel.
             macro_panel=context.macro_panel,
             persistent_entities=context.persistent_entities,
+            device=context.device,
+            num_threads=context.num_threads,
+            deterministic_algorithms=context.deterministic_algorithms,
         )
     return results
 
