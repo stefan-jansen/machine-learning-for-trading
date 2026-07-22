@@ -13,27 +13,26 @@
 # ---
 
 # %% [markdown]
-# # TSMixer for ETF Cross-Asset Lead-Lag
+# # TSMixer as a Global ETF Sequence Model
 #
-# Cross-asset ETFs exhibit lead-lag relationships: TLT leads equity volatility
-# shifts, GLD leads inflation expectations, and sector ETFs co-move in
-# regime-dependent clusters. TSMixer's channel-mixing architecture is built for
-# exactly this structure - its alternating time-mixing and feature-mixing layers
-# can learn cross-asset temporal interactions that a flat-feature model cannot
-# express. The 60-day lookback window covers the multi-week regime transitions
-# where these lead-lag relationships are strongest.
+# This notebook fits one global TSMixer across the ETF panel. Parameters are
+# shared across ETF series, while each training example contains one ETF's target
+# history and covariates. The model's mixing layers therefore learn nonlinear
+# temporal and within-series feature interactions; they do not directly mix one
+# ETF's observations into another ETF's forecast. The 60-session lookback lets
+# the shared model reuse temporal patterns across the panel.
 #
 # The question this notebook asks is whether that inductive bias pays off:
-# does cross-asset feature mixing lift the cross-sectional IC above the Ridge
+# does shared nonlinear sequence modeling lift the cross-sectional IC above the Ridge
 # (Ch11) and GBM (Ch12) baselines on the same ETF cross-section? The results are
-# read back from the frozen results registry - no GPU retraining happens on a
+# read back from the configured results registry - no GPU retraining happens on a
 # cached checkout.
 #
 # **Learning Objectives**:
 # - Read TSMixer walk-forward checkpoint results from the frozen registry
 # - Tune the checkpoint (epoch count) on validation via the shared grid, holdout sealed
 # - Place TSMixer against the linear and GBM baselines on the same cross-section
-# - Assess whether cross-asset feature mixing lifts IC above those baselines
+# - Assess whether shared nonlinear sequence modeling lifts IC above those baselines
 #
 # **Book Reference**: Chapter 13, Section 13.8 (Case Study Results)
 #
@@ -41,7 +40,7 @@
 # [`09_dl_lstm`](09_dl_lstm.ipynb) (for baselines)
 
 # %%
-"""TSMixer - ETF deep learning with registered walk-forward checkpoints."""
+"""Global ETF TSMixer with registered walk-forward checkpoints."""
 
 import sqlite3
 import warnings
@@ -51,6 +50,7 @@ import plotly.graph_objects as go
 import polars as pl
 import torch
 import yaml
+from IPython.display import Markdown, display
 
 import utils.style  # noqa: F401 - activates the ML4T Plotly template
 from case_studies.utils.analytics import load_best_ic_per_family
@@ -329,15 +329,16 @@ if to_train:
 #
 # The reported IC is the config's **peak-checkpoint** validation value: the epoch
 # count is tuned on the validation folds by scanning the checkpoint grid and
-# keeping the checkpoint with the highest mean cross-sectional IC (the epoch-count
-# analogue of early stopping). The holdout is never touched here.
+# keeping the checkpoint with the highest daily cross-sectional IC averaged over
+# the pooled validation dates (the epoch-count analogue of early stopping). The
+# holdout is never touched here.
 #
 # A full-coverage guard mirrors `06_linear`, `07_gbm`, and `13_model_analysis`: a
 # checkpoint that collapses to near-constant predictions on some folds produces no
 # cross-sectional IC on those validation dates, so its IC is measured on fewer
 # days (`ic_n_days` below the maximum) and is not comparable. Such checkpoints are
-# excluded from the winner. On the frozen registry every TSMixer checkpoint is
-# full-coverage (2016 days), so the guard is inert here.
+# excluded from the winner. Every checkpoint on the current registered surface
+# has the same 2,016-date coverage, so the guard is inert here.
 
 # %%
 grid_results.sort(
@@ -386,10 +387,8 @@ print(f"Baselines - Ridge (Ch11): {ridge_ic:+.4f} | GBM (Ch12): {gbm_ic:+.4f}")
 # ### TSMixer against the baselines
 #
 # The bar chart places the peak TSMixer IC next to the Ridge (Ch11) and GBM
-# (Ch12) leaders on the same label and validation split. TSMixer sits below both:
-# on this cross-section the channel-mixing architecture does not add
-# cross-sectional IC over a heavily regularized linear model or a shallow-tree
-# GBM.
+# (Ch12) leaders on the same label and validation split. The title is computed
+# from the registered values so it remains aligned with a new data vintage.
 
 # %%
 # IC comparison - TSMixer vs the flat-feature baselines, TSMixer outlined.
@@ -408,11 +407,23 @@ fig_cmp = go.Figure(
         showlegend=False,
     )
 )
-fig_cmp.update_layout(
-    title=(
+if best_ic < min(ridge_ic, gbm_ic):
+    _cmp_title = (
         f"TSMixer trails both baselines: peak IC {best_ic:+.3f} sits below "
         f"Ridge {ridge_ic:+.3f} and GBM {gbm_ic:+.3f}"
-    ),
+    )
+elif best_ic > max(ridge_ic, gbm_ic):
+    _cmp_title = (
+        f"TSMixer leads both baselines: peak IC {best_ic:+.3f} exceeds "
+        f"Ridge {ridge_ic:+.3f} and GBM {gbm_ic:+.3f}"
+    )
+else:
+    _cmp_title = (
+        f"TSMixer sits between the baselines: peak IC {best_ic:+.3f}, "
+        f"Ridge {ridge_ic:+.3f}, GBM {gbm_ic:+.3f}"
+    )
+fig_cmp.update_layout(
+    title=_cmp_title,
     height=500,
     width=950,
     margin=dict(t=90),
@@ -424,11 +435,10 @@ fig_cmp.show()
 # %% [markdown]
 # ## 5. Learning Curve
 #
-# Validation IC at each registered checkpoint traces how TSMixer trains. The peak
-# is the earliest checkpoint: IC is highest after 15 epochs and then decays toward
-# zero by epoch 90. Rather than converging onto a stable cross-asset signal, the
-# model degrades as training continues - the pattern of a weak signal that the
-# network overfits away, not one it consolidates.
+# Validation IC at each registered checkpoint traces how TSMixer trains. The
+# selected point and both baselines are computed from the registry. A
+# non-monotonic curve makes the checkpoint choice part of validation rather than
+# an assumption that the final epoch is best.
 
 # %%
 all_curves = pl.DataFrame([c for r in grid_results for c in r["curve"]])
@@ -467,7 +477,10 @@ if all_curves.height > 0:
         annotation_position="top right",
     )
     fig_lc.update_layout(
-        title="TSMixer peaks early and decays: validation IC falls from epoch 15 toward zero",
+        title=(
+            f"TSMixer peaks at epoch {best_epoch}: validation IC {best_ic:+.3f} "
+            f"versus Ridge {ridge_ic:+.3f} and GBM {gbm_ic:+.3f}"
+        ),
         height=520,
         width=950,
         legend=dict(title="", font=dict(size=11)),
@@ -484,12 +497,12 @@ if all_curves.height > 0:
 # %% [markdown]
 # ## 6. Winner Fold Metrics
 #
-# The winner's validation IC is the mean of its per-fold cross-sectional IC.
-# Reading the fold breakdown from the frozen registry shows how uneven that
-# average is: the headline IC rests on two strong folds and turns negative on
-# folds 4 and 5, a sign the cross-asset edge is not stable across the walk-forward.
+# The headline validation IC is computed per date across ETFs and then averaged
+# over all validation dates. The per-fold values below are diagnostics for
+# stability, not the definition of the headline metric.
 
 # %%
+fold_rows = []
 if best and best.get("best_prediction_hash"):
     import sqlite3
 
@@ -506,7 +519,8 @@ if best and best.get("best_prediction_hash"):
     for fold_id, ic, n_ent in fold_rows:
         print(f"  Fold {fold_id}: IC={ic:+.4f}  n_entities={int(n_ent)}")
     _fold_mean = float(np.mean([r[1] for r in fold_rows])) if fold_rows else float("nan")
-    print(f"\n  Mean fold IC: {_fold_mean:+.4f}  (registered peak IC: {best_ic:+.4f})")
+    print(f"\n  Diagnostic mean fold IC: {_fold_mean:+.4f}")
+    print(f"  Registered daily-pooled IC: {best_ic:+.4f}")
 
 # %% [markdown]
 # ## 7. Registered Predictions
@@ -529,30 +543,41 @@ if best and best.get("best_prediction_hash"):
 # %% [markdown]
 # ## 8. Key Takeaways
 #
-# - **TSMixer underperforms both baselines here.** The peak TSMixer checkpoint
-#   reaches validation IC $\approx +0.029$ (at 15 epochs), below the GBM leader
-#   (`leaves_7_mae`, $\approx +0.044$ from [`07_gbm`](07_gbm.ipynb)) and the
-#   full-coverage linear leader (Ridge at $\alpha = 10^6$, $\approx +0.042$ from
-#   [`06_linear`](06_linear.ipynb)). The channel-mixing inductive bias does not
-#   lift IC above a shallow-tree GBM or a heavily regularized linear model on this
-#   cross-section.
-# - **The signal peaks early and decays.** IC is highest at the first checkpoint
-#   (15 epochs) and falls toward zero by epoch 90. That is the signature of a weak
-#   signal the network overfits away with more training, not of stable cross-asset
-#   structure it consolidates - so the "fast convergence" is not evidence of
-#   learnable lead-lag structure here.
-# - **The edge is fold-fragile.** The winner's IC is carried by folds 2 and 6 and
-#   goes negative on folds 4 and 5, so the $+0.029$ is not a stable cross-sectional
-#   signal. The epoch count is tuned on the validation folds via the checkpoint
-#   grid, the analogue of early stopping; the holdout is untouched.
-#
-# On this ETF cross-section the predictable structure is largely captured by the
-# flat-feature baselines, and neither the TabM ensemble (Ch12), the LSTM, nor
-# TSMixer's cross-asset mixing clears them on validation IC. That motivates the
-# latent-factor view next: extracting a small set of factors may organize the
-# cross-section more parsimoniously than a full sequence model.
-#
-# **Next**: [`11_latent_factors`](11_latent_factors.ipynb) tests whether
-# PCA-based factor extraction captures the same cross-asset structure more
-# parsimoniously.
+# The summary below is generated from the selected registered checkpoint so its
+# epoch, IC, comparison, and fold-stability statements remain synchronized.
+
+# %%
+_negative_folds = [int(fold_id) for fold_id, ic, _ in fold_rows if ic < 0] if fold_rows else []
+_negative_text = ", ".join(map(str, _negative_folds)) if _negative_folds else "none"
+_baseline_reading = (
+    "trails both Ridge and GBM"
+    if best_ic < min(ridge_ic, gbm_ic)
+    else "leads both Ridge and GBM"
+    if best_ic > max(ridge_ic, gbm_ic)
+    else "sits between Ridge and GBM"
+)
+display(
+    Markdown(
+        f"""
+- **TSMixer {_baseline_reading}.** The full-coverage checkpoint selected at epoch
+  {best_epoch} has daily-pooled validation IC {best_ic:+.4f}, versus Ridge
+  {ridge_ic:+.4f} and GBM {gbm_ic:+.4f}.
+- **Checkpoint selection matters.** The registered curve is non-monotonic and the
+  final epoch is not assumed to be best. The epoch count is selected only on the
+  validation folds; the holdout remains sealed.
+- **The result is fold-fragile.** Negative fold diagnostics occur in folds
+  {_negative_text}. The HAC interval should therefore carry more weight than an
+  isolated strong fold.
+
+The global model shares parameters across ETF series but does not directly mix
+one ETF's observations into another ETF's forecast. Here, shared nonlinear
+sequence modeling does not improve on the flat-feature baselines.
+
+**Next**: [`11_latent_factors`](11_latent_factors.ipynb) tests whether explicit
+factor structure organizes the ETF cross-section more effectively.
+"""
+    )
+)
+
+# %% [markdown]
 # **Book**: Chapter 13.8 reports the case-study results across architectures.
