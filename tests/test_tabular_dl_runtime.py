@@ -380,6 +380,59 @@ def test_cached_replay_rejects_invalid_prediction_panels(
         )
 
 
+@pytest.mark.parametrize("corrupted_metric", ["ic_mean_daily", "ic_std_daily"])
+def test_cached_replay_rejects_corrupted_daily_registry_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    corrupted_metric: str,
+) -> None:
+    timestamps = [pd.Timestamp("2020-04-01")] * 5 + [pd.Timestamp("2020-05-01")] * 5
+    frame = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": list(range(5)) * 2,
+            "y_true": list(range(5)) * 2,
+            "y_score": list(range(5)) + list(reversed(range(5))),
+            "fold_id": [0] * 5 + [1] * 5,
+            "eval_actual": list(range(5)) * 2,
+        }
+    )
+    _install_cache(monkeypatch, tmp_path, {25: frame})
+    metric = tabular_dl.cross_sectional_ic(
+        frame,
+        frame,
+        pred_col="y_score",
+        ret_col="eval_actual",
+        date_col="timestamp",
+        entity_col="symbol",
+        method="spearman",
+        min_obs=5,
+    )
+    registry_metrics = {
+        "ic_mean_daily": float(metric["ic_mean"]),
+        "ic_std_daily": float(metric["ic_std"]),
+    }
+    registry_metrics[corrupted_metric] += 0.25
+    monkeypatch.setattr(
+        registry,
+        "load_prediction_metrics",
+        lambda *_args, **_kwargs: pl.DataFrame([registry_metrics]),
+    )
+
+    with pytest.raises(ValueError, match="daily metric mismatch"):
+        tabular_dl._load_cached_tabm_config(
+            case_study="probe",
+            training_spec={"family": "tabular_dl", "label": "label", "seed": 42},
+            config_name="tabm_probe",
+            prediction_split="validation",
+            date_col="timestamp",
+            entity_col="symbol",
+            eval_col="eval_actual",
+            expected_checkpoints=(25,),
+            expected_keys=frame.select("timestamp", "symbol", "fold_id"),
+        )
+
+
 def test_complete_registry_replays_predictions_instead_of_returning_empty(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

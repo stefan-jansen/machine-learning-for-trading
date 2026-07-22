@@ -356,6 +356,7 @@ def _load_cached_tabm_config(
 ) -> tuple[dict[str, Any], pl.DataFrame, list[dict[str, Any]]]:
     """Reconstruct one completed config from content-addressed registry artifacts."""
     from case_studies.utils.registry import (
+        load_prediction_metrics,
         load_prediction_sets,
         prediction_dir,
         training_hash_from_spec,
@@ -434,6 +435,35 @@ def _load_cached_tabm_config(
             method="spearman",
             min_obs=5,
         )
+        registry_metrics = load_prediction_metrics(
+            case_study, prediction_hash=row["prediction_hash"]
+        )
+        required_daily_metrics = {"ic_mean_daily", "ic_std_daily"}
+        missing_daily_metrics = required_daily_metrics - set(registry_metrics.columns)
+        if registry_metrics.height != 1 or missing_daily_metrics:
+            raise ValueError(
+                f"Cached {config_name} checkpoint {epoch} has invalid daily registry metrics"
+            )
+        comparisons = {
+            "daily mean": (
+                registry_metrics["ic_mean_daily"][0],
+                float(metric["ic_mean"]),
+            ),
+            "daily std": (
+                registry_metrics["ic_std_daily"][0],
+                float(metric.get("ic_std", 0.0)),
+            ),
+        }
+        mismatches = {
+            name: values
+            for name, values in comparisons.items()
+            if values[0] is None
+            or not np.isclose(float(values[0]), values[1], atol=1e-12, rtol=0.0)
+        }
+        if mismatches:
+            raise ValueError(
+                f"Cached {config_name} checkpoint {epoch} daily metric mismatch: {mismatches}"
+            )
         curves.append(
             {
                 "config": config_name,
