@@ -228,12 +228,14 @@ def compute_conformal_weights(
     calibrated width; missing widths raise instead of silently changing the
     selected basket.
 
-    A small floor at ``floor_quantile`` of the in-sample width distribution
-    prevents 1/Δ blow-up when residuals happen to be identical.
+    A small floor at ``floor_quantile`` of each decision time's cross-sectional
+    width distribution prevents 1/Δ blow-up without using future widths.
     """
     selected = _select_top_bottom(predictions, top_k, long_short, time_col)
 
-    widths = conformal_widths.select(time_col, "symbol", "width")
+    widths = conformal_widths.select(time_col, "symbol", "width").with_columns(
+        width_floor=pl.col("width").quantile(floor_quantile).over(time_col)
+    )
     # Harmonize join dtypes to predictions/weights.
     if widths[time_col].dtype != selected[time_col].dtype:
         widths = widths.cast({time_col: selected[time_col].dtype})
@@ -261,12 +263,9 @@ def compute_conformal_weights(
             "compute_conformal_widths() before backtest."
         )
 
-    floor_value = selected["width"].quantile(floor_quantile)
-    if floor_value is None:
-        raise ValueError("conformal_weighted: width floor is undefined")
-    floor = float(floor_value)
-    floor = max(floor, 1e-12)
-    selected = selected.with_columns(inv_w=1.0 / pl.max_horizontal(pl.col("width"), pl.lit(floor)))
+    selected = selected.with_columns(
+        inv_w=1.0 / pl.max_horizontal(pl.col("width"), pl.col("width_floor"), pl.lit(1e-12))
+    )
 
     long_w = selected.filter(pl.col("side") == "long").with_columns(
         weight=pl.col("inv_w") / pl.col("inv_w").sum().over(time_col)

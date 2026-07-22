@@ -108,6 +108,45 @@ def test_conformal_allocation_rejects_missing_selected_widths() -> None:
         compute_conformal_weights(predictions, incomplete_widths, top_k=2)
 
 
+def test_conformal_weight_floor_never_uses_future_timestamps() -> None:
+    """Appending future widths must not change already emitted allocation weights."""
+    early = datetime(2024, 1, 1)
+    future = datetime(2024, 2, 1)
+    symbols = [f"S{index:03d}" for index in range(100)]
+    predictions = pl.DataFrame(
+        {
+            "timestamp": [early] * 100 + [future] * 100,
+            "symbol": symbols * 2,
+            "y_score": [float(100 - index) for index in range(100)] * 2,
+        }
+    )
+    widths = pl.DataFrame(
+        {
+            "timestamp": [early] * 100 + [future] * 100,
+            "symbol": symbols * 2,
+            "width": [1e-9] + [1.0] * 99 + [1e-12] * 100,
+        }
+    )
+
+    prefix = compute_conformal_weights(
+        predictions.filter(pl.col("timestamp") == early),
+        widths.filter(pl.col("timestamp") == early),
+        top_k=100,
+    ).sort("timestamp", "symbol")
+    full = (
+        compute_conformal_weights(predictions, widths, top_k=100)
+        .filter(pl.col("timestamp") == early)
+        .sort("timestamp", "symbol")
+    )
+
+    max_difference = (
+        prefix.join(full, on=["timestamp", "symbol"], suffix="_full")
+        .select((pl.col("weight") - pl.col("weight_full")).abs().max())
+        .item()
+    )
+    assert max_difference < 1e-12
+
+
 def test_calibration_contract_changes_backtest_identity() -> None:
     legacy = {
         "strategy": {
