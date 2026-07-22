@@ -20,7 +20,7 @@ strategy you can actually run, and keep running, in a live market.
 > material with direct feedback. See [Courses](#courses) below.
 
 <p align="center">
-  <a href="https://amzn.to/4eigy2F"><img src="assets/cover.jpeg" width="45%" alt="Machine Learning for Trading, 3rd Edition"></a>
+  <a href="https://amzn.to/4eigy2F"><img src="assets/cover.png" width="45%" alt="Machine Learning for Trading, 3rd Edition"></a>
 </p>
 
 ---
