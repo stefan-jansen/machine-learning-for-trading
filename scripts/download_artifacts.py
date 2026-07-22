@@ -34,7 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # GitHub release configuration
 GITHUB_REPO = "stefan-jansen/machine-learning-for-trading"
-RELEASE_TAG = "v3.1.0-artifacts"
+RELEASE_TAG = "v3.0.0-alpha.4"
 BASE_URL = f"https://github.com/{GITHUB_REPO}/releases/download/{RELEASE_TAG}"
 
 CASE_STUDIES = [
