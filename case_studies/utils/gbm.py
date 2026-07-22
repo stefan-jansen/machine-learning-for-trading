@@ -1156,6 +1156,7 @@ def register_gbm_result(
     class_values: list | None = None,
     eval_col: str | None = None,
     training_spec: dict[str, Any] | None = None,
+    input_data_spec: dict[str, Any] | None = None,
 ) -> str:
     """Register a single GBM config's result to the registry.
 
@@ -1190,6 +1191,7 @@ def register_gbm_result(
             max_bin=max_bin,
             checkpoint_interval=cfg.get("checkpoint_interval", 50),
             train_sample_frac=train_sample_frac,
+            extra_params={"input_data_spec": input_data_spec} if input_data_spec else None,
         )
     else:
         spec = dict(training_spec)
@@ -1206,6 +1208,11 @@ def register_gbm_result(
         }
         if mismatches:
             raise ValueError(f"training_spec disagrees with registration inputs: {mismatches}")
+        if (
+            input_data_spec is not None
+            and spec.get("params", {}).get("input_data_spec") != input_data_spec
+        ):
+            raise ValueError("training_spec disagrees with input_data_spec")
     t_hash = register_training_run(
         case_study_id,
         spec=spec,
