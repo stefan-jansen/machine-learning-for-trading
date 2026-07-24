@@ -1778,12 +1778,16 @@ case_studies/nasdaq100_microstructure/03_financial_features:
     START_DATE: '2000-01-01'
   timeout: 120
 case_studies/nasdaq100_microstructure/04_model_based_features:
+  # MAX_SYMBOLS and START_DATE must match the consumers of this notebook's
+  # temporal artifact (05_evaluation and 06-12, all MAX_SYMBOLS 5 from
+  # 2000-01-01). This stage used to run on 3 symbols over 2021-06..2021-12 while
+  # the consumers built CV folds over the full two-year window, so the artifact
+  # covered none of fold 0 and validate_temporal_fold_coverage failed at 0.0%.
   long_running: true
   parameters:
-    END_DATE: '2021-12-31'
-    MAX_SYMBOLS: 3
-    START_DATE: '2021-06-01'
-  timeout: 600
+    MAX_SYMBOLS: 5
+    START_DATE: '2000-01-01'
+  timeout: 900
 case_studies/nasdaq100_microstructure/05_evaluation:
   parameters:
     MAX_SYMBOLS: 5
