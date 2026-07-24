@@ -50,42 +50,11 @@ def test_no_machine_specific_paths_in_committed_notebooks() -> None:
     )
 
 
-# Notebooks still carrying the fossil, all in chapters not yet shipped to readers
-# (case studies -> Beat 5+). They are desynced for additional reasons too, so the
-# empty tags cannot be stripped in isolation: doing so is churn that leaves the
-# notebook just as unopenable. Clear these before the beats that ship them; the
-# list must only ever shrink, which the second test below enforces.
-KNOWN_DESYNCED = frozenset(
-    {
-        "case_studies/cme_futures/10a_pca.ipynb",
-        "case_studies/cme_futures/10b_stochastic_discount_factor.ipynb",
-        "case_studies/crypto_perps_funding/05_evaluation.ipynb",
-        "case_studies/crypto_perps_funding/_archive/11_autoencoder.ipynb",
-        "case_studies/etfs/11a_pca.ipynb",
-        "case_studies/etfs/11b_ipca.ipynb",
-        "case_studies/etfs/11c_conditional_autoencoder.ipynb",
-        "case_studies/etfs/11d_stochastic_discount_factor.ipynb",
-        "case_studies/fx_pairs/06_linear.ipynb",
-        "case_studies/nasdaq100_microstructure/05_evaluation.ipynb",
-        "case_studies/sp500_equity_option_analytics/05_evaluation.ipynb",
-        "case_studies/sp500_equity_option_analytics/06_linear.ipynb",
-        "case_studies/sp500_equity_option_analytics/08_tabular_dl.ipynb",
-        "case_studies/sp500_equity_option_analytics/11a_pca.ipynb",
-        "case_studies/sp500_equity_option_analytics/11b_ipca.ipynb",
-        "case_studies/sp500_equity_option_analytics/11c_conditional_autoencoder.ipynb",
-        "case_studies/sp500_equity_option_analytics/11d_stochastic_discount_factor.ipynb",
-        "case_studies/sp500_equity_option_analytics/11e_supervised_autoencoder.ipynb",
-        "case_studies/sp500_options/01_feasibility_analysis.ipynb",
-        "case_studies/sp500_options/05_evaluation.ipynb",
-        "case_studies/us_equities_panel/04_model_based_features.ipynb",
-        "case_studies/us_equities_panel/05_evaluation.ipynb",
-        "case_studies/us_firm_characteristics/04_evaluation.ipynb",
-        "case_studies/us_firm_characteristics/08a_ipca.ipynb",
-        "case_studies/us_firm_characteristics/08b_conditional_autoencoder.ipynb",
-        "case_studies/us_firm_characteristics/08c_stochastic_discount_factor.ipynb",
-        "case_studies/us_firm_characteristics/08d_supervised_autoencoder.ipynb",
-    }
-)
+# Debt list for notebooks still carrying the empty-tag fossil. Emptied when the
+# case studies shipped: every entry below was a code-repo artifact that the
+# released notebooks do not carry, so the list cleared rather than shrank one at
+# a time. The list must only ever shrink, which the second test below enforces.
+KNOWN_DESYNCED: frozenset[str] = frozenset()
 
 
 def _empty_tag_offenders() -> dict[str, int]:
@@ -141,7 +110,6 @@ KNOWN_UNRENDERABLE = frozenset(
         "case_studies/crypto_perps_funding/_archive/11_autoencoder.ipynb",
         "case_studies/us_equities_panel/03_financial_features.ipynb",
         "case_studies/us_equities_panel/20_strategy_analysis.ipynb",
-        "case_studies/us_firm_characteristics/15_strategy_analysis.ipynb",
     }
 )
 
