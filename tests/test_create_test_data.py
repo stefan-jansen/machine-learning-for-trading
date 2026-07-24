@@ -169,7 +169,7 @@ def test_manifest_records_sizes_and_preserves_unselected_entries(tmp_path: Path)
         name="firm_characteristics",
         description="test",
         build=lambda source, output: [],
-        subdir=Path("equities") / "firm_characteristics",
+        owns=(Path("equities") / "firm_characteristics",),
         budget={"max_entities": 200},
     )
     import tests.create_test_data as ctd
