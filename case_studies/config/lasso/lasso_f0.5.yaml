@@ -1,0 +1,6 @@
+# Data-driven L1 grid: alpha = 0.5 x alpha_max (per-fold degeneracy boundary).
+# Auto-calibrates per case study so the family is never silently all-degenerate.
+model_class: Lasso
+params:
+  alpha_frac: 0.5
+  max_iter: 5000

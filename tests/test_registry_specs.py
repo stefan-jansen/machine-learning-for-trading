@@ -15,11 +15,13 @@ import json
 
 import pytest
 
+from case_studies.utils.registry import registration
 from case_studies.utils.registry.specs import (
     DEFAULT_SEED,
     HASH_LENGTH,
     _validate_spec,
     backtest_hash_from_parts,
+    build_training_spec,
     canonical_json,
     compute_hash,
     prediction_hash_from_parts,
@@ -211,6 +213,41 @@ def test_backtest_hash_invariant_under_strategy_key_order() -> None:
     assert backtest_hash_from_parts("p", a) == backtest_hash_from_parts("p", b)
 
 
+def test_backtest_hash_excludes_runtime_config_object() -> None:
+    planned = {
+        "version": 2,
+        "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 10}},
+        "backtest_config": {"cash": {"initial": 100_000.0}},
+    }
+    runtime = {**planned, "_runtime_backtest_config": object()}
+
+    assert backtest_hash_from_parts("pred", runtime) == backtest_hash_from_parts("pred", planned)
+
+
+def test_backtest_hash_normalizes_default_long_only_direction() -> None:
+    implicit = {"strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 5}}}
+    explicit = {
+        "strategy": {
+            "signal": {
+                "method": "equal_weight_top_k",
+                "top_k": 5,
+                "direction": "long_only",
+            }
+        }
+    }
+    short = {
+        "strategy": {
+            "signal": {
+                "method": "equal_weight_top_k",
+                "top_k": 5,
+                "direction": "short_only",
+            }
+        }
+    }
+    assert backtest_hash_from_parts("p", implicit) == backtest_hash_from_parts("p", explicit)
+    assert backtest_hash_from_parts("p", implicit) != backtest_hash_from_parts("p", short)
+
+
 # -----------------------------------------------------------------------------
 # Regression pin — the exact hash for a canonical spec
 # -----------------------------------------------------------------------------
@@ -225,3 +262,67 @@ def test_training_hash_regression_pin_for_canonical_spec() -> None:
     expected = hashlib.sha256(content.encode()).hexdigest()[:12]
 
     assert training_hash_from_spec(spec) == expected
+
+
+def test_legacy_input_lineage_remains_part_of_certified_registry_identity() -> None:
+    lineage = {"fingerprint": "certified", "artifacts": {"features": {"sha256": "abc"}}}
+    spec = build_training_spec(
+        "linear",
+        "ols",
+        "fwd_ret_5d",
+        n_folds=2,
+        input_lineage=lineage,
+    )
+
+    assert spec["input_lineage"] == lineage
+    assert training_hash_from_spec(spec) != training_hash_from_spec(
+        build_training_spec("linear", "ols", "fwd_ret_5d", n_folds=2)
+    )
+
+
+def test_pca_preset_preserves_shipped_registry_identity() -> None:
+    spec = build_training_spec(
+        "latent_factors",
+        "pca",
+        "fwd_ret_5d",
+        n_folds=5,
+        n_epochs=50,
+    )
+
+    assert spec["library"] == "sklearn"
+    assert spec["params"] == {"n_factors": 5}
+    assert training_hash_from_spec(spec) == "c59b8988c8c7"
+
+
+def test_epoch_registration_merges_spec_extra_params_on_preset_path(monkeypatch) -> None:
+    captured = {}
+
+    def capture_training_run(case_study, *, spec, **kwargs):
+        captured["case_study"] = case_study
+        captured["spec"] = spec
+        return training_hash_from_spec(spec)
+
+    monkeypatch.setattr(registration, "register_training_run", capture_training_run)
+    monkeypatch.setattr(registration, "register_prediction_set", lambda *args, **kwargs: "pred")
+
+    result = registration.register_epoch_checkpoint(
+        "etfs",
+        family="tabular_dl",
+        library="tabm",
+        config_name="tabm_s",
+        label="fwd_ret_21d",
+        n_folds=8,
+        n_epochs=100,
+        best_epoch=50,
+        ic_mean=0.01,
+        predictions=None,
+        spec_extra_params={
+            "batch_size": 4096,
+            "input_data_spec": {"input_digest": "sha256:input"},
+        },
+    )
+
+    assert captured["case_study"] == "etfs"
+    assert captured["spec"]["params"]["batch_size"] == 4096
+    assert captured["spec"]["params"]["input_data_spec"]["input_digest"] == "sha256:input"
+    assert result == training_hash_from_spec(captured["spec"])

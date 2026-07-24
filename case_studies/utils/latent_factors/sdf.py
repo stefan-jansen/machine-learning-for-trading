@@ -41,6 +41,7 @@ def run_sdf_fold(
     weight_decay: float = 0.0,
     log_fn=print,
     seed: int = 42,
+    device: str = "cpu",
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
     """Train the SDF network and emit checkpoint predictions."""
     del n_factors, log_fn
@@ -71,4 +72,5 @@ def run_sdf_fold(
         lr=lr,
         weight_decay=weight_decay,
         seed=seed,
+        device=device,
     )

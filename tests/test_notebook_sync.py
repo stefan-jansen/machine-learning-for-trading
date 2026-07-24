@@ -20,7 +20,19 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from notebook_provenance import check_all  # noqa: E402
+from notebook_provenance import check_all, production_parameters  # noqa: E402
+
+
+def test_production_parameters_allow_only_full_run_cache_bypasses():
+    assert production_parameters({})
+    assert production_parameters({"FORCE_RETRAIN": True})
+    assert production_parameters({"FORCE_RETRAIN": "true", "USE_CACHE": "false"})
+    assert production_parameters({"FORCE_REBACKTEST": "1"})
+
+    assert not production_parameters({"FORCE_RETRAIN": False})
+    assert not production_parameters({"MAX_FOLDS": 1})
+    assert not production_parameters({"TRAIN_SAMPLE_FRAC": 0.1})
+    assert not production_parameters({"USE_CACHE": True})
 
 
 def test_stamped_notebooks_are_current_and_production() -> None:

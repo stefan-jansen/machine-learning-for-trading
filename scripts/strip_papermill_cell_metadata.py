@@ -36,6 +36,7 @@ Idempotent. Guarded by ``tests/test_notebook_output_hygiene.py``.
 
 Usage:
     uv run python scripts/strip_papermill_cell_metadata.py            # rewrite in place
+    uv run python scripts/strip_papermill_cell_metadata.py a.ipynb    # selected notebooks
     uv run python scripts/strip_papermill_cell_metadata.py --check    # report only, exit 1 if dirty
 """
 
@@ -73,11 +74,20 @@ def strip_cell_papermill(raw: str) -> tuple[str, int]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true", help="report only; exit 1 if any found")
+    ap.add_argument("paths", nargs="*", type=Path, help="notebooks to inspect (default: all)")
     args = ap.parse_args()
+
+    notebooks = (
+        [path.resolve().with_suffix(".ipynb") for path in args.paths]
+        if args.paths
+        else _tracked_notebooks()
+    )
 
     dirty: list[tuple[Path, int]] = []
     unsafe: list[Path] = []
-    for nb_path in _tracked_notebooks():
+    for nb_path in notebooks:
+        if not nb_path.exists():
+            raise SystemExit(f"notebook not found: {nb_path}")
         if not pair_diff(nb_path):
             continue  # pair already agrees; the fossil is harmless here
         raw = nb_path.read_text(encoding="utf-8")

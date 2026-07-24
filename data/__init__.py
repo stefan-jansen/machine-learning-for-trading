@@ -118,7 +118,7 @@ from data.futures.loader import list_cme_products, list_cot_products, load_cme_f
 from data.fx.loader import list_fx_pairs, load_fx_pairs
 
 # Macro
-from data.macro.loader import load_macro, load_macro_metadata
+from data.macro.loader import load_macro, load_macro_initial_release, load_macro_metadata
 
 # Prediction Markets
 from data.prediction_markets.loader import load_kalshi, load_polymarket
@@ -135,6 +135,7 @@ __all__ = [
     "load_crypto_perps",
     # Macro
     "load_macro",
+    "load_macro_initial_release",
     "load_macro_metadata",
     # Equities
     "load_us_equities",

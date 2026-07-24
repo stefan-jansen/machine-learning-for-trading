@@ -209,8 +209,8 @@ backtest:
     checkpoints_per_config: 2
     # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
     expensive_allocators_skip: false
-    # All others (equal_weight, score_weighted, inverse_vol) take the cheap path.
-    # Ch16 signal-stage selection. Long-only equal-weight top-k. Percentile
+    # All other alternative allocators take the cheap path.
+    # Ch16 equal-weight baseline selection. Long-only top-k. Percentile
     # and quantile axes are commented out; uncomment to add them for any
     # label and the loader will synthesize the schemes automatically.
     top_k_grid:
@@ -227,8 +227,8 @@ backtest:
     # concentration profile so the cross-method comparison is honest. MVO uses
     # Ledoit-Wolf shrinkage as its covariance regularizer; IV/RP/HRP have
     # method-inherent diversification; score_weighted is reported unconstrained.
+    # Equal weight is the Ch16 baseline and is not repeated here.
     allocators:
-      - {name: equal_weight,    method: equal_weight}
       - {name: score_weighted,  method: score_weighted}
       - {name: inverse_vol,     method: inverse_vol}
       - {name: risk_parity,     method: risk_parity}
@@ -275,7 +275,28 @@ modeling:
     device: gpu
   latent_factors:
     persistent_entities: true
+    macro_context:
+      source: alfred_initial_release
+      policy: alfred_initial_release_close_lagged
+      version: v1
+      series:
+        - dgs1
+        - dgs2
+        - dgs3
+        - dgs5
+        - dgs7
+        - dgs10
+        - dgs20
+        - dgs30
+        - vixcls
+        - YIELD_CURVE_SLOPE
+        - YIELD_CURVE_5_10
+      availability_lag_days: 1
+      alignment: backward_asof
     model_kwargs:
+      ipca:
+        max_iter: 10000
+        tol: 0.00001
       sdf:
         checkpoint_epochs: [256, 512, 768, 1024, 1280]
         beta_checkpoint_epochs: [256]

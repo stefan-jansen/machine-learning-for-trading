@@ -42,7 +42,7 @@
 #
 # ## Prerequisites
 #
-# - `01_data_quality_diagnostics` — establishes the baseline coverage and
+# - `01_data_quality_diagnostics` - establishes the baseline coverage and
 #   outlier counts that motivate each cleaning step here.
 # - Familiarity with leakage-aware splitting (Chapter 6 §6.3).
 # - Polars expressions, Jupytext percent-format notebooks.
@@ -666,7 +666,7 @@ if us_equities is not None:
 # %% [markdown]
 # ### Cleaned US Equities Summary
 #
-# The cleaning pipeline is a teaching demonstration — downstream case study
+# The cleaning pipeline is a teaching demonstration - downstream case study
 # notebooks apply their own cleaning via loaders and feature engineering.
 
 # %%
@@ -954,7 +954,7 @@ print(
 
 # %%
 # Same configuration as the correct preprocessor (winsorize + scale) so the
-# only difference is the fit data — this isolates the leakage effect.
+# only difference is the fit data - this isolates the leakage effect.
 full_data = pl.concat([train_df, test_df])
 leaky_preprocessor = SplitAwarePreprocessor(
     scale_cols=["returns"],
@@ -996,7 +996,7 @@ fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharex=True, sharey=True)
 correct_vals = test_processed["returns"].to_numpy()
 leaky_vals = leaky_test_processed["returns"].to_numpy()
 
-# Identical bins and shared axes so the two panels are directly comparable —
+# Identical bins and shared axes so the two panels are directly comparable -
 # the only difference should be the leakage-induced shift, not the binning.
 bin_edges = np.linspace(
     min(correct_vals.min(), leaky_vals.min()),
@@ -1156,20 +1156,20 @@ for name, df in [("US Equities", us_equities_cleaned), ("ETFs", etfs_cleaned)]:
 
 # %% [markdown]
 # Both cleaned datasets pass basic quality checks: no null or negative
-# prices remain. This notebook demonstrates the cleaning techniques —
+# prices remain. This notebook demonstrates the cleaning techniques -
 # downstream case study notebooks apply their own cleaning via loaders.
 
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Preprocessing must be split-aware** — fit parameters on training data only
-# 2. **Domain filters catch obvious errors** — negative prices, impossible OHLC relations
-# 3. **Spike detection identifies data artifacts** — single-bar reversals often indicate errors
-# 4. **Winsorization handles outliers** — but bounds must come from training data
+# 1. **Preprocessing must be split-aware** - fit parameters on training data only
+# 2. **Domain filters catch obvious errors** - negative prices, impossible OHLC relations
+# 3. **Spike detection identifies data artifacts** - single-bar reversals often indicate errors
+# 4. **Winsorization handles outliers** - but bounds must come from training data
 # 5. **Categorical encoding** must handle unseen categories at test time
 # 6. **Walk-forward refit** captures parameter drift across market regimes
-# 7. **Cross-dataset alignment requires care** — use as-of joins for different frequencies
+# 7. **Cross-dataset alignment requires care** - use as-of joins for different frequencies
 #
 # **Next**: See `05_signal_evaluation` for IC-based signal quality assessment.
 # **Book**: Section 7.1 discusses why preprocessing choices affect model validity.

@@ -1,0 +1,5 @@
+max_samples: 50000
+n_folds: 5
+n_placebo: 100
+params: {}
+seed: 42

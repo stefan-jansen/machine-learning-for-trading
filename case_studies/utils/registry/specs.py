@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,17 @@ _HASH_EXCLUDED_METADATA = ("preset_path",)
 def _hashable_strategy_spec(strategy_spec: dict) -> dict:
     """Copy of *strategy_spec* with non-portable provenance stripped for hashing."""
     spec = copy.deepcopy(strategy_spec)
+    spec.pop("_runtime_backtest_config", None)
+    strategy = spec.get("strategy")
+    if isinstance(strategy, dict):
+        signal = strategy.get("signal")
+        if isinstance(signal, dict):
+            # ``long_only`` was historically implicit. Remove the explicit
+            # default so direction-less legacy specs and current specs retain
+            # one semantic identity. Non-default directions remain hash inputs.
+            direction = str(signal.get("direction", "long_only")).strip().lower()
+            if direction == "long_only":
+                signal.pop("direction", None)
     backtest_config = spec.get("backtest_config")
     if isinstance(backtest_config, dict):
         metadata = backtest_config.get("metadata")
@@ -118,6 +130,11 @@ _CONFIG_DIR: Path | None = None
 def _get_config_dir() -> Path:
     """Resolve shared config directory (lazy, cached)."""
     global _CONFIG_DIR
+    output_root = os.environ.get("ML4T_OUTPUT_DIR")
+    if output_root:
+        output_config = Path(output_root) / "config"
+        if output_config.is_dir():
+            return output_config
     if _CONFIG_DIR is None:
         from utils.paths import REPO_ROOT
 
@@ -164,6 +181,7 @@ def build_training_spec(
     causal_params: dict | None = None,
     extra_params: dict | None = None,
     train_sample_frac: float = 1.0,
+    input_lineage: dict | None = None,
 ) -> dict:
     """Build a complete training spec from a preset + case-study context.
 
@@ -196,6 +214,10 @@ def build_training_spec(
         Case-study-specific causal DML params (treatment, confounders, embargo).
     extra_params : dict, optional
         Additional params to merge into the params dict.
+    input_lineage : dict, optional
+        Legacy top-level model-input identity used by certified case-study
+        registries. New callers should place ``input_data_spec`` in
+        ``extra_params``.
     """
     preset = load_preset(family, config_name)
 
@@ -215,6 +237,8 @@ def build_training_spec(
         "n_folds": n_folds,
         "seed": seed,
     }
+    if input_lineage is not None:
+        spec["input_lineage"] = copy.deepcopy(input_lineage)
 
     # Family-specific fields
     if family == "gbm":

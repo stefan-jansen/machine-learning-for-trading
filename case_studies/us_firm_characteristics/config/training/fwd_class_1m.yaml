@@ -1,0 +1,37 @@
+# Model configurations for fwd_class_1m (classification)
+# Each entry references a preset in case_studies/_presets/{family}/.
+# Comment out lines to skip configs; add new preset names to extend.
+
+linear:
+- logistic_none
+- logistic_l2_C0.001
+- logistic_l2_C0.01
+- logistic_l2_C0.1
+- logistic_l2_C1.0
+- logistic_l2_C10.0
+- logistic_l2_C100.0
+- logistic_l1_C0.001
+- logistic_l1_C0.01
+- logistic_l1_C0.1
+- logistic_l1_C1.0
+- logistic_l1_C10.0
+- logistic_l1_C100.0
+gbm:
+- default_binary
+- leaves_7_binary
+- leaves_15_binary
+- leaves_31_binary
+- leaves_63_binary
+tabular_dl:
+- tabm_s
+- tabm_m
+- tabm_l
+latent_factors:
+# PCA is outside this case study's declared search surface; IPCA is the
+# designated linear characteristic-sorted baseline.
+- ipca
+- cae
+- sdf
+- sae
+causal_dml:
+- dml

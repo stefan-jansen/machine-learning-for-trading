@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 
-# Pin OpenMP threading before sklearn imports — HistGradientBoostingRegressor
+# Pin OpenMP threading before sklearn imports. HistGradientBoostingRegressor
 # uses OMP-parallel histogram construction whose floating-point reduction order
 # is non-deterministic across threads. With OMP_NUM_THREADS=1 the placebo loop
 # is bit-reproducible across runs at the same seed/spec/data.
@@ -31,7 +31,7 @@ from statsmodels.regression.linear_model import OLS
 from utils.modeling import RANDOM_SEED, seed_everything
 
 
-def embargo_from_buffer(label_buffer: str) -> int:
+def embargo_from_buffer(label_buffer: str, *, periods_per_year: int | None = None) -> int:
     """Convert a label buffer string to an integer embargo period count.
 
     Supports all pandas duration units (D, H/h, M, T/min).
@@ -42,7 +42,8 @@ def embargo_from_buffer(label_buffer: str) -> int:
     - H/h: the buffer is interpreted as the bar cadence; the result is the
       number of `value`-hour bars in one trading day (24 // value), so "8H"
       → 3 bars (a one-day embargo on 8-hour bars)
-    - M: `value` months × 21 trading days
+    - M: `value` monthly groups when `periods_per_year=12`, otherwise
+      `value` months × 21 trading days
     - T/min: the buffer is the cadence; the result is the bars in 15 minutes
       (`value` // 15), assuming 15-minute base bars
     """
@@ -56,14 +57,18 @@ def embargo_from_buffer(label_buffer: str) -> int:
         "D": value,
         "H": max(1, 24 // value),
         "h": max(1, 24 // value),
-        "M": value * 21,
+        "M": value if periods_per_year == 12 else value * 21,
         "T": max(1, value // 15),
         "min": max(1, value // 15),
     }[unit]
 
 
 def block_permute(
-    arr: np.ndarray, block_size: int, rng: np.random.Generator | None = None
+    arr: np.ndarray,
+    block_size: int,
+    rng: np.random.Generator | None = None,
+    groups: np.ndarray | None = None,
+    units: np.ndarray | None = None,
 ) -> np.ndarray:
     """Permute array in blocks to preserve autocorrelation structure.
 
@@ -78,6 +83,13 @@ def block_permute(
         Size of blocks to preserve.
     rng : np.random.Generator, optional
         Random number generator for reproducibility.
+    groups : array-like, optional
+        Ordered decision time for each row. For a single time series, this
+        validates that each row is one decision time.
+    units : array-like, optional
+        Panel entity for each row. When supplied with ``groups``, treatment is
+        block-permuted within each entity, so ``block_size`` counts that
+        entity's ordered decision times rather than flattened panel rows.
 
     Returns
     -------
@@ -88,6 +100,31 @@ def block_permute(
     n = len(arr)
     if rng is None:
         rng = np.random.default_rng()
+
+    if units is not None:
+        if groups is None:
+            raise ValueError("groups are required when units are supplied")
+        group_arr = np.asarray(groups)
+        unit_arr = np.asarray(units)
+        if len(group_arr) != n or len(unit_arr) != n:
+            raise ValueError("groups and units must have the same length as arr")
+        result = np.empty_like(arr)
+        for unit in pd.unique(unit_arr):
+            idx = np.flatnonzero(unit_arr == unit)
+            unit_groups = group_arr[idx]
+            if len(unit_groups) > 1 and np.any(unit_groups[1:] <= unit_groups[:-1]):
+                raise ValueError("groups must be strictly increasing within each unit")
+            result[idx] = block_permute(arr[idx], block_size, rng=rng)
+        return result
+
+    if groups is not None:
+        group_arr = np.asarray(groups)
+        if len(group_arr) != n:
+            raise ValueError("groups must have the same length as arr")
+        if len(np.unique(group_arr)) != n:
+            raise ValueError("units are required when decision times contain multiple rows")
+        if n > 1 and np.any(group_arr[1:] <= group_arr[:-1]):
+            raise ValueError("groups must be strictly increasing")
 
     n_blocks = n // block_size
     if n_blocks < 2:
@@ -108,6 +145,50 @@ def block_permute(
     return np.concatenate(result)
 
 
+def _walk_forward_indices(
+    n_rows: int,
+    n_folds: int,
+    embargo: int,
+    groups: np.ndarray | None = None,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Build expanding-window folds in rows or complete decision-time groups."""
+    if groups is None:
+        fold_size = n_rows // (n_folds + 1)
+        folds = []
+        for fold in range(n_folds):
+            train_end = (fold + 1) * fold_size
+            test_start = train_end + embargo
+            test_end = min(test_start + fold_size, n_rows)
+            folds.append((np.arange(0, train_end), np.arange(test_start, test_end)))
+        return folds
+
+    group_arr = np.asarray(groups)
+    if len(group_arr) != n_rows:
+        raise ValueError("groups must have the same length as the input arrays")
+    group_starts = np.flatnonzero(np.r_[True, group_arr[1:] != group_arr[:-1]])
+    ordered_groups = group_arr[group_starts]
+    if len(np.unique(ordered_groups)) != len(ordered_groups) or (
+        len(ordered_groups) > 1 and np.any(ordered_groups[1:] < ordered_groups[:-1])
+    ):
+        raise ValueError("groups must be sorted and contiguous")
+
+    fold_size = len(ordered_groups) // (n_folds + 1)
+    folds = []
+    for fold in range(n_folds):
+        train_end = (fold + 1) * fold_size
+        test_start = train_end + embargo
+        test_end = min(test_start + fold_size, len(ordered_groups))
+        train_groups = ordered_groups[:train_end]
+        test_groups = ordered_groups[test_start:test_end]
+        folds.append(
+            (
+                np.flatnonzero(np.isin(group_arr, train_groups)),
+                np.flatnonzero(np.isin(group_arr, test_groups)),
+            )
+        )
+    return folds
+
+
 def manual_dml_timeseries(
     Y: np.ndarray,
     T: np.ndarray,
@@ -119,6 +200,7 @@ def manual_dml_timeseries(
     return_residuals: bool = False,
     hac_maxlags: int | None = None,
     horizon: int | None = None,
+    groups: np.ndarray | None = None,
 ) -> dict:
     """Walk-forward DML with embargo for temporal data.
 
@@ -155,12 +237,17 @@ def manual_dml_timeseries(
         cube-root rule alone. Pass this for any overlapping label of horizon
         >= ~10 periods, or the standard error is understated and the
         t-statistic overstated.
+    groups : array-like or None
+        Ordered decision-time group for each observation. For panel data,
+        supply the timestamp column so folds and embargoes operate on complete
+        decision times rather than arbitrary rows.
 
     Returns
     -------
     dict
         Keys: theta, se_iid, se_hac, t_stat_iid, t_stat_hac, p_value_hac,
-        n_obs, hac_maxlags. If return_residuals: also Y_res, T_res.
+        n_obs, n_periods, hac_maxlags, covariance_type. If return_residuals:
+        also Y_res, T_res.
     """
     seed_everything(RANDOM_SEED)
 
@@ -170,18 +257,11 @@ def manual_dml_timeseries(
     Y_res = np.full(n, np.nan)
     T_res = np.full(n, np.nan)
 
-    fold_size = n // (n_folds + 1)
+    folds = _walk_forward_indices(n, n_folds, embargo, groups=groups)
 
-    for fold in range(n_folds):
-        train_end = (fold + 1) * fold_size
-        test_start = train_end + embargo
-        test_end = min(test_start + fold_size, n)
-
-        if test_end <= test_start:
+    for train_idx, test_idx in folds:
+        if len(test_idx) == 0:
             continue
-
-        train_idx = np.arange(0, train_end)
-        test_idx = np.arange(test_start, test_end)
 
         if len(train_idx) < 50 or len(test_idx) < 10:
             continue
@@ -205,6 +285,8 @@ def manual_dml_timeseries(
     Y_v = Y_res[valid]
     T_v = T_res[valid]
     n_valid = len(Y_v)
+    valid_groups = np.asarray(groups)[valid] if groups is not None else None
+    n_periods = len(np.unique(valid_groups)) if valid_groups is not None else n_valid
 
     empty = {
         "theta": np.nan,
@@ -214,7 +296,9 @@ def manual_dml_timeseries(
         "t_stat_hac": np.nan,
         "p_value_hac": np.nan,
         "n_obs": n_valid,
+        "n_periods": n_periods,
         "hac_maxlags": 0,
+        "covariance_type": "driscoll_kraay" if groups is not None else "newey_west",
     }
     if n_valid < 50:
         if return_residuals:
@@ -226,11 +310,11 @@ def manual_dml_timeseries(
     # Must include intercept: cross-fitting residuals may have non-zero mean
     # when training data varies across folds (expanding window).
     if hac_maxlags is None:
-        auto = max(1, int(n_valid ** (1 / 3)))
+        auto = max(1, int(n_periods ** (1 / 3)))
         # Overlapping h-period labels need L >= h-1; the cube-root rule is
         # horizon-blind and under-lags long-horizon overlapping returns.
         hac_maxlags = max(horizon - 1, auto) if horizon else auto
-        hac_maxlags = min(hac_maxlags, max(1, n_valid // 2))
+        hac_maxlags = min(hac_maxlags, max(1, n_periods // 2))
 
     T_const = sm.add_constant(T_v)
     ols_iid = OLS(Y_v, T_const).fit()
@@ -239,18 +323,36 @@ def manual_dml_timeseries(
     # HC0 standard error
     se_iid = np.sqrt(ols_iid.cov_HC0[1, 1])
 
-    # HAC (Newey-West) standard error with frequency-adaptive bandwidth
+    # Serial-correlation-robust standard error with frequency-adaptive bandwidth.
+    # Panel rows share decision times, so ordinary row-wise Newey-West treats
+    # cross-sectional observations as extra time periods and understates risk.
+    # Driscoll-Kraay aggregates the score by decision time and remains robust to
+    # general cross-sectional dependence.
     se_hac = se_iid
     try:
-        ols_hac = OLS(Y_v, T_const).fit(cov_type="HAC", cov_kwds={"maxlags": hac_maxlags})
-        cov = ols_hac.cov_params()
+        if valid_groups is not None:
+            time_codes = pd.factorize(valid_groups, sort=False)[0]
+            robust = ols_iid.get_robustcov_results(
+                cov_type="hac-groupsum",
+                time=time_codes,
+                maxlags=hac_maxlags,
+                use_correction="hac",
+                df_correction=False,
+            )
+        else:
+            robust = ols_iid.get_robustcov_results(
+                cov_type="HAC",
+                maxlags=hac_maxlags,
+                use_correction=True,
+            )
+        cov = robust.cov_params()
         se_hac = np.sqrt(cov.iloc[1, 1] if hasattr(cov, "iloc") else cov[1, 1])
     except Exception:
         pass  # Fall back to HC0 standard errors on numerical failure
 
     t_stat_hac = theta / se_hac if se_hac > 0 else np.nan
     p_value_hac = (
-        2 * (1 - stats.t.cdf(abs(t_stat_hac), df=n_valid - 2))
+        2 * (1 - stats.t.cdf(abs(t_stat_hac), df=max(n_periods - 2, 1)))
         if not np.isnan(t_stat_hac)
         else np.nan
     )
@@ -263,7 +365,9 @@ def manual_dml_timeseries(
         "t_stat_hac": t_stat_hac,
         "p_value_hac": p_value_hac,
         "n_obs": n_valid,
+        "n_periods": n_periods,
         "hac_maxlags": hac_maxlags,
+        "covariance_type": "driscoll_kraay" if groups is not None else "newey_west",
     }
 
     if return_residuals:
@@ -287,6 +391,23 @@ def classify_refutation(empirical_p: float) -> str:
     return "Passes" if empirical_p < REFUTATION_ALPHA else "Fails"
 
 
+def _resolve_panel_columns(
+    df: pd.DataFrame,
+    time_col: str | None,
+    entity_col: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve canonical panel columns while preserving single-series inputs."""
+    if time_col is None and "timestamp" in df.columns:
+        time_col = "timestamp"
+    if entity_col is None:
+        entity_col = next((name for name in ("symbol", "product") if name in df.columns), None)
+    if entity_col is not None and time_col is None:
+        raise ValueError("time_col is required when an entity column is present")
+    if time_col is not None and df[time_col].duplicated().any() and entity_col is None:
+        raise ValueError("entity_col is required when decision times contain multiple rows")
+    return time_col, entity_col
+
+
 def run_dml_analysis(
     df: pd.DataFrame,
     treatment_col: str,
@@ -299,6 +420,8 @@ def run_dml_analysis(
     seed: int = 42,
     hac_maxlags: int | None = None,
     horizon: int | None = None,
+    time_col: str | None = None,
+    entity_col: str | None = None,
 ) -> dict:
     """Full DML analysis pipeline: naive OLS, DML, and refutation tests.
 
@@ -328,20 +451,29 @@ def run_dml_analysis(
     horizon : int or None
         Label horizon in observation periods, forwarded to the second-stage
         HAC regression so the Newey-West bandwidth satisfies L >= horizon - 1.
-        Pass it for overlapping labels (horizon >= ~10) — e.g.
+        Pass it for overlapping labels (horizon >= ~10), for example,
         `horizon=embargo_from_buffer(mds.label_buffer)`. When both `horizon`
         and `hac_maxlags` are None, the bandwidth falls back to the
         horizon-blind cube-root rule and a warning is emitted.
+    time_col : str or None
+        Ordered decision-time column. Inferred from canonical ``timestamp``
+        when omitted. Required for panel data so cross-fitting, embargoes, and
+        placebo blocks keep each decision time intact.
+    entity_col : str or None
+        Panel entity column. Inferred from canonical ``symbol`` or ``product``
+        when omitted. Supply with ``time_col`` for non-canonical panels so
+        placebo blocks are permuted within entity histories.
 
     Returns
     -------
     dict
-        Comprehensive results with keys: naive_effect, dml_result,
+        Comprehensive results with keys: naive_effect, naive_n_obs, dml_result,
         confounding_bias, confounding_bias_pct, refutation (z_score,
         empirical_p, placebo_mean, placebo_std, placebo_effects,
         refutation_class), p_value_hac, hac_maxlags, and n_obs.
     """
     # Input validation
+    time_col, entity_col = _resolve_panel_columns(df, time_col, entity_col)
     n = len(df)
     min_rows = (n_folds + 1) * 50 + n_folds * embargo
     if n < min_rows:
@@ -372,11 +504,8 @@ def run_dml_analysis(
     T = df[treatment_col].values
     Y = df[outcome_col].values
     X = df[confounder_cols].values
-
-    # Naive OLS
-    T_const = np.column_stack([np.ones(len(T)), T])
-    naive_coef = np.linalg.lstsq(T_const, Y, rcond=None)[0]
-    naive_effect = naive_coef[1]
+    groups = df[time_col].values if time_col is not None else None
+    units = df[entity_col].values if entity_col is not None else None
 
     # DML estimate
     dml = manual_dml_timeseries(
@@ -388,7 +517,17 @@ def run_dml_analysis(
         return_residuals=True,
         hac_maxlags=hac_maxlags,
         horizon=horizon,
+        groups=groups,
     )
+
+    # Compare the adjusted estimate with naive OLS on the exact second-stage
+    # population. Earlier walk-forward dates have no out-of-fold residuals and
+    # cannot enter only one side of the comparison.
+    valid = np.isfinite(dml["Y_res"]) & np.isfinite(dml["T_res"])
+    naive_n_obs = int(valid.sum())
+    T_const = np.column_stack([np.ones(naive_n_obs), T[valid]])
+    naive_coef = np.linalg.lstsq(T_const, Y[valid], rcond=None)[0]
+    naive_effect = naive_coef[1]
 
     # Confounding bias
     dml_effect = dml["theta"]
@@ -397,17 +536,26 @@ def run_dml_analysis(
 
     # Block permutation refutation
     placebo_effects = []
+    placebo_n_obs = []
     for _ in range(n_placebo):
-        T_perm = block_permute(T, block_size, rng=rng)
+        T_perm = block_permute(T, block_size, rng=rng, groups=groups, units=units)
         perm_result = manual_dml_timeseries(
             Y,
             T_perm,
             X,
-            n_folds=min(3, n_folds),
+            n_folds=n_folds,
             embargo=embargo,
+            hac_maxlags=hac_maxlags,
+            horizon=horizon,
+            groups=groups,
         )
         if not np.isnan(perm_result["theta"]):
+            if perm_result["n_obs"] != dml["n_obs"]:
+                raise RuntimeError(
+                    "Observed and placebo DML statistics use different second-stage samples"
+                )
             placebo_effects.append(perm_result["theta"])
+            placebo_n_obs.append(int(perm_result["n_obs"]))
 
     refutation = {}
     if len(placebo_effects) >= 10:
@@ -423,12 +571,15 @@ def run_dml_analysis(
             "placebo_mean": p_mean,
             "placebo_std": p_std,
             "n_successful": len(placebo_effects),
+            "n_folds": n_folds,
+            "placebo_n_obs": placebo_n_obs,
             "placebo_effects": placebo_effects,
             "refutation_class": ref_class,
         }
 
     return {
         "naive_effect": naive_effect,
+        "naive_n_obs": naive_n_obs,
         "dml_result": dml,
         "confounding_bias": bias,
         "confounding_bias_pct": bias_pct,
@@ -450,9 +601,13 @@ def format_dml_summary(results: dict) -> str:
         "=" * 60,
         "DML ANALYSIS SUMMARY",
         "=" * 60,
-        f"Observations: {results['n_obs']:,}",
+        f"Analysis rows: {results['n_obs']:,}",
+        f"Second-stage rows: {dml.get('n_obs', results['n_obs']):,}",
+        f"Second-stage decision times: {dml.get('n_periods', results['n_obs']):,}",
+        f"Covariance: {dml.get('covariance_type', 'newey_west').replace('_', '-').title()}",
         f"HAC bandwidth: {hac_lags} lags (max of horizon-1 and cube-root)",
         "",
+        f"Naive OLS rows:    {results.get('naive_n_obs', results['n_obs']):,}",
         f"Naive OLS effect:  {results['naive_effect']:.6f}",
         f"DML effect:        {dml['theta']:.6f}",
         f"  SE (IID):        {dml['se_iid']:.6f}",
@@ -494,6 +649,13 @@ def register_causal_run(
     confounder_cols: list[str] | None = None,
     n_folds: int = 5,
     embargo: int = 0,
+    time_col: str | None = None,
+    block_size: int | None = None,
+    n_placebo: int | None = None,
+    seed: int | None = None,
+    horizon: int | None = None,
+    max_samples: int | None = None,
+    development_end: str | None = None,
     notebook: str = "causal_dml",
     case_dir=None,
     started_at: str | None = None,
@@ -502,7 +664,7 @@ def register_causal_run(
     """Register a causal DML run in the dedicated `causal_runs` table.
 
     Causal DML estimates a treatment effect rather than a cross-sectional
-    score, so it lives in its own table — distinct from `training_runs`,
+    score, so it lives in its own table, distinct from `training_runs`,
     `prediction_sets`, and `prediction_metrics` which serve predictive
     families. The `predictions` argument (per-row residuals + ATE) is
     accepted for backward compatibility but no longer persisted: it has
@@ -511,7 +673,7 @@ def register_causal_run(
     """
     import json
 
-    # Alias the registration helper to avoid shadowing this wrapper's own name —
+    # Alias the registration helper to avoid shadowing this wrapper's own name.
     # a future refactor that hoists this import to module level would otherwise
     # turn the call below into infinite recursion.
     from case_studies.utils.registry.registration import (
@@ -529,6 +691,20 @@ def register_causal_run(
     causal_params = {"treatment": treatment_col, "embargo": embargo}
     if confounder_cols:
         causal_params["confounders"] = confounder_cols
+    if time_col is not None:
+        causal_params["time_col"] = time_col
+    if block_size is not None:
+        causal_params["block_size"] = block_size
+    if n_placebo is not None:
+        causal_params["n_placebo"] = n_placebo
+    if seed is not None:
+        causal_params["seed"] = seed
+    if horizon is not None:
+        causal_params["horizon"] = horizon
+    if max_samples is not None:
+        causal_params["max_samples"] = max_samples
+    if development_end is not None:
+        causal_params["development_end"] = development_end
 
     spec = build_training_spec(
         "causal_dml",
@@ -540,7 +716,7 @@ def register_causal_run(
     causal_hash = training_hash_from_spec(spec)
 
     # Preserve NULLs for unknown p-values rather than silently coercing them
-    # to 1.0 — a HAC p-value that underflows to exactly 0.0 is a strongly
+    # to 1.0. A HAC p-value that underflows to exactly 0.0 is a strongly
     # significant result, and ``or 1.0`` would flip its meaning.
     p_value_hac = results.get("p_value_hac")
     refutation_p = ref.get("empirical_p")

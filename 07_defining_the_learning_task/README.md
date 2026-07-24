@@ -2,12 +2,6 @@
 
 The chapter shows that feature research starts long before modeling. It turns raw but validated market data into stable, protocol-safe inputs by enforcing train-only fitting, disciplined outlier handling, explicit representation choices, and visible missing-data rules. The payoff is not cosmetic cleanliness but comparability, auditability, and protection against leakage that would otherwise make later signal evaluation meaningless.
 
-<p align="center">
-  <img src="../assets/chapter_figures/figure_7_2_triple_barrier_method.jpeg" width="760" alt="Triple-barrier labeling method">
-</p>
-
-<p align="center"><em>The triple-barrier method labels an event by whichever barrier is hit first: profit target, stop loss, or maximum holding period.</em></p>
-
 ## Learning Objectives
 
 * Build split-aware preprocessing pipelines that produce stable, auditable inputs for label and feature computation.

@@ -1,0 +1,6 @@
+batch_size: 4096
+checkpoint_interval: 0
+n_epochs: 1
+params:
+  max_samples: 2000
+  n_ensemble: 4

@@ -1,0 +1,22 @@
+# Model configurations for fwd_dir_10d (classification variant)
+# Limited to linear + gbm — the families that have actually been trained for
+# this label. DL/tabular_dl/LF/causal are intentionally excluded; this is a
+# secondary classification variant, not a full sweep.
+
+linear:
+- logistic_none
+- logistic_l2_C0.001
+- logistic_l2_C0.01
+- logistic_l2_C0.1
+- logistic_l2_C1.0
+- logistic_l2_C10.0
+- logistic_l2_C100.0
+- logistic_l1_C0.001
+- logistic_l1_C0.01
+- logistic_l1_C0.1
+gbm:
+- default_binary
+- leaves_7_binary
+- leaves_15_binary
+- leaves_31_binary
+- leaves_63_binary

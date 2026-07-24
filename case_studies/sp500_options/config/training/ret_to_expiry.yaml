@@ -1,0 +1,59 @@
+# Model configurations for ret_to_expiry (hold-to-expiry short straddle)
+# Each entry references a preset in case_studies/config/{model_type}/.
+# Order: champion configs first (by fwd_ret_dh_10d validation IC).
+
+linear:
+- ridge_a1000.0
+- ridge_a10000.0
+- ridge_a100.0
+- ridge_a1.0
+- ridge_a10.0
+- ridge_a0.1
+- ridge_a0.01
+- ridge_a0.001
+- ols
+- ridge_a100000.0
+- ridge_a1000000.0
+- ridge_a10000000.0
+- lasso_f0.5
+- lasso_f0.2
+- lasso_f0.08
+- lasso_f0.03
+- lasso_f0.015
+- lasso_f0.35
+- lasso_f0.7
+- lasso_f0.85
+- enet_f0.5
+- enet_f0.2
+- enet_f0.08
+- enet_f0.03
+- enet_f0.015
+- enet_f0.35
+- enet_f0.7
+- enet_f0.85
+gbm:
+- leaves_31_mae
+- leaves_7_huber
+- leaves_7_mae
+- leaves_15_mae
+- default_mae
+- leaves_15_huber
+- leaves_31_mse
+- leaves_7_mse
+- leaves_31_huber
+- leaves_15_mse
+- leaves_63_mae
+- default_huber
+- leaves_63_huber
+- default_mse
+- leaves_63_mse
+deep_learning:
+- patchtst
+- lstm_h64
+- nlinear
+tabular_dl:
+- tabm_s
+- tabm_l
+- tabm_m
+causal_dml:
+- dml

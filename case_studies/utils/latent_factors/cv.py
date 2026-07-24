@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import inspect
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,10 +17,12 @@ import pandas as pd
 import polars as pl
 import yaml
 from ml4t.diagnostic.metrics import cross_sectional_ic
+from threadpoolctl import threadpool_limits
 
 from case_studies.utils.backtest_loaders import get_rebalance_step, thin_to_rebalance_dates
 from case_studies.utils.latent_factors.cae import run_cae_fold
 from case_studies.utils.latent_factors.ipca import run_ipca_fold
+from case_studies.utils.latent_factors.library_bridge import configure_latent_torch_runtime
 from case_studies.utils.latent_factors.panel import (
     prepare_panel_data,
     prepare_ragged_panel_data,
@@ -37,6 +41,8 @@ _MODEL_RUNNERS = {
     "sae": run_sae_fold,
 }
 
+TEMPORAL_FEATURE_ASSEMBLY = "fold_scoped_v1"
+
 
 def _numpy_serializer(obj: Any) -> Any:
     if isinstance(obj, np.ndarray):
@@ -54,15 +60,326 @@ def _save_fold_extras(path: Path, fold_extras: list[dict]) -> None:
     path.write_text(json.dumps(fold_extras, default=_numpy_serializer, indent=1))
 
 
-def load_fold_extras(case_study_id: str, model_name: str) -> list[dict] | None:
+def load_fold_extras(case_study_id: str, training_hash: str) -> list[dict] | None:
     from utils.paths import get_case_study_dir
 
     extras_path = (
-        get_case_study_dir(case_study_id) / "run_log" / "training" / model_name / "fold_extras.json"
+        get_case_study_dir(case_study_id)
+        / "run_log"
+        / "training"
+        / training_hash
+        / "fold_extras.json"
     )
     if not extras_path.exists():
         return None
     return json.loads(extras_path.read_text())
+
+
+def _expected_latent_checkpoints(
+    model_name: str,
+    *,
+    n_epochs: int,
+    model_kwargs: dict[str, Any],
+) -> tuple[int, ...]:
+    """Resolve the complete physical and library-defined checkpoint surface."""
+    from case_studies.utils.latent_factors.common import resolve_checkpoint_epochs
+
+    if model_name in {"pca", "ipca"}:
+        return (0,)
+    if model_name in {"cae", "sae"}:
+        physical = resolve_checkpoint_epochs(
+            n_epochs,
+            checkpoint_interval=model_kwargs.get("checkpoint_interval", 5),
+            checkpoint_epochs=model_kwargs.get("checkpoint_epochs"),
+        )
+        return tuple(physical)
+    if model_name == "sdf":
+        n_epochs_unc = int(model_kwargs.get("n_epochs_unc", 256))
+        n_epochs_cond = int(model_kwargs.get("n_epochs_cond", 1024))
+        physical = resolve_checkpoint_epochs(
+            max(n_epochs_unc, n_epochs_cond),
+            checkpoint_interval=model_kwargs.get("checkpoint_interval"),
+            checkpoint_epochs=model_kwargs.get("checkpoint_epochs"),
+        )
+        labels: set[int] = set()
+        labels.update(epoch for epoch in physical if epoch <= n_epochs_unc)
+        labels.update(n_epochs_unc + epoch for epoch in physical if epoch <= n_epochs_cond)
+        return tuple(sorted(labels))
+    raise ValueError(f"Unsupported latent-factor model: {model_name!r}")
+
+
+def _build_expected_latent_training_spec(
+    *,
+    model_name: str,
+    label_col: str,
+    n_factors: int,
+    n_epochs: int,
+    model_kwargs: dict[str, Any],
+    feature_names: list[str],
+    splits: list[dict[str, Any]],
+    task_type: str,
+    class_values: list | None,
+    eval_label_col: str | None,
+    input_digest: str,
+    macro_digest: str | None,
+    runtime_spec: dict[str, Any],
+    temporal_feature_assembly: str | None = None,
+    temporal_feature_digest: str | None = None,
+    macro_context_spec: dict[str, Any] | None = None,
+    input_data_spec: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], tuple[int, ...]]:
+    """Build the exact identity expected from the registration path."""
+    from case_studies.utils.registry import build_training_spec
+
+    try:
+        spec = build_training_spec(
+            "latent_factors",
+            model_name,
+            label_col,
+            n_folds=len(splits),
+            n_epochs=n_epochs,
+        )
+    except FileNotFoundError:
+        spec = {
+            "config_name": model_name,
+            "family": "latent_factors",
+            "feature_sets": ["financial", "model_based"],
+            "label": label_col,
+            "library": "pytorch",
+            "n_epochs": n_epochs,
+            "params": {"n_factors": n_factors},
+            "seed": 42,
+        }
+
+    checkpoints = _expected_latent_checkpoints(
+        model_name,
+        n_epochs=n_epochs,
+        model_kwargs=model_kwargs,
+    )
+    fold_extras: list[dict[str, Any]] = []
+    if model_name in {"cae", "sae", "sdf"}:
+        expected_extra: dict[str, Any] = {"checkpoint_epochs": list(checkpoints)}
+        if model_name == "sdf":
+            expected_extra["output_mode"] = model_kwargs.get("output_mode", "beta_network")
+            expected_extra["expected_return_mapper"] = model_kwargs.get(
+                "expected_return_mapper", "linear"
+            )
+        fold_extras = [expected_extra]
+    expected = _apply_latent_factor_runtime_spec(
+        spec=spec,
+        n_factors=n_factors,
+        n_epochs=n_epochs,
+        model_kwargs=model_kwargs,
+        fold_extras=fold_extras,
+        feature_names=feature_names,
+        splits=splits,
+        task_type=task_type,
+        class_values=class_values,
+        eval_label_col=eval_label_col,
+        input_digest=input_digest,
+        macro_digest=macro_digest,
+        runtime_spec=runtime_spec,
+        temporal_feature_assembly=temporal_feature_assembly,
+        temporal_feature_digest=temporal_feature_digest,
+        macro_context_spec=macro_context_spec,
+        input_data_spec=input_data_spec,
+    )
+    return expected, checkpoints
+
+
+def _expected_latent_prediction_keys(
+    dataset: pl.DataFrame,
+    *,
+    splits: list[dict[str, Any]],
+    label_col: str,
+    eval_label_col: str | None,
+    date_col: str,
+    entity_col: str,
+) -> pl.DataFrame:
+    """Return the exact validation key surface implied by the dated input."""
+    frames: list[pl.DataFrame] = []
+    for split in splits:
+        frame = dataset.filter(
+            (pl.col(date_col) >= _to_naive_timestamp(split["val_start"]))
+            & (pl.col(date_col) <= _to_naive_timestamp(split["val_end"]))
+            & pl.col(label_col).is_finite()
+        )
+        if eval_label_col:
+            frame = frame.filter(pl.col(eval_label_col).is_finite())
+        frames.append(
+            frame.select(date_col, entity_col).with_columns(
+                pl.lit(int(split["fold"]), dtype=pl.Int64).alias("fold_id")
+            )
+        )
+    if not frames:
+        return pl.DataFrame()
+    return _normalize_prediction_keys(pl.concat(frames).unique(), date_col, entity_col)
+
+
+def _normalize_prediction_keys(
+    frame: pl.DataFrame,
+    date_col: str,
+    entity_col: str,
+) -> pl.DataFrame:
+    key_cols = [date_col, entity_col, "fold_id"]
+    return (
+        frame.select(key_cols)
+        .with_columns(
+            pl.col(date_col).cast(pl.Datetime("us")),
+            pl.col(entity_col).cast(pl.String),
+            pl.col("fold_id").cast(pl.Int64),
+        )
+        .sort(key_cols)
+    )
+
+
+def _load_registered_latent_factor(
+    case_study_id: str,
+    *,
+    model_name: str,
+    training_spec: dict[str, Any],
+    prediction_split: str,
+    expected_checkpoints: tuple[int, ...],
+    expected_keys: pl.DataFrame,
+    date_col: str,
+    entity_col: str,
+    eval_label_col: str | None,
+) -> tuple[str, pl.DataFrame, pl.DataFrame] | None:
+    """Replay one exact, complete registry cohort and validate its metrics."""
+    from case_studies.utils import registry
+
+    training_hash = registry.training_hash_from_spec(training_spec)
+    runs = registry.load_training_runs(
+        case_study_id,
+        family="latent_factors",
+        label=training_spec["label"],
+    )
+    if runs.height == 0 or "training_hash" not in runs.columns:
+        return None
+    matching = runs.filter(pl.col("training_hash") == training_hash)
+    if matching.height == 0:
+        return None
+    if matching.height != 1 or json.loads(matching["spec_json"][0]) != training_spec:
+        raise ValueError(f"Cached {model_name} training identity is inconsistent")
+
+    prediction_sets = registry.load_prediction_sets(
+        case_study_id,
+        training_hash=training_hash,
+        split=prediction_split,
+    )
+    required_metadata = {"prediction_hash", "checkpoint_value", "checkpoint_kind"}
+    missing_metadata = required_metadata - set(prediction_sets.columns)
+    if missing_metadata:
+        raise ValueError(
+            f"Cached {model_name} checkpoint metadata is missing {sorted(missing_metadata)}"
+        )
+    if prediction_sets.height != len(expected_checkpoints):
+        raise ValueError(
+            f"Cached {model_name} checkpoint count {prediction_sets.height} does not match "
+            f"expected {len(expected_checkpoints)}"
+        )
+    if prediction_sets["checkpoint_value"].null_count():
+        raise ValueError(f"Cached {model_name} has a null checkpoint value")
+    if prediction_sets.filter(pl.col("checkpoint_kind") != "epoch").height:
+        raise ValueError(f"Cached {model_name} contains a non-epoch checkpoint")
+    observed = tuple(sorted(int(value) for value in prediction_sets["checkpoint_value"]))
+    if len(observed) != len(set(observed)) or observed != expected_checkpoints:
+        raise ValueError(
+            f"Cached {model_name} checkpoints {observed} do not match "
+            f"expected {expected_checkpoints}"
+        )
+
+    key_cols = [date_col, entity_col, "fold_id"]
+    metrics_rows: list[dict[str, Any]] = []
+    frames: list[pl.DataFrame] = []
+    for row in prediction_sets.sort("checkpoint_value").iter_rows(named=True):
+        epoch = int(row["checkpoint_value"])
+        path = (
+            registry.prediction_dir(case_study_id, row["prediction_hash"]) / "predictions.parquet"
+        )
+        if not path.exists():
+            raise FileNotFoundError(path)
+        predictions = pl.read_parquet(path)
+        required_cols = {date_col, entity_col, "fold_id", "y_true", "y_score", "epoch"}
+        if eval_label_col:
+            required_cols.add("eval_actual")
+        missing_cols = required_cols - set(predictions.columns)
+        if missing_cols:
+            raise ValueError(
+                f"Cached {model_name} checkpoint {epoch} schema is missing {sorted(missing_cols)}"
+            )
+        if predictions.select(pl.col(list(required_cols)).null_count()).row(0) != (0,) * len(
+            required_cols
+        ):
+            raise ValueError(f"Cached {model_name} checkpoint {epoch} contains nulls")
+        if predictions["epoch"].n_unique() != 1 or int(predictions["epoch"][0]) != epoch:
+            raise ValueError(f"Cached {model_name} checkpoint {epoch} has contradictory epoch data")
+        actual_keys = _normalize_prediction_keys(predictions, date_col, entity_col)
+        if actual_keys.n_unique() != predictions.height:
+            raise ValueError(f"Cached {model_name} checkpoint {epoch} has duplicate keys")
+        if not actual_keys.equals(expected_keys):
+            raise ValueError(
+                f"Cached {model_name} checkpoint {epoch} key or fold coverage is incomplete"
+            )
+
+        actual_col = "eval_actual" if eval_label_col else "y_true"
+        metric = cross_sectional_ic(
+            predictions,
+            predictions,
+            pred_col="y_score",
+            ret_col=actual_col,
+            date_col=date_col,
+            entity_col=entity_col,
+            method="spearman",
+            min_obs=5,
+        )
+        registry_metrics = registry.load_prediction_metrics(
+            case_study_id,
+            prediction_hash=row["prediction_hash"],
+        )
+        required_daily_metrics = {"ic_mean_daily", "ic_std_daily"}
+        if registry_metrics.height != 1 or not required_daily_metrics <= set(
+            registry_metrics.columns
+        ):
+            raise ValueError(
+                f"Cached {model_name} checkpoint {epoch} has invalid daily registry metrics"
+            )
+        comparisons = {
+            "daily mean": (registry_metrics["ic_mean_daily"][0], float(metric["ic_mean"])),
+            "daily std": (registry_metrics["ic_std_daily"][0], float(metric["ic_std"])),
+        }
+        mismatches = {
+            name: values
+            for name, values in comparisons.items()
+            if values[0] is None
+            or not np.isclose(float(values[0]), values[1], atol=1e-12, rtol=0.0)
+        }
+        if mismatches:
+            raise ValueError(
+                f"Cached {model_name} checkpoint {epoch} daily metric mismatch: {mismatches}"
+            )
+
+        for fold_id in expected_keys["fold_id"].unique().sort():
+            fold_metric = cross_sectional_ic(
+                predictions.filter(pl.col("fold_id") == fold_id),
+                predictions.filter(pl.col("fold_id") == fold_id),
+                pred_col="y_score",
+                ret_col=actual_col,
+                date_col=date_col,
+                entity_col=entity_col,
+                method="spearman",
+                min_obs=5,
+            )
+            metrics_rows.append(
+                {
+                    "epoch": epoch,
+                    "fold_id": int(fold_id),
+                    "ic_mean": float(fold_metric["ic_mean"]),
+                }
+            )
+        frames.append(predictions)
+
+    return training_hash, pl.DataFrame(metrics_rows), pl.concat(frames)
 
 
 def run_latent_factor_cv(
@@ -89,12 +406,21 @@ def run_latent_factor_cv(
     class_values: list | None = None,
     prediction_split: str = "validation",
     macro_panel: pl.DataFrame | None = None,
+    macro_context_spec: dict[str, Any] | None = None,
+    input_data_spec: dict[str, Any] | None = None,
     persistent_entities: bool = True,
     checkpoint_selection_policy: str | None = None,
     reporting_epoch: int | None = None,
     score_dates: str = "auto",
     score_cadence: str | None = None,
     score_rebalance_step: int | None = None,
+    device: str = "cpu",
+    num_threads: int = 8,
+    deterministic_algorithms: bool = True,
+    temporal_by_fold: pd.DataFrame | None = None,
+    temporal_keys: list[str] | None = None,
+    temporal_feature_names: list[str] | None = None,
+    fold_workers: int = 1,
 ) -> dict[str, Any]:
     """Run walk-forward latent factor CV from the raw dated dataset."""
     del panel_data
@@ -103,8 +429,53 @@ def run_latent_factor_cv(
             "run_latent_factor_cv requires dataset, feature_names, and label_col. "
             "Pre-built latent-factor panels are no longer supported."
         )
+    if isinstance(fold_workers, bool) or not isinstance(fold_workers, int) or fold_workers < 1:
+        raise ValueError("fold_workers must be a positive integer")
+    if fold_workers > 1 and models != ["ipca"]:
+        raise ValueError("parallel fold execution is currently supported only for IPCA-only runs")
 
     model_kwargs = model_kwargs or {}
+    runtime_spec = configure_latent_torch_runtime(
+        device,
+        seed=random_state if random_state is not None else RANDOM_SEED,
+        num_threads=num_threads,
+        deterministic_algorithms=deterministic_algorithms,
+    )
+    input_digest = _latent_input_digest(
+        dataset,
+        feature_names=feature_names,
+        label_col=label_col,
+        eval_label_col=eval_label_col,
+        date_col=date_col,
+        entity_col=entity_col,
+        splits=splits,
+    )
+    macro_digest = (
+        _frame_digest(_filter_dataset_for_splits(macro_panel, splits=splits, date_col=date_col))
+        if macro_panel is not None
+        else None
+    )
+    expected_prediction_keys = _expected_latent_prediction_keys(
+        dataset,
+        splits=splits,
+        label_col=label_col,
+        eval_label_col=eval_label_col,
+        date_col=date_col,
+        entity_col=entity_col,
+    )
+    has_fold_temporal = bool(
+        temporal_by_fold is not None and temporal_keys and temporal_feature_names
+    )
+    temporal_feature_assembly = TEMPORAL_FEATURE_ASSEMBLY if has_fold_temporal else None
+    temporal_feature_digest = (
+        _frame_digest(
+            pl.from_pandas(
+                temporal_by_fold.loc[:, ["fold", *temporal_keys, *temporal_feature_names]]
+            )
+        )
+        if has_fold_temporal
+        else None
+    )
     metric_policy = _resolve_metric_policy(
         case_study_id=case_study_id,
         label_col=label_col,
@@ -166,10 +537,67 @@ def run_latent_factor_cv(
 
         model_dir = save_dir / model_name if save_dir is not None else None
         model_dirs[model_name] = model_dir
+        model_temporal_feature_assembly = temporal_feature_assembly if model_name != "pca" else None
+        model_temporal_feature_digest = temporal_feature_digest if model_name != "pca" else None
+        model_macro_context = macro_context_spec if model_name == "sdf" else None
+        if use_cache and not force_retrain and case_study_id:
+            training_spec, expected_checkpoints = _build_expected_latent_training_spec(
+                model_name=model_name,
+                label_col=label_col,
+                n_factors=n_factors,
+                n_epochs=n_epochs,
+                model_kwargs=model_kwargs.get(model_name, {}),
+                feature_names=feature_names,
+                splits=splits,
+                task_type=task_type,
+                class_values=class_values,
+                eval_label_col=eval_label_col,
+                input_digest=input_digest,
+                macro_digest=macro_digest,
+                runtime_spec=runtime_spec,
+                temporal_feature_assembly=model_temporal_feature_assembly,
+                temporal_feature_digest=model_temporal_feature_digest,
+                macro_context_spec=model_macro_context,
+                input_data_spec=input_data_spec,
+            )
+            registered = _load_registered_latent_factor(
+                case_study_id,
+                model_name=model_name,
+                training_spec=training_spec,
+                prediction_split=prediction_split,
+                expected_checkpoints=expected_checkpoints,
+                expected_keys=expected_prediction_keys,
+                date_col=date_col,
+                entity_col=entity_col,
+                eval_label_col=eval_label_col,
+            )
+            if registered is not None:
+                training_hash, metrics_df, preds_df = registered
+                best_epoch, mean_ic = _select_reporting_epoch(
+                    metrics_df,
+                    checkpoint_selection_policy=metric_policy["checkpoint_selection_policy"],
+                    reporting_epoch=metric_policy["reporting_epoch"],
+                )
+                model_results.append(
+                    {
+                        "model_name": model_name,
+                        "mean_ic": round(mean_ic, 4),
+                        "best_epoch": best_epoch,
+                        "n_folds": int(metrics_df["fold_id"].n_unique()),
+                        "elapsed_s": 0.0,
+                        "started_at": None,
+                    }
+                )
+                all_predictions[model_name] = preds_df
+                fold_metrics[model_name] = metrics_df
+                all_extras[model_name] = load_fold_extras(case_study_id, training_hash) or []
+                log(f"  {model_name}: loaded exact registry cohort (IC={mean_ic:+.4f})")
+                continue
         if (
             use_cache
             and not force_retrain
             and model_dir is not None
+            and model_macro_context is None
             and (model_dir / "predictions.parquet").exists()
             and (model_dir / "fold_metrics.parquet").exists()
         ):
@@ -194,7 +622,7 @@ def run_latent_factor_cv(
             )
             all_predictions[model_name] = preds_df
             fold_metrics[model_name] = metrics_df
-            all_extras[model_name] = load_fold_extras(case_study_id, model_name) or []
+            all_extras[model_name] = []
             log(f"  {model_name}: loaded cache (best IC={mean_ic:+.4f})")
             continue
 
@@ -209,137 +637,227 @@ def run_latent_factor_cv(
         log(f"  {model_name} (K={n_factors}):")
 
     need_pca_inputs = "pca" in active_models
+    need_ragged_inputs = any(model_name != "pca" for model_name in active_models)
 
-    for split in splits:
-        seed_everything(RANDOM_SEED + int(split["fold"]))
-        fold_inputs = _prepare_fold_inputs(
-            dataset=dataset,
-            split=split,
-            feature_names=feature_names,
-            label_col=label_col,
-            date_col=date_col,
-            entity_col=entity_col,
-            eval_label_col=eval_label_col,
-            macro_panel=macro_panel,
-            need_pca_inputs=need_pca_inputs,
-        )
-        if fold_inputs is None:
-            log(f"    Fold {split['fold']}: skipped (insufficient train/validation dates)")
-            continue
-
-        log(
-            f"    Fold {split['fold']}: ragged train={fold_inputs['ragged']['n_train_periods']}, "
-            f"val={fold_inputs['ragged']['n_val_periods']}, "
-            f"max_N={fold_inputs['ragged']['chars_train'].shape[1]}"
-        )
-
-        for model_name in active_models:
-            runner = _MODEL_RUNNERS[model_name]
-            fold_started = time.perf_counter()
-            model_input = fold_inputs["pca"] if model_name == "pca" else fold_inputs["ragged"]
-
-            kwargs: dict[str, Any] = {"n_factors": n_factors}
+    def runner_kwargs(model_name: str, model_input: dict[str, Any]) -> dict[str, Any]:
+        runner = _MODEL_RUNNERS[model_name]
+        kwargs: dict[str, Any] = {"n_factors": n_factors}
+        if model_name in {"cae", "sae"}:
+            kwargs["n_epochs"] = n_epochs
+        if model_name in {"cae", "sae", "sdf"}:
+            kwargs["log_fn"] = log
+            kwargs["device"] = runtime_spec["device"]
+        if model_name in {"cae", "sae"}:
+            kwargs["task_type"] = task_type
+            if (
+                task_type == "classification"
+                and model_input.get("factor_returns_train") is not None
+            ):
+                kwargs["factor_returns_train"] = model_input["factor_returns_train"]
+        if model_name == "sdf" and model_input.get("macro_train") is not None:
+            kwargs["macro_train"] = model_input["macro_train"]
+            kwargs["macro_val"] = model_input["macro_val"]
+        if model_name in model_kwargs:
+            allowed = set(inspect.signature(runner).parameters)
+            explicit = {"device"}
             if model_name in {"cae", "sae"}:
-                kwargs["n_epochs"] = n_epochs
-            if model_name in {"cae", "sae", "sdf"}:
-                kwargs["log_fn"] = log
-            if model_name == "sae":
-                kwargs["task_type"] = task_type
-                if (
-                    task_type == "classification"
-                    and model_input.get("factor_returns_train") is not None
-                ):
-                    kwargs["factor_returns_train"] = model_input["factor_returns_train"]
-            if model_name == "cae":
-                kwargs["task_type"] = task_type
-                if (
-                    task_type == "classification"
-                    and model_input.get("factor_returns_train") is not None
-                ):
-                    kwargs["factor_returns_train"] = model_input["factor_returns_train"]
-            if model_name == "sdf" and model_input.get("macro_train") is not None:
-                kwargs["macro_train"] = model_input["macro_train"]
-                kwargs["macro_val"] = model_input["macro_val"]
-
-            if model_name in model_kwargs:
-                allowed = set(inspect.signature(runner).parameters.keys())
-                # Preset overrides defaults but must not stomp on parameters the
-                # caller explicitly passed via the cv-level signature (e.g.
-                # n_epochs for cae/sae) — Papermill smoke tests rely on this.
-                explicit = {"n_epochs"} if model_name in {"cae", "sae"} else set()
-                kwargs.update(
-                    {
-                        key: value
-                        for key, value in model_kwargs[model_name].items()
-                        if key in allowed and key not in explicit
-                    }
-                )
-
-            result = runner(
-                model_input["chars_train"],
-                model_input["returns_train"],
-                model_input["chars_val"],
-                model_input["returns_val"],
-                **kwargs,
+                explicit.add("n_epochs")
+            kwargs.update(
+                {
+                    key: value
+                    for key, value in model_kwargs[model_name].items()
+                    if key in allowed and key not in explicit
+                }
             )
-            if isinstance(result[0], dict):
-                checkpoint_preds, extra = result
-            else:
-                predictions_arr, extra = result
-                checkpoint_preds = {0: predictions_arr}
+        return kwargs
 
-            state[model_name]["fold_extras"].append({"fold_id": split["fold"], **extra})
-            checkpoint_ics: dict[int, float] = {}
+    def fit_fold(
+        model_name: str,
+        model_input: dict[str, Any],
+    ) -> tuple[dict[int, np.ndarray], dict[str, Any], float]:
+        fold_started = time.perf_counter()
+        result = _MODEL_RUNNERS[model_name](
+            model_input["chars_train"],
+            model_input["returns_train"],
+            model_input["chars_val"],
+            model_input["returns_val"],
+            **runner_kwargs(model_name, model_input),
+        )
+        if isinstance(result[0], dict):
+            checkpoint_preds, extra = result
+        else:
+            predictions_arr, extra = result
+            checkpoint_preds = {0: predictions_arr}
+        return checkpoint_preds, extra, time.perf_counter() - fold_started
 
-            for epoch, predictions in checkpoint_preds.items():
-                frame = _build_prediction_frame(
-                    predictions=predictions,
-                    returns_val=model_input["returns_val"],
-                    eval_returns_val=model_input.get("eval_returns_val"),
-                    val_dates=model_input["val_dates"],
-                    val_entities=model_input["val_entities"],
-                    fold_id=split["fold"],
-                    model_name=model_name,
-                    epoch=epoch,
-                )
-                scored_frame = _score_prediction_frame(
-                    frame,
-                    score_dates=metric_policy["score_dates"],
-                    score_cadence=metric_policy["score_cadence"],
-                    score_rebalance_step=metric_policy["score_rebalance_step"],
-                )
-                ic, n_scored_dates = _compute_frame_ic(scored_frame)
-                checkpoint_ics[epoch] = ic
-                state[model_name]["fold_ics"].append(
-                    {
-                        "fold_id": split["fold"],
-                        "epoch": epoch,
-                        "ic_mean": round(ic, 4),
-                        "n_train": model_input["n_train_periods"],
-                        "n_test": model_input["n_val_periods"],
-                        "n_scored_dates": n_scored_dates,
-                    }
-                )
-                if frame is not None:
-                    state[model_name]["pred_frames"].append(frame)
-
-            fold_elapsed = time.perf_counter() - fold_started
-            best_epoch, reported_ic = _select_epoch_from_values(
-                checkpoint_ics,
-                checkpoint_selection_policy=metric_policy["checkpoint_selection_policy"],
-                reporting_epoch=metric_policy["reporting_epoch"],
-            )
-            log(
-                f"      fold {split['fold']}: reported_epoch={best_epoch}, "
-                f"IC={reported_ic:+.4f}, {fold_elapsed:.1f}s"
-            )
-            _write_incremental_fold(
-                model_dir=model_dirs[model_name],
+    def record_fold(
+        *,
+        split: dict[str, Any],
+        model_name: str,
+        model_input: dict[str, Any],
+        checkpoint_preds: dict[int, np.ndarray],
+        extra: dict[str, Any],
+        fold_elapsed: float,
+    ) -> None:
+        state[model_name]["fold_extras"].append({"fold_id": split["fold"], **extra})
+        checkpoint_ics: dict[int, float] = {}
+        for epoch, predictions in checkpoint_preds.items():
+            frame = _build_prediction_frame(
+                predictions=predictions,
+                returns_val=model_input["returns_val"],
+                eval_returns_val=model_input.get("eval_returns_val"),
+                val_dates=model_input["val_dates"],
+                val_entities=model_input["val_entities"],
                 fold_id=split["fold"],
-                predictions=checkpoint_preds,
-                model_input=model_input,
                 model_name=model_name,
+                epoch=epoch,
             )
+            scored_frame = _score_prediction_frame(
+                frame,
+                score_dates=metric_policy["score_dates"],
+                score_cadence=metric_policy["score_cadence"],
+                score_rebalance_step=metric_policy["score_rebalance_step"],
+            )
+            ic, n_scored_dates = _compute_frame_ic(scored_frame)
+            checkpoint_ics[epoch] = ic
+            state[model_name]["fold_ics"].append(
+                {
+                    "fold_id": split["fold"],
+                    "epoch": epoch,
+                    "ic_mean": round(ic, 4),
+                    "n_train": model_input["n_train_periods"],
+                    "n_test": model_input["n_val_periods"],
+                    "n_scored_dates": n_scored_dates,
+                }
+            )
+            if frame is not None:
+                state[model_name]["pred_frames"].append(frame)
+        best_epoch, reported_ic = _select_epoch_from_values(
+            checkpoint_ics,
+            checkpoint_selection_policy=metric_policy["checkpoint_selection_policy"],
+            reporting_epoch=metric_policy["reporting_epoch"],
+        )
+        log(
+            f"      fold {split['fold']}: reported_epoch={best_epoch}, "
+            f"IC={reported_ic:+.4f}, {fold_elapsed:.1f}s"
+        )
+        _write_incremental_fold(
+            model_dir=model_dirs[model_name],
+            fold_id=split["fold"],
+            predictions=checkpoint_preds,
+            model_input=model_input,
+            model_name=model_name,
+        )
+
+    if fold_workers > 1 and active_models:
+        prepared_folds: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for split in splits:
+            fold_inputs = _prepare_fold_inputs(
+                dataset=dataset,
+                split=split,
+                feature_names=feature_names,
+                label_col=label_col,
+                date_col=date_col,
+                entity_col=entity_col,
+                eval_label_col=eval_label_col,
+                macro_panel=macro_panel,
+                need_pca_inputs=False,
+                need_ragged_inputs=True,
+                temporal_by_fold=temporal_by_fold,
+                temporal_keys=temporal_keys,
+                temporal_feature_names=temporal_feature_names,
+            )
+            if fold_inputs is None:
+                log(f"    Fold {split['fold']}: skipped (insufficient train/validation dates)")
+                continue
+            model_input = fold_inputs["ragged"]
+            log(
+                f"    Fold {split['fold']}: ragged "
+                f"train={model_input['n_train_periods']}, "
+                f"val={model_input['n_val_periods']}, "
+                f"max_N={model_input['chars_train'].shape[1]}"
+            )
+            prepared_folds.append((split, model_input))
+        if not prepared_folds:
+            raise RuntimeError("IPCA parallel execution produced no eligible folds")
+        prepared_folds.sort(key=lambda item: int(item[0]["fold"]))
+        worker_count = min(fold_workers, len(prepared_folds))
+        log(f"    IPCA parallel execution: {worker_count} workers, BLAS threads=1")
+        completed: dict[int, tuple[dict[int, np.ndarray], dict[str, Any], float]] = {}
+        with (
+            threadpool_limits(limits=1, user_api="blas"),
+            ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="ipca-fold") as pool,
+        ):
+            futures = {
+                pool.submit(fit_fold, "ipca", model_input): int(split["fold"])
+                for split, model_input in prepared_folds
+            }
+            for future in as_completed(futures):
+                fold_id = futures[future]
+                checkpoint_preds, extra, fold_elapsed = future.result()
+                completed[fold_id] = (checkpoint_preds, extra, fold_elapsed)
+                log(
+                    f"      fold {fold_id}: fit complete, "
+                    f"iterations={extra.get('iterations', '?')}, "
+                    f"converged={extra.get('converged', False)}, {fold_elapsed:.1f}s"
+                )
+        ordered_extras = [
+            {"fold_id": int(split["fold"]), **completed[int(split["fold"])][1]}
+            for split, _ in prepared_folds
+        ]
+        _require_ipca_convergence("ipca", ordered_extras)
+        for split, model_input in prepared_folds:
+            checkpoint_preds, extra, fold_elapsed = completed[int(split["fold"])]
+            record_fold(
+                split=split,
+                model_name="ipca",
+                model_input=model_input,
+                checkpoint_preds=checkpoint_preds,
+                extra=extra,
+                fold_elapsed=fold_elapsed,
+            )
+    else:
+        for split in splits:
+            if not active_models:
+                break
+            seed_everything(RANDOM_SEED + int(split["fold"]))
+            fold_inputs = _prepare_fold_inputs(
+                dataset=dataset,
+                split=split,
+                feature_names=feature_names,
+                label_col=label_col,
+                date_col=date_col,
+                entity_col=entity_col,
+                eval_label_col=eval_label_col,
+                macro_panel=macro_panel,
+                need_pca_inputs=need_pca_inputs,
+                need_ragged_inputs=need_ragged_inputs,
+                temporal_by_fold=temporal_by_fold,
+                temporal_keys=temporal_keys,
+                temporal_feature_names=temporal_feature_names,
+            )
+            if fold_inputs is None:
+                log(f"    Fold {split['fold']}: skipped (insufficient train/validation dates)")
+                continue
+            display_input = fold_inputs["ragged"] or fold_inputs["pca"]
+            input_kind = "ragged" if fold_inputs["ragged"] is not None else "persistent"
+            log(
+                f"    Fold {split['fold']}: {input_kind} "
+                f"train={display_input['n_train_periods']}, "
+                f"val={display_input['n_val_periods']}, "
+                f"max_N={display_input['chars_train'].shape[1]}"
+            )
+            for model_name in active_models:
+                model_input = fold_inputs["pca"] if model_name == "pca" else fold_inputs["ragged"]
+                checkpoint_preds, extra, fold_elapsed = fit_fold(model_name, model_input)
+                record_fold(
+                    split=split,
+                    model_name=model_name,
+                    model_input=model_input,
+                    checkpoint_preds=checkpoint_preds,
+                    extra=extra,
+                    fold_elapsed=fold_elapsed,
+                )
 
     for model_name in active_models:
         fold_ics_df = pl.DataFrame(state[model_name]["fold_ics"])
@@ -370,21 +888,21 @@ def run_latent_factor_cv(
         fold_metrics[model_name] = fold_ics_df
         all_extras[model_name] = state[model_name]["fold_extras"]
 
+        _require_ipca_convergence(model_name, state[model_name]["fold_extras"])
+
         model_dir = model_dirs[model_name]
         if model_dir is not None:
             model_dir.mkdir(parents=True, exist_ok=True)
             preds_df.write_parquet(model_dir / "predictions.parquet")
             fold_ics_df.write_parquet(model_dir / "fold_metrics.parquet")
 
-        if case_study_id and state[model_name]["fold_extras"]:
-            from utils.paths import get_case_study_dir
-
-            extras_dir = get_case_study_dir(case_study_id) / "run_log" / "training" / model_name
-            extras_dir.mkdir(parents=True, exist_ok=True)
-            _save_fold_extras(extras_dir / "fold_extras.json", state[model_name]["fold_extras"])
-
         if case_study_id and preds_df.height > 0:
-            _register_model_predictions(
+            model_temporal_feature_assembly = (
+                temporal_feature_assembly if model_name != "pca" else None
+            )
+            model_temporal_feature_digest = temporal_feature_digest if model_name != "pca" else None
+            model_macro_context = macro_context_spec if model_name == "sdf" else None
+            training_hash = _register_model_predictions(
                 case_study_id=case_study_id,
                 model_name=model_name,
                 label_col=label_col,
@@ -401,7 +919,24 @@ def run_latent_factor_cv(
                 fold_extras=state[model_name]["fold_extras"],
                 fold_ics_df=fold_ics_df,
                 preds_df=preds_df,
+                feature_names=feature_names,
+                splits=splits,
+                input_digest=input_digest,
+                macro_digest=macro_digest,
+                runtime_spec=runtime_spec,
+                temporal_feature_assembly=model_temporal_feature_assembly,
+                temporal_feature_digest=model_temporal_feature_digest,
+                macro_context_spec=model_macro_context,
+                input_data_spec=input_data_spec,
             )
+            if state[model_name]["fold_extras"]:
+                from utils.paths import get_case_study_dir
+
+                extras_dir = (
+                    get_case_study_dir(case_study_id) / "run_log" / "training" / training_hash
+                )
+                extras_dir.mkdir(parents=True, exist_ok=True)
+                _save_fold_extras(extras_dir / "fold_extras.json", state[model_name]["fold_extras"])
 
         log(f"    -> best epoch={best_epoch}, IC={mean_ic:+.4f} ({elapsed:.1f}s)")
         gc.collect()
@@ -425,6 +960,79 @@ def run_latent_factor_cv(
     }
 
 
+def _frame_digest(frame: pl.DataFrame) -> str:
+    """Return a stable digest of an ordered Polars frame and its schema."""
+    columns = list(frame.columns)
+    key_cols = [column for column in ("fold", "timestamp", "symbol") if column in columns]
+    ordered = frame.sort(key_cols) if key_cols else frame
+    row_hashes = ordered.hash_rows(seed=42).to_numpy()
+    schema = [(column, str(ordered.schema[column])) for column in columns]
+    digest = hashlib.sha256(json.dumps(schema, separators=(",", ":")).encode())
+    digest.update(row_hashes.tobytes())
+    return digest.hexdigest()
+
+
+def _latent_input_digest(
+    dataset: pl.DataFrame,
+    *,
+    feature_names: list[str],
+    label_col: str,
+    eval_label_col: str | None,
+    date_col: str,
+    entity_col: str,
+    splits: list[dict[str, Any]],
+) -> str:
+    columns = [date_col, entity_col, *feature_names, label_col]
+    if eval_label_col:
+        columns.append(eval_label_col)
+    dataset = _filter_dataset_for_splits(dataset, splits=splits, date_col=date_col)
+    return _frame_digest(dataset.select(columns))
+
+
+def _filter_dataset_for_splits(
+    dataset: pl.DataFrame,
+    *,
+    splits: list[dict[str, Any]],
+    date_col: str,
+) -> pl.DataFrame:
+    """Keep only rows used by at least one declared train or validation window."""
+    filter_col = pl.col(date_col)
+    if (
+        hasattr(dataset[date_col].dtype, "time_zone")
+        and dataset[date_col].dtype.time_zone is not None
+    ):
+        filter_col = filter_col.dt.replace_time_zone(None)
+
+    used = pl.lit(False)
+    for split in splits:
+        train = filter_col.is_between(
+            _to_naive_timestamp(split["train_start"]),
+            _to_naive_timestamp(split["train_end"]),
+            closed="both",
+        )
+        validation = filter_col.is_between(
+            _to_naive_timestamp(split["val_start"]),
+            _to_naive_timestamp(split["val_end"]),
+            closed="both",
+        )
+        used = used | train | validation
+    return dataset.filter(used)
+
+
+def _require_ipca_convergence(
+    model_name: str,
+    fold_extras: list[dict[str, Any]],
+) -> None:
+    if model_name != "ipca":
+        return
+    failed = [int(extra["fold_id"]) for extra in fold_extras if not extra.get("converged", False)]
+    if failed:
+        raise RuntimeError(
+            "IPCA did not converge for folds "
+            f"{failed}; refusing to register predictions from an incomplete ALS fit"
+        )
+
+
 def _prepare_fold_inputs(
     *,
     dataset: pl.DataFrame,
@@ -436,66 +1044,92 @@ def _prepare_fold_inputs(
     eval_label_col: str | None,
     macro_panel: pl.DataFrame | None,
     need_pca_inputs: bool,
+    need_ragged_inputs: bool = True,
+    temporal_by_fold: pd.DataFrame | None = None,
+    temporal_keys: list[str] | None = None,
+    temporal_feature_names: list[str] | None = None,
 ) -> dict[str, Any] | None:
+    if temporal_by_fold is not None and temporal_keys and temporal_feature_names:
+        dataset = _replace_fold_temporal_features(
+            dataset=dataset,
+            temporal_by_fold=temporal_by_fold,
+            temporal_keys=temporal_keys,
+            temporal_feature_names=temporal_feature_names,
+            fold_id=int(split["fold"]),
+        )
     fold_dataset = _filter_dataset_window(
         dataset,
         date_col=date_col,
         start=split["train_start"],
         end=split["val_end"],
     )
-    ragged_panel = prepare_ragged_panel_data(
-        fold_dataset,
-        feature_names=feature_names,
-        label_col=label_col,
-        date_col=date_col,
-        entity_col=entity_col,
-        eval_label_col=eval_label_col,
-        macro_panel=macro_panel,
-    )
-    ragged_panel["chars"] = rank_normalize_cross_section(ragged_panel["chars"])
+    ragged_inputs = None
+    if need_ragged_inputs:
+        ragged_dataset = fold_dataset
+        if macro_panel is not None:
+            macro_start = macro_panel.select(pl.col(date_col).min()).item()
+            ragged_dataset = ragged_dataset.filter(pl.col(date_col) >= macro_start)
+        ragged_panel = prepare_ragged_panel_data(
+            ragged_dataset,
+            feature_names=feature_names,
+            label_col=label_col,
+            date_col=date_col,
+            entity_col=entity_col,
+            eval_label_col=eval_label_col,
+            macro_panel=macro_panel,
+        )
+        ragged_panel["chars"] = rank_normalize_cross_section(ragged_panel["chars"])
 
-    ragged_train_mask = _date_mask(ragged_panel["dates"], split["train_start"], split["train_end"])
-    ragged_val_mask = _date_mask(ragged_panel["dates"], split["val_start"], split["val_end"])
-    n_train_periods = int(ragged_train_mask.sum())
-    n_val_periods = int(ragged_val_mask.sum())
-    if n_train_periods < 10 or n_val_periods < 3:
-        return None
-
-    ragged_inputs = {
-        "chars_train": ragged_panel["chars"][ragged_train_mask],
-        "returns_train": ragged_panel["returns"][ragged_train_mask],
-        "chars_val": ragged_panel["chars"][ragged_val_mask],
-        "returns_val": ragged_panel["returns"][ragged_val_mask],
-        "factor_returns_train": (
-            ragged_panel["eval_returns"][ragged_train_mask]
-            if ragged_panel.get("eval_returns") is not None
-            else None
-        ),
-        "eval_returns_val": (
-            ragged_panel["eval_returns"][ragged_val_mask]
-            if ragged_panel.get("eval_returns") is not None
-            else None
-        ),
-        "val_dates": ragged_panel["dates"][ragged_val_mask],
-        "val_entities": ragged_panel["entities"][ragged_val_mask],
-        "macro_train": ragged_panel["macro"][ragged_train_mask]
-        if ragged_panel.get("macro") is not None
-        else None,
-        "macro_val": ragged_panel["macro"][ragged_val_mask]
-        if ragged_panel.get("macro") is not None
-        else None,
-        "n_train_periods": n_train_periods,
-        "n_val_periods": n_val_periods,
-    }
+        ragged_train_mask = _date_mask(
+            ragged_panel["dates"], split["train_start"], split["train_end"]
+        )
+        ragged_val_mask = _date_mask(ragged_panel["dates"], split["val_start"], split["val_end"])
+        ragged_inputs = {
+            "chars_train": ragged_panel["chars"][ragged_train_mask],
+            "returns_train": ragged_panel["returns"][ragged_train_mask],
+            "chars_val": ragged_panel["chars"][ragged_val_mask],
+            "returns_val": ragged_panel["returns"][ragged_val_mask],
+            "factor_returns_train": (
+                ragged_panel["eval_returns"][ragged_train_mask]
+                if ragged_panel.get("eval_returns") is not None
+                else None
+            ),
+            "eval_returns_val": (
+                ragged_panel["eval_returns"][ragged_val_mask]
+                if ragged_panel.get("eval_returns") is not None
+                else None
+            ),
+            "val_dates": ragged_panel["dates"][ragged_val_mask],
+            "val_entities": ragged_panel["entities"][ragged_val_mask],
+            "macro_train": (
+                ragged_panel["macro"][ragged_train_mask]
+                if ragged_panel.get("macro") is not None
+                else None
+            ),
+            "macro_val": (
+                ragged_panel["macro"][ragged_val_mask]
+                if ragged_panel.get("macro") is not None
+                else None
+            ),
+            "n_train_periods": int(ragged_train_mask.sum()),
+            "n_val_periods": int(ragged_val_mask.sum()),
+        }
 
     persistent_inputs = None
     if need_pca_inputs:
+        train_dataset = _filter_dataset_window(
+            fold_dataset,
+            date_col=date_col,
+            start=split["train_start"],
+            end=split["train_end"],
+        )
         persistent_panel = prepare_panel_data(
             fold_dataset,
             feature_names=feature_names,
             label_col=label_col,
             date_col=date_col,
             entity_col=entity_col,
+            eligibility_dataset=train_dataset,
             eval_label_col=eval_label_col,
         )
         persistent_train_mask = _date_mask(
@@ -529,7 +1163,48 @@ def _prepare_fold_inputs(
             "n_val_periods": int(persistent_val_mask.sum()),
         }
 
+    available_input = ragged_inputs or persistent_inputs
+    if available_input is None:
+        raise ValueError("At least one latent-factor input representation is required")
+    if available_input["n_train_periods"] < 10 or available_input["n_val_periods"] < 3:
+        return None
+
     return {"ragged": ragged_inputs, "pca": persistent_inputs}
+
+
+def _replace_fold_temporal_features(
+    *,
+    dataset: pl.DataFrame,
+    temporal_by_fold: pd.DataFrame,
+    temporal_keys: list[str],
+    temporal_feature_names: list[str],
+    fold_id: int,
+) -> pl.DataFrame:
+    """Replace the schema-placeholder columns with one fold's learned features."""
+    fold_temporal_pd = temporal_by_fold.loc[temporal_by_fold["fold"] == fold_id].drop(
+        columns=["fold"]
+    )
+    if fold_temporal_pd.empty:
+        raise ValueError(f"No temporal features found for fold {fold_id}")
+
+    fold_temporal = pl.from_pandas(fold_temporal_pd)
+    casts = {
+        key: dataset.schema[key]
+        for key in temporal_keys
+        if fold_temporal.schema[key] != dataset.schema[key]
+    }
+    if casts:
+        fold_temporal = fold_temporal.cast(casts)
+    fold_temporal = fold_temporal.unique(subset=temporal_keys, keep="last")
+
+    missing = sorted(set(temporal_feature_names) - set(fold_temporal.columns))
+    if missing:
+        raise ValueError(f"Fold {fold_id} temporal data is missing features: {missing}")
+    return dataset.drop(temporal_feature_names, strict=False).join(
+        fold_temporal.select([*temporal_keys, *temporal_feature_names]),
+        on=temporal_keys,
+        how="left",
+    )
 
 
 def _filter_dataset_window(
@@ -600,7 +1275,10 @@ def _resolve_metric_policy(
 
     score_mode = score_dates
     if score_mode == "auto":
-        score_mode = lf_setup.get("score_dates") or ("rebalance" if case_study_id else "all")
+        # IC is defined at every prediction timestamp, then averaged. Portfolio
+        # rebalance cadence belongs to the downstream backtest and must not
+        # thin the model-evaluation series or checkpoint-selection metric.
+        score_mode = lf_setup.get("score_dates") or "all"
     if score_mode not in {"all", "rebalance"}:
         raise ValueError(f"score_dates must be 'auto', 'all', or 'rebalance'; got {score_dates!r}")
 
@@ -783,10 +1461,7 @@ def _select_epoch_from_values(
         epoch, ic = max(checkpoint_ics.items(), key=lambda item: (item[1], -item[0]))
         return int(epoch), float(ic)
 
-    if reporting_epoch is None and 0 in checkpoint_ics:
-        epoch = 0
-    else:
-        epoch = max(checkpoint_ics) if reporting_epoch is None else int(reporting_epoch)
+    epoch = max(checkpoint_ics) if reporting_epoch is None else int(reporting_epoch)
     if epoch not in checkpoint_ics:
         raise ValueError(
             f"Configured reporting_epoch={epoch} was not emitted; available epochs: "
@@ -838,7 +1513,16 @@ def _register_model_predictions(
     fold_extras: list[dict[str, Any]],
     fold_ics_df: pl.DataFrame,
     preds_df: pl.DataFrame,
-) -> None:
+    feature_names: list[str],
+    splits: list[dict[str, Any]],
+    input_digest: str,
+    macro_digest: str | None,
+    runtime_spec: dict[str, Any],
+    temporal_feature_assembly: str | None = None,
+    temporal_feature_digest: str | None = None,
+    macro_context_spec: dict[str, Any] | None = None,
+    input_data_spec: dict[str, Any] | None = None,
+) -> str:
     from case_studies.utils.registry import (
         build_training_spec,
         register_prediction_set,
@@ -846,6 +1530,16 @@ def _register_model_predictions(
     )
 
     n_folds = int(fold_ics_df["fold_id"].n_unique()) if fold_ics_df.height > 0 else 0
+    registered_checkpoints = _expected_latent_checkpoints(
+        model_name,
+        n_epochs=n_epochs,
+        model_kwargs=model_kwargs,
+    )
+    registered_extras = (
+        [{**fold_extras[0], "checkpoint_epochs": list(registered_checkpoints)}]
+        if fold_extras
+        else []
+    )
     try:
         spec = build_training_spec(
             "latent_factors",
@@ -862,6 +1556,7 @@ def _register_model_predictions(
             "label": label_col,
             "library": "pytorch",
             "n_epochs": n_epochs,
+            "n_folds": n_folds,
             "params": {"n_factors": n_factors},
             "seed": 42,
         }
@@ -871,7 +1566,19 @@ def _register_model_predictions(
         n_factors=n_factors,
         n_epochs=n_epochs,
         model_kwargs=model_kwargs,
-        fold_extras=fold_extras,
+        fold_extras=registered_extras,
+        feature_names=feature_names,
+        splits=splits,
+        task_type=task_type,
+        class_values=class_values,
+        eval_label_col=eval_label_col,
+        input_digest=input_digest,
+        macro_digest=macro_digest,
+        runtime_spec=runtime_spec,
+        temporal_feature_assembly=temporal_feature_assembly,
+        temporal_feature_digest=temporal_feature_digest,
+        macro_context_spec=macro_context_spec,
+        input_data_spec=input_data_spec,
     )
 
     training_hash = register_training_run(
@@ -883,8 +1590,10 @@ def _register_model_predictions(
     )
     eval_col = "eval_actual" if eval_label_col else None
 
-    for epoch in sorted(preds_df["epoch"].unique().to_list()):
+    for epoch in registered_checkpoints:
         epoch_preds = preds_df.filter(pl.col("epoch") == epoch)
+        if epoch_preds.height == 0:
+            raise ValueError(f"Missing registered checkpoint {epoch} for {model_name}")
         epoch_metrics = fold_ics_df.filter(pl.col("epoch") == epoch)
         ic_mean = float(epoch_metrics["ic_mean"].mean()) if epoch_metrics.height > 0 else 0.0
         register_prediction_set(
@@ -899,6 +1608,7 @@ def _register_model_predictions(
             eval_col=eval_col,
             metrics={"ic_mean": ic_mean},
         )
+    return training_hash
 
 
 def _apply_latent_factor_runtime_spec(
@@ -908,10 +1618,47 @@ def _apply_latent_factor_runtime_spec(
     n_epochs: int,
     model_kwargs: dict[str, Any],
     fold_extras: list[dict[str, Any]],
+    feature_names: list[str],
+    splits: list[dict[str, Any]],
+    task_type: str,
+    class_values: list | None,
+    eval_label_col: str | None,
+    input_digest: str,
+    macro_digest: str | None,
+    runtime_spec: dict[str, Any],
+    temporal_feature_assembly: str | None = None,
+    temporal_feature_digest: str | None = None,
+    macro_context_spec: dict[str, Any] | None = None,
+    input_data_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved = dict(spec)
     params = dict(resolved.get("params", {}))
     params.setdefault("n_factors", n_factors)
+    params["feature_names"] = list(feature_names)
+    params["splits"] = [
+        {
+            key: value.isoformat() if hasattr(value, "isoformat") else value
+            for key, value in split.items()
+        }
+        for split in splits
+    ]
+    params["task_type"] = task_type
+    params["class_values"] = list(class_values) if class_values is not None else None
+    params["eval_label_col"] = eval_label_col
+    params["input_digest"] = input_digest
+    params["macro_digest"] = macro_digest
+    params["runtime"] = dict(runtime_spec)
+
+    # IPCA solver controls are part of the configured training identity. If
+    # omitted, changing the ALS budget or tolerances reuses the historical
+    # training hash and overwrites its prediction artifact in place.
+    solver_fields = ("max_iter", "tol", "factor_ridge", "gamma_ridge")
+    first_extra = fold_extras[0] if fold_extras else {}
+    for field in solver_fields:
+        if field in model_kwargs:
+            params[field] = model_kwargs[field]
+        elif field in first_extra:
+            params[field] = first_extra[field]
 
     runtime_fields: dict[str, Any] = {}
     if n_epochs:
@@ -934,7 +1681,6 @@ def _apply_latent_factor_runtime_spec(
             runtime_fields[field] = model_kwargs[field]
 
     if fold_extras:
-        first_extra = fold_extras[0]
         for field in (
             "checkpoint_epochs",
             "n_epochs_unc",
@@ -950,5 +1696,24 @@ def _apply_latent_factor_runtime_spec(
                 runtime_fields[field] = first_extra[field]
 
     resolved.update(runtime_fields)
+    if (temporal_feature_assembly is None) != (temporal_feature_digest is None):
+        raise ValueError("Fold-scoped temporal identity requires both assembly and input digest")
+    if temporal_feature_assembly is not None:
+        resolved["temporal_feature_assembly"] = temporal_feature_assembly
+        resolved["temporal_feature_digest"] = temporal_feature_digest
+    if macro_context_spec is not None:
+        resolved["macro_context"] = macro_context_spec
+    if input_data_spec is not None:
+        resolved["input_data"] = input_data_spec
     resolved["params"] = params
     return resolved
+
+
+def _macro_context_matches(
+    registered_spec: dict[str, Any],
+    expected_macro_context: dict[str, Any] | None,
+) -> bool:
+    """Require exact macro identity when the caller declares one."""
+    if expected_macro_context is None:
+        return True
+    return registered_spec.get("macro_context") == expected_macro_context

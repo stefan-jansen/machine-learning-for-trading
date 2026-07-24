@@ -135,9 +135,6 @@ case_studies/*/backtest/
 case_studies/*/strategy/
 case_studies/*/evaluation/
 case_studies/*/exploration/
-case_studies/*/config/exploration/
-case_studies/*/config/cv_config.json
-case_studies/*/eligibility.csv
 case_studies/*/registry.db
 case_studies/*/results/
 case_studies/*/*_v1_contaminated/
@@ -146,6 +143,7 @@ case_studies/*/*_v1_contaminated/
 # registry.db is SSOT but too large for git (43-180 MB per case study)
 # Regenerated from pipeline runs; not needed for readers
 case_studies/*/run_log/
+case_studies/*/run_log
 
 # Model checkpoints (from training notebooks)
 **/trainer_great/
@@ -199,5 +197,5 @@ case_studies/*/catalog/*.json
 !24_autonomous_agents/forecast_traces/01_react_reasoning_20260615T191047Z_04eb6e7c603d.json
 !24_autonomous_agents/forecast_traces/09_evaluation_and_governance_20260615T191431Z_d5030378899c.json
 
-# Review tooling config (dev-only)
-.roborev.toml
+# roborev snapshots
+/.roborev/

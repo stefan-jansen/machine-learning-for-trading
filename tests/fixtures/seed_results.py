@@ -764,7 +764,8 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
 
     Uses real symbols from setup.yaml and dates spanning 2 years before the
     holdout boundary so backtests have data to work with. Predictions are random
-    noise — CI only needs the pipeline to complete, not meaningful results.
+    noise. Crypto artifacts are normalized even when copied intermediates exist
+    because its model analysis requires one common key and target panel.
     """
     db_path = cs_dir / "run_log" / "registry.db"
     if not db_path.exists():
@@ -816,7 +817,6 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     step = max(1, len(dates) // 60)
     dates = dates[::step]
 
-    rng = np.random.default_rng(42)
     n_symbols = len(symbols)
     n_dates = len(dates)
     n = n_symbols * n_dates
@@ -839,23 +839,26 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         for _di in range(n_dates)
         for _ in range(n_symbols)
     ]
+    target_rng = np.random.default_rng(42)
     template = _pl.DataFrame(
         {
             entity_col: rows_symbol,
             "timestamp": _pl.Series(rows_date).cast(_pl.Date),
             "fold": rows_fold,
-            "prediction": rng.normal(0, 0.01, n).tolist(),
-            "actual": rng.normal(0, 0.01, n).tolist(),
+            "actual": target_rng.normal(0, 0.01, n).tolist(),
         }
     )
 
+    rewrite_existing = cs_id == "crypto_perps_funding"
     for p_hash in hashes:
         pred_dir = cs_dir / "run_log" / "predictions" / p_hash
         pred_file = pred_dir / "predictions.parquet"
-        if pred_file.exists():
+        if pred_file.exists() and not rewrite_existing:
             continue
         pred_dir.mkdir(parents=True, exist_ok=True)
-        template.write_parquet(str(pred_file))
+        score_seed = int(hashlib.sha256(p_hash.encode()).hexdigest()[:16], 16)
+        scores = np.random.default_rng(score_seed).normal(0, 0.01, n).tolist()
+        template.with_columns(_pl.Series("prediction", scores)).write_parquet(str(pred_file))
 
 
 def _seed_causal_json(results_dir: Path, cs_id: str, label: str) -> None:

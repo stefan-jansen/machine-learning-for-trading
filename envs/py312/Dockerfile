@@ -13,7 +13,7 @@
 #   Ch10 NB03 (sentiment_evolution)  — gensim
 #   Ch12 NB10 (shap_nlp_sentiment)   — torch CUDA + shap
 #   Ch14 NB06 (conditional_autoencoder) — torch CUDA + shap
-#   Ch15 NB06 (fed_announcement_bsts) — pycausalimpact (ARIMA event-study port; py<3.13)
+#   Ch15 NB06 (fed_announcement_bsts) - tfcausalimpact in isolated /opt/bsts
 #   Ch21 deep_hedging_pfhedge        — pfhedge (unmaintained, numpy<2)
 #
 # Usage:
@@ -47,7 +47,18 @@ RUN uv pip install --python /opt/ml4t/bin/python --no-cache /build
 # x86-only signature stack (signatory + esig) for Ch05/Ch09 notebooks
 RUN /opt/ml4t/bin/pip install --no-cache-dir --no-build-isolation "signatory>=1.2" && \
     /opt/ml4t/bin/pip install --no-cache-dir --no-deps "esig>=1.0" && \
-    /opt/ml4t/bin/pip install --no-cache-dir "pyrecombine>=1.0" "roughpy>=0.2"
+    /opt/ml4t/bin/pip install --no-cache-dir "numpy>=2,<2.5" "pyrecombine>=1.0" "roughpy>=0.2"
+
+# tfcausalimpact requires pandas<=2.2 and NumPy 1.x, while the signature stack
+# above requires NumPy 2.x. Keep both valid dependency sets in isolated
+# interpreters inside the same reader image.
+RUN python -m venv /opt/bsts
+COPY envs/py312/bsts-pyproject.toml /build/bsts/pyproject.toml
+RUN uv pip install --python /opt/bsts/bin/python --no-cache /build/bsts && \
+    /opt/bsts/bin/python -m ipykernel install --prefix=/opt/bsts --name python3 \
+        --display-name "Python 3.12 (BSTS)" && \
+    /opt/bsts/bin/python -c "import importlib.metadata as m; import causalimpact; assert m.version('tfcausalimpact') == '0.0.18'"
+COPY envs/py312/kernels/bsts-quiet/kernel.json /opt/bsts/share/jupyter/kernels/bsts-quiet/kernel.json
 
 # Test infrastructure — pytest + helpers so CI doesn't need runtime pip install
 RUN /opt/ml4t/bin/pip install --no-cache-dir \

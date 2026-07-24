@@ -1,0 +1,41 @@
+{
+  "case_study": "us_equities_panel",
+  "label": "fwd_ret_5d",
+  "method": "daily_cross_sectional_mean_close_pct_change",
+  "periods_per_year": 252,
+  "n_symbols_in_universe": 3109,
+  "sharpe": 0.917441,
+  "cagr": 0.200694,
+  "vol": 0.227649,
+  "n_periods": 4136,
+  "ts_min": "2000-01-13 00:00:00",
+  "ts_max": "2018-03-27 00:00:00",
+  "by_period": {
+    "overall": {
+      "sharpe": 0.986156,
+      "cagr": 0.213803,
+      "vol": 0.221371,
+      "n_periods": 4698
+    },
+    "validation": {
+      "sharpe": 0.917441,
+      "cagr": 0.200694,
+      "vol": 0.227649,
+      "n_periods": 4136
+    },
+    "holdout": {
+      "sharpe": 1.711413,
+      "cagr": 0.314783,
+      "vol": 0.168203,
+      "n_periods": 562
+    },
+    "validation_window": [
+      "2000-01-13 00:00:00",
+      "2015-12-31 00:00:00"
+    ],
+    "holdout_window": [
+      "2016-01-04 00:00:00",
+      "2018-03-27 00:00:00"
+    ]
+  }
+}

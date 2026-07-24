@@ -28,7 +28,7 @@
 # - **Related**: [`12_kalshi_prediction_markets`](12_kalshi_prediction_markets.ipynb) (CFTC-regulated alternative)
 
 # %%
-"""Polymarket Prediction Markets — compare crypto-based event contracts with Kalshi for ML feature engineering."""
+"""Polymarket Prediction Markets - compare crypto-based event contracts with Kalshi for ML feature engineering."""
 
 import re
 import warnings
@@ -44,7 +44,7 @@ from utils.paths import get_output_dir
 from utils.style import COLORS
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+# Production defaults - Papermill injects overrides for CI
 LIVE = False
 
 # %% [markdown]
@@ -98,7 +98,7 @@ df.group_by("symbol").len().rename({"len": "days"}).sort("symbol")
 # %%
 # Map every contract into the four trading-relevant buckets the chapter
 # discusses (monetary_policy, crypto, commodities, geopolitics) using a
-# native polars regex chain — no Python UDF. The inference takes
+# native polars regex chain - no Python UDF. The inference takes
 # precedence over the loader's coarser provider category (e.g. an
 # "economics" Fed-rate contract maps to monetary_policy here) so that
 # the cross-platform Fed comparison below picks it up. Anything that
@@ -183,7 +183,7 @@ fig.add_trace(
 
 fig.update_layout(
     title=dict(
-        text="Distribution of Latest Implied Probabilities (Downloaded Polymarket Markets)",
+        text="Downloaded Polymarket contracts cluster at near-consensus 0 or 1",
         y=0.95,
     ),
     xaxis_title="Latest Implied Probability",
@@ -219,8 +219,8 @@ category_colors = {
     "technology": COLORS["copper"],
     "science": COLORS["positive"],
     "commodities": COLORS["blue"],
-    "geopolitics": COLORS.get("rose", "#e11d48"),
-    "other": "#94a3b8",
+    "geopolitics": COLORS["negative"],
+    "other": COLORS["neutral"],
 }
 
 contracts.select(
@@ -232,7 +232,7 @@ contracts.select(
 
 # %% [markdown]
 # High-volume, high-range contracts are the ones where new information moved
-# probabilities meaningfully — the natural candidates for event features or
+# probabilities meaningfully - the natural candidates for event features or
 # cross-platform comparison.
 
 # %% [markdown]
@@ -257,7 +257,7 @@ movers = (
 top_contracts = movers["symbol"].to_list()
 
 fig = go.Figure()
-palette = [COLORS["blue"], COLORS["amber"], COLORS["slate"]]
+palette = [COLORS["blue"], COLORS["amber"], COLORS["copper"]]
 
 for sym, color in zip(top_contracts, palette, strict=False):
     data = df.filter(pl.col("symbol") == sym).sort("timestamp").to_pandas()
@@ -274,7 +274,7 @@ for sym, color in zip(top_contracts, palette, strict=False):
 
 fig.update_layout(
     title=dict(
-        text="Probability Evolution for Top-Mover Polymarket Contracts",
+        text="Top-mover Polymarket contracts stayed near 0 over the 24-hour snapshot",
         y=0.97,
     ),
     xaxis_title="Date",
@@ -329,7 +329,7 @@ else:
 live_snapshot.head(10) if live_snapshot is not None else None
 
 # %% [markdown]
-# ## 9. Fed Rate Markets — Cross-Platform Comparison
+# ## 9. Fed Rate Markets - Cross-Platform Comparison
 #
 # Both Polymarket and Kalshi offer binary contracts on Federal Reserve
 # rate decisions. This creates a natural cross-platform comparison. We
@@ -562,7 +562,7 @@ fig = make_subplots(
 )
 
 # Iterate over the categories actually present in the snapshot (ordered by
-# market count) so every downloaded bucket appears — hard-coding a fixed
+# market count) so every downloaded bucket appears - hard-coding a fixed
 # list silently drops categories like technology and science that the
 # regex/loader inference surfaces.
 present_categories = (
@@ -573,7 +573,7 @@ for cat in present_categories:
     subset = features.filter(pl.col("category") == cat)
     if subset.is_empty():
         continue
-    color = category_colors.get(cat, "#94a3b8")
+    color = category_colors.get(cat, COLORS["neutral"])
 
     fig.add_trace(
         go.Box(
@@ -614,7 +614,7 @@ fig.show()
 # Across this snapshot every category sits close to full conviction: prices
 # cluster near 0 or 1, so `|p - 0.5|` stays near 0.5 for essentially all
 # contracts and the high-confidence flag is set on every row. The categories
-# separate on intraday range instead — crypto contracts move the most within
+# separate on intraday range instead - crypto contracts move the most within
 # a bar, while monetary-policy, technology, and science contracts are nearly
 # static. That intraday dispersion is where ML-driven signals are most likely
 # to live.

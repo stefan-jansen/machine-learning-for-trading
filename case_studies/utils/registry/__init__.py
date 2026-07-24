@@ -54,6 +54,16 @@ from .completeness import (
     training_run_status,
 )
 
+# --- lineage ---
+from .lineage import modeling_input_fingerprint
+
+# --- maintenance ---
+from .maintenance import (
+    DuplicateBacktest,
+    deduplicate_semantic_backtests,
+    find_semantic_backtest_duplicates,
+)
+
 # --- metrics ---
 from .metrics import (
     compute_backtest_fold_metrics,
@@ -90,6 +100,7 @@ from .queries import (
 
 # --- registration ---
 from .registration import (
+    clear_prediction_sets,
     register_backtest_fold_metrics,
     register_backtest_metrics,
     register_backtest_run,
@@ -133,12 +144,14 @@ __all__ = [
     "backtest_hash_from_parts",
     "load_preset",
     "build_training_spec",
+    "modeling_input_fingerprint",
     # store
     "REGISTRY_SCHEMA_SQL",
     "VALID_STAGES",
     "get_training_dir",
     # registration
     "register_training_run",
+    "clear_prediction_sets",
     "register_epoch_checkpoint",
     "register_prediction_set",
     "register_prediction_metrics",
@@ -161,6 +174,10 @@ __all__ = [
     "compute_fold_metrics_from_predictions",
     "compute_classification_metrics_from_predictions",
     "compute_regression_vs_binary_auc",
+    # maintenance
+    "DuplicateBacktest",
+    "find_semantic_backtest_duplicates",
+    "deduplicate_semantic_backtests",
     # queries
     "load_training_runs",
     "load_prediction_sets",

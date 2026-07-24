@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import gc
+import os
 import time
 import warnings
 from datetime import UTC, datetime
@@ -25,18 +26,128 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import polars as pl
+
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import torch
 import torch.nn as nn
 from ml4t.diagnostic.metrics import cross_sectional_ic
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 
-from case_studies.utils.registry import compute_fold_metrics_from_predictions
+from case_studies.utils.registry import clear_prediction_sets, compute_fold_metrics_from_predictions
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 from utils.modeling import RANDOM_SEED, seed_everything
+
+
+def resolve_torch_device(device: str) -> torch.device:
+    """Resolve an explicit Torch device without silently changing execution."""
+    normalized = device.lower()
+    if normalized == "gpu":
+        normalized = "cuda"
+    if normalized == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested but is unavailable")
+        return torch.device("cuda")
+    if normalized == "cpu":
+        return torch.device("cpu")
+    raise ValueError(f"Unsupported Torch device: {device!r}")
+
+
+def tabm_runtime_spec(
+    device: str,
+    *,
+    seed: int = RANDOM_SEED,
+    num_threads: int = 8,
+) -> dict[str, Any]:
+    """Return the execution settings that define a reproducible TabM run."""
+    if num_threads < 1:
+        raise ValueError("num_threads must be at least 1")
+    resolved = resolve_torch_device(device)
+    return {
+        "device": resolved.type,
+        "deterministic_algorithms": True,
+        "cublas_workspace_config": os.environ["CUBLAS_WORKSPACE_CONFIG"],
+        "num_threads": num_threads,
+        "seed": seed,
+    }
+
+
+def _tabm_checkpoint_epochs(config: dict[str, Any]) -> tuple[int, ...]:
+    """Return the exact checkpoint surface implied by one effective config."""
+    if str(config["config_name"]).startswith("tabpfn"):
+        return (1,)
+    n_epochs = int(config.get("n_epochs", 200))
+    checkpoint_interval = int(config.get("checkpoint_interval", 25))
+    if n_epochs < 1 or checkpoint_interval < 1:
+        raise ValueError("n_epochs and checkpoint_interval must be positive")
+    checkpoints = list(range(checkpoint_interval, n_epochs + 1, checkpoint_interval))
+    if not checkpoints or checkpoints[-1] != n_epochs:
+        checkpoints.append(n_epochs)
+    return tuple(checkpoints)
+
+
+def _build_tabm_training_spec(
+    config: dict[str, Any],
+    *,
+    label_col: str,
+    n_folds: int,
+    feature_names: list[str],
+    eval_label_col: str | None,
+    task_type: str,
+    class_values: list | None,
+    runtime_spec: dict[str, Any],
+    seed: int,
+    splits: list[dict[str, Any]] | None = None,
+    input_data_spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the single identity used for TabM lookup and registration."""
+    params = dict(config.get("params", {}))
+    params.update(
+        {
+            "batch_size": int(config.get("batch_size", 4096)),
+            "class_values": list(class_values) if class_values is not None else None,
+            "eval_label_col": eval_label_col,
+            "feature_names": list(feature_names),
+            "runtime": dict(runtime_spec),
+            "splits": [
+                {
+                    key: str(split[key]) if key != "fold" else int(split[key])
+                    for key in ("fold", "train_start", "train_end", "val_start", "val_end")
+                }
+                for split in (splits or [])
+            ],
+            "task_type": task_type,
+        }
+    )
+    if input_data_spec is not None:
+        params["input_data_spec"] = input_data_spec
+    return {
+        "checkpoint_interval": int(config.get("checkpoint_interval", 25)),
+        "config_name": config["config_name"],
+        "family": config.get("family", "tabular_dl"),
+        "feature_sets": ["financial", "model_based"],
+        "label": label_col,
+        "library": config.get("library", "tabm"),
+        "n_epochs": int(config.get("n_epochs", 200)),
+        "n_folds": n_folds,
+        "params": params,
+        "seed": seed,
+    }
+
+
+def _configure_torch_runtime(runtime_spec: dict[str, Any]) -> torch.device:
+    """Apply the strict deterministic settings recorded in a training spec."""
+    torch.set_num_threads(int(runtime_spec["num_threads"]))
+    torch.use_deterministic_algorithms(True, warn_only=False)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    seed_everything(int(runtime_spec["seed"]))
+    return resolve_torch_device(str(runtime_spec["device"]))
+
 
 # ---------------------------------------------------------------------------
 # TabM Model
@@ -137,6 +248,7 @@ def _train_tabm_fold(
     y_train: np.ndarray,
     X_val: np.ndarray,
     y_val: np.ndarray,
+    y_eval_val: np.ndarray,
     val_dates: np.ndarray,
     val_entities: np.ndarray | None,
     n_epochs: int,
@@ -192,9 +304,9 @@ def _train_tabm_fold(
             val_preds = _predict_in_chunks(model, X_val, device)
             ic_frame = pl.DataFrame(
                 {
-                    "date": val_dates,
+                    "timestamp": val_dates,
                     "symbol": val_entities,
-                    "y_true": y_val,
+                    "y_true": y_eval_val,
                     "y_pred": val_preds,
                 }
             )
@@ -203,7 +315,7 @@ def _train_tabm_fold(
                 ic_frame,
                 pred_col="y_pred",
                 ret_col="y_true",
-                date_col="date",
+                date_col="timestamp",
                 entity_col="symbol",
                 min_obs=5,
             )["ic_mean"]
@@ -225,20 +337,229 @@ def _train_tabm_fold(
 from case_studies.utils.registry.store import flush_fold_predictions
 
 
-def _load_incremental_preds(incr_dir: Path) -> pl.DataFrame:
-    """Reassemble all predictions from incremental fold saves."""
-    parquet_files = sorted(incr_dir.glob("*.parquet"))
-    if not parquet_files:
-        return pl.DataFrame()
-    return pl.concat([pl.read_parquet(f) for f in parquet_files])
-
-
 def _load_incremental_preds_for_config(incr_dir: Path, config_name: str) -> pl.DataFrame:
     """Reassemble one config's predictions from its per-fold incremental saves."""
     parquet_files = sorted(incr_dir.glob(f"{config_name}_fold*.parquet"))
     if not parquet_files:
         return pl.DataFrame()
     return pl.concat([pl.read_parquet(f) for f in parquet_files])
+
+
+def _load_cached_tabm_config(
+    *,
+    case_study: str,
+    training_spec: dict[str, Any],
+    config_name: str,
+    prediction_split: str,
+    date_col: str,
+    entity_col: str,
+    eval_col: str | None,
+    expected_checkpoints: tuple[int, ...],
+    expected_keys: pl.DataFrame,
+) -> tuple[dict[str, Any], pl.DataFrame, list[dict[str, Any]]]:
+    """Reconstruct one completed config from content-addressed registry artifacts."""
+    from case_studies.utils.registry import (
+        load_prediction_metrics,
+        load_prediction_sets,
+        prediction_dir,
+        training_hash_from_spec,
+    )
+
+    training_hash = training_hash_from_spec(training_spec)
+    prediction_sets = load_prediction_sets(
+        case_study,
+        training_hash=training_hash,
+        split=prediction_split,
+    )
+    required_metadata = {"prediction_hash", "checkpoint_value", "checkpoint_kind"}
+    missing_metadata = required_metadata - set(prediction_sets.columns)
+    if missing_metadata:
+        raise ValueError(
+            f"Cached {config_name} checkpoint metadata is missing {sorted(missing_metadata)}"
+        )
+    if prediction_sets.height != len(expected_checkpoints):
+        raise ValueError(
+            f"Cached {config_name} checkpoints row count {prediction_sets.height} does not match "
+            f"expected {len(expected_checkpoints)}"
+        )
+    if prediction_sets["checkpoint_value"].null_count():
+        raise ValueError(f"Cached {config_name} has a null checkpoint value")
+    if prediction_sets.filter(pl.col("checkpoint_kind") != "epoch").height:
+        raise ValueError(f"Cached {config_name} contains a non-epoch checkpoint")
+    checkpoint_values = prediction_sets["checkpoint_value"].to_list()
+    observed_checkpoints = tuple(sorted(int(value) for value in checkpoint_values))
+    if len(observed_checkpoints) != len(set(observed_checkpoints)):
+        raise ValueError(f"Cached {config_name} has duplicate checkpoints")
+    if observed_checkpoints != expected_checkpoints:
+        raise ValueError(
+            f"Cached {config_name} checkpoints {observed_checkpoints} do not match "
+            f"expected {expected_checkpoints}"
+        )
+
+    key_cols = [date_col, entity_col, "fold_id"]
+    expected_sorted = expected_keys.select(key_cols).sort(key_cols)
+    frames: list[pl.DataFrame] = []
+    curves: list[dict[str, Any]] = []
+    for row in prediction_sets.iter_rows(named=True):
+        epoch = row["checkpoint_value"]
+        if epoch is None:
+            continue
+        path = prediction_dir(case_study, row["prediction_hash"]) / "predictions.parquet"
+        if not path.exists():
+            raise FileNotFoundError(path)
+        predictions = pl.read_parquet(path)
+        required_cols = {date_col, entity_col, "fold_id", "y_true", "y_score"}
+        if eval_col:
+            required_cols.add(eval_col)
+        missing_cols = required_cols - set(predictions.columns)
+        if missing_cols:
+            raise ValueError(
+                f"Cached {config_name} checkpoint {epoch} schema is missing {sorted(missing_cols)}"
+            )
+        if predictions.select(pl.col(list(required_cols)).null_count()).row(0) != (0,) * len(
+            required_cols
+        ):
+            raise ValueError(f"Cached {config_name} checkpoint {epoch} schema contains nulls")
+        actual_keys = predictions.select(key_cols)
+        if actual_keys.n_unique() != predictions.height:
+            raise ValueError(f"Cached {config_name} checkpoint {epoch} has duplicate keys")
+        if not actual_keys.sort(key_cols).equals(expected_sorted):
+            raise ValueError(
+                f"Cached {config_name} checkpoint {epoch} key or fold coverage is incomplete"
+            )
+        actual_col = eval_col or "y_true"
+        metric = cross_sectional_ic(
+            predictions,
+            predictions,
+            pred_col="y_score",
+            ret_col=actual_col,
+            date_col=date_col,
+            entity_col=entity_col,
+            method="spearman",
+            min_obs=5,
+        )
+        registry_metrics = load_prediction_metrics(
+            case_study, prediction_hash=row["prediction_hash"]
+        )
+        required_daily_metrics = {"ic_mean_daily", "ic_std_daily"}
+        missing_daily_metrics = required_daily_metrics - set(registry_metrics.columns)
+        if registry_metrics.height != 1 or missing_daily_metrics:
+            raise ValueError(
+                f"Cached {config_name} checkpoint {epoch} has invalid daily registry metrics"
+            )
+        comparisons = {
+            "daily mean": (
+                registry_metrics["ic_mean_daily"][0],
+                float(metric["ic_mean"]),
+            ),
+            "daily std": (
+                registry_metrics["ic_std_daily"][0],
+                float(metric.get("ic_std", 0.0)),
+            ),
+        }
+        mismatches = {
+            name: values
+            for name, values in comparisons.items()
+            if values[0] is None
+            or not np.isclose(float(values[0]), values[1], atol=1e-12, rtol=0.0)
+        }
+        if mismatches:
+            raise ValueError(
+                f"Cached {config_name} checkpoint {epoch} daily metric mismatch: {mismatches}"
+            )
+        curves.append(
+            {
+                "config": config_name,
+                "epoch": int(epoch),
+                "ic_mean": float(metric["ic_mean"]),
+                "ic_std": float(metric.get("ic_std", 0.0)),
+            }
+        )
+        frames.append(
+            predictions.with_columns(
+                pl.lit(config_name).alias("config"),
+                pl.lit(int(epoch), dtype=pl.Int32).alias("epoch"),
+            )
+        )
+    if not curves:
+        raise ValueError(f"No cached {prediction_split} checkpoints for {config_name}")
+    best = max(curves, key=lambda row: row["ic_mean"])
+    result = {
+        "config_name": config_name,
+        "best_epoch": best["epoch"],
+        "best_ic": best["ic_mean"],
+        "elapsed_s": 0.0,
+        "started_at": None,
+        "cached": True,
+    }
+    return result, pl.concat(frames), curves
+
+
+def _assemble_tabm_results(
+    *,
+    config_results: list[dict[str, Any]],
+    all_predictions: pl.DataFrame,
+    curve_rows: list[dict[str, Any]],
+    training_rows: list[dict[str, Any]],
+    save_dir: Path | None,
+    date_col: str,
+    entity_col: str,
+    eval_col: str | None,
+) -> dict[str, Any]:
+    """Select the winner and build the same result for trained or cached configs."""
+    if not config_results:
+        raise ValueError("No configs completed successfully.")
+    ranked = sorted(
+        config_results,
+        key=lambda row: row["best_ic"] if not np.isnan(row["best_ic"]) else -999,
+        reverse=True,
+    )
+    best = ranked[0]
+    best_name = best["config_name"]
+    best_epoch = best["best_epoch"]
+    best_ic = best["best_ic"]
+    print(f"\n  Best: {best_name} @ epoch {best_epoch} (IC={best_ic:+.4f})")
+
+    best_predictions = all_predictions.filter(
+        (pl.col("config") == best_name) & (pl.col("epoch") == best_epoch)
+    )
+    if best_predictions.height:
+        best_predictions = best_predictions.with_columns(pl.lit(best_name).alias("model_id")).drop(
+            "config", "epoch"
+        )
+    curves = pl.DataFrame(curve_rows) if curve_rows else pl.DataFrame()
+    training_log = pl.DataFrame(training_rows) if training_rows else pl.DataFrame()
+
+    if save_dir is not None:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        if best_predictions.height:
+            best_predictions.write_parquet(save_dir / "predictions.parquet")
+        if all_predictions.height:
+            all_predictions.write_parquet(save_dir / "all_predictions.parquet")
+        if curves.height:
+            curves.write_parquet(save_dir / "learning_curves.parquet")
+        if training_log.height:
+            training_log.write_parquet(save_dir / "training_log.parquet")
+        print(f"  Saved TabM artifacts for {save_dir.name}")
+
+    return {
+        "grid_results": ranked,
+        "best_config_name": best_name,
+        "best_epoch": best_epoch,
+        "best_ic": best_ic,
+        "predictions": best_predictions,
+        "all_predictions": all_predictions,
+        "fold_metrics": compute_fold_metrics_from_predictions(
+            all_predictions,
+            best_name,
+            best_epoch,
+            date_col=date_col,
+            entity_col=entity_col,
+            eval_col=eval_col,
+        ),
+        "all_learning_curves": curves,
+        "training_log": training_log,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +582,12 @@ def _register_tabm_config(
     started_at: str | None = None,
     elapsed_s: float | None = None,
     prediction_split: str = "validation",
+    checkpoint_interval: int | None = None,
+    runtime_spec: dict[str, Any] | None = None,
+    task_type: str = "regression",
+    class_values: list | None = None,
+    eval_col: str | None = None,
+    training_spec: dict[str, Any] | None = None,
 ) -> str:
     """Register a single tabm config — thin delegate to register_epoch_checkpoint."""
     from case_studies.utils.registry import register_epoch_checkpoint
@@ -281,6 +608,12 @@ def _register_tabm_config(
         started_at=started_at,
         elapsed_s=elapsed_s,
         prediction_split=prediction_split,
+        checkpoint_interval=checkpoint_interval,
+        spec_extra_params={"runtime": runtime_spec} if runtime_spec else None,
+        task_type=task_type,
+        class_values=class_values,
+        eval_col=eval_col,
+        training_spec=training_spec,
     )
 
 
@@ -297,6 +630,9 @@ def run_tabm_cv(
     n_features: int,
     feature_names: list[str],
     label_col: str,
+    eval_label_col: str | None = None,
+    task_type: str = "regression",
+    class_values: list | None = None,
     date_col: str,
     entity_col: str = "symbol",
     device: str = "cuda",
@@ -309,6 +645,10 @@ def run_tabm_cv(
     temporal_feature_names: list[str] | None = None,
     force_retrain: bool = False,
     prediction_split: str = "validation",
+    seed: int = RANDOM_SEED,
+    num_threads: int = 8,
+    input_data_spec: dict[str, Any] | None = None,
+    identity_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Walk-forward tabular DL CV with epoch-checkpoint IC evaluation.
 
@@ -352,18 +692,97 @@ def run_tabm_cv(
         fold_metrics: pl.DataFrame — per-fold cross-sectional IC for best config
         all_learning_curves: pl.DataFrame — IC × epoch × config
     """
+    if task_type not in {"regression", "classification"}:
+        raise ValueError(f"Unsupported task_type: {task_type!r}")
+    if task_type == "classification" and not eval_label_col:
+        raise ValueError("classification requires eval_label_col for continuous-return IC")
+    if task_type == "classification" and not class_values:
+        raise ValueError("classification requires class_values")
+    if eval_label_col and eval_label_col not in dataset_pd.columns:
+        raise ValueError(f"eval_label_col {eval_label_col!r} is absent from the dataset")
+    if n_features != len(feature_names):
+        raise ValueError(
+            f"n_features={n_features} does not match {len(feature_names)} feature names"
+        )
+    if len(feature_names) != len(set(feature_names)):
+        raise ValueError("feature_names contains duplicates")
     if register and save_dir is None:
         raise ValueError(
             "register=True requires save_dir for incremental prediction saves. "
             "Pass save_dir=CASE_DIR / 'run_log' / 'training' / 'tabular_dl'"
         )
+    if input_data_spec is not None and identity_params is not None:
+        raise ValueError("Pass either input_data_spec or legacy identity_params, not both")
+
+    runtime_spec = tabm_runtime_spec(device, seed=seed, num_threads=num_threads)
+    torch_device = _configure_torch_runtime(runtime_spec)
+    eval_col = "eval_actual" if eval_label_col else None
+
+    dataset_pd = dataset_pd.sort_values([date_col, entity_col], kind="mergesort").reset_index(
+        drop=True
+    )
+    expected_key_frames = []
+    for split in splits:
+        val_mask = (dataset_pd[date_col] >= split["val_start"]) & (
+            dataset_pd[date_col] <= split["val_end"]
+        )
+        val_rows = dataset_pd.loc[val_mask]
+        valid = val_rows[label_col].notna()
+        if eval_label_col:
+            valid &= val_rows[eval_label_col].notna()
+        keys = pl.from_pandas(val_rows.loc[valid, [date_col, entity_col]])
+        expected_key_frames.append(
+            keys.with_columns(pl.lit(int(split["fold"]), dtype=pl.Int32).alias("fold_id"))
+        )
+    expected_keys = (
+        pl.concat(expected_key_frames)
+        if expected_key_frames
+        else pl.DataFrame(
+            schema={date_col: pl.Datetime, entity_col: pl.String, "fold_id": pl.Int32}
+        )
+    )
+    if expected_keys.n_unique(subset=[date_col, entity_col, "fold_id"]) != expected_keys.height:
+        raise ValueError("validation data contains duplicate timestamp/entity/fold keys")
+    if identity_params is not None:
+        from case_studies.utils.registry import build_training_spec
+
+        training_specs = {
+            cfg["config_name"]: build_training_spec(
+                cfg.get("family", "tabular_dl"),
+                cfg["config_name"],
+                label_col,
+                n_folds=len(splits),
+                n_epochs=cfg.get("n_epochs"),
+                extra_params=identity_params,
+            )
+            for cfg in configs
+        }
+    else:
+        training_specs = {
+            cfg["config_name"]: _build_tabm_training_spec(
+                cfg,
+                label_col=label_col,
+                n_folds=len(splits),
+                feature_names=feature_names,
+                eval_label_col=eval_label_col,
+                task_type=task_type,
+                class_values=class_values,
+                runtime_spec=runtime_spec,
+                seed=seed,
+                splits=splits,
+                input_data_spec=input_data_spec,
+            )
+            for cfg in configs
+        }
+    cached_results: list[dict[str, Any]] = []
+    cached_prediction_frames: list[pl.DataFrame] = []
+    cached_curves: list[dict[str, Any]] = []
 
     # Filter out configs whose training_hash is already complete (unless
     # force_retrain). This prevents re-running finished work across the entire
     # sweep — the caller can override with force_retrain=True for debugging.
     if register and case_study and not force_retrain:
         from case_studies.utils.registry import (
-            build_training_spec,
             load_prediction_sets,
             training_hash_from_spec,
             training_run_status,
@@ -372,13 +791,7 @@ def run_tabm_cv(
         pending_configs = []
         for cfg in configs:
             try:
-                spec = build_training_spec(
-                    cfg["family"],
-                    cfg["config_name"],
-                    label_col,
-                    n_folds=len(splits),
-                    n_epochs=cfg.get("n_epochs"),
-                )
+                spec = training_specs[cfg["config_name"]]
                 status = training_run_status(case_study, spec)
                 split_rows = load_prediction_sets(
                     case_study,
@@ -387,8 +800,23 @@ def run_tabm_cv(
                 )
                 split_complete = not split_rows.is_empty()
                 if status.complete and split_complete:
+                    cached_result, cached_predictions, cached_curve_rows = _load_cached_tabm_config(
+                        case_study=case_study,
+                        training_spec=spec,
+                        config_name=cfg["config_name"],
+                        prediction_split=prediction_split,
+                        date_col=date_col,
+                        entity_col=entity_col,
+                        eval_col=eval_col,
+                        expected_checkpoints=_tabm_checkpoint_epochs(cfg),
+                        expected_keys=expected_keys,
+                    )
+                    cached_results.append(cached_result)
+                    cached_prediction_frames.append(cached_predictions)
+                    cached_curves.extend(cached_curve_rows)
                     print(
-                        f"  SKIP {cfg['config_name']:25s}  ({status.summary()}, split={prediction_split})"
+                        f"  REUSE {cfg['config_name']:24s}  "
+                        f"({status.summary()}, split={prediction_split})"
                     )
                     continue
                 if status.complete and not split_complete:
@@ -398,27 +826,22 @@ def run_tabm_cv(
                 elif status.partial:
                     print(f"  RETRAIN {cfg['config_name']:25s}  partial state: {status.summary()}")
             except Exception as exc:
-                print(f"  WARN: skip-check failed for {cfg['config_name']}: {exc}")
+                print(f"  RETRAIN {cfg['config_name']:25s}  invalid cache: {exc}")
             pending_configs.append(cfg)
 
         if not pending_configs:
-            print("All configs already complete — nothing to do.")
-            return {
-                "grid_results": [],
-                "best_config_name": None,
-                "best_epoch": 0,
-                "best_ic": float("nan"),
-                "predictions": pl.DataFrame(),
-                "all_predictions": pl.DataFrame(),
-                "fold_metrics": pl.DataFrame(),
-                "all_learning_curves": pl.DataFrame(),
-                "training_log": pl.DataFrame(),
-            }
+            print("All configs complete; replaying content-addressed predictions.")
+            return _assemble_tabm_results(
+                config_results=cached_results,
+                all_predictions=pl.concat(cached_prediction_frames),
+                curve_rows=cached_curves,
+                training_rows=[],
+                save_dir=save_dir / label_col if save_dir is not None else None,
+                date_col=date_col,
+                entity_col=entity_col,
+                eval_col=eval_col,
+            )
         configs = pending_configs
-
-    torch_device = torch.device(device if torch.cuda.is_available() else "cpu")
-
-    seed_everything(RANDOM_SEED)
 
     dates_series = dataset_pd[date_col]
 
@@ -453,20 +876,27 @@ def run_tabm_cv(
             train_df = dataset_pd.loc[train_mask]
             val_df = dataset_pd.loc[val_mask]
 
-        # Drop NaN labels
+        # Drop rows without a fit target or declared evaluation target.
         train_valid = train_df[label_col].notna()
         val_valid = val_df[label_col].notna()
+        if eval_label_col:
+            train_valid &= train_df[eval_label_col].notna()
+            val_valid &= val_df[eval_label_col].notna()
         train_df = train_df.loc[train_valid]
         val_df = val_df.loc[val_valid]
 
         if len(train_df) < 100 or len(val_df) < 50:
-            print(f"  Fold {split['fold']}: skipped (train={len(train_df)}, val={len(val_df)})")
-            continue
+            raise ValueError(
+                f"Fold {split['fold']} is too small: train={len(train_df)}, val={len(val_df)}"
+            )
 
         X_train = train_df[feature_names].values.astype(np.float32)
         y_train = train_df[label_col].values.astype(np.float32)
         X_val = val_df[feature_names].values.astype(np.float32)
         y_val = val_df[label_col].values.astype(np.float32)
+        y_eval_val = (
+            val_df[eval_label_col].values.astype(np.float32) if eval_label_col else y_val.copy()
+        )
         val_dates = val_df[date_col].values
         val_entities = val_df[entity_col].values
 
@@ -483,6 +913,7 @@ def run_tabm_cv(
                 "y_train": y_train,
                 "X_val": X_val,
                 "y_val": y_val,
+                "y_eval_val": y_eval_val,
                 "val_dates": val_dates,
                 "val_entities": val_entities,
                 "n_train": len(X_train),
@@ -496,17 +927,38 @@ def run_tabm_cv(
 
     # Grid search — train each config, evaluate at checkpoints, store ALL predictions.
     # Incremental save: flush predictions to disk after each fold × config.
-    config_results: list[dict[str, Any]] = []
-    all_curves: list[dict] = []
+    config_results: list[dict[str, Any]] = list(cached_results)
+    all_curves: list[dict] = list(cached_curves)
     training_log: list[dict] = []
 
     # Set up incremental save directory
-    incr_dir = save_dir / "_incremental" if save_dir is not None else None
+    run_save_dir = save_dir / label_col if save_dir is not None else None
+    incr_dir = run_save_dir / "_incremental" if run_save_dir is not None else None
     if incr_dir is not None:
         incr_dir.mkdir(parents=True, exist_ok=True)
 
     for cfg in configs:
         config_name = cfg["config_name"]
+        if register and case_study and force_retrain:
+            from case_studies.utils.registry import build_training_spec, training_hash_from_spec
+
+            spec = build_training_spec(
+                cfg["family"],
+                config_name,
+                label_col,
+                n_folds=len(splits),
+                n_epochs=cfg.get("n_epochs"),
+            )
+            removed = clear_prediction_sets(
+                case_study,
+                training_hash_from_spec(spec),
+                split=prediction_split,
+            )
+            if removed["prediction_sets"]:
+                print(
+                    f"  cleared {removed['prediction_sets']} prior {prediction_split} "
+                    f"checkpoint(s) for {config_name}"
+                )
         cfg_params = dict(cfg.get("params", {}))
         cfg_n_epochs = cfg.get("n_epochs", 200)
         cfg_batch_size = cfg.get("batch_size", 4096)
@@ -522,7 +974,7 @@ def run_tabm_cv(
 
         for fd in fold_data:
             fold_t0 = time.perf_counter()
-            seed_everything(RANDOM_SEED + fd["fold"])
+            seed_everything(seed + fd["fold"])
 
             if is_tabpfn:
                 try:
@@ -535,9 +987,9 @@ def run_tabm_cv(
                     )
                     ic_frame = pl.DataFrame(
                         {
-                            "date": fd["val_dates"],
+                            "timestamp": fd["val_dates"],
                             "symbol": fd["val_entities"],
-                            "y_true": fd["y_val"],
+                            "y_true": fd["y_eval_val"],
                             "y_pred": preds,
                         }
                     )
@@ -546,7 +998,7 @@ def run_tabm_cv(
                         ic_frame,
                         pred_col="y_pred",
                         ret_col="y_true",
-                        date_col="date",
+                        date_col="timestamp",
                         entity_col="symbol",
                         min_obs=5,
                     )["ic_mean"]
@@ -564,6 +1016,8 @@ def run_tabm_cv(
                             fd["y_val"],
                             date_col,
                             entity_col,
+                            eval_actual=fd["y_eval_val"] if eval_col else None,
+                            eval_col=eval_col or "eval_actual",
                         )
 
                     fold_elapsed = time.perf_counter() - fold_t0
@@ -599,6 +1053,7 @@ def run_tabm_cv(
                     y_train=fd["y_train"],
                     X_val=fd["X_val"],
                     y_val=fd["y_val"],
+                    y_eval_val=fd["y_eval_val"],
                     val_dates=fd["val_dates"],
                     val_entities=fd["val_entities"],
                     n_epochs=cfg_n_epochs,
@@ -622,6 +1077,8 @@ def run_tabm_cv(
                         fd["y_val"],
                         date_col,
                         entity_col,
+                        eval_actual=fd["y_eval_val"] if eval_col else None,
+                        eval_col=eval_col or "eval_actual",
                     )
 
                 del model, checkpoint_preds
@@ -656,15 +1113,40 @@ def run_tabm_cv(
         if is_tabpfn and not tabpfn_available:
             continue
 
-        # Find best epoch for this config (mean IC across folds)
-        if fold_checkpoint_ics:
+        cfg_all_preds = (
+            _load_incremental_preds_for_config(incr_dir, config_name)
+            if incr_dir is not None
+            else pl.DataFrame()
+        )
+        checkpoint_metrics: dict[int, dict[str, float]] = {}
+        if cfg_all_preds.height:
+            actual_col = eval_col if eval_col else "y_true"
+            for epoch in sorted(cfg_all_preds["epoch"].unique().to_list()):
+                epoch_predictions = cfg_all_preds.filter(pl.col("epoch") == epoch)
+                checkpoint_metrics[int(epoch)] = cross_sectional_ic(
+                    epoch_predictions,
+                    epoch_predictions,
+                    pred_col="y_score",
+                    ret_col=actual_col,
+                    date_col=date_col,
+                    entity_col=entity_col,
+                    method="spearman",
+                    min_obs=5,
+                )
+        elif fold_checkpoint_ics:
+            checkpoint_metrics = {
+                int(epoch): {
+                    "ic_mean": float(np.nanmean(values)),
+                    "ic_std": float(np.nanstd(values)) if len(values) > 1 else 0.0,
+                }
+                for epoch, values in fold_checkpoint_ics.items()
+            }
+
+        if checkpoint_metrics:
             best_cp = max(
-                fold_checkpoint_ics.keys(),
-                key=lambda ep: (
-                    np.nanmean(fold_checkpoint_ics[ep]) if fold_checkpoint_ics[ep] else -1
-                ),
+                checkpoint_metrics, key=lambda epoch: checkpoint_metrics[epoch]["ic_mean"]
             )
-            best_ic_val = float(np.nanmean(fold_checkpoint_ics[best_cp]))
+            best_ic_val = float(checkpoint_metrics[best_cp]["ic_mean"])
         else:
             best_cp = 0
             best_ic_val = float("nan")
@@ -681,12 +1163,12 @@ def run_tabm_cv(
         )
 
         cfg_curves_list = []
-        for ep, ics in sorted(fold_checkpoint_ics.items()):
+        for ep, metric in sorted(checkpoint_metrics.items()):
             entry = {
                 "config": config_name,
                 "epoch": ep,
-                "ic_mean": float(np.nanmean(ics)),
-                "ic_std": float(np.nanstd(ics)) if len(ics) > 1 else 0.0,
+                "ic_mean": float(metric["ic_mean"]),
+                "ic_std": float(metric.get("ic_std", 0.0)),
             }
             all_curves.append(entry)
             cfg_curves_list.append(entry)
@@ -703,13 +1185,13 @@ def run_tabm_cv(
         # training_run each time.
         if register and case_study and incr_dir is not None:
             try:
-                cfg_all_preds = _load_incremental_preds_for_config(incr_dir, config_name)
                 if cfg_all_preds.height > 0:
                     from case_studies.utils.registry import register_prediction_set
 
                     cfg_curves_df = pl.DataFrame(cfg_curves_list) if cfg_curves_list else None
                     epoch_ics = {
-                        ep: float(np.nanmean(ics)) for ep, ics in fold_checkpoint_ics.items()
+                        epoch: float(metric["ic_mean"])
+                        for epoch, metric in checkpoint_metrics.items()
                     }
                     epochs = sorted(cfg_all_preds["epoch"].unique().to_list())
 
@@ -732,6 +1214,12 @@ def run_tabm_cv(
                         started_at=config_started_at,
                         elapsed_s=elapsed,
                         prediction_split=prediction_split,
+                        checkpoint_interval=cfg.get("checkpoint_interval"),
+                        runtime_spec=runtime_spec,
+                        task_type=task_type,
+                        class_values=class_values,
+                        eval_col=eval_col,
+                        training_spec=training_specs[config_name],
                     )
 
                     # Remaining epochs: just register prediction_sets
@@ -749,6 +1237,10 @@ def run_tabm_cv(
                             split=prediction_split,
                             predictions=ep_slice,
                             metrics={"ic_mean": epoch_ics.get(ep, float("nan"))},
+                            task_type=task_type,
+                            class_values=class_values,
+                            eval_col=eval_col,
+                            label=label_col,
                         )
                     print(
                         f"    registered {config_name} incrementally ({len(epochs)} per-epoch slices)"
@@ -758,71 +1250,20 @@ def run_tabm_cv(
 
         gc.collect()
 
-    if not config_results:
-        raise ValueError("No configs completed successfully.")
-
-    # Select best config
-    config_results.sort(
-        key=lambda r: r["best_ic"] if not np.isnan(r["best_ic"]) else -999,
-        reverse=True,
+    prediction_frames = list(cached_prediction_frames)
+    if incr_dir is not None:
+        for config_name in [cfg["config_name"] for cfg in configs]:
+            frame = _load_incremental_preds_for_config(incr_dir, config_name)
+            if frame.height:
+                prediction_frames.append(frame)
+    all_predictions = pl.concat(prediction_frames) if prediction_frames else pl.DataFrame()
+    return _assemble_tabm_results(
+        config_results=config_results,
+        all_predictions=all_predictions,
+        curve_rows=all_curves,
+        training_rows=training_log,
+        save_dir=run_save_dir,
+        date_col=date_col,
+        entity_col=entity_col,
+        eval_col=eval_col,
     )
-    best_result = config_results[0]
-    best_config_name = best_result["config_name"]
-    best_epoch = best_result["best_epoch"]
-    best_ic = best_result["best_ic"]
-
-    print(f"\n  Best: {best_config_name} @ epoch {best_epoch} (IC={best_ic:+.4f})")
-
-    # Reassemble all predictions from incremental saves
-    all_predictions = _load_incremental_preds(incr_dir) if incr_dir is not None else pl.DataFrame()
-
-    # Extract best-config predictions at best epoch
-    if all_predictions.height > 0:
-        best_preds_df = all_predictions.filter(
-            (pl.col("config") == best_config_name) & (pl.col("epoch") == best_epoch)
-        )
-        predictions = best_preds_df.with_columns(
-            pl.lit(best_config_name).alias("model_id"),
-        ).drop("config", "epoch")
-    else:
-        predictions = pl.DataFrame()
-
-    learning_curves = pl.DataFrame(all_curves) if all_curves else pl.DataFrame()
-    training_log_df = pl.DataFrame(training_log) if training_log else pl.DataFrame()
-
-    # Save final outputs
-    if save_dir is not None:
-        save_dir.mkdir(parents=True, exist_ok=True)
-        if predictions.height > 0:
-            predictions.write_parquet(save_dir / "predictions.parquet")
-        if all_predictions.height > 0:
-            all_predictions.write_parquet(save_dir / "all_predictions.parquet")
-        if learning_curves.height > 0:
-            learning_curves.write_parquet(save_dir / "learning_curves.parquet")
-        if training_log_df.height > 0:
-            training_log_df.write_parquet(save_dir / "training_log.parquet")
-        print(f"  Saved to {save_dir}")
-
-    # Register in unified registry
-    # Note: per-config registration happens incrementally inside the training
-    # loop above (see the `register` block after each config's best_epoch is
-    # computed). The old batched registration block was removed to avoid
-    # duplicate writes — each config's training_hash is persisted immediately
-    # after its folds complete, protecting against interruption losing work.
-
-    return {
-        "grid_results": config_results,
-        "best_config_name": best_config_name,
-        "best_epoch": best_epoch,
-        "best_ic": best_ic,
-        "predictions": predictions,
-        "all_predictions": all_predictions,
-        "fold_metrics": compute_fold_metrics_from_predictions(
-            all_predictions,
-            best_config_name,
-            best_epoch,
-            date_col=date_col,
-        ),
-        "all_learning_curves": learning_curves,
-        "training_log": training_log_df,
-    }

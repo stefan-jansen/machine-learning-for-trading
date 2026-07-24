@@ -1,0 +1,33 @@
+# Model configurations for fwd_dir_8h_3c (classification)
+# Each entry references a preset in case_studies/_presets/{family}/.
+# Comment out lines to skip configs; add new preset names to extend.
+
+linear:
+- logistic_none
+- logistic_l2_C0.001
+- logistic_l2_C0.01
+- logistic_l2_C0.1
+- logistic_l2_C1.0
+- logistic_l2_C10.0
+- logistic_l2_C100.0
+- logistic_l1_C0.001
+- logistic_l1_C0.01
+- logistic_l1_C0.1
+- logistic_l1_C1.0
+- logistic_l1_C10.0
+- logistic_l1_C100.0
+gbm:
+- default_multiclass
+- leaves_7_multiclass
+- leaves_15_multiclass
+- leaves_31_multiclass
+- leaves_63_multiclass
+deep_learning:
+- nlinear
+- lstm_h64
+tabular_dl:
+- tabm_s
+- tabm_m
+- tabm_l
+causal_dml:
+- dml

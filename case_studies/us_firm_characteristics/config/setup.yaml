@@ -1,45 +1,45 @@
 strategy_id: us_firm_characteristics
-setup_version: v1
+setup_version: v2
 
 universe:
-  min_price_usd: 5
-  min_adv_usd: 1000000
-  exclusions: [ADRs, REITs, financials]
-  identifiers: anonymized_permno_based
-  note: Filters applied by the data provider before anonymization; cannot be independently verified.
-  # Curated universe size (~2,500 stocks after the filters above); matches the
-  # README and the 10_model_analysis default. Display metadata only (read by
-  # 03_case_study_overview); the backtest counts assets from data.
+  inclusion_rule: complete_characteristic_case
+  identifiers: anonymous_split_scoped_firm_axis
+  note: >-
+    The authors retain observations with all 46 characteristics available.
+    Anonymous identifiers are persistent within each released tensor block;
+    the archive does not publish a mapping between blocks.
+  # Approximate active cross-sectional breadth. Display metadata only; the
+  # backtest counts assets from data.
   n_assets: 2500
 
 decision:
   cadence: monthly_month_end
   snapshot: month_end_close
   execution_delay: next_bar_open
-  characteristic_lag: 6_months
+  characteristic_availability: provider_standard_conventions
+  yearly_update: end_of_june
+  monthly_update: month_end_for_next_month
 
-# Engine-level execution defaults. Single source of truth — Ch16-19 notebooks
+# Engine-level execution defaults. Single source of truth - Ch16-19 notebooks
 # read these via get_backtest_config(); never declare a local INITIAL_CASH
 # or share_type constant. Changing values here invalidates every existing
 # backtest_hash for this case study (cash + share_type are spec-hash inputs).
 #
 # Moment-based allocators (inverse_vol, risk_parity, hrp, mvo_ledoit_wolf)
-# are EXCLUDED for this case study. US firm characteristics is a returns-only
-# cross-sectional panel keyed by integer firm IDs (no continuous per-symbol
-# price series), so a per-symbol trailing volatility or covariance is not
-# well-defined: firms enter and exit, and 12 monthly observations cannot
-# support a covariance over a top-50 cross-section. Under that data the
-# moment allocators either degenerate to equal weight (mvo/hrp hit their
-# observation-count guards and fall back) or produce numbers from a
-# covariance estimate the data cannot justify (inverse_vol, risk_parity).
-# Only lookback-free allocators (equal_weight, score_weighted,
-# conformal_weighted) are swept and eligible for carrier selection.
+# are EXCLUDED for this case study. The recovered anonymous identities provide
+# per-firm monthly return histories within each tensor block, but the declared
+# 12-month lookback is too short to support a stable covariance estimate over
+# a top-50 long-short cross-section with changing membership. Under that data,
+# the multivariate allocators either hit observation-count guards and fall back
+# or rely on an estimate the design cannot justify.
+# Equal weight establishes the baseline; only the lookback-free alternatives
+# (score_weighted and conformal_weighted) enter the allocation sweep.
 # ``allocator_lookback`` below is retained only because get_backtest_config()
 # requires the key; it is unused while no moment allocator is configured.
 #
 # Cash defaults to 1_000_000 rather than 100_000: monthly-cadence
 # long-short portfolios at top_k=50 carry ~$10K per leg per name at the
-# 100k tier — below realistic round-trip granularity for institutional
+# 100k tier - below realistic round-trip granularity for institutional
 # US equity. 1M keeps the spec-implied position sizes (notional per name
 # / fixed-cost ratio) in a regime the backtest engine resolves cleanly.
 execution:
@@ -48,10 +48,10 @@ execution:
   allocator_lookback: 12         # 1 year of monthly bars
 
 mapping:
-  class: long_short_decile_rebalance
+  class: long_short_top_k_rebalance
   position_state_space: long_short
-  entry_logic: decile_sort_long_top_short_bottom
-  sizing: equal_weight_within_decile
+  entry_logic: rank_top_k_long_bottom_k_short
+  sizing: equal_weight_within_leg
 
 costs:
   class: material
@@ -62,8 +62,8 @@ costs:
 
 evaluation:
   n_splits: 10
-  train_size: 10Y
-  val_size: 1Y
+  train_size: 10YE
+  val_size: 1YE
   holdout_start: '2016-01-01'
   holdout_end: '2016-12-31'
   calendar: null  # Monthly returns; calendar-aware splitting needs daily frequency.
@@ -108,16 +108,17 @@ backtest:
     # downstream stages take the top-N from the upstream stage's rank-1.
     # Notebooks read these via get_top_n_predictions(case_study, stage).
     top_n_predictions:
-      signal: 0                 # all signal predictions (eq-weight baseline)
+      signal: 0                 # all predictions at the equal-weight baseline
       allocation: 10            # top-10 model configs by equal-weight baseline Sharpe
       cost_sensitivity: 1       # top-1 of {signal+allocation} per label
       risk_overlay: 1           # top-1 of {signal+allocation} per label
     # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
     expensive_allocators_skip: false
-    # All others (equal_weight, score_weighted) take the cheap path.
+    # The two alternatives below take the cheap path. Equal weight is already
+    # the baseline and must not be repeated as an allocation-stage method.
     # Ch16 backtest is equal-weight sized within the selected set. The
     # selection rule is one of: top-k (rank), percentile band (long-only
-    # cutoff), or quantile buckets (e.g. quintile long-short — combines
+    # cutoff), or quantile buckets (e.g. quintile long-short, which combines
     # with the long-short mapping). Only top_k_grid is active here;
     # uncomment percentile_grid / quantile_grid to add other selection axes
     # for any label.
@@ -130,13 +131,11 @@ backtest:
     # quantile_grid:
     #   fwd_ret_1m: [5, 10]
     # Ch17 portfolio: reuses top_k_grid above and sweeps over allocators.
-    # Only lookback-free allocators are listed — moment-based allocators
-    # (inverse_vol, risk_parity, hrp, mvo_ledoit_wolf) are excluded because
-    # this returns-only firm-characteristics panel has no per-symbol price
-    # series to estimate volatility or covariance from (see the execution
-    # block above). No max-weight cap.
+    # Only lookback-free alternatives are listed - moment-based allocators
+    # (inverse_vol, risk_parity, hrp, mvo_ledoit_wolf) are excluded because a
+    # 12-month history is too thin for the declared top-50 cross-section (see
+    # the execution block above). No max-weight cap.
     allocators:
-      - {name: equal_weight,    method: equal_weight}
       - {name: score_weighted,  method: score_weighted}
       - {name: conformal_weighted, method: conformal_weighted}
     # Ch18 cost sensitivity (bps regime).
@@ -163,9 +162,36 @@ modeling:
   gbm:
     libraries: [lightgbm]
     preset: default
-    device: gpu
+    # CPU is the reader-facing reproducible path. Numerical parameters stay
+    # fixed when maintainers opt into a different execution backend.
+    device: cpu
+    max_bin: 63
+    num_threads: 8
+  tabular_dl:
+    models: [tabm]
+    device: cuda
+    num_threads: 8
   latent_factors:
-    persistent_entities: false
+    persistent_entities: true
+    device: cuda
+    num_threads: 8
+    deterministic_algorithms: true
+    # Only unrevised daily market observations enter the SDF context. The
+    # one-day availability lag prevents same-close information from entering
+    # the next-month forecast.
+    macro_series:
+      - dff
+      - dgs1
+      - dgs2
+      - dgs3
+      - dgs5
+      - dgs7
+      - dgs10
+      - dgs20
+      - dgs30
+      - t10y2y
+      - vixcls
+    macro_availability_lag_days: 1
     model_kwargs:
       sdf:
         checkpoint_epochs: [256, 512, 768, 1024, 1280]

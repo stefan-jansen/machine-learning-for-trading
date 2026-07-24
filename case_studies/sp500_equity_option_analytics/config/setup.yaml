@@ -80,7 +80,8 @@ backtest:
       risk_overlay: 1           # top-1 of {signal+allocation} per label
     # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
     expensive_allocators_skip: false
-    # All others (equal_weight, score_weighted, inverse_vol) take the cheap path.
+    # Equal weight is the baseline above, not an allocation-stage method.
+    # Score-weighted and inverse-vol take the cheap path.
     # Ch16 signal-stage selection. Long-only equal-weight top-k for every
     # label.
     top_k_grid:
@@ -98,13 +99,11 @@ backtest:
     # (the prior 0.40 cap was already the loosened-from-0.20 workaround;
     # restoring it would push moment allocators back toward equal-weight).
     allocators:
-      - {name: equal_weight,    method: equal_weight}
       - {name: score_weighted,  method: score_weighted}
       - {name: inverse_vol,     method: inverse_vol}
       - {name: risk_parity,     method: risk_parity}
       - {name: mvo_ledoit_wolf, method: mvo_ledoit_wolf, lookback: 126}
       - {name: hrp,             method: hrp}
-      - {name: conformal_weighted, method: conformal_weighted}
     # Ch18 cost sensitivity (bps regime — headline). A companion per-share
     # regime is run from Ch18 cost notebooks for regime comparison; for
     # sp500_eoa it is exploratory only because flat-default half-spread on
@@ -144,6 +143,14 @@ evaluation:
 labels:
   primary: fwd_ret_5d
   buffer: 10D
+  # Outcome horizons seal validation before holdout. They are separate from
+  # the deliberately conservative primary train-to-validation buffer above.
+  horizons:
+    fwd_ret_5d: 5D
+    fwd_ret_10d: 10D
+    fwd_ret_risk_adj_5d: 5D
+    fwd_dir_5d: 5D
+    fwd_dir_10d: 10D
   variants:
     - fwd_ret_10d
     - fwd_ret_risk_adj_5d
@@ -171,7 +178,8 @@ modeling:
   gbm:
     libraries: [lightgbm]
     preset: default
-    device: gpu
+    device: cuda
+    max_bin: 63
   latent_factors:
     persistent_entities: true
     model_kwargs:

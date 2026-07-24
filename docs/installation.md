@@ -316,7 +316,12 @@ A small number of notebooks require Python 3.12 libraries not available on Pytho
 # x86 systems only (Linux, Windows WSL2, macOS Intel)
 docker compose --profile py312 pull py312
 docker compose --profile py312 run --rm py312 python 05_synthetic_data/03_sigcwgan_signatures.py
+docker compose --profile py312 run --rm py312 \
+  /opt/bsts/bin/python 15_causal_estimation/06_fed_announcement_bsts.py
 ```
+
+Chapter 15 notebook 06 uses the isolated `/opt/bsts` interpreter so its NumPy 1 and
+pandas 2.2 constraints do not replace dependencies required by the other py312 notebooks.
 
 **Apple Silicon**: These notebooks cannot run natively. View the pre-executed `.ipynb` files in Jupyter or on GitHub.
 

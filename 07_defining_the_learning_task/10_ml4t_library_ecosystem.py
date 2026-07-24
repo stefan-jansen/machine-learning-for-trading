@@ -14,7 +14,7 @@
 # ---
 
 # %%
-"""The ml4t Library Ecosystem — unified data, feature, and diagnostic libraries for Chapters 7-12."""
+"""The ml4t Library Ecosystem - unified data, feature, and diagnostic libraries for Chapters 7-12."""
 
 # %% [markdown]
 # # The ml4t Library Ecosystem
@@ -46,7 +46,7 @@
 #
 # ## Prerequisites
 #
-# - `01_data_quality_diagnostics` — establishes the ETF dataset shape used here.
+# - `01_data_quality_diagnostics` - establishes the ETF dataset shape used here.
 # - Polars basics (`with_columns`, `over`, `lazy`).
 
 # %%
@@ -67,7 +67,7 @@ from data import load_etfs
 warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+# Production defaults - Papermill injects overrides for CI
 SPY_START_DATE = "2015-01-01"
 
 # %% [markdown]
@@ -142,9 +142,9 @@ for feature_name in ["rsi", "atr", "garman_klass_volatility"]:
 # `compute_features()` accepts three input formats, from simplest to most
 # reproducible:
 #
-# 1. **List of names** — default parameters
-# 2. **List of dicts** — custom parameters per feature
-# 3. **YAML config** — stored configuration for pipelines
+# 1. **List of names** - default parameters
+# 2. **List of dicts** - custom parameters per feature
+# 3. **YAML config** - stored configuration for pipelines
 
 # %% [markdown]
 # ### 3.1 Simple Feature List
@@ -336,7 +336,7 @@ for horizon in ("1D", "5D", "21D"):
 # %% [markdown]
 # ### 6.1 GroupBy + Rolling via `.over()`
 #
-# Polars' `.over()` expression is the window function syntax — parallel
+# Polars' `.over()` expression is the window function syntax - parallel
 # and significantly faster than pandas' `groupby().transform()`.
 
 # %%
@@ -355,7 +355,7 @@ display(features.select(["symbol", "timestamp", "close", "ret_1d", "vol_21d"]).t
 
 # %% [markdown]
 # **Key pattern**: All transformations in ONE `with_columns()` call
-# for parallel execution — never chain separate calls.
+# for parallel execution - never chain separate calls.
 
 # %% [markdown]
 # ### 6.2 ASOF Joins (Point-in-Time Matching)

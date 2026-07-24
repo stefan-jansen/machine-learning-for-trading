@@ -31,11 +31,15 @@ def _select_top_bottom(
         cs_rank=pl.col(score_col).rank(method="ordinal", descending=True).over(time_col),
         n_assets=pl.col(score_col).count().over(time_col),
     )
+    effective_k = pl.min_horizontal(pl.lit(top_k), pl.col("n_assets") // 2)
     if long_short:
         selected = ranked.filter(
-            (pl.col("cs_rank") <= top_k) | (pl.col("cs_rank") > pl.col("n_assets") - top_k)
+            (pl.col("cs_rank") <= effective_k)
+            | (pl.col("cs_rank") > pl.col("n_assets") - effective_k)
         ).with_columns(
-            side=pl.when(pl.col("cs_rank") <= top_k).then(pl.lit("long")).otherwise(pl.lit("short"))
+            side=pl.when(pl.col("cs_rank") <= effective_k)
+            .then(pl.lit("long"))
+            .otherwise(pl.lit("short"))
         )
     else:
         selected = ranked.filter(pl.col("cs_rank") <= top_k).with_columns(side=pl.lit("long"))
@@ -49,7 +53,7 @@ def _filter_prices_to_prediction_assets(
 ) -> pl.DataFrame:
     """Pre-filter prices to only assets in predictions (performance optimization)."""
     pred_assets = predictions[asset_col].unique()
-    return prices_df.filter(pl.col(asset_col).is_in(pred_assets))
+    return prices_df.filter(pl.col(asset_col).is_in(pred_assets.implode()))
 
 
 def _returns_from_prices(
@@ -101,6 +105,16 @@ def _normalize_within_sides(
     if short_w.height > 0:
         parts.append(short_w)
     return pl.concat(parts, how="diagonal_relaxed")
+
+
+def _fill_missing_vol_at_decision_time(
+    selected: pl.DataFrame,
+    time_col: str,
+) -> pl.DataFrame:
+    """Fill unavailable asset volatility from the current cross-section only."""
+    return selected.with_columns(
+        pl.col("vol").fill_null(pl.col("vol").median().over(time_col)).fill_null(1.0)
+    )
 
 
 def _cap_weights(
@@ -220,21 +234,35 @@ def compute_conformal_weights(
     Selects top-K by ``y_score`` and weights each selected asset by 1/Δ_i,
     normalized within each side (long/short) so the leg sums to ±1. Widths
     come from ``case_studies.utils.conformal.compute_conformal_widths`` and
-    are joined on (timestamp, symbol). Assets without a calibrated width at
-    that timestamp are dropped from the leg (the inverse-width sum
-    renormalizes accordingly).
+    are joined on (timestamp, symbol). Every selected asset must have a
+    calibrated width; missing widths raise instead of silently changing the
+    selected basket.
 
-    A small floor at ``floor_quantile`` of the in-sample width distribution
-    prevents 1/Δ blow-up when residuals happen to be identical.
+    A small floor at ``floor_quantile`` of each decision time's cross-sectional
+    width distribution prevents 1/Δ blow-up without using future widths.
     """
     selected = _select_top_bottom(predictions, top_k, long_short, time_col)
 
-    widths = conformal_widths.select(time_col, "symbol", "width")
+    widths = conformal_widths.select(time_col, "symbol", "width").with_columns(
+        width_floor=pl.col("width").quantile(floor_quantile).over(time_col)
+    )
     # Harmonize join dtypes to predictions/weights.
     if widths[time_col].dtype != selected[time_col].dtype:
         widths = widths.cast({time_col: selected[time_col].dtype})
     if widths["symbol"].dtype != selected["symbol"].dtype:
         widths = widths.cast({"symbol": selected["symbol"].dtype})
+
+    missing = selected.select(time_col, "symbol").join(
+        widths.select(time_col, "symbol").unique(),
+        on=[time_col, "symbol"],
+        how="anti",
+    )
+    if not missing.is_empty():
+        sample = missing.head(5).to_dicts()
+        raise ValueError(
+            "conformal_weighted: missing widths for selected assets "
+            f"(n={missing.height}, sample={sample})"
+        )
 
     selected = selected.join(widths, on=[time_col, "symbol"], how="inner")
     if selected.is_empty():
@@ -245,9 +273,9 @@ def compute_conformal_weights(
             "compute_conformal_widths() before backtest."
         )
 
-    floor = float(selected["width"].quantile(floor_quantile))
-    floor = max(floor, 1e-12)
-    selected = selected.with_columns(inv_w=1.0 / pl.max_horizontal(pl.col("width"), pl.lit(floor)))
+    selected = selected.with_columns(
+        inv_w=1.0 / pl.max_horizontal(pl.col("width"), pl.col("width_floor"), pl.lit(1e-12))
+    )
 
     long_w = selected.filter(pl.col("side") == "long").with_columns(
         weight=pl.col("inv_w") / pl.col("inv_w").sum().over(time_col)
@@ -282,8 +310,8 @@ def compute_inverse_vol_weights(
         _prices, vol_window, time_col, target_dtype=predictions[time_col].dtype
     )
 
-    selected = selected.join(vol, on=[time_col, "symbol"], how="left").with_columns(
-        pl.col("vol").fill_null(pl.col("vol").median())
+    selected = _fill_missing_vol_at_decision_time(
+        selected.join(vol, on=[time_col, "symbol"], how="left"), time_col
     )
 
     result = _normalize_within_sides(selected, time_col)
@@ -309,8 +337,8 @@ def compute_risk_parity_weights(
         _prices, vol_window, time_col, target_dtype=predictions[time_col].dtype
     )
 
-    selected = selected.join(vol, on=[time_col, "symbol"], how="left").with_columns(
-        pl.col("vol").fill_null(pl.col("vol").median())
+    selected = _fill_missing_vol_at_decision_time(
+        selected.join(vol, on=[time_col, "symbol"], how="left"), time_col
     )
 
     # Risk-parity approximation: w_i proportional to 1 / vol_i^1.5
@@ -380,7 +408,7 @@ def compute_mvo_weights(
         )
         recent_dates = recent[time_col].unique().sort()
         if len(recent_dates) > lookback:
-            recent = recent.filter(pl.col(time_col).is_in(recent_dates.tail(lookback)))
+            recent = recent.filter(pl.col(time_col).is_in(recent_dates.tail(lookback).implode()))
         window_rets = (
             recent.pivot(on="symbol", index=time_col, values="ret").sort(time_col).drop(time_col)
         )
@@ -534,7 +562,9 @@ def compute_hrp_weights(
 
             recent_dates = recent[time_col].unique().sort()
             if len(recent_dates) > vol_window:
-                recent = recent.filter(pl.col(time_col).is_in(recent_dates.tail(vol_window)))
+                recent = recent.filter(
+                    pl.col(time_col).is_in(recent_dates.tail(vol_window).implode())
+                )
 
             # Pivot to wide format — drop assets with insufficient coverage
             pivot = recent.pivot(on="symbol", index=time_col, values="ret").drop(time_col)

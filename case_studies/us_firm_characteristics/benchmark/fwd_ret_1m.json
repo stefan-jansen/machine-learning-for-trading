@@ -1,0 +1,40 @@
+{
+  "case_study": "us_firm_characteristics",
+  "label": "fwd_ret_1m",
+  "method": "cross_sectional_mean_label",
+  "periods_per_year": 12,
+  "sharpe": 0.483517,
+  "cagr": 0.08165,
+  "vol": 0.207417,
+  "n_periods": 120,
+  "ts_min": "2006-01-31",
+  "ts_max": "2016-12-30",
+  "by_period": {
+    "overall": {
+      "sharpe": 0.549879,
+      "cagr": 0.095033,
+      "vol": 0.20341,
+      "n_periods": 132
+    },
+    "validation": {
+      "sharpe": 0.483517,
+      "cagr": 0.08165,
+      "vol": 0.207417,
+      "n_periods": 120
+    },
+    "holdout": {
+      "sharpe": 1.410907,
+      "cagr": 0.238315,
+      "vol": 0.161217,
+      "n_periods": 12
+    },
+    "validation_window": [
+      "2006-01-31",
+      "2015-12-31"
+    ],
+    "holdout_window": [
+      "2016-01-29",
+      "2016-12-30"
+    ]
+  }
+}

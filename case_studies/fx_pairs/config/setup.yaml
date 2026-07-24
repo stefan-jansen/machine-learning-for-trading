@@ -81,8 +81,10 @@ backtest:
       risk_overlay: 1           # top-1 of {signal+allocation} per label
     # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
     expensive_allocators_skip: false
-    # All others (equal_weight, score_weighted, inverse_vol) take the cheap path.
-    # Ch16 signal-stage selection. Long-short equal-weight top-k on all
+    # All alternative allocators take the cheap path except the two moment-based
+    # methods covered by expensive_allocators_skip. Equal weight is the baseline
+    # and is intentionally absent here so the allocation stage cannot double-count it.
+    # Ch16 baseline selection. Long-short equal-weight top-k on all
     # three label horizons; long-short is enforced at the backtest config
     # level (allow_short_selling=true).
     top_k_grid:
@@ -95,7 +97,6 @@ backtest:
     # fields. No max-weight cap: each allocator expresses its natural
     # concentration profile so the cross-method comparison is honest.
     allocators:
-      - {name: equal_weight,    method: equal_weight}
       - {name: score_weighted,  method: score_weighted}
       - {name: inverse_vol,     method: inverse_vol}
       - {name: risk_parity,     method: risk_parity}

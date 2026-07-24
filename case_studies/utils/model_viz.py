@@ -11,8 +11,48 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from matplotlib.colors import LinearSegmentedColormap
 
-from utils.style import COLORS
+from utils.style import (
+    COLOR_CYCLER,
+    COLORS,
+    MARKER_CYCLER,
+    add_message_title,
+    ml4t_diverging,
+    ml4t_palette,
+)
+
+ML4T_DIVERGING_CMAP = LinearSegmentedColormap.from_list("ml4t_diverging", ml4t_diverging())
+ML4T_SEQUENTIAL_CMAP = LinearSegmentedColormap.from_list(
+    "ml4t_sequential", list(reversed(ml4t_palette(5)))
+)
+
+# Fixed ML4T-brand color per model family: distinct hues (legible in the color
+# track and on white), and consistent across every model-analysis figure so a
+# family reads as the same color in the boxplot, monotonicity, and forest.
+# Keyed by the bare family name; model_labels like "gbm/leaves_31_mse" are split
+# on "/". Falls back to the categorical cycler for unknown labels.
+FAMILY_COLORS = {
+    "linear": COLORS["blue"],  # navy
+    "gbm": COLORS["amber"],  # gold
+    "tabular_dl": COLORS["copper"],  # copper
+    "deep_learning": COLORS["positive"],  # green
+    "latent_factors": COLORS["negative"],  # red
+    "causal": COLORS["neutral"],  # slate
+    "causal_dml": COLORS["neutral"],
+    "benchmark": COLORS["slate"],
+}
+
+
+def _family_color(label: str, i: int = 0) -> str:
+    """Brand color for a model family; falls back to the categorical cycler."""
+    return FAMILY_COLORS.get(label.split("/")[0], COLOR_CYCLER[i % len(COLOR_CYCLER)])
+
+
+def _sorted_fold_columns(columns: list[str]) -> list[str]:
+    """Return pivoted fold columns in numeric order."""
+    return sorted(columns, key=lambda column: int(column))
+
 
 # ---------------------------------------------------------------------------
 # Figure 1: Cross-Validation Timeline
@@ -24,6 +64,7 @@ def plot_cv_timeline(
     n_splits: int,
     holdout_start: str | None = None,
     date_col: str = "timestamp",
+    title: str = "Walk-forward validation preserves the holdout boundary",
 ) -> None:
     """Plot walk-forward fold validation windows as horizontal bars."""
     if fold_ranges.height == 0:
@@ -50,7 +91,7 @@ def plot_cv_timeline(
     ax.set_yticks(range(n_splits))
     ax.set_yticklabels([f"Fold {i}" for i in range(n_splits)])
     ax.invert_yaxis()
-    ax.set_title("Walk-Forward Cross-Validation Design")
+    add_message_title(ax, title)
 
     if holdout_start:
         import pandas as pd
@@ -80,6 +121,7 @@ def plot_cv_timeline(
 
 def plot_fold_heatmap(
     fold_ic: pl.DataFrame,
+    title: str = "Validation performance varies across folds",
 ) -> tuple[list[str], list[str], np.ndarray]:
     """Plot fold × model IC heatmap with mean annotations.
 
@@ -90,7 +132,7 @@ def plot_fold_heatmap(
 
     pivot = fold_ic.pivot(on="fold_id", index="model_label", values="ic_mean")
     model_labels = pivot["model_label"].to_list()
-    fold_cols = [c for c in pivot.columns if c != "model_label"]
+    fold_cols = _sorted_fold_columns([c for c in pivot.columns if c != "model_label"])
     matrix = pivot.select(fold_cols).to_numpy()
     row_means = np.nanmean(matrix, axis=1)
 
@@ -100,7 +142,7 @@ def plot_fold_heatmap(
     fig, ax = plt.subplots(figsize=(max(8, n_folds * 1.2), max(4, n_models * 0.8)))
 
     vmax = max(abs(np.nanmin(matrix)), abs(np.nanmax(matrix)), 0.01)
-    im = ax.imshow(matrix, cmap="RdYlBu", vmin=-vmax, vmax=vmax, aspect="auto")
+    im = ax.imshow(matrix, cmap=ML4T_DIVERGING_CMAP, vmin=-vmax, vmax=vmax, aspect="auto")
 
     for i in range(n_models):
         for j in range(n_folds):
@@ -113,7 +155,7 @@ def plot_fold_heatmap(
     ax.set_xticklabels([f"Fold {c}" for c in fold_cols], rotation=45, ha="right")
     ax.set_yticks(range(n_models))
     ax.set_yticklabels(model_labels)
-    ax.set_title("Validation IC by Model Family and Fold")
+    add_message_title(ax, title)
 
     for i, mean in enumerate(row_means):
         ax.text(
@@ -138,7 +180,10 @@ def plot_fold_heatmap(
 # ---------------------------------------------------------------------------
 
 
-def plot_fold_boxplot(fold_ic: pl.DataFrame) -> None:
+def plot_fold_boxplot(
+    fold_ic: pl.DataFrame,
+    title: str = "Fold dispersion limits confidence in family rankings",
+) -> None:
     """Boxplot with jittered scatter of fold-level IC per model family."""
     if fold_ic.height == 0:
         return
@@ -162,7 +207,7 @@ def plot_fold_boxplot(fold_ic: pl.DataFrame) -> None:
         meanprops=dict(marker="D", markerfacecolor="white", markeredgecolor="black"),
     )
 
-    palette = list(COLORS.values())[:n_families]
+    palette = [_family_color(fam, i) for i, fam in enumerate(families)]
     for patch, color in zip(bp["boxes"], palette, strict=False):
         patch.set_facecolor(color)
         patch.set_alpha(0.6)
@@ -183,7 +228,7 @@ def plot_fold_boxplot(fold_ic: pl.DataFrame) -> None:
     ax.set_xticks(list(range(n_families)))
     ax.set_xticklabels([l.split("/")[0] for l in families], rotation=30, ha="right")
     ax.set_ylabel("Mean IC per Fold")
-    ax.set_title("Fold Performance Distribution by Model Family")
+    add_message_title(ax, title)
     fig.tight_layout()
     fig.show()
 
@@ -199,6 +244,7 @@ def plot_bucket_monotonicity(
     unconditional_mean: float | None = None,
     label_name: str = "Forward Return",
     cost_range: list[int] | None = None,
+    title: str = "Higher scores do not guarantee monotonic realized returns",
 ) -> None:
     """Plot mean return per prediction bucket for each model family."""
     if not bucket_results:
@@ -206,12 +252,12 @@ def plot_bucket_monotonicity(
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    palette_items = list(COLORS.items())
     for i, (label, buckets) in enumerate(bucket_results.items()):
-        color = palette_items[i % len(palette_items)][1]
+        color = _family_color(label, i)
+        marker = MARKER_CYCLER[i % len(MARKER_CYCLER)]
         x = buckets["bucket"].to_numpy()
         y = buckets["mean_return"].to_numpy()
-        ax.plot(x, y, marker="o", label=label, color=color, linewidth=2)
+        ax.plot(x, y, marker=marker, label=label, color=color, linewidth=2)
 
     if unconditional_mean is not None:
         ax.axhline(
@@ -224,7 +270,7 @@ def plot_bucket_monotonicity(
 
     ax.set_xlabel(f"Prediction Bucket (1 = lowest, {n_buckets} = highest)")
     ax.set_ylabel(f"Mean Realized {label_name}")
-    ax.set_title("Do Higher Predictions Correspond to Higher Realized Returns?")
+    add_message_title(ax, title)
     ax.legend(loc="upper left", fontsize=8)
     fig.tight_layout()
     fig.show()
@@ -255,6 +301,7 @@ def plot_bucket_monotonicity(
 def plot_correlation_matrix(
     corr_matrix: np.ndarray,
     labels: list[str],
+    title: str = "Model rankings share limited common signal",
 ) -> None:
     """Plot pairwise prediction correlation heatmap."""
     if corr_matrix.size == 0 or len(labels) < 2:
@@ -263,7 +310,7 @@ def plot_correlation_matrix(
     n = len(labels)
     fig, ax = plt.subplots(figsize=(max(6, n * 1.2), max(5, n)))
 
-    im = ax.imshow(corr_matrix, cmap="Blues", vmin=0, vmax=1)
+    im = ax.imshow(corr_matrix, cmap=ML4T_SEQUENTIAL_CMAP, vmin=0, vmax=1)
     for i in range(n):
         for j in range(n):
             val = corr_matrix[i, j]
@@ -275,7 +322,7 @@ def plot_correlation_matrix(
     ax.set_xticklabels(short_labels, rotation=45, ha="right")
     ax.set_yticks(range(n))
     ax.set_yticklabels(short_labels)
-    ax.set_title("Pairwise Prediction Rank Correlation")
+    add_message_title(ax, title)
     fig.colorbar(im, ax=ax, shrink=0.8)
     fig.show()
 
@@ -292,6 +339,7 @@ def plot_correlation_matrix(
 def plot_learning_curves(
     cp_data: pl.DataFrame,
     cp_families: list[str],
+    titles: dict[str, str] | None = None,
 ) -> None:
     """Plot IC vs checkpoint for each config within each family."""
     if not cp_families or cp_data.height == 0:
@@ -307,7 +355,7 @@ def plot_learning_curves(
         for config in sorted(fam_data["config_name"].unique().to_list()):
             cfg_data = fam_data.filter(pl.col("config_name") == config).sort("checkpoint_value")
             x = cfg_data["checkpoint_value"].to_numpy()
-            y = cfg_data["ic_mean"].to_numpy()
+            y = cfg_data["ic_mean_daily"].to_numpy()
 
             ax.plot(x, y, marker=".", label=config, linewidth=1.5)
 
@@ -320,7 +368,8 @@ def plot_learning_curves(
         ax.axhline(0, color="gray", linestyle="--", linewidth=0.5)
         ax.set_xlabel("Checkpoint (epoch / trees)")
         ax.set_ylabel("Mean IC (across folds)")
-        ax.set_title(f"Learning Curve: {family}")
+        title = titles.get(family) if titles else None
+        add_message_title(ax, title or f"{family} performance changes across checkpoints")
         ax.legend(fontsize=7, loc="lower right")
 
     fig.tight_layout()
@@ -335,6 +384,7 @@ def plot_learning_curves(
 def plot_feature_importance_heatmap(
     importance_df: pl.DataFrame,
     top_n: int = 15,
+    title: str = "A small feature set remains important across folds",
 ) -> None:
     """Plot feature importance (normalized) across folds as a heatmap."""
     if importance_df is None or importance_df.height == 0:
@@ -346,7 +396,7 @@ def plot_feature_importance_heatmap(
         .pivot(on="fold_id", index="feature", values="importance_norm")
     )
 
-    fold_cols = [c for c in pivot.columns if c != "feature"]
+    fold_cols = _sorted_fold_columns([c for c in pivot.columns if c != "feature"])
     features = pivot["feature"].to_list()
     imp_matrix = pivot.select(fold_cols).to_numpy()
     mean_imp = np.nanmean(imp_matrix, axis=1)
@@ -358,7 +408,7 @@ def plot_feature_importance_heatmap(
 
     fig, ax = plt.subplots(figsize=(max(8, len(fold_cols)), max(6, n_show * 0.4)))
 
-    im = ax.imshow(matrix_sorted, cmap="YlOrRd", aspect="auto", vmin=0, vmax=1)
+    im = ax.imshow(matrix_sorted, cmap=ML4T_SEQUENTIAL_CMAP, aspect="auto", vmin=0, vmax=1)
     for i in range(n_show):
         for j in range(len(fold_cols)):
             val = matrix_sorted[i, j]
@@ -369,7 +419,7 @@ def plot_feature_importance_heatmap(
     ax.set_xticklabels([f"Fold {c}" for c in fold_cols], rotation=45, ha="right")
     ax.set_yticks(range(n_show))
     ax.set_yticklabels(features_sorted)
-    ax.set_title("Feature Importance Stability Across Folds")
+    add_message_title(ax, title)
     fig.colorbar(im, ax=ax, shrink=0.8)
     fig.show()
 
@@ -397,6 +447,7 @@ def plot_feature_importance_heatmap(
 
 def plot_regime_bars(
     regime_df: pl.DataFrame,
+    title: str = "Model performance changes sign across volatility regimes",
 ) -> None:
     """Grouped bar chart of IC by volatility regime per family."""
     if regime_df.height == 0:
@@ -468,7 +519,7 @@ def plot_regime_bars(
     ax.set_xticks(x)
     ax.set_xticklabels(families, rotation=30, ha="right")
     ax.set_ylabel("Mean IC")
-    ax.set_title("Model Performance by Volatility Regime")
+    add_message_title(ax, title)
     ax.legend()
     fig.tight_layout()
     fig.show()
@@ -633,16 +684,7 @@ def plot_label_horizon_forest(
     if n_lab == 0 or n_fam == 0:
         return
 
-    family_palette = {
-        "linear": COLORS.get("blue", "C0"),
-        "gbm": COLORS.get("orange", "C1"),
-        "deep_learning": COLORS.get("green", "C2"),
-        "tabular_dl": COLORS.get("purple", "C3"),
-        "latent_factors": COLORS.get("red", "C4"),
-        "causal": COLORS.get("brown", "C5"),
-        "causal_dml": COLORS.get("brown", "C5"),
-        "benchmark": COLORS.get("gray", "C7"),
-    }
+    family_palette = {f: _family_color(f) for f in fams}
     label_display = label_display or {}
     family_display = family_display or {}
 
@@ -743,7 +785,7 @@ def plot_rolling_daily_ic(
     ax.axhline(0, color="0.5", linestyle="--", linewidth=0.8)
     ax.set_xlabel("Date")
     ax.set_ylabel("Cross-sectional IC")
-    ax.set_title(f"Daily IC time series{(' — ' + label) if label else ''}")
+    ax.set_title(f"Daily IC time series{(' - ' + label) if label else ''}")
     ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
     fig.show()

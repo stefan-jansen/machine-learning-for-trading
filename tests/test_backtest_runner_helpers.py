@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
@@ -22,13 +23,61 @@ import pytest
 from case_studies.utils.backtest_runner import (
     _MAX_NULL_RATE,
     _align_symbol_dtype,
+    _target_weights_by_timestamp,
     apply_universe_filter,
+    run_plumbing_test,
     substitute_continuous_return_for_classification,
 )
 
 
 def test_max_null_rate_constant_default() -> None:
     assert _MAX_NULL_RATE == 0.10
+
+
+def test_vectorized_plumbing_test_runs_random_scores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import case_studies.utils.backtest_runner as br
+
+    spec = {
+        "version": 2,
+        "strategy": {"rebalance": {"mode": "vectorized"}},
+        "backtest_config": {},
+    }
+    predictions = pl.DataFrame(
+        {
+            "timestamp": [datetime(2024, 1, 1), datetime(2024, 1, 1)],
+            "symbol": ["A", "B"],
+            "y_score": [0.8, 0.2],
+            "y_true": [0.1, -0.1],
+        }
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(br, "get_backtest_config", lambda _: object())
+    monkeypatch.setattr(br, "ensure_backtest_spec", lambda *args, **kwargs: args[2])
+
+    def fake_run_backtest(*args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(metrics={"sharpe": 0.25})
+
+    monkeypatch.setattr(br, "run_backtest", fake_run_backtest)
+
+    observed = run_plumbing_test(
+        "demo",
+        pl.DataFrame(),
+        spec,
+        predictions=predictions,
+        label="fwd_ret_1m",
+        seed=7,
+    )
+
+    randomized = captured["predictions"]
+    assert isinstance(randomized, pl.DataFrame)
+    assert observed == 0.25
+    assert captured["register"] is False
+    assert randomized["y_true"].to_list() == predictions["y_true"].to_list()
+    assert randomized["y_score"].to_list() != predictions["y_score"].to_list()
 
 
 def test_align_symbol_dtype_same_dtype_passthrough() -> None:
@@ -68,6 +117,65 @@ def test_align_symbol_dtype_int_source_to_string_target() -> None:
     other = pl.DataFrame({"symbol": [1, 2]}, schema={"symbol": pl.UInt32})
     out = _align_symbol_dtype(target, other, case_study="x", target_side="t", other_side="o")
     assert out.schema["symbol"] == pl.Utf8
+
+
+def test_target_weights_are_deterministic_across_input_order() -> None:
+    timestamp = datetime(2024, 1, 2)
+    weights = pl.DataFrame(
+        {
+            "timestamp": [timestamp, timestamp, timestamp],
+            "symbol": ["C", "A", "B"],
+            "weight": [0.2, 0.5, 0.3],
+        }
+    )
+
+    expected = {timestamp: {"A": 0.5, "B": 0.3, "C": 0.2}}
+    assert _target_weights_by_timestamp(weights) == expected
+    assert _target_weights_by_timestamp(weights.reverse()) == expected
+
+
+def test_target_weights_reject_duplicate_keys() -> None:
+    timestamp = datetime(2024, 1, 2)
+    weights = pl.DataFrame(
+        {
+            "timestamp": [timestamp, timestamp],
+            "symbol": ["A", "A"],
+            "weight": [0.5, -0.5],
+        }
+    )
+    with pytest.raises(ValueError, match="duplicate timestamp-symbol"):
+        _target_weights_by_timestamp(weights)
+
+
+def test_precompute_weights_forwards_prediction_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    import case_studies.utils.backtest_runner as br
+
+    timestamp = datetime(2024, 1, 2)
+    predictions = pl.DataFrame({"timestamp": [timestamp], "symbol": ["BTC"], "y_score": [0.1]})
+    base_weights = pl.DataFrame({"timestamp": [timestamp], "symbol": ["BTC"], "weight": [1.0]})
+    captured = {}
+
+    monkeypatch.setattr(br, "build_target_weights_from_config", lambda *_args: base_weights)
+
+    def fake_apply(*_args, **kwargs):
+        captured.update(kwargs)
+        return base_weights
+
+    monkeypatch.setattr(br, "_apply_allocation", fake_apply)
+    result = br.precompute_weights(
+        predictions,
+        {
+            "signal": {"method": "equal_weight_top_k"},
+            "allocation": {"method": "conformal_weighted"},
+        },
+        pl.DataFrame(),
+        label="fwd_ret_24h",
+        case_study="crypto_perps_funding",
+        prediction_hash="current_mae_pit",
+    )
+
+    assert result.equals(base_weights)
+    assert captured["prediction_hash"] == "current_mae_pit"
 
 
 def test_apply_universe_filter_collapses_intraday_to_date_grain(

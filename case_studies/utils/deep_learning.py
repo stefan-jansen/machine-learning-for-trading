@@ -35,7 +35,11 @@ import torch.nn as nn
 from ml4t.diagnostic.metrics import cross_sectional_ic
 from torch.utils.data import DataLoader
 
-from case_studies.utils.registry import compute_fold_metrics_from_predictions
+from case_studies.utils.cv_results import (
+    assemble_cv_result,
+    combine_cv_results,
+    rebuild_cv_result_from_registry,
+)
 from case_studies.utils.registry.store import (
     _save_parquet,
     flush_fold_predictions,
@@ -378,6 +382,7 @@ def _register_dl_config(
     started_at: str | None = None,
     elapsed_s: float | None = None,
     prediction_split: str = "validation",
+    identity_params: dict[str, Any] | None = None,
 ) -> str:
     """Register a single DL config — thin delegate to register_epoch_checkpoint."""
     from case_studies.utils.registry import register_epoch_checkpoint
@@ -399,7 +404,31 @@ def _register_dl_config(
         started_at=started_at,
         elapsed_s=elapsed_s,
         prediction_split=prediction_split,
+        spec_extra_params=identity_params,
     )
+
+
+def _decision_time_checkpoint_metrics(
+    frame: pl.DataFrame,
+    *,
+    date_col: str,
+    entity_col: str,
+) -> dict[str, float | int]:
+    """Score one pooled checkpoint with equal weight per decision timestamp."""
+    stats = cross_sectional_ic(
+        frame,
+        frame,
+        pred_col="y_score",
+        ret_col="y_true",
+        date_col=date_col,
+        entity_col=entity_col,
+        min_obs=5,
+    )
+    return {
+        "ic_mean": float(stats["ic_mean"]),
+        "ic_std": float(stats["ic_std"]),
+        "ic_n_days": int(stats["n_periods"]),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +458,8 @@ def run_dl_cv(
     temporal_feature_names: list[str] | None = None,
     force_retrain: bool = False,
     prediction_split: str = "validation",
+    identity_params: dict[str, Any] | None = None,
+    input_data_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Walk-forward DL CV with epoch-checkpoint IC evaluation.
 
@@ -473,7 +504,11 @@ def run_dl_cv(
         fold_metrics: pl.DataFrame — per-fold cross-sectional IC for best config
         all_learning_curves: pl.DataFrame — IC × epoch × config
     """
-    from case_studies.utils.darts_forecasting import run_darts_cv, uses_darts_backend
+    from case_studies.utils.darts_forecasting import (
+        darts_training_identity,
+        run_darts_cv,
+        uses_darts_backend,
+    )
 
     if register and save_dir is None:
         raise ValueError(
@@ -481,27 +516,63 @@ def run_dl_cv(
             "Pass save_dir=CASE_DIR / 'run_log' / 'training' / 'deep_learning'"
         )
 
+    cached_result = None
+
+    def _config_identity_params(cfg: dict[str, Any]) -> dict[str, Any] | None:
+        params = dict(identity_params or {})
+        if input_data_spec is not None:
+            if uses_darts_backend([cfg]):
+                if case_study is None:
+                    raise ValueError("Darts identity requires case_study")
+                params.update(
+                    darts_training_identity(
+                        cfg,
+                        label_col,
+                        case_study=case_study,
+                        input_data_spec=input_data_spec,
+                        max_train_sequences=max_train_sequences,
+                    )
+                )
+            else:
+                params.update(
+                    {
+                        "batch_size": cfg.get("batch_size", 2048),
+                        "input_data_spec": input_data_spec,
+                        "lookback": cfg.get("params", {}).get("lookback", 60),
+                        "max_train_sequences": max_train_sequences,
+                    }
+                )
+        return params or None
+
+    from case_studies.utils.registry import build_training_spec
+
+    training_specs = {
+        cfg["config_name"]: build_training_spec(
+            cfg["family"],
+            cfg["config_name"],
+            label_col,
+            n_folds=len(splits),
+            n_epochs=cfg.get("n_epochs"),
+            extra_params=_config_identity_params(cfg),
+        )
+        for cfg in configs
+    }
+
     # Filter out configs whose training_hash is already complete (unless
     # force_retrain). Fold-major training can't skip individual configs
     # mid-fold, so the filter happens BEFORE the fold loop starts.
     if register and case_study and not force_retrain:
         from case_studies.utils.registry import (
-            build_training_spec,
             load_prediction_sets,
             training_hash_from_spec,
             training_run_status,
         )
 
         pending_configs = []
+        cached_configs = []
         for cfg in configs:
             try:
-                spec = build_training_spec(
-                    cfg["family"],
-                    cfg["config_name"],
-                    label_col,
-                    n_folds=len(splits),
-                    n_epochs=cfg.get("n_epochs"),
-                )
+                spec = training_specs[cfg["config_name"]]
                 status = training_run_status(case_study, spec)
                 split_rows = load_prediction_sets(
                     case_study,
@@ -513,6 +584,7 @@ def run_dl_cv(
                     print(
                         f"  SKIP {cfg['config_name']:25s}  ({status.summary()}, split={prediction_split})"
                     )
+                    cached_configs.append(cfg)
                     continue
                 if status.complete and not split_complete:
                     print(
@@ -524,23 +596,51 @@ def run_dl_cv(
                 print(f"  WARN: skip-check failed for {cfg['config_name']}: {exc}")
             pending_configs.append(cfg)
 
+        if cached_configs:
+            cached_result = rebuild_cv_result_from_registry(
+                case_study,
+                cached_configs,
+                label_col=label_col,
+                n_folds=len(splits),
+                prediction_split=prediction_split,
+                date_col=date_col,
+                entity_col=entity_col,
+                training_specs=training_specs,
+            )
         if not pending_configs:
-            print("All configs already complete — nothing to do.")
-            return {
-                "grid_results": [],
-                "best_config_name": None,
-                "best_epoch": 0,
-                "best_ic": float("nan"),
-                "predictions": pl.DataFrame(),
-                "all_predictions": pl.DataFrame(),
-                "fold_metrics": pl.DataFrame(),
-                "all_learning_curves": pl.DataFrame(),
-                "training_log": pl.DataFrame(),
-            }
+            print("All configs already complete - rebuilt results from the registry.")
+            assert cached_result is not None
+            return cached_result
         configs = pending_configs
 
+    if register and case_study and force_retrain:
+        from case_studies.utils.registry import (
+            build_training_spec,
+            clear_prediction_sets,
+            training_hash_from_spec,
+        )
+
+        for cfg in configs:
+            spec = build_training_spec(
+                cfg["family"],
+                cfg["config_name"],
+                label_col,
+                n_folds=len(splits),
+                n_epochs=cfg.get("n_epochs"),
+            )
+            removed = clear_prediction_sets(
+                case_study,
+                training_hash_from_spec(spec),
+                split=prediction_split,
+            )
+            if removed["prediction_sets"]:
+                print(
+                    f"  cleared {removed['prediction_sets']} prior {prediction_split} "
+                    f"checkpoint(s) for {cfg['config_name']}"
+                )
+
     if uses_darts_backend(configs):
-        return run_darts_cv(
+        fresh_result = run_darts_cv(
             dataset_pd,
             splits,
             configs=configs,
@@ -555,10 +655,23 @@ def run_dl_cv(
             case_study=case_study,
             notebook=notebook,
             prediction_split=prediction_split,
+            identity_params=identity_params,
+            input_data_spec=input_data_spec,
+            temporal_by_fold=temporal_by_fold,
+            temporal_keys=temporal_keys,
+            temporal_feature_names=temporal_feature_names,
         )
+        if cached_result is not None:
+            return combine_cv_results(
+                [cached_result, fresh_result],
+                date_col=date_col,
+                entity_col=entity_col,
+            )
+        return fresh_result
 
-    torch_device = torch.device(device if torch.cuda.is_available() else "cpu")
-    expected_fold_ids = [int(split["fold"]) for split in splits]
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested for deep learning, but CUDA is unavailable")
+    torch_device = torch.device(device)
     if selected_folds:
         selected = {int(fold) for fold in selected_folds}
         splits = [split for split in splits if int(split["fold"]) in selected]
@@ -590,6 +703,7 @@ def run_dl_cv(
         }
 
     n_valid_folds = 0
+    expected_fold_ids: list[int] = []
 
     _has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
 
@@ -639,6 +753,7 @@ def run_dl_cv(
         n_train_seq = len(train_ds)
         n_val_seq = len(val_ds)
         n_valid_folds += 1
+        expected_fold_ids.append(int(split["fold"]))
         print("    datasets ready")
 
         # Train ALL configs on this fold before freeing fold data
@@ -820,52 +935,50 @@ def run_dl_cv(
             else pl.DataFrame()
         )
 
-        epoch_scores: list[tuple[int, float, float]] = []
+        epoch_scores: list[tuple[int, float, float, int]] = []
         if cfg_preds.height > 0:
             for epoch in sorted(cfg_preds["epoch"].unique().to_list()):
                 ep_df = cfg_preds.filter(pl.col("epoch") == epoch)
                 fold_ids = sorted(ep_df["fold_id"].unique().to_list())
                 if fold_ids != expected_fold_ids:
                     continue
-                fold_ics = []
-                for fold_id in expected_fold_ids:
-                    fold_df = ep_df.filter(pl.col("fold_id") == fold_id)
-                    _entity = entity_col if entity_col in fold_df.columns else None
-                    ic = cross_sectional_ic(
-                        fold_df,
-                        fold_df,
-                        pred_col="y_score",
-                        ret_col="y_true",
-                        date_col=date_col,
-                        entity_col=_entity,
-                        method="spearman",
-                        min_obs=5,
-                    )["ic_mean"]
-                    fold_ics.append(ic)
-                ic_mean = float(np.nanmean(fold_ics))
-                ic_std = float(np.nanstd(fold_ics)) if len(fold_ics) > 1 else 0.0
+                metrics = _decision_time_checkpoint_metrics(
+                    ep_df,
+                    date_col=date_col,
+                    entity_col=entity_col,
+                )
+                ic_mean = float(metrics["ic_mean"])
+                ic_std = float(metrics["ic_std"])
+                ic_n_days = int(metrics["ic_n_days"])
                 all_curves.append(
                     {
                         "config": config_name,
                         "epoch": epoch,
                         "ic_mean": ic_mean,
                         "ic_std": ic_std,
+                        "ic_n_days": ic_n_days,
                     }
                 )
                 complete_prediction_frames.append(ep_df)
-                epoch_scores.append((epoch, ic_mean, ic_std))
+                epoch_scores.append((epoch, ic_mean, ic_std, ic_n_days))
 
         if epoch_scores:
-            best_cp, best_ic_val, _best_ic_std = max(epoch_scores, key=lambda item: item[1])
+            full_coverage = max(item[3] for item in epoch_scores)
+            eligible_scores = [item for item in epoch_scores if item[3] == full_coverage]
+            best_cp, best_ic_val, _best_ic_std, best_ic_n_days = max(
+                eligible_scores, key=lambda item: item[1]
+            )
         else:
             best_cp = 0
             best_ic_val = float("nan")
+            best_ic_n_days = 0
 
         config_results.append(
             {
                 "config_name": config_name,
                 "best_epoch": best_cp,
                 "best_ic": best_ic_val,
+                "ic_n_days": best_ic_n_days,
                 "elapsed_s": acc["elapsed_s"],
                 "started_at": acc["started_at"],
             }
@@ -883,66 +996,60 @@ def run_dl_cv(
             f"  {config_name}: best_epoch={best_cp}, IC={best_ic_val:+.4f} ({acc['elapsed_s']:.1f}s)"
         )
 
-        # Incremental registration: persist this config as soon as aggregation
-        # completes. If the notebook is interrupted here, completed configs are
-        # already in the registry. (Fold-major training means ALL configs reach
-        # this point together, but registration is still moved out of the old
-        # batched block at the end.)
-        if register and case_study and epoch_scores:
-            cfg_best_preds = None
-            for frame in complete_prediction_frames:
-                if (
-                    frame.height > 0
-                    and "config" in frame.columns
-                    and frame["config"].unique().to_list() == [config_name]
-                ):
-                    # Filter to the best epoch for this config
-                    bep_df = frame.filter(pl.col("epoch") == best_cp)
-                    if bep_df.height > 0:
-                        cfg_best_preds = (
-                            bep_df
-                            if cfg_best_preds is None
-                            else pl.concat([cfg_best_preds, bep_df], how="diagonal_relaxed")
-                        )
-            if cfg_best_preds is not None and cfg_best_preds.height > 0:
-                try:
-                    arch = _resolve_arch_name(config_name)
-                    cfg_curves_df = pl.DataFrame(
-                        [c for c in all_curves if c["config"] == config_name]
+        # Incremental registration: persist every complete checkpoint as soon as
+        # aggregation finishes. Registering only the raw-IC peak would prevent a
+        # reader from applying the checkpoint-level coverage guard when that peak
+        # has undefined daily IC on part of the validation surface.
+        if register and case_study and epoch_scores and cfg_preds.height > 0:
+            try:
+                from case_studies.utils.registry import register_prediction_set
+
+                arch = _resolve_arch_name(config_name)
+                cfg_curves_df = pl.DataFrame([c for c in all_curves if c["config"] == config_name])
+                epoch_ic = {epoch: ic for epoch, ic, _std, _days in epoch_scores}
+                epochs = sorted(cfg_preds["epoch"].unique().to_list())
+                first_ep = best_cp if best_cp in epochs else epochs[0]
+                first_slice = cfg_preds.filter(pl.col("epoch") == first_ep).drop("config", "epoch")
+                t_hash = _register_dl_config(
+                    case_study=case_study,
+                    label=label_col,
+                    config_name=config_name,
+                    architecture=arch,
+                    n_epochs=cfg.get("n_epochs"),
+                    best_epoch=int(first_ep),
+                    lookback=lookback,
+                    n_folds=len(splits),
+                    ic_mean=epoch_ic.get(first_ep, best_ic_val),
+                    predictions=first_slice,
+                    notebook=notebook,
+                    learning_curves=cfg_curves_df if cfg_curves_df.height > 0 else None,
+                    started_at=acc.get("started_at"),
+                    elapsed_s=acc.get("elapsed_s"),
+                    prediction_split=prediction_split,
+                    identity_params=_config_identity_params(cfg),
+                )
+                for epoch, _ic, _epoch_std, _days in epoch_scores:
+                    if epoch == first_ep:
+                        continue
+                    epoch_preds = cfg_preds.filter(pl.col("epoch") == epoch).drop("config", "epoch")
+                    register_prediction_set(
+                        case_study,
+                        training_hash=t_hash,
+                        checkpoint_value=int(epoch),
+                        checkpoint_kind="epoch",
+                        split=prediction_split,
+                        predictions=epoch_preds,
+                        metrics={"ic_mean": epoch_ic[epoch]},
                     )
-                    _register_dl_config(
-                        case_study=case_study,
-                        label=label_col,
-                        config_name=config_name,
-                        architecture=arch,
-                        n_epochs=cfg.get("n_epochs"),
-                        best_epoch=best_cp,
-                        lookback=lookback,
-                        n_folds=len(splits),
-                        ic_mean=best_ic_val,
-                        predictions=cfg_best_preds,
-                        notebook=notebook,
-                        learning_curves=cfg_curves_df if cfg_curves_df.height > 0 else None,
-                        started_at=acc.get("started_at"),
-                        elapsed_s=acc.get("elapsed_s"),
-                        prediction_split=prediction_split,
-                    )
-                    print(f"    registered {config_name} incrementally")
-                except Exception as exc:
-                    print(f"    WARN: incremental registration failed for {config_name}: {exc}")
+                print(
+                    f"    registered {config_name} incrementally "
+                    f"({len(epoch_scores)} per-epoch slices)"
+                )
+            except Exception as exc:
+                print(f"    WARN: incremental registration failed for {config_name}: {exc}")
 
     del config_acc
     gc.collect()
-
-    config_results.sort(
-        key=lambda r: r["best_ic"] if not np.isnan(r["best_ic"]) else -999, reverse=True
-    )
-    best_result = config_results[0]
-    best_config_name = best_result["config_name"]
-    best_epoch = best_result["best_epoch"]
-    best_ic = best_result["best_ic"]
-
-    print(f"\n  Best: {best_config_name} @ epoch {best_epoch} (IC={best_ic:+.4f})")
 
     complete_predictions = (
         pl.concat(complete_prediction_frames, how="diagonal_relaxed")
@@ -950,19 +1057,22 @@ def run_dl_cv(
         else pl.DataFrame()
     )
 
-    # Extract best-config predictions at best epoch
-    if complete_predictions.height > 0:
-        best_preds_df = complete_predictions.filter(
-            (pl.col("config") == best_config_name) & (pl.col("epoch") == best_epoch)
-        )
-        predictions = best_preds_df.with_columns(
-            pl.lit(best_config_name).alias("model_id"),
-        ).drop("config", "epoch")
-    else:
-        predictions = pl.DataFrame()
-
     learning_curves = pl.DataFrame(all_curves) if all_curves else pl.DataFrame()
     training_log_df = pl.DataFrame(training_log) if training_log else pl.DataFrame()
+    fresh_result = assemble_cv_result(
+        learning_curves,
+        complete_predictions,
+        date_col=date_col,
+        entity_col=entity_col,
+        metadata={row["config_name"]: row for row in config_results},
+        training_log=training_log_df,
+    )
+    predictions = fresh_result["predictions"]
+
+    print(
+        f"\n  Best: {fresh_result['best_config_name']} @ epoch "
+        f"{fresh_result['best_epoch']} (IC={fresh_result['best_ic']:+.4f})"
+    )
 
     # Save final outputs
     if save_dir is not None:
@@ -981,19 +1091,10 @@ def run_dl_cv(
     # aggregation loop above (right after each config's best_epoch is computed).
     # The old batched registration block was removed to avoid duplicate writes.
 
-    return {
-        "grid_results": config_results,
-        "best_config_name": best_config_name,
-        "best_epoch": best_epoch,
-        "best_ic": best_ic,
-        "predictions": predictions,
-        "all_predictions": complete_predictions,
-        "fold_metrics": compute_fold_metrics_from_predictions(
-            complete_predictions,
-            best_config_name,
-            best_epoch,
+    if cached_result is not None:
+        return combine_cv_results(
+            [cached_result, fresh_result],
             date_col=date_col,
-        ),
-        "all_learning_curves": learning_curves,
-        "training_log": training_log_df,
-    }
+            entity_col=entity_col,
+        )
+    return fresh_result

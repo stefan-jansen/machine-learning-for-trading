@@ -32,6 +32,7 @@ Idempotent: running twice is a no-op. A companion test
 
 Usage:
     uv run python scripts/strip_empty_cell_tags.py            # rewrite in place
+    uv run python scripts/strip_empty_cell_tags.py a.ipynb    # selected notebooks
     uv run python scripts/strip_empty_cell_tags.py --check    # report only, exit 1 if dirty
 """
 
@@ -56,6 +57,7 @@ from sanitize_notebook_paths import REPO_ROOT, _iter_notebooks
 PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r'[ \t]*"tags": \[\],\n'), ""),
     (re.compile(r',\n[ \t]*"tags": \[\]\n'), "\n"),
+    (re.compile(r'[ \t]*"tags": \[\]\n'), ""),
 ]
 
 
@@ -80,11 +82,20 @@ def paired_py_has_fossil(nb: Path) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true", help="report only; exit 1 if any found")
+    ap.add_argument("paths", nargs="*", type=Path, help="notebooks to inspect (default: all)")
     args = ap.parse_args()
+
+    notebooks = (
+        [path.resolve().with_suffix(".ipynb") for path in args.paths]
+        if args.paths
+        else _iter_notebooks()
+    )
 
     dirty: list[tuple[Path, int]] = []
     skipped = 0
-    for nb in _iter_notebooks():
+    for nb in notebooks:
+        if not nb.exists():
+            raise SystemExit(f"notebook not found: {nb}")
         if paired_py_has_fossil(nb):
             skipped += 1
             continue

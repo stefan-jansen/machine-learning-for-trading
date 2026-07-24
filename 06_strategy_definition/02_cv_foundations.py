@@ -16,7 +16,7 @@
 # %% [markdown]
 # # Cross-Validation for Financial Machine Learning
 #
-# **ML4T Third Edition — Chapter 6: Strategy Definition**
+# **ML4T Third Edition — Chapter 6: Strategy Research Framework**
 #
 # **Docker image**: `ml4t`
 #
@@ -59,13 +59,11 @@ from sklearn.model_selection import KFold
 
 from utils.modeling import get_cv_config
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, apply_ml4t_style
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
 
 # %%
-apply_ml4t_style("light")
-
 # ML4T palette roles for the CV schematics: training is the main series, the
 # validation fold is the amber highlight, and buffers are a light neutral.
 TRAIN_C, TRAIN_EDGE = COLORS["slate"], COLORS["blue"]

@@ -1,6 +1,6 @@
 """Strategy analysis figure helpers and assessment writer.
 
-Companion to ``BacktestExplorer`` — produces the figures and structured
+Companion to ``BacktestExplorer`` - produces the figures and structured
 artifacts for each case study's ``strategy_analysis.py`` notebook.
 
 Usage::
@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
+from case_studies.utils.carrier_pins import CARRIER_PINS
 from case_studies.utils.notebook_contracts import degenerate_prediction_sql
 
 # ---------------------------------------------------------------------------
@@ -37,13 +38,13 @@ from case_studies.utils.notebook_contracts import degenerate_prediction_sql
 # Per-CS whitelist of labels eligible to anchor the registered strategy. The
 # only entry today is sp500_options, restricted to ret_to_expiry because the
 # four legacy diagnostic variants (fwd_ret_5d, fwd_ret_10d, fwd_ret_dh_5d,
-# fwd_ret_dh_10d) were dropped from the sweep + registry 2026-05-17 — they
+# fwd_ret_dh_10d) were dropped from the sweep + registry 2026-05-17 - they
 # went through the vectorized backtest path which treats their 5d/10d
 # forward returns as daily returns, inflating Sharpes (e.g. fwd_ret_10d
 # allocation Sharpe ~6.5) to non-credible levels. ret_to_expiry runs through
 # the HTM daily-MTM cohort path and is the only label with an honest cost
 # model for this CS. Mirrors the canonical definition in
-# 20_strategy_synthesis/holdout.py::LABEL_RESTRICTIONS — keep these in sync.
+# 20_strategy_synthesis/holdout.py::LABEL_RESTRICTIONS - keep these in sync.
 LABEL_RESTRICTIONS: dict[str, frozenset[str]] = {
     "sp500_options": frozenset({"ret_to_expiry"}),
 }
@@ -51,39 +52,101 @@ LABEL_RESTRICTIONS: dict[str, frozenset[str]] = {
 
 # Per-CS canonical universe pin: case_study -> strategy.signal.universe_filter
 # value eligible to anchor the registered rank-1. sp500_options trades only the
-# liquid (bottom-quintile half-spread) subset — the full-universe round-trip
+# liquid (bottom-quintile half-spread) subset - the full-universe round-trip
 # option spread consumes the variance-risk-premium edge, so full-universe rows
 # are excluded from rank-1 selection (the full universe is retained only for the
 # Ch18 htm_cost_cascade comparison, never as the deployed carrier). Without this
 # pin, full-universe allocation backtests registered by the standard sweep
 # (e.g. the 2026-05-31 L1-grid rollout) leak into rank-1 by raw Sharpe and
 # orphan the liquid-lineage holdout. Mirrored in 20_strategy_synthesis/holdout.py
-# (select_best_models) — keep in sync.
+# (select_best_models) - keep in sync.
 UNIVERSE_RESTRICTIONS: dict[str, str] = {
     "sp500_options": "liquid",
 }
 
 
-# Per-CS carrier pin: case_study -> validation backtest_hash (prefix) to deploy as
-# the canonical carrier when the cross-stage val rank-1 is statistically tied with a
-# more diversified / more precisely-estimated configuration. This is a documented
-# a-priori (validation-time) tie-break, NOT a holdout-based selection.
-#
-# us_firm_characteristics: validation Sharpe ties at ~2.75 between
-#   A = leaves_7_mae / score_weighted (cross-stage rank-1, 2.7589) and
-#   B = default_huber / equal_weight  (signal-stage rank-1, 2.7542).
-# Block-bootstrap Sharpe CIs (backtest_metrics): B [2.33, 3.37] width 1.04 vs
-# A [2.10, 3.57] width 1.46 — B is estimated ~29% more precisely (lower vol, 50
-# equal-weight names vs 10 score-weighted). B is also far more diversified (holdout
-# MaxDD -8.6% vs -34%). Both criteria are validation-time, so B is pinned as the
-# deployed carrier. The pinned row is default_huber/equal_weight t50 at the
-# allocation stage; regenerate by re-querying the validation allocation rank-1 with
-# config_name='default_huber' AND allocation.method='equal_weight' if the sweep is
-# rebuilt. Keep in sync with 20_strategy_synthesis/01_aggregate_synthesis.py, which
-# imports this dict to pin the §20.5 / Figure 20.7 allocator-comparison spine.
-CARRIER_PINS: dict[str, str] = {
-    "us_firm_characteristics": "e676e1989e1f",
-}
+# Carrier choices are owner-controlled in ``carrier_pins`` and use validation
+# information only. The corrected S&P 500 options carrier is the liquid-universe
+# cross-stage rank-1. Two alternative allocator rows tie its Sharpe exactly, so
+# the deterministic tie-break preserves the simpler equal-weight baseline spec.
+
+
+def rank_returns_on_common_support(
+    returns_by_hash: dict[str, pl.DataFrame], *, periods_per_year: int
+) -> pl.DataFrame:
+    """Rank backtests after restricting every return series to exact common support."""
+    if not returns_by_hash:
+        raise ValueError("No return series supplied for common-support ranking")
+
+    normalized: dict[str, pl.DataFrame] = {}
+    common_timestamps: set[Any] | None = None
+    for backtest_hash, frame in returns_by_hash.items():
+        return_col = next(
+            (name for name in ("daily_return", "return", "returns") if name in frame.columns),
+            None,
+        )
+        if "timestamp" not in frame.columns or return_col is None:
+            raise ValueError(
+                f"{backtest_hash}: expected timestamp plus a return column; got {frame.columns}"
+            )
+        selected = (
+            frame.select("timestamp", pl.col(return_col).alias("daily_return"))
+            .with_columns(pl.col("timestamp").cast(pl.Datetime("ns")))
+            .sort("timestamp")
+        )
+        if selected["timestamp"].n_unique() != selected.height:
+            raise ValueError(f"{backtest_hash}: duplicate timestamps in daily returns")
+        normalized[backtest_hash] = selected
+        timestamps = set(selected["timestamp"].to_list())
+        common_timestamps = (
+            timestamps if common_timestamps is None else common_timestamps & timestamps
+        )
+
+    if common_timestamps is None or len(common_timestamps) < 2:
+        raise ValueError("Backtest candidates have fewer than two common timestamps")
+
+    from case_studies.utils.backtest_runner import compute_portfolio_metrics
+
+    common = sorted(common_timestamps)
+    common_frame = pl.DataFrame({"timestamp": common}, schema={"timestamp": pl.Datetime("ns")})
+    common_ns = common_frame["timestamp"].cast(pl.Int64).to_list()
+    rows: list[dict[str, Any]] = []
+    for backtest_hash, frame in normalized.items():
+        aligned = frame.join(common_frame, on="timestamp", how="inner").sort("timestamp")
+        if aligned["timestamp"].cast(pl.Int64).to_list() != common_ns:
+            raise ValueError(f"{backtest_hash}: failed exact common-support alignment")
+        metrics = compute_portfolio_metrics(
+            aligned["daily_return"].to_numpy(),
+            periods_per_year=periods_per_year,
+            uncertainty=False,
+            trim_leading_zeros=False,
+        )
+        rows.append(
+            {
+                "backtest_hash": backtest_hash,
+                "sharpe": float(metrics["sharpe"]),
+                "n_periods": aligned.height,
+                "start": common[0],
+                "end": common[-1],
+            }
+        )
+    return pl.DataFrame(rows).sort("sharpe", descending=True)
+
+
+def rank_backtests_on_common_support(
+    case_study: str, backtest_hashes: list[str], *, periods_per_year: int
+) -> pl.DataFrame:
+    """Load registered returns and rank them on their exact timestamp intersection."""
+    from utils.paths import get_case_study_dir
+
+    backtest_root = get_case_study_dir(case_study) / "run_log" / "backtest"
+    returns_by_hash: dict[str, pl.DataFrame] = {}
+    for backtest_hash in backtest_hashes:
+        path = backtest_root / backtest_hash / "daily_returns.parquet"
+        if not path.exists():
+            raise FileNotFoundError(f"Missing registered return artifact: {path}")
+        returns_by_hash[backtest_hash] = pl.read_parquet(path)
+    return rank_returns_on_common_support(returns_by_hash, periods_per_year=periods_per_year)
 
 
 def select_holdout_self_backtest(
@@ -98,7 +161,7 @@ def select_holdout_self_backtest(
     rank-1 strategy on the holdout prediction set. Matching by strategy
     spec (rather than by max-Sharpe over candidates sharing the
     ``training_hash``) keeps the lookup robust against experimental
-    side-channel allocators — most importantly ``conformal_weighted`` —
+    side-channel allocators - most importantly ``conformal_weighted`` -
     that may share the holdout pred set but diverge from val rank-1's
     allocator method. Without this guard, an allocator variant whose
     holdout Sharpe happens to exceed the canonical lineage's silently
@@ -153,11 +216,12 @@ def select_holdout_self_backtest(
 def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
     """Resolve the canonical val rank-1 + matching holdout for a case study.
 
-    Cross-stage val rank-1 = max(sharpe) over stage IN (signal, allocation,
-    risk_overlay) on split='validation', with LABEL_RESTRICTIONS applied for
-    case studies that have one. Holdout match is by training_hash on the
-    rank-1's prediction set. Use this in every strategy_analysis notebook
-    rather than hardcoding hashes — hardcoded hashes go stale every time the
+    Cross-stage validation rank-1 is selected over stage IN (signal,
+    allocation, risk_overlay) with LABEL_RESTRICTIONS applied where defined.
+    When a ``walk_forward_v2`` conformal candidate is present, every candidate
+    is re-ranked on exact common timestamp support. Holdout match is by
+    training_hash on the rank-1's prediction set. Use this in every strategy_analysis notebook
+    rather than hardcoding hashes - hardcoded hashes go stale every time the
     sweep is rebuilt, and queries that forget LABEL_RESTRICTIONS surface the
     diagnostic-variant rows (sp500_options' fwd_ret_10d Sharpe ≈ 9.7) as
     bogus rank-1 candidates.
@@ -180,7 +244,7 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
     base_select = """
         SELECT b.backtest_hash, b.prediction_hash, b.stage,
                t.training_hash, t.family, t.config_name, t.label,
-               bm.sharpe
+               bm.sharpe, b.spec_json
         FROM backtest_runs b
         JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
         JOIN prediction_sets p ON p.prediction_hash = b.prediction_hash
@@ -190,8 +254,8 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
     if carrier_pin:
         # Documented a-priori carrier pin: resolve directly to the pinned
         # validation backtest rather than the max-Sharpe cross-stage rank-1.
-        # See CARRIER_PINS for the rationale (statistical tie broken on CI
-        # width + diversification at validation time).
+        # The owner-controlled pin is a validation-time choice. Current-lineage
+        # carrier decisions are deferred until all model producers finish.
         val_sql = base_select + (
             " WHERE b.backtest_hash LIKE ?"
             " AND p.split = 'validation'"
@@ -215,7 +279,7 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
         if universe_pin:
             val_sql += " AND json_extract(b.spec_json, '$.strategy.signal.universe_filter') = ?"
             params = params + (universe_pin,)
-        # Tie-break: among rows with identical Sharpe (e.g. the signal-stage
+        # Tie-break: among rows with identical Sharpe (e.g. the equal-weight baseline
         # equal-weight selection and its economically identical equal_weight
         # allocation-stage re-run, which share a prediction), prefer the
         # signal-only spec (no allocation block). That is the spec the holdout
@@ -224,20 +288,59 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
         val_sql += (
             " ORDER BY bm.sharpe DESC,"
             " (json_extract(b.spec_json, '$.strategy.allocation') IS NULL) DESC,"
-            " b.backtest_hash ASC LIMIT 1"
+            " b.backtest_hash ASC"
         )
 
     db = sqlite3.connect(str(db_path))
     try:
-        val = db.execute(val_sql, params).fetchone()
-        if val is None:
+        candidates = db.execute(val_sql, params).fetchall()
+        if not candidates:
             raise RuntimeError(
                 f"No validation rank-1 candidate for {case_study} (label_filter={label_filter})"
             )
-        (val_bh, val_ph, val_stage, train_h, family, config_name, label, val_sharpe) = val
-
     finally:
         db.close()
+
+    def _is_strict_conformal(row: tuple[Any, ...]) -> bool:
+        strategy = json.loads(row[8]).get("strategy", {})
+        allocation = strategy.get("allocation") or {}
+        return (
+            allocation.get("method") == "conformal_weighted"
+            and allocation.get("calibration_version") == "walk_forward_v2"
+        )
+
+    strict_conformal_present = any(_is_strict_conformal(row) for row in candidates)
+    if strict_conformal_present:
+        candidates = [
+            row
+            for row in candidates
+            if (json.loads(row[8]).get("strategy", {}).get("allocation") or {}).get("method")
+            != "conformal_weighted"
+            or _is_strict_conformal(row)
+        ]
+        from case_studies.utils.uncertainty import periods_per_year_from_setup
+
+        common_ranking = rank_backtests_on_common_support(
+            case_study,
+            [row[0] for row in candidates],
+            periods_per_year=int(periods_per_year_from_setup(case_study)),
+        )
+        rank_rows = {row["backtest_hash"]: row for row in common_ranking.iter_rows(named=True)}
+        val = next(row for row in candidates if row[0] == common_ranking["backtest_hash"][0])
+        val_sharpe = float(common_ranking["sharpe"][0])
+        comparison_n_periods: int | None = int(common_ranking["n_periods"][0])
+        comparison_start = common_ranking["start"][0]
+        comparison_end = common_ranking["end"][0]
+        if any(rank_rows[row[0]]["n_periods"] != comparison_n_periods for row in candidates):
+            raise RuntimeError("Common-support ranking produced unequal n_periods")
+    else:
+        val = candidates[0]
+        val_sharpe = float(val[7])
+        comparison_n_periods = None
+        comparison_start = None
+        comparison_end = None
+
+    (val_bh, val_ph, val_stage, train_h, family, config_name, label, _, _) = val
 
     # Match holdout by strategy spec to the val rank-1 backtest, so an
     # experimental side-channel allocator (e.g., conformal_weighted) on
@@ -267,6 +370,9 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
         "val_prediction_hash": val_ph,
         "val_stage": val_stage,
         "val_sharpe": val_sharpe,
+        "comparison_n_periods": comparison_n_periods,
+        "comparison_start": comparison_start,
+        "comparison_end": comparison_end,
         "training_hash": train_h,
         "family": family,
         "config_name": config_name,
@@ -434,7 +540,7 @@ def plot_ic_vs_sharpe(
     ew_sharpe: float | None = None,
     ax: plt.Axes | None = None,
 ) -> plt.Figure:
-    """IC vs signal-stage Sharpe scatter with annotations.
+    """IC vs equal-weight baseline Sharpe scatter with annotations.
 
     Parameters
     ----------
@@ -449,7 +555,7 @@ def plot_ic_vs_sharpe(
     -------
     plt.Figure
     """
-    # Load all signal-stage backtests
+    # Load all equal-weight baseline backtests
     all_bt = explorer.best(stage="signal", top_n=9999)
     if all_bt.is_empty():
         fig, ax = plt.subplots()
@@ -656,7 +762,7 @@ def plot_sharpe_waterfall(
                 stacklevel=2,
             )
 
-    # value labels — always above the upper edge so they don't overlap a CI bar
+    # value labels - always above the upper edge so they don't overlap a CI bar
     for i, (bar, val) in enumerate(zip(bars, sharpes, strict=False)):
         # Only use ci_hi as the anchor when the CI actually brackets the
         # point estimate (see ci_brackets_point above); otherwise the
@@ -1132,11 +1238,11 @@ def compute_cost_bps(setup: dict) -> float:
     """Per-leg cost in bps from a case-study setup.yaml.
 
     Precedence:
-    1. ``costs.per_leg_cost_bps_range`` — average of the declared range.
-    2. ``costs.fee_schedule`` + ``costs.cost_tiers`` — tier-weighted average
+    1. ``costs.per_leg_cost_bps_range`` - average of the declared range.
+    2. ``costs.fee_schedule`` + ``costs.cost_tiers`` - tier-weighted average
        of taker/maker fees (tiered structures e.g. crypto).
-    3. ``costs.fee_schedule`` with only taker_bps/maker_bps — simple average.
-    4. Fallback ``10.0`` — explicit last resort.
+    3. ``costs.fee_schedule`` with only taker_bps/maker_bps - simple average.
+    4. Fallback ``10.0`` - explicit last resort.
 
     setup.yaml is authoritative. The fallback (10.0) is hit only when the
     case study does not declare any cost structure; flag such a case study
@@ -1144,7 +1250,7 @@ def compute_cost_bps(setup: dict) -> float:
 
     Note on crypto (precedence 3 today): the `cost_tiers` block that
     formerly produced a tier-weighted ~3.47 bps was removed in commit
-    `2b3bff1a` (setup.yaml reader-cleanup pass) — the majors/alts
+    `2b3bff1a` (setup.yaml reader-cleanup pass) - the majors/alts
     breakdown lives in the inline YAML comment now, not as machine-
     readable data. The simple (taker+maker)/2 = 3.0 bps headline is
     intentional under the post-cleanup config; if a future revision
@@ -1257,10 +1363,10 @@ def compute_operating_profile(lineage: dict, setup: dict) -> pl.DataFrame:
 
     rows = [
         {"property": "Trading cadence", "value": cadence},
-        {"property": "Portfolio concentration (top_k)", "value": str(top_k) if top_k else "—"},
-        {"property": "Allocator", "value": (allocator or "—").replace("_", " ")},
-        {"property": "Cost assumption", "value": f"{cost_bps} bps/leg" if cost_bps else "—"},
-        {"property": "Worst drawdown", "value": f"{worst_dd:.1%}" if worst_dd else "—"},
+        {"property": "Portfolio concentration (top_k)", "value": str(top_k) if top_k else "-"},
+        {"property": "Allocator", "value": (allocator or "-").replace("_", " ")},
+        {"property": "Cost assumption", "value": f"{cost_bps} bps/leg" if cost_bps else "-"},
+        {"property": "Worst drawdown", "value": f"{worst_dd:.1%}" if worst_dd else "-"},
     ]
 
     return pl.DataFrame(rows)
@@ -1399,7 +1505,7 @@ def build_all_synthesis(
                     "n_folds": row.get("n_predictions", 0),
                 }
 
-        # --- backtest: signal-stage champion ---
+        # --- backtest: equal-weight baseline champion ---
         cs_bt = bt_df.filter(pl.col("case_study") == display)
         backtest_dict: dict[str, Any] = {}
         if not cs_bt.is_empty():
@@ -1484,7 +1590,7 @@ def build_all_synthesis(
 
         # --- costs ---
         # A pinned CS MUST carry cost/risk on its spine prediction; falling back
-        # to None here would pool full-universe rows — the exact cost-defeat-demo
+        # to None here would pool full-universe rows - the exact cost-defeat-demo
         # leak the pin prevents. Fail loudly rather than leak silently.
         skip_cost_risk = False
         if cs in pin_cost_risk_to_spine and spine_pred is None:
@@ -1497,7 +1603,7 @@ def build_all_synthesis(
             # Test-mode escape hatch: the pinned carrier is registered out-of-band
             # (e.g. nasdaq's cost-feasible ensemble), so an isolated test registry
             # has no carrier rows to resolve a spine from. Mark cost/risk
-            # not-applicable rather than pooling full-universe rows — the same leak
+            # not-applicable rather than pooling full-universe rows - the same leak
             # the hard raise prevents in production (where allow_missing_spine=False).
             skip_cost_risk = True
         cost_risk_pred = spine_pred if cs in pin_cost_risk_to_spine else None

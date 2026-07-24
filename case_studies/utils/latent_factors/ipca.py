@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+from ml4t.models.configs import IPCAConfig
 
 from case_studies.utils.latent_factors.library_bridge import run_ipca_fold_with_library
 
@@ -16,7 +17,7 @@ def run_ipca_fold(
     returns_val: np.ndarray,
     n_factors: int,
     *,
-    max_iter: int = 100,
+    max_iter: int = IPCAConfig().max_iter,
     tol: float = 1e-6,
     factor_ridge: float = 1e-6,
     gamma_ridge: float = 1e-6,

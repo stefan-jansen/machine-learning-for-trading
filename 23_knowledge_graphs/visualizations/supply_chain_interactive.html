@@ -1,0 +1,358 @@
+<html>
+    <head>
+        <meta charset="utf-8">
+
+            <script>function neighbourhoodHighlight(params) {
+  // console.log("in nieghbourhoodhighlight");
+  allNodes = nodes.get({ returnType: "Object" });
+  // originalNodes = JSON.parse(JSON.stringify(allNodes));
+  // if something is selected:
+  if (params.nodes.length > 0) {
+    highlightActive = true;
+    var i, j;
+    var selectedNode = params.nodes[0];
+    var degrees = 2;
+
+    // mark all nodes as hard to read.
+    for (let nodeId in allNodes) {
+      // nodeColors[nodeId] = allNodes[nodeId].color;
+      allNodes[nodeId].color = "rgba(200,200,200,0.5)";
+      if (allNodes[nodeId].hiddenLabel === undefined) {
+        allNodes[nodeId].hiddenLabel = allNodes[nodeId].label;
+        allNodes[nodeId].label = undefined;
+      }
+    }
+    var connectedNodes = network.getConnectedNodes(selectedNode);
+    var allConnectedNodes = [];
+
+    // get the second degree nodes
+    for (i = 1; i < degrees; i++) {
+      for (j = 0; j < connectedNodes.length; j++) {
+        allConnectedNodes = allConnectedNodes.concat(
+          network.getConnectedNodes(connectedNodes[j])
+        );
+      }
+    }
+
+    // all second degree nodes get a different color and their label back
+    for (i = 0; i < allConnectedNodes.length; i++) {
+      // allNodes[allConnectedNodes[i]].color = "pink";
+      allNodes[allConnectedNodes[i]].color = "rgba(150,150,150,0.75)";
+      if (allNodes[allConnectedNodes[i]].hiddenLabel !== undefined) {
+        allNodes[allConnectedNodes[i]].label =
+          allNodes[allConnectedNodes[i]].hiddenLabel;
+        allNodes[allConnectedNodes[i]].hiddenLabel = undefined;
+      }
+    }
+
+    // all first degree nodes get their own color and their label back
+    for (i = 0; i < connectedNodes.length; i++) {
+      // allNodes[connectedNodes[i]].color = undefined;
+      allNodes[connectedNodes[i]].color = nodeColors[connectedNodes[i]];
+      if (allNodes[connectedNodes[i]].hiddenLabel !== undefined) {
+        allNodes[connectedNodes[i]].label =
+          allNodes[connectedNodes[i]].hiddenLabel;
+        allNodes[connectedNodes[i]].hiddenLabel = undefined;
+      }
+    }
+
+    // the main node gets its own color and its label back.
+    // allNodes[selectedNode].color = undefined;
+    allNodes[selectedNode].color = nodeColors[selectedNode];
+    if (allNodes[selectedNode].hiddenLabel !== undefined) {
+      allNodes[selectedNode].label = allNodes[selectedNode].hiddenLabel;
+      allNodes[selectedNode].hiddenLabel = undefined;
+    }
+  } else if (highlightActive === true) {
+    // console.log("highlightActive was true");
+    // reset all nodes
+    for (let nodeId in allNodes) {
+      // allNodes[nodeId].color = "purple";
+      allNodes[nodeId].color = nodeColors[nodeId];
+      // delete allNodes[nodeId].color;
+      if (allNodes[nodeId].hiddenLabel !== undefined) {
+        allNodes[nodeId].label = allNodes[nodeId].hiddenLabel;
+        allNodes[nodeId].hiddenLabel = undefined;
+      }
+    }
+    highlightActive = false;
+  }
+
+  // transform the object into an array
+  var updateArray = [];
+  if (params.nodes.length > 0) {
+    for (let nodeId in allNodes) {
+      if (allNodes.hasOwnProperty(nodeId)) {
+        // console.log(allNodes[nodeId]);
+        updateArray.push(allNodes[nodeId]);
+      }
+    }
+    nodes.update(updateArray);
+  } else {
+    // console.log("Nothing was selected");
+    for (let nodeId in allNodes) {
+      if (allNodes.hasOwnProperty(nodeId)) {
+        // console.log(allNodes[nodeId]);
+        // allNodes[nodeId].color = {};
+        updateArray.push(allNodes[nodeId]);
+      }
+    }
+    nodes.update(updateArray);
+  }
+}
+
+function filterHighlight(params) {
+  allNodes = nodes.get({ returnType: "Object" });
+  // if something is selected:
+  if (params.nodes.length > 0) {
+    filterActive = true;
+    let selectedNodes = params.nodes;
+
+    // hiding all nodes and saving the label
+    for (let nodeId in allNodes) {
+      allNodes[nodeId].hidden = true;
+      if (allNodes[nodeId].savedLabel === undefined) {
+        allNodes[nodeId].savedLabel = allNodes[nodeId].label;
+        allNodes[nodeId].label = undefined;
+      }
+    }
+
+    for (let i=0; i < selectedNodes.length; i++) {
+      allNodes[selectedNodes[i]].hidden = false;
+      if (allNodes[selectedNodes[i]].savedLabel !== undefined) {
+        allNodes[selectedNodes[i]].label = allNodes[selectedNodes[i]].savedLabel;
+        allNodes[selectedNodes[i]].savedLabel = undefined;
+      }
+    }
+
+  } else if (filterActive === true) {
+    // reset all nodes
+    for (let nodeId in allNodes) {
+      allNodes[nodeId].hidden = false;
+      if (allNodes[nodeId].savedLabel !== undefined) {
+        allNodes[nodeId].label = allNodes[nodeId].savedLabel;
+        allNodes[nodeId].savedLabel = undefined;
+      }
+    }
+    filterActive = false;
+  }
+
+  // transform the object into an array
+  var updateArray = [];
+  if (params.nodes.length > 0) {
+    for (let nodeId in allNodes) {
+      if (allNodes.hasOwnProperty(nodeId)) {
+        updateArray.push(allNodes[nodeId]);
+      }
+    }
+    nodes.update(updateArray);
+  } else {
+    for (let nodeId in allNodes) {
+      if (allNodes.hasOwnProperty(nodeId)) {
+        updateArray.push(allNodes[nodeId]);
+      }
+    }
+    nodes.update(updateArray);
+  }
+}
+
+function selectNode(nodes) {
+  network.selectNodes(nodes);
+  neighbourhoodHighlight({ nodes: nodes });
+  return nodes;
+}
+
+function selectNodes(nodes) {
+  network.selectNodes(nodes);
+  filterHighlight({nodes: nodes});
+  return nodes;
+}
+
+function highlightFilter(filter) {
+  let selectedNodes = []
+  let selectedProp = filter['property']
+  if (filter['item'] === 'node') {
+    let allNodes = nodes.get({ returnType: "Object" });
+    for (let nodeId in allNodes) {
+      if (allNodes[nodeId][selectedProp] && filter['value'].includes((allNodes[nodeId][selectedProp]).toString())) {
+        selectedNodes.push(nodeId)
+      }
+    }
+  }
+  else if (filter['item'] === 'edge'){
+    let allEdges = edges.get({returnType: 'object'});
+    // check if the selected property exists for selected edge and select the nodes connected to the edge
+    for (let edge in allEdges) {
+      if (allEdges[edge][selectedProp] && filter['value'].includes((allEdges[edge][selectedProp]).toString())) {
+        selectedNodes.push(allEdges[edge]['from'])
+        selectedNodes.push(allEdges[edge]['to'])
+      }
+    }
+  }
+  selectNodes(selectedNodes)
+}</script>
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/dist/vis-network.min.css" integrity="sha512-WgxfT5LWjfszlPHXRmBWHkV2eceiWTOBvrKCNbdgDYTHrT2AeLCGbF4sZlZw3UMN3WtL0tGUoIAKsu8mllg/XA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/vis-network.min.js" integrity="sha512-LnvoEWDFrqGHlHmDD2101OrLcbsfkrzoSpvtSQtxK3RMnRV0eOkhhBN2dXHKRrUU8p2DGRTk35n4O8nWSVe1mQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+
+
+
+
+
+
+
+<center>
+<h1></h1>
+</center>
+
+<!-- <link rel="stylesheet" href="../node_modules/vis/dist/vis.min.css" type="text/css" />
+<script type="text/javascript" src="../node_modules/vis/dist/vis.js"> </script>-->
+        <link
+          href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/css/bootstrap.min.css"
+          rel="stylesheet"
+          integrity="sha384-eOJMYsd53ii+scO/bJGFsiCZc+5NDVN2yr8+0RDqr0Ql0h+rP48ckxlpbzKgwra6"
+          crossorigin="anonymous"
+        />
+        <script
+          src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/js/bootstrap.bundle.min.js"
+          integrity="sha384-JEW9xMcG8R+pH31jmWH6WWP0WintQrMb4s7ZOdauHnUtxwoG2vI5DkLtS3qm9Ekf"
+          crossorigin="anonymous"
+        ></script>
+
+
+        <center>
+          <h1></h1>
+        </center>
+        <style type="text/css">
+
+             #mynetwork {
+                 width: 100%;
+                 height: 600px;
+                 background-color: #FAFAF9;
+                 border: 1px solid lightgray;
+                 position: relative;
+                 float: left;
+             }
+
+
+
+
+
+
+        </style>
+    </head>
+
+
+    <body>
+        <div class="card" style="width: 100%">
+
+
+            <div id="mynetwork" class="card-body"></div>
+        </div>
+
+
+
+
+        <script type="text/javascript">
+
+              // initialize global variables.
+              var edges;
+              var nodes;
+              var allNodes;
+              var allEdges;
+              var nodeColors;
+              var originalNodes;
+              var network;
+              var container;
+              var options, data;
+              var filter = {
+                  item : '',
+                  property : '',
+                  value : []
+              };
+
+
+
+
+
+              // This method is responsible for drawing the graph, returns the drawn network
+              function drawGraph() {
+                  var container = document.getElementById('mynetwork');
+
+
+
+                  // parsing and collecting nodes and edges from the python
+                  nodes = new vis.DataSet([{"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Apple Inc", "label": "Apple Inc", "shape": "dot", "size": 20, "title": "\u003cb\u003eApple Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn"}, {"color": "#D4A84B", "font": {"color": "#0a1628"}, "id": "TSMC", "label": "TSMC", "shape": "dot", "size": 198, "title": "\u003cb\u003eTSMC\u003c/b\u003e\u003cbr\u003eSupplies 61 companies\u003cbr\u003e\u003ci\u003eConcentration risk: HIGH\u003c/i\u003e"}, {"color": "#D4A84B", "font": {"color": "#0a1628"}, "id": "Foxconn", "label": "Foxconn", "shape": "dot", "size": 114, "title": "\u003cb\u003eFoxconn\u003c/b\u003e\u003cbr\u003eSupplies 33 companies\u003cbr\u003e\u003ci\u003eConcentration risk: HIGH\u003c/i\u003e"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "AbbVie Inc", "label": "AbbVie Inc", "shape": "dot", "size": 20, "title": "\u003cb\u003eAbbVie Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung, Lupron"}, {"color": "#D4A84B", "font": {"color": "#0a1628"}, "id": "Samsung", "label": "Samsung", "shape": "dot", "size": 99, "title": "\u003cb\u003eSamsung\u003c/b\u003e\u003cbr\u003eSupplies 28 companies\u003cbr\u003e\u003ci\u003eConcentration risk: HIGH\u003c/i\u003e"}, {"color": "#D4A84B", "font": {"color": "#0a1628"}, "id": "Lupron", "label": "Lupron", "shape": "dot", "size": 18, "title": "\u003cb\u003eLupron\u003c/b\u003e\u003cbr\u003eSupplies 1 companies\u003cbr\u003e\u003ci\u003eConcentration risk: LOW\u003c/i\u003e"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "ABBOTT LABORATORIES", "label": "ABBOTT LABOR", "shape": "dot", "size": 20, "title": "\u003cb\u003eABBOTT LABORATORIES\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "ADOBE INC", "label": "ADOBE INC", "shape": "dot", "size": 20, "title": "\u003cb\u003eADOBE INC\u003c/b\u003e\u003cbr\u003eKey suppliers: Microsoft, TSMC"}, {"color": "#D4A84B", "font": {"color": "#0a1628"}, "id": "Microsoft", "label": "Microsoft", "shape": "dot", "size": 18, "title": "\u003cb\u003eMicrosoft\u003c/b\u003e\u003cbr\u003eSupplies 1 companies\u003cbr\u003e\u003ci\u003eConcentration risk: LOW\u003c/i\u003e"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "AIG Parent", "label": "AIG Parent", "shape": "dot", "size": 20, "title": "\u003cb\u003eAIG Parent\u003c/b\u003e\u003cbr\u003eKey suppliers: Fortitude Re, lessors, employees, subsidiaries"}, {"color": "#D4A84B", "font": {"color": "#0a1628"}, "id": "Fortitude Re", "label": "Fortitude Re", "shape": "dot", "size": 18, "title": "\u003cb\u003eFortitude Re\u003c/b\u003e\u003cbr\u003eSupplies 1 companies\u003cbr\u003e\u003ci\u003eConcentration risk: LOW\u003c/i\u003e"}, {"color": "#D4A84B", "font": {"color": "#0a1628"}, "id": "lessors", "label": "lessors", "shape": "dot", "size": 18, "title": "\u003cb\u003elessors\u003c/b\u003e\u003cbr\u003eSupplies 1 companies\u003cbr\u003e\u003ci\u003eConcentration risk: LOW\u003c/i\u003e"}, {"color": "#D4A84B", "font": {"color": "#0a1628"}, "id": "employees", "label": "employees", "shape": "dot", "size": 18, "title": "\u003cb\u003eemployees\u003c/b\u003e\u003cbr\u003eSupplies 1 companies\u003cbr\u003e\u003ci\u003eConcentration risk: LOW\u003c/i\u003e"}, {"color": "#D4A84B", "font": {"color": "#0a1628"}, "id": "subsidiaries", "label": "subsidiaries", "shape": "dot", "size": 18, "title": "\u003cb\u003esubsidiaries\u003c/b\u003e\u003cbr\u003eSupplies 1 companies\u003cbr\u003e\u003ci\u003eConcentration risk: LOW\u003c/i\u003e"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "AMGEN INC", "label": "AMGEN INC", "shape": "dot", "size": 20, "title": "\u003cb\u003eAMGEN INC\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung, Lilly, contract manufacturers"}, {"color": "#D4A84B", "font": {"color": "#0a1628"}, "id": "Lilly", "label": "Lilly", "shape": "dot", "size": 18, "title": "\u003cb\u003eLilly\u003c/b\u003e\u003cbr\u003eSupplies 1 companies\u003cbr\u003e\u003ci\u003eConcentration risk: LOW\u003c/i\u003e"}, {"color": "#D4A84B", "font": {"color": "#0a1628"}, "id": "contract manufacturers", "label": "contract manufacturers", "shape": "dot", "size": 18, "title": "\u003cb\u003econtract manufacturers\u003c/b\u003e\u003cbr\u003eSupplies 1 companies\u003cbr\u003e\u003ci\u003eConcentration risk: LOW\u003c/i\u003e"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Broadcom Inc", "label": "Broadcom Inc", "shape": "dot", "size": 20, "title": "\u003cb\u003eBroadcom Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, ASE, Foxconn"}, {"color": "#D4A84B", "font": {"color": "#0a1628"}, "id": "ASE", "label": "ASE", "shape": "dot", "size": 18, "title": "\u003cb\u003eASE\u003c/b\u003e\u003cbr\u003eSupplies 1 companies\u003cbr\u003e\u003ci\u003eConcentration risk: LOW\u003c/i\u003e"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "American Express Co", "label": "American Exp", "shape": "dot", "size": 20, "title": "\u003cb\u003eAmerican Express Co\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "BOEING CO", "label": "BOEING CO", "shape": "dot", "size": 20, "title": "\u003cb\u003eBOEING CO\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "BANK OF AMERICA CORP /DE/", "label": "BANK OF AMER", "shape": "dot", "size": 20, "title": "\u003cb\u003eBANK OF AMERICA CORP /DE/\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Booking Holdings Inc", "label": "Booking Hold", "shape": "dot", "size": 20, "title": "\u003cb\u003eBooking Holdings Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "BlackRock, Inc", "label": "BlackRock, I", "shape": "dot", "size": 20, "title": "\u003cb\u003eBlackRock, Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "BRISTOL MYERS SQUIBB CO", "label": "BRISTOL MYER", "shape": "dot", "size": 20, "title": "\u003cb\u003eBRISTOL MYERS SQUIBB CO\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Bristol Myers Squibb Co", "label": "Bristol Myer", "shape": "dot", "size": 20, "title": "\u003cb\u003eBristol Myers Squibb Co\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "COLGATE PALMOLIVE CO", "label": "COLGATE PALM", "shape": "dot", "size": 20, "title": "\u003cb\u003eCOLGATE PALMOLIVE CO\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "COMCAST CORP", "label": "COMCAST CORP", "shape": "dot", "size": 20, "title": "\u003cb\u003eCOMCAST CORP\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Capital One Financial Corp", "label": "Capital One ", "shape": "dot", "size": 20, "title": "\u003cb\u003eCapital One Financial Corp\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "CONOCOPHILLIPS", "label": "CONOCOPHILLI", "shape": "dot", "size": 20, "title": "\u003cb\u003eCONOCOPHILLIPS\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "ConocoPhillips", "label": "ConocoPhilli", "shape": "dot", "size": 20, "title": "\u003cb\u003eConocoPhillips\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "DEERE \u0026 CO", "label": "DEERE \u0026 CO", "shape": "dot", "size": 20, "title": "\u003cb\u003eDEERE \u0026 CO\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "John Deere", "label": "John Deere", "shape": "dot", "size": 20, "title": "\u003cb\u003eJohn Deere\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Samsung, Foxconn"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Walt Disney Co", "label": "Walt Disney ", "shape": "dot", "size": 20, "title": "\u003cb\u003eWalt Disney Co\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "FORD MOTOR CO", "label": "FORD MOTOR C", "shape": "dot", "size": 20, "title": "\u003cb\u003eFORD MOTOR CO\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "General Dynamics Corp", "label": "General Dyna", "shape": "dot", "size": 20, "title": "\u003cb\u003eGeneral Dynamics Corp\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "GILEAD SCIENCES, INC", "label": "GILEAD SCIEN", "shape": "dot", "size": 20, "title": "\u003cb\u003eGILEAD SCIENCES, INC\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "General Motors Co", "label": "General Moto", "shape": "dot", "size": 20, "title": "\u003cb\u003eGeneral Motors Co\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Alphabet Inc", "label": "Alphabet Inc", "shape": "dot", "size": 20, "title": "\u003cb\u003eAlphabet Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "The Goldman Sachs Group, Inc", "label": "The Goldman ", "shape": "dot", "size": 20, "title": "\u003cb\u003eThe Goldman Sachs Group, Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Goldman Sachs Group Inc", "label": "Goldman Sach", "shape": "dot", "size": 20, "title": "\u003cb\u003eGoldman Sachs Group Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "HONEYWELL INTERNATIONAL INC", "label": "HONEYWELL IN", "shape": "dot", "size": 20, "title": "\u003cb\u003eHONEYWELL INTERNATIONAL INC\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Honeywell International Inc", "label": "Honeywell In", "shape": "dot", "size": 20, "title": "\u003cb\u003eHoneywell International Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "International Business Machines Corp", "label": "Internationa", "shape": "dot", "size": 20, "title": "\u003cb\u003eInternational Business Machines Corp\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Intel Corp", "label": "Intel Corp", "shape": "dot", "size": 20, "title": "\u003cb\u003eIntel Corp\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "JOHNSON \u0026 JOHNSON", "label": "JOHNSON \u0026 JO", "shape": "dot", "size": 20, "title": "\u003cb\u003eJOHNSON \u0026 JOHNSON\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "JPMORGAN CHASE \u0026 CO", "label": "JPMORGAN CHA", "shape": "dot", "size": 20, "title": "\u003cb\u003eJPMORGAN CHASE \u0026 CO\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Linde PLC", "label": "Linde PLC", "shape": "dot", "size": 20, "title": "\u003cb\u003eLinde PLC\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "LOCKHEED MARTIN CORP", "label": "LOCKHEED MAR", "shape": "dot", "size": 20, "title": "\u003cb\u003eLOCKHEED MARTIN CORP\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "LOWES COMPANIES INC", "label": "LOWES COMPAN", "shape": "dot", "size": 20, "title": "\u003cb\u003eLOWES COMPANIES INC\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "McDONALDS CORP", "label": "McDONALDS CO", "shape": "dot", "size": 20, "title": "\u003cb\u003eMcDONALDS CORP\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Medtronic plc", "label": "Medtronic pl", "shape": "dot", "size": 20, "title": "\u003cb\u003eMedtronic plc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "METLIFE INC", "label": "METLIFE INC", "shape": "dot", "size": 20, "title": "\u003cb\u003eMETLIFE INC\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Meta Platforms, Inc", "label": "Meta Platfor", "shape": "dot", "size": 20, "title": "\u003cb\u003eMeta Platforms, Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "3M CO", "label": "3M CO", "shape": "dot", "size": 20, "title": "\u003cb\u003e3M CO\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Altria Group, Inc", "label": "Altria Group", "shape": "dot", "size": 20, "title": "\u003cb\u003eAltria Group, Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Merck \u0026 Co., Inc", "label": "Merck \u0026 Co.,", "shape": "dot", "size": 20, "title": "\u003cb\u003eMerck \u0026 Co., Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "MORGAN STANLEY", "label": "MORGAN STANL", "shape": "dot", "size": 20, "title": "\u003cb\u003eMORGAN STANLEY\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Microsoft Corp", "label": "Microsoft Co", "shape": "dot", "size": 20, "title": "\u003cb\u003eMicrosoft Corp\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Netflix Inc", "label": "Netflix Inc", "shape": "dot", "size": 20, "title": "\u003cb\u003eNetflix Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "NIKE, Inc", "label": "NIKE, Inc", "shape": "dot", "size": 20, "title": "\u003cb\u003eNIKE, Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Oracle Corp", "label": "Oracle Corp", "shape": "dot", "size": 20, "title": "\u003cb\u003eOracle Corp\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "PEPSICO INC", "label": "PEPSICO INC", "shape": "dot", "size": 20, "title": "\u003cb\u003ePEPSICO INC\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Pfizer Inc", "label": "Pfizer Inc", "shape": "dot", "size": 20, "title": "\u003cb\u003ePfizer Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Philip Morris International Inc", "label": "Philip Morri", "shape": "dot", "size": 20, "title": "\u003cb\u003ePhilip Morris International Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "PayPal Holdings, Inc", "label": "PayPal Holdi", "shape": "dot", "size": 20, "title": "\u003cb\u003ePayPal Holdings, Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "STARBUCKS CORP", "label": "STARBUCKS CO", "shape": "dot", "size": 20, "title": "\u003cb\u003eSTARBUCKS CORP\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "AT\u0026T INC", "label": "AT\u0026T INC", "shape": "dot", "size": 20, "title": "\u003cb\u003eAT\u0026T INC\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Foxconn, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "THERMO FISHER SCIENTIFIC INC", "label": "THERMO FISHE", "shape": "dot", "size": 20, "title": "\u003cb\u003eTHERMO FISHER SCIENTIFIC INC\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Tesla, Inc", "label": "Tesla, Inc", "shape": "dot", "size": 20, "title": "\u003cb\u003eTesla, Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "UNITEDHEALTH GROUP INC", "label": "UNITEDHEALTH", "shape": "dot", "size": 20, "title": "\u003cb\u003eUNITEDHEALTH GROUP INC\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "UNION PACIFIC CORP", "label": "UNION PACIFI", "shape": "dot", "size": 20, "title": "\u003cb\u003eUNION PACIFIC CORP\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC, Samsung"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Union Pacific Corp", "label": "Union Pacifi", "shape": "dot", "size": 20, "title": "\u003cb\u003eUnion Pacific Corp\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}, {"color": "#0a1628", "font": {"color": "#0a1628"}, "id": "Walmart Inc", "label": "Walmart Inc", "shape": "dot", "size": 20, "title": "\u003cb\u003eWalmart Inc\u003c/b\u003e\u003cbr\u003eKey suppliers: TSMC"}]);
+                  edges = new vis.DataSet([{"color": "#e8e8e6", "from": "Apple Inc", "to": "TSMC"}, {"color": "#e8e8e6", "from": "Apple Inc", "to": "Foxconn"}, {"color": "#e8e8e6", "from": "TSMC", "to": "AbbVie Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "ABBOTT LABORATORIES"}, {"color": "#e8e8e6", "from": "TSMC", "to": "ADOBE INC"}, {"color": "#e8e8e6", "from": "TSMC", "to": "AMGEN INC"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Broadcom Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "American Express Co"}, {"color": "#e8e8e6", "from": "TSMC", "to": "BOEING CO"}, {"color": "#e8e8e6", "from": "TSMC", "to": "BANK OF AMERICA CORP /DE/"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Booking Holdings Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "BlackRock, Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "BRISTOL MYERS SQUIBB CO"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Bristol Myers Squibb Co"}, {"color": "#e8e8e6", "from": "TSMC", "to": "COLGATE PALMOLIVE CO"}, {"color": "#e8e8e6", "from": "TSMC", "to": "COMCAST CORP"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Capital One Financial Corp"}, {"color": "#e8e8e6", "from": "TSMC", "to": "CONOCOPHILLIPS"}, {"color": "#e8e8e6", "from": "TSMC", "to": "ConocoPhillips"}, {"color": "#e8e8e6", "from": "TSMC", "to": "DEERE \u0026 CO"}, {"color": "#e8e8e6", "from": "TSMC", "to": "John Deere"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Walt Disney Co"}, {"color": "#e8e8e6", "from": "TSMC", "to": "FORD MOTOR CO"}, {"color": "#e8e8e6", "from": "TSMC", "to": "General Dynamics Corp"}, {"color": "#e8e8e6", "from": "TSMC", "to": "GILEAD SCIENCES, INC"}, {"color": "#e8e8e6", "from": "TSMC", "to": "General Motors Co"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Alphabet Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "The Goldman Sachs Group, Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Goldman Sachs Group Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "HONEYWELL INTERNATIONAL INC"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Honeywell International Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "International Business Machines Corp"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Intel Corp"}, {"color": "#e8e8e6", "from": "TSMC", "to": "JOHNSON \u0026 JOHNSON"}, {"color": "#e8e8e6", "from": "TSMC", "to": "JPMORGAN CHASE \u0026 CO"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Linde PLC"}, {"color": "#e8e8e6", "from": "TSMC", "to": "LOCKHEED MARTIN CORP"}, {"color": "#e8e8e6", "from": "TSMC", "to": "LOWES COMPANIES INC"}, {"color": "#e8e8e6", "from": "TSMC", "to": "McDONALDS CORP"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Medtronic plc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "METLIFE INC"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Meta Platforms, Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "3M CO"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Altria Group, Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Merck \u0026 Co., Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "MORGAN STANLEY"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Microsoft Corp"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Netflix Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "NIKE, Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Oracle Corp"}, {"color": "#e8e8e6", "from": "TSMC", "to": "PEPSICO INC"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Pfizer Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Philip Morris International Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "PayPal Holdings, Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "STARBUCKS CORP"}, {"color": "#e8e8e6", "from": "TSMC", "to": "AT\u0026T INC"}, {"color": "#e8e8e6", "from": "TSMC", "to": "THERMO FISHER SCIENTIFIC INC"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Tesla, Inc"}, {"color": "#e8e8e6", "from": "TSMC", "to": "UNITEDHEALTH GROUP INC"}, {"color": "#e8e8e6", "from": "TSMC", "to": "UNION PACIFIC CORP"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Union Pacific Corp"}, {"color": "#e8e8e6", "from": "TSMC", "to": "Walmart Inc"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "AbbVie Inc"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "AMGEN INC"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "Broadcom Inc"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "BOEING CO"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "BANK OF AMERICA CORP /DE/"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "Booking Holdings Inc"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "BRISTOL MYERS SQUIBB CO"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "Bristol Myers Squibb Co"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "COMCAST CORP"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "DEERE \u0026 CO"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "John Deere"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "FORD MOTOR CO"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "General Dynamics Corp"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "General Motors Co"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "Alphabet Inc"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "Honeywell International Inc"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "JOHNSON \u0026 JOHNSON"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "JPMORGAN CHASE \u0026 CO"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "LOCKHEED MARTIN CORP"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "LOWES COMPANIES INC"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "McDONALDS CORP"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "METLIFE INC"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "Meta Platforms, Inc"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "3M CO"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "MORGAN STANLEY"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "NIKE, Inc"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "Oracle Corp"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "PEPSICO INC"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "Philip Morris International Inc"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "PayPal Holdings, Inc"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "STARBUCKS CORP"}, {"color": "#e8e8e6", "from": "Foxconn", "to": "AT\u0026T INC"}, {"color": "#e8e8e6", "from": "AbbVie Inc", "to": "Samsung"}, {"color": "#e8e8e6", "from": "AbbVie Inc", "to": "Lupron"}, {"color": "#e8e8e6", "from": "Samsung", "to": "AMGEN INC"}, {"color": "#e8e8e6", "from": "Samsung", "to": "BOEING CO"}, {"color": "#e8e8e6", "from": "Samsung", "to": "Booking Holdings Inc"}, {"color": "#e8e8e6", "from": "Samsung", "to": "BRISTOL MYERS SQUIBB CO"}, {"color": "#e8e8e6", "from": "Samsung", "to": "Bristol Myers Squibb Co"}, {"color": "#e8e8e6", "from": "Samsung", "to": "COMCAST CORP"}, {"color": "#e8e8e6", "from": "Samsung", "to": "John Deere"}, {"color": "#e8e8e6", "from": "Samsung", "to": "DEERE \u0026 CO"}, {"color": "#e8e8e6", "from": "Samsung", "to": "FORD MOTOR CO"}, {"color": "#e8e8e6", "from": "Samsung", "to": "General Dynamics Corp"}, {"color": "#e8e8e6", "from": "Samsung", "to": "General Motors Co"}, {"color": "#e8e8e6", "from": "Samsung", "to": "Alphabet Inc"}, {"color": "#e8e8e6", "from": "Samsung", "to": "Honeywell International Inc"}, {"color": "#e8e8e6", "from": "Samsung", "to": "JPMORGAN CHASE \u0026 CO"}, {"color": "#e8e8e6", "from": "Samsung", "to": "LOCKHEED MARTIN CORP"}, {"color": "#e8e8e6", "from": "Samsung", "to": "LOWES COMPANIES INC"}, {"color": "#e8e8e6", "from": "Samsung", "to": "McDONALDS CORP"}, {"color": "#e8e8e6", "from": "Samsung", "to": "METLIFE INC"}, {"color": "#e8e8e6", "from": "Samsung", "to": "Meta Platforms, Inc"}, {"color": "#e8e8e6", "from": "Samsung", "to": "MORGAN STANLEY"}, {"color": "#e8e8e6", "from": "Samsung", "to": "NIKE, Inc"}, {"color": "#e8e8e6", "from": "Samsung", "to": "Oracle Corp"}, {"color": "#e8e8e6", "from": "Samsung", "to": "PEPSICO INC"}, {"color": "#e8e8e6", "from": "Samsung", "to": "Philip Morris International Inc"}, {"color": "#e8e8e6", "from": "Samsung", "to": "STARBUCKS CORP"}, {"color": "#e8e8e6", "from": "Samsung", "to": "AT\u0026T INC"}, {"color": "#e8e8e6", "from": "Samsung", "to": "UNION PACIFIC CORP"}, {"color": "#e8e8e6", "from": "ADOBE INC", "to": "Microsoft"}, {"color": "#e8e8e6", "from": "AIG Parent", "to": "Fortitude Re"}, {"color": "#e8e8e6", "from": "AIG Parent", "to": "lessors"}, {"color": "#e8e8e6", "from": "AIG Parent", "to": "employees"}, {"color": "#e8e8e6", "from": "AIG Parent", "to": "subsidiaries"}, {"color": "#e8e8e6", "from": "AMGEN INC", "to": "Lilly"}, {"color": "#e8e8e6", "from": "AMGEN INC", "to": "contract manufacturers"}, {"color": "#e8e8e6", "from": "Broadcom Inc", "to": "ASE"}]);
+
+                  nodeColors = {};
+                  allNodes = nodes.get({ returnType: "Object" });
+                  for (nodeId in allNodes) {
+                    nodeColors[nodeId] = allNodes[nodeId].color;
+                  }
+                  allEdges = edges.get({ returnType: "Object" });
+                  // adding nodes and edges to the graph
+                  data = {nodes: nodes, edges: edges};
+
+                  var options = {
+    "configure": {
+        "enabled": false
+    },
+    "edges": {
+        "color": {
+            "inherit": true
+        },
+        "smooth": {
+            "enabled": true,
+            "type": "dynamic"
+        }
+    },
+    "interaction": {
+        "dragNodes": true,
+        "hideEdgesOnDrag": false,
+        "hideNodesOnDrag": false
+    },
+    "physics": {
+        "enabled": true,
+        "forceAtlas2Based": {
+            "avoidOverlap": 0,
+            "centralGravity": 0.01,
+            "damping": 0.4,
+            "gravitationalConstant": -50,
+            "springConstant": 0.08,
+            "springLength": 100
+        },
+        "solver": "forceAtlas2Based",
+        "stabilization": {
+            "enabled": true,
+            "fit": true,
+            "iterations": 1000,
+            "onlyDynamicEdges": false,
+            "updateInterval": 50
+        }
+    }
+};
+
+
+
+
+
+
+                  network = new vis.Network(container, data, options);
+
+
+
+
+
+
+
+
+
+
+                  return network;
+
+              }
+              drawGraph();
+        </script>
+    </body>
+</html>

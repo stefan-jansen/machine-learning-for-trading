@@ -1,0 +1,44 @@
+# Model configurations for fwd_ret_60m
+# Each entry references a preset in case_studies/_presets/{family}/.
+# Comment out lines to skip configs; add new preset names to extend.
+
+linear:
+- ols
+- ridge_a0.001
+- ridge_a0.01
+- ridge_a0.1
+- ridge_a1.0
+- ridge_a10.0
+- ridge_a100.0
+- ridge_a1000.0
+- ridge_a10000.0
+- ridge_a100000.0
+- ridge_a1000000.0
+- ridge_a10000000.0
+- lasso_a0.01
+- lasso_a0.1
+- enet_a0.01
+- enet_a0.1
+gbm:
+- default_mse
+- default_mae
+- default_huber
+- leaves_7_mse
+- leaves_7_mae
+- leaves_7_huber
+- leaves_15_mse
+- leaves_15_mae
+- leaves_15_huber
+- leaves_31_mse
+- leaves_31_mae
+- leaves_31_huber
+- leaves_63_mse
+- leaves_63_mae
+- leaves_63_huber
+deep_learning:
+- nlinear
+- lstm_h64
+- tcn
+- patchtst
+causal_dml:
+- dml

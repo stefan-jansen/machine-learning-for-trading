@@ -41,13 +41,13 @@
 #
 # ## Prerequisites
 #
-# - `05_signal_evaluation` — produces the IC time series whose inference we
+# - `05_signal_evaluation` - produces the IC time series whose inference we
 #   formalize here.
 # - Familiarity with autocorrelation, the Newey-West HAC estimator, and
 #   block bootstrap.
 
 # %%
-"""IC Inference — statistical testing and confidence intervals for information coefficients."""
+"""IC Inference - statistical testing and confidence intervals for information coefficients."""
 
 from __future__ import annotations
 
@@ -377,16 +377,16 @@ print(f"\nBlock Bootstrap CI includes zero: {'Yes' if ci_includes_zero else 'No'
 # single date, it resamples asset pairs and recomputes Spearman IC. This is useful
 # when you want a confidence interval for a single cross-section's IC.
 #
-# For **time-series** inference on the IC series itself — "is the mean IC over
-# many dates significantly different from zero?" — the correct tool is the
+# For **time-series** inference on the IC series itself - "is the mean IC over
+# many dates significantly different from zero?" - the correct tool is the
 # block bootstrap from Section 3 above, which preserves temporal dependence.
 #
 # ```python
-# # Cross-sectional bootstrap (library) — CI for one date's IC
+# # Cross-sectional bootstrap (library) - CI for one date's IC
 # from ml4t.diagnostic.evaluation.stats.hac_standard_errors import stationary_bootstrap_ic
 # result = stationary_bootstrap_ic(signals_t, returns_t, n_samples=1000)
 #
-# # Time-series bootstrap (manual) — CI for mean IC across dates
+# # Time-series bootstrap (manual) - CI for mean IC across dates
 # block_bootstrap_ic_ci(ic_series, n_bootstrap=2000, block_length=21)
 # ```
 #
@@ -499,7 +499,7 @@ fig.show()
 # | 0.10 | Outside the published cross-sectional range; prior is leakage until ruled out |
 #
 # Whether any of these magnitudes survives transaction costs depends on
-# rebalancing frequency, turnover, and capacity — see the break-even
+# rebalancing frequency, turnover, and capacity - see the break-even
 # analysis in `05_signal_evaluation`.
 
 # %%
@@ -527,7 +527,7 @@ print(f"  Annual cost drag: {cost_impact:.2%}")
 # This is a simplified Grinold approximation
 ir_approx = observed_ic * np.sqrt(252)
 print(f"\nGrinold IR approximation (raw): {ir_approx:.2f}")
-print("  (This is a raw, pre-cost upper bound — net IR depends on turnover and costs;")
+print("  (This is a raw, pre-cost upper bound - net IR depends on turnover and costs;")
 print("   the break-even cost analysis in `05_signal_evaluation` evaluates feasibility.)")
 
 # %% [markdown]

@@ -81,19 +81,26 @@ def prepare_panel_data(
     label_col: str,
     date_col: str,
     entity_col: str,
+    *,
+    eligibility_dataset: pl.DataFrame,
     max_entities: int = 0,
     min_coverage: float = 0.5,
     eval_label_col: str | None = None,
     macro_panel: pl.DataFrame | None = None,
 ) -> dict[str, Any]:
-    """Build a persistent-entity panel for stable-ID models such as PCA."""
+    """Build a persistent-entity panel with eligibility learned from training data."""
     df = _sort_panel_frame(dataset, date_col=date_col, entity_col=entity_col)
+    eligibility_df = _sort_panel_frame(
+        eligibility_dataset,
+        date_col=date_col,
+        entity_col=entity_col,
+    )
 
-    n_dates_total = df[date_col].n_unique()
+    n_dates_total = eligibility_df[date_col].n_unique()
     min_dates = max(int(n_dates_total * min_coverage), 10)
 
     eligible = (
-        df.group_by(entity_col)
+        eligibility_df.group_by(entity_col)
         .len()
         .filter(pl.col("len") >= min_dates)
         .sort(["len", entity_col], descending=[True, False])
@@ -117,21 +124,29 @@ def prepare_panel_data(
     eval_returns = (
         np.full((n_dates, n_entities), np.nan, dtype=np.float32) if eval_label_col else None
     )
-    entity_to_idx = {entity: idx for idx, entity in enumerate(entities)}
+    date_values = np.asarray(dates, dtype="datetime64[ns]")
+    entity_values = np.asarray(entities, dtype=object)
+    date_idx = np.searchsorted(date_values, df[date_col].to_numpy())
+    entity_idx = np.searchsorted(entity_values, df[entity_col].to_numpy())
 
-    groups = df.partition_by(date_col, maintain_order=True)
-    for date_idx, group in enumerate(groups):
-        for row in group.iter_rows(named=True):
-            entity_idx = entity_to_idx.get(row[entity_col])
-            if entity_idx is None:
-                continue
-            chars[date_idx, entity_idx] = np.asarray(
-                [row.get(feature, np.nan) for feature in feature_names],
-                dtype=np.float32,
+    chars[date_idx, entity_idx] = (
+        df.select(feature_names)
+        .to_numpy()
+        .astype(
+            np.float32,
+            copy=False,
+        )
+    )
+    returns[date_idx, entity_idx] = df[label_col].to_numpy().astype(np.float32, copy=False)
+    if eval_returns is not None:
+        eval_returns[date_idx, entity_idx] = (
+            df[eval_label_col]
+            .to_numpy()
+            .astype(
+                np.float32,
+                copy=False,
             )
-            returns[date_idx, entity_idx] = np.float32(row.get(label_col, np.nan))
-            if eval_returns is not None:
-                eval_returns[date_idx, entity_idx] = np.float32(row.get(eval_label_col, np.nan))
+        )
 
     macro = None
     macro_features: list[str] | None = None
@@ -142,8 +157,8 @@ def prepare_panel_data(
         "chars": chars,
         "returns": returns,
         "eval_returns": eval_returns,
-        "dates": np.asarray(dates, dtype="datetime64[ns]"),
-        "entities": np.asarray(entities, dtype=object),
+        "dates": date_values,
+        "entities": entity_values,
         "entity_col": entity_col,
         "macro": macro,
         "macro_features": macro_features,
@@ -233,12 +248,20 @@ def align_macro_to_dates(
     if not feature_cols:
         return np.zeros((len(dates), 0), dtype=np.float32), []
 
-    date_frame = pl.DataFrame({date_col: list(dates)}).sort(date_col)
-    aligned = (
-        date_frame.join_asof(macro.sort(date_col), on=date_col, strategy="backward")
-        .fill_null(strategy="backward")
-        .fill_null(strategy="forward")
+    date_frame = (
+        pl.DataFrame(pl.Series(date_col, dates))
+        .with_columns(pl.col(date_col).cast(macro.schema[date_col]))
+        .sort(date_col)
     )
+    aligned = date_frame.join_asof(
+        macro.sort(date_col), on=date_col, strategy="backward"
+    ).fill_null(strategy="forward")
+    null_counts = aligned.select(feature_cols).null_count().row(0)
+    if any(null_counts):
+        missing = [name for name, count in zip(feature_cols, null_counts, strict=True) if count]
+        raise ValueError(
+            f"Macro context is unavailable on or before the first requested date for: {missing}"
+        )
     return aligned.select(feature_cols).to_numpy().astype(np.float32), feature_cols
 
 

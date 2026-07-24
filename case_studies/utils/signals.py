@@ -212,9 +212,11 @@ def build_target_weights(
         n_assets=pl.col(score_col).count().over(time_col),
     )
 
-    # Effective top_k (can't select more assets than available)
+    # Long and short selections must remain disjoint. With an odd universe,
+    # leave the median asset unselected when top_k reaches half the panel.
+    max_side = pl.col("n_assets") // 2 if long_short else pl.col("n_assets")
     df = df.with_columns(
-        eff_k=pl.min_horizontal(pl.lit(top_k), pl.col("n_assets")),
+        eff_k=pl.min_horizontal(pl.lit(top_k), max_side),
     )
 
     if method == "equal_weight_top_k":

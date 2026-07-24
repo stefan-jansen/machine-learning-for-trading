@@ -16,7 +16,7 @@
 # %% [markdown]
 # # Case Study Overview: Cross-Strategy Summary
 #
-# **ML4T Third Edition - Chapter 6: Strategy Definition**
+# **ML4T Third Edition - Chapter 6: Strategy Research Framework**
 #
 # **Docker image**: `ml4t`
 #
@@ -45,6 +45,11 @@ import yaml
 from matplotlib.patches import Patch
 
 from utils.paths import REPO_ROOT
+from utils.style import COLORS
+
+# ML4T role colors, matching the CV schematics in 02_cv_foundations: training is
+# the slate main series, validation the amber highlight, the sealed holdout a muted neutral.
+TRAIN_C, VAL_C, HOLDOUT_C = COLORS["slate"], COLORS["amber"], COLORS["silver_muted"]
 
 warnings.filterwarnings("ignore")
 
@@ -462,7 +467,7 @@ def plot_coverage(coverage_data):
             cs["val_start"] - cs["data_start"],
             left=cs["data_start"],
             height=bar_height,
-            color="0.3",
+            color=TRAIN_C,
             edgecolor="white",
             linewidth=0.5,
         )
@@ -471,7 +476,7 @@ def plot_coverage(coverage_data):
             cs["holdout_start"] - cs["val_start"],
             left=cs["val_start"],
             height=bar_height,
-            color="0.55",
+            color=VAL_C,
             edgecolor="white",
             linewidth=0.5,
         )
@@ -480,7 +485,7 @@ def plot_coverage(coverage_data):
             cs["holdout_end"] - cs["holdout_start"] + 1,
             left=cs["holdout_start"],
             height=bar_height,
-            color="0.8",
+            color=HOLDOUT_C,
             edgecolor="white",
             linewidth=0.5,
         )
@@ -496,9 +501,9 @@ def plot_coverage(coverage_data):
     ax.tick_params(left=False)
 
     legend_elements = [
-        Patch(facecolor="0.3", label="Training"),
-        Patch(facecolor="0.55", label="Validation"),
-        Patch(facecolor="0.8", label="Holdout (sealed)"),
+        Patch(facecolor=TRAIN_C, label="Training"),
+        Patch(facecolor=VAL_C, label="Validation"),
+        Patch(facecolor=HOLDOUT_C, label="Holdout (sealed)"),
     ]
     ax.legend(
         handles=legend_elements,
@@ -546,9 +551,10 @@ if case_studies_coverage:
     )
 
 # %% [markdown]
-# **Interpretation** (computed from results):
+# **Interpretation** (reconstructed from each protocol):
 #
-# The coverage statistics above show the actual data spans. Key observations:
+# The spans above are implied by each walk-forward protocol (holdout, fold count,
+# and train/test windows), not raw data-availability dates. Key observations:
 # - **Longest histories** (US Equities, Firm Characteristics) provide deep validation
 #   but may include regime changes that affect stationarity
 # - **Recent datasets** (Crypto, Microstructure) limit walk-forward depth but

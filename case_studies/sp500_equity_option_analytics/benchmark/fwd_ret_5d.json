@@ -1,0 +1,41 @@
+{
+  "case_study": "sp500_equity_option_analytics",
+  "label": "fwd_ret_5d",
+  "method": "daily_cross_sectional_mean_close_pct_change",
+  "periods_per_year": 252,
+  "n_symbols_in_universe": 550,
+  "sharpe": 0.685197,
+  "cagr": 0.169547,
+  "vol": 0.290879,
+  "n_periods": 501,
+  "ts_min": "2019-01-08 00:00:00",
+  "ts_max": "2021-12-31 00:00:00",
+  "by_period": {
+    "overall": {
+      "sharpe": 0.882775,
+      "cagr": 0.208359,
+      "vol": 0.250214,
+      "n_periods": 753
+    },
+    "validation": {
+      "sharpe": 0.685197,
+      "cagr": 0.169547,
+      "vol": 0.290879,
+      "n_periods": 501
+    },
+    "holdout": {
+      "sharpe": 1.912929,
+      "cagr": 0.28939,
+      "vol": 0.137889,
+      "n_periods": 252
+    },
+    "validation_window": [
+      "2019-01-08 00:00:00",
+      "2020-12-31 00:00:00"
+    ],
+    "holdout_window": [
+      "2021-01-04 00:00:00",
+      "2021-12-31 00:00:00"
+    ]
+  }
+}

@@ -467,7 +467,7 @@ def load_backtest_predictions(
 ) -> BacktestPredictions:
     """Load and normalize prediction artifacts for backtesting.
 
-    The model registry (``registry.db`` / ``models.db``) is the source of truth.
+    The model registry (``registry.db``) is the source of truth.
     Predictions are loaded from content-addressed run directories
     (``run_log/models/runs/{hash}/`` or ``models/runs/{hash}/``), keyed by
     the registry's ``model_runs`` table.
@@ -1553,24 +1553,25 @@ def print_stage_dsr_summary(
 
     The selection-bias question — "after K variants were tried, does the leader
     have skill?" — is well-defined at every pipeline stage, not just the
-    signal stage. This helper iterates the four stages, prints the leader
+    equal-weight baseline. This helper iterates the four stages, prints the leader
     table for each one (with PSR per variant + DSR for the leader), and
     silently skips stages that have no data.
     """
     for stage in stages:
+        display_stage = "equal-weight baseline" if stage == "signal" else stage
         try:
             table = explorer.deflated_sharpe(stage=stage, top_n=top_n)
         except ValueError as exc:
             if "zero variance" in str(exc).lower():
-                print(f"\n--- DSR @ {stage}: skipped ({exc}) ---")
+                print(f"\n--- DSR @ {display_stage}: skipped ({exc}) ---")
                 continue
             raise
         except Exception as exc:  # pragma: no cover
-            print(f"\n--- DSR @ {stage}: error ({exc}) ---")
+            print(f"\n--- DSR @ {display_stage}: error ({exc}) ---")
             continue
         if table is None or table.is_empty():
             continue
-        print(f"\n--- DSR @ {stage} (K={table.height}) ---")
+        print(f"\n--- DSR @ {display_stage} (K={table.height}) ---")
         print(table.head(head))
 
 

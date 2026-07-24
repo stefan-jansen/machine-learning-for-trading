@@ -102,6 +102,23 @@ def resolve_label_buffer(
     return None
 
 
+def resolve_label_horizon(
+    case_study_id: str,
+    label: str,
+    setup: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Return the outcome horizon, which may be shorter than the CV buffer."""
+    label_spec = load_label_spec(case_study_id, label)
+    if label_spec is not None:
+        definition = label_spec.get("definition", {})
+        if definition.get("horizon"):
+            return str(definition["horizon"])
+
+    labels = (setup or {}).get("labels", {})
+    horizon = (labels.get("horizons") or {}).get(label)
+    return str(horizon) if horizon else resolve_label_buffer(case_study_id, label, setup)
+
+
 def resolve_market_semantics(
     case_study_id: str,
     setup: Mapping[str, Any] | None = None,
@@ -130,6 +147,7 @@ __all__ = [
     "load_label_spec",
     "load_market_data_spec",
     "resolve_label_buffer",
+    "resolve_label_horizon",
     "resolve_market_runtime",
     "resolve_market_semantics",
     "resolve_storage_path",

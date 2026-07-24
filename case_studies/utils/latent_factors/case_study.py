@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from hashlib import sha256
+from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import polars as pl
 import yaml
 
 from case_studies.utils.latent_factors import EXPENSIVE_MODELS, run_latent_factor_cv
+from case_studies.utils.latent_factors.library_bridge import preferred_latent_device
+from case_studies.utils.latent_factors.macro_context import load_configured_macro_context
 from data import load_macro
+from utils.artifact_specs import load_feature_spec, load_label_spec, resolve_storage_path
 from utils.modeling import load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
 
@@ -28,6 +34,8 @@ class LatentFactorCaseStudyContext:
     setup_model_kwargs: dict[str, dict[str, Any]]
     persistent_entities: bool
     macro_panel: pl.DataFrame | None
+    macro_context_spec: dict[str, Any] | None
+    input_data_spec: dict[str, Any]
     dataset: pl.DataFrame
     feature_names: list[str]
     task_type: str
@@ -36,8 +44,14 @@ class LatentFactorCaseStudyContext:
     date_col: str
     entity_col: str
     splits: list[dict[str, Any]]
+    temporal_by_fold: pd.DataFrame | None
+    temporal_keys: list[str]
+    temporal_feature_names: list[str]
     max_symbols: int = 0
     max_folds: int = 0
+    device: str = "cpu"
+    num_threads: int = 8
+    deterministic_algorithms: bool = True
 
     def model_kwargs_for_label(self, label: str) -> dict[str, dict[str, Any]]:
         """Return preset+setup-merged model_kwargs for a specific label.
@@ -75,11 +89,31 @@ def load_case_study_context(
     setup_kwargs = _normalize_model_kwargs(lf_setup.get("model_kwargs", {}))
     model_kwargs = _merge_model_kwargs(preset_kwargs, setup_kwargs)
     persistent_entities = bool(lf_setup.get("persistent_entities", True))
-    macro_panel = load_macro() if use_macro else None
+    device = str(lf_setup.get("device", preferred_latent_device()))
+    num_threads = int(lf_setup.get("num_threads", 8))
+    deterministic_algorithms = bool(lf_setup.get("deterministic_algorithms", True))
+    macro_context_config = lf_setup.get("macro_context")
+    if use_macro and macro_context_config:
+        macro_panel, macro_context_spec = load_configured_macro_context(macro_context_config)
+    elif use_macro:
+        macro_panel, macro_context_spec = _load_macro_panel(lf_setup), None
+    else:
+        macro_panel, macro_context_spec = (
+            None,
+            {
+                "policy": "disabled",
+                "version": "v1",
+                "series": [],
+                "availability_lag_days": 0,
+                "alignment": "none",
+                "input_digest": None,
+            },
+        )
 
     modeling_dataset = load_modeling_dataset(
         case_study_id, resolved_primary, max_symbols=max_symbols
     )
+    input_data_spec = _training_input_identity(case_study_id, resolved_primary)
     splits = modeling_dataset.splits[:max_folds] if max_folds else modeling_dataset.splits
 
     return LatentFactorCaseStudyContext(
@@ -92,6 +126,8 @@ def load_case_study_context(
         setup_model_kwargs=setup_kwargs,
         persistent_entities=persistent_entities,
         macro_panel=macro_panel,
+        macro_context_spec=macro_context_spec,
+        input_data_spec=input_data_spec,
         dataset=modeling_dataset.dataset,
         feature_names=modeling_dataset.feature_names,
         task_type=modeling_dataset.task_type,
@@ -100,9 +136,40 @@ def load_case_study_context(
         date_col=modeling_dataset.date_col,
         entity_col=modeling_dataset.entity_cols[0] if modeling_dataset.entity_cols else "symbol",
         splits=splits,
+        temporal_by_fold=modeling_dataset.temporal_by_fold,
+        temporal_keys=modeling_dataset.temporal_keys,
+        temporal_feature_names=modeling_dataset.temporal_feature_names,
         max_symbols=max_symbols,
         max_folds=max_folds,
+        device=device,
+        num_threads=num_threads,
+        deterministic_algorithms=deterministic_algorithms,
     )
+
+
+def _load_macro_panel(lf_setup: dict[str, Any]) -> pl.DataFrame:
+    """Load the configured point-in-time macro surface."""
+    configured_series = lf_setup.get("macro_series")
+    if configured_series is not None:
+        if not isinstance(configured_series, list) or not configured_series:
+            raise ValueError("modeling.latent_factors.macro_series must be a non-empty list")
+        if not all(isinstance(name, str) and name for name in configured_series):
+            raise ValueError("Every latent-factor macro series must be a non-empty string")
+
+    macro_panel = load_macro(series=configured_series)
+    if configured_series is not None:
+        missing = sorted(set(configured_series) - set(macro_panel.columns))
+        if missing:
+            raise ValueError(f"Configured latent-factor macro series are unavailable: {missing}")
+
+    availability_lag_days = int(lf_setup.get("macro_availability_lag_days", 0))
+    if availability_lag_days < 0:
+        raise ValueError("macro_availability_lag_days cannot be negative")
+    if availability_lag_days:
+        macro_panel = macro_panel.with_columns(
+            pl.col("timestamp") + pl.duration(days=availability_lag_days)
+        )
+    return macro_panel
 
 
 def configured_models(
@@ -129,6 +196,8 @@ def run_case_study_model(
     use_cache: bool,
     force_retrain: bool,
     macro_panel: pl.DataFrame | None = None,
+    reporting_epoch: int | None = None,
+    fold_workers: int = 1,
 ) -> dict[str, Any]:
     return run_latent_factor_cv(
         panel_data=None,
@@ -151,7 +220,17 @@ def run_case_study_model(
         date_col=context.date_col,
         entity_col=context.entity_col,
         macro_panel=context.macro_panel if macro_panel is None else macro_panel,
+        macro_context_spec=context.macro_context_spec,
+        input_data_spec=context.input_data_spec,
         persistent_entities=context.persistent_entities,
+        device=context.device,
+        num_threads=context.num_threads,
+        deterministic_algorithms=context.deterministic_algorithms,
+        temporal_by_fold=context.temporal_by_fold,
+        temporal_keys=context.temporal_keys,
+        temporal_feature_names=context.temporal_feature_names,
+        reporting_epoch=reporting_epoch,
+        fold_workers=fold_workers,
     )
 
 
@@ -164,6 +243,8 @@ def run_case_study_variants(
     n_epochs: int,
     use_cache: bool,
     force_retrain: bool,
+    reporting_epoch: int | None = None,
+    fold_workers: int = 1,
 ) -> dict[str, dict[str, Any]]:
     from utils.modeling import ConfigError
 
@@ -182,6 +263,7 @@ def run_case_study_variants(
         modeling_dataset = load_modeling_dataset(
             context.case_study_id, variant_label, max_symbols=context.max_symbols
         )
+        input_data_spec = _training_input_identity(context.case_study_id, variant_label)
         # Honour the same max_folds truncation the primary run uses, so a
         # `max_folds=2` smoke test does not silently retrain variants on the
         # full split set.
@@ -220,9 +302,65 @@ def run_case_study_variants(
             # without this the variant SDF runs would silently degrade to a
             # macro-less fit while the primary uses the full panel.
             macro_panel=context.macro_panel,
+            macro_context_spec=context.macro_context_spec,
+            input_data_spec=input_data_spec,
             persistent_entities=context.persistent_entities,
+            device=context.device,
+            num_threads=context.num_threads,
+            deterministic_algorithms=context.deterministic_algorithms,
+            temporal_by_fold=modeling_dataset.temporal_by_fold,
+            temporal_keys=modeling_dataset.temporal_keys,
+            temporal_feature_names=modeling_dataset.temporal_feature_names,
+            reporting_epoch=reporting_epoch,
+            fold_workers=fold_workers,
         )
     return results
+
+
+def _training_input_identity(case_study_id: str, label: str) -> dict[str, Any]:
+    """Return portable content identity for every materialized modeling input."""
+    case_dir = get_case_study_dir(case_study_id)
+    inputs = {
+        "financial": resolve_storage_path(
+            case_study_id,
+            load_feature_spec(case_study_id, "financial"),
+            "features/financial.parquet",
+        ),
+        "label": resolve_storage_path(
+            case_study_id,
+            load_label_spec(case_study_id, label),
+            f"labels/{label}.parquet",
+        ),
+        "setup": case_dir / "config" / "setup.yaml",
+    }
+    temporal_path = resolve_storage_path(
+        case_study_id,
+        load_feature_spec(case_study_id, "model_based"),
+        "features/model_based.parquet",
+    )
+    if temporal_path.exists():
+        inputs["model_based"] = temporal_path
+
+    missing = [role for role, path in inputs.items() if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"Missing training inputs for identity: {sorted(missing)}")
+
+    files = [
+        {"role": role, "sha256": f"sha256:{_sha256_file(path)}"}
+        for role, path in sorted(inputs.items())
+    ]
+    aggregate = sha256(
+        "\n".join(f"{item['role']}={item['sha256']}" for item in files).encode()
+    ).hexdigest()
+    return {"version": "v1", "files": files, "input_digest": f"sha256:{aggregate}"}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as source:
+        while block := source.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _normalize_model_kwargs(model_kwargs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:

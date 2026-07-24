@@ -44,14 +44,17 @@
 import warnings
 from datetime import date
 
+import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+import seaborn as sns
 import yaml
 from ml4t.diagnostic.metrics import compute_ic_hac_stats
 
 from data import load_etfs
 from utils.modeling import get_cv_config
 from utils.paths import get_case_study_dir
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
 
@@ -134,15 +137,47 @@ print("Created regression labels: fwd_ret_21d, fwd_ret_5d")
 # ## 4. Label Distribution Summary
 
 # %%
-# Regression 21d
-ret21 = labels_df.select("fwd_ret_21d").drop_nulls()
-print(f"Regression (fwd_ret_21d): {len(ret21):,} samples")
-print(f"  Mean: {ret21['fwd_ret_21d'].mean():.4f}, Std: {ret21['fwd_ret_21d'].std():.4f}")
+ret21 = labels_df["fwd_ret_21d"].drop_nulls().to_numpy()
+ret5 = labels_df["fwd_ret_5d"].drop_nulls().to_numpy()
+print(f"fwd_ret_21d: {len(ret21):,} samples | fwd_ret_5d: {len(ret5):,} samples")
 
-# Regression 5d
-ret5 = labels_df.select("fwd_ret_5d").drop_nulls()
-print(f"\nRegression (fwd_ret_5d): {len(ret5):,} samples")
-print(f"  Mean: {ret5['fwd_ret_5d'].mean():.4f}, Std: {ret5['fwd_ret_5d'].std():.4f}")
+# Overlaid densities on a shared axis make the horizon scaling visible: the
+# 21-day label is ~sqrt(21/5) ~ 2x wider than the 5-day label, the signature of
+# returns that compound over time. x-axis clipped to +/-20% (>99.5% of mass) so
+# the bulk is legible; both share identical bins for an honest comparison.
+clip = 0.20
+bins = np.linspace(-clip, clip, 61)
+fig, ax = plt.subplots(figsize=(9, 4))
+ax.hist(
+    ret5,
+    bins=bins,
+    density=True,
+    color=COLORS["amber"],
+    alpha=0.55,
+    label=f"fwd_ret_5d  (std {ret5.std():.3f})",
+)
+ax.hist(
+    ret21,
+    bins=bins,
+    density=True,
+    histtype="step",
+    color=COLORS["blue"],
+    linewidth=2,
+    label=f"fwd_ret_21d (std {ret21.std():.3f})",
+)
+ax.axvline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.8)
+ax.set_xlabel("Forward return (clipped to +/-20%)")
+ax.set_ylabel("Density")
+ax.set_title(
+    "The 21-day label is ~2x wider than the 5-day label (returns compound over the horizon)",
+    loc="left",
+    color=COLORS["blue"],
+    fontweight="semibold",
+)
+ax.legend(loc="upper left", frameon=False)
+sns.despine()
+fig.tight_layout()
+plt.show()
 
 # %% [markdown]
 # ### Label Autocorrelation
@@ -155,12 +190,30 @@ print(f"  Mean: {ret5['fwd_ret_5d'].mean():.4f}, Std: {ret5['fwd_ret_5d'].std():
 spy_labels = labels_df.filter(pl.col("symbol") == "SPY").sort("timestamp")
 spy_ret21 = spy_labels["fwd_ret_21d"].drop_nulls().to_numpy()
 
-acf_lags = [1, 5, 21]
-print("Label autocorrelation (SPY fwd_ret_21d):")
-for lag in acf_lags:
-    if len(spy_ret21) > lag:
-        acf_val = np.corrcoef(spy_ret21[lag:], spy_ret21[:-lag])[0, 1]
-        print(f"  Lag {lag:2d}: {acf_val:.3f}")
+max_lag = 25
+lags = np.arange(1, max_lag + 1)
+acf = np.array([np.corrcoef(spy_ret21[k:], spy_ret21[:-k])[0, 1] for k in lags])
+
+fig, ax = plt.subplots(figsize=(9, 4))
+ax.bar(lags, acf, color=COLORS["blue"], width=0.7)
+ax.axhline(0, color=COLORS["neutral"], linewidth=0.8)
+# The overlap length is horizon - 1 = 20 days: labels sharing no calendar days
+# (lag >= 21) are essentially uncorrelated. This lag sets the HAC window (Sec 5)
+# and the CV purge gap.
+ax.axvline(21, color=COLORS["copper"], linestyle=":", linewidth=1.5, label="lag 21 = horizon")
+ax.set_xlabel("Lag (trading days)")
+ax.set_ylabel("Autocorrelation")
+ax.set_title(
+    "Overlapping 21-day labels decay linearly to ~0 autocorrelation at lag 21",
+    loc="left",
+    color=COLORS["blue"],
+    fontweight="semibold",
+)
+ax.set_xticks([1, 5, 10, 15, 20, 21, 25])
+ax.legend(loc="upper right", frameon=False)
+sns.despine()
+fig.tight_layout()
+plt.show()
 
 # %% [markdown]
 # ## 5. Baseline IC: Raw Momentum vs Labels
@@ -171,16 +224,21 @@ for lag in acf_lags:
 
 
 # %%
-# Baseline signal: raw 126d momentum. Restricted to train+validation rows
-# (timestamp < holdout_start) so this expectation-setting diagnostic never
-# reads the sealed holdout.
-def baseline_frame(label_col: str) -> pl.DataFrame:
-    """126d momentum vs `label_col`, pre-holdout rows only."""
+# Baseline signal: raw 126d momentum. To keep this expectation-setting
+# diagnostic strictly out-of-holdout, we purge on the LABEL endpoint, not just
+# the signal date: a row dated just before holdout_start still has a forward
+# label that reaches h days into the holdout window. Requiring the label's
+# forward endpoint (timestamp shifted -h) to fall before holdout_start seals
+# that boundary overlap (the same purge the Sec 4.1 autocorrelation motivates).
+def baseline_frame(label_col: str, horizon: int) -> pl.DataFrame:
+    """126d momentum vs `label_col`, using only rows whose label ends pre-holdout."""
+    holdout = date.fromisoformat(holdout_start)
     return (
         labels_df.with_columns(
-            (pl.col("close") / pl.col("close").shift(126).over("symbol") - 1).alias("raw_mom_126d")
+            (pl.col("close") / pl.col("close").shift(126).over("symbol") - 1).alias("raw_mom_126d"),
+            pl.col("timestamp").shift(-horizon).over("symbol").alias("_label_end"),
         )
-        .filter(pl.col("timestamp") < date.fromisoformat(holdout_start))
+        .filter(pl.col("_label_end") < holdout)
         .drop_nulls(subset=["raw_mom_126d", label_col])
     )
 
@@ -207,8 +265,8 @@ def compute_ic_by_date(df: pl.DataFrame, signal_col: str, label_col: str) -> pl.
     return ic_by_date
 
 
-ic_21d = compute_ic_by_date(baseline_frame("fwd_ret_21d"), "raw_mom_126d", "fwd_ret_21d")
-ic_5d = compute_ic_by_date(baseline_frame("fwd_ret_5d"), "raw_mom_126d", "fwd_ret_5d")
+ic_21d = compute_ic_by_date(baseline_frame("fwd_ret_21d", 21), "raw_mom_126d", "fwd_ret_21d")
+ic_5d = compute_ic_by_date(baseline_frame("fwd_ret_5d", 5), "raw_mom_126d", "fwd_ret_5d")
 
 
 def fmt_ic(ic_df: pl.DataFrame, horizon: int) -> str:
@@ -270,10 +328,7 @@ print("Saved labels/fwd_ret_21d.parquet, labels/fwd_ret_5d.parquet")
 cv_config = get_cv_config("etfs")
 cv_config.to_json(CASE_DIR / "config" / "cv_config.json")
 print(f"Saved cv_config.json (n_splits={cv_config.n_splits})")
-# %% [markdown]
-# ## 7. Results Collection
 
-# %%
 # %% [markdown]
 # ## Key Takeaways
 #

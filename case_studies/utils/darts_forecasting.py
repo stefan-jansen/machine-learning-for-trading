@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from darts import TimeSeries
 from darts.models import NBEATSModel, TSMixerModel
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
-from case_studies.utils.registry import compute_fold_metrics_from_predictions
+from case_studies.utils.cv_results import assemble_cv_result
 from utils.modeling import RANDOM_SEED, seed_everything
 
 SUPPORTED_DARTS_ARCHITECTURES = {"nbeats", "tsmixer"}
@@ -189,7 +190,10 @@ def _resolve_chunk_lengths(cfg: dict[str, Any], label_horizon: int) -> tuple[int
     input_chunk_length = int(
         params.get(
             "input_chunk_length",
-            params.get("darts_input_chunk_length", _recommended_input_chunk_length(label_horizon)),
+            params.get(
+                "darts_input_chunk_length",
+                params.get("lookback", _recommended_input_chunk_length(label_horizon)),
+            ),
         )
     )
     output_chunk_length = int(params.get("darts_output_chunk_length", label_horizon))
@@ -199,6 +203,69 @@ def _resolve_chunk_lengths(cfg: dict[str, Any], label_horizon: int) -> tuple[int
             f"{input_chunk_length} <= {output_chunk_length} for {cfg['config_name']}"
         )
     return input_chunk_length, output_chunk_length
+
+
+def darts_training_identity(
+    cfg: dict[str, Any],
+    label_col: str,
+    *,
+    case_study: str,
+    input_data_spec: dict[str, Any] | None,
+    max_train_sequences: int,
+) -> dict[str, Any]:
+    """Return the runtime parameters that define a Darts training run."""
+    input_chunk_length, output_chunk_length = _resolve_chunk_lengths(
+        cfg, _parse_label_horizon(label_col)
+    )
+    return {
+        "batch_size": cfg.get("batch_size", 2048),
+        "base_target_data_spec": darts_base_target_identity(case_study),
+        "input_chunk_length": input_chunk_length,
+        "input_data_spec": input_data_spec,
+        "lookback": cfg.get("params", {}).get("lookback", input_chunk_length),
+        "max_train_sequences": max_train_sequences,
+        "output_chunk_length": output_chunk_length,
+    }
+
+
+def darts_base_target_identity(case_study: str) -> dict[str, str]:
+    """Hash the raw market file from which Darts derives its one-period target."""
+    from utils import ML4T_DATA_PATH
+
+    relative_paths = {
+        "etfs": Path("etfs/market/etf_universe.parquet"),
+        "cme_futures": Path("futures/market/continuous/daily/continuous_daily.parquet"),
+        "us_equities_panel": Path("equities/market/us_equities/us_equities.parquet"),
+    }
+    if case_study not in relative_paths:
+        raise ValueError(f"No Darts base-target identity is defined for {case_study}")
+    relative_path = relative_paths[case_study]
+    path = ML4T_DATA_PATH / relative_path
+    if not path.exists():
+        raise FileNotFoundError(f"Missing Darts base-target file: {path}")
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return {
+        "dataset": relative_path.as_posix(),
+        "sha256": f"sha256:{digest.hexdigest()}",
+    }
+
+
+def select_full_coverage_checkpoint(
+    curve: list[dict[str, Any]],
+) -> tuple[dict[str, Any], float | None, list[int]]:
+    """Select maximum daily IC only among maximum-coverage checkpoints."""
+    if not curve:
+        raise ValueError("Cannot select a checkpoint from an empty curve")
+    finite_days = [item["ic_n_days"] for item in curve if np.isfinite(item["ic_n_days"])]
+    full_days = max(finite_days) if finite_days else None
+    eligible = [
+        item for item in curve if np.isfinite(item["ic_n_days"]) and item["ic_n_days"] == full_days
+    ] or curve
+    partial_epochs = [item["epoch"] for item in curve if item not in eligible]
+    return max(eligible, key=lambda item: item["ic_mean"]), full_days, partial_epochs
 
 
 def _build_darts_model(
@@ -309,6 +376,7 @@ def _load_base_target_frame(
         join_keys = [date_col, "product"]
         if "position" in dataset_pd.columns:
             join_keys.append("position")
+        assert isinstance(target_df, pl.DataFrame)
         return target_df.to_pandas(), join_keys
 
     if case_study == "us_equities_panel":
@@ -424,6 +492,32 @@ def _prepare_fold_series(
     return series
 
 
+def _overlay_fold_temporal_features(
+    dataset_pd: pd.DataFrame,
+    split: dict[str, Any],
+    date_col: str,
+    temporal_by_fold,
+    temporal_keys: list[str] | None,
+    temporal_feature_names: list[str] | None,
+) -> pd.DataFrame:
+    """Return the requested fold with its training-fitted temporal features."""
+    if temporal_by_fold is None or not temporal_keys or not temporal_feature_names:
+        return dataset_pd
+    from utils.modeling import _replace_temporal_columns
+
+    fold_mask = (dataset_pd[date_col] >= split["train_start"]) & (
+        dataset_pd[date_col] <= split["val_end"]
+    )
+    return _replace_temporal_columns(
+        dataset_pd,
+        fold_mask,
+        temporal_by_fold,
+        temporal_keys,
+        temporal_feature_names,
+        split["fold"],
+    )
+
+
 def _predict_fold(
     model,
     fold_series: list[_FoldSeries],
@@ -491,6 +585,11 @@ def run_darts_cv(
     case_study: str | None,
     notebook: str | None,
     prediction_split: str = "validation",
+    identity_params: dict[str, Any] | None = None,
+    input_data_spec: dict[str, Any] | None = None,
+    temporal_by_fold=None,
+    temporal_keys: list[str] | None = None,
+    temporal_feature_names: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run Darts-backed global forecasting models and emit standard DL artifacts."""
     if case_study is None:
@@ -503,6 +602,20 @@ def run_darts_cv(
 
     from case_studies.utils.deep_learning import _register_dl_config
 
+    def _config_identity_params(cfg: dict[str, Any]) -> dict[str, Any] | None:
+        params = dict(identity_params or {})
+        if input_data_spec is not None:
+            params.update(
+                darts_training_identity(
+                    cfg,
+                    label_col,
+                    case_study=case_study,
+                    input_data_spec=input_data_spec,
+                    max_train_sequences=max_train_sequences,
+                )
+            )
+        return params or None
+
     label_horizon = _parse_label_horizon(label_col)
     dataset_pd = _attach_base_target(dataset_pd.copy(), case_study, date_col)
 
@@ -510,6 +623,7 @@ def run_darts_cv(
     learning_rows: list[dict[str, Any]] = []
     training_log: list[dict[str, Any]] = []
     prediction_frames: list[pl.DataFrame] = []
+    has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
 
     for cfg in configs:
         config_name = cfg["config_name"]
@@ -531,8 +645,20 @@ def run_darts_cv(
         for split in splits:
             fold_seed = cfg_seed + split["fold"]
             seed_everything(fold_seed)
+            fold_dataset = (
+                _overlay_fold_temporal_features(
+                    dataset_pd,
+                    split,
+                    date_col,
+                    temporal_by_fold,
+                    temporal_keys,
+                    temporal_feature_names,
+                )
+                if has_fold_temporal
+                else dataset_pd
+            )
             fold_series = _prepare_fold_series(
-                dataset_pd,
+                fold_dataset,
                 split,
                 feature_names,
                 label_col,
@@ -564,6 +690,7 @@ def run_darts_cv(
             epoch_rows: list[dict[str, Any]] = []
             checkpoint_frames: list[pl.DataFrame] = []
             checkpoint_ics: dict[int, float] = {}
+            checkpoint_n_days: dict[int, int] = {}
             n_val_points = 0
             incr_dir = save_dir / "_incremental" if save_dir is not None else None
             log_dir = save_dir / "_incremental_logs" if save_dir is not None else None
@@ -631,7 +758,7 @@ def run_darts_cv(
                     _flush_darts_fold_preds(incr_dir, config_name, split["fold"], checkpoint_frames)
 
                 _entity = entity_col if entity_col in checkpoint_preds.columns else None
-                ic = cross_sectional_ic(
+                ic_result = cross_sectional_ic(
                     checkpoint_preds,
                     checkpoint_preds,
                     pred_col="y_score",
@@ -640,8 +767,10 @@ def run_darts_cv(
                     entity_col=_entity,
                     method="spearman",
                     min_obs=5,
-                )["ic_mean"]
+                )
+                ic = float(ic_result["ic_mean"])
                 checkpoint_ics[epochs_trained] = ic
+                checkpoint_n_days[epochs_trained] = int(ic_result["n_periods"])
                 for row in reversed(epoch_rows):
                     if row["epoch"] == epochs_trained:
                         row["ic"] = round(ic, 4)
@@ -670,7 +799,15 @@ def run_darts_cv(
                 print(f"    no validation predictions generated ({elapsed:.1f}s)")
                 continue
 
-            fold_best_epoch = max(checkpoint_ics, key=checkpoint_ics.get)
+            full_fold_coverage = max(checkpoint_n_days.values())
+            fold_best_epoch = max(
+                (
+                    epoch
+                    for epoch, n_days in checkpoint_n_days.items()
+                    if n_days == full_fold_coverage
+                ),
+                key=lambda epoch: checkpoint_ics[epoch],
+            )
             fold_best_ic = checkpoint_ics[fold_best_epoch]
             for row in epoch_rows:
                 row["n_val"] = n_val_points
@@ -681,49 +818,73 @@ def run_darts_cv(
             training_log.extend(epoch_rows)
             print(f"    fold best epoch={fold_best_epoch}, IC={fold_best_ic:+.4f} ({elapsed:.1f}s)")
 
-        epoch_scores: list[tuple[int, float, float]] = []
+        epoch_scores: list[tuple[int, float, float, int]] = []
         if cfg_prediction_frames:
             cfg_all_preds = pl.concat(cfg_prediction_frames)
+            expected_fold_ids = sorted(cfg_all_preds["fold_id"].unique().to_list())
             for epoch in sorted(cfg_all_preds["epoch"].unique().to_list()):
                 ep_df = cfg_all_preds.filter(pl.col("epoch") == epoch)
+                _entity = entity_col if entity_col in ep_df.columns else None
+                ic_mean = float(
+                    cross_sectional_ic(
+                        ep_df,
+                        ep_df,
+                        pred_col="y_score",
+                        ret_col="y_true",
+                        date_col=date_col,
+                        entity_col=_entity,
+                        method="spearman",
+                        min_obs=5,
+                    )["ic_mean"]
+                )
                 fold_ids = sorted(ep_df["fold_id"].unique().to_list())
+                if fold_ids != expected_fold_ids:
+                    continue
                 fold_epoch_ics = []
+                fold_n_days = []
                 for fold_id in fold_ids:
                     fold_df = ep_df.filter(pl.col("fold_id") == fold_id)
                     _entity = entity_col if entity_col in fold_df.columns else None
-                    fold_epoch_ics.append(
-                        cross_sectional_ic(
-                            fold_df,
-                            fold_df,
-                            pred_col="y_score",
-                            ret_col="y_true",
-                            date_col=date_col,
-                            entity_col=_entity,
-                            method="spearman",
-                            min_obs=5,
-                        )["ic_mean"]
+                    ic_result = cross_sectional_ic(
+                        fold_df,
+                        fold_df,
+                        pred_col="y_score",
+                        ret_col="y_true",
+                        date_col=date_col,
+                        entity_col=_entity,
+                        method="spearman",
+                        min_obs=5,
                     )
-                ic_mean = float(np.nanmean(fold_epoch_ics))
+                    fold_epoch_ics.append(float(ic_result["ic_mean"]))
+                    fold_n_days.append(int(ic_result["n_periods"]))
                 ic_std = float(np.nanstd(fold_epoch_ics)) if len(fold_epoch_ics) > 1 else 0.0
+                ic_n_days = sum(fold_n_days)
                 learning_rows.append(
                     {
                         "config": config_name,
                         "epoch": epoch,
                         "ic_mean": ic_mean,
                         "ic_std": ic_std,
+                        "ic_n_days": ic_n_days,
                     }
                 )
-                epoch_scores.append((epoch, ic_mean, ic_std))
+                epoch_scores.append((epoch, ic_mean, ic_std, ic_n_days))
 
         if epoch_scores:
-            best_epoch, best_ic, best_ic_std = max(epoch_scores, key=lambda item: item[1])
+            full_coverage = max(item[3] for item in epoch_scores)
+            eligible_scores = [item for item in epoch_scores if item[3] == full_coverage]
+            best_epoch, best_ic, best_ic_std, best_ic_n_days = max(
+                eligible_scores, key=lambda item: item[1]
+            )
         else:
             best_epoch, best_ic, best_ic_std = n_epochs, float("nan"), 0.0
+            best_ic_n_days = 0
         config_results.append(
             {
                 "config_name": config_name,
                 "best_epoch": best_epoch,
                 "best_ic": best_ic,
+                "ic_n_days": best_ic_n_days,
                 "input_chunk_length": input_chunk_length,
                 "elapsed_s": elapsed_total,
                 "started_at": started_at,
@@ -737,27 +898,18 @@ def run_darts_cv(
     if not config_results:
         raise RuntimeError("Darts run produced no config results.")
 
-    config_results.sort(
-        key=lambda row: row["best_ic"] if not np.isnan(row["best_ic"]) else -999,
-        reverse=True,
-    )
-    best_result = config_results[0]
-    best_config_name = best_result["config_name"]
-    best_epoch = best_result["best_epoch"]
-    best_ic = best_result["best_ic"]
-
     all_predictions = pl.concat(prediction_frames) if prediction_frames else pl.DataFrame()
-    predictions = (
-        all_predictions.filter(
-            (pl.col("config") == best_config_name) & (pl.col("epoch") == best_epoch)
-        )
-        .with_columns(pl.lit(best_config_name).alias("model_id"))
-        .drop("config", "epoch")
-        if all_predictions.height > 0
-        else pl.DataFrame()
-    )
     learning_curves = pl.DataFrame(learning_rows) if learning_rows else pl.DataFrame()
     training_log_df = pl.DataFrame(training_log) if training_log else pl.DataFrame()
+    result = assemble_cv_result(
+        learning_curves,
+        all_predictions,
+        date_col=date_col,
+        entity_col=entity_col,
+        metadata={row["config_name"]: row for row in config_results},
+        training_log=training_log_df,
+    )
+    predictions = result["predictions"]
 
     if save_dir is not None:
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -771,44 +923,51 @@ def run_darts_cv(
             training_log_df.write_parquet(save_dir / "training_log.parquet")
 
     if register and case_study and all_predictions.height > 0:
+        from case_studies.utils.registry import register_prediction_set
+
         for row in config_results:
             cfg_name = row["config_name"]
             cfg = next(c for c in configs if c["config_name"] == cfg_name)
-            cfg_preds = all_predictions.filter(
-                (pl.col("config") == cfg_name) & (pl.col("epoch") == row["best_epoch"])
-            )
+            cfg_preds = all_predictions.filter(pl.col("config") == cfg_name)
             cfg_curves = learning_curves.filter(pl.col("config") == cfg_name)
-            _register_dl_config(
+            epoch_ics = {
+                int(item["epoch"]): float(item["ic_mean"])
+                for item in cfg_curves.iter_rows(named=True)
+            }
+            epochs = sorted(cfg_preds["epoch"].unique().to_list())
+            first_epoch = row["best_epoch"] if row["best_epoch"] in epochs else epochs[0]
+            first_slice = cfg_preds.filter(pl.col("epoch") == first_epoch).drop("config", "epoch")
+            training_hash = _register_dl_config(
                 case_study=case_study,
                 label=label_col,
                 config_name=cfg_name,
                 architecture=cfg["params"]["architecture"],
                 n_epochs=cfg.get("n_epochs", 100),
-                best_epoch=row["best_epoch"],
+                best_epoch=first_epoch,
                 lookback=row["input_chunk_length"],
                 n_folds=len(splits),
-                ic_mean=row["best_ic"],
-                predictions=cfg_preds,
+                ic_mean=epoch_ics.get(first_epoch, row["best_ic"]),
+                predictions=first_slice,
                 notebook=notebook,
                 learning_curves=cfg_curves,
                 started_at=row.get("started_at"),
                 elapsed_s=row.get("elapsed_s"),
                 prediction_split=prediction_split,
+                identity_params=_config_identity_params(cfg),
             )
+            for epoch in epochs:
+                if epoch == first_epoch:
+                    continue
+                epoch_slice = cfg_preds.filter(pl.col("epoch") == epoch).drop("config", "epoch")
+                register_prediction_set(
+                    case_study,
+                    training_hash=training_hash,
+                    checkpoint_value=int(epoch),
+                    checkpoint_kind="epoch",
+                    split=prediction_split,
+                    predictions=epoch_slice,
+                    metrics={"ic_mean": epoch_ics.get(epoch, float("nan"))},
+                )
+            print(f"    registered {cfg_name} ({len(epochs)} per-epoch slices)")
 
-    return {
-        "grid_results": config_results,
-        "best_config_name": best_config_name,
-        "best_epoch": best_epoch,
-        "best_ic": best_ic,
-        "predictions": predictions,
-        "all_predictions": all_predictions,
-        "fold_metrics": compute_fold_metrics_from_predictions(
-            all_predictions,
-            best_config_name,
-            best_epoch,
-            date_col=date_col,
-        ),
-        "all_learning_curves": learning_curves,
-        "training_log": training_log_df,
-    }
+    return result

@@ -1,0 +1,266 @@
+"""Regression tests for the local RoboRev installation and PR gate."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+GATE = REPO_ROOT / "scripts" / "roborev_pr_gate.sh"
+INSTALLER = REPO_ROOT / "scripts" / "install_local_roborev.sh"
+
+
+def _write_executable(path: Path, content: str) -> None:
+    path.write_text(content)
+    path.chmod(0o755)
+
+
+def _fake_environment(tmp_path: Path, *, branch: str, open_review: bool) -> dict[str, str]:
+    bin_dir = tmp_path / "bin"
+    hooks = tmp_path / "hooks"
+    bin_dir.mkdir()
+    hooks.mkdir()
+
+    fake_sha = "a" * 40
+    base_sha = "c" * 40
+    _write_executable(
+        bin_dir / "git",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+case "$1 $2" in
+  "rev-parse --show-toplevel") printf '%s\\n' "{tmp_path}" ;;
+  "rev-parse --git-path") printf '%s\\n' "{hooks}/pre-push" ;;
+  "rev-parse refs/heads/"*) printf '%s\\n' "{fake_sha}" ;;
+  "rev-parse FETCH_HEAD") printf '%s\\n' "{base_sha}" ;;
+  "rev-parse HEAD") printf '%s\\n' "{fake_sha}" ;;
+  "fetch --quiet") : ;;
+  "branch --show-current") printf '%s\\n' "{branch}" ;;
+  "symbolic-ref --quiet") printf '%s\\n' "{branch}" ;;
+  *) printf 'unexpected git invocation: %s\\n' "$*" >&2; exit 2 ;;
+esac
+""",
+    )
+    listing = "Found 1 open job(s):\\n\\nJob #42" if open_review else "No open jobs found."
+    _write_executable(
+        bin_dir / "roborev",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "{tmp_path}/roborev.log"
+if [[ "$1 $2 $3" == "fix --open --list" ]]; then
+  printf '%b\\n' "{listing}"
+fi
+""",
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ML4T_GIT_BIN": str(bin_dir / "git"),
+            "ML4T_ROBOREV_BIN": str(bin_dir / "roborev"),
+        }
+    )
+    return env
+
+
+def _branch_update(branch: str, remote_branch: str | None = None) -> str:
+    fake_sha = "a" * 40
+    old_sha = "b" * 40
+    remote_branch = remote_branch or branch
+    return f"refs/heads/{branch} {fake_sha} refs/heads/{remote_branch} {old_sha}\n"
+
+
+def test_gate_passes_after_branch_review_with_no_open_findings(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="feature", open_review=False)
+
+    result = subprocess.run(
+        [GATE],
+        env=env,
+        input=_branch_update("feature"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "PR gate passed" in result.stdout
+    invocations = (tmp_path / "roborev.log").read_text()
+    assert "review --branch=feature --base " + "c" * 40 in invocations
+    assert "--agent codex --panel none" in invocations
+    assert "fix --open --list --branch feature" in invocations
+
+
+def test_gate_blocks_every_open_severity(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="feature", open_review=True)
+
+    result = subprocess.run(
+        [GATE],
+        env=env,
+        input=_branch_update("feature"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "resolve every open RoboRev finding" in result.stderr
+
+
+def test_gate_rejects_explicit_push_to_main(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="feature", open_review=False)
+
+    result = subprocess.run(
+        [GATE],
+        env=env,
+        input=_branch_update("feature", "main"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "Direct pushes to main are not allowed" in result.stderr
+    assert not (tmp_path / "roborev.log").exists()
+
+
+def test_gate_skips_tag_and_deletion_updates(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="main", open_review=False)
+    zeros = "0" * 40
+    sha = "a" * 40
+    updates = (
+        f"refs/tags/v1 {sha} refs/tags/v1 {zeros}\n(delete) {zeros} refs/heads/old-feature {sha}\n"
+    )
+
+    result = subprocess.run(
+        [GATE], env=env, input=updates, text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0
+    assert "no branch updates require review" in result.stdout
+    assert not (tmp_path / "roborev.log").exists()
+
+
+def test_gate_reviews_every_branch_in_multi_ref_push(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="feature-a", open_review=False)
+    updates = _branch_update("feature-a") + _branch_update("feature-b")
+
+    result = subprocess.run(
+        [GATE], env=env, input=updates, text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0
+    invocations = (tmp_path / "roborev.log").read_text()
+    assert "review --branch=feature-a" in invocations
+    assert "review --branch=feature-b" in invocations
+
+
+def test_gate_reviews_explicit_head_refspec(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="feature", open_review=False)
+    sha = "a" * 40
+    old_sha = "b" * 40
+    update = f"HEAD {sha} refs/heads/feature {old_sha}\n"
+
+    result = subprocess.run(
+        [GATE], env=env, input=update, text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0
+    invocations = (tmp_path / "roborev.log").read_text()
+    assert "review --branch=feature" in invocations
+
+
+def test_gate_fetches_named_remote_base(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="feature", open_review=False)
+    git_log = tmp_path / "git.log"
+    original_git = Path(env["ML4T_GIT_BIN"])
+    content = original_git.read_text().replace(
+        'case "$1 $2" in', f'printf \'%s\\n\' "$*" >> "{git_log}"\ncase "$1 $2" in'
+    )
+    _write_executable(original_git, content)
+
+    result = subprocess.run(
+        [GATE, "upstream", "unused-url"],
+        env=env,
+        input=_branch_update("feature"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "fetch --quiet --no-tags upstream main" in git_log.read_text()
+
+
+def test_gate_blocks_when_branch_changes_during_review(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="feature", open_review=False)
+    git_bin = Path(env["ML4T_GIT_BIN"])
+    counter = tmp_path / "ref-count"
+    content = git_bin.read_text().replace(
+        f'"rev-parse refs/heads/"*) printf \'%s\\n\' "{"a" * 40}" ;;',
+        '"rev-parse refs/heads/"*) '
+        f'count=$(cat "{counter}" 2>/dev/null || printf 0); '
+        f'printf \'%s\' "$((count + 1))" > "{counter}"; '
+        f"if (( count >= 2 )); then printf '%s\\n' \"{'d' * 40}\"; "
+        f"else printf '%s\\n' \"{'a' * 40}\"; fi ;;",
+    )
+    _write_executable(git_bin, content)
+
+    result = subprocess.run(
+        [GATE],
+        env=env,
+        input=_branch_update("feature"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "Local ref changed during review" in result.stderr
+
+
+@pytest.mark.parametrize("zero_sha", ["0" * 40, "0" * 64])
+def test_gate_skips_sha1_and_sha256_deletions(tmp_path: Path, zero_sha: str) -> None:
+    env = _fake_environment(tmp_path, branch="feature", open_review=False)
+    old_sha = "b" * len(zero_sha)
+    update = f"(delete) {zero_sha} refs/heads/old-feature {old_sha}\n"
+
+    result = subprocess.run(
+        [GATE], env=env, input=update, text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0
+    assert "no branch updates require review" in result.stdout
+    assert not (tmp_path / "roborev.log").exists()
+
+
+def test_installer_is_idempotent_and_refuses_foreign_hook(tmp_path: Path) -> None:
+    env = _fake_environment(tmp_path, branch="feature", open_review=False)
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    gate = scripts / GATE.name
+    gate.write_bytes(GATE.read_bytes())
+    gate.chmod(0o755)
+
+    first = subprocess.run([INSTALLER], env=env, text=True, capture_output=True, check=False)
+    hook = tmp_path / "hooks" / "pre-push"
+    first_content = hook.read_text()
+    second = subprocess.run([INSTALLER], env=env, text=True, capture_output=True, check=False)
+
+    assert first.returncode == 0
+    assert second.returncode == 0
+    assert hook.read_text() == first_content
+    assert "# ml4t roborev pre-push hook v1" in first_content
+
+    hook.write_text("#!/usr/bin/env bash\nprintf 'foreign hook\\n'\n")
+    rejected = subprocess.run([INSTALLER], env=env, text=True, capture_output=True, check=False)
+
+    assert rejected.returncode == 1
+    assert "Refusing to replace an existing pre-push hook" in rejected.stderr
+    assert hook.read_text() == "#!/usr/bin/env bash\nprintf 'foreign hook\\n'\n"
+
+
+@pytest.mark.parametrize("script", [GATE, INSTALLER])
+def test_scripts_pass_bash_syntax_check(script: Path) -> None:
+    subprocess.run(["bash", "-n", script], check=True)

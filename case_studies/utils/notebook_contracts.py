@@ -42,6 +42,39 @@ def degenerate_prediction_sql(prediction_hash_column: str = "p.prediction_hash")
     )
 
 
+def full_coverage_prediction_sql(
+    prediction_set_alias: str = "p",
+    training_run_alias: str = "t",
+    prediction_metric_alias: str = "pm",
+) -> str:
+    """SQL clause retaining the maximum-coverage rows for each family and label.
+
+    A model family can contain checkpoints evaluated on fewer decision dates than
+    its peers even when no fold-level IC is NULL. Comparing or selecting those
+    rows against full-coverage checkpoints changes the evaluation sample. The
+    eligible surface therefore keeps rows whose ``ic_n_days`` equals the maximum
+    for the same ``(split, family, label)``.
+
+    The surrounding query must join ``prediction_sets``, ``training_runs``, and
+    ``prediction_metrics`` under the supplied aliases. The returned fragment
+    begins with ``" AND "`` and takes no bound parameters.
+    """
+    return f"""
+        AND {prediction_metric_alias}.ic_n_days IS NOT NULL
+        AND {prediction_metric_alias}.ic_n_days = (
+            SELECT MAX(pm_full.ic_n_days)
+            FROM prediction_sets p_full
+            JOIN training_runs t_full
+              ON p_full.training_hash = t_full.training_hash
+            JOIN prediction_metrics pm_full
+              ON p_full.prediction_hash = pm_full.prediction_hash
+            WHERE p_full.split = {prediction_set_alias}.split
+              AND t_full.family = {training_run_alias}.family
+              AND t_full.label = {training_run_alias}.label
+        )
+    """
+
+
 def filter_active_model_rows(
     df: pl.DataFrame,
     case_study: str,

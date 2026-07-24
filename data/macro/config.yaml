@@ -30,6 +30,26 @@ macro:
     raw_file: fred_macro_raw.parquet
     metadata_file: fred_macro_metadata.parquet
 
+  alfred_initial_release:
+    symbols:
+      - DGS1
+      - DGS2
+      - DGS3
+      - DGS5
+      - DGS7
+      - DGS10
+      - DGS20
+      - DGS30
+      - VIXCLS
+    outputs:
+      aligned_file: fred_macro_initial_release.parquet
+      raw_file: fred_macro_initial_release_raw.parquet
+    derived:
+      - name: YIELD_CURVE_SLOPE
+        formula: DGS10 - DGS2
+      - name: YIELD_CURVE_5_10
+        formula: DGS10 - DGS5
+
   series:
     daily:
       description: "Daily rates and volatility indicators"

@@ -1,0 +1,101 @@
+{
+  "notebook": "09_evaluation_and_governance",
+  "provider": "author-selected-synthetic",
+  "question": null,
+  "params": {
+    "panel": [
+      {
+        "question_id": "97b979efabb36bda",
+        "question": "Will the Federal Reserve cut rates at the March 2025 FOMC meeting?",
+        "cutoff_date": "2025-03-10",
+        "resolution_date": "2025-03-19",
+        "agent_probs": [0.05, 0.05, 0.05],
+        "final_p": 0.01
+      },
+      {
+        "question_id": "05e0002bb7675735",
+        "question": "Will US CPI year-over-year for January 2025 come in at or above 3.0%?",
+        "cutoff_date": "2025-02-05",
+        "resolution_date": "2025-02-12",
+        "agent_probs": [1.0, 1.0, 1.0],
+        "final_p": 0.99
+      },
+      {
+        "question_id": "68862de4f4eeae57",
+        "question": "Will NVIDIA beat Q4 FY2025 earnings expectations?",
+        "cutoff_date": "2025-02-20",
+        "resolution_date": "2025-02-26",
+        "agent_probs": [0.97, 0.97, 0.97],
+        "final_p": 0.99
+      },
+      {
+        "question_id": "bc88c660688c7cbb",
+        "question": "Will TSLA report Q4 2024 deliveries above 500,000 vehicles?",
+        "cutoff_date": "2024-12-28",
+        "resolution_date": "2025-01-02",
+        "agent_probs": [0.04, 0.04, 0.04],
+        "final_p": 0.01
+      },
+      {
+        "question_id": "f62248e32966ae91",
+        "question": "Will the S&P 500 close above 6,000 on January 31, 2025?",
+        "cutoff_date": "2025-01-25",
+        "resolution_date": "2025-01-31",
+        "agent_probs": [0.95, 0.95, 0.95],
+        "final_p": 0.99
+      },
+      {
+        "question_id": "863473e114846dd0",
+        "question": "Will a major tech IPO (>$1B valuation) price in Q1 2025?",
+        "cutoff_date": "2025-03-15",
+        "resolution_date": "2025-03-31",
+        "agent_probs": [0.97, 0.97, 0.97],
+        "final_p": 0.99
+      },
+      {
+        "question_id": "08e518d1f9702143",
+        "question": "Will Bitcoin exceed $100,000 before March 1, 2025?",
+        "cutoff_date": "2025-02-20",
+        "resolution_date": "2025-03-01",
+        "agent_probs": [0.99, 0.98, 0.98],
+        "final_p": 0.99
+      },
+      {
+        "question_id": "5874f008d8e23c35",
+        "question": "Will the US impose new tariffs on Chinese goods before April 2025?",
+        "cutoff_date": "2025-03-20",
+        "resolution_date": "2025-04-01",
+        "agent_probs": [0.97, 0.97, 0.97],
+        "final_p": 0.99
+      },
+      {
+        "question_id": "a26ab133d163c69d",
+        "question": "Will OpenAI release GPT-5 before April 2025?",
+        "cutoff_date": "2025-03-20",
+        "resolution_date": "2025-04-01",
+        "agent_probs": [0.03, 0.03, 0.03],
+        "final_p": 0.01
+      },
+      {
+        "question_id": "636f63ee4ff13f52",
+        "question": "Will Apple announce a foldable device at its Spring 2025 event?",
+        "cutoff_date": "2025-03-15",
+        "resolution_date": "2025-06-30",
+        "agent_probs": [0.03, 0.03, 0.03],
+        "final_p": 0.01
+      }
+    ],
+    "n_agents": 3,
+    "input_kind": "author-selected synthetic arithmetic"
+  },
+  "agents": [],
+  "aggregation": null,
+  "debate": null,
+  "supervisor": null,
+  "final_probability": null,
+  "final_confidence": null,
+  "llm_calls": [],
+  "notes": "Post-resolution author-selected probabilities for arithmetic demonstrations only. They are not model forecasts or empirical performance evidence.",
+  "created_at": "2026-06-15T19:14:31+00:00",
+  "run_id": "synthetic-arithmetic-v1"
+}

@@ -1,0 +1,42 @@
+{
+  "artifact_source": "benchmark_suite.py real-data rerun (250 US equities x 20yr daily, 1998-2018)",
+  "scenario_id": "multi_250_20yr",
+  "scenario_label": "250 assets, 20 years daily",
+  "data_source": "real",
+  "cached": true,
+  "limitations": [
+    "Parity is evaluated on decoded fill-level chronology plus final portfolio value.",
+    "LEAN's summary trade count remains an aggregate order statistic; fill count is the parity surface."
+  ],
+  "results": [
+    {
+      "framework_id": "ml4t-lean",
+      "label": "ml4t-backtest (LEAN profile)",
+      "num_trades": 428459,
+      "final_value": 720044.0004815969,
+      "runtime_sec": 41.65405851602554,
+      "data_points": 1260000
+    },
+    {
+      "framework_id": "lean",
+      "label": "QuantConnect LEAN CLI",
+      "num_trades": 428459,
+      "final_value": 720042.43,
+      "runtime_sec": 188.39312462694943,
+      "data_points": 1260000
+    }
+  ],
+  "comparison": {
+    "trade_gap": 0,
+    "trade_gap_pct": 0.0,
+    "final_value_gap": 1.5704815968638286,
+    "final_value_gap_pct": 2.1810959068951376e-06,
+    "runtime_speedup": 4.522803571576802,
+    "remaining_gap_driver": "price_precision",
+    "notes": [
+      "next-bar open execution is aligned",
+      "margin-enabled LEAN account semantics are aligned",
+      "decoded fill chronology matches exactly at event identity and 4-decimal price"
+    ]
+  }
+}

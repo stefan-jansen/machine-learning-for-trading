@@ -1,7 +1,7 @@
 [project]
 name = "ml4t-py312"
 version = "3.0.0"
-description = "ML4T 3rd Edition - Python 3.12 image for packages without 3.14 wheels (gensim, signatory, esig, pfhedge, tfcausalimpact)"
+description = "ML4T 3rd Edition - Python 3.12 image for packages without 3.14 wheels (gensim, signatory, esig, pfhedge, pycausalimpact)"
 requires-python = ">=3.12,<3.13"
 license = { text = "MIT" }
 

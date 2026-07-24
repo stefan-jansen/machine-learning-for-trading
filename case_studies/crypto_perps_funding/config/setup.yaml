@@ -102,8 +102,8 @@ backtest:
     # Ch17 portfolio: reuses top_k_grid above and sweeps over allocators.
     # Moment-based allocators (IV/RP/HRP/MVO_LW) all use the CS-level
     # ``execution.allocator_lookback`` (240 8-hourly bars). No max-weight cap.
+    # Equal weight is the baseline above, so this list contains alternatives only.
     allocators:
-      - {name: equal_weight,    method: equal_weight}
       - {name: score_weighted,  method: score_weighted}
       - {name: inverse_vol,     method: inverse_vol}
       - {name: risk_parity,     method: risk_parity}

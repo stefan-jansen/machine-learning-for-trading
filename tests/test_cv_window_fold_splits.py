@@ -44,7 +44,13 @@ def isolated_case_study(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     cv_window._holdout_window.cache_clear()
 
 
-def _seed_setup_yaml(cs_dir: Path, *, with_buffer: bool, label: str) -> None:
+def _seed_setup_yaml(
+    cs_dir: Path,
+    *,
+    with_buffer: bool,
+    label: str,
+    horizon: str | None = None,
+) -> None:
     cs_dir.mkdir(parents=True, exist_ok=True)
     cfg = cs_dir / "config"
     cfg.mkdir(exist_ok=True)
@@ -63,6 +69,8 @@ def _seed_setup_yaml(cs_dir: Path, *, with_buffer: bool, label: str) -> None:
     }
     if with_buffer:
         setup["labels"]["buffer"] = "21D"
+    if horizon is not None:
+        setup["labels"]["horizons"] = {label: horizon}
     (cfg / "setup.yaml").write_text(yaml.safe_dump(setup))
 
 
@@ -140,6 +148,62 @@ def test_schema_detection_falls_back_to_date_column(
     splits = _fold_splits(cs, "fwd_ret_21d")
     assert splits is not None
     assert len(splits) >= 1
+
+
+def test_fold_splits_uses_outcome_horizon_for_holdout_boundary(
+    isolated_case_study: Path,
+) -> None:
+    """A conservative train gap must not truncate the validation outcome window."""
+    from case_studies.utils.cv_window import _fold_splits
+    from utils.cv_splits import generate_cv_splits
+
+    cs = "test_cs_distinct_horizon"
+    label = "fwd_ret_5d"
+    cs_dir = isolated_case_study / cs
+    _seed_setup_yaml(
+        cs_dir,
+        with_buffer=True,
+        label=label,
+        horizon="5D",
+    )
+    _seed_label_parquet(cs_dir, label=label, date_col="timestamp")
+
+    splits = _fold_splits(cs, label)
+    expected = generate_cv_splits(
+        pl.read_parquet(cs_dir / "labels" / f"{label}.parquet"),
+        case_study_id=cs,
+        label_buffer="21D",
+        outcome_horizon="5D",
+    )
+
+    assert splits is not None
+    assert max(split[2] for split in splits) == max(split["val_end"].date() for split in expected)
+
+
+def test_modeling_fold_boundaries_match_consumer_order(
+    isolated_case_study: Path,
+) -> None:
+    """Feature producers must receive the same backward fold IDs as model consumers."""
+    from case_studies.utils.cv_window import modeling_fold_boundaries
+
+    cs = "test_cs_producer_consumer_folds"
+    label = "fwd_ret_5d"
+    cs_dir = isolated_case_study / cs
+    _seed_setup_yaml(
+        cs_dir,
+        with_buffer=True,
+        label=label,
+        horizon="5D",
+    )
+    _seed_label_parquet(cs_dir, label=label, date_col="timestamp")
+
+    producer = modeling_fold_boundaries(cs, label)
+
+    assert producer is not None
+    assert [split["fold"] for split in producer] == [0, 1]
+    assert producer[0]["val_start"] > producer[1]["val_start"]
+    assert producer[0]["train_end"] < producer[0]["val_start"]
+    assert producer[1]["train_end"] < producer[1]["val_start"]
 
 
 def test_schema_without_timestamp_or_date_raises(

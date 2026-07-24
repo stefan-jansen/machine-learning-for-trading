@@ -1,0 +1,98 @@
+{
+  "case_study_id": "us_firm_characteristics",
+  "n_splits": 10,
+  "holdout_start": "2016-01-29",
+  "holdout_end": "2016-12-30",
+  "splits": [
+    {
+      "fold": 0,
+      "train_start": "1996-01-31",
+      "train_end": "2005-12-30",
+      "test_start": "2006-02-28",
+      "test_end": "2006-12-29",
+      "purge_months": 1,
+      "embargo_months": 0
+    },
+    {
+      "fold": 1,
+      "train_start": "1997-01-31",
+      "train_end": "2006-12-29",
+      "test_start": "2007-02-28",
+      "test_end": "2007-12-31",
+      "purge_months": 1,
+      "embargo_months": 0
+    },
+    {
+      "fold": 2,
+      "train_start": "1998-01-30",
+      "train_end": "2007-12-31",
+      "test_start": "2008-02-29",
+      "test_end": "2008-12-31",
+      "purge_months": 1,
+      "embargo_months": 0
+    },
+    {
+      "fold": 3,
+      "train_start": "1999-01-29",
+      "train_end": "2008-12-31",
+      "test_start": "2009-02-27",
+      "test_end": "2009-12-31",
+      "purge_months": 1,
+      "embargo_months": 0
+    },
+    {
+      "fold": 4,
+      "train_start": "2000-01-31",
+      "train_end": "2009-12-31",
+      "test_start": "2010-02-26",
+      "test_end": "2010-12-31",
+      "purge_months": 1,
+      "embargo_months": 0
+    },
+    {
+      "fold": 5,
+      "train_start": "2001-01-31",
+      "train_end": "2010-12-31",
+      "test_start": "2011-02-28",
+      "test_end": "2011-12-30",
+      "purge_months": 1,
+      "embargo_months": 0
+    },
+    {
+      "fold": 6,
+      "train_start": "2002-01-31",
+      "train_end": "2011-12-30",
+      "test_start": "2012-02-29",
+      "test_end": "2012-12-31",
+      "purge_months": 1,
+      "embargo_months": 0
+    },
+    {
+      "fold": 7,
+      "train_start": "2003-01-31",
+      "train_end": "2012-12-31",
+      "test_start": "2013-02-28",
+      "test_end": "2013-12-31",
+      "purge_months": 1,
+      "embargo_months": 0
+    },
+    {
+      "fold": 8,
+      "train_start": "2004-01-30",
+      "train_end": "2013-12-31",
+      "test_start": "2014-02-28",
+      "test_end": "2014-12-31",
+      "purge_months": 1,
+      "embargo_months": 0
+    },
+    {
+      "fold": 9,
+      "train_start": "2005-01-31",
+      "train_end": "2014-12-31",
+      "test_start": "2015-02-27",
+      "test_end": "2015-12-31",
+      "purge_months": 1,
+      "embargo_months": 0
+    }
+  ]
+}

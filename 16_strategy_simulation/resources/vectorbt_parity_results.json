@@ -1,0 +1,37 @@
+{
+  "artifact_source": "benchmark_suite.py real-data rerun (250 US equities x 20yr daily, 1998-2018)",
+  "scenario_id": "multi_250_20yr",
+  "scenario_label": "250 assets, 20 years daily",
+  "data_source": "real",
+  "cached": true,
+  "limitations": [
+    "These results cover the canonical target-share benchmark, not the Chapter 16 case-study adapters.",
+    "VectorBT OSS matches terminal value to floating-point noise on the current benchmark surface.",
+    "A small residual trade gap remains, so this is economic parity rather than exact order decomposition parity."
+  ],
+  "results": [
+    {
+      "engine_id": "vectorbt",
+      "engine_label": "VectorBT OSS",
+      "profile": "vectorbt_strict",
+      "status": "production",
+      "ml4t_framework_id": "ml4t-vbt-strict",
+      "reference_framework_id": "vbt-oss",
+      "ml4t_num_trades": 225810,
+      "reference_num_trades": 225844,
+      "trade_gap": -34,
+      "trade_gap_pct": -0.0001505463948566267,
+      "ml4t_final_value": 685179.0073298404,
+      "reference_final_value": 685179.0073298091,
+      "final_value_gap_abs": 3.1315721571445465e-08,
+      "final_value_gap_pct": 4.5704438163517354e-14,
+      "ml4t_runtime_sec": 46.49065937404521,
+      "reference_runtime_sec": 29.728597074979916,
+      "runtime_speedup": 0.6394531175777814
+    }
+  ],
+  "sources": [
+    "ml4t-backtest/validation/METHODOLOGY.md",
+    "third_edition/code/16_strategy_simulation/18_vectorbt_engine_parity.py"
+  ]
+}

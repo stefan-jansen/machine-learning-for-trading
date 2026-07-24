@@ -59,7 +59,7 @@ from ml4t.engineer.features.volume import obv
 from scipy.stats import spearmanr
 
 from data import load_etfs, load_macro
-from utils.paths import get_case_study_dir
+from utils.paths import display_path, get_case_study_dir
 
 warnings.filterwarnings("ignore")
 
@@ -174,8 +174,16 @@ def compute_momentum_features(df: pl.DataFrame) -> pl.DataFrame:
     # 12-1: 252d return excluding most recent 21d
     # 6-1: 126d return excluding most recent 21d
     df = df.with_columns(
-        (pl.col("ret_252d") - pl.col("ret_21d")).alias("skip_recent_12_1"),
-        (pl.col("ret_126d") - pl.col("ret_21d")).alias("skip_recent_6_1"),
+        (
+            pl.col("close").shift(21).over("symbol")
+            / pl.col("close").shift(252).over("symbol").clip(lower_bound=1e-8)
+            - 1
+        ).alias("skip_recent_12_1"),
+        (
+            pl.col("close").shift(21).over("symbol")
+            / pl.col("close").shift(126).over("symbol").clip(lower_bound=1e-8)
+            - 1
+        ).alias("skip_recent_6_1"),
     )
 
     # Log returns for volatility
@@ -633,7 +641,7 @@ print(f"Monthly rank persistence (correlation): {rank_corr:.3f}")
 # %%
 FEATURES_DIR.mkdir(parents=True, exist_ok=True)
 features.write_parquet(FEATURES_DIR / "financial.parquet")
-print(f"Saved {len(feature_cols)} features to {FEATURES_DIR / 'financial.parquet'}")
+print(f"Saved {len(feature_cols)} features to {display_path(FEATURES_DIR / 'financial.parquet')}")
 print(f"  {len(features):,} rows, {features['symbol'].n_unique()} assets")
 # %% [markdown]
 # **Note on frequency**: The feature matrix is saved at daily frequency

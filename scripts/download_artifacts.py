@@ -17,19 +17,24 @@ Usage:
 """
 
 import argparse
+import hashlib
 import os
 import shutil
+import sqlite3
+import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import urllib.request
-from pathlib import Path
+import uuid
+from pathlib import Path, PurePosixPath
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # GitHub release configuration
 GITHUB_REPO = "stefan-jansen/machine-learning-for-trading"
-RELEASE_TAG = "v3.0.0-artifacts"
+RELEASE_TAG = "v3.0.0-alpha.4"
 BASE_URL = f"https://github.com/{GITHUB_REPO}/releases/download/{RELEASE_TAG}"
 
 CASE_STUDIES = [
@@ -44,11 +49,23 @@ CASE_STUDIES = [
     "us_equities_panel",
 ]
 
+ARTIFACT_SHA256 = {
+    "cme_futures": "c636ef677bd290126a918de602b5e05be3506d3ab02f90dd612382f22ef58898",
+    "crypto_perps_funding": "df34fbed5225fab615d6030bbd9ee3fe8d136dbb8c01663cd4184e905ef5b4eb",
+    "etfs": "20f2012d309b7236b1e3d0d8efeb6c585b3cd205f770341dacc803b7dafd861e",
+    "fx_pairs": "19d2ac6cf2ddfdbf5a475978ee73c3a517a73c6ed961186a8b8a2f8d35719be5",
+    "sp500_equity_option_analytics": (
+        "f4d86a9fc6166163ab6b51c05b6bc7ad0e26135899efe41414102b8cac04b172"
+    ),
+    "sp500_options": "f6eacbc36b5e438b606c99cf7d9c45ae2685ce56fa8c5a157ec36a6b2b025fdc",
+    "us_firm_characteristics": ("883ca036076053dad03407f4c63089d5c6f245ec73d5beb088c13b1e67da8136"),
+}
+
 
 RELEASE_HINT = (
     f"The pre-computed artifacts release ({RELEASE_TAG}) may not be published yet.\n"
     "The artifacts are added as the case-study chapters roll out; until then every\n"
-    "notebook still runs end to end from scratch — the artifacts only skip retraining.\n"
+    "notebook still runs end to end from scratch - the artifacts only skip retraining.\n"
     f"Check the latest releases at https://github.com/{GITHUB_REPO}/releases"
 )
 
@@ -133,7 +150,7 @@ def download_file(url: str, dest: Path, desc: str) -> bool:
         if e.code in (401, 403, 404) and shutil.which("gh"):
             return _download_with_gh(Path(url).name, dest, desc)
         if e.code in (401, 403, 404):
-            print(f"\r  {desc}: FAILED ({e.code} {e.reason}) — likely missing authentication")
+            print(f"\r  {desc}: FAILED ({e.code} {e.reason}) - likely missing authentication")
         else:
             print(f"\r  {desc}: FAILED ({e.code} {e.reason})")
         return False
@@ -142,19 +159,114 @@ def download_file(url: str, dest: Path, desc: str) -> bool:
         return False
 
 
-def extract_tarball(tarball: Path, extract_to: Path) -> int:
-    """Extract tarball and return number of files extracted."""
-    count = 0
-    with tarfile.open(tarball, "r:gz") as tar:
-        tar.extractall(path=extract_to, filter="data")
-        count = len(tar.getmembers())
-    return count
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_archive_members(tar: tarfile.TarFile, cs_id: str) -> None:
+    expected_prefix = ("case_studies", cs_id, "run_log")
+    for member in tar.getmembers():
+        parts = PurePosixPath(member.name).parts
+        is_parent = len(parts) <= len(expected_prefix) and parts == expected_prefix[: len(parts)]
+        is_payload = parts[:3] == expected_prefix
+        if (not is_parent and not is_payload) or ".." in parts:
+            raise ValueError(f"Unexpected archive member: {member.name}")
+
+
+def _verify_run_log(run_log: Path) -> None:
+    manifest = run_log / ".release/SHA256SUMS"
+    if not manifest.is_file():
+        raise ValueError("Bundle has no internal artifact checksum manifest")
+
+    root = run_log.resolve()
+    for line in manifest.read_text().splitlines():
+        expected, relative = line.split(maxsplit=1)
+        artifact = (run_log / relative.strip().lstrip("*")).resolve()
+        if not artifact.is_relative_to(root) or not artifact.is_file():
+            raise ValueError(f"Invalid artifact manifest path: {relative}")
+        if _sha256(artifact) != expected:
+            raise ValueError(f"artifact checksum mismatch: {relative}")
+
+    registry = run_log / "registry.db"
+    uri = f"file:{registry.resolve()}?mode=ro&immutable=1"
+    with sqlite3.connect(uri, uri=True) as connection:
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()
+        foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
+    if integrity != ("ok",) or foreign_keys:
+        raise ValueError("Installed registry failed SQLite integrity checks")
+
+
+def _set_tree_writable(root: Path, *, writable: bool) -> None:
+    paths = [root, *root.rglob("*")]
+    for path in paths:
+        mode = path.stat().st_mode
+        if writable:
+            path.chmod(mode | stat.S_IWUSR)
+        else:
+            path.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+
+
+def install_artifact_archive(
+    archive: Path,
+    cs_id: str,
+    *,
+    expected_sha256: str,
+    repo_root: Path = REPO_ROOT,
+    force: bool = False,
+) -> Path:
+    """Verify and atomically install one case-study run log."""
+    if _sha256(archive) != expected_sha256:
+        raise ValueError(f"{cs_id} archive checksum mismatch")
+
+    case_dir = repo_root / "case_studies" / cs_id
+    target = case_dir / "run_log"
+    case_dir.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink():
+        raise ValueError(f"Refusing to replace symlinked run log: {target}")
+    if target.exists() and not target.is_dir():
+        raise ValueError(f"Run-log target is not a directory: {target}")
+    if target.exists() and not force:
+        return target
+
+    stage_parent = Path(tempfile.mkdtemp(prefix=".run-log-install-", dir=case_dir))
+    ready = case_dir / f".run-log-ready-{uuid.uuid4().hex}"
+    previous = case_dir / f".run-log-previous-{uuid.uuid4().hex}"
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            _validate_archive_members(tar, cs_id)
+            tar.extractall(path=stage_parent, filter="data")
+        staged = stage_parent / "case_studies" / cs_id / "run_log"
+        _verify_run_log(staged)
+        staged.rename(ready)
+        _set_tree_writable(ready, writable=False)
+
+        if target.exists():
+            target.rename(previous)
+        try:
+            ready.rename(target)
+        except Exception:
+            if previous.exists() and not target.exists():
+                previous.rename(target)
+            raise
+        if previous.exists():
+            _set_tree_writable(previous, writable=True)
+            shutil.rmtree(previous, ignore_errors=True)
+        return target
+    finally:
+        if ready.exists():
+            _set_tree_writable(ready, writable=True)
+            shutil.rmtree(ready)
+        shutil.rmtree(stage_parent, ignore_errors=True)
 
 
 def has_artifacts(cs_id: str) -> bool:
     """Check if a case study already has artifacts."""
     cs_dir = REPO_ROOT / "case_studies" / cs_id / "run_log"
-    return (cs_dir / "registry.db").exists()
+    return (cs_dir / "registry.db").exists() and (cs_dir / ".release/SHA256SUMS").exists()
 
 
 def download_case_study(cs_id: str, force: bool = False) -> bool:
@@ -163,6 +275,11 @@ def download_case_study(cs_id: str, force: bool = False) -> bool:
         print(f"  {cs_id}: already has artifacts (use --force to re-download)")
         return True
 
+    expected_sha256 = ARTIFACT_SHA256.get(cs_id)
+    if expected_sha256 is None:
+        print(f"  {cs_id}: artifact bundle is not published in {RELEASE_TAG}")
+        return False
+
     tarball_name = f"{cs_id}.tar.gz"
     url = f"{BASE_URL}/{tarball_name}"
     tmp_path = REPO_ROOT / ".cache" / tarball_name
@@ -170,12 +287,20 @@ def download_case_study(cs_id: str, force: bool = False) -> bool:
     if not download_file(url, tmp_path, cs_id):
         return False
 
-    print("  Extracting...", end=" ", flush=True)
-    n = extract_tarball(tmp_path, REPO_ROOT)
-    print(f"{n} files")
-
-    # Clean up tarball
-    tmp_path.unlink()
+    print("  Verifying and installing...", end=" ", flush=True)
+    try:
+        install_artifact_archive(
+            tmp_path,
+            cs_id,
+            expected_sha256=expected_sha256,
+            force=force,
+        )
+    except (OSError, ValueError, tarfile.TarError) as error:
+        print(f"FAILED ({error})")
+        return False
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    print("done")
     return True
 
 
@@ -191,11 +316,16 @@ def main():
     if args.list:
         print("Available case studies:")
         for cs in CASE_STUDIES:
-            status = "installed" if has_artifacts(cs) else "not installed"
+            if has_artifacts(cs):
+                status = "installed"
+            elif cs in ARTIFACT_SHA256:
+                status = "available"
+            else:
+                status = "pending"
             print(f"  {cs:40s} [{status}]")
         return
 
-    cs_list = [args.cs] if args.cs else CASE_STUDIES
+    cs_list = [args.cs] if args.cs else [cs for cs in CASE_STUDIES if cs in ARTIFACT_SHA256]
 
     # Validate
     for cs in cs_list:

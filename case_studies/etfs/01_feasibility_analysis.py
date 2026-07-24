@@ -58,9 +58,9 @@ import yaml
 
 from data import load_etfs
 from utils.paths import get_case_study_dir
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
-sns.set_style("whitegrid")
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "etfs"
@@ -198,27 +198,33 @@ annual_dv_stats.select(
 # #### Visualize the Dollar Volume Evolution
 
 # %%
-fig, ax = plt.subplots(figsize=(10, 4))
+fig, ax = plt.subplots(figsize=(9, 4))
 
 years = annual_dv_stats["year"].to_numpy()
 median_dv = annual_dv_stats["median_dv"].to_numpy() / 1e6
 p75_dv = annual_dv_stats["p75_dv"].to_numpy() / 1e6
 p90_dv = annual_dv_stats["p90_dv"].to_numpy() / 1e6
 
-ax.fill_between(years, median_dv, p75_dv, alpha=0.3, color="#606060", label="p50-p75")
-ax.fill_between(years, p75_dv, p90_dv, alpha=0.2, color="#808080", label="p75-p90")
-ax.plot(years, median_dv, "o-", color="#404040", linewidth=2, label="Median")
-ax.plot(years, p90_dv, "s--", color="#606060", linewidth=1, label="90th percentile")
+# Log y-axis: dollar volume spans two orders of magnitude, and the $10M/$50M
+# eligibility floors are only legible against the distribution on a log scale.
+ax.fill_between(years, median_dv, p90_dv, alpha=0.18, color=COLORS["blue"], label="p50-p90 range")
+ax.plot(years, p90_dv, "s--", color=COLORS["neutral"], linewidth=1, label="90th percentile")
+ax.plot(years, median_dv, "o-", color=COLORS["blue"], linewidth=2, label="Median ETF")
 
-# Show potential thresholds
-ax.axhline(10, color="black", linestyle=":", linewidth=1.5, label="$10M threshold")
-ax.axhline(50, color="#404040", linestyle=":", linewidth=1.5, label="$50M threshold")
+# Eligibility thresholds (the strategy uses $10M; $50M shown for reference)
+ax.axhline(10, color=COLORS["amber"], linestyle=":", linewidth=1.5, label="$10M floor (used)")
+ax.axhline(50, color=COLORS["copper"], linestyle=":", linewidth=1.5, label="$50M (reference)")
 
+ax.set_yscale("log")
 ax.set_xlabel("Year")
-ax.set_ylabel("Dollar Volume ($ millions/day)")
-ax.set_title("ETF Dollar Volume Distribution Over Time")
-ax.legend(loc="upper left")
-ax.set_ylim(0, None)
+ax.set_ylabel("Dollar volume ($M/day, log scale)")
+ax.set_title(
+    "The median ETF cleared the $10M eligibility floor every year, liquidity up ~20x",
+    loc="left",
+    color=COLORS["blue"],
+    fontweight="semibold",
+)
+ax.legend(loc="upper left", ncol=2, fontsize=8)
 sns.despine()
 
 fig.tight_layout()
@@ -472,61 +478,51 @@ cost_df.select(
 )
 
 # %% [markdown]
-# #### Visualize Return Distributions
+# #### Visualize Cost Exceedance
 #
-# The visualization shows return distributions at each horizon with cost reference lines.
-# Note how the distributions widen as the horizon increases.
+# The empirical CDF of absolute returns reads off the exact fraction of moves that
+# exceed any cost threshold: everything to the right of the 20 bps cost line clears the
+# round trip. The curves shift right as the horizon lengthens---larger typical moves,
+# so more of the distribution sits above cost.
 
 # %%
-fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+# Empirical CDF of absolute returns per horizon on a shared log x-axis: it reads off
+# the exact fraction exceeding any cost threshold (1 - ECDF at the cost) and keeps the
+# comparison honest (identical support), which mismatched histogram x-limits cannot.
+fig, ax = plt.subplots(figsize=(9, 4))
 
-# Use grayscale for book compatibility
 horizons = [
-    ("Daily", daily_abs, "#404040"),
-    ("Weekly", weekly_abs, "#707070"),
-    ("Monthly", monthly_abs, "#a0a0a0"),
+    ("Daily", daily_abs, COLORS["neutral"]),
+    ("Weekly", weekly_abs, COLORS["amber"]),
+    ("Monthly", monthly_abs, COLORS["blue"]),
 ]
 
-for ax, (label, data, color) in zip(axes, horizons, strict=False):
-    # Use different x-limits to show the actual distribution shape
-    if label == "Daily":
-        xlim = 0.06
-    elif label == "Weekly":
-        xlim = 0.10
-    else:
-        xlim = 0.15
+for label, data, color in horizons:
+    x = np.sort(data[data > 0])
+    y = np.arange(1, len(x) + 1) / len(x)
+    frac_above = float((data > ROUND_TRIP_COST).mean())
+    ax.plot(x, y, color=color, linewidth=1.8, label=f"{label} — {frac_above:.0%} > cost")
 
-    # Histogram
-    bins = np.linspace(0, xlim, 40)
-    ax.hist(data[data < xlim], bins=bins, density=True, alpha=0.7, color=color, edgecolor="white")
+# Cost reference line: everything to the RIGHT of it clears the 20 bps round trip.
+ax.axvline(
+    ROUND_TRIP_COST,
+    color=COLORS["copper"],
+    linestyle="--",
+    linewidth=1.5,
+    label="20 bps round-trip cost",
+)
 
-    # Cost reference line
-    ax.axvline(ROUND_TRIP_COST, color="black", linestyle="--", linewidth=2, label="Cost: 20 bps")
-
-    # Statistics annotation
-    median_val = np.median(data)
-    frac_above = (data > ROUND_TRIP_COST).mean()
-    ax.axvline(median_val, color="#404040", linestyle="-", linewidth=1.5, alpha=0.7)
-
-    stats_text = f"Median: {median_val * 100:.2f}%\n{frac_above:.0%} > cost"
-    ax.text(
-        0.95,
-        0.95,
-        stats_text,
-        transform=ax.transAxes,
-        ha="right",
-        va="top",
-        fontsize=10,
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
-    )
-
-    ax.set_xlabel("Absolute Return")
-    ax.set_title(f"{label} Horizon")
-    ax.set_xlim(0, xlim)
-    ax.legend(loc="upper right", fontsize=9)
-
-axes[0].set_ylabel("Density")
-fig.suptitle("ETF Return Distributions by Horizon", fontsize=12, fontweight="bold")
+ax.set_xscale("log")
+ax.set_xlim(1e-4, 5e-1)
+ax.set_xlabel("Absolute return (log scale)")
+ax.set_ylabel("Cumulative fraction of moves")
+ax.set_title(
+    "Absolute moves clear the 20 bps cost at every horizon; headroom grows with horizon",
+    loc="left",
+    color=COLORS["blue"],
+    fontweight="semibold",
+)
+ax.legend(loc="upper left", fontsize=8)
 sns.despine()
 fig.tight_layout()
 plt.show()

@@ -1,0 +1,51 @@
+{
+  "case_study_id": "nasdaq100_microstructure",
+  "computed_at_utc": "2026-07-04T18:45:42.314557+00:00",
+  "data_period": {
+    "start": "2020-01-01",
+    "end": "2021-12-31",
+    "holdout_start": "2021-07-01"
+  },
+  "universe": {
+    "n_assets_declared": 114,
+    "n_symbols_in_data": 114,
+    "missing_from_data": [],
+    "extra_in_data": []
+  },
+  "horizon_feasibility_bps": {
+    "median_abs_1m": 4.457652303120341,
+    "median_abs_5m": 9.394698561500103,
+    "median_abs_15m": 16.28167545817627,
+    "median_abs_30m": 23.18718381113083
+  },
+  "cost_exceedance_at_friction_floor_pct": {
+    "friction_floor_bps": 5.0,
+    "1m": 45.86927098805745,
+    "5m": 70.09002156402437,
+    "15m": 82.04470593203467,
+    "30m": 87.26399874554835
+  },
+  "move_to_cost_ratio_15m": 3.256335091635254,
+  "liquidity_profile_bps": {
+    "universe_median": 2.442600948652326,
+    "universe_p75": 3.8963569062925334,
+    "high_tier_median": 1.2073649304491174,
+    "tod_open_15min_median": 6.656652492211636,
+    "tod_close_15min_median": 1.6454216813698461
+  },
+  "baseline_lagged_return_ic": {
+    "label": "fwd_ret_15m on close-to-close 15-min returns (bid-ask bounce contaminated)",
+    "mean_ic": -0.019183406585826627,
+    "ic_std": 0.1736440123933521,
+    "t_stat": -12.413138826206355,
+    "n_cross_sections": 12625
+  },
+  "walk_forward": {
+    "n_folds_generated": 2,
+    "n_splits_declared": 2,
+    "train_months": 6,
+    "test_months": 6,
+    "holdout_start": "2021-07-01",
+    "last_test_end": "2021-06-30"
+  }
+}

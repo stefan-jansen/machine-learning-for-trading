@@ -2,12 +2,6 @@
 
 The chapter gives the chapter its core editorial value: a disciplined way to move from a trading narrative to a feature specification. The three-step filter -- horizon alignment, driver hypothesis, and role separation -- turns feature design from indicator collecting into explicit hypothesis design, while the reference-frame, representation, and aggregation knobs make clear which choices actually change meaning and which only smooth noise.
 
-<p align="center">
-  <img src="../assets/chapter_figures/figure_8_2_feature_family_taxonomy.jpeg" width="760" alt="Financial feature family taxonomy">
-</p>
-
-<p align="center"><em>Financial features differ by data requirement and role. Some are direct signals; others describe state, feasibility, or context.</em></p>
-
 ## Learning Objectives
 
 * Translate a trading hypothesis into a documented feature specification using horizon alignment, driver hypothesis, and role separation.

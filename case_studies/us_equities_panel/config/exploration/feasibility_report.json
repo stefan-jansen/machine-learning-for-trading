@@ -1,0 +1,67 @@
+{
+  "case_study_id": "us_equities_panel",
+  "computed_at_utc": "2026-07-04T18:46:10.377559+00:00",
+  "data_period": {
+    "start": "1990-01-01",
+    "end": "2018-03-31"
+  },
+  "universe": {
+    "n_assets_declared": 3199,
+    "n_distinct_stocks_panel": 3199,
+    "avg_stocks_per_day": 2004,
+    "n_stocks_per_fold_min": 1892,
+    "n_stocks_per_fold_max": 3163
+  },
+  "return_distribution_abs_bps": {
+    "daily_median": 120.96774193548376,
+    "weekly_median": 279.2046575466567,
+    "monthly_median": 616.4383561643838
+  },
+  "cost_exceedance_at_10bps_rt_pct": {
+    "daily": 89.58979945632262,
+    "weekly": 95.47856227015907,
+    "monthly": 98.05533095196668
+  },
+  "era_dependent_costs": {
+    "decimalization_date": "2001-01-29",
+    "pre_decimal_rt_bps_mid": 45.0,
+    "post_decimal_rt_bps_mid": 20.0,
+    "horizon_table": [
+      {
+        "horizon": "Daily",
+        "n_pre": 568933,
+        "n_post": 1486330,
+        "median_pre_bps": 126.58227848101222,
+        "median_post_bps": 119.33174224343813,
+        "pct_pre_above_pre_rt": 73.74769964125828,
+        "pct_post_above_post_rt": 87.95859600492489
+      },
+      {
+        "horizon": "Weekly",
+        "n_pre": 117486,
+        "n_post": 308352,
+        "median_pre_bps": 288.3720930232569,
+        "median_post_bps": 276.24309392265235,
+        "pct_pre_above_pre_rt": 87.97643974601229,
+        "pct_post_above_post_rt": 94.91425383976754
+      },
+      {
+        "horizon": "Monthly",
+        "n_pre": 26597,
+        "n_post": 71106,
+        "median_pre_bps": 643.4782608695655,
+        "median_post_bps": 607.0339120307088,
+        "pct_pre_above_pre_rt": 94.71368951385494,
+        "pct_post_above_post_rt": 97.7695271847664
+      }
+    ]
+  },
+  "feasibility_ratio_daily_at_10bps": 12.096774193548375,
+  "walk_forward": {
+    "n_folds_generated": 16,
+    "n_splits_declared": 16,
+    "holdout_start": "2016-01-01",
+    "holdout_end": "2018-03-31",
+    "last_test_end": "2015-12-31"
+  }
+}

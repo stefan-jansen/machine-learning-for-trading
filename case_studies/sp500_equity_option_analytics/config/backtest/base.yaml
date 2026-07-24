@@ -1,0 +1,17 @@
+account:
+  allow_short_selling: false
+execution:
+  execution_price: open
+  execution_mode: next_bar
+commission:
+  model: percentage
+  rate: 0.00039
+slippage:
+  model: percentage
+  rate: 0.00026
+calendar:
+  calendar: NYSE
+  timezone: UTC
+  data_frequency: daily
+metadata:
+  case_study: sp500_equity_option_analytics

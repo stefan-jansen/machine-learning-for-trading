@@ -255,6 +255,23 @@ class BacktestRunResult:
     execution_mode: str = "engine"
 
 
+def _target_weights_by_timestamp(weights: pl.DataFrame) -> dict[datetime, dict[str, float]]:
+    """Build deterministic timestamp and symbol ordered engine targets."""
+    duplicate_count = weights.select(pl.struct("timestamp", "symbol").is_duplicated().sum()).item()
+    if duplicate_count:
+        raise ValueError(
+            f"Target weights contain {duplicate_count} duplicate timestamp-symbol rows"
+        )
+    targets: dict[datetime, dict[str, float]] = {}
+    for row in weights.sort("timestamp", "symbol").iter_rows(named=True):
+        timestamp = row["timestamp"]
+        if timestamp not in targets:
+            targets[timestamp] = {}
+        if row["weight"] != 0:
+            targets[timestamp][row["symbol"]] = row["weight"]
+    return targets
+
+
 # ---------------------------------------------------------------------------
 # Weight precomputation (for risk sweep reuse)
 # ---------------------------------------------------------------------------
@@ -267,11 +284,16 @@ def precompute_weights(
     *,
     label: str = "",
     case_study: str = "",
+    prediction_hash: str | None = None,
+    conformal_widths: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Compute allocation weights from a strategy spec, without running the engine.
 
     Use this to avoid redundant MVO/HRP computation in Ch19 risk sweeps
     where the same allocation weights are tested with different risk overlays.
+
+    ``prediction_hash`` is required for the ``conformal_weighted`` allocation
+    method (it loads that prediction's conformal widths); other methods ignore it.
 
     Returns
     -------
@@ -294,6 +316,8 @@ def precompute_weights(
             cadence=cadence,
             label=label,
             case_study=case_study,
+            prediction_hash=prediction_hash,
+            conformal_widths=conformal_widths,
         )
     return weights
 
@@ -781,6 +805,9 @@ def run_backtest(
         prediction_hash=prediction_hash,
         initial_cash=initial_cash,
     )
+    from case_studies.utils.conformal import ensure_conformal_calibration_identity
+
+    strategy_spec = ensure_conformal_calibration_identity(strategy_spec)
     # Re-source initial_cash from the canonical spec. ensure_backtest_spec's
     # idempotent-canonical branch preserves an existing backtest_config.cash.initial
     # (typically $100K from setup.yaml) without overwriting it from the function
@@ -1071,13 +1098,7 @@ def _run_engine(
     apply_calendar_session_enforcement(config, calendar)
 
     # Pre-compute weight dict from DataFrame
-    weight_dict: dict[datetime, dict[str, float]] = {}
-    for row in weights.iter_rows(named=True):
-        ts = row["timestamp"]
-        if ts not in weight_dict:
-            weight_dict[ts] = {}
-        if row["weight"] != 0:
-            weight_dict[ts][row["symbol"]] = row["weight"]
+    weight_dict = _target_weights_by_timestamp(weights)
 
     # Resolve calendar-aware rebalance schedule, then thin by the label's
     # non-overlapping step from setup.yaml::labels.rebalance_step. Mirrors
@@ -1809,6 +1830,7 @@ def _apply_allocation(
     label: str = "",
     case_study: str = "",
     prediction_hash: str | None = None,
+    conformal_widths: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Post-process signal weights with an allocation method.
 
@@ -1901,7 +1923,30 @@ def _apply_allocation(
         from case_studies.utils.conformal import load_conformal_widths
 
         alpha = float(alloc_spec.get("alpha", 0.20))
-        widths = load_conformal_widths(case_study, prediction_hash, alpha=alpha)
+        min_calibration_n = int(alloc_spec.get("min_calibration_n", 30))
+        calibration_version = str(alloc_spec.get("calibration_version", "walk_forward_v2"))
+        widths = conformal_widths
+        if widths is None:
+            widths = load_conformal_widths(
+                case_study,
+                prediction_hash,
+                alpha=alpha,
+                min_calibration_n=min_calibration_n,
+                calibration_version=calibration_version,
+            )
+        # Conformal widths are keyed by the timestamps stored in predictions.parquet,
+        # which keep their original time zone; `normalize_prediction_columns` has
+        # already made the prediction side tz-naive. Harmonize to the weights dtype
+        # (as predictions and prices are above) or the join raises SchemaError on
+        # every case study whose predictions are tz-aware, e.g. crypto_perps_funding.
+        if widths["timestamp"].dtype != ts_dtype:
+            widths = widths.cast({"timestamp": ts_dtype})
+        supported_timestamps = widths.select("timestamp").unique()
+        rebal_preds = rebal_preds.join(supported_timestamps, on="timestamp", how="inner")
+        if rebal_preds.is_empty():
+            raise ValueError(
+                "conformal_weighted: no prediction timestamps have prior-only calibration"
+            )
         floor_q = float(alloc_spec.get("floor_quantile", 0.01))
         result = compute_conformal_weights(
             rebal_preds,
@@ -2021,6 +2066,8 @@ def run_plumbing_test(
     prices: pl.DataFrame,
     strategy_spec: dict,
     *,
+    predictions: pl.DataFrame | None = None,
+    label: str | None = None,
     n_assets: int | None = None,
     top_k: int = 20,
     seed: int = 42,
@@ -2045,23 +2092,27 @@ def run_plumbing_test(
     rebal_spec = strategy.get("rebalance", {})
 
     if rebal_spec["mode"] == "vectorized":
-        # Generate random weights
-        timestamps = prices["timestamp"].unique().sort()
-        symbols = prices["symbol"].unique().sort().to_list()
+        if predictions is None or label is None:
+            raise ValueError("Vectorized plumbing tests require predictions and label")
+
+        random_predictions = normalize_prediction_columns(predictions)
         rng = np.random.default_rng(seed)
-
-        rows = []
-        k = min(top_k, len(symbols))
-        for ts in timestamps:
-            selected = rng.choice(symbols, size=k, replace=False)
-            w = 1.0 / k
-            for s in selected:
-                rows.append({"timestamp": ts, "symbol": s, "weight": w})
-
-        random_weights = pl.DataFrame(rows)
-        # Need y_true for vectorized path — use prices to get returns
-        # This is a simplified plumbing test for vectorized
-        return 0.0  # Vectorized plumbing test is in the notebook
+        random_predictions = random_predictions.with_columns(
+            pl.Series("y_score", rng.standard_normal(random_predictions.height))
+        )
+        result = run_backtest(
+            case_study,
+            "plumbing_test",
+            strategy_spec,
+            prices=prices,
+            predictions=random_predictions,
+            label=label,
+            register=False,
+            initial_cash=initial_cash,
+            calendar=calendar,
+            contract_specs=contract_specs,
+        )
+        return float(result.metrics["sharpe"])
 
     # Engine plumbing test
     from ml4t.backtest import DataFeed, Engine, RebalanceConfig, Strategy, TargetWeightExecutor

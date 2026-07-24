@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import numpy as np
@@ -26,12 +27,48 @@ from ml4t.models.types import CrossSectionBatch, PersistentPanelBatch
 
 from case_studies.utils.latent_factors.common import TaskType, summarize_predictions
 
-# CAE/SAE/SDF inherit `device="cpu"` from `AssetPredictionConfig` /
-# `LatentFactorConfig` defaults in ml4t-models, so without an explicit
-# override the case-study runs train on CPU even when CUDA is available.
-# Fall back to "cpu" only when no GPU is present so notebook execution
-# doesn't break on CPU-only machines.
-_PREFERRED_DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
+
+def preferred_latent_device() -> str:
+    """Return the fastest available Torch device for latent-factor fitting."""
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+_PREFERRED_DEVICE = preferred_latent_device()
+
+
+def configure_latent_torch_runtime(
+    device: str,
+    *,
+    seed: int,
+    num_threads: int,
+    deterministic_algorithms: bool,
+) -> dict[str, Any]:
+    """Resolve and configure one explicit latent-factor Torch runtime."""
+    normalized = device.lower()
+    if normalized == "gpu":
+        normalized = "cuda"
+    if normalized not in {"cpu", "cuda"}:
+        raise ValueError(f"Unsupported latent-factor device: {device!r}")
+    if normalized == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested for latent-factor training but is unavailable")
+    if num_threads < 1:
+        raise ValueError("num_threads must be at least 1")
+
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.set_num_threads(num_threads)
+    torch.use_deterministic_algorithms(deterministic_algorithms, warn_only=False)
+    torch.backends.cudnn.deterministic = deterministic_algorithms
+    torch.backends.cudnn.benchmark = False
+    torch.manual_seed(seed)
+    if normalized == "cuda":
+        torch.cuda.manual_seed_all(seed)
+    return {
+        "device": normalized,
+        "deterministic_algorithms": deterministic_algorithms,
+        "cublas_workspace_config": os.environ["CUBLAS_WORKSPACE_CONFIG"],
+        "num_threads": num_threads,
+        "seed": seed,
+    }
 
 
 def run_pca_fold_with_library(
@@ -90,7 +127,7 @@ def run_ipca_fold_with_library(
     returns_val: np.ndarray,
     *,
     n_factors: int,
-    max_iter: int = 100,
+    max_iter: int = IPCAConfig().max_iter,
     tol: float = 1e-6,
     factor_ridge: float = 1e-6,
     gamma_ridge: float = 1e-6,
@@ -121,8 +158,15 @@ def run_ipca_fold_with_library(
     extras = {
         "n_factors": n_factors,
         "n_instruments": int(chars_train.shape[2] + 1),
+        "max_iter": int(model.config.max_iter),
+        "tol": float(model.config.tol),
+        "factor_ridge": float(model.config.factor_ridge),
+        "gamma_ridge": float(model.config.gamma_ridge),
         "iterations": int(val_state.metadata.get("fit_iterations", 0)),
         "converged": bool(val_state.metadata.get("fit_converged", fit.converged)),
+        "parameter_delta": float(val_state.metadata.get("fit_parameter_delta", float("inf"))),
+        "objective_delta": float(val_state.metadata.get("fit_objective_delta", float("inf"))),
+        "forecast_delta": float(val_state.metadata.get("fit_forecast_delta", float("inf"))),
         "factor_premium": np.nanmean(train_state.factor_returns, axis=0).tolist(),
         "gamma": model.gamma.tolist(),
         "train_metrics": dict(fit.train_metrics),
@@ -148,6 +192,7 @@ def run_cae_fold_with_library(
     lr: float = 1e-3,
     task_type: TaskType = "regression",
     seed: int = 42,
+    device: str = "cpu",
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
     train_batch = _cross_section_batch(
         chars_train,
@@ -168,7 +213,7 @@ def run_cae_fold_with_library(
             lr=lr,
             lambda_l1=lambda_l1,
             batch_size=batch_size,
-            device=_PREFERRED_DEVICE,
+            device=device,
             seed=seed,
         )
     )
@@ -206,6 +251,7 @@ def run_sae_fold_with_library(
     aux_weight: float = 1.0,
     task_type: TaskType = "regression",
     seed: int = 42,
+    device: str = "cpu",
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
     train_batch = _cross_section_batch(
         chars_train,
@@ -228,7 +274,7 @@ def run_sae_fold_with_library(
             checkpoint_interval=checkpoint_interval,
             checkpoint_epochs=tuple(checkpoint_epochs or ()),
             lr=lr,
-            device=_PREFERRED_DEVICE,
+            device=device,
             seed=seed,
         )
     )
@@ -270,6 +316,7 @@ def run_sdf_fold_with_library(
     lr: float = 1e-3,
     weight_decay: float = 0.0,
     seed: int = 42,
+    device: str = "cpu",
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
     train_batch = _cross_section_batch(
         chars_train,
@@ -299,7 +346,7 @@ def run_sdf_fold_with_library(
             burn_in_epochs=burn_in_epochs,
             lr=lr,
             weight_decay=weight_decay,
-            device=_PREFERRED_DEVICE,
+            device=device,
             seed=seed,
         )
     )

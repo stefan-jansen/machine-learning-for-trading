@@ -12,8 +12,8 @@ The stamp lives in ``nb.metadata["ml4t_provenance"]``::
     source_py_blob : git blob hash of the paired .py at execution time
     executed_at    : ISO-8601 timestamp
     executor       : environment label (e.g. "ml4t-gpu", "local-uv")
-    production     : bool — True iff no papermill parameter overrides were injected
-    parameters     : the papermill parameter overrides ({} for a production run)
+    production     : bool — True iff overrides preserve the full production surface
+    parameters     : the papermill parameter overrides
     notes          : optional free text (e.g. "GPU libs: xgboost,lightgbm,catboost")
 
 Gate (``check``): for every tracked ``.ipynb`` that HAS a stamp,
@@ -47,6 +47,33 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SKIP_PARTS = {"_reference", ".venv", ".git", ".ipynb_checkpoints"}
 STAMP_KEY = "ml4t_provenance"
+PRODUCTION_SAFE_PARAMETERS = {
+    "FORCE_REBACKTEST": True,
+    "FORCE_RETRAIN": True,
+    "USE_CACHE": False,
+}
+
+
+def _coerce_bool(value: object) -> bool | None:
+    """Return a boolean for Papermill's bool-like CLI values."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return None
+
+
+def production_parameters(parameters: dict[str, object]) -> bool:
+    """Whether overrides preserve the full production execution surface."""
+    return all(
+        name in PRODUCTION_SAFE_PARAMETERS
+        and _coerce_bool(value) is PRODUCTION_SAFE_PARAMETERS[name]
+        for name, value in parameters.items()
+    )
 
 
 def iter_notebooks() -> list[Path]:
@@ -87,7 +114,7 @@ def stamp_notebook(nb_path: Path, executor: str, notes: str | None = None) -> di
         "source_py_blob": git_blob(py),
         "executed_at": datetime.now(UTC).isoformat(),
         "executor": executor,
-        "production": not params,
+        "production": production_parameters(params),
         "parameters": params,
     }
     if notes:

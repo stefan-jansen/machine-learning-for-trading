@@ -43,13 +43,13 @@ uv run python data/etfs/market/download.py --symbol SPY # single symbol
 uv run python data/etfs/market/download.py --dry-run    # plan only
 ```
 
-Output layout under `$ML4T_DATA_PATH/etfs/`:
+Output layout under `$ML4T_DATA_PATH/etfs/market/`:
 
 ```
-ohlcv_daily.parquet                  # consolidated 100-ETF daily OHLCV (loader target)
-ohlcv/symbol=<TICKER>/data.parquet   # hive-partitioned per-symbol bars (provider-native)
-etfs_dictionary.parquet              # symbol metadata (category, inception, AUM, expense ratio)
-config.yaml                          # universe definition + category tags
+etf_universe.parquet                    # consolidated 100-ETF daily OHLCV (loader target)
+ohlcv_1d/ticker=<TICKER>/...            # hive-partitioned per-symbol bars (provider-native)
+etf_universe_dictionary.parquet         # symbol metadata (symbol, group, description)
+etf_universe_metadata.json              # dataset metadata (row counts, date span)
 ```
 
 ## Loading

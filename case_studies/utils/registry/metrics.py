@@ -614,11 +614,12 @@ def compute_fold_metrics_from_predictions(
     best_epoch: int,
     date_col: str = "timestamp",
     entity_col: str = "symbol",
+    eval_col: str | None = None,
 ):
     """Compute per-fold cross-sectional IC from a registered predictions table.
 
     Filters to the best (config, epoch) and groups by fold_id, returning a
-    polars DataFrame with [fold_id, ic_mean, n_test].
+    polars DataFrame with [fold_id, ic_mean, n_test, n_entities].
 
     Used by deep_learning / tabular_dl / darts_forecasting runners to assemble
     a fold_metrics summary at the end of CV.
@@ -635,6 +636,7 @@ def compute_fold_metrics_from_predictions(
     if best_preds.height == 0:
         return pl.DataFrame()
 
+    actual_col = eval_col if eval_col and eval_col in best_preds.columns else "y_true"
     rows = []
     for fold_id in sorted(best_preds["fold_id"].unique().to_list()):
         fold_df = best_preds.filter(pl.col("fold_id") == fold_id)
@@ -643,7 +645,7 @@ def compute_fold_metrics_from_predictions(
             fold_df,
             fold_df,
             pred_col="y_score",
-            ret_col="y_true",
+            ret_col=actual_col,
             date_col=date_col,
             entity_col=_entity,
             method="spearman",
@@ -654,6 +656,9 @@ def compute_fold_metrics_from_predictions(
                 "fold_id": fold_id,
                 "ic_mean": result["ic_mean"],
                 "n_test": fold_df.height,
+                "n_entities": (
+                    fold_df[entity_col].n_unique() if entity_col in fold_df.columns else 0
+                ),
             }
         )
     return pl.DataFrame(rows) if rows else pl.DataFrame()

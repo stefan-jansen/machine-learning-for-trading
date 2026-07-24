@@ -25,7 +25,7 @@
 #
 # Panel features matter because temporal features computed in isolation
 # (volatility, momentum, regime probabilities) gain signal when placed
-# in cross-sectional context - a 25% conditional volatility means
+# in cross-sectional context — a 25% conditional volatility means
 # different things for a utility stock and a biotech.
 #
 # **Learning Objectives**:
@@ -41,7 +41,7 @@
 # `11_hmm_regimes` for regime features used in universe aggregation.
 
 # %%
-"""Panel Features - pairwise and cross-sectional transforms for multi-asset temporal features."""
+"""Panel Features — pairwise and cross-sectional transforms for multi-asset temporal features."""
 
 import warnings
 
@@ -71,7 +71,7 @@ from data import load_etfs
 from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
-# Production defaults - Papermill injects overrides for CI
+# Production defaults — Papermill injects overrides for CI
 MAX_SYMBOLS = 0  # 0 = all symbols
 START_DATE = "2015-01-01"
 END_DATE = "2024-12-31"
@@ -178,7 +178,7 @@ print(f"\nImplied hedge ratio from Johansen: {hedge_ratio_joh:.4f}")
 # %% [markdown]
 # When both tests agree on cointegration, we have stronger evidence of a
 # long-run equilibrium relationship. When they disagree, treat the pair
-# with caution - the relationship may be fragile or sensitive to the
+# with caution — the relationship may be fragile or sensitive to the
 # sample period. The Johansen-implied hedge ratio often differs from OLS
 # because the two methods weight observations differently.
 
@@ -315,7 +315,7 @@ print(f"Half-life (OLS spread): {half_life_ols:.1f} days")
 print(f"Half-life (Kalman spread): {half_life_kf:.1f} days")
 
 # %% [markdown]
-# The half-life estimate uses full-sample OLS on the spread - in a
+# The half-life estimate uses full-sample OLS on the spread — in a
 # walk-forward context, only past data should be used. The Kalman spread
 # typically yields shorter half-lives because the adaptive hedge ratio
 # removes low-frequency drift from the spread, leaving a faster-reverting residual.
@@ -345,7 +345,7 @@ print(f"Lookback window: {lookback} days (2x half-life)")
 
 # %% [markdown]
 # The z-score normalizes the spread by its rolling mean and standard
-# deviation - it is the natural signal for mean-reverting spreads because
+# deviation — it is the natural signal for mean-reverting spreads because
 # cointegration implies the spread is stationary around a fixed level.
 # Entry at $\pm 2\sigma$ captures significant deviations while filtering noise.
 
@@ -425,7 +425,7 @@ plt.show()
 # ## Illustrative Backtest
 #
 # A compact backtest demonstrates how cointegration features translate into
-# tradable signals. This ignores transaction costs and slippage - see
+# tradable signals. This ignores transaction costs and slippage — see
 # Chapters 18–19 for proper strategy evaluation with realistic cost models.
 
 # %%
@@ -557,7 +557,7 @@ display_df["Half-life (d)"] = display_df["Half-life (d)"].map(
 display(display_df)
 
 # %% [markdown]
-# Economic relatedness does not guarantee cointegration - several
+# Economic relatedness does not guarantee cointegration — several
 # apparently related pairs fail the Engle-Granger test, and the two
 # tests sometimes disagree. Half-lives range from days to months,
 # reflecting the speed at which different pair relationships mean-revert.
@@ -662,9 +662,7 @@ if all_signals:
     output_path = MODEL_DIR / "pairs_trading_signals.parquet"
     combined_signals.write_parquet(output_path)
 
-    # Show a repo-root-relative path so the output carries no machine-specific prefix.
-    display_path = output_path.relative_to(get_case_study_dir("etfs").parents[1])
-    print(f"\n[OK] Saved pairs trading signals to {display_path}")
+    print(f"\n[OK] Saved pairs trading signals to {output_path}")
     print(f"  Shape: {combined_signals.shape}")
     print(f"  Pairs: {combined_signals['pair'].unique().to_list()}")
     print(
@@ -727,7 +725,7 @@ for col in ["corr", "beta", "coint_score"]:
 # The library expressions compose naturally in `with_columns()`, making it
 # straightforward to compute cross-asset features across many pairs in a
 # single Polars pipeline. `correlation_regime_indicator()` adds binary
-# regime flags based on rolling correlation levels - useful for
+# regime flags based on rolling correlation levels — useful for
 # conditional feature engineering.
 
 # %% [markdown]
@@ -735,7 +733,7 @@ for col in ["corr", "beta", "coint_score"]:
 #
 # Raw temporal features (momentum, conditional volatility, regime
 # probabilities) vary in scale across assets. Cross-sectional ranking
-# converts them to universe-relative signals - essential for panel models
+# converts them to universe-relative signals — essential for panel models
 # that predict cross-sectional returns.
 
 # %%
@@ -811,14 +809,14 @@ plt.show()
 # %% [markdown]
 # Ranks are bounded, stationary, and immune to outliers. A high
 # momentum rank (top of universe) followed by rank decay signals
-# momentum exhaustion - a feature that absolute momentum values
+# momentum exhaustion — a feature that absolute momentum values
 # cannot express because their scale drifts with market conditions.
 
 # %% [markdown]
 # ## Relative Temporal Features
 #
 # Many temporal features gain signal when expressed relative to a
-# benchmark - isolating idiosyncratic dynamics from systematic exposure.
+# benchmark — isolating idiosyncratic dynamics from systematic exposure.
 # We demonstrate market-relative features (vs SPY). Sector-relative
 # features follow the same pattern with a sector ETF as benchmark
 # (e.g., XLE momentum minus XLF momentum isolates energy-specific signal).
@@ -878,7 +876,7 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# Relative momentum removes the market component - XLE's energy-sector
+# Relative momentum removes the market component — XLE's energy-sector
 # bets become visible only after subtracting the broad equity trend.
 # Relative volatility (vol / market vol) distinguishes periods where an
 # asset is genuinely more volatile from periods where the entire market
@@ -891,13 +889,13 @@ plt.show()
 # Individual regime classifications (from `11_hmm_regimes`) gain
 # power when aggregated across the universe. We approximate per-asset
 # regime probabilities from realized volatility percentiles to
-# demonstrate the aggregation mechanics. This is exploratory - the
+# demonstrate the aggregation mechanics. This is exploratory — the
 # full-history ranking introduces look-ahead. In production, use
 # HMM-filtered regime probabilities estimated within walk-forward folds.
 
 # %%
 # Illustrative regime probabilities from rolling volatility (proxy for HMM crisis probs).
-# WARNING: This ranks each asset's volatility over its FULL history - a look-ahead
+# WARNING: This ranks each asset's volatility over its FULL history — a look-ahead
 # shortcut for demonstrating the aggregation mechanics. In production, use per-asset
 # HMM filtered probabilities estimated inside walk-forward folds (see 11_hmm_regimes).
 vol_panel = panel.select(["timestamp", "symbol", "vol_60d"]).with_columns(
@@ -953,24 +951,24 @@ plt.show()
 # confirming that aggregating individual regime indicators produces
 # a useful system-wide stress signal. Regime dispersion is low during
 # broad crises (all assets move together) and high during sector
-# rotations (differentiated behavior) - making it a complement to
+# rotations (differentiated behavior) — making it a complement to
 # crisis breadth rather than a substitute.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Cross-sectional ranking normalizes temporal features** - ranks are
+# 1. **Cross-sectional ranking normalizes temporal features** — ranks are
 #    scale-invariant, outlier-robust, and stationary, making heterogeneous
 #    assets comparable for panel models
-# 2. **Relative features decompose alpha from beta** - asset momentum minus
+# 2. **Relative features decompose alpha from beta** — asset momentum minus
 #    sector momentum isolates idiosyncratic signal from systematic exposure
-# 3. **Two cointegration tests for robustness** - Engle-Granger and Johansen
+# 3. **Two cointegration tests for robustness** — Engle-Granger and Johansen
 #    may disagree; treat pairs with caution when they do
-# 4. **Kalman filter adapts** - dynamic hedge ratios track structural shifts
+# 4. **Kalman filter adapts** — dynamic hedge ratios track structural shifts
 #    that a static OLS estimate misses
-# 5. **Half-life guides lookback** - use 2x half-life for rolling z-score
+# 5. **Half-life guides lookback** — use 2x half-life for rolling z-score
 #    windows; short half-lives are more practical for trading
-# 6. **Screen multiple pairs** - economic relatedness does not guarantee
+# 6. **Screen multiple pairs** — economic relatedness does not guarantee
 #    cointegration; the `ml4t-engineer` library scales this analysis
 #    with Polars-native expressions
 #

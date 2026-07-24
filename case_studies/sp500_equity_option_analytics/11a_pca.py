@@ -1,0 +1,163 @@
+# ---
+# jupyter:
+#   jupytext:
+#     cell_metadata_filter: tags,-papermill
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.3
+#   kernelspec:
+#     display_name: Python 3 (ipykernel)
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # PCA for the S&P 500 Equity-and-Options Cross-Section
+#
+# PCA is the unconditioned baseline of the latent-factor suite (*Chapter 14*). It takes the
+# leading variance directions of the return panel with no characteristic conditioning and no
+# return supervision, so it sets the bar that the conditioned estimator (IPCA), the
+# reconstruction estimator (CAE), and the no-arbitrage / supervised estimators (SDF, SAE) must
+# clear. The question for this cross-section is narrow: does return-panel factor structure alone
+# forecast the forward cross-section of returns? Each estimator is scored by its average daily
+# information coefficient (IC) with a HAC-corrected 95% interval; an interval that excludes zero
+# is the bar for signal. Cross-model comparison lives in `13_model_analysis`.
+
+# %%
+"""S&P 500 equity+options PCA case-study run via the shared library path."""
+
+import sqlite3
+import warnings
+
+import polars as pl
+
+from case_studies.utils.analytics import _registry_path
+from case_studies.utils.latent_factors.case_study import (
+    configured_models,
+    load_case_study_context,
+    run_case_study_model,
+    run_case_study_variants,
+)
+
+warnings.filterwarnings("ignore")
+
+# %% tags=["parameters"]
+CASE_STUDY_ID = "sp500_equity_option_analytics"
+PRIMARY_LABEL = ""
+MAX_SYMBOLS = 0
+N_FACTORS = 5
+N_EPOCHS = 50
+USE_CACHE = True
+FORCE_RETRAIN = False
+MAX_FOLDS = 0
+MAX_VARIANT_LABELS = -1
+RUN_VARIANTS = True
+USE_MACRO = False
+MODEL_NAME = "pca"
+
+# %%
+context = load_case_study_context(
+    CASE_STUDY_ID,
+    primary_label=PRIMARY_LABEL,
+    max_symbols=MAX_SYMBOLS,
+    max_folds=MAX_FOLDS,
+    max_variant_labels=MAX_VARIANT_LABELS,
+    use_macro=USE_MACRO,
+)
+if MODEL_NAME not in configured_models(context):
+    raise ValueError(f"{MODEL_NAME!r} is not configured for {CASE_STUDY_ID}")
+
+# %% [markdown]
+# ## Walk-forward cross-validation (primary label)
+
+# %%
+result = run_case_study_model(
+    context,
+    model_name=MODEL_NAME,
+    notebook="11a_pca",
+    n_factors=N_FACTORS,
+    n_epochs=N_EPOCHS,
+    use_cache=USE_CACHE,
+    force_retrain=FORCE_RETRAIN,
+)
+print(result["model_results"])
+print(result["fold_metrics"][MODEL_NAME])
+
+# %% [markdown]
+# ## Alternative labels
+#
+# The same estimator is scored against the 10-day return and the risk-adjusted 5-day return, the
+# two secondary labels this case study carries.
+
+# %%
+variant_results = {}
+if RUN_VARIANTS and context.variant_labels:
+    variant_results = run_case_study_variants(
+        context,
+        model_name=MODEL_NAME,
+        notebook="11a_pca",
+        n_factors=N_FACTORS,
+        n_epochs=N_EPOCHS,
+        use_cache=USE_CACHE,
+        force_retrain=FORCE_RETRAIN,
+    )
+    for label, variant_result in variant_results.items():
+        print(label, variant_result["model_results"])
+
+
+# %% [markdown]
+# ## Validation significance
+#
+# The registry holds a HAC-corrected 95% interval for every checkpoint. For each label we report
+# the best validation checkpoint (the one the within-latent selection rule keeps). Notebook 13
+# carries only the daily-IC leader of the latent-factor family into the cross-family comparison.
+
+
+# %%
+def significance_summary(case_study_id: str, family: str, config_name: str) -> pl.DataFrame:
+    """Best validation checkpoint per label, with HAC-corrected IC interval, from the registry."""
+    query = """
+        SELECT t.label, ps.checkpoint_value AS epoch, COALESCE(pm.ic_mean_daily, pm.ic_mean) AS ic_mean, pm.ic_t_hac,
+               pm.ic_p_hac, pm.ic_ci_lo, pm.ic_ci_hi, pm.ic_n_days
+        FROM training_runs t
+        JOIN prediction_sets ps ON ps.training_hash = t.training_hash
+        JOIN prediction_metrics pm ON pm.prediction_hash = ps.prediction_hash
+        WHERE t.family = ? AND t.config_name = ? AND ps.split = 'validation'
+    """
+    with sqlite3.connect(_registry_path(case_study_id)) as con:
+        cursor = con.execute(query, [family, config_name])
+        columns = [d[0] for d in cursor.description]
+        rows = cursor.fetchall()
+    frame = pl.DataFrame(rows, schema=columns, orient="row")
+    return (
+        frame.sort("ic_mean", descending=True)
+        .group_by("label", maintain_order=False)
+        .first()
+        .sort("label")
+        .with_columns(
+            pl.col("ic_mean").round(4),
+            pl.col("ic_t_hac").round(2).alias("hac_t"),
+            pl.col("ic_p_hac").round(3).alias("hac_p"),
+            pl.col("ic_ci_lo").round(4).alias("ci_lo"),
+            pl.col("ic_ci_hi").round(4).alias("ci_hi"),
+        )
+        .select("label", "epoch", "ic_mean", "hac_t", "hac_p", "ci_lo", "ci_hi", "ic_n_days")
+    )
+
+
+significance = significance_summary(CASE_STUDY_ID, "latent_factors", MODEL_NAME)
+print(significance)
+
+# %% [markdown]
+# ## Takeaway
+#
+# PCA's validation IC is **-0.0126** on the primary 5-day label (HAC *t* -1.28,
+# 95% CI [-0.0320, +0.0068]), so the weekly target remains null. The secondary targets
+# differ: 10-day IC is **+0.0815** (*t* 5.02, CI [+0.0497, +0.1134]) and risk-adjusted
+# 5-day IC is **+0.0444** (*t* 3.93, CI [+0.0222, +0.0666]); both intervals exclude
+# zero. PCA therefore provides target-specific structural evidence without solving the
+# primary weekly prediction problem. On that primary label SDF is the nominal latent
+# leader, but its interval also covers zero. The full comparison against the
+# *Chapters 11-13* supervised models is in `13_model_analysis`.

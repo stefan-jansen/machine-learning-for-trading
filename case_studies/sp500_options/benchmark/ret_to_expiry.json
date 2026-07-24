@@ -1,0 +1,41 @@
+{
+  "case_study": "sp500_options",
+  "label": "ret_to_expiry",
+  "method": "daily_cross_sectional_mean_close_pct_change",
+  "periods_per_year": 252,
+  "n_symbols_in_universe": 497,
+  "sharpe": 0.738537,
+  "cagr": 0.197852,
+  "vol": 0.311148,
+  "n_periods": 501,
+  "ts_min": "2019-01-08 00:00:00",
+  "ts_max": "2021-12-31 00:00:00",
+  "by_period": {
+    "overall": {
+      "sharpe": 1.090494,
+      "cagr": 0.292443,
+      "vol": 0.269059,
+      "n_periods": 753
+    },
+    "validation": {
+      "sharpe": 0.738537,
+      "cagr": 0.197852,
+      "vol": 0.311148,
+      "n_periods": 501
+    },
+    "holdout": {
+      "sharpe": 2.71371,
+      "cagr": 0.503261,
+      "vol": 0.154724,
+      "n_periods": 252
+    },
+    "validation_window": [
+      "2019-01-08 00:00:00",
+      "2020-12-31 00:00:00"
+    ],
+    "holdout_window": [
+      "2021-01-04 00:00:00",
+      "2021-12-31 00:00:00"
+    ]
+  }
+}

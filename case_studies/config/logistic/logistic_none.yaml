@@ -1,0 +1,4 @@
+model_class: LogisticRegression
+params:
+  max_iter: 1000
+  solver: lbfgs

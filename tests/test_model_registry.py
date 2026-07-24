@@ -358,6 +358,15 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
     override_params = overrides.get("parameters", {})
     parameters = {**override_params, **_QUICK_PARAMS}
 
+    # Exercise the ETF LSTM's multi-checkpoint registration contract in the
+    # reduced E2E run. Epochs 5 and 6 must both become prediction sets.
+    if case_study == "etfs" and notebook_path.stem == "09_dl_lstm":
+        parameters["N_EPOCHS"] = 6
+        parameters["MAX_SYMBOLS"] = 6
+    if case_study == "etfs" and notebook_path.stem == "10_dl_tsmixer":
+        parameters["N_EPOCHS"] = 2
+        parameters["MAX_SYMBOLS"] = 6
+
     # Latent factor models need a wider cross-section for factor extraction
     stage_match_p = _STAGE_RE.match(stage)
     suffix_p = stage[len(stage_match_p.group(0)) :] if stage_match_p else stage
@@ -420,6 +429,43 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
                 f"\n  Registry OK: +{new_training} training_runs, "
                 f"+{new_predictions} prediction_sets"
             )
+
+            if case_study == "etfs" and notebook_path.stem == "09_dl_lstm":
+                db = sqlite3.connect(str(registry_db))
+                try:
+                    checkpoints = {
+                        row[0]
+                        for row in db.execute(
+                            """
+                            SELECT ps.checkpoint_value
+                            FROM prediction_sets ps
+                            JOIN training_runs tr USING (training_hash)
+                            WHERE tr.entry_point = '09_dl_lstm'
+                              AND ps.split = 'validation'
+                            """
+                        )
+                    }
+                finally:
+                    db.close()
+                assert {5, 6}.issubset(checkpoints), checkpoints
+            if case_study == "etfs" and notebook_path.stem == "10_dl_tsmixer":
+                db = sqlite3.connect(str(registry_db))
+                try:
+                    checkpoints = {
+                        row[0]
+                        for row in db.execute(
+                            """
+                            SELECT ps.checkpoint_value
+                            FROM prediction_sets ps
+                            JOIN training_runs tr USING (training_hash)
+                            WHERE tr.entry_point = 'dl_tsmixer'
+                              AND ps.split = 'validation'
+                            """
+                        )
+                    }
+                finally:
+                    db.close()
+                assert {1, 2}.issubset(checkpoints), checkpoints
         elif len(runs) > 0:
             print(
                 f"\n  Registry OK: {len(runs)} training_runs with "

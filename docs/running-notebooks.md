@@ -39,7 +39,7 @@ subset requires a non-default profile such as `py312`, `benchmark`, or `rapids`.
 | Ch10 `01_word2vec`, `02_asset_embeddings`, `03_sentiment_evolution` | gensim (no Python 3.14 wheel) | py312 |
 | Ch12 `10_shap_nlp_sentiment` | torch CUDA bug on 3.14 + shap | py312 |
 | Ch14 `06_conditional_autoencoder` | torch CUDA bug on 3.14 + shap | py312 |
-| Ch15 `06_fed_announcement_bsts` | tfcausalimpact (TFP BSTS, py<3.13) | py312 |
+| Ch15 `06_fed_announcement_bsts` | tfcausalimpact (TFP BSTS, isolated `/opt/bsts/bin/python`) | py312 |
 | Ch21 `05_deep_hedging_pfhedge` | pfhedge (unmaintained, numpy<2) | py312 |
 | Ch02 `21_storage_benchmark_database` | requires benchmark image + database services | benchmark |
 | Ch12 `02_gbm_comparison` (GPU section) | RAPIDS cuML, LightGBM CUDA | rapids |
@@ -204,10 +204,27 @@ See [`case_studies/RUN_LOG.md`](../case_studies/RUN_LOG.md) for the schema and q
 
 ### Pre-Computed Results (Download Artifacts)
 
-Running all nine case study pipelines end-to-end (training ~50 model configurations, running ~1,000 backtests per case study) takes days of compute. To let you explore results immediately, we provide a curated subset of artifacts as a **GitHub release**:
+Running a case study end to end can take hours or days. The artifact release provides the complete
+registered run logs for all nine case studies. Each is a separate download, so you can take only the
+ones you want - start with `etfs` (33 MB), the case study the book follows most closely.
+
+| Case study | Download |
+|---|---:|
+| `etfs` | 33 MB |
+| `cme_futures` | 37 MB |
+| `fx_pairs` | 41 MB |
+| `sp500_options` | 42 MB |
+| `crypto_perps_funding` | 43 MB |
+| `sp500_equity_option_analytics` | 44 MB |
+| `us_firm_characteristics` | 56 MB |
+| `nasdaq100_microstructure` | 1.1 GB |
+| `us_equities_panel` | 1.6 GB |
+
+The last two are large because they are wide, high-frequency panels - a single NASDAQ minute-bar
+prediction set is about 80 MB on its own. Their artifact counts are in line with the rest.
 
 ```bash
-# Download all case study artifacts (~1.6 GB total)
+# Download all nine case study artifacts (about 3.1 GB total)
 uv run python scripts/download_artifacts.py
 
 # Download a single case study
@@ -217,32 +234,71 @@ uv run python scripts/download_artifacts.py --cs etfs
 uv run python scripts/download_artifacts.py --list
 ```
 
-This populates `case_studies/{cs}/run_log/` with:
+The downloader verifies the archive and every file inside it before atomically installing
+`case_studies/{cs}/run_log/`. An interrupted or corrupt download leaves any existing run log
+unchanged. The installed baseline is read-only and contains:
 
-- **`registry.db`** — full metrics database (all training runs, predictions, backtests)
-- **Best predictions per model family** — validation predictions for cross-model comparison (Ch11-15 insight notebooks)
-- **Top-10 predictions by IC** — for backtest analysis (Ch16)
-- **Top backtests by stage** — signal, allocation, cost sensitivity (Ch17-19 strategy notebooks)
-- **Holdout predictions** — for out-of-sample synthesis (Ch20)
+- **`registry.db`** - the accepted metrics and provenance database
+- **Training artifacts** - registered specifications, coefficients, boosters, checkpoints, and curves
+- **Predictions** - every stored validation and holdout prediction referenced by the registry
+- **Backtests** - every registered return, trade, weight, and configuration file that the run produced
+- **Release metadata** - source identity, scope records, and per-file checksums
 
 With these artifacts, you can:
 
-1. **Browse results immediately** — the model-analysis and strategy-analysis stages load predictions and metrics from the registry
-2. **Reproduce selectively** — run any model notebook to verify or extend results
-3. **Experiment** — new runs register automatically alongside the shipped baselines
-4. **Compare** — analytical notebooks query whatever is in the registry, so your experiments appear next to the book's results
+1. **Browse results immediately** - analysis notebooks load metrics and stored artifacts directly.
+2. **Trace results** - registry hashes resolve to the exact prediction and backtest files used downstream.
+3. **Reproduce selectively** - rerun a chosen model in an isolated experiment instead of retraining the sweep.
+4. **Compare safely** - start from the released run log without modifying the downloaded baseline.
 
-**What's not included**: The full set of ~1,000 backtest variations per case study (these total ~97 GB). The download provides the ~20 best-performing configurations that the book discusses. You can generate the rest by running the backtest stages yourself.
+The separate maintainer archive also preserves historical registry backups and obsolete caches. Those
+files are not reader inputs and are therefore excluded from the release bundles.
+
+### Why a Fresh Run May Not Match the Published Numbers Exactly
+
+The released artifacts are a snapshot: they record what the pipeline produced at the time the book
+went to press. If you rerun a stage yourself, expect small differences from the stored values.
+
+- **The code keeps improving.** This repository is maintained after publication. Bug fixes and
+  refinements land in the notebooks continuously, and a fix made after the snapshot was taken will
+  move the numbers a fresh run produces. The released registry is not regenerated every time.
+- **Hardware and libraries differ.** GPU training is not bitwise reproducible, and library versions,
+  BLAS backends, and CPU-versus-GPU execution all shift results at the margin.
+- **Market data is revised.** Vendors restate history. A download today may not be byte-identical to
+  the one behind the release.
+
+Differences of this kind are normally small enough to leave the conclusions intact. The book's
+arguments rest on the *shape* of the results - which model families work, how much the selection
+funnel deflates apparent performance, where costs bite - not on a specific Sharpe ratio to three
+decimals. Treat the published numbers as the reference run, not as values a rerun must match.
+
+If a rerun produces a difference large enough to change a conclusion rather than a decimal, that is
+worth reporting as an issue.
 
 ---
 
-## Experimenting
+## Experimenting Without Changing the Release Baseline
 
-The case study pipeline is designed for experimentation. Here are common workflows:
+Create a writable copy of the installed artifacts before changing a configuration or running a
+training or backtest stage:
+
+```bash
+uv run python scripts/create_experiment.py \
+  --cs etfs \
+  --output /tmp/ml4t-etf-experiment
+
+ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
+  uv run python case_studies/etfs/07_gbm.py
+```
+
+The setup command copies every available generated prerequisite, changes the release marker to a
+baseline marker, and makes only the copy writable. `ML4T_OUTPUT_DIR` routes new registry rows and
+artifacts into `/tmp/ml4t-etf-experiment/etfs/`. The downloaded release remains unchanged.
 
 ### Try Different Model Hyperparameters
 
-Open a model notebook (e.g., `07_gbm.py`), modify the configuration, and run it. The new run registers with a unique hash — your results coexist with the originals.
+Open a model notebook such as `07_gbm.py`, modify the configuration, and run it with the experiment's
+`ML4T_OUTPUT_DIR`. The new run receives a unique hash in the copied registry.
 
 ```python
 # In 07_gbm.py, change the parameter grid:
@@ -266,11 +322,11 @@ REBALANCE_FREQ = "W"    # Weekly instead of monthly
 
 ### Compare Your Experiments
 
-Open the analysis notebook — it automatically picks up all registry entries:
+Run the analysis notebook with the same output root so it reads the copied registry:
 
 ```bash
-uv run python case_studies/etfs/18_strategy_analysis.py
-# Shows your new runs alongside the book's baselines
+ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
+  uv run python case_studies/etfs/18_strategy_analysis.py
 ```
 
 ---

@@ -24,7 +24,11 @@ import numpy as np
 import polars as pl
 
 from case_studies.utils.backtest_presets import cost_view, strategy_view
-from case_studies.utils.notebook_contracts import excluded_family_sql, filter_active_model_rows
+from case_studies.utils.notebook_contracts import (
+    excluded_family_sql,
+    filter_active_model_rows,
+    full_coverage_prediction_sql,
+)
 
 # Sentinel distinguishing "no filter" from "match exit_at_max_days IS NULL".
 _UNSET = object()
@@ -48,6 +52,10 @@ _BEST_SCHEMA: dict[str, pl.DataType] = {
     "total_return": pl.Float64,
     "volatility": pl.Float64,
     "ic_mean": pl.Float64,
+    "ic_mean_daily": pl.Float64,
+    "ic_ci_lo": pl.Float64,
+    "ic_ci_hi": pl.Float64,
+    "ic_n_days": pl.Float64,
 }
 
 # ---------------------------------------------------------------------------
@@ -179,6 +187,8 @@ class BacktestExplorer:
         *,
         top_n: int = 10,
         metric: str = "sharpe",
+        label: str | None = None,
+        prediction_hashes: tuple[str, ...] | list[str] | None = None,
     ) -> pl.DataFrame:
         """Top-N backtests at a given stage, ranked by ``metric``.
 
@@ -189,6 +199,16 @@ class BacktestExplorer:
             config_name, label, signal_method, sharpe, cagr, max_drawdown,
             total_return, volatility, ic_mean
         """
+        filter_sql = ""
+        filter_params: list[str] = []
+        if label:
+            filter_sql += " AND t.label = ?"
+            filter_params.append(label)
+        if prediction_hashes:
+            placeholders = ", ".join("?" for _ in prediction_hashes)
+            filter_sql += f" AND p.prediction_hash IN ({placeholders})"
+            filter_params.extend(prediction_hashes)
+
         df = self._query(
             f"""
             SELECT
@@ -204,7 +224,11 @@ class BacktestExplorer:
                 bm.max_drawdown,
                 bm.total_return,
                 bm.volatility,
-                pm.ic_mean
+                pm.ic_mean,
+                pm.ic_mean_daily,
+                pm.ic_ci_lo,
+                pm.ic_ci_hi,
+                pm.ic_n_days
             FROM backtest_runs b
             JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
             JOIN training_runs t ON p.training_hash = t.training_hash
@@ -213,12 +237,19 @@ class BacktestExplorer:
             WHERE b.stage = ?
               AND p.split != 'holdout'
               {excluded_family_sql(self.case_study, "t.family")[0]}
+              {full_coverage_prediction_sql("p", "t", "pm")}
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
+              {filter_sql}
             ORDER BY bm.sharpe DESC
             LIMIT ?
             """,
-            (stage, *excluded_family_sql(self.case_study, "t.family")[1], top_n),
+            (
+                stage,
+                *excluded_family_sql(self.case_study, "t.family")[1],
+                *filter_params,
+                top_n,
+            ),
         )
         if df.is_empty():
             return pl.DataFrame(schema=_BEST_SCHEMA)
@@ -274,6 +305,10 @@ class BacktestExplorer:
             "total_return",
             "volatility",
             "ic_mean",
+            "ic_mean_daily",
+            "ic_ci_lo",
+            "ic_ci_hi",
+            "ic_n_days",
         )
 
     # -----------------------------------------------------------------
@@ -298,9 +333,11 @@ class BacktestExplorer:
             JOIN backtest_runs b ON bm.backtest_hash = b.backtest_hash
             JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
             JOIN training_runs t ON p.training_hash = t.training_hash
+            JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
             WHERE b.stage = ?
               AND p.split != 'holdout'
               {excluded_family_sql(self.case_study, "t.family")[0]}
+              {full_coverage_prediction_sql("p", "t", "pm")}
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
             """,
@@ -333,6 +370,8 @@ class BacktestExplorer:
         *,
         prediction_hash: str | None = None,
         stages: tuple[str, ...] = ("allocation",),
+        label: str | None = None,
+        prediction_hashes: tuple[str, ...] | list[str] | None = None,
     ) -> pl.DataFrame:
         """Compare allocation methods from the allocation stage.
 
@@ -349,6 +388,13 @@ class BacktestExplorer:
             risk overlay (ch19) is a downstream layer covered in §20.7, so
             folding it in here would credit the allocator with the overlay's
             work. Pass ``"risk_overlay"`` explicitly only for cross-stage views.
+        label : str, optional
+            Restrict the comparison to one target label. Publication notebooks
+            should pass their active label so accumulated sibling-label rows do
+            not change the reported allocator ranking.
+        prediction_hashes : sequence of str, optional
+            Restrict the comparison to prediction sets advanced by the current
+            funnel. This excludes accumulated rows from earlier sweeps.
 
         Returns
         -------
@@ -368,16 +414,30 @@ class BacktestExplorer:
             FROM backtest_runs b
             JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
             JOIN training_runs t ON p.training_hash = t.training_hash
+            JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
             JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
             WHERE b.stage IN ({placeholders})
+              AND p.split != 'holdout'
+              {excluded_family_sql(self.case_study, "t.family")[0]}
+              {full_coverage_prediction_sql("p", "t", "pm")}
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
         """
-        params: tuple = tuple(stages)
+        params: tuple = (*stages, *excluded_family_sql(self.case_study, "t.family")[1])
         if prediction_hash:
             sql += " AND b.prediction_hash LIKE ?"
             params = (*params, prediction_hash + "%")
+        if label:
+            sql += " AND t.label = ?"
+            params = (*params, label)
+        if prediction_hashes:
+            hash_placeholders = ", ".join("?" for _ in prediction_hashes)
+            sql += f" AND p.prediction_hash IN ({hash_placeholders})"
+            params = (*params, *prediction_hashes)
         df = self._query(sql, params)
+        if df.is_empty():
+            return df
+        df = self._filter_active_models(df)
         if df.is_empty():
             return df
 
@@ -1059,7 +1119,7 @@ class BacktestExplorer:
         self,
         stage: str = "signal",
         *,
-        label: str = "",
+        label: str,
         limit: int = 0,
     ) -> int:
         """Compute and store fold metrics for existing backtests.
@@ -1073,7 +1133,7 @@ class BacktestExplorer:
         stage : str
             Pipeline stage to backfill.
         label : str
-            Label name for fold boundary computation.
+            Required label name for both row selection and fold boundary computation.
         limit : int
             Max backtests to process (0 = all).
 
@@ -1092,12 +1152,15 @@ class BacktestExplorer:
             """
             SELECT b.backtest_hash
             FROM backtest_runs b
+            JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
+            JOIN training_runs t ON p.training_hash = t.training_hash
             WHERE b.stage = ?
+              AND t.label = ?
               AND b.backtest_hash NOT IN (
                   SELECT DISTINCT backtest_hash FROM backtest_fold_metrics
               )
             """,
-            (stage,),
+            (stage, label),
         )
         if df.is_empty():
             return 0
@@ -1139,7 +1202,7 @@ class BacktestExplorer:
             pct_positive
         """
         df = self._query(
-            """
+            f"""
             SELECT
                 bm.sharpe,
                 t.family || '/' || COALESCE(t.config_name, 'default') AS source
@@ -1147,8 +1210,10 @@ class BacktestExplorer:
             JOIN backtest_runs b ON bm.backtest_hash = b.backtest_hash
             JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
             JOIN training_runs t ON p.training_hash = t.training_hash
+            JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
             WHERE b.stage = ?
               AND p.split != 'holdout'
+              {full_coverage_prediction_sql("p", "t", "pm")}
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
             """,

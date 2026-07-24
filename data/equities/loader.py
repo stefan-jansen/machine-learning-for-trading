@@ -1007,26 +1007,21 @@ def load_firm_characteristics(
 ) -> pl.DataFrame:
     """Load firm characteristics dataset for ML-based asset pricing.
 
-    Chen-Pelger-Zhu (2020) anonymized dataset with ~180 firm characteristics
+    Chen-Pelger-Zhu (2020) anonymized dataset with 46 firm characteristics
     (accounting ratios, price-based measures) and monthly returns for US equities.
-    Standard benchmark for Chapters 10-16.
+    Anonymous identifiers are persistent within each published data split.
 
     Args:
         split: Which split to load ("all", "train", "valid", "test")
-               - train: 1967-1989 (~70%)
-               - valid: 1990-1999 (~15%)
-               - test: 2000-2016 (~15%)
+               - train: 1967-1986
+               - valid: 1987-1991
+               - test: 1992-2016
         include_macro: Whether to include macro columns
 
     Returns:
-        DataFrame with ~180 firm characteristics and returns
+        DataFrame with symbol, timestamp, 46 firm characteristics, and returns
     """
-    # Use canonical firm_characteristics_*.parquet naming
-    if split == "valid":
-        # Valid split derived from full dataset
-        filename = "firm_characteristics_all.parquet"
-    else:
-        filename = f"firm_characteristics_{split}.parquet"
+    filename = f"firm_characteristics_{split}.parquet"
 
     path = ML4T_DATA_PATH / "equities" / "firm_characteristics" / filename
 
@@ -1039,25 +1034,20 @@ def load_firm_characteristics(
 
     df = pl.read_parquet(path)
 
-    # Normalize: date → timestamp for canonical schema
+    # Normalize date to timestamp for canonical schema.
     if "date" in df.columns and "timestamp" not in df.columns:
         df = df.rename({"date": "timestamp"})
     if df["timestamp"].dtype != pl.Date:
         df = df.with_columns(pl.col("timestamp").cast(pl.Date))
 
-    # Add split column based on year (matches Chen-Pelger-Zhu methodology)
-    if "split" not in df.columns and "timestamp" in df.columns:
-        df = df.with_columns(
-            pl.when(pl.col("timestamp").dt.year() < 1990)
-            .then(pl.lit("train"))
-            .when(pl.col("timestamp").dt.year() < 2000)
-            .then(pl.lit("valid"))
-            .otherwise(pl.lit("test"))
-            .alias("split")
+    required = {"symbol", "timestamp", "split"}
+    if missing := required.difference(df.columns):
+        raise ValueError(
+            f"Outdated firm-characteristics parquet at {path}: missing {sorted(missing)}. "
+            "Re-run data/equities/firm_characteristics/download.py --convert to recover "
+            "persistent anonymous identifiers from the published tensors."
         )
-
-    # Filter to requested split if not "all"
-    if split != "all" and "split" in df.columns:
+    if split != "all":
         df = df.filter(pl.col("split") == split)
 
     if not include_macro:

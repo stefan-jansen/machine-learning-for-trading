@@ -1,0 +1,41 @@
+{
+  "case_study": "etfs",
+  "label": "fwd_ret_5d",
+  "method": "daily_cross_sectional_mean_close_pct_change",
+  "periods_per_year": 252,
+  "n_symbols_in_universe": 99,
+  "sharpe": 0.62481,
+  "cagr": 0.082132,
+  "vol": 0.142766,
+  "n_periods": 2015,
+  "ts_min": "2015-12-29 00:00:00",
+  "ts_max": "2025-12-31 00:00:00",
+  "by_period": {
+    "overall": {
+      "sharpe": 0.741446,
+      "cagr": 0.096587,
+      "vol": 0.137126,
+      "n_periods": 2517
+    },
+    "validation": {
+      "sharpe": 0.62481,
+      "cagr": 0.082132,
+      "vol": 0.142766,
+      "n_periods": 2015
+    },
+    "holdout": {
+      "sharpe": 1.357982,
+      "cagr": 0.156582,
+      "vol": 0.11173,
+      "n_periods": 502
+    },
+    "validation_window": [
+      "2015-12-29 00:00:00",
+      "2023-12-29 00:00:00"
+    ],
+    "holdout_window": [
+      "2024-01-02 00:00:00",
+      "2025-12-31 00:00:00"
+    ]
+  }
+}

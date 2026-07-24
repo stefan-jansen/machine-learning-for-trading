@@ -1,0 +1,65 @@
+{
+  "n_splits": 8,
+  "train_size": "P5Y",
+  "test_size": "P1Y",
+  "test_start": "2024-01-01",
+  "test_end": "2025-12-31",
+  "splits": [
+    {
+      "fold": 0,
+      "train_start": "2011-01-03",
+      "train_end": "2015-10-26",
+      "val_start": "2015-10-28",
+      "val_end": "2016-11-14"
+    },
+    {
+      "fold": 1,
+      "train_start": "2011-11-02",
+      "train_end": "2016-11-10",
+      "val_start": "2016-11-15",
+      "val_end": "2017-11-23"
+    },
+    {
+      "fold": 2,
+      "train_start": "2012-10-01",
+      "train_end": "2017-11-22",
+      "val_start": "2017-11-27",
+      "val_end": "2018-12-07"
+    },
+    {
+      "fold": 3,
+      "train_start": "2013-09-19",
+      "train_end": "2018-12-06",
+      "val_start": "2018-12-10",
+      "val_end": "2019-10-30"
+    },
+    {
+      "fold": 4,
+      "train_start": "2014-10-07",
+      "train_end": "2019-10-29",
+      "val_start": "2019-10-31",
+      "val_end": "2020-11-17"
+    },
+    {
+      "fold": 5,
+      "train_start": "2015-10-22",
+      "train_end": "2020-11-16",
+      "val_start": "2020-11-18",
+      "val_end": "2021-12-02"
+    },
+    {
+      "fold": 6,
+      "train_start": "2016-11-09",
+      "train_end": "2021-12-01",
+      "val_start": "2021-12-06",
+      "val_end": "2022-12-14"
+    },
+    {
+      "fold": 7,
+      "train_start": "2017-11-21",
+      "train_end": "2022-12-13",
+      "val_start": "2022-12-15",
+      "val_end": "2023-12-28"
+    }
+  ]
+}
