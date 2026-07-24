@@ -115,7 +115,7 @@ if FUTURES_START_DATE:
     )
 
 print(f"Futures: {len(futures):,} rows")
-print(f"Products: {futures['product'].unique().to_list()}")
+print(f"Products: {futures['product'].unique().sort().to_list()}")
 print(f"Tenors: {futures['tenor'].unique().sort().to_list()}")
 print(f"Date range: {futures['session_date'].min()} to {futures['session_date'].max()}")
 
