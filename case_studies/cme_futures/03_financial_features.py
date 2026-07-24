@@ -287,8 +287,18 @@ def compute_position_features(data: pl.DataFrame) -> pl.DataFrame:
             .alias(f"ret_{h}d")
         )
 
-    # Skip-month momentum: 12m return minus last month (avoids short-term reversal)
-    data = data.with_columns((pl.col("ret_252d") - pl.col("ret_21d")).alias("skip_month_mom"))
+    # Skip-month momentum (12-1): the return from t-252 to t-21, which avoids
+    # short-term reversal. Returns compound, so the recent month is removed by
+    # dividing prices, not by subtracting ret_21d from ret_252d. Same
+    # negative-price guard as the multi-horizon returns above.
+    _skip_end = pl.col("adj_close").shift(21).over(["product", "position"])
+    _skip_start = pl.col("adj_close").shift(252).over(["product", "position"])
+    data = data.with_columns(
+        pl.when((_skip_start > 0) & (_skip_end > 0))
+        .then(_skip_end / _skip_start - 1)
+        .otherwise(None)
+        .alias("skip_month_mom")
+    )
 
     # Daily returns for volatility
     lagged_1d = pl.col("adj_close").shift(1).over(["product", "position"])
@@ -1122,7 +1132,7 @@ print(f"Date range: {output_df['timestamp'].min()} to {output_df['timestamp'].ma
 print("\nNew features (vs prior version):")
 print("  + carry_zscore_63d, carry_zscore_126d (time-series normalization)")
 print("  + carry_rank_sector (sector-conditional ranking)")
-print("  + skip_month_mom (12m - 1m, avoids reversal)")
+print("  + skip_month_mom (t-252 to t-21, avoids reversal)")
 print("  + carry_mom_interaction (carry z-score * momentum)")
 print("  + month_sin, month_cos (seasonal encoding)")
 print("  + roll_proximity (roll-week flag)")

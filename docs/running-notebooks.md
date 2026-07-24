@@ -254,6 +254,27 @@ With these artifacts, you can:
 The separate maintainer archive also preserves historical registry backups and obsolete caches. Those
 files are not reader inputs and are therefore excluded from the release bundles.
 
+### Why a Fresh Run May Not Match the Published Numbers Exactly
+
+The released artifacts are a snapshot: they record what the pipeline produced at the time the book
+went to press. If you rerun a stage yourself, expect small differences from the stored values.
+
+- **The code keeps improving.** This repository is maintained after publication. Bug fixes and
+  refinements land in the notebooks continuously, and a fix made after the snapshot was taken will
+  move the numbers a fresh run produces. The released registry is not regenerated every time.
+- **Hardware and libraries differ.** GPU training is not bitwise reproducible, and library versions,
+  BLAS backends, and CPU-versus-GPU execution all shift results at the margin.
+- **Market data is revised.** Vendors restate history. A download today may not be byte-identical to
+  the one behind the release.
+
+Differences of this kind are normally small enough to leave the conclusions intact. The book's
+arguments rest on the *shape* of the results - which model families work, how much the selection
+funnel deflates apparent performance, where costs bite - not on a specific Sharpe ratio to three
+decimals. Treat the published numbers as the reference run, not as values a rerun must match.
+
+If a rerun produces a difference large enough to change a conclusion rather than a decimal, that is
+worth reporting as an issue.
+
 ---
 
 ## Experimenting Without Changing the Release Baseline

@@ -1044,9 +1044,8 @@ def compute_cohort_metrics(
         out["ras_complexity"] = float(complexity)
         out["ras_n_strategies"] = float(k_variants)
         out["ras_leader"] = float(ras_result.adjusted_values[leader_idx])
-        # The library's RASResult doesn't expose a p-value directly; surface
-        # the standardized leader-vs-zero z-score as a downstream proxy if
-        # later wired. Leave None for now.
+        # RASResult reports adjusted values, not a p-value, so there is no
+        # p-value to surface for the RAS adjustment.
         out["ras_pvalue"] = None
     except _ESTIMATOR_ERRORS as exc:
         warnings.warn(f"ras_sharpe_adjustment failed for {leader_hash}: {exc}", stacklevel=2)

@@ -315,7 +315,7 @@ def compute_momentum_features(daily_df: pl.DataFrame) -> pl.DataFrame:
 
     Features:
     - mom_{5,21,63,126,252}d: Raw returns at multiple lookbacks
-    - mom_skip_recent: 252d - 21d (skip recent month)
+    - mom_skip_recent: return from t-252 to t-21 (skip recent month)
     - mom_risk_adj_63: 63d return / 63d realized vol
     """
     df = daily_df.sort(["symbol", "timestamp"]).select(["timestamp", "symbol", "close"])
@@ -330,8 +330,16 @@ def compute_momentum_features(daily_df: pl.DataFrame) -> pl.DataFrame:
             ).alias(f"mom_{lb}d")
         )
 
-    # Skip-recent momentum (12-1 month): 252d return minus recent 21d
-    df = df.with_columns((pl.col("mom_252d") - pl.col("mom_21d")).alias("mom_skip_recent"))
+    # Skip-recent momentum (12-1 month, Jegadeesh and Titman 1993): the return
+    # from t-252 to t-21. Returns compound, so the recent month is removed by
+    # dividing prices, not by subtracting mom_21d from mom_252d.
+    df = df.with_columns(
+        (
+            pl.col("close").shift(21).over("symbol")
+            / pl.col("close").shift(252).over("symbol").clip(lower_bound=1e-8)
+            - 1
+        ).alias("mom_skip_recent")
+    )
 
     # Risk-adjusted momentum: 63d return / 63d vol
     df = df.with_columns(pl.col("close").pct_change().over("symbol").alias("_ret"))

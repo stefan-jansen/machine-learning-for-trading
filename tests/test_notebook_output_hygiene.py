@@ -108,7 +108,6 @@ KNOWN_UNRENDERABLE = frozenset(
     {
         "15_causal_estimation/08_neural_causal_discovery.ipynb",
         "case_studies/crypto_perps_funding/_archive/11_autoencoder.ipynb",
-        "case_studies/us_equities_panel/03_financial_features.ipynb",
         "case_studies/us_equities_panel/20_strategy_analysis.ipynb",
     }
 )

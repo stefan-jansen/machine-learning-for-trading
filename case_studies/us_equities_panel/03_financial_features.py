@@ -140,10 +140,13 @@ print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 # volatility features. These are the core signal families for cross-sectional
 # equity prediction.
 #
-# **Skip-month momentum** follows Jegadeesh and Titman (1993): the 12-month
-# return minus the most recent month ($r_{12M} - r_{1M}$). Excluding the
-# last month avoids the short-term reversal effect that contaminates
-# raw 12-month returns.
+# **Skip-month momentum** follows Jegadeesh and Titman (1993): the return
+# earned from twelve months ago through one month ago,
+# $P_{t-21}/P_{t-252} - 1$. Excluding the last month avoids the short-term
+# reversal effect that contaminates raw 12-month returns. Note that returns
+# compound, so the recent month is removed by dividing prices rather than by
+# subtracting $r_{1M}$ from $r_{12M}$; the difference of two simple returns is
+# only a first-order approximation and is not a return over any window.
 
 
 # %%
@@ -156,8 +159,15 @@ def compute_momentum_returns(data: pl.DataFrame) -> pl.DataFrame:
                 f"ret_{h}d"
             )
         )
-    # Skip-month momentum (12M - 1M): Jegadeesh-Titman (1993) construction
-    data = data.with_columns((pl.col("ret_252d") - pl.col("ret_21d")).alias("ret_12m_skip"))
+    # Skip-month momentum (12-1): Jegadeesh-Titman (1993) construction, the
+    # return from t-252 to t-21.
+    data = data.with_columns(
+        (
+            pl.col("adj_close").shift(21).over("symbol")
+            / pl.col("adj_close").shift(252).over("symbol").clip(lower_bound=1e-8)
+            - 1
+        ).alias("ret_12m_skip")
+    )
     return data
 
 
