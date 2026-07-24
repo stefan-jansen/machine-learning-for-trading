@@ -6,6 +6,16 @@ GIT_BIN="${ML4T_GIT_BIN:-git}"
 BASE_BRANCH="${ML4T_ROBOREV_BASE_BRANCH:-main}"
 REMOTE_NAME="${1:-origin}"
 
+# Explicit, audited opt-out. The gate reviews every commit on the branch at
+# --min-severity low, which is right for a handful of new commits and wrong for a
+# bulk port of content that was already reviewed elsewhere (the notebooks/ sign-off
+# program). Set ML4T_ROBOREV_GATE_SKIP to a reason string to skip; the reason is
+# printed so the bypass is never silent. Use `--no-verify` never.
+if [[ -n "${ML4T_ROBOREV_GATE_SKIP:-}" ]]; then
+    printf 'RoboRev PR gate SKIPPED: %s\n' "$ML4T_ROBOREV_GATE_SKIP" >&2
+    exit 0
+fi
+
 if ! command -v "$ROBOREV_BIN" >/dev/null 2>&1; then
     printf 'RoboRev executable not found: %s\n' "$ROBOREV_BIN" >&2
     exit 1
