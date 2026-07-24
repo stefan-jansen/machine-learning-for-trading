@@ -235,3 +235,48 @@ def test_common_support_ranking_uses_identical_timestamps() -> None:
     assert ranked["n_periods"].unique().to_list() == [3]
     assert ranked["start"].unique().to_list() == [datetime(2020, 1, 2)]
     assert ranked["end"].unique().to_list() == [datetime(2020, 1, 4)]
+
+
+def test_conformal_allocation_accepts_tz_aware_widths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Widths keep the predictions parquet's time zone; weights are always tz-naive.
+
+    ``normalize_prediction_columns`` strips the time zone from predictions before
+    signal weights are built, while ``compute_conformal_widths`` reads
+    predictions.parquet directly and preserves it. Case studies that store UTC-aware
+    timestamps (crypto_perps_funding) therefore reach ``_apply_allocation`` with a
+    tz-aware widths frame and a tz-naive weights frame, which raised
+    ``SchemaError: datatypes of join keys don't match`` on the common-support join.
+    """
+    import case_studies.utils.backtest_loaders as loaders
+    from case_studies.utils.backtest_runner import _apply_allocation
+
+    stamps = [datetime(2024, 1, 1, 8), datetime(2024, 1, 1, 16)]
+    naive = pl.DataFrame(
+        {
+            "timestamp": stamps * 2,
+            "symbol": ["BTC", "BTC", "ETH", "ETH"],
+        }
+    ).with_columns(pl.col("timestamp").cast(pl.Datetime("ms")))
+    weights = naive.with_columns(weight=pl.lit(0.5))
+    predictions = naive.with_columns(y_score=pl.Series([2.0, 2.0, 1.0, 1.0]))
+    widths = naive.with_columns(
+        width=pl.lit(1.0),
+        timestamp=pl.col("timestamp").dt.replace_time_zone("UTC"),
+    )
+    assert widths["timestamp"].dtype.time_zone == "UTC"
+
+    monkeypatch.setattr(loaders, "get_rebalance_step", lambda *_args: 1)
+
+    result = _apply_allocation(
+        weights,
+        predictions,
+        naive.with_columns(close=pl.lit(100.0)),
+        {"method": "conformal_weighted", "top_k": 2},
+        label="fwd_ret_24h",
+        case_study="crypto_perps_funding",
+        prediction_hash="unused_widths_are_passed_in",
+        conformal_widths=widths,
+    )
+
+    assert result.height == 4
+    assert result["timestamp"].dtype == weights["timestamp"].dtype

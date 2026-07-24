@@ -1934,6 +1934,13 @@ def _apply_allocation(
                 min_calibration_n=min_calibration_n,
                 calibration_version=calibration_version,
             )
+        # Conformal widths are keyed by the timestamps stored in predictions.parquet,
+        # which keep their original time zone; `normalize_prediction_columns` has
+        # already made the prediction side tz-naive. Harmonize to the weights dtype
+        # (as predictions and prices are above) or the join raises SchemaError on
+        # every case study whose predictions are tz-aware, e.g. crypto_perps_funding.
+        if widths["timestamp"].dtype != ts_dtype:
+            widths = widths.cast({"timestamp": ts_dtype})
         supported_timestamps = widths.select("timestamp").unique()
         rebal_preds = rebal_preds.join(supported_timestamps, on="timestamp", how="inner")
         if rebal_preds.is_empty():
