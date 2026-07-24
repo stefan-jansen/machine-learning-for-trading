@@ -266,8 +266,10 @@ def compute_conformal_widths(
     )
 
     if write:
-        out = _predictions_dir(case_study, prediction_hash) / "conformal_widths.parquet"
-        _write_widths(out, widths, alpha)
+        # `pred_dir` honours the `case_dir` override the predictions were read
+        # from; recomputing it without that override would write the widths into
+        # an unrelated run log.
+        _write_widths(pred_dir / "conformal_widths.parquet", widths, alpha)
 
     return widths
 
