@@ -57,9 +57,11 @@ class Dataset:
         build: Callable invoked as ``build(source, output)``; returns the list of
             files it wrote. Receives the roots, not per-file paths, because some
             datasets fan out to several outputs.
-        subdir: Path under the output root that this dataset owns, relative to it.
-            ``--clean`` removes exactly this directory, so it must not be shared
-            with another dataset.
+        owns: Paths under the output root, files or directories, that this dataset
+            is solely responsible for. ``--clean`` removes exactly these and
+            nothing else, so a dataset that shares a directory with an artifact it
+            does not generate must name the individual files rather than the
+            directory.
         budget: Manifest ``subsets`` entry describing the reduction (e.g.
             ``{"max_entities": 200}``). Recorded verbatim in the manifest.
     """
@@ -67,7 +69,7 @@ class Dataset:
     name: str
     description: str
     build: Callable[[Path, Path], list[Path]]
-    subdir: Path
+    owns: tuple[Path, ...]
     budget: dict[str, object] = field(default_factory=dict)
 
 
@@ -161,6 +163,58 @@ def build_firm_characteristics(source: Path, output: Path) -> list[Path]:
     return written
 
 
+# --- institutional holdings (13F) ---------------------------------------------
+
+# Columns 22_rag_financial_research/07_institutional_holdings_graph refuses to run
+# without. report_date is the SEC period-of-report, distinct from filing_date, and
+# put_call marks option positions the notebook separates out from share holdings.
+# A fixture missing them is not a smaller fixture, it is a different schema.
+_13F_REQUIRED_PROVENANCE = ("report_date", "put_call")
+_13F_DIR = Path("equities") / "positioning" / "13f"
+# The three artifacts load_institutional_holdings_13f, load_13f_edges and
+# load_13f_stock_features read. The co-ownership matrix is deliberately absent:
+# the notebook computes it from the holdings, and the production .npy is 255MB.
+_13F_FILES = (
+    "institutional_holdings.parquet",
+    "institution_stock_edges.parquet",
+    "stock_features.parquet",
+)
+
+
+def build_institutional_holdings_13f(source: Path, output: Path) -> list[Path]:
+    """Copy the production 13F artifacts into the fixture set verbatim.
+
+    No reduction is applied. Together these are about three megabytes, and the
+    notebook filters to a hardcoded CIK list, so any subsample keyed on
+    institution risks dropping a CIK the notebook asks for and turning a schema
+    fixture into a silent coverage gap.
+    """
+    written: list[Path] = []
+    for filename in _13F_FILES:
+        src = source / _13F_DIR / filename
+        if not src.exists():
+            raise FileNotFoundError(
+                f"13F artifact not found at {src}. Fetch it with "
+                "data/equities/positioning/13f_download.py."
+            )
+
+        if filename == "institutional_holdings.parquet":
+            names = set(pl.scan_parquet(src).collect_schema().names())
+            if missing := sorted(set(_13F_REQUIRED_PROVENANCE) - names):
+                raise ValueError(
+                    f"Source 13F artifact at {src} lacks SEC provenance {missing}. It predates "
+                    "the canonical downloader; regenerate it before building the fixture."
+                )
+
+        dst = output / _13F_DIR / filename
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        rows = pl.scan_parquet(dst).select(pl.len()).collect().item()
+        print(f"    {filename}: {rows:,} rows ({dst.stat().st_size / 1e6:.1f} MB), copied verbatim")
+        written.append(dst)
+    return written
+
+
 DATASETS: tuple[Dataset, ...] = (
     Dataset(
         name="firm_characteristics",
@@ -169,8 +223,20 @@ DATASETS: tuple[Dataset, ...] = (
             "split, built from the char/*.npz tensors so symbol identity survives"
         ),
         build=build_firm_characteristics,
-        subdir=Path("equities") / "firm_characteristics",
+        owns=(Path("equities") / "firm_characteristics",),
         budget={"max_entities": FIRM_CHAR_MAX_ENTITIES},
+    ),
+    Dataset(
+        name="institutional_holdings_13f",
+        description=(
+            "the whole production 13F artifacts, already small enough to ship "
+            "intact and carrying the SEC provenance columns readers filter on"
+        ),
+        build=build_institutional_holdings_13f,
+        # Named individually, not as the 13f/ directory: bulk/ sits beside them and
+        # is produced elsewhere, so --clean must not take it.
+        owns=tuple(Path("equities") / "positioning" / "13f" / name for name in _13F_FILES),
+        budget={"subsample": "none"},
     ),
 )
 
@@ -257,9 +323,12 @@ def main() -> int:
     for dataset in selected:
         print(f"  {dataset.name}: {dataset.description}")
         if args.clean:
-            target = output / dataset.subdir
-            if target.exists():
-                shutil.rmtree(target)
+            for owned in dataset.owns:
+                target = output / owned
+                if target.is_dir():
+                    shutil.rmtree(target)
+                elif target.exists():
+                    target.unlink()
         built[dataset.name] = dataset.build(source, output)
         print()
 
