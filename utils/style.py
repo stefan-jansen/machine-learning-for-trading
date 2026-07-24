@@ -356,9 +356,25 @@ def upper_triangle_mask(corr: object) -> np.ndarray:
 # Canonical panel-label size for Plotly subplot figures. Plotly writes
 # subplot_titles as annotations with an explicit size of 16, and an explicit
 # value beats the template's annotationdefaults — so the template cannot lower
-# them and every subplot figure needs style_subplot_titles() to restore the
-# intended title 19 > panel label 13 > body 11 hierarchy.
+# them from here. style_subplot_titles() is the opt-in helper that does, giving
+# a title 19 > panel label 13 > body 11 hierarchy. Most subplot figures in the
+# repo have not adopted it yet and still carry plotly's 16pt blue labels.
 SUBPLOT_TITLE_SIZE = 13
+
+
+def _is_subplot_title(annotation: object) -> bool:
+    """Match only the annotations ``make_subplots`` creates for ``subplot_titles``.
+
+    Those carry a distinctive signature - paper-referenced, arrowless, and
+    bottom-anchored - which ordinary ``add_annotation`` callouts do not.
+    Matching on it keeps the restyle off a figure's data callouts.
+    """
+    return (
+        getattr(annotation, "showarrow", None) is False
+        and getattr(annotation, "xref", None) == "paper"
+        and getattr(annotation, "yref", None) == "paper"
+        and getattr(annotation, "yanchor", None) == "bottom"
+    )
 
 
 def style_subplot_titles(fig: object, size: int = SUBPLOT_TITLE_SIZE) -> object:
@@ -372,9 +388,15 @@ def style_subplot_titles(fig: object, size: int = SUBPLOT_TITLE_SIZE) -> object:
         ...
         style_subplot_titles(fig)
 
+    Only the panel labels are restyled - `add_annotation` callouts keep their
+    own font, so the call is safe at any point in figure construction.
+
     Returns the figure so it can be chained.
     """
-    fig.update_annotations(font={"size": size, "color": COLORS["slate"]})  # type: ignore[attr-defined]
+    fig.update_annotations(  # type: ignore[attr-defined]
+        font={"size": size, "color": COLORS["slate"]},
+        selector=_is_subplot_title,
+    )
     return fig
 
 
@@ -406,10 +428,9 @@ def _register_plotly_template() -> None:
                 # figure in the repo. Raising the title is the only fix that works from
                 # the template alone; notebooks bind make_subplots before importing this
                 # module, so wrapping it here would come too late.
-                # Hierarchy is title 19 > panel label > body 11. The template alone
-                # can only raise the title; to bring the 16pt panel labels down to
-                # SUBPLOT_TITLE_SIZE call style_subplot_titles(fig) after building a
-                # make_subplots figure.
+                # Hierarchy is title 19 > panel label 16 > body 11. Figures that opt
+                # into style_subplot_titles(fig) bring the panel label down further,
+                # to SUBPLOT_TITLE_SIZE.
                 font=dict(size=19, color=COLORS["blue"]),
                 x=0.5,
                 xanchor="center",
