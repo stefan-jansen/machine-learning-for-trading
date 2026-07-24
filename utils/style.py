@@ -353,6 +353,31 @@ def upper_triangle_mask(corr: object) -> np.ndarray:
     return np.triu(np.ones_like(np.asarray(corr), dtype=bool), k=1)
 
 
+# Canonical panel-label size for Plotly subplot figures. Plotly writes
+# subplot_titles as annotations with an explicit size of 16, and an explicit
+# value beats the template's annotationdefaults — so the template cannot lower
+# them and every subplot figure needs style_subplot_titles() to restore the
+# intended title 19 > panel label 13 > body 11 hierarchy.
+SUBPLOT_TITLE_SIZE = 13
+
+
+def style_subplot_titles(fig: object, size: int = SUBPLOT_TITLE_SIZE) -> object:
+    """Bring ``make_subplots`` panel labels under the figure title.
+
+    Plotly hardcodes 16pt on subplot-title annotations, which outranks the body
+    text and competes with the 19pt figure title the template sets. Call this
+    after building a subplot figure::
+
+        fig = make_subplots(rows=2, cols=2, subplot_titles=[...])
+        ...
+        style_subplot_titles(fig)
+
+    Returns the figure so it can be chained.
+    """
+    fig.update_annotations(font={"size": size, "color": COLORS["slate"]})  # type: ignore[attr-defined]
+    return fig
+
+
 # =============================================================================
 # PLOTLY TEMPLATE (optional — only used if Plotly is installed)
 # =============================================================================
@@ -381,7 +406,10 @@ def _register_plotly_template() -> None:
                 # figure in the repo. Raising the title is the only fix that works from
                 # the template alone; notebooks bind make_subplots before importing this
                 # module, so wrapping it here would come too late.
-                # Hierarchy is now title 19 > panel label 16 > body 11.
+                # Hierarchy is title 19 > panel label > body 11. The template alone
+                # can only raise the title; to bring the 16pt panel labels down to
+                # SUBPLOT_TITLE_SIZE call style_subplot_titles(fig) after building a
+                # make_subplots figure.
                 font=dict(size=19, color=COLORS["blue"]),
                 x=0.5,
                 xanchor="center",
@@ -888,6 +916,8 @@ __all__ = [
     "label_line_ends",
     "zero_line",
     "upper_triangle_mask",
+    "style_subplot_titles",
+    "SUBPLOT_TITLE_SIZE",
     # Book-specific
     "ML4T_STYLE",
     "HAS_PLOTLY",

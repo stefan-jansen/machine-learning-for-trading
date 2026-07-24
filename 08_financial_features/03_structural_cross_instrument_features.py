@@ -65,7 +65,7 @@ from utils.paths import get_chapter_dir
 # Importing utils.style registers and activates the ML4T Plotly template
 # (house palette, fonts, gridlines) as the repo-wide default, so every Plotly
 # figure below inherits the book style; matplotlib is styled via matplotlibrc.
-from utils.style import COLORS
+from utils.style import COLORS, style_subplot_titles
 
 warnings.filterwarnings("ignore")
 
@@ -252,6 +252,7 @@ for idx, product in enumerate(PRODUCTS):
     )
     fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=row, col=col)
 
+style_subplot_titles(fig)
 fig.update_layout(height=500, title="Carry (Roll Yield) Across Products", showlegend=False)
 fig.update_yaxes(title_text="Roll Yield (ann.)", row=1, col=1)
 fig.update_yaxes(title_text="Roll Yield (ann.)", row=2, col=1)
@@ -865,13 +866,10 @@ fig.add_trace(
 )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=4, col=1)
 
-# The ml4t template renders subplot titles larger and in blue, which reads backwards
-# against the main title; force the panel labels smaller and in body color so the
-# hierarchy runs main title -> panel label (same fix as case_study_feature_summary).
-fig.update_annotations(font={"size": 13, "color": COLORS["slate"]})
+style_subplot_titles(fig)
 fig.update_layout(
     height=700,
-    title={"text": f"Options-Implied Features - {viz_symbol}", "font": {"size": 19}},
+    title=f"Options-Implied Features - {viz_symbol}",
     showlegend=False,
 )
 fig.update_yaxes(title_text="IV", row=1, col=1)
