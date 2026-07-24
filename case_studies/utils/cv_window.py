@@ -237,3 +237,39 @@ def lookup_split(case_study: str, prediction_hash: str) -> Split | None:
     if row[0] == "validation":
         return "validation"
     return None
+
+
+def modeling_fold_boundaries_by_label(case_study: str) -> dict[str, list[dict]]:
+    """Fold boundaries for every configured label, keyed by label name.
+
+    A label's walk-forward geometry is a function of its ``label_buffer`` and
+    the dates its own label parquet covers, so labels configured with different
+    buffers produce different train and validation windows. Producers of
+    per-fold artifacts (``04_model_based_features``) must therefore emit one
+    fold set per label and tag rows with ``cv_label``; a single fold set built
+    from the primary label leaves variant labels reading temporal features fit
+    on the wrong training window, and short of their validation window's tail.
+
+    Labels whose parquet is missing are skipped (nothing is derivable for
+    them), matching :func:`modeling_fold_boundaries`.
+
+    Returns
+    -------
+    dict
+        ``{label: [{fold, train_start, train_end, val_start, val_end}, ...]}``,
+        primary label first.
+    """
+    from utils.cv_splits import configured_labels
+
+    out: dict[str, list[dict]] = {}
+    for label in configured_labels(case_study, _load_setup_yaml(case_study)):
+        boundaries = modeling_fold_boundaries(case_study, label)
+        if boundaries is not None:
+            out[label] = boundaries
+    if not out:
+        raise ValueError(
+            f"No fold boundaries derivable for case study {case_study!r}: no "
+            f"configured label has a parquet under case_studies/{case_study}/labels/. "
+            f"Run 02_labels first."
+        )
+    return out

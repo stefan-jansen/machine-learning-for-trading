@@ -1,12 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
-#     cell_metadata_filter: -all
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -29,9 +29,18 @@
 # 3. **GARCH(1,1) Conditional Volatility**: Per-ETF volatility forecasts that
 #    provide each asset's own risk dynamics.
 #
-# Each row in the output carries a `fold` column identifying which fold's
-# model produced it. This enables downstream CV to use the correct
+# Each row in the output carries a `cv_label` and a `fold` column identifying
+# which fold's model produced it. This enables downstream CV to use the correct
 # (non-leaked) features for each fold.
+#
+# The `cv_label` column matters because a fold's boundaries depend on the label
+# being predicted: the gap sealed between `train_end` and `val_start` is sized
+# to that label's horizon. This case study configures `fwd_ret_21d` (21-day
+# buffer) and `fwd_ret_5d` (5-day buffer), whose folds therefore cover different
+# windows. Fitting one set of temporal models on the primary label's windows and
+# handing them to both would train the 5-day models on the wrong data and leave
+# the tail of their validation window without features, so we fit each label's
+# folds separately.
 #
 # ## Learning Objectives
 #
@@ -70,8 +79,9 @@ from ml4t.diagnostic.evaluation.stats import robust_ic
 from ml4t.engineer.features.fdiff import ffdiff
 from sklearn.cluster import KMeans
 
+from case_studies.utils.cv_window import modeling_fold_boundaries_by_label
 from data import load_etfs
-from utils.cv_splits import generate_cv_splits, load_evaluation_config
+from utils.cv_splits import load_evaluation_config
 from utils.paths import get_case_study_dir
 from utils.style import COLORS
 
@@ -94,38 +104,48 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} assets")
 # %% [markdown]
 # ## CV Fold Setup
 #
-# We load the walk-forward CV splits from `setup.yaml` and add a holdout
-# fold. All temporal models are fit per fold on training data only.
+# We load the walk-forward CV splits from `setup.yaml`, once **per configured
+# label**, and add a holdout fold to each. All temporal models are fit per fold
+# on training data only.
+#
+# `modeling_fold_boundaries_by_label` derives each label's folds from that
+# label's own parquet and buffer -- the same derivation the modeling notebooks
+# use when they load this artifact, so producer and consumer agree by
+# construction. `fwd_ret_5d` seals a shorter gap than `fwd_ret_21d`, so its
+# training windows run three weeks longer and its validation windows end later.
 
 # %%
-# Generate CV splits
-cv_splits = generate_cv_splits(prices, case_study_id="etfs", label_buffer="21D")
+label_folds = modeling_fold_boundaries_by_label("etfs")
 eval_config = load_evaluation_config("etfs")
 
-# Add holdout fold: fit on all pre-holdout data, extract for holdout period
 holdout_start = str(eval_config["holdout_start"])
 holdout_end = str(eval_config.get("holdout_end", prices["timestamp"].max()))
 
-# The last CV fold's val_end is the boundary before holdout
-# For holdout, train on everything up to holdout_start
-holdout_fold = {
-    "fold": len(cv_splits),
-    "train_start": cv_splits[0]["train_start"],
-    "train_end": holdout_start,
-    "val_start": holdout_start,
-    "val_end": str(holdout_end),
-}
-all_folds = cv_splits + [holdout_fold]
+# Add a holdout fold per label: fit on all pre-holdout data, extract for the
+# holdout period. The last CV fold's val_end is the boundary before holdout.
+all_folds = []
+for cv_label, cv_splits in label_folds.items():
+    holdout_fold = {
+        "fold": len(cv_splits),
+        "train_start": cv_splits[0]["train_start"],
+        "train_end": holdout_start,
+        "val_start": holdout_start,
+        "val_end": str(holdout_end),
+    }
+    for fold in [*cv_splits, holdout_fold]:
+        all_folds.append({**fold, "cv_label": cv_label})
 
-n_cv = len(cv_splits)
-n_total = len(all_folds)
-print(f"CV folds: {n_cv}, plus holdout fold (fold {n_cv})")
-for fold in all_folds:
-    label = "HOLDOUT" if fold["fold"] == n_cv else f"Fold {fold['fold']}"
-    print(
-        f"  {label}: train {fold['train_start']}..{fold['train_end']}, "
-        f"val {fold['val_start']}..{fold['val_end']}"
-    )
+for cv_label, cv_splits in label_folds.items():
+    n_cv = len(cv_splits)
+    print(f"{cv_label}: {n_cv} CV folds, plus holdout fold (fold {n_cv})")
+    for fold in all_folds:
+        if fold["cv_label"] != cv_label:
+            continue
+        name = "HOLDOUT" if fold["fold"] == n_cv else f"Fold {fold['fold']}"
+        print(
+            f"  {name}: train {fold['train_start']}..{fold['train_end']}, "
+            f"val {fold['val_start']}..{fold['val_end']}"
+        )
 
 # %% [markdown]
 # ## Part 1: HMM Regime Detection
@@ -396,6 +416,7 @@ hmm_fold_results = []
 
 for fold in all_folds:
     fold_idx = fold["fold"]
+    cv_label = fold["cv_label"]
     train_start, train_end = fold["train_start"], fold["train_end"]
     val_end = fold["val_end"]
 
@@ -408,7 +429,8 @@ for fold in all_folds:
 
     if len(X_train) < 252:
         print(
-            f"  Fold {fold_idx}: insufficient SPY training data ({len(X_train)} obs), skipping HMM"
+            f"  {cv_label} fold {fold_idx}: insufficient SPY training data "
+            f"({len(X_train)} obs), skipping HMM"
         )
         continue
 
@@ -426,7 +448,7 @@ for fold in all_folds:
             continue
 
     if best_fold_model is None:
-        print(f"  Fold {fold_idx}: HMM fitting failed")
+        print(f"  {cv_label} fold {fold_idx}: HMM fitting failed")
         continue
 
     order = sort_states_by_variance(best_fold_model)
@@ -441,21 +463,23 @@ for fold in all_folds:
     filtered = compute_filtered_probs(best_fold_model, X_fold)
 
     regime_df = derive_regime_features(spy_fold["timestamp"], filtered, order)
-    regime_df = regime_df.with_columns(pl.lit(fold_idx).alias("fold"))
+    regime_df = regime_df.with_columns(
+        pl.lit(fold_idx).alias("fold"), pl.lit(cv_label).alias("cv_label")
+    )
 
     hmm_fold_results.append(regime_df)
     print(
-        f"  Fold {fold_idx}: HMM LL={best_fold_ll:.1f}, {len(regime_df)} dates, "
+        f"  {cv_label} fold {fold_idx}: HMM LL={best_fold_ll:.1f}, {len(regime_df)} dates, "
         f"stress={regime_df['regime_prob_stress'].mean():.3f}"
     )
 
 hmm_features = (
     pl.concat(hmm_fold_results)
     if hmm_fold_results
-    else pl.DataFrame(schema={"timestamp": pl.Date, "fold": pl.Int64})
+    else pl.DataFrame(schema={"timestamp": pl.Date, "fold": pl.Int64, "cv_label": pl.String})
 )
-n_hmm_folds = hmm_features["fold"].n_unique() if len(hmm_features) > 0 else 0
-print(f"\nHMM features: {len(hmm_features):,} rows across {n_hmm_folds} folds")
+n_hmm_folds = len(hmm_features.select("cv_label", "fold").unique()) if len(hmm_features) > 0 else 0
+print(f"\nHMM features: {len(hmm_features):,} rows across {n_hmm_folds} label-folds")
 
 # %% [markdown]
 # ## Part 2: Fractional Differencing (Per Fold)
@@ -507,6 +531,7 @@ ffd_fold_results = []
 
 for fold in all_folds:
     fold_idx = fold["fold"]
+    cv_label = fold["cv_label"]
     train_start = fold["train_start"]
     val_end = fold["val_end"]
 
@@ -541,12 +566,14 @@ for fold in all_folds:
         ffd_fold = fold_frames[0]
         for df in fold_frames[1:]:
             ffd_fold = ffd_fold.join(df, on="timestamp", how="outer_coalesce")
-        ffd_fold = ffd_fold.sort("timestamp").with_columns(pl.lit(fold_idx).alias("fold"))
+        ffd_fold = ffd_fold.sort("timestamp").with_columns(
+            pl.lit(fold_idx).alias("fold"), pl.lit(cv_label).alias("cv_label")
+        )
         ffd_fold_results.append(ffd_fold)
         ffd_cols = [c for c in ffd_fold.columns if c.startswith("ffd_")]
-        print(f"  Fold {fold_idx}: FFD {len(ffd_cols)} series, {len(ffd_fold):,} dates")
+        print(f"  {cv_label} fold {fold_idx}: FFD {len(ffd_cols)} series, {len(ffd_fold):,} dates")
     else:
-        print(f"  Fold {fold_idx}: no FFD series produced (no qualifying ETFs)")
+        print(f"  {cv_label} fold {fold_idx}: no FFD series produced (no qualifying ETFs)")
 
 ffd_features = pl.concat(ffd_fold_results) if ffd_fold_results else pl.DataFrame()
 ffd_col_names = [c for c in ffd_features.columns if c.startswith("ffd_")]
@@ -570,7 +597,7 @@ all_symbols = sorted(prices["symbol"].unique().to_list())
 if MAX_SYMBOLS > 0:
     all_symbols = all_symbols[:MAX_SYMBOLS]
 
-print(f"Fitting GARCH(1,1) on {len(all_symbols)} ETFs across {len(all_folds)} folds...")
+print(f"Fitting GARCH(1,1) on {len(all_symbols)} ETFs across {len(all_folds)} label-folds...")
 
 
 # %%
@@ -599,6 +626,7 @@ def fit_garch_fold(
         Conditional volatility for the full fold window with fold column.
     """
     fold_idx = fold["fold"]
+    cv_label = fold["cv_label"]
     train_start = fold["train_start"]
     train_end = fold["train_end"]
     val_end = fold["val_end"]
@@ -662,6 +690,7 @@ def fit_garch_fold(
                     "symbol": [sym] * len(sym_data),
                     "garch_cond_vol": cond_vol_ann,
                     "fold": [fold_idx] * len(sym_data),
+                    "cv_label": [cv_label] * len(sym_data),
                 }
             ).drop_nulls()
 
@@ -671,7 +700,10 @@ def fit_garch_fold(
         except Exception:
             n_fail += 1
 
-    print(f"  Fold {fold_idx} GARCH: {n_success}/{len(symbols)} fitted, {n_fail} failed/skipped")
+    print(
+        f"  {cv_label} fold {fold_idx} GARCH: {n_success}/{len(symbols)} fitted, "
+        f"{n_fail} failed/skipped"
+    )
     return pl.concat(results) if results else pl.DataFrame()
 
 
@@ -688,9 +720,8 @@ garch_cols = ["garch_cond_vol"]
 
 if len(garch_df) > 0:
     n_syms = garch_df["symbol"].n_unique()
-    print(
-        f"\nGARCH features: {len(garch_df):,} rows, {n_syms} assets, {garch_df['fold'].n_unique()} folds"
-    )
+    n_garch_folds = len(garch_df.select("cv_label", "fold").unique())
+    print(f"\nGARCH features: {len(garch_df):,} rows, {n_syms} assets, {n_garch_folds} label-folds")
     print(
         f"  Conditional vol: mean={garch_df['garch_cond_vol'].mean():.3f}, "
         f"std={garch_df['garch_cond_vol'].std():.3f}"
@@ -709,6 +740,7 @@ fold_panels = []
 
 for fold in all_folds:
     fold_idx = fold["fold"]
+    cv_label = fold["cv_label"]
     train_start = fold["train_start"]
     val_end = fold["val_end"]
 
@@ -721,17 +753,21 @@ for fold in all_folds:
         .select(["timestamp", "symbol"])
         .unique()
         .sort(["timestamp", "symbol"])
-        .with_columns(pl.lit(fold_idx).alias("fold"))
+        .with_columns(pl.lit(fold_idx).alias("fold"), pl.lit(cv_label).alias("cv_label"))
     )
 
-    # Get date-level features for this fold
+    # Get date-level features for this label's fold
     fold_hmm = (
-        hmm_features.filter(pl.col("fold") == fold_idx).drop("fold")
+        hmm_features.filter((pl.col("fold") == fold_idx) & (pl.col("cv_label") == cv_label)).drop(
+            "fold", "cv_label"
+        )
         if len(hmm_features) > 0
         else pl.DataFrame()
     )
     fold_ffd = (
-        ffd_features.filter(pl.col("fold") == fold_idx).drop("fold")
+        ffd_features.filter((pl.col("fold") == fold_idx) & (pl.col("cv_label") == cv_label)).drop(
+            "fold", "cv_label"
+        )
         if len(ffd_features) > 0
         else pl.DataFrame()
     )
@@ -754,16 +790,24 @@ for fold in all_folds:
 
     # Join per-asset GARCH features
     if len(garch_df) > 0:
-        fold_garch = garch_df.filter(pl.col("fold") == fold_idx).drop("fold")
+        fold_garch = garch_df.filter(
+            (pl.col("fold") == fold_idx) & (pl.col("cv_label") == cv_label)
+        ).drop("fold", "cv_label")
         panel = panel.join(fold_garch, on=["timestamp", "symbol"], how="left")
 
     fold_panels.append(panel)
 
-temporal = pl.concat(fold_panels).sort(["fold", "timestamp", "symbol"])
+temporal = pl.concat(fold_panels).sort(["cv_label", "fold", "timestamp", "symbol"])
 
-temporal_cols = [c for c in temporal.columns if c not in ("timestamp", "symbol", "fold")]
+temporal_cols = [
+    c for c in temporal.columns if c not in ("timestamp", "symbol", "fold", "cv_label")
+]
 print(f"Combined model-based features: {len(temporal_cols)} columns, {len(temporal):,} rows")
-print(f"  Assets: {temporal['symbol'].n_unique()}, Folds: {temporal['fold'].n_unique()}")
+print(
+    f"  Assets: {temporal['symbol'].n_unique()}, "
+    f"labels: {temporal['cv_label'].n_unique()}, "
+    f"label-folds: {len(temporal.select('cv_label', 'fold').unique())}"
+)
 
 # %% [markdown]
 # ### Quality Check
@@ -787,9 +831,9 @@ for col in temporal_cols:
 # %%
 print("\nPer-fold feature means:")
 fold_summary = (
-    temporal.group_by("fold")
+    temporal.group_by("cv_label", "fold")
     .agg([pl.col(c).mean().alias(f"mean_{c}") for c in temporal_cols])
-    .sort("fold")
+    .sort("cv_label", "fold")
 )
 print(fold_summary)
 
@@ -803,7 +847,7 @@ FEATURES_DIR.mkdir(parents=True, exist_ok=True)
 temporal.write_parquet(FEATURES_DIR / "model_based.parquet")
 print(
     f"Saved: features/model_based.parquet "
-    f"({len(temporal):,} rows, {len(temporal_cols)} features + fold column)"
+    f"({len(temporal):,} rows, {len(temporal_cols)} features + cv_label/fold columns)"
 )
 
 # %% [markdown]
@@ -815,19 +859,23 @@ print(
 # EXCLUDED from this development-time readout -- its features are saved for the
 # final out-of-sample evaluation, but letting the holdout inform feature-quality
 # expectations here would break the seal (mirrors the scoping in 02/03).
+#
+# The readout is scoped to the primary label, so it reads that label's fold
+# geometry out of the artifact.
 
 # %%
-labels = pl.read_parquet(CASE_DIR / "labels" / "fwd_ret_21d.parquet")
 label_col = "fwd_ret_21d"
+labels = pl.read_parquet(CASE_DIR / "labels" / f"{label_col}.parquet")
 
 # Only evaluate on validation periods of the CV folds (exclude the holdout fold)
 val_rows = []
-for fold in cv_splits:
+for fold in label_folds[label_col]:
     fold_idx = fold["fold"]
     val_start = fold["val_start"]
     val_end = fold["val_end"]
     fold_val = temporal.filter(
         (pl.col("fold") == fold_idx)
+        & (pl.col("cv_label") == label_col)
         & (pl.col("timestamp") >= pl.lit(val_start).cast(pl.Date))
         & (pl.col("timestamp") <= pl.lit(val_end).cast(pl.Date))
     )

@@ -434,6 +434,20 @@ def load_modeling_dataset(
     _temporal_feature_names = []
 
     if temporal is not None:
+        # A per-fold temporal artifact describes one label's walk-forward
+        # geometry. Labels configured with different buffers have different
+        # train and validation windows, so keep only the rows fit for the label
+        # being loaded; using another label's rows means reading features fit on
+        # the wrong training window.
+        if "cv_label" in temporal.columns:
+            available = sorted(temporal["cv_label"].unique().to_list())
+            temporal = temporal.filter(pl.col("cv_label") == primary_label).drop("cv_label")
+            if temporal.is_empty():
+                raise ValueError(
+                    f"Temporal artifact for case study {case_study_id!r} carries no rows for "
+                    f"label {primary_label!r}; it covers {available}. Re-run "
+                    f"04_model_based_features, which emits one fold set per configured label."
+                )
         _temporal_keys = sorted(set(temporal.columns) & set(feature_keys))
         casts = {
             k: features.schema[k]
