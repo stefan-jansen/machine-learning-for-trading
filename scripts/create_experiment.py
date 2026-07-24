@@ -18,6 +18,23 @@ def _make_writable(root: Path) -> None:
         path.chmod(path.stat().st_mode | stat.S_IWUSR)
 
 
+def _seed_shared_presets(repo_root: Path, output_root: Path) -> None:
+    """Copy the shared model presets into the experiment's ML4T_OUTPUT_DIR.
+
+    ``load_configs`` resolves preset files at ``{ML4T_OUTPUT_DIR}/config/{model_type}/``
+    (it reads ``case_dir.parent / "config"``), so the shared ``case_studies/config/``
+    tree must be present there for a preset lookup to succeed under the experiment
+    dir. Mirrors ``tests/conftest.py::seeded_output_dir``. Shared across every case
+    study in one output root, so seed it once and leave an existing copy in place.
+    """
+    src = repo_root / "case_studies" / "config"
+    dst = output_root / "config"
+    if not src.is_dir() or dst.exists():
+        return
+    shutil.copytree(src, dst)
+    _make_writable(dst)
+
+
 def create_experiment(
     case_study: str,
     output_root: Path,
@@ -29,6 +46,9 @@ def create_experiment(
     source_run_log = source / "run_log"
     if not source.is_dir() or not source_run_log.is_dir() or source_run_log.is_symlink():
         raise ValueError(f"Install the {case_study} artifact bundle before creating an experiment")
+    source_config = source / "config"
+    if not source_config.is_dir():
+        raise ValueError(f"Case study {case_study} has no config/ tree; cannot create experiment")
 
     output_root = output_root.resolve()
     target = output_root / case_study
@@ -44,6 +64,12 @@ def create_experiment(
             if candidate.is_dir():
                 shutil.copytree(candidate, staging / name)
 
+        # config/ is a version-controlled input, not a generated artifact, but the
+        # reader edits it to define the experiment and get_case_study_dir() redirects
+        # config reads to ML4T_OUTPUT_DIR, so the experiment must carry its own copy
+        # (else notebooks crash on config/setup.yaml before any reader edit is reached).
+        shutil.copytree(source_config, staging / "config")
+
         _make_writable(staging)
         release_metadata = staging / "run_log/.release"
         if release_metadata.exists():
@@ -52,6 +78,8 @@ def create_experiment(
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+
+    _seed_shared_presets(repo_root, output_root)
     return target
 
 
@@ -69,8 +97,10 @@ def main() -> None:
     args = parser.parse_args()
 
     experiment = create_experiment(args.cs, args.output)
+    output_root = args.output.resolve()
     print(f"Experiment ready: {experiment}")
-    print(f"Set ML4T_OUTPUT_DIR={args.output.resolve()} when running case-study notebooks.")
+    print(f"Edit the config in {experiment / 'config'} to change the experiment,")
+    print(f"then set ML4T_OUTPUT_DIR={output_root} when running case-study notebooks.")
 
 
 if __name__ == "__main__":

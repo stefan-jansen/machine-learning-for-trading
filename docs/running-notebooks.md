@@ -291,33 +291,61 @@ ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
   uv run python case_studies/etfs/07_gbm.py
 ```
 
-The setup command copies every available generated prerequisite, changes the release marker to a
-baseline marker, and makes only the copy writable. `ML4T_OUTPUT_DIR` routes new registry rows and
-artifacts into `/tmp/ml4t-etf-experiment/etfs/`. The downloaded release remains unchanged.
+The setup command copies every available generated prerequisite **and the case study's `config/`
+tree** into the experiment, changes the release marker to a baseline marker, and makes only the copy
+writable. `ML4T_OUTPUT_DIR` routes both config reads and new registry rows into
+`/tmp/ml4t-etf-experiment/`, so you change a configuration **inside the experiment** and the
+downloaded release stays untouched. You edit config there, not in the model notebook - the notebooks
+have no hyperparameter grids inline; they read the config system described below.
+
+> **Prerequisite for training stages.** The artifact bundle installs the registry (`run_log/`) only.
+> `07_gbm.py` and the other model notebooks also need the modeling dataset (`features/`, `labels/`),
+> which you produce by running `02_labels.py`, `03_financial_features.py`, and
+> `04_model_based_features.py` first. `create_experiment.py` copies whatever of those already exist in
+> the case study directory.
 
 ### Try Different Model Hyperparameters
 
-Open a model notebook such as `07_gbm.py`, modify the configuration, and run it with the experiment's
-`ML4T_OUTPUT_DIR`. The new run receives a unique hash in the copied registry.
+The GBM grid is not a `PARAM_GRID` inside `07_gbm.py`. It is the list of preset names in
+`config/training/{label}.yaml` under the `gbm:` key; each name resolves to a preset file in
+`case_studies/config/lgb/{name}.yaml` that holds the actual LightGBM parameters. To change the grid,
+edit these files **in the experiment**:
 
-```python
-# In 07_gbm.py, change the parameter grid:
-PARAM_GRID = {
-    "num_leaves": [31, 63, 127],      # Try more complex trees
-    "learning_rate": [0.01, 0.05],     # Different learning rates
-    "min_child_samples": [20, 50],
-}
+```bash
+# Add or remove configs from the grid (one preset name per line under `gbm:`):
+$EDITOR /tmp/ml4t-etf-experiment/etfs/config/training/fwd_ret_21d.yaml
+
+# Change the hyperparameters of a preset, or add a new preset file:
+$EDITOR /tmp/ml4t-etf-experiment/config/lgb/leaves_63_mse.yaml
+
+# Run on CPU if you do not have a CUDA-enabled LightGBM build
+# (set modeling.gbm.device: cpu in the experiment's setup.yaml):
+$EDITOR /tmp/ml4t-etf-experiment/etfs/config/setup.yaml
+
+ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
+  uv run python case_studies/etfs/07_gbm.py
 ```
+
+Each config that is not already in the copied registry trains and receives a unique hash there; the
+analysis notebooks pick up every registry hash automatically.
 
 ### Try a Different Backtest Configuration
 
-Modify the signal-to-position mapping, change cost assumptions, or adjust position sizing:
+Cadence, transaction costs, and selection breadth live in the experiment's
+`etfs/config/setup.yaml`, not as variables in `14_backtest.py`:
 
-```python
-# In 14_backtest.py, change the strategy:
-TOP_N = 10              # Hold top 10 instead of top 20
-COST_BPS = 15           # Higher transaction costs
-REBALANCE_FREQ = "W"    # Weekly instead of monthly
+- `decision.cadence` - rebalance cadence (e.g. `monthly_month_end`).
+- `costs.*` - the transaction-cost model (per-share fees, spreads).
+- `backtest.sweep.top_n_predictions` - how many model configs advance at each stage.
+
+The `14_backtest.py` parameter cell exposes run-scoping knobs only - `SPLIT`, `TOP_K`, `MAX_SYMBOLS`,
+`TOP_N_PREDICTIONS`, `FORCE_REBACKTEST` - which select what to backtest, not the strategy economics.
+
+```bash
+$EDITOR /tmp/ml4t-etf-experiment/etfs/config/setup.yaml   # edit decision / costs / backtest.sweep
+
+ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
+  uv run python case_studies/etfs/14_backtest.py
 ```
 
 ### Compare Your Experiments
