@@ -1661,10 +1661,13 @@ case_studies/etfs/11a_pca:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/etfs/11b_ipca:
+  # IPCA alternates least squares to convergence per fold, which does not
+  # shrink with the universe the way a fixed-epoch fit does; 300s is not enough
+  # even at MAX_SYMBOLS 5. Matches the 11_latent_factors budget.
   parameters:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-  timeout: 300
+  timeout: 900
 case_studies/etfs/11_latent_factors:
   gpu: true
   parameters:
@@ -1995,7 +1998,8 @@ case_studies/sp500_equity_option_analytics/11_latent_factors:
     N_FACTORS: 2
   timeout: 600
 case_studies/sp500_equity_option_analytics/11a_pca: {}
-case_studies/sp500_equity_option_analytics/11b_ipca: {}
+case_studies/sp500_equity_option_analytics/11b_ipca:
+  timeout: 900
 case_studies/sp500_equity_option_analytics/12_causal_dml:
   parameters:
     CV_FOLDS: 2

@@ -385,3 +385,31 @@ def generate_cv_splits(
         )
 
     return splits
+
+
+def configured_labels(
+    case_study_id: str,
+    setup: dict[str, Any] | None = None,
+) -> list[str]:
+    """Every label the case study configures, primary first.
+
+    Producers of per-fold artifacts iterate this so the artifact carries one
+    fold set per label rather than only the primary label's. A case study's
+    variant labels carry their own ``label_buffer``, so their walk-forward
+    geometry genuinely differs from the primary's — see
+    ``modeling_fold_boundaries_by_label`` in ``case_studies/utils/cv_window.py``.
+    """
+    if setup is None:
+        setup_path = get_case_study_dir(case_study_id, create=False) / "config" / "setup.yaml"
+        with open(setup_path) as f:
+            setup = yaml.safe_load(f)
+
+    labels_cfg = (setup or {}).get("labels", {}) or {}
+    ordered = [labels_cfg.get("primary"), *(labels_cfg.get("variants") or [])]
+    labels = [label for label in ordered if label]
+    if not labels:
+        raise ValueError(
+            f"No labels configured for case study {case_study_id!r}; expected "
+            f"labels.primary in case_studies/{case_study_id}/config/setup.yaml"
+        )
+    return labels
