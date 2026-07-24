@@ -34,7 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # GitHub release configuration
 GITHUB_REPO = "stefan-jansen/machine-learning-for-trading"
-RELEASE_TAG = "v3.0.0-alpha.4"
+RELEASE_TAG = "v3.0.0-artifacts"
 BASE_URL = f"https://github.com/{GITHUB_REPO}/releases/download/{RELEASE_TAG}"
 
 CASE_STUDIES = [
@@ -50,15 +50,17 @@ CASE_STUDIES = [
 ]
 
 ARTIFACT_SHA256 = {
-    "cme_futures": "c636ef677bd290126a918de602b5e05be3506d3ab02f90dd612382f22ef58898",
-    "crypto_perps_funding": "df34fbed5225fab615d6030bbd9ee3fe8d136dbb8c01663cd4184e905ef5b4eb",
-    "etfs": "20f2012d309b7236b1e3d0d8efeb6c585b3cd205f770341dacc803b7dafd861e",
-    "fx_pairs": "19d2ac6cf2ddfdbf5a475978ee73c3a517a73c6ed961186a8b8a2f8d35719be5",
+    "cme_futures": "ab1c97276cdf74aa95d894cc0b0f3ea909c3ed8356f41f217e008c971e34b4f8",
+    "crypto_perps_funding": "517030f3def6d0264984c2b545032741100df4ee3d159e44ef4c348a314c4c7f",
+    "etfs": "93d3e24dcb4872b965f355a6931f163e0871a58729c1bd1ea6d99f369f2baf39",
+    "fx_pairs": "0555a5b2788576ba9eeb8fd874f5375a651d5094b2952eb42aa01aac4bee38e6",
+    "nasdaq100_microstructure": "a688081f30f97b2ab9f7f926e0608734ed4145ecfd1bf189624709d694c2167f",
+    "us_equities_panel": "ebf5b0b846da310e2611126b0059e5c51f116e185f82d47248f81cf088f32e27",
     "sp500_equity_option_analytics": (
-        "f4d86a9fc6166163ab6b51c05b6bc7ad0e26135899efe41414102b8cac04b172"
+        "4eba2aadcc1fc5af322f0cfb0a8d4dcfb036391141adff59a0358c2a8401ca49"
     ),
-    "sp500_options": "f6eacbc36b5e438b606c99cf7d9c45ae2685ce56fa8c5a157ec36a6b2b025fdc",
-    "us_firm_characteristics": ("883ca036076053dad03407f4c63089d5c6f245ec73d5beb088c13b1e67da8136"),
+    "sp500_options": "55333f313d3a2180a468e326030aa80d713b271c85d41d55989532f9567fccb2",
+    "us_firm_characteristics": ("2ec2087a054e1a075f7baa51546a2453c0d7db6108211e9cfbb80f95d894cffb"),
 }
 
 

@@ -1,5 +1,5 @@
 # Model configurations for fwd_ret_1m_win
-# Each entry references a preset in case_studies/_presets/{family}/.
+# Each entry references a preset in case_studies/config/{model_type}/.
 # Comment out lines to skip configs; add new preset names to extend.
 
 linear:
