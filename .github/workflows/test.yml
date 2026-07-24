@@ -11,15 +11,24 @@
 #
 # Trigger policy:
 #   - PR: incremental (path-filtered, only changed chapters)
+#   - Push to main: incremental (same path filter as PR) — see below
 #   - Weekly: full suite on schedule (Monday 6 AM UTC)
 #   - After Docker Publish: full suite (workflow_run trigger)
 #   - Manual: workflow_dispatch with optional run_all flag
-#   - Push to main: NOT triggered (conserves minutes)
+#
+# Push to main was previously NOT triggered, to conserve minutes. Exports land on
+# main as pushes, so nothing CI ran had ever seen what shipped: issue #372 (59 of
+# 122 shipped notebooks would not open in JupyterLab) reached a reader through
+# that gap, and the weekly cron is up to 7 days late. The push run is
+# path-filtered exactly like the PR run, so the marginal cost is one duplicate
+# run per merge — cheaper than one reader-found defect.
 
 name: Tests
 
 on:
   pull_request:
+    branches: [main]
+  push:
     branches: [main]
   schedule:
     - cron: '0 6 * * 1'   # Weekly Monday 6 AM UTC
@@ -149,7 +158,20 @@ jobs:
 
           # --- Chapter matrix (all chapters including Ch01 and Ch05) ---
           chapters="[]"
-          add_ch() { chapters=$(echo "$chapters" | jq -c --arg n "$1" --arg f "$2" '. + [{"name":$n,"filter":$f}]'); }
+          # Public-subset scoping: include a chapter only if at least one of its
+          # NN_* directories is actually present. The public repo ships chapters
+          # incrementally (beat by beat), so this auto-scopes the matrix to what
+          # is shipped — no per-beat workflow edits, and unshipped chapters can't
+          # fail with "no tests collected".
+          add_ch() {
+            local n="$1" f="$2" p
+            for p in $(echo "$f" | grep -oE '[0-9]{2}_' || true); do
+              if compgen -G "${p}*" >/dev/null 2>&1; then
+                chapters=$(echo "$chapters" | jq -c --arg n "$n" --arg f "$f" '. + [{"name":$n,"filter":$f}]')
+                return
+              fi
+            done
+          }
 
           if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch01 }}" == "true" ]]; then
             add_ch "ch01" "01_process"
@@ -231,7 +253,19 @@ jobs:
 
           # --- Case study matrix ---
           cases="[]"
-          add_cs() { cases=$(echo "$cases" | jq -c --arg cs "$1" '. + [{"case-study":$cs}]'); }
+          # Public repo ships case-study CONFIG but gates the pipeline code.
+          # test_case_studies.py auto-discovers stages by globbing
+          # case_studies/<cs>/[0-9][0-9]*.py, and the results registry is seeded
+          # from the test-data repo at run time (NOT shipped to this repo). So
+          # gate on the same signal the test collects: enroll a case study only
+          # once its pipeline notebooks are shipped here — currently only
+          # config/setup.yaml ships, so case-study jobs stay skipped. Future
+          # beats that ship the notebooks auto-enroll, no workflow edits.
+          add_cs() {
+            if compgen -G "case_studies/$1/[0-9][0-9]*.py" >/dev/null 2>&1; then
+              cases=$(echo "$cases" | jq -c --arg cs "$1" '. + [{"case-study":$cs}]')
+            fi
+          }
 
           if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-etfs }}" == "true" ]]; then
             add_cs "etfs"
@@ -285,6 +319,54 @@ jobs:
         run: uvx ruff@0.15.8 format --check utils/ data/ tests/
 
   # ---------------------------------------------------------------------------
+  # Reader-facing guards. Always-on, never path-filtered, no Docker, ~1 minute.
+  #
+  # Every other job in this workflow asks "does the notebook run?". None asked
+  # "can a reader open it?" — so issue #372 was invisible to the entire suite
+  # while 59 of 122 shipped notebooks raised File Load Error in JupyterLab.
+  #
+  # check_notebook_pair_sync.py is that missing check, and it already existed:
+  # it was wired into .pre-commit-config.yaml only, so it gated commits and not
+  # pushes. Exports reach main as pushes. This job is where it actually gates.
+  #
+  # Unfiltered by design: a desynced pair is caused by tooling that touches many
+  # chapters at once (papermill metadata, ruff-format, a partial export), so
+  # "only test what changed" is precisely the wrong scope for it.
+  # ---------------------------------------------------------------------------
+  guards:
+    name: guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "latest"
+      - name: Install guard deps
+        # jupytext only: check_notebook_pair_sync.py shells out to the `jupytext`
+        # binary, so it must be on PATH. Deliberately not the project env — this
+        # stays a ~1-minute gate.
+        run: |
+          uv venv --python 3.14
+          uv pip install jupytext==1.19.3 pytest nbformat
+      - name: Notebook pairs open in JupyterLab (#372 regression gate)
+        run: |
+          source .venv/bin/activate
+          python scripts/check_notebook_pair_sync.py
+      # test_no_machine_specific_paths is deselected, not skipped: it is RED today
+      # (97 `/home/stefan/...` leaks across 46 notebooks, incl. shipped Ch1
+      # factor_regimes). The leaks are in outputs — cosmetic, not breakage — so
+      # they do not justify holding this gate back; but the fix is NOT to run
+      # sanitize_notebook_paths.py, which rewrites source code (it turned a real
+      # Docker mount path in ch02/16_provider_comparison into a relative path).
+      # Fix = make the sanitizer outputs-only and JSON-aware, then delete this
+      # line. Tracked so it cannot be quietly forgotten.
+      - name: Notebook output hygiene
+        run: |
+          source .venv/bin/activate
+          python -m pytest tests/test_notebook_output_hygiene.py -q \
+            --deselect tests/test_notebook_output_hygiene.py::test_no_machine_specific_paths_in_committed_notebooks
+
+  # ---------------------------------------------------------------------------
   # Fast native unit tests — download-script logic (no Docker, no network,
   # no test-data, no secrets). Seconds per PR.
   #
@@ -292,7 +374,11 @@ jobs:
   # path is invisible to them — this is how the in-container free-data download
   # bug (#361) reached readers. These tests exercise that logic directly:
   # path resolution / output placement, download_all dispatch modes, the
-  # firm-characteristics archive flatten, and download-script registry drift.
+  # firm-characteristics archive flatten, download-script registry drift, the
+  # compose /data-mount contract (static regression-lock for #361), and the
+  # drift-coverage ratchet (every free dataset keeps a live external smoke).
+  # The networked container smoke (Phase 2b) and live drift pulls (Phase 3) run
+  # in container-smoke.yml / weekly-external.yml, not here.
   # ---------------------------------------------------------------------------
   test-unit:
     runs-on: ubuntu-latest
@@ -325,7 +411,8 @@ jobs:
             tests/test_firm_characteristics_extract.py \
             tests/test_download_all_dispatch.py \
             tests/test_download_scripts_registry.py \
-            tests/test_compose_ports.py \
+            tests/test_compose_mounts.py \
+            tests/test_download_coverage.py \
             -v --tb=short
 
   # ---------------------------------------------------------------------------
@@ -487,9 +574,8 @@ jobs:
                 or 01_word2vec or 02_asset_embeddings or 03_sentiment_evolution \
                 or 01_timegan or 07_dp_gan \
                 or 10_shap_nlp_sentiment or 06_conditional_autoencoder \
+                or 06_fed_announcement_bsts \
                 or deep_hedging_pfhedge"
-          /opt/bsts/bin/python -m pytest tests/test_docker_notebooks.py \
-            -v --tb=short -k "06_fed_announcement_bsts"
 
   # ---------------------------------------------------------------------------
   # Neo4j Docker service (Ch23 Knowledge Graphs)
