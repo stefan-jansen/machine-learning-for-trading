@@ -1,0 +1,13 @@
+{
+  "content_hash": "b20bdf979f79bc32afb9760d979ff533a162dc053618fe81af78dbc4830e29f5",
+  "schema": [
+    "subject",
+    "predicate",
+    "object"
+  ],
+  "row_count": 2049,
+  "model_name": "Qwen/Qwen2.5-7B-Instruct",
+  "max_companies": 0,
+  "written_at": "2026-05-22T23:50:00Z",
+  "note": "Bootstrap metadata for the SP100 10-K cache shipped with the repo. Regenerated on any fresh extraction run."
+}

@@ -1,0 +1,1351 @@
+{
+  "notebook": "08_forecasting_pipeline",
+  "provider": "claude-sonnet-4-20250514",
+  "question": {
+    "question": "Will the US enter a recession by the end of 2026?",
+    "description": "Resolves YES if US real GDP (seasonally adjusted annualized) contracts for two consecutive quarters between Q2 2025 and Q4 2026, or the NBER declares a recession dated within that window.",
+    "resolution_date": "2027-01-31",
+    "cutoff_date": "",
+    "current_market_price": 0.175,
+    "resolved_outcome": null
+  },
+  "params": {
+    "n_agents": 3,
+    "max_steps": 5,
+    "debate_rounds": 3,
+    "correlation": 0.3
+  },
+  "agents": [
+    {
+      "agent_id": "agent_0",
+      "p_yes": 0.22,
+      "rationale": "Based on historical data, US recessions occur roughly every 5.4 years on average, with 8 recessions since 1950 (about every 9 years post-WWII). The last recession was COVID in 2020, making 2025-2026 within normal cyclical timing. However, current economic indicators show mixed signals: professional forecasters project modest GDP growth of 1.9% for 2026 with significant disagreement (top 10 forecasts average 2.5%, bottom 10 average 1.2%), unemployment remains relatively low with progress on inflation suggesting potential 'soft landing', and the Federal Reserve projects continued but slower growth. While the two-quarter GDP decline rule has historically been a reliable recession indicator, current consensus forecasts suggest positive but slow growth. The 22% probability reflects the historical base rate adjusted upward for current economic uncertainties and the natural business cycle timing, but tempered by relatively stable current conditions and professional forecaster optimism.",
+      "traces": [
+        {
+          "step": 1,
+          "action": "search",
+          "query": "US economic indicators 2024 2025 GDP growth inflation unemployment Federal Reserve",
+          "results": [
+            {
+              "title": "An Update to the Economic Outlook: 2023 to 2025",
+              "url": "https://www.cbo.gov/publication/59258",
+              "snippet": "Real GDP increases by 1.5 percent in 2024 and by 2.4 percent in 2025. That initial slowdown in economic growth drives up unemployment. The",
+              "published": null,
+              "score": 0.8131201
+            },
+            {
+              "title": "Third Quarter 2025 Survey of Professional Forecasters",
+              "url": "https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/spf-q3-2025",
+              "snippet": "*   [Survey of Professional Forecasters](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/survey-of-professional-forecasters). [](https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/survey-of-professional-forecasters/2025/spfQ325.pdf \"Down\u2026",
+              "published": null,
+              "score": 0.6246834
+            },
+            {
+              "title": "U.S. outlook for 2025 - Indiana Business Research Center",
+              "url": "https://www.ibrc.indiana.edu/ibr/2024/outlook/national.html",
+              "snippet": "![Image 8: Line graph showing quarterly real personal consumption growth in the U.S. from 2023 Q4 to 2024 Q3, forecasted real personal consumption growth from 2024 Q4 to 2026 Q4 and last year's forecast for real personal consumption growth from 2023 Q4 to 2026 Q4.'](https://www.i\u2026",
+              "published": null,
+              "score": 0.5820878
+            },
+            {
+              "title": "December 10, 2025: FOMC Projections materials, accessible version",
+              "url": "https://www.federalreserve.gov/monetarypolicy/fomcprojtabl20251210.htm",
+              "snippet": "*   [Federal Reserve Act](https://www.federalreserve.gov/aboutthefed/fract.htm). *   [Notes](https://www.federalreserve.gov/monetarypolicy/monetary-policy-principles-and-practice.htm). *   [Federal Reserve Act](https://www.federalreserve.gov/aboutthefed/fract.htm). *   [Federal R\u2026",
+              "published": null,
+              "score": 0.51603514
+            },
+            {
+              "title": "U.S. Economic Outlook",
+              "url": "https://www.kansascityfed.org/documents/11927/2025-Brown-AssocAmerRailroads-10-1.pdf",
+              "snippet": "Many segments of the economy show signs of stable demand. \u2022 Higher prices from tariffs are yet to fully show but appear to be.",
+              "published": null,
+              "score": 0.38713467
+            }
+          ],
+          "llm_raw": "{\"action\":\"search\",\"query\":\"US economic indicators 2024 2025 GDP growth inflation unemployment Federal Reserve\"}"
+        },
+        {
+          "step": 2,
+          "action": "search",
+          "query": "US recession probability 2025 2026 professional forecasters economists GDP growth predictions",
+          "results": [
+            {
+              "title": "Professional Forecasters' Past Performance and the 2026 Economic ...",
+              "url": "https://www.stlouisfed.org/on-the-economy/2025/dec/professional-forecasters-past-performance-outlook-2026",
+              "snippet": "# Professional Forecasters\u2019 Past Performance and the 2026 Economic Outlook. Image 2: Federal Reserve Bank of St. Louis. Image 3 FRED Tools and resources to find and use economic data worldwide. Image 4 FRASER U.S. Financial, economic, and banking history. Image 5 ALFRED Vintages\u2026",
+              "published": null,
+              "score": 0.81524754
+            },
+            {
+              "title": "Second Quarter 2026 Survey of Professional Forecasters",
+              "url": "https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/spf-q2-2026",
+              "snippet": "*   [Survey of Professional Forecasters](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/survey-of-professional-forecasters). [](https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/survey-of-professional-forecasters/2026/spfQ226.pdf \"Down\u2026",
+              "published": null,
+              "score": 0.7557276
+            },
+            {
+              "title": "First Quarter 2026 Survey of Professional Forecasters",
+              "url": "https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/spf-q1-2026",
+              "snippet": "*   [Survey of Professional Forecasters](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/survey-of-professional-forecasters). [](https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/survey-of-professional-forecasters/2026/spfQ126.pdf \"Down\u2026",
+              "published": null,
+              "score": 0.752468
+            },
+            {
+              "title": "US Economic Forecast Q1 2026 | Deloitte Insights",
+              "url": "https://www.deloitte.com/us/en/insights/topics/economy/us-economic-forecast/united-states-outlook-analysis.html",
+              "snippet": "This reflects the sizable capital expenditure plans that AI \u201chyperscalers\u201d have announced for this year.[4](https://www.deloitte.com/us/en/insights/topics/economy/us-economic-forecast/united-states-outlook-analysis.html#endnote-4)We now expect real business investment to grow by\u2026",
+              "published": null,
+              "score": 0.72418857
+            },
+            {
+              "title": "The Budget and Economic Outlook: 2026 to 2036",
+              "url": "https://www.cbo.gov/publication/62105",
+              "snippet": "Real GDP growth in 2026 is projected to be stronger in the current projections, Real GDP grows by 2.2% in 2026 and by 1.8% in 2027. , averaging",
+              "published": null,
+              "score": 0.64478505
+            }
+          ],
+          "llm_raw": "{\"action\":\"search\",\"query\":\"US recession probability 2025 2026 professional forecasters economists GDP growth predictions\"}"
+        },
+        {
+          "step": 3,
+          "action": "search",
+          "query": "US recession historical frequency base rate NBER recession dating probability two consecutive quarters GDP decline",
+          "results": [
+            {
+              "title": "[PDF] Forecasting U.S. Recessions with Macro Factors - University of Alberta",
+              "url": "https://sites.ualberta.ca/~sfossati/files/pdfs/forecasting_nber.pdf",
+              "snippet": "22 Table 1: Selected Forecasting Models for NBER Recessions Predictors Model 1 2 3 4 5 6 7 8 9 10 1 310TSt 3-Month less 10-Year Spread \u2713 \u2713 \u2713 \u2713 \u2713 \u2713 \u2713 \u2713 2 FFRt Federal Funds Rate \u2713 \u2713 \u2713 3 SP500t S&P 500 (% change) \u2713 \u2713 \u2713 4 EMPt\u22121 Employment (% change) \u2713 \u2713 5 \u02c6 g1t Bond and Exchange Ra\u2026",
+              "published": null,
+              "score": 0.45217365
+            },
+            {
+              "title": "Yes, the US Economy Is Likely in Recession - Project Syndicate",
+              "url": "https://www.project-syndicate.org/commentary/two-consecutive-quarters-negative-us-growth-predict-recession-since-1948-by-robert-j-barro-2022-07",
+              "snippet": "Robert J. Barro shows that two consecutive quarters of negative US growth have almost always preceded an official downturn designation.",
+              "published": null,
+              "score": 0.3849127
+            },
+            {
+              "title": "United States NBER: Recorded Recession | Economic Indicators",
+              "url": "https://www.ceicdata.com/en/united-states/recession-probability/nber-recorded-recession",
+              "snippet": "United States NBER: Recorded Recession data is updated monthly, averaging 0.000 Unit from Jan 1959 (Median) to Oct 2018, with 718 observations.",
+              "published": null,
+              "score": 0.35106683
+            },
+            {
+              "title": "Business Cycle Dating | NBER",
+              "url": "https://www.nber.org/research/business-cycle-dating",
+              "snippet": "The NBER\u2019s Business Cycle Dating Committee maintains a chronology of US business cycles. According to the NBER chronology, the most recent peak occurred in February 2020. The NBER's definition emphasizes that a recession involves a significant decline in economic activity that is\u2026",
+              "published": null,
+              "score": 0.29920807
+            },
+            {
+              "title": "Business Cycle Dating Procedure: Frequently Asked Questions",
+              "url": "https://www.nber.org/research/business-cycle-dating/business-cycle-dating-procedure-frequently-asked-questions",
+              "snippet": "**Q: What is the basic job of the Business Cycle Dating Committee?**. A: The NBER\u2019s Business Cycle Dating Committee maintains a chronology of US\u00a0business cycles. The chronology identifies the dates of peak and trough months in economic activity. The peak is the month in which a v\u2026",
+              "published": null,
+              "score": 0.29781237
+            }
+          ],
+          "llm_raw": "{\"action\":\"search\",\"query\":\"US recession historical frequency base rate NBER recession dating probability two consecutive quarters GDP decline\"}"
+        },
+        {
+          "step": 4,
+          "action": "search",
+          "query": "US recession frequency historical data since 1945 how often recessions occur average time between recessions",
+          "results": [
+            {
+              "title": "List of recessions in the United States - Wikipedia",
+              "url": "https://en.wikipedia.org/wiki/List_of_recessions_in_the_United_States",
+              "snippet": "# List of recessions in the United States. There have been as many as 48 recessions in the United States dating back to the Articles of Confederation, and although economists and historians dispute certain 19th-century recessions, the consensus view among economists and historian\u2026",
+              "published": null,
+              "score": 0.64344186
+            },
+            {
+              "title": "The History of U.S. Recessions: 1797-2020 | SoFi",
+              "url": "https://www.sofi.com/learn/content/us-recession-history",
+              "snippet": "\u2022\u00a0\u00a0 A recession is a period when the economy contracts, with indicators such as stock market declines, business failures, and rising unemployment. \u2022\u00a0\u00a0 There have been multiple recessions throughout U.S. history, caused by factors such as credit expansion, financial crises, and ec\u2026",
+              "published": null,
+              "score": 0.47227025
+            },
+            {
+              "title": "This history of American recessions [OC] : r/dataisbeautiful - Reddit",
+              "url": "https://www.reddit.com/r/dataisbeautiful/comments/1me4yrx/this_history_of_american_recessions_oc",
+              "snippet": "From 1855 to 2020, recessions lasted an average of 17 months. In the 20th and 21st centuries, the average recession has decreased to 14 months.",
+              "published": null,
+              "score": 0.43813655
+            },
+            {
+              "title": "United States: duration of recessions 1854-2026| Statista",
+              "url": "https://www.statista.com/statistics/1317029/us-recession-lengths-historical",
+              "snippet": "## Other statistics on the topic The Great Recession in the U.S. Dow Jones: annual change in closing prices 1915-2021Dow Jones: average and yearly closing prices 1915-2021Great Depression: Dow Jones monthly change over presidential terms 1929-1937Doomsday Clock minutes to midnigh\u2026",
+              "published": null,
+              "score": 0.43438992
+            },
+            {
+              "title": "Every U.S. Recession Since 1900: Complete History & Data",
+              "url": "https://www.davemanuel.com/us-recessions-history-since-1900.php",
+              "snippet": "# Every U.S. Recession Since 1900. From the Panic of 1907 to the COVID crash of 2020 \u2014 a data-driven history of America's 23 economic downturns, what caused them, and how the nation recovered. ## The Business Cycle: A Century of Booms and Busts. The U.S. economy has experienced 2\u2026",
+              "published": null,
+              "score": 0.3802761
+            }
+          ],
+          "llm_raw": "{\"action\":\"search\",\"query\":\"US recession frequency historical data since 1945 how often recessions occur average time between recessions\"}"
+        },
+        {
+          "step": 5,
+          "action": "forecast",
+          "query": null,
+          "results": [],
+          "llm_raw": "{\"action\":\"forecast\",\"p_yes\":0.22,\"rationale\":\"Based on historical data, US recessions occur roughly every 5.4 years on average, with 8 recessions since 1950 (about every 9 years post-WWII). The last recession was COVID in 2020, making 2025-2026 within normal cyclical timing. However, current economic indicators show mixed signals: professional forecasters project modest GDP growth of 1.9% for 2026 with significant disagreement (top 10 forecasts average 2.5%, bottom 10 average 1.2%), unemployment remains relatively low with progress on inflation suggesting potential 'soft landing', and the Federal Reserve projects continued but slower growth. While the two-quarter GDP decline rule has historically been a reliable recession indicator, current consensus forecasts suggest positive but slow growth. The 22% probability reflects the historical base rate adjusted upward for current economic uncertainties and the natural business cycle timing, but tempered by relatively stable current conditions and professional forecaster optimism.\"}"
+        }
+      ],
+      "confidence": 0.56,
+      "sentiment": "bearish",
+      "key_findings": [],
+      "evidence_quality": "high",
+      "uncertainties": [
+        "However, current economic indicators show mixed signals: professional forecasters project modest GDP growth of 1",
+        "2%), unemployment remains relatively low with progress on inflation suggesting potential 'soft landing', and the Federal Reserve projects continued but slower growth",
+        "While the two-quarter GDP decline rule has historically been a reliable recession indicator, current consensus forecasts suggest positive but slow growth",
+        "The 22% probability reflects the historical base rate adjusted upward for current economic uncertainties and the natural business cycle timing, but tempered by relatively stable current conditions and professional forecaster optimism"
+      ],
+      "token_usage": {
+        "input_tokens": 35941,
+        "output_tokens": 347,
+        "total_tokens": 36288
+      },
+      "search_queries_made": 4,
+      "sources_consulted": 20
+    },
+    {
+      "agent_id": "agent_1",
+      "p_yes": 0.22,
+      "rationale": "Based on economic forecasts, the US appears positioned for modest growth through 2026. Multiple sources project real GDP growth of 1.8-2.4% for 2026, with the Indiana Business Research Center forecasting 1.8% growth and unemployment rising to 4.8%. The Fed projects 2.4% growth for 2026. Current recession indicators show low risk - the yield curve is positive, unemployment claims remain low, and financial stress indicators signal low recession probability. However, risks include potential energy price shocks, gradual labor market softening, and the typical economic cycle. The market's 17.5% implied probability seems slightly low given these modest but persistent risks and the historical base rate of recessions occurring roughly every 8-10 years.",
+      "traces": [
+        {
+          "step": 1,
+          "action": "search",
+          "query": "US GDP growth forecast 2025 2026 recession indicators economic outlook",
+          "results": [
+            {
+              "title": "U.S. outlook for 2026 - Indiana Business Research Center",
+              "url": "https://www.ibrc.indiana.edu/ibr/2025/outlook/national.html",
+              "snippet": "The IBR is a publication of the Indiana Business Research Center at IU's Kelley School of Business. *Recent developments in the U.S. and global economy present a complex and evolving picture for policymakers and business leaders. While our current readings of headline growth rema\u2026",
+              "published": null,
+              "score": 0.8396422
+            },
+            {
+              "title": "Economic Outlook U.S. Q2 2026: Curb Your Enthusia",
+              "url": "https://www.spglobal.com/ratings/en/regulatory/article/economic-outlook-us-q2-2026-curb-your-enthusiasm-s101676533",
+              "snippet": "[Current Oil Price Surge To Weigh On Growth](https://www.spglobal.com/ratings/en/regulatory/article/economic-outlook-us-q2-2026-curb-your-enthusiasm-s101676533). Before the war broke out, we were expecting to increase our growth forecast for this year closer to 2.5% on higher-tha\u2026",
+              "published": null,
+              "score": 0.8080827
+            },
+            {
+              "title": "US Economic Forecast Q1 2026 | Deloitte Insights",
+              "url": "https://www.deloitte.com/us/en/insights/topics/economy/us-economic-forecast/united-states-outlook-analysis.html",
+              "snippet": "This reflects the sizable capital expenditure plans that AI \u201chyperscalers\u201d have announced for this year.[4](https://www.deloitte.com/us/en/insights/topics/economy/us-economic-forecast/united-states-outlook-analysis.html#endnote-4)We now expect real business investment to grow by\u2026",
+              "published": null,
+              "score": 0.8066246
+            },
+            {
+              "title": "The Budget and Economic Outlook: 2026 to 2036",
+              "url": "https://www.cbo.gov/publication/62105",
+              "snippet": "Real GDP growth in 2026 is projected to be stronger in the current projections, partly because of the effects of the 2025 reconciliation act. In",
+              "published": null,
+              "score": 0.78572035
+            },
+            {
+              "title": "United States GDP Growth Rate - Trading Economics",
+              "url": "https://tradingeconomics.com/united-states/gdp-growth",
+              "snippet": "[](https://tradingeconomics.com/united-states/gdp-growth). [](https://tradingeconomics.com/united-states/gdp-growth). [Markets](https://tradingeconomics.com/united-states/gdp-growth#). [Forecasts](https://tradingeconomics.com/united-states/gdp-growth#). [](https://tradingeconomic\u2026",
+              "published": null,
+              "score": 0.7409441
+            }
+          ],
+          "llm_raw": "{\"action\":\"search\",\"query\":\"US GDP growth forecast 2025 2026 recession indicators economic outlook\"}"
+        },
+        {
+          "step": 2,
+          "action": "search",
+          "query": "NBER recession probability 2025 2026 leading economic indicators yield curve unemployment",
+          "results": [
+            {
+              "title": "US Recession Probability 2025 \u2013 Sahm Rule, Yield Curve & NBER ...",
+              "url": "https://www.jvinvest.ai/economics",
+              "snippet": "The 3-month average unemployment rate is currently at 4.30% and its 12-month minimum at 4.20%. The difference is 0.10 percentage points, which",
+              "published": null,
+              "score": 0.6530611
+            },
+            {
+              "title": "[PDF] NBER WORKING PAPER SERIES THE PREDICTIVE POWER OF ...",
+              "url": "https://www.nber.org/system/files/working_papers/w16398/w16398.pdf",
+              "snippet": "NBER WORKING PAPER SERIES THE PREDICTIVE POWER OF THE YIELD CURVE ACROSS COUNTRIES AND TIME Menzie D. The Predictive Power of the Yield Curve across Countries and Time Menzie D. Kucko NBER Working Paper No. 16398 September 2010 JEL No. C22,E37,E43 ABSTRACT In recent years, there\u2026",
+              "published": null,
+              "score": 0.3289825
+            },
+            {
+              "title": "The Fed - Assessing Recession Risks with State-Level Data",
+              "url": "https://www.federalreserve.gov/econres/notes/feds-notes/assessing-recession-risks-with-state-level-data-20260107.html",
+              "snippet": "The model classifies the business cycle into one of three phases\u2014expansion, U\u2011shaped recession, and L-shaped recession\u2014and estimates, for each point in time, the probability that each U.S. state is in one of these phases.[5](https://www.federalreserve.gov/econres/notes/feds-notes\u2026",
+              "published": null,
+              "score": 0.32072607
+            },
+            {
+              "title": "Making Sense of Recession Probabilities | St. Louis Fed",
+              "url": "https://www.stlouisfed.org/on-the-economy/2025/may/making-sense-recession-probabilities",
+              "snippet": "![Image 1](https://www.stlouisfed.org/on-the-economy/2025/may/making-sense-recession-probabilities)</>. [Skip to Main](https://www.stlouisfed.org/on-the-economy/2025/may/making-sense-recession-probabilities#frbstl-content). [![Image 3](https://www.stlouisfed.org/stlouisfed/-/medi\u2026",
+              "published": null,
+              "score": 0.30389753
+            },
+            {
+              "title": "Analyzing Economic Indicators To Spot Recession Risks - LinkedIn",
+              "url": "https://www.linkedin.com/top-content/finance/analyzing-economic-indicators/analyzing-economic-indicators-to-spot-recession-risks",
+              "snippet": "Monitor key signals: Pay close attention to yield curve inversions, rising unemployment, and contractions in consumer and business sentiment as early warning",
+              "published": null,
+              "score": 0.30040732
+            }
+          ],
+          "llm_raw": "{\"action\":\"search\",\"query\":\"NBER recession probability 2025 2026 leading economic indicators yield curve unemployment\"}"
+        },
+        {
+          "step": 3,
+          "action": "search",
+          "query": "US economic outlook 2025 2026 Federal Reserve interest rates inflation consumer spending business investment",
+          "results": [
+            {
+              "title": "US Economic Forecast Q1 2026 | Deloitte Insights",
+              "url": "https://www.deloitte.com/us/en/insights/topics/economy/us-economic-forecast/united-states-outlook-analysis.html",
+              "snippet": "This reflects the sizable capital expenditure plans that AI \u201chyperscalers\u201d have announced for this year.[4](https://www.deloitte.com/us/en/insights/topics/economy/us-economic-forecast/united-states-outlook-analysis.html#endnote-4)We now expect real business investment to grow by\u2026",
+              "published": null,
+              "score": 0.8624794
+            },
+            {
+              "title": "Economic Outlook U.S. Q1 2026: Steady As She Goes - S&P Global",
+              "url": "https://www.spglobal.com/ratings/en/regulatory/article/economic-outlook-us-q1-2026-steady-as-she-goes-but-on-a-narrow-path-s101658550",
+              "snippet": "We forecast U.S. real GDP growth of 2% in 2025 and 2026, modestly up from our September forecast and slightly above near-term potential growth.",
+              "published": null,
+              "score": 0.8512743
+            },
+            {
+              "title": "[PDF] United States Economic Outlook - University of Michigan",
+              "url": "https://lsa.umich.edu/content/dam/econ-assets/Econdocs/RSQE%20PDFs/RSQE_May26_US_Forecast.pdf",
+              "snippet": "Headline CPI inflation is projected to reach 4.0 percent year over year in 2026Q2, driven by energy price pressures, and then decline as oil prices come down. Our preferred measure of home prices, the seasonally adjusted S&P Case-Shiller Home Price Index (Chart 14), remained subd\u2026",
+              "published": null,
+              "score": 0.81979275
+            },
+            {
+              "title": "The Budget and Economic Outlook: 2026 to 2036",
+              "url": "https://www.cbo.gov/publication/62105",
+              "snippet": "Inflation, as measured by the price index for personal consumption expenditures, slows from 2.8 percent in 2025 to 2.7 percent in 2026.",
+              "published": null,
+              "score": 0.8080827
+            },
+            {
+              "title": "Fed Projections: Solid Growth, Higher Short-Term Inflation - Statista",
+              "url": "https://www.statista.com/chart/31437/fed-projections-of-inflation-interest-rates-gdp-growth-and-unemployment",
+              "snippet": "As your partner for data-driven success, we combine expertise in research, strategy, and marketing communications. See why Statista is the trusted choice for reliable data and insights. Despite the challenging macroeconomic environment and a high degree of uncertainty regarding t\u2026",
+              "published": null,
+              "score": 0.7771143
+            }
+          ],
+          "llm_raw": "{\"action\":\"search\",\"query\":\"US economic outlook 2025 2026 Federal Reserve interest rates inflation consumer spending business investment\"}"
+        },
+        {
+          "step": 4,
+          "action": "forecast",
+          "query": null,
+          "results": [],
+          "llm_raw": "{\"action\":\"forecast\",\"p_yes\":0.22,\"rationale\":\"Based on economic forecasts, the US appears positioned for modest growth through 2026. Multiple sources project real GDP growth of 1.8-2.4% for 2026, with the Indiana Business Research Center forecasting 1.8% growth and unemployment rising to 4.8%. The Fed projects 2.4% growth for 2026. Current recession indicators show low risk - the yield curve is positive, unemployment claims remain low, and financial stress indicators signal low recession probability. However, risks include potential energy price shocks, gradual labor market softening, and the typical economic cycle. The market's 17.5% implied probability seems slightly low given these modest but persistent risks and the historical base rate of recessions occurring roughly every 8-10 years.\"}"
+        }
+      ],
+      "confidence": 0.56,
+      "sentiment": "bearish",
+      "key_findings": [],
+      "evidence_quality": "high",
+      "uncertainties": [
+        "Current recession indicators show low risk - the yield curve is positive, unemployment claims remain low, and financial stress indicators signal low recession probability",
+        "However, risks include potential energy price shocks, gradual labor market softening, and the typical economic cycle",
+        "5% implied probability seems slightly low given these modest but persistent risks and the historical base rate of recessions occurring roughly every 8-10 years"
+      ],
+      "token_usage": {
+        "input_tokens": 15689,
+        "output_tokens": 268,
+        "total_tokens": 15957
+      },
+      "search_queries_made": 3,
+      "sources_consulted": 15
+    },
+    {
+      "agent_id": "agent_2",
+      "p_yes": 0.22,
+      "rationale": "Based on current economic indicators and forecasts, recession probability appears low but not negligible. Key evidence: 1) GDP growth forecasts show positive but slowing growth (1.8% in 2026 per Indiana Business Research Center, around 2% range from other sources), 2) Unemployment expected to rise moderately to 4.5-4.8% by 2026 but remains historically low, 3) Federal Reserve recession risk indicators show low probability based on yield curve, credit spreads, and employment data, 4) New York Fed Treasury spread model shows 14.98% recession probability for May 2027, 5) AI investment and business spending provide economic support. However, softening labor market momentum, political/economic uncertainty, and typical business cycle risks warrant some caution. The market implied probability of 17.5% appears slightly low given these mixed signals and historical base rates of recessions occurring roughly every 8-10 years.",
+      "traces": [
+        {
+          "step": 1,
+          "action": "search",
+          "query": "US GDP growth forecast 2025 2026 recession indicators economic outlook",
+          "results": [
+            {
+              "title": "U.S. outlook for 2026 - Indiana Business Research Center",
+              "url": "https://www.ibrc.indiana.edu/ibr/2025/outlook/national.html",
+              "snippet": "The IBR is a publication of the Indiana Business Research Center at IU's Kelley School of Business. *Recent developments in the U.S. and global economy present a complex and evolving picture for policymakers and business leaders. While our current readings of headline growth rema\u2026",
+              "published": null,
+              "score": 0.8396422
+            },
+            {
+              "title": "Economic Outlook U.S. Q2 2026: Curb Your Enthusia",
+              "url": "https://www.spglobal.com/ratings/en/regulatory/article/economic-outlook-us-q2-2026-curb-your-enthusiasm-s101676533",
+              "snippet": "[Current Oil Price Surge To Weigh On Growth](https://www.spglobal.com/ratings/en/regulatory/article/economic-outlook-us-q2-2026-curb-your-enthusiasm-s101676533). Before the war broke out, we were expecting to increase our growth forecast for this year closer to 2.5% on higher-tha\u2026",
+              "published": null,
+              "score": 0.8080827
+            },
+            {
+              "title": "US Economic Forecast Q1 2026 | Deloitte Insights",
+              "url": "https://www.deloitte.com/us/en/insights/topics/economy/us-economic-forecast/united-states-outlook-analysis.html",
+              "snippet": "This reflects the sizable capital expenditure plans that AI \u201chyperscalers\u201d have announced for this year.[4](https://www.deloitte.com/us/en/insights/topics/economy/us-economic-forecast/united-states-outlook-analysis.html#endnote-4)We now expect real business investment to grow by\u2026",
+              "published": null,
+              "score": 0.8066246
+            },
+            {
+              "title": "The Budget and Economic Outlook: 2026 to 2036",
+              "url": "https://www.cbo.gov/publication/62105",
+              "snippet": "Real GDP growth in 2026 is projected to be stronger in the current projections, partly because of the effects of the 2025 reconciliation act. In",
+              "published": null,
+              "score": 0.78572035
+            },
+            {
+              "title": "United States GDP Growth Rate - Trading Economics",
+              "url": "https://tradingeconomics.com/united-states/gdp-growth",
+              "snippet": "[](https://tradingeconomics.com/united-states/gdp-growth). [](https://tradingeconomics.com/united-states/gdp-growth). [Markets](https://tradingeconomics.com/united-states/gdp-growth#). [Forecasts](https://tradingeconomics.com/united-states/gdp-growth#). [](https://tradingeconomic\u2026",
+              "published": null,
+              "score": 0.7409441
+            }
+          ],
+          "llm_raw": "{\"action\":\"search\",\"query\":\"US GDP growth forecast 2025 2026 recession indicators economic outlook\"}"
+        },
+        {
+          "step": 2,
+          "action": "search",
+          "query": "US recession probability 2025 2026 NBER economic indicators unemployment inflation Federal Reserve",
+          "results": [
+            {
+              "title": "[PDF] Probability of US Recession Predicted by Treasury Spread",
+              "url": "https://www.newyorkfed.org/medialibrary/media/research/capital_markets/prob_rec.pdf",
+              "snippet": "Probability of US Recession Predicted by Treasury Spread* Treasury Spread: 10 yr bond rate-3 month bill rate Monthly Average (Percent) 1959 1961 1963 1965 1967 1969 1971 1973 1975 1977 1979 1981 1983 1985 1987 1989 1991 1993 1995 1997 1999 2001 2003 2005 2007 2009 2011 2013 2015\u2026",
+              "published": null,
+              "score": 0.69746524
+            },
+            {
+              "title": "The Fed - Assessing Recession Risks with State-Level Data",
+              "url": "https://www.federalreserve.gov/econres/notes/feds-notes/assessing-recession-risks-with-state-level-data-20260107.html",
+              "snippet": "The model classifies the business cycle into one of three phases\u2014expansion, U\u2011shaped recession, and L-shaped recession\u2014and estimates, for each point in time, the probability that each U.S. state is in one of these phases.[5](https://www.federalreserve.gov/econres/notes/feds-notes\u2026",
+              "published": null,
+              "score": 0.64986813
+            },
+            {
+              "title": "Making Sense of Recession Probabilities | St. Louis Fed",
+              "url": "https://www.stlouisfed.org/on-the-economy/2025/may/making-sense-recession-probabilities",
+              "snippet": "![Image 1](https://www.stlouisfed.org/on-the-economy/2025/may/making-sense-recession-probabilities)</>. [Skip to Main](https://www.stlouisfed.org/on-the-economy/2025/may/making-sense-recession-probabilities#frbstl-content). [![Image 3](https://www.stlouisfed.org/stlouisfed/-/medi\u2026",
+              "published": null,
+              "score": 0.5923135
+            },
+            {
+              "title": "First Quarter 2025 Survey of Professional Forecasters",
+              "url": "https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/spf-q1-2025",
+              "snippet": "*   [Survey of Professional Forecasters](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/survey-of-professional-forecasters). [](https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/survey-of-professional-forecasters/2025/spfQ125.pdf \"Down\u2026",
+              "published": null,
+              "score": 0.5758033
+            },
+            {
+              "title": "Forecasting US Recessions in Real-Time Using Regional Economic Sentiment",
+              "url": "https://www.clevelandfed.org/publications/economic-commentary/2025/ec-202513-forecasting-us-recessions-in-real-time-using-regional-economic-sentiment",
+              "snippet": "We serve the American people as part of the US central bank. We support the US economy and our region by studying economic conditions and issues that impact our communities, serving financial institutions, and providing economic education and resources for all. Community outreach\u2026",
+              "published": null,
+              "score": 0.42391166
+            }
+          ],
+          "llm_raw": "{\"action\":\"search\",\"query\":\"US recession probability 2025 2026 NBER economic indicators unemployment inflation Federal Reserve\"}"
+        },
+        {
+          "step": 3,
+          "action": "search",
+          "query": "current US economic indicators 2025 unemployment rate inflation GDP growth Federal Reserve policy",
+          "results": [
+            {
+              "title": "[PDF] The Economic Indicators That Shape Fed Policy.docx",
+              "url": "https://finpolicy.georgetown.edu/wp-content/uploads/2026/01/The-Economic-Indicators-That-Shape-Fed-Policy.docx.pdf",
+              "snippet": "In 2025, the labor market softened as employment growth slowed and the unemployment rate increased moderately. This was often referred to as a \u201c",
+              "published": null,
+              "score": 0.74363416
+            },
+            {
+              "title": "December 10, 2025: FOMC Projections materials, accessible version",
+              "url": "https://www.federalreserve.gov/monetarypolicy/fomcprojtabl20251210.htm",
+              "snippet": "most likely outcomes for real gross domestic product (GDP) growth, the unemployment rate, and inflation for each year from 2025 to 2028",
+              "published": null,
+              "score": 0.7402687
+            },
+            {
+              "title": "US Economic Forecast Q1 2026 | Deloitte Insights",
+              "url": "https://www.deloitte.com/us/en/insights/topics/economy/us-economic-forecast/united-states-outlook-analysis.html",
+              "snippet": "After rising to 4.5% in November 2025, the unemployment rate stood at 4.4% in February 2026, exactly where it was five months earlier.",
+              "published": null,
+              "score": 0.6342494
+            },
+            {
+              "title": "Third Quarter 2025 Survey of Professional Forecasters",
+              "url": "https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/spf-q3-2025",
+              "snippet": "The unemployment rate is projected to be an annual average of 4.2 percent in 2025 and 4.5 percent in 2026 before falling to 4.4 percent in 2027,",
+              "published": null,
+              "score": 0.57006866
+            },
+            {
+              "title": "[PDF] National Economic Indicators, June 1, 2026",
+              "url": "https://www.richmondfed.org/-/media/richmondfedorg/research/national_economy/national_economic_indicators/pdf/all_charts.pdf",
+              "snippet": "Job gains have remained low, on average, and the unemployment rate has been little changed in recent months. Inflation is elevated, in part",
+              "published": null,
+              "score": 0.54274267
+            }
+          ],
+          "llm_raw": "{\"action\":\"search\",\"query\":\"current US economic indicators 2025 unemployment rate inflation GDP growth Federal Reserve policy\"}"
+        },
+        {
+          "step": 4,
+          "action": "forecast",
+          "query": null,
+          "results": [],
+          "llm_raw": "{\"action\":\"forecast\",\"p_yes\":0.22,\"rationale\":\"Based on current economic indicators and forecasts, recession probability appears low but not negligible. Key evidence: 1) GDP growth forecasts show positive but slowing growth (1.8% in 2026 per Indiana Business Research Center, around 2% range from other sources), 2) Unemployment expected to rise moderately to 4.5-4.8% by 2026 but remains historically low, 3) Federal Reserve recession risk indicators show low probability based on yield curve, credit spreads, and employment data, 4) New York Fed Treasury spread model shows 14.98% recession probability for May 2027, 5) AI investment and business spending provide economic support. However, softening labor market momentum, political/economic uncertainty, and typical business cycle risks warrant some caution. The market implied probability of 17.5% appears slightly low given these mixed signals and historical base rates of recessions occurring roughly every 8-10 years.\"}"
+        }
+      ],
+      "confidence": 0.56,
+      "sentiment": "bearish",
+      "key_findings": [],
+      "evidence_quality": "high",
+      "uncertainties": [
+        "Based on current economic indicators and forecasts, recession probability appears low but not negligible",
+        "Key evidence: 1) GDP growth forecasts show positive but slowing growth (1",
+        "8% by 2026 but remains historically low, 3) Federal Reserve recession risk indicators show low probability based on yield curve, credit spreads, and employment data, 4) New York Fed Treasury spread model shows 14",
+        "However, softening labor market momentum, political/economic uncertainty, and typical business cycle risks warrant some caution"
+      ],
+      "token_usage": {
+        "input_tokens": 19715,
+        "output_tokens": 308,
+        "total_tokens": 20023
+      },
+      "search_queries_made": 3,
+      "sources_consulted": 15
+    }
+  ],
+  "aggregation": {
+    "method": "neyman",
+    "raw_probability": 0.22,
+    "extremized_probability": 0.1166,
+    "extremization_factor": 1.3693,
+    "input_probabilities": [
+      0.22,
+      0.22,
+      0.22
+    ],
+    "input_weights": [],
+    "effective_n": 1.88
+  },
+  "debate": {
+    "rounds": [
+      {
+        "round_number": 1,
+        "bull_argument": "The probability of recession by 2026 is significantly underestimated. While current forecasts appear optimistic, multiple converging risk factors create a perfect storm scenario. The Federal Reserve's aggressive rate hiking cycle has created substantial lag effects that typically manifest 12-18 months later, meaning the full impact won't be felt until 2025-2026. Commercial real estate is facing a $1.5 trillion refinancing wall through 2026 with rates 3-4x higher than original loans, threatening widespread defaults. Geopolitical tensions including potential China-Taiwan conflict, ongoing Russia-Ukraine war, and Middle East instability could trigger supply chain disruptions and energy price spikes. The inverted yield curve has been a reliable recession predictor, correctly forecasting the last 7 recessions, and it inverted in 2022. Additionally, household savings rates have normalized from pandemic highs while credit card delinquencies are rising, indicating consumer stress that will reduce spending - the primary driver of US GDP.",
+        "bull_probability": 0.45,
+        "bear_argument": "The Bull's recession probability is significantly overstated due to several critical oversights. First, the Federal Reserve has already begun cutting rates from their peak, providing monetary accommodation that wasn't available in previous recession cycles - this proactive easing creates a crucial buffer against economic contraction. Second, the US labor market remains exceptionally robust with unemployment near historic lows and continuing job creation, providing the income stability necessary to sustain consumer spending. Third, corporate balance sheets are fundamentally stronger than pre-2008, with many companies holding record cash reserves and having refinanced debt at low rates during 2020-2022, creating resilience against higher borrowing costs. Fourth, while the yield curve inversion is noted, it's important that it has already begun normalizing, and the lag time from inversion to recession averages 16 months - we're already past that window from the 2022 inversion. Finally, the commercial real estate concerns, while real, represent a much smaller portion of the overall economy than residential real estate did in 2008, and banks are better capitalized to absorb losses. The combination of Fed flexibility, labor market strength, and improved financial system resilience suggests the economy can navigate current headwinds without falling into recession.",
+        "bear_probability": 0.18,
+        "consensus_reached": false,
+        "bull_key_evidence": [
+          "Federal Reserve rate hikes create 12-18 month lag effects, with full impact hitting 2025-2026",
+          "Commercial real estate faces $1.5 trillion refinancing crisis with rates 3-4x higher than original loans",
+          "Inverted yield curve correctly predicted last 7 recessions and inverted in 2022",
+          "Rising credit card delinquencies and normalized savings rates indicate growing consumer financial stress",
+          "Geopolitical risks including potential China-Taiwan conflict could trigger major economic disruption"
+        ],
+        "bear_key_evidence": [
+          "Federal Reserve has already begun cutting rates from peak levels, providing monetary accommodation and policy flexibility not available in previous cycles",
+          "US unemployment remains near historic lows with continued job creation, providing income stability that supports consumer spending and economic growth",
+          "Corporate balance sheets are significantly stronger than pre-2008 with record cash reserves and debt refinanced at low rates during 2020-2022, creating resilience against higher borrowing costs"
+        ]
+      },
+      {
+        "round_number": 2,
+        "bull_argument": "The Bear significantly underestimates recession risks by overlooking critical vulnerabilities that are building momentum. While the Fed has cut rates, they remain restrictive at 4.25-4.5% compared to the 0-0.25% range that previously supported growth, and the full impact of previous tightening typically materializes with 12-18 month lags - meaning we're still experiencing the contractionary effects of 2022-2023 rate hikes. The labor market strength is misleading as a leading indicator since employment is notoriously lagging - unemployment typically rises rapidly once recession begins, not before. Corporate balance sheets may appear strong, but this masks significant sectoral stress: commercial real estate faces $1.2 trillion in refinancing needs through 2026 at much higher rates, regional banks hold concentrated CRE exposure creating systemic risk, and zombie companies sustained by low rates now face refinancing cliffs. The yield curve normalization the Bear cites actually supports recession risk - historically, recessions often begin as curves steepen after inversion, not during the inversion itself. Most critically, the current economic expansion is already the 4th longest in US history at nearly 4 years post-COVID, and leading indicators including the Conference Board's LEI have shown persistent negative readings for over a year, signaling underlying weakness that GDP growth hasn't yet reflected.",
+        "bull_probability": 0.35,
+        "bear_argument": "The Bull's recession case relies on backward-looking patterns that don't account for the unprecedented monetary and fiscal policy tools now available. The Fed's current 4.25-4.5% rates aren't restrictive in today's context - they're normalized rates that reflect higher productivity growth and structural changes in the economy. The 'lagging effects' argument ignores that the economy has already absorbed most tightening impacts through 2023-2024 without significant damage. The commercial real estate concerns are overblown - while refinancing pressures exist, banks have been provisioning for losses since 2022, and the sector represents only 2.5% of GDP. Most importantly, the Bull mischaracterizes the current expansion timeline - measuring from the COVID trough artificially inflates expansion length, when the real expansion began in 2010. The economy has demonstrated remarkable resilience through multiple stress tests including supply chain disruptions, energy price shocks, and aggressive rate hikes. Leading indicators like the Conference Board LEI are notoriously noisy and have given false recession signals multiple times in recent decades. Current labor market strength, with unemployment near historic lows and job openings still elevated, provides substantial cushion against recession. Corporate balance sheets remain historically strong with low debt-to-equity ratios, and consumer spending continues to show resilience supported by excess savings and wage growth.",
+        "bear_probability": 0.15,
+        "consensus_reached": false,
+        "bull_key_evidence": [
+          "Commercial real estate refinancing cliff with $1.2 trillion needing refinancing at 3-4x higher rates through 2026, concentrated in vulnerable regional banks",
+          "Leading Economic Index has declined for 12+ consecutive months, historically preceding recessions by 6-12 months",
+          "Current expansion duration of ~4 years puts it in 75th percentile historically, with natural business cycle pressures building despite apparent current strength"
+        ],
+        "bear_key_evidence": [
+          "Fed policy tools and bank reserves provide unprecedented recession prevention capability compared to historical periods",
+          "Corporate debt-to-equity ratios remain at multi-decade lows with $2+ trillion in excess cash on balance sheets",
+          "Consumer balance sheets show continued strength with debt service ratios near historic lows and $1.7 trillion in excess savings still providing spending support"
+        ]
+      },
+      {
+        "round_number": 3,
+        "bull_argument": "The Bear's optimism ignores critical structural vulnerabilities and timing patterns that strongly favor recession by 2026. First, the Bear mischaracterizes monetary policy transmission - while the economy absorbed initial tightening, the full impact of the most aggressive Fed cycle since the 1980s operates with 18-24 month lags, meaning peak effects are hitting now through 2026. The 4.25-4.5% rates ARE restrictive when real rates exceed 2% - historically recessionary territory. Second, the commercial real estate crisis is far from 'overblown' - $1.5 trillion in CRE loans need refinancing through 2026 at rates 3-4x higher than original terms, with office vacancy rates at 20%+ in major cities. This creates a banking sector stress comparable to the S&L crisis. Third, the Bear's expansion timeline argument actually supports the Bull case - whether measured from 2010 or 2020, we're at or near historical expansion limits, and no expansion has survived the combination of inverted yield curves, leading indicator deterioration, and credit tightening we've experienced. The labor market strength is a lagging indicator that typically peaks just before recessions. Most critically, the Bear ignores the unprecedented debt burden - total US debt-to-GDP at 350%+ creates deflationary pressures that monetary policy cannot easily overcome, while corporate debt servicing costs have tripled, forcing widespread layoffs and investment cuts already visible in manufacturing and tech sectors.",
+        "bull_probability": 0.45,
+        "bear_argument": "The Bull fundamentally overestimates recession risk by misreading both historical patterns and current economic resilience. First, the monetary policy transmission argument is flawed - the economy has already demonstrated remarkable adaptability to higher rates, with consumer spending remaining robust, unemployment near historic lows at 3.7%, and corporate earnings maintaining growth. If 18-24 month lags were deterministic, we'd already see clear recessionary signals, yet leading indicators are stabilizing. Second, the CRE crisis narrative is overblown - while refinancing challenges exist, banks have been proactively managing exposures since 2022, maintaining strong capital ratios above regulatory requirements. The banking sector stress comparison to S&Ls ignores modern risk management and regulatory oversight. Third, expansion length arguments ignore fundamental structural changes - the post-2008 economy operates with lower leverage, stronger household balance sheets, and more resilient financial institutions. The 2020 recession was an exogenous shock, not a traditional business cycle end, making expansion dating from 2020 more appropriate. Most critically, the Bull ignores powerful stabilizing forces: record household wealth from asset appreciation, corporate balance sheets flush with cash from pandemic-era financing, reshoring trends creating domestic investment opportunities, and fiscal policy remaining accommodative. The debt-to-GDP argument conflates gross debt with net debt service burden, which remains manageable given low average borrowing costs locked in during the low-rate era.",
+        "bear_probability": 0.15,
+        "consensus_reached": false,
+        "bull_key_evidence": [
+          "$1.5 trillion in commercial real estate refinancing needs through 2026 at 3-4x higher rates, with office vacancy rates exceeding 20%",
+          "Real interest rates above 2% with 18-24 month monetary transmission lags meaning peak tightening effects hit 2025-2026",
+          "Total US debt-to-GDP at 350%+ creates deflationary spiral risk while corporate debt servicing costs have tripled since 2022"
+        ],
+        "bear_key_evidence": [
+          "Unemployment remains at historic lows of 3.7% with consumer spending growth continuing despite higher rates",
+          "Banking sector maintains strong capital ratios above regulatory requirements with proactive CRE exposure management since 2022",
+          "Household wealth at record levels from asset appreciation with corporate cash positions remaining elevated from pandemic-era financing"
+        ]
+      }
+    ],
+    "bull_final_probability": 0.45,
+    "bear_final_probability": 0.15,
+    "consensus_reached": false,
+    "early_termination": false,
+    "token_usage": {
+      "input_tokens": 4030,
+      "output_tokens": 2493,
+      "total_tokens": 6523
+    }
+  },
+  "supervisor": {
+    "disagreements": [
+      "Agent 0 relies on historical recession frequency (every 5.4-9 years) suggesting 2025-2026 timing is plausible, while other agents focus on current economic forecasts showing positive growth",
+      "All agents cite similar GDP growth forecasts (1.8-2.4% for 2026) but may be using incomplete or outdated data sources",
+      "The rationales appear cut off mid-sentence, suggesting missing critical information about recession indicators, yield curves, employment data, or other leading economic indicators"
+    ],
+    "queries": [
+      "What are the most recent 2024 economic indicators for recession prediction including yield curve inversions, unemployment trends, and leading economic index data?",
+      "What is the current consensus among major economic forecasting institutions (Fed, CBO, IMF) regarding US recession probability for 2025-2026?",
+      "How accurate have historical recession frequency models been compared to indicator-based forecasting models for predicting US recessions?"
+    ],
+    "search_results": {
+      "What are the most recent 2024 economic indicators for recession prediction including yield curve inversions, unemployment trends, and leading economic index data?": [
+        {
+          "title": "[PDF] National Economic Indicators, June 1, 2026",
+          "url": "https://www.richmondfed.org/-/media/richmondfedorg/research/national_economy/national_economic_indicators/pdf/all_charts.pdf",
+          "snippet": "Recent indicators suggest that economic activity has been expanding at a solid pace. Job gains have remained low, on average, and the",
+          "published": null,
+          "score": 0.53881395
+        },
+        {
+          "title": "[PDF] The U.S. Economic Outlook for 2025\u20132026 - University of Michigan",
+          "url": "https://lsa.umich.edu/content/dam/econ-assets/Econdocs/RSQE%20PDFs/UM_RSQE_US_Forecast_Nov24.pdf",
+          "snippet": "Calendar year real GDP growth picks up to 2.2 percent in 2026. The unemployment rate ticks up from 4.2 percent in. 2024Q4 to 4.3 percent in",
+          "published": null,
+          "score": 0.3580393
+        },
+        {
+          "title": "Yield Curve and Predicted GDP Growth",
+          "url": "https://www.clevelandfed.org/indicators-and-data/yield-curve-and-predicted-gdp-growth",
+          "snippet": "We use the yield curve to predict future GDP growth and recession probabilities. The spread between short- and long-term rates typically correlates with",
+          "published": null,
+          "score": 0.2358296
+        },
+        {
+          "title": "U.S. Census Bureau Economic Indicators",
+          "url": "https://www.census.gov/economic-indicators",
+          "snippet": "The U.S. Census Bureau's economic indicator surveys provide monthly and quarterly data that are timely, reliable, and offer comprehensive measures of the",
+          "published": null,
+          "score": 0.12906231
+        },
+        {
+          "title": "Does this line predict America's next recession? - YouTube",
+          "url": "https://www.youtube.com/watch?v=oW4hfaiXKG8",
+          "snippet": "The yield curve has predicted America's last eight recessions. In March this year it inverted again. So what does it mean for America?",
+          "published": null,
+          "score": 0.10844383
+        }
+      ],
+      "What is the current consensus among major economic forecasting institutions (Fed, CBO, IMF) regarding US recession probability for 2025-2026?": [
+        {
+          "title": "Professional Forecasters' Past Performance and the 2026 Economic ...",
+          "url": "https://www.stlouisfed.org/on-the-economy/2025/dec/professional-forecasters-past-performance-outlook-2026",
+          "snippet": "The consensus outlook for real GDP growth in 2026 is 1.9%, but it seems that forecasters have considerable disagreement on the outlook for the",
+          "published": null,
+          "score": 0.57952
+        },
+        {
+          "title": "US Economic Forecast Q1 2026 | Deloitte Insights",
+          "url": "https://www.deloitte.com/us/en/insights/topics/economy/us-economic-forecast/united-states-outlook-analysis.html",
+          "snippet": "The midpoint of the federal funds rate drops below 1% by the end of 2027. Real GDP is expected to decline by 0.4% in 2027 and 1% in 2028. A",
+          "published": null,
+          "score": 0.528315
+        },
+        {
+          "title": "U.S. Quarterly Economic Forecast",
+          "url": "https://economics.td.com/us-quarterly-economic-forecast",
+          "snippet": "The U.S. is facing this new shock from a solid starting point, and overall economic growth in 2026 is still expected to run at a healthy 2.4%.",
+          "published": null,
+          "score": 0.47811517
+        },
+        {
+          "title": "Economic outlook for 2026, focusing on the United States, the UK ...",
+          "url": "https://rsmus.com/insights/economics/economic-outlook-for-2026.html",
+          "snippet": "U.S. growth is expected to rebound to 2.2% in 2026, driven by fiscal and monetary easing. money. Inflation will stay above 2%,",
+          "published": null,
+          "score": 0.4250568
+        },
+        {
+          "title": "The Budget and Economic Outlook: 2026 to 2036",
+          "url": "https://www.cbo.gov/publication/62105",
+          "snippet": "Real GDP growth in 2026 is projected to be stronger in the current projections, partly because of the effects of the 2025 reconciliation act. In",
+          "published": null,
+          "score": 0.38221118
+        }
+      ],
+      "How accurate have historical recession frequency models been compared to indicator-based forecasting models for predicting US recessions?": [
+        {
+          "title": "Which Leading Indicators Have Done Better at Signaling Past ...",
+          "url": "https://www.chicagofed.org/publications/chicago-fed-letter/2019/425",
+          "snippet": "In the extreme case, a prediction that a recession never occurs is 88% accurate because recessions have only occurred in 12% of all months since 1971. Obviously",
+          "published": null,
+          "score": 0.51822984
+        },
+        {
+          "title": "[PDF] Forecasting U.S. Recessions with Macro Factors - University of Alberta",
+          "url": "https://sites.ualberta.ca/~sfossati/files/pdfs/forecasting_nber.pdf",
+          "snippet": "22 Table 1: Selected Forecasting Models for NBER Recessions Predictors Model 1 2 3 4 5 6 7 8 9 10 1 310TSt 3-Month less 10-Year Spread \u2713 \u2713 \u2713 \u2713 \u2713 \u2713 \u2713 \u2713 2 FFRt Federal Funds Rate \u2713 \u2713 \u2713 3 SP500t S&P 500 (% change) \u2713 \u2713 \u2713 4 EMPt\u22121 Employment (% change) \u2713 \u2713 5 \u02c6 g1t Bond and Exchange Ra\u2026",
+          "published": null,
+          "score": 0.444059
+        },
+        {
+          "title": "Forecasting the Great Recession in the United States:First Results from a Model Comparison Exercise | M\u00e1ty\u00e1s Farkas",
+          "url": "https://www.matyasfarkas.eu/publication/dsge_fccomparison",
+          "snippet": "# Forecasting the Great Recession in the United States:First Results from a Model Comparison Exercise. Forecast comparison of pre-crisis models during the Great Recession. In this paper, we compare forecasts of the Great Recession based on a range of post-crisis NK-DSGE models em\u2026",
+          "published": null,
+          "score": 0.3000688
+        },
+        {
+          "title": "[PDF] Modeling and Predicting U.S. Recessions Using Machine Learning ...",
+          "url": "https://repository.essex.ac.uk/28762/1/Modeling%20and%20Predicting%20US%20Recessions%20Using%20Machine%20Learning%20Techniques_IJF.pdf",
+          "snippet": "45 Figure 1: Out-of-sample Recession Probabilities for the January 2000 to June 2019 period: Panel (a) displays the predicted recession probabilities based on the Yield Curve Logit, the LASSO, the Bayes GLM, and the k-nn model related to the long-term (12-month ahead) forecast ho\u2026",
+          "published": null,
+          "score": 0.29799622
+        },
+        {
+          "title": "Dates of U.S. recessions as inferred by GDP-based recession indicator",
+          "url": "https://fred.stlouisfed.org/series/JHDUSRGDPBR",
+          "snippet": "# Dates of U.S. recessions as inferred by GDP-based recession indicator (JHDUSRGDPBR). **Release:** GDP-Based Recession Indicator Index. The series assigns dates to U.S. recessions based on a mathematical model of the way that recessions differ from expansions. Whenever the GDP-b\u2026",
+          "published": null,
+          "score": 0.2870083
+        }
+      ]
+    },
+    "p_yes": 0.18,
+    "confidence": "medium",
+    "rationale": "The evidence reinforces the agents' low recession probability assessment but suggests it may be slightly too high. Professional forecasters show consensus GDP growth of 1.9-2.4% for 2026, with the CBO projecting stronger growth due to fiscal easing. While historical frequency models suggest recessions every 5-9 years, the research shows indicator-based models significantly outperform simple frequency approaches. Current leading indicators appear benign with solid economic activity and low unemployment (4.3% projected). However, some uncertainty remains given forecaster disagreement and the documented difficulty in predicting recession timing precisely.",
+    "resolved_disagreements": [],
+    "unresolved_uncertainties": [],
+    "token_usage": {
+      "input_tokens": 3619,
+      "output_tokens": 404,
+      "total_tokens": 4023
+    }
+  },
+  "final_probability": 0.175,
+  "final_confidence": 0.6,
+  "llm_calls": [
+    {
+      "seq": 0,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a forecasting agent in a multi-agent forecasting system.\n\nYour job:\n1) Gather evidence by issuing web/news search queries when needed.\n2) Then produce a binary probability forecast for the question.\n\nYou must follow the action schema exactly and output valid JSON only.\nYou must not browse prediction market prices unless they are explicitly provided."
+        },
+        {
+          "role": "user",
+          "content": "QUESTION:\nWill the US enter a recession by the end of 2026?\n\nMARKET CONTEXT:\nResolves YES if US real GDP (seasonally adjusted annualized) contracts for two consecutive quarters between Q2 2025 and Q4 2026, or the NBER declares a recession dated within that window.\n\nMARKET IMPLIED PROBABILITY (p_yes):\n0.175\n\nNEXT ACTION SCHEMA (output JSON only):\nIf you need more info:\n{\"action\":\"search\",\"query\":\"...\"}\nIf you are ready to forecast:\n{\"action\":\"forecast\",\"p_yes\":0.XX,\"rationale\":\"short explanation grounded in evidence and base rates\"}\n\nPick exactly one action."
+        }
+      ],
+      "response": "{\"action\":\"search\",\"query\":\"US economic indicators 2024 2025 GDP growth inflation unemployment Federal Reserve\"}",
+      "input_tokens": 254,
+      "output_tokens": 27,
+      "total_tokens": 281,
+      "timestamp": "2026-06-09T14:17:35+00:00"
+    },
+    {
+      "seq": 1,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a forecasting agent in a multi-agent forecasting system.\n\nYour job:\n1) Gather evidence by issuing web/news search queries when needed.\n2) Then produce a binary probability forecast for the question.\n\nYou must follow the action schema exactly and output valid JSON only.\nYou must not browse prediction market prices unless they are explicitly provided."
+        },
+        {
+          "role": "user",
+          "content": "QUESTION:\nWill the US enter a recession by the end of 2026?\n\nMARKET CONTEXT:\nResolves YES if US real GDP (seasonally adjusted annualized) contracts for two consecutive quarters between Q2 2025 and Q4 2026, or the NBER declares a recession dated within that window.\n\nMARKET IMPLIED PROBABILITY (p_yes):\n0.175\n\nNEXT ACTION SCHEMA (output JSON only):\nIf you need more info:\n{\"action\":\"search\",\"query\":\"...\"}\nIf you are ready to forecast:\n{\"action\":\"forecast\",\"p_yes\":0.XX,\"rationale\":\"short explanation grounded in evidence and base rates\"}\n\nPick exactly one action."
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US economic indicators 2024 2025 GDP growth inflation unemployment Federal Reserve\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. An Update to the Economic Outlook: 2023 to 2025\n   URL: https://www.cbo.gov/publication/59258\n   Real GDP increases by 1.5 percent in 2024 and by 2.4 percent in 2025. That initial slowdown in economic growth drives up unemployment. The\n\n2. Third Quarter 2025 Survey of Professional Forecasters\n   URL: https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/spf-q3-2025\n   *   [Survey of Professional Forecasters](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/survey-of-professional-forecasters). [](https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/survey-of-professional-forecasters/2025/spfQ325.pdf \"Download\"). *   [Mean Probabilities for Real GDP Growth in 2025](https://www.philadelphiafed.org/-/media/FRBP/Asset\u2026"
+        }
+      ],
+      "response": "{\"action\":\"search\",\"query\":\"US recession probability 2025 2026 professional forecasters economists GDP growth predictions\"}",
+      "input_tokens": 3802,
+      "output_tokens": 28,
+      "total_tokens": 3830,
+      "timestamp": "2026-06-09T14:17:37+00:00"
+    },
+    {
+      "seq": 2,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a forecasting agent in a multi-agent forecasting system.\n\nYour job:\n1) Gather evidence by issuing web/news search queries when needed.\n2) Then produce a binary probability forecast for the question.\n\nYou must follow the action schema exactly and output valid JSON only.\nYou must not browse prediction market prices unless they are explicitly provided."
+        },
+        {
+          "role": "user",
+          "content": "QUESTION:\nWill the US enter a recession by the end of 2026?\n\nMARKET CONTEXT:\nResolves YES if US real GDP (seasonally adjusted annualized) contracts for two consecutive quarters between Q2 2025 and Q4 2026, or the NBER declares a recession dated within that window.\n\nMARKET IMPLIED PROBABILITY (p_yes):\n0.175\n\nNEXT ACTION SCHEMA (output JSON only):\nIf you need more info:\n{\"action\":\"search\",\"query\":\"...\"}\nIf you are ready to forecast:\n{\"action\":\"forecast\",\"p_yes\":0.XX,\"rationale\":\"short explanation grounded in evidence and base rates\"}\n\nPick exactly one action."
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US economic indicators 2024 2025 GDP growth inflation unemployment Federal Reserve\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. An Update to the Economic Outlook: 2023 to 2025\n   URL: https://www.cbo.gov/publication/59258\n   Real GDP increases by 1.5 percent in 2024 and by 2.4 percent in 2025. That initial slowdown in economic growth drives up unemployment. The\n\n2. Third Quarter 2025 Survey of Professional Forecasters\n   URL: https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/spf-q3-2025\n   *   [Survey of Professional Forecasters](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/survey-of-professional-forecasters). [](https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/survey-of-professional-forecasters/2025/spfQ325.pdf \"Download\"). *   [Mean Probabilities for Real GDP Growth in 2025](https://www.philadelphiafed.org/-/media/FRBP/Asset\u2026"
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US recession probability 2025 2026 professional forecasters economists GDP growth predictions\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. Professional Forecasters' Past Performance and the 2026 Economic ...\n   URL: https://www.stlouisfed.org/on-the-economy/2025/dec/professional-forecasters-past-performance-outlook-2026\n   # Professional Forecasters\u2019 Past Performance and the 2026 Economic Outlook. Image 2: Federal Reserve Bank of St. Louis. Image 3 FRED Tools and resources to find and use economic data worldwide. Image 4 FRASER U.S. Financial, economic, and banking history. Image 5 ALFRED Vintages of economic data from specific dates in history. Image 7: Federal Reserve Bank of St. Louis mobile eagle logo. About the St. Louis Fed. *   Image 9: In Focus: News and Notes from the St. Louis Fed. Subscribe to our In Focus newsletter. *   Fed & U.S. Economic History. U.S. Financial, economic, and banking history.\u2026"
+        }
+      ],
+      "response": "{\"action\":\"search\",\"query\":\"US recession historical frequency base rate NBER recession dating probability two consecutive quarters GDP decline\"}",
+      "input_tokens": 9130,
+      "output_tokens": 28,
+      "total_tokens": 9158,
+      "timestamp": "2026-06-09T14:17:41+00:00"
+    },
+    {
+      "seq": 3,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a forecasting agent in a multi-agent forecasting system.\n\nYour job:\n1) Gather evidence by issuing web/news search queries when needed.\n2) Then produce a binary probability forecast for the question.\n\nYou must follow the action schema exactly and output valid JSON only.\nYou must not browse prediction market prices unless they are explicitly provided."
+        },
+        {
+          "role": "user",
+          "content": "QUESTION:\nWill the US enter a recession by the end of 2026?\n\nMARKET CONTEXT:\nResolves YES if US real GDP (seasonally adjusted annualized) contracts for two consecutive quarters between Q2 2025 and Q4 2026, or the NBER declares a recession dated within that window.\n\nMARKET IMPLIED PROBABILITY (p_yes):\n0.175\n\nNEXT ACTION SCHEMA (output JSON only):\nIf you need more info:\n{\"action\":\"search\",\"query\":\"...\"}\nIf you are ready to forecast:\n{\"action\":\"forecast\",\"p_yes\":0.XX,\"rationale\":\"short explanation grounded in evidence and base rates\"}\n\nPick exactly one action."
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US economic indicators 2024 2025 GDP growth inflation unemployment Federal Reserve\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. An Update to the Economic Outlook: 2023 to 2025\n   URL: https://www.cbo.gov/publication/59258\n   Real GDP increases by 1.5 percent in 2024 and by 2.4 percent in 2025. That initial slowdown in economic growth drives up unemployment. The\n\n2. Third Quarter 2025 Survey of Professional Forecasters\n   URL: https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/spf-q3-2025\n   *   [Survey of Professional Forecasters](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/survey-of-professional-forecasters). [](https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/survey-of-professional-forecasters/2025/spfQ325.pdf \"Download\"). *   [Mean Probabilities for Real GDP Growth in 2025](https://www.philadelphiafed.org/-/media/FRBP/Asset\u2026"
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US recession probability 2025 2026 professional forecasters economists GDP growth predictions\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. Professional Forecasters' Past Performance and the 2026 Economic ...\n   URL: https://www.stlouisfed.org/on-the-economy/2025/dec/professional-forecasters-past-performance-outlook-2026\n   # Professional Forecasters\u2019 Past Performance and the 2026 Economic Outlook. Image 2: Federal Reserve Bank of St. Louis. Image 3 FRED Tools and resources to find and use economic data worldwide. Image 4 FRASER U.S. Financial, economic, and banking history. Image 5 ALFRED Vintages of economic data from specific dates in history. Image 7: Federal Reserve Bank of St. Louis mobile eagle logo. About the St. Louis Fed. *   Image 9: In Focus: News and Notes from the St. Louis Fed. Subscribe to our In Focus newsletter. *   Fed & U.S. Economic History. U.S. Financial, economic, and banking history.\u2026"
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US recession historical frequency base rate NBER recession dating probability two consecutive quarters GDP decline\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. [PDF] Forecasting U.S. Recessions with Macro Factors - University of Alberta\n   URL: https://sites.ualberta.ca/~sfossati/files/pdfs/forecasting_nber.pdf\n   22 Table 1: Selected Forecasting Models for NBER Recessions Predictors Model 1 2 3 4 5 6 7 8 9 10 1 310TSt 3-Month less 10-Year Spread \u2713 \u2713 \u2713 \u2713 \u2713 \u2713 \u2713 \u2713 2 FFRt Federal Funds Rate \u2713 \u2713 \u2713 3 SP500t S&P 500 (% change) \u2713 \u2713 \u2713 4 EMPt\u22121 Employment (% change) \u2713 \u2713 5 \u02c6 g1t Bond and Exchange Rates Factor \u2713 6 \u02c6 g2t Stock Market Factor \u2713 \u2713 \u2713 \u2713 7 \u02c6 g3t\u22121 Real Factor \u2713 \u2713 \u2713 \u2713 \u2713 23 Table 2: Forecasting NBER Recessions Over the Next 3 Months Sample Statistic Model 1 2 3 4 5 6 7 8 9 10 (A) In-Sample Fit 1967:01 \u2013 2005:12 R2 mf 0.10 0.21 0.11 0.39 0.49 0.47 0.41 0.49 0.49 0.49 1967:01 \u2013 2010:12 R2 mf 0.05 0.08 0.07 0.38 0.45 0.45 0.40 0.48 0\u2026"
+        }
+      ],
+      "response": "{\"action\":\"search\",\"query\":\"US recession frequency historical data since 1945 how often recessions occur average time between recessions\"}",
+      "input_tokens": 10718,
+      "output_tokens": 31,
+      "total_tokens": 10749,
+      "timestamp": "2026-06-09T14:17:44+00:00"
+    },
+    {
+      "seq": 4,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a forecasting agent in a multi-agent forecasting system.\n\nYour job:\n1) Gather evidence by issuing web/news search queries when needed.\n2) Then produce a binary probability forecast for the question.\n\nYou must follow the action schema exactly and output valid JSON only.\nYou must not browse prediction market prices unless they are explicitly provided."
+        },
+        {
+          "role": "user",
+          "content": "QUESTION:\nWill the US enter a recession by the end of 2026?\n\nMARKET CONTEXT:\nResolves YES if US real GDP (seasonally adjusted annualized) contracts for two consecutive quarters between Q2 2025 and Q4 2026, or the NBER declares a recession dated within that window.\n\nMARKET IMPLIED PROBABILITY (p_yes):\n0.175\n\nNEXT ACTION SCHEMA (output JSON only):\nIf you need more info:\n{\"action\":\"search\",\"query\":\"...\"}\nIf you are ready to forecast:\n{\"action\":\"forecast\",\"p_yes\":0.XX,\"rationale\":\"short explanation grounded in evidence and base rates\"}\n\nPick exactly one action."
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US economic indicators 2024 2025 GDP growth inflation unemployment Federal Reserve\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. An Update to the Economic Outlook: 2023 to 2025\n   URL: https://www.cbo.gov/publication/59258\n   Real GDP increases by 1.5 percent in 2024 and by 2.4 percent in 2025. That initial slowdown in economic growth drives up unemployment. The\n\n2. Third Quarter 2025 Survey of Professional Forecasters\n   URL: https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/spf-q3-2025\n   *   [Survey of Professional Forecasters](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/survey-of-professional-forecasters). [](https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/survey-of-professional-forecasters/2025/spfQ325.pdf \"Download\"). *   [Mean Probabilities for Real GDP Growth in 2025](https://www.philadelphiafed.org/-/media/FRBP/Asset\u2026"
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US recession probability 2025 2026 professional forecasters economists GDP growth predictions\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. Professional Forecasters' Past Performance and the 2026 Economic ...\n   URL: https://www.stlouisfed.org/on-the-economy/2025/dec/professional-forecasters-past-performance-outlook-2026\n   # Professional Forecasters\u2019 Past Performance and the 2026 Economic Outlook. Image 2: Federal Reserve Bank of St. Louis. Image 3 FRED Tools and resources to find and use economic data worldwide. Image 4 FRASER U.S. Financial, economic, and banking history. Image 5 ALFRED Vintages of economic data from specific dates in history. Image 7: Federal Reserve Bank of St. Louis mobile eagle logo. About the St. Louis Fed. *   Image 9: In Focus: News and Notes from the St. Louis Fed. Subscribe to our In Focus newsletter. *   Fed & U.S. Economic History. U.S. Financial, economic, and banking history.\u2026"
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US recession historical frequency base rate NBER recession dating probability two consecutive quarters GDP decline\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. [PDF] Forecasting U.S. Recessions with Macro Factors - University of Alberta\n   URL: https://sites.ualberta.ca/~sfossati/files/pdfs/forecasting_nber.pdf\n   22 Table 1: Selected Forecasting Models for NBER Recessions Predictors Model 1 2 3 4 5 6 7 8 9 10 1 310TSt 3-Month less 10-Year Spread \u2713 \u2713 \u2713 \u2713 \u2713 \u2713 \u2713 \u2713 2 FFRt Federal Funds Rate \u2713 \u2713 \u2713 3 SP500t S&P 500 (% change) \u2713 \u2713 \u2713 4 EMPt\u22121 Employment (% change) \u2713 \u2713 5 \u02c6 g1t Bond and Exchange Rates Factor \u2713 6 \u02c6 g2t Stock Market Factor \u2713 \u2713 \u2713 \u2713 7 \u02c6 g3t\u22121 Real Factor \u2713 \u2713 \u2713 \u2713 \u2713 23 Table 2: Forecasting NBER Recessions Over the Next 3 Months Sample Statistic Model 1 2 3 4 5 6 7 8 9 10 (A) In-Sample Fit 1967:01 \u2013 2005:12 R2 mf 0.10 0.21 0.11 0.39 0.49 0.47 0.41 0.49 0.49 0.49 1967:01 \u2013 2010:12 R2 mf 0.05 0.08 0.07 0.38 0.45 0.45 0.40 0.48 0\u2026"
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US recession frequency historical data since 1945 how often recessions occur average time between recessions\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. List of recessions in the United States - Wikipedia\n   URL: https://en.wikipedia.org/wiki/List_of_recessions_in_the_United_States\n   # List of recessions in the United States. There have been as many as 48 recessions in the United States dating back to the Articles of Confederation, and although economists and historians dispute certain 19th-century recessions, the consensus view among economists and historians is that \"the [cyclical] volatility of GNP and unemployment was greater before the Great Depression than it has been since the end of World War\u00a0II.\" Cycles in the country's agricultural production, industrial production, consumption, business investment, and the health of the banking industry contribute to these declines. The average duration of the 11 recessions b\u2026"
+        }
+      ],
+      "response": "{\"action\":\"forecast\",\"p_yes\":0.22,\"rationale\":\"Based on historical data, US recessions occur roughly every 5.4 years on average, with 8 recessions since 1950 (about every 9 years post-WWII). The last recession was COVID in 2020, making 2025-2026 within normal cyclical timing. However, current economic indicators show mixed signals: professional forecasters project modest GDP growth of 1.9% for 2026 with significant disagreement (top 10 forecasts average 2.5%, bottom 10 average 1.2%), unemployment remains relatively low with progress on inflation suggesting potential 'soft landing', and the Federal Reserve projects continued but slower growth. While the two-quarter GDP decline rule has historically been a reliable recession indicator, current consensus forecasts suggest positive but slow gr\u2026",
+      "input_tokens": 12037,
+      "output_tokens": 233,
+      "total_tokens": 12270,
+      "timestamp": "2026-06-09T14:17:55+00:00"
+    },
+    {
+      "seq": 5,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a forecasting agent in a multi-agent forecasting system.\n\nYour job:\n1) Gather evidence by issuing web/news search queries when needed.\n2) Then produce a binary probability forecast for the question.\n\nYou must follow the action schema exactly and output valid JSON only.\nYou must not browse prediction market prices unless they are explicitly provided."
+        },
+        {
+          "role": "user",
+          "content": "QUESTION:\nWill the US enter a recession by the end of 2026?\n\nMARKET CONTEXT:\nResolves YES if US real GDP (seasonally adjusted annualized) contracts for two consecutive quarters between Q2 2025 and Q4 2026, or the NBER declares a recession dated within that window.\n\nMARKET IMPLIED PROBABILITY (p_yes):\n0.175\n\nNEXT ACTION SCHEMA (output JSON only):\nIf you need more info:\n{\"action\":\"search\",\"query\":\"...\"}\nIf you are ready to forecast:\n{\"action\":\"forecast\",\"p_yes\":0.XX,\"rationale\":\"short explanation grounded in evidence and base rates\"}\n\nPick exactly one action."
+        }
+      ],
+      "response": "{\"action\":\"search\",\"query\":\"US GDP growth forecast 2025 2026 recession indicators economic outlook\"}",
+      "input_tokens": 254,
+      "output_tokens": 26,
+      "total_tokens": 280,
+      "timestamp": "2026-06-09T14:17:57+00:00"
+    },
+    {
+      "seq": 6,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a forecasting agent in a multi-agent forecasting system.\n\nYour job:\n1) Gather evidence by issuing web/news search queries when needed.\n2) Then produce a binary probability forecast for the question.\n\nYou must follow the action schema exactly and output valid JSON only.\nYou must not browse prediction market prices unless they are explicitly provided."
+        },
+        {
+          "role": "user",
+          "content": "QUESTION:\nWill the US enter a recession by the end of 2026?\n\nMARKET CONTEXT:\nResolves YES if US real GDP (seasonally adjusted annualized) contracts for two consecutive quarters between Q2 2025 and Q4 2026, or the NBER declares a recession dated within that window.\n\nMARKET IMPLIED PROBABILITY (p_yes):\n0.175\n\nNEXT ACTION SCHEMA (output JSON only):\nIf you need more info:\n{\"action\":\"search\",\"query\":\"...\"}\nIf you are ready to forecast:\n{\"action\":\"forecast\",\"p_yes\":0.XX,\"rationale\":\"short explanation grounded in evidence and base rates\"}\n\nPick exactly one action."
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US GDP growth forecast 2025 2026 recession indicators economic outlook\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. U.S. outlook for 2026 - Indiana Business Research Center\n   URL: https://www.ibrc.indiana.edu/ibr/2025/outlook/national.html\n   The IBR is a publication of the Indiana Business Research Center at IU's Kelley School of Business. *Recent developments in the U.S. and global economy present a complex and evolving picture for policymakers and business leaders. While our current readings of headline growth remain resilient \u2014 buoyed by strong investment in artificial intelligence, a resilient consumer and robust financial markets \u2014 underlying indicators suggest a more nuanced reality.1 Labor market momentum is softening, with slower payroll gains and rising concerns about hiring reluctance amid political and economic uncertainty. The Indiana Business Research Center forecasts r\u2026"
+        }
+      ],
+      "response": "{\"action\":\"search\",\"query\":\"NBER recession probability 2025 2026 leading economic indicators yield curve unemployment\"}",
+      "input_tokens": 3206,
+      "output_tokens": 29,
+      "total_tokens": 3235,
+      "timestamp": "2026-06-09T14:17:59+00:00"
+    },
+    {
+      "seq": 7,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a forecasting agent in a multi-agent forecasting system.\n\nYour job:\n1) Gather evidence by issuing web/news search queries when needed.\n2) Then produce a binary probability forecast for the question.\n\nYou must follow the action schema exactly and output valid JSON only.\nYou must not browse prediction market prices unless they are explicitly provided."
+        },
+        {
+          "role": "user",
+          "content": "QUESTION:\nWill the US enter a recession by the end of 2026?\n\nMARKET CONTEXT:\nResolves YES if US real GDP (seasonally adjusted annualized) contracts for two consecutive quarters between Q2 2025 and Q4 2026, or the NBER declares a recession dated within that window.\n\nMARKET IMPLIED PROBABILITY (p_yes):\n0.175\n\nNEXT ACTION SCHEMA (output JSON only):\nIf you need more info:\n{\"action\":\"search\",\"query\":\"...\"}\nIf you are ready to forecast:\n{\"action\":\"forecast\",\"p_yes\":0.XX,\"rationale\":\"short explanation grounded in evidence and base rates\"}\n\nPick exactly one action."
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US GDP growth forecast 2025 2026 recession indicators economic outlook\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. U.S. outlook for 2026 - Indiana Business Research Center\n   URL: https://www.ibrc.indiana.edu/ibr/2025/outlook/national.html\n   The IBR is a publication of the Indiana Business Research Center at IU's Kelley School of Business. *Recent developments in the U.S. and global economy present a complex and evolving picture for policymakers and business leaders. While our current readings of headline growth remain resilient \u2014 buoyed by strong investment in artificial intelligence, a resilient consumer and robust financial markets \u2014 underlying indicators suggest a more nuanced reality.1 Labor market momentum is softening, with slower payroll gains and rising concerns about hiring reluctance amid political and economic uncertainty. The Indiana Business Research Center forecasts r\u2026"
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"NBER recession probability 2025 2026 leading economic indicators yield curve unemployment\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. US Recession Probability 2025 \u2013 Sahm Rule, Yield Curve & NBER ...\n   URL: https://www.jvinvest.ai/economics\n   The 3-month average unemployment rate is currently at 4.30% and its 12-month minimum at 4.20%. The difference is 0.10 percentage points, which\n\n2. [PDF] NBER WORKING PAPER SERIES THE PREDICTIVE POWER OF ...\n   URL: https://www.nber.org/system/files/working_papers/w16398/w16398.pdf\n   NBER WORKING PAPER SERIES THE PREDICTIVE POWER OF THE YIELD CURVE ACROSS COUNTRIES AND TIME Menzie D. The Predictive Power of the Yield Curve across Countries and Time Menzie D. Kucko NBER Working Paper No. 16398 September 2010 JEL No. C22,E37,E43 ABSTRACT In recent years, there has been renewed interest in the yield curve (or alternatively, the term premium) as a predictor of futur\u2026"
+        }
+      ],
+      "response": "{\"action\":\"search\",\"query\":\"US economic outlook 2025 2026 Federal Reserve interest rates inflation consumer spending business investment\"}",
+      "input_tokens": 5424,
+      "output_tokens": 30,
+      "total_tokens": 5454,
+      "timestamp": "2026-06-09T14:18:01+00:00"
+    },
+    {
+      "seq": 8,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a forecasting agent in a multi-agent forecasting system.\n\nYour job:\n1) Gather evidence by issuing web/news search queries when needed.\n2) Then produce a binary probability forecast for the question.\n\nYou must follow the action schema exactly and output valid JSON only.\nYou must not browse prediction market prices unless they are explicitly provided."
+        },
+        {
+          "role": "user",
+          "content": "QUESTION:\nWill the US enter a recession by the end of 2026?\n\nMARKET CONTEXT:\nResolves YES if US real GDP (seasonally adjusted annualized) contracts for two consecutive quarters between Q2 2025 and Q4 2026, or the NBER declares a recession dated within that window.\n\nMARKET IMPLIED PROBABILITY (p_yes):\n0.175\n\nNEXT ACTION SCHEMA (output JSON only):\nIf you need more info:\n{\"action\":\"search\",\"query\":\"...\"}\nIf you are ready to forecast:\n{\"action\":\"forecast\",\"p_yes\":0.XX,\"rationale\":\"short explanation grounded in evidence and base rates\"}\n\nPick exactly one action."
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US GDP growth forecast 2025 2026 recession indicators economic outlook\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. U.S. outlook for 2026 - Indiana Business Research Center\n   URL: https://www.ibrc.indiana.edu/ibr/2025/outlook/national.html\n   The IBR is a publication of the Indiana Business Research Center at IU's Kelley School of Business. *Recent developments in the U.S. and global economy present a complex and evolving picture for policymakers and business leaders. While our current readings of headline growth remain resilient \u2014 buoyed by strong investment in artificial intelligence, a resilient consumer and robust financial markets \u2014 underlying indicators suggest a more nuanced reality.1 Labor market momentum is softening, with slower payroll gains and rising concerns about hiring reluctance amid political and economic uncertainty. The Indiana Business Research Center forecasts r\u2026"
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"NBER recession probability 2025 2026 leading economic indicators yield curve unemployment\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. US Recession Probability 2025 \u2013 Sahm Rule, Yield Curve & NBER ...\n   URL: https://www.jvinvest.ai/economics\n   The 3-month average unemployment rate is currently at 4.30% and its 12-month minimum at 4.20%. The difference is 0.10 percentage points, which\n\n2. [PDF] NBER WORKING PAPER SERIES THE PREDICTIVE POWER OF ...\n   URL: https://www.nber.org/system/files/working_papers/w16398/w16398.pdf\n   NBER WORKING PAPER SERIES THE PREDICTIVE POWER OF THE YIELD CURVE ACROSS COUNTRIES AND TIME Menzie D. The Predictive Power of the Yield Curve across Countries and Time Menzie D. Kucko NBER Working Paper No. 16398 September 2010 JEL No. C22,E37,E43 ABSTRACT In recent years, there has been renewed interest in the yield curve (or alternatively, the term premium) as a predictor of futur\u2026"
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US economic outlook 2025 2026 Federal Reserve interest rates inflation consumer spending business investment\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. US Economic Forecast Q1 2026 | Deloitte Insights\n   URL: https://www.deloitte.com/us/en/insights/topics/economy/us-economic-forecast/united-states-outlook-analysis.html\n   This reflects the sizable capital expenditure plans that AI \u201chyperscalers\u201d have announced for this year.[4](https://www.deloitte.com/us/en/insights/topics/economy/us-economic-forecast/united-states-outlook-analysis.html#endnote-4)We now expect real business investment to grow by 4% in 2026\u2014an acceleration from the second half of 2025. The federal deficit is expected to remain above 6% of GDP through 2030, exceeding the Congressional Budget Office\u2019s (CBO) baseline expectation.[6](https://www.deloitte.com/us/en/insights/topics/economy/us-economic-forecast/united-states-outlook-analysis.html#endnote-6)The\u2026"
+        }
+      ],
+      "response": "{\"action\":\"forecast\",\"p_yes\":0.22,\"rationale\":\"Based on economic forecasts, the US appears positioned for modest growth through 2026. Multiple sources project real GDP growth of 1.8-2.4% for 2026, with the Indiana Business Research Center forecasting 1.8% growth and unemployment rising to 4.8%. The Fed projects 2.4% growth for 2026. Current recession indicators show low risk - the yield curve is positive, unemployment claims remain low, and financial stress indicators signal low recession probability. However, risks include potential energy price shocks, gradual labor market softening, and the typical economic cycle. The market's 17.5% implied probability seems slightly low given these modest but persistent risks and the historical base rate of recessions occurring roughly every 8-10 years\u2026",
+      "input_tokens": 6805,
+      "output_tokens": 183,
+      "total_tokens": 6988,
+      "timestamp": "2026-06-09T14:18:09+00:00"
+    },
+    {
+      "seq": 9,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a forecasting agent in a multi-agent forecasting system.\n\nYour job:\n1) Gather evidence by issuing web/news search queries when needed.\n2) Then produce a binary probability forecast for the question.\n\nYou must follow the action schema exactly and output valid JSON only.\nYou must not browse prediction market prices unless they are explicitly provided."
+        },
+        {
+          "role": "user",
+          "content": "QUESTION:\nWill the US enter a recession by the end of 2026?\n\nMARKET CONTEXT:\nResolves YES if US real GDP (seasonally adjusted annualized) contracts for two consecutive quarters between Q2 2025 and Q4 2026, or the NBER declares a recession dated within that window.\n\nMARKET IMPLIED PROBABILITY (p_yes):\n0.175\n\nNEXT ACTION SCHEMA (output JSON only):\nIf you need more info:\n{\"action\":\"search\",\"query\":\"...\"}\nIf you are ready to forecast:\n{\"action\":\"forecast\",\"p_yes\":0.XX,\"rationale\":\"short explanation grounded in evidence and base rates\"}\n\nPick exactly one action."
+        }
+      ],
+      "response": "{\"action\":\"search\",\"query\":\"US GDP growth forecast 2025 2026 recession indicators economic outlook\"}",
+      "input_tokens": 254,
+      "output_tokens": 26,
+      "total_tokens": 280,
+      "timestamp": "2026-06-09T14:18:11+00:00"
+    },
+    {
+      "seq": 10,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a forecasting agent in a multi-agent forecasting system.\n\nYour job:\n1) Gather evidence by issuing web/news search queries when needed.\n2) Then produce a binary probability forecast for the question.\n\nYou must follow the action schema exactly and output valid JSON only.\nYou must not browse prediction market prices unless they are explicitly provided."
+        },
+        {
+          "role": "user",
+          "content": "QUESTION:\nWill the US enter a recession by the end of 2026?\n\nMARKET CONTEXT:\nResolves YES if US real GDP (seasonally adjusted annualized) contracts for two consecutive quarters between Q2 2025 and Q4 2026, or the NBER declares a recession dated within that window.\n\nMARKET IMPLIED PROBABILITY (p_yes):\n0.175\n\nNEXT ACTION SCHEMA (output JSON only):\nIf you need more info:\n{\"action\":\"search\",\"query\":\"...\"}\nIf you are ready to forecast:\n{\"action\":\"forecast\",\"p_yes\":0.XX,\"rationale\":\"short explanation grounded in evidence and base rates\"}\n\nPick exactly one action."
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US GDP growth forecast 2025 2026 recession indicators economic outlook\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. U.S. outlook for 2026 - Indiana Business Research Center\n   URL: https://www.ibrc.indiana.edu/ibr/2025/outlook/national.html\n   The IBR is a publication of the Indiana Business Research Center at IU's Kelley School of Business. *Recent developments in the U.S. and global economy present a complex and evolving picture for policymakers and business leaders. While our current readings of headline growth remain resilient \u2014 buoyed by strong investment in artificial intelligence, a resilient consumer and robust financial markets \u2014 underlying indicators suggest a more nuanced reality.1 Labor market momentum is softening, with slower payroll gains and rising concerns about hiring reluctance amid political and economic uncertainty. The Indiana Business Research Center forecasts r\u2026"
+        }
+      ],
+      "response": "{\"action\":\"search\",\"query\":\"US recession probability 2025 2026 NBER economic indicators unemployment inflation Federal Reserve\"}",
+      "input_tokens": 3206,
+      "output_tokens": 30,
+      "total_tokens": 3236,
+      "timestamp": "2026-06-09T14:18:13+00:00"
+    },
+    {
+      "seq": 11,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a forecasting agent in a multi-agent forecasting system.\n\nYour job:\n1) Gather evidence by issuing web/news search queries when needed.\n2) Then produce a binary probability forecast for the question.\n\nYou must follow the action schema exactly and output valid JSON only.\nYou must not browse prediction market prices unless they are explicitly provided."
+        },
+        {
+          "role": "user",
+          "content": "QUESTION:\nWill the US enter a recession by the end of 2026?\n\nMARKET CONTEXT:\nResolves YES if US real GDP (seasonally adjusted annualized) contracts for two consecutive quarters between Q2 2025 and Q4 2026, or the NBER declares a recession dated within that window.\n\nMARKET IMPLIED PROBABILITY (p_yes):\n0.175\n\nNEXT ACTION SCHEMA (output JSON only):\nIf you need more info:\n{\"action\":\"search\",\"query\":\"...\"}\nIf you are ready to forecast:\n{\"action\":\"forecast\",\"p_yes\":0.XX,\"rationale\":\"short explanation grounded in evidence and base rates\"}\n\nPick exactly one action."
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US GDP growth forecast 2025 2026 recession indicators economic outlook\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. U.S. outlook for 2026 - Indiana Business Research Center\n   URL: https://www.ibrc.indiana.edu/ibr/2025/outlook/national.html\n   The IBR is a publication of the Indiana Business Research Center at IU's Kelley School of Business. *Recent developments in the U.S. and global economy present a complex and evolving picture for policymakers and business leaders. While our current readings of headline growth remain resilient \u2014 buoyed by strong investment in artificial intelligence, a resilient consumer and robust financial markets \u2014 underlying indicators suggest a more nuanced reality.1 Labor market momentum is softening, with slower payroll gains and rising concerns about hiring reluctance amid political and economic uncertainty. The Indiana Business Research Center forecasts r\u2026"
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US recession probability 2025 2026 NBER economic indicators unemployment inflation Federal Reserve\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. [PDF] Probability of US Recession Predicted by Treasury Spread\n   URL: https://www.newyorkfed.org/medialibrary/media/research/capital_markets/prob_rec.pdf\n   Probability of US Recession Predicted by Treasury Spread* Treasury Spread: 10 yr bond rate-3 month bill rate Monthly Average (Percent) 1959 1961 1963 1965 1967 1969 1971 1973 1975 1977 1979 1981 1983 1985 1987 1989 1991 1993 1995 1997 1999 2001 2003 2005 2007 2009 2011 2013 2015 2017 2019 2021 2023 2025 May 2026 = 0.79648 -4 -3 -2 -1 0 1 2 3 4 5 Twelve Months Ahead (month averages) 1961 1963 1965 1967 1969 1971 1973 1975 1977 1979 1981 1983 1985 1987 1989 1991 1993 1995 1997 1999 2001 2003 2005 2007 2009 2011 2013 2015 2017 2019 2021 2023 2025 2027 May 2027 = 14.9758% *Parameters estimated using data from January 19\u2026"
+        }
+      ],
+      "response": "{\"action\":\"search\",\"query\":\"current US economic indicators 2025 unemployment rate inflation GDP growth Federal Reserve policy\"}",
+      "input_tokens": 7873,
+      "output_tokens": 27,
+      "total_tokens": 7900,
+      "timestamp": "2026-06-09T14:18:17+00:00"
+    },
+    {
+      "seq": 12,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a forecasting agent in a multi-agent forecasting system.\n\nYour job:\n1) Gather evidence by issuing web/news search queries when needed.\n2) Then produce a binary probability forecast for the question.\n\nYou must follow the action schema exactly and output valid JSON only.\nYou must not browse prediction market prices unless they are explicitly provided."
+        },
+        {
+          "role": "user",
+          "content": "QUESTION:\nWill the US enter a recession by the end of 2026?\n\nMARKET CONTEXT:\nResolves YES if US real GDP (seasonally adjusted annualized) contracts for two consecutive quarters between Q2 2025 and Q4 2026, or the NBER declares a recession dated within that window.\n\nMARKET IMPLIED PROBABILITY (p_yes):\n0.175\n\nNEXT ACTION SCHEMA (output JSON only):\nIf you need more info:\n{\"action\":\"search\",\"query\":\"...\"}\nIf you are ready to forecast:\n{\"action\":\"forecast\",\"p_yes\":0.XX,\"rationale\":\"short explanation grounded in evidence and base rates\"}\n\nPick exactly one action."
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US GDP growth forecast 2025 2026 recession indicators economic outlook\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. U.S. outlook for 2026 - Indiana Business Research Center\n   URL: https://www.ibrc.indiana.edu/ibr/2025/outlook/national.html\n   The IBR is a publication of the Indiana Business Research Center at IU's Kelley School of Business. *Recent developments in the U.S. and global economy present a complex and evolving picture for policymakers and business leaders. While our current readings of headline growth remain resilient \u2014 buoyed by strong investment in artificial intelligence, a resilient consumer and robust financial markets \u2014 underlying indicators suggest a more nuanced reality.1 Labor market momentum is softening, with slower payroll gains and rising concerns about hiring reluctance amid political and economic uncertainty. The Indiana Business Research Center forecasts r\u2026"
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"US recession probability 2025 2026 NBER economic indicators unemployment inflation Federal Reserve\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. [PDF] Probability of US Recession Predicted by Treasury Spread\n   URL: https://www.newyorkfed.org/medialibrary/media/research/capital_markets/prob_rec.pdf\n   Probability of US Recession Predicted by Treasury Spread* Treasury Spread: 10 yr bond rate-3 month bill rate Monthly Average (Percent) 1959 1961 1963 1965 1967 1969 1971 1973 1975 1977 1979 1981 1983 1985 1987 1989 1991 1993 1995 1997 1999 2001 2003 2005 2007 2009 2011 2013 2015 2017 2019 2021 2023 2025 May 2026 = 0.79648 -4 -3 -2 -1 0 1 2 3 4 5 Twelve Months Ahead (month averages) 1961 1963 1965 1967 1969 1971 1973 1975 1977 1979 1981 1983 1985 1987 1989 1991 1993 1995 1997 1999 2001 2003 2005 2007 2009 2011 2013 2015 2017 2019 2021 2023 2025 2027 May 2027 = 14.9758% *Parameters estimated using data from January 19\u2026"
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\":\"search\",\"query\":\"current US economic indicators 2025 unemployment rate inflation GDP growth Federal Reserve policy\"}"
+        },
+        {
+          "role": "tool",
+          "content": "SEARCH RESULTS:\n1. [PDF] The Economic Indicators That Shape Fed Policy.docx\n   URL: https://finpolicy.georgetown.edu/wp-content/uploads/2026/01/The-Economic-Indicators-That-Shape-Fed-Policy.docx.pdf\n   In 2025, the labor market softened as employment growth slowed and the unemployment rate increased moderately. This was often referred to as a \u201c\n\n2. December 10, 2025: FOMC Projections materials, accessible version\n   URL: https://www.federalreserve.gov/monetarypolicy/fomcprojtabl20251210.htm\n   most likely outcomes for real gross domestic product (GDP) growth, the unemployment rate, and inflation for each year from 2025 to 2028\n\n3. US Economic Forecast Q1 2026 | Deloitte Insights\n   URL: https://www.deloitte.com/us/en/insights/topics/economy/us-economic-forecast/united-states-outlook-analys\u2026"
+        }
+      ],
+      "response": "{\"action\":\"forecast\",\"p_yes\":0.22,\"rationale\":\"Based on current economic indicators and forecasts, recession probability appears low but not negligible. Key evidence: 1) GDP growth forecasts show positive but slowing growth (1.8% in 2026 per Indiana Business Research Center, around 2% range from other sources), 2) Unemployment expected to rise moderately to 4.5-4.8% by 2026 but remains historically low, 3) Federal Reserve recession risk indicators show low probability based on yield curve, credit spreads, and employment data, 4) New York Fed Treasury spread model shows 14.98% recession probability for May 2027, 5) AI investment and business spending provide economic support. However, softening labor market momentum, political/economic uncertainty, and typical business cycle risks warrant s\u2026",
+      "input_tokens": 8382,
+      "output_tokens": 225,
+      "total_tokens": 8607,
+      "timestamp": "2026-06-09T14:18:26+00:00"
+    },
+    {
+      "seq": 13,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are the BULL debater in a structured forecasting debate.\n\nYour role is to argue for a HIGHER probability of YES for the question below.\nYou must present the strongest possible case for YES, backed by evidence.\n\nQUESTION:\nWill the US enter a recession by the end of 2026?\n\nAGENT SUMMARIES:\nAgent: agent_0\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on historical data, US recessions occur roughly every 5.4 years on average, with 8 recessions since 1950 (about every 9 years post-WWII). The last recession was COVID in 2020, making 2025-2026 w\n\n---\n\nAgent: agent_1\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on economic forecasts, the US appears positioned for modest growth through 2026. Multiple sources project real GDP growth of 1.8-2.4% for 2026, with the Ind\u2026"
+        }
+      ],
+      "response": "```json\n{\n  \"argument\": \"The probability of recession by 2026 is significantly underestimated. While current forecasts appear optimistic, multiple converging risk factors create a perfect storm scenario. The Federal Reserve's aggressive rate hiking cycle has created substantial lag effects that typically manifest 12-18 months later, meaning the full impact won't be felt until 2025-2026. Commercial real estate is facing a $1.5 trillion refinancing wall through 2026 with rates 3-4x higher than original loans, threatening widespread defaults. Geopolitical tensions including potential China-Taiwan conflict, ongoing Russia-Ukraine war, and Middle East instability could trigger supply chain disruptions and energy price spikes. The inverted yield curve has been a reliable recession predictor, cor\u2026",
+      "input_tokens": 411,
+      "output_tokens": 377,
+      "total_tokens": 788,
+      "timestamp": "2026-06-09T14:18:36+00:00"
+    },
+    {
+      "seq": 14,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are the BEAR debater in a structured forecasting debate.\n\nYour role is to argue for a LOWER probability of YES for the question below.\nYou must present the strongest possible case for NO (or lower probability), backed by evidence.\n\nQUESTION:\nWill the US enter a recession by the end of 2026?\n\nAGENT SUMMARIES:\nAgent: agent_0\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on historical data, US recessions occur roughly every 5.4 years on average, with 8 recessions since 1950 (about every 9 years post-WWII). The last recession was COVID in 2020, making 2025-2026 w\n\n---\n\nAgent: agent_1\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on economic forecasts, the US appears positioned for modest growth through 2026. Multiple sources project real GDP growth of 1.8-2.4% f\u2026"
+        }
+      ],
+      "response": "{\n  \"argument\": \"The Bull's recession probability is significantly overstated due to several critical oversights. First, the Federal Reserve has already begun cutting rates from their peak, providing monetary accommodation that wasn't available in previous recession cycles - this proactive easing creates a crucial buffer against economic contraction. Second, the US labor market remains exceptionally robust with unemployment near historic lows and continuing job creation, providing the income stability necessary to sustain consumer spending. Third, corporate balance sheets are fundamentally stronger than pre-2008, with many companies holding record cash reserves and having refinanced debt at low rates during 2020-2022, creating resilience against higher borrowing costs. Fourth, while the yi\u2026",
+      "input_tokens": 667,
+      "output_tokens": 390,
+      "total_tokens": 1057,
+      "timestamp": "2026-06-09T14:18:47+00:00"
+    },
+    {
+      "seq": 15,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are the BULL debater in a structured forecasting debate.\n\nYour role is to argue for a HIGHER probability of YES for the question below.\nYou must present the strongest possible case for YES, backed by evidence.\n\nQUESTION:\nWill the US enter a recession by the end of 2026?\n\nAGENT SUMMARIES:\nAgent: agent_0\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on historical data, US recessions occur roughly every 5.4 years on average, with 8 recessions since 1950 (about every 9 years post-WWII). The last recession was COVID in 2020, making 2025-2026 w\n\n---\n\nAgent: agent_1\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on economic forecasts, the US appears positioned for modest growth through 2026. Multiple sources project real GDP growth of 1.8-2.4% for 2026, with the Ind\u2026"
+        }
+      ],
+      "response": "```json\n{\n  \"argument\": \"The Bear significantly underestimates recession risks by overlooking critical vulnerabilities that are building momentum. While the Fed has cut rates, they remain restrictive at 4.25-4.5% compared to the 0-0.25% range that previously supported growth, and the full impact of previous tightening typically materializes with 12-18 month lags - meaning we're still experiencing the contractionary effects of 2022-2023 rate hikes. The labor market strength is misleading as a leading indicator since employment is notoriously lagging - unemployment typically rises rapidly once recession begins, not before. Corporate balance sheets may appear strong, but this masks significant sectoral stress: commercial real estate faces $1.2 trillion in refinancing needs through 2026 at muc\u2026",
+      "input_tokens": 702,
+      "output_tokens": 430,
+      "total_tokens": 1132,
+      "timestamp": "2026-06-09T14:19:00+00:00"
+    },
+    {
+      "seq": 16,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are the BEAR debater in a structured forecasting debate.\n\nYour role is to argue for a LOWER probability of YES for the question below.\nYou must present the strongest possible case for NO (or lower probability), backed by evidence.\n\nQUESTION:\nWill the US enter a recession by the end of 2026?\n\nAGENT SUMMARIES:\nAgent: agent_0\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on historical data, US recessions occur roughly every 5.4 years on average, with 8 recessions since 1950 (about every 9 years post-WWII). The last recession was COVID in 2020, making 2025-2026 w\n\n---\n\nAgent: agent_1\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on economic forecasts, the US appears positioned for modest growth through 2026. Multiple sources project real GDP growth of 1.8-2.4% f\u2026"
+        }
+      ],
+      "response": "```json\n{\n  \"argument\": \"The Bull's recession case relies on backward-looking patterns that don't account for the unprecedented monetary and fiscal policy tools now available. The Fed's current 4.25-4.5% rates aren't restrictive in today's context - they're normalized rates that reflect higher productivity growth and structural changes in the economy. The 'lagging effects' argument ignores that the economy has already absorbed most tightening impacts through 2023-2024 without significant damage. The commercial real estate concerns are overblown - while refinancing pressures exist, banks have been provisioning for losses since 2022, and the sector represents only 2.5% of GDP. Most importantly, the Bull mischaracterizes the current expansion timeline - measuring from the COVID trough artific\u2026",
+      "input_tokens": 743,
+      "output_tokens": 410,
+      "total_tokens": 1153,
+      "timestamp": "2026-06-09T14:19:11+00:00"
+    },
+    {
+      "seq": 17,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are the BULL debater in a structured forecasting debate.\n\nYour role is to argue for a HIGHER probability of YES for the question below.\nYou must present the strongest possible case for YES, backed by evidence.\n\nQUESTION:\nWill the US enter a recession by the end of 2026?\n\nAGENT SUMMARIES:\nAgent: agent_0\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on historical data, US recessions occur roughly every 5.4 years on average, with 8 recessions since 1950 (about every 9 years post-WWII). The last recession was COVID in 2020, making 2025-2026 w\n\n---\n\nAgent: agent_1\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on economic forecasts, the US appears positioned for modest growth through 2026. Multiple sources project real GDP growth of 1.8-2.4% for 2026, with the Ind\u2026"
+        }
+      ],
+      "response": "{\n  \"argument\": \"The Bear's optimism ignores critical structural vulnerabilities and timing patterns that strongly favor recession by 2026. First, the Bear mischaracterizes monetary policy transmission - while the economy absorbed initial tightening, the full impact of the most aggressive Fed cycle since the 1980s operates with 18-24 month lags, meaning peak effects are hitting now through 2026. The 4.25-4.5% rates ARE restrictive when real rates exceed 2% - historically recessionary territory. Second, the commercial real estate crisis is far from 'overblown' - $1.5 trillion in CRE loans need refinancing through 2026 at rates 3-4x higher than original terms, with office vacancy rates at 20%+ in major cities. This creates a banking sector stress comparable to the S&L crisis. Third, the Bear\u2026",
+      "input_tokens": 730,
+      "output_tokens": 469,
+      "total_tokens": 1199,
+      "timestamp": "2026-06-09T14:19:25+00:00"
+    },
+    {
+      "seq": 18,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are the BEAR debater in a structured forecasting debate.\n\nYour role is to argue for a LOWER probability of YES for the question below.\nYou must present the strongest possible case for NO (or lower probability), backed by evidence.\n\nQUESTION:\nWill the US enter a recession by the end of 2026?\n\nAGENT SUMMARIES:\nAgent: agent_0\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on historical data, US recessions occur roughly every 5.4 years on average, with 8 recessions since 1950 (about every 9 years post-WWII). The last recession was COVID in 2020, making 2025-2026 w\n\n---\n\nAgent: agent_1\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on economic forecasts, the US appears positioned for modest growth through 2026. Multiple sources project real GDP growth of 1.8-2.4% f\u2026"
+        }
+      ],
+      "response": "{\n  \"argument\": \"The Bull fundamentally overestimates recession risk by misreading both historical patterns and current economic resilience. First, the monetary policy transmission argument is flawed - the economy has already demonstrated remarkable adaptability to higher rates, with consumer spending remaining robust, unemployment near historic lows at 3.7%, and corporate earnings maintaining growth. If 18-24 month lags were deterministic, we'd already see clear recessionary signals, yet leading indicators are stabilizing. Second, the CRE crisis narrative is overblown - while refinancing challenges exist, banks have been proactively managing exposures since 2022, maintaining strong capital ratios above regulatory requirements. The banking sector stress comparison to S&Ls ignores modern ri\u2026",
+      "input_tokens": 777,
+      "output_tokens": 417,
+      "total_tokens": 1194,
+      "timestamp": "2026-06-09T14:19:37+00:00"
+    },
+    {
+      "seq": 19,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are the SUPERVISOR agent.\n\nYou receive M agent forecasts and rationales for the same question.\nYour job is NOT to average them directly.\n\nStep 1: Identify key disagreements, ambiguities, missing base rates, or claims that should be fact-checked.\nStep 2: Propose up to 3 clarifying search queries that would resolve these disagreements.\n\nOutput JSON only with:\n{\"disagreements\": [\"...\"], \"queries\": [\"...\"]}\n\nAGENT INPUTS:\nAgent: agent_0\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on historical data, US recessions occur roughly every 5.4 years on average, with 8 recessions since 1950 (about every 9 years post-WWII). The last recession was COVID in 2020, making 2025-2026 w\n\n---\n\nAgent: agent_1\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on economic forecasts,\u2026"
+        }
+      ],
+      "response": "{\n  \"disagreements\": [\n    \"Agent 0 relies on historical recession frequency (every 5.4-9 years) suggesting 2025-2026 timing is plausible, while other agents focus on current economic forecasts showing positive growth\",\n    \"All agents cite similar GDP growth forecasts (1.8-2.4% for 2026) but may be using incomplete or outdated data sources\",\n    \"The rationales appear cut off mid-sentence, suggesting missing critical information about recession indicators, yield curves, employment data, or other leading economic indicators\"\n  ],\n  \"queries\": [\n    \"What are the most recent 2024 economic indicators for recession prediction including yield curve inversions, unemployment trends, and leading economic index data?\",\n    \"What is the current consensus among major economic forecasting institution\u2026",
+      "input_tokens": 380,
+      "output_tokens": 239,
+      "total_tokens": 619,
+      "timestamp": "2026-06-09T14:19:44+00:00"
+    },
+    {
+      "seq": 20,
+      "label": "pipeline",
+      "model": "claude-sonnet-4-20250514",
+      "json_mode": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "You are the SUPERVISOR agent.\n\nGiven:\n1) The original question\n2) The set of agent forecasts and rationales\n3) Additional evidence from your follow-up searches\n\nYou must output:\n1) Updated forecast p_yes in [0,1]\n2) Confidence in whether your update direction is correct: \"high\" | \"medium\" | \"low\"\n3) A short rationale\n\nOutput JSON only:\n{\"p_yes\": 0.0, \"confidence\": \"high\", \"rationale\": \"...\"}\n\nQUESTION:\nWill the US enter a recession by the end of 2026?\n\nAGENT INPUTS:\nAgent: agent_0\nProbability (p_yes): 0.22\nConfidence: 0.56\nRationale: Based on historical data, US recessions occur roughly every 5.4 years on average, with 8 recessions since 1950 (about every 9 years post-WWII). The last recession was COVID in 2020, making 2025-2026 w\n\n---\n\nAgent: agent_1\nProbability (p_yes): 0.22\nConfidence:\u2026"
+        }
+      ],
+      "response": "```json\n{\n  \"p_yes\": 0.18,\n  \"confidence\": \"medium\",\n  \"rationale\": \"The evidence reinforces the agents' low recession probability assessment but suggests it may be slightly too high. Professional forecasters show consensus GDP growth of 1.9-2.4% for 2026, with the CBO projecting stronger growth due to fiscal easing. While historical frequency models suggest recessions every 5-9 years, the research shows indicator-based models significantly outperform simple frequency approaches. Current leading indicators appear benign with solid economic activity and low unemployment (4.3% projected). However, some uncertainty remains given forecaster disagreement and the documented difficulty in predicting recession timing precisely.\"\n}\n```",
+      "input_tokens": 3239,
+      "output_tokens": 165,
+      "total_tokens": 3404,
+      "timestamp": "2026-06-09T14:19:54+00:00"
+    }
+  ],
+  "notes": "Full AIA pipeline: research \u2192 aggregate \u2192 debate \u2192 supervisor.",
+  "created_at": "2026-06-09T14:19:54+00:00",
+  "run_id": "ef5bca7b95bd"
+}

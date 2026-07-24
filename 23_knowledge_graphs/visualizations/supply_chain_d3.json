@@ -1,0 +1,1186 @@
+{
+  "nodes": [
+    {
+      "id": "Apple Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 2,
+      "risk_level": "low"
+    },
+    {
+      "id": "TSMC",
+      "group": 1,
+      "type": "supplier",
+      "degree": 61,
+      "risk_level": "high"
+    },
+    {
+      "id": "Foxconn",
+      "group": 1,
+      "type": "supplier",
+      "degree": 33,
+      "risk_level": "high"
+    },
+    {
+      "id": "AbbVie Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 4,
+      "risk_level": "low"
+    },
+    {
+      "id": "Samsung",
+      "group": 1,
+      "type": "supplier",
+      "degree": 28,
+      "risk_level": "high"
+    },
+    {
+      "id": "Lupron",
+      "group": 1,
+      "type": "supplier",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "ABBOTT LABORATORIES",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "ADOBE INC",
+      "group": 2,
+      "type": "company",
+      "degree": 2,
+      "risk_level": "low"
+    },
+    {
+      "id": "Microsoft",
+      "group": 1,
+      "type": "supplier",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "AIG Parent",
+      "group": 2,
+      "type": "company",
+      "degree": 4,
+      "risk_level": "low"
+    },
+    {
+      "id": "Fortitude Re",
+      "group": 1,
+      "type": "supplier",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "lessors",
+      "group": 1,
+      "type": "supplier",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "employees",
+      "group": 1,
+      "type": "supplier",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "subsidiaries",
+      "group": 1,
+      "type": "supplier",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "AMGEN INC",
+      "group": 2,
+      "type": "company",
+      "degree": 5,
+      "risk_level": "medium"
+    },
+    {
+      "id": "Lilly",
+      "group": 1,
+      "type": "supplier",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "contract manufacturers",
+      "group": 1,
+      "type": "supplier",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "Broadcom Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "ASE",
+      "group": 1,
+      "type": "supplier",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "American Express Co",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "BOEING CO",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "BANK OF AMERICA CORP /DE/",
+      "group": 2,
+      "type": "company",
+      "degree": 2,
+      "risk_level": "low"
+    },
+    {
+      "id": "Booking Holdings Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "BlackRock, Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "BRISTOL MYERS SQUIBB CO",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "Bristol Myers Squibb Co",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "COLGATE PALMOLIVE CO",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "COMCAST CORP",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "Capital One Financial Corp",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "CONOCOPHILLIPS",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "ConocoPhillips",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "DEERE & CO",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "John Deere",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "Walt Disney Co",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "FORD MOTOR CO",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "General Dynamics Corp",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "GILEAD SCIENCES, INC",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "General Motors Co",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "Alphabet Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "The Goldman Sachs Group, Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "Goldman Sachs Group Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "HONEYWELL INTERNATIONAL INC",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "Honeywell International Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "International Business Machines Corp",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "Intel Corp",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "JOHNSON & JOHNSON",
+      "group": 2,
+      "type": "company",
+      "degree": 2,
+      "risk_level": "low"
+    },
+    {
+      "id": "JPMORGAN CHASE & CO",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "Linde PLC",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "LOCKHEED MARTIN CORP",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "LOWES COMPANIES INC",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "McDONALDS CORP",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "Medtronic plc",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "METLIFE INC",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "Meta Platforms, Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "3M CO",
+      "group": 2,
+      "type": "company",
+      "degree": 2,
+      "risk_level": "low"
+    },
+    {
+      "id": "Altria Group, Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "Merck & Co., Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "MORGAN STANLEY",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "Microsoft Corp",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "Netflix Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "NIKE, Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "Oracle Corp",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "PEPSICO INC",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "Pfizer Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "Philip Morris International Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "PayPal Holdings, Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 2,
+      "risk_level": "low"
+    },
+    {
+      "id": "STARBUCKS CORP",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "AT&T INC",
+      "group": 2,
+      "type": "company",
+      "degree": 3,
+      "risk_level": "low"
+    },
+    {
+      "id": "THERMO FISHER SCIENTIFIC INC",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "Tesla, Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "UNITEDHEALTH GROUP INC",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "UNION PACIFIC CORP",
+      "group": 2,
+      "type": "company",
+      "degree": 2,
+      "risk_level": "low"
+    },
+    {
+      "id": "Union Pacific Corp",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    },
+    {
+      "id": "Walmart Inc",
+      "group": 2,
+      "type": "company",
+      "degree": 1,
+      "risk_level": "low"
+    }
+  ],
+  "links": [
+    {
+      "source": 0,
+      "target": 1,
+      "type": "supplies"
+    },
+    {
+      "source": 0,
+      "target": 2,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 3,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 6,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 7,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 14,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 17,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 19,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 20,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 21,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 22,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 23,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 24,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 25,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 26,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 27,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 28,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 29,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 30,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 31,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 32,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 33,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 34,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 35,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 36,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 37,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 38,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 39,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 40,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 41,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 42,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 43,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 44,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 45,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 46,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 47,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 48,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 49,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 50,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 51,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 52,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 53,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 54,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 55,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 56,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 57,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 58,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 59,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 60,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 61,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 62,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 63,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 64,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 65,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 66,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 67,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 68,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 69,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 70,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 71,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 72,
+      "type": "supplies"
+    },
+    {
+      "source": 1,
+      "target": 73,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 3,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 14,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 17,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 20,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 21,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 22,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 24,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 25,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 27,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 31,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 32,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 34,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 35,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 37,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 38,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 42,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 45,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 46,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 48,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 49,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 50,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 52,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 53,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 54,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 57,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 60,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 61,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 62,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 64,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 65,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 66,
+      "type": "supplies"
+    },
+    {
+      "source": 2,
+      "target": 67,
+      "type": "supplies"
+    },
+    {
+      "source": 3,
+      "target": 4,
+      "type": "supplies"
+    },
+    {
+      "source": 3,
+      "target": 5,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 14,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 20,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 22,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 24,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 25,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 27,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 32,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 31,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 34,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 35,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 37,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 38,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 42,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 46,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 48,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 49,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 50,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 52,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 53,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 57,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 60,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 61,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 62,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 64,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 66,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 67,
+      "type": "supplies"
+    },
+    {
+      "source": 4,
+      "target": 71,
+      "type": "supplies"
+    },
+    {
+      "source": 7,
+      "target": 8,
+      "type": "supplies"
+    },
+    {
+      "source": 9,
+      "target": 10,
+      "type": "supplies"
+    },
+    {
+      "source": 9,
+      "target": 11,
+      "type": "supplies"
+    },
+    {
+      "source": 9,
+      "target": 12,
+      "type": "supplies"
+    },
+    {
+      "source": 9,
+      "target": 13,
+      "type": "supplies"
+    },
+    {
+      "source": 14,
+      "target": 15,
+      "type": "supplies"
+    },
+    {
+      "source": 14,
+      "target": 16,
+      "type": "supplies"
+    },
+    {
+      "source": 17,
+      "target": 18,
+      "type": "supplies"
+    }
+  ],
+  "metadata": {
+    "total_companies": 62,
+    "total_suppliers": 12,
+    "total_relationships": 131,
+    "high_risk_suppliers": 3,
+    "generated": "2026-05-23 06:32:31"
+  }
+}
