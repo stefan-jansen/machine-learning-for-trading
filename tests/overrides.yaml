@@ -1738,19 +1738,26 @@ case_studies/fx_pairs/03_financial_features:
     START_DATE: '2000-01-01'
   timeout: 300
 case_studies/fx_pairs/04_model_based_features:
+  # No MAX_FOLDS: this notebook writes the temporal artifact every downstream
+  # notebook validates against the FULL fold set, so truncating the producer's
+  # folds guarantees "artifact fold is missing" for folds 2-7.
   parameters:
     GARCH_MIN_OBS: 50
     HMM_N_RESTARTS: 1
     KALMAN_MAXITER: 50
-    MAX_FOLDS: 2
     MAX_SAMPLE_ASSETS: 3
     MAX_SYMBOLS: 5
     MIN_OBS: 10
     MIN_TRAIN_BARS: 10
-    N_HMM_RESTARTS: 3
+    # Production parity (10). Three restarts was a speed hack that held only
+    # while the producer was truncated to two folds; across all 24 label-folds
+    # at least one lands on a seed whose EM log-likelihood decreases, every
+    # restart is rejected as unstable, and the notebook raises "No stable HMM
+    # fit". Restart count is a numerical-robustness knob, not a size knob.
+    N_HMM_RESTARTS: 10
     N_RESTARTS: 1
     START_DATE: '2000-01-01'
-  timeout: 300
+  timeout: 900
 case_studies/fx_pairs/05_evaluation:
   parameters:
     MAX_SYMBOLS: 5
