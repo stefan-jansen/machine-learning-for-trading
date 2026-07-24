@@ -321,6 +321,52 @@ def get_classification_eval_label(case_study_id: str, label: str) -> str:
     return str(mapping[label])
 
 
+def load_temporal_features(
+    case_study_id: str,
+    label: str,
+    path: Path | None = None,
+) -> pl.DataFrame:
+    """Read a per-fold temporal artifact and keep the rows fit for ``label``.
+
+    ``04_model_based_features`` emits one fold set per configured label, tagged
+    with ``cv_label``, because labels configured with different buffers seal
+    different gaps and therefore have different fold boundaries. Every reader of
+    ``features/model_based.parquet`` must select its own label's rows: filtering
+    on ``fold`` alone silently mixes geometries, which shows up downstream as
+    duplicate ``(timestamp, symbol)`` keys or as folds whose windows do not line
+    up with the artifact.
+
+    Parameters
+    ----------
+    case_study_id : str
+        Case study identifier, used to locate the default artifact path.
+    label : str
+        The label whose fold geometry the caller needs.
+    path : Path, optional
+        Explicit artifact path. Defaults to
+        ``case_studies/<case_study_id>/features/model_based.parquet``.
+
+    Returns
+    -------
+    pl.DataFrame
+        The artifact restricted to ``label``, with ``cv_label`` dropped.
+    """
+    if path is None:
+        path = get_case_study_dir(case_study_id, create=False) / "features" / "model_based.parquet"
+    temporal = pl.read_parquet(path)
+    if "cv_label" not in temporal.columns:
+        return temporal
+    available = sorted(temporal["cv_label"].unique().to_list())
+    temporal = temporal.filter(pl.col("cv_label") == label).drop("cv_label")
+    if temporal.is_empty():
+        raise ValueError(
+            f"Temporal artifact for case study {case_study_id!r} carries no rows for "
+            f"label {label!r}; it covers {available}. Re-run 04_model_based_features, "
+            f"which emits one fold set per configured label."
+        )
+    return temporal
+
+
 def load_modeling_dataset(
     case_study_id: str,
     primary_label: str,
