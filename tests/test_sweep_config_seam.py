@@ -245,3 +245,30 @@ class TestRegistryReconciliation:
                         f"unrecognized by the seam test - extend the test or "
                         f"the loader."
                     )
+
+
+# ---------------------------------------------------------------------------
+# ML4T_OUTPUT_DIR redirection - the create_experiment workflow
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_reads_redirected_setup_under_output_dir(tmp_path, monkeypatch):
+    """When ML4T_OUTPUT_DIR is set, the sweep loader must read setup.yaml from
+    the redirected dir, so a reader's experiment-local edit to
+    ``backtest.sweep.top_n_predictions`` is honored (regression for the
+    create_experiment workflow: model stages redirect config reads, and the
+    Ch16-19 sweep must too)."""
+    from case_studies.utils.sweep_config import get_top_n_predictions, load_sweep
+
+    cs = "etfs"
+    exp_config = tmp_path / cs / "config"
+    exp_config.mkdir(parents=True)
+    # A deliberately non-default allocation breadth the source setup.yaml never uses.
+    sentinel = 3
+    (exp_config / "setup.yaml").write_text(
+        f"backtest:\n  sweep:\n    top_n_predictions:\n      allocation: {sentinel}\n"
+    )
+
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
+    assert load_sweep(cs)["top_n_predictions"]["allocation"] == sentinel
+    assert get_top_n_predictions(cs, "allocation") == sentinel

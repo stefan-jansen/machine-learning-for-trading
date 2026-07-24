@@ -18,23 +18,6 @@ def _make_writable(root: Path) -> None:
         path.chmod(path.stat().st_mode | stat.S_IWUSR)
 
 
-def _seed_shared_presets(repo_root: Path, output_root: Path) -> None:
-    """Copy the shared model presets into the experiment's ML4T_OUTPUT_DIR.
-
-    ``load_configs`` resolves preset files at ``{ML4T_OUTPUT_DIR}/config/{model_type}/``
-    (it reads ``case_dir.parent / "config"``), so the shared ``case_studies/config/``
-    tree must be present there for a preset lookup to succeed under the experiment
-    dir. Mirrors ``tests/conftest.py::seeded_output_dir``. Shared across every case
-    study in one output root, so seed it once and leave an existing copy in place.
-    """
-    src = repo_root / "case_studies" / "config"
-    dst = output_root / "config"
-    if not src.is_dir() or dst.exists():
-        return
-    shutil.copytree(src, dst)
-    _make_writable(dst)
-
-
 def create_experiment(
     case_study: str,
     output_root: Path,
@@ -55,8 +38,16 @@ def create_experiment(
     if target.exists():
         raise FileExistsError(f"Experiment already exists: {target}")
 
+    # Shared model presets (case_studies/config/) resolve at {ML4T_OUTPUT_DIR}/config/
+    # (load_configs reads case_dir.parent / "config"). Seed them once per output root;
+    # leave an existing copy in place so a second case-study experiment reuses it.
+    presets_src = repo_root / "case_studies" / "config"
+    presets_dst = output_root / "config"
+    seed_presets = presets_src.is_dir() and not presets_dst.exists()
+
     output_root.mkdir(parents=True, exist_ok=True)
     staging = output_root / f".{case_study}-staging-{uuid.uuid4().hex}"
+    presets_staging = output_root / f".config-staging-{uuid.uuid4().hex}" if seed_presets else None
     try:
         staging.mkdir()
         for name in GENERATED_DIRS:
@@ -74,12 +65,22 @@ def create_experiment(
         release_metadata = staging / "run_log/.release"
         if release_metadata.exists():
             release_metadata.rename(staging / "run_log/.baseline")
+
+        if presets_staging is not None:
+            shutil.copytree(presets_src, presets_staging)
+            _make_writable(presets_staging)
+
+        # All expensive copies are done; finalize with atomic renames only. Order:
+        # presets first so a completed case-study dir never implies missing presets.
+        if presets_staging is not None:
+            presets_staging.rename(presets_dst)
         staging.rename(target)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
+        if presets_staging is not None:
+            shutil.rmtree(presets_staging, ignore_errors=True)
         raise
 
-    _seed_shared_presets(repo_root, output_root)
     return target
 
 

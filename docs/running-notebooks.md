@@ -280,13 +280,23 @@ worth reporting as an issue.
 ## Experimenting Without Changing the Release Baseline
 
 Create a writable copy of the installed artifacts before changing a configuration or running a
-training or backtest stage:
+training or backtest stage. The artifact bundle installs the registry (`run_log/`) only, so first
+produce the modeling dataset (`features/`, `labels/`) that the model stages consume, then create the
+experiment and run your edited stage against it:
 
 ```bash
+# 1. Produce the modeling dataset the model notebooks need (writes features/ and
+#    labels/ into the case study directory; skip any that already exist).
+uv run python case_studies/etfs/02_labels.py
+uv run python case_studies/etfs/03_financial_features.py
+uv run python case_studies/etfs/04_model_based_features.py
+
+# 2. Snapshot the installed artifacts + config into a writable experiment.
 uv run python scripts/create_experiment.py \
   --cs etfs \
   --output /tmp/ml4t-etf-experiment
 
+# 3. Edit config in the experiment (see below), then run the stage against it.
 ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
   uv run python case_studies/etfs/07_gbm.py
 ```
@@ -297,12 +307,6 @@ writable. `ML4T_OUTPUT_DIR` routes both config reads and new registry rows into
 `/tmp/ml4t-etf-experiment/`, so you change a configuration **inside the experiment** and the
 downloaded release stays untouched. You edit config there, not in the model notebook - the notebooks
 have no hyperparameter grids inline; they read the config system described below.
-
-> **Prerequisite for training stages.** The artifact bundle installs the registry (`run_log/`) only.
-> `07_gbm.py` and the other model notebooks also need the modeling dataset (`features/`, `labels/`),
-> which you produce by running `02_labels.py`, `03_financial_features.py`, and
-> `04_model_based_features.py` first. `create_experiment.py` copies whatever of those already exist in
-> the case study directory.
 
 ### Try Different Model Hyperparameters
 
