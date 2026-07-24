@@ -205,11 +205,26 @@ See [`case_studies/RUN_LOG.md`](../case_studies/RUN_LOG.md) for the schema and q
 ### Pre-Computed Results (Download Artifacts)
 
 Running a case study end to end can take hours or days. The artifact release provides the complete
-registered run logs for the seven released case studies. NASDAQ-100 Microstructure and US Equities
-Panel remain available as executable source pipelines while their bundles are finalized.
+registered run logs for all nine case studies. Each is a separate download, so you can take only the
+ones you want - start with `etfs` (33 MB), the case study the book follows most closely.
+
+| Case study | Download |
+|---|---:|
+| `etfs` | 33 MB |
+| `cme_futures` | 37 MB |
+| `fx_pairs` | 41 MB |
+| `sp500_options` | 42 MB |
+| `crypto_perps_funding` | 43 MB |
+| `sp500_equity_option_analytics` | 44 MB |
+| `us_firm_characteristics` | 56 MB |
+| `nasdaq100_microstructure` | 1.1 GB |
+| `us_equities_panel` | 1.6 GB |
+
+The last two are large because they are wide, high-frequency panels - a single NASDAQ minute-bar
+prediction set is about 80 MB on its own. Their artifact counts are in line with the rest.
 
 ```bash
-# Download all available case study artifacts (about 4.1 GB total)
+# Download all nine case study artifacts (about 3.1 GB total)
 uv run python scripts/download_artifacts.py
 
 # Download a single case study

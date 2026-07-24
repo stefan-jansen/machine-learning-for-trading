@@ -16,10 +16,8 @@ strategy you can actually run, and keep running, in a live market.
   and [six production Python libraries](https://ml4trading.io/libraries/)
   that facilitate substantial parts of the workflow.
 
-> For the first time, we are offering [live cohort courses](https://ml4trading.io/courses/), plus free lightning
-> lessons on [multi-agent systems](https://maven.com/p/6c2609/build-multi-agent-systems-you-can-audit) and
-> [From Trading Idea to Validated Strategy](https://maven.com/p/7a8c60/from-trading-idea-to-validated-strategy?utm_medium=ll_share_link&utm_source=instructor)
-> are coming up on **June 24, 2026**.
+> For the first time, we are offering [live cohort courses](https://ml4trading.io/courses/) that work through this
+> material with direct feedback. See [Courses](#courses) below.
 
 <p align="center">
   <a href="https://amzn.to/4eigy2F"><img src="assets/cover.jpeg" width="45%" alt="Machine Learning for Trading, 3rd Edition"></a>
@@ -105,7 +103,7 @@ range:
   and proper scoring rules for event forecasts.
 - [Production](https://ml4trading.io/primer/): 2 topics, champion-challenger evaluation and training-serving skew with
   feature stores.
-- [Cross-cutting concepts](https://ml4trading.io/primer/): 20 building blocks referenced across chapters, for example
+- [Cross-cutting concepts](https://ml4trading.io/primer/): 24 building blocks referenced across chapters, for example
   momentum and mean reversion, the bias-variance tradeoff, and walk-forward validation.
 
 ### 56 Agent Skills
@@ -137,7 +135,7 @@ the material live, with direct feedback:
 
 - [Machine Learning for Trading: From Research to Production](https://maven.com/stefan-jansen/research-to-production):
   take a research idea all the way to a deployed, monitored strategy.
-- [Building Multi-Agent Forecasting Systems](https://maven.com/stefan-jansen/forecasting-agents):
+- [Engineering a Multi-Agent Forecasting System](https://maven.com/stefan-jansen/agent-engineering):
   design auditable multi-agent systems for financial research.
 
 Each course runs as a scheduled cohort; the links above always point to the next one, where you can enroll or join the
