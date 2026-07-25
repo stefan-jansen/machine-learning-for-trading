@@ -64,8 +64,11 @@ SHA-256(canonical_json(spec))[:12]      Content-addressed hash → registry row
 Each case study has a single `setup.yaml` that defines the trading problem. It is
 the source of truth for the universe, decision cadence, execution defaults, cost
 model, primary and secondary labels, walk-forward parameters, the Ch16–19 sweep
-grid, and (where applicable) the causal estimand. Notebooks read it at runtime —
-nothing is hardcoded in code.
+grid, and (where applicable) the causal estimand. Notebooks read it at runtime
+rather than carrying their own copies of these values. A few training stages do
+keep hardcoded constants that override the preset they loaded — see
+[`docs/running-notebooks.md`](../docs/running-notebooks.md) for which ones and
+what wins.
 
 ```yaml
 # case_studies/etfs/config/setup.yaml (excerpt)

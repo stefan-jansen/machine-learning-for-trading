@@ -376,19 +376,27 @@ intercept config edits, and both are per-stage rather than systematic:
   runtime seed (on CUDA it does not). Where a notebook constant wins, edit the constant.
 
 Those lists are what we have found, not a proof of completeness - the precedence is a known wart, not
-a design. So verify rather than assume, and verify against **what the stage prints**: each model stage
-echoes the config it resolved before training (`09_dl_lstm.py`, for instance, prints each config name
-with its architecture, epoch count and lookback). If your edited value does not appear there, it did
-not reach the model - either it was dropped before dispatch or overwritten afterwards. Check the stage
-`.py` for a reassignment of your key after `load_configs`, and prefer adding a new preset file over
-editing an existing one.
+a design. So verify rather than assume. The one check that always works is to **read the stage `.py`**:
+find your key's `load_configs` call and look for any reassignment of that key afterwards. Prefer adding
+a new preset file over editing an existing one, which sidesteps the question entirely.
 
-Do **not** use "did a new registry hash appear?" as that check. The training hash is built by
-`build_training_spec`, which re-reads the preset from disk rather than reading the dict the stage
-mutated, and it records the execution backend as provenance rather than identity. Two consequences run
-in opposite directions: editing a GBM preset's `params.seed` changes the hash even though CPU training
-substitutes the runtime seed and fits the same model, while switching that stage between CPU and CUDA
-changes the fitted model without producing a new hash at all.
+Two shortcuts look like they would answer this and do not.
+
+- **What the stage prints is a partial view.** Each stage echoes some of the config it resolved -
+  `09_dl_lstm.py` prints each config name with its architecture, epoch count and lookback, and
+  `07_gbm.py` prints leaf count, objective and tree count. But the echo is a summary line, not a dump
+  of the resolved config: `07_gbm.py` never prints `learning_rate` or `feature_fraction`, so an edit
+  to either is invisible there whether or not it reached the model. Absence from the echo proves
+  nothing.
+- **"Did a new registry hash appear?" is not a reliable signal either**, because the hash and the
+  fitted model are built from different sources. `build_training_spec` re-reads the preset from disk;
+  the stage's own overwrites reach the hash only when the stage explicitly forwards them. The
+  sequence and tabular stages do forward theirs (`n_epochs`, `batch_size` and `lookback` are passed
+  into the spec, so the hash tracks the value that trained). The GBM seed is the known exception, and
+  it diverges in both directions: editing a GBM preset's `params.seed` changes the hash even though
+  CPU training substitutes the runtime seed and fits the same model, while switching that stage
+  between CPU and CUDA changes the fitted model without producing a new hash at all, because the
+  execution backend is recorded as provenance rather than identity.
 
 Stage numbers differ per case study - check its `README.md`. The sequence-model stages share the
 `deep_learning` key and each one selects its own presets by `params.architecture`, so adding an LSTM
@@ -405,12 +413,16 @@ $EDITOR /tmp/ml4t-etf-experiment/config/lgb/leaves_127_mse.yaml   # num_leaves: 
 $EDITOR /tmp/ml4t-etf-experiment/etfs/config/training/fwd_ret_21d.yaml   # add: - leaves_127_mse
 ```
 
-**What earns a new hash.** A run's identity is the hash of the *effective* specification - the preset
-parameters as the stage actually resolved them, plus case-study context such as label, fold count and
-seed. An edit produces a new training hash and trains from scratch only if it survives to that point:
-a value the stage overwrites (see the override list above) is hashed at the overwritten value, so
-editing it in the preset reuses the existing hash and returns the registered result unchanged.
-Re-running a genuinely unchanged config is likewise a no-op that reuses the registered result. That is
+**What earns a new hash.** A run's identity is the hash of the specification `build_training_spec`
+assembles - the preset as read from disk, plus case-study context such as label, fold count and seed,
+plus whatever the stage explicitly forwards. A brand-new preset file therefore always earns a new
+hash and trains from scratch. Editing an *existing* preset is where identity and fitted model can come
+apart, in either direction, so treat the hash as a cache key rather than as proof of what trained:
+where the stage overwrites your key and forwards the overwrite (the sequence and tabular epoch, batch
+and lookback settings), the hash follows the value that actually trained and your preset edit is a
+no-op in both; where it overwrites without forwarding (the GBM seed on CPU), the hash moves but the
+model does not. Re-running a genuinely unchanged config is a no-op that reuses the registered result.
+That is
 why an experiment can accumulate your variants alongside the released ones and stay comparable. The
 exact hash inputs are documented in
 [`case_studies/RUN_LOG.md`](../case_studies/RUN_LOG.md#configuration-flow).
