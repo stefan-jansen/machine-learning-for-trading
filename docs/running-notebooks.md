@@ -342,8 +342,11 @@ Cadence, transaction costs, and selection breadth live in the experiment's
 - `costs.*` - the transaction-cost model (per-share fees, spreads).
 - `backtest.sweep.top_n_predictions` - how many model configs advance at each stage.
 
-The `14_backtest.py` parameter cell exposes run-scoping knobs only - `SPLIT`, `TOP_K`, `MAX_SYMBOLS`,
-`TOP_N_PREDICTIONS`, `FORCE_REBACKTEST` - which select what to backtest, not the strategy economics.
+The `14_backtest.py` parameter cell exposes run-scoping knobs - `TOP_K`, `MAX_SYMBOLS`,
+`TOP_N_PREDICTIONS`, `FORCE_REBACKTEST` - which scope what to backtest, not the strategy economics.
+This notebook always backtests on the **validation** split (the split the sweep selects on); the
+held-out test set is evaluated once on the selected winner in the analysis stage, not from here, so
+do not repurpose the `SPLIT` variable to backtest holdout.
 
 ```bash
 $EDITOR /tmp/ml4t-etf-experiment/etfs/config/setup.yaml   # edit decision / costs / backtest.sweep
@@ -470,11 +473,13 @@ case_studies/etfs/07_gbm:
 
 ### Output Isolation
 
-When the environment variable `ML4T_OUTPUT_DIR` is set (which `pytest` does automatically), all notebook outputs are redirected to a temporary directory. This prevents test runs from overwriting production artifacts like trained models or backtest results.
+When the environment variable `ML4T_OUTPUT_DIR` is set (which `pytest` does automatically), notebook outputs **and config reads** are redirected to that directory. This prevents test runs from overwriting production artifacts like trained models or backtest results. Because config is redirected too, the target must contain the case study's config; `pytest` seeds it automatically, and for a manual run `create_experiment.py` builds a self-contained copy:
 
 ```bash
-# Manual output isolation
-ML4T_OUTPUT_DIR=/tmp/ml4t-test uv run python case_studies/etfs/07_gbm.py
+# Manual output isolation: create a self-contained experiment (copies config +
+# artifacts) so the redirected config reads resolve, then run against it.
+uv run python scripts/create_experiment.py --cs etfs --output /tmp/ml4t-etf-experiment
+ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment uv run python case_studies/etfs/07_gbm.py
 ```
 
 ---
