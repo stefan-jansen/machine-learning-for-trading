@@ -264,6 +264,85 @@ def test_cpu_training_repeats_bit_exactly() -> None:
     assert first["learning_curves"] == second["learning_curves"]
 
 
+def test_max_bin_changes_the_fitted_model() -> None:
+    """max_bin is not cosmetic: it must be declared, never inherited from a device branch.
+
+    Every published GBM number was produced with max_bin=63 (recorded inside the saved
+    boosters). Swapping to LightGBM's 255 default silently moves every result, so this
+    pins the empirical consequence that
+    ``test_gbm_training_identity_covers_every_declared_numerical_input`` pins for the hash.
+    """
+    n_dates, n_entities, n_features = 60, 20, 6
+    rng = np.random.default_rng(0)
+    n = n_dates * n_entities
+    x = rng.normal(size=(n, n_features)).astype(np.float32)
+    y = (0.4 * x[:, 0] - 0.3 * x[:, 1] + rng.normal(scale=1.0, size=n)).astype(np.float32)
+    dates = np.repeat(np.arange(n_dates), n_entities)
+    entities = np.tile(np.arange(n_entities), n_dates).astype(str)
+
+    folds = []
+    cut = n_dates // 3
+    for f in range(2):
+        tr = dates < cut * (f + 1)
+        va = (dates >= cut * (f + 1)) & (dates < cut * (f + 2))
+        folds.append(
+            {
+                "fold": f,
+                "X_train": x[tr],
+                "y_train": y[tr],
+                "y_train_lgb": y[tr],
+                "X_val": x[va],
+                "y_val": y[va],
+                "y_val_lgb": y[va],
+                "y_eval": None,
+                "dates": dates[va],
+                "entities": entities[va],
+                "n_train": int(tr.sum()),
+                "n_val": int(va.sum()),
+            }
+        )
+
+    config = {
+        "config_name": "max_bin_probe",
+        "family": "gbm",
+        "max_iterations": 40,
+        "checkpoint_interval": 20,
+        "params": {
+            "objective": "regression_l1",
+            "num_leaves": 7,
+            "learning_rate": 0.1,
+            "feature_fraction": 0.7,
+            "bagging_fraction": 0.8,
+            "bagging_freq": 1,
+            "seed": 42,
+        },
+    }
+
+    def train(max_bin: int) -> dict[tuple[int, int], np.ndarray]:
+        result = gbm.train_gbm_config(
+            dict(config),
+            folds,
+            feature_names=[f"f{i}" for i in range(n_features)],
+            device="cpu",
+            max_bin=max_bin,
+            entity_col="symbol",
+            date_col="date",
+            task_type="regression",
+            save_dir=None,
+        )
+        # Key on (fold, n_trees) so the comparison is checkpoint-for-checkpoint.
+        return {(e["fold"], e["n_trees"]): np.asarray(e["y_pred"]) for e in result["predictions"]}
+
+    # Compare the predictions themselves, not an aggregate IC: two binnings can
+    # preserve the cross-sectional ranking and so score an identical Spearman IC
+    # while fitting different models, which would let this guard pass vacuously.
+    coarse, fine = train(63), train(255)
+    assert coarse.keys() == fine.keys(), "max_bin must not change the checkpoint grid"
+    assert any(not np.array_equal(coarse[k], fine[k]) for k in coarse), (
+        "max_bin should change the fitted model; a guard has gone stale"
+    )
+
+
 def test_checkpoint_metrics_average_the_complete_monthly_series() -> None:
     predictions = [
         _gbm_prediction_entry(0, [pd.Timestamp("2020-01-01")], 1, 50),
