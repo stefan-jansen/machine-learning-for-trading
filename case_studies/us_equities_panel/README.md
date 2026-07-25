@@ -20,7 +20,7 @@ The pipeline is unusually long because the universe is unusually large. Sixteen 
 
 | Stage | Notebook | Chapter | Description | Writes |
 |-------|----------|---------|-------------|--------|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe breadth, era-dependent cost feasibility, walk-forward folds | Nothing - the evidence stays in the notebook |
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe breadth, era-dependent cost feasibility, walk-forward folds | `config/exploration/feasibility_report.json` |
 | Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 1-day, 5-day, and 21-day forward returns | `labels/fwd_ret_1d.parquet`, `labels/fwd_ret_5d.parquet`, `labels/fwd_ret_21d.parquet`, `config/cv_config.json` |
 | Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | 63 cross-sectional factors: momentum, volatility, liquidity, value | `features/financial.parquet` |
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward Wasserstein regime distance, FFD, GARCH features | `features/model_based.parquet` |
@@ -37,7 +37,7 @@ The pipeline is unusually long because the universe is unusually large. Sixteen 
 | IPCA | [`13b_ipca`](13b_ipca.ipynb) | Ch14 | Instrumented PCA with characteristic-conditioned loadings | Training runs and prediction sets |
 | Causal DML | [`14_causal_dml`](14_causal_dml.ipynb) | Ch15 | Causal effect of 12-1 momentum on daily returns | A row in the registry's `causal_runs` |
 | Model Analysis | [`15_model_analysis`](15_model_analysis.ipynb) | -- | Cross-model IC comparison and fold stability diagnostics | Nothing - it reads the registry |
-| Backtest | [`16_backtest`](16_backtest.ipynb) | Ch16 | Daily long-short top-K strategy simulation | One backtest run per prediction set and entry scheme; returns, trades, weights, fills, and `spec.json` under `run_log/backtest/{hash}/` |
+| Backtest | [`16_backtest`](16_backtest.ipynb) | Ch16 | Daily long-short top-K strategy simulation | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, `trades.parquet`, `fills.parquet`, `equity.parquet`, `portfolio_state.parquet`, and `spec.json` under `run_log/backtest/{hash}/` |
 | Portfolio | [`17_portfolio_management`](17_portfolio_management.ipynb) | Ch17 | Allocation sweep on the highest-IC GBM signal | One backtest run per allocation method, same artifact layout |
 | Costs | [`18_costs`](18_costs.ipynb) | Ch18 | Cost-grid sweep on the top allocation combinations | One backtest run per cost level, same artifact layout |
 | Risk | [`19_risk_management`](19_risk_management.ipynb) | Ch19 | Position-level and portfolio-level risk overlays | One backtest run per overlay variant, same artifact layout |

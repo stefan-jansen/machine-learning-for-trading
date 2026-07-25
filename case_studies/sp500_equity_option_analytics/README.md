@@ -32,7 +32,7 @@ the two result versions are not mixed.
 
 | Stage | Notebook | Chapter | What it teaches | Writes |
 |---|---|---:|---|--------|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | 6 | Tests options coverage, weekly cadence, and whether equity trading costs leave room for research. | `config/exploration/coverage.csv` |
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | 6 | Tests options coverage, weekly cadence, and whether equity trading costs leave room for research. | `config/exploration/feasibility_report.json`, `config/exploration/coverage.csv` |
 | Labels | [`02_labels`](02_labels.ipynb) | 7 | Builds five- and ten-day return, risk-adjusted, and direction labels with walk-forward boundaries. | `labels/fwd_ret_5d.parquet`, `labels/fwd_ret_10d.parquet`, `labels/fwd_ret_risk_adj_5d.parquet`, `labels/fwd_dir_5d.parquet`, `labels/fwd_dir_10d.parquet`, `config/cv_config.json` |
 | Financial features | [`03_financial_features`](03_financial_features.ipynb) | 8 | Joins lagged IV surfaces to realized volatility, momentum, and liquidity features. | `features/financial.parquet` |
 | Temporal features | [`04_model_based_features`](04_model_based_features.ipynb) | 9 | Produces forward-only GJR-GARCH volatility features and documents the pinned single-start feature vintage. | `features/model_based.parquet` |
@@ -50,7 +50,7 @@ the two result versions are not mixed.
 | Supervised autoencoder | [`11e_supervised_autoencoder`](11e_supervised_autoencoder.ipynb) | 14 | Learns return-supervised latent factors and reports uncertainty by checkpoint. | Training runs and prediction sets |
 | Causal DML | [`12_causal_dml`](12_causal_dml.ipynb) | 15 | Estimates the `ivrv_spread` effect with walk-forward DML and panel-robust inference. | A row in the registry's `causal_runs` |
 | Model analysis | [`13_model_analysis`](13_model_analysis.ipynb) | 11-15 | Compares full-coverage families using daily IC with HAC intervals and feature provenance. | Nothing - it reads the registry |
-| Equal-weight baseline | [`14_backtest`](14_backtest.ipynb) | 16 | Runs equal-weight top-k baselines and applies coverage-aware selection. | One backtest run per prediction set and entry scheme; returns, trades, weights, fills, and `spec.json` under `run_log/backtest/{hash}/` |
+| Equal-weight baseline | [`14_backtest`](14_backtest.ipynb) | 16 | Runs equal-weight top-k baselines and applies coverage-aware selection. | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, `trades.parquet`, `fills.parquet`, `equity.parquet`, `portfolio_state.parquet`, and `spec.json` under `run_log/backtest/{hash}/` |
 | Allocation | [`15_portfolio_management`](15_portfolio_management.ipynb) | 17 | Tests five alternative allocators on the ten advancing model configurations. | One backtest run per allocation method, same artifact layout |
 | Costs | [`16_costs`](16_costs.ipynb) | 18 | Replays one selected allocation lineage across the exact 17-point cost surface. | One backtest run per cost level, same artifact layout |
 | Risk | [`17_risk_management`](17_risk_management.ipynb) | 19 | Compares 14 predeclared fixed controls with paired return uncertainty. | One backtest run per overlay variant, same artifact layout |

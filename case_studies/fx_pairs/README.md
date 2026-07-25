@@ -20,10 +20,10 @@ The pipeline is a study in hypothesis revision, from short-horizon momentum to m
 
 | Stage | Notebook | Chapter | Description | Writes |
 |-------|----------|---------|-------------|--------|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Daily NY 5pm close cadence, horizon-cost feasibility, walk-forward fold demonstration | Nothing - the evidence stays in the notebook |
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Daily NY 5pm close cadence, horizon-cost feasibility, walk-forward fold demonstration | `config/exploration/feasibility_report.json` |
 | Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 1-day, 5-day, and 21-day forward returns | `labels/fwd_ret_1d.parquet`, `labels/fwd_ret_5d.parquet`, `labels/fwd_ret_21d.parquet` |
 | Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | Momentum, carry, volatility, and mean-reversion features | `features/financial.parquet` |
-| Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward ARIMA, HMM, and spectral features | `features/model_based.parquet`, `config/cv_config.json` |
+| Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward ARIMA, HMM, and spectral features | `features/model_based.parquet` |
 | Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7--9 | Feature-label IC diagnostics across 20 pairs | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
 | Linear | [`06_linear`](06_linear.ipynb) | Ch11 | Ridge, LASSO, ElasticNet on momentum and carry signals | Training runs and prediction sets in `run_log/registry.db`; coefficients under `run_log/training/{hash}/`, scores under `run_log/predictions/{hash}/` |
 | GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM testing non-linear USD factor and momentum interactions | Training runs and prediction sets; boosters and learning curves under `run_log/training/{hash}/` |
@@ -32,7 +32,7 @@ The pipeline is a study in hypothesis revision, from short-horizon momentum to m
 | NLinear | [`10_dl_nlinear`](10_dl_nlinear.ipynb) | Ch13 | Tests whether FX dynamics are approximately linear | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
 | Causal DML | [`11_causal_dml`](11_causal_dml.ipynb) | Ch15 | Does FX momentum cause future returns or reflect overshooting? | A row in the registry's `causal_runs` |
 | Model Analysis | [`12_model_analysis`](12_model_analysis.ipynb) | -- | Cross-model IC comparison and fold stability diagnostics | Nothing - it reads the registry |
-| Backtest | [`13_backtest`](13_backtest.ipynb) | Ch16 | Long-short daily FX strategy simulation | One backtest run per prediction set and entry scheme; returns, trades, weights, fills, and `spec.json` under `run_log/backtest/{hash}/` |
+| Backtest | [`13_backtest`](13_backtest.ipynb) | Ch16 | Long-short daily FX strategy simulation | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, `trades.parquet`, `fills.parquet`, `equity.parquet`, `portfolio_state.parquet`, and `spec.json` under `run_log/backtest/{hash}/` |
 | Portfolio | [`14_portfolio_management`](14_portfolio_management.ipynb) | Ch17 | Allocation methods for the small FX cross-section | One backtest run per allocation method, same artifact layout |
 | Costs | [`15_costs`](15_costs.ipynb) | Ch18 | Spread impact on the selected 21-day carrier | One backtest run per cost level, same artifact layout |
 | Risk | [`16_risk_management`](16_risk_management.ipynb) | Ch19 | Position-level controls compared with the unoverlaid carrier | One backtest run per overlay variant, same artifact layout |

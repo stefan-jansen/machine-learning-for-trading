@@ -20,7 +20,7 @@ The configuration is the most cost-favorable in the book — long-only rank-and-
 
 | Stage | Notebook | Chapter | Description | Writes |
 |-------|----------|---------|-------------|--------|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe breadth, point-in-time eligibility, horizon-cost feasibility, walk-forward demonstration | `eligibility.csv` |
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe breadth, point-in-time eligibility, horizon-cost feasibility, walk-forward demonstration | `config/exploration/feasibility_report.json`, `eligibility.csv` |
 | Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 21-day and 5-day forward returns with walk-forward splits | `labels/fwd_ret_21d.parquet`, `labels/fwd_ret_5d.parquet`, `config/cv_config.json` |
 | Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | Momentum, volatility, and cross-asset ranking features | `features/financial.parquet` |
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | ARIMA, HMM, and spectral features from walk-forward fits | `features/model_based.parquet` |
@@ -38,7 +38,7 @@ The configuration is the most cost-favorable in the book — long-only rank-and-
 | Supervised autoencoder | [`11e_supervised_autoencoder`](11e_supervised_autoencoder.ipynb) | Ch14 | Autoencoder trained against the return label rather than reconstruction | Training runs and prediction sets |
 | Causal DML | [`12_causal_dml`](12_causal_dml.ipynb) | Ch15 | Does momentum cause future ETF returns or reflect confounders? | A row in the registry's `causal_runs` |
 | Model Analysis | [`13_model_analysis`](13_model_analysis.ipynb) | Ch11-15 | Cross-family IC comparison, checkpoint sensitivity, fold stability | Nothing - it reads the registry |
-| Backtest | [`14_backtest`](14_backtest.ipynb) | Ch16 | Strategy simulation with falsification against equal-weight | One backtest run per prediction set and entry scheme; returns, trades, weights, fills, and `spec.json` under `run_log/backtest/{hash}/` |
+| Backtest | [`14_backtest`](14_backtest.ipynb) | Ch16 | Strategy simulation with falsification against equal-weight | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, `trades.parquet`, `fills.parquet`, `equity.parquet`, `portfolio_state.parquet`, and `spec.json` under `run_log/backtest/{hash}/` |
 | Portfolio | [`15_portfolio_management`](15_portfolio_management.ipynb) | Ch17 | Score-weighted, risk-parity, inverse-vol, MVO, HRP, and conformal-weighted allocation | One backtest run per allocation method, same artifact layout |
 | Costs | [`16_costs`](16_costs.ipynb) | Ch18 | Transaction cost impact on the momentum edge | One backtest run per cost level, same artifact layout |
 | Risk | [`17_risk_management`](17_risk_management.ipynb) | Ch19 | Position-level stop-loss, trailing-stop, and time-exit overlays calibrated against the in-sample MAE distribution | One backtest run per overlay variant, same artifact layout |

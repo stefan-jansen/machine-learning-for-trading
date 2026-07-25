@@ -20,7 +20,7 @@ The pipeline runs a long-short carry-ranked strategy with weekly Friday-close de
 
 | Stage | Notebook | Chapter | Description | Writes |
 |-------|----------|---------|-------------|--------|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe coverage, cost-vs-edge feasibility, walk-forward verification against `config/setup.yaml` | Nothing - the evidence stays in the notebook |
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe coverage, cost-vs-edge feasibility, walk-forward verification against `config/setup.yaml` | `config/exploration/feasibility_report.json` |
 | Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 5-day and 21-day forward returns from ratio back-adjusted continuous data | `labels/fwd_ret_5d.parquet`, `labels/fwd_ret_21d.parquet`, `labels/fwd_tb_5d.parquet`, `config/cv_config.json` |
 | Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | Term structure, carry, momentum, and roll-return features | `features/financial.parquet` |
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Expanding-window ARIMA and HMM features via statsforecast | `features/model_based.parquet` |
@@ -34,11 +34,11 @@ The pipeline runs a long-short carry-ranked strategy with weekly Friday-close de
 | SDF | [`10b_stochastic_discount_factor`](10b_stochastic_discount_factor.ipynb) | Ch14 | Stochastic discount factor on the same panel | Training runs and prediction sets |
 | Causal DML | [`11_causal_dml`](11_causal_dml.ipynb) | Ch15 | Does the carry signal cause future returns or proxy for risk? | A row in the registry's `causal_runs` |
 | Model Analysis | [`12_model_analysis`](12_model_analysis.ipynb) | Ch11-15 | Cross-model IC comparison and fold stability diagnostics | Nothing - it reads the registry |
-| Backtest | [`13_backtest`](13_backtest.ipynb) | Ch16 | Long-short carry-ranked strategy simulation | One backtest run per prediction set and entry scheme; returns, trades, weights, fills, and `spec.json` under `run_log/backtest/{hash}/` |
+| Backtest | [`13_backtest`](13_backtest.ipynb) | Ch16 | Long-short carry-ranked strategy simulation | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, `trades.parquet`, `fills.parquet`, `equity.parquet`, `portfolio_state.parquet`, and `spec.json` under `run_log/backtest/{hash}/` |
 | Portfolio | [`14_portfolio_management`](14_portfolio_management.ipynb) | Ch17 | Equal-risk, score-weighted, and sector-constrained allocation | One backtest run per allocation method, same artifact layout |
 | Costs | [`15_costs`](15_costs.ipynb) | Ch18 | Commission, spread, and roll slippage impact analysis | One backtest run per cost level, same artifact layout |
 | Risk | [`16_risk_management`](16_risk_management.ipynb) | Ch19 | Position-level risk overlays (stop-loss, trailing stops, time exits) | One backtest run per overlay variant, same artifact layout |
-| Strategy Analysis | [`17_strategy_analysis`](17_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics | `20_strategy_synthesis/output/cme_futures/cme_futures_tearsheet.html` |
+| Strategy Analysis | [`17_strategy_analysis`](17_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics | `20_strategy_synthesis/output/cme_futures/cme_futures_tearsheet.html`; also fills the registry's `cohort_metrics` and `backtest_paired_metrics` tables |
 
 ## Margin Model
 

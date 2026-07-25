@@ -28,7 +28,7 @@ The cost-mitigation cascade (O'Donovan & Yu 2024) is encoded in the `strategy.si
 
 | Stage | Notebook | Chapter | Description | Writes |
 |-------|----------|---------|-------------|--------|
-| Setup | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Straddle selection, HTM protocol, delta-hedge during hold, margin requirements | Nothing - the evidence stays in the notebook |
+| Setup | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Straddle selection, HTM protocol, delta-hedge during hold, margin requirements | `config/exploration/feasibility_report.json` |
 | Labels | [`02_labels`](02_labels.ipynb) | Ch7 | HTM short-straddle return + delta-hedged and raw forward variants | One parquet per label in `labels/` (hold-to-maturity, delta-hedged, execution, and raw forward variants), and `config/cv_config.json` |
 | Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | VRP, IV surface, skew, term structure, and Greeks features | `features/financial.parquet` |
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward GJR-GARCH volatility + particle-filtered stochastic volatility | `features/model_based.parquet` |
@@ -41,9 +41,9 @@ The cost-mitigation cascade (O'Donovan & Yu 2024) is encoded in the `strategy.si
 | PatchTST | [`09b_patchtst`](09b_patchtst.ipynb) | Ch13 | Multi-scale patch attention on options dynamics | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
 | Causal DML | [`10_causal_dml`](10_causal_dml.ipynb) | Ch15 | Treatment effect of VRP on delta-hedged returns | A row in the registry's `causal_runs` |
 | Model Analysis | [`11_model_analysis`](11_model_analysis.ipynb) | — | Cross-model IC comparison and fold stability diagnostics | Nothing - it reads the registry |
-| Backtest | [`12_backtest`](12_backtest.ipynb) | Ch16 | HTM dispatch with multi-cohort daily-MTM aggregation | One backtest run per prediction set and entry scheme; returns, trades, weights, fills, and `spec.json` under `run_log/backtest/{hash}/` |
+| Backtest | [`12_backtest`](12_backtest.ipynb) | Ch16 | HTM dispatch with multi-cohort daily-MTM aggregation | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, and `spec.json` under `run_log/backtest/{hash}/` (the vectorized path produces no trade or fill ledger) |
 | Portfolio | [`13_portfolio_management`](13_portfolio_management.ipynb) | Ch17 | Long-short straddle allocation with margin constraints | One backtest run per allocation method, same artifact layout |
-| Costs | [`14_costs`](14_costs.ipynb) | Ch18 | HTM cost-sensitivity grid in % of premium across families and universes | `evaluation/htm_cost_sensitivity.parquet` - the grid is aggregated inline, not through `run_backtest()` |
+| Costs | [`14_costs`](14_costs.ipynb) | Ch18 | HTM cost-sensitivity grid in % of premium across families and universes | `evaluation/htm_cost_sensitivity.parquet`, plus one registered backtest run per cost cell (the grid is aggregated inline rather than through `run_backtest()`) |
 | Risk | [`15_risk_management`](15_risk_management.ipynb) | Ch19 | Position-level exit rules (portfolio-level overlays framed as §19.8 governance) | Nothing - the comparison stays in the notebook |
 | Strategy Analysis | [`16_strategy_analysis`](16_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with paired-bootstrap holdout closure | `20_strategy_synthesis/output/sp500_options/sp500_options_tearsheet.html` |
 | Appendix | [`90_ic_diagnostic`](90_ic_diagnostic.ipynb) | — | Signal-attribution deep dive outside the main pipeline | Nothing - it reads the registry |

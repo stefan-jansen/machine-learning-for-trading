@@ -22,7 +22,7 @@ The teaching arc threads four claims that must be evaluated jointly: regression-
 
 | Stage | Notebook | Chapter | Description | Writes |
 |-------|----------|---------|-------------|--------|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Monthly decision cadence, 6-month accounting lag, long-short decile protocol; feasibility evidence vs `config/setup.yaml` | Nothing - the evidence stays in the notebook |
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Monthly decision cadence, 6-month accounting lag, long-short decile protocol; feasibility evidence vs `config/setup.yaml` | `config/exploration/feasibility_report.json` |
 | Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 1-month forward returns with winsorized regression and median-split classification variants | `labels/prices.parquet`, `labels/fwd_ret_1m.parquet`, `labels/fwd_ret_1m_win.parquet`, `labels/fwd_class_1m.parquet`, `config/cv_config.json` |
 | Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | 57 firm characteristics across value, quality, momentum, risk, and investment families | `features/financial.parquet`, `features/feature_doc.json` |
 | Evaluation | [`04_evaluation`](04_evaluation.ipynb) | Ch7–9 | HAC-adjusted feature IC with FDR control across the characteristic panel | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
@@ -36,7 +36,7 @@ The teaching arc threads four claims that must be evaluated jointly: regression-
 | Supervised autoencoder | [`08d_supervised_autoencoder`](08d_supervised_autoencoder.ipynb) | Ch14 | Return-supervised latent factors | Training runs and prediction sets |
 | Causal DML | [`09_causal_dml`](09_causal_dml.ipynb) | Ch15 | Does 12-month momentum cause future returns under FF5 confounder controls? | A row in the registry's `causal_runs` |
 | Model Analysis | [`10_model_analysis`](10_model_analysis.ipynb) | n/a | Cross-family IC comparison, conformal coverage, fold-stability diagnostics | Nothing - it reads the registry |
-| Backtest | [`11_backtest`](11_backtest.ipynb) | Ch16 | Long-short decile strategy simulation across the prediction-signal sweep | One backtest run per prediction set and entry scheme; returns, trades, weights, fills, and `spec.json` under `run_log/backtest/{hash}/` |
+| Backtest | [`11_backtest`](11_backtest.ipynb) | Ch16 | Long-short decile strategy simulation across the prediction-signal sweep | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, and `spec.json` under `run_log/backtest/{hash}/` (the vectorized path produces no trade or fill ledger) |
 | Portfolio | [`12_portfolio_management`](12_portfolio_management.ipynb) | Ch17 | Allocator and concentration sweep on the deep cross-section | One backtest run per allocation method, same artifact layout |
 | Costs | [`13_costs`](13_costs.ipynb) | Ch18 | Era-dependent cost grid spanning pre- and post-decimalization | One backtest run per cost level, same artifact layout |
 | Risk | [`14_risk_management`](14_risk_management.ipynb) | Ch19 | Position-level and portfolio-level risk overlays on the monthly cadence | One backtest run per overlay variant, same artifact layout |
