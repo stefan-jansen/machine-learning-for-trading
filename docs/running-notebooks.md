@@ -414,8 +414,11 @@ a design. There is no single check that settles it, and the shortcuts that look 
   `register_gbm_result`, so a forced retrain can leave the previous prediction set registered
   alongside the new one, or overwrite predictions while cached descendant backtests keep pointing at
   the old numbers. The ETF stage also does not pass `runtime_params`, so the registry will not record
-  which backend produced a run either. (`us_firm_characteristics/06_gbm.py` and
-  `sp500_options/07_gbm.py` do record it, and the latter passes `replace_existing`.)
+  which backend produced a run either. Practice varies across the case studies:
+  `sp500_equity_option_analytics/07_gbm.py` passes both `runtime_params` and `replace_existing`,
+  `us_firm_characteristics/06_gbm.py` records the backend but does not replace, and
+  `sp500_options/07_gbm.py` registers through `register_training_run` and `register_prediction_set`
+  directly and does neither. The empty-`run_log/` advice is the one that holds everywhere.
 
 Stage numbers differ per case study - check its `README.md`. The sequence-model stages share the
 `deep_learning` key and each one selects its own presets by `params.architecture`, so adding an LSTM
@@ -495,8 +498,9 @@ ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
 ### Declarations That Always Come From the Repository
 
 A few entries are methodology declarations rather than knobs, and are deliberately read from the
-repository copy even when you point `ML4T_OUTPUT_DIR` at an experiment. Editing them inside the
-experiment has no effect.
+repository copy even when you point `ML4T_OUTPUT_DIR` at an experiment. For the four `setup.yaml`
+entries, editing the experiment copy has no effect at all; `config/backtest/base.yaml` is only
+partly pinned, which the last bullet explains.
 
 Editing the repository copy does change behavior. For the four `setup.yaml` entries below, the edited
 value never reaches `backtest_hash`, so **an existing registry will not notice**: rows computed under
@@ -527,12 +531,17 @@ separately at the end.
   collide with cached results computed at a different one. Making it a real knob means routing every
   reader through one hash-covered value - a hash-identity change, not a configuration change.
 - `config/backtest/base.yaml` - the engine-level backtest preset, checked-in source rather than
-  runtime configuration. This one behaves differently from the four above: its resolved values are
-  carried in the spec's `backtest_config`, which *is* hashed apart from a small set of excluded
-  provenance keys under `backtest_config.metadata`. Editing a retained field such as
-  `execution_price` therefore produces a new `backtest_hash` and a fresh run rather than a silent
-  cache hit - the failure mode is a registry that no longer compares against the released rows, not
-  one that mixes them.
+  runtime configuration. This one does not behave like the four above and is the most confusing file
+  in the set, so treat it as read-only. Its resolved values are carried in the spec's
+  `backtest_config`, which *is* hashed apart from a small set of excluded provenance keys under
+  `backtest_config.metadata`, so editing a retained field such as `execution_price` in the repository
+  produces a new `backtest_hash` and a fresh run rather than a silent cache hit. And an experiment
+  copy is not simply ignored: the engine resolves the repository preset, but
+  `_preset_requests_quotes()` in `case_studies/utils/backtest_loaders.py` reads the file through
+  `get_case_study_dir()`, which is experiment-aware, and uses it to decide whether the price loader
+  pulls bid/ask columns. On a quote-driven case study such as `nasdaq100_microstructure`, editing the
+  experiment copy can therefore change which columns are loaded - or fail the load outright - while
+  the engine still runs the repository's settings.
 
 ---
 
