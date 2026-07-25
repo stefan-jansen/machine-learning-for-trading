@@ -473,14 +473,7 @@ case_studies/etfs/07_gbm:
 
 ### Output Isolation
 
-When the environment variable `ML4T_OUTPUT_DIR` is set (which `pytest` does automatically), notebook outputs **and config reads** are redirected to that directory. This prevents test runs from overwriting production artifacts like trained models or backtest results. Because config is redirected too, the target must contain the case study's config; `pytest` seeds it automatically, and for a manual run `create_experiment.py` builds a self-contained copy:
-
-```bash
-# Manual output isolation: create a self-contained experiment (copies config +
-# artifacts) so the redirected config reads resolve, then run against it.
-uv run python scripts/create_experiment.py --cs etfs --output /tmp/ml4t-etf-experiment
-ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment uv run python case_studies/etfs/07_gbm.py
-```
+When the environment variable `ML4T_OUTPUT_DIR` is set (which `pytest` does automatically), notebook outputs **and the model/sweep config reads** are redirected to that directory. This prevents test runs from overwriting production artifacts like trained models or backtest results. Because that config is redirected too, the target must contain the case study's config: `pytest` seeds it automatically, and for a manual run `create_experiment.py` builds the isolated copy. To actually run a stage against the isolated directory - including generating the `features/`/`labels/` a model stage needs first - follow the runnable sequence in [Experimenting Without Changing the Release Baseline](#experimenting-without-changing-the-release-baseline) above; setting `ML4T_OUTPUT_DIR` by hand at an empty path will fail because the redirected config (and modeling dataset) are absent.
 
 ---
 
