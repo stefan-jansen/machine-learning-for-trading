@@ -460,14 +460,15 @@ variables in `14_backtest.py`, and both are safe to vary against an existing set
 - `costs.*` - the transaction-cost model (per-share fees, spreads).
 - `backtest.sweep.top_n_predictions` - how many model configs advance at each stage.
 
-`decision.cadence` also lives there, but it is **not** a backtest-only knob and editing it in an
-experiment alone will quietly give you a wrong answer. The decision schedule is baked into the
-prediction artifacts an earlier stage wrote, so an existing prediction set keeps its original dates;
-and `labels.rebalance_step`, which thins those dates so holding periods do not overlap, follows from
-the cadence but is read from the repository copy (see
+`decision.cadence` also lives there and takes one extra step. It does not require retraining - the
+model stages register a prediction at every validation timestamp, and the backtest applies the cadence
+itself, which is part of `backtest_hash`, so your existing predictions are reused and the new cadence
+gets its own registry rows rather than colliding with the old ones. What does not follow along is
+`labels.rebalance_step`: it thins the decision dates so holding periods do not overlap, so it depends
+on the cadence, but it is read from the repository copy and ignores your experiment (see
 [Declarations That Always Come From the Repository](#declarations-that-always-come-from-the-repository)).
-Changing the cadence for real means changing it in the repository, re-deriving the labels, and
-re-running the pipeline from training onward into an empty `run_log/`.
+Change the cadence in the experiment and the repository's `rebalance_step` will be wrong for it, so
+set a compatible value in the repository file at the same time.
 
 The `14_backtest.py` parameter cell exposes run-scoping knobs - `TOP_K`, `MAX_SYMBOLS`,
 `TOP_N_PREDICTIONS`, `FORCE_REBACKTEST` - which scope what to backtest, not the strategy economics.
