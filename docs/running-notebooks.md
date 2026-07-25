@@ -368,10 +368,14 @@ rather than the preset:
 
 | Stage | Ignores the preset's | In favor of |
 |---|---|---|
-| `08_tabular_dl.py`, `09_dl_lstm.py`, `10_dl_tsmixer.py` | `n_epochs`, `batch_size`, `params.lookback` | `N_EPOCHS`, `BATCH_SIZE`, `LOOKBACK` in the stage |
-| `11a_pca.py` … `11e_supervised_autoencoder.py` | `n_epochs` | `N_EPOCHS = 50` in the stage |
+| `09_dl_lstm.py`, `10_dl_tsmixer.py` | `n_epochs`, `batch_size`, `params.lookback` | `N_EPOCHS`, `BATCH_SIZE`, `LOOKBACK` in the stage |
+| `08_tabular_dl.py` | `n_epochs`, `batch_size` | `N_EPOCHS`, `BATCH_SIZE` in the stage |
+| `11c_conditional_autoencoder.py`, `11e_supervised_autoencoder.py` | `n_epochs` | `N_EPOCHS = 50` in the stage |
 | `12_causal_dml.py` | `n_folds`, `n_placebo`, `max_samples`, `seed` | the stage's parameter cell |
 | `07_gbm.py` on CPU | `params.seed` | the runtime seed, applied in `case_studies/utils/gbm.py` |
+
+The other latent-factor stages are unaffected: PCA and IPCA have no epoch setting, and the SDF preset
+declares `n_epochs_unc`, `n_epochs_moment` and `n_epochs_cond`, which the stage passes through.
 
 That last one is applied one layer below the stage file, so reading `07_gbm.py` alone will not reveal
 it. The list is what we have found rather than a guarantee of completeness - this precedence is a
