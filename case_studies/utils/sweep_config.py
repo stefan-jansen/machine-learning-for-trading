@@ -154,9 +154,16 @@ def load_sweep(case_study: str) -> dict:
 
 
 def _setup_path(case_study: str):
-    from utils import CASE_STUDIES_DIR
+    # Resolve through get_case_study_dir so setup.yaml is read from the same place
+    # the model stages read it: the source tree in production, or ML4T_OUTPUT_DIR
+    # when set (tests, and the create_experiment workflow where the reader edits
+    # backtest.sweep/costs/execution in their isolated experiment copy).
+    from utils.paths import get_case_study_dir
 
-    return CASE_STUDIES_DIR / case_study / "config" / "setup.yaml"
+    # create=False: reading config must never materialize the case-study dir. A
+    # side-effect mkdir under ML4T_OUTPUT_DIR would make create_experiment think
+    # the experiment already exists.
+    return get_case_study_dir(case_study, create=False) / "config" / "setup.yaml"
 
 
 def _load_setup(case_study: str) -> dict:

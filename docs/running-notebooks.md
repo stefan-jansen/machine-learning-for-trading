@@ -280,44 +280,79 @@ worth reporting as an issue.
 ## Experimenting Without Changing the Release Baseline
 
 Create a writable copy of the installed artifacts before changing a configuration or running a
-training or backtest stage:
+training or backtest stage. The artifact bundle installs the registry (`run_log/`) only, so first
+produce the modeling dataset (`features/`, `labels/`) that the model stages consume, then create the
+experiment and run your edited stage against it:
 
 ```bash
+# 1. Produce the modeling dataset the model notebooks need (writes features/ and
+#    labels/ into the case study directory; skip any that already exist).
+uv run python case_studies/etfs/02_labels.py
+uv run python case_studies/etfs/03_financial_features.py
+uv run python case_studies/etfs/04_model_based_features.py
+
+# 2. Snapshot the installed artifacts + config into a writable experiment.
 uv run python scripts/create_experiment.py \
   --cs etfs \
   --output /tmp/ml4t-etf-experiment
+
+# 3. Edit config in the experiment (see below), then run the stage against it.
+ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
+  uv run python case_studies/etfs/07_gbm.py
+```
+
+The setup command copies every available generated prerequisite **and the case study's `config/`
+tree** into the experiment, changes the release marker to a baseline marker, and makes only the copy
+writable. `ML4T_OUTPUT_DIR` routes both config reads and new registry rows into
+`/tmp/ml4t-etf-experiment/`, so you change a configuration **inside the experiment** and the
+downloaded release stays untouched. You edit config there, not in the model notebook - the notebooks
+have no hyperparameter grids inline; they read the config system described below.
+
+### Try Different Model Hyperparameters
+
+The GBM grid is not a `PARAM_GRID` inside `07_gbm.py`. It is the list of preset names in
+`config/training/{label}.yaml` under the `gbm:` key; each name resolves to a preset file in
+`case_studies/config/lgb/{name}.yaml` that holds the actual LightGBM parameters. To change the grid,
+edit these files **in the experiment**:
+
+```bash
+# Add or remove configs from the grid (one preset name per line under `gbm:`):
+$EDITOR /tmp/ml4t-etf-experiment/etfs/config/training/fwd_ret_21d.yaml
+
+# Change the hyperparameters of a preset, or add a new preset file:
+$EDITOR /tmp/ml4t-etf-experiment/config/lgb/leaves_63_mse.yaml
+
+# Run on CPU if you do not have a CUDA-enabled LightGBM build
+# (set modeling.gbm.device: cpu in the experiment's setup.yaml):
+$EDITOR /tmp/ml4t-etf-experiment/etfs/config/setup.yaml
 
 ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
   uv run python case_studies/etfs/07_gbm.py
 ```
 
-The setup command copies every available generated prerequisite, changes the release marker to a
-baseline marker, and makes only the copy writable. `ML4T_OUTPUT_DIR` routes new registry rows and
-artifacts into `/tmp/ml4t-etf-experiment/etfs/`. The downloaded release remains unchanged.
-
-### Try Different Model Hyperparameters
-
-Open a model notebook such as `07_gbm.py`, modify the configuration, and run it with the experiment's
-`ML4T_OUTPUT_DIR`. The new run receives a unique hash in the copied registry.
-
-```python
-# In 07_gbm.py, change the parameter grid:
-PARAM_GRID = {
-    "num_leaves": [31, 63, 127],      # Try more complex trees
-    "learning_rate": [0.01, 0.05],     # Different learning rates
-    "min_child_samples": [20, 50],
-}
-```
+Each config that is not already in the copied registry trains and receives a unique hash there; the
+analysis notebooks pick up every registry hash automatically.
 
 ### Try a Different Backtest Configuration
 
-Modify the signal-to-position mapping, change cost assumptions, or adjust position sizing:
+Cadence, transaction costs, and selection breadth live in the experiment's
+`etfs/config/setup.yaml`, not as variables in `14_backtest.py`:
 
-```python
-# In 14_backtest.py, change the strategy:
-TOP_N = 10              # Hold top 10 instead of top 20
-COST_BPS = 15           # Higher transaction costs
-REBALANCE_FREQ = "W"    # Weekly instead of monthly
+- `decision.cadence` - rebalance cadence (e.g. `monthly_month_end`).
+- `costs.*` - the transaction-cost model (per-share fees, spreads).
+- `backtest.sweep.top_n_predictions` - how many model configs advance at each stage.
+
+The `14_backtest.py` parameter cell exposes run-scoping knobs - `TOP_K`, `MAX_SYMBOLS`,
+`TOP_N_PREDICTIONS`, `FORCE_REBACKTEST` - which scope what to backtest, not the strategy economics.
+This notebook always backtests on the **validation** split (the split the sweep selects on); the
+held-out test set is evaluated once on the selected winner in the analysis stage, not from here, so
+do not repurpose the `SPLIT` variable to backtest holdout.
+
+```bash
+$EDITOR /tmp/ml4t-etf-experiment/etfs/config/setup.yaml   # edit decision / costs / backtest.sweep
+
+ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
+  uv run python case_studies/etfs/14_backtest.py
 ```
 
 ### Compare Your Experiments
@@ -438,12 +473,7 @@ case_studies/etfs/07_gbm:
 
 ### Output Isolation
 
-When the environment variable `ML4T_OUTPUT_DIR` is set (which `pytest` does automatically), all notebook outputs are redirected to a temporary directory. This prevents test runs from overwriting production artifacts like trained models or backtest results.
-
-```bash
-# Manual output isolation
-ML4T_OUTPUT_DIR=/tmp/ml4t-test uv run python case_studies/etfs/07_gbm.py
-```
+When the environment variable `ML4T_OUTPUT_DIR` is set (which `pytest` does automatically), notebook outputs **and the model/sweep config reads** are redirected to that directory. This prevents test runs from overwriting production artifacts like trained models or backtest results. Because that config is redirected too, the target must contain the case study's config: `pytest` seeds it automatically, and for a manual run `create_experiment.py` builds the isolated copy. To actually run a stage against the isolated directory - including generating the `features/`/`labels/` a model stage needs first - follow the runnable sequence in [Experimenting Without Changing the Release Baseline](#experimenting-without-changing-the-release-baseline) above; setting `ML4T_OUTPUT_DIR` by hand at an empty path will fail because the redirected config (and modeling dataset) are absent.
 
 ---
 
