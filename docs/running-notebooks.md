@@ -436,11 +436,12 @@ ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
 
 ### Declarations That Always Come From the Repository
 
-These entries are methodology declarations rather than knobs. They are read from the repository copy
-even when `ML4T_OUTPUT_DIR` points at an experiment, so editing them in the experiment does nothing.
-Leave them alone - that is the intended use. If you do change one in the repository, start from an
-empty `run_log/`: none of them reaches `backtest_hash`, so rows computed under the old value keep
-their hash and get reused, quietly mixing two methodologies in one registry.
+The four `setup.yaml` entries below are methodology declarations rather than knobs. They are read from
+the repository copy even when `ML4T_OUTPUT_DIR` points at an experiment, so editing them in the
+experiment does nothing. Leave them alone - that is the intended use. If you do change one in the
+repository, start from an empty `run_log/`: none of the four reaches `backtest_hash`, so rows computed
+under the old value keep their hash and get reused, quietly mixing two methodologies in one registry.
+`config/backtest/base.yaml`, listed last, does not work like them.
 
 - `labels.rebalance_step` - how many schedule slots a trade advances so holding periods do not
   overlap. It follows from the cadence and the label horizon, so it is declared per label rather than
@@ -457,10 +458,12 @@ their hash and get reused, quietly mixing two methodologies in one registry.
   experiment-aware one so an experiment edit changes only what it *reports*, and two `sp500_options`
   stages prefilter at a hardcoded 0.20 first, so no larger configured value can widen the cohort.
   Making it a real knob means routing every reader through one hash-covered value.
-- `config/backtest/base.yaml` - the engine-level backtest preset. Treat it as read-only. It is the
-  one file here that is only partly pinned: the engine uses the repository copy, but the price loader
-  consults the experiment copy to decide whether to pull bid/ask columns, so editing it in an
-  experiment can change which data loads, or fail the load, without changing what the engine runs.
+- `config/backtest/base.yaml` - the engine-level backtest preset, and the exception to everything
+  above. Treat it as read-only. Its engine fields *are* hashed into `backtest_config`, so a repository
+  edit produces new hashes rather than silently reusing old rows. And it is only partly pinned: the
+  engine uses the repository copy, but the price loader consults the experiment copy to decide whether
+  to pull bid/ask columns, so an experiment edit can change which data loads, or fail the load,
+  without changing what the engine runs.
 
 ---
 
