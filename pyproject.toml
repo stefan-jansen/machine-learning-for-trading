@@ -223,6 +223,11 @@ live = [
     "python-okx>=0.3",
     "alpaca-py>=0.33",
 ]
+# Retrieval / embeddings (Ch22). Voyage AI is a paid API; the notebook guards
+# the import and skips when VOYAGE_API_KEY is unset.
+rag = [
+    "voyageai>=0.3",
+]
 # Development tools
 dev = [
     "pytest>=8.0",
