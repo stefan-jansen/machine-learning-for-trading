@@ -160,7 +160,10 @@ def _setup_path(case_study: str):
     # backtest.sweep/costs/execution in their isolated experiment copy).
     from utils.paths import get_case_study_dir
 
-    return get_case_study_dir(case_study) / "config" / "setup.yaml"
+    # create=False: reading config must never materialize the case-study dir. A
+    # side-effect mkdir under ML4T_OUTPUT_DIR would make create_experiment think
+    # the experiment already exists.
+    return get_case_study_dir(case_study, create=False) / "config" / "setup.yaml"
 
 
 def _load_setup(case_study: str) -> dict:

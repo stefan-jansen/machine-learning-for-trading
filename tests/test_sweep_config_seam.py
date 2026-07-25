@@ -272,3 +272,15 @@ def test_sweep_reads_redirected_setup_under_output_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
     assert load_sweep(cs)["top_n_predictions"]["allocation"] == sentinel
     assert get_top_n_predictions(cs, "allocation") == sentinel
+
+
+def test_sweep_read_does_not_create_case_study_dir(tmp_path, monkeypatch):
+    """Reading sweep config must not materialize the case-study dir under
+    ML4T_OUTPUT_DIR: a side-effect mkdir would make create_experiment believe
+    the experiment already exists."""
+    from case_studies.utils.sweep_config import load_sweep
+
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
+    with pytest.raises((FileNotFoundError, KeyError)):
+        load_sweep("etfs")  # no config seeded under tmp_path
+    assert not (tmp_path / "etfs").exists()
