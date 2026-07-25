@@ -408,11 +408,14 @@ a design. There is no single check that settles it, and the shortcuts that look 
   editing a GBM preset's `params.seed` changes the hash even though CPU training substitutes the
   runtime seed and fits the same model. The execution backend is not part of the training identity
   at all, so switching `07_gbm.py` between CPU and CUDA produces the same hash - and because a
-  complete hash is skipped, the stage reuses the cached run rather than refitting. Set
-  `FORCE_RETRAIN = True` if you want the other backend actually trained, and note that the ETF stage
-  does not pass `runtime_params` to `register_gbm_result`, so the registry will not record which
-  backend produced the run either. (`us_firm_characteristics/06_gbm.py` and
-  `sp500_options/07_gbm.py` do record it.)
+  complete hash is skipped, the stage reuses the cached run rather than refitting. To train on the
+  other backend, point `ML4T_OUTPUT_DIR` at an experiment with an **empty `run_log/`** rather than
+  reaching for `FORCE_RETRAIN`: the ETF stage does not pass `replace_existing` to
+  `register_gbm_result`, so a forced retrain can leave the previous prediction set registered
+  alongside the new one, or overwrite predictions while cached descendant backtests keep pointing at
+  the old numbers. The ETF stage also does not pass `runtime_params`, so the registry will not record
+  which backend produced a run either. (`us_firm_characteristics/06_gbm.py` and
+  `sp500_options/07_gbm.py` do record it, and the latter passes `replace_existing`.)
 
 Stage numbers differ per case study - check its `README.md`. The sequence-model stages share the
 `deep_learning` key and each one selects its own presets by `params.architecture`, so adding an LSTM
@@ -451,12 +454,20 @@ exact hash inputs are documented in
 
 ### Try a Different Backtest Configuration
 
-Cadence, transaction costs, and selection breadth live in the experiment's
-`etfs/config/setup.yaml`, not as variables in `14_backtest.py`:
+Transaction costs and selection breadth live in the experiment's `etfs/config/setup.yaml`, not as
+variables in `14_backtest.py`, and both are safe to vary against an existing set of predictions:
 
-- `decision.cadence` - rebalance cadence (e.g. `monthly_month_end`).
 - `costs.*` - the transaction-cost model (per-share fees, spreads).
 - `backtest.sweep.top_n_predictions` - how many model configs advance at each stage.
+
+`decision.cadence` also lives there, but it is **not** a backtest-only knob and editing it in an
+experiment alone will quietly give you a wrong answer. The decision schedule is baked into the
+prediction artifacts an earlier stage wrote, so an existing prediction set keeps its original dates;
+and `labels.rebalance_step`, which thins those dates so holding periods do not overlap, follows from
+the cadence but is read from the repository copy (see
+[Declarations That Always Come From the Repository](#declarations-that-always-come-from-the-repository)).
+Changing the cadence for real means changing it in the repository, re-deriving the labels, and
+re-running the pipeline from training onward into an empty `run_log/`.
 
 The `14_backtest.py` parameter cell exposes run-scoping knobs - `TOP_K`, `MAX_SYMBOLS`,
 `TOP_N_PREDICTIONS`, `FORCE_REBACKTEST` - which scope what to backtest, not the strategy economics.
@@ -465,7 +476,7 @@ held-out test set is evaluated once on the selected winner in the analysis stage
 do not repurpose the `SPLIT` variable to backtest holdout.
 
 ```bash
-$EDITOR /tmp/ml4t-etf-experiment/etfs/config/setup.yaml   # edit decision / costs / backtest.sweep
+$EDITOR /tmp/ml4t-etf-experiment/etfs/config/setup.yaml   # edit costs / backtest.sweep
 
 ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
   uv run python case_studies/etfs/14_backtest.py
