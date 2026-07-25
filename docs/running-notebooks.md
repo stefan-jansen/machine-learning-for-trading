@@ -380,8 +380,8 @@ intercept config edits, and both are per-stage rather than systematic:
   autoencoders, `11c_conditional_autoencoder.py` and `11e_supervised_autoencoder.py`);
   `12_causal_dml.py` replaces `n_folds`, `n_placebo`, `max_samples` and `seed`; and on CPU the shared
   GBM runner replaces a preset's `seed` with the runtime seed (on CUDA it does not); and `07_gbm.py`
-  sets `MAX_BIN` inline (63, or 255 when a requested CUDA device is unavailable) rather than reading
-  it from configuration. Where a notebook constant wins, edit the constant.
+  sets `MAX_BIN` inline (63, or 255 when a non-CPU device is requested but CUDA is unavailable)
+  rather than reading it from configuration. Where a notebook constant wins, edit the constant.
 
 Those lists are what we have found, not a proof of completeness - the precedence is a known wart, not
 a design. There is no single check that settles it, and the shortcuts that look like one do not work:
@@ -408,12 +408,13 @@ a design. There is no single check that settles it, and the shortcuts that look 
   into the spec, so the hash tracks the value that trained). The GBM seed is the known exception:
   editing a GBM preset's `params.seed` changes the hash even though CPU training substitutes the
   runtime seed and fits the same model. The execution backend itself is not part of the training
-  identity, so setting `modeling.gbm.device` to `cpu` instead of `cuda` produces the same hash - and
-  because a complete hash is skipped, the stage reuses the cached run rather than refitting. The one
-  way the backend does move the hash is the automatic fallback: `07_gbm.py` sets `MAX_BIN = 63`, and
-  only when `device` is left at `cuda` on a host without CUDA does it drop to `cpu` **and** raise
-  `MAX_BIN` to 255. `max_bin` is a real hash input, so that path gets its own hash and its own model,
-  while an explicit `device: cpu` keeps the GPU binning at 63 and does not. To train on the
+  identity, so setting `modeling.gbm.device` to `cpu` instead of the shipped `gpu` produces the same
+  hash - and because a complete hash is skipped, the stage reuses the cached run rather than
+  refitting. The one way the backend does move the hash is the automatic fallback: `07_gbm.py` sets
+  `MAX_BIN = 63`, and when `device` is left at any non-CPU value (`gpu` in the ETF setup, `cuda`
+  elsewhere) on a host without CUDA, it drops to `cpu` **and** raises `MAX_BIN` to 255. `max_bin` is
+  a real hash input, so that path gets its own hash and its own model, while an explicit
+  `device: cpu` keeps the GPU binning at 63 and does not. To train on the
   other backend, point `ML4T_OUTPUT_DIR` at an experiment with an **empty `run_log/`** rather than
   reaching for `FORCE_RETRAIN`: the ETF stage does not pass `replace_existing` to
   `register_gbm_result`, so a forced retrain can leave the previous prediction set registered
