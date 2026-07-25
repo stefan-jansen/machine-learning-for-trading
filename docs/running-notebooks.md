@@ -375,9 +375,12 @@ intercept config edits, and both are per-stage rather than systematic:
   architecture they own and drop the rest.
 - **A preset value may be overwritten after loading.** `08_tabular_dl.py`, `09_dl_lstm.py` and
   `10_dl_tsmixer.py` replace `n_epochs`, `batch_size` and `params.lookback` with the notebook's
-  `N_EPOCHS` / `BATCH_SIZE` / `LOOKBACK`; `12_causal_dml.py` replaces `n_folds`, `n_placebo`,
-  `max_samples` and `seed`; and on CPU the shared GBM runner replaces a preset's `seed` with the
-  runtime seed (on CUDA it does not). Where a notebook constant wins, edit the constant.
+  `N_EPOCHS` / `BATCH_SIZE` / `LOOKBACK`; the latent-factor stages pass their own `N_EPOCHS = 50` into
+  the shared runner, so a preset's `n_epochs` never takes effect there either (this matters for the
+  autoencoders, `11c_conditional_autoencoder.py` and `11e_supervised_autoencoder.py`);
+  `12_causal_dml.py` replaces `n_folds`, `n_placebo`, `max_samples` and `seed`; and on CPU the shared
+  GBM runner replaces a preset's `seed` with the runtime seed (on CUDA it does not). Where a notebook
+  constant wins, edit the constant.
 
 Those lists are what we have found, not a proof of completeness - the precedence is a known wart, not
 a design. There is no single check that settles it, and the shortcuts that look like one do not work:
@@ -483,10 +486,12 @@ A few entries are methodology declarations rather than knobs, and are deliberate
 repository copy even when you point `ML4T_OUTPUT_DIR` at an experiment. Editing them inside the
 experiment has no effect.
 
-Editing the repository copy does change behavior, but none of these values reaches `backtest_hash`,
-so **an existing registry will not notice**: rows computed under the old value keep their hash and are
-reused as cache hits, silently mixing two methodologies in one registry. If you change one, start from
-an empty `run_log/` rather than an inherited copy - or leave them alone, which is the intended use.
+Editing the repository copy does change behavior. For the four `setup.yaml` entries below, the edited
+value never reaches `backtest_hash`, so **an existing registry will not notice**: rows computed under
+the old value keep their hash and are reused as cache hits, silently mixing two methodologies in one
+registry. If you change one, start from an empty `run_log/` rather than an inherited copy - or leave
+them alone, which is the intended use. `config/backtest/base.yaml` is the exception and is described
+separately at the end.
 
 - `labels.rebalance_step` in `setup.yaml` - how many schedule slots a trade advances so holding
   periods do not overlap. It follows from the cadence and the label horizon, so it is declared per
@@ -510,7 +515,12 @@ an empty `run_log/` rather than an inherited copy - or leave them alone, which i
   collide with cached results computed at a different one. Making it a real knob means routing every
   reader through one hash-covered value - a hash-identity change, not a configuration change.
 - `config/backtest/base.yaml` - the engine-level backtest preset, checked-in source rather than
-  runtime configuration.
+  runtime configuration. This one behaves differently from the four above: its resolved values are
+  carried in the spec's `backtest_config`, which *is* hashed apart from a small set of excluded
+  provenance keys under `backtest_config.metadata`. Editing a retained field such as
+  `execution_price` therefore produces a new `backtest_hash` and a fresh run rather than a silent
+  cache hit - the failure mode is a registry that no longer compares against the released rows, not
+  one that mixes them.
 
 ---
 
