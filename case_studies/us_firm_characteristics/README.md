@@ -20,23 +20,27 @@ The teaching arc threads four claims that must be evaluated jointly: regression-
 
 ## Pipeline
 
-| Stage | Notebook | Chapter | Description |
-|-------|----------|---------|-------------|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Monthly decision cadence, 6-month accounting lag, long-short decile protocol; feasibility evidence vs `config/setup.yaml` |
-| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 1-month forward returns with winsorized regression and median-split classification variants |
-| Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | 57 firm characteristics across value, quality, momentum, risk, and investment families |
-| Evaluation | [`04_evaluation`](04_evaluation.ipynb) | Ch7–9 | HAC-adjusted feature IC with FDR control across the characteristic panel |
-| Linear | [`05_linear`](05_linear.ipynb) | Ch11 | Ridge, LASSO, ElasticNet, and logistic baselines on the characteristic matrix |
-| GBM | [`06_gbm`](06_gbm.ipynb) | Ch12 | LightGBM testing non-linear value-quality-momentum interactions |
-| Tabular DL | [`07_tabular_dl`](07_tabular_dl.ipynb) | Ch12 | TabM rank-1 adapter MLP ensemble on the flat characteristic matrix |
-| Latent Factors | [`08_latent_factors`](08_latent_factors.ipynb) | Ch14 | IPCA, CAE, SDF, and SAE factor extraction on the characteristic panel |
-| Causal DML | [`09_causal_dml`](09_causal_dml.ipynb) | Ch15 | Does 12-month momentum cause future returns under FF5 confounder controls? |
-| Model Analysis | [`10_model_analysis`](10_model_analysis.ipynb) | n/a | Cross-family IC comparison, conformal coverage, fold-stability diagnostics |
-| Backtest | [`11_backtest`](11_backtest.ipynb) | Ch16 | Long-short decile strategy simulation across the prediction-signal sweep |
-| Portfolio | [`12_portfolio_management`](12_portfolio_management.ipynb) | Ch17 | Allocator and concentration sweep on the deep cross-section |
-| Costs | [`13_costs`](13_costs.ipynb) | Ch18 | Era-dependent cost grid spanning pre- and post-decimalization |
-| Risk | [`14_risk_management`](14_risk_management.ipynb) | Ch19 | Position-level and portfolio-level risk overlays on the monthly cadence |
-| Strategy Analysis | [`15_strategy_analysis`](15_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics |
+| Stage | Notebook | Chapter | Description | Writes |
+|-------|----------|---------|-------------|--------|
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Monthly decision cadence, 6-month accounting lag, long-short decile protocol; feasibility evidence vs `config/setup.yaml` | Nothing - the evidence stays in the notebook |
+| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 1-month forward returns with winsorized regression and median-split classification variants | `labels/prices.parquet`, `labels/fwd_ret_1m.parquet`, `labels/fwd_ret_1m_win.parquet`, `labels/fwd_class_1m.parquet`, `config/cv_config.json` |
+| Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | 57 firm characteristics across value, quality, momentum, risk, and investment families | `features/financial.parquet`, `features/feature_doc.json` |
+| Evaluation | [`04_evaluation`](04_evaluation.ipynb) | Ch7–9 | HAC-adjusted feature IC with FDR control across the characteristic panel | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
+| Linear | [`05_linear`](05_linear.ipynb) | Ch11 | Ridge, LASSO, ElasticNet, and logistic baselines on the characteristic matrix | Training runs and prediction sets in `run_log/registry.db`; coefficients under `run_log/training/{hash}/`, scores under `run_log/predictions/{hash}/` |
+| GBM | [`06_gbm`](06_gbm.ipynb) | Ch12 | LightGBM testing non-linear value-quality-momentum interactions | Training runs and prediction sets; boosters and learning curves under `run_log/training/{hash}/` |
+| Tabular DL | [`07_tabular_dl`](07_tabular_dl.ipynb) | Ch12 | TabM rank-1 adapter MLP ensemble on the flat characteristic matrix | Training runs and prediction sets; checkpoints under `run_log/training/tabular_dl/` |
+| Latent factors (index) | [`08_latent_factors`](08_latent_factors.ipynb) | Ch14 | Index of the four latent-factor notebooks below | Nothing - it reads the registry |
+| IPCA | [`08a_ipca`](08a_ipca.ipynb) | Ch14 | Instrumented PCA with characteristic-conditioned loadings | Training runs and prediction sets |
+| Conditional autoencoder | [`08b_conditional_autoencoder`](08b_conditional_autoencoder.ipynb) | Ch14 | Nonlinear conditional factor exposures on the characteristic panel | Training runs and prediction sets |
+| SDF | [`08c_stochastic_discount_factor`](08c_stochastic_discount_factor.ipynb) | Ch14 | Neural stochastic discount factor on the same panel | Training runs and prediction sets |
+| Supervised autoencoder | [`08d_supervised_autoencoder`](08d_supervised_autoencoder.ipynb) | Ch14 | Return-supervised latent factors | Training runs and prediction sets |
+| Causal DML | [`09_causal_dml`](09_causal_dml.ipynb) | Ch15 | Does 12-month momentum cause future returns under FF5 confounder controls? | A row in the registry's `causal_runs` |
+| Model Analysis | [`10_model_analysis`](10_model_analysis.ipynb) | n/a | Cross-family IC comparison, conformal coverage, fold-stability diagnostics | Nothing - it reads the registry |
+| Backtest | [`11_backtest`](11_backtest.ipynb) | Ch16 | Long-short decile strategy simulation across the prediction-signal sweep | One backtest run per prediction set and entry scheme; returns, trades, weights, fills, and `spec.json` under `run_log/backtest/{hash}/` |
+| Portfolio | [`12_portfolio_management`](12_portfolio_management.ipynb) | Ch17 | Allocator and concentration sweep on the deep cross-section | One backtest run per allocation method, same artifact layout |
+| Costs | [`13_costs`](13_costs.ipynb) | Ch18 | Era-dependent cost grid spanning pre- and post-decimalization | One backtest run per cost level, same artifact layout |
+| Risk | [`14_risk_management`](14_risk_management.ipynb) | Ch19 | Position-level and portfolio-level risk overlays on the monthly cadence | One backtest run per overlay variant, same artifact layout |
+| Strategy Analysis | [`15_strategy_analysis`](15_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics | `20_strategy_synthesis/output/us_firm_characteristics/us_firm_characteristics_tearsheet.html` |
 
 ## Key Results
 
@@ -61,7 +65,11 @@ uv run python case_studies/us_firm_characteristics/04_evaluation.py
 uv run python case_studies/us_firm_characteristics/05_linear.py
 uv run python case_studies/us_firm_characteristics/06_gbm.py
 uv run python case_studies/us_firm_characteristics/07_tabular_dl.py
-uv run python case_studies/us_firm_characteristics/08_latent_factors.py
+uv run python case_studies/us_firm_characteristics/08a_ipca.py
+uv run python case_studies/us_firm_characteristics/08b_conditional_autoencoder.py
+uv run python case_studies/us_firm_characteristics/08c_stochastic_discount_factor.py
+uv run python case_studies/us_firm_characteristics/08d_supervised_autoencoder.py
+uv run python case_studies/us_firm_characteristics/08_latent_factors.py   # summarizes 08a-08d
 uv run python case_studies/us_firm_characteristics/09_causal_dml.py
 uv run python case_studies/us_firm_characteristics/10_model_analysis.py
 uv run python case_studies/us_firm_characteristics/11_backtest.py
