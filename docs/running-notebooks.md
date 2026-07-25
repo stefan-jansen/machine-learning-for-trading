@@ -419,11 +419,15 @@ a design. There is no single check that settles it, and the shortcuts that look 
   `register_gbm_result`, so a forced retrain can leave the previous prediction set registered
   alongside the new one, or overwrite predictions while cached descendant backtests keep pointing at
   the old numbers. The ETF stage also does not pass `runtime_params`, so the registry will not record
-  which backend produced a run either. Practice varies across the case studies:
-  `sp500_equity_option_analytics/07_gbm.py` passes both `runtime_params` and `replace_existing`,
-  `us_firm_characteristics/06_gbm.py` records the backend but does not replace, and
-  `sp500_options/07_gbm.py` registers through `register_training_run` and `register_prediction_set`
-  directly and does neither. The empty-`run_log/` advice is the one that holds everywhere.
+  which backend produced a run either. Practice varies across the case studies, so check the stage
+  you are actually running: `sp500_equity_option_analytics/07_gbm.py` passes both `runtime_params`
+  and `replace_existing`; `us_firm_characteristics/06_gbm.py` records the backend but does not
+  replace; and `sp500_options/07_gbm.py` takes the opposite approach, registering through
+  `register_training_run` and `register_prediction_set` directly with neither, but folding
+  `execution.device` and `execution.max_bin` into an `input_identity` block that *is* hashed. That
+  last one is the design the rest should converge on - the backend is part of the run's identity, so
+  switching it yields a new hash rather than a silent cache hit, and no empty registry is needed. For
+  the stages that do not hash the backend, an empty `run_log/` remains the safe way to switch.
 
 Stage numbers differ per case study - check its `README.md`. The sequence-model stages share the
 `deep_learning` key and each one selects its own presets by `params.architecture`, so adding an LSTM
