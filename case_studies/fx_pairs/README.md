@@ -36,7 +36,7 @@ The pipeline is a study in hypothesis revision, from short-horizon momentum to m
 | Portfolio | [`14_portfolio_management`](14_portfolio_management.ipynb) | Ch17 | Allocation methods for the small FX cross-section | One backtest run per allocation method, same artifact layout |
 | Costs | [`15_costs`](15_costs.ipynb) | Ch18 | Spread impact on the selected 21-day carrier | One backtest run per cost level, same artifact layout |
 | Risk | [`16_risk_management`](16_risk_management.ipynb) | Ch19 | Position-level controls compared with the unoverlaid carrier | One backtest run per overlay variant, same artifact layout |
-| Strategy Analysis | [`17_strategy_analysis`](17_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with IC, Sharpe, and cost analysis | `20_strategy_synthesis/output/fx_pairs/`: `fx_pairs_tearsheet.html`, `strategy_assessment.json`, `tearsheet_predictions.parquet` |
+| Strategy Analysis | [`17_strategy_analysis`](17_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with IC, Sharpe, and cost analysis | `20_strategy_synthesis/output/fx_pairs/fx_pairs_tearsheet.html` and `strategy_assessment.json` (a `tearsheet_predictions.parquet` is staged alongside them and deleted again) |
 
 ## Key Results
 

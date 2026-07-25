@@ -41,7 +41,7 @@ The pipeline is unusually long because the universe is unusually large. Sixteen 
 | Portfolio | [`17_portfolio_management`](17_portfolio_management.ipynb) | Ch17 | Allocation sweep on the highest-IC GBM signal | One backtest run per allocation method, same artifact layout |
 | Costs | [`18_costs`](18_costs.ipynb) | Ch18 | Cost-grid sweep on the top allocation combinations | One backtest run per cost level, same artifact layout |
 | Risk | [`19_risk_management`](19_risk_management.ipynb) | Ch19 | Position-level and portfolio-level risk overlays | One backtest run per overlay variant, same artifact layout |
-| Strategy Analysis | [`20_strategy_analysis`](20_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment: signal, lineage, holdout, attribution | `20_strategy_synthesis/output/us_equities_panel/us_equities_panel_tearsheet.html` |
+| Strategy Analysis | [`20_strategy_analysis`](20_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment: signal, lineage, holdout, attribution | `results/strategy_assessment.json`, `20_strategy_synthesis/output/us_equities_panel/us_equities_panel_tearsheet.html` |
 
 ## Key Results
 

@@ -45,7 +45,7 @@ The cost-mitigation cascade (O'Donovan & Yu 2024) is encoded in the `strategy.si
 | Portfolio | [`13_portfolio_management`](13_portfolio_management.ipynb) | Ch17 | Long-short straddle allocation with margin constraints | One backtest run per allocation method, same artifact layout |
 | Costs | [`14_costs`](14_costs.ipynb) | Ch18 | HTM cost-sensitivity grid in % of premium across families and universes | `evaluation/htm_cost_sensitivity.parquet`, plus one registered backtest run per cost cell (the grid is aggregated inline rather than through `run_backtest()`) |
 | Risk | [`15_risk_management`](15_risk_management.ipynb) | Ch19 | Position-level exit rules (portfolio-level overlays framed as §19.8 governance) | Nothing - the comparison stays in the notebook |
-| Strategy Analysis | [`16_strategy_analysis`](16_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with paired-bootstrap holdout closure | `20_strategy_synthesis/output/sp500_options/sp500_options_tearsheet.html` |
+| Strategy Analysis | [`16_strategy_analysis`](16_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with paired-bootstrap holdout closure | `results/strategy_assessment.json`, `20_strategy_synthesis/output/sp500_options/sp500_options_tearsheet.html` |
 | Appendix | [`90_ic_diagnostic`](90_ic_diagnostic.ipynb) | — | Signal-attribution deep dive outside the main pipeline | Nothing - it reads the registry |
 
 ## Key Results

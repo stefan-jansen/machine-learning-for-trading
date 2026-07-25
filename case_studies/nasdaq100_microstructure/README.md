@@ -19,7 +19,7 @@ This case study uses AlgoSeek TAQ-derived 15-minute bars for 114 NASDAQ-100 cons
 | Stage | Notebook | Chapter | Description | Writes |
 |-------|----------|---------|-------------|--------|
 | Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Empirical half-spreads, horizon feasibility vs cost floor, baseline lagged-return IC, walk-forward demo | `config/exploration/feasibility_report.json`, `liquidity_profile.parquet`, `liquidity_tod_profile.parquet` |
-| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 15-minute, 5-minute, and 60-minute forward returns | One parquet per label in `labels/` (`fwd_ret_15m` plus the `fwd_ret_5m`, `fwd_ret_60m`, `fwd_dir_15m` variants), and `config/cv_config.json` |
+| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 15-minute, 5-minute, and 60-minute forward returns | One parquet per label in `labels/` (`fwd_ret_15m` plus the `fwd_ret_5m`, `fwd_ret_60m`, `fwd_dir_15m` variants) |
 | Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | Order-flow, spread, volatility, and microstructure features | `features/financial.parquet` |
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward temporal features for intraday patterns | `features/model_based.parquet` |
 | Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7--9 | Feature-label IC diagnostics for 66 financial and temporal features | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
@@ -35,7 +35,7 @@ This case study uses AlgoSeek TAQ-derived 15-minute bars for 114 NASDAQ-100 cons
 | Portfolio | [`15_portfolio_management`](15_portfolio_management.ipynb) | Ch17 | Allocation methods under dollar-neutral intraday constraints | One backtest run per allocation method, same artifact layout |
 | Costs | [`16_costs`](16_costs.ipynb) | Ch18 | Flagship cost analysis: spread, impact, and commission decomposition | One backtest run per cost level, same artifact layout |
 | Risk | [`17_risk_management`](17_risk_management.ipynb) | Ch19 | Intraday risk controls and position-level exit rules | One backtest run per overlay variant, same artifact layout |
-| Strategy Analysis | [`18_strategy_analysis`](18_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with IC, Sharpe, and cost analysis | `20_strategy_synthesis/output/nasdaq100_microstructure/nasdaq100_microstructure_tearsheet.html` |
+| Strategy Analysis | [`18_strategy_analysis`](18_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with IC, Sharpe, and cost analysis | `results/strategy_assessment.json`, `20_strategy_synthesis/output/nasdaq100_microstructure/nasdaq100_microstructure_tearsheet.html` |
 
 ## Key Results
 
