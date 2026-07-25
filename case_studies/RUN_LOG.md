@@ -65,10 +65,14 @@ Each case study has a single `setup.yaml` that defines the trading problem. It i
 the source of truth for the universe, decision cadence, execution defaults, cost
 model, primary and secondary labels, walk-forward parameters, the Ch16–19 sweep
 grid, and (where applicable) the causal estimand. Notebooks read it at runtime
-rather than carrying their own copies of these values. A few training stages do
-keep hardcoded constants that override the preset they loaded — see
-[`docs/running-notebooks.md`](../docs/running-notebooks.md) for which ones and
-what wins.
+rather than carrying their own copies of these values, and that is the intent
+rather than an invariant the code enforces. Known exceptions: several training
+stages keep hardcoded constants that override the preset they just loaded; the
+shared GBM runner substitutes the seed on CPU; and in `sp500_options`, the
+`12_backtest.py` and `13_portfolio_management.py` stages prefilter with a
+hardcoded `LIQUID_QUANTILE = 0.20` ahead of the configured sweep value. See
+[`docs/running-notebooks.md`](../docs/running-notebooks.md) for the full list and
+what wins in each case.
 
 ```yaml
 # case_studies/etfs/config/setup.yaml (excerpt)
@@ -93,7 +97,7 @@ costs:
 labels:
   primary: fwd_ret_21d
   variants: [fwd_ret_5d]
-  rebalance_step:            # one entry per label — required, never inferred
+  rebalance_step:            # one entry per label - required, never inferred
     fwd_ret_21d: 1
     fwd_ret_5d: 1
 backtest:

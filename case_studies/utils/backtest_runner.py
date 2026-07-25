@@ -671,7 +671,7 @@ def apply_universe_filter(
     # registry the experiment inherits. Making it experiment-editable therefore
     # requires plumbing it into strategy.signal and the hash first, and dropping
     # the hardcoded LIQUID_QUANTILE prefilters in sp500_options 12_backtest.py
-    # and 13_portfolio_management.py — a hash-identity change, not a config change.
+    # and 13_portfolio_management.py - a hash-identity change, not a config change.
     from pathlib import Path as _Path
 
     import yaml as _yaml

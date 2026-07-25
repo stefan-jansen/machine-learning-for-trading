@@ -361,7 +361,7 @@ with that list is not uniform, so check the last column before you assume an edi
 | Family key in `config/training/{label}.yaml` | Presets live in | ETF stage that reads it | What the stage does with the list |
 |---|---|---|---|
 | `linear` | `config/{ols,ridge,lasso,elastic_net,logistic}/` | `06_linear.py` | Trains every listed preset exactly as written |
-| `gbm` | `config/lgb/` | `07_gbm.py` | Trains every listed preset exactly as written |
+| `gbm` | `config/lgb/` | `07_gbm.py` | Dispatches every listed preset; the shared runner then substitutes the seed on CPU (see the runtime overrides below) |
 | `tabular_dl` | `config/tabm/` | `08_tabular_dl.py` | Trains every listed preset, but **overwrites `n_epochs` and `batch_size`** with the notebook's `N_EPOCHS` / `BATCH_SIZE` |
 | `deep_learning` | `config/{lstm,tcn,tsmixer,nlinear,patchtst,nbeats}/` | `09_dl_lstm.py`, `10_dl_tsmixer.py` | Each stage keeps only the presets whose `params.architecture` matches its own (`lstm`, `tsmixer`) and **silently drops the rest** - the ETF case study runs no stage for `tcn`, `nlinear`, `patchtst` or `nbeats` |
 | `latent_factors` | `config/{pca,ipca,cae,sae,sdf}/` | `11a_pca.py` … `11e_supervised_autoencoder.py` | The list selects **which models run**, one per notebook. `11_latent_factors.py` is only an index that reports already-registered results |
@@ -401,11 +401,15 @@ a design. There is no single check that settles it, and the shortcuts that look 
   fitted model are built from different sources. `build_training_spec` re-reads the preset from disk;
   the stage's own overwrites reach the hash only when the stage explicitly forwards them. The
   sequence and tabular stages do forward theirs (`n_epochs`, `batch_size` and `lookback` are passed
-  into the spec, so the hash tracks the value that trained). The GBM seed is the known exception, and
-  it diverges in both directions: editing a GBM preset's `params.seed` changes the hash even though
-  CPU training substitutes the runtime seed and fits the same model, while switching that stage
-  between CPU and CUDA changes the fitted model without producing a new hash at all, because the
-  execution backend is recorded as provenance rather than identity.
+  into the spec, so the hash tracks the value that trained). The GBM seed is the known exception:
+  editing a GBM preset's `params.seed` changes the hash even though CPU training substitutes the
+  runtime seed and fits the same model. The execution backend is not part of the training identity
+  at all, so switching `07_gbm.py` between CPU and CUDA produces the same hash - and because a
+  complete hash is skipped, the stage reuses the cached run rather than refitting. Set
+  `FORCE_RETRAIN = True` if you want the other backend actually trained, and note that the ETF stage
+  does not pass `runtime_params` to `register_gbm_result`, so the registry will not record which
+  backend produced the run either. (`us_firm_characteristics/06_gbm.py` and
+  `sp500_options/07_gbm.py` do record it.)
 
 Stage numbers differ per case study - check its `README.md`. The sequence-model stages share the
 `deep_learning` key and each one selects its own presets by `params.architecture`, so adding an LSTM
@@ -477,7 +481,12 @@ ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
 
 A few entries are methodology declarations rather than knobs, and are deliberately read from the
 repository copy even when you point `ML4T_OUTPUT_DIR` at an experiment. Editing them inside the
-experiment has no effect; edit the repository file if you really want to change them.
+experiment has no effect.
+
+Editing the repository copy does change behavior, but none of these values reaches `backtest_hash`,
+so **an existing registry will not notice**: rows computed under the old value keep their hash and are
+reused as cache hits, silently mixing two methodologies in one registry. If you change one, start from
+an empty `run_log/` rather than an inherited copy - or leave them alone, which is the intended use.
 
 - `labels.rebalance_step` in `setup.yaml` - how many schedule slots a trade advances so holding
   periods do not overlap. It follows from the cadence and the label horizon, so it is declared per
