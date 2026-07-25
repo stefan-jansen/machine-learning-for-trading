@@ -318,7 +318,7 @@ def test_max_bin_changes_the_fitted_model() -> None:
         },
     }
 
-    def train(max_bin: int) -> float:
+    def train(max_bin: int) -> dict[tuple[int, int], np.ndarray]:
         result = gbm.train_gbm_config(
             dict(config),
             folds,
@@ -330,9 +330,17 @@ def test_max_bin_changes_the_fitted_model() -> None:
             task_type="regression",
             save_dir=None,
         )
-        return result["best_ic"]
+        # Key on (fold, n_trees) so the comparison is checkpoint-for-checkpoint.
+        return {(e["fold"], e["n_trees"]): np.asarray(e["y_pred"]) for e in result["predictions"]}
 
-    assert train(63) != train(255), "max_bin should change the fitted model; a guard has gone stale"
+    # Compare the predictions themselves, not an aggregate IC: two binnings can
+    # preserve the cross-sectional ranking and so score an identical Spearman IC
+    # while fitting different models, which would let this guard pass vacuously.
+    coarse, fine = train(63), train(255)
+    assert coarse.keys() == fine.keys(), "max_bin must not change the checkpoint grid"
+    assert any(not np.array_equal(coarse[k], fine[k]) for k in coarse), (
+        "max_bin should change the fitted model; a guard has gone stale"
+    )
 
 
 def test_checkpoint_metrics_average_the_complete_monthly_series() -> None:

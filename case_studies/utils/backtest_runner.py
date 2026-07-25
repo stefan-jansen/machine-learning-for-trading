@@ -664,6 +664,14 @@ def apply_universe_filter(
             f"universe_filter='liquid' requires 'instr_rel_spread' on the prices "
             f"frame for case_study={case_study!r}; got columns={list(prices.columns)}."
         )
+    # Deliberately pinned to the repository copy rather than resolved through
+    # get_case_study_dir/get_htm_cost_cascade: liquid_quantile is NOT part of the
+    # backtest spec and so never enters backtest_hash. Letting an experiment copy
+    # vary it would let two different quantiles collide on one hash against the
+    # registry the experiment inherits. Making it experiment-editable therefore
+    # requires plumbing it into strategy.signal and the hash first, and dropping
+    # the hardcoded LIQUID_QUANTILE prefilters in sp500_options 12_backtest.py
+    # and 13_portfolio_management.py — a hash-identity change, not a config change.
     from pathlib import Path as _Path
 
     import yaml as _yaml

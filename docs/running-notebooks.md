@@ -351,17 +351,44 @@ Each config that is not already in the copied registry trains and receives a uni
 analysis notebooks pick up every registry hash automatically.
 
 The same two files drive **every** model family, not just GBM. A stage reads the list under its own
-family key and resolves each name against the shared preset directory, so the recipe - edit the menu,
-edit or add a preset - is identical everywhere:
+family key and resolves each name against the shared preset directory. What the stage then *does*
+with that list is not uniform, so check the last column before you assume an edit will take effect:
 
-| Family key in `config/training/{label}.yaml` | Presets live in | ETF stage that reads it |
-|---|---|---|
-| `linear` | `config/{ols,ridge,lasso,elastic_net,logistic}/` | `06_linear.py` |
-| `gbm` | `config/lgb/` | `07_gbm.py` |
-| `tabular_dl` | `config/tabm/` | `08_tabular_dl.py` |
-| `deep_learning` | `config/{lstm,tcn,tsmixer,nlinear,patchtst,nbeats}/` | `09_dl_lstm.py`, `10_dl_tsmixer.py` |
-| `latent_factors` | `config/{pca,ipca,cae,sae,sdf}/` | `11_latent_factors.py` |
-| `causal_dml` | `config/dml/` | `12_causal_dml.py` |
+| Family key in `config/training/{label}.yaml` | Presets live in | ETF stage that reads it | What the stage does with the list |
+|---|---|---|---|
+| `linear` | `config/{ols,ridge,lasso,elastic_net,logistic}/` | `06_linear.py` | Trains every listed preset exactly as written |
+| `gbm` | `config/lgb/` | `07_gbm.py` | Trains every listed preset exactly as written |
+| `tabular_dl` | `config/tabm/` | `08_tabular_dl.py` | Trains every listed preset, but **overwrites `n_epochs` and `batch_size`** with the notebook's `N_EPOCHS` / `BATCH_SIZE` |
+| `deep_learning` | `config/{lstm,tcn,tsmixer,nlinear,patchtst,nbeats}/` | `09_dl_lstm.py`, `10_dl_tsmixer.py` | Each stage keeps only the presets whose `params.architecture` matches its own (`lstm`, `tsmixer`) and **silently drops the rest** - the ETF case study runs no stage for `tcn`, `nlinear`, `patchtst` or `nbeats` |
+| `latent_factors` | `config/{pca,ipca,cae,sae,sdf}/` | `11a_pca.py` … `11e_supervised_autoencoder.py` | The list selects **which models run**, one per notebook. `11_latent_factors.py` is only an index that reports already-registered results |
+| `causal_dml` | `config/dml/` | `12_causal_dml.py` | **Uses only the first listed preset** |
+
+Neither kind of edit is guaranteed to reach the model, so do not assume one did. Two mechanisms
+intercept config edits, and both are per-stage rather than systematic:
+
+- **A listed preset may never be dispatched.** `12_causal_dml.py` takes only the first entry, so
+  appended DML presets are ignored until you reorder the menu. The sequence stages keep only the
+  architecture they own and drop the rest.
+- **A preset value may be overwritten after loading.** `08_tabular_dl.py`, `09_dl_lstm.py` and
+  `10_dl_tsmixer.py` replace `n_epochs`, `batch_size` and `params.lookback` with the notebook's
+  `N_EPOCHS` / `BATCH_SIZE` / `LOOKBACK`; `12_causal_dml.py` replaces `n_folds`, `n_placebo`,
+  `max_samples` and `seed`; and on CPU the shared GBM runner replaces a preset's `seed` with the
+  runtime seed (on CUDA it does not). Where a notebook constant wins, edit the constant.
+
+Those lists are what we have found, not a proof of completeness - the precedence is a known wart, not
+a design. So verify rather than assume, and verify against **what the stage prints**: each model stage
+echoes the config it resolved before training (`09_dl_lstm.py`, for instance, prints each config name
+with its architecture, epoch count and lookback). If your edited value does not appear there, it did
+not reach the model - either it was dropped before dispatch or overwritten afterwards. Check the stage
+`.py` for a reassignment of your key after `load_configs`, and prefer adding a new preset file over
+editing an existing one.
+
+Do **not** use "did a new registry hash appear?" as that check. The training hash is built by
+`build_training_spec`, which re-reads the preset from disk rather than reading the dict the stage
+mutated, and it records the execution backend as provenance rather than identity. Two consequences run
+in opposite directions: editing a GBM preset's `params.seed` changes the hash even though CPU training
+substitutes the runtime seed and fits the same model, while switching that stage between CPU and CUDA
+changes the fitted model without producing a new hash at all.
 
 Stage numbers differ per case study - check its `README.md`. The sequence-model stages share the
 `deep_learning` key and each one selects its own presets by `params.architecture`, so adding an LSTM
@@ -378,11 +405,14 @@ $EDITOR /tmp/ml4t-etf-experiment/config/lgb/leaves_127_mse.yaml   # num_leaves: 
 $EDITOR /tmp/ml4t-etf-experiment/etfs/config/training/fwd_ret_21d.yaml   # add: - leaves_127_mse
 ```
 
-**What earns a new hash.** A run's identity is the hash of its full specification - preset parameters
-plus case-study context such as label, fold count, and seed - so any edit to a preset produces a new
-training hash and trains from scratch, while re-running an unchanged config is a no-op that reuses the
-registered result. That is why an experiment can accumulate your variants alongside the released ones
-and stay comparable. The exact hash inputs are documented in
+**What earns a new hash.** A run's identity is the hash of the *effective* specification - the preset
+parameters as the stage actually resolved them, plus case-study context such as label, fold count and
+seed. An edit produces a new training hash and trains from scratch only if it survives to that point:
+a value the stage overwrites (see the override list above) is hashed at the overwritten value, so
+editing it in the preset reuses the existing hash and returns the registered result unchanged.
+Re-running a genuinely unchanged config is likewise a no-op that reuses the registered result. That is
+why an experiment can accumulate your variants alongside the released ones and stay comparable. The
+exact hash inputs are documented in
 [`case_studies/RUN_LOG.md`](../case_studies/RUN_LOG.md#configuration-flow).
 
 ### Try a Different Backtest Configuration
@@ -427,8 +457,22 @@ experiment has no effect; edit the repository file if you really want to change 
   label rather than inferred at runtime.
 - `labels.classification_eval_label` in `setup.yaml` - the continuous return substituted for a
   classification target when a backtest needs economic P&L (classification case studies only).
-- `universe.cost_feasible` and `backtest.sweep.htm_cost_cascade` in `setup.yaml` - read only when a
-  signal requests the `cost_feasible` or `liquid` universe filter.
+- `universe.cost_feasible` in `setup.yaml` - the frozen, per-split symbol list read when a signal
+  requests the `cost_feasible` universe filter. It is a committed *result* of
+  `build_cost_feasible_universe.py` (profiled strictly before each window, so it carries no
+  look-ahead), not a knob.
+- `backtest.sweep.htm_cost_cascade.liquid_quantile` in `setup.yaml` - the quantile defining the
+  tightest-spread subset for the `liquid` universe filter. **Treat this one as fixed at 0.20 and do not
+  edit it in either location.** It has three readers that do not agree: the shared runtime filter in
+  `case_studies/utils/backtest_runner.py` reads the repository copy; the Ch18 cascade notebook
+  (`sp500_options/14_costs.py`) reads it through the experiment-aware loader, so an experiment edit
+  changes what that notebook *reports*; and `sp500_options/12_backtest.py` and
+  `13_portfolio_management.py` prefilter with a hardcoded `LIQUID_QUANTILE = 0.20` before the shared
+  filter runs, so no configured value above 0.20 can widen the cohort. The repository pin on the
+  runtime filter is deliberate: `liquid_quantile` is not part of the backtest spec and so never enters
+  `backtest_hash`, and an experiment inherits a copy of the registry, so a varying quantile would
+  collide with cached results computed at a different one. Making it a real knob means routing every
+  reader through one hash-covered value - a hash-identity change, not a configuration change.
 - `config/backtest/base.yaml` - the engine-level backtest preset, checked-in source rather than
   runtime configuration.
 
