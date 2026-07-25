@@ -1,7 +1,7 @@
 """Shared GBM pipeline infrastructure for Ch12 notebooks and case study templates.
 
 Provides:
-- load_gbm_config(): Load canonical params from YAML config files
+- load_gbm_config(): Canonical params for a named capacity preset
 - make_model_params(): Transparent library-specific parameter mapping
 - create_model(): Factory for unfitted sklearn-compatible GBM regressors
 
@@ -30,20 +30,18 @@ import polars as pl
 # torch first ensures its bundled CUDA runtime wins. Same pattern as in
 # `case_studies/utils/latent_factors/__init__.py` and `model_analysis.py`.
 import torch  # noqa: F401
-import yaml
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
-from utils.config import REPO_ROOT
+from utils.modeling import RANDOM_SEED, seed_everything
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-from utils.modeling import RANDOM_SEED, seed_everything
 
-_CONFIGS_DIR = REPO_ROOT / "case_studies" / "_configs" / "gbm"
-_MODELING_CONFIG = REPO_ROOT / "case_studies" / "_configs" / "modeling.yaml"
-
-# Fallback presets (used when YAML files are not available)
+# Capacity presets for the Ch12 cross-library benchmark. These are library-neutral
+# canonical names (see PARAM_NAMES below), deliberately separate from the case-study
+# LightGBM presets in `case_studies/config/lgb/`, which are LightGBM-native and drive
+# the registered sweep.
 PRESETS: dict[str, dict[str, Any]] = {
     "light": {
         "n_trees": 200,
@@ -79,25 +77,18 @@ PRESETS: dict[str, dict[str, Any]] = {
 
 
 def load_gbm_config(preset: str = "medium") -> dict[str, Any]:
-    """Load canonical GBM parameters from YAML config.
-
-    Falls back to built-in PRESETS if YAML file not found.
+    """Load canonical GBM parameters for a capacity preset.
 
     Parameters
     ----------
     preset : str
-        Preset name ("light", "medium", "heavy") or path to YAML file.
+        Preset name ("light", "medium", "heavy", "default").
 
     Returns
     -------
     dict
         Canonical parameters (n_trees, max_depth, lr, l2, ...).
     """
-    yaml_path = _CONFIGS_DIR / f"{preset}.yaml"
-    if yaml_path.exists():
-        with open(yaml_path) as f:
-            return yaml.safe_load(f)
-
     if preset in PRESETS:
         return dict(PRESETS[preset])
 

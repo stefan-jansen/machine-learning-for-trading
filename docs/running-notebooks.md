@@ -196,6 +196,23 @@ uv run python case_studies/etfs/18_strategy_analysis.py
 
 Each stage checks for the artifacts it needs and tells you which earlier stage to run if anything is missing, so you can always pick up partway through.
 
+### How a Case Study Is Configured
+
+The stages carry no hyperparameter grids or strategy constants inline. Everything a stage needs is
+declared in three layers of configuration that it reads at runtime:
+
+| File | Declares |
+|---|---|
+| `case_studies/{cs}/config/setup.yaml` | The trading problem - universe, decision cadence, execution defaults, costs, labels, walk-forward splits, and the Ch16-19 sweep grid |
+| `case_studies/{cs}/config/training/{label}.yaml` | The training menu - which named model configs run for that label, by family |
+| `case_studies/config/{model_type}/{name}.yaml` | The preset - the hyperparameters behind one config name, shared across case studies |
+
+[`case_studies/RUN_LOG.md`](../case_studies/RUN_LOG.md#configuration-flow) documents the layers and
+how a configuration becomes a content-addressed hash.
+[Experimenting](#experimenting-without-changing-the-release-baseline) below is the practical
+counterpart: which file to edit for a given change, and how to run it without touching the release
+baseline.
+
 ### The Run Log
 
 Every model training run, prediction set, causal-effect estimate, and backtest is recorded in a per-case-study **run log** (`run_log/`). The SQLite catalog `run_log/registry.db` is the single source of truth for all metrics discussed in the book — IC scores, Sharpe ratios, drawdowns, etc.
@@ -333,6 +350,41 @@ ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
 Each config that is not already in the copied registry trains and receives a unique hash there; the
 analysis notebooks pick up every registry hash automatically.
 
+The same two files drive **every** model family, not just GBM. A stage reads the list under its own
+family key and resolves each name against the shared preset directory, so the recipe - edit the menu,
+edit or add a preset - is identical everywhere:
+
+| Family key in `config/training/{label}.yaml` | Presets live in | ETF stage that reads it |
+|---|---|---|
+| `linear` | `config/{ols,ridge,lasso,elastic_net,logistic}/` | `06_linear.py` |
+| `gbm` | `config/lgb/` | `07_gbm.py` |
+| `tabular_dl` | `config/tabm/` | `08_tabular_dl.py` |
+| `deep_learning` | `config/{lstm,tcn,tsmixer,nlinear,patchtst,nbeats}/` | `09_dl_lstm.py`, `10_dl_tsmixer.py` |
+| `latent_factors` | `config/{pca,ipca,cae,sae,sdf}/` | `11_latent_factors.py` |
+| `causal_dml` | `config/dml/` | `12_causal_dml.py` |
+
+Stage numbers differ per case study - check its `README.md`. The sequence-model stages share the
+`deep_learning` key and each one selects its own presets by `params.architecture`, so adding an LSTM
+variant means adding it under `deep_learning:` and running `09_dl_lstm.py`.
+
+**Adding a new preset.** Drop a YAML file into the directory for its model type and list its filename
+stem in the menu. Nothing else registers it - `family` and `library` are derived from the directory
+name, so a file in `config/lgb/` is a LightGBM run by construction:
+
+```bash
+cp /tmp/ml4t-etf-experiment/config/lgb/leaves_63_mse.yaml \
+   /tmp/ml4t-etf-experiment/config/lgb/leaves_127_mse.yaml
+$EDITOR /tmp/ml4t-etf-experiment/config/lgb/leaves_127_mse.yaml   # num_leaves: 127
+$EDITOR /tmp/ml4t-etf-experiment/etfs/config/training/fwd_ret_21d.yaml   # add: - leaves_127_mse
+```
+
+**What earns a new hash.** A run's identity is the hash of its full specification - preset parameters
+plus case-study context such as label, fold count, and seed - so any edit to a preset produces a new
+training hash and trains from scratch, while re-running an unchanged config is a no-op that reuses the
+registered result. That is why an experiment can accumulate your variants alongside the released ones
+and stay comparable. The exact hash inputs are documented in
+[`case_studies/RUN_LOG.md`](../case_studies/RUN_LOG.md#configuration-flow).
+
 ### Try a Different Backtest Configuration
 
 Cadence, transaction costs, and selection breadth live in the experiment's
@@ -363,6 +415,22 @@ Run the analysis notebook with the same output root so it reads the copied regis
 ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
   uv run python case_studies/etfs/18_strategy_analysis.py
 ```
+
+### Declarations That Always Come From the Repository
+
+A few entries are methodology declarations rather than knobs, and are deliberately read from the
+repository copy even when you point `ML4T_OUTPUT_DIR` at an experiment. Editing them inside the
+experiment has no effect; edit the repository file if you really want to change them.
+
+- `labels.rebalance_step` in `setup.yaml` - how many schedule slots a trade advances so holding
+  periods do not overlap. It follows from the cadence and the label horizon, so it is declared per
+  label rather than inferred at runtime.
+- `labels.classification_eval_label` in `setup.yaml` - the continuous return substituted for a
+  classification target when a backtest needs economic P&L (classification case studies only).
+- `universe.cost_feasible` and `backtest.sweep.htm_cost_cascade` in `setup.yaml` - read only when a
+  signal requests the `cost_feasible` or `liquid` universe filter.
+- `config/backtest/base.yaml` - the engine-level backtest preset, checked-in source rather than
+  runtime configuration.
 
 ---
 

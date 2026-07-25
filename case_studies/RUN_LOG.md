@@ -62,9 +62,10 @@ SHA-256(canonical_json(spec))[:12]      Content-addressed hash → registry row
 ### Layer 1: case study setup (`config/setup.yaml`)
 
 Each case study has a single `setup.yaml` that defines the trading problem. It is
-the source of truth for the universe, decision cadence, cost model, primary and
-secondary labels, walk-forward parameters, and (where applicable) the causal
-estimand. Notebooks read it at runtime — nothing is hardcoded in code.
+the source of truth for the universe, decision cadence, execution defaults, cost
+model, primary and secondary labels, walk-forward parameters, the Ch16–19 sweep
+grid, and (where applicable) the causal estimand. Notebooks read it at runtime —
+nothing is hardcoded in code.
 
 ```yaml
 # case_studies/etfs/config/setup.yaml (excerpt)
@@ -74,14 +75,29 @@ universe:
   n_assets: 100
 decision:
   cadence: monthly_month_end
+  snapshot: close
   execution_delay: next_bar_open
+execution:
+  initial_cash: 100_000
+  share_type: integer
+  allocator_lookback: 63
 costs:
   class: material
-  per_leg_cost_bps_range: [5, 15]
+  model: per_share_plus_spread
+  per_share: 0.0035
+  default_half_spread_usd: 0.02
+  spread_convention: half_spread
 labels:
   primary: fwd_ret_21d
   variants: [fwd_ret_5d]
-  rebalance_step: 21
+  rebalance_step:            # one entry per label — required, never inferred
+    fwd_ret_21d: 1
+    fwd_ret_5d: 1
+backtest:
+  sweep:
+    top_k_grid: {fwd_ret_21d: [10, 20], fwd_ret_5d: [10, 20]}
+    cost_grid_bps: [0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 50]
+    allocators: [{name: score_weighted, method: score_weighted}, ...]
 evaluation:
   n_splits: 8
   train_size: 10Y
@@ -90,6 +106,12 @@ causal:
   treatment: skip_recent_6_1
   confounders: [vol_21d, vol_126d, regime, yield_curve_slope]
 ```
+
+The `costs` block is market-specific: ETFs and NASDAQ minute bars declare a
+per-share-plus-spread model, futures declare commission per contract and spread
+ticks, crypto declares a maker/taker fee schedule, and the equity panels declare
+a per-leg basis-point range. Read the case study's own file rather than assuming
+the shape.
 
 ### Layer 2: training menus (`config/training/{label}.yaml`)
 
