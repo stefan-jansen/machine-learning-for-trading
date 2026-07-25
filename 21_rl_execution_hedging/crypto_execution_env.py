@@ -204,9 +204,20 @@ class CryptoExecutionEnv(gym.Env):
         return np.array([np.clip(normalized, 0.0, 1.0)], dtype=np.float32)
 
     def _trade_metrics(
-        self, market: CryptoMarketState, shares_to_sell: float
+        self,
+        market: CryptoMarketState,
+        shares_to_sell: float,
+        concurrent_shares: float = 0.0,
     ) -> tuple[float, float]:
-        participation_rate = shares_to_sell / (market.volume + 1e-8)
+        """Execution price and shortfall for one trade.
+
+        ``concurrent_shares`` are shares executed against the same bar by a
+        second trade. Impact is charged on the *combined* participation, so
+        splitting an order across two trades at one timestamp costs exactly
+        what executing it in one trade costs. Without this, concave
+        square-root impact would make splitting artificially cheap.
+        """
+        participation_rate = (shares_to_sell + concurrent_shares) / (market.volume + 1e-8)
         # Square-root-plus-linear, matching the model the notebook documents.
         # The linear term was written as participation_rate**2, which made
         # impact grow quadratically and overstated forced-liquidation cost.
@@ -237,10 +248,25 @@ class CryptoExecutionEnv(gym.Env):
         reference_shares = self.reference_trade_size()
         max_trade_shares = self.max_trade_size(market)
         shares_to_sell = self.action_to_target_shares(action, market)
-        execution_price, shortfall = self._trade_metrics(market, shares_to_sell)
+
+        # Any residual left after the final step is liquidated against this same
+        # bar, so it is known before the trade is priced and both legs are
+        # charged on their combined participation.
+        residual_tolerance = 1e-9 * max(self.total_shares, 1.0)
+        forced_shares = (
+            max(self.remaining_shares - shares_to_sell, 0.0)
+            if self.step_idx >= self.horizon - 1
+            else 0.0
+        )
+        if forced_shares <= residual_tolerance:
+            forced_shares = 0.0
+
+        execution_price, shortfall = self._trade_metrics(market, shares_to_sell, forced_shares)
 
         # Update state
         self.remaining_shares -= shares_to_sell
+        if self.remaining_shares <= residual_tolerance:
+            self.remaining_shares = 0.0
         self.total_cost += shortfall
         risk_penalty = (
             0.0
@@ -281,9 +307,10 @@ class CryptoExecutionEnv(gym.Env):
         terminated = self.step_idx >= self.horizon or self.remaining_shares <= 0
         truncated = False
 
-        if terminated and self.remaining_shares > 0:
-            forced_shares = self.remaining_shares
-            penalty_price, remaining_shortfall = self._trade_metrics(market, forced_shares)
+        if terminated and forced_shares > 0:
+            penalty_price, remaining_shortfall = self._trade_metrics(
+                market, forced_shares, shares_to_sell
+            )
             self.total_cost += remaining_shortfall
             reward -= remaining_shortfall / (self.arrival_price * self.total_shares) * 10000
             self.execution_history.append(

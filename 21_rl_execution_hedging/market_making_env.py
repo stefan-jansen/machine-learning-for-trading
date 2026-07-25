@@ -32,10 +32,11 @@ def generate_garch_market_data(
     imbalance = 0
 
     for _ in range(n_steps):
-        # Record the *conditional* volatility, which is known before this
-        # step's shock is drawn. Appending the post-update variance instead
-        # would leak the realized return into the observation the agent quotes
-        # on: sigma_t is known at t-1, sigma_{t+1} is not.
+        # Record the conditional volatility of the return about to be drawn, so
+        # that volatilities[t] pairs with the move from prices[t] to
+        # prices[t+1]. Appending the post-update variance instead paired
+        # prices[t] with a variance computed from return_t itself, letting the
+        # agent see the size of the move it was quoting into.
         volatilities.append(np.sqrt(variance))
 
         shock = np.clip(rng.standard_normal(), -5, 5)

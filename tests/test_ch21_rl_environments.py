@@ -1,7 +1,7 @@
 """Unit tests for the Chapter 21 RL environment modules.
 
 These modules shipped to readers as broken imports (they were never committed),
-and review of the restored files found four defects. Each is pinned here.
+and review of the restored files found six defects. Each is pinned here.
 """
 
 from __future__ import annotations
@@ -125,6 +125,30 @@ def test_ample_liquidity_completes_without_forcing() -> None:
         if terminated:
             break
     assert not any(h.get("forced_liquidation", False) for h in env.execution_history)
+
+
+def test_terminal_split_is_not_cheaper_than_one_trade() -> None:
+    """Square-root impact is concave, so charging the forced-liquidation leg its
+    own participation rate would make a low final action buy artificially good
+    execution. Both legs are charged on the combined participation instead."""
+    costs = []
+    for final_action in (0.0, 0.25, 0.5, 0.75, 1.0):
+        env = CryptoExecutionEnv(
+            market_data(volume=50.0),
+            total_shares=100.0,
+            horizon=4,
+            impact_coefficient=0.05,
+            max_participation_rate=1.0,
+            seed=0,
+        )
+        env.reset(seed=0)
+        terminated = False
+        while not terminated:
+            action = final_action if env.step_idx == env.horizon - 1 else 0.5
+            _, _, terminated, _, _ = env.step(np.array([action], dtype=np.float32))
+        assert np.isclose(sum(h["shares_sold"] for h in env.execution_history), 100.0)
+        costs.append(env.total_cost)
+    assert np.allclose(costs, costs[0]), f"splitting the terminal order changes total cost: {costs}"
 
 
 def test_reset_window_covers_the_last_valid_start() -> None:
