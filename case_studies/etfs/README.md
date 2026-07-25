@@ -26,7 +26,7 @@ The configuration is the most cost-favorable in the book — long-only rank-and-
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | ARIMA, HMM, and spectral features from walk-forward fits | `features/model_based.parquet` |
 | Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7-9 | Feature-label IC diagnostics across all engineered features | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
 | Linear | [`06_linear`](06_linear.ipynb) | Ch11 | Ridge, LASSO, ElasticNet baseline for cross-asset momentum | Training runs and prediction sets in `run_log/registry.db`; coefficients under `run_log/training/{hash}/`, scores under `run_log/predictions/{hash}/` |
-| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM with Optuna testing non-linear interactions | Training runs and prediction sets; boosters and learning curves under `run_log/training/{hash}/` |
+| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM with Optuna testing non-linear interactions | Training runs and prediction sets; boosters, `learning_curves.parquet`, and `fold_metrics.parquet` under `run_log/training/{hash}/` |
 | Tabular DL | [`08_tabular_dl`](08_tabular_dl.ipynb) | Ch12 | TabM rank-1 adapter MLP ensemble | Training runs and prediction sets; checkpoints under `run_log/training/tabular_dl/` |
 | LSTM | [`09_dl_lstm`](09_dl_lstm.ipynb) | Ch13 | Temporal gating over sequential ETF return windows | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
 | TSMixer | [`10_dl_tsmixer`](10_dl_tsmixer.ipynb) | Ch13 | Cross-asset lead-lag patterns via time-feature mixing | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |

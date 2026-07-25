@@ -24,7 +24,7 @@ This case study uses AlgoSeek TAQ-derived 15-minute bars for 114 NASDAQ-100 cons
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward temporal features for intraday patterns | `features/model_based.parquet` |
 | Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7--9 | Feature-label IC diagnostics for 66 financial and temporal features | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
 | Linear | [`06_linear`](06_linear.ipynb) | Ch11 | Ridge baseline on the richest feature space in the book | Training runs and prediction sets in `run_log/registry.db`; coefficients under `run_log/training/{hash}/`, scores under `run_log/predictions/{hash}/` |
-| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM on 13M+ training samples at 15-minute frequency | Training runs and prediction sets; boosters and learning curves under `run_log/training/{hash}/` |
+| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM on 13M+ training samples at 15-minute frequency | Training runs and prediction sets; boosters, `learning_curves.parquet`, and `fold_metrics.parquet` under `run_log/training/{hash}/` |
 | NLinear | [`08_dl_nlinear`](08_dl_nlinear.ipynb) | Ch13 | Minimal temporal baseline for the intraday microstructure signal | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
 | LSTM | [`09_dl_lstm`](09_dl_lstm.ipynb) | Ch13 | Recurrent memory for short-lived order-flow and spread dynamics | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
 | TCN | [`10_dl_tcn`](10_dl_tcn.ipynb) | Ch13 | Dilated causal convolutions for intraday temporal patterns | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |

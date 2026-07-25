@@ -26,7 +26,7 @@ The pipeline is unusually long because the universe is unusually large. Sixteen 
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward Wasserstein regime distance, FFD, GARCH features | `features/model_based.parquet` |
 | Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7--9 | Feature-label IC diagnostics across the full panel | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
 | Linear | [`06_linear`](06_linear.ipynb) | Ch11 | Ridge, LASSO, ElasticNet on the full feature matrix | Training runs and prediction sets in `run_log/registry.db`; coefficients under `run_log/training/{hash}/`, scores under `run_log/predictions/{hash}/` |
-| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM grid across leaf profiles and loss functions | Training runs and prediction sets; boosters and learning curves under `run_log/training/{hash}/` |
+| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM grid across leaf profiles and loss functions | Training runs and prediction sets; boosters, `learning_curves.parquet`, and `fold_metrics.parquet` under `run_log/training/{hash}/` |
 | Tabular DL | [`08_tabular_dl`](08_tabular_dl.ipynb) | Ch12 | TabM attention-style ensembling on the cross-section | Training runs and prediction sets; checkpoints under `run_log/training/tabular_dl/` |
 | NLinear | [`09_dl_nlinear`](09_dl_nlinear.ipynb) | Ch13 | Minimal temporal baseline with last-value normalization | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
 | LSTM | [`10_dl_lstm`](10_dl_lstm.ipynb) | Ch13 | Sequential memory across daily return windows | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |

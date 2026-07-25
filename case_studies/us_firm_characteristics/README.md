@@ -27,7 +27,7 @@ The teaching arc threads four claims that must be evaluated jointly: regression-
 | Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | 57 firm characteristics across value, quality, momentum, risk, and investment families | `features/financial.parquet`, `features/feature_doc.json` |
 | Evaluation | [`04_evaluation`](04_evaluation.ipynb) | Ch7–9 | HAC-adjusted feature IC with FDR control across the characteristic panel | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
 | Linear | [`05_linear`](05_linear.ipynb) | Ch11 | Ridge, LASSO, ElasticNet, and logistic baselines on the characteristic matrix | Training runs and prediction sets in `run_log/registry.db`; coefficients under `run_log/training/{hash}/`, scores under `run_log/predictions/{hash}/` |
-| GBM | [`06_gbm`](06_gbm.ipynb) | Ch12 | LightGBM testing non-linear value-quality-momentum interactions | Training runs and prediction sets; boosters and learning curves under `run_log/training/{hash}/` |
+| GBM | [`06_gbm`](06_gbm.ipynb) | Ch12 | LightGBM testing non-linear value-quality-momentum interactions | Training runs and prediction sets; boosters, `learning_curves.parquet`, and `fold_metrics.parquet` under `run_log/training/{hash}/` |
 | Tabular DL | [`07_tabular_dl`](07_tabular_dl.ipynb) | Ch12 | TabM rank-1 adapter MLP ensemble on the flat characteristic matrix | Training runs and prediction sets; checkpoints under `run_log/training/tabular_dl/` |
 | Latent factors (index) | [`08_latent_factors`](08_latent_factors.ipynb) | Ch14 | Index of the four latent-factor notebooks below | Nothing - it reads the registry |
 | IPCA | [`08a_ipca`](08a_ipca.ipynb) | Ch14 | Instrumented PCA with characteristic-conditioned loadings | Training runs and prediction sets |
@@ -39,8 +39,8 @@ The teaching arc threads four claims that must be evaluated jointly: regression-
 | Backtest | [`11_backtest`](11_backtest.ipynb) | Ch16 | Long-short decile strategy simulation across the prediction-signal sweep | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, and `spec.json` under `run_log/backtest/{hash}/` (the vectorized path produces no trade or fill ledger) |
 | Portfolio | [`12_portfolio_management`](12_portfolio_management.ipynb) | Ch17 | Allocator and concentration sweep on the deep cross-section | One backtest run per allocation method, same artifact layout |
 | Costs | [`13_costs`](13_costs.ipynb) | Ch18 | Era-dependent cost grid spanning pre- and post-decimalization | One backtest run per cost level, same artifact layout |
-| Risk | [`14_risk_management`](14_risk_management.ipynb) | Ch19 | Position-level and portfolio-level risk overlays on the monthly cadence | One backtest run per overlay variant, same artifact layout |
-| Strategy Analysis | [`15_strategy_analysis`](15_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics | `20_strategy_synthesis/output/us_firm_characteristics/us_firm_characteristics_tearsheet.html` |
+| Risk | [`14_risk_management`](14_risk_management.ipynb) | Ch19 | Position-level and portfolio-level risk overlays on the monthly cadence | Nothing - the position-control loop is gated off on the vectorized path and the portfolio-control list is asserted empty, so no overlay variant is registered |
+| Strategy Analysis | [`15_strategy_analysis`](15_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics | Nothing - the tear sheet needs a `trades.parquet` the vectorized backtester never emits, so the stage takes its no-trades branch |
 
 ## Key Results
 

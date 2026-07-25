@@ -26,7 +26,7 @@ The pipeline runs a long-short carry-ranked strategy with weekly Friday-close de
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Expanding-window ARIMA and HMM features via statsforecast | `features/model_based.parquet` |
 | Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7-9 | Feature-label IC diagnostics across 30 products and 7 sectors | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
 | Linear | [`06_linear`](06_linear.ipynb) | Ch11 | Ridge, LASSO, ElasticNet on carry and momentum signals | Training runs and prediction sets in `run_log/registry.db`; coefficients under `run_log/training/{hash}/`, scores under `run_log/predictions/{hash}/` |
-| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM testing non-linear carry and momentum interactions | Training runs and prediction sets; boosters and learning curves under `run_log/training/{hash}/` |
+| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM testing non-linear carry and momentum interactions | Training runs and prediction sets; boosters, `learning_curves.parquet`, and `fold_metrics.parquet` under `run_log/training/{hash}/` |
 | Tabular DL | [`08_tabular_dl`](08_tabular_dl.ipynb) | Ch12 | TabM rank-1 adapter MLP ensemble on flat features | Training runs and prediction sets; checkpoints under `run_log/training/tabular_dl/` |
 | LSTM | [`09_dl_lstm`](09_dl_lstm.ipynb) | Ch13 | Gated recurrence on the 30-product daily panel | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
 | Latent factors (index) | [`10_latent_factors`](10_latent_factors.ipynb) | Ch14 | Index of the two latent-factor notebooks below | Nothing - it reads the registry |

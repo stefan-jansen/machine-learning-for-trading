@@ -26,7 +26,7 @@ The pipeline is a study in hypothesis revision, from short-horizon momentum to m
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward ARIMA, HMM, and spectral features | `features/model_based.parquet` |
 | Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7--9 | Feature-label IC diagnostics across 20 pairs | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
 | Linear | [`06_linear`](06_linear.ipynb) | Ch11 | Ridge, LASSO, ElasticNet on momentum and carry signals | Training runs and prediction sets in `run_log/registry.db`; coefficients under `run_log/training/{hash}/`, scores under `run_log/predictions/{hash}/` |
-| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM testing non-linear USD factor and momentum interactions | Training runs and prediction sets; boosters and learning curves under `run_log/training/{hash}/` |
+| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM testing non-linear USD factor and momentum interactions | Training runs and prediction sets; boosters, `learning_curves.parquet`, and `fold_metrics.parquet` under `run_log/training/{hash}/` |
 | Tabular DL | [`08_tabular_dl`](08_tabular_dl.ipynb) | Ch12 | TabM attention-style ensembling on the FX feature matrix | Training runs and prediction sets; checkpoints under `run_log/training/tabular_dl/` |
 | TCN | [`09_dl_tcn`](09_dl_tcn.ipynb) | Ch13 | Dilated causal convolutions for daily FX dynamics | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
 | NLinear | [`10_dl_nlinear`](10_dl_nlinear.ipynb) | Ch13 | Tests whether FX dynamics are approximately linear | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
