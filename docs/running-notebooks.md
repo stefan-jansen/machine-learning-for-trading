@@ -198,12 +198,8 @@ Each stage checks for the artifacts it needs and tells you which earlier stage t
 
 ### How a Case Study Is Configured
 
-Hyperparameter grids and strategy constants are declared in three layers of configuration that each
-stage reads at runtime, rather than being written into the stage itself. The exceptions are worth
-knowing before you edit anything: a few training stages keep inline constants that override the
-preset they just loaded, and one substitution happens deeper still, in the shared GBM runner. Both
-are catalogued under [Try Different Model Hyperparameters](#try-different-model-hyperparameters)
-below.
+Hyperparameter grids and strategy constants are not written into the stage files. Each stage reads
+them at runtime from three layers of configuration:
 
 | File | Declares |
 |---|---|
@@ -355,90 +351,36 @@ Each config that is not already in the copied registry trains and receives a uni
 analysis notebooks pick up every registry hash automatically.
 
 The same two files drive **every** model family, not just GBM. A stage reads the list under its own
-family key and resolves each name against the shared preset directory. What the stage then *does*
-with that list is not uniform, so check the last column before you assume an edit will take effect:
+family key and resolves each name against the shared preset directory. Which listed presets actually
+run is not uniform, so check the last column before adding one:
 
-| Family key in `config/training/{label}.yaml` | Presets live in | ETF stage that reads it | What the stage does with the list |
+| Family key in `config/training/{label}.yaml` | Presets live in | ETF stage that reads it | Which presets it runs |
 |---|---|---|---|
-| `linear` | `config/{ols,ridge,lasso,elastic_net,logistic}/` | `06_linear.py` | Trains every listed preset exactly as written |
-| `gbm` | `config/lgb/` | `07_gbm.py` | Dispatches every listed preset; the shared runner then substitutes the seed on CPU (see the runtime overrides below) |
-| `tabular_dl` | `config/tabm/` | `08_tabular_dl.py` | Trains every listed preset, but **overwrites `n_epochs` and `batch_size`** with the notebook's `N_EPOCHS` / `BATCH_SIZE` |
-| `deep_learning` | `config/{lstm,tcn,tsmixer,nlinear,patchtst,nbeats}/` | `09_dl_lstm.py`, `10_dl_tsmixer.py` | Each stage keeps only the presets whose `params.architecture` matches its own (`lstm`, `tsmixer`) and **silently drops the rest** - the ETF case study runs no stage for `tcn`, `nlinear`, `patchtst` or `nbeats` |
-| `latent_factors` | `config/{pca,ipca,cae,sae,sdf}/` | `11a_pca.py` … `11e_supervised_autoencoder.py` | The list selects **which models run**, one per notebook. `11_latent_factors.py` is only an index that reports already-registered results |
-| `causal_dml` | `config/dml/` | `12_causal_dml.py` | **Uses only the first listed preset** |
+| `linear` | `config/{ols,ridge,lasso,elastic_net,logistic}/` | `06_linear.py` | All of them |
+| `gbm` | `config/lgb/` | `07_gbm.py` | All of them |
+| `tabular_dl` | `config/tabm/` | `08_tabular_dl.py` | All of them |
+| `deep_learning` | `config/{lstm,tcn,tsmixer,nlinear,patchtst,nbeats}/` | `09_dl_lstm.py`, `10_dl_tsmixer.py` | Only those whose `params.architecture` matches the stage's own (`lstm`, `tsmixer`); the rest are dropped, so the ETF case study runs nothing for `tcn`, `nlinear`, `patchtst` or `nbeats` |
+| `latent_factors` | `config/{pca,ipca,cae,sae,sdf}/` | `11a_pca.py` … `11e_supervised_autoencoder.py` | One per notebook, each asking for a fixed model name. `11_latent_factors.py` is an index that reports registered results, not a training stage |
+| `causal_dml` | `config/dml/` | `12_causal_dml.py` | Only the first listed |
 
-Neither kind of edit is guaranteed to reach the model, so do not assume one did. Two mechanisms
-intercept config edits, and both are per-stage rather than systematic:
+**Some stages override the preset they load.** Where a notebook constant wins, edit that constant
+rather than the preset:
 
-- **A listed preset may never be dispatched.** `12_causal_dml.py` takes only the first entry, so
-  appended DML presets are ignored until you reorder the menu. The sequence stages keep only the
-  architecture they own and drop the rest.
-- **A preset value may be overwritten after loading.** `08_tabular_dl.py`, `09_dl_lstm.py` and
-  `10_dl_tsmixer.py` replace `n_epochs`, `batch_size` and `params.lookback` with the notebook's
-  `N_EPOCHS` / `BATCH_SIZE` / `LOOKBACK`; the latent-factor stages pass their own `N_EPOCHS = 50` into
-  the shared runner, so a preset's `n_epochs` never takes effect there either (this matters for the
-  autoencoders, `11c_conditional_autoencoder.py` and `11e_supervised_autoencoder.py`);
-  `12_causal_dml.py` replaces `n_folds`, `n_placebo`, `max_samples` and `seed`; and on CPU the shared
-  GBM runner replaces a preset's `seed` with the runtime seed (on CUDA it does not); and `07_gbm.py`
-  sets `MAX_BIN` inline (63, or 255 when a non-CPU device is requested but CUDA is unavailable)
-  rather than reading it from configuration. Where a notebook constant wins, edit the constant.
+| Stage | Ignores the preset's | In favor of |
+|---|---|---|
+| `08_tabular_dl.py`, `09_dl_lstm.py`, `10_dl_tsmixer.py` | `n_epochs`, `batch_size`, `params.lookback` | `N_EPOCHS`, `BATCH_SIZE`, `LOOKBACK` in the stage |
+| `11a_pca.py` … `11e_supervised_autoencoder.py` | `n_epochs` | `N_EPOCHS = 50` in the stage |
+| `12_causal_dml.py` | `n_folds`, `n_placebo`, `max_samples`, `seed` | the stage's parameter cell |
+| `07_gbm.py` on CPU | `params.seed` | the runtime seed, applied in `case_studies/utils/gbm.py` |
 
-Those lists are what we have found, not a proof of completeness - the precedence is a known wart, not
-a design. There is no single check that settles it, and the shortcuts that look like one do not work:
-
-- **Reading the stage `.py` is the best starting point but is not sufficient.** Look for a
-  reassignment of your key after the `load_configs` call - that catches the epoch, batch and lookback
-  overrides. It will not catch the GBM seed, which is replaced inside the shared runner
-  (`case_studies/utils/gbm.py`) rather than in `07_gbm.py`, so a substitution can live one layer below
-  the file you are reading.
-- **Adding a new preset instead of editing one does not sidestep precedence.** A new TabM or sequence
-  preset is still subject to its stage's inline epoch and batch constants, exactly as an existing one
-  is. What a new file does avoid is changing the identity of a released run.
-
-- **What the stage prints is a partial view.** Each stage echoes some of the config it resolved -
-  `09_dl_lstm.py` prints each config name with its architecture, epoch count and lookback, and
-  `07_gbm.py` prints leaf count, objective and tree count. But the echo is a summary line, not a dump
-  of the resolved config: `07_gbm.py` never prints `learning_rate` or `feature_fraction`, so an edit
-  to either is invisible there whether or not it reached the model. Absence from the echo proves
-  nothing.
-- **"Did a new registry hash appear?" is not a reliable signal either**, because the hash and the
-  fitted model are built from different sources. `build_training_spec` re-reads the preset from disk;
-  the stage's own overwrites reach the hash only when the stage explicitly forwards them. The
-  sequence and tabular stages do forward theirs (`n_epochs`, `batch_size` and `lookback` are passed
-  into the spec, so the hash tracks the value that trained). The GBM seed is the known exception:
-  editing a GBM preset's `params.seed` changes the hash even though CPU training substitutes the
-  runtime seed and fits the same model. The execution backend itself is not part of the training
-  identity, so setting `modeling.gbm.device` to `cpu` instead of the shipped `gpu` produces the same
-  hash - and because a complete hash is skipped, the stage reuses the cached run rather than
-  refitting. The one way the backend does move the hash is the automatic fallback: `07_gbm.py` sets
-  `MAX_BIN = 63`, and when `device` is left at any non-CPU value (`gpu` in the ETF setup, `cuda`
-  elsewhere) on a host without CUDA, it drops to `cpu` **and** raises `MAX_BIN` to 255. `max_bin` is
-  a real hash input, so that path gets its own hash and its own model, while an explicit
-  `device: cpu` keeps the GPU binning at 63 and does not. To train on the
-  other backend, point `ML4T_OUTPUT_DIR` at an experiment with an **empty `run_log/`** rather than
-  reaching for `FORCE_RETRAIN`: the ETF stage does not pass `replace_existing` to
-  `register_gbm_result`, so a forced retrain can leave the previous prediction set registered
-  alongside the new one, or overwrite predictions while cached descendant backtests keep pointing at
-  the old numbers. The ETF stage also does not pass `runtime_params`, so the registry will not record
-  which backend produced a run either. Practice varies across the case studies, so check the stage
-  you are actually running: `sp500_equity_option_analytics/07_gbm.py` passes both `runtime_params`
-  and `replace_existing`; `us_firm_characteristics/06_gbm.py` records the backend but does not
-  replace; and `sp500_options/07_gbm.py` takes the opposite approach, registering through
-  `register_training_run` and `register_prediction_set` directly with neither, but folding
-  `execution.device` and `execution.max_bin` into an `input_identity` block that *is* hashed. That
-  last one is the design the rest should converge on - the backend is part of the run's identity, so
-  switching it yields a new hash rather than a silent cache hit, and no empty registry is needed. For
-  the stages that do not hash the backend, an empty `run_log/` remains the safe way to switch.
-
-Stage numbers differ per case study - check its `README.md`. The sequence-model stages share the
-`deep_learning` key and each one selects its own presets by `params.architecture`, so adding an LSTM
-variant means adding it under `deep_learning:` and running `09_dl_lstm.py`.
+That last one is applied one layer below the stage file, so reading `07_gbm.py` alone will not reveal
+it. The list is what we have found rather than a guarantee of completeness - this precedence is a
+known wart, not a design, and it is tracked for a future release. If an edit appears to do nothing,
+check the stage for a reassignment of your key after `load_configs`.
 
 **Adding a new preset.** Drop a YAML file into the directory for its model type and list its filename
-stem in the menu. No other declaration is needed - `family` and `library` are derived from the
-directory name, so a file in `config/lgb/` is a LightGBM run by construction. Whether the stage then
-picks it up is the separate question the dispatch table answers; the `gbm` and `linear` families train
-every listed preset, which is why the example below uses one:
+stem in the menu. Nothing else is needed: `family` and `library` come from the directory name, so a
+file in `config/lgb/` is a LightGBM run by construction.
 
 ```bash
 cp /tmp/ml4t-etf-experiment/config/lgb/leaves_63_mse.yaml \
@@ -447,23 +389,13 @@ $EDITOR /tmp/ml4t-etf-experiment/config/lgb/leaves_127_mse.yaml   # num_leaves: 
 $EDITOR /tmp/ml4t-etf-experiment/etfs/config/training/fwd_ret_21d.yaml   # add: - leaves_127_mse
 ```
 
-**What earns a new hash.** A run's identity is the hash of the specification `build_training_spec`
-assembles - the preset as read from disk, plus case-study context such as label, fold count and seed,
-plus whatever the stage explicitly forwards. A new preset file earns a new hash and trains from
-scratch **once a stage actually dispatches it**, which is the condition the dispatch table above sets
-out: an appended DML preset is not dispatched, a sequence preset whose `params.architecture` no stage
-owns is dropped, and the latent-factor notebooks each request one fixed model name (`11a_pca.py` asks
-for `pca`), so a preset listed under a new name never runs. In each of those cases nothing trains and
-no hash appears. Editing an *existing* preset is where identity and fitted model can come apart, in
-either direction, so treat the hash as a cache key rather than as proof of what trained:
-where the stage overwrites your key and forwards the overwrite (the sequence and tabular epoch, batch
-and lookback settings), the hash follows the value that actually trained and your preset edit is a
-no-op in both; where it overwrites without forwarding (the GBM seed on CPU), the hash moves but the
-model does not. Re-running a genuinely unchanged config is a no-op that reuses the registered result.
-That is why an experiment can accumulate your variants alongside the released ones and stay
-comparable. The
-exact hash inputs are documented in
-[`case_studies/RUN_LOG.md`](../case_studies/RUN_LOG.md#configuration-flow).
+**What earns a new hash.** A run is identified by the hash of its resolved specification, so a config
+the registry has not seen trains and registers under a new hash, and re-running an unchanged one
+reuses the stored result. That is what lets an experiment accumulate your variants alongside the
+released ones and stay comparable. Two caveats: a preset the stage never dispatches produces no hash
+at all because nothing runs, and the hash is a cache key rather than a record of what trained, so do
+not use "a new hash appeared" to confirm that an override reached the model. The exact hash inputs are
+in [`case_studies/RUN_LOG.md`](../case_studies/RUN_LOG.md#configuration-flow).
 
 ### Try a Different Backtest Configuration
 
@@ -473,15 +405,12 @@ variables in `14_backtest.py`, and both are safe to vary against an existing set
 - `costs.*` - the transaction-cost model (per-share fees, spreads).
 - `backtest.sweep.top_n_predictions` - how many model configs advance at each stage.
 
-`decision.cadence` also lives there and takes one extra step. It does not require retraining - the
-model stages register a prediction at every validation timestamp, and the backtest applies the cadence
-itself, which is part of `backtest_hash`, so your existing predictions are reused and the new cadence
-gets its own registry rows rather than colliding with the old ones. What does not follow along is
-`labels.rebalance_step`: it thins the decision dates so holding periods do not overlap, so it depends
-on the cadence, but it is read from the repository copy and ignores your experiment (see
-[Declarations That Always Come From the Repository](#declarations-that-always-come-from-the-repository)).
-Change the cadence in the experiment and the repository's `rebalance_step` will be wrong for it, so
-set a compatible value in the repository file at the same time.
+`decision.cadence` lives there too and takes one extra step. No retraining is needed - the backtest
+applies the cadence to your existing predictions and registers the result under a new hash. But
+`labels.rebalance_step`, which thins decision dates so holding periods do not overlap, depends on the
+cadence and is one of the repository-pinned declarations
+[below](#declarations-that-always-come-from-the-repository). Set a compatible value there at the same
+time, or it will be wrong for your new cadence.
 
 The `14_backtest.py` parameter cell exposes run-scoping knobs - `TOP_K`, `MAX_SYMBOLS`,
 `TOP_N_PREDICTIONS`, `FORCE_REBACKTEST` - which scope what to backtest, not the strategy economics.
@@ -507,51 +436,31 @@ ML4T_OUTPUT_DIR=/tmp/ml4t-etf-experiment \
 
 ### Declarations That Always Come From the Repository
 
-A few entries are methodology declarations rather than knobs, and are deliberately read from the
-repository copy even when you point `ML4T_OUTPUT_DIR` at an experiment. For the four `setup.yaml`
-entries, editing the experiment copy has no effect at all; `config/backtest/base.yaml` is only
-partly pinned, which the last bullet explains.
+These entries are methodology declarations rather than knobs. They are read from the repository copy
+even when `ML4T_OUTPUT_DIR` points at an experiment, so editing them in the experiment does nothing.
+Leave them alone - that is the intended use. If you do change one in the repository, start from an
+empty `run_log/`: none of them reaches `backtest_hash`, so rows computed under the old value keep
+their hash and get reused, quietly mixing two methodologies in one registry.
 
-Editing the repository copy does change behavior. For the four `setup.yaml` entries below, the edited
-value never reaches `backtest_hash`, so **an existing registry will not notice**: rows computed under
-the old value keep their hash and are reused as cache hits, silently mixing two methodologies in one
-registry. If you change one, start from an empty `run_log/` rather than an inherited copy - or leave
-them alone, which is the intended use. `config/backtest/base.yaml` is the exception and is described
-separately at the end.
-
-- `labels.rebalance_step` in `setup.yaml` - how many schedule slots a trade advances so holding
-  periods do not overlap. It follows from the cadence and the label horizon, so it is declared per
-  label rather than inferred at runtime.
-- `labels.classification_eval_label` in `setup.yaml` - the continuous return substituted for a
-  classification target when a backtest needs economic P&L (classification case studies only).
-- `universe.cost_feasible` in `setup.yaml` - the frozen, per-split symbol list read when a signal
-  requests the `cost_feasible` universe filter. It is a committed *result* of
-  `case_studies/nasdaq100_microstructure/_build_cost_feasible_universe.py` (profiled strictly before
-  each window, so it carries no look-ahead), not a knob.
-- `backtest.sweep.htm_cost_cascade.liquid_quantile` in `setup.yaml` - the quantile defining the
-  tightest-spread subset for the `liquid` universe filter. **Treat this one as fixed at 0.20 and do not
-  edit it in either location.** It has three readers that do not agree: the shared runtime filter in
-  `case_studies/utils/backtest_runner.py` reads the repository copy; the Ch18 cascade notebook
-  (`sp500_options/14_costs.py`) reads it through the experiment-aware loader, so an experiment edit
-  changes what that notebook *reports*; and `sp500_options/12_backtest.py` and
-  `13_portfolio_management.py` prefilter with a hardcoded `LIQUID_QUANTILE = 0.20` before the shared
-  filter runs, so no configured value above 0.20 can widen the cohort. The repository pin on the
-  runtime filter is deliberate: `liquid_quantile` is not part of the backtest spec and so never enters
-  `backtest_hash`, and an experiment inherits a copy of the registry, so a varying quantile would
-  collide with cached results computed at a different one. Making it a real knob means routing every
-  reader through one hash-covered value - a hash-identity change, not a configuration change.
-- `config/backtest/base.yaml` - the engine-level backtest preset, checked-in source rather than
-  runtime configuration. This one does not behave like the four above and is the most confusing file
-  in the set, so treat it as read-only. Its resolved values are carried in the spec's
-  `backtest_config`, which *is* hashed apart from a small set of excluded provenance keys under
-  `backtest_config.metadata`, so editing a retained field such as `execution_price` in the repository
-  produces a new `backtest_hash` and a fresh run rather than a silent cache hit. And an experiment
-  copy is not simply ignored: the engine resolves the repository preset, but
-  `_preset_requests_quotes()` in `case_studies/utils/backtest_loaders.py` reads the file through
-  `get_case_study_dir()`, which is experiment-aware, and uses it to decide whether the price loader
-  pulls bid/ask columns. On a quote-driven case study such as `nasdaq100_microstructure`, editing the
-  experiment copy can therefore change which columns are loaded - or fail the load outright - while
-  the engine still runs the repository's settings.
+- `labels.rebalance_step` - how many schedule slots a trade advances so holding periods do not
+  overlap. It follows from the cadence and the label horizon, so it is declared per label rather than
+  inferred at runtime.
+- `labels.classification_eval_label` - the continuous return substituted for a classification target
+  when a backtest needs economic P&L (classification case studies only).
+- `universe.cost_feasible` - the frozen, per-split symbol list used by the `cost_feasible` universe
+  filter. It is a committed *result* of
+  `case_studies/nasdaq100_microstructure/_build_cost_feasible_universe.py`, profiled strictly before
+  each window so it carries no look-ahead.
+- `backtest.sweep.htm_cost_cascade.liquid_quantile` - the quantile defining the tightest-spread subset
+  for the `liquid` universe filter. **Treat this as fixed at 0.20.** Its readers do not agree: the
+  shared runtime filter takes the repository value, the Ch18 cascade notebook reads the
+  experiment-aware one so an experiment edit changes only what it *reports*, and two `sp500_options`
+  stages prefilter at a hardcoded 0.20 first, so no larger configured value can widen the cohort.
+  Making it a real knob means routing every reader through one hash-covered value.
+- `config/backtest/base.yaml` - the engine-level backtest preset. Treat it as read-only. It is the
+  one file here that is only partly pinned: the engine uses the repository copy, but the price loader
+  consults the experiment copy to decide whether to pull bid/ask columns, so editing it in an
+  experiment can change which data loads, or fail the load, without changing what the engine runs.
 
 ---
 
