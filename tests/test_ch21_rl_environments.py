@@ -127,6 +127,37 @@ def test_ample_liquidity_completes_without_forcing() -> None:
     assert not any(h.get("forced_liquidation", False) for h in env.execution_history)
 
 
+def test_forced_liquidation_appends_a_second_row_on_the_final_bar() -> None:
+    """A forced liquidation is recorded as an extra row on the final bar, so
+    ``history[-1]`` is the involuntary remainder rather than that bar's volume.
+    04_crypto_execution_rl reported ``history[-1]`` as "last step share" and put
+    it in one column beside the baselines' own final trade, which are different
+    quantities. The notebook now sums every row on the final bar; this pins the
+    history shape that fix depends on."""
+    env = CryptoExecutionEnv(
+        market_data(volume=1.0), total_shares=500.0, horizon=24, max_participation_rate=0.10, seed=3
+    )
+    env.reset(seed=3)
+    for _ in range(30):
+        _, _, terminated, _, _ = env.step(np.array([1.0], dtype=np.float32))
+        if terminated:
+            break
+
+    final_bar = [h for h in env.execution_history if int(h["step"]) >= env.horizon - 1]
+    assert len(final_bar) == 2, "expected the policy leg and the forced leg on the final bar"
+    assert not final_bar[0].get("forced_liquidation", False)
+    assert final_bar[1].get("forced_liquidation", False)
+    assert env.execution_history[-1] is final_bar[1]
+
+    # The forced leg alone understates the bar; the two together clear the order.
+    bar_volume = sum(float(h["shares_sold"]) for h in final_bar)
+    assert float(final_bar[1]["shares_sold"]) < bar_volume
+    assert sum(float(h["shares_sold"]) for h in env.execution_history) == pytest.approx(
+        env.total_shares
+    )
+    assert env.remaining_shares == 0.0
+
+
 def test_terminal_split_is_not_cheaper_than_one_trade() -> None:
     """Square-root impact is concave, so charging the forced-liquidation leg its
     own participation rate would make a low final action buy artificially good

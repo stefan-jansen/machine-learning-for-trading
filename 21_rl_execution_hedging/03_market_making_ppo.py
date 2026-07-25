@@ -68,7 +68,7 @@ OUTPUT_DIR = get_output_dir(21, "market_making_actor_critic")
 # %% tags=["parameters"]
 EPISODE_LENGTH = 500
 TOTAL_TIMESTEPS = 300_000
-EVAL_EPISODES = 20
+EVAL_EPISODES = 240
 INVENTORY_LIMIT = 100
 LAMBDA_INVENTORY = 0.001
 LEARNING_RATE = 3e-4
@@ -386,14 +386,34 @@ baseline_mean_min = min(row["mean_final_wealth"] for row in baseline_summary)
 baseline_mean_max = max(row["mean_final_wealth"] for row in baseline_summary)
 baseline_std_min = min(row["std_final_wealth"] for row in baseline_summary)
 baseline_std_max = max(row["std_final_wealth"] for row in baseline_summary)
+
+# Mean wealth per episode is noisy, so quote the standard error alongside it and
+# size the gap to the strongest baseline in standard errors. Without this the
+# comparison reads as a ranking when it may be a coin flip.
+n_eval = config["eval_episodes"]
+ppo_se = ppo_summary["std_final_wealth"] / np.sqrt(n_eval)
+best_baseline = max(baseline_summary, key=lambda row: row["mean_final_wealth"])
+gap = ppo_summary["mean_final_wealth"] - best_baseline["mean_final_wealth"]
+gap_se = float(np.hypot(ppo_se, best_baseline["std_final_wealth"] / np.sqrt(n_eval)))
+gap_sigma = abs(gap) / gap_se
+verdict = "ahead of" if gap > 0 else "behind"
+resolution = (
+    "far enough outside evaluation noise to be a result rather than a draw"
+    if gap_sigma >= 3
+    else "well inside evaluation noise, so the ordering is not resolved at this episode count"
+)
 display(
     Markdown(
         f"""
-**Finding.** PPO earns mean liquidated wealth of {ppo_summary["mean_final_wealth"]:.1f} USD,
-compared with {baseline_mean_min:.1f} to {baseline_mean_max:.1f} USD for the reservation-price
-baselines. Its wealth standard deviation is {ppo_summary["std_final_wealth"]:.1f} USD, versus
-{baseline_std_min:.1f} to {baseline_std_max:.1f} USD for the baselines. The learned policy's
-signature in this run is dispersion, not clear mean dominance.
+**Finding.** Over {n_eval} evaluation episodes PPO earns mean liquidated wealth of
+{ppo_summary["mean_final_wealth"]:.1f} USD (standard error {ppo_se:.1f}), compared with
+{baseline_mean_min:.1f} to {baseline_mean_max:.1f} USD for the reservation-price baselines. Its
+wealth standard deviation is {ppo_summary["std_final_wealth"]:.1f} USD, versus {baseline_std_min:.1f}
+to {baseline_std_max:.1f} USD for the baselines, so dispersion is the learned policy's signature.
+That dispersion leaves it {abs(gap):.1f} USD {verdict} the best baseline
+("{best_baseline["strategy"]}"), a gap of {gap_sigma:.1f} standard errors - {resolution}.
+The sign of that gap is a property of this trained policy at seed {SEED}, not of PPO in general:
+mean wealth is seed-sensitive here, which is why the comparison needs the standard error attached.
 """
     )
 )
@@ -575,9 +595,10 @@ inventory-control mechanism. It averages {ppo_trades:.0f} trades per episode, co
 measured after terminal liquidation, so every strategy uses the same inventory and mark-to-market
 convention.
 
-The learned policy jointly chooses skew and spread width, but it does not establish mean dominance
-over the reservation-price rules. It remains a simulator policy rather than a closed-form
-reproduction of Avellaneda-Stoikov.
+The learned policy jointly chooses skew and spread width, but on mean liquidated wealth it lands
+{gap_sigma:.1f} standard errors {verdict} the best reservation-price rule over {n_eval} episodes.
+Reproducing the inventory-control mechanism is not the same as beating the rules that encode it: this
+remains a simulator policy rather than a closed-form reproduction of Avellaneda-Stoikov.
 
 **Next**: See `deep_hedging_pfhedge` for option hedging with tail-risk objectives. Section 21.5
 develops the market-making interpretation.

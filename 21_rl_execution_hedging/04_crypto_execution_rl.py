@@ -453,6 +453,7 @@ def evaluate_strategy(strategy_name: str, strategy_fn, n_episodes: int = 20, see
     forced_liqs = []
     all_paths = []
     last_step_shares = []
+    forced_shares = []
     final_quarter_shares = []
 
     for i in range(n_episodes):
@@ -470,7 +471,18 @@ def evaluate_strategy(strategy_name: str, strategy_fn, n_episodes: int = 20, see
         shortfalls.append(result["shortfall_bps"])
         forced_liqs.append(result["forced_liquidation"])
         history = result["history"]
-        last_step_shares.append(float(history[-1]["shares_sold"]) / env.total_shares)
+        # A forced liquidation appends a second row on the final bar, so
+        # `history[-1]` is the involuntary remainder rather than the bar's
+        # volume. Sum every row on the final bar so the figure means the same
+        # thing for all three strategies, and size the forced leg separately.
+        last_step_shares.append(
+            sum(float(h["shares_sold"]) for h in history if int(h["step"]) >= env.horizon - 1)
+            / env.total_shares
+        )
+        forced_shares.append(
+            sum(float(h["shares_sold"]) for h in history if h.get("forced_liquidation", False))
+            / env.total_shares
+        )
         final_quarter_cutoff = max(env.horizon - env.horizon // 4, 0)
         final_quarter_volume = sum(
             float(h["shares_sold"]) for h in history if int(h["step"]) >= final_quarter_cutoff
@@ -485,6 +497,7 @@ def evaluate_strategy(strategy_name: str, strategy_fn, n_episodes: int = 20, see
         "max_bps": np.max(shortfalls),
         "forced_liq_rate": float(np.mean(forced_liqs)),
         "avg_last_step_share_pct": 100 * float(np.mean(last_step_shares)),
+        "avg_forced_share_pct": 100 * float(np.mean(forced_shares)),
         "avg_final_quarter_share_pct": 100 * float(np.mean(final_quarter_shares)),
     }
     return summary, all_paths
@@ -509,7 +522,8 @@ for name, fn in [
     print(
         f"{name:15s}: {results[name]['mean_bps']:7.2f} +/- {results[name]['std_bps']:6.2f} bps"
         f" | forced liquidation: {results[name]['forced_liq_rate'] * 100:5.1f}%"
-        f" | last step share: {results[name]['avg_last_step_share_pct']:5.1f}%"
+        f" | last bar share: {results[name]['avg_last_step_share_pct']:5.1f}%"
+        f" | forced share: {results[name]['avg_forced_share_pct']:5.1f}%"
     )
 
 # %% [markdown]
@@ -651,6 +665,7 @@ diagnostic_data = [
     {
         "Strategy": name,
         "Forced Liq %": f"{results[name]['forced_liq_rate'] * 100:.1f}",
+        "Forced Vol %": f"{results[name]['avg_forced_share_pct']:.1f}",
         "Final Quarter Vol %": f"{results[name]['avg_final_quarter_share_pct']:.1f}",
     }
     for name in ["TWAP", "Funding-Aware", "PPO"]
@@ -658,8 +673,14 @@ diagnostic_data = [
 pl.DataFrame(diagnostic_data)
 
 # %% [markdown]
-# A high forced-liquidation rate indicates that the policy is delaying too much
-# execution until the end of the horizon.
+# The flag fires when a policy reaches the final bar still holding more than it
+# sells there, either because it paced too slowly or because the schedule and
+# participation caps bind. The environment unwinds the remainder against that
+# same bar and charges both legs on their combined participation. The rate
+# therefore counts episodes that ended with an involuntary trade; on its own it
+# does not say the policy back-loaded. Read it against the volume columns: a
+# policy can execute less of the order late than TWAP does and still leave a
+# residual it fails to clear on the last bar.
 
 # %% [markdown]
 # ## 8. Pooled Conditional Analysis Across Evaluation Episodes
@@ -761,7 +782,7 @@ for name, r in results.items():
             "Best (bps)": f"{r['min_bps']:.2f}",
             "Worst (bps)": f"{r['max_bps']:.2f}",
             "Forced Liq %": f"{100 * r['forced_liq_rate']:.0f}",
-            "Last Step %": f"{r['avg_last_step_share_pct']:.1f}",
+            "Last Bar %": f"{r['avg_last_step_share_pct']:.1f}",
         }
     )
 
@@ -794,6 +815,7 @@ if config["export_results"]:
                 "max_bps": r["max_bps"],
                 "forced_liq_rate": r["forced_liq_rate"],
                 "avg_last_step_share_pct": r["avg_last_step_share_pct"],
+                "avg_forced_share_pct": r["avg_forced_share_pct"],
                 "avg_final_quarter_share_pct": r["avg_final_quarter_share_pct"],
             }
             for name, r in results.items()
@@ -811,8 +833,9 @@ best_mean = min(results, key=lambda name: results[name]["mean_bps"])
 strategy_lines = "\n".join(
     f"- **{name}**: mean shortfall {results[name]['mean_bps']:.1f} bps, standard deviation "
     f"{results[name]['std_bps']:.1f} bps, final-quarter volume "
-    f"{results[name]['avg_final_quarter_share_pct']:.1f}%, and last-hour volume "
-    f"{results[name]['avg_last_step_share_pct']:.1f}%."
+    f"{results[name]['avg_final_quarter_share_pct']:.1f}%, last-hour volume "
+    f"{results[name]['avg_last_step_share_pct']:.1f}%, of which "
+    f"{results[name]['avg_forced_share_pct']:.1f}% was unwound involuntarily."
     for name in ["TWAP", "Funding-Aware", "PPO"]
 )
 premium_rates = dict(zip(premium_summary["state"], premium_summary["shares_per_hour"], strict=True))
