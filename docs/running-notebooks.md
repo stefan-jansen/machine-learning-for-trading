@@ -198,8 +198,12 @@ Each stage checks for the artifacts it needs and tells you which earlier stage t
 
 ### How a Case Study Is Configured
 
-The stages carry no hyperparameter grids or strategy constants inline. Everything a stage needs is
-declared in three layers of configuration that it reads at runtime:
+Hyperparameter grids and strategy constants are declared in three layers of configuration that each
+stage reads at runtime, rather than being written into the stage itself. The exceptions are worth
+knowing before you edit anything: a few training stages keep inline constants that override the
+preset they just loaded, and one substitution happens deeper still, in the shared GBM runner. Both
+are catalogued under [Try Different Model Hyperparameters](#try-different-model-hyperparameters)
+below.
 
 | File | Declares |
 |---|---|
@@ -376,11 +380,16 @@ intercept config edits, and both are per-stage rather than systematic:
   runtime seed (on CUDA it does not). Where a notebook constant wins, edit the constant.
 
 Those lists are what we have found, not a proof of completeness - the precedence is a known wart, not
-a design. So verify rather than assume. The one check that always works is to **read the stage `.py`**:
-find your key's `load_configs` call and look for any reassignment of that key afterwards. Prefer adding
-a new preset file over editing an existing one, which sidesteps the question entirely.
+a design. There is no single check that settles it, and the shortcuts that look like one do not work:
 
-Two shortcuts look like they would answer this and do not.
+- **Reading the stage `.py` is the best starting point but is not sufficient.** Look for a
+  reassignment of your key after the `load_configs` call - that catches the epoch, batch and lookback
+  overrides. It will not catch the GBM seed, which is replaced inside the shared runner
+  (`case_studies/utils/gbm.py`) rather than in `07_gbm.py`, so a substitution can live one layer below
+  the file you are reading.
+- **Adding a new preset instead of editing one does not sidestep precedence.** A new TabM or sequence
+  preset is still subject to its stage's inline epoch and batch constants, exactly as an existing one
+  is. What a new file does avoid is changing the identity of a released run.
 
 - **What the stage prints is a partial view.** Each stage echoes some of the config it resolved -
   `09_dl_lstm.py` prints each config name with its architecture, epoch count and lookback, and
@@ -403,8 +412,10 @@ Stage numbers differ per case study - check its `README.md`. The sequence-model 
 variant means adding it under `deep_learning:` and running `09_dl_lstm.py`.
 
 **Adding a new preset.** Drop a YAML file into the directory for its model type and list its filename
-stem in the menu. Nothing else registers it - `family` and `library` are derived from the directory
-name, so a file in `config/lgb/` is a LightGBM run by construction:
+stem in the menu. No other declaration is needed - `family` and `library` are derived from the
+directory name, so a file in `config/lgb/` is a LightGBM run by construction. Whether the stage then
+picks it up is the separate question the dispatch table answers; the `gbm` and `linear` families train
+every listed preset, which is why the example below uses one:
 
 ```bash
 cp /tmp/ml4t-etf-experiment/config/lgb/leaves_63_mse.yaml \
@@ -415,15 +426,19 @@ $EDITOR /tmp/ml4t-etf-experiment/etfs/config/training/fwd_ret_21d.yaml   # add: 
 
 **What earns a new hash.** A run's identity is the hash of the specification `build_training_spec`
 assembles - the preset as read from disk, plus case-study context such as label, fold count and seed,
-plus whatever the stage explicitly forwards. A brand-new preset file therefore always earns a new
-hash and trains from scratch. Editing an *existing* preset is where identity and fitted model can come
-apart, in either direction, so treat the hash as a cache key rather than as proof of what trained:
+plus whatever the stage explicitly forwards. A new preset file earns a new hash and trains from
+scratch **once a stage actually dispatches it**, which is the condition the dispatch table above sets
+out: an appended DML preset is not dispatched, a sequence preset whose `params.architecture` no stage
+owns is dropped, and the latent-factor notebooks each request one fixed model name (`11a_pca.py` asks
+for `pca`), so a preset listed under a new name never runs. In each of those cases nothing trains and
+no hash appears. Editing an *existing* preset is where identity and fitted model can come apart, in
+either direction, so treat the hash as a cache key rather than as proof of what trained:
 where the stage overwrites your key and forwards the overwrite (the sequence and tabular epoch, batch
 and lookback settings), the hash follows the value that actually trained and your preset edit is a
 no-op in both; where it overwrites without forwarding (the GBM seed on CPU), the hash moves but the
 model does not. Re-running a genuinely unchanged config is a no-op that reuses the registered result.
-That is
-why an experiment can accumulate your variants alongside the released ones and stay comparable. The
+That is why an experiment can accumulate your variants alongside the released ones and stay
+comparable. The
 exact hash inputs are documented in
 [`case_studies/RUN_LOG.md`](../case_studies/RUN_LOG.md#configuration-flow).
 
