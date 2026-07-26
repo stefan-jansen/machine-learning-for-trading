@@ -208,10 +208,11 @@ def _sys_is_the_module(tree: ast.Module) -> bool:
     ):
         return False
     for node in ast.walk(tree):
-        # Imported names are inspected on their Import/ImportFrom statement; an
-        # `alias` node carries the imported name in its own `name` field, which
-        # is not a binding of it.
-        if isinstance(node, ast.alias):
+        # Two nodes carry a name in a binding field without binding anything.
+        # `alias` holds the imported name, which the Import/ImportFrom branches
+        # below inspect instead; `keyword` holds a keyword-argument name, so
+        # `configure(sys=sys)` passes the module rather than rebinding it.
+        if isinstance(node, ast.alias | ast.keyword):
             continue
         if isinstance(node, ast.Import):
             if any(alias.asname == "sys" for alias in node.names):

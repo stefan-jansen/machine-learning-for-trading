@@ -133,6 +133,26 @@ def test_a_sys_that_is_not_the_module_grants_nothing(tree: Path, source: str) ->
     assert not resolves_in_repo("tool", test_file, tree)
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        # `keyword.arg` holds a keyword-argument name in the same field a binding
+        # uses, so reading fields without excluding it disqualified this file.
+        'import sys\nsys.path.insert(0, "scripts")\nconfigure(sys=sys)\nimport tool\n',
+        # A local named `sys_path`, an attribute named `sys`, a string "sys": none
+        # of them bind the name.
+        'import sys\nsys.path.insert(0, "scripts")\nsys_path = cfg.sys\nlabel = "sys"\nimport tool\n',
+    ],
+)
+def test_using_the_name_without_binding_it_keeps_the_credit(tree: Path, source: str) -> None:
+    """Passing the module on, or naming something near it, is not a rebinding. A
+    check that read these as bindings would reject the file's real path insert and
+    fail a working import."""
+    test_file = tree / "test_thing.py"
+    test_file.write_text(source)
+    assert resolves_in_repo("tool", test_file, tree)
+
+
 def test_a_guarded_or_deferred_sys_path_insert_still_counts(tree: Path) -> None:
     """Position and scope are not modeled, so an insert inside a conditional or a
     function counts for the imports in the file. The guard asks whether the module
