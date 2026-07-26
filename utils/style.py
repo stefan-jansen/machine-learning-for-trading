@@ -353,6 +353,72 @@ def upper_triangle_mask(corr: object) -> np.ndarray:
     return np.triu(np.ones_like(np.asarray(corr), dtype=bool), k=1)
 
 
+# Canonical panel-label size for Plotly subplot figures. Plotly writes
+# subplot_titles as annotations carrying an explicit size of 16, and an explicit
+# value beats the template's annotationdefaults, so the template cannot lower
+# them from here. That leaves a subplot figure with 16pt panel labels above a
+# 14pt figure title. style_subplot_titles() is the opt-in helper that restores
+# the order: title 14 > panel label 13 > body 11.
+SUBPLOT_TITLE_SIZE = 13
+
+
+# The size Plotly stamps on every subplot-title annotation it creates. Part of
+# the signature below, so a change to this default makes the helper match
+# nothing rather than match the wrong thing;
+# test_style_subplot_titles_restyles_panel_labels fails first if it moves.
+_PLOTLY_SUBPLOT_TITLE_SIZE = 16
+
+
+def _is_subplot_title(annotation: object) -> bool:
+    """Match the annotations ``make_subplots`` creates for ``subplot_titles``.
+
+    Plotly stamps all six of these properties on a subplot title and on nothing
+    else it creates: arrowless, referenced to the paper in both axes, centered
+    horizontally, anchored at the bottom, and sized 16. A caption or source note
+    added with ``add_annotation`` normally differs in at least one - most often
+    the size, since 16 is not a size hand-written annotations pick.
+
+    An ``add_annotation`` call that happens to set all six identically is
+    indistinguishable from a panel label and will be restyled. Nothing in the
+    figure records which annotations Plotly authored, so that case cannot be
+    separated; it just needs a different size or anchor to opt out.
+    """
+    return (
+        getattr(annotation, "showarrow", None) is False
+        and getattr(annotation, "xref", None) == "paper"
+        and getattr(annotation, "yref", None) == "paper"
+        and getattr(annotation, "xanchor", None) == "center"
+        and getattr(annotation, "yanchor", None) == "bottom"
+        and getattr(getattr(annotation, "font", None), "size", None) == _PLOTLY_SUBPLOT_TITLE_SIZE
+    )
+
+
+def style_subplot_titles(fig: object, size: int = SUBPLOT_TITLE_SIZE) -> object:
+    """Bring ``make_subplots`` panel labels under the figure title.
+
+    Plotly hardcodes 16pt on subplot-title annotations, which outranks both the
+    body text and the 14pt figure title the template sets. Call this after
+    building a subplot figure::
+
+        fig = make_subplots(rows=2, cols=2, subplot_titles=[...])
+        ...
+        style_subplot_titles(fig)
+
+    Only the panel labels are restyled - ``add_annotation`` callouts keep their
+    own font, so the call is safe at any point in figure construction. It also
+    applies once: a restyled label no longer carries Plotly's 16pt and so falls
+    out of the selector, which makes a second call at a different ``size`` a
+    no-op rather than a second restyle.
+
+    Returns the figure so it can be chained.
+    """
+    fig.update_annotations(  # type: ignore[attr-defined]
+        font={"size": size, "color": COLORS["slate"]},
+        selector=_is_subplot_title,
+    )
+    return fig
+
+
 # =============================================================================
 # PLOTLY TEMPLATE (optional — only used if Plotly is installed)
 # =============================================================================
@@ -879,6 +945,8 @@ __all__ = [
     "label_line_ends",
     "zero_line",
     "upper_triangle_mask",
+    "style_subplot_titles",
+    "SUBPLOT_TITLE_SIZE",
     # Book-specific
     "ML4T_STYLE",
     "HAS_PLOTLY",
