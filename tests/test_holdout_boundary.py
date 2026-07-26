@@ -93,13 +93,16 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
     "case_studies/etfs/05_evaluation.py",
 ]
 
-# Of the three above, only 03 currently derives the endpoint PER SYMBOL. 02 and 05
-# use a market-wide calendar, which is correct exactly while every symbol trades
+# Of the three above, 02 and 03 derive the endpoint PER SYMBOL; 05 still uses a
+# market-wide calendar, which is equivalent exactly while every symbol trades
 # every session -- true of this panel (one 752-day 2023 calendar) but not
-# guaranteed. Bringing them onto the per-symbol form is tracked in
-# ``issues/2026-07-18-evaluation-holdout-leak-sibling-sweep``; asserting it here
-# before they are changed would just add a red test.
-PER_SYMBOL_ENDPOINT_NOTEBOOKS = ["case_studies/etfs/03_financial_features.py"]
+# guaranteed. Converting 05 is tracked in
+# ``issues/2026-07-18-evaluation-holdout-leak-sibling-sweep`` §3; asserting it
+# here before it is changed would just add a red test.
+PER_SYMBOL_ENDPOINT_NOTEBOOKS = [
+    "case_studies/etfs/02_labels.py",
+    "case_studies/etfs/03_financial_features.py",
+]
 
 
 @pytest.mark.parametrize("rel_path", LABEL_ENDPOINT_PURGED_NOTEBOOKS, ids=lambda p: p)
@@ -139,7 +142,7 @@ def test_holdout_purge_is_on_the_label_endpoint(rel_path: str) -> None:
     # `last_signal_date` and then never using it satisfies the assertion above,
     # which is exactly the state the 2026-07-21 revert would be restored to.
     leaky = re.search(
-        r"filter\(\s*pl\.col\(\"timestamp\"\)\s*<\s*(?:date\.fromisoformat\()?"
+        r"filter\(\s*pl\.col\(\"timestamp\"\)\s*<=?\s*(?:date\.fromisoformat\()?"
         r"[A-Za-z_]*holdout_start",
         source,
         re.IGNORECASE,

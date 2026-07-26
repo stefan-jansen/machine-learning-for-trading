@@ -839,6 +839,10 @@ sig_colors = [
 naive_abs = [abs(t) for t in eval_summary["naive_tstat"].to_list()]
 hac_abs = [abs(t) for t in eval_summary["hac_tstat"].to_list()]
 n_tested = eval_summary.height
+# Newey-West does not GUARANTEE a smaller standard error -- negative estimated
+# autocovariances can shrink it -- so count the features that were deflated
+# rather than asserting it of all of them.
+n_deflated = sum(h <= n for h, n in zip(hac_abs, naive_abs))
 
 fig_tstat = go.Figure()
 fig_tstat.add_trace(
@@ -868,7 +872,10 @@ fig_tstat.add_trace(
     )
 )
 fig_tstat.update_layout(
-    title=f"HAC deflation pulls all {n_tested} features toward zero (|HAC t| <= |naive t|)",
+    title=(
+        f"HAC deflation pulls {n_deflated} of {n_tested} features toward zero "
+        "(|HAC t| <= |naive t|)"
+    ),
     xaxis_title="|Naive t-stat|",
     yaxis_title=f"|HAC t-stat| (Newey-West, lag {LABEL_HORIZON - 1})",
     height=500,
