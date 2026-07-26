@@ -56,11 +56,42 @@ def _copy_rows(src, dst, table: str, rows: list) -> int:
     return len(rows)
 
 
+def rejected_output_root(intermediates_dir: Path) -> str | None:
+    """Return why this output root must not be written to, or None.
+
+    Each destination is unlinked before its source is opened, and a production
+    registry.db is 43-180 MB and gitignored, so a run pointed at a case-study tree
+    destroys the results SSOT with nothing to restore it from.
+
+    Two rules. The root may not be, or sit inside, any directory named
+    ``case_studies``: in a worktree ``CODE_CS_DIR`` is the worktree's own tree while
+    the canonical registries are the ones in ~/ml4t/code, so path equality alone
+    would let a run write over them. And no destination may resolve onto its own
+    source. Both are checked before anything is created or removed.
+    """
+    resolved = intermediates_dir.resolve()
+    if any(part.name == "case_studies" for part in (resolved, *resolved.parents)):
+        return (
+            f"{resolved} is inside a case_studies tree, where each destination is a "
+            "production registry.db that this script unlinks before reading"
+        )
+    for cs_id in CASE_STUDY_IDS:
+        src_db = (CODE_CS_DIR / cs_id / "run_log" / "registry.db").resolve()
+        if (resolved / cs_id / "run_log" / "registry.db") == src_db:
+            return f"{resolved} resolves onto the source registry at {src_db}"
+    return None
+
+
 def sample_registry(cs_id: str, intermediates_dir: Path = DEFAULT_INTERMEDIATES_DIR) -> dict:
     """Sample from production registry into test intermediates. Returns stats."""
     src_db = CODE_CS_DIR / cs_id / "run_log" / "registry.db"
     if not src_db.exists():
         return {"status": "SKIP", "reason": "no source registry.db"}
+    if reason := rejected_output_root(intermediates_dir):
+        raise ValueError(
+            f"Refusing to sample {cs_id}: {reason}. Point --output at the test-data "
+            "repo's intermediates/ directory."
+        )
 
     dst_dir = intermediates_dir / cs_id / "run_log"
     dst_dir.mkdir(parents=True, exist_ok=True)
@@ -181,6 +212,12 @@ def main() -> int:
     )
     args = parser.parse_args()
     intermediates_dir = args.output.expanduser().resolve()
+
+    if reason := rejected_output_root(intermediates_dir):
+        parser.error(
+            f"--output is not usable: {reason}. Point it at the test-data repo's "
+            "intermediates/ directory."
+        )
 
     print(f"Sampling registries from {CODE_CS_DIR}")
     print(f"Writing to {intermediates_dir}")

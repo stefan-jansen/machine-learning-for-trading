@@ -453,6 +453,7 @@ jobs:
           .venv/bin/python -m pytest \
             tests/test_pm_helpers.py \
             tests/test_create_test_data.py \
+            tests/test_sample_registry_for_tests.py \
             -v --tb=short
 
   # ---------------------------------------------------------------------------
