@@ -813,8 +813,8 @@ fig_ic = go.Figure(
 fig_ic.update_layout(
     title=(
         f"Only {n_top20_sig} of the top 20 features by |IC| "
-        f"{'survives' if n_top20_sig == 1 else 'survive'} FDR at 5% (green); "
-        "the rest are multiple-testing noise"
+        f"{'survives' if n_top20_sig == 1 else 'survive'} BH-FDR at 5% (green); "
+        "the rest are not rejected once multiple testing is accounted for"
     ),
     xaxis_title="Feature",
     yaxis_title="Mean cross-sectional IC (train+val)",

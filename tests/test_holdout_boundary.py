@@ -93,6 +93,14 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
     "case_studies/etfs/05_evaluation.py",
 ]
 
+# Of the three above, only 03 currently derives the endpoint PER SYMBOL. 02 and 05
+# use a market-wide calendar, which is correct exactly while every symbol trades
+# every session -- true of this panel (one 752-day 2023 calendar) but not
+# guaranteed. Bringing them onto the per-symbol form is tracked in
+# ``issues/2026-07-18-evaluation-holdout-leak-sibling-sweep``; asserting it here
+# before they are changed would just add a red test.
+PER_SYMBOL_ENDPOINT_NOTEBOOKS = ["case_studies/etfs/03_financial_features.py"]
+
 
 @pytest.mark.parametrize("rel_path", LABEL_ENDPOINT_PURGED_NOTEBOOKS, ids=lambda p: p)
 def test_holdout_purge_is_on_the_label_endpoint(rel_path: str) -> None:
@@ -245,3 +253,23 @@ def test_crypto_tcn_requires_cuda_and_hashes_current_inputs() -> None:
     assert source.count("extra_params=IDENTITY_PARAMS") == 2
     assert "identity_params=IDENTITY_PARAMS" in source
     assert "current CPU" not in source
+
+
+@pytest.mark.parametrize("rel_path", PER_SYMBOL_ENDPOINT_NOTEBOOKS, ids=lambda p: p)
+def test_label_endpoint_is_derived_per_symbol(rel_path: str) -> None:
+    """The endpoint must be shifted within symbol, as the label generator does.
+
+    A market-wide cutoff is only equivalent while every symbol trades every
+    session. A symbol that misses one would have its own label window end later
+    than the market-wide endpoint, and reach into the holdout.
+    """
+    source = (REPO_ROOT / rel_path).read_text()
+    assert re.search(
+        r"\.shift\(-\s*[A-Za-z_]*horizon\s*\)\s*\.over\(\s*\"symbol\"\s*\)",
+        source,
+        re.IGNORECASE,
+    ), (
+        f'{rel_path}: the label endpoint must be shifted with .over("symbol"), '
+        'matching shift(-horizon).over("symbol") in 02_labels; a market-wide '
+        "cutoff under-purges a symbol with a gapped calendar"
+    )
