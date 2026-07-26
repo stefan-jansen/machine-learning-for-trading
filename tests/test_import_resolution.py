@@ -489,6 +489,50 @@ def test_a_scoped_pathlib_import_grants_nothing(tmp_path: Path, pathlib_import: 
     assert not resolves_in_repo("tool", test_file, root)
 
 
+def test_a_plain_string_entry_needs_no_pathlib_import(tmp_path: Path) -> None:
+    """A literal entry is readable whether or not the file imports `Path`.
+    Refusing the whole name map when `Path` is unreadable rejected
+    `SCRIPTS = "scripts"`, which needs neither `Path` nor `str` to be read."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    test_file.write_text(
+        'import sys\n\nSCRIPTS = "scripts"\nsys.path.insert(0, SCRIPTS)\nimport tool\n'
+    )
+    assert resolves_in_repo("tool", test_file, root)
+
+
+@pytest.mark.parametrize(
+    ("base", "entry"),
+    [
+        (".", 'BASE / "scripts"'),  # TypeError: unsupported operand str / str
+        ("scripts/inner", "BASE.parent"),  # AttributeError: str has no .parent
+        (".", 'BASE.resolve() / "scripts"'),  # AttributeError: str has no .resolve
+    ],
+)
+def test_a_string_base_cannot_be_joined_or_walked(tmp_path: Path, base: str, entry: str) -> None:
+    """`"." / "scripts"` raises TypeError, so the insert never runs and the
+    directory is no resolution root. Reading every literal as a `Path` lost the
+    runtime type and granted a root for an entry that never existed.
+
+    Each shape is written so that misreading it yields `<repo>/scripts`, where
+    the module sits — landing on the repo root instead would assert nothing,
+    since the root is a resolution root regardless."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    # The pathlib import is what makes this a test of the runtime type rather
+    # than of the readability check: without it the whole name map is refused
+    # anyway, and the assertion would hold for the wrong reason.
+    test_file.write_text(
+        "import sys\nfrom pathlib import Path\n\n"
+        f'BASE = "{base}"\nsys.path.insert(0, {entry})\nimport tool\n'
+    )
+    assert not resolves_in_repo("tool", test_file, root)
+
+
 def test_a_wildcard_import_makes_path_and_str_unreadable() -> None:
     """What a wildcard binds cannot be read here, so it can shadow `Path` or
     `str` unseen. `_sys_is_the_module` rejects such a file before any insert is

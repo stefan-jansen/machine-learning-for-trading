@@ -77,6 +77,7 @@ import tomllib
 from collections import Counter
 from functools import lru_cache, partial
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -254,7 +255,23 @@ def _sys_is_the_module(tree: ast.Module) -> bool:
     return True
 
 
-def _module_level_path_names(tree: ast.Module, source: Path) -> dict[str, Path]:
+class _Value(NamedTuple):
+    """A ``sys.path``-ish expression this reader worked out, and its runtime type.
+
+    The type is load-bearing: ``"." / "scripts"`` raises ``TypeError``, so a
+    ``str`` base cannot be joined or walked. Reading every literal as a ``Path``
+    granted a resolution root for an entry the running code never reaches.
+    Either type is a legal entry on its own -- only building on one requires a
+    ``Path``.
+    """
+
+    path: Path
+    is_path: bool
+
+
+def _module_level_path_names(
+    tree: ast.Module, source: Path, *, calls_readable: bool
+) -> dict[str, _Value]:
     """Module-level names bound to a directory this reader can work out.
 
     A ``sys.path`` entry is usually written against a name — ``REPO_ROOT /
@@ -271,20 +288,20 @@ def _module_level_path_names(tree: ast.Module, source: Path) -> dict[str, Path]:
     assignment go unrecorded, so a readable second one looked like the single
     binding and lent its directory to an insert that ran against the first.
 
-    ``Path`` and ``str`` have to be readable for any of this: see
-    :func:`_path_builtins_are_readable`.
+    ``calls_readable`` says whether ``Path`` and ``str`` mean what they are
+    spelled (:func:`_path_builtins_are_readable`); it disqualifies the
+    assignments built on them, not the whole map, since ``SCRIPTS = "scripts"``
+    needs neither name to be read.
     """
-    if not _path_builtins_are_readable(tree):
-        return {}
     counts = _binding_counts(tree)
-    bindings: dict[str, Path] = {}
+    bindings: dict[str, _Value] = {}
     for node in tree.body:
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
         target = node.targets[0]
         if not isinstance(target, ast.Name) or counts[target.id] != 1:
             continue
-        resolved = _static_path(node.value, source, bindings, calls_readable=True)
+        resolved = _static_value(node.value, source, bindings, calls_readable=calls_readable)
         if resolved is not None:
             bindings[target.id] = resolved
     return bindings
@@ -362,9 +379,22 @@ def _binding_counts(tree: ast.Module) -> Counter[str]:
 
 
 def _static_path(
-    node: ast.AST, source: Path, names: dict[str, Path], *, calls_readable: bool
+    node: ast.AST, source: Path, names: dict[str, _Value], *, calls_readable: bool
 ) -> Path | None:
-    """The directory a path expression names, or ``None`` if it cannot be read.
+    """The directory a ``sys.path`` entry names, or ``None`` if it cannot be read.
+
+    A ``str`` and a ``Path`` are both legal entries, so either type answers here;
+    :func:`_static_value` is what keeps them apart while the expression is being
+    built up.
+    """
+    value = _static_value(node, source, names, calls_readable=calls_readable)
+    return None if value is None else value.path
+
+
+def _static_value(
+    node: ast.AST, source: Path, names: dict[str, _Value], *, calls_readable: bool
+) -> _Value | None:
+    """The value a path expression has, or ``None`` if it cannot be read.
 
     Only the vocabulary these files actually use is understood: ``Path(...)``,
     ``str(...)``, ``.resolve()``, ``.parent``, ``.parents[n]``, ``/`` against a
@@ -372,50 +402,69 @@ def _static_path(
     ``None``, so the entry grants no resolution root — the guard reports an
     import it cannot justify rather than approving one it cannot check.
 
+    ``/``, ``.parent``, ``.parents[n]`` and ``.resolve()`` need a ``Path`` on the
+    left. A ``str`` there is a ``TypeError`` or an ``AttributeError`` at import
+    time, so the mutation never runs and the entry is not a resolution root --
+    the same reason a scoped ``Path`` import grants nothing (see
+    :func:`_imports_pathlib_path`).
+
     ``calls_readable`` says whether ``Path`` and ``str`` in the file this
     expression came from are the ones they are spelled as
     (:func:`_path_builtins_are_readable`). When they are not, an expression
     built on either is unreadable and grants nothing, whether it reaches the
     reader through a module-level name or is written into the insert directly.
     """
-    recurse = partial(_static_path, source=source, names=names, calls_readable=calls_readable)
+    recurse = partial(_static_value, source=source, names=names, calls_readable=calls_readable)
+
+    def _base(of: ast.AST) -> Path | None:
+        """The left-hand side of a path operator, which has to be a ``Path``."""
+        value = recurse(of)
+        return value.path if value is not None and value.is_path else None
+
     if isinstance(node, ast.Constant):
-        return Path(node.value) if isinstance(node.value, str) and node.value else None
+        if isinstance(node.value, str) and node.value:
+            return _Value(Path(node.value), is_path=False)
+        return None
     if isinstance(node, ast.Name):
         return names.get(node.id)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-        base = recurse(node.left)
+        base = _base(node.left)
         if base is None or not isinstance(node.right, ast.Constant):
             return None
         segment = node.right.value
-        return base / segment if isinstance(segment, str) and segment else None
+        if not (isinstance(segment, str) and segment):
+            return None
+        return _Value(base / segment, is_path=True)
     if isinstance(node, ast.Subscript):  # X.parents[n]
         value = node.value
         if not (isinstance(value, ast.Attribute) and value.attr == "parents"):
             return None
-        base = recurse(value.value)
+        base = _base(value.value)
         index = node.slice
         if base is None or not (isinstance(index, ast.Constant) and isinstance(index.value, int)):
             return None
         parents = base.parents
-        return parents[index.value] if index.value < len(parents) else None
+        return _Value(parents[index.value], is_path=True) if index.value < len(parents) else None
     if isinstance(node, ast.Attribute) and node.attr == "parent":
-        base = recurse(node.value)
-        return base.parent if base is not None else None
+        base = _base(node.value)
+        return _Value(base.parent, is_path=True) if base is not None else None
     if isinstance(node, ast.Call):
         func = node.func
         if isinstance(func, ast.Attribute) and func.attr == "resolve" and not node.args:
-            return recurse(func.value)
+            base = _base(func.value)
+            return _Value(base, is_path=True) if base is not None else None
         if not (calls_readable and isinstance(func, ast.Name) and len(node.args) == 1):
             return None
         # `__file__` is this very file, which is how every in-repo base is built.
         if func.id == "Path":
             arg = node.args[0]
             if isinstance(arg, ast.Name) and arg.id == "__file__":
-                return source
-            return recurse(arg)
+                return _Value(source, is_path=True)
+            inner = recurse(arg)
+            return _Value(inner.path, is_path=True) if inner is not None else None
         if func.id == "str":
-            return recurse(node.args[0])
+            inner = recurse(node.args[0])
+            return _Value(inner.path, is_path=False) if inner is not None else None
     return None
 
 
@@ -463,8 +512,8 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
     if not _sys_is_the_module(tree):
         return []
     resolved_root = root.resolve()
-    names = _module_level_path_names(tree, path)
     calls_readable = _path_builtins_are_readable(tree)
+    names = _module_level_path_names(tree, path, calls_readable=calls_readable)
     roots: list[Path] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
