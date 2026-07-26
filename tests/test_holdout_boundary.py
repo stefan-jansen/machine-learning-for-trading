@@ -86,8 +86,8 @@ def test_holdout_filter_precedes_first_ic_computation(rel_path: str, first_ic_ma
 # they truncate the price frame first and compute forward returns on the
 # truncated frame, so the boundary rows come out null and drop. That is a
 # different, equally sound mechanism, and asserting this one against them would
-# be wrong. Widening the audit to the other eight case studies is tracked in
-# ``issues/2026-07-18-evaluation-holdout-leak-sibling-sweep``.
+# be wrong. The other eight case studies have not been audited for this class of
+# leak; add their notebooks here as each is checked.
 LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
     "case_studies/etfs/02_labels.py",
     "case_studies/etfs/03_financial_features.py",
@@ -105,8 +105,9 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
 # every session across the full panel -- they list late -- so "the panel is
 # dense" would be the wrong justification for the exemption; the tested
 # equivalence at the boundary is the right one. Converting 05 to the per-symbol
-# form regardless is tracked in
-# ``issues/2026-07-18-evaluation-holdout-leak-sibling-sweep`` §3.
+# form regardless would remove the dependence on that data property; it is
+# deferred because editing 05 forces the case study's evaluation to be
+# re-executed on a newer feature vintage.
 PER_SYMBOL_ENDPOINT_NOTEBOOKS = [
     "case_studies/etfs/02_labels.py",
     "case_studies/etfs/03_financial_features.py",
@@ -493,8 +494,8 @@ def test_the_two_purges_agree_on_the_shipped_label_panel() -> None:
         f"cutoff (e.g. {under_purged}), {len(per_symbol - market_wide)} only by "
         "the per-symbol purge. The exemption of 05_evaluation.py from "
         "PER_SYMBOL_ENDPOINT_NOTEBOOKS rested on that equivalence, so convert 05 "
-        "to the per-symbol form -- see issues/"
-        "2026-07-18-evaluation-holdout-leak-sibling-sweep §3."
+        "to the per-symbol form -- derive _label_end with "
+        '.shift(-LABEL_HORIZON).over("symbol") as 02 and 03 do.'
     )
 
 
