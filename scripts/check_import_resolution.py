@@ -144,14 +144,22 @@ def imports_with_lines(path: Path) -> list[tuple[str, int, int, bool]]:
 
 
 @cache
-def package_init_names(package: Path) -> frozenset[str]:
-    """Names a package's ``__init__.py`` binds other than by relative import.
+def package_init_names(package: Path) -> frozenset[tuple[str, int]]:
+    """Names a package's ``__init__.py`` binds, each with the line that binds it.
 
     ``from . import x`` also succeeds when ``x`` is a symbol the ``__init__.py``
-    defines rather than a submodule on disk. Bindings that come from a relative
-    import are deliberately excluded: those are the statements being checked, so
-    counting them would let the guard satisfy itself with the very line in
-    question.
+    binds rather than a submodule on disk. The line number is part of the answer
+    because a statement inside the ``__init__.py`` runs before everything below
+    it: ``from . import missing`` followed by ``missing = 1`` raises
+    ``ImportError`` at runtime, so that binding must not satisfy that import.
+
+    *Bare* relative bindings (``from . import x``) are excluded: those are the
+    statements being checked, so counting them would let the guard satisfy
+    itself with the very line in question. Bindings from an explicit relative
+    module (``from .constants import VALUE``) do count -- they bind ``VALUE``,
+    and ``constants`` itself is resolved separately, so nothing is taken on
+    trust. Only module resolution is static here, not symbol existence: if
+    ``constants`` exists but never defines ``VALUE``, no static check catches it.
     """
     init = package / "__init__.py"
     if not init.is_file():
@@ -160,19 +168,35 @@ def package_init_names(package: Path) -> frozenset[str]:
         tree = ast.parse(init.read_text(encoding="utf-8"))
     except (SyntaxError, UnicodeDecodeError):
         return frozenset()
-    names: set[str] = set()
+    names: set[tuple[str, int]] = set()
     for node in tree.body:
         if isinstance(node, ast.Assign):
-            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            names.update((t.id, node.lineno) for t in node.targets if isinstance(t, ast.Name))
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.add(node.target.id)
+            names.add((node.target.id, node.lineno))
         elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            names.add(node.name)
+            names.add((node.name, node.lineno))
         elif isinstance(node, ast.Import):
-            names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and not node.level:
-            names.update(alias.asname or alias.name for alias in node.names)
+            names.update(
+                (alias.asname or alias.name.split(".")[0], node.lineno) for alias in node.names
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.update((alias.asname or alias.name, node.lineno) for alias in node.names)
     return frozenset(names)
+
+
+def init_binds(package: Path, name: str, before: int | None) -> bool:
+    """True if ``package/__init__.py`` binds ``name``.
+
+    ``before`` limits the answer to bindings established above that line, which
+    is what the ``__init__.py`` sees partway through its own execution. ``None``
+    means no limit: a sibling module is imported after the ``__init__.py`` has
+    run to completion, so every binding is in place by then.
+    """
+    return any(
+        bound == name and (before is None or lineno < before)
+        for bound, lineno in package_init_names(package)
+    )
 
 
 def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
@@ -276,7 +300,9 @@ def _resolves_under(package: Path, parts: list[str]) -> bool:
     return (package / f"{leaf}.py").is_file() or (package / leaf).is_dir()
 
 
-def resolves_relative(name: str, level: int, source: Path, root: Path, bare: bool = False) -> bool:
+def resolves_relative(
+    name: str, level: int, source: Path, root: Path, bare: bool = False, lineno: int = 0
+) -> bool:
     """True if a relative import resolves.
 
     The anchor is the importing file's package, walked up ``level - 1`` times.
@@ -284,6 +310,11 @@ def resolves_relative(name: str, level: int, source: Path, root: Path, bare: boo
     ``from .mod import x`` needs ``mod`` to be a module on disk. ``from . import
     x`` (``bare``) is satisfied by either a submodule or a name the package's
     ``__init__.py`` binds, since both make the statement work at runtime.
+
+    ``lineno`` is where the import sits in ``source``. It matters only when
+    ``source`` *is* the anchor's ``__init__.py``, because then the statement runs
+    partway through the file that would bind the name; bindings below it do not
+    exist yet. Defaulting to 0 keeps a caller that omits it on the strict side.
     """
     anchor = source.parent
     for _ in range(level - 1):
@@ -292,7 +323,10 @@ def resolves_relative(name: str, level: int, source: Path, root: Path, bare: boo
             return False
     if _resolves_under(anchor, name.split(".")):
         return True
-    return bare and name in package_init_names(anchor)
+    if not bare:
+        return False
+    before = lineno if source == anchor / "__init__.py" else None
+    return init_binds(anchor, name, before)
 
 
 def resolves_in_repo(name: str, source: Path, root: Path) -> bool:
@@ -327,7 +361,7 @@ def main() -> int:
     for path in iter_source_files(root):
         for name, lineno, level, bare in imports_with_lines(path):
             if level > 0:
-                if not resolves_relative(name, level, path, root, bare):
+                if not resolves_relative(name, level, path, root, bare, lineno):
                     failures.append((path.relative_to(root), lineno, "." * level + name))
                 continue
             # Third-party and stdlib are classified on the top-level component:

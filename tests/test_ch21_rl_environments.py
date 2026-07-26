@@ -21,6 +21,7 @@ from crypto_execution_env import CryptoExecutionEnv  # noqa: E402
 from market_making_env import (  # noqa: E402
     MarketMakingDynamics,
     MarketMakingEnv,
+    decode_action,
     generate_garch_market_data,
 )
 
@@ -76,6 +77,14 @@ def test_volatility_series_is_conditional_not_realized() -> None:
     assert len(prices) == len(vols) + 1
 
 
+# Skew +1 with the widest spread accumulates a long position and ends the episode
+# holding it, so terminal liquidation actually costs something. Sampling actions
+# instead would be both unseeded (`action_space.sample()` is not seeded by
+# `reset`) and prone to ending flat, where liquidation adjusts nothing and the
+# assertions below hold against the old implementation too.
+LONG_AT_EXPIRY = 8
+
+
 def test_terminal_row_reward_matches_the_returned_reward() -> None:
     """The final history row had `wealth` updated for terminal liquidation but
     `reward` left at its pre-liquidation value, so the row disagreed with the
@@ -84,19 +93,63 @@ def test_terminal_row_reward_matches_the_returned_reward() -> None:
     env.reset(seed=7)
     rewards = []
     while True:
-        _, reward, terminated, _, info = env.step(env.action_space.sample())
+        _, reward, terminated, _, info = env.step(LONG_AT_EXPIRY)
         rewards.append(reward)
         if terminated:
             break
 
     final = env.history[-1]
+    # Liquidation moves the reward by exactly -liquidation_cost, so a nonzero
+    # cost is what makes the equality below discriminate at all.
+    assert final["terminal_inventory"] != 0
+    assert final["liquidation_cost"] > 0
     assert final["reward"] == pytest.approx(rewards[-1])
     assert final["wealth"] == pytest.approx(info["wealth"])
-    assert "terminal_inventory" in final and "liquidation_cost" in final
     # Every non-terminal row already agreed; this pins that it stays that way.
     assert all(
         row["reward"] == pytest.approx(r) for row, r in zip(env.history, rewards, strict=True)
     )
+
+
+def test_quote_inventory_is_the_position_the_quote_responded_to() -> None:
+    """`quote_offset_bps` is a function of the inventory held when the quote was
+    posted. The row's `inventory` is the post-fill position, so pairing the two
+    plots the skew against an inventory one fill later -- what Figure 21.7 did."""
+    env = MarketMakingEnv(episode_length=60, inventory_limit=10, dynamics=DYNAMICS, seed=11)
+    env.reset(seed=11)
+    while True:
+        _, _, terminated, _, _ = env.step(LONG_AT_EXPIRY)
+        if terminated:
+            break
+
+    # quote_inventory[t] is the inventory the previous row closed with, and 0 at
+    # the open. That chain is what makes it the pre-fill position.
+    assert env.history[0]["quote_inventory"] == 0
+    assert [h["quote_inventory"] for h in env.history[1:]] == [
+        h["inventory"] for h in env.history[:-1]
+    ]
+    # The offset is reproducible from quote_inventory alone, up to the constant
+    # skew this deterministic action holds. One share of inventory moves it by
+    # vol / limit = 10 bps, so a 0.01 bps tolerance -- set by float32
+    # cancellation in `quote_center - price`, not by the effect being small --
+    # still separates the two series by three orders of magnitude.
+    skew_level, _ = decode_action(LONG_AT_EXPIRY, DYNAMICS)
+
+    def offset_from(inventory: float, step: int) -> float:
+        inv_norm = inventory / env.inventory_limit
+        return float((skew_level * 0.25 - inv_norm) * env.volatilities[step]) * 10_000
+
+    mismatched = 0
+    for row in env.history:
+        assert row["quote_offset_bps"] == pytest.approx(
+            offset_from(row["quote_inventory"], row["step"]), abs=0.01
+        )
+        if row["quote_inventory"] != row["inventory"]:
+            mismatched += 1
+            assert row["quote_offset_bps"] != pytest.approx(
+                offset_from(row["inventory"], row["step"]), abs=0.01
+            )
+    assert mismatched > 0, "the two series never diverge here, so this asserts nothing"
 
 
 def test_impact_is_square_root_plus_linear() -> None:

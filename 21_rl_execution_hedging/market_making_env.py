@@ -220,6 +220,12 @@ class MarketMakingEnv(gym.Env):
         self.current_quote_offset = quote_center - price
 
         wealth_before = self.cash + self.inventory * price
+        # The quotes above were computed from the inventory held *before* this
+        # bar's fills, so that is the position they respond to. The row's
+        # `inventory` is the post-fill position -- the realized path, one fill
+        # later -- which is a different series and the wrong x-axis for the
+        # quote-skew figure.
+        quote_inventory = self.inventory
         bid_filled, ask_filled = simulate_fills(
             self.rng,
             self.inventory,
@@ -252,6 +258,7 @@ class MarketMakingEnv(gym.Env):
             {
                 "step": self.step_idx,
                 "inventory": self.inventory,
+                "quote_inventory": quote_inventory,
                 "wealth": self.wealth,
                 "reward": reward,
                 "trades": self.n_trades,
@@ -285,10 +292,10 @@ class MarketMakingEnv(gym.Env):
             # here while updating `wealth` made the final row disagree with
             # itself and with the returned transition.
             self.history[-1]["reward"] = reward
-            # `inventory` stays the position the agent quoted against, which is
-            # what pairs with `quote_offset_bps` in the inventory-skew figure.
-            # Post-liquidation inventory is zero by construction; the position
-            # carried into liquidation is `terminal_inventory`.
+            # `inventory` stays the post-fill position, which on this row is the
+            # position carried into liquidation; post-liquidation inventory is
+            # zero by construction and would erase that. `quote_inventory` is
+            # what pairs with `quote_offset_bps`, and it is untouched here.
             self.history[-1]["terminal_inventory"] = remaining_inventory
             self.history[-1]["liquidation_cost"] = liquidation_cost
 

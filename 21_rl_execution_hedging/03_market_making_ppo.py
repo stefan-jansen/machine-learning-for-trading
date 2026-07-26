@@ -534,9 +534,11 @@ fig.show()
 
 # %%
 # Pool PPO evaluation histories and measure the learned quote-center shift
-# as inventory varies.
+# as inventory varies. The quote responds to the inventory held when it was
+# posted (`quote_inventory`), not the post-fill position on the same row, which
+# is that inventory plus whatever the quote went on to trade.
 policy_samples = [
-    {"inventory": h["inventory"], "quote_offset_bps": h["quote_offset_bps"]}
+    {"inventory": h["quote_inventory"], "quote_offset_bps": h["quote_offset_bps"]}
     for run in results[RL_LABEL]
     for h in run["history"]
 ]
@@ -550,9 +552,15 @@ else:
     bin_edges = np.linspace(inv_min, inv_max, 9)
 
 bin_ids = np.digitize(policy_df["inventory"].to_numpy(), bin_edges[1:-1], right=False)
+# Inventory is whole contracts and each bin is [edge, next_edge), so label the
+# integers a bin actually holds. Rounding the two edges outward instead printed
+# overlapping ranges ("-3 to 2" next to "1 to 6"), leaving no way to read off
+# which bucket a position of 1 or 2 belongs to.
+n_bins = len(bin_edges) - 1
 bin_labels = [
-    f"{int(np.floor(bin_edges[i]))} to {int(np.ceil(bin_edges[i + 1]))}"
-    for i in range(len(bin_edges) - 1)
+    f"{max(int(np.ceil(bin_edges[i])), inv_min)} to "
+    f"{inv_max if i == n_bins - 1 else int(np.ceil(bin_edges[i + 1])) - 1}"
+    for i in range(n_bins)
 ]
 
 grouped = []

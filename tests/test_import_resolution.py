@@ -172,6 +172,54 @@ def test_init_relative_imports_do_not_satisfy_themselves(tree: Path) -> None:
     assert resolves_relative("configs", 1, init, tree, bare=True)
 
 
+def test_init_binding_below_the_import_does_not_satisfy_it(tree: Path) -> None:
+    """`from . import missing` followed by `missing = 1` raises at runtime: the
+    import runs first. Ignoring statement order left a variant of the original
+    hole open, since any later binding of the name looked like a definition."""
+    pkg = tree / "07_chapter" / "pkg"
+    init = pkg / "__init__.py"
+    init.write_text("from . import late\n\nlate = 1\n")
+    package_init_names.cache_clear()
+    assert not resolves_relative("late", 1, init, tree, bare=True, lineno=1)
+    # Above the import the same binding is real, so the statement does work.
+    init.write_text("early = 1\n\nfrom . import early\n")
+    package_init_names.cache_clear()
+    assert resolves_relative("early", 1, init, tree, bare=True, lineno=3)
+
+
+def test_sibling_sees_every_init_binding_regardless_of_order(tree: Path) -> None:
+    """Order only constrains the __init__ itself. A sibling is imported after the
+    __init__ has run to completion, so a binding anywhere in it is in place."""
+    pkg = tree / "07_chapter" / "pkg"
+    (pkg / "__init__.py").write_text("from .helper import setup\n\nLIMIT = 5\n")
+    (pkg / "helper.py").write_text("def setup():\n    pass\n")
+    mod = pkg / "thing.py"
+    mod.write_text("from . import LIMIT\n")
+    package_init_names.cache_clear()
+    assert resolves_relative("LIMIT", 1, mod, tree, bare=True, lineno=1)
+
+
+def test_bare_relative_import_accepts_an_init_re_export(tree: Path) -> None:
+    """`from .constants import VALUE` in the __init__ makes `from . import VALUE`
+    work in a sibling. Excluding *every* relative binding rejected that working
+    code; only the bare form has to be excluded, and `constants` is checked on
+    its own line anyway."""
+    pkg = tree / "07_chapter" / "pkg"
+    (pkg / "constants.py").write_text("VALUE = 1\n")
+    (pkg / "__init__.py").write_text("from .constants import VALUE\n")
+    mod = pkg / "thing.py"
+    mod.write_text("from . import VALUE\n")
+    package_init_names.cache_clear()
+    assert resolves_relative("VALUE", 1, mod, tree, bare=True, lineno=1)
+    # A re-export from a module that does not exist buys nothing: the __init__'s
+    # own `from .absent import ...` line is what fails.
+    (pkg / "__init__.py").write_text("from .absent import OTHER\n")
+    package_init_names.cache_clear()
+    assert resolves_relative("OTHER", 1, mod, tree, bare=True, lineno=1)
+    init = pkg / "__init__.py"
+    assert not resolves_relative("absent", 1, init, tree, lineno=1)
+
+
 def test_missing_relative_import_does_not_resolve(tree: Path) -> None:
     """`from .missing import value` names a repo file by definition."""
     mod = tree / "07_chapter" / "pkg" / "thing.py"
