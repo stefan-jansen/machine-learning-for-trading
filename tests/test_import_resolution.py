@@ -391,6 +391,51 @@ def test_an_unreadable_base_grants_nothing(tmp_path: Path) -> None:
         assert not resolves_in_repo("tool", test_file, root), base
 
 
+def test_an_unreadable_first_assignment_still_counts_as_a_binding(tmp_path: Path) -> None:
+    """Counting only the assignments this reader understands let an unreadable
+    first one go unrecorded, so the readable second one looked like the single
+    binding and lent its directory to an insert that ran against the first."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    test_file.write_text(
+        "import sys\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "BASE = os.environ['SOMEWHERE']\n"
+        'sys.path.insert(0, str(BASE / "scripts"))\n'
+        "import tool\n"
+        "BASE = Path(__file__).resolve().parent\n"
+    )
+    assert not resolves_in_repo("tool", test_file, root)
+
+
+@pytest.mark.parametrize(
+    "preamble",
+    [
+        "from mypath import Path",  # not pathlib's
+        "from pathlib import Path as _P\nPath = _P\n",  # rebound
+        "from pathlib import Path\ndef str(x):\n    return x\n",  # builtin shadowed
+    ],
+)
+def test_a_shadowed_path_or_str_grants_nothing(tmp_path: Path, preamble: str) -> None:
+    """`Path` and `str` are spellings, not guarantees. A local, imported or
+    rebound one can name a directory outside the checkout at runtime while the
+    expression still reads as an in-repo path."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    test_file.write_text(
+        f"import sys\n{preamble}\n"
+        "REPO_ROOT = Path(__file__).resolve().parent\n"
+        'sys.path.insert(0, str(REPO_ROOT / "scripts"))\n'
+        "import tool\n"
+    )
+    assert not resolves_in_repo("tool", test_file, root)
+
+
 def test_dot_github_scripts_is_scanned(tmp_path: Path) -> None:
     """SKIP_DIRS drops `.github` wholesale, which would silently exempt the
     guards and notebook tooling that live in `.github/scripts/` — including this

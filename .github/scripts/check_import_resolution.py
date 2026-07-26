@@ -74,6 +74,7 @@ import ast
 import re
 import sys
 import tomllib
+from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 
@@ -262,26 +263,71 @@ def _module_level_path_names(tree: ast.Module, source: Path) -> dict[str, Path]:
     separates ``REPO_ROOT = Path(__file__).resolve().parents[2]`` from
     ``EXTERNAL_ROOT = Path("/somewhere/else")``.
 
-    A name assigned more than once is dropped rather than guessed at: which
-    binding is live at the insert is an execution-order question, and this guard
-    does not answer those.
+    A name bound more than once anywhere in the file is dropped rather than
+    guessed at: which binding is live at the insert is an execution-order
+    question, and this guard does not answer those. That count is taken over
+    every binding form, not over the assignments this reader happens to
+    understand -- counting only the readable ones let an unreadable first
+    assignment go unrecorded, so a readable second one looked like the single
+    binding and lent its directory to an insert that ran against the first.
+
+    ``Path`` and ``str`` are spellings, not guarantees. They are read as
+    ``pathlib.Path`` and the builtin only in a file that imports the former
+    unaliased and rebinds neither; otherwise every expression built on them is
+    unreadable and grants nothing.
     """
+    counts = _binding_counts(tree)
+    if counts["str"] or counts["Path"] > 1 or not _imports_pathlib_path(tree):
+        return {}
     bindings: dict[str, Path] = {}
-    rebound: set[str] = set()
     for node in tree.body:
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
         target = node.targets[0]
-        if not isinstance(target, ast.Name):
-            continue
-        if target.id in bindings or target.id in rebound:
-            bindings.pop(target.id, None)
-            rebound.add(target.id)
+        if not isinstance(target, ast.Name) or counts[target.id] != 1:
             continue
         resolved = _static_path(node.value, source, bindings)
         if resolved is not None:
             bindings[target.id] = resolved
     return bindings
+
+
+def _imports_pathlib_path(tree: ast.Module) -> bool:
+    """True if the file does a plain ``from pathlib import Path``."""
+    return any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "pathlib"
+        and node.level == 0
+        and any(alias.name == "Path" and alias.asname is None for alias in node.names)
+        for node in ast.walk(tree)
+    )
+
+
+def _binding_counts(tree: ast.Module) -> Counter[str]:
+    """How many times each name is bound anywhere in the file.
+
+    Whole-file and every form, for the same reason :func:`_sys_is_the_module`
+    is: deciding which binding is live at a given expression is a scope-and-order
+    question this guard does not answer, so a name bound twice is simply not
+    read. Counting conservatively costs a resolution root, which surfaces as a
+    named failure; undercounting silently approves an import.
+    """
+    counts: Counter[str] = Counter()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            for alias in node.names:
+                counts[alias.asname or alias.name.split(".")[0]] += 1
+        elif isinstance(node, ast.alias | ast.keyword):
+            continue
+        elif isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Store | ast.Del):
+                counts[node.id] += 1
+        else:
+            for field in _BINDING_FIELDS:
+                bound = getattr(node, field, None)
+                if isinstance(bound, str):
+                    counts[bound] += 1
+    return counts
 
 
 def _static_path(node: ast.AST, source: Path, names: dict[str, Path]) -> Path | None:
