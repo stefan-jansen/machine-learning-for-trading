@@ -1,6 +1,6 @@
 # Case Studies
 
-Nine case studies thread through Chapters 6--20, applying the same ML4T workflow to different asset classes, frequencies, and trading constraints. Each case study defines a universe, builds labels and features, trains models from linear baselines through deep learning, and evaluates strategies through backtesting, portfolio construction, cost analysis, and risk management.
+Nine case studies thread through Chapters 6-20, applying the same ML4T workflow to different asset classes, frequencies, and trading constraints. Each case study defines a universe, builds labels and features, trains models from linear baselines through deep learning, and evaluates strategies through backtesting, portfolio construction, cost analysis, and risk management.
 
 ## Overview
 
@@ -18,51 +18,21 @@ Nine case studies thread through Chapters 6--20, applying the same ML4T workflow
 
 ## Pipeline Stages
 
-Each case study follows the same chapter progression. Notebooks are numbered sequentially, with each number mapping to a chapter:
+Every case study runs the same sequence of phases, and each phase maps to a book chapter. The stage
+*numbers* differ from one case study to the next, because each market gets a different set of
+model-family stages, but the phase order is identical everywhere. The phase-to-chapter table lives in
+**[Running Notebooks](../docs/running-notebooks.md#the-workflow)**.
 
-| Stage | Chapter | Typical Notebook | What It Produces |
-|-------|---------|------------------|------------------|
-| Feasibility | Ch6 | `01_feasibility_analysis` | Universe and cost feasibility evidence for the canonical `config/setup.yaml` |
-| Labels | Ch7 | `02_labels` | Forward returns, walk-forward CV splits |
-| Features | Ch8 | `03_financial_features` | Momentum, volatility, carry, and domain-specific features |
-| Temporal | Ch9 | `04_model_based_features` | ARIMA, HMM, spectral features from walk-forward fits |
-| Evaluation | Ch7--9 | `05_evaluation` | Feature-label IC diagnostics |
-| Linear | Ch11 | `06_linear` | Ridge, LASSO, ElasticNet baseline predictions |
-| GBM | Ch12 | `07_gbm` | LightGBM predictions with Optuna |
-| Tabular DL | Ch12 | `08_tabular_dl` | TabM / neural tabular predictions |
-| Deep Learning | Ch13 | `09-10_dl_*` | LSTM, TCN, TSMixer, PatchTST, N-BEATS predictions |
-| Latent Factors | Ch14 | `*_latent_factors`, `*_pca`, `*_ipca`, `*_sdf` | PCA, IPCA, CAE, SAE, SDF factor models |
-| Causal | Ch15 | `*_causal_dml` | Double ML treatment effect estimates |
-| Backtest | Ch16 | `*_backtest` | Strategy simulation results |
-| Analysis | Ch16 | `*_backtest_analysis` | Performance attribution and reporting |
-| Portfolio | Ch17 | `*_portfolio_management` | Allocation methods and portfolio construction |
-| Costs | Ch18 | `*_costs` | Transaction cost impact analysis |
-| Risk | Ch19 | `*_risk_management` | Drawdown controls, position limits, risk budgets |
-| Synthesis | Ch20 | `*_synthesis` | End-to-end strategy assessment |
-
-Not every case study has every model type. The exact notebook set depends on the dataset characteristics. See each case study's README for the complete pipeline table.
+Not every case study has every model type. The exact notebook set depends on the dataset
+characteristics; each case study's own README lists its stages, in order, with the chapter each one
+belongs to.
 
 ## Running a Complete Pipeline
 
-```bash
-# From repo root -- always
-
-# Example: ETF pipeline
-uv run python case_studies/etfs/01_feasibility_analysis.py
-uv run python case_studies/etfs/02_labels.py
-uv run python case_studies/etfs/03_financial_features.py
-uv run python case_studies/etfs/04_model_based_features.py
-uv run python case_studies/etfs/05_evaluation.py
-uv run python case_studies/etfs/06_linear.py
-uv run python case_studies/etfs/07_gbm.py
-# ... continue through synthesis
-
-# Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "etfs"
-
-# Headless (no display)
-MPLBACKEND=Agg PLOTLY_RENDERER=json uv run python case_studies/etfs/01_feasibility_analysis.py
-```
+Run the stages in order from the repo root. See
+**[Running a Case Study End to End](../docs/running-notebooks.md#running-a-case-study-end-to-end)**
+for the pattern, and the case study's own README for its exact stage list. Reduced-parameter test
+runs and headless execution are covered in the same document.
 
 ## Directory Layout
 

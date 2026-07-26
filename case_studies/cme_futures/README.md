@@ -11,32 +11,34 @@ The pipeline runs a long-short carry-ranked strategy with weekly Friday-close de
 | Asset Class | CME futures (30 products, 7 sectors) |
 | Frequency | Daily data, weekly decisions |
 | Universe | 30 front-month continuous contracts |
-| History | 2011--2025 |
+| History | 2011-2025 |
 | Primary Label | fwd_ret_5d |
 | CV Folds | 5 (8Y train, 1Y val) |
 | Cost Model | Material (commission + spread + roll slippage) |
 
 ## Pipeline
 
-| Stage | Notebook | Chapter | Description |
-|-------|----------|---------|-------------|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe coverage, cost-vs-edge feasibility, walk-forward verification against `config/setup.yaml` |
-| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 5-day and 21-day forward returns from ratio back-adjusted continuous data |
-| Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | Term structure, carry, momentum, and roll-return features |
-| Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Expanding-window ARIMA and HMM features via statsforecast |
-| Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7--9 | Feature-label IC diagnostics across 30 products and 7 sectors |
-| Linear | [`06_linear`](06_linear.ipynb) | Ch11 | Ridge, LASSO, ElasticNet on carry and momentum signals |
-| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM testing non-linear carry and momentum interactions |
-| Tabular DL | [`08_tabular_dl`](08_tabular_dl.ipynb) | Ch12 | TabM rank-1 adapter MLP ensemble on flat features |
-| LSTM | [`09_dl_lstm`](09_dl_lstm.ipynb) | Ch13 | Gated recurrence on the 30-product daily panel |
-| Latent Factors | [`10_latent_factors`](10_latent_factors.ipynb) | Ch14 | PCA and SDF on the cross-sectional characteristics panel |
-| Causal DML | [`11_causal_dml`](11_causal_dml.ipynb) | Ch15 | Does the carry signal cause future returns or proxy for risk? |
-| Model Analysis | [`12_model_analysis`](12_model_analysis.ipynb) | -- | Cross-model IC comparison and fold stability diagnostics |
-| Backtest | [`13_backtest`](13_backtest.ipynb) | Ch16 | Long-short carry-ranked strategy simulation |
-| Portfolio | [`14_portfolio_management`](14_portfolio_management.ipynb) | Ch17 | Equal-risk, score-weighted, and sector-constrained allocation |
-| Costs | [`15_costs`](15_costs.ipynb) | Ch18 | Commission, spread, and roll slippage impact analysis |
-| Risk | [`16_risk_management`](16_risk_management.ipynb) | Ch19 | Position-level risk overlays (stop-loss, trailing stops, time exits) |
-| Strategy Analysis | [`17_strategy_analysis`](17_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics |
+| Stage | Notebook | Chapter | Description | Writes |
+|-------|----------|---------|-------------|--------|
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe coverage, cost-vs-edge feasibility, walk-forward verification against `config/setup.yaml` | `config/exploration/feasibility_report.json` |
+| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 5-day and 21-day forward returns from ratio back-adjusted continuous data | `labels/fwd_ret_5d.parquet`, `labels/fwd_ret_21d.parquet`, `labels/fwd_tb_5d.parquet`, `config/cv_config.json` |
+| Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | Term structure, carry, momentum, and roll-return features | `features/financial.parquet` |
+| Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Expanding-window ARIMA and HMM features via statsforecast | `features/model_based.parquet` |
+| Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7-9 | Feature-label IC diagnostics across 30 products and 7 sectors | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
+| Linear | [`06_linear`](06_linear.ipynb) | Ch11 | Ridge, LASSO, ElasticNet on carry and momentum signals | Training runs and prediction sets in `run_log/registry.db`; coefficients under `run_log/training/{hash}/`, scores under `run_log/predictions/{hash}/` |
+| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM testing non-linear carry and momentum interactions | Training runs and prediction sets; boosters, `learning_curves.parquet`, and `fold_metrics.parquet` under `run_log/training/{hash}/` |
+| Tabular DL | [`08_tabular_dl`](08_tabular_dl.ipynb) | Ch12 | TabM rank-1 adapter MLP ensemble on flat features | Training runs and prediction sets; checkpoints under `run_log/training/tabular_dl/` |
+| LSTM | [`09_dl_lstm`](09_dl_lstm.ipynb) | Ch13 | Gated recurrence on the 30-product daily panel | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
+| Latent factors (index) | [`10_latent_factors`](10_latent_factors.ipynb) | Ch14 | Index of the two latent-factor notebooks below | Nothing - it reads the registry |
+| PCA | [`10a_pca`](10a_pca.ipynb) | Ch14 | Principal components on the cross-sectional characteristics panel | Training runs and prediction sets |
+| SDF | [`10b_stochastic_discount_factor`](10b_stochastic_discount_factor.ipynb) | Ch14 | Stochastic discount factor on the same panel | Training runs and prediction sets |
+| Causal DML | [`11_causal_dml`](11_causal_dml.ipynb) | Ch15 | Does the carry signal cause future returns or proxy for risk? | A row in the registry's `causal_runs` |
+| Model Analysis | [`12_model_analysis`](12_model_analysis.ipynb) | Ch11-15 | Cross-model IC comparison and fold stability diagnostics | Nothing - it reads the registry |
+| Backtest | [`13_backtest`](13_backtest.ipynb) | Ch16 | Long-short carry-ranked strategy simulation | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, `trades.parquet`, `fills.parquet`, `equity.parquet`, `portfolio_state.parquet`, and `spec.json` under `run_log/backtest/{hash}/` |
+| Portfolio | [`14_portfolio_management`](14_portfolio_management.ipynb) | Ch17 | Equal-risk, score-weighted, and sector-constrained allocation | One backtest run per allocation method, same artifact layout |
+| Costs | [`15_costs`](15_costs.ipynb) | Ch18 | Commission, spread, and roll slippage impact analysis | One backtest run per cost level, same artifact layout |
+| Risk | [`16_risk_management`](16_risk_management.ipynb) | Ch19 | Position-level risk overlays (stop-loss, trailing stops, time exits) | One backtest run per overlay variant, same artifact layout |
+| Strategy Analysis | [`17_strategy_analysis`](17_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with uncertainty-aware metrics | `results/strategy_assessment.json`, `20_strategy_synthesis/output/cme_futures/cme_futures_tearsheet.html`; fills the registry's `cohort_metrics` and `backtest_paired_metrics` tables, but only when either is missing or empty |
 
 ## Margin Model
 
@@ -83,7 +85,9 @@ uv run python case_studies/cme_futures/06_linear.py
 uv run python case_studies/cme_futures/07_gbm.py
 uv run python case_studies/cme_futures/08_tabular_dl.py
 uv run python case_studies/cme_futures/09_dl_lstm.py
-uv run python case_studies/cme_futures/10_latent_factors.py
+uv run python case_studies/cme_futures/10a_pca.py
+uv run python case_studies/cme_futures/10b_stochastic_discount_factor.py
+uv run python case_studies/cme_futures/10_latent_factors.py   # summarizes 10a-10b
 uv run python case_studies/cme_futures/11_causal_dml.py
 uv run python case_studies/cme_futures/12_model_analysis.py
 uv run python case_studies/cme_futures/13_backtest.py

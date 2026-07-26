@@ -26,27 +26,27 @@ The cost-mitigation cascade (O'Donovan & Yu 2024) is encoded in the `strategy.si
 
 ## Pipeline
 
-| Stage | Notebook | Chapter | Description |
-|-------|----------|---------|-------------|
-| Setup | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Straddle selection, HTM protocol, delta-hedge during hold, margin requirements |
-| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | HTM short-straddle return + delta-hedged and raw forward variants |
-| Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | VRP, IV surface, skew, term structure, and Greeks features |
-| Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward GJR-GARCH volatility + particle-filtered stochastic volatility |
-| Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7–9 | IC diagnostics on the engineered feature set |
-| Linear | [`06_linear`](06_linear.ipynb) | Ch11 | Ridge / Lasso / Elastic Net on each label |
-| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM regression and classification on each label |
-| Tabular DL | [`08_tabular_dl`](08_tabular_dl.ipynb) | Ch12 | TabM rank-1 adapter MLP on the options feature matrix |
-| Deep Learning | [`09_deep_learning`](09_deep_learning.ipynb) | Ch13 | Index notebook for sequence models |
-| LSTM | [`09a_lstm`](09a_lstm.ipynb) | Ch13 | Sequential gating over daily options features |
-| PatchTST | [`09b_patchtst`](09b_patchtst.ipynb) | Ch13 | Multi-scale patch attention on options dynamics |
-| Causal DML | [`10_causal_dml`](10_causal_dml.ipynb) | Ch15 | Treatment effect of VRP on delta-hedged returns |
-| Model Analysis | [`11_model_analysis`](11_model_analysis.ipynb) | — | Cross-model IC comparison and fold stability diagnostics |
-| Backtest | [`12_backtest`](12_backtest.ipynb) | Ch16 | HTM dispatch with multi-cohort daily-MTM aggregation |
-| Portfolio | [`13_portfolio_management`](13_portfolio_management.ipynb) | Ch17 | Long-short straddle allocation with margin constraints |
-| Costs | [`14_costs`](14_costs.ipynb) | Ch18 | HTM cost-sensitivity grid in % of premium across families and universes |
-| Risk | [`15_risk_management`](15_risk_management.ipynb) | Ch19 | Position-level exit rules (portfolio-level overlays framed as §19.8 governance) |
-| Strategy Analysis | [`16_strategy_analysis`](16_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with paired-bootstrap holdout closure |
-| Appendix | [`90_ic_diagnostic`](90_ic_diagnostic.ipynb) | — | Signal-attribution deep dive outside the main pipeline |
+| Stage | Notebook | Chapter | Description | Writes |
+|-------|----------|---------|-------------|--------|
+| Setup | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Straddle selection, HTM protocol, delta-hedge during hold, margin requirements | `config/exploration/feasibility_report.json` |
+| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | HTM short-straddle return + delta-hedged and raw forward variants | One parquet per label in `labels/` (hold-to-maturity, delta-hedged, execution, and raw forward variants), and `config/cv_config.json` |
+| Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | VRP, IV surface, skew, term structure, and Greeks features | `features/financial.parquet` |
+| Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward GJR-GARCH volatility + particle-filtered stochastic volatility | `features/model_based.parquet` |
+| Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7–9 | IC diagnostics on the engineered feature set | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
+| Linear | [`06_linear`](06_linear.ipynb) | Ch11 | Ridge / Lasso / Elastic Net on each label | Training runs and prediction sets in `run_log/registry.db`; coefficients under `run_log/training/{hash}/`, scores under `run_log/predictions/{hash}/` |
+| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM regression and classification on each label | Training runs and prediction sets; boosters, `learning_curves.parquet`, and `feature_importance.parquet` under `run_log/training/{hash}/` (this case study has its own artifact writer and does not emit `fold_metrics.parquet`) |
+| Tabular DL | [`08_tabular_dl`](08_tabular_dl.ipynb) | Ch12 | TabM rank-1 adapter MLP on the options feature matrix | Training runs and prediction sets; checkpoints under `run_log/training/tabular_dl/` |
+| Deep Learning | [`09_deep_learning`](09_deep_learning.ipynb) | Ch13 | Index notebook for sequence models | Nothing - it reads the registry |
+| LSTM | [`09a_lstm`](09a_lstm.ipynb) | Ch13 | Sequential gating over daily options features | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
+| PatchTST | [`09b_patchtst`](09b_patchtst.ipynb) | Ch13 | Multi-scale patch attention on options dynamics | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
+| Causal DML | [`10_causal_dml`](10_causal_dml.ipynb) | Ch15 | Treatment effect of VRP on delta-hedged returns | A row in the registry's `causal_runs` |
+| Model Analysis | [`11_model_analysis`](11_model_analysis.ipynb) | — | Cross-model IC comparison and fold stability diagnostics | Nothing - it reads the registry |
+| Backtest | [`12_backtest`](12_backtest.ipynb) | Ch16 | HTM dispatch with multi-cohort daily-MTM aggregation | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, and `spec.json` under `run_log/backtest/{hash}/` (the vectorized path produces no trade or fill ledger) |
+| Portfolio | [`13_portfolio_management`](13_portfolio_management.ipynb) | Ch17 | Long-short straddle allocation with margin constraints | One backtest run per allocation method, same artifact layout |
+| Costs | [`14_costs`](14_costs.ipynb) | Ch18 | HTM cost-sensitivity grid in % of premium across families and universes | `evaluation/htm_cost_sensitivity.parquet`, plus one registered backtest run per cost cell with `daily_returns.parquet` and `spec.json` under `run_log/backtest/{hash}/` (the grid is aggregated inline rather than through `run_backtest()`, so there are no weights) |
+| Risk | [`15_risk_management`](15_risk_management.ipynb) | Ch19 | Position-level exit rules (portfolio-level overlays framed as §19.8 governance) | Nothing - the comparison stays in the notebook |
+| Strategy Analysis | [`16_strategy_analysis`](16_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with paired-bootstrap holdout closure | `results/strategy_assessment.json`. The tear sheet is gated on a `trades.parquet` the vectorized HTM backtester does not emit, so it is skipped |
+| Appendix | [`90_ic_diagnostic`](90_ic_diagnostic.ipynb) | — | Signal-attribution deep dive outside the main pipeline | Nothing - it reads the registry |
 
 ## Key Results
 

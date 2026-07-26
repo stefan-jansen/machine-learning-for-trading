@@ -18,30 +18,30 @@ The pipeline is unusually long because the universe is unusually large. Sixteen 
 
 ## Pipeline
 
-| Stage | Notebook | Chapter | Description |
-|-------|----------|---------|-------------|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe breadth, era-dependent cost feasibility, walk-forward folds |
-| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 1-day, 5-day, and 21-day forward returns |
-| Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | 63 cross-sectional factors: momentum, volatility, liquidity, value |
-| Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward Wasserstein regime distance, FFD, GARCH features |
-| Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7--9 | Feature-label IC diagnostics across the full panel |
-| Linear | [`06_linear`](06_linear.ipynb) | Ch11 | Ridge, LASSO, ElasticNet on the full feature matrix |
-| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM grid across leaf profiles and loss functions |
-| Tabular DL | [`08_tabular_dl`](08_tabular_dl.ipynb) | Ch12 | TabM attention-style ensembling on the cross-section |
-| NLinear | [`09_dl_nlinear`](09_dl_nlinear.ipynb) | Ch13 | Minimal temporal baseline with last-value normalization |
-| LSTM | [`10_dl_lstm`](10_dl_lstm.ipynb) | Ch13 | Sequential memory across daily return windows |
-| TSMixer | [`11_dl_tsmixer`](11_dl_tsmixer.ipynb) | Ch13 | Time-mixing and feature-mixing across the 60-day lookback |
-| Weekly DL | [`12_dl_weekly`](12_dl_weekly.ipynb) | Ch13 | Weekly-cadence LSTM/NLinear comparison |
-| Latent Factors | [`13_latent_factors`](13_latent_factors.ipynb) | Ch14 | Index notebook for PCA + IPCA on the broad equity panel |
-| PCA | [`13a_pca`](13a_pca.ipynb) | Ch14 | Static factor extraction from the return covariance |
-| IPCA | [`13b_ipca`](13b_ipca.ipynb) | Ch14 | Instrumented PCA with characteristic-conditioned loadings |
-| Causal DML | [`14_causal_dml`](14_causal_dml.ipynb) | Ch15 | Causal effect of 12-1 momentum on daily returns |
-| Model Analysis | [`15_model_analysis`](15_model_analysis.ipynb) | -- | Cross-model IC comparison and fold stability diagnostics |
-| Backtest | [`16_backtest`](16_backtest.ipynb) | Ch16 | Daily long-short top-K strategy simulation |
-| Portfolio | [`17_portfolio_management`](17_portfolio_management.ipynb) | Ch17 | Allocation sweep on the highest-IC GBM signal |
-| Costs | [`18_costs`](18_costs.ipynb) | Ch18 | Cost-grid sweep on the top allocation combinations |
-| Risk | [`19_risk_management`](19_risk_management.ipynb) | Ch19 | Position-level and portfolio-level risk overlays |
-| Strategy Analysis | [`20_strategy_analysis`](20_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment: signal, lineage, holdout, attribution |
+| Stage | Notebook | Chapter | Description | Writes |
+|-------|----------|---------|-------------|--------|
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe breadth, era-dependent cost feasibility, walk-forward folds | `config/exploration/feasibility_report.json` |
+| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 1-day, 5-day, and 21-day forward returns | `labels/fwd_ret_1d.parquet`, `labels/fwd_ret_5d.parquet`, `labels/fwd_ret_21d.parquet`, `config/cv_config.json` |
+| Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | 63 cross-sectional factors: momentum, volatility, liquidity, value | `features/financial.parquet` |
+| Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward Wasserstein regime distance, FFD, GARCH features | `features/model_based.parquet` |
+| Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7--9 | Feature-label IC diagnostics across the full panel | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
+| Linear | [`06_linear`](06_linear.ipynb) | Ch11 | Ridge, LASSO, ElasticNet on the full feature matrix | Training runs and prediction sets in `run_log/registry.db`; coefficients under `run_log/training/{hash}/`, scores under `run_log/predictions/{hash}/` |
+| GBM | [`07_gbm`](07_gbm.ipynb) | Ch12 | LightGBM grid across leaf profiles and loss functions | Training runs and prediction sets; boosters, `learning_curves.parquet`, and `fold_metrics.parquet` under `run_log/training/{hash}/` |
+| Tabular DL | [`08_tabular_dl`](08_tabular_dl.ipynb) | Ch12 | TabM attention-style ensembling on the cross-section | Training runs and prediction sets; checkpoints under `run_log/training/tabular_dl/` |
+| NLinear | [`09_dl_nlinear`](09_dl_nlinear.ipynb) | Ch13 | Minimal temporal baseline with last-value normalization | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
+| LSTM | [`10_dl_lstm`](10_dl_lstm.ipynb) | Ch13 | Sequential memory across daily return windows | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
+| TSMixer | [`11_dl_tsmixer`](11_dl_tsmixer.ipynb) | Ch13 | Time-mixing and feature-mixing across the 60-day lookback | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
+| Weekly DL | [`12_dl_weekly`](12_dl_weekly.ipynb) | Ch13 | Weekly-cadence LSTM/NLinear comparison | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
+| Latent Factors | [`13_latent_factors`](13_latent_factors.ipynb) | Ch14 | Index notebook for PCA + IPCA on the broad equity panel | Nothing - it reads the registry |
+| PCA | [`13a_pca`](13a_pca.ipynb) | Ch14 | Static factor extraction from the return covariance | Training runs and prediction sets |
+| IPCA | [`13b_ipca`](13b_ipca.ipynb) | Ch14 | Instrumented PCA with characteristic-conditioned loadings | Training runs and prediction sets |
+| Causal DML | [`14_causal_dml`](14_causal_dml.ipynb) | Ch15 | Causal effect of 12-1 momentum on daily returns | A row in the registry's `causal_runs` |
+| Model Analysis | [`15_model_analysis`](15_model_analysis.ipynb) | -- | Cross-model IC comparison and fold stability diagnostics | Nothing - it reads the registry |
+| Backtest | [`16_backtest`](16_backtest.ipynb) | Ch16 | Daily long-short top-K strategy simulation | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, `trades.parquet`, `fills.parquet`, `equity.parquet`, `portfolio_state.parquet`, and `spec.json` under `run_log/backtest/{hash}/` |
+| Portfolio | [`17_portfolio_management`](17_portfolio_management.ipynb) | Ch17 | Allocation sweep on the highest-IC GBM signal | One backtest run per allocation method, same artifact layout |
+| Costs | [`18_costs`](18_costs.ipynb) | Ch18 | Cost-grid sweep on the top allocation combinations | One backtest run per cost level, same artifact layout |
+| Risk | [`19_risk_management`](19_risk_management.ipynb) | Ch19 | Position-level and portfolio-level risk overlays | One backtest run per overlay variant, same artifact layout |
+| Strategy Analysis | [`20_strategy_analysis`](20_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment: signal, lineage, holdout, attribution | `results/strategy_assessment.json`, `20_strategy_synthesis/output/us_equities_panel/us_equities_panel_tearsheet.html` |
 
 ## Key Results
 

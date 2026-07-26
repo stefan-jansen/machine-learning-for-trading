@@ -20,25 +20,25 @@ costs, and uncertainty from only two validation folds.
 
 ## Pipeline
 
-| Stage | Notebook | Chapter | Description |
-|---|---|---|---|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Tests funding persistence, cost feasibility, and strict completed-bar endpoints. |
-| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | Builds forward returns and class labels without admitting holdout-ending observations. |
-| Financial features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | Produces 39 premium, funding, momentum, volatility, and liquidity features. |
-| Model-based features | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Adds five fold-specific volatility and regime features fit on prior data. |
-| Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7-9 | Evaluates the exact 44-feature training frame on the canonical label clock. |
-| Linear models | [`06_linear`](06_linear.ipynb) | Ch11 | Fits complete Ridge, Lasso, and ElasticNet validation surfaces. |
-| Gradient boosting | [`07_gbm`](07_gbm.ipynb) | Ch12 | Trains the CUDA LightGBM grid and preserves physical boosters and predictions. |
-| Tabular deep learning | [`08_tabular_dl`](08_tabular_dl.ipynb) | Ch12 | Trains TabM checkpoints on the same fingerprinted frame. |
-| LSTM | [`09_dl_lstm`](09_dl_lstm.ipynb) | Ch13 | Evaluates causal 60-bar recurrent sequences on CUDA. |
-| TCN | [`10_dl_tcn`](10_dl_tcn.ipynb) | Ch13 | Evaluates dilated causal convolutions on the same sequence contract. |
-| Causal DML | [`11_causal_dml`](11_causal_dml.ipynb) | Ch15 | Tests whether the basis premium has a causal interpretation after adjustment. |
-| Model analysis | [`12_model_analysis`](12_model_analysis.ipynb) | Ch12-15 | Compares four current family leaders on one physical validation panel. |
-| Backtest | [`13_backtest`](13_backtest.ipynb) | Ch16 | Replays a frozen carrier with completed-bar prices and official funding. |
-| Portfolio | [`14_portfolio_management`](14_portfolio_management.ipynb) | Ch17 | Compares corrected point-in-time allocation methods on that carrier. |
-| Costs | [`15_costs`](15_costs.ipynb) | Ch18 | Measures cost sensitivity and price-only versus funding-inclusive breakevens. |
-| Risk | [`16_risk_management`](16_risk_management.ipynb) | Ch19 | Evaluates fixed and pre-validation-calibrated position-risk rules. |
-| Synthesis | [`17_strategy_analysis`](17_strategy_analysis.ipynb) | Ch20 | Keeps current model evidence separate from frozen carrier diagnostics. |
+| Stage | Notebook | Chapter | Description | Writes |
+|---|---|---|---|---|
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Tests funding persistence, cost feasibility, and strict completed-bar endpoints. | `config/exploration/feasibility_report.json` |
+| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | Builds forward returns and class labels without admitting holdout-ending observations. | One parquet per label in `labels/` (`fwd_ret_8h` plus the `fwd_ret_24h`, `fwd_dir_8h`, `fwd_dir_8h_3c` variants), and `config/cv_config.json` |
+| Financial features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | Produces 39 premium, funding, momentum, volatility, and liquidity features. | `features/financial.parquet` |
+| Model-based features | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Adds five fold-specific volatility and regime features fit on prior data. | `features/model_based.parquet` |
+| Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7-9 | Evaluates the exact 44-feature training frame on the canonical label clock. | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
+| Linear models | [`06_linear`](06_linear.ipynb) | Ch11 | Fits complete Ridge, Lasso, and ElasticNet validation surfaces. | Training runs and prediction sets in `run_log/registry.db`; coefficients under `run_log/training/{hash}/`, scores under `run_log/predictions/{hash}/` |
+| Gradient boosting | [`07_gbm`](07_gbm.ipynb) | Ch12 | Trains the CUDA LightGBM grid and preserves physical boosters and predictions. | Training runs and prediction sets; boosters, `learning_curves.parquet`, and `fold_metrics.parquet` under `run_log/training/{hash}/` |
+| Tabular deep learning | [`08_tabular_dl`](08_tabular_dl.ipynb) | Ch12 | Trains TabM checkpoints on the same fingerprinted frame. | Training runs and prediction sets; checkpoints under `run_log/training/tabular_dl/` |
+| LSTM | [`09_dl_lstm`](09_dl_lstm.ipynb) | Ch13 | Evaluates causal 60-bar recurrent sequences on CUDA. | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
+| TCN | [`10_dl_tcn`](10_dl_tcn.ipynb) | Ch13 | Evaluates dilated causal convolutions on the same sequence contract. | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
+| Causal DML | [`11_causal_dml`](11_causal_dml.ipynb) | Ch15 | Tests whether the basis premium has a causal interpretation after adjustment. | A row in the registry's `causal_runs` |
+| Model analysis | [`12_model_analysis`](12_model_analysis.ipynb) | Ch12-15 | Compares four current family leaders on one physical validation panel. | Nothing - it reads the registry |
+| Backtest | [`13_backtest`](13_backtest.ipynb) | Ch16 | Replays a frozen carrier with completed-bar prices and official funding. | Nothing - it replays a frozen carrier with `register=False` |
+| Portfolio | [`14_portfolio_management`](14_portfolio_management.ipynb) | Ch17 | Compares corrected point-in-time allocation methods on that carrier. | Nothing - it replays a frozen carrier with `register=False` |
+| Costs | [`15_costs`](15_costs.ipynb) | Ch18 | Measures cost sensitivity and price-only versus funding-inclusive breakevens. | Nothing - it replays a frozen carrier with `register=False` |
+| Risk | [`16_risk_management`](16_risk_management.ipynb) | Ch19 | Evaluates fixed and pre-validation-calibrated position-risk rules. | Nothing - it replays a frozen carrier with `register=False` |
+| Synthesis | [`17_strategy_analysis`](17_strategy_analysis.ipynb) | Ch20 | Keeps current model evidence separate from frozen carrier diagnostics. | Nothing - it reads the registry |
 
 ## Running
 
