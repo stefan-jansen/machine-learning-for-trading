@@ -12,10 +12,12 @@ Sampling strategy:
 
 Usage:
     uv run python tests/sample_registry_for_tests.py
+    uv run python tests/sample_registry_for_tests.py --output ~/ml4t/test-data/intermediates
 
-Writes to: ~/ml4t/test-data/intermediates/{cs}/run_log/registry.db
+Writes to: <--output>/{cs}/run_log/registry.db
 """
 
+import argparse
 import contextlib
 import sqlite3
 from pathlib import Path
@@ -24,7 +26,7 @@ REPO_ROOT = Path(__file__).parent.parent
 CODE_CS_DIR = REPO_ROOT / "case_studies"
 
 TEST_DATA_ROOT = Path.home() / "ml4t" / "test-data"
-INTERMEDIATES_DIR = TEST_DATA_ROOT / "intermediates"
+DEFAULT_INTERMEDIATES_DIR = TEST_DATA_ROOT / "intermediates"
 
 CASE_STUDY_IDS = [
     "etfs",
@@ -53,13 +55,13 @@ def _copy_rows(src, dst, table: str, rows: list) -> int:
     return len(rows)
 
 
-def sample_registry(cs_id: str) -> dict:
+def sample_registry(cs_id: str, intermediates_dir: Path = DEFAULT_INTERMEDIATES_DIR) -> dict:
     """Sample from production registry into test intermediates. Returns stats."""
     src_db = CODE_CS_DIR / cs_id / "run_log" / "registry.db"
     if not src_db.exists():
         return {"status": "SKIP", "reason": "no source registry.db"}
 
-    dst_dir = INTERMEDIATES_DIR / cs_id / "run_log"
+    dst_dir = intermediates_dir / cs_id / "run_log"
     dst_dir.mkdir(parents=True, exist_ok=True)
     dst_db = dst_dir / "registry.db"
 
@@ -166,14 +168,27 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_INTERMEDIATES_DIR,
+        help=(
+            "Fixture intermediates root to write (the test-data repo's "
+            "intermediates/ directory). Default: ~/ml4t/test-data/intermediates"
+        ),
+    )
+    args = parser.parse_args()
+    intermediates_dir = args.output.expanduser().resolve()
+
     print(f"Sampling registries from {CODE_CS_DIR}")
-    print(f"Writing to {INTERMEDIATES_DIR}")
+    print(f"Writing to {intermediates_dir}")
     print(f"Top {TOP_N_PER_GROUP} backtests per (family × stage) + all holdout\n")
 
     total_size = 0
     for cs_id in CASE_STUDY_IDS:
         print(f"--- {cs_id} ---")
-        stats = sample_registry(cs_id)
+        stats = sample_registry(cs_id, intermediates_dir)
         if stats["status"] != "OK":
             print(f"  {stats['status']}: {stats.get('reason', '')}")
             continue

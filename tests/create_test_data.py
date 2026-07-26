@@ -165,20 +165,53 @@ def build_firm_characteristics(source: Path, output: Path) -> list[Path]:
 
 # --- institutional holdings (13F) ---------------------------------------------
 
-# Columns 22_rag_financial_research/07_institutional_holdings_graph refuses to run
-# without. report_date is the SEC period-of-report, distinct from filing_date, and
-# put_call marks option positions the notebook separates out from share holdings.
-# A fixture missing them is not a smaller fixture, it is a different schema.
-_13F_REQUIRED_PROVENANCE = ("report_date", "put_call")
 _13F_DIR = Path("equities") / "positioning" / "13f"
-# The three artifacts load_institutional_holdings_13f, load_13f_edges and
-# load_13f_stock_features read. The co-ownership matrix is deliberately absent:
-# the notebook computes it from the holdings, and the production .npy is 255MB.
-_13F_FILES = (
-    "institutional_holdings.parquet",
-    "institution_stock_edges.parquet",
-    "stock_features.parquet",
-)
+
+# The canonical columns of each artifact data/equities/positioning/13f_download.py
+# emits, as required by their consumers. Validating one artifact is not enough:
+# the three are generated together and a stale copy of any of them is a different
+# schema, not a smaller fixture. Concretely, 22_rag/07 refuses to run without
+# holdings.put_call and holdings.report_date (report_date is the SEC
+# period-of-report, distinct from filing_date, and put_call marks the option
+# positions the notebook separates from share holdings), and
+# 10_text_feature_engineering/02 reads stock_features.issuer_name, which an older
+# generation of the producer spelled `issuer`.
+#
+# Listed per file rather than as one set so the error names the artifact that is
+# stale. The co-ownership matrix is deliberately absent from the fixture: the
+# notebook computes it from the holdings, and the production .npy is 255MB.
+_13F_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
+    "institutional_holdings.parquet": (
+        "cik",
+        "accession_no",
+        "cusip",
+        "issuer",
+        "shares",
+        "value_thousands",
+        "put_call",
+        "report_date",
+        "filing_date",
+        "company_name",
+    ),
+    "institution_stock_edges.parquet": (
+        "institution_id",
+        "stock_id",
+        "institution_name",
+        "stock_name",
+        "weight_value",
+        "weight_shares",
+        "report_date",
+        "timestamp",
+    ),
+    "stock_features.parquet": (
+        "cusip",
+        "issuer_name",
+        "n_inst_holders",
+        "total_inst_value_usd",
+        "timestamp",
+    ),
+}
+_13F_FILES = tuple(_13F_REQUIRED_COLUMNS)
 
 
 def build_institutional_holdings_13f(source: Path, output: Path) -> list[Path]:
@@ -198,13 +231,13 @@ def build_institutional_holdings_13f(source: Path, output: Path) -> list[Path]:
                 "data/equities/positioning/13f_download.py."
             )
 
-        if filename == "institutional_holdings.parquet":
-            names = set(pl.scan_parquet(src).collect_schema().names())
-            if missing := sorted(set(_13F_REQUIRED_PROVENANCE) - names):
-                raise ValueError(
-                    f"Source 13F artifact at {src} lacks SEC provenance {missing}. It predates "
-                    "the canonical downloader; regenerate it before building the fixture."
-                )
+        names = set(pl.scan_parquet(src).collect_schema().names())
+        if missing := sorted(set(_13F_REQUIRED_COLUMNS[filename]) - names):
+            raise ValueError(
+                f"Source 13F artifact at {src} is missing {missing}. It predates the "
+                "canonical downloader; regenerate all three artifacts with "
+                "data/equities/positioning/13f_download.py before building the fixture."
+            )
 
         dst = output / _13F_DIR / filename
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -243,12 +276,24 @@ DATASETS: tuple[Dataset, ...] = (
 DATASETS_BY_NAME = {dataset.name: dataset for dataset in DATASETS}
 
 
+def _owned_by(dataset: Dataset, rel: str) -> bool:
+    """Whether ``rel`` (manifest key, POSIX-relative) falls under the dataset."""
+    return any(
+        rel == owned.as_posix() or rel.startswith(f"{owned.as_posix()}/") for owned in dataset.owns
+    )
+
+
 def write_manifest(output: Path, built: dict[str, list[Path]]) -> Path:
     """Rewrite data/manifest.json from what this run actually produced.
 
     Only the datasets built in this run are refreshed; entries for datasets not
     selected are carried over, so a single ``--dataset`` run does not blank the
     rest of the manifest.
+
+    A rebuilt dataset's old entries are dropped before the new ones are recorded,
+    keyed on its ``owns`` paths. Merging instead would leave an artifact that has
+    been renamed or discontinued listed forever, and the manifest is the only
+    record of what the fixture set is supposed to contain.
     """
     manifest_path = output / "manifest.json"
     manifest: dict = {"version": "1", "subsets": {}, "files": {}}
@@ -260,6 +305,9 @@ def write_manifest(output: Path, built: dict[str, list[Path]]) -> Path:
     for name, paths in built.items():
         dataset = DATASETS_BY_NAME[name]
         manifest["subsets"][name] = {**dataset.budget, "description": dataset.description}
+        manifest["files"] = {
+            rel: entry for rel, entry in manifest["files"].items() if not _owned_by(dataset, rel)
+        }
         for path in paths:
             rel = path.relative_to(output).as_posix()
             size = path.stat().st_size

@@ -37,7 +37,10 @@ TEST_DATA_DIR="${1:-$HOME/ml4t/test-data}"
 SOURCE_DATA="${ML4T_SOURCE_DATA:-$HOME/ml4t/code/data}"
 STEPS="${STEPS:-1,2,3}"
 
-if [[ ! -d "$SOURCE_DATA" ]]; then
+# Only step 1 reads production data; steps 2 and 3 run off the fixture set and
+# the case-study registries, so requiring it would block the common single-step
+# re-run.
+if [[ ",$STEPS," == *",1,"* && ! -d "$SOURCE_DATA" ]]; then
   echo "ERROR: production data root not found: $SOURCE_DATA" >&2
   echo "Set ML4T_SOURCE_DATA to the directory holding the full datasets." >&2
   exit 1
@@ -52,11 +55,16 @@ echo ""
 
 cd "$REPO_ROOT"
 
-# MPLBACKEND=Agg is needed for headless execution. PLOTLY_RENDERER is deliberately
-# NOT set: this script used to export PLOTLY_RENDERER=json, which makes Plotly emit
-# a JSON blob instead of image/png, so every notebook it touched renders as raw
-# JSON on GitHub. That is the origin of the unrenderable-figure debt the `guards`
-# job reports. Do not reintroduce it.
+# MPLBACKEND=Agg is needed for headless execution.
+#
+# PLOTLY_RENDERER is not exported here, but note that it is not thereby unset:
+# step 2 runs notebooks through run_notebook(), which sets PLOTLY_RENDERER=json
+# itself. That is safe in this script because it writes only parquet
+# intermediates -- the executed notebook goes to a gitignored _executed_*.ipynb
+# and is discarded. The rule the JSON renderer breaks applies to re-executing a
+# *committed* notebook: it emits a JSON blob instead of image/png, so the figures
+# render as raw JSON on GitHub. Never use this script's step 2 to refresh a
+# committed notebook.
 export MPLBACKEND=Agg
 
 if [[ ",$STEPS," == *",1,"* ]]; then
@@ -85,7 +93,8 @@ if [[ ",$STEPS," == *",3,"* ]]; then
   echo "=== Step 3: sample production registries ==="
   # Reads each case study's production run_log/registry.db and copies a subset in.
   # Read-only with respect to the production registries; it never writes them.
-  uv run python tests/sample_registry_for_tests.py
+  uv run python tests/sample_registry_for_tests.py \
+      --output "$TEST_DATA_DIR/intermediates"
   echo ""
 fi
 

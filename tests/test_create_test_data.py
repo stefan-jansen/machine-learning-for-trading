@@ -7,6 +7,7 @@ canonical schema survives the reduction, that firm identity is preserved rather
 than re-derived per date, and that the manifest describes what was written.
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -14,12 +15,19 @@ import polars as pl
 import pytest
 
 from tests.create_test_data import (
+    _13F_REQUIRED_COLUMNS,
     FIRM_CHAR_SPLITS,
     Dataset,
     _firm_char_tensor_dir,
     build_firm_characteristics,
+    build_institutional_holdings_13f,
     write_manifest,
 )
+
+
+def ctd_13f_required_columns() -> dict[str, tuple[str, ...]]:
+    """The canonical 13F schemas, so a test frame is built from one source."""
+    return _13F_REQUIRED_COLUMNS
 
 
 def _write_tensor(path: Path, dates: list[int], n_firms: int, seed: int) -> None:
@@ -182,11 +190,93 @@ def test_manifest_records_sizes_and_preserves_unselected_entries(tmp_path: Path)
     finally:
         ctd.DATASETS_BY_NAME = original
 
-    import json
-
     manifest = json.loads(manifest_path.read_text())
     assert manifest["subsets"]["etfs"] == {"max_symbols": 15}, "unselected subset was dropped"
     assert manifest["files"]["etfs/etf_universe.parquet"]["size_bytes"] == 1
     entry = manifest["files"]["equities/firm_characteristics/firm_characteristics_all.parquet"]
     assert entry["size_bytes"] == written.stat().st_size
     assert manifest["subsets"]["firm_characteristics"]["max_entities"] == 200
+
+
+def test_manifest_drops_entries_the_rebuild_no_longer_produces(tmp_path: Path) -> None:
+    """A renamed or discontinued artifact must not stay listed forever."""
+    output = tmp_path / "out"
+    target = output / "equities" / "firm_characteristics"
+    target.mkdir(parents=True)
+    (output / "manifest.json").write_text(
+        json.dumps(
+            {
+                "version": "1",
+                "subsets": {},
+                "files": {
+                    # Under the dataset's owns path, but not produced this run.
+                    "equities/firm_characteristics/firm_characteristics_46.parquet": {
+                        "size_bytes": 9,
+                        "size_mb": 0.0,
+                    },
+                    # Outside it — belongs to another dataset, must survive.
+                    "equities/positioning/13f/stock_features.parquet": {
+                        "size_bytes": 7,
+                        "size_mb": 0.0,
+                    },
+                },
+            }
+        )
+    )
+    written = target / "firm_characteristics_all.parquet"
+    pl.DataFrame({"symbol": [1]}).write_parquet(written)
+
+    dataset = Dataset(
+        name="firm_characteristics",
+        description="test",
+        build=lambda source, output: [],
+        owns=(Path("equities") / "firm_characteristics",),
+    )
+    import tests.create_test_data as ctd
+
+    original = ctd.DATASETS_BY_NAME
+    ctd.DATASETS_BY_NAME = dict(original, firm_characteristics=dataset)
+    try:
+        manifest_path = write_manifest(output, {"firm_characteristics": [written]})
+    finally:
+        ctd.DATASETS_BY_NAME = original
+
+    files = json.loads(manifest_path.read_text())["files"]
+    assert "equities/firm_characteristics/firm_characteristics_46.parquet" not in files
+    assert "equities/firm_characteristics/firm_characteristics_all.parquet" in files
+    assert files["equities/positioning/13f/stock_features.parquet"]["size_bytes"] == 7
+
+
+def test_13f_builder_rejects_a_stale_derived_artifact(tmp_path: Path) -> None:
+    """Validating the holdings alone lets a stale edges or features file through.
+
+    ``stock_features`` is the case that reached readers: an older producer spelled
+    its issuer column ``issuer``, and 10_text_feature_engineering/02 reads
+    ``issuer_name``.
+    """
+    source = tmp_path / "source"
+    holdings_dir = source / "equities" / "positioning" / "13f"
+    holdings_dir.mkdir(parents=True)
+
+    for filename, columns in ctd_13f_required_columns().items():
+        frame = pl.DataFrame({column: [0] for column in columns})
+        if filename == "stock_features.parquet":
+            frame = frame.drop("issuer_name").with_columns(pl.lit("ACME").alias("issuer"))
+        frame.write_parquet(holdings_dir / filename)
+
+    with pytest.raises(ValueError, match=r"stock_features\.parquet.*\['issuer_name'\]"):
+        build_institutional_holdings_13f(source, tmp_path / "out")
+
+
+def test_13f_builder_copies_a_complete_artifact_set(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    holdings_dir = source / "equities" / "positioning" / "13f"
+    holdings_dir.mkdir(parents=True)
+    for filename, columns in ctd_13f_required_columns().items():
+        pl.DataFrame({column: [0] for column in columns}).write_parquet(holdings_dir / filename)
+
+    output = tmp_path / "out"
+    written = build_institutional_holdings_13f(source, output)
+
+    assert {path.name for path in written} == set(ctd_13f_required_columns())
+    assert all(path.exists() for path in written)
