@@ -24,10 +24,66 @@ from tests.create_test_data import (
     write_manifest,
 )
 
+# The columns data/equities/positioning/13f_download.py writes, transcribed from
+# its select() and agg() calls rather than imported from create_test_data. Reading
+# them from _13F_REQUIRED_COLUMNS would make every test below agree with whatever
+# that constant happens to say, including an incomplete version of it.
+_PRODUCER_13F_SCHEMAS: dict[str, tuple[str, ...]] = {
+    "institutional_holdings.parquet": (
+        "cik",
+        "accession_no",
+        "issuer",
+        "cusip",
+        "value_thousands",
+        "shares",
+        "put_call",
+        "report_date",
+        "filing_date",
+        "company_name",
+    ),
+    "institution_stock_edges.parquet": (
+        "institution_id",
+        "stock_id",
+        "institution_name",
+        "stock_name",
+        "weight_value",
+        "weight_shares",
+        "report_date",
+        "timestamp",
+    ),
+    "stock_features.parquet": (
+        "cusip",
+        "issuer_name",
+        "n_inst_holders",
+        "total_inst_value_usd",
+        "avg_position_size_usd",
+        "position_size_std_usd",
+        "timestamp",
+        "ownership_hhi",
+        "inst_coverage_pct",
+        "position_cv",
+        "inst_value_change_usd",
+        "inst_pct_change",
+    ),
+}
+
 
 def ctd_13f_required_columns() -> dict[str, tuple[str, ...]]:
     """The canonical 13F schemas, so a test frame is built from one source."""
-    return _13F_REQUIRED_COLUMNS
+    return _PRODUCER_13F_SCHEMAS
+
+
+def test_13f_required_columns_cover_the_producer_schemas() -> None:
+    """A column the producer emits but the check omits is invisible until ch22 runs.
+
+    22_rag/07 rebuilds ``stock_features`` and compares it with ``assert_frame_equal``,
+    which checks the whole schema. A source artifact from an older producer
+    generation therefore has to be rejected on any missing column, not only on the
+    few a loader reads by name.
+    """
+    assert {name: set(columns) for name, columns in _13F_REQUIRED_COLUMNS.items()} == {
+        name: set(columns) for name, columns in _PRODUCER_13F_SCHEMAS.items()
+    }
 
 
 def _write_tensor(path: Path, dates: list[int], n_firms: int, seed: int) -> None:
@@ -265,6 +321,22 @@ def test_13f_builder_rejects_a_stale_derived_artifact(tmp_path: Path) -> None:
         frame.write_parquet(holdings_dir / filename)
 
     with pytest.raises(ValueError, match=r"stock_features\.parquet.*\['issuer_name'\]"):
+        build_institutional_holdings_13f(source, tmp_path / "out")
+
+
+def test_13f_builder_rejects_a_source_missing_a_derived_feature(tmp_path: Path) -> None:
+    """No consumer loads ``ownership_hhi`` by name, and ch22's parity check still needs it."""
+    source = tmp_path / "source"
+    holdings_dir = source / "equities" / "positioning" / "13f"
+    holdings_dir.mkdir(parents=True)
+
+    for filename, columns in ctd_13f_required_columns().items():
+        frame = pl.DataFrame({column: [0] for column in columns})
+        if filename == "stock_features.parquet":
+            frame = frame.drop("ownership_hhi")
+        frame.write_parquet(holdings_dir / filename)
+
+    with pytest.raises(ValueError, match=r"stock_features\.parquet.*\['ownership_hhi'\]"):
         build_institutional_holdings_13f(source, tmp_path / "out")
 
 

@@ -203,12 +203,24 @@ _13F_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "report_date",
         "timestamp",
     ),
+    # Every column build_features_and_matrix emits, not just the ones a consumer
+    # names: 22_rag/07 rebuilds this frame and compares it with
+    # assert_frame_equal, which checks the whole schema, so a source missing a
+    # derived column passes a partial check here and fails the notebook's parity
+    # assertion instead.
     "stock_features.parquet": (
         "cusip",
         "issuer_name",
         "n_inst_holders",
         "total_inst_value_usd",
+        "avg_position_size_usd",
+        "position_size_std_usd",
         "timestamp",
+        "ownership_hhi",
+        "inst_coverage_pct",
+        "position_cv",
+        "inst_value_change_usd",
+        "inst_pct_change",
     ),
 }
 _13F_FILES = tuple(_13F_REQUIRED_COLUMNS)

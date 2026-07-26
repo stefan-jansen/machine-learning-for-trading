@@ -2014,15 +2014,19 @@ case_studies/sp500_options/04_model_based_features:
   # which it defines, so Papermill logged "Passed unknown parameter" and the full
   # production MCMC workload (10 calibration symbols x 2000 draws x 4 chains) ran
   # anyway. Raising the timeout hid that rather than fixing it.
+  #
+  # The sampler settings are deliberately NOT reduced. sv_diagnostics_pass()
+  # requires bulk and tail ESS of at least 400 and raises after one retry, so any
+  # draw count whose total posterior sample count approaches 400 fails closed by
+  # construction: 2 chains x 100 draws is 200 samples, and the retry's 2 x 200 is
+  # exactly 400, which correlated NUTS draws never reach in effective terms.
+  # What is safe to reduce is how many times that sampler runs and how finely the
+  # filter resolves: the pool is the per-fold MCMC fit count (10 -> 2) and the
+  # particle count is the filter's resolution over every segment (1000 -> 100).
   gpu: true
   parameters:
-    SV_CHAINS: 2
-    SV_DRAWS: 100
     SV_N_PARTICLES: 100
     SV_POOL_SIZE: 2
-    SV_RETRY_DRAWS: 200
-    SV_RETRY_TUNE: 200
-    SV_TUNE: 100
   timeout: 1800
 case_studies/sp500_options/05_evaluation:
   parameters:
