@@ -23,7 +23,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.pm_helpers import current_test_tier, get_overrides, get_tier, run_notebook
+from tests.pm_helpers import (
+    current_test_tier,
+    get_overrides,
+    get_tier,
+    missing_required_env,
+    run_notebook,
+)
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -105,6 +111,10 @@ def test_case_study_pipeline(
     if overrides.get("skip"):
         reason = overrides.get("skip_reason", "marked skip in overrides")
         pytest.skip(f"Skipped: {reason}")
+
+    # Credentials the notebook cannot run without.
+    if absent := missing_required_env(overrides):
+        pytest.skip(f"Requires {', '.join(absent)} (unset in this environment)")
 
     # Check required imports (e.g., gensim, signatory, duckdb)
     requires = overrides.get("requires_import")

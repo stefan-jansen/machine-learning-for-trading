@@ -109,8 +109,7 @@
 04_fundamental_alternative_data/01_academic_characteristics:
   timeout: 300
 04_fundamental_alternative_data/02_sec_filing_explorer:
-  skip: true
-  skip_reason: Requires EDGAR_IDENTITY env var for SEC EDGAR network calls; CI does not provide.
+  requires_env: EDGAR_IDENTITY
   tier: weekly
   timeout: 300
 04_fundamental_alternative_data/03_sec_form4_insider_transactions:
@@ -136,8 +135,7 @@
 04_fundamental_alternative_data/13_polymarket_prediction_markets:
   timeout: 120
 04_fundamental_alternative_data/14_text_data_extraction:
-  skip: true
-  skip_reason: Requires EDGAR_IDENTITY env var for SEC EDGAR network calls; CI does not provide.
+  requires_env: EDGAR_IDENTITY
   tier: weekly
   timeout: 300
 05_synthetic_data/00_classical_simulation:
@@ -1078,6 +1076,8 @@
     - AAPL
     YEARS:
     - 2024
+  requires_env: EDGAR_IDENTITY
+  tier: weekly
   timeout: 300
 22_rag_financial_research/02_domain_embeddings_comparison:
   parameters:

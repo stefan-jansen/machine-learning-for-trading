@@ -16,6 +16,11 @@ overrides.yaml schema (per-notebook, all optional):
     skip: bool — hard skip in uv-native run (Docker tests ignore)
     skip_reason: str
     requires_import: str | list[str]
+    requires_env: str | list[str] — environment variables the notebook cannot run
+        without (API keys, SEC identity). Skipped when any is unset or blank,
+        executed when they are all present. Prefer this over `skip: true` for a
+        missing capability: `skip` is unconditional, so a notebook marked that
+        way stays unexecuted even in the workflow that supplies the credential.
     gpu: bool
     long_running: bool
     docker_env: str — informational (e.g., "benchmark")
@@ -81,6 +86,21 @@ def current_test_tier() -> str:
     if tier not in VALID_TIERS:
         raise ValueError(f"Invalid ML4T_TEST_TIER={tier!r} — must be one of {sorted(VALID_TIERS)}")
     return tier
+
+
+def missing_required_env(overrides: dict) -> list[str]:
+    """Return the ``requires_env`` variables that are unset or blank.
+
+    An empty list means the notebook's credentials are all present and it must
+    execute. This is what keeps a credential-gated notebook honest in both
+    directions: it does not fail the per-commit run that has no secret, and it
+    does not silently stay skipped in the weekly run that does.
+    """
+    declared = overrides.get("requires_env")
+    if not declared:
+        return []
+    names = [declared] if isinstance(declared, str) else list(declared)
+    return [name for name in names if not (os.environ.get(name) or "").strip()]
 
 
 def get_reruns(overrides: dict) -> int:
