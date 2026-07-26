@@ -166,43 +166,67 @@ def imports_with_lines(path: Path) -> list[tuple[str, int, int]]:
     return found
 
 
+#: Fields the grammar uses to hold a single bound identifier. Checking fields
+#: rather than node types means a binding form that is not enumerated anywhere --
+#: a match-statement capture, a type parameter, something a future release adds --
+#: is still caught: ``name`` covers ``FunctionDef``/``ClassDef``/``ExceptHandler``/
+#: ``MatchAs``/``MatchStar``/``TypeVar``, ``arg`` covers parameters, and ``rest``
+#: covers ``MatchMapping``.
+_BINDING_FIELDS = ("name", "arg", "rest")
+
+
+def _binds_the_name(node: ast.AST, name: str) -> bool:
+    """True if ``node`` binds ``name`` through an identifier field or a
+    ``global``/``nonlocal`` declaration."""
+    if any(getattr(node, field, None) == name for field in _BINDING_FIELDS):
+        return True
+    declared = getattr(node, "names", None)
+    return isinstance(declared, list) and name in declared
+
+
 def _sys_is_the_module(tree: ast.Module) -> bool:
     """True if the name ``sys`` in this file is the standard-library module.
 
-    Conservative and whole-file: the file must contain a plain ``import sys``,
-    and the name must never be bound any other way. An alias
-    (``import config as sys``), a reassignment, a parameter, or a ``for`` target
-    all disqualify it, because any of them make ``sys.path.append("scripts")``
-    an unrelated call that would otherwise approve a broken import.
+    The file must carry a plain ``import sys`` **at module level** -- a nested
+    one binds only inside its own function, so a module-level
+    ``sys.path.append(...)`` beside it raises ``NameError`` and never touches the
+    path -- and the name must never be bound any other way anywhere in the file.
+    An alias (``import config as sys``), a reassignment, a parameter, a ``for``
+    target, a ``case`` capture: any of them make ``sys.path.append("scripts")``
+    an unrelated call that would otherwise approve a broken import. A wildcard
+    import disqualifies the file too, since what it binds cannot be read here.
 
     Whole-file rather than per-scope on purpose. Which binding is live at a given
     call is a scope-and-order question, and this guard does not answer those; a
     file that both imports ``sys`` and rebinds the name anywhere simply gets no
     credit for its mutations, which costs a false positive at worst.
     """
-    imported = False
+    if not any(
+        isinstance(node, ast.Import)
+        and any(alias.name == "sys" and alias.asname is None for alias in node.names)
+        for node in tree.body
+    ):
+        return False
     for node in ast.walk(tree):
+        # Imported names are inspected on their Import/ImportFrom statement; an
+        # `alias` node carries the imported name in its own `name` field, which
+        # is not a binding of it.
+        if isinstance(node, ast.alias):
+            continue
         if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.asname == "sys":
-                    return False
-                if alias.name == "sys" and alias.asname is None:
-                    imported = True
+            if any(alias.asname == "sys" for alias in node.names):
+                return False
         elif isinstance(node, ast.ImportFrom):
+            if any(alias.name == "*" for alias in node.names):
+                return False
             if any((alias.asname or alias.name) == "sys" for alias in node.names):
                 return False
         elif isinstance(node, ast.Name):
             if node.id == "sys" and isinstance(node.ctx, ast.Store | ast.Del):
                 return False
-        elif isinstance(node, ast.arg):
-            if node.arg == "sys":
-                return False
-        elif isinstance(
-            node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.ExceptHandler
-        ):
-            if node.name == "sys":
-                return False
-    return imported
+        elif _binds_the_name(node, "sys"):
+            return False
+    return True
 
 
 def explicit_path_inserts(path: Path, root: Path) -> list[Path]:

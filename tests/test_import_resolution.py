@@ -111,14 +111,23 @@ def test_an_unrelated_path_append_is_not_a_sys_path_mutation(tree: Path) -> None
         'from config import loader as sys\nsys.path.append("scripts")\nimport tool\n',
         'def f(sys):\n    sys.path.append("scripts")\n\n\nimport tool\n',
         'for sys in items:\n    sys.path.append("scripts")\n\nimport tool\n',
+        'import sys\ntry:\n    pass\nexcept ValueError as sys:\n    pass\nsys.path.append("s")\nimport tool\n',
+        # A `case` capture binds outside ast.Name, so type enumeration missed it.
+        'import sys\nmatch v:\n    case sys:\n        pass\nsys.path.append("scripts")\nimport tool\n',
+        # A wildcard import may export its own `sys`; what it binds is unreadable.
+        'import sys\nfrom config import *\nsys.path.append("scripts")\nimport tool\n',
+        # Nested: the import binds inside `f` only, so the module-level call raises
+        # NameError and never touches the path.
+        'def f():\n    import sys\n\n\nsys.path.append("scripts")\nimport tool\n',
         # No `import sys` at all: whatever `sys` is here, it is not the module.
         'sys.path.append("scripts")\nimport tool\n',
     ],
 )
 def test_a_sys_that_is_not_the_module_grants_nothing(tree: Path, source: str) -> None:
-    """The name has to be the stdlib module, not just spelled `sys`. An alias, a
-    reassignment, a parameter, or a loop target makes `sys.path.append("scripts")`
-    an unrelated call, and honoring it would approve a broken import."""
+    """The name has to be the stdlib module bound at module level, not just spelled
+    `sys`. An alias, a reassignment, a parameter, a loop or `case` target, or an
+    import nested in a function makes `sys.path.append("scripts")` an unrelated or
+    failing call, and honoring it would approve a broken import."""
     test_file = tree / "test_thing.py"
     test_file.write_text(source)
     assert not resolves_in_repo("tool", test_file, tree)
