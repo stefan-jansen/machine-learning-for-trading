@@ -97,9 +97,10 @@ def main():
         # Normalize column names to lowercase
         df = df.rename({col: col.lower() for col in df.columns})
 
-        # Parse date column if string
-        if df["date"].dtype == pl.Utf8:
-            df = df.with_columns(pl.col("date").str.to_datetime().alias("date"))
+        # Normalize the provider time field to the canonical schema
+        df = df.rename({"date": "timestamp"})
+        if df["timestamp"].dtype == pl.Utf8:
+            df = df.with_columns(pl.col("timestamp").str.to_datetime())
 
         # Drop null articles (should be very few)
         n_before = len(df)
@@ -117,7 +118,7 @@ def main():
         print(f"Total articles: {len(df):,}")
         print(f"Columns: {df.columns}")
         print(f"File size: {output_file.stat().st_size / 1024 / 1024:.1f} MB")
-        print(f"Date range: {df['date'].min()} to {df['date'].max()}")
+        print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 
         # Show sample
         print("\nSample headlines:")

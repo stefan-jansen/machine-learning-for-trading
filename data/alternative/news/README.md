@@ -100,7 +100,8 @@ from data import load_bloomberg_news
 df = load_bloomberg_news(start_date="2010-01-01", end_date="2013-12-31")
 ```
 
-The loader covers ``bloomberg_news.parquet`` (headline + body corpus).
+The loader covers ``bloomberg_news.parquet`` (headline + body corpus) and
+returns the article publication time as canonical ``timestamp``.
 The structured-financials file is still read directly when needed —
 Bloomberg corpora are secondary to FNSPID; prefer ``load_fnspid()``
 when building new pipelines.

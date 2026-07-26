@@ -191,6 +191,33 @@ positions_df = (
     .join(quarter_availability, on="report_period", how="left")
 )
 
+# A quarter enters the graph only once every covered manager has filed for it.
+# 13F filings are due 45 days after quarter end, so inside that window the newest
+# quarter holds the early filers only, and their peers' absence would read as a
+# mass exit rather than as missing coverage. The downloader applies the same rule,
+# so this is also what keeps the reconstruction below equal to its artifacts.
+covered_ciks = holdings_df["cik"].n_unique()
+complete_periods = (
+    positions_df.group_by("report_period")
+    .agg(pl.col("cik").n_unique().alias("n_ciks"))
+    .filter(pl.col("n_ciks") == covered_ciks)["report_period"]
+    .to_list()
+)
+if not complete_periods:
+    raise ValueError(
+        f"No reporting quarter is covered by all {covered_ciks} institutions in the "
+        "artifact, so no graph can be built without treating missing filers as exits."
+    )
+partial_periods = sorted(
+    set(positions_df["report_period"].unique().to_list()) - set(complete_periods)
+)
+if partial_periods:
+    print(
+        f"Excluded {len(partial_periods)} partially filed quarter(s): "
+        f"{', '.join(str(p) for p in partial_periods)}"
+    )
+positions_df = positions_df.filter(pl.col("report_period").is_in(complete_periods))
+
 if NUM_QUARTERS > 0:
     recent_periods = (
         positions_df["report_period"].unique().sort(descending=True).head(NUM_QUARTERS).to_list()
@@ -780,7 +807,13 @@ if len(latest_holdings) > 0:
         .with_columns(
             [
                 # Derived features
-                (pl.col("n_inst_holders") / len(INSTITUTIONS)).alias("inst_coverage_pct"),
+                # Breadth is a share of the managers actually in the graph, which is
+                # the denominator the canonical producer uses. Dividing by the
+                # configured list instead would diverge from the artifact whenever
+                # the two cover different manager sets.
+                (pl.col("n_inst_holders") / latest_holdings["cik"].n_unique()).alias(
+                    "inst_coverage_pct"
+                ),
                 (
                     pl.col("position_size_std_usd")
                     / pl.col("avg_position_size_usd").clip(lower_bound=1)

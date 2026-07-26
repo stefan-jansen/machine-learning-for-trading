@@ -23,7 +23,8 @@ Output layout under `$ML4T_DATA_PATH/equities/positioning/13f/`:
     (per-cik)
       institutional_holdings.parquet    raw holdings: cik, accession_no,
                                         issuer, cusip, value_thousands,
-                                        shares, filing_date, company_name
+                                        shares, put_call, report_date,
+                                        filing_date, company_name
       institution_stock_edges.parquet   institution → stock edge list
       stock_features.parquet            stock-level features
       coownership_matrix.npy            stock × stock similarity
@@ -56,6 +57,8 @@ import re
 import time
 import xml.etree.ElementTree as ET
 import zipfile
+from collections.abc import Iterable
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -102,6 +105,7 @@ def get_recent_13f_filings(cik: str, num_filings: int) -> list[dict]:
                     "cik": cik,
                     "company_name": data.get("name", "Unknown"),
                     "accession_number": recent["accessionNumber"][i],
+                    "report_date": recent["reportDate"][i],
                     "filing_date": recent["filingDate"][i],
                 }
             )
@@ -149,6 +153,7 @@ def parse_13f_holdings(cik: str, accession: str) -> list[dict]:
         value_str = info_table.findtext("ns:value", "0", ns_map)
         shares_elem = info_table.find("ns:shrsOrPrnAmt/ns:sshPrnamt", ns_map)
         shares_str = shares_elem.text if shares_elem is not None else "0"
+        put_call_text = info_table.findtext("ns:putCall", "", ns_map).strip().upper()
         holdings.append(
             {
                 "cik": cik,
@@ -157,48 +162,229 @@ def parse_13f_holdings(cik: str, accession: str) -> list[dict]:
                 "cusip": cusip.strip(),
                 "value_thousands": int(value_str) if value_str.isdigit() else 0,
                 "shares": int(shares_str) if shares_str.isdigit() else 0,
+                "put_call": put_call_text or None,
             }
         )
     return holdings
 
 
+def _complete_report_dates(holdings_df: pl.DataFrame, expected_ciks: set[str]) -> list[date]:
+    """Return report dates every expected institution filed for, newest first.
+
+    13F filings are due 45 days after quarter end, so a download run inside that
+    window sees the newest quarter from the early filers only. Building the graph
+    from it would drop the late filers and read their absence as a mass exit in
+    the quarter-over-quarter ownership change. Both the graph quarter and the
+    quarter it is compared against are therefore drawn from this list, so a
+    partially filed quarter can never enter either side of the comparison.
+
+    Coverage is measured over every disclosed row, not just long equity: a
+    manager who filed but disclosed only options has still filed, and counting
+    that as a missing filing would step back a quarter for no reason.
+    """
+    covered = (
+        holdings_df.filter(pl.col("cik").is_in(list(expected_ciks)))
+        .group_by("report_date")
+        .agg(pl.col("cik").n_unique().alias("n_ciks"))
+    )
+    complete = covered.filter(pl.col("n_ciks") == len(expected_ciks))
+    if complete.is_empty():
+        raise ValueError(
+            f"No 13F report date is covered by all {len(expected_ciks)} requested "
+            "institutions, so no quarter can be built without treating missing "
+            "filers as exits. Request more filings per institution with "
+            "--num-filings, or narrow the institution list."
+        )
+    dates = complete["report_date"].sort(descending=True).to_list()
+    newest = holdings_df["report_date"].max()
+    if dates[0] != newest:
+        filed = set(holdings_df.filter(pl.col("report_date") == newest)["cik"].unique().to_list())
+        print(
+            f"Report date {newest} has only {len(filed)} of {len(expected_ciks)} "
+            f"institutions filed; building the graph from {dates[0]} instead. "
+            f"Awaiting: {', '.join(sorted(expected_ciks - filed))}"
+        )
+    return dates
+
+
+def _reject_pre_2023_reporting_units(equity: pl.DataFrame) -> None:
+    """Refuse filings that report value in thousands rather than dollars.
+
+    The SEC switched 13F market value from thousands to whole dollars on
+    2023-01-03. The producer keeps the legacy `value_thousands` column name but
+    publishes the derived features as `*_usd`, which only holds for filings
+    after the switch. Mixing the two would be wrong by a factor of 1,000, and
+    silently so.
+    """
+    earliest = equity["filing_date"].min()
+    if earliest is not None and earliest.isoformat() < "2023-01-03":
+        raise ValueError(
+            f"13F holdings reach back to {earliest}, before the SEC switched "
+            "market value from thousands to dollars on 2023-01-03. The derived "
+            "artifacts label value in USD and cannot mix the two conventions. "
+            "Reduce --num-filings so the window starts after that date."
+        )
+
+
 def build_features_and_matrix(
     holdings_df: pl.DataFrame,
+    expected_ciks: Iterable[str] | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame, np.ndarray, list[str]]:
-    """Build stock features, edge list, and stock co-ownership similarity matrix."""
-    latest = holdings_df.sort("filing_date", descending=True).group_by(["cik", "cusip"]).first()
+    """Build the latest positive-equity graph and its point-in-time features.
 
-    edge_list = latest.select(
-        [
-            pl.col("cik").alias("institution_id"),
-            pl.col("cusip").alias("stock_id"),
-            pl.col("company_name").alias("institution_name"),
-            pl.col("issuer").alias("stock_name"),
-            pl.col("value_thousands").alias("weight_value"),
-            pl.col("shares").alias("weight_shares"),
-        ]
+    Args:
+        holdings_df: Canonical 13F holdings, including `put_call` and `report_date`.
+        expected_ciks: The institutions the caller requested, used to step back
+            from a quarter they have not all filed for yet. Without it there is
+            no way to tell a manager who has not filed from one who left the
+            universe, so the newest quarter present is used as-is.
+    """
+    if "put_call" not in holdings_df.columns:
+        raise ValueError("13F holdings must preserve the SEC putCall field.")
+    equity = holdings_df.filter(
+        pl.col("put_call").fill_null("").cast(pl.Utf8).str.strip_chars() == ""
+    )
+    if equity.is_empty():
+        raise ValueError("The 13F holdings contain no long-equity positions.")
+    _reject_pre_2023_reporting_units(equity)
+    complete_dates = (
+        None if expected_ciks is None else _complete_report_dates(holdings_df, set(expected_ciks))
+    )
+    latest_report_date = (
+        equity["report_date"].max() if complete_dates is None else complete_dates[0]
+    )
+    latest_rows = equity.filter(pl.col("report_date") == latest_report_date)
+    if latest_rows.is_empty():
+        raise ValueError("The latest 13F report date has no positive long-equity positions.")
+    latest_timestamp = latest_rows["filing_date"].max()
+    issuer_names = (
+        latest_rows.group_by(["cusip", "issuer"])
+        .agg(pl.col("value_thousands").sum().alias("issuer_value"))
+        .sort(
+            ["cusip", "issuer_value", "issuer"],
+            descending=[False, True, False],
+        )
+        .unique(subset="cusip", keep="first", maintain_order=True)
+        .select("cusip", pl.col("issuer").alias("stock_name"))
+    )
+    latest = (
+        latest_rows.group_by(["cik", "cusip"])
+        .agg(
+            pl.col("company_name").sort().first().alias("institution_name"),
+            pl.col("value_thousands").cast(pl.Float64).sum().alias("reported_value_usd"),
+            pl.col("shares").sum().alias("shares"),
+        )
+        .join(issuer_names, on="cusip", how="left")
+        .filter(pl.col("reported_value_usd") > 0)
+        .with_columns(
+            pl.lit(latest_report_date).alias("report_date"),
+            pl.lit(latest_timestamp).alias("timestamp"),
+        )
+        .sort(["cik", "cusip"])
     )
 
+    edge_list = latest.select(
+        pl.col("cik").alias("institution_id"),
+        pl.col("cusip").alias("stock_id"),
+        "institution_name",
+        "stock_name",
+        pl.col("reported_value_usd").alias("weight_value"),
+        pl.col("shares").alias("weight_shares"),
+        "report_date",
+        "timestamp",
+    ).sort(["institution_id", "stock_id"])
+
+    institution_count = latest["cik"].n_unique()
     stock_features = (
         latest.group_by("cusip")
         .agg(
-            pl.col("issuer").first(),
+            pl.col("stock_name").first().alias("issuer_name"),
             pl.col("cik").n_unique().alias("n_inst_holders"),
-            pl.col("value_thousands").sum().alias("total_inst_value"),
+            pl.col("reported_value_usd").sum().alias("total_inst_value_usd"),
+            pl.col("reported_value_usd").mean().alias("avg_position_size_usd"),
+            pl.col("reported_value_usd").std().fill_null(0).alias("position_size_std_usd"),
+            pl.col("timestamp").max().alias("timestamp"),
+            (pl.col("reported_value_usd") / pl.col("reported_value_usd").sum())
+            .pow(2)
+            .sum()
+            .alias("ownership_hhi"),
         )
         .with_columns(
-            (pl.col("total_inst_value") / pl.col("n_inst_holders")).alias("avg_inst_value"),
+            (pl.col("n_inst_holders") / institution_count).alias("inst_coverage_pct"),
+            (
+                pl.col("position_size_std_usd")
+                / pl.col("avg_position_size_usd").clip(lower_bound=1)
+            ).alias("position_cv"),
         )
+        .sort("cusip")
     )
+
+    position_panel = (
+        equity.group_by(["cik", "cusip", "report_date"])
+        .agg(pl.col("value_thousands").cast(pl.Float64).sum().alias("reported_value_usd"))
+        .filter(pl.col("reported_value_usd") > 0)
+    )
+    # Compare the graph's quarter against another quarter every institution filed
+    # for. A partially filed quarter on either side would read as mass entries or
+    # exits rather than as real ownership change.
+    eligible = (
+        position_panel["report_date"].unique().to_list()
+        if complete_dates is None
+        else complete_dates
+    )
+    prior_periods = sorted((d for d in eligible if d < latest_report_date), reverse=True)
+    if prior_periods:
+        current_period, prior_period = latest_report_date, prior_periods[0]
+        stock_quarter = position_panel.group_by(["cusip", "report_date"]).agg(
+            pl.col("reported_value_usd").sum().alias("quarter_value_usd")
+        )
+        prior = stock_quarter.filter(pl.col("report_date") == prior_period).select(
+            "cusip", pl.col("quarter_value_usd").alias("prior_value_usd")
+        )
+        current = stock_quarter.filter(pl.col("report_date") == current_period).select(
+            "cusip", pl.col("quarter_value_usd").alias("current_value_usd")
+        )
+        changes = (
+            prior.join(current, on="cusip", how="full", coalesce=True)
+            .with_columns(
+                pl.col("prior_value_usd").fill_null(0),
+                pl.col("current_value_usd").fill_null(0),
+            )
+            .with_columns(
+                (pl.col("current_value_usd") - pl.col("prior_value_usd")).alias(
+                    "inst_value_change_usd"
+                ),
+                pl.when(pl.col("prior_value_usd") > 0)
+                .then(
+                    (pl.col("current_value_usd") - pl.col("prior_value_usd"))
+                    / pl.col("prior_value_usd")
+                )
+                .otherwise(None)
+                .alias("inst_pct_change"),
+            )
+            .select("cusip", "inst_value_change_usd", "inst_pct_change")
+        )
+        stock_features = stock_features.join(changes, on="cusip", how="left").with_columns(
+            pl.col("inst_value_change_usd").fill_null(0)
+        )
+    else:
+        # Keep the artifact schema fixed. With a single quarter there is nothing
+        # to compare against, so the change is zero dollars and an undefined rate
+        # rather than a missing column that consumers would have to test for.
+        stock_features = stock_features.with_columns(
+            pl.lit(0.0, dtype=pl.Float64).alias("inst_value_change_usd"),
+            pl.lit(None, dtype=pl.Float64).alias("inst_pct_change"),
+        )
+    stock_features = stock_features.sort("cusip")
 
     # Co-ownership similarity matrix
     stocks = sorted(latest["cusip"].unique().to_list())
-    institutions = latest["cik"].unique().to_list()
+    institutions = sorted(latest["cik"].unique().to_list())
     stock_idx = {s: i for i, s in enumerate(stocks)}
     inst_idx = {c: i for i, c in enumerate(institutions)}
     ownership = np.zeros((len(institutions), len(stocks)), dtype=np.float32)
     for row in latest.iter_rows(named=True):
-        ownership[inst_idx[row["cik"]], stock_idx[row["cusip"]]] = row["value_thousands"]
+        ownership[inst_idx[row["cik"]], stock_idx[row["cusip"]]] = row["reported_value_usd"]
     row_sums = ownership.sum(axis=1, keepdims=True)
     row_sums[row_sums == 0] = 1
     ownership_norm = ownership / row_sums
@@ -272,7 +458,7 @@ def _normalize_bulk_to_canonical(
     """Join the three bulk tables into the canonical per-cik schema.
 
     Output columns: cik, accession_no, issuer, cusip, value_thousands,
-    shares, filing_date, company_name.
+    shares, put_call, report_date, filing_date, company_name.
     """
     # SEC SUBMISSION.FILING_DATE is "DD-MON-YYYY" uppercase (e.g. "31-OCT-2024").
     # Parse to a Date so downstream filter by start_date/end_date works.
@@ -280,6 +466,9 @@ def _normalize_bulk_to_canonical(
         [
             pl.col("ACCESSION_NUMBER"),
             pl.col("CIK").cast(pl.Utf8).str.zfill(10).alias("cik"),
+            pl.col("PERIODOFREPORT")
+            .str.to_date(format="%d-%b-%Y", strict=False)
+            .alias("report_date"),
             pl.col("FILING_DATE").str.to_date(format="%d-%b-%Y", strict=False).alias("filing_date"),
         ]
     )
@@ -290,6 +479,16 @@ def _normalize_bulk_to_canonical(
         ]
     )
     # INFOTABLE is the big table — keep only what the canonical schema needs.
+    put_call = (
+        pl.col("PUTCALL")
+        .cast(pl.Utf8)
+        .str.strip_chars()
+        .replace("", None)
+        .str.to_uppercase()
+        .alias("put_call")
+        if "PUTCALL" in infotable.columns
+        else pl.lit(None, dtype=pl.Utf8).alias("put_call")
+    )
     holdings = infotable.select(
         [
             pl.col("ACCESSION_NUMBER").alias("accession_no"),
@@ -297,6 +496,7 @@ def _normalize_bulk_to_canonical(
             pl.col("CUSIP").alias("cusip"),
             pl.col("VALUE").cast(pl.Int64).alias("value_thousands"),
             pl.col("SSHPRNAMT").cast(pl.Int64).alias("shares"),
+            put_call,
             pl.col("ACCESSION_NUMBER"),
         ]
     )
@@ -313,6 +513,8 @@ def _normalize_bulk_to_canonical(
                 "cusip",
                 "value_thousands",
                 "shares",
+                "put_call",
+                "report_date",
                 "filing_date",
                 "company_name",
             ]
@@ -395,6 +597,7 @@ def _run_per_cik(
     for row in filings_df.iter_rows(named=True):
         holdings = parse_13f_holdings(row["cik"], row["accession_number"])
         for h in holdings:
+            h["report_date"] = row["report_date"]
             h["filing_date"] = row["filing_date"]
             h["company_name"] = row["company_name"]
         all_holdings.extend(holdings)
@@ -407,8 +610,13 @@ def _run_per_cik(
         print("No holdings parsed.")
         return 1
 
-    holdings_df = pl.DataFrame(all_holdings)
-    stock_features, edge_list, coown_matrix, stocks = build_features_and_matrix(holdings_df)
+    holdings_df = pl.from_dicts(all_holdings, infer_schema_length=None).with_columns(
+        pl.col("report_date").str.to_date(),
+        pl.col("filing_date").str.to_date(),
+    )
+    stock_features, edge_list, coown_matrix, stocks = build_features_and_matrix(
+        holdings_df, expected_ciks=[cik for _, cik in institutions]
+    )
 
     holdings_path = output_dir / "institutional_holdings.parquet"
     edges_path = output_dir / "institution_stock_edges.parquet"
