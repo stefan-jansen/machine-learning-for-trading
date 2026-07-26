@@ -668,10 +668,6 @@ print(f"  {len(features):,} rows, {features['symbol'].n_unique()} assets")
 # due to different feature sets and evaluation scope.
 
 # %%
-# Load 21-day forward return labels
-labels = pl.read_parquet(CASE_DIR / "labels" / "fwd_ret_21d.parquet")
-label_col = "fwd_ret_21d"
-
 # Holdout boundary: feature evaluation is a development decision, so the
 # sealed holdout (setup.yaml `evaluation.holdout_start`; see the rule in
 # 06_strategy_definition/02_cv_foundations) must not inform which features
@@ -680,7 +676,14 @@ label_col = "fwd_ret_21d"
 # baseline-IC scoping in `02_labels`.
 setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 holdout_start = setup["evaluation"]["holdout_start"]
-LABEL_HORIZON = 21  # fwd_ret_21d: the forward window whose endpoint must clear the holdout
+
+# The label and its horizon both come from the config, so a change to
+# `labels.primary` cannot leave the purge and the HAC lag pointing at a
+# different forward window than the label they are correcting for.
+label_col = setup["labels"]["primary"]
+LABEL_HORIZON = int(label_col.rsplit("_", 1)[-1].removesuffix("d"))
+labels = pl.read_parquet(CASE_DIR / "labels" / f"{label_col}.parquet")
+print(f"Label: {label_col} (horizon {LABEL_HORIZON}d, from setup.yaml labels.primary)")
 
 # Seal the holdout on the LABEL endpoint, not the signal date. A pre-holdout
 # date whose 21-day forward label reaches into the holdout would leak holdout
