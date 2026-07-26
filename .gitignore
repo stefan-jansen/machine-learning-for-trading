@@ -197,5 +197,6 @@ case_studies/*/catalog/*.json
 !24_autonomous_agents/forecast_traces/01_react_reasoning_20260615T191047Z_04eb6e7c603d.json
 !24_autonomous_agents/forecast_traces/09_evaluation_and_governance_20260615T191431Z_d5030378899c.json
 
-# roborev snapshots
+# roborev snapshots and the local review-agent config
 /.roborev/
+/.roborev.toml
