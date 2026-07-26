@@ -8,16 +8,19 @@ rules that keep it from crying wolf on legitimate imports.
 
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 
 from check_import_resolution import (  # noqa: E402
+    _path_builtins_are_readable,
     imports_with_lines,
+    iter_source_files,
     resolves_in_repo,
     resolves_relative,
     third_party_names,
@@ -310,6 +313,252 @@ def test_an_absolute_sys_path_entry_is_not_reinterpreted(tree: Path) -> None:
     # An absolute path that really points into the repo is a resolution root.
     test_file.write_text(f'import sys\nsys.path.insert(0, "{tree / "scripts"}")\nimport tool\n')
     assert resolves_in_repo("tool", test_file, tree)
+
+
+def test_a_multi_segment_path_insert_names_one_directory(tmp_path: Path) -> None:
+    """`REPO_ROOT / ".github" / "scripts"` is one root written as two literals.
+    Reading each constant on its own produced `<repo>/.github` and
+    `<repo>/scripts` — neither the directory meant, so the import failed."""
+    root = tmp_path / "repo"
+    (root / ".github" / "scripts").mkdir(parents=True)
+    (root / ".github" / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    test_file.write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "REPO_ROOT = Path(__file__).resolve().parent\n"
+        'sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))\n'
+        "import tool\n"
+    )
+    assert resolves_in_repo("tool", test_file, root)
+
+    # The segments are not a pool of independent roots: a module sitting at only
+    # one of them does not satisfy the import.
+    (root / "scripts").mkdir()
+    (root / "scripts" / "stray.py").write_text("")
+    assert not resolves_in_repo("stray", test_file, root)
+
+
+def test_a_base_outside_the_checkout_grants_nothing(tmp_path: Path) -> None:
+    """Reading only the literals made `EXTERNAL_ROOT / "scripts"` and
+    `REPO_ROOT / "scripts"` the same entry, so an import passed on the strength
+    of a module this repo ships at a path the running code never searches."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+
+    test_file.write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        'EXTERNAL_ROOT = Path("/somewhere/else")\n'
+        'sys.path.insert(0, str(EXTERNAL_ROOT / "scripts"))\n'
+        "import tool\n"
+    )
+    assert not resolves_in_repo("tool", test_file, root)
+
+    # The same entry against a base that really is the repo root is honored.
+    test_file.write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "REPO_ROOT = Path(__file__).resolve().parent\n"
+        'sys.path.insert(0, str(REPO_ROOT / "scripts"))\n'
+        "import tool\n"
+    )
+    assert resolves_in_repo("tool", test_file, root)
+
+
+def test_an_unreadable_base_grants_nothing(tmp_path: Path) -> None:
+    """A name this reader cannot follow — computed, imported, rebound — must not
+    fall back to the repo root. Reporting an import it cannot justify is the
+    cheaper error; approving one it cannot check is the bug class itself."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+
+    for base in (
+        "BASE = os.environ['SOMEWHERE']",
+        "from config import BASE",
+        'BASE = Path("/a")\nBASE = Path("/b")',  # rebound: which one is live?
+    ):
+        test_file.write_text(
+            "import sys\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            f"{base}\n"
+            'sys.path.insert(0, str(BASE / "scripts"))\n'
+            "import tool\n"
+        )
+        assert not resolves_in_repo("tool", test_file, root), base
+
+
+def test_an_unreadable_first_assignment_still_counts_as_a_binding(tmp_path: Path) -> None:
+    """Counting only the assignments this reader understands let an unreadable
+    first one go unrecorded, so the readable second one looked like the single
+    binding and lent its directory to an insert that ran against the first."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    test_file.write_text(
+        "import sys\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "BASE = os.environ['SOMEWHERE']\n"
+        'sys.path.insert(0, str(BASE / "scripts"))\n'
+        "import tool\n"
+        "BASE = Path(__file__).resolve().parent\n"
+    )
+    assert not resolves_in_repo("tool", test_file, root)
+
+
+@pytest.mark.parametrize(
+    "preamble",
+    [
+        "from mypath import Path",  # not pathlib's
+        "from pathlib import Path as _P\nPath = _P\n",  # rebound
+        "from pathlib import Path\ndef str(x):\n    return x\n",  # builtin shadowed
+    ],
+)
+def test_a_shadowed_path_or_str_grants_nothing(tmp_path: Path, preamble: str) -> None:
+    """`Path` and `str` are spellings, not guarantees. A local, imported or
+    rebound one can name a directory outside the checkout at runtime while the
+    expression still reads as an in-repo path."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    test_file.write_text(
+        f"import sys\n{preamble}\n"
+        "REPO_ROOT = Path(__file__).resolve().parent\n"
+        'sys.path.insert(0, str(REPO_ROOT / "scripts"))\n'
+        "import tool\n"
+    )
+    assert not resolves_in_repo("tool", test_file, root)
+
+
+@pytest.mark.parametrize(
+    "preamble",
+    [
+        "from mypath import Path",  # not pathlib's
+        "from pathlib import Path as _P\nPath = _P\n",  # rebound
+        "from pathlib import Path\ndef str(x):\n    return x\n",  # builtin shadowed
+    ],
+)
+def test_a_shadowed_path_or_str_grants_nothing_written_inline(
+    tmp_path: Path, preamble: str
+) -> None:
+    """The same claim written as one expression rather than through a
+    module-level name. Validating the names only left this form trusted, so a
+    shadowed `Path` or `str` could still name a directory outside the checkout
+    at runtime while the insert read as an in-repo path."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    test_file.write_text(
+        f"import sys\n{preamble}\n"
+        'sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))\n'
+        "import tool\n"
+    )
+    assert not resolves_in_repo("tool", test_file, root)
+
+
+@pytest.mark.parametrize(
+    "pathlib_import",
+    [
+        "def helper():\n    from pathlib import Path\n",  # binds inside the function only
+        "class Holder:\n    from pathlib import Path\n",  # binds as a class attribute
+    ],
+)
+def test_a_scoped_pathlib_import_grants_nothing(tmp_path: Path, pathlib_import: str) -> None:
+    """An import inside a function or class does not bind the module-level name,
+    so the `Path(__file__)` beside it raises NameError and the insert it builds
+    never runs. Reading the file as trustworthy approved an import on the
+    strength of a `sys.path` entry that never existed."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    test_file.write_text(
+        f"import sys\n{pathlib_import}\n"
+        'sys.path.insert(0, Path(__file__).resolve().parent / "scripts")\n'
+        "import tool\n"
+    )
+    assert not resolves_in_repo("tool", test_file, root)
+
+
+def test_a_plain_string_entry_needs_no_pathlib_import(tmp_path: Path) -> None:
+    """A literal entry is readable whether or not the file imports `Path`.
+    Refusing the whole name map when `Path` is unreadable rejected
+    `SCRIPTS = "scripts"`, which needs neither `Path` nor `str` to be read."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    test_file.write_text(
+        'import sys\n\nSCRIPTS = "scripts"\nsys.path.insert(0, SCRIPTS)\nimport tool\n'
+    )
+    assert resolves_in_repo("tool", test_file, root)
+
+
+@pytest.mark.parametrize(
+    ("base", "entry"),
+    [
+        (".", 'BASE / "scripts"'),  # TypeError: unsupported operand str / str
+        ("scripts/inner", "BASE.parent"),  # AttributeError: str has no .parent
+        (".", 'BASE.resolve() / "scripts"'),  # AttributeError: str has no .resolve
+    ],
+)
+def test_a_string_base_cannot_be_joined_or_walked(tmp_path: Path, base: str, entry: str) -> None:
+    """`"." / "scripts"` raises TypeError, so the insert never runs and the
+    directory is no resolution root. Reading every literal as a `Path` lost the
+    runtime type and granted a root for an entry that never existed.
+
+    Each shape is written so that misreading it yields `<repo>/scripts`, where
+    the module sits — landing on the repo root instead would assert nothing,
+    since the root is a resolution root regardless."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    # The pathlib import is what makes this a test of the runtime type rather
+    # than of the readability check: without it the whole name map is refused
+    # anyway, and the assertion would hold for the wrong reason.
+    test_file.write_text(
+        "import sys\nfrom pathlib import Path\n\n"
+        f'BASE = "{base}"\nsys.path.insert(0, {entry})\nimport tool\n'
+    )
+    assert not resolves_in_repo("tool", test_file, root)
+
+
+def test_a_wildcard_import_makes_path_and_str_unreadable() -> None:
+    """What a wildcard binds cannot be read here, so it can shadow `Path` or
+    `str` unseen. `_sys_is_the_module` rejects such a file before any insert is
+    read, which is why this is asserted on the predicate itself: the predicate
+    has to hold on its own rather than on a caller's unrelated check."""
+    clean = "import sys\nfrom pathlib import Path\n"
+    assert _path_builtins_are_readable(ast.parse(clean))
+    assert not _path_builtins_are_readable(ast.parse(clean + "from custom import *\n"))
+
+
+def test_dot_github_scripts_is_scanned(tmp_path: Path) -> None:
+    """SKIP_DIRS drops `.github` wholesale, which would silently exempt the
+    guards and notebook tooling that live in `.github/scripts/` — including this
+    guard itself — from the check they exist to enforce."""
+    root = tmp_path / "repo"
+    (root / ".github" / "workflows").mkdir(parents=True)
+    (root / ".github" / "scripts").mkdir()
+    (root / ".github" / "scripts" / "guard.py").write_text("")
+    (root / ".github" / "workflows" / "helper.py").write_text("")
+    (root / ".github" / "scripts" / "__pycache__").mkdir()
+    (root / ".github" / "scripts" / "__pycache__" / "guard.py").write_text("")
+
+    scanned = {p.relative_to(root).as_posix() for p in iter_source_files(root)}
+    assert ".github/scripts/guard.py" in scanned
+    assert ".github/workflows/helper.py" not in scanned
+    assert ".github/scripts/__pycache__/guard.py" not in scanned
 
 
 def test_a_path_entry_cannot_walk_out_of_the_repo(tmp_path: Path) -> None:

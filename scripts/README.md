@@ -12,10 +12,22 @@ importable library code the notebooks build on lives in [`utils/`](../utils).
   `ML4T_OUTPUT_DIR`-isolated experiment.
 - **`sync_notebooks.py`** — regenerates a notebook's `.ipynb` from its Jupytext `.py`
   source (or the reverse); pass `--check` to only report which pairs have drifted.
-- **`sanitize_notebook_paths.py`** — strips machine-specific absolute paths out of
-  committed notebook outputs and metadata; a CI check fails if any slip through.
-- **`notebook_provenance.py`** — the pre-commit gate: it stamps each executed notebook
-  with the git hash of its `.py` source and blocks commits of stale or test-mode runs.
+
+That is the whole directory, which is the point: everything here is something a
+reader runs. The checks CI enforces and the tools that repair committed notebooks
+live in [`.github/scripts/`](../.github/scripts). Reading the book needs none of
+them; opening a pull request can, and the failure tells you which:
+
+- `notebook_provenance.py stamp <nb.ipynb> --executor <env>` — re-stamps a
+  notebook. The pre-commit gate fails a stamped notebook whose `.py` source has
+  moved on since, and any notebook committed from a test-mode run. An unstamped
+  notebook is reported but does not fail, until the backfill is complete and the
+  gate moves to `--strict`.
+- `strip_empty_cell_tags.py` — run when the pair-sync gate reports a notebook
+  whose `.ipynb` carries empty `tags: []` its `.py` does not.
+- `sanitize_notebook_paths.py` — strips machine-specific absolute paths out of
+  committed notebook outputs. It currently rewrites source as well as outputs, so
+  check its diff before committing.
 
 > Internal registry-maintenance tooling (backfills, schema migrations, one-off data
 > repairs) is intentionally **not** in this repository — it lives in the separate

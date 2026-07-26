@@ -29,10 +29,10 @@ provenance exists. Flip to ``--strict`` once the backfill is complete.
 
 Usage::
 
-    uv run python scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu
-    uv run python scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --notes "..."
-    uv run python scripts/notebook_provenance.py check          # gate (stamped-only)
-    uv run python scripts/notebook_provenance.py check --strict  # also fail on unverified
+    uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu
+    uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --notes "..."
+    uv run python .github/scripts/notebook_provenance.py check          # gate (stamped-only)
+    uv run python .github/scripts/notebook_provenance.py check --strict  # also fail on unverified
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ import sys
 from datetime import UTC, datetime, timezone
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SKIP_PARTS = {"_reference", ".venv", ".git", ".ipynb_checkpoints"}
 STAMP_KEY = "ml4t_provenance"
 PRODUCTION_SAFE_PARAMETERS = {

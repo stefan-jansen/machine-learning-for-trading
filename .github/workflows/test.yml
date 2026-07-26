@@ -351,7 +351,7 @@ jobs:
       - name: Notebook pairs open in JupyterLab (#372 regression gate)
         run: |
           source .venv/bin/activate
-          python scripts/check_notebook_pair_sync.py
+          python .github/scripts/check_notebook_pair_sync.py
       # Chapter 21 shipped two notebooks importing helper modules that were
       # never committed, so every reader hit ModuleNotFoundError. This is a
       # purely static check (no imports executed, nothing installed), which is
@@ -359,7 +359,7 @@ jobs:
       - name: Every import resolves to a file or a declared dependency
         run: |
           source .venv/bin/activate
-          python scripts/check_import_resolution.py
+          python .github/scripts/check_import_resolution.py
       # test_no_machine_specific_paths is deselected, not skipped: it is RED today
       # (97 `/home/stefan/...` leaks across 46 notebooks, incl. shipped Ch1
       # factor_regimes). The leaks are in outputs — cosmetic, not breakage — so
