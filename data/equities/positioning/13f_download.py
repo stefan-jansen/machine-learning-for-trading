@@ -168,7 +168,7 @@ def parse_13f_holdings(cik: str, accession: str) -> list[dict]:
     return holdings
 
 
-def _complete_report_dates(equity: pl.DataFrame, expected_ciks: set[str]) -> list[date]:
+def _complete_report_dates(holdings_df: pl.DataFrame, expected_ciks: set[str]) -> list[date]:
     """Return report dates every expected institution filed for, newest first.
 
     13F filings are due 45 days after quarter end, so a download run inside that
@@ -177,9 +177,13 @@ def _complete_report_dates(equity: pl.DataFrame, expected_ciks: set[str]) -> lis
     the quarter-over-quarter ownership change. Both the graph quarter and the
     quarter it is compared against are therefore drawn from this list, so a
     partially filed quarter can never enter either side of the comparison.
+
+    Coverage is measured over every disclosed row, not just long equity: a
+    manager who filed but disclosed only options has still filed, and counting
+    that as a missing filing would step back a quarter for no reason.
     """
     covered = (
-        equity.filter(pl.col("cik").is_in(list(expected_ciks)))
+        holdings_df.filter(pl.col("cik").is_in(list(expected_ciks)))
         .group_by("report_date")
         .agg(pl.col("cik").n_unique().alias("n_ciks"))
     )
@@ -192,9 +196,9 @@ def _complete_report_dates(equity: pl.DataFrame, expected_ciks: set[str]) -> lis
             "--num-filings, or narrow the institution list."
         )
     dates = complete["report_date"].sort(descending=True).to_list()
-    newest = equity["report_date"].max()
+    newest = holdings_df["report_date"].max()
     if dates[0] != newest:
-        filed = set(equity.filter(pl.col("report_date") == newest)["cik"].unique().to_list())
+        filed = set(holdings_df.filter(pl.col("report_date") == newest)["cik"].unique().to_list())
         print(
             f"Report date {newest} has only {len(filed)} of {len(expected_ciks)} "
             f"institutions filed; building the graph from {dates[0]} instead. "
@@ -244,7 +248,7 @@ def build_features_and_matrix(
         raise ValueError("The 13F holdings contain no long-equity positions.")
     _reject_pre_2023_reporting_units(equity)
     complete_dates = (
-        None if expected_ciks is None else _complete_report_dates(equity, set(expected_ciks))
+        None if expected_ciks is None else _complete_report_dates(holdings_df, set(expected_ciks))
     )
     latest_report_date = (
         equity["report_date"].max() if complete_dates is None else complete_dates[0]
@@ -362,6 +366,14 @@ def build_features_and_matrix(
         )
         stock_features = stock_features.join(changes, on="cusip", how="left").with_columns(
             pl.col("inst_value_change_usd").fill_null(0)
+        )
+    else:
+        # Keep the artifact schema fixed. With a single quarter there is nothing
+        # to compare against, so the change is zero dollars and an undefined rate
+        # rather than a missing column that consumers would have to test for.
+        stock_features = stock_features.with_columns(
+            pl.lit(0.0, dtype=pl.Float64).alias("inst_value_change_usd"),
+            pl.lit(None, dtype=pl.Float64).alias("inst_pct_change"),
         )
     stock_features = stock_features.sort("cusip")
 

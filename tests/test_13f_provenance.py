@@ -241,6 +241,37 @@ def test_ownership_change_compares_two_fully_filed_quarters() -> None:
     assert features["inst_pct_change"].to_list() == [pytest.approx(350 / 150)]
 
 
+def test_options_only_filing_still_counts_as_having_filed() -> None:
+    # Manager 2 filed for 2024-09-30 but disclosed only a put. It has filed, so
+    # the newest quarter is complete and must not be stepped back from.
+    holdings = _two_manager_holdings(date(2024, 9, 30)).with_columns(
+        pl.when(pl.col("accession_no") == "c")
+        .then(pl.lit("PUT"))
+        .otherwise(pl.col("put_call"))
+        .alias("put_call")
+    )
+
+    _features, edges, _matrix, _stocks = downloader.build_features_and_matrix(
+        holdings, expected_ciks=["1", "2"]
+    )
+
+    assert edges["report_date"].unique().to_list() == [date(2024, 9, 30)]
+    assert edges["institution_id"].to_list() == ["1"]
+
+
+def test_single_quarter_still_emits_the_ownership_change_columns() -> None:
+    holdings = _two_manager_holdings(date(2024, 9, 30)).filter(
+        pl.col("report_date") == date(2024, 9, 30)
+    )
+
+    features, _edges, _matrix, _stocks = downloader.build_features_and_matrix(
+        holdings, expected_ciks=["1", "2"]
+    )
+
+    assert features["inst_value_change_usd"].to_list() == [0.0]
+    assert features["inst_pct_change"].to_list() == [None]
+
+
 def test_pre_2023_filings_are_refused_rather_than_mislabeled_as_usd() -> None:
     holdings = _two_manager_holdings(date(2024, 9, 30)).with_columns(
         pl.when(pl.col("accession_no") == "a")
