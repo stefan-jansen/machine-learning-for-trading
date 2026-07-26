@@ -365,6 +365,29 @@ def test_a_gapped_calendar_separates_the_two_purges() -> None:
         assert endpoint is None or endpoint >= holdout_start
 
 
+def evaluation_notebook_label() -> tuple[str, int]:
+    """The label file and horizon ``05_evaluation`` actually uses.
+
+    05 hardcodes both, so the equivalence check has to run on its values rather
+    than the configured ones -- otherwise a config change would leave the check
+    validating a purge the notebook does not perform. Requiring them to equal the
+    configured label is what makes the hardcoding safe, and is the assertion that
+    fails if `labels.primary` moves and 05 is not moved with it.
+    """
+    source = (REPO_ROOT / "case_studies" / "etfs" / "05_evaluation.py").read_text()
+    label_file = re.search(r'^PRIMARY_LABEL_FILE\s*=\s*"([^"]+)"', source, re.MULTILINE)
+    maxlags = re.search(r"^HAC_MAXLAGS\s*=\s*(\d+)", source, re.MULTILINE)
+    assert label_file and maxlags, (
+        "05_evaluation no longer declares PRIMARY_LABEL_FILE and HAC_MAXLAGS as "
+        "literals; read its label and horizon from wherever it now takes them"
+    )
+    assert re.search(r"^LABEL_HORIZON\s*=\s*HAC_MAXLAGS\b", source, re.MULTILINE), (
+        "05_evaluation's purge horizon is no longer HAC_MAXLAGS; this helper "
+        "reports the wrong horizon for the equivalence check"
+    )
+    return label_file.group(1), int(maxlags.group(1))
+
+
 def test_the_two_purges_agree_on_the_shipped_label_panel() -> None:
     """The 05 exemption in ``PER_SYMBOL_ENDPOINT_NOTEBOOKS``, executed.
 
@@ -376,8 +399,18 @@ def test_the_two_purges_agree_on_the_shipped_label_panel() -> None:
     pl = pytest.importorskip("polars")
     setup = yaml.safe_load(SETUP_YAML.read_text())
     label_col = setup["labels"]["primary"]
-    horizon = int(label_col.rsplit("_", 1)[-1].removesuffix("d"))
-    artifact = REPO_ROOT / "case_studies" / "etfs" / "labels" / f"{label_col}.parquet"
+    configured_horizon = int(label_col.rsplit("_", 1)[-1].removesuffix("d"))
+
+    # Run on what 05 reads, and require that to be what setup.yaml declares.
+    label_file, horizon = evaluation_notebook_label()
+    assert (label_file, horizon) == (f"{label_col}.parquet", configured_horizon), (
+        f"05_evaluation evaluates {label_file} at horizon {horizon} while "
+        f"setup.yaml declares {label_col} at horizon {configured_horizon}. Its "
+        "purge is sealing a label the case study no longer selects; update 05 "
+        "before relying on the equivalence below."
+    )
+
+    artifact = REPO_ROOT / "case_studies" / "etfs" / "labels" / label_file
     if not artifact.exists():
         pytest.skip(f"{artifact.relative_to(REPO_ROOT)} not generated locally")
 
