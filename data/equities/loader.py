@@ -1381,7 +1381,9 @@ def load_institutional_holdings_13f(
 ) -> pl.DataFrame:
     """Load 13F institutional holdings for Chapter 10 / Chapter 22-23 notebooks.
 
-    Produced by `data/equities/positioning/13f_download.py`.
+    Produced by `data/equities/positioning/13f_download.py`. The `put_call`
+    field preserves the SEC security-type marker so consumers can separate
+    long-equity rows from put and call positions.
     """
     path = ML4T_DATA_PATH / "equities" / "positioning" / "13f" / "institutional_holdings.parquet"
     if not path.exists():
@@ -1393,8 +1395,13 @@ def load_institutional_holdings_13f(
         )
 
     data = pl.read_parquet(path)
-    if "filing_date" in data.columns and data["filing_date"].dtype == pl.String:
-        data = data.with_columns(pl.col("filing_date").str.to_date(strict=False))
+    date_columns = [
+        pl.col(column).str.to_date(strict=False)
+        for column in ("report_date", "filing_date")
+        if column in data.columns and data[column].dtype == pl.String
+    ]
+    if date_columns:
+        data = data.with_columns(date_columns)
 
     if start_date and "filing_date" in data.columns:
         data = data.filter(pl.col("filing_date") >= pl.lit(start_date).str.to_date())
@@ -1437,9 +1444,9 @@ def load_13f_bulk_holdings(quarter: str) -> pl.DataFrame:
 
     Produced by `data/equities/positioning/13f_download.py --mode bulk`.
     Same canonical schema as `load_institutional_holdings_13f` (cik,
-    accession_no, issuer, cusip, value_thousands, shares, filing_date,
-    company_name) but covers all ~5-7K filers in the window instead of the
-    curated institution list.
+    accession_no, issuer, cusip, value_thousands, shares, put_call,
+    report_date, filing_date, company_name) but covers all ~5-7K filers
+    in the window instead of the curated institution list.
 
     Args:
         quarter: SEC filing-window label, e.g. '2024Q3'. SEC labels by

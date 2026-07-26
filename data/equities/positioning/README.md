@@ -69,6 +69,9 @@ edges = load_13f_edges()
 q3_2024 = load_13f_bulk_holdings("2024Q3")
 ```
 
+The holdings schema preserves both SEC dates: `report_date` is the quarter-end
+position date and `filing_date` is when the filing became public.
+
 ## Consumers
 
 - **Ch4 NB 03** — Form 4 insider-transaction parsing

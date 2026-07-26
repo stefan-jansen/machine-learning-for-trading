@@ -97,11 +97,11 @@ def load_bloomberg_news(
     corpus for ESG retrieval experiments.
 
     Args:
-        start_date: Optional ``date`` filter (YYYY-MM-DD).
-        end_date: Optional ``date`` filter (YYYY-MM-DD).
+        start_date: Optional ``timestamp`` filter (YYYY-MM-DD).
+        end_date: Optional ``timestamp`` filter (YYYY-MM-DD).
 
     Returns:
-        DataFrame with columns: headline, journalists, date, link, article.
+        DataFrame with columns: headline, journalists, timestamp, link, article.
 
     Note:
         Bloomberg owns the underlying text; the HuggingFace mirror is
@@ -117,11 +117,13 @@ def load_bloomberg_news(
         )
 
     data = pl.read_parquet(path)
+    if "timestamp" not in data.columns and "date" in data.columns:
+        data = data.rename({"date": "timestamp"})
 
     if start_date:
-        data = data.filter(pl.col("date") >= pl.lit(start_date).str.to_datetime())
+        data = data.filter(pl.col("timestamp") >= pl.lit(start_date).str.to_datetime())
     if end_date:
-        data = data.filter(pl.col("date") <= pl.lit(end_date).str.to_datetime())
+        data = data.filter(pl.col("timestamp") <= pl.lit(end_date).str.to_datetime())
 
     return data
 
