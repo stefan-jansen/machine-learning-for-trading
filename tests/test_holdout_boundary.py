@@ -127,6 +127,22 @@ def test_holdout_purge_is_on_the_label_endpoint(rel_path: str) -> None:
         "window closes strictly before the holdout."
     )
 
+    # ...and the leaking filter must be gone. Without this, deriving
+    # `last_signal_date` and then never using it satisfies the assertion above,
+    # which is exactly the state the 2026-07-21 revert would be restored to.
+    leaky = re.search(
+        r"filter\(\s*pl\.col\(\"timestamp\"\)\s*<\s*(?:date\.fromisoformat\()?"
+        r"[A-Za-z_]*holdout_start",
+        source,
+        re.IGNORECASE,
+    )
+    assert leaky is None, (
+        f"{rel_path}: found a signal-date filter against the holdout boundary "
+        f"({leaky.group(0) if leaky else ''!r}). That filter looks sealed and is "
+        "not -- the forward labels of the last `horizon` dates it keeps are "
+        "computed from holdout prices. Filter on the label endpoint instead."
+    )
+
 
 def test_selected_features_artifact_stops_before_holdout() -> None:
     """If the Ch8 selection artifact has been regenerated locally, its feature

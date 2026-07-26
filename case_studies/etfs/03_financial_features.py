@@ -684,24 +684,27 @@ LABEL_HORIZON = 21  # fwd_ret_21d: the forward window whose endpoint must clear 
 
 # Seal the holdout on the LABEL endpoint, not the signal date. A pre-holdout
 # date whose 21-day forward label reaches into the holdout would leak holdout
-# prices into feature selection (IC ranking + BH-FDR below). The eligibility
-# filter leaves gaps in `features`, so the endpoint is computed on the dense
-# trading calendar from `prices`: keep signal dates whose label window closes
-# strictly before holdout_start (same purge as the 02_labels baseline IC and
-# the 05_evaluation feature triage).
+# prices into feature selection (IC ranking + BH-FDR below). The endpoint is
+# derived PER SYMBOL with the same `shift(-horizon).over("symbol")` that
+# `02_labels` used to build the label, so a symbol with a gapped calendar is
+# purged by its own label window rather than by a market-wide date. It is
+# computed on `prices` because the eligibility filter leaves gaps in `features`.
 holdout_start_dt = date.fromisoformat(holdout_start)
-last_signal_date = (
-    prices.select("timestamp")
-    .unique()
-    .sort("timestamp")
-    .with_columns(pl.col("timestamp").shift(-LABEL_HORIZON).alias("_label_end"))
-    .filter(pl.col("_label_end") < holdout_start_dt)["timestamp"]
-    .max()
+label_end = (
+    prices.select(["symbol", "timestamp"])
+    .sort(["symbol", "timestamp"])
+    .with_columns(pl.col("timestamp").shift(-LABEL_HORIZON).over("symbol").alias("_label_end"))
 )
 
-eval_df = features.join(
-    labels.select(["timestamp", "symbol", label_col]), on=["timestamp", "symbol"], how="inner"
-).filter(pl.col("timestamp") <= last_signal_date)
+eval_df = (
+    features.join(
+        labels.select(["timestamp", "symbol", label_col]), on=["timestamp", "symbol"], how="inner"
+    )
+    .join(label_end, on=["symbol", "timestamp"], how="inner")
+    .filter(pl.col("_label_end") < holdout_start_dt)
+    .drop("_label_end")
+)
+last_signal_date = eval_df["timestamp"].max()
 print(
     f"Evaluation set: {len(eval_df):,} rows "
     f"({eval_df['timestamp'].n_unique():,} dates x {eval_df['symbol'].n_unique()} assets, "
