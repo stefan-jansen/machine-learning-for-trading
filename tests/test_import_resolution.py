@@ -17,20 +17,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from check_import_resolution import (  # noqa: E402
-    _init_body,
     imports_with_lines,
-    package_init_names,
     resolves_in_repo,
     resolves_relative,
     third_party_names,
 )
-
-
-def _clear_init_caches() -> None:
-    """Both initializer caches key on the package path, which these tests reuse
-    while rewriting the file underneath it."""
-    package_init_names.cache_clear()
-    _init_body.cache_clear()
 
 
 @pytest.fixture
@@ -86,7 +77,7 @@ def test_explicit_sys_path_insert_is_honored(tree: Path) -> None:
         'sys.path.insert(0, str(Path(__file__).parent / "scripts"))\n'
         "import tool\n"
     )
-    assert resolves_in_repo("tool", test_file, tree, lineno=4)
+    assert resolves_in_repo("tool", test_file, tree)
 
 
 def test_unrelated_name_still_fails_with_sys_path_insert(tree: Path) -> None:
@@ -98,34 +89,31 @@ def test_unrelated_name_still_fails_with_sys_path_insert(tree: Path) -> None:
         'sys.path.insert(0, str(Path(__file__).parent / "scripts"))\n'
         "import nonexistent_module\n"
     )
-    assert not resolves_in_repo("nonexistent_module", test_file, tree, lineno=4)
+    assert not resolves_in_repo("nonexistent_module", test_file, tree)
 
 
-def test_sys_path_insert_below_the_import_does_not_help_it(tree: Path) -> None:
-    """The insert runs after the import, so the import still fails at runtime."""
-    test_file = tree / "test_thing.py"
-    test_file.write_text('import sys\nimport tool\nsys.path.insert(0, "scripts")\n')
-    assert not resolves_in_repo("tool", test_file, tree, lineno=2)
-    # Above it, the same insert is in force.
-    test_file.write_text('import sys\nsys.path.insert(0, "scripts")\nimport tool\n')
-    assert resolves_in_repo("tool", test_file, tree, lineno=3)
-
-
-def test_sys_path_insert_inside_a_function_does_not_count(tree: Path) -> None:
-    """A mutation in a function body, a branch, or a `try` may never run, so it
-    cannot be treated as putting a directory on sys.path."""
-    test_file = tree / "test_thing.py"
-    test_file.write_text(
-        'import sys\n\n\ndef setup():\n    sys.path.insert(0, "scripts")\n\n\nimport tool\n'
+def test_a_guarded_or_deferred_sys_path_insert_still_counts(tree: Path) -> None:
+    """Position and scope are not modeled, so an insert inside a conditional or a
+    function counts for the imports in the file. The guard asks whether the module
+    exists, not whether the insert has run: `tool` is committed either way, and an
+    insert that truly never runs raises a named ImportError on first use."""
+    guarded = tree / "test_guarded.py"
+    guarded.write_text(
+        'import sys\n\nif True:\n    sys.path.insert(0, "scripts")\n    import tool\n'
     )
-    assert not resolves_in_repo("tool", test_file, tree, lineno=8)
+    assert resolves_in_repo("tool", guarded, tree)
+    deferred = tree / "test_deferred.py"
+    deferred.write_text(
+        'import sys\n\n\ndef later():\n    import tool\n\n\nsys.path.insert(0, "scripts")\n'
+    )
+    assert resolves_in_repo("tool", deferred, tree)
 
 
 def test_imports_are_extracted_with_line_numbers(tmp_path: Path) -> None:
     """Dotted names are kept whole so submodules can be resolved."""
     src = tmp_path / "m.py"
     src.write_text("import os\n\nfrom pkg.sub import thing\nimport a.b as ab\n")
-    found = {name: (lineno, level) for name, lineno, level, _ in imports_with_lines(src)}
+    found = {name: (lineno, level) for name, lineno, level in imports_with_lines(src)}
     assert found == {"os": (1, 0), "pkg.sub": (3, 0), "a.b": (4, 0)}
 
 
@@ -150,14 +138,13 @@ def test_namespace_package_submodule_resolves(tree: Path) -> None:
 
 
 def test_relative_imports_are_captured_with_their_level(tmp_path: Path) -> None:
-    """Both forms are captured. `from . import x` is flagged bare, because `x`
-    may be a submodule or a name the package __init__ binds."""
+    """Both forms are captured, with the depth that anchors them."""
     src = tmp_path / "m.py"
     src.write_text("from . import sibling\nfrom .mod import thing\nfrom ..up import y\n")
     assert imports_with_lines(src) == [
-        ("sibling", 1, 1, True),
-        ("mod", 2, 1, False),
-        ("up", 3, 2, False),
+        ("sibling", 1, 1),
+        ("mod", 2, 1),
+        ("up", 3, 2),
     ]
 
 
@@ -167,137 +154,44 @@ def test_bare_relative_import_of_missing_submodule_does_not_resolve(tree: Path) 
     pkg = tree / "07_chapter" / "pkg"
     mod = pkg / "thing.py"
     mod.write_text("from . import missing\n")
-    assert not resolves_relative("missing", 1, mod, tree, bare=True)
+    assert not resolves_relative("missing", 1, mod, tree)
     (pkg / "missing.py").write_text("value = 1\n")
-    assert resolves_relative("missing", 1, mod, tree, bare=True)
+    assert resolves_relative("missing", 1, mod, tree)
 
 
-def test_bare_relative_import_accepts_a_name_the_init_binds(tree: Path) -> None:
-    """`from . import CONSTANT` is legal when the package __init__ defines it,
-    so requiring a module on disk would reject working code."""
+def test_bare_relative_import_demands_a_module_not_an_init_binding(tree: Path) -> None:
+    """The narrowed contract, and the one legal shape it rejects.
+
+    `from . import CONSTANT` works at runtime when the package __init__ binds
+    CONSTANT, and the guard reports it anyway. Accepting initializer bindings is
+    what reopens the bug class this guard exists for: `deepm/__init__.py` does
+    `from . import configs, dataset, ...`, and once a name an __init__ binds
+    counts as resolution, deciding which of those nine submodules must exist on
+    disk turns into a static model of Python's execution order. No file in this
+    repo relies on the rejected form; one that did would get a named error and a
+    one-line fix (`from .constants import CONSTANT`).
+    """
     pkg = tree / "07_chapter" / "pkg"
     (pkg / "__init__.py").write_text("CONSTANT = 3\n\n\ndef helper():\n    pass\n")
     mod = pkg / "thing.py"
     mod.write_text("from . import CONSTANT, helper\n")
-    assert resolves_relative("CONSTANT", 1, mod, tree, bare=True)
-    assert resolves_relative("helper", 1, mod, tree, bare=True)
-    assert not resolves_relative("absent", 1, mod, tree, bare=True)
-    # The strict form still demands a module: a symbol named CONSTANT does not
-    # make `from .CONSTANT import x` importable.
     assert not resolves_relative("CONSTANT", 1, mod, tree)
+    assert not resolves_relative("helper", 1, mod, tree)
+    # A submodule of that name is what resolves.
+    (pkg / "CONSTANT.py").write_text("")
+    assert resolves_relative("CONSTANT", 1, mod, tree)
 
 
 def test_init_relative_imports_do_not_satisfy_themselves(tree: Path) -> None:
-    """`deepm/__init__.py` does `from . import configs, ...`. Counting names an
-    __init__ binds *by relative import* would let that line prove itself, so
-    those bindings are excluded and the submodules must actually exist."""
+    """`deepm/__init__.py` does `from . import configs, ...` - the exact shape of
+    the shipped bug. The initializer naming the submodule proves nothing; the
+    file has to be there."""
     pkg = tree / "07_chapter" / "pkg"
     init = pkg / "__init__.py"
     init.write_text("from . import configs\n")
-    assert not resolves_relative("configs", 1, init, tree, bare=True)
+    assert not resolves_relative("configs", 1, init, tree)
     (pkg / "configs.py").write_text("")
-    _clear_init_caches()
-    assert resolves_relative("configs", 1, init, tree, bare=True)
-
-
-def test_init_binding_below_the_import_does_not_satisfy_it(tree: Path) -> None:
-    """`from . import missing` followed by `missing = 1` raises at runtime: the
-    import runs first. Ignoring statement order left a variant of the original
-    hole open, since any later binding of the name looked like a definition."""
-    pkg = tree / "07_chapter" / "pkg"
-    init = pkg / "__init__.py"
-    init.write_text("from . import late\n\nlate = 1\n")
-    _clear_init_caches()
-    assert not resolves_relative("late", 1, init, tree, bare=True, lineno=1)
-    # Above the import the same binding is real, so the statement does work.
-    init.write_text("early = 1\n\nfrom . import early\n")
-    _clear_init_caches()
-    assert resolves_relative("early", 1, init, tree, bare=True, lineno=3)
-
-
-def test_same_line_binding_above_the_import_is_visible(tree: Path) -> None:
-    """`early = 1; from . import early` is legal and puts both statements on one
-    line, so ordering has to compare statement position, not line number."""
-    pkg = tree / "07_chapter" / "pkg"
-    init = pkg / "__init__.py"
-    init.write_text("early = 1; from . import early\n")
-    _clear_init_caches()
-    assert resolves_relative("early", 1, init, tree, bare=True, lineno=1)
-    # Reversed on the same line, the import runs first and fails.
-    init.write_text("from . import late; late = 1\n")
-    _clear_init_caches()
-    assert not resolves_relative("late", 1, init, tree, bare=True, lineno=1)
-
-
-def test_sibling_the_init_does_not_import_sees_every_binding(tree: Path) -> None:
-    """A submodule the initializer never imports is loaded only after it has run
-    to completion, so a binding anywhere in it is in place."""
-    pkg = tree / "07_chapter" / "pkg"
-    (pkg / "__init__.py").write_text("from .helper import setup\n\nLIMIT = 5\n")
-    (pkg / "helper.py").write_text("def setup():\n    pass\n")
-    mod = pkg / "thing.py"
-    mod.write_text("from . import LIMIT\n")
-    _clear_init_caches()
-    assert resolves_relative("LIMIT", 1, mod, tree, bare=True, lineno=1)
-
-
-def test_sibling_imported_by_the_init_sees_only_what_ran_before_it(tree: Path) -> None:
-    """Circular initialization: the __init__ imports `thing` before defining
-    `LIMIT`, and `thing` does `from . import LIMIT`. That raises at runtime, so
-    treating every sibling as fully initialized was a false negative."""
-    pkg = tree / "07_chapter" / "pkg"
-    mod = pkg / "thing.py"
-    mod.write_text("from . import LIMIT\n")
-
-    (pkg / "__init__.py").write_text("from . import thing\n\nLIMIT = 5\n")
-    _clear_init_caches()
-    assert not resolves_relative("LIMIT", 1, mod, tree, bare=True, lineno=1)
-
-    # Defined before the import, the same binding is there when `thing` loads.
-    (pkg / "__init__.py").write_text("LIMIT = 5\n\nfrom . import thing\n")
-    _clear_init_caches()
-    assert resolves_relative("LIMIT", 1, mod, tree, bare=True, lineno=1)
-
-    # The explicit form imports the sibling just the same.
-    (pkg / "__init__.py").write_text("from .thing import anything\n\nLIMIT = 5\n")
-    _clear_init_caches()
-    assert not resolves_relative("LIMIT", 1, mod, tree, bare=True, lineno=1)
-
-
-def test_bare_relative_import_accepts_an_init_re_export(tree: Path) -> None:
-    """`from .constants import VALUE` in the __init__ makes `from . import VALUE`
-    work in a sibling. Excluding *every* relative binding rejected that working
-    code; only the bare form has to be excluded, and `constants` is checked on
-    its own line anyway."""
-    pkg = tree / "07_chapter" / "pkg"
-    (pkg / "constants.py").write_text("VALUE = 1\n")
-    (pkg / "__init__.py").write_text("from .constants import VALUE\n")
-    mod = pkg / "thing.py"
-    mod.write_text("from . import VALUE\n")
-    _clear_init_caches()
-    assert resolves_relative("VALUE", 1, mod, tree, bare=True, lineno=1)
-    # A re-export from a module that does not exist buys nothing: the __init__'s
-    # own `from .absent import ...` line is what fails.
-    (pkg / "__init__.py").write_text("from .absent import OTHER\n")
-    _clear_init_caches()
-    assert resolves_relative("OTHER", 1, mod, tree, bare=True, lineno=1)
-    init = pkg / "__init__.py"
-    assert not resolves_relative("absent", 1, init, tree, lineno=1)
-
-
-def test_annotation_without_a_value_is_not_a_binding(tree: Path) -> None:
-    """`NAME: int` only records an annotation; nothing named NAME exists, so
-    `from . import NAME` fails at runtime unless a NAME submodule is there."""
-    pkg = tree / "07_chapter" / "pkg"
-    (pkg / "__init__.py").write_text("ANNOTATED: int\n")
-    mod = pkg / "thing.py"
-    mod.write_text("from . import ANNOTATED\n")
-    _clear_init_caches()
-    assert not resolves_relative("ANNOTATED", 1, mod, tree, bare=True, lineno=1)
-    # With a value it does bind.
-    (pkg / "__init__.py").write_text("ANNOTATED: int = 1\n")
-    _clear_init_caches()
-    assert resolves_relative("ANNOTATED", 1, mod, tree, bare=True, lineno=1)
+    assert resolves_relative("configs", 1, init, tree)
 
 
 def test_missing_relative_import_does_not_resolve(tree: Path) -> None:

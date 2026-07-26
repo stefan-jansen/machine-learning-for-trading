@@ -20,13 +20,33 @@ instead of only inside a built Docker image. An import name passes if it is:
    ``IMAGE_OVERRIDES`` for packages that live only in a non-default Docker
    image), under the name it is actually imported as.
 
-Relative imports are resolved against the importing file's own package, in both
-forms: ``from .mod import x`` requires ``mod`` to be a module on disk, and
-``from . import x`` accepts either a submodule or a name the package's
-``__init__.py`` binds, because both make that statement work.
+Relative imports are resolved against the importing file's own package, and both
+forms require a module on disk: ``from .mod import x`` needs ``mod.py``, and
+``from . import x`` needs ``x.py``.
 
 Anything else is, by elimination, a module the author expected to exist in the
 repo and that is not there.
+
+**What this guard deliberately does not check: when code runs.** It answers one
+question - does a module by this name exist where this file can see it - and says
+nothing about import-time ordering. Two consequences, both accepted:
+
+* ``from . import NAME`` where ``NAME`` is only bound by the package's
+  ``__init__.py`` (a constant, a function, a re-export) is legal Python and is
+  reported here anyway. Requiring a module on disk is what closes the bug class:
+  ``deepm/__init__.py`` does ``from . import configs, dataset, ...``, and once a
+  name an initializer binds counts as resolution, deciding which of those nine
+  submodules must exist becomes a static model of execution order. No file in
+  this repo relies on the rejected form.
+* A ``sys.path`` mutation counts wherever it sits in the file. One placed below
+  its import, or inside a function that is never called, is honored here and
+  fails at runtime.
+
+Both residuals fail loudly for anyone who runs the code, with a named
+``ImportError`` on the first line that touches it. That is the opposite of the
+silent, reader-facing bug this guard exists to prevent, and modeling Python's
+execution order statically to catch them costs more false positives than it
+buys, so the contract stays at existence.
 
 Adding a dependency therefore means declaring it in ``pyproject.toml`` — which
 is required anyway. Only when a package's *import* name differs from its
@@ -41,7 +61,7 @@ import ast
 import re
 import sys
 import tomllib
-from functools import cache, lru_cache
+from functools import lru_cache
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -105,8 +125,8 @@ def third_party_names(root: Path) -> set[str]:
     return names
 
 
-def imports_with_lines(path: Path) -> list[tuple[str, int, int, bool]]:
-    """Import names in ``path`` as ``(name, lineno, level, bare)``.
+def imports_with_lines(path: Path) -> list[tuple[str, int, int]]:
+    """Import names in ``path`` as ``(name, lineno, level)``.
 
     Dotted names are kept whole. ``from utils.missing import x`` raises
     ``ModuleNotFoundError`` even though ``utils`` exists, so resolution has to
@@ -117,149 +137,55 @@ def imports_with_lines(path: Path) -> list[tuple[str, int, int, bool]]:
     ``from . import x``, 2 for ``from .. import x``. Relative imports name repo
     files by definition, so they are checked rather than skipped.
 
-    ``bare`` marks ``from . import x``, where ``x`` may be either a submodule or
-    a name the package's ``__init__.py`` binds. Both are legal, so a bare alias
-    resolves against either; ``from .x import y`` requires ``x`` to be a module
-    and is checked more strictly.
+    ``from . import x`` contributes each imported alias, since ``x`` is the
+    module name being asked for. ``lineno`` is carried for the error message.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (SyntaxError, UnicodeDecodeError):
         return []
-    found: list[tuple[str, int, int, bool]] = []
+    found: list[tuple[str, int, int]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                found.append((alias.name, node.lineno, 0, False))
+                found.append((alias.name, node.lineno, 0))
         elif isinstance(node, ast.ImportFrom):
             if node.level and node.level > 0:
                 if node.module:
-                    found.append((node.module, node.lineno, node.level, False))
+                    found.append((node.module, node.lineno, node.level))
                 else:
                     for alias in node.names:
-                        found.append((alias.name, node.lineno, node.level, True))
+                        found.append((alias.name, node.lineno, node.level))
             elif node.module:
-                found.append((node.module, node.lineno, 0, False))
+                found.append((node.module, node.lineno, 0))
     return found
 
 
-# A cutoff past every statement: nothing in the initializer is hidden.
-ALL_VISIBLE = sys.maxsize
-
-
-@cache
-def package_init_names(package: Path) -> frozenset[tuple[str, int]]:
-    """Names a package's ``__init__.py`` binds, each with its statement position.
-
-    ``from . import x`` also succeeds when ``x`` is a symbol the ``__init__.py``
-    binds rather than a submodule on disk, so those names have to be collected.
-    Position is part of the answer because an initializer is only bound as far as
-    it has run: ``from . import late`` followed by ``late = 1`` raises
-    ``ImportError``. Position means index in ``tree.body``, not line number -
-    ``early = 1; from . import early`` is legal and puts both on one line.
-
-    *Bare* relative bindings (``from . import x``) are excluded at any position:
-    those are the statements being checked, so counting them would let the guard
-    satisfy itself with the very line in question. Bindings from an explicit
-    relative module (``from .constants import VALUE``) do count -- they bind
-    ``VALUE``, and ``constants`` is resolved on its own line, so nothing is taken
-    on trust. Only module resolution is static here, not symbol existence: if
-    ``constants`` exists but never defines ``VALUE``, no static check catches it.
-    """
-    names: set[tuple[str, int]] = set()
-    for index, node in enumerate(_init_body(package)):
-        if isinstance(node, ast.Assign):
-            names.update((t.id, index) for t in node.targets if isinstance(t, ast.Name))
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            # `NAME: int = 1` binds; a bare `NAME: int` only records an
-            # annotation, so `from . import NAME` still fails at runtime.
-            if node.value is not None:
-                names.add((node.target.id, index))
-        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            names.add((node.name, index))
-        elif isinstance(node, ast.Import):
-            names.update((alias.asname or alias.name.split(".")[0], index) for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            names.update((alias.asname or alias.name, index) for alias in node.names)
-    return frozenset(names)
-
-
-@cache
-def _init_body(package: Path) -> tuple[ast.stmt, ...]:
-    """Top-level statements of ``package/__init__.py``, in order."""
-    init = package / "__init__.py"
-    if not init.is_file():
-        return ()
-    try:
-        return tuple(ast.parse(init.read_text(encoding="utf-8")).body)
-    except (SyntaxError, UnicodeDecodeError):
-        return ()
-
-
-def _visibility_cutoff(package: Path, source: Path, lineno: int) -> int:
-    """How far ``package/__init__.py`` has run when ``source`` reads its names.
-
-    Two ways a module can see a half-initialized package:
-
-    * ``source`` *is* the ``__init__.py``. The statement being checked is itself a
-      relative import, so nothing below it has run yet.
-    * ``source`` is a submodule that the ``__init__.py`` imports. Loading it
-      happens *during* that import statement, so it sees the package only as far
-      as the statements above. Any other submodule is imported after the
-      initializer has run to completion and sees all of it.
-
-    Residual, deliberately not modeled: the initializer imports ``a``, which
-    imports sibling ``b``. ``b`` is also loaded mid-initialization, but reaching
-    it needs transitive import analysis. The direct case above is the one that
-    occurs, and no file in this repo resolves a bare relative import through an
-    initializer binding at all -- these rules exist to keep the guard honest if
-    one ever does.
-    """
-    body = _init_body(package)
-    if source == package / "__init__.py":
-        for index, node in enumerate(body):
-            if isinstance(node, ast.ImportFrom) and node.level and node.lineno == lineno:
-                return index
-        return 0  # position unknown: assume the initializer has run nothing
-    for index, node in enumerate(body):
-        if not (isinstance(node, ast.ImportFrom) and node.level):
-            continue
-        loaded = {node.module.split(".")[0]} if node.module else {a.name for a in node.names}
-        if source.stem in loaded:
-            return index
-    return ALL_VISIBLE
-
-
-def init_binds(package: Path, name: str, source: Path, lineno: int) -> bool:
-    """True if ``package/__init__.py`` has bound ``name`` by the time ``source``
-    reads it -- see :func:`_visibility_cutoff` for what "by the time" means."""
-    cutoff = _visibility_cutoff(package, source, lineno)
-    return any(bound == name and index < cutoff for bound, index in package_init_names(package))
-
-
-def explicit_path_inserts(path: Path, root: Path) -> list[tuple[Path, int]]:
-    """Directories the file itself puts on ``sys.path``, with the line that does it.
+def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
+    """Directories the file itself puts on ``sys.path``.
 
     ``tests/test_notebook_sync.py`` does ``sys.path.insert(0, REPO_ROOT / "scripts")``
     before importing ``notebook_provenance``. That is a real resolution root, so
     the guard honors it instead of demanding an allowlist entry.
 
-    Only mutations that are *statements of the module itself* count, and callers
-    honor one only for imports below it. A mutation inside a function, a branch,
-    or a ``try`` may never run, and one below an import cannot help that import -
-    counting either would approve a name that fails at runtime. All four files in
-    this repo that rely on a mutation do it at the top, above the import.
+    Position and scope are not consulted: a mutation anywhere in the file counts
+    for every import in it. That admits the file whose insert sits below its
+    import or inside a function nobody calls, which fails at runtime with a named
+    ``ImportError``. Deciding it statically means modeling execution order --
+    which path reaches which import -- and that rejects legitimate shapes
+    (``if condition: sys.path.insert(...); import tool``, an import deferred
+    inside a function defined above the insert) to catch a failure the author
+    hits the first time they run the file.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (SyntaxError, UnicodeDecodeError):
         return []
-    roots: list[tuple[Path, int]] = []
-    for statement in tree.body:
-        if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+    roots: list[Path] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
             continue
-        call = statement.value
-        func = call.func
+        func = node.func
         if not (
             isinstance(func, ast.Attribute)
             and func.attr in {"insert", "append"}
@@ -267,9 +193,9 @@ def explicit_path_inserts(path: Path, root: Path) -> list[tuple[Path, int]]:
             and func.value.attr == "path"
         ):
             continue
-        for literal in (s for s in ast.walk(call) if isinstance(s, ast.Constant)):
+        for literal in (s for s in ast.walk(node) if isinstance(s, ast.Constant)):
             if isinstance(literal.value, str) and literal.value:
-                roots.append((root / literal.value.lstrip("/"), statement.lineno))
+                roots.append(root / literal.value.lstrip("/"))
     return roots
 
 
@@ -309,15 +235,14 @@ def is_entry_point(source: Path) -> bool:
         return False
 
 
-def _resolution_roots(source: Path, root: Path, lineno: int) -> list[Path]:
+def _resolution_roots(source: Path, root: Path) -> list[Path]:
     """Directories that are on ``sys.path`` when ``source`` is imported.
 
     The importing file's own directory is ``sys.path[0]`` when it is the script
     being run; the repo root is the working directory the project documents for
     notebook runs; an ancestor counts only if notebooks live there and can be
     the entry point (this is how ``16_strategy_simulation/validation/adapters/``
-    imports ``validation``); plus whatever the file inserts *above* ``lineno``,
-    since a later insert has not run when the import executes.
+    imports ``validation``); plus whatever the file inserts itself.
     """
     entries = entry_point_dirs(root)
     bases: list[Path] = [root]
@@ -332,7 +257,7 @@ def _resolution_roots(source: Path, root: Path, lineno: int) -> list[Path]:
         parent = parent.parent
         if parent in entries:
             bases.append(parent)
-    bases.extend(inserted for inserted, at in explicit_path_inserts(source, root) if at < lineno)
+    bases.extend(explicit_path_inserts(source, root))
     return bases
 
 
@@ -346,32 +271,24 @@ def _resolves_under(package: Path, parts: list[str]) -> bool:
     return (package / f"{leaf}.py").is_file() or (package / leaf).is_dir()
 
 
-def resolves_relative(
-    name: str, level: int, source: Path, root: Path, bare: bool = False, lineno: int = 0
-) -> bool:
-    """True if a relative import resolves.
+def resolves_relative(name: str, level: int, source: Path, root: Path) -> bool:
+    """True if a relative import resolves to a module on disk.
 
     The anchor is the importing file's package, walked up ``level - 1`` times.
-
-    ``from .mod import x`` needs ``mod`` to be a module on disk. ``from . import
-    x`` (``bare``) is satisfied by either a submodule or a name the package's
-    ``__init__.py`` binds, since both make the statement work at runtime.
-
-    ``lineno`` is where the import sits in ``source``. It matters only for the
-    bare form, and only to decide how much of the package's ``__init__.py`` has
-    run by then. Defaulting to 0 keeps a caller that omits it on the strict side.
+    Both forms require a module: ``from .mod import x`` needs ``mod.py``, and
+    ``from . import x`` needs ``x.py``. The second is the form that let the
+    Chapter 21 bug class recur, and demanding a file is what closes it -- see the
+    module docstring for the legal shape this rejects and why that is accepted.
     """
     anchor = source.parent
     for _ in range(level - 1):
         anchor = anchor.parent
         if root not in anchor.parents and anchor != root:
             return False
-    if _resolves_under(anchor, name.split(".")):
-        return True
-    return bare and init_binds(anchor, name, source, lineno)
+    return _resolves_under(anchor, name.split("."))
 
 
-def resolves_in_repo(name: str, source: Path, root: Path, lineno: int = 0) -> bool:
+def resolves_in_repo(name: str, source: Path, root: Path) -> bool:
     """True if the dotted module ``name`` resolves to repo files.
 
     Every component of a dotted path must exist: ``from utils.missing import x``
@@ -382,13 +299,9 @@ def resolves_in_repo(name: str, source: Path, root: Path, lineno: int = 0) -> bo
     packages are PEP 420 namespace packages -- ``data/equities/`` has no
     ``__init__.py`` yet ``data.equities.loader`` imports correctly -- so
     requiring ``__init__.py`` would reject 53 working imports.
-
-    ``lineno`` is where the import sits, which decides whether a ``sys.path``
-    mutation in the same file has run yet. Defaulting to 0 admits none of them,
-    keeping a caller that omits it on the strict side.
     """
     parts = name.split(".")
-    return any(_resolves_under(base, parts) for base in _resolution_roots(source, root, lineno))
+    return any(_resolves_under(base, parts) for base in _resolution_roots(source, root))
 
 
 def iter_source_files(root: Path):
@@ -405,9 +318,9 @@ def main() -> int:
     failures: list[tuple[Path, int, str]] = []
 
     for path in iter_source_files(root):
-        for name, lineno, level, bare in imports_with_lines(path):
+        for name, lineno, level in imports_with_lines(path):
             if level > 0:
-                if not resolves_relative(name, level, path, root, bare, lineno):
+                if not resolves_relative(name, level, path, root):
                     failures.append((path.relative_to(root), lineno, "." * level + name))
                 continue
             # Third-party and stdlib are classified on the top-level component:
@@ -416,7 +329,7 @@ def main() -> int:
             top = name.split(".")[0]
             if top in STDLIB or _normalize(top) in allowed:
                 continue
-            if resolves_in_repo(name, path, root, lineno):
+            if resolves_in_repo(name, path, root):
                 continue
             failures.append((path.relative_to(root), lineno, name))
 
