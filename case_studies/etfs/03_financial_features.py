@@ -60,6 +60,7 @@ from scipy.stats import spearmanr
 
 from data import load_etfs, load_macro
 from utils.paths import display_path, get_case_study_dir
+from utils.style import COLORS, ml4t_diverging
 
 warnings.filterwarnings("ignore")
 
@@ -79,13 +80,6 @@ NUMERIC_DTYPES = {
     pl.Float32,
     pl.Float64,
 }
-
-
-def as_float(value: object | None) -> float | None:
-    """Convert Polars scalar outputs to plain float for plotting."""
-    if value is None:
-        return None
-    return float(str(value))
 
 
 # %% tags=["parameters"]
@@ -112,10 +106,8 @@ prices = (
     .sort(["symbol", "timestamp"])
 )
 
-# Load eligibility for PIT filtering
+# Load eligibility for PIT filtering (symbol + eligible_year pairs from 01)
 eligibility = pl.read_csv(CASE_DIR / "eligibility.csv")
-if "symbol" in eligibility.columns and "symbol" not in eligibility.columns:
-    eligibility = eligibility
 
 assets_list = sorted(prices["symbol"].unique().to_list())
 n_assets = prices["symbol"].n_unique()
@@ -660,8 +652,9 @@ print(f"  {len(features):,} rows, {features['symbol'].n_unique()} assets")
 #
 # - **HAC standard errors** (Newey-West): Overlapping 21-day returns create
 #   autocorrelated IC time series, inflating naive t-statistics
-# - **BH-FDR correction**: With 57 simultaneous tests, naive p-values overstate
-#   significance; we control the false discovery rate at 5%
+# - **BH-FDR correction**: with one hypothesis test per feature, naive p-values
+#   overstate significance; we control the false discovery rate at 5% (the exact
+#   count of features tested and surviving is printed below)
 #
 # The cross-sectional IC on date $t$ is:
 #
@@ -687,14 +680,32 @@ label_col = "fwd_ret_21d"
 # baseline-IC scoping in `02_labels`.
 setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 holdout_start = setup["evaluation"]["holdout_start"]
+LABEL_HORIZON = 21  # fwd_ret_21d: the forward window whose endpoint must clear the holdout
+
+# Seal the holdout on the LABEL endpoint, not the signal date. A pre-holdout
+# date whose 21-day forward label reaches into the holdout would leak holdout
+# prices into feature selection (IC ranking + BH-FDR below). The eligibility
+# filter leaves gaps in `features`, so the endpoint is computed on the dense
+# trading calendar from `prices`: keep signal dates whose label window closes
+# strictly before holdout_start (same purge as the 02_labels baseline IC and
+# the 05_evaluation feature triage).
+holdout_start_dt = date.fromisoformat(holdout_start)
+last_signal_date = (
+    prices.select("timestamp")
+    .unique()
+    .sort("timestamp")
+    .with_columns(pl.col("timestamp").shift(-LABEL_HORIZON).alias("_label_end"))
+    .filter(pl.col("_label_end") < holdout_start_dt)["timestamp"]
+    .max()
+)
 
 eval_df = features.join(
     labels.select(["timestamp", "symbol", label_col]), on=["timestamp", "symbol"], how="inner"
-).filter(pl.col("timestamp") < date.fromisoformat(holdout_start))
+).filter(pl.col("timestamp") <= last_signal_date)
 print(
     f"Evaluation set: {len(eval_df):,} rows "
     f"({eval_df['timestamp'].n_unique():,} dates x {eval_df['symbol'].n_unique()} assets, "
-    f"train+val only, < {holdout_start})"
+    f"labels end < {holdout_start}; last signal date {last_signal_date})"
 )
 
 # %% [markdown]
@@ -728,7 +739,12 @@ for j, feat in enumerate(feature_cols):
     valid_ic = ic_series[~np.isnan(ic_series)]
     if len(valid_ic) < 30:
         continue
-    stats = compute_ic_hac_stats(pl.DataFrame({"ic": valid_ic}), ic_col="ic")
+    # label_horizon=21 forces the Newey-West lag to cover the 21-day label
+    # overlap (>=20); without it the auto lag (~9) under-corrects and inflates
+    # the HAC t-stats -- the exact autocorrelation this section claims to handle.
+    stats = compute_ic_hac_stats(
+        pl.DataFrame({"ic": valid_ic}), ic_col="ic", label_horizon=LABEL_HORIZON
+    )
     ic_stats[feat] = stats
 
 print(f"Computed IC stats for {len(ic_stats)} features ({n_dates:,} dates)")
@@ -766,19 +782,21 @@ print("\nTop 10 by IC:")
 print(eval_summary.head(10))
 
 # %% [markdown]
-# **Note on date-level features**: Features like `regime_binary`,
-# `yield_curve_slope`, `corr_spy_tlt_63d`, and `choppiness_63d` are identical
-# across all symbols on a given date. Their cross-sectional IC is zero by
-# construction because they cannot differentiate between assets. These features
-# add value through interactions with cross-sectional features (e.g., conditional
-# momentum) rather than standalone ranking ability.
+# **Note on date-level features**: Features like `regime`, `yield_curve_slope`,
+# `yield_curve_zscore`, and `corr_spy_tlt_63d` are identical across all symbols on
+# a given date (macro/cross-asset signals broadcast to every ETF). Their
+# cross-sectional IC is near zero by construction because they cannot differentiate
+# between assets. These features add value through interactions with cross-sectional
+# features (e.g., conditional momentum) rather than standalone ranking ability.
 
 # %% [markdown]
 # ### IC Bar Chart
 
 # %%
 top20 = eval_summary.sort(pl.col("ic_mean").abs(), descending=True).head(20)
-colors = ["#2ecc71" if sig else "#95a5a6" for sig in top20["significant_fdr05"].to_list()]
+top20_sig = top20["significant_fdr05"].to_list()
+colors = [COLORS["positive"] if sig else COLORS["neutral"] for sig in top20_sig]
+n_top20_sig = sum(top20_sig)
 
 fig_ic = go.Figure(
     go.Bar(
@@ -790,9 +808,13 @@ fig_ic = go.Figure(
     )
 )
 fig_ic.update_layout(
-    title="Top 20 Features by |IC| (green = FDR-significant at 5%)",
+    title=(
+        f"Only {n_top20_sig} of the top 20 features by |IC| "
+        f"{'survives' if n_top20_sig == 1 else 'survive'} FDR at 5% (green); "
+        "the rest are multiple-testing noise"
+    ),
     xaxis_title="Feature",
-    yaxis_title="Mean IC",
+    yaxis_title="Mean cross-sectional IC (train+val)",
     xaxis_tickangle=45,
     height=500,
 )
@@ -803,44 +825,51 @@ fig_ic.show()
 
 # %%
 sig_colors = [
-    "#2ecc71" if sig else "#95a5a6" for sig in eval_summary["significant_fdr05"].to_list()
+    COLORS["positive"] if sig else COLORS["neutral"]
+    for sig in eval_summary["significant_fdr05"].to_list()
 ]
+
+# Plot |t| vs |t|: HAC deflation shrinks each t-stat TOWARD ZERO, so for a
+# negative naive-t feature the HAC t is larger (closer to 0) -- on signed axes
+# that point sits ABOVE the diagonal. Absolute values make the one true claim
+# literal: every point is on or below the 45-degree line (|HAC t| <= |naive t|).
+naive_abs = [abs(t) for t in eval_summary["naive_tstat"].to_list()]
+hac_abs = [abs(t) for t in eval_summary["hac_tstat"].to_list()]
+n_tested = eval_summary.height
 
 fig_tstat = go.Figure()
 fig_tstat.add_trace(
     go.Scatter(
-        x=eval_summary["naive_tstat"].to_list(),
-        y=eval_summary["hac_tstat"].to_list(),
+        x=naive_abs,
+        y=hac_abs,
         mode="markers",
         marker=dict(color=sig_colors, size=8),
         text=eval_summary["feature"].to_list(),
-        hovertemplate="%{text}<br>Naive t: %{x:.2f}<br>HAC t: %{y:.2f}<extra></extra>",
+        customdata=list(
+            zip(eval_summary["naive_tstat"].to_list(), eval_summary["hac_tstat"].to_list())
+        ),
+        hovertemplate=(
+            "%{text}<br>naive t: %{customdata[0]:.2f}<br>HAC t: %{customdata[1]:.2f}<extra></extra>"
+        ),
+        showlegend=False,
     )
 )
-naive_tstat_min = as_float(eval_summary["naive_tstat"].min())
-naive_tstat_max = as_float(eval_summary["naive_tstat"].max())
-hac_tstat_min = as_float(eval_summary["hac_tstat"].min())
-hac_tstat_max = as_float(eval_summary["hac_tstat"].max())
-assert naive_tstat_min is not None and naive_tstat_max is not None
-assert hac_tstat_min is not None and hac_tstat_max is not None
-t_range = [
-    min(naive_tstat_min, hac_tstat_min) - 0.5,
-    max(naive_tstat_max, hac_tstat_max) + 0.5,
-]
+t_max = max(max(naive_abs), max(hac_abs)) + 0.5
 fig_tstat.add_trace(
     go.Scatter(
-        x=t_range,
-        y=t_range,
+        x=[0, t_max],
+        y=[0, t_max],
         mode="lines",
-        line=dict(dash="dash", color="gray"),
+        line=dict(dash="dash", color=COLORS["neutral"]),
         showlegend=False,
     )
 )
 fig_tstat.update_layout(
-    title="Naive vs HAC-Adjusted t-Statistics",
-    xaxis_title="Naive t-stat",
-    yaxis_title="HAC t-stat",
+    title=f"HAC deflation pulls all {n_tested} features toward zero (|HAC t| <= |naive t|)",
+    xaxis_title="|Naive t-stat|",
+    yaxis_title=f"|HAC t-stat| (Newey-West, lag {LABEL_HORIZON - 1})",
     height=500,
+    showlegend=False,
 )
 fig_tstat.show()
 
@@ -860,21 +889,29 @@ high_corr_pairs = [
     if abs(corr_matrix.loc[f1, f2]) > 0.7
 ]
 
+_div = ml4t_diverging()  # [negative, neutral, positive] -> centered diverging scale
+diverging_scale = [[0.0, _div[0]], [0.5, _div[1]], [1.0, _div[2]]]
+
 fig_corr = go.Figure(
     go.Heatmap(
         z=corr_matrix.values,
         x=feature_cols,
         y=feature_cols,
-        colorscale="RdBu_r",
+        colorscale=diverging_scale,
         zmid=0,
         zmin=-1,
         zmax=1,
     )
 )
 fig_corr.update_layout(
-    title=f"Feature Correlation (Spearman, {len(high_corr_pairs)} pairs > 0.7)",
+    title=(
+        f"{len(high_corr_pairs)} feature pairs exceed |rho|>0.7 -- "
+        "redundancy clusters for Ch11 regularization"
+    ),
     height=800,
-    width=800,
+    width=900,
+    # feature names run to ~19 characters; the default left margin clips them
+    margin=dict(l=170),
 )
 fig_corr.show()
 
@@ -973,6 +1010,9 @@ top_features = (
 )
 family_ic_dict = {row["family"]: round(row["avg_ic"], 4) for row in family_ic.to_dicts()}
 
+print(f"Top FDR-significant features by |IC|: {top_features}")
+print(f"Family average IC: {family_ic_dict}")
+
 # %% [markdown]
 # ## Key Takeaways
 #
@@ -985,8 +1025,11 @@ family_ic_dict = {row["family"]: round(row["avg_ic"], 4) for row in family_ic.to
 #    inflating early-period cross-section breadth
 # 5. **SPY-TLT 63d correlation** added as cross-asset regime indicator
 # 6. **Yield curve z-score** provides continuous regime signal (better than binary)
-# 7. **IC evaluation with HAC + FDR** validates feature significance -- overlapping
-#    labels inflate naive t-stats; multiple testing further culls spurious features
+# 7. **IC evaluation with HAC + FDR** shows how little survives honest testing: the
+#    correct Newey-West lag (>=20 for the 21-day label overlap) deflates naive
+#    t-stats, and BH-FDR then culls all but one feature. Individual cross-sectional
+#    IC significance is rare -- which is why Ch11+ relies on regularized
+#    multi-feature models rather than single-feature bets
 # 8. **Gap: regime dynamics**: Cross-sectional features capture relative
 #    positioning but not market-level regime shifts. Ch9 adds data-driven
 #    regime detection (HMM) and memory-preserving transforms (FFD) that

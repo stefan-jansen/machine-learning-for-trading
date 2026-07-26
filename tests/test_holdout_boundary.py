@@ -11,6 +11,7 @@ notebook sources instead: each must read the holdout boundary from
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from pathlib import Path
 
@@ -71,6 +72,59 @@ def test_holdout_filter_precedes_first_ic_computation(rel_path: str, first_ic_ma
     assert 0 <= filter_pos < ic_pos, (
         f"{rel_path}: the holdout filter must be applied before the first IC "
         "computation so selection decisions never see the sealed holdout"
+    )
+
+
+# Notebooks that read a label series spanning the FULL sample and must therefore
+# purge on the label endpoint rather than the signal date. Filtering
+# ``timestamp < holdout_start`` looks sealed and is not: the forward labels of
+# the last ``horizon`` pre-holdout dates are computed from holdout prices, so
+# the IC ranking and BH-FDR below still see the holdout.
+#
+# The sibling notebooks in ``08_financial_features`` are deliberately absent:
+# they truncate the price frame first and compute forward returns on the
+# truncated frame, so the boundary rows come out null and drop. That is a
+# different, equally sound mechanism, and asserting this one against them would
+# be wrong. Widening the audit to the other eight case studies is tracked in
+# ``issues/2026-07-18-evaluation-holdout-leak-sibling-sweep``.
+LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
+    "case_studies/etfs/02_labels.py",
+    "case_studies/etfs/03_financial_features.py",
+    "case_studies/etfs/05_evaluation.py",
+]
+
+
+@pytest.mark.parametrize("rel_path", LABEL_ENDPOINT_PURGED_NOTEBOOKS, ids=lambda p: p)
+def test_holdout_purge_is_on_the_label_endpoint(rel_path: str) -> None:
+    """Regression gate for the 2026-07-21 revert.
+
+    ``test_holdout_filter_precedes_first_ic_computation`` passes on a bare
+    signal-date filter -- it only checks that the string ``holdout_start``
+    appears before the first IC computation. That is why the seal could be
+    removed from ``03_financial_features`` and stay green for five days. This
+    test checks the mechanism instead: the label endpoint is derived by shifting
+    the calendar by the label horizon, and the evaluation frame is filtered on
+    that endpoint.
+    """
+    source = (REPO_ROOT / rel_path).read_text()
+
+    assert "_label_end" in source, (
+        f"{rel_path}: no label-endpoint column. Purge on the endpoint of the "
+        "forward-label window (shift the dense calendar by the label horizon), "
+        "not on the signal date -- see case_studies/etfs/05_evaluation.py"
+    )
+    assert re.search(r"\.shift\(-\s*[A-Za-z_]*horizon", source, re.IGNORECASE), (
+        f"{rel_path}: the label endpoint must be shifted by the declared label "
+        "horizon, not by a bare integer that can drift from the label config"
+    )
+
+    # The endpoint must actually gate a frame, not merely be computed.
+    assert re.search(r"filter\(\s*pl\.col\(\"_label_end\"\)\s*<", source) or re.search(
+        r"filter\(\s*pl\.col\(\"timestamp\"\)\s*<=\s*last_signal_date", source
+    ), (
+        f"{rel_path}: the label endpoint is computed but never filtered on. "
+        "The evaluation frame must be restricted to signal dates whose label "
+        "window closes strictly before the holdout."
     )
 
 
