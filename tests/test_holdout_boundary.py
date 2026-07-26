@@ -375,15 +375,27 @@ def evaluation_notebook_label() -> tuple[str, int]:
     fails if `labels.primary` moves and 05 is not moved with it.
     """
     source = (REPO_ROOT / "case_studies" / "etfs" / "05_evaluation.py").read_text()
-    label_file = re.search(r'^PRIMARY_LABEL_FILE\s*=\s*"([^"]+)"', source, re.MULTILINE)
-    maxlags = re.search(r"^HAC_MAXLAGS\s*=\s*(\d+)", source, re.MULTILINE)
+    # Anchored to the end of the value: `HAC_MAXLAGS = 21 * 2` must not be read
+    # as 21, which is how a helper that parses a prefix reports a horizon the
+    # notebook does not use.
+    comment = r"[ \t]*(?:#.*)?$"
+    label_file = re.search(rf'^PRIMARY_LABEL_FILE = "([^"]+)"{comment}', source, re.MULTILINE)
+    maxlags = re.search(rf"^HAC_MAXLAGS = (\d+){comment}", source, re.MULTILINE)
     assert label_file and maxlags, (
         "05_evaluation no longer declares PRIMARY_LABEL_FILE and HAC_MAXLAGS as "
-        "literals; read its label and horizon from wherever it now takes them"
+        "plain literals; read its label and horizon from wherever it now takes them"
     )
-    assert re.search(r"^LABEL_HORIZON\s*=\s*HAC_MAXLAGS\b", source, re.MULTILINE), (
-        "05_evaluation's purge horizon is no longer HAC_MAXLAGS; this helper "
+    assert re.search(rf"^LABEL_HORIZON = HAC_MAXLAGS{comment}", source, re.MULTILINE), (
+        "05_evaluation's purge horizon is no longer HAC_MAXLAGS alone; this helper "
         "reports the wrong horizon for the equivalence check"
+    )
+    # ...and both must be what the notebook reads and shifts by, not constants it
+    # declares and then ignores.
+    assert re.search(
+        r'read_parquet\(\s*CASE_DIR\s*/\s*"labels"\s*/\s*PRIMARY_LABEL_FILE\s*\)', source
+    ), "05_evaluation declares PRIMARY_LABEL_FILE but does not load the labels with it"
+    assert re.search(r"shift\(\s*-\s*LABEL_HORIZON\s*\)", source), (
+        "05_evaluation declares LABEL_HORIZON but does not shift the calendar by it"
     )
     return label_file.group(1), int(maxlags.group(1))
 
