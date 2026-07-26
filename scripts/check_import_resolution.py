@@ -249,9 +249,11 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
     before importing ``notebook_provenance``. That is a real resolution root, so
     the guard honors it instead of demanding an allowlist entry.
 
-    Only a directory inside the repo is returned. An absolute entry keeps its own
-    semantics rather than being reinterpreted relative to the repo, and one that
-    lands outside cannot hold a module this repo ships, so it grants nothing.
+    Only a directory inside the repo is returned, judged after resolving both
+    sides so that ``..`` segments and symlinks cannot walk out of the checkout. An
+    absolute entry keeps its own semantics rather than being reinterpreted
+    relative to the repo, and one that lands outside cannot hold a module this
+    repo ships, so it grants nothing.
 
     The receiver has to be the standard-library ``sys.path``. Matching any
     ``x.path.append()`` would let an unrelated call turn a broken import into a
@@ -274,6 +276,7 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
         return []
     if not _sys_is_the_module(tree):
         return []
+    resolved_root = root.resolve()
     roots: list[Path] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -293,10 +296,13 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
                 # An absolute entry stays absolute. Rewriting "/scripts" to
                 # <repo>/scripts claimed a directory Python never searches, and
                 # a root outside the repo cannot hold a module this repo ships,
-                # so it is no resolution root here either way.
+                # so it is no resolution root here either way. Containment is
+                # decided on resolved paths and the resolved path is what gets
+                # used: `<repo>/../external` lists `<repo>` among its lexical
+                # parents, and an in-repo symlink can point anywhere.
                 inserted = Path(literal.value)
-                inserted = inserted if inserted.is_absolute() else root / inserted
-                if inserted == root or root in inserted.parents:
+                inserted = (inserted if inserted.is_absolute() else root / inserted).resolve()
+                if inserted == resolved_root or resolved_root in inserted.parents:
                     roots.append(inserted)
     return roots
 

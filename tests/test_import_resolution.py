@@ -305,6 +305,33 @@ def test_an_absolute_sys_path_entry_is_not_reinterpreted(tree: Path) -> None:
     assert resolves_in_repo("tool", test_file, tree)
 
 
+def test_a_path_entry_cannot_walk_out_of_the_repo(tmp_path: Path) -> None:
+    """Lexical containment was not enough: `<repo>/../external` lists `<repo>`
+    among its parents, and an in-repo symlink can point anywhere. Either would let
+    a module outside the checkout satisfy a missing import."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "external"
+    outside.mkdir()
+    (outside / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+
+    test_file.write_text('import sys\nsys.path.insert(0, "../external")\nimport tool\n')
+    assert not resolves_in_repo("tool", test_file, root)
+
+    (root / "linked").symlink_to(outside)
+    test_file.write_text('import sys\nsys.path.insert(0, "linked")\nimport tool\n')
+    assert not resolves_in_repo("tool", test_file, root)
+
+    # A symlink that stays inside the repo still resolves.
+    inside = root / "scripts"
+    inside.mkdir()
+    (inside / "helper.py").write_text("")
+    (root / "shortcut").symlink_to(inside)
+    test_file.write_text('import sys\nsys.path.insert(0, "shortcut")\nimport helper\n')
+    assert resolves_in_repo("helper", test_file, root)
+
+
 def test_non_entry_point_ancestor_is_not_a_resolution_root(tmp_path: Path) -> None:
     """A bare sibling import must not resolve via an intermediate directory
     that nothing is ever run from."""
