@@ -94,17 +94,18 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
 ]
 
 # Of the three above, 02 and 03 derive the endpoint PER SYMBOL; 05 still uses a
-# market-wide calendar. That is equivalent exactly while no symbol misses a
-# session inside the label window before the boundary, and on the shipped label
-# panel it is: both filters keep the same 418,362 rows and no row survives the
-# market-wide cutoff with its own label endpoint inside the holdout (measured
-# 2026-07-26 on ``labels/fwd_ret_21d.parquet``). So 05 does not leak today; the
-# market-wide form is a robustness gap, not an open defect, and converting it is
-# tracked in ``issues/2026-07-18-evaluation-holdout-leak-sibling-sweep`` §3.
-# Asserting the per-symbol form here before 05 is changed would only add a red
-# test. Note that 58 of the 99 ETFs do NOT trade every session across the full
-# panel -- they list late -- so "the panel is dense" is the wrong justification;
-# what holds is the measured equivalence at the boundary.
+# market-wide calendar. The two are equivalent exactly while no symbol misses a
+# session inside the label window before the boundary, which is a property of the
+# data and not of the code -- so it is executed, not asserted here:
+# ``test_the_two_purges_agree_on_the_shipped_label_panel`` runs both filters over
+# the label panel and requires the same rows, and
+# ``test_a_gapped_calendar_separates_the_two_purges`` builds a panel where they
+# disagree so that check cannot pass vacuously. 58 of the 99 ETFs do not trade
+# every session across the full panel -- they list late -- so "the panel is
+# dense" would be the wrong justification for the exemption; the tested
+# equivalence at the boundary is the right one. Converting 05 to the per-symbol
+# form regardless is tracked in
+# ``issues/2026-07-18-evaluation-holdout-leak-sibling-sweep`` §3.
 PER_SYMBOL_ENDPOINT_NOTEBOOKS = [
     "case_studies/etfs/02_labels.py",
     "case_studies/etfs/03_financial_features.py",
@@ -287,4 +288,158 @@ def test_label_endpoint_is_derived_per_symbol(rel_path: str) -> None:
         f"{rel_path}: the label endpoint must be derived as shift(-horizon)"
         '.over("symbol").alias("_label_end"), matching 02_labels; a market-wide '
         "cutoff under-purges a symbol with a gapped calendar"
+    )
+
+
+# The two purges, transcribed from the notebooks that run them, so the
+# equivalence the 05 exemption rests on is executable.
+
+
+def _kept_market_wide(label_df, horizon: int, holdout_start: date) -> set[tuple]:
+    """``05_evaluation``: one calendar for the whole market, then a date cutoff."""
+    import polars as pl
+
+    last_signal_date = (
+        label_df.select("timestamp")
+        .unique()
+        .sort("timestamp")
+        .with_columns(pl.col("timestamp").shift(-horizon).alias("_label_end"))
+        .filter(pl.col("_label_end") < holdout_start)["timestamp"]
+        .max()
+    )
+    kept = label_df.filter(pl.col("timestamp") <= last_signal_date)
+    return set(zip(kept["timestamp"].to_list(), kept["symbol"].to_list()))
+
+
+def _kept_per_symbol(label_df, horizon: int, holdout_start: date) -> set[tuple]:
+    """``03_financial_features``: each symbol's own label window."""
+    import polars as pl
+
+    kept = (
+        label_df.sort(["symbol", "timestamp"])
+        .with_columns(pl.col("timestamp").shift(-horizon).over("symbol").alias("_label_end"))
+        .filter(pl.col("_label_end") < holdout_start)
+    )
+    return set(zip(kept["timestamp"].to_list(), kept["symbol"].to_list()))
+
+
+def test_a_gapped_calendar_separates_the_two_purges() -> None:
+    """Without this, the equivalence test below could pass on any panel at all.
+
+    ``GAPPED`` stops trading four sessions before the boundary and resumes inside
+    the holdout, so its label window from 01-02 closes on 01-09 -- inside. The
+    market-wide cutoff keeps that row because the market's own calendar closes
+    01-02's window on 01-05.
+    """
+    pl = pytest.importorskip("polars")
+    holdout_start = date(2020, 1, 8)
+    horizon = 3
+    dense = [date(2020, 1, day) for day in range(1, 11)]
+    gapped = [date(2020, 1, day) for day in (1, 2, 3, 4, 9, 10)]
+    label_df = pl.DataFrame(
+        {
+            "timestamp": dense + gapped,
+            "symbol": ["DENSE"] * len(dense) + ["GAPPED"] * len(gapped),
+        }
+    )
+
+    market_wide = _kept_market_wide(label_df, horizon, holdout_start)
+    per_symbol = _kept_per_symbol(label_df, horizon, holdout_start)
+
+    assert per_symbol < market_wide, (
+        "the gapped calendar must make the two purges disagree, or the "
+        "equivalence check on the real panel proves nothing"
+    )
+    under_purged = market_wide - per_symbol
+    assert (date(2020, 1, 2), "GAPPED") in under_purged
+    # Every row the market-wide cutoff keeps and the per-symbol purge drops has
+    # its own label window closing at or after the boundary: that is the leak.
+    with_endpoints = label_df.sort(["symbol", "timestamp"]).with_columns(
+        pl.col("timestamp").shift(-horizon).over("symbol").alias("_label_end")
+    )
+    endpoints = {
+        (timestamp, symbol): endpoint for timestamp, symbol, endpoint in with_endpoints.iter_rows()
+    }
+    for row in under_purged:
+        endpoint = endpoints[row]
+        assert endpoint is None or endpoint >= holdout_start
+
+
+def test_the_two_purges_agree_on_the_shipped_label_panel() -> None:
+    """The 05 exemption in ``PER_SYMBOL_ENDPOINT_NOTEBOOKS``, executed.
+
+    05 uses a market-wide cutoff, which under-purges a symbol whose calendar has
+    a gap inside the label window before the boundary. Whether any symbol does is
+    a property of the label panel, so check the panel rather than reasoning about
+    it. Skips where the labels have not been generated; runs wherever they have.
+    """
+    pl = pytest.importorskip("polars")
+    setup = yaml.safe_load(SETUP_YAML.read_text())
+    label_col = setup["labels"]["primary"]
+    horizon = int(label_col.rsplit("_", 1)[-1].removesuffix("d"))
+    artifact = REPO_ROOT / "case_studies" / "etfs" / "labels" / f"{label_col}.parquet"
+    if not artifact.exists():
+        pytest.skip(f"{artifact.relative_to(REPO_ROOT)} not generated locally")
+
+    label_df = pl.read_parquet(artifact).select(["timestamp", "symbol"])
+    holdout_start = date.fromisoformat(setup["evaluation"]["holdout_start"])
+
+    market_wide = _kept_market_wide(label_df, horizon, holdout_start)
+    per_symbol = _kept_per_symbol(label_df, horizon, holdout_start)
+
+    under_purged = sorted(market_wide - per_symbol)[:5]
+    assert market_wide == per_symbol, (
+        f"05_evaluation's market-wide cutoff and 03's per-symbol purge no longer "
+        f"keep the same rows on {label_col}: "
+        f"{len(market_wide - per_symbol)} rows kept only by the market-wide "
+        f"cutoff (e.g. {under_purged}), {len(per_symbol - market_wide)} only by "
+        "the per-symbol purge. The exemption of 05_evaluation.py from "
+        "PER_SYMBOL_ENDPOINT_NOTEBOOKS rested on that equivalence, so convert 05 "
+        "to the per-symbol form -- see issues/"
+        "2026-07-18-evaluation-holdout-leak-sibling-sweep §3."
+    )
+
+
+def test_the_label_and_horizon_are_resolved_from_the_configured_primary_label() -> None:
+    """One config read must drive both the endpoint purge and the HAC lag.
+
+    A hardcoded 21 works until ``labels.primary`` changes, and then the purge and
+    the Newey-West lag are silently wrong for the label actually being evaluated.
+    """
+    source = (REPO_ROOT / "case_studies" / "etfs" / "03_financial_features.py").read_text()
+
+    assert 'setup["labels"]["primary"]' in source, (
+        "03_financial_features must take the label column from setup.yaml "
+        "labels.primary, not from a filename literal"
+    )
+    hardcoded = re.search(r"^LABEL_HORIZON\s*=\s*\d+", source, re.MULTILINE)
+    assert hardcoded is None, (
+        f"03_financial_features hardcodes the label horizon ({hardcoded.group(0) if hardcoded else ''}). "
+        "Derive it from the configured primary label instead."
+    )
+    assert re.search(r'read_parquet\([^)]*"fwd_ret_\d+d\.parquet"', source) is None, (
+        "03_financial_features names a label file literally; read the configured "
+        "primary label's parquet instead"
+    )
+    # The one resolved value has to reach both places that depend on it.
+    assert 'shift(-LABEL_HORIZON).over("symbol")' in source, (
+        "the holdout purge must shift by the resolved horizon"
+    )
+    assert "label_horizon=LABEL_HORIZON" in source, (
+        "the Newey-West lag must be set from the resolved horizon, not a literal"
+    )
+
+
+def test_the_narrative_states_the_configured_horizon() -> None:
+    """The prose names a horizon in days; it has to be the configured one, or the
+    notebook explains one label while computing another."""
+    setup = yaml.safe_load(SETUP_YAML.read_text())
+    horizon = int(setup["labels"]["primary"].rsplit("_", 1)[-1].removesuffix("d"))
+    source = (REPO_ROOT / "case_studies" / "etfs" / "03_financial_features.py").read_text()
+
+    stated = {int(n) for n in re.findall(r"(\d+)-day (?:forward|label|return)", source)}
+    assert stated <= {horizon}, (
+        f"03_financial_features describes {sorted(stated - {horizon})}-day labels "
+        f"while setup.yaml configures a {horizon}-day horizon "
+        f"({setup['labels']['primary']})"
     )
