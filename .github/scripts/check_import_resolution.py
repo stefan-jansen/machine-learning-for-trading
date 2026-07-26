@@ -53,15 +53,13 @@ stops whoever runs that import. Modeling Python's execution order statically to
 close them costs more false positives than it buys, so the contract stays at
 existence.
 
-**And what it does not check: where a computed path points.** A ``sys.path``
-entry written as ``BASE / "sub"`` is read for its literal segments and anchored
-to the repo root, because what ``BASE`` holds is not knowable without running
-the file. Every such mutation in this repo binds ``BASE`` to the repo root, so
-the reading is exact here. One that bound it outside the checkout would be read
-as ``<repo>/sub``, and an import could then pass on the strength of a module
-this repo really ships at a path the running code never searches. Refusing every
-computed base instead would reject the four working files that do this and fail
-CI on correct code, which is the more expensive error of the two.
+A ``sys.path`` entry is read as an expression rather than scavenged for the
+literals in it, so ``REPO_ROOT / "sub"`` and ``EXTERNAL_ROOT / "sub"`` are not
+the same entry: the assignment that bound the name decides whether the directory
+is in the checkout at all. The vocabulary understood is the one these files use
+(``Path(__file__)``, ``.resolve()``, ``.parent``, ``.parents[n]``, ``/``, a name
+bound once at module level); an entry built any other way grants no resolution
+root, so an unresolved import beneath it is reported rather than approved.
 
 Adding a dependency therefore means declaring it in ``pyproject.toml`` — which
 is required anyway. Only when a package's *import* name differs from its
@@ -255,27 +253,82 @@ def _sys_is_the_module(tree: ast.Module) -> bool:
     return True
 
 
-def _literal_path_segments(node: ast.AST) -> list[str]:
-    """The string literals a path expression contributes, in source order.
+def _module_level_path_names(tree: ast.Module, source: Path) -> dict[str, Path]:
+    """Module-level names bound to a directory this reader can work out.
 
-    One directory can be written as several literals: ``REPO_ROOT / ".github" /
-    "scripts"`` names a single root. Reading each constant on its own turned
-    that into two roots, ``<repo>/.github`` and ``<repo>/scripts``, and the one
-    directory actually meant was not among them. Joining the ``/`` chain
-    recovers it.
+    A ``sys.path`` entry is usually written against a name — ``REPO_ROOT /
+    ".github" / "scripts"`` — so where that name points decides whether the
+    entry is inside the checkout at all. Reading the assignment is what
+    separates ``REPO_ROOT = Path(__file__).resolve().parents[2]`` from
+    ``EXTERNAL_ROOT = Path("/somewhere/else")``.
 
-    Only literals are followed, so the base of the chain contributes nothing and
-    the remainder is anchored to the repo root by the caller. That is exact for
-    every mutation in this repo and wrong for one based outside the checkout;
-    see the module docstring for why the alternative costs more.
+    A name assigned more than once is dropped rather than guessed at: which
+    binding is live at the insert is an execution-order question, and this guard
+    does not answer those.
+    """
+    bindings: dict[str, Path] = {}
+    rebound: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+        if target.id in bindings or target.id in rebound:
+            bindings.pop(target.id, None)
+            rebound.add(target.id)
+            continue
+        resolved = _static_path(node.value, source, bindings)
+        if resolved is not None:
+            bindings[target.id] = resolved
+    return bindings
+
+
+def _static_path(node: ast.AST, source: Path, names: dict[str, Path]) -> Path | None:
+    """The directory a path expression names, or ``None`` if it cannot be read.
+
+    Only the vocabulary these files actually use is understood: ``Path(...)``,
+    ``str(...)``, ``.resolve()``, ``.parent``, ``.parents[n]``, ``/`` against a
+    literal, and a name bound earlier at module level. Anything else returns
+    ``None``, so the entry grants no resolution root — the guard reports an
+    import it cannot justify rather than approving one it cannot check.
     """
     if isinstance(node, ast.Constant):
-        return [node.value] if isinstance(node.value, str) and node.value else []
+        return Path(node.value) if isinstance(node.value, str) and node.value else None
+    if isinstance(node, ast.Name):
+        return names.get(node.id)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-        return _literal_path_segments(node.left) + _literal_path_segments(node.right)
-    if isinstance(node, ast.Call):  # str(...), Path(...), os.path.join(...)
-        return [seg for a in node.args for seg in _literal_path_segments(a)]
-    return []
+        base = _static_path(node.left, source, names)
+        if base is None or not isinstance(node.right, ast.Constant):
+            return None
+        segment = node.right.value
+        return base / segment if isinstance(segment, str) and segment else None
+    if isinstance(node, ast.Subscript):  # X.parents[n]
+        value = node.value
+        if not (isinstance(value, ast.Attribute) and value.attr == "parents"):
+            return None
+        base = _static_path(value.value, source, names)
+        index = node.slice
+        if base is None or not (isinstance(index, ast.Constant) and isinstance(index.value, int)):
+            return None
+        parents = base.parents
+        return parents[index.value] if index.value < len(parents) else None
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        base = _static_path(node.value, source, names)
+        return base.parent if base is not None else None
+    if isinstance(node, ast.Call):
+        func = node.func
+        # `__file__` is this very file, which is how every in-repo base is built.
+        if isinstance(func, ast.Name) and func.id == "Path" and len(node.args) == 1:
+            arg = node.args[0]
+            if isinstance(arg, ast.Name) and arg.id == "__file__":
+                return source
+            return _static_path(arg, source, names)
+        if isinstance(func, ast.Name) and func.id == "str" and len(node.args) == 1:
+            return _static_path(node.args[0], source, names)
+        if isinstance(func, ast.Attribute) and func.attr == "resolve" and not node.args:
+            return _static_path(func.value, source, names)
+    return None
 
 
 def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
@@ -291,6 +344,14 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
     absolute entry keeps its own semantics rather than being reinterpreted
     relative to the repo, and one that lands outside cannot hold a module this
     repo ships, so it grants nothing.
+
+    Where the entry points is read from the expression, not guessed from the
+    literals in it (see :func:`_static_path`). Taking the literals alone meant
+    ``EXTERNAL_ROOT / "scripts"`` was indistinguishable from ``REPO_ROOT /
+    "scripts"``, so an import could pass on the strength of a module this repo
+    ships at a path the running code never searches. An expression this reader
+    cannot follow yields nothing, which costs a false positive naming the file
+    and line rather than a silent approval.
 
     The receiver has to be the standard-library ``sys.path``. Matching any
     ``x.path.append()`` would let an unrelated call turn a broken import into a
@@ -314,6 +375,7 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
     if not _sys_is_the_module(tree):
         return []
     resolved_root = root.resolve()
+    names = _module_level_path_names(tree, path)
     roots: list[Path] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -329,8 +391,8 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
         ):
             continue
         for arg in node.args:
-            segments = _literal_path_segments(arg)
-            if not segments:
+            inserted = _static_path(arg, path, names)
+            if inserted is None:
                 continue
             # An absolute entry stays absolute. Rewriting "/scripts" to
             # <repo>/scripts claimed a directory Python never searches, and
@@ -339,7 +401,6 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
             # decided on resolved paths and the resolved path is what gets
             # used: `<repo>/../external` lists `<repo>` among its lexical
             # parents, and an in-repo symlink can point anywhere.
-            inserted = Path(*segments)
             inserted = (inserted if inserted.is_absolute() else root / inserted).resolve()
             if inserted == resolved_root or resolved_root in inserted.parents:
                 roots.append(inserted)

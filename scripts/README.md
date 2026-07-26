@@ -13,10 +13,18 @@ importable library code the notebooks build on lives in [`utils/`](../utils).
 - **`sync_notebooks.py`** — regenerates a notebook's `.ipynb` from its Jupytext `.py`
   source (or the reverse); pass `--check` to only report which pairs have drifted.
 
-That is the whole directory, which is the point: everything here is something you
-run. The checks CI enforces and the tools that maintain the committed notebooks
-live in [`.github/scripts/`](../.github/scripts) — you never need to run them, and
-you would only read them to see what a pull request has to satisfy.
+That is the whole directory, which is the point: everything here is something a
+reader runs. The checks CI enforces and the tools that repair committed notebooks
+live in [`.github/scripts/`](../.github/scripts). Reading the book needs none of
+them; opening a pull request can, and the failure tells you which:
+
+- `notebook_provenance.py stamp <nb.ipynb> --executor <env>` — required after
+  re-executing a notebook, or the pre-commit gate rejects the commit as stale.
+- `strip_empty_cell_tags.py` — run when the pair-sync gate reports a notebook
+  whose `.ipynb` carries empty `tags: []` its `.py` does not.
+- `sanitize_notebook_paths.py` — strips machine-specific absolute paths out of
+  committed notebook outputs. It currently rewrites source as well as outputs, so
+  check its diff before committing.
 
 > Internal registry-maintenance tooling (backfills, schema migrations, one-off data
 > repairs) is intentionally **not** in this repository — it lives in the separate

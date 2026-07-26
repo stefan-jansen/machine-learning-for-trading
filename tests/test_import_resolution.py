@@ -337,17 +337,15 @@ def test_a_multi_segment_path_insert_names_one_directory(tmp_path: Path) -> None
     assert not resolves_in_repo("stray", test_file, root)
 
 
-def test_a_computed_base_is_read_against_the_repo_root(tmp_path: Path) -> None:
-    """An accepted residual, pinned so it stays deliberate: the base of a `/`
-    chain is a name, and what it holds cannot be read without running the file.
-    The literal segments are anchored to the repo root, which is exact for every
-    such mutation in this repo and wrong for one based outside the checkout.
-    Refusing every computed base would instead fail CI on the four working files
-    that do this."""
+def test_a_base_outside_the_checkout_grants_nothing(tmp_path: Path) -> None:
+    """Reading only the literals made `EXTERNAL_ROOT / "scripts"` and
+    `REPO_ROOT / "scripts"` the same entry, so an import passed on the strength
+    of a module this repo ships at a path the running code never searches."""
     root = tmp_path / "repo"
     (root / "scripts").mkdir(parents=True)
     (root / "scripts" / "tool.py").write_text("")
     test_file = root / "test_thing.py"
+
     test_file.write_text(
         "import sys\n"
         "from pathlib import Path\n"
@@ -355,11 +353,42 @@ def test_a_computed_base_is_read_against_the_repo_root(tmp_path: Path) -> None:
         'sys.path.insert(0, str(EXTERNAL_ROOT / "scripts"))\n'
         "import tool\n"
     )
+    assert not resolves_in_repo("tool", test_file, root)
+
+    # The same entry against a base that really is the repo root is honored.
+    test_file.write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "REPO_ROOT = Path(__file__).resolve().parent\n"
+        'sys.path.insert(0, str(REPO_ROOT / "scripts"))\n'
+        "import tool\n"
+    )
     assert resolves_in_repo("tool", test_file, root)
 
-    # It grants no more than that: the repo must really ship the module at the
-    # path the literals name, so an absent one is still reported.
-    assert not resolves_in_repo("absent", test_file, root)
+
+def test_an_unreadable_base_grants_nothing(tmp_path: Path) -> None:
+    """A name this reader cannot follow — computed, imported, rebound — must not
+    fall back to the repo root. Reporting an import it cannot justify is the
+    cheaper error; approving one it cannot check is the bug class itself."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+
+    for base in (
+        "BASE = os.environ['SOMEWHERE']",
+        "from config import BASE",
+        'BASE = Path("/a")\nBASE = Path("/b")',  # rebound: which one is live?
+    ):
+        test_file.write_text(
+            "import sys\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            f"{base}\n"
+            'sys.path.insert(0, str(BASE / "scripts"))\n'
+            "import tool\n"
+        )
+        assert not resolves_in_repo("tool", test_file, root), base
 
 
 def test_dot_github_scripts_is_scanned(tmp_path: Path) -> None:
