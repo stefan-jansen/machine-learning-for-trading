@@ -12,10 +12,11 @@ importable library code the notebooks build on lives in [`utils/`](../utils).
   `ML4T_OUTPUT_DIR`-isolated experiment.
 - **`sync_notebooks.py`** — regenerates a notebook's `.ipynb` from its Jupytext `.py`
   source (or the reverse); pass `--check` to only report which pairs have drifted.
-- **`sanitize_notebook_paths.py`** — strips machine-specific absolute paths out of
-  committed notebook outputs and metadata; a CI check fails if any slip through.
-- **`notebook_provenance.py`** — the pre-commit gate: it stamps each executed notebook
-  with the git hash of its `.py` source and blocks commits of stale or test-mode runs.
+
+That is the whole directory, which is the point: everything here is something you
+run. The checks CI enforces and the tools that maintain the committed notebooks
+live in [`.github/scripts/`](../.github/scripts) — you never need to run them, and
+you would only read them to see what a pull request has to satisfy.
 
 > Internal registry-maintenance tooling (backfills, schema migrations, one-off data
 > repairs) is intentionally **not** in this repository — it lives in the separate
