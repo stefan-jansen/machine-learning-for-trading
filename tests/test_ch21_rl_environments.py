@@ -127,13 +127,15 @@ def test_ample_liquidity_completes_without_forcing() -> None:
     assert not any(h.get("forced_liquidation", False) for h in env.execution_history)
 
 
-def test_forced_liquidation_appends_a_second_row_on_the_final_bar() -> None:
-    """A forced liquidation is recorded as an extra row on the final bar, so
-    ``history[-1]`` is the involuntary remainder rather than that bar's volume.
-    04_crypto_execution_rl reported ``history[-1]`` as "last step share" and put
-    it in one column beside the baselines' own final trade, which are different
-    quantities. The notebook now sums every row on the final bar; this pins the
-    history shape that fix depends on."""
+def test_history_records_one_row_per_bar_even_when_liquidation_is_forced() -> None:
+    """A forced liquidation happens against the final bar, not in an extra hour.
+
+    It used to be appended as a second row carrying ``step == horizon``, so every
+    consumer had to collapse the pair. Two did not: the notebook's "last step
+    share" column read the involuntary remainder alone, and the trajectory figure
+    plotted PPO over 25 hours of a 24-hour horizon while the baselines spanned
+    24. The bar is now one row whose ``shares_sold`` is the whole bar and whose
+    ``forced_shares`` isolates the involuntary part."""
     env = CryptoExecutionEnv(
         market_data(volume=1.0), total_shares=500.0, horizon=24, max_participation_rate=0.10, seed=3
     )
@@ -143,19 +145,64 @@ def test_forced_liquidation_appends_a_second_row_on_the_final_bar() -> None:
         if terminated:
             break
 
-    final_bar = [h for h in env.execution_history if int(h["step"]) >= env.horizon - 1]
-    assert len(final_bar) == 2, "expected the policy leg and the forced leg on the final bar"
-    assert not final_bar[0].get("forced_liquidation", False)
-    assert final_bar[1].get("forced_liquidation", False)
-    assert env.execution_history[-1] is final_bar[1]
+    steps = [int(h["step"]) for h in env.execution_history]
+    assert steps == sorted(set(steps)), "a bar is recorded more than once"
+    assert max(steps) <= env.horizon - 1, "history runs past the final bar"
 
-    # The forced leg alone understates the bar; the two together clear the order.
-    bar_volume = sum(float(h["shares_sold"]) for h in final_bar)
-    assert float(final_bar[1]["shares_sold"]) < bar_volume
+    final_bar = env.execution_history[-1]
+    assert final_bar["forced_liquidation"] is True
+    assert 0 < float(final_bar["forced_shares"]) < float(final_bar["shares_sold"]), (
+        "the bar must hold both the policy leg and the forced remainder"
+    )
+    assert float(final_bar["remaining"]) == 0.0
     assert sum(float(h["shares_sold"]) for h in env.execution_history) == pytest.approx(
         env.total_shares
     )
     assert env.remaining_shares == 0.0
+    # Every row carries the same keys, so the aggregate evaluation table and the
+    # parquet artifact built from it have one schema rather than nulls on the
+    # rows the forced leg used to omit.
+    assert {frozenset(h) for h in env.execution_history} == {frozenset(final_bar)}
+
+
+def test_forced_remainder_is_not_charged_inventory_risk() -> None:
+    """Risk prices exposure carried past the bar; a forced remainder is sold into
+    that same bar, so it carries none. Charging it made the terminal reward depend
+    on how the final order split between the policy leg and the forced leg."""
+    rewards, forced, bar_volume = {}, {}, {}
+    for final_action in (0.0, 0.25, 0.5, 0.75, 1.0):
+        env = CryptoExecutionEnv(
+            market_data(volume=50.0),
+            total_shares=100.0,
+            horizon=4,
+            impact_coefficient=0.05,
+            max_participation_rate=1.0,
+            risk_aversion=1e-2,
+            seed=0,
+        )
+        env.reset(seed=0)
+        terminated, total_reward = False, 0.0
+        while not terminated:
+            action = final_action if env.step_idx == env.horizon - 1 else 0.5
+            _, reward, terminated, _, _ = env.step(np.array([action], dtype=np.float32))
+            total_reward += reward
+        final_bar = env.execution_history[-1]
+        assert sum(h["shares_sold"] for h in env.execution_history) == pytest.approx(100.0)
+        assert final_bar["risk_penalty"] == 0.0, "the liquidated remainder was charged risk"
+        rewards[final_action] = total_reward
+        forced[final_action] = final_bar["forced_shares"]
+        bar_volume[final_action] = final_bar["shares_sold"]
+
+    # The final bar clears the same quantity in every case; only the voluntary /
+    # forced split differs. That is the invariance the reward must respect.
+    assert max(forced.values()) > 0 and min(forced.values()) == 0.0, (
+        f"the split did not vary, so this asserts nothing: {forced}"
+    )
+    assert np.allclose(list(bar_volume.values()), next(iter(bar_volume.values())))
+    values = list(rewards.values())
+    assert np.allclose(values, values[0]), (
+        f"splitting the terminal order changes total reward: {rewards}"
+    )
 
 
 def test_terminal_split_is_not_cheaper_than_one_trade() -> None:

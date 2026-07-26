@@ -388,19 +388,51 @@ baseline_std_min = min(row["std_final_wealth"] for row in baseline_summary)
 baseline_std_max = max(row["std_final_wealth"] for row in baseline_summary)
 
 # Mean wealth per episode is noisy, so quote the standard error alongside it and
-# size the gap to the strongest baseline in standard errors. Without this the
-# comparison reads as a ranking when it may be a coin flip.
+# size the gap in standard errors. Without this the comparison reads as a ranking
+# when it may be a coin flip.
+#
+# Every strategy trades the same price path in episode i (all four reset to seed
+# 1000 + i), so the samples are paired and the gap is measured per episode before
+# averaging. Treating the two means as independent samples would use the wrong
+# standard error: the shared path is common to both arms and cancels in the
+# difference. The reference baseline is fixed in advance -- picking whichever
+# baseline happens to look best in this run and then testing against it would
+# make the interval a selection artifact -- and the paired gap to all three is
+# reported so the reader sees the spread rather than one hand-picked number.
+REFERENCE_BASELINE = "Reservation + Base Spread"
 n_eval = config["eval_episodes"]
-ppo_se = ppo_summary["std_final_wealth"] / np.sqrt(n_eval)
-best_baseline = max(baseline_summary, key=lambda row: row["mean_final_wealth"])
-gap = ppo_summary["mean_final_wealth"] - best_baseline["mean_final_wealth"]
-gap_se = float(np.hypot(ppo_se, best_baseline["std_final_wealth"] / np.sqrt(n_eval)))
+
+
+def paired_gap(baseline_name: str) -> tuple[float, float, float]:
+    """Mean per-episode wealth gap to one baseline, its standard error, and correlation."""
+    ppo_wealth = np.array([run["final_wealth"] for run in results[RL_LABEL]])
+    base_wealth = np.array([run["final_wealth"] for run in results[baseline_name]])
+    differences = ppo_wealth - base_wealth
+    standard_error = float(differences.std(ddof=1) / np.sqrt(differences.size))
+    return (
+        float(differences.mean()),
+        standard_error,
+        float(np.corrcoef(ppo_wealth, base_wealth)[0, 1]),
+    )
+
+
+ppo_se = float(np.std([run["final_wealth"] for run in results[RL_LABEL]], ddof=1) / np.sqrt(n_eval))
+gap, gap_se, gap_corr = paired_gap(REFERENCE_BASELINE)
 gap_sigma = abs(gap) / gap_se
 verdict = "ahead of" if gap > 0 else "behind"
 resolution = (
     "far enough outside evaluation noise to be a result rather than a draw"
     if gap_sigma >= 3
     else "well inside evaluation noise, so the ordering is not resolved at this episode count"
+)
+all_gaps = {name: paired_gap(name) for name in baseline_actions}
+gap_range = "; ".join(
+    f"{name} {value:+.1f} USD ({value / standard_error:+.1f} SE)"
+    for name, (value, standard_error, _) in all_gaps.items()
+)
+same_sign = sum(1 for value, _, _ in all_gaps.values() if (value > 0) == (gap > 0))
+agreement = (
+    f"all {len(all_gaps)}" if same_sign == len(all_gaps) else f"{same_sign} of the {len(all_gaps)}"
 )
 display(
     Markdown(
@@ -410,8 +442,12 @@ display(
 {baseline_mean_min:.1f} to {baseline_mean_max:.1f} USD for the reservation-price baselines. Its
 wealth standard deviation is {ppo_summary["std_final_wealth"]:.1f} USD, versus {baseline_std_min:.1f}
 to {baseline_std_max:.1f} USD for the baselines, so dispersion is the learned policy's signature.
-That dispersion leaves it {abs(gap):.1f} USD {verdict} the best baseline
-("{best_baseline["strategy"]}"), a gap of {gap_sigma:.1f} standard errors - {resolution}.
+
+Every strategy trades the same price path within an episode, so the comparison is per episode.
+Against the prespecified reference baseline ("{REFERENCE_BASELINE}") PPO is {abs(gap):.1f} USD
+{verdict} it, a paired gap of {gap_sigma:.1f} standard errors - {resolution}. Episode wealth
+correlates {gap_corr:.2f} across the two arms. The paired gap to each baseline is: {gap_range}.
+
 The sign of that gap is a property of this trained policy at seed {SEED}, not of PPO in general:
 mean wealth is seed-sensitive here, which is why the comparison needs the standard error attached.
 """
@@ -596,7 +632,8 @@ measured after terminal liquidation, so every strategy uses the same inventory a
 convention.
 
 The learned policy jointly chooses skew and spread width, but on mean liquidated wealth it lands
-{gap_sigma:.1f} standard errors {verdict} the best reservation-price rule over {n_eval} episodes.
+{gap_sigma:.1f} standard errors {verdict} the reference reservation-price rule over {n_eval} paired
+episodes, and {verdict} {agreement} of them.
 Reproducing the inventory-control mechanism is not the same as beating the rules that encode it: this
 remains a simulator policy rather than a closed-form reproduction of Avellaneda-Stoikov.
 

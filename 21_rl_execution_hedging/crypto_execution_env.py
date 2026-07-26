@@ -262,27 +262,50 @@ class CryptoExecutionEnv(gym.Env):
             forced_shares = 0.0
 
         execution_price, shortfall = self._trade_metrics(market, shares_to_sell, forced_shares)
+        # Both legs are charged on the same combined participation, so they clear
+        # at one price: the bar has a single execution price regardless of how
+        # the order is split between the policy and the forced remainder.
+        if forced_shares > 0:
+            _, forced_shortfall = self._trade_metrics(market, forced_shares, shares_to_sell)
+        else:
+            forced_shortfall = 0.0
 
         # Update state
         self.remaining_shares -= shares_to_sell
         if self.remaining_shares <= residual_tolerance:
             self.remaining_shares = 0.0
-        self.total_cost += shortfall
+        self.total_cost += shortfall + forced_shortfall
+
+        # Inventory risk prices the exposure actually carried past this bar.
+        # A forced remainder is liquidated against this same bar, so it is never
+        # carried and must not be charged: otherwise the terminal reward depends
+        # on how the final order splits between the policy leg and the forced
+        # leg even though exposure and execution cost are identical either way.
+        carried_shares = max(self.remaining_shares - forced_shares, 0.0)
         risk_penalty = (
-            0.0
-            if self.remaining_shares <= 0
-            else self._inventory_risk_penalty(market, self.remaining_shares)
+            0.0 if carried_shares <= 0 else self._inventory_risk_penalty(market, carried_shares)
         )
         schedule_penalty = self._schedule_penalty(shares_to_sell, reference_shares)
 
+        if forced_shares > 0:
+            self.remaining_shares = 0.0
+
+        # One history row per bar. The forced leg used to be a second row on the
+        # final bar, which every consumer then had to remember to collapse -- the
+        # trajectory figure plotted it as a fictitious extra hour and the
+        # last-bar volume column read the involuntary remainder alone. Recording
+        # the bar once, with the forced quantity as its own field, removes the
+        # trap instead of patching each reader.
         self.execution_history.append(
             {
                 "step": self.step_idx,
                 "timestamp": str(market.timestamp),
                 "price": market.price,
-                "shares_sold": shares_to_sell,
+                "shares_sold": shares_to_sell + forced_shares,
+                "forced_shares": forced_shares,
+                "forced_liquidation": forced_shares > 0,
                 "execution_price": execution_price,
-                "shortfall": shortfall,
+                "shortfall": shortfall + forced_shortfall,
                 "remaining": self.remaining_shares,
                 "volume": market.volume,
                 "premium_index": market.premium_index,
@@ -298,7 +321,7 @@ class CryptoExecutionEnv(gym.Env):
         self.step_idx += 1
 
         reward = (
-            -(shortfall + risk_penalty + schedule_penalty)
+            -(shortfall + forced_shortfall + risk_penalty + schedule_penalty)
             / (self.arrival_price * self.total_shares)
             * 10_000
         )
@@ -307,41 +330,16 @@ class CryptoExecutionEnv(gym.Env):
         terminated = self.step_idx >= self.horizon or self.remaining_shares <= 0
         truncated = False
 
-        if terminated and forced_shares > 0:
-            penalty_price, remaining_shortfall = self._trade_metrics(
-                market, forced_shares, shares_to_sell
-            )
-            self.total_cost += remaining_shortfall
-            reward -= remaining_shortfall / (self.arrival_price * self.total_shares) * 10000
-            self.execution_history.append(
-                {
-                    "step": self.step_idx,
-                    "timestamp": str(market.timestamp),
-                    "price": market.price,
-                    "shares_sold": forced_shares,
-                    "execution_price": penalty_price,
-                    "shortfall": remaining_shortfall,
-                    "remaining": 0.0,
-                    "volume": market.volume,
-                    "premium_index": market.premium_index,
-                    "risk_penalty": 0.0,
-                    "schedule_penalty": 0.0,
-                    "hour": market.hour,
-                    "hours_to_funding": market.hours_to_funding,
-                    "forced_liquidation": True,
-                }
-            )
-            self.remaining_shares = 0.0
-
         # Return final observation
         if terminated:
             self.step_idx = min(self.step_idx, self.horizon - 1)
 
         obs = self._get_obs()
         info = {
-            "shares_sold": shares_to_sell,
+            "shares_sold": shares_to_sell + forced_shares,
+            "forced_shares": forced_shares,
             "remaining_shares": self.remaining_shares,
-            "step_shortfall": shortfall,
+            "step_shortfall": shortfall + forced_shortfall,
             "total_shortfall": self.total_cost,
             "risk_penalty": risk_penalty,
             "schedule_penalty": schedule_penalty,

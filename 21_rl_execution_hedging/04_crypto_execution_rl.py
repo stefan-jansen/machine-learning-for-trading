@@ -471,18 +471,12 @@ def evaluate_strategy(strategy_name: str, strategy_fn, n_episodes: int = 20, see
         shortfalls.append(result["shortfall_bps"])
         forced_liqs.append(result["forced_liquidation"])
         history = result["history"]
-        # A forced liquidation appends a second row on the final bar, so
-        # `history[-1]` is the involuntary remainder rather than the bar's
-        # volume. Sum every row on the final bar so the figure means the same
-        # thing for all three strategies, and size the forced leg separately.
-        last_step_shares.append(
-            sum(float(h["shares_sold"]) for h in history if int(h["step"]) >= env.horizon - 1)
-            / env.total_shares
-        )
-        forced_shares.append(
-            sum(float(h["shares_sold"]) for h in history if h.get("forced_liquidation", False))
-            / env.total_shares
-        )
+        # `shares_sold` is the whole bar and `forced_shares` the involuntary part
+        # of it, so the last-bar column means the same thing for all three
+        # strategies and the forced leg is sized separately rather than standing
+        # in for the bar.
+        last_step_shares.append(float(history[-1]["shares_sold"]) / env.total_shares)
+        forced_shares.append(sum(float(h["forced_shares"]) for h in history) / env.total_shares)
         final_quarter_cutoff = max(env.horizon - env.horizon // 4, 0)
         final_quarter_volume = sum(
             float(h["shares_sold"]) for h in history if int(h["step"]) >= final_quarter_cutoff
