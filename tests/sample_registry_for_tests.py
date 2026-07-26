@@ -20,6 +20,7 @@ Writes to: <--output>/{cs}/run_log/registry.db
 import argparse
 import contextlib
 import sqlite3
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -167,7 +168,7 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
     return stats
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output",
@@ -186,11 +187,13 @@ def main():
     print(f"Top {TOP_N_PER_GROUP} backtests per (family × stage) + all holdout\n")
 
     total_size = 0
+    not_refreshed: list[str] = []
     for cs_id in CASE_STUDY_IDS:
         print(f"--- {cs_id} ---")
         stats = sample_registry(cs_id, intermediates_dir)
         if stats["status"] != "OK":
             print(f"  {stats['status']}: {stats.get('reason', '')}")
+            not_refreshed.append(cs_id)
             continue
         for table in [
             "training_runs",
@@ -207,6 +210,18 @@ def main():
 
     print(f"\nTotal registry size: {total_size} KB ({total_size / 1024:.1f} MB)")
 
+    if not_refreshed:
+        # A skipped case study leaves whatever registry the destination already
+        # held, so exiting 0 here reports a refresh that did not happen and the
+        # replay-only notebooks then read the previous vintage.
+        print(
+            f"\nERROR: {len(not_refreshed)} of {len(CASE_STUDY_IDS)} registries were not "
+            f"refreshed: {', '.join(not_refreshed)}. Their production registry.db is missing "
+            f"under {CODE_CS_DIR}; the fixture keeps whatever it held before this run."
+        )
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
