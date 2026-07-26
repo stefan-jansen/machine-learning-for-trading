@@ -785,12 +785,14 @@ print("\nTop 10 by IC:")
 print(eval_summary.head(10))
 
 # %% [markdown]
-# **Note on date-level features**: Features like `regime`, `yield_curve_slope`,
-# `yield_curve_zscore`, and `corr_spy_tlt_63d` are identical across all symbols on
-# a given date (macro/cross-asset signals broadcast to every ETF). Their
-# cross-sectional IC is near zero by construction because they cannot differentiate
-# between assets. These features add value through interactions with cross-sectional
-# features (e.g., conditional momentum) rather than standalone ranking ability.
+# **Note on date-level features**: `regime`, `yield_curve_slope`, `yield_curve_zscore`,
+# and `corr_spy_tlt_63d` are identical across all symbols on a given date
+# (macro/cross-asset signals broadcast to every ETF). A rank correlation against a
+# constant is *undefined*, not near zero: `spearmanr` returns NaN on every date, so
+# these four never accumulate a usable IC series, drop out before the HAC and BH-FDR
+# stage, and are absent from the tested count printed above. That count is therefore
+# smaller than the number of features saved. They add value through interactions with
+# cross-sectional features (e.g., conditional momentum) rather than standalone ranking.
 
 # %% [markdown]
 # ### IC Bar Chart

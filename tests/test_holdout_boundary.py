@@ -267,12 +267,18 @@ def test_label_endpoint_is_derived_per_symbol(rel_path: str) -> None:
     than the market-wide endpoint, and reach into the holdout.
     """
     source = (REPO_ROOT / rel_path).read_text()
+    # The match must bind to `_label_end`. Without that anchor the label
+    # generator's own `close.shift(-horizon).over("symbol")` in 02_labels
+    # satisfies the pattern, so the endpoint derivation could be deleted and
+    # this test would still pass -- the same vacuous-gate failure that let the
+    # 2026-07-21 revert stay green.
     assert re.search(
-        r"\.shift\(-\s*[A-Za-z_]*horizon\s*\)\s*\.over\(\s*\"symbol\"\s*\)",
+        r"\.shift\(-\s*[A-Za-z_]*horizon\s*\)\s*\.over\(\s*\"symbol\"\s*\)"
+        r"\s*\.alias\(\s*\"_label_end\"\s*\)",
         source,
         re.IGNORECASE,
     ), (
-        f'{rel_path}: the label endpoint must be shifted with .over("symbol"), '
-        'matching shift(-horizon).over("symbol") in 02_labels; a market-wide '
+        f"{rel_path}: the label endpoint must be derived as shift(-horizon)"
+        '.over("symbol").alias("_label_end"), matching 02_labels; a market-wide '
         "cutoff under-purges a symbol with a gapped calendar"
     )
