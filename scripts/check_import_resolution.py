@@ -143,60 +143,95 @@ def imports_with_lines(path: Path) -> list[tuple[str, int, int, bool]]:
     return found
 
 
+# A cutoff past every statement: nothing in the initializer is hidden.
+ALL_VISIBLE = sys.maxsize
+
+
 @cache
 def package_init_names(package: Path) -> frozenset[tuple[str, int]]:
-    """Names a package's ``__init__.py`` binds, each with the line that binds it.
+    """Names a package's ``__init__.py`` binds, each with its statement position.
 
     ``from . import x`` also succeeds when ``x`` is a symbol the ``__init__.py``
-    binds rather than a submodule on disk. The line number is part of the answer
-    because a statement inside the ``__init__.py`` runs before everything below
-    it: ``from . import missing`` followed by ``missing = 1`` raises
-    ``ImportError`` at runtime, so that binding must not satisfy that import.
+    binds rather than a submodule on disk, so those names have to be collected.
+    Position is part of the answer because an initializer is only bound as far as
+    it has run: ``from . import late`` followed by ``late = 1`` raises
+    ``ImportError``. Position means index in ``tree.body``, not line number -
+    ``early = 1; from . import early`` is legal and puts both on one line.
 
-    *Bare* relative bindings (``from . import x``) are excluded: those are the
-    statements being checked, so counting them would let the guard satisfy
-    itself with the very line in question. Bindings from an explicit relative
-    module (``from .constants import VALUE``) do count -- they bind ``VALUE``,
-    and ``constants`` itself is resolved separately, so nothing is taken on
-    trust. Only module resolution is static here, not symbol existence: if
+    *Bare* relative bindings (``from . import x``) are excluded at any position:
+    those are the statements being checked, so counting them would let the guard
+    satisfy itself with the very line in question. Bindings from an explicit
+    relative module (``from .constants import VALUE``) do count -- they bind
+    ``VALUE``, and ``constants`` is resolved on its own line, so nothing is taken
+    on trust. Only module resolution is static here, not symbol existence: if
     ``constants`` exists but never defines ``VALUE``, no static check catches it.
     """
-    init = package / "__init__.py"
-    if not init.is_file():
-        return frozenset()
-    try:
-        tree = ast.parse(init.read_text(encoding="utf-8"))
-    except (SyntaxError, UnicodeDecodeError):
-        return frozenset()
     names: set[tuple[str, int]] = set()
-    for node in tree.body:
+    for index, node in enumerate(_init_body(package)):
         if isinstance(node, ast.Assign):
-            names.update((t.id, node.lineno) for t in node.targets if isinstance(t, ast.Name))
+            names.update((t.id, index) for t in node.targets if isinstance(t, ast.Name))
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.add((node.target.id, node.lineno))
+            names.add((node.target.id, index))
         elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            names.add((node.name, node.lineno))
+            names.add((node.name, index))
         elif isinstance(node, ast.Import):
-            names.update(
-                (alias.asname or alias.name.split(".")[0], node.lineno) for alias in node.names
-            )
+            names.update((alias.asname or alias.name.split(".")[0], index) for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
-            names.update((alias.asname or alias.name, node.lineno) for alias in node.names)
+            names.update((alias.asname or alias.name, index) for alias in node.names)
     return frozenset(names)
 
 
-def init_binds(package: Path, name: str, before: int | None) -> bool:
-    """True if ``package/__init__.py`` binds ``name``.
+@cache
+def _init_body(package: Path) -> tuple[ast.stmt, ...]:
+    """Top-level statements of ``package/__init__.py``, in order."""
+    init = package / "__init__.py"
+    if not init.is_file():
+        return ()
+    try:
+        return tuple(ast.parse(init.read_text(encoding="utf-8")).body)
+    except (SyntaxError, UnicodeDecodeError):
+        return ()
 
-    ``before`` limits the answer to bindings established above that line, which
-    is what the ``__init__.py`` sees partway through its own execution. ``None``
-    means no limit: a sibling module is imported after the ``__init__.py`` has
-    run to completion, so every binding is in place by then.
+
+def _visibility_cutoff(package: Path, source: Path, lineno: int) -> int:
+    """How far ``package/__init__.py`` has run when ``source`` reads its names.
+
+    Two ways a module can see a half-initialized package:
+
+    * ``source`` *is* the ``__init__.py``. The statement being checked is itself a
+      relative import, so nothing below it has run yet.
+    * ``source`` is a submodule that the ``__init__.py`` imports. Loading it
+      happens *during* that import statement, so it sees the package only as far
+      as the statements above. Any other submodule is imported after the
+      initializer has run to completion and sees all of it.
+
+    Residual, deliberately not modeled: the initializer imports ``a``, which
+    imports sibling ``b``. ``b`` is also loaded mid-initialization, but reaching
+    it needs transitive import analysis. The direct case above is the one that
+    occurs, and no file in this repo resolves a bare relative import through an
+    initializer binding at all -- these rules exist to keep the guard honest if
+    one ever does.
     """
-    return any(
-        bound == name and (before is None or lineno < before)
-        for bound, lineno in package_init_names(package)
-    )
+    body = _init_body(package)
+    if source == package / "__init__.py":
+        for index, node in enumerate(body):
+            if isinstance(node, ast.ImportFrom) and node.level and node.lineno == lineno:
+                return index
+        return 0  # position unknown: assume the initializer has run nothing
+    for index, node in enumerate(body):
+        if not (isinstance(node, ast.ImportFrom) and node.level):
+            continue
+        loaded = {node.module.split(".")[0]} if node.module else {a.name for a in node.names}
+        if source.stem in loaded:
+            return index
+    return ALL_VISIBLE
+
+
+def init_binds(package: Path, name: str, source: Path, lineno: int) -> bool:
+    """True if ``package/__init__.py`` has bound ``name`` by the time ``source``
+    reads it -- see :func:`_visibility_cutoff` for what "by the time" means."""
+    cutoff = _visibility_cutoff(package, source, lineno)
+    return any(bound == name and index < cutoff for bound, index in package_init_names(package))
 
 
 def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
@@ -311,10 +346,9 @@ def resolves_relative(
     x`` (``bare``) is satisfied by either a submodule or a name the package's
     ``__init__.py`` binds, since both make the statement work at runtime.
 
-    ``lineno`` is where the import sits in ``source``. It matters only when
-    ``source`` *is* the anchor's ``__init__.py``, because then the statement runs
-    partway through the file that would bind the name; bindings below it do not
-    exist yet. Defaulting to 0 keeps a caller that omits it on the strict side.
+    ``lineno`` is where the import sits in ``source``. It matters only for the
+    bare form, and only to decide how much of the package's ``__init__.py`` has
+    run by then. Defaulting to 0 keeps a caller that omits it on the strict side.
     """
     anchor = source.parent
     for _ in range(level - 1):
@@ -323,10 +357,7 @@ def resolves_relative(
             return False
     if _resolves_under(anchor, name.split(".")):
         return True
-    if not bare:
-        return False
-    before = lineno if source == anchor / "__init__.py" else None
-    return init_binds(anchor, name, before)
+    return bare and init_binds(anchor, name, source, lineno)
 
 
 def resolves_in_repo(name: str, source: Path, root: Path) -> bool:

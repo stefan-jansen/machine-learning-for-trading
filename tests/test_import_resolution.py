@@ -17,12 +17,20 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from check_import_resolution import (  # noqa: E402
+    _init_body,
     imports_with_lines,
     package_init_names,
     resolves_in_repo,
     resolves_relative,
     third_party_names,
 )
+
+
+def _clear_init_caches() -> None:
+    """Both initializer caches key on the package path, which these tests reuse
+    while rewriting the file underneath it."""
+    package_init_names.cache_clear()
+    _init_body.cache_clear()
 
 
 @pytest.fixture
@@ -168,7 +176,7 @@ def test_init_relative_imports_do_not_satisfy_themselves(tree: Path) -> None:
     init.write_text("from . import configs\n")
     assert not resolves_relative("configs", 1, init, tree, bare=True)
     (pkg / "configs.py").write_text("")
-    package_init_names.cache_clear()
+    _clear_init_caches()
     assert resolves_relative("configs", 1, init, tree, bare=True)
 
 
@@ -179,24 +187,61 @@ def test_init_binding_below_the_import_does_not_satisfy_it(tree: Path) -> None:
     pkg = tree / "07_chapter" / "pkg"
     init = pkg / "__init__.py"
     init.write_text("from . import late\n\nlate = 1\n")
-    package_init_names.cache_clear()
+    _clear_init_caches()
     assert not resolves_relative("late", 1, init, tree, bare=True, lineno=1)
     # Above the import the same binding is real, so the statement does work.
     init.write_text("early = 1\n\nfrom . import early\n")
-    package_init_names.cache_clear()
+    _clear_init_caches()
     assert resolves_relative("early", 1, init, tree, bare=True, lineno=3)
 
 
-def test_sibling_sees_every_init_binding_regardless_of_order(tree: Path) -> None:
-    """Order only constrains the __init__ itself. A sibling is imported after the
-    __init__ has run to completion, so a binding anywhere in it is in place."""
+def test_same_line_binding_above_the_import_is_visible(tree: Path) -> None:
+    """`early = 1; from . import early` is legal and puts both statements on one
+    line, so ordering has to compare statement position, not line number."""
+    pkg = tree / "07_chapter" / "pkg"
+    init = pkg / "__init__.py"
+    init.write_text("early = 1; from . import early\n")
+    _clear_init_caches()
+    assert resolves_relative("early", 1, init, tree, bare=True, lineno=1)
+    # Reversed on the same line, the import runs first and fails.
+    init.write_text("from . import late; late = 1\n")
+    _clear_init_caches()
+    assert not resolves_relative("late", 1, init, tree, bare=True, lineno=1)
+
+
+def test_sibling_the_init_does_not_import_sees_every_binding(tree: Path) -> None:
+    """A submodule the initializer never imports is loaded only after it has run
+    to completion, so a binding anywhere in it is in place."""
     pkg = tree / "07_chapter" / "pkg"
     (pkg / "__init__.py").write_text("from .helper import setup\n\nLIMIT = 5\n")
     (pkg / "helper.py").write_text("def setup():\n    pass\n")
     mod = pkg / "thing.py"
     mod.write_text("from . import LIMIT\n")
-    package_init_names.cache_clear()
+    _clear_init_caches()
     assert resolves_relative("LIMIT", 1, mod, tree, bare=True, lineno=1)
+
+
+def test_sibling_imported_by_the_init_sees_only_what_ran_before_it(tree: Path) -> None:
+    """Circular initialization: the __init__ imports `thing` before defining
+    `LIMIT`, and `thing` does `from . import LIMIT`. That raises at runtime, so
+    treating every sibling as fully initialized was a false negative."""
+    pkg = tree / "07_chapter" / "pkg"
+    mod = pkg / "thing.py"
+    mod.write_text("from . import LIMIT\n")
+
+    (pkg / "__init__.py").write_text("from . import thing\n\nLIMIT = 5\n")
+    _clear_init_caches()
+    assert not resolves_relative("LIMIT", 1, mod, tree, bare=True, lineno=1)
+
+    # Defined before the import, the same binding is there when `thing` loads.
+    (pkg / "__init__.py").write_text("LIMIT = 5\n\nfrom . import thing\n")
+    _clear_init_caches()
+    assert resolves_relative("LIMIT", 1, mod, tree, bare=True, lineno=1)
+
+    # The explicit form imports the sibling just the same.
+    (pkg / "__init__.py").write_text("from .thing import anything\n\nLIMIT = 5\n")
+    _clear_init_caches()
+    assert not resolves_relative("LIMIT", 1, mod, tree, bare=True, lineno=1)
 
 
 def test_bare_relative_import_accepts_an_init_re_export(tree: Path) -> None:
@@ -209,12 +254,12 @@ def test_bare_relative_import_accepts_an_init_re_export(tree: Path) -> None:
     (pkg / "__init__.py").write_text("from .constants import VALUE\n")
     mod = pkg / "thing.py"
     mod.write_text("from . import VALUE\n")
-    package_init_names.cache_clear()
+    _clear_init_caches()
     assert resolves_relative("VALUE", 1, mod, tree, bare=True, lineno=1)
     # A re-export from a module that does not exist buys nothing: the __init__'s
     # own `from .absent import ...` line is what fails.
     (pkg / "__init__.py").write_text("from .absent import OTHER\n")
-    package_init_names.cache_clear()
+    _clear_init_caches()
     assert resolves_relative("OTHER", 1, mod, tree, bare=True, lineno=1)
     init = pkg / "__init__.py"
     assert not resolves_relative("absent", 1, init, tree, lineno=1)
