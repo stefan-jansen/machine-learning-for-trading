@@ -12,15 +12,17 @@ strategy you can actually run, and keep running, in a live market.
 - **Generative AI** and **autonomous agents** are new to this edition and cut across that workflow, bringing
   retrieval-augmented generation, knowledge graphs, and multi-agent systems to financial research.
 - The [companion website](https://ml4trading.io) features [112 primers](https://ml4trading.io/primer/),
-  [56 agent skills](https://ml4trading.io/skills/),
+  [61 agent skills](https://ml4trading.io/skills/),
   and [six production Python libraries](https://ml4trading.io/libraries/)
   that facilitate substantial parts of the workflow.
 
-> For the first time, we are offering [live cohort courses](https://ml4trading.io/courses/) that work through this
-> material with direct feedback. See [Courses](#courses) below.
+> **Free reader's guide:** Join [Navigate ML for Trading, 3rd Edition](https://maven.com/p/c6e0e7/navigate-ml-for-trading-3rd-edition)
+> on **July 30, 2026 at 11:00 AM ET** for a 30-minute map of the book, case studies, code, and companion resources.
+> See all current [courses and workshops](https://maven.com/stefan-jansen); the cohort courses are listed under
+> [Courses](#courses) below.
 
 <p align="center">
-  <a href="https://amzn.to/4eigy2F"><img src="assets/cover.jpeg" width="45%" alt="Machine Learning for Trading, 3rd Edition"></a>
+  <a href="https://amzn.to/4eigy2F"><img src="assets/cover.png" width="45%" alt="Machine Learning for Trading, 3rd Edition"></a>
 </p>
 
 ---
@@ -106,7 +108,7 @@ range:
 - [Cross-cutting concepts](https://ml4trading.io/primer/): 24 building blocks referenced across chapters, for example
   momentum and mean reversion, the bias-variance tradeoff, and walk-forward validation.
 
-### 56 Agent Skills
+### 61 Agent Skills
 
 Reusable, guard-railed tasks for coding agents, each with built-in defenses against lookahead bias, data leakage, and
 multiple-testing errors. Each category links to its full set; a few skills show the range:
@@ -127,6 +129,8 @@ multiple-testing errors. Each category links to its full set; a few skills show 
 - [Workflows](https://ml4trading.io/skills/): 5 skills covering factor research, model validation, and production
   readiness.
 - [Production](https://ml4trading.io/skills/): 2 skills, live trading and monitoring & alerting.
+- [Advanced AI](https://ml4trading.io/skills/): 5 skills covering research operators, agent memory, forecasting,
+  governance, and RAG evaluation.
 
 ### Courses
 
@@ -140,7 +144,7 @@ the material live, with direct feedback:
 
 Each course runs as a scheduled cohort; the links above always point to the next one, where you can enroll or join the
 waitlist. *Stay current between cohorts with the
-twice-weekly [**Insights** newsletter](https://insights.ml4trading.io/).*
+[**Insights** newsletter](https://insights.ml4trading.io/).*
 
 ---
 

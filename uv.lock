@@ -4365,7 +4365,7 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.8" },
     { name = "ml4t-backtest", specifier = ">=0.1.0b20" },
     { name = "ml4t-data", specifier = ">=0.1.0b15" },
-    { name = "ml4t-diagnostic", specifier = ">=0.1.0b23" },
+    { name = "ml4t-diagnostic", specifier = ">=0.1.0b25" },
     { name = "ml4t-engineer", specifier = ">=0.1.0b10" },
     { name = "ml4t-live", specifier = ">=0.1.0b3" },
     { name = "ml4t-models", specifier = ">=0.1.0a6" },
@@ -4496,7 +4496,7 @@ wheels = [
 
 [[package]]
 name = "ml4t-diagnostic"
-version = "0.1.0b23"
+version = "0.1.0b25"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "arch" },
@@ -4518,9 +4518,9 @@ dependencies = [
     { name = "statsmodels" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b3/80/3b78ca08a3a37445199ce2c941c74c9c6452bc31eca8df76849261017659/ml4t_diagnostic-0.1.0b23.tar.gz", hash = "sha256:e46f755575430ef41beed2f03e2a657a0de68ee7b9964575a4b3e6b2a0a35408", size = 1387039, upload-time = "2026-07-20T16:37:13.101Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/08/17/3aaa0b955dc5358e3c4b0fb0eed8c7c8f2bcfcb67ca16df4c695f183b423/ml4t_diagnostic-0.1.0b25.tar.gz", hash = "sha256:6e3c12fd51e67be1841d213bf7e30555bf9f0be284a2f1b129602e15169914f9", size = 1388197, upload-time = "2026-07-23T02:07:15.428Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7b/29/ecf53275ba73dd2545fdf3de0d115564e83a777f58831ffa2bf602e2c7ff/ml4t_diagnostic-0.1.0b23-py3-none-any.whl", hash = "sha256:ea776c8a9024dcbc840044be99c8942408898669fb3ed2b9de85df78bd75b2ef", size = 941148, upload-time = "2026-07-20T16:37:11.327Z" },
+    { url = "https://files.pythonhosted.org/packages/29/3f/0cc42bdab3d97ece8727234c24356397906600a721281560e4600b94a22a/ml4t_diagnostic-0.1.0b25-py3-none-any.whl", hash = "sha256:ffb284a15f7f7ff48a16eaf07d18269e0ffa3f749aadb2ba34c7e58f12bdc8a0", size = 941470, upload-time = "2026-07-23T02:07:13.558Z" },
 ]
 
 [[package]]

@@ -25,7 +25,7 @@ dependencies = [
     "shap>=0.45",
     "opacus>=1.4",
     "pfhedge>=0.23",
-    "ml4t-diagnostic>=0.1.0b22",
+    "ml4t-diagnostic>=0.1.0b25",
     # Bayesian (arviz/pymc for uncertainty features, pycausalimpact for ARIMA event studies)
     "arviz>=0.18,<1.0",
     "pymc>=5.14",
