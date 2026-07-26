@@ -168,14 +168,15 @@ def parse_13f_holdings(cik: str, accession: str) -> list[dict]:
     return holdings
 
 
-def _latest_complete_report_date(equity: pl.DataFrame, expected_ciks: set[str]) -> date:
-    """Return the newest report date at which every expected institution has filed.
+def _complete_report_dates(equity: pl.DataFrame, expected_ciks: set[str]) -> list[date]:
+    """Return report dates every expected institution filed for, newest first.
 
     13F filings are due 45 days after quarter end, so a download run inside that
     window sees the newest quarter from the early filers only. Building the graph
     from it would drop the late filers and read their absence as a mass exit in
-    the quarter-over-quarter ownership change. Step back to the newest quarter
-    that every requested institution reported.
+    the quarter-over-quarter ownership change. Both the graph quarter and the
+    quarter it is compared against are therefore drawn from this list, so a
+    partially filed quarter can never enter either side of the comparison.
     """
     covered = (
         equity.filter(pl.col("cik").is_in(list(expected_ciks)))
@@ -190,16 +191,35 @@ def _latest_complete_report_date(equity: pl.DataFrame, expected_ciks: set[str]) 
             "filers as exits. Request more filings per institution with "
             "--num-filings, or narrow the institution list."
         )
-    latest_complete = complete["report_date"].max()
+    dates = complete["report_date"].sort(descending=True).to_list()
     newest = equity["report_date"].max()
-    if latest_complete != newest:
+    if dates[0] != newest:
         filed = set(equity.filter(pl.col("report_date") == newest)["cik"].unique().to_list())
         print(
             f"Report date {newest} has only {len(filed)} of {len(expected_ciks)} "
-            f"institutions filed; building the graph from {latest_complete} instead. "
+            f"institutions filed; building the graph from {dates[0]} instead. "
             f"Awaiting: {', '.join(sorted(expected_ciks - filed))}"
         )
-    return latest_complete
+    return dates
+
+
+def _reject_pre_2023_reporting_units(equity: pl.DataFrame) -> None:
+    """Refuse filings that report value in thousands rather than dollars.
+
+    The SEC switched 13F market value from thousands to whole dollars on
+    2023-01-03. The producer keeps the legacy `value_thousands` column name but
+    publishes the derived features as `*_usd`, which only holds for filings
+    after the switch. Mixing the two would be wrong by a factor of 1,000, and
+    silently so.
+    """
+    earliest = equity["filing_date"].min()
+    if earliest is not None and earliest.isoformat() < "2023-01-03":
+        raise ValueError(
+            f"13F holdings reach back to {earliest}, before the SEC switched "
+            "market value from thousands to dollars on 2023-01-03. The derived "
+            "artifacts label value in USD and cannot mix the two conventions. "
+            "Reduce --num-filings so the window starts after that date."
+        )
 
 
 def build_features_and_matrix(
@@ -222,10 +242,12 @@ def build_features_and_matrix(
     )
     if equity.is_empty():
         raise ValueError("The 13F holdings contain no long-equity positions.")
+    _reject_pre_2023_reporting_units(equity)
+    complete_dates = (
+        None if expected_ciks is None else _complete_report_dates(equity, set(expected_ciks))
+    )
     latest_report_date = (
-        equity["report_date"].max()
-        if expected_ciks is None
-        else _latest_complete_report_date(equity, set(expected_ciks))
+        equity["report_date"].max() if complete_dates is None else complete_dates[0]
     )
     latest_rows = equity.filter(pl.col("report_date") == latest_report_date)
     if latest_rows.is_empty():
@@ -298,13 +320,15 @@ def build_features_and_matrix(
         .agg(pl.col("value_thousands").cast(pl.Float64).sum().alias("reported_value_usd"))
         .filter(pl.col("reported_value_usd") > 0)
     )
-    # Measure the change into the graph's quarter, not into a partially filed newer one.
-    prior_periods = (
-        position_panel.filter(pl.col("report_date") < latest_report_date)["report_date"]
-        .unique()
-        .sort(descending=True)
-        .to_list()
+    # Compare the graph's quarter against another quarter every institution filed
+    # for. A partially filed quarter on either side would read as mass entries or
+    # exits rather than as real ownership change.
+    eligible = (
+        position_panel["report_date"].unique().to_list()
+        if complete_dates is None
+        else complete_dates
     )
+    prior_periods = sorted((d for d in eligible if d < latest_report_date), reverse=True)
     if prior_periods:
         current_period, prior_period = latest_report_date, prior_periods[0]
         stock_quarter = position_panel.group_by(["cusip", "report_date"]).agg(

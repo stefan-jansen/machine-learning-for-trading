@@ -202,6 +202,57 @@ def test_complete_newest_quarter_is_used_as_is() -> None:
     assert edges["weight_value"].to_list() == [300, 200]
 
 
+def test_ownership_change_compares_two_fully_filed_quarters() -> None:
+    # Manager 2 skipped 2024-06-30, so that quarter must not be the comparison
+    # base: its absence there is a gap in coverage, not a sold position.
+    holdings = pl.DataFrame(
+        {
+            "cik": ["1", "1", "1", "2", "2"],
+            "accession_no": ["a", "b", "c", "d", "e"],
+            "issuer": ["EXAMPLE"] * 5,
+            "cusip": ["123"] * 5,
+            "value_thousands": [100, 200, 400, 50, 100],
+            "shares": [10, 20, 40, 5, 10],
+            "put_call": [None] * 5,
+            "report_date": [
+                date(2024, 3, 31),
+                date(2024, 6, 30),
+                date(2024, 9, 30),
+                date(2024, 3, 31),
+                date(2024, 9, 30),
+            ],
+            "filing_date": [
+                date(2024, 5, 14),
+                date(2024, 8, 14),
+                date(2024, 11, 14),
+                date(2024, 5, 14),
+                date(2024, 11, 14),
+            ],
+            "company_name": ["Manager 1"] * 3 + ["Manager 2"] * 2,
+        }
+    )
+
+    features, _edges, _matrix, _stocks = downloader.build_features_and_matrix(
+        holdings, expected_ciks=["1", "2"]
+    )
+
+    # 2024-09-30 (500) against 2024-03-31 (150), not against the partial 2024-06-30.
+    assert features["inst_value_change_usd"].to_list() == [350]
+    assert features["inst_pct_change"].to_list() == [pytest.approx(350 / 150)]
+
+
+def test_pre_2023_filings_are_refused_rather_than_mislabeled_as_usd() -> None:
+    holdings = _two_manager_holdings(date(2024, 9, 30)).with_columns(
+        pl.when(pl.col("accession_no") == "a")
+        .then(pl.lit(date(2022, 11, 14)))
+        .otherwise(pl.col("filing_date"))
+        .alias("filing_date")
+    )
+
+    with pytest.raises(ValueError, match="thousands to dollars"):
+        downloader.build_features_and_matrix(holdings, expected_ciks=["1", "2"])
+
+
 def test_no_quarter_covered_by_every_institution_is_refused() -> None:
     holdings = _two_manager_holdings(date(2024, 9, 30))
 
