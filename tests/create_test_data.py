@@ -402,6 +402,23 @@ def write_manifest(output: Path, built: dict[str, list[Path]]) -> Path:
     return manifest_path
 
 
+def roots_overlap(source: Path, output: Path) -> str | None:
+    """Return why these roots cannot be used together, or None.
+
+    The fixture root and the production root have to be separate trees. With
+    ``--clean`` the same path on both sides deletes the production tensors and 13F
+    artifacts before the build reads them; without it, the copy would be a file
+    onto itself. Nesting either way is the same hazard one level down.
+    """
+    if source == output:
+        return f"--source and --output are the same directory: {source}"
+    if output in source.parents:
+        return f"--output {output} contains --source {source}"
+    if source in output.parents:
+        return f"--output {output} is inside --source {source}"
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -436,6 +453,8 @@ def main() -> int:
     output = args.output.expanduser().resolve()
     if not source.is_dir():
         parser.error(f"--source is not a directory: {source}")
+    if overlap := roots_overlap(source, output):
+        parser.error(overlap)
 
     selected = [DATASETS_BY_NAME[name] for name in (args.dataset or sorted(DATASETS_BY_NAME))]
 

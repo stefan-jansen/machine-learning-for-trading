@@ -1615,11 +1615,12 @@ case_studies/etfs/10_dl_tsmixer:
   # LOOKBACK becomes the Darts input_chunk_length, which must exceed
   # output_chunk_length, and output_chunk_length is the label horizon: etfs is
   # primary fwd_ret_21d, so 21. LOOKBACK was 5, which _resolve_chunk_lengths
-  # rejects outright on any data size. 24 is the smallest value that keeps the
-  # window valid without paying for the notebook default of 60.
+  # rejects outright on any data size. 22 is the smallest value it accepts - the
+  # check is input > output and nothing more - so the window is valid without
+  # paying for the notebook default of 60.
   parameters:
     BATCH_SIZE: 32
-    LOOKBACK: 24
+    LOOKBACK: 22
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
     N_EPOCHS: 1

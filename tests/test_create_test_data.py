@@ -23,6 +23,7 @@ from tests.create_test_data import (
     _load_13f_producer,
     build_firm_characteristics,
     build_institutional_holdings_13f,
+    roots_overlap,
     write_manifest,
 )
 
@@ -425,6 +426,16 @@ def test_13f_builder_rejects_derived_artifacts_the_holdings_do_not_produce(tmp_p
 
     with pytest.raises(ValueError, match=r"stock_features\.parquet is not what the current"):
         build_institutional_holdings_13f(source, tmp_path / "out")
+
+
+def test_overlapping_roots_are_rejected(tmp_path: Path) -> None:
+    """--clean plus one root would delete the production data it then reads."""
+    root = tmp_path / "data"
+    nested = root / "fixtures"
+    assert roots_overlap(root, root) is not None
+    assert roots_overlap(root, nested) is not None
+    assert roots_overlap(nested, root) is not None
+    assert roots_overlap(root, tmp_path / "elsewhere") is None
 
 
 def test_13f_builder_copies_a_complete_artifact_set(tmp_path: Path) -> None:
