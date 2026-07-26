@@ -53,6 +53,16 @@ stops whoever runs that import. Modeling Python's execution order statically to
 close them costs more false positives than it buys, so the contract stays at
 existence.
 
+**And what it does not check: where a computed path points.** A ``sys.path``
+entry written as ``BASE / "sub"`` is read for its literal segments and anchored
+to the repo root, because what ``BASE`` holds is not knowable without running
+the file. Every such mutation in this repo binds ``BASE`` to the repo root, so
+the reading is exact here. One that bound it outside the checkout would be read
+as ``<repo>/sub``, and an import could then pass on the strength of a module
+this repo really ships at a path the running code never searches. Refusing every
+computed base instead would reject the four working files that do this and fail
+CI on correct code, which is the more expensive error of the two.
+
 Adding a dependency therefore means declaring it in ``pyproject.toml`` — which
 is required anyway. Only when a package's *import* name differs from its
 *distribution* name (``bs4`` from ``beautifulsoup4``) does it need an entry, and
@@ -254,8 +264,10 @@ def _literal_path_segments(node: ast.AST) -> list[str]:
     directory actually meant was not among them. Joining the ``/`` chain
     recovers it.
 
-    Only literals are followed. A segment computed at runtime contributes
-    nothing, which loses the root rather than inventing a wrong one.
+    Only literals are followed, so the base of the chain contributes nothing and
+    the remainder is anchored to the repo root by the caller. That is exact for
+    every mutation in this repo and wrong for one based outside the checkout;
+    see the module docstring for why the alternative costs more.
     """
     if isinstance(node, ast.Constant):
         return [node.value] if isinstance(node.value, str) and node.value else []

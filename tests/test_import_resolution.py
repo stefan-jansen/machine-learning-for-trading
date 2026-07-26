@@ -337,6 +337,31 @@ def test_a_multi_segment_path_insert_names_one_directory(tmp_path: Path) -> None
     assert not resolves_in_repo("stray", test_file, root)
 
 
+def test_a_computed_base_is_read_against_the_repo_root(tmp_path: Path) -> None:
+    """An accepted residual, pinned so it stays deliberate: the base of a `/`
+    chain is a name, and what it holds cannot be read without running the file.
+    The literal segments are anchored to the repo root, which is exact for every
+    such mutation in this repo and wrong for one based outside the checkout.
+    Refusing every computed base would instead fail CI on the four working files
+    that do this."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    test_file.write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        'EXTERNAL_ROOT = Path("/somewhere/else")\n'
+        'sys.path.insert(0, str(EXTERNAL_ROOT / "scripts"))\n'
+        "import tool\n"
+    )
+    assert resolves_in_repo("tool", test_file, root)
+
+    # It grants no more than that: the repo must really ship the module at the
+    # path the literals name, so an absent one is still reported.
+    assert not resolves_in_repo("absent", test_file, root)
+
+
 def test_dot_github_scripts_is_scanned(tmp_path: Path) -> None:
     """SKIP_DIRS drops `.github` wholesale, which would silently exempt the
     guards and notebook tooling that live in `.github/scripts/` — including this
