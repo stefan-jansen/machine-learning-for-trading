@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tests.pm_helpers import (
     RECORD_REPLAY,
@@ -13,22 +14,26 @@ from tests.pm_helpers import (
     get_record_mode,
     get_reruns,
     get_tier,
+    missing_required_env,
 )
 
 
 def test_collect_chapter_notebooks_keeps_real_notebooks_and_skips_helpers() -> None:
     notebooks = {path.as_posix() for path in collect_chapter_notebooks(Path("."), range(1, 28))}
 
-    assert "06_strategy_definition/02_case_study_overview.py" in notebooks
+    assert "06_strategy_definition/03_case_study_overview.py" in notebooks
     assert "08_financial_features/case_study_feature_summary.py" in notebooks
     assert "11_ml_pipeline/08_ml_backtest_intro.py" in notebooks
     assert "16_strategy_simulation/01_backtest_first_principles.py" in notebooks
     assert "21_rl_execution_hedging/07_backtest_with_impact.py" in notebooks
 
-    assert "03_market_microstructure/filter_itch_symbol.py" not in notebooks
-    assert "03_market_microstructure/lob_utils.py" not in notebooks
-    assert "03_market_microstructure/lob_generator.py" not in notebooks
-    assert "13_dl_time_series/dl_utils.py" not in notebooks
+    # Helper modules that live beside the notebooks. Each is a file that exists
+    # today, so the exclusion is actually exercised: asserting a deleted path is
+    # absent proves nothing.
+    assert "03_market_microstructure/limit_orderbook.py" not in notebooks
+    assert "13_dl_time_series/dl_sequences.py" not in notebooks
+    assert "21_rl_execution_hedging/rl_environments.py" not in notebooks
+    assert "16_strategy_simulation/_etf_baseline.py" not in notebooks
 
 
 # ---------------------------------------------------------------------------
@@ -96,3 +101,65 @@ def test_get_record_mode_accepts_rewrite() -> None:
 def test_get_record_mode_rejects_invalid() -> None:
     with pytest.raises(ValueError, match="Invalid record_mode"):
         get_record_mode({"record_mode": "none"})
+
+
+# ---------------------------------------------------------------------------
+# requires_env — credential gating
+# ---------------------------------------------------------------------------
+
+
+def test_missing_required_env_empty_without_declaration() -> None:
+    assert missing_required_env({}) == []
+
+
+def test_missing_required_env_reports_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ML4T_FAKE_KEY", raising=False)
+
+    assert missing_required_env({"requires_env": "ML4T_FAKE_KEY"}) == ["ML4T_FAKE_KEY"]
+
+
+def test_missing_required_env_treats_blank_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unset GitHub secret interpolates to the empty string, not to nothing."""
+    monkeypatch.setenv("ML4T_FAKE_KEY", "   ")
+
+    assert missing_required_env({"requires_env": "ML4T_FAKE_KEY"}) == ["ML4T_FAKE_KEY"]
+
+
+def test_missing_required_env_empty_when_all_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ML4T_FAKE_KEY", "Jane Doe jane@example.org")
+    monkeypatch.setenv("ML4T_OTHER_KEY", "token")
+
+    assert missing_required_env({"requires_env": ["ML4T_FAKE_KEY", "ML4T_OTHER_KEY"]}) == []
+
+
+def test_missing_required_env_reports_only_the_absent_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ML4T_FAKE_KEY", "present")
+    monkeypatch.delenv("ML4T_OTHER_KEY", raising=False)
+
+    assert missing_required_env({"requires_env": ["ML4T_FAKE_KEY", "ML4T_OTHER_KEY"]}) == [
+        "ML4T_OTHER_KEY"
+    ]
+
+
+def test_credential_gated_notebooks_declare_requires_env_not_skip() -> None:
+    """A notebook blocked only on a credential must be gated, never hard-skipped.
+
+    ``skip: true`` is unconditional and is checked after tier routing, so a
+    notebook marked that way stays unexecuted even in weekly-external.yml, which
+    exists to supply exactly these credentials.
+
+    Selection is by ``requires_env`` rather than by what ``skip_reason`` happens to
+    say: an entry carrying both keys is hard-skipped whatever reason it gives, and
+    matching on the reason text would let it through under any other wording.
+    """
+    overrides = yaml.safe_load((Path(__file__).parent / "overrides.yaml").read_text())
+
+    hard_skipped_despite_a_gate = {
+        key
+        for key, value in overrides.items()
+        if isinstance(value, dict) and value.get("requires_env") and value.get("skip")
+    }
+
+    assert hard_skipped_despite_a_gate == set()

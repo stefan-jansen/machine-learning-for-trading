@@ -12,19 +12,22 @@ Sampling strategy:
 
 Usage:
     uv run python tests/sample_registry_for_tests.py
+    uv run python tests/sample_registry_for_tests.py --output ~/ml4t/test-data/intermediates
 
-Writes to: ~/ml4t/test-data/intermediates/{cs}/run_log/registry.db
+Writes to: <--output>/{cs}/run_log/registry.db
 """
 
+import argparse
 import contextlib
 import sqlite3
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
 CODE_CS_DIR = REPO_ROOT / "case_studies"
 
 TEST_DATA_ROOT = Path.home() / "ml4t" / "test-data"
-INTERMEDIATES_DIR = TEST_DATA_ROOT / "intermediates"
+DEFAULT_INTERMEDIATES_DIR = TEST_DATA_ROOT / "intermediates"
 
 CASE_STUDY_IDS = [
     "etfs",
@@ -53,13 +56,54 @@ def _copy_rows(src, dst, table: str, rows: list) -> int:
     return len(rows)
 
 
-def sample_registry(cs_id: str) -> dict:
+def rejected_output_root(intermediates_dir: Path) -> str | None:
+    """Return why this output root must not be written to, or None.
+
+    Each destination is unlinked before its source is opened, and a production
+    registry.db is 43-180 MB and gitignored, so a run pointed at a case-study tree
+    destroys the results SSOT with nothing to restore it from.
+
+    Two rules. The root may not be, or sit inside, any directory named
+    ``case_studies``: in a worktree ``CODE_CS_DIR`` is the worktree's own tree while
+    the canonical registries are the ones in ~/ml4t/code, so path equality alone
+    would let a run write over them. And no destination may land on a production
+    registry once every symlink along it is followed - the per-agent worktree setup
+    symlinks each case study's ``run_log`` to the canonical one precisely so the
+    results source of truth is shared, which makes a symlinked destination the
+    normal case here rather than an exotic one. Both are checked before anything is
+    created or removed.
+    """
+    resolved = intermediates_dir.resolve()
+    if any(part.name == "case_studies" for part in (resolved, *resolved.parents)):
+        return (
+            f"{resolved} is inside a case_studies tree, where each destination is a "
+            "production registry.db that this script unlinks before reading"
+        )
+    for cs_id in CASE_STUDY_IDS:
+        src_db = (CODE_CS_DIR / cs_id / "run_log" / "registry.db").resolve()
+        dst_db = (resolved / cs_id / "run_log" / "registry.db").resolve()
+        if dst_db == src_db:
+            return f"{resolved} resolves onto the source registry at {src_db}"
+        if any(part.name == "case_studies" for part in dst_db.parents):
+            return (
+                f"{resolved}/{cs_id}/run_log resolves into a case_studies tree "
+                f"({dst_db}), whose registry this script unlinks before reading"
+            )
+    return None
+
+
+def sample_registry(cs_id: str, intermediates_dir: Path = DEFAULT_INTERMEDIATES_DIR) -> dict:
     """Sample from production registry into test intermediates. Returns stats."""
     src_db = CODE_CS_DIR / cs_id / "run_log" / "registry.db"
     if not src_db.exists():
         return {"status": "SKIP", "reason": "no source registry.db"}
+    if reason := rejected_output_root(intermediates_dir):
+        raise ValueError(
+            f"Refusing to sample {cs_id}: {reason}. Point --output at the test-data "
+            "repo's intermediates/ directory."
+        )
 
-    dst_dir = INTERMEDIATES_DIR / cs_id / "run_log"
+    dst_dir = intermediates_dir / cs_id / "run_log"
     dst_dir.mkdir(parents=True, exist_ok=True)
     dst_db = dst_dir / "registry.db"
 
@@ -165,17 +209,38 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
     return stats
 
 
-def main():
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_INTERMEDIATES_DIR,
+        help=(
+            "Fixture intermediates root to write (the test-data repo's "
+            "intermediates/ directory). Default: ~/ml4t/test-data/intermediates"
+        ),
+    )
+    args = parser.parse_args()
+    intermediates_dir = args.output.expanduser().resolve()
+
+    if reason := rejected_output_root(intermediates_dir):
+        parser.error(
+            f"--output is not usable: {reason}. Point it at the test-data repo's "
+            "intermediates/ directory."
+        )
+
     print(f"Sampling registries from {CODE_CS_DIR}")
-    print(f"Writing to {INTERMEDIATES_DIR}")
+    print(f"Writing to {intermediates_dir}")
     print(f"Top {TOP_N_PER_GROUP} backtests per (family × stage) + all holdout\n")
 
     total_size = 0
+    not_refreshed: list[str] = []
     for cs_id in CASE_STUDY_IDS:
         print(f"--- {cs_id} ---")
-        stats = sample_registry(cs_id)
+        stats = sample_registry(cs_id, intermediates_dir)
         if stats["status"] != "OK":
             print(f"  {stats['status']}: {stats.get('reason', '')}")
+            not_refreshed.append(cs_id)
             continue
         for table in [
             "training_runs",
@@ -192,6 +257,18 @@ def main():
 
     print(f"\nTotal registry size: {total_size} KB ({total_size / 1024:.1f} MB)")
 
+    if not_refreshed:
+        # A skipped case study leaves whatever registry the destination already
+        # held, so exiting 0 here reports a refresh that did not happen and the
+        # replay-only notebooks then read the previous vintage.
+        print(
+            f"\nERROR: {len(not_refreshed)} of {len(CASE_STUDY_IDS)} registries were not "
+            f"refreshed: {', '.join(not_refreshed)}. Their production registry.db is missing "
+            f"under {CODE_CS_DIR}; the fixture keeps whatever it held before this run."
+        )
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

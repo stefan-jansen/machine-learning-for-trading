@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -322,6 +323,12 @@ def main():
         json.dump(metadata, f, indent=2)
     print(f"Metadata: {metadata_path}")
 
+    # A failed stage leaves whatever the previous run wrote in place, so exiting 0
+    # reports success while the fixture set still holds the stale artifact. That
+    # is how the sp500_options temporal artifact shipped without a `fold` column:
+    # the stage timed out, the wrapper ran under `set -e` and saw nothing.
+    return 1 if failed else 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

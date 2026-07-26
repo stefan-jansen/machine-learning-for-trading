@@ -109,8 +109,7 @@
 04_fundamental_alternative_data/01_academic_characteristics:
   timeout: 300
 04_fundamental_alternative_data/02_sec_filing_explorer:
-  skip: true
-  skip_reason: Requires EDGAR_IDENTITY env var for SEC EDGAR network calls; CI does not provide.
+  requires_env: EDGAR_IDENTITY
   tier: weekly
   timeout: 300
 04_fundamental_alternative_data/03_sec_form4_insider_transactions:
@@ -136,8 +135,7 @@
 04_fundamental_alternative_data/13_polymarket_prediction_markets:
   timeout: 120
 04_fundamental_alternative_data/14_text_data_extraction:
-  skip: true
-  skip_reason: Requires EDGAR_IDENTITY env var for SEC EDGAR network calls; CI does not provide.
+  requires_env: EDGAR_IDENTITY
   tier: weekly
   timeout: 300
 05_synthetic_data/00_classical_simulation:
@@ -1073,11 +1071,16 @@
     COHORT_SAMPLE: 10
   timeout: 300
 22_rag_financial_research/01_sec_filing_pipeline:
+  # SYMBOLS, not TICKERS: the notebook's parameters cell declares SYMBOLS, so the
+  # old key was dropped by Papermill and the weekly job fetched all five default
+  # symbols across both default years from EDGAR instead of one.
   parameters:
-    TICKERS:
+    SYMBOLS:
     - AAPL
     YEARS:
     - 2024
+  requires_env: EDGAR_IDENTITY
+  tier: weekly
   timeout: 300
 22_rag_financial_research/02_domain_embeddings_comparison:
   parameters:
@@ -1609,13 +1612,34 @@ case_studies/etfs/09_dl_lstm:
     N_EPOCHS: 1
   timeout: 180
 case_studies/etfs/10_dl_tsmixer:
+  # LOOKBACK becomes the Darts input_chunk_length, which must exceed
+  # output_chunk_length, and output_chunk_length is the label horizon: etfs is
+  # primary fwd_ret_21d, so 21. LOOKBACK was 5, which _resolve_chunk_lengths
+  # rejects outright on any data size. 22 is the smallest value it accepts - the
+  # check is input > output and nothing more - so the window is valid without
+  # paying for the notebook default of 60.
   parameters:
     BATCH_SIZE: 32
-    LOOKBACK: 5
+    LOOKBACK: 22
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
     N_EPOCHS: 1
   timeout: 180
+case_studies/etfs/11a_pca:
+  # MAX_SYMBOLS must match 04_model_based_features, which builds the temporal
+  # artifact these notebooks validate against. With no override they ran on the
+  # full fixture universe while the artifact covered 5 symbols, so the CV splits
+  # spanned dates the artifact never saw and fold 0 validation came out at 93.5%,
+  # just under the 95% floor in MIN_TEMPORAL_DATE_COVERAGE.
+  parameters:
+    MAX_FOLDS: 2
+    MAX_SYMBOLS: 5
+  timeout: 300
+case_studies/etfs/11b_ipca:
+  parameters:
+    MAX_FOLDS: 2
+    MAX_SYMBOLS: 5
+  timeout: 300
 case_studies/etfs/11_latent_factors:
   gpu: true
   parameters:
@@ -1778,12 +1802,16 @@ case_studies/nasdaq100_microstructure/03_financial_features:
     START_DATE: '2000-01-01'
   timeout: 120
 case_studies/nasdaq100_microstructure/04_model_based_features:
+  # MAX_SYMBOLS and START_DATE must match the consumers of this notebook's
+  # temporal artifact (05_evaluation and 06-12, all MAX_SYMBOLS 5 from
+  # 2000-01-01). This stage used to run on 3 symbols over 2021-06..2021-12 while
+  # the consumers built CV folds over the full two-year window, so the artifact
+  # covered none of fold 0 and validate_temporal_fold_coverage failed at 0.0%.
   long_running: true
   parameters:
-    END_DATE: '2021-12-31'
-    MAX_SYMBOLS: 3
-    START_DATE: '2021-06-01'
-  timeout: 600
+    MAX_SYMBOLS: 5
+    START_DATE: '2000-01-01'
+  timeout: 900
 case_studies/nasdaq100_microstructure/05_evaluation:
   parameters:
     MAX_SYMBOLS: 5
@@ -1979,12 +2007,31 @@ case_studies/sp500_options/03_financial_features:
     N_RESTARTS: 1
   timeout: 120
 case_studies/sp500_options/04_model_based_features:
+  # Skipped in CI (gpu: true), so this timeout bounds only fixture generation via
+  # tests/generate_intermediates.py, where 300s was not enough to finish even on a
+  # GPU. The stage silently failed there, which is why the committed temporal
+  # artifact had no `fold` column and 05_evaluation, 07_gbm and 09_deep_learning
+  # failed on missing fold-specific features.
+  #
+  # The parameters below are the ones this notebook's parameters cell actually
+  # declares. It was previously given MAX_FOLDS / MAX_SYMBOLS / N_EPOCHS, none of
+  # which it defines, so Papermill logged "Passed unknown parameter" and the full
+  # production MCMC workload (10 calibration symbols x 2000 draws x 4 chains) ran
+  # anyway. Raising the timeout hid that rather than fixing it.
+  #
+  # The sampler settings are deliberately NOT reduced. sv_diagnostics_pass()
+  # requires bulk and tail ESS of at least 400 and raises after one retry, so any
+  # draw count whose total posterior sample count approaches 400 fails closed by
+  # construction: 2 chains x 100 draws is 200 samples, and the retry's 2 x 200 is
+  # exactly 400, which correlated NUTS draws never reach in effective terms.
+  # What is safe to reduce is how many times that sampler runs and how finely the
+  # filter resolves: the pool is the per-fold MCMC fit count (10 -> 2) and the
+  # particle count is the filter's resolution over every segment (1000 -> 100).
   gpu: true
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 2
-  timeout: 300
+    SV_N_PARTICLES: 100
+    SV_POOL_SIZE: 2
+  timeout: 1800
 case_studies/sp500_options/05_evaluation:
   parameters:
     MAX_SYMBOLS: 5
