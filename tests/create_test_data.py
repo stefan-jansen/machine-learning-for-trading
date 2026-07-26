@@ -260,14 +260,25 @@ def _require_derived_13f_matches_holdings(source_dir: Path) -> None:
     same comparison belongs here - before the stale copy enters the fixture set,
     rather than after a chapter job goes red against it.
 
-    The rebuild is keyed on the CIK set the holdings themselves carry, which is
-    the producer's own rule: it steps back to the newest quarter every requested
-    institution filed for, so a quarter that is still filling in cannot enter
-    either side of the ownership-change comparison.
+    The rebuild is keyed on the producer's configured institution set, not on
+    whichever CIKs the holdings happen to carry. Keyed on the holdings, a file
+    missing one of the ten institutions is internally consistent and would pass,
+    which is the silent coverage gap this builder exists to prevent: the notebook
+    asks for all ten by CIK. Passing the configured set also reproduces the
+    producer's own step-back rule, so a quarter that is still filling in cannot
+    enter either side of the ownership-change comparison.
     """
-    build = _load_13f_producer().build_features_and_matrix
+    producer = _load_13f_producer()
+    required_ciks = [cik for _, cik in producer.INSTITUTIONS]
     holdings = pl.read_parquet(source_dir / "institutional_holdings.parquet")
-    features, edges, *_ = build(holdings, expected_ciks=holdings["cik"].unique().to_list())
+    if absent := sorted(set(required_ciks) - set(holdings["cik"].unique().to_list())):
+        raise ValueError(
+            f"Source 13F holdings at {source_dir} cover none of the filings of {absent}, "
+            "which data/equities/positioning/13f_download.py requests by CIK. The fixture "
+            "would be internally consistent and still miss an institution the notebook asks "
+            "for; regenerate all three artifacts."
+        )
+    features, edges, *_ = producer.build_features_and_matrix(holdings, expected_ciks=required_ciks)
     for filename, rebuilt, keys in (
         ("institution_stock_edges.parquet", edges, ["institution_id", "stock_id"]),
         ("stock_features.parquet", features, ["cusip"]),

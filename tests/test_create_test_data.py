@@ -342,21 +342,26 @@ def test_13f_builder_rejects_a_source_missing_a_derived_feature(tmp_path: Path) 
         build_institutional_holdings_13f(source, tmp_path / "out")
 
 
-def _write_13f_source(holdings_dir: Path) -> pl.DataFrame:
+def _write_13f_source(holdings_dir: Path, drop_cik: str | None = None) -> pl.DataFrame:
     """Write a consistent three-artifact 13F source and return the holdings.
 
-    Two institutions filing two post-2023 quarters for three issuers: enough for
-    the producer to find a quarter both filed for, and a prior one to measure
+    Every institution the producer requests, filing two post-2023 quarters for
+    three issuers: one quarter to build the graph from and a prior one to measure
     ownership change against. The derived artifacts come from the producer itself,
-    so this source is consistent by construction and any test that perturbs it is
+    so the source is consistent by construction and a test that perturbs it is
     testing the check rather than the fixture.
+
+    ``drop_cik`` omits one institution from all three artifacts, which is the case
+    a rebuild keyed on the holdings' own CIKs cannot see.
     """
+    producer = _load_13f_producer()
+    ciks = [cik for _, cik in producer.INSTITUTIONS if cik != drop_cik]
     rows = []
     for report_date, filing_date in (
         (date(2024, 6, 30), date(2024, 8, 14)),
         (date(2024, 9, 30), date(2024, 11, 14)),
     ):
-        for cik, company in (("0001067983", "BERKSHIRE"), ("0001350694", "BRIDGEWATER")):
+        for cik in ciks:
             for index, (cusip, issuer) in enumerate(
                 (("037833100", "APPLE INC"), ("594918104", "MICROSOFT"), ("67066G104", "NVIDIA"))
             ):
@@ -366,22 +371,39 @@ def _write_13f_source(holdings_dir: Path) -> pl.DataFrame:
                         "accession_no": f"{cik}-{report_date:%Y%m%d}-{index}",
                         "issuer": issuer,
                         "cusip": cusip,
-                        "value_thousands": 1_000_000 * (index + 1) + int(cik[-1]),
+                        "value_thousands": 1_000_000 * (index + 1) + int(cik[-4:]),
                         "shares": 10_000 * (index + 1),
                         "put_call": "",
                         "report_date": report_date,
                         "filing_date": filing_date,
-                        "company_name": company,
+                        "company_name": f"INSTITUTION {cik}",
                     }
                 )
     holdings = pl.DataFrame(rows)
     holdings.write_parquet(holdings_dir / "institutional_holdings.parquet")
 
-    build = _load_13f_producer().build_features_and_matrix
-    features, edges, *_ = build(holdings, expected_ciks=holdings["cik"].unique().to_list())
+    features, edges, *_ = producer.build_features_and_matrix(holdings, expected_ciks=ciks)
     edges.write_parquet(holdings_dir / "institution_stock_edges.parquet")
     features.write_parquet(holdings_dir / "stock_features.parquet")
     return holdings
+
+
+def test_13f_builder_rejects_a_source_missing_a_requested_institution(tmp_path: Path) -> None:
+    """A consistent artifact set can still be short one institution.
+
+    22_rag/07 asks for all ten by CIK, so a holdings file that simply lacks one is
+    a coverage gap the graph reads as an absent manager rather than as a broken
+    fixture. Keyed on the holdings' own CIKs the rebuild would agree with itself
+    and pass.
+    """
+    source = tmp_path / "source"
+    holdings_dir = source / "equities" / "positioning" / "13f"
+    holdings_dir.mkdir(parents=True)
+    missing = _load_13f_producer().INSTITUTIONS[0][1]
+    _write_13f_source(holdings_dir, drop_cik=missing)
+
+    with pytest.raises(ValueError, match=rf"cover none of the filings of \['{missing}'\]"):
+        build_institutional_holdings_13f(source, tmp_path / "out")
 
 
 def test_13f_builder_rejects_derived_artifacts_the_holdings_do_not_produce(tmp_path: Path) -> None:
