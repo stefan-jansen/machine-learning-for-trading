@@ -8,6 +8,7 @@ rules that keep it from crying wolf on legitimate imports.
 
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -17,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 
 from check_import_resolution import (  # noqa: E402
+    _path_builtins_are_readable,
     imports_with_lines,
     iter_source_files,
     resolves_in_repo,
@@ -434,6 +436,43 @@ def test_a_shadowed_path_or_str_grants_nothing(tmp_path: Path, preamble: str) ->
         "import tool\n"
     )
     assert not resolves_in_repo("tool", test_file, root)
+
+
+@pytest.mark.parametrize(
+    "preamble",
+    [
+        "from mypath import Path",  # not pathlib's
+        "from pathlib import Path as _P\nPath = _P\n",  # rebound
+        "from pathlib import Path\ndef str(x):\n    return x\n",  # builtin shadowed
+    ],
+)
+def test_a_shadowed_path_or_str_grants_nothing_written_inline(
+    tmp_path: Path, preamble: str
+) -> None:
+    """The same claim written as one expression rather than through a
+    module-level name. Validating the names only left this form trusted, so a
+    shadowed `Path` or `str` could still name a directory outside the checkout
+    at runtime while the insert read as an in-repo path."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    test_file.write_text(
+        f"import sys\n{preamble}\n"
+        'sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))\n'
+        "import tool\n"
+    )
+    assert not resolves_in_repo("tool", test_file, root)
+
+
+def test_a_wildcard_import_makes_path_and_str_unreadable() -> None:
+    """What a wildcard binds cannot be read here, so it can shadow `Path` or
+    `str` unseen. `_sys_is_the_module` rejects such a file before any insert is
+    read, which is why this is asserted on the predicate itself: the predicate
+    has to hold on its own rather than on a caller's unrelated check."""
+    clean = "import sys\nfrom pathlib import Path\n"
+    assert _path_builtins_are_readable(ast.parse(clean))
+    assert not _path_builtins_are_readable(ast.parse(clean + "from custom import *\n"))
 
 
 def test_dot_github_scripts_is_scanned(tmp_path: Path) -> None:

@@ -75,7 +75,7 @@ import re
 import sys
 import tomllib
 from collections import Counter
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -271,14 +271,12 @@ def _module_level_path_names(tree: ast.Module, source: Path) -> dict[str, Path]:
     assignment go unrecorded, so a readable second one looked like the single
     binding and lent its directory to an insert that ran against the first.
 
-    ``Path`` and ``str`` are spellings, not guarantees. They are read as
-    ``pathlib.Path`` and the builtin only in a file that imports the former
-    unaliased and rebinds neither; otherwise every expression built on them is
-    unreadable and grants nothing.
+    ``Path`` and ``str`` have to be readable for any of this: see
+    :func:`_path_builtins_are_readable`.
     """
-    counts = _binding_counts(tree)
-    if counts["str"] or counts["Path"] > 1 or not _imports_pathlib_path(tree):
+    if not _path_builtins_are_readable(tree):
         return {}
+    counts = _binding_counts(tree)
     bindings: dict[str, Path] = {}
     for node in tree.body:
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
@@ -286,10 +284,31 @@ def _module_level_path_names(tree: ast.Module, source: Path) -> dict[str, Path]:
         target = node.targets[0]
         if not isinstance(target, ast.Name) or counts[target.id] != 1:
             continue
-        resolved = _static_path(node.value, source, bindings)
+        resolved = _static_path(node.value, source, bindings, calls_readable=True)
         if resolved is not None:
             bindings[target.id] = resolved
     return bindings
+
+
+def _path_builtins_are_readable(tree: ast.Module) -> bool:
+    """True if ``Path`` and ``str`` in this file mean what they are spelled.
+
+    They are spellings, not guarantees: a local, imported or rebound one can
+    name a directory outside the checkout at runtime while the expression still
+    reads as an in-repo path. So both are read as ``pathlib.Path`` and the
+    builtin only in a file that imports the former unaliased and rebinds
+    neither, and a wildcard import -- whose bindings cannot be read here --
+    disqualifies the file the same way it does in :func:`_sys_is_the_module`.
+
+    This gates every ``Path(...)`` and ``str(...)`` the reader evaluates, not
+    just the ones reached through a module-level name. Gating only the name map
+    left ``sys.path.insert(0, Path(__file__).parent / "scripts")`` trusted in a
+    file where ``Path`` is someone else's.
+    """
+    counts = _binding_counts(tree)
+    return not (
+        counts["str"] or counts["Path"] > 1 or counts["*"] or not _imports_pathlib_path(tree)
+    )
 
 
 def _imports_pathlib_path(tree: ast.Module) -> bool:
@@ -330,7 +349,9 @@ def _binding_counts(tree: ast.Module) -> Counter[str]:
     return counts
 
 
-def _static_path(node: ast.AST, source: Path, names: dict[str, Path]) -> Path | None:
+def _static_path(
+    node: ast.AST, source: Path, names: dict[str, Path], *, calls_readable: bool
+) -> Path | None:
     """The directory a path expression names, or ``None`` if it cannot be read.
 
     Only the vocabulary these files actually use is understood: ``Path(...)``,
@@ -338,13 +359,20 @@ def _static_path(node: ast.AST, source: Path, names: dict[str, Path]) -> Path | 
     literal, and a name bound earlier at module level. Anything else returns
     ``None``, so the entry grants no resolution root — the guard reports an
     import it cannot justify rather than approving one it cannot check.
+
+    ``calls_readable`` says whether ``Path`` and ``str`` in the file this
+    expression came from are the ones they are spelled as
+    (:func:`_path_builtins_are_readable`). When they are not, an expression
+    built on either is unreadable and grants nothing, whether it reaches the
+    reader through a module-level name or is written into the insert directly.
     """
+    recurse = partial(_static_path, source=source, names=names, calls_readable=calls_readable)
     if isinstance(node, ast.Constant):
         return Path(node.value) if isinstance(node.value, str) and node.value else None
     if isinstance(node, ast.Name):
         return names.get(node.id)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-        base = _static_path(node.left, source, names)
+        base = recurse(node.left)
         if base is None or not isinstance(node.right, ast.Constant):
             return None
         segment = node.right.value
@@ -353,27 +381,29 @@ def _static_path(node: ast.AST, source: Path, names: dict[str, Path]) -> Path | 
         value = node.value
         if not (isinstance(value, ast.Attribute) and value.attr == "parents"):
             return None
-        base = _static_path(value.value, source, names)
+        base = recurse(value.value)
         index = node.slice
         if base is None or not (isinstance(index, ast.Constant) and isinstance(index.value, int)):
             return None
         parents = base.parents
         return parents[index.value] if index.value < len(parents) else None
     if isinstance(node, ast.Attribute) and node.attr == "parent":
-        base = _static_path(node.value, source, names)
+        base = recurse(node.value)
         return base.parent if base is not None else None
     if isinstance(node, ast.Call):
         func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "resolve" and not node.args:
+            return recurse(func.value)
+        if not (calls_readable and isinstance(func, ast.Name) and len(node.args) == 1):
+            return None
         # `__file__` is this very file, which is how every in-repo base is built.
-        if isinstance(func, ast.Name) and func.id == "Path" and len(node.args) == 1:
+        if func.id == "Path":
             arg = node.args[0]
             if isinstance(arg, ast.Name) and arg.id == "__file__":
                 return source
-            return _static_path(arg, source, names)
-        if isinstance(func, ast.Name) and func.id == "str" and len(node.args) == 1:
-            return _static_path(node.args[0], source, names)
-        if isinstance(func, ast.Attribute) and func.attr == "resolve" and not node.args:
-            return _static_path(func.value, source, names)
+            return recurse(arg)
+        if func.id == "str":
+            return recurse(node.args[0])
     return None
 
 
@@ -422,6 +452,7 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
         return []
     resolved_root = root.resolve()
     names = _module_level_path_names(tree, path)
+    calls_readable = _path_builtins_are_readable(tree)
     roots: list[Path] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -437,7 +468,7 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
         ):
             continue
         for arg in node.args:
-            inserted = _static_path(arg, path, names)
+            inserted = _static_path(arg, path, names, calls_readable=calls_readable)
             if inserted is None:
                 continue
             # An absolute entry stays absolute. Rewriting "/scripts" to
