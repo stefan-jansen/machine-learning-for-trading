@@ -312,13 +312,25 @@ def _path_builtins_are_readable(tree: ast.Module) -> bool:
 
 
 def _imports_pathlib_path(tree: ast.Module) -> bool:
-    """True if the file does a plain ``from pathlib import Path``."""
+    """True if the file does a plain ``from pathlib import Path`` at module level.
+
+    Module level for the same reason :func:`_sys_is_the_module` demands it of
+    ``import sys``: an import inside a function binds only in that function's
+    scope, so a module-level ``Path(__file__)`` beside it raises ``NameError``
+    and the ``sys.path`` mutation it builds never happens. Reading such a file as
+    trustworthy approved imports on the strength of an entry that never existed.
+
+    A qualifying import nested in a module-level ``try`` or ``if`` does bind, and
+    is refused anyway rather than deciding which branch runs. That costs a
+    resolution root, which surfaces as a named failure; no file in this repo
+    writes one.
+    """
     return any(
         isinstance(node, ast.ImportFrom)
         and node.module == "pathlib"
         and node.level == 0
         and any(alias.name == "Path" and alias.asname is None for alias in node.names)
-        for node in ast.walk(tree)
+        for node in tree.body
     )
 
 

@@ -465,6 +465,30 @@ def test_a_shadowed_path_or_str_grants_nothing_written_inline(
     assert not resolves_in_repo("tool", test_file, root)
 
 
+@pytest.mark.parametrize(
+    "pathlib_import",
+    [
+        "def helper():\n    from pathlib import Path\n",  # binds inside the function only
+        "class Holder:\n    from pathlib import Path\n",  # binds as a class attribute
+    ],
+)
+def test_a_scoped_pathlib_import_grants_nothing(tmp_path: Path, pathlib_import: str) -> None:
+    """An import inside a function or class does not bind the module-level name,
+    so the `Path(__file__)` beside it raises NameError and the insert it builds
+    never runs. Reading the file as trustworthy approved an import on the
+    strength of a `sys.path` entry that never existed."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    test_file.write_text(
+        f"import sys\n{pathlib_import}\n"
+        'sys.path.insert(0, Path(__file__).resolve().parent / "scripts")\n'
+        "import tool\n"
+    )
+    assert not resolves_in_repo("tool", test_file, root)
+
+
 def test_a_wildcard_import_makes_path_and_str_unreadable() -> None:
     """What a wildcard binds cannot be read here, so it can shadow `Path` or
     `str` unseen. `_sys_is_the_module` rejects such a file before any insert is
