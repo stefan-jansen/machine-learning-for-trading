@@ -29,24 +29,28 @@ repo and that is not there.
 
 **What this guard deliberately does not check: when code runs.** It answers one
 question - does a module by this name exist where this file can see it - and says
-nothing about import-time ordering. Two consequences, both accepted:
+nothing about import-time ordering. That leaves one residual in each direction,
+both accepted:
 
-* ``from . import NAME`` where ``NAME`` is only bound by the package's
-  ``__init__.py`` (a constant, a function, a re-export) is legal Python and is
-  reported here anyway. Requiring a module on disk is what closes the bug class:
-  ``deepm/__init__.py`` does ``from . import configs, dataset, ...``, and once a
-  name an initializer binds counts as resolution, deciding which of those nine
-  submodules must exist becomes a static model of execution order. No file in
-  this repo relies on the rejected form.
-* A ``sys.path`` mutation counts wherever it sits in the file. One placed below
-  its import, or inside a function that is never called, is honored here and
-  fails at runtime.
+* **A false positive, reported here and working at runtime.** ``from . import
+  NAME`` where ``NAME`` is only bound by the package's ``__init__.py`` (a
+  constant, a function, a re-export) is legal Python and is flagged anyway.
+  Requiring a module on disk is what closes the bug class: ``deepm/__init__.py``
+  does ``from . import configs, dataset, ...``, and once a name an initializer
+  binds counts as resolution, deciding which of those nine submodules must exist
+  becomes a static model of execution order. No file in this repo uses the
+  rejected form; one that did would get a named failure from this script and a
+  one-line fix (``from .constants import NAME``).
+* **A false negative, passing here and failing at runtime.** A ``sys.path``
+  mutation counts wherever it sits in the file, so one placed below its import,
+  or inside a function that is never called, is honored. Running the file raises
+  ``ModuleNotFoundError`` on that import.
 
-Both residuals fail loudly for anyone who runs the code, with a named
-``ImportError`` on the first line that touches it. That is the opposite of the
-silent, reader-facing bug this guard exists to prevent, and modeling Python's
-execution order statically to catch them costs more false positives than it
-buys, so the contract stays at existence.
+Neither residual is silent, which is what separates them from the bug this guard
+exists to prevent: the first stops CI with a named file and line, the second
+stops the author the first time they run the code. Modeling Python's execution
+order statically to close them costs more false positives than it buys, so the
+contract stays at existence.
 
 Adding a dependency therefore means declaring it in ``pyproject.toml`` — which
 is required anyway. Only when a package's *import* name differs from its
@@ -168,6 +172,11 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
     before importing ``notebook_provenance``. That is a real resolution root, so
     the guard honors it instead of demanding an allowlist entry.
 
+    The receiver has to be ``sys.path`` itself. Matching any ``x.path.append()``
+    would let an unrelated call -- ``config.path.append("scripts")`` -- turn a
+    broken import into a resolved one, which is a false negative in the bug class
+    this guard exists for. Every mutation in this repo is spelled ``sys.path``.
+
     Position and scope are not consulted: a mutation anywhere in the file counts
     for every import in it. That admits the file whose insert sits below its
     import or inside a function nobody calls, which fails at runtime with a named
@@ -191,6 +200,8 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
             and func.attr in {"insert", "append"}
             and isinstance(func.value, ast.Attribute)
             and func.value.attr == "path"
+            and isinstance(func.value.value, ast.Name)
+            and func.value.value.id == "sys"
         ):
             continue
         for literal in (s for s in ast.walk(node) if isinstance(s, ast.Constant)):

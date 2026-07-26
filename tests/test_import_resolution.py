@@ -92,6 +92,17 @@ def test_unrelated_name_still_fails_with_sys_path_insert(tree: Path) -> None:
     assert not resolves_in_repo("nonexistent_module", test_file, tree)
 
 
+def test_an_unrelated_path_append_is_not_a_sys_path_mutation(tree: Path) -> None:
+    """Matching any `x.path.append()` would let an unrelated call approve a broken
+    import - a false negative in the exact bug class this guard covers."""
+    test_file = tree / "test_thing.py"
+    test_file.write_text('import config\nconfig.path.append("scripts")\nimport tool\n')
+    assert not resolves_in_repo("tool", test_file, tree)
+    # Spelled on sys, the same call is a real resolution root.
+    test_file.write_text('import sys\nsys.path.append("scripts")\nimport tool\n')
+    assert resolves_in_repo("tool", test_file, tree)
+
+
 def test_a_guarded_or_deferred_sys_path_insert_still_counts(tree: Path) -> None:
     """Position and scope are not modeled, so an insert inside a conditional or a
     function counts for the imports in the file. The guard asks whether the module
