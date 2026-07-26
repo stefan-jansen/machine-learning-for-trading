@@ -94,11 +94,17 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
 ]
 
 # Of the three above, 02 and 03 derive the endpoint PER SYMBOL; 05 still uses a
-# market-wide calendar, which is equivalent exactly while every symbol trades
-# every session -- true of this panel (one 752-day 2023 calendar) but not
-# guaranteed. Converting 05 is tracked in
-# ``issues/2026-07-18-evaluation-holdout-leak-sibling-sweep`` §3; asserting it
-# here before it is changed would just add a red test.
+# market-wide calendar. That is equivalent exactly while no symbol misses a
+# session inside the label window before the boundary, and on the shipped label
+# panel it is: both filters keep the same 418,362 rows and no row survives the
+# market-wide cutoff with its own label endpoint inside the holdout (measured
+# 2026-07-26 on ``labels/fwd_ret_21d.parquet``). So 05 does not leak today; the
+# market-wide form is a robustness gap, not an open defect, and converting it is
+# tracked in ``issues/2026-07-18-evaluation-holdout-leak-sibling-sweep`` §3.
+# Asserting the per-symbol form here before 05 is changed would only add a red
+# test. Note that 58 of the 99 ETFs do NOT trade every session across the full
+# panel -- they list late -- so "the panel is dense" is the wrong justification;
+# what holds is the measured equivalence at the boundary.
 PER_SYMBOL_ENDPOINT_NOTEBOOKS = [
     "case_studies/etfs/02_labels.py",
     "case_studies/etfs/03_financial_features.py",

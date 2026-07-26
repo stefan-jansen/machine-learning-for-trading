@@ -834,10 +834,10 @@ sig_colors = [
     for sig in eval_summary["significant_fdr05"].to_list()
 ]
 
-# Plot |t| vs |t|: HAC deflation shrinks each t-stat TOWARD ZERO, so for a
-# negative naive-t feature the HAC t is larger (closer to 0) -- on signed axes
-# that point sits ABOVE the diagonal. Absolute values make the one true claim
-# literal: every point is on or below the 45-degree line (|HAC t| <= |naive t|).
+# Plot |t| vs |t|. On signed axes a deflated negative-t feature moves UPWARD --
+# its t-stat rises toward zero -- so deflation lands on both sides of the
+# diagonal and the picture reads as if the correction cut both ways. On absolute
+# axes the diagonal is a single threshold: a point on or below it was deflated.
 naive_abs = [abs(t) for t in eval_summary["naive_tstat"].to_list()]
 hac_abs = [abs(t) for t in eval_summary["hac_tstat"].to_list()]
 n_tested = eval_summary.height
