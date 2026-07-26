@@ -807,7 +807,13 @@ if len(latest_holdings) > 0:
         .with_columns(
             [
                 # Derived features
-                (pl.col("n_inst_holders") / len(INSTITUTIONS)).alias("inst_coverage_pct"),
+                # Breadth is a share of the managers actually in the graph, which is
+                # the denominator the canonical producer uses. Dividing by the
+                # configured list instead would diverge from the artifact whenever
+                # the two cover different manager sets.
+                (pl.col("n_inst_holders") / latest_holdings["cik"].n_unique()).alias(
+                    "inst_coverage_pct"
+                ),
                 (
                     pl.col("position_size_std_usd")
                     / pl.col("avg_position_size_usd").clip(lower_bound=1)
