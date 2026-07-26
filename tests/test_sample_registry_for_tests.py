@@ -34,6 +34,24 @@ def test_a_root_resolving_onto_a_source_registry_is_rejected() -> None:
     assert rejected_output_root(CODE_CS_DIR.parent / "case_studies") is not None
 
 
+def test_a_symlinked_destination_is_rejected(tmp_path: Path) -> None:
+    """The worktree setup symlinks each case study's run_log to the canonical one, so
+    a destination that only looks separate is the normal case, not an exotic one."""
+    root = tmp_path / "intermediates"
+    (root / "etfs").mkdir(parents=True)
+    (root / "etfs" / "run_log").symlink_to(CODE_CS_DIR / "etfs" / "run_log")
+
+    assert rejected_output_root(root) is not None
+
+
+def test_a_symlinked_case_study_directory_is_rejected(tmp_path: Path) -> None:
+    root = tmp_path / "intermediates"
+    root.mkdir(parents=True)
+    (root / "etfs").symlink_to(CODE_CS_DIR / "etfs")
+
+    assert rejected_output_root(root) is not None
+
+
 def test_every_case_study_is_covered_by_the_check(tmp_path: Path) -> None:
     """The guard iterates CASE_STUDY_IDS; an empty list would make it vacuous."""
     assert len(CASE_STUDY_IDS) == 9

@@ -66,8 +66,12 @@ def rejected_output_root(intermediates_dir: Path) -> str | None:
     Two rules. The root may not be, or sit inside, any directory named
     ``case_studies``: in a worktree ``CODE_CS_DIR`` is the worktree's own tree while
     the canonical registries are the ones in ~/ml4t/code, so path equality alone
-    would let a run write over them. And no destination may resolve onto its own
-    source. Both are checked before anything is created or removed.
+    would let a run write over them. And no destination may land on a production
+    registry once every symlink along it is followed - the per-agent worktree setup
+    symlinks each case study's ``run_log`` to the canonical one precisely so the
+    results source of truth is shared, which makes a symlinked destination the
+    normal case here rather than an exotic one. Both are checked before anything is
+    created or removed.
     """
     resolved = intermediates_dir.resolve()
     if any(part.name == "case_studies" for part in (resolved, *resolved.parents)):
@@ -77,8 +81,14 @@ def rejected_output_root(intermediates_dir: Path) -> str | None:
         )
     for cs_id in CASE_STUDY_IDS:
         src_db = (CODE_CS_DIR / cs_id / "run_log" / "registry.db").resolve()
-        if (resolved / cs_id / "run_log" / "registry.db") == src_db:
+        dst_db = (resolved / cs_id / "run_log" / "registry.db").resolve()
+        if dst_db == src_db:
             return f"{resolved} resolves onto the source registry at {src_db}"
+        if any(part.name == "case_studies" for part in dst_db.parents):
+            return (
+                f"{resolved}/{cs_id}/run_log resolves into a case_studies tree "
+                f"({dst_db}), whose registry this script unlinks before reading"
+            )
     return None
 
 
