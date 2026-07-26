@@ -86,7 +86,7 @@ def test_explicit_sys_path_insert_is_honored(tree: Path) -> None:
         'sys.path.insert(0, str(Path(__file__).parent / "scripts"))\n'
         "import tool\n"
     )
-    assert resolves_in_repo("tool", test_file, tree)
+    assert resolves_in_repo("tool", test_file, tree, lineno=4)
 
 
 def test_unrelated_name_still_fails_with_sys_path_insert(tree: Path) -> None:
@@ -98,7 +98,27 @@ def test_unrelated_name_still_fails_with_sys_path_insert(tree: Path) -> None:
         'sys.path.insert(0, str(Path(__file__).parent / "scripts"))\n'
         "import nonexistent_module\n"
     )
-    assert not resolves_in_repo("nonexistent_module", test_file, tree)
+    assert not resolves_in_repo("nonexistent_module", test_file, tree, lineno=4)
+
+
+def test_sys_path_insert_below_the_import_does_not_help_it(tree: Path) -> None:
+    """The insert runs after the import, so the import still fails at runtime."""
+    test_file = tree / "test_thing.py"
+    test_file.write_text('import sys\nimport tool\nsys.path.insert(0, "scripts")\n')
+    assert not resolves_in_repo("tool", test_file, tree, lineno=2)
+    # Above it, the same insert is in force.
+    test_file.write_text('import sys\nsys.path.insert(0, "scripts")\nimport tool\n')
+    assert resolves_in_repo("tool", test_file, tree, lineno=3)
+
+
+def test_sys_path_insert_inside_a_function_does_not_count(tree: Path) -> None:
+    """A mutation in a function body, a branch, or a `try` may never run, so it
+    cannot be treated as putting a directory on sys.path."""
+    test_file = tree / "test_thing.py"
+    test_file.write_text(
+        'import sys\n\n\ndef setup():\n    sys.path.insert(0, "scripts")\n\n\nimport tool\n'
+    )
+    assert not resolves_in_repo("tool", test_file, tree, lineno=8)
 
 
 def test_imports_are_extracted_with_line_numbers(tmp_path: Path) -> None:
@@ -263,6 +283,21 @@ def test_bare_relative_import_accepts_an_init_re_export(tree: Path) -> None:
     assert resolves_relative("OTHER", 1, mod, tree, bare=True, lineno=1)
     init = pkg / "__init__.py"
     assert not resolves_relative("absent", 1, init, tree, lineno=1)
+
+
+def test_annotation_without_a_value_is_not_a_binding(tree: Path) -> None:
+    """`NAME: int` only records an annotation; nothing named NAME exists, so
+    `from . import NAME` fails at runtime unless a NAME submodule is there."""
+    pkg = tree / "07_chapter" / "pkg"
+    (pkg / "__init__.py").write_text("ANNOTATED: int\n")
+    mod = pkg / "thing.py"
+    mod.write_text("from . import ANNOTATED\n")
+    _clear_init_caches()
+    assert not resolves_relative("ANNOTATED", 1, mod, tree, bare=True, lineno=1)
+    # With a value it does bind.
+    (pkg / "__init__.py").write_text("ANNOTATED: int = 1\n")
+    _clear_init_caches()
+    assert resolves_relative("ANNOTATED", 1, mod, tree, bare=True, lineno=1)
 
 
 def test_missing_relative_import_does_not_resolve(tree: Path) -> None:

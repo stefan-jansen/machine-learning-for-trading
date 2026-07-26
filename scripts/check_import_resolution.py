@@ -171,7 +171,10 @@ def package_init_names(package: Path) -> frozenset[tuple[str, int]]:
         if isinstance(node, ast.Assign):
             names.update((t.id, index) for t in node.targets if isinstance(t, ast.Name))
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.add((node.target.id, index))
+            # `NAME: int = 1` binds; a bare `NAME: int` only records an
+            # annotation, so `from . import NAME` still fails at runtime.
+            if node.value is not None:
+                names.add((node.target.id, index))
         elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             names.add((node.name, index))
         elif isinstance(node, ast.Import):
@@ -234,22 +237,29 @@ def init_binds(package: Path, name: str, source: Path, lineno: int) -> bool:
     return any(bound == name and index < cutoff for bound, index in package_init_names(package))
 
 
-def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
-    """Directories the file itself puts on ``sys.path``.
+def explicit_path_inserts(path: Path, root: Path) -> list[tuple[Path, int]]:
+    """Directories the file itself puts on ``sys.path``, with the line that does it.
 
     ``tests/test_notebook_sync.py`` does ``sys.path.insert(0, REPO_ROOT / "scripts")``
     before importing ``notebook_provenance``. That is a real resolution root, so
     the guard honors it instead of demanding an allowlist entry.
+
+    Only mutations that are *statements of the module itself* count, and callers
+    honor one only for imports below it. A mutation inside a function, a branch,
+    or a ``try`` may never run, and one below an import cannot help that import -
+    counting either would approve a name that fails at runtime. All four files in
+    this repo that rely on a mutation do it at the top, above the import.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (SyntaxError, UnicodeDecodeError):
         return []
-    roots: list[Path] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+    roots: list[tuple[Path, int]] = []
+    for statement in tree.body:
+        if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
             continue
-        func = node.func
+        call = statement.value
+        func = call.func
         if not (
             isinstance(func, ast.Attribute)
             and func.attr in {"insert", "append"}
@@ -257,9 +267,9 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
             and func.value.attr == "path"
         ):
             continue
-        for literal in (s for s in ast.walk(node) if isinstance(s, ast.Constant)):
+        for literal in (s for s in ast.walk(call) if isinstance(s, ast.Constant)):
             if isinstance(literal.value, str) and literal.value:
-                roots.append(root / literal.value.lstrip("/"))
+                roots.append((root / literal.value.lstrip("/"), statement.lineno))
     return roots
 
 
@@ -299,14 +309,15 @@ def is_entry_point(source: Path) -> bool:
         return False
 
 
-def _resolution_roots(source: Path, root: Path) -> list[Path]:
+def _resolution_roots(source: Path, root: Path, lineno: int) -> list[Path]:
     """Directories that are on ``sys.path`` when ``source`` is imported.
 
     The importing file's own directory is ``sys.path[0]`` when it is the script
     being run; the repo root is the working directory the project documents for
     notebook runs; an ancestor counts only if notebooks live there and can be
     the entry point (this is how ``16_strategy_simulation/validation/adapters/``
-    imports ``validation``); plus whatever the file itself inserts.
+    imports ``validation``); plus whatever the file inserts *above* ``lineno``,
+    since a later insert has not run when the import executes.
     """
     entries = entry_point_dirs(root)
     bases: list[Path] = [root]
@@ -321,7 +332,7 @@ def _resolution_roots(source: Path, root: Path) -> list[Path]:
         parent = parent.parent
         if parent in entries:
             bases.append(parent)
-    bases.extend(explicit_path_inserts(source, root))
+    bases.extend(inserted for inserted, at in explicit_path_inserts(source, root) if at < lineno)
     return bases
 
 
@@ -360,7 +371,7 @@ def resolves_relative(
     return bare and init_binds(anchor, name, source, lineno)
 
 
-def resolves_in_repo(name: str, source: Path, root: Path) -> bool:
+def resolves_in_repo(name: str, source: Path, root: Path, lineno: int = 0) -> bool:
     """True if the dotted module ``name`` resolves to repo files.
 
     Every component of a dotted path must exist: ``from utils.missing import x``
@@ -371,9 +382,13 @@ def resolves_in_repo(name: str, source: Path, root: Path) -> bool:
     packages are PEP 420 namespace packages -- ``data/equities/`` has no
     ``__init__.py`` yet ``data.equities.loader`` imports correctly -- so
     requiring ``__init__.py`` would reject 53 working imports.
+
+    ``lineno`` is where the import sits, which decides whether a ``sys.path``
+    mutation in the same file has run yet. Defaulting to 0 admits none of them,
+    keeping a caller that omits it on the strict side.
     """
     parts = name.split(".")
-    return any(_resolves_under(base, parts) for base in _resolution_roots(source, root))
+    return any(_resolves_under(base, parts) for base in _resolution_roots(source, root, lineno))
 
 
 def iter_source_files(root: Path):
@@ -401,7 +416,7 @@ def main() -> int:
             top = name.split(".")[0]
             if top in STDLIB or _normalize(top) in allowed:
                 continue
-            if resolves_in_repo(name, path, root):
+            if resolves_in_repo(name, path, root, lineno):
                 continue
             failures.append((path.relative_to(root), lineno, name))
 
