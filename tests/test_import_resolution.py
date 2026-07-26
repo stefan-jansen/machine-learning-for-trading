@@ -103,6 +103,27 @@ def test_an_unrelated_path_append_is_not_a_sys_path_mutation(tree: Path) -> None
     assert resolves_in_repo("tool", test_file, tree)
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import config as sys\nsys.path.append("scripts")\nimport tool\n',
+        'import sys\nsys = object()\nsys.path.append("scripts")\nimport tool\n',
+        'from config import loader as sys\nsys.path.append("scripts")\nimport tool\n',
+        'def f(sys):\n    sys.path.append("scripts")\n\n\nimport tool\n',
+        'for sys in items:\n    sys.path.append("scripts")\n\nimport tool\n',
+        # No `import sys` at all: whatever `sys` is here, it is not the module.
+        'sys.path.append("scripts")\nimport tool\n',
+    ],
+)
+def test_a_sys_that_is_not_the_module_grants_nothing(tree: Path, source: str) -> None:
+    """The name has to be the stdlib module, not just spelled `sys`. An alias, a
+    reassignment, a parameter, or a loop target makes `sys.path.append("scripts")`
+    an unrelated call, and honoring it would approve a broken import."""
+    test_file = tree / "test_thing.py"
+    test_file.write_text(source)
+    assert not resolves_in_repo("tool", test_file, tree)
+
+
 def test_a_guarded_or_deferred_sys_path_insert_still_counts(tree: Path) -> None:
     """Position and scope are not modeled, so an insert inside a conditional or a
     function counts for the imports in the file. The guard asks whether the module

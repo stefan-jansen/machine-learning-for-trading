@@ -43,14 +43,15 @@ both accepted:
   one-line fix (``from .constants import NAME``).
 * **A false negative, passing here and failing at runtime.** A ``sys.path``
   mutation counts wherever it sits in the file, so one placed below its import,
-  or inside a function that is never called, is honored. Running the file raises
-  ``ModuleNotFoundError`` on that import.
+  or inside a function that is never called, is honored. Executing the affected
+  import raises ``ModuleNotFoundError`` -- immediately for a module-level import,
+  and whenever it is first reached for one deferred inside a function or branch.
 
 Neither residual is silent, which is what separates them from the bug this guard
 exists to prevent: the first stops CI with a named file and line, the second
-stops the author the first time they run the code. Modeling Python's execution
-order statically to close them costs more false positives than it buys, so the
-contract stays at existence.
+stops whoever runs that import. Modeling Python's execution order statically to
+close them costs more false positives than it buys, so the contract stays at
+existence.
 
 Adding a dependency therefore means declaring it in ``pyproject.toml`` — which
 is required anyway. Only when a package's *import* name differs from its
@@ -165,6 +166,45 @@ def imports_with_lines(path: Path) -> list[tuple[str, int, int]]:
     return found
 
 
+def _sys_is_the_module(tree: ast.Module) -> bool:
+    """True if the name ``sys`` in this file is the standard-library module.
+
+    Conservative and whole-file: the file must contain a plain ``import sys``,
+    and the name must never be bound any other way. An alias
+    (``import config as sys``), a reassignment, a parameter, or a ``for`` target
+    all disqualify it, because any of them make ``sys.path.append("scripts")``
+    an unrelated call that would otherwise approve a broken import.
+
+    Whole-file rather than per-scope on purpose. Which binding is live at a given
+    call is a scope-and-order question, and this guard does not answer those; a
+    file that both imports ``sys`` and rebinds the name anywhere simply gets no
+    credit for its mutations, which costs a false positive at worst.
+    """
+    imported = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname == "sys":
+                    return False
+                if alias.name == "sys" and alias.asname is None:
+                    imported = True
+        elif isinstance(node, ast.ImportFrom):
+            if any((alias.asname or alias.name) == "sys" for alias in node.names):
+                return False
+        elif isinstance(node, ast.Name):
+            if node.id == "sys" and isinstance(node.ctx, ast.Store | ast.Del):
+                return False
+        elif isinstance(node, ast.arg):
+            if node.arg == "sys":
+                return False
+        elif isinstance(
+            node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.ExceptHandler
+        ):
+            if node.name == "sys":
+                return False
+    return imported
+
+
 def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
     """Directories the file itself puts on ``sys.path``.
 
@@ -172,23 +212,26 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
     before importing ``notebook_provenance``. That is a real resolution root, so
     the guard honors it instead of demanding an allowlist entry.
 
-    The receiver has to be ``sys.path`` itself. Matching any ``x.path.append()``
-    would let an unrelated call -- ``config.path.append("scripts")`` -- turn a
-    broken import into a resolved one, which is a false negative in the bug class
-    this guard exists for. Every mutation in this repo is spelled ``sys.path``.
+    The receiver has to be the standard-library ``sys.path``. Matching any
+    ``x.path.append()`` would let an unrelated call turn a broken import into a
+    resolved one, which is a false negative in the bug class this guard exists
+    for, so both the attribute spelling and the binding of the name are checked
+    (see :func:`_sys_is_the_module`). Every mutation in this repo is a plain
+    ``sys.path.insert`` in a file that imports ``sys`` unaliased.
 
     Position and scope are not consulted: a mutation anywhere in the file counts
     for every import in it. That admits the file whose insert sits below its
-    import or inside a function nobody calls, which fails at runtime with a named
-    ``ImportError``. Deciding it statically means modeling execution order --
-    which path reaches which import -- and that rejects legitimate shapes
-    (``if condition: sys.path.insert(...); import tool``, an import deferred
-    inside a function defined above the insert) to catch a failure the author
-    hits the first time they run the file.
+    import or inside a function nobody calls. Deciding it statically means
+    modeling execution order -- which path reaches which import -- and that
+    rejects legitimate shapes (``if condition: sys.path.insert(...); import
+    tool``, an import deferred inside a function defined above the insert) to
+    catch a failure that raises as soon as the affected import runs.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (SyntaxError, UnicodeDecodeError):
+        return []
+    if not _sys_is_the_module(tree):
         return []
     roots: list[Path] = []
     for node in ast.walk(tree):
