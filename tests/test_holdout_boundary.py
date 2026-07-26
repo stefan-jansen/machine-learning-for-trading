@@ -11,6 +11,7 @@ notebook sources instead: each must read the holdout boundary from
 
 from __future__ import annotations
 
+import ast
 import re
 from datetime import date
 from pathlib import Path
@@ -374,30 +375,82 @@ def evaluation_notebook_label() -> tuple[str, int]:
     configured label is what makes the hardcoding safe, and is the assertion that
     fails if `labels.primary` moves and 05 is not moved with it.
     """
-    source = (REPO_ROOT / "case_studies" / "etfs" / "05_evaluation.py").read_text()
-    # Anchored to the end of the value: `HAC_MAXLAGS = 21 * 2` must not be read
-    # as 21, which is how a helper that parses a prefix reports a horizon the
-    # notebook does not use.
-    comment = r"[ \t]*(?:#.*)?$"
-    label_file = re.search(rf'^PRIMARY_LABEL_FILE = "([^"]+)"{comment}', source, re.MULTILINE)
-    maxlags = re.search(rf"^HAC_MAXLAGS = (\d+){comment}", source, re.MULTILINE)
-    assert label_file and maxlags, (
-        "05_evaluation no longer declares PRIMARY_LABEL_FILE and HAC_MAXLAGS as "
-        "plain literals; read its label and horizon from wherever it now takes them"
+    tree = ast.parse((REPO_ROOT / "case_studies" / "etfs" / "05_evaluation.py").read_text())
+
+    # Parsed rather than pattern-matched: a text match on an assignment reports
+    # the value it can see, so `HAC_MAXLAGS = 21 * 2` reads as 21 while the
+    # notebook purges on 42, and a match anywhere in the file is satisfied by a
+    # call the label frame is not built from.
+    literals: dict[str, object] = {}
+    horizon_alias: ast.expr | None = None
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+        if target.id in ("PRIMARY_LABEL_FILE", "HAC_MAXLAGS") and isinstance(
+            node.value, ast.Constant
+        ):
+            literals[target.id] = node.value.value
+        elif target.id == "LABEL_HORIZON":
+            horizon_alias = node.value
+
+    assert set(literals) == {"PRIMARY_LABEL_FILE", "HAC_MAXLAGS"}, (
+        "05_evaluation no longer assigns PRIMARY_LABEL_FILE and HAC_MAXLAGS a "
+        "plain literal each; read its label and horizon from wherever it now "
+        f"takes them (found {sorted(literals)})"
     )
-    assert re.search(rf"^LABEL_HORIZON = HAC_MAXLAGS{comment}", source, re.MULTILINE), (
-        "05_evaluation's purge horizon is no longer HAC_MAXLAGS alone; this helper "
-        "reports the wrong horizon for the equivalence check"
+    assert isinstance(horizon_alias, ast.Name) and horizon_alias.id == "HAC_MAXLAGS", (
+        "05_evaluation's purge horizon is no longer HAC_MAXLAGS itself, so this "
+        "helper would report a horizon the notebook does not use"
     )
-    # ...and both must be what the notebook reads and shifts by, not constants it
-    # declares and then ignores.
-    assert re.search(
-        r'read_parquet\(\s*CASE_DIR\s*/\s*"labels"\s*/\s*PRIMARY_LABEL_FILE\s*\)', source
-    ), "05_evaluation declares PRIMARY_LABEL_FILE but does not load the labels with it"
-    assert re.search(r"shift\(\s*-\s*LABEL_HORIZON\s*\)", source), (
-        "05_evaluation declares LABEL_HORIZON but does not shift the calendar by it"
+
+    def calls_to(node: ast.AST, method: str) -> list[ast.Call]:
+        return [
+            sub
+            for sub in ast.walk(node)
+            if isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and sub.func.attr == method
+        ]
+
+    def names_in(node: ast.AST) -> set[str]:
+        return {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)}
+
+    # The label frame must be read through the constant, in every statement that
+    # builds it -- not merely somewhere in the file.
+    label_reads = [
+        read
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "label_df" for t in node.targets)
+        for read in calls_to(node.value, "read_parquet")
+    ]
+    assert label_reads and all("PRIMARY_LABEL_FILE" in names_in(read) for read in label_reads), (
+        "05_evaluation must load label_df through PRIMARY_LABEL_FILE; a hardcoded "
+        "path there would leave the constant, and this check, describing a file "
+        "the notebook does not read"
     )
-    return label_file.group(1), int(maxlags.group(1))
+
+    # ...and the endpoint it purges on must be that constant's shift.
+    endpoint_aliases = [
+        call
+        for call in calls_to(tree, "alias")
+        if call.args
+        and isinstance(call.args[0], ast.Constant)
+        and call.args[0].value == "_label_end"
+    ]
+    assert endpoint_aliases, "05_evaluation no longer derives a _label_end column"
+    for alias in endpoint_aliases:
+        assert isinstance(alias.func, ast.Attribute)
+        shifts = calls_to(alias.func.value, "shift")
+        assert shifts and all("LABEL_HORIZON" in names_in(shift) for shift in shifts), (
+            "05_evaluation must shift the calendar by LABEL_HORIZON to derive "
+            "_label_end; another horizon there purges a window this check is not "
+            "measuring"
+        )
+    return str(literals["PRIMARY_LABEL_FILE"]), int(literals["HAC_MAXLAGS"])  # type: ignore[arg-type]
 
 
 def test_the_two_purges_agree_on_the_shipped_label_panel() -> None:
