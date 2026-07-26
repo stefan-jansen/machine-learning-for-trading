@@ -80,12 +80,21 @@ def test_docker_notebook(notebook_path, populated_data_dir, seeded_output_dir):
     timeout = overrides.get("timeout", 300)
     parameters = overrides.get("parameters", {})
 
+    # Some py312 notebooks need a venv other than the one running pytest.
+    kernel_python = overrides.get("kernel_python")
+    if kernel_python and not Path(kernel_python).exists():
+        pytest.skip(f"Interpreter {kernel_python} not present in this environment")
+    launcher = overrides.get("kernel_launcher")
+    kernel_launcher = REPO_ROOT / launcher if launcher else None
+
     result = run_notebook(
         py_path=notebook_path,
         parameters=parameters,
         timeout=timeout,
         output_dir=seeded_output_dir,
         data_dir=populated_data_dir,
+        kernel_python=kernel_python,
+        kernel_launcher=kernel_launcher,
     )
 
     if result["status"] == "error":

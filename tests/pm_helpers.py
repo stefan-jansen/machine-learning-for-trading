@@ -24,6 +24,10 @@ overrides.yaml schema (per-notebook, all optional):
     gpu: bool
     long_running: bool
     docker_env: str — informational (e.g., "benchmark")
+    kernel_python: str — interpreter to execute with, for a notebook whose
+        dependencies live in a venv other than the one running pytest (the
+        py312 image keeps tfcausalimpact in /opt/bsts on NumPy 1.x).
+    kernel_launcher: str — repo-relative launcher script for that interpreter.
     tier: "per_commit" | "weekly" | "on_demand" — default "per_commit"
         Per-commit runs the Tests workflow on every PR/push.
         Weekly runs the weekly-external scheduled workflow (Step 2).
@@ -34,7 +38,9 @@ overrides.yaml schema (per-notebook, all optional):
         Default "replay".
 """
 
+import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -192,6 +198,39 @@ def sync_notebook(py_path: Path) -> Path:
     return tmp_ipynb
 
 
+def register_kernelspec(python_exe: str, launcher: Path | None = None) -> tuple[str, Path]:
+    """Write a throwaway kernelspec that runs a specific interpreter.
+
+    The py312 image keeps `tfcausalimpact` in an isolated `/opt/bsts` venv because
+    it needs NumPy 1.x while the signature stack on `/opt/ml4t` needs 2.x. The
+    kernelspec baked into the image points at `/app/envs/py312/bsts_kernel.py`,
+    which only resolves under docker-compose; CI checks the repo out elsewhere.
+    Generating the spec here keeps the launcher path anchored to REPO_ROOT, so
+    the same code works in both.
+
+    Args:
+        python_exe: Interpreter to run the kernel with
+        launcher: Optional kernel launcher script (defaults to plain ipykernel)
+
+    Returns:
+        (kernel_name, jupyter_path) — set JUPYTER_PATH to the second value.
+    """
+    kernel_name = "ml4t-scoped"
+    root = Path(tempfile.mkdtemp(prefix="_pm_kernels_"))
+    spec_dir = root / "kernels" / kernel_name
+    spec_dir.mkdir(parents=True)
+
+    if launcher is not None:
+        argv = [python_exe, str(launcher), "-f", "{connection_file}"]
+    else:
+        argv = [python_exe, "-m", "ipykernel_launcher", "-f", "{connection_file}"]
+
+    (spec_dir / "kernel.json").write_text(
+        json.dumps({"argv": argv, "display_name": kernel_name, "language": "python"})
+    )
+    return kernel_name, root
+
+
 def run_notebook(
     py_path: Path,
     parameters: dict | None = None,
@@ -201,6 +240,8 @@ def run_notebook(
     extra_env: dict[str, str] | None = None,
     log_path: Path | None = None,
     cwd: Path | None = None,
+    kernel_python: str | None = None,
+    kernel_launcher: Path | None = None,
 ) -> dict:
     """Execute a notebook via Papermill with parameter injection.
 
@@ -218,6 +259,9 @@ def run_notebook(
         data_dir: Directory for ML4T_DATA_PATH (test data location)
         extra_env: Additional environment variables for notebook execution
         log_path: Path to progress log file (appended to)
+        kernel_python: Interpreter to execute with, when the notebook needs an
+            environment other than the one running pytest
+        kernel_launcher: Optional launcher script for that interpreter
 
     Returns:
         Dict with keys: status ("ok" or "error"), error (str if failed),
@@ -293,6 +337,14 @@ def run_notebook(
     except ImportError:
         pass
 
+    # A notebook whose dependencies live in a separate venv runs on its own
+    # kernelspec, written to a temp JUPYTER_PATH so nothing global is touched.
+    kernel_name = "python3"
+    kernel_root: Path | None = None
+    if kernel_python:
+        kernel_name, kernel_root = register_kernelspec(kernel_python, kernel_launcher)
+        env_vars["JUPYTER_PATH"] = str(kernel_root)
+
     remove_vars = ["TEST", "QUICK_TEST"]
     if extra_env:
         for key in extra_env:
@@ -320,7 +372,7 @@ def run_notebook(
             str(executed_path),
             parameters=parameters or {},
             cwd=str(cwd or REPO_ROOT),
-            kernel_name="python3",
+            kernel_name=kernel_name,
             execution_timeout=timeout,
             request_save_on_cell_execute=True,
             progress_bar=False,
@@ -370,6 +422,9 @@ def run_notebook(
         # Clean up executed notebook
         if executed_path.exists():
             executed_path.unlink()
+        # Clean up the temp kernelspec
+        if kernel_root is not None:
+            shutil.rmtree(kernel_root, ignore_errors=True)
 
 
 def collect_chapter_notebooks(repo_root: Path, chapter_range: range) -> list[Path]:

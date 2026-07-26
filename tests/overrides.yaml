@@ -691,6 +691,11 @@
   timeout: 360
 15_causal_estimation/06_fed_announcement_bsts:
   docker_env: py312
+  # tfcausalimpact needs NumPy 1.x, the signature stack on /opt/ml4t needs 2.x,
+  # so the py312 image keeps it in a second venv. Without this the notebook runs
+  # on /opt/ml4t and dies on `No module named 'tensorflow'`.
+  kernel_python: /opt/bsts/bin/python
+  kernel_launcher: envs/py312/bsts_kernel.py
   parameters:
     MAX_FOMC_EVENTS: 1
     MAX_PLACEBO_DATES: 1
