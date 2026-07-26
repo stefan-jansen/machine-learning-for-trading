@@ -119,6 +119,9 @@ def test_an_unrelated_path_append_is_not_a_sys_path_mutation(tree: Path) -> None
         # Nested: the import binds inside `f` only, so the module-level call raises
         # NameError and never touches the path.
         'def f():\n    import sys\n\n\nsys.path.append("scripts")\nimport tool\n',
+        # A `global` declaration is not a binding, but the assignment under it is.
+        'import sys\nsys.path.append("scripts")\n\n\ndef clobber():\n'
+        "    global sys\n    sys = None\n\n\nimport tool\n",
         # No `import sys` at all: whatever `sys` is here, it is not the module.
         'sys.path.append("scripts")\nimport tool\n',
     ],
@@ -142,6 +145,10 @@ def test_a_sys_that_is_not_the_module_grants_nothing(tree: Path, source: str) ->
         # A local named `sys_path`, an attribute named `sys`, a string "sys": none
         # of them bind the name.
         'import sys\nsys.path.insert(0, "scripts")\nsys_path = cfg.sys\nlabel = "sys"\nimport tool\n',
+        # `global sys` only names the scope an assignment would write to. Reading
+        # sys.path through it binds nothing.
+        'import sys\nsys.path.insert(0, "scripts")\n\n\ndef show():\n'
+        "    global sys\n    print(sys.path)\n\n\nimport tool\n",
     ],
 )
 def test_using_the_name_without_binding_it_keeps_the_credit(tree: Path, source: str) -> None:

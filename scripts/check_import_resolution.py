@@ -183,17 +183,20 @@ def imports_with_lines(path: Path) -> list[tuple[str, int, int]]:
 #: a match-statement capture, a type parameter, something a future release adds --
 #: is still caught: ``name`` covers ``FunctionDef``/``ClassDef``/``ExceptHandler``/
 #: ``MatchAs``/``MatchStar``/``TypeVar``, ``arg`` covers parameters, and ``rest``
-#: covers ``MatchMapping``.
+#: covers ``MatchMapping``. Assignments bind through ``ast.Name`` instead and are
+#: checked there.
 _BINDING_FIELDS = ("name", "arg", "rest")
 
 
 def _binds_the_name(node: ast.AST, name: str) -> bool:
-    """True if ``node`` binds ``name`` through an identifier field or a
-    ``global``/``nonlocal`` declaration."""
-    if any(getattr(node, field, None) == name for field in _BINDING_FIELDS):
-        return True
-    declared = getattr(node, "names", None)
-    return isinstance(declared, list) and name in declared
+    """True if ``node`` binds ``name`` through an identifier field.
+
+    ``global sys`` and ``nonlocal sys`` are not bindings -- they only say which
+    scope an assignment writes to, and the assignment itself is an ``ast.Name``
+    store that is checked on its own. Treating the declaration as a binding
+    rejected a file that merely reads ``sys.path`` inside a function.
+    """
+    return any(getattr(node, field, None) == name for field in _BINDING_FIELDS)
 
 
 def _sys_is_the_module(tree: ast.Module) -> bool:
