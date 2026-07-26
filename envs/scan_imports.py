@@ -84,6 +84,7 @@ IMAGE_OVERRIDES: dict[str, str] = {
     "tables": "benchmark",
     # optional — broker / market-data SDKs readers may skip
     "databento": "optional",
+    "voyageai": "optional",
 }
 
 VALID_IMAGES: tuple[str, ...] = ("ml4t", "py312", "benchmark", "rapids", "optional")

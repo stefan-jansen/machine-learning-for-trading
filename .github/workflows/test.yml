@@ -352,6 +352,14 @@ jobs:
         run: |
           source .venv/bin/activate
           python scripts/check_notebook_pair_sync.py
+      # Chapter 21 shipped two notebooks importing helper modules that were
+      # never committed, so every reader hit ModuleNotFoundError. This is a
+      # purely static check (no imports executed, nothing installed), which is
+      # why it belongs in this fast job rather than inside a built image.
+      - name: Every import resolves to a file or a declared dependency
+        run: |
+          source .venv/bin/activate
+          python scripts/check_import_resolution.py
       # test_no_machine_specific_paths is deselected, not skipped: it is RED today
       # (97 `/home/stefan/...` leaks across 46 notebooks, incl. shipped Ch1
       # factor_regimes). The leaks are in outputs — cosmetic, not breakage — so
@@ -388,12 +396,13 @@ jobs:
         with:
           version: "latest"
       - name: Install minimal test deps
-        # Just the import surface of the download-logic tests (utils/downloading
-        # + data/download_all + firm-char extract_zip). Intentionally NOT the
-        # full project env (no torch/ml4t-*) so this stays a fast per-commit gate.
+        # Just the import surface of the tests in this job (utils/downloading +
+        # data/download_all + firm-char extract_zip, plus gymnasium for the
+        # Chapter 21 environments). Intentionally NOT the full project env (no
+        # torch/ml4t-*) so this stays a fast per-commit gate.
         run: |
           uv venv --python 3.14
-          uv pip install pytest numpy polars pyyaml python-dotenv plotly
+          uv pip install pytest numpy polars pyyaml python-dotenv plotly gymnasium
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -413,6 +422,19 @@ jobs:
             tests/test_download_scripts_registry.py \
             tests/test_compose_mounts.py \
             tests/test_download_coverage.py \
+            -v --tb=short
+      # The Chapter 21 environments reached readers as broken imports partly
+      # because no job ran the tests that name them: test_import_coverage.py
+      # listed both notebooks while nothing invoked it. These two files pin the
+      # restored environments and the behavior of the import guard the `guards`
+      # job executes, so they gate every PR from here.
+      - name: Run Chapter 21 environment and import-guard tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          .venv/bin/python -m pytest \
+            tests/test_ch21_rl_environments.py \
+            tests/test_import_resolution.py \
             -v --tb=short
 
   # ---------------------------------------------------------------------------

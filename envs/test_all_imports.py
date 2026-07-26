@@ -18,8 +18,11 @@ import importlib
 import sys
 from collections import defaultdict
 
-# Package -> import name mapping (where they differ)
+# Package -> import name mapping (where they differ), including where they differ
+# only in case: imports are case-sensitive, so `ipython` has to be listed for
+# `import IPython` to be recognized.
 IMPORT_MAP = {
+    "ipython": "IPython",
     "beautifulsoup4": "bs4",
     "scikit-learn": "sklearn",
     "pyyaml": "yaml",
@@ -28,7 +31,7 @@ IMPORT_MAP = {
     "pywavelets": "pywt",
     "riskfolio-lib": "riskfolio",
     "iex-parser": "iex_parser",
-    "chronos-t5": "chronos",
+    "chronos-forecasting": "chronos",
     "granite-tsfm": "tsfm_public",
     "psycopg2-binary": "psycopg2",
     "ib-insync": "ib_async",
@@ -38,6 +41,13 @@ IMPORT_MAP = {
     "sentence-transformers": "sentence_transformers",
     "exchange-calendars": "exchange_calendars",
     "be-great": "be_great",
+    "edgartools": "edgar",
+    "pyportfolioopt": "pypfopt",
+    "llama-index-core": "llama_index",
+    "google-genai": "google",
+    "alpaca-py": "alpaca",
+    "ml4t-data": "ml4t",
+    "python-okx": "okx",
 }
 
 # =========================================================================

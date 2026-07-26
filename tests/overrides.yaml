@@ -1048,6 +1048,7 @@
 21_rl_execution_hedging/03_market_making_ppo:
   gpu: true
   parameters:
+    EVAL_EPISODES: 2
     TOTAL_TIMESTEPS: 1000
   timeout: 600
 21_rl_execution_hedging/04_crypto_execution_rl:
