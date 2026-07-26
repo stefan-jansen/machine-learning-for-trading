@@ -436,6 +436,19 @@ jobs:
             tests/test_ch21_rl_environments.py \
             tests/test_import_resolution.py \
             -v --tb=short
+      # The harness that decides which notebooks run, and the subsampler that
+      # builds the fixtures they run against. Both were ungated: the fixture
+      # regeneration path had not been runnable for months without anything
+      # going red, and a notebook could be marked skip on a credential the
+      # weekly workflow supplies without anything noticing.
+      - name: Run test-harness and fixture-generator tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          .venv/bin/python -m pytest \
+            tests/test_pm_helpers.py \
+            tests/test_create_test_data.py \
+            -v --tb=short
 
   # ---------------------------------------------------------------------------
   # Chapter notebook tests — inside Docker (ml4t/ml4t:latest)
