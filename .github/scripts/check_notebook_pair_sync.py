@@ -18,8 +18,8 @@ A notebook can pass that gate and still fail this one.
 
 Usage::
 
-    uv run python scripts/check_notebook_pair_sync.py            # all paired notebooks
-    uv run python scripts/check_notebook_pair_sync.py a.ipynb b.py   # only these (pre-commit)
+    uv run python .github/scripts/check_notebook_pair_sync.py          # all paired notebooks
+    uv run python .github/scripts/check_notebook_pair_sync.py a.ipynb b.py  # only these (pre-commit)
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SKIP_PARTS = {"_reference", ".venv", ".git", ".ipynb_checkpoints"}
 
 
@@ -79,7 +79,7 @@ def main(argv: list[str]) -> int:
         print(f"  {nb.relative_to(REPO_ROOT)}")
     print(
         "\nReaders see a 'File Load Error' dialog, not a notebook (cf. public #372).\n"
-        "Fix: `uv run python scripts/strip_empty_cell_tags.py` if it is empty `tags: []`,\n"
+        "Fix: `uv run python .github/scripts/strip_empty_cell_tags.py` if it is empty `tags: []`,\n"
         "otherwise re-sync the pair (`jupytext --sync <nb>.py`) and re-execute if code changed."
     )
     return 1

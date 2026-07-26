@@ -69,12 +69,12 @@ import tomllib
 from functools import lru_cache
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from envs.scan_imports import SKIP_DIRS, STDLIB  # noqa: E402
 from envs.test_all_imports import IMPORT_MAP  # noqa: E402
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # import name -> distribution that provides it, inverted from the repo's single
 # canonical mapping in envs/test_all_imports.py.
@@ -245,12 +245,34 @@ def _sys_is_the_module(tree: ast.Module) -> bool:
     return True
 
 
+def _literal_path_segments(node: ast.AST) -> list[str]:
+    """The string literals a path expression contributes, in source order.
+
+    One directory can be written as several literals: ``REPO_ROOT / ".github" /
+    "scripts"`` names a single root. Reading each constant on its own turned
+    that into two roots, ``<repo>/.github`` and ``<repo>/scripts``, and the one
+    directory actually meant was not among them. Joining the ``/`` chain
+    recovers it.
+
+    Only literals are followed. A segment computed at runtime contributes
+    nothing, which loses the root rather than inventing a wrong one.
+    """
+    if isinstance(node, ast.Constant):
+        return [node.value] if isinstance(node.value, str) and node.value else []
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return _literal_path_segments(node.left) + _literal_path_segments(node.right)
+    if isinstance(node, ast.Call):  # str(...), Path(...), os.path.join(...)
+        return [seg for a in node.args for seg in _literal_path_segments(a)]
+    return []
+
+
 def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
     """Directories the file itself puts on ``sys.path``.
 
-    ``tests/test_notebook_sync.py`` does ``sys.path.insert(0, REPO_ROOT / "scripts")``
-    before importing ``notebook_provenance``. That is a real resolution root, so
-    the guard honors it instead of demanding an allowlist entry.
+    ``tests/test_notebook_sync.py`` does ``sys.path.insert(0, REPO_ROOT /
+    ".github" / "scripts")`` before importing ``notebook_provenance``. That is a
+    real resolution root, so the guard honors it instead of demanding an
+    allowlist entry.
 
     Only a directory inside the repo is returned, judged after resolving both
     sides so that ``..`` segments and symlinks cannot walk out of the checkout. An
@@ -294,19 +316,21 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
             and func.value.value.id == "sys"
         ):
             continue
-        for literal in (s for s in ast.walk(node) if isinstance(s, ast.Constant)):
-            if isinstance(literal.value, str) and literal.value:
-                # An absolute entry stays absolute. Rewriting "/scripts" to
-                # <repo>/scripts claimed a directory Python never searches, and
-                # a root outside the repo cannot hold a module this repo ships,
-                # so it is no resolution root here either way. Containment is
-                # decided on resolved paths and the resolved path is what gets
-                # used: `<repo>/../external` lists `<repo>` among its lexical
-                # parents, and an in-repo symlink can point anywhere.
-                inserted = Path(literal.value)
-                inserted = (inserted if inserted.is_absolute() else root / inserted).resolve()
-                if inserted == resolved_root or resolved_root in inserted.parents:
-                    roots.append(inserted)
+        for arg in node.args:
+            segments = _literal_path_segments(arg)
+            if not segments:
+                continue
+            # An absolute entry stays absolute. Rewriting "/scripts" to
+            # <repo>/scripts claimed a directory Python never searches, and
+            # a root outside the repo cannot hold a module this repo ships,
+            # so it is no resolution root here either way. Containment is
+            # decided on resolved paths and the resolved path is what gets
+            # used: `<repo>/../external` lists `<repo>` among its lexical
+            # parents, and an in-repo symlink can point anywhere.
+            inserted = Path(*segments)
+            inserted = (inserted if inserted.is_absolute() else root / inserted).resolve()
+            if inserted == resolved_root or resolved_root in inserted.parents:
+                roots.append(inserted)
     return roots
 
 
@@ -418,6 +442,13 @@ def resolves_in_repo(name: str, source: Path, root: Path) -> bool:
 def iter_source_files(root: Path):
     for path in sorted(root.rglob("*.py")):
         parts = path.relative_to(root).parts
+        # SKIP_DIRS drops ``.github`` wholesale, which is right for workflow
+        # YAML but wrong for ``.github/scripts/`` — that directory holds this
+        # repo's own guards and notebook tooling. A broken import there is the
+        # same defect as anywhere else, and this file lives in it, so the
+        # subdirectory is scanned back in.
+        if parts[:2] == (".github", "scripts"):
+            parts = parts[2:]
         if any(p in SKIP_DIRS for p in parts):
             continue
         yield path

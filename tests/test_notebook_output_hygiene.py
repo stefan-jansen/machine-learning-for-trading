@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 
 from sanitize_notebook_paths import _iter_notebooks, sanitize_text  # noqa: E402
 from strip_empty_cell_tags import paired_py_has_fossil, strip_text  # noqa: E402
@@ -45,7 +45,7 @@ def test_no_machine_specific_paths_in_committed_notebooks() -> None:
             offenders.append(f"{nb.relative_to(REPO_ROOT)} ({n})")
     assert not offenders, (
         "Notebooks leak machine-specific absolute paths in their committed "
-        "outputs/metadata. Run `uv run python scripts/sanitize_notebook_paths.py` "
+        "outputs/metadata. Run `uv run python .github/scripts/sanitize_notebook_paths.py` "
         "to fix:\n  " + "\n  ".join(offenders)
     )
 
@@ -75,7 +75,7 @@ def test_no_empty_cell_tags_in_committed_notebooks() -> None:
     assert not offenders, (
         "Notebooks carry empty `tags: []` cell metadata their paired .py lacks, so "
         "JupyterLab shows a 'File Load Error' instead of the notebook (cf. public "
-        "#372). Run `uv run python scripts/strip_empty_cell_tags.py` to fix:\n  "
+        "#372). Run `uv run python .github/scripts/strip_empty_cell_tags.py` to fix:\n  "
         + "\n  ".join(offenders)
     )
 

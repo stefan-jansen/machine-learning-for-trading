@@ -15,8 +15,8 @@ Idempotent: running twice is a no-op. A companion test
 (``tests/test_notebook_output_hygiene.py``) fails CI if any leak survives.
 
 Usage:
-    uv run python scripts/sanitize_notebook_paths.py            # rewrite in place
-    uv run python scripts/sanitize_notebook_paths.py --check    # report only, exit 1 if dirty
+    uv run python .github/scripts/sanitize_notebook_paths.py            # rewrite in place
+    uv run python .github/scripts/sanitize_notebook_paths.py --check    # report only, exit 1 if dirty
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import re
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Applied in order; earlier (longer) rules win. The two repo-root prefixes map
 # to "" so paths become repo-relative. `third_edition/code` is a stale former

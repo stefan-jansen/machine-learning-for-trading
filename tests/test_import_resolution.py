@@ -14,10 +14,11 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 
 from check_import_resolution import (  # noqa: E402
     imports_with_lines,
+    iter_source_files,
     resolves_in_repo,
     resolves_relative,
     third_party_names,
@@ -310,6 +311,48 @@ def test_an_absolute_sys_path_entry_is_not_reinterpreted(tree: Path) -> None:
     # An absolute path that really points into the repo is a resolution root.
     test_file.write_text(f'import sys\nsys.path.insert(0, "{tree / "scripts"}")\nimport tool\n')
     assert resolves_in_repo("tool", test_file, tree)
+
+
+def test_a_multi_segment_path_insert_names_one_directory(tmp_path: Path) -> None:
+    """`REPO_ROOT / ".github" / "scripts"` is one root written as two literals.
+    Reading each constant on its own produced `<repo>/.github` and
+    `<repo>/scripts` — neither the directory meant, so the import failed."""
+    root = tmp_path / "repo"
+    (root / ".github" / "scripts").mkdir(parents=True)
+    (root / ".github" / "scripts" / "tool.py").write_text("")
+    test_file = root / "test_thing.py"
+    test_file.write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "REPO_ROOT = Path(__file__).resolve().parent\n"
+        'sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))\n'
+        "import tool\n"
+    )
+    assert resolves_in_repo("tool", test_file, root)
+
+    # The segments are not a pool of independent roots: a module sitting at only
+    # one of them does not satisfy the import.
+    (root / "scripts").mkdir()
+    (root / "scripts" / "stray.py").write_text("")
+    assert not resolves_in_repo("stray", test_file, root)
+
+
+def test_dot_github_scripts_is_scanned(tmp_path: Path) -> None:
+    """SKIP_DIRS drops `.github` wholesale, which would silently exempt the
+    guards and notebook tooling that live in `.github/scripts/` — including this
+    guard itself — from the check they exist to enforce."""
+    root = tmp_path / "repo"
+    (root / ".github" / "workflows").mkdir(parents=True)
+    (root / ".github" / "scripts").mkdir()
+    (root / ".github" / "scripts" / "guard.py").write_text("")
+    (root / ".github" / "workflows" / "helper.py").write_text("")
+    (root / ".github" / "scripts" / "__pycache__").mkdir()
+    (root / ".github" / "scripts" / "__pycache__" / "guard.py").write_text("")
+
+    scanned = {p.relative_to(root).as_posix() for p in iter_source_files(root)}
+    assert ".github/scripts/guard.py" in scanned
+    assert ".github/workflows/helper.py" not in scanned
+    assert ".github/scripts/__pycache__/guard.py" not in scanned
 
 
 def test_a_path_entry_cannot_walk_out_of_the_repo(tmp_path: Path) -> None:

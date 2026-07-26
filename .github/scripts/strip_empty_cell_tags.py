@@ -31,9 +31,9 @@ Idempotent: running twice is a no-op. A companion test
 (``tests/test_notebook_output_hygiene.py``) fails CI if any empty tag survives.
 
 Usage:
-    uv run python scripts/strip_empty_cell_tags.py            # rewrite in place
-    uv run python scripts/strip_empty_cell_tags.py a.ipynb    # selected notebooks
-    uv run python scripts/strip_empty_cell_tags.py --check    # report only, exit 1 if dirty
+    uv run python .github/scripts/strip_empty_cell_tags.py            # rewrite in place
+    uv run python .github/scripts/strip_empty_cell_tags.py a.ipynb    # selected notebooks
+    uv run python .github/scripts/strip_empty_cell_tags.py --check    # report only, exit 1 if dirty
 """
 
 from __future__ import annotations

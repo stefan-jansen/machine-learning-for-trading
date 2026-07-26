@@ -35,9 +35,9 @@ that the fossil is gone.
 Idempotent. Guarded by ``tests/test_notebook_output_hygiene.py``.
 
 Usage:
-    uv run python scripts/strip_papermill_cell_metadata.py            # rewrite in place
-    uv run python scripts/strip_papermill_cell_metadata.py a.ipynb    # selected notebooks
-    uv run python scripts/strip_papermill_cell_metadata.py --check    # report only, exit 1 if dirty
+    uv run python .github/scripts/strip_papermill_cell_metadata.py            # rewrite in place
+    uv run python .github/scripts/strip_papermill_cell_metadata.py a.ipynb    # selected notebooks
+    uv run python .github/scripts/strip_papermill_cell_metadata.py --check    # report only, exit 1 if dirty
 """
 
 from __future__ import annotations
