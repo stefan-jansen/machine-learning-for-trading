@@ -20,8 +20,10 @@ instead of only inside a built Docker image. An import name passes if it is:
    ``IMAGE_OVERRIDES`` for packages that live only in a non-default Docker
    image), under the name it is actually imported as.
 
-Relative imports (``from .mod import x``) are resolved against the importing
-file's own package.
+Relative imports are resolved against the importing file's own package, in both
+forms: ``from .mod import x`` requires ``mod`` to be a module on disk, and
+``from . import x`` accepts either a submodule or a name the package's
+``__init__.py`` binds, because both make that statement work.
 
 Anything else is, by elimination, a module the author expected to exist in the
 repo and that is not there.
@@ -39,7 +41,7 @@ import ast
 import re
 import sys
 import tomllib
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -103,8 +105,8 @@ def third_party_names(root: Path) -> set[str]:
     return names
 
 
-def imports_with_lines(path: Path) -> list[tuple[str, int, int]]:
-    """Import names in ``path`` as ``(name, lineno, level)``.
+def imports_with_lines(path: Path) -> list[tuple[str, int, int, bool]]:
+    """Import names in ``path`` as ``(name, lineno, level, bare)``.
 
     Dotted names are kept whole. ``from utils.missing import x`` raises
     ``ModuleNotFoundError`` even though ``utils`` exists, so resolution has to
@@ -114,27 +116,63 @@ def imports_with_lines(path: Path) -> list[tuple[str, int, int]]:
     ``level`` is the relative-import depth: 0 for absolute imports, 1 for
     ``from . import x``, 2 for ``from .. import x``. Relative imports name repo
     files by definition, so they are checked rather than skipped.
+
+    ``bare`` marks ``from . import x``, where ``x`` may be either a submodule or
+    a name the package's ``__init__.py`` binds. Both are legal, so a bare alias
+    resolves against either; ``from .x import y`` requires ``x`` to be a module
+    and is checked more strictly.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (SyntaxError, UnicodeDecodeError):
         return []
-    found: list[tuple[str, int, int]] = []
+    found: list[tuple[str, int, int, bool]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                found.append((alias.name, node.lineno, 0))
+                found.append((alias.name, node.lineno, 0, False))
         elif isinstance(node, ast.ImportFrom):
             if node.level and node.level > 0:
-                # Only `from .mod import x` is checked. In `from . import x`,
-                # `x` may be a submodule or a symbol re-exported by the
-                # package's __init__.py, and the two are not distinguishable
-                # without importing.
                 if node.module:
-                    found.append((node.module, node.lineno, node.level))
+                    found.append((node.module, node.lineno, node.level, False))
+                else:
+                    for alias in node.names:
+                        found.append((alias.name, node.lineno, node.level, True))
             elif node.module:
-                found.append((node.module, node.lineno, 0))
+                found.append((node.module, node.lineno, 0, False))
     return found
+
+
+@cache
+def package_init_names(package: Path) -> frozenset[str]:
+    """Names a package's ``__init__.py`` binds other than by relative import.
+
+    ``from . import x`` also succeeds when ``x`` is a symbol the ``__init__.py``
+    defines rather than a submodule on disk. Bindings that come from a relative
+    import are deliberately excluded: those are the statements being checked, so
+    counting them would let the guard satisfy itself with the very line in
+    question.
+    """
+    init = package / "__init__.py"
+    if not init.is_file():
+        return frozenset()
+    try:
+        tree = ast.parse(init.read_text(encoding="utf-8"))
+    except (SyntaxError, UnicodeDecodeError):
+        return frozenset()
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            names.add(node.name)
+        elif isinstance(node, ast.Import):
+            names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and not node.level:
+            names.update(alias.asname or alias.name for alias in node.names)
+    return frozenset(names)
 
 
 def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
@@ -238,17 +276,23 @@ def _resolves_under(package: Path, parts: list[str]) -> bool:
     return (package / f"{leaf}.py").is_file() or (package / leaf).is_dir()
 
 
-def resolves_relative(name: str, level: int, source: Path, root: Path) -> bool:
-    """True if a relative import (``from .mod import x``) resolves.
+def resolves_relative(name: str, level: int, source: Path, root: Path, bare: bool = False) -> bool:
+    """True if a relative import resolves.
 
     The anchor is the importing file's package, walked up ``level - 1`` times.
+
+    ``from .mod import x`` needs ``mod`` to be a module on disk. ``from . import
+    x`` (``bare``) is satisfied by either a submodule or a name the package's
+    ``__init__.py`` binds, since both make the statement work at runtime.
     """
     anchor = source.parent
     for _ in range(level - 1):
         anchor = anchor.parent
         if root not in anchor.parents and anchor != root:
             return False
-    return _resolves_under(anchor, name.split("."))
+    if _resolves_under(anchor, name.split(".")):
+        return True
+    return bare and name in package_init_names(anchor)
 
 
 def resolves_in_repo(name: str, source: Path, root: Path) -> bool:
@@ -281,9 +325,9 @@ def main() -> int:
     failures: list[tuple[Path, int, str]] = []
 
     for path in iter_source_files(root):
-        for name, lineno, level in imports_with_lines(path):
+        for name, lineno, level, bare in imports_with_lines(path):
             if level > 0:
-                if not resolves_relative(name, level, path, root):
+                if not resolves_relative(name, level, path, root, bare):
                     failures.append((path.relative_to(root), lineno, "." * level + name))
                 continue
             # Third-party and stdlib are classified on the top-level component:

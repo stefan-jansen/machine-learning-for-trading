@@ -280,6 +280,15 @@ class MarketMakingEnv(gym.Env):
             self.inventory = 0
             self.wealth = liquidated_wealth
             self.history[-1]["wealth"] = self.wealth
+            # The row's reward has to be the reward the agent was actually
+            # given, liquidation included. Leaving the pre-liquidation value
+            # here while updating `wealth` made the final row disagree with
+            # itself and with the returned transition.
+            self.history[-1]["reward"] = reward
+            # `inventory` stays the position the agent quoted against, which is
+            # what pairs with `quote_offset_bps` in the inventory-skew figure.
+            # Post-liquidation inventory is zero by construction; the position
+            # carried into liquidation is `terminal_inventory`.
             self.history[-1]["terminal_inventory"] = remaining_inventory
             self.history[-1]["liquidation_cost"] = liquidation_cost
 

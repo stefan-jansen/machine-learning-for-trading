@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPO_ROOT / "21_rl_execution_hedging"))
 from crypto_execution_env import CryptoExecutionEnv  # noqa: E402
 from market_making_env import (  # noqa: E402
     MarketMakingDynamics,
+    MarketMakingEnv,
     generate_garch_market_data,
 )
 
@@ -73,6 +74,29 @@ def test_volatility_series_is_conditional_not_realized() -> None:
         )
         rng.uniform(-1, 1)  # imbalance draw, keeps the stream aligned
     assert len(prices) == len(vols) + 1
+
+
+def test_terminal_row_reward_matches_the_returned_reward() -> None:
+    """The final history row had `wealth` updated for terminal liquidation but
+    `reward` left at its pre-liquidation value, so the row disagreed with the
+    transition the agent was actually given."""
+    env = MarketMakingEnv(episode_length=40, inventory_limit=10, dynamics=DYNAMICS, seed=7)
+    env.reset(seed=7)
+    rewards = []
+    while True:
+        _, reward, terminated, _, info = env.step(env.action_space.sample())
+        rewards.append(reward)
+        if terminated:
+            break
+
+    final = env.history[-1]
+    assert final["reward"] == pytest.approx(rewards[-1])
+    assert final["wealth"] == pytest.approx(info["wealth"])
+    assert "terminal_inventory" in final and "liquidation_cost" in final
+    # Every non-terminal row already agreed; this pins that it stays that way.
+    assert all(
+        row["reward"] == pytest.approx(r) for row, r in zip(env.history, rewards, strict=True)
+    )
 
 
 def test_impact_is_square_root_plus_linear() -> None:

@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from check_import_resolution import (  # noqa: E402
     imports_with_lines,
+    package_init_names,
     resolves_in_repo,
     resolves_relative,
     third_party_names,
@@ -96,7 +97,7 @@ def test_imports_are_extracted_with_line_numbers(tmp_path: Path) -> None:
     """Dotted names are kept whole so submodules can be resolved."""
     src = tmp_path / "m.py"
     src.write_text("import os\n\nfrom pkg.sub import thing\nimport a.b as ab\n")
-    found = {name: (lineno, level) for name, lineno, level in imports_with_lines(src)}
+    found = {name: (lineno, level) for name, lineno, level, _ in imports_with_lines(src)}
     assert found == {"os": (1, 0), "pkg.sub": (3, 0), "a.b": (4, 0)}
 
 
@@ -121,11 +122,54 @@ def test_namespace_package_submodule_resolves(tree: Path) -> None:
 
 
 def test_relative_imports_are_captured_with_their_level(tmp_path: Path) -> None:
-    """`from .mod import x` is checked; `from . import x` is not, because `x`
-    may be a symbol re-exported by the package __init__ rather than a module."""
+    """Both forms are captured. `from . import x` is flagged bare, because `x`
+    may be a submodule or a name the package __init__ binds."""
     src = tmp_path / "m.py"
     src.write_text("from . import sibling\nfrom .mod import thing\nfrom ..up import y\n")
-    assert imports_with_lines(src) == [("mod", 2, 1), ("up", 3, 2)]
+    assert imports_with_lines(src) == [
+        ("sibling", 1, 1, True),
+        ("mod", 2, 1, False),
+        ("up", 3, 2, False),
+    ]
+
+
+def test_bare_relative_import_of_missing_submodule_does_not_resolve(tree: Path) -> None:
+    """`from . import missing` is the form that let the Chapter 21 class of bug
+    recur: it was skipped entirely, so a deleted sibling passed the guard."""
+    pkg = tree / "07_chapter" / "pkg"
+    mod = pkg / "thing.py"
+    mod.write_text("from . import missing\n")
+    assert not resolves_relative("missing", 1, mod, tree, bare=True)
+    (pkg / "missing.py").write_text("value = 1\n")
+    assert resolves_relative("missing", 1, mod, tree, bare=True)
+
+
+def test_bare_relative_import_accepts_a_name_the_init_binds(tree: Path) -> None:
+    """`from . import CONSTANT` is legal when the package __init__ defines it,
+    so requiring a module on disk would reject working code."""
+    pkg = tree / "07_chapter" / "pkg"
+    (pkg / "__init__.py").write_text("CONSTANT = 3\n\n\ndef helper():\n    pass\n")
+    mod = pkg / "thing.py"
+    mod.write_text("from . import CONSTANT, helper\n")
+    assert resolves_relative("CONSTANT", 1, mod, tree, bare=True)
+    assert resolves_relative("helper", 1, mod, tree, bare=True)
+    assert not resolves_relative("absent", 1, mod, tree, bare=True)
+    # The strict form still demands a module: a symbol named CONSTANT does not
+    # make `from .CONSTANT import x` importable.
+    assert not resolves_relative("CONSTANT", 1, mod, tree)
+
+
+def test_init_relative_imports_do_not_satisfy_themselves(tree: Path) -> None:
+    """`deepm/__init__.py` does `from . import configs, ...`. Counting names an
+    __init__ binds *by relative import* would let that line prove itself, so
+    those bindings are excluded and the submodules must actually exist."""
+    pkg = tree / "07_chapter" / "pkg"
+    init = pkg / "__init__.py"
+    init.write_text("from . import configs\n")
+    assert not resolves_relative("configs", 1, init, tree, bare=True)
+    (pkg / "configs.py").write_text("")
+    package_init_names.cache_clear()
+    assert resolves_relative("configs", 1, init, tree, bare=True)
 
 
 def test_missing_relative_import_does_not_resolve(tree: Path) -> None:
