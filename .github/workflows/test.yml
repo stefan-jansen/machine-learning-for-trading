@@ -449,6 +449,15 @@ jobs:
       - name: Run test-harness and fixture-generator tests
         env:
           PYTHONPATH: ${{ github.workspace }}
+          # Same override as the download-logic step above, and for the same
+          # reason: create_test_data imports the production producers, which
+          # pulls in utils.config, which hard-fails at import when
+          # ML4T_DATA_PATH does not exist. This job checks out no test-data, so
+          # the workflow-level default points at a directory that is not there.
+          # The tests build their own synthetic sources under tmp_path and read
+          # nothing from this path.
+          ML4T_PATH: ${{ github.workspace }}
+          ML4T_DATA_PATH: ${{ github.workspace }}/data
         run: |
           .venv/bin/python -m pytest \
             tests/test_pm_helpers.py \
