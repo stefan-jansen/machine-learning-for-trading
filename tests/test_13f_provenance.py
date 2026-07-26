@@ -4,6 +4,7 @@ from datetime import date
 
 import numpy as np
 import polars as pl
+import pytest
 
 from data.equities import loader
 
@@ -156,6 +157,56 @@ def test_derived_graph_is_latest_quarter_positive_equity_only() -> None:
     assert features["timestamp"].to_list() == [date(2024, 11, 14)]
     assert stocks == ["123"]
     np.testing.assert_allclose(matrix, np.ones((1, 1), dtype=np.float32), atol=1e-6)
+
+
+def _two_manager_holdings(second_manager_report_date: date) -> pl.DataFrame:
+    """Two managers, each with one long-equity lot, at possibly different quarters."""
+    return pl.DataFrame(
+        {
+            "cik": ["1", "1", "2"],
+            "accession_no": ["a", "b", "c"],
+            "issuer": ["EXAMPLE", "EXAMPLE", "EXAMPLE"],
+            "cusip": ["123", "123", "123"],
+            "value_thousands": [100, 300, 200],
+            "shares": [10, 30, 20],
+            "put_call": [None, None, None],
+            "report_date": [date(2024, 6, 30), date(2024, 9, 30), second_manager_report_date],
+            "filing_date": [date(2024, 8, 14), date(2024, 11, 10), date(2024, 8, 14)],
+            "company_name": ["Manager 1", "Manager 1", "Manager 2"],
+        }
+    )
+
+
+def test_partially_filed_quarter_falls_back_to_the_last_complete_one(capsys) -> None:
+    # Manager 2 has not filed for 2024-09-30 yet; using it would read as an exit.
+    holdings = _two_manager_holdings(date(2024, 6, 30))
+
+    features, edges, _matrix, _stocks = downloader.build_features_and_matrix(
+        holdings, expected_ciks=["1", "2"]
+    )
+
+    assert edges["report_date"].unique().to_list() == [date(2024, 6, 30)]
+    assert edges["weight_value"].to_list() == [100, 200]
+    assert features["total_inst_value_usd"].to_list() == [300]
+    assert "0 of 2" not in capsys.readouterr().out
+
+
+def test_complete_newest_quarter_is_used_as_is() -> None:
+    holdings = _two_manager_holdings(date(2024, 9, 30))
+
+    _features, edges, _matrix, _stocks = downloader.build_features_and_matrix(
+        holdings, expected_ciks=["1", "2"]
+    )
+
+    assert edges["report_date"].unique().to_list() == [date(2024, 9, 30)]
+    assert edges["weight_value"].to_list() == [300, 200]
+
+
+def test_no_quarter_covered_by_every_institution_is_refused() -> None:
+    holdings = _two_manager_holdings(date(2024, 9, 30))
+
+    with pytest.raises(ValueError, match="No 13F report date is covered"):
+        downloader.build_features_and_matrix(holdings, expected_ciks=["1", "2", "3"])
 
 
 def test_holdings_loader_parses_both_sec_dates(tmp_path, monkeypatch) -> None:

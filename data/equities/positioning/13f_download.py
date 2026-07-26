@@ -57,6 +57,8 @@ import re
 import time
 import xml.etree.ElementTree as ET
 import zipfile
+from collections.abc import Iterable
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -166,16 +168,65 @@ def parse_13f_holdings(cik: str, accession: str) -> list[dict]:
     return holdings
 
 
+def _latest_complete_report_date(equity: pl.DataFrame, expected_ciks: set[str]) -> date:
+    """Return the newest report date at which every expected institution has filed.
+
+    13F filings are due 45 days after quarter end, so a download run inside that
+    window sees the newest quarter from the early filers only. Building the graph
+    from it would drop the late filers and read their absence as a mass exit in
+    the quarter-over-quarter ownership change. Step back to the newest quarter
+    that every requested institution reported.
+    """
+    covered = (
+        equity.filter(pl.col("cik").is_in(list(expected_ciks)))
+        .group_by("report_date")
+        .agg(pl.col("cik").n_unique().alias("n_ciks"))
+    )
+    complete = covered.filter(pl.col("n_ciks") == len(expected_ciks))
+    if complete.is_empty():
+        raise ValueError(
+            f"No 13F report date is covered by all {len(expected_ciks)} requested "
+            "institutions, so no quarter can be built without treating missing "
+            "filers as exits. Request more filings per institution with "
+            "--num-filings, or narrow the institution list."
+        )
+    latest_complete = complete["report_date"].max()
+    newest = equity["report_date"].max()
+    if latest_complete != newest:
+        filed = set(equity.filter(pl.col("report_date") == newest)["cik"].unique().to_list())
+        print(
+            f"Report date {newest} has only {len(filed)} of {len(expected_ciks)} "
+            f"institutions filed; building the graph from {latest_complete} instead. "
+            f"Awaiting: {', '.join(sorted(expected_ciks - filed))}"
+        )
+    return latest_complete
+
+
 def build_features_and_matrix(
     holdings_df: pl.DataFrame,
+    expected_ciks: Iterable[str] | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame, np.ndarray, list[str]]:
-    """Build the latest positive-equity graph and its point-in-time features."""
+    """Build the latest positive-equity graph and its point-in-time features.
+
+    Args:
+        holdings_df: Canonical 13F holdings, including `put_call` and `report_date`.
+        expected_ciks: The institutions the caller requested, used to step back
+            from a quarter they have not all filed for yet. Without it there is
+            no way to tell a manager who has not filed from one who left the
+            universe, so the newest quarter present is used as-is.
+    """
     if "put_call" not in holdings_df.columns:
         raise ValueError("13F holdings must preserve the SEC putCall field.")
     equity = holdings_df.filter(
         pl.col("put_call").fill_null("").cast(pl.Utf8).str.strip_chars() == ""
     )
-    latest_report_date = equity["report_date"].max()
+    if equity.is_empty():
+        raise ValueError("The 13F holdings contain no long-equity positions.")
+    latest_report_date = (
+        equity["report_date"].max()
+        if expected_ciks is None
+        else _latest_complete_report_date(equity, set(expected_ciks))
+    )
     latest_rows = equity.filter(pl.col("report_date") == latest_report_date)
     if latest_rows.is_empty():
         raise ValueError("The latest 13F report date has no positive long-equity positions.")
@@ -247,9 +298,15 @@ def build_features_and_matrix(
         .agg(pl.col("value_thousands").cast(pl.Float64).sum().alias("reported_value_usd"))
         .filter(pl.col("reported_value_usd") > 0)
     )
-    periods = position_panel["report_date"].unique().sort(descending=True).head(2).to_list()
-    if len(periods) == 2:
-        current_period, prior_period = periods
+    # Measure the change into the graph's quarter, not into a partially filed newer one.
+    prior_periods = (
+        position_panel.filter(pl.col("report_date") < latest_report_date)["report_date"]
+        .unique()
+        .sort(descending=True)
+        .to_list()
+    )
+    if prior_periods:
+        current_period, prior_period = latest_report_date, prior_periods[0]
         stock_quarter = position_panel.group_by(["cusip", "report_date"]).agg(
             pl.col("reported_value_usd").sum().alias("quarter_value_usd")
         )
@@ -521,7 +578,9 @@ def _run_per_cik(
         pl.col("report_date").str.to_date(),
         pl.col("filing_date").str.to_date(),
     )
-    stock_features, edge_list, coown_matrix, stocks = build_features_and_matrix(holdings_df)
+    stock_features, edge_list, coown_matrix, stocks = build_features_and_matrix(
+        holdings_df, expected_ciks=[cik for _, cik in institutions]
+    )
 
     holdings_path = output_dir / "institutional_holdings.parquet"
     edges_path = output_dir / "institution_stock_edges.parquet"

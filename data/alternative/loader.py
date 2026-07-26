@@ -97,8 +97,9 @@ def load_bloomberg_news(
     corpus for ESG retrieval experiments.
 
     Args:
-        start_date: Optional ``timestamp`` filter (YYYY-MM-DD).
-        end_date: Optional ``timestamp`` filter (YYYY-MM-DD).
+        start_date: Optional ``timestamp`` filter (YYYY-MM-DD), inclusive.
+        end_date: Optional ``timestamp`` filter (YYYY-MM-DD), inclusive of the
+            whole day, so intraday articles on that date are kept.
 
     Returns:
         DataFrame with columns: headline, journalists, timestamp, link, article.
@@ -121,9 +122,9 @@ def load_bloomberg_news(
         data = data.rename({"date": "timestamp"})
 
     if start_date:
-        data = data.filter(pl.col("timestamp") >= pl.lit(start_date).str.to_datetime())
+        data = data.filter(pl.col("timestamp").dt.date() >= pl.lit(start_date).str.to_date())
     if end_date:
-        data = data.filter(pl.col("timestamp") <= pl.lit(end_date).str.to_datetime())
+        data = data.filter(pl.col("timestamp").dt.date() <= pl.lit(end_date).str.to_date())
 
     return data
 
