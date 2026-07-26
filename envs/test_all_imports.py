@@ -18,8 +18,11 @@ import importlib
 import sys
 from collections import defaultdict
 
-# Package -> import name mapping (where they differ)
+# Package -> import name mapping (where they differ), including where they differ
+# only in case: imports are case-sensitive, so `ipython` has to be listed for
+# `import IPython` to be recognized.
 IMPORT_MAP = {
+    "ipython": "IPython",
     "beautifulsoup4": "bs4",
     "scikit-learn": "sklearn",
     "pyyaml": "yaml",

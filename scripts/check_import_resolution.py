@@ -118,6 +118,16 @@ def third_party_names(root: Path) -> set[str]:
     Declaring ``scikit-learn`` permits ``import sklearn``, not
     ``import scikit_learn`` -- the latter would fail at runtime, so accepting it
     here would be a false negative.
+
+    The two sides are cased differently on purpose. **Distribution** names are
+    case-insensitive (PEP 503), so they are normalized for lookup. **Import**
+    names are not: ``import NumPy`` raises ``ModuleNotFoundError`` on Linux, so
+    the names returned here keep the casing they are imported under and callers
+    must match them exactly. Where an import name is *derived* from a
+    distribution name it is the normalized form, which is the lowercase spelling
+    that nearly every distribution actually uses; the exceptions are what
+    ``IMPORT_MAP`` is for, and a package whose import name is capitalized needs an
+    entry there just as one whose name differs entirely does.
     """
     from envs.scan_imports import IMAGE_OVERRIDES
 
@@ -125,8 +135,10 @@ def third_party_names(root: Path) -> set[str]:
     available = declared_dependencies(root) | locked_distributions(root)
     names = set()
     for dist in available:
-        names.add(_normalize(dist_to_import.get(dist, dist)))
-    names.update(_normalize(k) for k in IMAGE_OVERRIDES)
+        mapped = dist_to_import.get(dist)
+        names.add(mapped if mapped is not None else _normalize(dist))
+    # IMAGE_OVERRIDES is keyed by import name, so those are taken as written too.
+    names.update(IMAGE_OVERRIDES)
     return names
 
 
@@ -237,6 +249,10 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
     before importing ``notebook_provenance``. That is a real resolution root, so
     the guard honors it instead of demanding an allowlist entry.
 
+    Only a directory inside the repo is returned. An absolute entry keeps its own
+    semantics rather than being reinterpreted relative to the repo, and one that
+    lands outside cannot hold a module this repo ships, so it grants nothing.
+
     The receiver has to be the standard-library ``sys.path``. Matching any
     ``x.path.append()`` would let an unrelated call turn a broken import into a
     resolved one, which is a false negative in the bug class this guard exists
@@ -274,7 +290,14 @@ def explicit_path_inserts(path: Path, root: Path) -> list[Path]:
             continue
         for literal in (s for s in ast.walk(node) if isinstance(s, ast.Constant)):
             if isinstance(literal.value, str) and literal.value:
-                roots.append(root / literal.value.lstrip("/"))
+                # An absolute entry stays absolute. Rewriting "/scripts" to
+                # <repo>/scripts claimed a directory Python never searches, and
+                # a root outside the repo cannot hold a module this repo ships,
+                # so it is no resolution root here either way.
+                inserted = Path(literal.value)
+                inserted = inserted if inserted.is_absolute() else root / inserted
+                if inserted == root or root in inserted.parents:
+                    roots.append(inserted)
     return roots
 
 
@@ -405,8 +428,10 @@ def main() -> int:
             # Third-party and stdlib are classified on the top-level component:
             # submodules of an installed distribution cannot be checked without
             # importing it, which this guard deliberately does not do.
+            # Matched exactly: imports are case-sensitive, so `import NumPy` is a
+            # runtime failure even though the distribution is spelled any way.
             top = name.split(".")[0]
-            if top in STDLIB or _normalize(top) in allowed:
+            if top in STDLIB or top in allowed:
                 continue
             if resolves_in_repo(name, path, root):
                 continue

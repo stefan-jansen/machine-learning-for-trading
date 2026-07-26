@@ -282,6 +282,29 @@ def test_distribution_name_is_not_accepted_as_import_name() -> None:
     assert "granite_tsfm" not in names
 
 
+def test_import_names_are_case_sensitive() -> None:
+    """`import NumPy` raises ModuleNotFoundError on Linux, so the accepted names
+    carry the casing they are imported under. Distribution names stay
+    case-insensitive per PEP 503, which is why `ipython` maps to `IPython` rather
+    than being accepted in either spelling."""
+    names = third_party_names(REPO_ROOT)
+    assert "numpy" in names
+    assert "NumPy" not in names
+    assert "IPython" in names
+    assert "ipython" not in names
+
+
+def test_an_absolute_sys_path_entry_is_not_reinterpreted(tree: Path) -> None:
+    """Rewriting "/scripts" to <repo>/scripts claimed a directory Python never
+    searches, so a broken import resolved against the repo's own scripts/."""
+    test_file = tree / "test_thing.py"
+    test_file.write_text('import sys\nsys.path.insert(0, "/scripts")\nimport tool\n')
+    assert not resolves_in_repo("tool", test_file, tree)
+    # An absolute path that really points into the repo is a resolution root.
+    test_file.write_text(f'import sys\nsys.path.insert(0, "{tree / "scripts"}")\nimport tool\n')
+    assert resolves_in_repo("tool", test_file, tree)
+
+
 def test_non_entry_point_ancestor_is_not_a_resolution_root(tmp_path: Path) -> None:
     """A bare sibling import must not resolve via an intermediate directory
     that nothing is ever run from."""
