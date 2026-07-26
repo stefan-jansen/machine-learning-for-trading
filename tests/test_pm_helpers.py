@@ -149,15 +149,17 @@ def test_credential_gated_notebooks_declare_requires_env_not_skip() -> None:
     ``skip: true`` is unconditional and is checked after tier routing, so a
     notebook marked that way stays unexecuted even in weekly-external.yml, which
     exists to supply exactly these credentials.
+
+    Selection is by ``requires_env`` rather than by what ``skip_reason`` happens to
+    say: an entry carrying both keys is hard-skipped whatever reason it gives, and
+    matching on the reason text would let it through under any other wording.
     """
     overrides = yaml.safe_load((Path(__file__).parent / "overrides.yaml").read_text())
 
-    hard_skipped_on_a_credential = {
+    hard_skipped_despite_a_gate = {
         key
         for key, value in overrides.items()
-        if isinstance(value, dict)
-        and value.get("skip")
-        and "EDGAR_IDENTITY" in str(value.get("skip_reason", ""))
+        if isinstance(value, dict) and value.get("requires_env") and value.get("skip")
     }
 
-    assert hard_skipped_on_a_credential == set()
+    assert hard_skipped_despite_a_gate == set()

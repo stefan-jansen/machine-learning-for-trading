@@ -11,8 +11,16 @@ subsample budgets are the ones recorded in ``data/manifest.json`` in the test-da
 repo, which is rewritten from DATASETS on every run so the manifest cannot drift
 from what was actually generated.
 
+DATASETS covers the fixtures whose absence or staleness has taken a CI job red,
+not every fixture the test-data repo carries. The rest - equities bars, crypto,
+futures, FX, the nasdaq minute set, options - were produced before this script
+existed and have no spec here yet, so this is not a from-empty rebuild of the
+fixture repo: it operates on a checkout of ml4t/third-edition-test-data and
+replaces the datasets it knows. Reconstructing the remaining specs is tracked in
+``agents/issues`` (test-data regeneration coverage).
+
 Usage:
-    # Everything (from the repo root)
+    # Every dataset declared below, over an existing test-data checkout
     uv run python tests/create_test_data.py \
         --source ~/ml4t/code/data --output ~/ml4t/test-data/data
 
@@ -33,6 +41,7 @@ debt was created.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import shutil
 import sys
@@ -41,6 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import polars as pl
+from polars.testing import assert_frame_equal
 
 REPO_ROOT = Path(__file__).parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -226,6 +236,53 @@ _13F_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
 _13F_FILES = tuple(_13F_REQUIRED_COLUMNS)
 
 
+def _load_13f_producer():
+    """Import data/equities/positioning/13f_download.py by path.
+
+    Its filename starts with a digit, so it cannot be reached by an import
+    statement.
+    """
+    path = REPO_ROOT / "data" / "equities" / "positioning" / "13f_download.py"
+    spec = importlib.util.spec_from_file_location("ml4t_13f_download", path)
+    if spec is None or spec.loader is None:
+        raise FileNotFoundError(f"13F producer not found at {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _require_derived_13f_matches_holdings(source_dir: Path) -> None:
+    """Rebuild edges and stock features from the holdings and require equality.
+
+    A column-name check passes an artifact whose dtypes, column order or values
+    are those of an older producer generation. 22_rag/07 rebuilds both frames and
+    compares them with ``assert_frame_equal``, which checks all of that, so the
+    same comparison belongs here - before the stale copy enters the fixture set,
+    rather than after a chapter job goes red against it.
+
+    The rebuild is keyed on the CIK set the holdings themselves carry, which is
+    the producer's own rule: it steps back to the newest quarter every requested
+    institution filed for, so a quarter that is still filling in cannot enter
+    either side of the ownership-change comparison.
+    """
+    build = _load_13f_producer().build_features_and_matrix
+    holdings = pl.read_parquet(source_dir / "institutional_holdings.parquet")
+    features, edges, *_ = build(holdings, expected_ciks=holdings["cik"].unique().to_list())
+    for filename, rebuilt, keys in (
+        ("institution_stock_edges.parquet", edges, ["institution_id", "stock_id"]),
+        ("stock_features.parquet", features, ["cusip"]),
+    ):
+        stored = pl.read_parquet(source_dir / filename)
+        try:
+            assert_frame_equal(rebuilt.sort(keys), stored.sort(keys), check_row_order=True)
+        except AssertionError as exc:
+            raise ValueError(
+                f"Source 13F artifact at {source_dir / filename} is not what the current "
+                f"producer builds from institutional_holdings.parquet: {exc}. Regenerate "
+                "all three artifacts with data/equities/positioning/13f_download.py."
+            ) from exc
+
+
 def build_institutional_holdings_13f(source: Path, output: Path) -> list[Path]:
     """Copy the production 13F artifacts into the fixture set verbatim.
 
@@ -234,9 +291,9 @@ def build_institutional_holdings_13f(source: Path, output: Path) -> list[Path]:
     institution risks dropping a CIK the notebook asks for and turning a schema
     fixture into a silent coverage gap.
     """
-    written: list[Path] = []
+    source_dir = source / _13F_DIR
     for filename in _13F_FILES:
-        src = source / _13F_DIR / filename
+        src = source_dir / filename
         if not src.exists():
             raise FileNotFoundError(
                 f"13F artifact not found at {src}. Fetch it with "
@@ -251,9 +308,13 @@ def build_institutional_holdings_13f(source: Path, output: Path) -> list[Path]:
                 "data/equities/positioning/13f_download.py before building the fixture."
             )
 
+    _require_derived_13f_matches_holdings(source_dir)
+
+    written: list[Path] = []
+    for filename in _13F_FILES:
         dst = output / _13F_DIR / filename
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dst)
+        shutil.copyfile(source_dir / filename, dst)
         rows = pl.scan_parquet(dst).select(pl.len()).collect().item()
         print(f"    {filename}: {rows:,} rows ({dst.stat().st_size / 1e6:.1f} MB), copied verbatim")
         written.append(dst)

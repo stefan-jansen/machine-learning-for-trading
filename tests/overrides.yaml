@@ -1071,8 +1071,11 @@
     COHORT_SAMPLE: 10
   timeout: 300
 22_rag_financial_research/01_sec_filing_pipeline:
+  # SYMBOLS, not TICKERS: the notebook's parameters cell declares SYMBOLS, so the
+  # old key was dropped by Papermill and the weekly job fetched all five default
+  # symbols across both default years from EDGAR instead of one.
   parameters:
-    TICKERS:
+    SYMBOLS:
     - AAPL
     YEARS:
     - 2024

@@ -69,9 +69,14 @@ export MPLBACKEND=Agg
 
 if [[ ",$STEPS," == *",1,"* ]]; then
   echo "=== Step 1: subsample raw data ==="
+  # --clean so a rebuild leaves no file the current spec does not produce. The
+  # manifest is rewritten from the specs either way, so without it a discontinued
+  # or renamed artifact loses its manifest entry and stays on disk, where the
+  # "git add -A" below would commit it back into the fixture set.
   uv run python tests/create_test_data.py \
       --source "$SOURCE_DATA" \
-      --output "$TEST_DATA_DIR/data"
+      --output "$TEST_DATA_DIR/data" \
+      --clean
   echo ""
 fi
 

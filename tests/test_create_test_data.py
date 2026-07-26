@@ -8,6 +8,7 @@ than re-derived per date, and that the manifest describes what was written.
 """
 
 import json
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,7 @@ from tests.create_test_data import (
     FIRM_CHAR_SPLITS,
     Dataset,
     _firm_char_tensor_dir,
+    _load_13f_producer,
     build_firm_characteristics,
     build_institutional_holdings_13f,
     write_manifest,
@@ -340,15 +342,79 @@ def test_13f_builder_rejects_a_source_missing_a_derived_feature(tmp_path: Path) 
         build_institutional_holdings_13f(source, tmp_path / "out")
 
 
+def _write_13f_source(holdings_dir: Path) -> pl.DataFrame:
+    """Write a consistent three-artifact 13F source and return the holdings.
+
+    Two institutions filing two post-2023 quarters for three issuers: enough for
+    the producer to find a quarter both filed for, and a prior one to measure
+    ownership change against. The derived artifacts come from the producer itself,
+    so this source is consistent by construction and any test that perturbs it is
+    testing the check rather than the fixture.
+    """
+    rows = []
+    for report_date, filing_date in (
+        (date(2024, 6, 30), date(2024, 8, 14)),
+        (date(2024, 9, 30), date(2024, 11, 14)),
+    ):
+        for cik, company in (("0001067983", "BERKSHIRE"), ("0001350694", "BRIDGEWATER")):
+            for index, (cusip, issuer) in enumerate(
+                (("037833100", "APPLE INC"), ("594918104", "MICROSOFT"), ("67066G104", "NVIDIA"))
+            ):
+                rows.append(
+                    {
+                        "cik": cik,
+                        "accession_no": f"{cik}-{report_date:%Y%m%d}-{index}",
+                        "issuer": issuer,
+                        "cusip": cusip,
+                        "value_thousands": 1_000_000 * (index + 1) + int(cik[-1]),
+                        "shares": 10_000 * (index + 1),
+                        "put_call": "",
+                        "report_date": report_date,
+                        "filing_date": filing_date,
+                        "company_name": company,
+                    }
+                )
+    holdings = pl.DataFrame(rows)
+    holdings.write_parquet(holdings_dir / "institutional_holdings.parquet")
+
+    build = _load_13f_producer().build_features_and_matrix
+    features, edges, *_ = build(holdings, expected_ciks=holdings["cik"].unique().to_list())
+    edges.write_parquet(holdings_dir / "institution_stock_edges.parquet")
+    features.write_parquet(holdings_dir / "stock_features.parquet")
+    return holdings
+
+
+def test_13f_builder_rejects_derived_artifacts_the_holdings_do_not_produce(tmp_path: Path) -> None:
+    """A complete column set is not the same artifact as the current producer's.
+
+    22_rag/07 rebuilds edges and features and compares whole frames, so a source
+    whose derived files carry stale values passes every name check here and fails
+    the notebook instead.
+    """
+    source = tmp_path / "source"
+    holdings_dir = source / "equities" / "positioning" / "13f"
+    holdings_dir.mkdir(parents=True)
+    _write_13f_source(holdings_dir)
+
+    features_path = holdings_dir / "stock_features.parquet"
+    pl.read_parquet(features_path).with_columns(
+        pl.col("total_inst_value_usd") * 1000
+    ).write_parquet(features_path)
+
+    with pytest.raises(ValueError, match=r"stock_features\.parquet is not what the current"):
+        build_institutional_holdings_13f(source, tmp_path / "out")
+
+
 def test_13f_builder_copies_a_complete_artifact_set(tmp_path: Path) -> None:
     source = tmp_path / "source"
     holdings_dir = source / "equities" / "positioning" / "13f"
     holdings_dir.mkdir(parents=True)
-    for filename, columns in ctd_13f_required_columns().items():
-        pl.DataFrame({column: [0] for column in columns}).write_parquet(holdings_dir / filename)
+    _write_13f_source(holdings_dir)
 
     output = tmp_path / "out"
     written = build_institutional_holdings_13f(source, output)
 
     assert {path.name for path in written} == set(ctd_13f_required_columns())
     assert all(path.exists() for path in written)
+    for path in written:
+        assert set(ctd_13f_required_columns()[path.name]).issubset(pl.read_parquet(path).columns)
