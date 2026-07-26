@@ -337,6 +337,38 @@ def _train_tabm_fold(
 from case_studies.utils.registry.store import flush_fold_predictions
 
 
+def _decision_time_checkpoint_metrics(
+    frame: pl.DataFrame,
+    *,
+    date_col: str,
+    entity_col: str,
+    pred_col: str = "y_score",
+    ret_col: str = "y_true",
+) -> dict[str, float | int]:
+    """Score one pooled checkpoint with equal weight per decision timestamp.
+
+    The counterpart of ``deep_learning._decision_time_checkpoint_metrics``, and
+    the same contract: a decision time with 200 names counts once, exactly as a
+    decision time with 20 does. Pooling the rows instead would weight the wide
+    days, and averaging per-fold ICs would weight the folds.
+    """
+    stats = cross_sectional_ic(
+        frame,
+        frame,
+        pred_col=pred_col,
+        ret_col=ret_col,
+        date_col=date_col,
+        entity_col=entity_col,
+        method="spearman",
+        min_obs=5,
+    )
+    return {
+        "ic_mean": float(stats["ic_mean"]),
+        "ic_std": float(stats["ic_std"]),
+        "ic_n_days": int(stats["n_periods"]),
+    }
+
+
 def _load_incremental_preds_for_config(incr_dir: Path, config_name: str) -> pl.DataFrame:
     """Reassemble one config's predictions from its per-fold incremental saves."""
     parquet_files = sorted(incr_dir.glob(f"{config_name}_fold*.parquet"))
@@ -1123,15 +1155,11 @@ def run_tabm_cv(
             actual_col = eval_col if eval_col else "y_true"
             for epoch in sorted(cfg_all_preds["epoch"].unique().to_list()):
                 epoch_predictions = cfg_all_preds.filter(pl.col("epoch") == epoch)
-                checkpoint_metrics[int(epoch)] = cross_sectional_ic(
+                checkpoint_metrics[int(epoch)] = _decision_time_checkpoint_metrics(
                     epoch_predictions,
-                    epoch_predictions,
-                    pred_col="y_score",
-                    ret_col=actual_col,
                     date_col=date_col,
                     entity_col=entity_col,
-                    method="spearman",
-                    min_obs=5,
+                    ret_col=actual_col,
                 )
         elif fold_checkpoint_ics:
             checkpoint_metrics = {

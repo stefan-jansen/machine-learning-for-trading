@@ -7,7 +7,8 @@ from datetime import UTC, datetime
 import polars as pl
 import pytest
 
-from case_studies.utils import deep_learning
+from case_studies.utils import deep_learning, gbm, tabular_dl
+from case_studies.utils import registry as registry_api
 from case_studies.utils.registry import (
     build_training_spec,
     modeling_input_fingerprint,
@@ -151,3 +152,121 @@ def test_crypto_dl_checkpoint_metric_equal_weights_decision_times() -> None:
 
     assert metrics["ic_n_days"] == 2
     assert metrics["ic_mean"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_crypto_lightgbm_cuda_request_fails_closed(monkeypatch) -> None:
+    """A CUDA-requested Crypto grid must never continue on CPU."""
+    monkeypatch.setattr(gbm, "_best_gpu_device", lambda _library: None)
+    config = {
+        "config_name": "cuda_required",
+        "params": {"objective": "regression"},
+        "max_iterations": 2,
+        "checkpoint_interval": 1,
+    }
+
+    with pytest.raises(RuntimeError, match="CUDA"):
+        gbm.train_gbm_config(config, [], feature_names=[], device="cuda")
+
+
+def test_crypto_gbm_registration_keeps_current_lineage(tmp_path, monkeypatch) -> None:
+    """The per-config checkpoint must retain the notebook's current input identity."""
+    captured = {}
+    preset = tmp_path / "config/lgb/default_mse.yaml"
+    preset.parent.mkdir(parents=True)
+    preset.write_text(
+        "library: lightgbm\nmax_iterations: 2\ncheckpoint_interval: 1\n"
+        "params:\n  objective: regression\n"
+    )
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
+
+    def capture_training_run(_case_study_id, *, spec, **_kwargs):
+        captured["spec"] = spec
+        return training_hash_from_spec(spec)
+
+    monkeypatch.setattr(registry_api, "register_training_run", capture_training_run)
+    monkeypatch.setattr(registry_api, "get_training_dir", lambda *_args, **_kwargs: tmp_path)
+    result = {
+        "best_iter": 1,
+        "best_ic": 0.0,
+        "best_ic_std": 0.0,
+        "elapsed_s": 0.1,
+        "predictions": [],
+        "learning_curves": [],
+        "fold_metrics": [],
+    }
+    cfg = {"family": "gbm", "config_name": "default_mse", "checkpoint_interval": 50}
+
+    gbm.register_gbm_result(
+        "crypto_perps_funding",
+        result,
+        cfg,
+        "fwd_ret_8h",
+        n_folds=2,
+        max_bin=63,
+        extra_params={"device": "cuda", "input_fingerprint": "current-lineage"},
+    )
+
+    assert captured["spec"]["params"]["device"] == "cuda"
+    assert captured["spec"]["params"]["input_fingerprint"] == "current-lineage"
+
+
+def test_crypto_tabm_cuda_request_fails_closed(monkeypatch) -> None:
+    """A CUDA-requested TabM grid must never continue on CPU."""
+    monkeypatch.setattr(tabular_dl.torch.cuda, "is_available", lambda: False)
+
+    with pytest.raises(RuntimeError, match="CUDA"):
+        tabular_dl.run_tabm_cv(
+            None,
+            [],
+            configs=[],
+            n_features=0,
+            feature_names=[],
+            label_col="fwd_ret_8h",
+            date_col="timestamp",
+            device="cuda",
+        )
+
+
+def test_crypto_tabm_checkpoint_metric_equal_weights_decision_times() -> None:
+    """Unequal cross-section sizes must not turn checkpoint IC into row weighting."""
+    first = datetime(2023, 1, 1, tzinfo=UTC)
+    second = datetime(2023, 1, 2, tzinfo=UTC)
+    frame = pl.DataFrame(
+        {
+            "timestamp": [first] * 5 + [second] * 10,
+            "symbol": [f"a{i}" for i in range(5)] + [f"b{i}" for i in range(10)],
+            "y_score": [float(i) for i in range(5)] + [float(i) for i in range(10)],
+            "y_true": [float(i) for i in range(5)] + [float(9 - i) for i in range(10)],
+        }
+    )
+
+    metrics = tabular_dl._decision_time_checkpoint_metrics(
+        frame,
+        date_col="timestamp",
+        entity_col="symbol",
+    )
+
+    assert metrics["ic_n_days"] == 2
+    assert metrics["ic_mean"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_crypto_tabm_rejects_two_sources_of_training_identity() -> None:
+    """A TabM run must not be handed both identity spellings at once.
+
+    `input_data_spec` and the legacy `identity_params` both feed the training
+    spec, and whichever won would silently decide the training hash. Refusing
+    the pair is what keeps a Crypto re-run from registering under an identity
+    the notebook did not intend.
+    """
+    with pytest.raises(ValueError, match="not both"):
+        tabular_dl.run_tabm_cv(
+            dataset_pd=None,
+            splits=[],
+            configs=[],
+            n_features=1,
+            feature_names=["f0"],
+            label_col="fwd_ret_8h",
+            date_col="timestamp",
+            input_data_spec={"input_fingerprint": "from-spec"},
+            identity_params={"input_fingerprint": "legacy"},
+        )
