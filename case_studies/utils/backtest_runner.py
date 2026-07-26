@@ -44,26 +44,135 @@ from case_studies.utils.signals import build_target_weights_from_config
 # Periods per year for Sharpe annualization
 # ---------------------------------------------------------------------------
 
-# Periods per year for Sharpe annualization.  Used by the vectorized path
-# where each return observation corresponds to one rebalance period.
-_PERIODS_PER_YEAR: dict[str, float] = {
-    "monthly_month_end": 12,
-    "weekly": 52,
-    "weekly_friday": 52,
-    "weekly_friday_close": 52,
-    "daily": 252,
-    "daily_close": 252,
-    "daily_ny_close": 252,
-    "8_hour_funding_aligned": 365 * 3,  # 3 observations per calendar day
-    "15_min": 252 * 26,  # ~26 fifteen-min bars per NYSE session
-    "15_minute": 252 * 26,  # alias
-    "30_min": 252 * 13,  # ~13 thirty-min bars per NYSE session
-    "30_minute": 252 * 13,
-    "1_hour": 252 * 6.5,  # 6.5 hours per NYSE session
-    "1_hourly": 252 * 6.5,
-    "4_hour": 252 * 1.625,  # ~1.625 four-hour bars per NYSE session
-    "4_hourly": 252 * 1.625,
-}
+# NOTE: a `cadence -> periods_per_year` table used to live here. It was the
+# source of a real defect: it assumed each return observation is one rebalance
+# period, which is false for every case study that rebalances slowly and marks
+# to market daily. Measured grid frequencies are 252/yr for sp500_options and
+# nasdaq100_microstructure despite weekly cohorts and intraday signals, and
+# 252/yr for monthly-rebalanced etfs. Annualize with
+# `resolve_periods_per_year` below, which reads the declared
+# `evaluation.periods_per_year` and reconciles it against the grid on hand.
+
+
+def observed_periods_per_year(daily_returns) -> float:
+    """Sampling rate of a return frame, or 0.0 if it cannot be measured.
+
+    Rows divided by elapsed span would answer a different question - how densely
+    the frame covers its own window - and would read a daily series with a
+    six-month hole in it as a twice-weekly one. What the annualization needs is
+    the spacing between consecutive observations, so the rate is measured over
+    the intervals that are typical of the series and gaps far longer than the
+    typical spacing are dropped from both the count and the span.
+
+    A weekday grid has intervals of one day and three across a weekend, both
+    within the cut, and comes out near 252. A grid thinned to every fifth
+    session has intervals near seven days throughout and comes out near 52. A
+    delisting hole or a suspended market drops out of the span instead of
+    dragging the rate down with it.
+    """
+    n = len(daily_returns)
+    if n <= 2:
+        return 0.0
+    all_ts = daily_returns["timestamp"].unique().sort()
+    gaps = all_ts.diff().drop_nulls().dt.total_seconds().to_numpy().astype(float)
+    gaps = gaps[gaps > 0]
+    if gaps.size == 0:
+        return 0.0
+
+    typical = float(np.median(gaps))
+    if typical <= 0:
+        return 0.0
+    kept = gaps[gaps <= 5.0 * typical]
+    if kept.size == 0:
+        return 0.0
+
+    span_years = float(kept.sum()) / (365.25 * 86400)
+    return kept.size / span_years if span_years > 0.01 else 0.0
+
+
+def reconcile_periods_per_year(declared: int, daily_returns, *, case_study: str = "") -> int:
+    """Keep the declared factor unless the frame on hand contradicts it outright.
+
+    The declared `evaluation.periods_per_year` is the authority: it describes
+    the convention of the registered return grid, and using it keeps metrics on
+    the round factor the rest of the pipeline shares. But it is a case-study
+    constant, and one path writes a grid that does not match it. The vectorized
+    path thins predictions to rebalance dates before aggregating, so with
+    `sp500_options`'s rebalance_step of 5 a daily prediction grid leaves about
+    74 rows a year against a declared 252.
+
+    The override is one-directional, because thinning is the only mechanism by
+    which the written grid departs from the declared convention, and it only
+    coarsens. A frame that reads *finer* than declared is therefore not evidence
+    that the declared value is wrong - an intraday grid whose case study still
+    declares 252 is a setup.yaml that has not caught up, and inflating Sharpe by
+    the square root of a factor of 139 is not the way to report that. It stays on
+    the declared value and says so in the log.
+
+    A factor of two of headroom on the coarse side keeps holidays and partial
+    years on the declared value, and still catches thinning, which coarsens by
+    the rebalance step and so lands well outside it.
+    """
+    import logging
+
+    observed = observed_periods_per_year(daily_returns)
+    if not observed or not declared:
+        return declared or int(observed) or 252
+
+    ratio = observed / declared
+    if ratio > 2.0:
+        logging.getLogger(__name__).warning(
+            "%s: return grid is %.1f obs/yr, finer than the %d declared in setup.yaml. "
+            "Annualizing at the declared value; declare the grid's own frequency if "
+            "this case study writes intraday returns.",
+            case_study or "backtest",
+            observed,
+            declared,
+        )
+        return declared
+    if ratio >= 0.5:
+        return declared
+
+    logging.getLogger(__name__).warning(
+        "%s: return grid is %.1f obs/yr but setup.yaml declares %d; annualizing at "
+        "the observed rate. Thinning to rebalance dates is the usual cause.",
+        case_study or "backtest",
+        observed,
+        declared,
+    )
+    return int(observed)
+
+
+def resolve_periods_per_year(case_study: str, daily_returns) -> int:
+    """Annualization factor for a return series, resolved once per backtest.
+
+    Every path that annualizes a registered return grid goes through here, so
+    the overall metrics, the per-fold metrics and the backfill cannot disagree
+    about what the same frame is.
+    """
+    from case_studies.utils.uncertainty import periods_per_year_from_setup
+
+    try:
+        declared = int(periods_per_year_from_setup(case_study))
+    except (FileNotFoundError, KeyError):
+        declared = 0
+
+    return reconcile_periods_per_year(declared, daily_returns, case_study=case_study)
+
+
+def overall_periods_per_year(case_study: str | None, calendar: str, daily_returns) -> int:
+    """Annualization for a whole-window backtest, whichever engine produced it.
+
+    The engine path used to read the exchange calendar, which returns ~252 for
+    every equity venue and so disagreed with a monthly case study by a factor of
+    21, and with its own per-fold metrics. A named case study now resolves the
+    same way everywhere; the calendar remains for a call that has no case study
+    and therefore no declared value to read.
+    """
+    if case_study:
+        return resolve_periods_per_year(case_study, daily_returns)
+    return calendar_periods_per_year(calendar)
+
 
 # Calendar name → exchange_calendars MIC code
 _CALENDAR_TO_XCAL: dict[str, str] = {
@@ -1044,14 +1153,22 @@ def run_backtest(
             elapsed_s=_bt_elapsed_s,
         )
 
-        # Compute and register per-fold backtest metrics
-        cadence = rebal_spec.get("cadence", "daily")
-        ppy = int(_PERIODS_PER_YEAR.get(cadence, 252))
+        # Compute and register per-fold backtest metrics.
+        # Annualize at the frequency of the *return series*, not the rebalance
+        # cadence. `daily_returns` is one row per session regardless of how often
+        # the strategy trades, so a monthly-rebalanced strategy on daily returns
+        # was being annualized at 12 instead of 252. Sharpe, Sortino and
+        # volatility scale with the square root of the factor, so those came out
+        # low by exactly sqrt(252/12) = 4.583. CAGR carries the factor in a
+        # compounding exponent rather than a multiplier, so its error is not a
+        # fixed ratio, and Calmar inherits whatever CAGR did because it divides
+        # CAGR by max drawdown. total_return and max_drawdown are unaffected.
+        # Same resolver and same frame as the overall metrics, so the two agree.
         fold_metrics = compute_backtest_fold_metrics(
             daily_returns,
             case_study,
             label=label,
-            periods_per_year=ppy,
+            periods_per_year=resolve_periods_per_year(case_study, daily_returns),
         )
         if fold_metrics:
             register_backtest_fold_metrics(case_study, backtest_hash, fold_metrics)
@@ -1284,7 +1401,7 @@ def _run_engine(
         )
     returns_arr = daily_df["daily_return"].to_numpy()
 
-    ppy = calendar_periods_per_year(calendar)
+    ppy = overall_periods_per_year(case_study, calendar, daily_df)
     metrics = compute_portfolio_metrics(returns_arr, periods_per_year=ppy, trim_leading_zeros=False)
 
     # Engine-specific metrics (execution details not derivable from returns)
@@ -1735,13 +1852,13 @@ def _run_vectorized(
     returns_arr = daily_returns["daily_return"].to_numpy()
     n = len(returns_arr)
 
-    # Annualization: use cadence when known, else estimate from data span
-    periods_per_year = int(_PERIODS_PER_YEAR.get(cadence, 0))
-    if not periods_per_year and n > 1:
-        all_ts = daily_returns["timestamp"].unique().sort()
-        span_secs = float((all_ts[-1] - all_ts[0]).total_seconds())
-        span_years = span_secs / (365.25 * 86400)
-        periods_per_year = int(n / span_years) if span_years > 0.01 else 252
+    # Annualize at the frequency of the grid this function writes, which is
+    # neither the rebalance cadence nor always the declared value. This path
+    # thins predictions to rebalance dates first, so its grid can be coarser
+    # than the registered convention. `resolve_periods_per_year` handles that
+    # reconciliation, and `run_backtest` calls it on this same frame for the
+    # per-fold metrics, so overall and fold annualization cannot diverge.
+    periods_per_year = resolve_periods_per_year(case_study, daily_returns)
 
     metrics = compute_portfolio_metrics(returns_arr, periods_per_year=periods_per_year or 252)
 
