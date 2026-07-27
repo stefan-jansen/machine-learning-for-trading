@@ -224,6 +224,14 @@ def test_check_kernel_routing_rejects_a_missing_launcher(tmp_path: Path) -> None
     assert "does_not_exist.py" in routing.problem
 
 
+def test_check_kernel_routing_rejects_a_directory(tmp_path: Path) -> None:
+    """An executable bit is not enough: os.access(X_OK) is true for a searchable
+    directory, so /opt/bsts/bin would pass and die at kernel startup."""
+    routing = check_kernel_routing({"kernel_python": str(tmp_path)})
+
+    assert routing.problem is not None
+
+
 def test_check_kernel_routing_returns_what_it_validated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

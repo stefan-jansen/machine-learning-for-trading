@@ -241,7 +241,9 @@ def check_kernel_routing(overrides: dict) -> KernelRouting:
         f"Rebuild or repull the {image} image." if image else "Rebuild the image that provides it."
     )
 
-    if not os.access(kernel_python, os.X_OK):
+    # os.access(..., X_OK) is also true for a searchable directory, so a path like
+    # /opt/bsts/bin would pass and die later at kernel startup.
+    if not (Path(kernel_python).is_file() and os.access(kernel_python, os.X_OK)):
         return KernelRouting(
             f"overrides.yaml routes this notebook to {kernel_python}, "
             f"which is not executable here. {rebuild}"
