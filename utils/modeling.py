@@ -20,6 +20,8 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import random
 import warnings
@@ -124,6 +126,84 @@ class ModelingDataset:
     # None for regression labels. When set, the column lives in ``dataset`` and
     # downstream IC computation must use it instead of the binary ``label_col``.
     eval_label_col: str | None = None
+    # Inputs ``input_lineage`` is derived from: the artifact paths and the
+    # universe reduction, which are not otherwise recoverable from this object.
+    lineage_inputs: dict[str, Any] = field(default_factory=dict, repr=False)
+    _input_lineage: dict[str, Any] | None = field(default=None, init=False, repr=False)
+
+    @property
+    def input_lineage(self) -> dict[str, Any]:
+        """Identity-defining input lineage, computed on first use.
+
+        A training spec that persists results includes this payload so changed
+        artifacts or CV windows cannot reuse an old training hash. It digests
+        every input artifact, and those run to gigabytes - nasdaq100's feature
+        parquet alone is 7 GB and takes ~12 s to hash - while only the notebooks
+        that pass it to ``build_training_spec`` need it. Computing it here rather
+        than in ``load_modeling_dataset`` keeps that cost off every other caller.
+        """
+        if self._input_lineage is None:
+            if not self.lineage_inputs:
+                raise ValueError(
+                    "input_lineage is unavailable: this ModelingDataset was built without "
+                    "lineage_inputs. Construct it via load_modeling_dataset()."
+                )
+            self._input_lineage = build_modeling_input_lineage(
+                artifacts=self.lineage_inputs["artifacts"],
+                feature_names=self.feature_names,
+                splits=self.splits,
+                label_buffer=self.label_buffer,
+                task_type=self.task_type,
+                eval_label_col=self.eval_label_col,
+                max_symbols=self.lineage_inputs["max_symbols"],
+                symbols=self.lineage_inputs["symbols"],
+            )
+        return self._input_lineage
+
+
+def _sha256_file(path: Path) -> str:
+    """Return a stable digest for an identity-defining input artifact."""
+    digest = hashlib.sha256()
+    with path.open("rb") as src:
+        for chunk in iter(lambda: src.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_modeling_input_lineage(
+    *,
+    artifacts: dict[str, Path],
+    feature_names: list[str],
+    splits: list[dict[str, Any]],
+    label_buffer: str,
+    task_type: str,
+    eval_label_col: str | None,
+    max_symbols: int,
+    symbols: list[str] | None,
+) -> dict[str, Any]:
+    """Build the portable input identity carried by persisted training runs."""
+    split_fields = ("fold", "train_start", "train_end", "val_start", "val_end")
+    normalized_splits = [
+        {key: str(split[key]) for key in split_fields if split.get(key) is not None}
+        for split in splits
+    ]
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "artifacts": {
+            name: {"sha256": _sha256_file(path), "size": path.stat().st_size}
+            for name, path in sorted(artifacts.items())
+        },
+        "feature_names": list(feature_names),
+        "splits": normalized_splits,
+        "label_buffer": label_buffer,
+        "task_type": task_type,
+        "eval_label_col": eval_label_col,
+        "max_symbols": int(max_symbols),
+        "symbols": sorted(symbols) if symbols else None,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    payload["fingerprint"] = hashlib.sha256(canonical.encode()).hexdigest()
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +616,7 @@ def load_modeling_dataset(
     # Classification labels: load the continuous-return label they were derived
     # from so IC can be computed against returns rather than the binary target.
     eval_label_col: str | None = None
+    eval_label_path: Path | None = None
     if task_type == "classification":
         eval_label_col = get_classification_eval_label(case_study_id, label_col)
         eval_label_path = resolve_storage_path(
@@ -562,6 +643,14 @@ def load_modeling_dataset(
             c for c in dataset.columns if c not in ID_COLS and c not in {label_col, eval_label_col}
         ]
 
+    input_artifacts = {
+        "financial": features_path,
+        "label": label_path,
+    }
+    if temporal_path.exists():
+        input_artifacts["model_based"] = temporal_path
+    if eval_label_path is not None:
+        input_artifacts["eval_label"] = eval_label_path
     return ModelingDataset(
         dataset=dataset,
         feature_names=feature_names,
@@ -579,6 +668,11 @@ def load_modeling_dataset(
         temporal_keys=_temporal_keys,
         temporal_feature_names=_temporal_feature_names,
         eval_label_col=eval_label_col,
+        lineage_inputs={
+            "artifacts": input_artifacts,
+            "max_symbols": max_symbols,
+            "symbols": symbols,
+        },
     )
 
 

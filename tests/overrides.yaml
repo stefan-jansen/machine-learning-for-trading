@@ -1958,6 +1958,13 @@ case_studies/sp500_equity_option_analytics/06_linear:
     MAX_SYMBOLS: 5
   timeout: 120
 case_studies/sp500_equity_option_analytics/07_gbm:
+  # This case study declares modeling.gbm.device: cuda in its setup.yaml, and the
+  # notebook resolves DEVICE from there rather than from a parameter, so no
+  # override can route it to CPU. Same treatment as the us_firm GPU notebooks
+  # (#415) and the crypto training notebooks: marked GPU-only so a CPU runner
+  # skips it instead of failing on the CUDA guard. Nothing downstream in this
+  # pipeline depends on its predictions - 08 through 18 pass without it.
+  gpu: true
   parameters:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
@@ -1995,7 +2002,30 @@ case_studies/sp500_equity_option_analytics/11_latent_factors:
     N_FACTORS: 2
   timeout: 600
 case_studies/sp500_equity_option_analytics/11a_pca: {}
-case_studies/sp500_equity_option_analytics/11b_ipca: {}
+case_studies/sp500_equity_option_analytics/11b_ipca:
+  # IPCA estimates a 45-characteristic Gamma from the cross-section. Production
+  # has 634 symbols; the CI fixture has 23, giving 19-21 assets per date, so at
+  # the production N_FACTORS=5 the ALS is under-determined and never reaches
+  # tol=1e-6. Measured on fold 0 of the fixture: K=5 and K=3 both still report
+  # converged=False after 2000 iterations, and loosening tol to 1e-4 at K=5 does
+  # not help either, so this is non-identification and not slow convergence.
+  # K=2 converges at iteration 553. The notebook's own guard then passes on a
+  # real fit rather than being relaxed.
+  parameters:
+    N_FACTORS: 2
+  timeout: 600
+
+case_studies/sp500_equity_option_analytics/11d_stochastic_discount_factor:
+  # The SDF training cell exceeded the 300s default in CI while the whole
+  # notebook runs in 98s locally on the same image, so the cap is what fails,
+  # not the notebook. Sized for the slower runner with headroom.
+  timeout: 900
+
+case_studies/sp500_equity_option_analytics/11e_supervised_autoencoder:
+  # 95s locally, ~190s on the CI runner - passing, but close enough to the 300s
+  # default that the next slow runner turns it red. Same headroom as 11d.
+  timeout: 900
+
 case_studies/sp500_equity_option_analytics/12_causal_dml:
   parameters:
     CV_FOLDS: 2
