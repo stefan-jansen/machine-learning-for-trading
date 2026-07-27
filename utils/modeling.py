@@ -44,6 +44,12 @@ from utils.cv_splits import generate_cv_splits, make_wf_config
 
 RANDOM_SEED = 42
 MIN_TEMPORAL_DATE_COVERAGE = 0.95  # Allow short calendar-edge gaps, not missing windows.
+# Burn-in a temporal model cannot emit through, excused only at the start of a
+# train window. Measured on crypto_perps_funding, whose GARCH and HMM features
+# carry a 90-bar rolling z-score: 97/2024 dates (4.8%) for fold 0 and 119/1935
+# (6.1%) for fold 1. A stale artifact whose fold IDs have shifted presents as a
+# leading gap of roughly half the window, so this bound still rejects it.
+MAX_TEMPORAL_WARMUP_FRACTION = 0.10
 
 
 def seed_everything(seed: int = RANDOM_SEED) -> None:
@@ -851,6 +857,7 @@ def validate_temporal_fold_coverage(
     *,
     date_col: str,
     min_date_coverage: float = MIN_TEMPORAL_DATE_COVERAGE,
+    max_warmup_fraction: float = MAX_TEMPORAL_WARMUP_FRACTION,
 ) -> None:
     """Fail when a fold-specific temporal artifact does not cover a CV window.
 
@@ -858,9 +865,20 @@ def validate_temporal_fold_coverage(
     Temporal model fitting may legitimately skip individual symbols, whose
     missing values are imputed downstream, but a missing date range indicates
     that artifact fold IDs or windows do not match the canonical CV splits.
+
+    A temporal model cannot emit a value before it has been fitted, so the start
+    of a *training* window carries a burn-in prefix that no regeneration removes.
+    A leading run of uncovered dates in a train window is therefore excused up to
+    ``max_warmup_fraction`` of that window and coverage is measured on the
+    remainder. Validation windows get no such allowance: every date a model is
+    scored on must carry a temporal value. The excused prefix is bounded because
+    a stale artifact whose fold IDs have shifted also presents as a leading gap,
+    one that spans a large share of the window rather than a burn-in.
     """
     if not 0 < min_date_coverage <= 1:
         raise ValueError("min_date_coverage must be in (0, 1]")
+    if not 0 <= max_warmup_fraction < 1:
+        raise ValueError("max_warmup_fraction must be in [0, 1)")
 
     if isinstance(dataset, pl.DataFrame):
         dataset_dates = dataset.select(date_col).unique()[date_col].to_pandas()
@@ -871,7 +889,7 @@ def validate_temporal_fold_coverage(
     else:
         temporal_pd = temporal_by_fold[[date_col, "fold"]].drop_duplicates()
 
-    dataset_index = pd.DatetimeIndex(pd.to_datetime(dataset_dates, utc=True)).unique()
+    dataset_index = pd.DatetimeIndex(pd.to_datetime(dataset_dates, utc=True)).unique().sort_values()
     temporal_pd = temporal_pd.copy()
     temporal_pd[date_col] = pd.to_datetime(temporal_pd[date_col], utc=True)
     available_folds = set(temporal_pd["fold"].dropna().astype(int).unique())
@@ -898,12 +916,20 @@ def validate_temporal_fold_coverage(
             if len(expected) == 0:
                 failures.append(f"fold {fold_id} {window}: dataset window is empty")
                 continue
-            covered = int(expected.isin(fold_dates).sum())
-            coverage = covered / len(expected)
+            present = expected.isin(fold_dates)
+            warmup = 0
+            if window == "train" and present.any() and not present[0]:
+                leading = int(present.argmax())
+                if leading <= max_warmup_fraction * len(expected):
+                    warmup = leading
+            scored = present[warmup:]
+            covered = int(scored.sum())
+            coverage = covered / len(scored)
             if coverage < min_date_coverage:
+                excused = f", excusing a {warmup}-date warm-up prefix" if warmup else ""
                 failures.append(
                     f"fold {fold_id} {window}: temporal date coverage "
-                    f"{covered}/{len(expected)} ({coverage:.1%})"
+                    f"{covered}/{len(scored)} ({coverage:.1%}){excused}"
                 )
 
     if failures:
