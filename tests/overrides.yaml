@@ -2176,11 +2176,19 @@ case_studies/us_equities_panel/11_dl_tsmixer:
   # The default MAX_SYMBOLS top-by-history selection picks production symbols
   # absent from the sampled raw panel; SYMBOLS overrides it. Sibling lstm/nlinear
   # use a non-Darts path and don't need this.
+  #
+  # Every pinned symbol must additionally be gap-free across the whole MAX_FOLDS
+  # span and cover both validation windows: cross_sectional_ic uses min_obs=5, so
+  # a symbol missing from a date drops that date, and a whitelist of exactly five
+  # scores zero days as soon as one drops out. AMD was pinned here and has no rows
+  # at all in 2014 or 2015 - both test validation windows - which left four symbols
+  # per date, ic_n_days=0 and a NaN IC for every checkpoint. Eight symbols keeps
+  # three spare above min_obs.
   parameters:
     BATCH_SIZE: 32
     LOOKBACK: 5
     MAX_FOLDS: 2
-    SYMBOLS: [AAPL, AMD, AIG, AMAT, BAC]
+    SYMBOLS: [AIG, AMAT, C, CSCO, GE, INTC, JPM, MSFT]
     N_EPOCHS: 1
   timeout: 600
 case_studies/us_equities_panel/12_dl_weekly:
