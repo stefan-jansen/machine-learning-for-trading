@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests import pm_helpers
 from tests.pm_helpers import (
     RECORD_REPLAY,
     RECORD_REWRITE,
@@ -220,15 +221,43 @@ def test_check_kernel_routing_rejects_a_missing_launcher(tmp_path: Path) -> None
     assert "does_not_exist.py" in routing.problem
 
 
-def test_check_kernel_routing_returns_what_it_validated(tmp_path: Path) -> None:
+def test_check_kernel_routing_returns_what_it_validated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The call site passes these straight to run_notebook, so returning them
-    keeps it from reading the overrides differently from what was checked."""
+    keeps it from reading the overrides differently from what was checked.
+
+    REPO_ROOT is redirected so this asserts the return contract rather than the
+    repo layout - otherwise relocating the real launcher fails the one test whose
+    job is to prove the wiring.
+    """
+    monkeypatch.setattr(pm_helpers, "REPO_ROOT", tmp_path)
     interpreter = _executable(tmp_path)
+    launcher = tmp_path / "envs" / "py312" / "kernel.py"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("")
 
     routing = check_kernel_routing(
-        {"kernel_python": str(interpreter), "kernel_launcher": "envs/py312/bsts_kernel.py"}
+        {"kernel_python": str(interpreter), "kernel_launcher": "envs/py312/kernel.py"}
     )
 
     assert routing.problem is None
     assert routing.python == str(interpreter)
-    assert routing.launcher == Path(__file__).parent.parent / "envs/py312/bsts_kernel.py"
+    assert routing.launcher == launcher
+
+
+def test_no_override_declares_a_launcher_without_an_interpreter() -> None:
+    """check_kernel_routing only fires for a notebook a Docker job selects, and CI
+    runs those under -k. A static sweep catches the misconfiguration in an entry
+    nothing currently selects."""
+    overrides = yaml.safe_load((Path(__file__).parent / "overrides.yaml").read_text())
+
+    launcher_without_interpreter = {
+        key
+        for key, value in overrides.items()
+        if isinstance(value, dict)
+        and value.get("kernel_launcher")
+        and not value.get("kernel_python")
+    }
+
+    assert launcher_without_interpreter == set()

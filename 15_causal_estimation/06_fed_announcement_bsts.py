@@ -145,7 +145,8 @@ tf.get_logger().setLevel("ERROR")
 #
 # Fed decisions can affect broad US financial markets. Using SPY or VNQ as
 # controls is problematic because they may react to the same announcement.
-# This example instead uses:
+# The argument rests on the categories, not on the particular tickers, so what
+# `CONTROL_ETFS` should hold is one of each. The default set is:
 # - **International ETFs** (VEA, EFA): Correlated through global risk factors
 #   but less directly affected by FOMC (which targets US policy rates)
 # - **Commodities** (DBC): Affected by USD but different transmission mechanism
