@@ -50,6 +50,10 @@ VALIDATION_START = "2015-01-01"
 VALIDATION_END = "2015-12-31"
 TOP_N_LIQUID = 200
 CALIBRATION_DAYS = 63
+# Fewest assets a decision time may carry before its cross-sectional statistics
+# stop meaning anything. Ten is well below the ~200-name book this runs on in
+# production and well above the point where a rank correlation degenerates.
+MIN_ASSETS_PER_DATE = 10
 OLS_PREDICTION_HASH = "f9e84a32a9f0"
 RIDGE_PREDICTION_HASH = "c0b36ffb8f51"
 
@@ -179,7 +183,34 @@ def load_validation_predictions() -> pl.DataFrame:
         .filter(date_filter)
         .join(liquid_universe, on="symbol", how="inner")
     )
-    return pl.concat([linear_ols, linear_ridge]).collect().sort(["model", "timestamp", "symbol"])
+    stream = pl.concat([linear_ols, linear_ridge]).collect().sort(["model", "timestamp", "symbol"])
+    # Every detector below reads a cross-sectional statistic per decision time.
+    # With two or three names a daily rank correlation is +/-1 by construction and
+    # the drift verdict is an artifact of breadth, not of the models. Session
+    # coverage alone does not catch that: a stream can span every date and still
+    # carry a handful of assets on each of them.
+    # Both streams have to survive the filters. A model emptied by the date or
+    # liquid-universe join leaves no group to inspect, so a breadth check over
+    # the groups that exist would pass while the notebook compares one model
+    # against nothing.
+    present = set(stream["model"].unique().to_list())
+    if present != {"linear_ols", "linear_ridge"}:
+        raise ValueError(
+            f"Expected both prediction streams, got {sorted(present)}. The date filter "
+            f"or the liquid-universe join removed one entirely."
+        )
+    breadth = stream.group_by(["model", "timestamp"]).agg(
+        pl.col("symbol").n_unique().alias("n_assets")
+    )
+    if breadth["n_assets"].min() < MIN_ASSETS_PER_DATE:
+        worst = breadth.sort("n_assets").row(0, named=True)
+        raise ValueError(
+            f"{worst['model']} carries {worst['n_assets']} assets on "
+            f"{worst['timestamp']:%Y-%m-%d}, below the {MIN_ASSETS_PER_DATE} a "
+            f"cross-sectional statistic needs. The prediction streams and the liquid "
+            f"universe they are joined to are not covering the same names."
+        )
+    return stream
 
 
 # %%

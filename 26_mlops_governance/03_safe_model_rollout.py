@@ -259,8 +259,9 @@ def validate_coverage(frame: pd.DataFrame, start: str, end: str) -> None:
 
 
 # %% [markdown]
-# The portfolio is dollar-neutral: the top and bottom 100 predictions receive equal long and short
-# weights. Turnover cost is charged separately for each model using only its previous portfolio.
+# The portfolio is dollar-neutral: the top and bottom `TOP_K` predictions receive equal long and
+# short weights. Turnover cost is charged separately for each model using only its previous
+# portfolio.
 
 
 # %%
@@ -271,8 +272,30 @@ def build_portfolio_stream(predictions: pd.DataFrame, top_k: int, cost_bps: floa
 
     for (model_name, timestamp), frame in predictions.groupby(["model", "timestamp"], sort=True):
         ranked = frame.sort_values("score")
+        # Below 2 * top_k names the two legs draw from the same assets, the long
+        # side overwrites the short weights, and the book stops being
+        # dollar-neutral. The spreads then come out near zero and the rollout
+        # decision reads as a clean rejection of the challenger, so this has to
+        # fail loudly rather than be inferred from the verdict.
+        if ranked["symbol"].nunique() < 2 * top_k:
+            raise ValueError(
+                f"{model_name} on {timestamp:%Y-%m-%d} ranks {ranked['symbol'].nunique()} "
+                f"symbols, fewer than the {2 * top_k} a top-{top_k} against bottom-{top_k} "
+                f"book needs. Lower TOP_K or widen the universe."
+            )
         short = ranked.head(top_k)
         long = ranked.tail(top_k)
+        # A repeated symbol inside one leg collapses in the weight dict below, so
+        # the book would hold fewer than top_k names at 1/top_k each and the
+        # return would count the duplicated row twice.
+        for leg_name, leg in (("short", short), ("long", long)):
+            if leg["symbol"].nunique() != top_k:
+                raise ValueError(
+                    f"{model_name} on {timestamp:%Y-%m-%d}: the {leg_name} leg holds "
+                    f"{leg['symbol'].nunique()} distinct symbols across {len(leg)} rows."
+                )
+        if set(short["symbol"]) & set(long["symbol"]):
+            raise ValueError(f"{model_name} on {timestamp:%Y-%m-%d}: long and short legs overlap.")
         weights = {symbol: -1 / top_k for symbol in short["symbol"]}
         weights.update({symbol: 1 / top_k for symbol in long["symbol"]})
         previous = previous_weights.get(model_name, {})

@@ -1338,14 +1338,19 @@
 26_mlops_governance/02_online_drift_detection:
   timeout: 300
 26_mlops_governance/03_safe_model_rollout:
-  skip: true
-  skip_reason: "Synthetic CI predictions (seed_results.py) span only holdout_start±2y;
-    notebook hardcodes SELECTION=2010-2014, ROLLOUT=2015. us_equities_panel synthetic preds
-    cover 2014-01 to 2016-06 with only ~13 rebalance dates in the rollout window, so the
-    shadow/AB/staged slicing (rollout_dates[:63][63:189][189:]) collapses ab_dates to empty
-    and ab_pivot has no model columns — KeyError 'linear_ols'. Un-skip when seed_results
-    can produce predictions spanning the notebook's date windows, or rewrite the notebook
-    to derive windows from the data."
+  # Was skipped for a cause that no longer exists: the reason described an A/B and
+  # staged-capital slicing the notebook has since dropped, and it now stops after
+  # the 63-session shadow decision. With the prediction artifacts it pins present
+  # in the fixture it runs, so it is a real test again.
+  #
+  # TOP_K is reduced because the book is dollar-neutral over the top and bottom
+  # TOP_K predictions and the fixture carries well under 200 symbols on any
+  # evaluated date, so the production value of 100 cannot be filled. This is not
+  # a silent failure any more: build_portfolio_stream raises when a date ranks
+  # fewer than 2 * TOP_K distinct symbols. Raise this only alongside the fixture
+  # universe.
+  parameters:
+    TOP_K: 10
   timeout: 300
 26_mlops_governance/04_circuit_breakers:
   timeout: 300

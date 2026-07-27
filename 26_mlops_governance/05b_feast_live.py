@@ -270,7 +270,14 @@ for fv in registered_views:
 # earlier than that next tradable bar.
 
 # %%
-labels = (
+# Consecutive validation windows are separated by the label embargo, so the dates
+# inside a gap carry no fitted model-feature vintage at all, and the same holds
+# after the last window ends. Asking for a decision date there is answerable only
+# by carrying the previous fold forward: Feast does so within its TTL, the manual
+# exact-key join does not, and the two stop agreeing. Restrict the event set to
+# the (symbol, timestamp) keys the producer actually fitted, which removes the
+# trailing edge and every interior gap rather than only the last date.
+requested = (
     pl.scan_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")
     .filter(
         (pl.col("timestamp") >= pl.lit(pd.Timestamp(TRAINING_START).date()))
@@ -279,6 +286,44 @@ labels = (
     .select("symbol", "timestamp", pl.col(PRIMARY_LABEL).alias("label"))
     .collect()
 )
+# Both feature views carry a TTL, so a key missing from either source can be
+# answered by Feast from an earlier row while the exact-key join drops it. The
+# event set has to be restricted to the keys present in both.
+financial_keys = (
+    pl.scan_parquet(financial_feast_path)
+    .select(pl.col("symbol"), pl.col("timestamp").cast(pl.Date))
+    .unique()
+    .collect()
+)
+labels = requested.join(
+    model_features.select("symbol", "timestamp"), on=["symbol", "timestamp"]
+).join(financial_keys, on=["symbol", "timestamp"])
+if labels.is_empty():
+    raise ValueError(
+        f"No event in {TRAINING_START}..{TRAINING_END} has a row in both feature sources. "
+        "Both join paths would return nothing, and the parity check below reads an "
+        "empty difference as a match, so it would report every feature matching."
+    )
+if labels.height < requested.height:
+    # Split by source: a key missing from the model features is the embargo gap
+    # this clip exists for, while one missing from the financial features is a
+    # different problem wearing the same total.
+    dropped = requested.join(
+        labels.select("symbol", "timestamp"), on=["symbol", "timestamp"], how="anti"
+    )
+    no_model = dropped.join(
+        model_features.select("symbol", "timestamp"), on=["symbol", "timestamp"], how="anti"
+    ).height
+    no_financial = dropped.join(financial_keys, on=["symbol", "timestamp"], how="anti").height
+    # An event can be missing from both, so the two counts overlap. Report the
+    # overlap rather than letting the parts add up to more than the whole.
+    both = no_model + no_financial - dropped.height
+    print(
+        f"Dropped {dropped.height:,} of {requested.height:,} events: "
+        f"{no_model:,} with no fitted model-feature vintage, "
+        f"{no_financial:,} with no financial-feature row, "
+        f"{both:,} missing from both."
+    )
 
 entity_df = labels.select(
     "symbol",
@@ -359,6 +404,7 @@ merged = polars_pd.merge(
     how="inner",
     suffixes=("_polars", "_feast"),
 )
+assert len(merged) > 0, "Nothing to compare - a parity check over zero rows proves nothing."
 assert len(polars_pd) == len(feast_training) == len(merged)
 
 mismatches = []
