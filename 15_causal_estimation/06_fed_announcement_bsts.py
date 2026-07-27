@@ -161,6 +161,8 @@ POST_PERIOD_DAYS = 20
 START_DATE = "2020-01-01"
 END_DATE = "2024-06-01"
 TARGET_ETF = "IEF"
+# Control ETFs: international + commodity (see rationale in markdown above)
+CONTROL_ETFS = ["VEA", "EFA", "DBC"]
 # Zero means all configured dates; CI injects smaller positive limits.
 MAX_FOMC_EVENTS = 0
 MAX_PLACEBO_DATES = 0
@@ -168,9 +170,6 @@ MAX_PLACEBO_DATES = 0
 # %%
 set_global_seeds(SEED)
 tf.random.set_seed(SEED)
-
-# Control ETFs: international + commodity (see rationale in markdown above)
-CONTROL_ETFS = ["VEA", "EFA", "DBC"]
 
 # Selected FOMC announcement dates
 FOMC_EVENTS = [
