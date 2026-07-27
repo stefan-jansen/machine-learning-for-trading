@@ -72,7 +72,7 @@ def assemble_cv_result(
 
     eligible = curve_df.filter(pl.col("ic_mean").is_finite())
     full_coverage_days: float | None = None
-    if require_full_coverage:
+    if require_full_coverage and not eligible.is_empty():
         finite_days = eligible.filter(pl.col("ic_n_days").is_finite())
         if finite_days.height == eligible.height:
             full_coverage_days = float(cast(int | float, finite_days["ic_n_days"].max()))
@@ -84,7 +84,14 @@ def assemble_cv_result(
             )
 
     if eligible.is_empty():
-        raise ValueError("No finite, full-coverage checkpoint is available for selection.")
+        # Report the scored-day counts: ic_n_days == 0 for every checkpoint means no
+        # decision date reached the cross-sectional IC min_obs threshold, which is a
+        # universe-too-small problem rather than a training failure.
+        scored = curve_df.select("config", "epoch", "ic_mean", "ic_n_days").to_dicts()
+        raise ValueError(
+            "No finite, full-coverage checkpoint is available for selection. "
+            f"Considered {len(scored)} checkpoint(s): {scored}"
+        )
 
     metadata = metadata or {}
     grid: list[dict[str, Any]] = []

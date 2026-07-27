@@ -1294,6 +1294,11 @@
     SIMULATION_STEPS: 5
   timeout: 180
 25_live_trading/06_quantconnect_case_study:
+  parameters:
+    # The fixture registry selects the same configuration, but conftest rewrites
+    # the copied prediction parquet to canonical column names, so its bytes
+    # differ from the sealed artifact. EXPECTED_TRAINING_HASH still asserts.
+    EXPECTED_PREDICTIONS_SHA256: null
   timeout: 180
 25_live_trading/07_order_state_machine:
   timeout: 180
@@ -2191,11 +2196,19 @@ case_studies/us_equities_panel/11_dl_tsmixer:
   # The default MAX_SYMBOLS top-by-history selection picks production symbols
   # absent from the sampled raw panel; SYMBOLS overrides it. Sibling lstm/nlinear
   # use a non-Darts path and don't need this.
+  #
+  # Every pinned symbol must additionally be gap-free across the whole MAX_FOLDS
+  # span and cover both validation windows: cross_sectional_ic uses min_obs=5, so
+  # a symbol missing from a date drops that date, and a whitelist of exactly five
+  # scores zero days as soon as one drops out. AMD was pinned here and has no rows
+  # at all in 2014 or 2015 - both test validation windows - which left four symbols
+  # per date, ic_n_days=0 and a NaN IC for every checkpoint. Eight symbols keeps
+  # three spare above min_obs.
   parameters:
     BATCH_SIZE: 32
     LOOKBACK: 5
     MAX_FOLDS: 2
-    SYMBOLS: [AAPL, AMD, AIG, AMAT, BAC]
+    SYMBOLS: [AIG, AMAT, C, CSCO, GE, INTC, JPM, MSFT]
     N_EPOCHS: 1
   timeout: 600
 case_studies/us_equities_panel/12_dl_weekly:
@@ -2275,6 +2288,12 @@ case_studies/us_firm_characteristics/06_gbm:
     NUM_BOOST_ROUND: 5
   timeout: 180
 case_studies/us_firm_characteristics/07_tabular_dl:
+  # setup.yaml pins modeling.tabular_dl.device: cuda, and resolve_torch_device
+  # refuses to silently downgrade an explicit device. So this notebook cannot run
+  # on the CPU runner, and running it there is what the GPU-first rule forbids.
+  # Sibling us_equities_panel/08_tabular_dl passes on CPU only because that case
+  # study pins no tabular_dl device.
+  gpu: true
   parameters:
     BATCH_SIZE: 32
     MAX_FOLDS: 2
@@ -2287,6 +2306,38 @@ case_studies/us_firm_characteristics/08_latent_factors:
     FORCE_RETRAIN: true
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
+    N_EPOCHS: 2
+    N_FACTORS: 2
+  timeout: 300
+# 08a and 08b are the split successors of 08_latent_factors above, and the entry
+# never followed the split: neither had one, so both ran unreduced and unmarked and
+# died on the latent-factor CUDA guard. They need different treatment.
+#
+# 08a_ipca is NOT a GPU notebook. Its own preamble records that IPCA has no GPU
+# implementation and the production fit used four bounded CPU workers; the notebook
+# imports no Torch. It only demanded CUDA because load_case_study_context builds one
+# runtime for the whole latent-factor family, takes no device argument, and the
+# family is configured cuda for the Torch models (cae/sdf/sae).
+#
+# It cannot pass here on either device: it is a publication-replay notebook that
+# patches a fitting sentinel over the model runner and asserts zero fit calls, so it
+# needs the production registry's cached IPCA predictions. The trimmed fixture has
+# none, and reduced MAX_SYMBOLS/MAX_FOLDS would miss the cache key anyway. Verified
+# both ways - forced to CPU and on a 3090 it fails identically at cell 6 with "IPCA
+# fitting is forbidden during sign-off". So it skips for the same reason as 08c/08d.
+case_studies/us_firm_characteristics/08a_ipca:
+  skip: true
+  skip_reason: 'Cache-only publication replay: patches a fitting sentinel and asserts zero fit calls, so it requires the production registry IPCA predictions absent from the trimmed test-data. Not GPU-related - IPCA has no GPU implementation. Needs a full fixture rebuild.'
+# 08b is genuinely GPU: a Torch conditional autoencoder that trains, and its chapter
+# counterpart 14_latent_factors/06_conditional_autoencoder is already gpu: true.
+# Verified passing on a 3090 with these parameters.
+case_studies/us_firm_characteristics/08b_conditional_autoencoder:
+  gpu: true
+  parameters:
+    FORCE_RETRAIN: true
+    MAX_FOLDS: 2
+    MAX_SYMBOLS: 5
+    MAX_VARIANT_LABELS: 0
     N_EPOCHS: 2
     N_FACTORS: 2
   timeout: 300
