@@ -14,7 +14,14 @@ import yaml
 # Per-model-type overrides applied to copied preset YAMLs.
 # Goal: minimal workload that still exercises the training loop + registry.
 _TEST_PRESET_PATCHES: dict[str, dict] = {
-    "lgb": {"max_iterations": 2, "checkpoint_interval": 1},
+    # A 2-tree LightGBM assigns every name in a small cross-section to the same
+    # leaf on some dates, so the prediction has zero variance there and Spearman
+    # IC is undefined. sp500_options/07_gbm requires a finite daily IC on every
+    # eligible validation date, and lost 6 of 460 that way (1 of 460 even against
+    # the full fixture universe). Twenty trees separates the cross-section; the
+    # interval keeps the checkpoint count at 2, so nothing that counts
+    # checkpoints has to change.
+    "lgb": {"max_iterations": 20, "checkpoint_interval": 10},
     # DL families: 2 epochs, checkpoint every epoch
     "lstm": {"n_epochs": 2, "checkpoint_interval": 1},
     "tsmixer": {"n_epochs": 2, "checkpoint_interval": 1},

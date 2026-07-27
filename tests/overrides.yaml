@@ -2124,11 +2124,25 @@ case_studies/sp500_options/06_linear:
     MAX_SYMBOLS: 5
   timeout: 120
 case_studies/sp500_options/07_gbm:
+  # The checkpoint grid is derived from the LightGBM preset, not from a notebook
+  # parameter: range(checkpoint_interval, max_iterations + 1, checkpoint_interval).
+  # load_preset() reads $ML4T_OUTPUT_DIR/config in preference to the repo
+  # (case_studies/utils/registry/specs.py::_get_config_dir), and the CI fixture's
+  # config/lgb/*.yaml carry checkpoint_interval: 1, max_iterations: 2 against the
+  # repo's 50 / 500. So CI has 2 checkpoints per config where production has 10,
+  # and the hypothesis grid is EXPECTED_CONFIG_COUNT x EXPECTED_CHECKPOINT_COUNT
+  # = 15 x 2 = 30 against production's 150. EXPECTED_CONFIG_COUNT is unchanged:
+  # the fixture ships all 15 presets. Re-check these two if the fixture presets
+  # change.
+  #
+  # NUM_BOOST_ROUND was removed: 07_gbm.py does not declare it, so Papermill
+  # logged "Passed unknown parameter" and it reduced nothing.
   parameters:
+    EXPECTED_CHECKPOINT_COUNT: 2
+    EXPECTED_HYPOTHESIS_COUNT: 30
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-    NUM_BOOST_ROUND: 5
-  timeout: 180
+  timeout: 300
 case_studies/sp500_options/08_tabular_dl:
   parameters:
     BATCH_SIZE: 32
@@ -2137,6 +2151,15 @@ case_studies/sp500_options/08_tabular_dl:
     N_EPOCHS: 1
   timeout: 180
 case_studies/sp500_options/09_deep_learning:
+  # A read-only index over what 09a_lstm and 09b_patchtst register, which sorts
+  # before both by filename. Without this it reads a registry its producers have
+  # not written to yet.
+  run_after: 09b_patchtst
+  # CI retrains both producers at one epoch, so they register different training
+  # and prediction hashes than the published run. The cohort's composition - both
+  # accepted configurations, one validation prediction set each - is still checked.
+  parameters:
+    REQUIRE_PINNED_DEEP_IDENTITY: false
   timeout: 60
 case_studies/sp500_options/09a_lstm:
   parameters:
@@ -2164,14 +2187,26 @@ case_studies/sp500_options/10_causal_dml:
 case_studies/sp500_options/11_model_analysis:
   timeout: 300
 case_studies/sp500_options/12_backtest:
+  # See the 09_deep_learning entry for why the pinned deep-producer hashes cannot
+  # hold against a CI-retrained registry.
+  # The top-k grid is [5, 10, 20] and get_entry_schemes_for drops any k >= n_assets
+  # (k == the whole universe is the equal-weight benchmark, not a ranked portfolio).
+  # At MAX_SYMBOLS: 5 every scheme was dropped, so the sweep registered nothing and
+  # the surface contract compared an empty grid against the seeded registry. 21 keeps
+  # all three schemes feasible against the fixture's 22 straddle symbols.
   parameters:
-    MAX_SYMBOLS: 5
+    MAX_SYMBOLS: 21
+    REQUIRE_PINNED_DEEP_IDENTITY: false
     TOP_K: 2
-  timeout: 120
+  timeout: 900
 case_studies/sp500_options/13_portfolio_management:
   skip: true
   skip_reason: "Depends on 12_backtest signal-stage results — see that entry's skip_reason."
-case_studies/sp500_options/14_costs: {}
+case_studies/sp500_options/14_costs:
+  # See the 09_deep_learning entry for why the pinned deep-producer hashes cannot
+  # hold against a CI-retrained registry.
+  parameters:
+    REQUIRE_PINNED_DEEP_IDENTITY: false
 case_studies/sp500_options/15_risk_management:
   skip: true
   skip_reason: "Depends on 13_portfolio_management allocation-stage results — see 12_backtest entry."
@@ -2179,8 +2214,21 @@ case_studies/sp500_options/16_strategy_analysis:
   skip: true
   skip_reason: 'Depends on 13_portfolio_management allocation-stage results — see 12_backtest entry.'
 case_studies/sp500_options/90_ic_diagnostic:
+  # This notebook is the only one in the pipeline that runs on fwd_ret_dh_10d;
+  # every other one uses ret_to_expiry. The two horizons give fold 0 different
+  # validation windows (fwd_ret_dh_10d ends 2020-12-16, ret_to_expiry 2020-11-10),
+  # and the fixture's model_based.parquet was tagged from the ret_to_expiry splits
+  # alone, so the last 25 dates carry the -1 sentinel instead of fold 0. The
+  # alignment check therefore sees 216/241 (89.6%) and raises. Production measures
+  # 241/241. The -1 rows must NOT be retagged into fold 0: -1 is a separate
+  # full-sample fit whose garch_cond_vol and sv_vol disagree with fold 0 on all
+  # 14,360 shared keys, so promoting them would be look-ahead inside fold 0's
+  # scored window. The fix belongs in the test-data fixture, which has to tag
+  # folds per label.
   parameters:
     MAX_SYMBOLS: 5
+  skip: true
+  skip_reason: "CI fixture tags folds from ret_to_expiry splits only, so fwd_ret_dh_10d fold 0 covers 216/241 dates (89.6%); production is 241/241. Fixture defect, not a notebook defect — see the comment above."
   timeout: 120
 case_studies/us_equities_panel/01_feasibility_analysis:
   parameters:

@@ -51,11 +51,33 @@ CASE_STUDIES = [
 _STAGE_RE = re.compile(r"^\d{2}[a-z]?_")
 
 
+def _stage_order_key(case_study: str, stage: str) -> tuple[str, int, str]:
+    """Sort key placing a stage after the producer its overrides name.
+
+    Filename order is pipeline order everywhere except where a read-only index
+    notebook sorts ahead of the notebooks it reads: `09_deep_learning` reads what
+    `09a_lstm` and `09b_patchtst` register, and sorts before both. An entry in
+    `tests/overrides.yaml` declares the dependency:
+
+        case_studies/sp500_options/09_deep_learning:
+          run_after: 09b_patchtst
+
+    The stage then sorts as though it were named after its producer. The
+    declaration is not transitive: `run_after` must name a stage that itself has
+    no `run_after`.
+    """
+    target = get_overrides(f"case_studies/{case_study}/{stage}").get("run_after")
+    if target:
+        return (target, 1, stage)
+    return (stage, 0, stage)
+
+
 def _collect_case_study_tests():
     """Collect all case study pipeline notebooks as (case_study, stage, path) tuples.
 
     Auto-discovers files matching ^\\d{2}[a-z]?_ in each case study directory,
-    sorted numerically. Skips helper files (starting with _).
+    sorted numerically, then applies any `run_after` declarations.
+    Skips helper files (starting with _).
     """
     tests = []
     for cs in CASE_STUDIES:
@@ -63,13 +85,26 @@ def _collect_case_study_tests():
         if not cs_dir.exists():
             continue
 
+        stages = []
         for notebook in sorted(cs_dir.glob("[0-9][0-9]*.py")):
             if notebook.name.startswith("_"):
                 continue
             if not _STAGE_RE.match(notebook.name):
                 continue
             stage = notebook.stem  # e.g., "06_linear" or "11a_pca"
-            tests.append((cs, stage, notebook))
+            stages.append((cs, stage, notebook))
+
+        known = {stage for _, stage, _ in stages}
+        for _, stage, _ in stages:
+            target = get_overrides(f"case_studies/{cs}/{stage}").get("run_after")
+            if target and target not in known:
+                raise ValueError(
+                    f"case_studies/{cs}/{stage} declares run_after: {target}, "
+                    f"which is not a stage of {cs}"
+                )
+
+        stages.sort(key=lambda item: _stage_order_key(item[0], item[1]))
+        tests.extend(stages)
 
     return tests
 
