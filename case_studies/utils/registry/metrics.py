@@ -339,7 +339,27 @@ def compute_backtest_fold_metrics(
     if not isinstance(daily_returns, pl.DataFrame):
         daily_returns = pl.from_pandas(daily_returns)
 
-    # Determine periods_per_year from case study calendar or data frequency
+    # Determine periods_per_year: the declared convention of the daily_returns
+    # grid first, then the exchange calendar, then the observed data frequency.
+    # `evaluation.periods_per_year` is the only one of the three that knows the
+    # difference between a genuinely monthly series (us_firm, 12) and a monthly-
+    # rebalanced strategy marked to market daily (etfs, 252).
+    # Callers that omit it — `BacktestExplorer.backfill_fold_metrics` is the one
+    # in the tree — get the same reconciliation `run_backtest` applies, so a
+    # backfilled thinned grid is not annualized at the declared daily rate.
+    if periods_per_year == 0 or periods_per_year is None:
+        try:
+            from case_studies.utils.backtest_runner import reconcile_periods_per_year
+            from case_studies.utils.uncertainty import periods_per_year_from_setup
+
+            declared = int(periods_per_year_from_setup(case_study_id))
+            periods_per_year = (
+                reconcile_periods_per_year(declared, daily_returns, case_study=case_study_id)
+                if declared
+                else 0
+            )
+        except (KeyError, FileNotFoundError, ImportError):
+            periods_per_year = 0
     if periods_per_year == 0 or periods_per_year is None:
         # Try to get calendar from setup.yaml → exchange_calendars
         try:
