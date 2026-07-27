@@ -84,12 +84,9 @@ def test_docker_notebook(notebook_path, populated_data_dir, seeded_output_dir):
     # Some py312 notebooks need a venv other than the one running pytest. Broken
     # routing means the image is stale or the override is mistyped; skipping there
     # would let the job pass without ever running the notebook.
-    routing_problem = check_kernel_routing(overrides)
-    if routing_problem:
-        pytest.fail(f"{rel_path}: {routing_problem}")
-    kernel_python = overrides.get("kernel_python")
-    launcher = overrides.get("kernel_launcher")
-    kernel_launcher = REPO_ROOT / launcher if launcher else None
+    routing = check_kernel_routing(overrides)
+    if routing.problem:
+        pytest.fail(f"{rel_path}: {routing.problem}")
 
     result = run_notebook(
         py_path=notebook_path,
@@ -97,8 +94,8 @@ def test_docker_notebook(notebook_path, populated_data_dir, seeded_output_dir):
         timeout=timeout,
         output_dir=seeded_output_dir,
         data_dir=populated_data_dir,
-        kernel_python=kernel_python,
-        kernel_launcher=kernel_launcher,
+        kernel_python=routing.python,
+        kernel_launcher=routing.launcher,
     )
 
     if result["status"] == "error":

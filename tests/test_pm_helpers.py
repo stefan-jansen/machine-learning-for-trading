@@ -166,52 +166,69 @@ def test_credential_gated_notebooks_declare_requires_env_not_skip() -> None:
     assert hard_skipped_despite_a_gate == set()
 
 
-def test_check_kernel_routing_passes_when_no_interpreter_is_declared() -> None:
-    assert check_kernel_routing({"timeout": 300}) is None
+def _executable(tmp_path: Path) -> Path:
+    interpreter = tmp_path / "python"
+    interpreter.write_text("#!/bin/sh\n")
+    interpreter.chmod(0o755)
+    return interpreter
+
+
+def test_check_kernel_routing_passes_when_nothing_is_declared() -> None:
+    routing = check_kernel_routing({"timeout": 300})
+
+    assert routing.problem is None
+    assert routing.python is None
+    assert routing.launcher is None
 
 
 def test_check_kernel_routing_rejects_a_missing_interpreter() -> None:
-    problem = check_kernel_routing({"kernel_python": "/opt/nope/bin/python", "docker_env": "py312"})
+    routing = check_kernel_routing({"kernel_python": "/opt/nope/bin/python", "docker_env": "py312"})
 
-    assert problem is not None
-    assert "/opt/nope/bin/python" in problem
-    assert "py312" in problem
+    assert routing.problem is not None
+    assert "/opt/nope/bin/python" in routing.problem
+    assert "py312" in routing.problem
 
 
 def test_check_kernel_routing_names_no_image_when_the_override_declares_none() -> None:
     """`docker_env` is optional, and "Rebuild the None image" is worse than silence."""
-    problem = check_kernel_routing({"kernel_python": "/opt/nope/bin/python"})
+    routing = check_kernel_routing({"kernel_python": "/opt/nope/bin/python"})
 
-    assert problem is not None
-    assert "None" not in problem
+    assert routing.problem is not None
+    assert "None" not in routing.problem
+
+
+def test_check_kernel_routing_rejects_a_launcher_with_no_interpreter() -> None:
+    """run_notebook gates the kernelspec on kernel_python, so a lone launcher is
+    dropped in silence and the notebook runs on the pytest interpreter."""
+    routing = check_kernel_routing({"kernel_launcher": "envs/py312/bsts_kernel.py"})
+
+    assert routing.problem is not None
+    assert "kernel_python" in routing.problem
 
 
 def test_check_kernel_routing_rejects_a_missing_launcher(tmp_path: Path) -> None:
     """The launcher goes into the kernelspec argv unchecked; a bad path kills the
     kernel at startup with an error that says nothing about the launcher."""
-    interpreter = tmp_path / "python"
-    interpreter.write_text("#!/bin/sh\n")
-    interpreter.chmod(0o755)
-
-    problem = check_kernel_routing(
-        {"kernel_python": str(interpreter), "kernel_launcher": "envs/py312/does_not_exist.py"}
+    routing = check_kernel_routing(
+        {
+            "kernel_python": str(_executable(tmp_path)),
+            "kernel_launcher": "envs/py312/does_not_exist.py",
+        }
     )
 
-    assert problem is not None
-    assert "does_not_exist.py" in problem
+    assert routing.problem is not None
+    assert "does_not_exist.py" in routing.problem
 
 
-def test_check_kernel_routing_accepts_a_resolvable_interpreter_and_launcher(tmp_path: Path) -> None:
-    interpreter = tmp_path / "python"
-    interpreter.write_text("#!/bin/sh\n")
-    interpreter.chmod(0o755)
+def test_check_kernel_routing_returns_what_it_validated(tmp_path: Path) -> None:
+    """The call site passes these straight to run_notebook, so returning them
+    keeps it from reading the overrides differently from what was checked."""
+    interpreter = _executable(tmp_path)
 
-    assert (
-        check_kernel_routing(
-            {
-                "kernel_python": str(interpreter),
-                "kernel_launcher": "envs/py312/bsts_kernel.py",
-            }
-        )
-        is None
+    routing = check_kernel_routing(
+        {"kernel_python": str(interpreter), "kernel_launcher": "envs/py312/bsts_kernel.py"}
     )
+
+    assert routing.problem is None
+    assert routing.python == str(interpreter)
+    assert routing.launcher == Path(__file__).parent.parent / "envs/py312/bsts_kernel.py"

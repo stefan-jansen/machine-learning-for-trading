@@ -45,6 +45,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
 
@@ -198,19 +199,42 @@ def sync_notebook(py_path: Path) -> Path:
     return tmp_ipynb
 
 
-def check_kernel_routing(overrides: dict) -> str | None:
-    """Return why a notebook's kernel routing is unusable, or None if it is fine.
+class KernelRouting(NamedTuple):
+    """A notebook's validated kernel routing, or why it cannot be used.
+
+    `problem` is None when the routing is usable. `python` and `launcher` are the
+    validated values the caller should pass to `run_notebook`, so the call site
+    cannot read the overrides differently from what was checked.
+    """
+
+    problem: str | None
+    python: str | None = None
+    launcher: Path | None = None
+
+
+def check_kernel_routing(overrides: dict) -> KernelRouting:
+    """Validate a notebook's kernel routing without needing the image it names.
 
     A notebook whose dependencies live outside the interpreter running pytest
     declares `kernel_python` (and optionally `kernel_launcher`) in overrides.yaml.
     Both halves are written straight into a kernelspec `argv`, so a stale image or
     a mistyped path produces either a silently skipped notebook or an opaque
-    kernel-startup error. Callers turn a message into a test failure; returning
-    the message rather than raising keeps this unit-testable off a real image.
+    kernel-startup error. Callers turn a problem into a test failure; returning it
+    rather than raising keeps this unit-testable off a real image.
     """
     kernel_python = overrides.get("kernel_python")
+    launcher = overrides.get("kernel_launcher")
+
     if not kernel_python:
-        return None
+        # run_notebook gates the whole kernelspec on kernel_python, so a launcher
+        # on its own is dropped in silence - the same undiagnosed mis-routing this
+        # function exists to close, on the other half of the pair.
+        if launcher:
+            return KernelRouting(
+                f"overrides.yaml declares kernel_launcher {launcher} with no kernel_python. "
+                f"The launcher is ignored and the notebook runs on the pytest interpreter."
+            )
+        return KernelRouting(None)
 
     image = overrides.get("docker_env")
     rebuild = (
@@ -218,16 +242,19 @@ def check_kernel_routing(overrides: dict) -> str | None:
     )
 
     if not os.access(kernel_python, os.X_OK):
-        return f"overrides.yaml routes this notebook to {kernel_python}, which is not executable here. {rebuild}"
+        return KernelRouting(
+            f"overrides.yaml routes this notebook to {kernel_python}, "
+            f"which is not executable here. {rebuild}"
+        )
 
-    launcher = overrides.get("kernel_launcher")
-    if launcher and not (REPO_ROOT / launcher).is_file():
-        return (
+    launcher_path = REPO_ROOT / launcher if launcher else None
+    if launcher_path is not None and not launcher_path.is_file():
+        return KernelRouting(
             f"overrides.yaml routes this notebook through the kernel launcher {launcher}, "
-            f"which does not exist at {REPO_ROOT / launcher}. The kernel would die at startup "
+            f"which does not exist at {launcher_path}. The kernel would die at startup "
             f"with an unrelated papermill error."
         )
-    return None
+    return KernelRouting(None, kernel_python, launcher_path)
 
 
 def register_kernelspec(python_exe: str, launcher: Path | None = None) -> tuple[str, Path]:
