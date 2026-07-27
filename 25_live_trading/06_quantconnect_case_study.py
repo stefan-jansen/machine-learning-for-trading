@@ -65,24 +65,27 @@ import matplotlib.pyplot as plt
 import polars as pl
 from demo_artifacts import normalize_demo_predictions
 
-from utils.paths import display_path, get_case_study_source_dir, get_output_dir
+from utils.paths import display_path, get_case_study_dir, get_output_dir
 from utils.style import COLORS, FIGSIZE, add_message_title
 
 # %% tags=["parameters"]
 HORIZON = 21
 PREDICTION_THRESHOLD = 0.0
-EXPECTED_REGISTRY_SHA256 = "3802d13fa68d3d06c1be81332cc0f59bf157ad329e492c90da2f5c598994d3a9"
+# What this export depends on: the configuration the registry selects, and the
+# bytes of that configuration's sealed holdout predictions. The registry file
+# itself is not pinned. It accumulates rows from every run in the case study,
+# so its hash moves whether or not the selection moves, which would make a
+# whole-file pin fail on runs that export exactly the right predictions. Set a
+# pin to None to report the observed value instead of asserting it.
+EXPECTED_TRAINING_HASH = "0488120b490e"
 EXPECTED_PREDICTIONS_SHA256 = "b3b12dcdfac8a0c59b80609b6c81aff203828a3e19a2d992b1da993185a34b48"
 EXPORT_PATH = get_output_dir(25, "quantconnect_export") / "ml4t_qc_predictions.json"
 
 
 # %%
-case_study_dir = get_case_study_source_dir("etfs")
+case_study_dir = get_case_study_dir("etfs")
 registry_path = case_study_dir / "run_log" / "registry.db"
 registry_hash_before = hashlib.sha256(registry_path.read_bytes()).hexdigest()
-assert registry_hash_before == EXPECTED_REGISTRY_SHA256, (
-    f"ETF registry provenance changed: {registry_hash_before}"
-)
 
 # Resolve the selected cross-stage winner and its one sealed holdout prediction
 # set using a read-only immutable SQLite connection. This cannot create a WAL,
@@ -106,13 +109,18 @@ with sqlite3.connect(registry_uri, uri=True) as conn:
         (winner[0],),
     ).fetchall()
 
+assert EXPECTED_TRAINING_HASH in (None, winner[0]), (
+    f"The registry now selects a different configuration: {winner[0]}"
+)
 assert len(holdout_rows) == 1, f"Expected one sealed holdout set, found {len(holdout_rows)}"
 prediction_hash = holdout_rows[0][0]
 prediction_path = (
     case_study_dir / "run_log" / "predictions" / prediction_hash / "predictions.parquet"
 )
 prediction_file_hash = hashlib.sha256(prediction_path.read_bytes()).hexdigest()
-assert prediction_file_hash == EXPECTED_PREDICTIONS_SHA256
+assert EXPECTED_PREDICTIONS_SHA256 in (None, prediction_file_hash), (
+    f"Holdout prediction set provenance changed: {prediction_file_hash}"
+)
 predictions = normalize_demo_predictions(pl.read_parquet(prediction_path), "symbol")
 registry_hash_after_load = hashlib.sha256(registry_path.read_bytes()).hexdigest()
 assert registry_hash_after_load == registry_hash_before
