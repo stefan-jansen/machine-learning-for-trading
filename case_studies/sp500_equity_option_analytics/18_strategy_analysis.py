@@ -60,7 +60,6 @@ warnings.filterwarnings("ignore")
 # registry artifacts without launching another training or evaluation run.
 
 # %%
-from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import get_backtest_config
 from case_studies.utils.backtest_presets import (
     clone_backtest_spec,
@@ -106,7 +105,6 @@ bt_config = get_backtest_config(CASE_STUDY)
 LABEL = bt_config.primary_label
 PERIODS_PER_YEAR = periods_per_year_from_setup(CASE_STUDY)
 CONFIGURED_COST_BPS = bt_config.commission_bps + bt_config.slippage_bps
-explorer = BacktestExplorer(CASE_STUDY)
 set_global_seeds(SEED)
 
 print(f"Case study: {CASE_STUDY}; corrected label: {LABEL}; mode: registry read-only")
@@ -118,6 +116,12 @@ print(f"Case study: {CASE_STUDY}; corrected label: {LABEL}; mode: registry read-
 # primary label, filters allocation rows to the active five-method grid, and
 # filters risk rows to the 14 predeclared controls. Historical conformal rows,
 # alternate labels, and full-validation MAE-calibrated rules cannot enter.
+#
+# Coverage is measured against the sealed validation window
+# (``coverage_window="canonical"``), not the raw stored day count: this
+# registry's sweep predates the outcome-horizon seal, and some checkpoints
+# carry a few pre-seal decision dates that inflate their raw count without
+# covering any more of the modeling window.
 
 # %%
 top_predictions = resolve_best_predictions(
@@ -127,6 +131,7 @@ top_predictions = resolve_best_predictions(
     stage="signal",
     top_n=get_top_n_predictions(CASE_STUDY, "allocation"),
     checkpoints_per_config=get_checkpoints_per_config(CASE_STUDY),
+    coverage_window="canonical",
 )
 selected_prediction_hashes = top_predictions["prediction_hash"].to_list()
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY)}
@@ -136,6 +141,7 @@ baseline_pool = resolve_best_backtest_runs(
     split="validation",
     stage="signal",
     top_n=9999,
+    coverage_window="canonical",
 ).filter(pl.col("prediction_hash").is_in(selected_prediction_hashes))
 allocation_pool = resolve_best_backtest_runs(
     CASE_STUDY,
@@ -143,6 +149,7 @@ allocation_pool = resolve_best_backtest_runs(
     split="validation",
     stage="allocation",
     top_n=9999,
+    coverage_window="canonical",
 ).filter(pl.col("prediction_hash").is_in(selected_prediction_hashes))
 candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
     "backtest_hash"
@@ -172,36 +179,67 @@ strategy_carrier = (
 )
 
 # %% [markdown]
-# The canonical fold boundary incorporates the five-session outcome horizon.
-# The selected prediction artifact must not extend beyond that sealed date.
+# The canonical fold boundary incorporates the five-session outcome horizon: a
+# decision made on the last validation day has its five-session return observable
+# before the holdout opens. The registry was swept before that boundary was
+# adopted, so its last validation fold runs to the holdout start and carries a
+# horizon's worth of decisions whose outcome is only observable inside the
+# holdout - here, five sessions, about 1% of validation rows. Everything below
+# reads the sealed span, so the holdout stays sealed with respect to selection.
 
 # %%
 validation_window = canonical_window(CASE_STUDY, LABEL, split="validation")
-carrier_predictions = read_predictions(CASE_STUDY, strategy_carrier["prediction_hash"])
+if validation_window is None:
+    raise RuntimeError(f"No canonical validation window derivable for {LABEL}")
+
+
+def seal(frame: pl.DataFrame | None) -> pl.DataFrame | None:
+    """Cut a timestamped artifact to the sealed validation window."""
+    if frame is None:
+        return None
+    return frame.filter(
+        pl.col("timestamp").cast(pl.Date).is_between(validation_window[0], validation_window[1])
+    )
+
+
+def sealed_daily_returns(backtest_hash: str) -> pl.DataFrame | None:
+    """Registered daily returns for one backtest, cut to the sealed window."""
+    return seal(load_daily_returns_with_timestamp(CASE_STUDY, backtest_hash))
+
+
+registered_predictions = read_predictions(CASE_STUDY, strategy_carrier["prediction_hash"])
+carrier_predictions = seal(registered_predictions)
+if carrier_predictions.is_empty():
+    raise RuntimeError("The strategy carrier has no decisions inside the sealed validation window")
 latest_decision = carrier_predictions["timestamp"].max()
 latest_decision_date = (
     latest_decision.date() if hasattr(latest_decision, "date") else latest_decision
 )
-if validation_window is None or latest_decision_date > validation_window[1]:
-    raise RuntimeError("The strategy carrier crosses the sealed validation-outcome boundary")
-carrier_returns = load_daily_returns_with_timestamp(
-    CASE_STUDY,
-    strategy_carrier["backtest_hash"],
+registered_returns = load_daily_returns_with_timestamp(
+    CASE_STUDY, strategy_carrier["backtest_hash"]
 )
-if carrier_returns is None:
+if registered_returns is None:
     raise RuntimeError("The strategy carrier has no registered daily-return artifact")
-registered_window = (
-    carrier_returns["timestamp"].min(),
-    carrier_returns["timestamp"].max(),
-)
-if registered_window != validation_window:
+carrier_returns = seal(registered_returns)
+# Measured on the UNSEALED frame. Sealing first makes the comparison one-sided: the
+# min/max of an already-trimmed frame can only fall short of the window, never past
+# it, so a registered artifact that overruns the seal reads as a clean match.
+registered_dates = registered_returns["timestamp"].cast(pl.Date)
+if registered_dates.is_empty():
+    raise RuntimeError("The strategy carrier's registered daily-return artifact is empty")
+registered_window = (registered_dates.min(), registered_dates.max())
+if registered_window[0] > validation_window[0] or registered_window[1] < validation_window[1]:
     raise RuntimeError(
         "The registered strategy carrier does not cover the canonical validation window: "
         f"registered={registered_window}, canonical={validation_window}"
     )
+dropped = len(registered_predictions) - len(carrier_predictions)
+dropped_returns = len(registered_returns) - len(carrier_returns)
 print(
     f"Sealed validation window: {validation_window[0]} to {validation_window[1]}; "
-    f"carrier latest decision: {latest_decision_date}"
+    f"carrier latest decision: {latest_decision_date}; "
+    f"decisions dropped past the seal: {dropped}; "
+    f"return days dropped past the seal: {dropped_returns}"
 )
 
 # %%
@@ -258,9 +296,15 @@ with sqlite3.connect(REGISTRY_DB) as db:
         connection=db,
         execute_options={"parameters": risk_hashes},
     )
+# An empty read comes back with a null-typed join key, which makes the join raise a
+# SchemaError before the row-count contract below can report what is actually missing.
+risk_metrics = risk_metrics.with_columns(pl.col("backtest_hash").cast(pl.String))
 risk_surface = pl.DataFrame(risk_plans).join(risk_metrics, on="backtest_hash", how="inner")
 if len(risk_surface) != len(risk_plans):
-    raise RuntimeError(f"Expected {len(risk_plans)} fixed risk rows, found {len(risk_surface)}")
+    raise RuntimeError(
+        f"Expected {len(risk_plans)} fixed risk rows for carrier "
+        f"{strategy_carrier['prediction_hash']}, found {len(risk_surface)}"
+    )
 if risk_surface.filter(pl.col("stage") != "risk_overlay").height:
     raise RuntimeError("A corrected risk hash has the wrong registry stage")
 no_overlay = {
@@ -273,17 +317,21 @@ no_overlay = {
 risk_candidates = pl.concat([risk_surface, pl.DataFrame([no_overlay])], how="diagonal_relaxed")
 risk_winner = risk_candidates.sort("sharpe", descending=True).row(0, named=True)
 
+# %% [markdown]
+# The equal-weight starting point comes from the same pool the carrier was
+# drawn from, so baseline and carrier are judged under one eligibility rule.
+# Querying it separately would re-apply the raw stored day count and drop this
+# carrier's prediction, which passes coverage only in the sealed window.
+
 # %%
-baseline_row = (
-    explorer.best(
-        stage="signal",
-        top_n=9999,
-        label=LABEL,
-        prediction_hashes=[strategy_carrier["prediction_hash"]],
-    )
-    .sort("sharpe", descending=True)
-    .row(0, named=True)
+carrier_baselines = baseline_pool.filter(
+    pl.col("prediction_hash") == strategy_carrier["prediction_hash"]
 )
+if carrier_baselines.is_empty():
+    raise RuntimeError(
+        f"No equal-weight baseline row for carrier prediction {strategy_carrier['prediction_hash']}"
+    )
+baseline_row = carrier_baselines.sort("sharpe", descending=True).row(0, named=True)
 
 # %% [markdown]
 # The visible carrier path retains the equal-weight starting point, the best
@@ -300,7 +348,7 @@ carrier_rows = [
 if strategy_carrier["backtest_hash"] != baseline_row["backtest_hash"]:
     carrier_rows.append(
         {
-            "stage": "Score weighted",
+            "stage": strategy_carrier["allocator"],
             "backtest_hash": strategy_carrier["backtest_hash"],
             "sharpe": strategy_carrier["sharpe"],
         }
@@ -308,7 +356,7 @@ if strategy_carrier["backtest_hash"] != baseline_row["backtest_hash"]:
 if risk_winner["backtest_hash"] != strategy_carrier["backtest_hash"]:
     carrier_rows.append(
         {
-            "stage": "Trailing stop 5%",
+            "stage": risk_winner["risk_name"],
             "backtest_hash": risk_winner["backtest_hash"],
             "sharpe": risk_winner["sharpe"],
         }
@@ -328,18 +376,48 @@ with sqlite3.connect(REGISTRY_DB) as db:
     )
 carrier = carrier.join(carrier_metrics, on="backtest_hash", how="left")
 
+with sqlite3.connect(REGISTRY_DB) as db:
+    carrier_identity = db.execute(
+        """
+        SELECT t.family, t.config_name
+        FROM prediction_sets p
+        JOIN training_runs t ON p.training_hash = t.training_hash
+        WHERE p.prediction_hash = ? AND p.split = 'validation'
+        """,
+        (strategy_carrier["prediction_hash"],),
+    ).fetchone()
+if carrier_identity is None:
+    msg = (
+        f"No validation training_runs row for carrier prediction "
+        f"{strategy_carrier['prediction_hash']}. The registry is missing the "
+        f"training run this prediction was registered under."
+    )
+    raise RuntimeError(msg)
+carrier_family, carrier_config = carrier_identity
+
 print(
     f"Carrier: prediction={strategy_carrier['prediction_hash']}; "
+    f"model={carrier_family}/{carrier_config}; "
     f"allocator={strategy_carrier['allocator']}; top_k={strategy_carrier['top_k']}; "
     f"risk={risk_winner['risk_name']}"
+)
+print(
+    "Validation Sharpe by stage: "
+    + " -> ".join(
+        f"{stage} {sharpe:.3f}"
+        for stage, sharpe in zip(
+            carrier["stage"].to_list(), carrier["sharpe"].to_list(), strict=True
+        )
+    )
 )
 carrier
 
 # %% [markdown]
-# The corrected primary-label carrier is NLinear with score weighting, ten
-# stocks, and a five-percent trailing stop. Validation Sharpe rises from 0.826
-# at the equal-weight baseline to 1.186 after allocation and 2.088 after the
-# fixed risk rule.
+# The printout above names the corrected primary-label carrier and its Sharpe
+# at each stage of the funnel. Read the model, allocator, and risk rule from
+# that line rather than from a fixed description here: eligibility is measured
+# against the sealed window, so the carrier is whatever the corrected filter
+# selects, not a name pinned in prose.
 
 # %%
 fig_stage, ax_stage = plt.subplots(figsize=FIGSIZE["single"], constrained_layout=True)
@@ -361,11 +439,29 @@ ax_stage.errorbar(
     linewidth=2,
 )
 ax_stage.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=1)
-ax_stage.set_xticks(x, carrier["stage"].to_list())
+
+
+_ACRONYMS = {"mvo", "hrp", "gbm", "sdf", "sae", "ipca", "lstm"}
+
+
+def as_label(name: str) -> str:
+    """Registry identifier rendered for a chart axis or title."""
+    words = []
+    for word in name.replace("_", " ").split():
+        if word.lower() in _ACRONYMS:
+            words.append(word.upper())
+        elif word.endswith("pct") and word[:-3].isdigit():
+            words.append(f"{word[:-3]}%")
+        else:
+            words.append(word.capitalize())
+    return " ".join(words)
+
+
+ax_stage.set_xticks(x, [as_label(stage) for stage in carrier["stage"].to_list()])
 ax_stage.set_ylabel("Annualized validation Sharpe")
 add_message_title(
     ax_stage,
-    "Allocation and a fixed trailing stop lift the NLinear carrier",
+    f"Allocation and a fixed risk control lift the {carrier_family.upper()} carrier",
     f"Validation 2019-2020; {CONFIGURED_COST_BPS:.1f} bps/side; 95% block-bootstrap intervals",
 )
 fig_stage.show()
@@ -428,14 +524,22 @@ with sqlite3.connect(REGISTRY_DB) as db:
         connection=db,
         execute_options={"parameters": cost_hashes},
     )
+cost_metrics = cost_metrics.with_columns(pl.col("backtest_hash").cast(pl.String))
 cost_surface = pl.DataFrame(cost_plans).join(cost_metrics, on="backtest_hash", how="inner")
 if len(cost_surface) != len(cost_plans):
-    raise RuntimeError(f"Expected {len(cost_plans)} cost rows, found {len(cost_surface)}")
+    raise RuntimeError(
+        f"Expected {len(cost_plans)} cost rows for carrier "
+        f"{strategy_carrier['prediction_hash']}, found {len(cost_surface)}"
+    )
 if cost_surface.filter(pl.col("stage") != "cost_sensitivity").height:
     raise RuntimeError("A corrected cost hash has the wrong registry stage")
 
 # %%
 bps = cost_surface.filter(pl.col("regime") == "bps").sort("cost_value")
+crossings = bps.filter(pl.col("sharpe_ci95_lo") <= 0)
+first_crossing = crossings["cost_value"].min() if crossings.height else None
+max_bps = bps["cost_value"].max()
+
 fig_cost, ax_cost = plt.subplots(figsize=FIGSIZE["single"], constrained_layout=True)
 ax_cost.plot(
     bps["cost_value"],
@@ -454,17 +558,35 @@ ax_cost.fill_between(
 ax_cost.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=1)
 ax_cost.set_xlabel("One-way cost per traded notional (bps)")
 ax_cost.set_ylabel("Annualized validation Sharpe")
+if first_crossing is not None:
+    ax_cost.axvline(first_crossing, color=COLORS["neutral"], linestyle=":", linewidth=1)
 add_message_title(
     ax_cost,
-    "The allocation carrier stays positive through the 50 bps stress",
+    (
+        f"The point path stays positive to {max_bps:.0f} bps, "
+        f"the interval only to {first_crossing:.0f} bps"
+        if first_crossing is not None
+        else f"The carrier stays positive through the {max_bps:.0f} bps stress"
+    ),
     "Validation 2019-2020; one-way costs; 95% block-bootstrap band",
 )
 fig_cost.show()
 
+# %%
+print(
+    f"Point Sharpe at {max_bps:.0f} bps: {bps['sharpe'][-1]:.3f}; "
+    + (
+        f"lower bound first crosses zero at {first_crossing:.0f} bps"
+        if first_crossing is not None
+        else "lower bound stays above zero across the grid"
+    )
+)
+
 # %% [markdown]
-# The point estimate decays gradually across the test grid, but its uncertainty
-# lower bound first crosses zero at 10 bps. Cost survival is therefore a robustness
-# result for the point path, not a precise estimate of net performance.
+# The point estimate decays gradually across the test grid, while its
+# uncertainty lower bound crosses zero far earlier, at the cost level printed
+# above. Cost survival is therefore a robustness result for the point path, not
+# a precise estimate of net performance.
 
 # %% [markdown]
 # ## 3. Paired risk effect and risk-cohort selection adjustment
@@ -475,8 +597,8 @@ fig_cost.show()
 # model and allocation search, so it is a lower bound on the total search cost.
 
 # %%
-baseline_returns = load_daily_returns_with_timestamp(CASE_STUDY, strategy_carrier["backtest_hash"])
-winner_returns = load_daily_returns_with_timestamp(CASE_STUDY, risk_winner["backtest_hash"])
+baseline_returns = sealed_daily_returns(strategy_carrier["backtest_hash"])
+winner_returns = sealed_daily_returns(risk_winner["backtest_hash"])
 if baseline_returns is None or winner_returns is None:
     raise RuntimeError("Missing daily returns for the corrected carrier")
 aligned = (
@@ -504,7 +626,7 @@ paired_risk = compute_paired_uncertainty(
 
 # %%
 returns_by_hash = {
-    backtest_hash: load_daily_returns_with_timestamp(CASE_STUDY, backtest_hash)
+    backtest_hash: sealed_daily_returns(backtest_hash)
     for backtest_hash in risk_surface["backtest_hash"]
 }
 fold_returns_by_hash = {
@@ -539,13 +661,19 @@ risk_diagnostics = pl.DataFrame(
         {"diagnostic": "Risk-cohort folds", "value": risk_cohort["pbo_n_folds"]},
     ]
 )
+print(
+    f"Paired improvement of {risk_winner['risk_name']} over its allocation baseline: "
+    f"{paired_risk['sharpe_diff']:+.3f} "
+    f"[{paired_risk['sharpe_diff_ci95_lo']:.3f}, {paired_risk['sharpe_diff_ci95_hi']:.3f}]"
+)
 risk_diagnostics
 
 # %% [markdown]
-# The five-percent trailing stop's paired Sharpe improvement is 0.907 with a
-# 95% interval of [0.067, 1.685]. The selection-adjusted diagnostics below
-# account for choosing among the 14 fixed controls, but only two validation
-# folds remain available for temporal stability analysis.
+# The paired interval above is the risk rule's own effect, measured against its
+# exact allocation baseline on aligned timestamps. The selection-adjusted
+# diagnostics in the same table account for choosing among the 14 fixed
+# controls, but only two validation folds remain available for temporal
+# stability analysis, so the cohort statistics rest on a thin sample.
 
 # %% [markdown]
 # ## 4. Holdout status: preserved observation, unresolved current carrier
@@ -553,8 +681,9 @@ risk_diagnostics
 # The 2021 holdout has already been observed on an IPCA risk-adjusted-return
 # lineage. The corrected carrier uses a different family, label, allocation,
 # and risk rule. Running it now would turn the holdout into another selection
-# round. This notebook therefore checks that no matching NLinear holdout exists
-# and reports the stored IPCA row only as historical context.
+# round. This notebook therefore checks that no holdout prediction exists for
+# the corrected carrier's own training run, and reports the stored IPCA row
+# only as historical context.
 
 # %%
 with sqlite3.connect(REGISTRY_DB) as db:
@@ -618,42 +747,59 @@ print(f"Matching holdout predictions for corrected carrier: {current_holdout_cou
 pl.DataFrame(historical_holdout)
 
 # %% [markdown]
-# The stored IPCA/conformal holdout Sharpe is 0.421 with a 95% interval of
-# [-1.287, 2.225]. It neither validates nor refutes the corrected NLinear
-# carrier. The current carrier's out-of-sample status is unresolved and needs a
-# future untouched evaluation window.
+# The stored holdout rows above sit on an IPCA risk-adjusted-return lineage.
+# They neither validate nor refute the corrected carrier, which uses a
+# different family, label, allocation, and risk rule. The current carrier's
+# out-of-sample status is unresolved and needs a future untouched evaluation
+# window.
 
 # %% [markdown]
 # ## 5. Publication assessment
 #
-# The corrected validation record is internally closed: all planned allocation,
-# cost, and risk hashes exist; the selected risk result reproduces exactly; and
-# its point-in-time and paired-uncertainty checks pass. The missing item is not a
-# computation failure. It is the deliberate absence of a second use of the
-# already-observed holdout.
+# The corrected validation record is internally closed: every planned
+# allocation, cost, and risk hash exists and the selected risk result
+# reproduces exactly. Closed is not the same as favorable. The gate table below
+# reports each check on its own terms, and the paired risk interval is the one
+# to read carefully. The remaining gap is not a computation failure: it is the
+# deliberate absence of a second use of the already-observed holdout.
 
 # %%
+final_row = carrier.row(len(carrier) - 1, named=True)
+stress = bps.sort("cost_value").row(len(bps) - 1, named=True)
 assessment = pl.DataFrame(
     [
         {
             "gate": "Corrected validation carrier",
             "status": "PASS",
-            "evidence": "NLinear / score weighted / top 10 / trailing stop 5%",
+            "evidence": (
+                f"{carrier_family}/{carrier_config} / {strategy_carrier['allocator']} / "
+                f"top {strategy_carrier['top_k']} / {risk_winner['risk_name']}"
+            ),
         },
         {
             "gate": "Validation Sharpe uncertainty",
-            "status": "PASS",
-            "evidence": "2.088 [1.005, 3.117]",
+            "status": "PASS" if final_row["sharpe_ci95_lo"] > 0 else "INCONCLUSIVE",
+            "evidence": (
+                f"{final_row['sharpe']:.3f} "
+                f"[{final_row['sharpe_ci95_lo']:.3f}, {final_row['sharpe_ci95_hi']:.3f}]"
+            ),
         },
         {
             "gate": "Paired risk improvement",
-            "status": "PASS",
-            "evidence": "+0.907 [0.067, 1.685]",
+            "status": "PASS" if paired_risk["sharpe_diff_ci95_lo"] > 0 else "INCONCLUSIVE",
+            "evidence": (
+                f"{paired_risk['sharpe_diff']:+.3f} "
+                f"[{paired_risk['sharpe_diff_ci95_lo']:.3f}, "
+                f"{paired_risk['sharpe_diff_ci95_hi']:.3f}]"
+            ),
         },
         {
-            "gate": "50 bps point stress",
-            "status": "PASS",
-            "evidence": "Sharpe 0.769; uncertainty includes zero",
+            "gate": f"{stress['cost_value']:.0f} bps point stress",
+            "status": "PASS" if stress["sharpe"] > 0 else "FAIL",
+            "evidence": (
+                f"Sharpe {stress['sharpe']:.3f} "
+                f"[{stress['sharpe_ci95_lo']:.3f}, {stress['sharpe_ci95_hi']:.3f}]"
+            ),
         },
         {
             "gate": "Matching untouched holdout",
@@ -672,18 +818,23 @@ assessment
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. The technically corrected v3.1 validation carrier is NLinear with score
-#    weighting, ten stocks, and a five-percent trailing stop.
-# 2. Validation Sharpe progresses from 0.826 at equal weight to 1.186 after
-#    allocation and 2.088 after the risk rule; the final 95% interval is
-#    [1.005, 3.117].
-# 3. The risk rule's paired improvement is +0.907 [0.067, 1.685]. Selection
-#    adjustment covers the 14 fixed controls, but only two validation folds
-#    remain for stability analysis.
-# 4. The allocation carrier retains point Sharpe 0.769 at the 50 bps stress,
-#    although its uncertainty interval first crosses zero at 10 bps.
-# 5. The existing IPCA/conformal holdout is historical and not comparable to
-#    the corrected carrier. A matching NLinear holdout was not run because the
-#    2021 window has already been observed.
+# 1. The corrected v3.1 validation carrier is the model, allocator, top-k, and
+#    risk rule named in the assessment table above. Eligibility is decided by
+#    coverage of the sealed validation window, so a checkpoint whose extra
+#    decision dates fall outside that window earns no advantage.
+# 2. Validation Sharpe rises across the three funnel stages shown in the stage
+#    chart, and the interval at every stage is wide: the point path improves
+#    far more convincingly than the uncertainty around it narrows.
+# 3. The risk rule's paired improvement is reported with its own interval
+#    against the exact allocation baseline. Selection adjustment covers the 14
+#    fixed controls, but only two validation folds remain for stability
+#    analysis.
+# 4. The allocation carrier keeps a positive point Sharpe through the top of
+#    the cost grid, while its uncertainty band crosses zero much earlier. Cost
+#    survival here is a statement about the point path, not about net
+#    performance.
+# 5. The existing IPCA holdout rows are historical and not comparable to the
+#    corrected carrier. No matching holdout was run, because the 2021 window
+#    has already been observed.
 # 6. Publication may present v3.1 as a corrected validation record, but it must
 #    label out-of-sample efficacy unresolved and make no deployment claim.

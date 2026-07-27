@@ -43,6 +43,33 @@ _MODEL_RUNNERS = {
 
 TEMPORAL_FEATURE_ASSEMBLY = "fold_scoped_v1"
 
+# Runner arguments the caller supplies directly, which a preset must not overwrite.
+# Every latent-factor preset declares n_factors, so before this set covered it the
+# N_FACTORS notebook parameter was a no-op in every configured notebook.
+_CALLER_SUPPLIED_RUNNER_ARGS = frozenset({"device", "n_factors"})
+_EPOCH_MODELS = frozenset({"cae", "sae"})
+
+
+def merge_preset_into_runner_kwargs(
+    kwargs: dict[str, Any],
+    *,
+    preset: dict[str, Any],
+    allowed: set[str],
+    model_name: str,
+) -> dict[str, Any]:
+    """Fold a model's preset into runner kwargs the caller already filled in.
+
+    Mutates and returns ``kwargs``. A preset value is applied only when the runner
+    accepts that argument and the caller did not supply it.
+    """
+    explicit = set(_CALLER_SUPPLIED_RUNNER_ARGS)
+    if model_name in _EPOCH_MODELS:
+        explicit.add("n_epochs")
+    kwargs.update(
+        {key: value for key, value in preset.items() if key in allowed and key not in explicit}
+    )
+    return kwargs
+
 
 def _numpy_serializer(obj: Any) -> Any:
     if isinstance(obj, np.ndarray):
@@ -658,16 +685,11 @@ def run_latent_factor_cv(
             kwargs["macro_train"] = model_input["macro_train"]
             kwargs["macro_val"] = model_input["macro_val"]
         if model_name in model_kwargs:
-            allowed = set(inspect.signature(runner).parameters)
-            explicit = {"device"}
-            if model_name in {"cae", "sae"}:
-                explicit.add("n_epochs")
-            kwargs.update(
-                {
-                    key: value
-                    for key, value in model_kwargs[model_name].items()
-                    if key in allowed and key not in explicit
-                }
+            merge_preset_into_runner_kwargs(
+                kwargs,
+                preset=model_kwargs[model_name],
+                allowed=set(inspect.signature(runner).parameters),
+                model_name=model_name,
             )
         return kwargs
 
@@ -1633,7 +1655,12 @@ def _apply_latent_factor_runtime_spec(
 ) -> dict[str, Any]:
     resolved = dict(spec)
     params = dict(resolved.get("params", {}))
-    params.setdefault("n_factors", n_factors)
+    # The K the fit ran at, not the K the preset declares. `resolved["params"]`
+    # comes from the preset, which always sets n_factors, so a setdefault here
+    # never took effect: a K=2 fit registered under a spec reading n_factors 5.
+    # Now that the caller's K wins at the runner, K would no longer separate
+    # training hashes, and a K=2 request would load or overwrite the K=5 cohort.
+    params["n_factors"] = n_factors
     params["feature_names"] = list(feature_names)
     params["splits"] = [
         {

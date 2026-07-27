@@ -10,6 +10,7 @@ from pathlib import Path
 import polars as pl
 
 from ..notebook_contracts import (
+    canonical_coverage_days,
     degenerate_prediction_sql,
     excluded_family_sql,
     filter_active_model_rows,
@@ -716,6 +717,210 @@ _BEST_PREDICTIONS_SCHEMA: dict[str, pl.DataType] = {
 }
 
 
+def _finalize_predictions_frame(df: pl.DataFrame, case_study: str, case_dir: Path):
+    """Shared tail for ``resolve_best_predictions``'s two coverage-window paths.
+
+    Drops excluded families, attaches ``source``/``predictions_path``, and keeps only
+    prediction sets with a physical parquet on disk. Returns the frame unchanged (still
+    possibly empty) rather than the caller's schema-stable empty sentinel; callers apply
+    that sentinel themselves.
+    """
+    import polars as pl
+
+    if df.is_empty():
+        return df
+    df = filter_active_model_rows(df, case_study)
+    if df.is_empty():
+        return df
+
+    df = df.with_columns(
+        (pl.col("family") + pl.lit("/") + pl.col("config_name").fill_null(pl.lit("default"))).alias(
+            "source"
+        ),
+    )
+
+    pred_base = _run_log_dir(case_dir) / "predictions"
+    df = df.with_columns(
+        (
+            pl.lit(str(pred_base))
+            + pl.lit("/")
+            + pl.col("prediction_hash")
+            + pl.lit("/predictions.parquet")
+        ).alias("predictions_path"),
+    )
+    existing = _existing_prediction_hashes(case_dir)
+    if existing is not None:
+        df = df.filter(pl.col("prediction_hash").is_in(list(existing)))
+
+    return df
+
+
+def _canonical_family_coverage_bar(
+    case_study: str,
+    label: str,
+    split: str,
+    case_dir: Path,
+) -> dict[str, int]:
+    """Max in-window coverage per family, over EVERY prediction set for the label.
+
+    The eligibility bar has to be the family's best coverage, not the best among the
+    rows that happen to carry a backtest at the stage being resolved. Taking the max
+    after a stage filter lowers the bar whenever the family's full-coverage prediction
+    was never backtested at that stage, and a partial-coverage prediction then
+    qualifies - which is exactly what ``full_coverage_prediction_sql`` prevents on the
+    raw path, where the ``MAX(ic_n_days)`` subquery ranges over all of
+    ``(split, family, label)`` with no stage restriction.
+
+    Requires a ``prediction_metrics`` row, matching the raw path's implicit
+    requirement (``full_coverage_prediction_sql`` joins ``pm``): a prediction set
+    whose metrics were never computed can't set the bar other candidates must meet.
+    """
+    exclude_clause, exclude_params = excluded_family_sql(case_study, "t.family")
+    degenerate_clause = degenerate_prediction_sql("p.prediction_hash")
+    query = f"""
+        SELECT p.prediction_hash, t.family
+        FROM prediction_sets p
+        JOIN training_runs t ON p.training_hash = t.training_hash
+        JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
+        WHERE t.label = ?
+          AND p.split = ?
+          {exclude_clause}
+          {degenerate_clause}
+    """
+    universe = _query_table(case_dir, query, tuple([label, split] + exclude_params))
+    bar: dict[str, int] = {}
+    if universe.is_empty():
+        return bar
+    for prediction_hash, family in universe.select("prediction_hash", "family").iter_rows():
+        days = canonical_coverage_days(case_study, label, split, prediction_hash, case_dir)
+        if days is None:
+            continue
+        if days > bar.get(family, -1):
+            bar[family] = days
+    return bar
+
+
+def _resolve_best_predictions_canonical(
+    case_study: str,
+    label: str,
+    *,
+    split: str | None,
+    top_n: int,
+    stage: str,
+    chapter_filter: str | None,
+    universe_filter: str | None,
+    case_dir: Path | None,
+    checkpoints_per_config: int,
+):
+    """``resolve_best_predictions(coverage_window="canonical")``.
+
+    Re-ranks using ``canonical_coverage_days`` (in-canonical-window day counts recomputed
+    from each prediction's parquet) in place of the SQL-embedded
+    ``full_coverage_prediction_sql`` comparison on stored ``ic_n_days``. Requires
+    an explicit ``split`` — the canonical window is per ``(case_study, label, split)``.
+    """
+    import polars as pl
+
+    if not split:
+        raise ValueError("coverage_window='canonical' requires an explicit split")
+
+    if case_dir is None:
+        case_dir = _case_dir(case_study)
+    db_path = _registry_db_path(case_dir)
+    if not db_path.exists():
+        logger.warning("No registry.db found for '%s'", case_study)
+        return pl.DataFrame(schema=_BEST_PREDICTIONS_SCHEMA)
+
+    stage_clause, stage_params = _stage_filter_clause(stage, chapter_filter)
+    exclude_clause, exclude_params = excluded_family_sql(case_study, "t.family")
+    degenerate_clause = degenerate_prediction_sql("p.prediction_hash")
+
+    universe_clause = ""
+    params: list[str] = [label] + stage_params + exclude_params + [split]
+    if universe_filter:
+        universe_clause = "AND json_extract(b.spec_json, '$.strategy.signal.universe_filter') = ?"
+        params.append(universe_filter)
+
+    # Same per_prediction shape as the raw path, minus full_coverage_prediction_sql —
+    # that comparison is replaced below by canonical_coverage_days, computed in Python.
+    query = f"""
+        SELECT
+            p.prediction_hash,
+            p.training_hash,
+            p.split,
+            p.checkpoint_value,
+            t.family,
+            t.config_name,
+            t.label,
+            MAX(bm.sharpe) AS sharpe
+        FROM backtest_metrics bm
+        JOIN backtest_runs b ON bm.backtest_hash = b.backtest_hash
+        JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
+        JOIN training_runs t ON p.training_hash = t.training_hash
+        JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
+        WHERE t.label = ?
+          {stage_clause}
+          {exclude_clause}
+          {degenerate_clause}
+          AND p.split = ?
+          {universe_clause}
+        GROUP BY p.prediction_hash
+    """
+    per_prediction = _query_table(case_dir, query, tuple(params))
+    if per_prediction.is_empty():
+        return pl.DataFrame(schema=_BEST_PREDICTIONS_SCHEMA)
+
+    in_window = {
+        h: canonical_coverage_days(case_study, label, split, h, case_dir)
+        for h in per_prediction["prediction_hash"].unique().to_list()
+    }
+    bar = _canonical_family_coverage_bar(case_study, label, split, case_dir)
+    per_prediction = per_prediction.with_columns(
+        pl.col("prediction_hash").replace_strict(in_window, default=None).alias("_in_window_days"),
+        pl.col("family").replace_strict(bar, default=None).alias("_family_bar"),
+    ).filter(pl.col("_in_window_days").is_not_null())
+    if per_prediction.is_empty():
+        return pl.DataFrame(schema=_BEST_PREDICTIONS_SCHEMA)
+    per_prediction = per_prediction.filter(pl.col("_in_window_days") == pl.col("_family_bar")).drop(
+        "_in_window_days", "_family_bar"
+    )
+
+    top_cfgs = (
+        per_prediction.group_by(["family", "config_name"])
+        .agg(pl.col("sharpe").max().alias("_best"))
+        .sort("_best", descending=True)
+        .head(top_n)
+        .select(["family", "config_name"])
+    )
+    ranked = (
+        # `nulls_equal` mirrors the raw path's `pp.config_name IS tc.config_name`
+        # (see `_resolve_best_predictions`). `config_name` is nullable, group_by
+        # keeps a null group, and a default inner join would then drop every row
+        # of it - silently removing that family from the ranking even when it
+        # holds the best Sharpe.
+        per_prediction.join(top_cfgs, on=["family", "config_name"], how="inner", nulls_equal=True)
+        .sort(["sharpe", "checkpoint_value"], descending=[True, True])
+        .with_columns(pl.int_range(pl.len()).over(["family", "config_name"]).alias("_rn"))
+        .filter(pl.col("_rn") < max(1, int(checkpoints_per_config)))
+        .drop("_rn")
+        .sort("sharpe", descending=True)
+    )
+    df = ranked.select(
+        "prediction_hash",
+        "training_hash",
+        "family",
+        "config_name",
+        "label",
+        "split",
+        "checkpoint_value",
+        "sharpe",
+    )
+    df = _finalize_predictions_frame(df, case_study, case_dir)
+    if df.is_empty():
+        return pl.DataFrame(schema=_BEST_PREDICTIONS_SCHEMA)
+    return df
+
+
 def resolve_best_predictions(
     case_study: str,
     label: str,
@@ -727,6 +932,7 @@ def resolve_best_predictions(
     universe_filter: str | None = None,
     case_dir: Path | None = None,
     checkpoints_per_config: int = 1,
+    coverage_window: str = "raw",
 ):
     """Return top-N prediction hashes ranked by backtest Sharpe at a given stage.
 
@@ -758,6 +964,14 @@ def resolve_best_predictions(
         Override case study directory.
     checkpoints_per_config : int
         How many checkpoints each advancing config contributes, best first.
+    coverage_window : str
+        "raw" (default): compares stored ``ic_n_days`` via
+        ``full_coverage_prediction_sql`` — unchanged behavior for every existing
+        caller. "canonical": recomputes coverage from each prediction set's parquet,
+        bounded to ``canonical_window(case_study, label, split)``. Use when a case
+        study's prediction sets predate a canonical-window change and raw
+        ``ic_n_days`` differs across peers only by out-of-window dates.
+        Requires ``split``.
 
     Returns
     -------
@@ -766,6 +980,19 @@ def resolve_best_predictions(
         source, label, split, sharpe, predictions_path
     """
     import polars as pl
+
+    if coverage_window == "canonical":
+        return _resolve_best_predictions_canonical(
+            case_study,
+            label,
+            split=split,
+            top_n=top_n,
+            stage=stage,
+            chapter_filter=chapter_filter,
+            universe_filter=universe_filter,
+            case_dir=case_dir,
+            checkpoints_per_config=checkpoints_per_config,
+        )
 
     if case_dir is None:
         case_dir = _case_dir(case_study)
@@ -868,32 +1095,102 @@ def resolve_best_predictions(
     df = _query_table(case_dir, query, tuple(params))
     if df.is_empty():
         return pl.DataFrame(schema=_BEST_PREDICTIONS_SCHEMA)
-    df = filter_active_model_rows(df, case_study)
+    df = _finalize_predictions_frame(df, case_study, case_dir)
     if df.is_empty():
         return pl.DataFrame(schema=_BEST_PREDICTIONS_SCHEMA)
 
-    # Build source string
+    return df
+
+
+def _resolve_best_backtest_runs_canonical(
+    case_study: str,
+    label: str,
+    *,
+    split: str | None,
+    stage: str | None,
+    chapter: str | None,
+    top_n: int,
+    case_dir: Path | None,
+):
+    """``resolve_best_backtest_runs(coverage_window="canonical")``.
+
+    Same replacement as ``_resolve_best_predictions_canonical``: drops
+    ``full_coverage_prediction_sql`` and re-filters in Python using
+    ``canonical_coverage_days``.
+    """
+    import polars as pl
+
+    if not split:
+        raise ValueError("coverage_window='canonical' requires an explicit split")
+
+    if case_dir is None:
+        case_dir = _case_dir(case_study)
+    db_path = _registry_db_path(case_dir)
+    if not db_path.exists():
+        logger.warning("No registry.db found for '%s'", case_study)
+        return pl.DataFrame()
+
+    if stage is None and chapter:
+        _chapter_to_stage = {
+            "ch16": "signal",
+            "ch17": "allocation",
+            "ch18": "cost_sensitivity",
+            "ch19": "risk_overlay",
+        }
+        stage = _chapter_to_stage.get(chapter, chapter)
+
+    stage_clause, stage_params = _stage_filter_clause(stage)
+    exclude_clause, exclude_params = excluded_family_sql(case_study, "t.family")
+    degenerate_clause = degenerate_prediction_sql("p.prediction_hash")
+
+    query = f"""
+        SELECT
+            b.backtest_hash,
+            b.prediction_hash,
+            b.spec_json,
+            bm.sharpe,
+            t.family,
+            t.config_name
+        FROM backtest_metrics bm
+        JOIN backtest_runs b ON bm.backtest_hash = b.backtest_hash
+        JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
+        JOIN training_runs t ON p.training_hash = t.training_hash
+        JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
+        WHERE t.label = ?
+          {exclude_clause}
+          {stage_clause}
+          {degenerate_clause}
+          AND p.split = ?
+    """
+    df = _query_table(case_dir, query, tuple([label] + exclude_params + stage_params + [split]))
+    if df.is_empty():
+        return df
+
+    in_window = {
+        h: canonical_coverage_days(case_study, label, split, h, case_dir)
+        for h in df["prediction_hash"].unique().to_list()
+    }
+    bar = _canonical_family_coverage_bar(case_study, label, split, case_dir)
     df = df.with_columns(
-        (pl.col("family") + pl.lit("/") + pl.col("config_name").fill_null(pl.lit("default"))).alias(
-            "source"
-        ),
+        pl.col("prediction_hash").replace_strict(in_window, default=None).alias("_in_window_days"),
+        pl.col("family").replace_strict(bar, default=None).alias("_family_bar"),
+    ).filter(pl.col("_in_window_days").is_not_null())
+    if df.is_empty():
+        return df
+    df = df.filter(pl.col("_in_window_days") == pl.col("_family_bar")).drop(
+        "_in_window_days", "_family_bar"
     )
 
-    # Add predictions_path and filter to entries with physical files
-    pred_base = _run_log_dir(case_dir) / "predictions"
-    df = df.with_columns(
-        (
-            pl.lit(str(pred_base))
-            + pl.lit("/")
-            + pl.col("prediction_hash")
-            + pl.lit("/predictions.parquet")
-        ).alias("predictions_path"),
-    )
+    df = filter_active_model_rows(df, case_study)
+    if df.is_empty():
+        return df
+
     existing = _existing_prediction_hashes(case_dir)
     if existing is not None:
         df = df.filter(pl.col("prediction_hash").is_in(list(existing)))
 
-    return df
+    df = df.sort("sharpe", descending=True).head(top_n)
+    return df.select("backtest_hash", "prediction_hash", "spec_json", "sharpe")
 
 
 def resolve_best_backtest_runs(
@@ -905,6 +1202,7 @@ def resolve_best_backtest_runs(
     chapter: str | None = None,
     top_n: int = 3,
     case_dir: Path | None = None,
+    coverage_window: str = "raw",
 ):
     """Return top-N backtest runs at a given stage, ranked by Sharpe.
 
@@ -933,6 +1231,9 @@ def resolve_best_backtest_runs(
         Number of top runs to return.
     case_dir : Path, optional
         Override case study directory.
+    coverage_window : str
+        See ``resolve_best_predictions``. "raw" (default) is unchanged behavior;
+        "canonical" requires an explicit ``split``.
 
     Returns
     -------
@@ -940,6 +1241,17 @@ def resolve_best_backtest_runs(
         Columns: backtest_hash, prediction_hash, spec_json, sharpe
     """
     import polars as pl
+
+    if coverage_window == "canonical":
+        return _resolve_best_backtest_runs_canonical(
+            case_study,
+            label,
+            split=split,
+            stage=stage,
+            chapter=chapter,
+            top_n=top_n,
+            case_dir=case_dir,
+        )
 
     if case_dir is None:
         case_dir = _case_dir(case_study)

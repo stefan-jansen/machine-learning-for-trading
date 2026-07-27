@@ -15,6 +15,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.preset_patches import _patch_presets_for_testing
+
 REPO_ROOT = Path(__file__).parent.parent
 
 # Case study IDs whose config/setup.yaml should be seeded into test output dirs
@@ -269,29 +271,10 @@ def seeded_output_dir(tmp_path_factory):
     return output_dir
 
 
-# ---------------------------------------------------------------------------
-# Preset patching — reduce workload for CI/test runs
-# ---------------------------------------------------------------------------
-
-# Per-model-type overrides applied to copied preset YAMLs.
-# Goal: minimal workload that still exercises the training loop + registry.
-_TEST_PRESET_PATCHES: dict[str, dict] = {
-    "lgb": {"max_iterations": 2, "checkpoint_interval": 1},
-    # DL families: 2 epochs, checkpoint every epoch
-    "lstm": {"n_epochs": 2, "checkpoint_interval": 1},
-    "tsmixer": {"n_epochs": 2, "checkpoint_interval": 1},
-    "tcn": {"n_epochs": 2, "checkpoint_interval": 1},
-    "nlinear": {"n_epochs": 2, "checkpoint_interval": 1},
-    "patchtst": {"n_epochs": 2, "checkpoint_interval": 1},
-    # TabDL: 2 epochs
-    "tabm": {"n_epochs": 2, "checkpoint_interval": 1},
-    # Latent factors: 2 epochs
-    "cae": {"n_epochs": 2, "checkpoint_interval": 1},
-    "sdf": {"n_epochs": 2, "checkpoint_interval": 1},
-    "sae": {"n_epochs": 2, "checkpoint_interval": 1},
-    "ipca": {"n_epochs": 2, "checkpoint_interval": 1},
-}
-
+# _patch_presets_for_testing (imported above) and the _TEST_PRESET_PATCHES
+# table it reads live in tests/preset_patches.py, which
+# tests/generate_intermediates.py also imports - that script runs standalone
+# without pytest installed, so the table can't live in this module.
 
 _PREDICTION_COL_RENAMES = {
     "y_score": "prediction",
@@ -318,21 +301,6 @@ def _migrate_predictions_schema(preds_root: Path) -> None:
             continue
         df = pl.read_parquet(parquet).rename(renames)
         df.write_parquet(parquet)
-
-
-def _patch_presets_for_testing(config_dir: Path) -> None:
-    """Patch copied preset YAMLs with reduced-workload values for testing."""
-    for model_type, overrides in _TEST_PRESET_PATCHES.items():
-        model_dir = config_dir / model_type
-        if not model_dir.exists():
-            continue
-        for preset_path in model_dir.glob("*.yaml"):
-            preset = yaml.safe_load(preset_path.read_text())
-            if preset is None:
-                continue
-            preset.update(overrides)
-            with open(preset_path, "w") as f:
-                yaml.dump(preset, f, default_flow_style=False)
 
 
 # Max configs per family in label config files (keep tests fast but comprehensive).

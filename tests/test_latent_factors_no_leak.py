@@ -1030,6 +1030,90 @@ def test_ipca_solver_controls_change_training_identity() -> None:
     assert training_hash_from_spec(old) != training_hash_from_spec(corrected)
 
 
+def test_n_factors_changes_training_identity_even_when_the_preset_declares_one() -> None:
+    """K reaches the runner, so it has to reach the registered spec too.
+
+    Every latent-factor preset declares ``n_factors: 5``, so a ``setdefault`` here
+    left the spec reading 5 for a fit that ran at K=2: same label, same inputs,
+    same training_hash, and the K=2 request then loads or overwrites the K=5 cohort.
+    """
+    from case_studies.utils.latent_factors.cv import _apply_latent_factor_runtime_spec
+    from case_studies.utils.registry.specs import training_hash_from_spec
+
+    preset = {
+        "config_name": "ipca",
+        "family": "latent_factors",
+        "label": "fwd_ret_21d",
+        "n_folds": 8,
+        "params": {"n_factors": 5},  # what case_studies/config/ipca/ipca.yaml ships
+        "seed": 42,
+    }
+    identity = {
+        "feature_names": ["feature"],
+        "splits": [],
+        "task_type": "regression",
+        "class_values": None,
+        "eval_label_col": None,
+        "input_digest": "input-digest",
+        "macro_digest": None,
+        "runtime_spec": {"device": "cpu"},
+        "model_kwargs": {},
+        "fold_extras": [],
+        "n_epochs": 50,
+    }
+    at_five = _apply_latent_factor_runtime_spec(spec=preset, n_factors=5, **identity)
+    at_two = _apply_latent_factor_runtime_spec(spec=preset, n_factors=2, **identity)
+
+    assert at_five["params"]["n_factors"] == 5
+    assert at_two["params"]["n_factors"] == 2
+    assert training_hash_from_spec(at_five) != training_hash_from_spec(at_two)
+
+
+def test_caller_n_factors_wins_over_the_preset_at_the_runner() -> None:
+    """The other half of the same contract: what the fit actually runs at.
+
+    Without this the N_FACTORS notebook parameter was a no-op wherever a preset
+    declared one - which is every configured latent-factor notebook.
+    """
+    from case_studies.utils.latent_factors.cv import merge_preset_into_runner_kwargs
+
+    merged = merge_preset_into_runner_kwargs(
+        {"n_factors": 2},
+        preset={"n_factors": 5, "max_iter": 10_000},
+        allowed={"n_factors", "max_iter"},
+        model_name="ipca",
+    )
+
+    assert merged["n_factors"] == 2
+    assert merged["max_iter"] == 10_000, "a preset value the caller did not set must still apply"
+
+
+def test_a_preset_argument_the_runner_does_not_accept_is_dropped() -> None:
+    from case_studies.utils.latent_factors.cv import merge_preset_into_runner_kwargs
+
+    merged = merge_preset_into_runner_kwargs(
+        {"n_factors": 5},
+        preset={"max_iter": 10_000, "not_a_runner_argument": 1},
+        allowed={"n_factors", "max_iter"},
+        model_name="ipca",
+    )
+
+    assert "not_a_runner_argument" not in merged
+
+
+def test_epoch_models_also_keep_the_caller_epoch_count() -> None:
+    from case_studies.utils.latent_factors.cv import merge_preset_into_runner_kwargs
+
+    merged = merge_preset_into_runner_kwargs(
+        {"n_factors": 2, "n_epochs": 2, "device": "cpu"},
+        preset={"n_factors": 5, "n_epochs": 50, "device": "cuda"},
+        allowed={"n_factors", "n_epochs", "device"},
+        model_name="cae",
+    )
+
+    assert (merged["n_factors"], merged["n_epochs"], merged["device"]) == (2, 2, "cpu")
+
+
 def test_ipca_wrapper_defers_to_library_iteration_default() -> None:
     import inspect
 

@@ -39,8 +39,10 @@ import yaml
 
 try:
     from tests.pm_helpers import get_overrides, run_notebook
+    from tests.preset_patches import _patch_presets_for_testing
 except ModuleNotFoundError:
     from pm_helpers import get_overrides, run_notebook
+    from preset_patches import _patch_presets_for_testing
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -69,39 +71,14 @@ DL_STAGE_PATTERNS = re.compile(
 # Config seeding — replicate conftest.py seeded_output_dir logic
 # ---------------------------------------------------------------------------
 
-# Per-model-type overrides applied to copied preset YAMLs.
-# Goal: minimal workload that still exercises the training loop + registry.
-_TEST_PRESET_PATCHES: dict[str, dict] = {
-    "lgb": {"max_iterations": 2, "checkpoint_interval": 1},
-    "lstm": {"n_epochs": 2, "checkpoint_interval": 1},
-    "tsmixer": {"n_epochs": 2, "checkpoint_interval": 1},
-    "tcn": {"n_epochs": 2, "checkpoint_interval": 1},
-    "nlinear": {"n_epochs": 2, "checkpoint_interval": 1},
-    "patchtst": {"n_epochs": 2, "checkpoint_interval": 1},
-    "tabm": {"n_epochs": 2, "checkpoint_interval": 1},
-    "cae": {"n_epochs": 2, "checkpoint_interval": 1},
-    "sdf": {"n_epochs": 2, "checkpoint_interval": 1},
-    "sae": {"n_epochs": 2, "checkpoint_interval": 1},
-    "ipca": {"n_epochs": 2, "checkpoint_interval": 1},
-}
+# _patch_presets_for_testing (and the _TEST_PRESET_PATCHES it reads) is
+# imported from tests/preset_patches.py rather than duplicated here: two
+# copies of the same workload-reduction table drift the moment one gets a
+# fix the other doesn't (e.g. IPCA's factor_ridge/gamma_ridge
+# regularization), silently regenerating fixtures against the stale values.
 
 _MAX_CONFIGS_PER_FAMILY = 2
 _TRIM_FAMILIES = {"linear", "gbm"}
-
-
-def _patch_presets_for_testing(config_dir: Path) -> None:
-    """Patch copied preset YAMLs with reduced-workload values for testing."""
-    for model_type, overrides in _TEST_PRESET_PATCHES.items():
-        model_dir = config_dir / model_type
-        if not model_dir.exists():
-            continue
-        for preset_path in model_dir.glob("*.yaml"):
-            preset = yaml.safe_load(preset_path.read_text())
-            if preset is None:
-                continue
-            preset.update(overrides)
-            with open(preset_path, "w") as f:
-                yaml.dump(preset, f, default_flow_style=False)
 
 
 def _trim_label_configs(cs_config_dir: Path) -> None:

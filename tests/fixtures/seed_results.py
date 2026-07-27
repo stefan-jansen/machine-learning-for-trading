@@ -762,10 +762,13 @@ def _backfill_all_backtest_artifacts(cs_dir: Path) -> None:
 def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     """Generate synthetic prediction parquets for every hash in the registry.
 
-    Uses real symbols from setup.yaml and dates spanning 2 years before the
-    holdout boundary so backtests have data to work with. Predictions are random
-    noise. Crypto artifacts are normalized even when copied intermediates exist
-    because its model analysis requires one common key and target panel.
+    Uses real symbols from setup.yaml. Each hash gets dates drawn from the window
+    its own registry row declares — the CV validation window for ``validation``
+    rows, the configured holdout for ``holdout`` rows — so a seeded artifact can
+    never claim decisions outside the split it is registered under. Predictions
+    are random noise. Crypto artifacts are normalized even when copied
+    intermediates exist because its model analysis requires one common key and
+    target panel.
     """
     db_path = cs_dir / "run_log" / "registry.db"
     if not db_path.exists():
@@ -777,11 +780,35 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     except ImportError:
         return
 
-    # Get all prediction hashes from registry
+    # Kept separate from the numpy/polars import above: without it every hash
+    # falls back to the holdout-relative grid, which is a weaker fixture. Folding
+    # it into that try would make an import failure skip the backfill entirely,
+    # leaving notebooks with no prediction artifacts at all.
+    try:
+        from case_studies.utils.cv_window import canonical_window
+    except ImportError:
+        canonical_window = None
+
+    # Get every prediction hash with the split and label it is registered under,
+    # so each artifact can be built inside its own window. The registry predates
+    # this join in some case studies, so a missing table or column must degrade
+    # to the old hash-only behaviour rather than abort seeding.
     db = sqlite3.connect(str(db_path))
-    hashes = [r[0] for r in db.execute("SELECT prediction_hash FROM prediction_sets").fetchall()]
+    try:
+        hash_rows = db.execute(
+            """
+            SELECT ps.prediction_hash, ps.split, t.label
+            FROM prediction_sets ps
+            LEFT JOIN training_runs t ON ps.training_hash = t.training_hash
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        hash_rows = [
+            (r[0], None, None)
+            for r in db.execute("SELECT prediction_hash FROM prediction_sets").fetchall()
+        ]
     db.close()
-    if not hashes:
+    if not hash_rows:
         return
 
     # Read symbols from setup.yaml (fall back to generic)
@@ -801,60 +828,109 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         if eval_cfg.get("holdout_start"):
             holdout_start = eval_cfg["holdout_start"]
 
-    # Generate daily dates: 2 years before holdout through 6 months after
     from datetime import date, timedelta
 
+    def _weekday_grid(start: date, end: date) -> list[date]:
+        """~60 weekdays spanning ``start`` through ``end``, inclusive."""
+        days = []
+        d = start
+        while d <= end:
+            if d.weekday() < 5:
+                days.append(d)
+            d += timedelta(days=1)
+        if not days:
+            return days
+        step = max(1, len(days) // 60)
+        grid = days[::step]
+        # Keep the true end date: consumers compare the artifact's last decision
+        # against the window's last date, and subsampling can drop it.
+        if grid[-1] != days[-1]:
+            grid.append(days[-1])
+        return grid
+
+    # Fallback grids, used when a hash's window cannot be derived. They are keyed by
+    # split rather than universal: a single holdout-relative range spanning six months
+    # past the boundary hands a `validation` hash decisions inside the holdout, which
+    # is the defect this function exists to prevent. The degrade paths are ordinary
+    # (a NULL label, an absent label parquet, an older registry schema), so the
+    # contract has to hold on them too.
     ho = date.fromisoformat(holdout_start)
-    start = ho - timedelta(days=730)
-    end = ho + timedelta(days=180)
-    dates = []
-    d = start
-    while d <= end:
-        if d.weekday() < 5:  # Weekdays only
-            dates.append(d)
-        d += timedelta(days=1)
-    # Subsample to ~60 dates for speed
-    step = max(1, len(dates) // 60)
-    dates = dates[::step]
+    unknown_split_window = (ho - timedelta(days=730), ho + timedelta(days=180))
+    fallback_windows = {
+        "validation": (ho - timedelta(days=730), ho - timedelta(days=1)),
+        "holdout": (ho, ho + timedelta(days=180)),
+    }
+
+    def _window_for(split: str | None, label: str | None) -> tuple[date, date]:
+        """The date range a hash registered under ``split`` is allowed to cover.
+
+        A seeded artifact that reaches past its own split's window is not a
+        weaker fixture, it is a wrong one: notebooks that enforce the sealed
+        validation/holdout boundary read the artifact's last decision date and
+        reject the carrier. Falls back to the split's own holdout-relative grid
+        when the case study has no derivable window for the label.
+        """
+        fallback = fallback_windows.get(split or "", unknown_split_window)
+        if canonical_window is None or split not in fallback_windows or not label:
+            return fallback
+        try:
+            window = canonical_window(cs_id, label, split=split)
+        except Exception:  # noqa: BLE001 — a missing label parquet must not break seeding
+            return fallback
+        if not window:
+            return fallback
+        # A window that holds no weekday yields an empty grid and therefore an empty
+        # artifact. Degrading to this split's own fallback keeps the boundary; the
+        # global one used to be reached here and crossed it.
+        return window if _weekday_grid(*window) else fallback
 
     n_symbols = len(symbols)
-    n_dates = len(dates)
-    n = n_symbols * n_dates
-
-    # Build one template DataFrame, reuse for all hashes
-    rows_symbol = [s for _ in dates for s in symbols]
-    rows_date = [d for d in dates for _ in range(n_symbols)]
-    # Canonical production schema: prediction / actual / fold (NOT y_score / y_true / fold_id).
-    # Notebooks read these columns by name; using non-canonical names here would silently
-    # break downstream notebooks that resolve hashes from the registry.
-    #
-    # Fold assignment must mirror walk-forward CV: every symbol is present in every
-    # fold for the dates in that fold's window. Assigning fold by row index (e.g.,
-    # i % 2) silently partitions symbols across folds and breaks per-symbol
-    # conformal calibration (each symbol ends up in one fold only). Partition by
-    # date instead so all symbols share the same fold on each date.
-    n_folds = 2
-    rows_fold = [
-        (_di // max(1, n_dates // n_folds + 1)) % n_folds
-        for _di in range(n_dates)
-        for _ in range(n_symbols)
-    ]
     target_rng = np.random.default_rng(42)
-    template = _pl.DataFrame(
-        {
-            entity_col: rows_symbol,
-            "timestamp": _pl.Series(rows_date).cast(_pl.Date),
-            "fold": rows_fold,
-            "actual": target_rng.normal(0, 0.01, n).tolist(),
-        }
-    )
+    templates: dict[tuple[date, date], tuple[object, int]] = {}
+
+    def _template_for(window: tuple[date, date]):
+        """One reusable frame per distinct window; scores are added per hash."""
+        cached = templates.get(window)
+        if cached is not None:
+            return cached
+        dates = _weekday_grid(*window)
+        n_dates = len(dates)
+        n = n_symbols * n_dates
+        rows_symbol = [s for _ in dates for s in symbols]
+        rows_date = [d for d in dates for _ in range(n_symbols)]
+        # Canonical production schema: prediction / actual / fold (NOT y_score / y_true / fold_id).
+        # Notebooks read these columns by name; using non-canonical names here would silently
+        # break downstream notebooks that resolve hashes from the registry.
+        #
+        # Fold assignment must mirror walk-forward CV: every symbol is present in every
+        # fold for the dates in that fold's window. Assigning fold by row index (e.g.,
+        # i % 2) silently partitions symbols across folds and breaks per-symbol
+        # conformal calibration (each symbol ends up in one fold only). Partition by
+        # date instead so all symbols share the same fold on each date.
+        n_folds = 2
+        rows_fold = [
+            (_di // max(1, n_dates // n_folds + 1)) % n_folds
+            for _di in range(n_dates)
+            for _ in range(n_symbols)
+        ]
+        frame = _pl.DataFrame(
+            {
+                entity_col: rows_symbol,
+                "timestamp": _pl.Series(rows_date).cast(_pl.Date),
+                "fold": rows_fold,
+                "actual": target_rng.normal(0, 0.01, n).tolist(),
+            }
+        )
+        templates[window] = (frame, n)
+        return templates[window]
 
     rewrite_existing = cs_id == "crypto_perps_funding"
-    for p_hash in hashes:
+    for p_hash, split, label in hash_rows:
         pred_dir = cs_dir / "run_log" / "predictions" / p_hash
         pred_file = pred_dir / "predictions.parquet"
         if pred_file.exists() and not rewrite_existing:
             continue
+        template, n = _template_for(_window_for(split, label))
         pred_dir.mkdir(parents=True, exist_ok=True)
         score_seed = int(hashlib.sha256(p_hash.encode()).hexdigest()[:16], 16)
         scores = np.random.default_rng(score_seed).normal(0, 0.01, n).tolist()
