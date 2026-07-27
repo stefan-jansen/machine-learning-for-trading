@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from tests.pm_helpers import (
+    check_kernel_routing,
     collect_chapter_notebooks,
     current_test_tier,
     get_overrides,
@@ -80,12 +81,21 @@ def test_docker_notebook(notebook_path, populated_data_dir, seeded_output_dir):
     timeout = overrides.get("timeout", 300)
     parameters = overrides.get("parameters", {})
 
+    # Some py312 notebooks need a venv other than the one running pytest. Broken
+    # routing means the image is stale or the override is mistyped; skipping there
+    # would let the job pass without ever running the notebook.
+    routing = check_kernel_routing(overrides)
+    if routing.problem:
+        pytest.fail(f"{rel_path}: {routing.problem}")
+
     result = run_notebook(
         py_path=notebook_path,
         parameters=parameters,
         timeout=timeout,
         output_dir=seeded_output_dir,
         data_dir=populated_data_dir,
+        kernel_python=routing.python,
+        kernel_launcher=routing.launcher,
     )
 
     if result["status"] == "error":

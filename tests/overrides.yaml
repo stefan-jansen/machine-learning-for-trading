@@ -691,9 +691,24 @@
   timeout: 360
 15_causal_estimation/06_fed_announcement_bsts:
   docker_env: py312
+  # tfcausalimpact needs NumPy 1.x, the signature stack on /opt/ml4t needs 2.x,
+  # so the py312 image keeps it in a second venv. Without this the notebook runs
+  # on /opt/ml4t and dies on `No module named 'tensorflow'`.
+  kernel_python: /opt/bsts/bin/python
+  kernel_launcher: envs/py312/bsts_kernel.py
   parameters:
     MAX_FOMC_EVENTS: 1
     MAX_PLACEBO_DATES: 1
+    # The 24-symbol test ETF universe carries neither IEF nor VEA. Keep the
+    # production design shape - one bond target, two international controls,
+    # one commodity control - on symbols the fixture does carry, rather than
+    # widening the shared universe and shifting the ~14 other notebooks that
+    # call load_etfs() with no symbol filter.
+    TARGET_ETF: TLT
+    CONTROL_ETFS:
+      - EEM
+      - EFA
+      - DBC
   requires_import: causalimpact
   timeout: 300
 15_causal_estimation/07_tigramite_time_series:
