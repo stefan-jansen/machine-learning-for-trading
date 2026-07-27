@@ -177,7 +177,7 @@ dependencies = [
     "llama-index-embeddings-huggingface>=0.7.0",
     "chromadb>=1.5.5",
     "pfhedge>=0.22.0",
-    "ml4t-models>=0.1.0a6",
+    "ml4t-models>=0.1.0b0",
     "llama-index-vector-stores-chroma>=0.5.5",
     "llama-index-llms-openai>=0.7.7",
     # Ch24 Autonomous Agents (required at notebook runtime; Docker installs
