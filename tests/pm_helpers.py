@@ -236,17 +236,24 @@ def check_kernel_routing(overrides: dict) -> KernelRouting:
             )
         return KernelRouting(None)
 
+    # os.access(..., X_OK) is also true for a searchable directory, so a path like
+    # /opt/bsts/bin would pass and die later at kernel startup. A directory is an
+    # error in the override itself, so pointing at the image would misdirect.
+    if Path(kernel_python).is_dir():
+        return KernelRouting(
+            f"overrides.yaml routes this notebook to {kernel_python}, "
+            f"which is a directory, not an executable file. Correct the kernel_python entry."
+        )
+
     image = overrides.get("docker_env")
     rebuild = (
         f"Rebuild or repull the {image} image." if image else "Rebuild the image that provides it."
     )
 
-    # os.access(..., X_OK) is also true for a searchable directory, so a path like
-    # /opt/bsts/bin would pass and die later at kernel startup.
     if not (Path(kernel_python).is_file() and os.access(kernel_python, os.X_OK)):
         return KernelRouting(
             f"overrides.yaml routes this notebook to {kernel_python}, "
-            f"which is not executable here. {rebuild}"
+            f"which is not an executable file here. {rebuild}"
         )
 
     launcher_path = REPO_ROOT / launcher if launcher else None

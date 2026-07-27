@@ -145,9 +145,10 @@ tf.get_logger().setLevel("ERROR")
 #
 # Fed decisions can affect broad US financial markets. Using SPY or VNQ as
 # controls is problematic because they may react to the same announcement.
-# The argument rests on the categories, not on the particular tickers, so
-# `CONTROL_ETFS` should cover both. The default set - and the panel the CI run
-# substitutes - is two international controls and one commodity control:
+# The argument rests on two categories, international and commodity, rather than
+# on the particular tickers, so `CONTROL_ETFS` should cover both. The default set
+# and the panel the CI run substitutes are both two international controls and one
+# commodity control. The defaults are:
 # - **International ETFs** (VEA, EFA): Correlated through global risk factors
 #   but less directly affected by FOMC (which targets US policy rates)
 # - **Commodities** (DBC): Affected by USD but different transmission mechanism

@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -226,10 +227,30 @@ def test_check_kernel_routing_rejects_a_missing_launcher(tmp_path: Path) -> None
 
 def test_check_kernel_routing_rejects_a_directory(tmp_path: Path) -> None:
     """An executable bit is not enough: os.access(X_OK) is true for a searchable
-    directory, so /opt/bsts/bin would pass and die at kernel startup."""
-    routing = check_kernel_routing({"kernel_python": str(tmp_path)})
+    directory, so /opt/bsts/bin would pass and die at kernel startup.
+
+    A directory is an error in the override, not a stale image, so the message must
+    not send the operator off to rebuild one.
+    """
+    routing = check_kernel_routing({"kernel_python": str(tmp_path), "docker_env": "py312"})
 
     assert routing.problem is not None
+    assert str(tmp_path) in routing.problem
+    assert "directory" in routing.problem
+    assert "Rebuild" not in routing.problem
+
+
+def test_check_kernel_routing_rejects_a_file_without_the_executable_bit(tmp_path: Path) -> None:
+    """The other half of the interpreter predicate - e.g. a COPY that dropped the
+    mode bits leaves a real python that cannot be run."""
+    interpreter = tmp_path / "python"
+    interpreter.write_text("#!/bin/sh\n")
+    interpreter.chmod(0o644)
+
+    routing = check_kernel_routing({"kernel_python": str(interpreter)})
+
+    assert routing.problem is not None
+    assert str(interpreter) in routing.problem
 
 
 def test_check_kernel_routing_returns_what_it_validated(
@@ -270,7 +291,9 @@ def test_every_declared_kernel_launcher_resolves(overrides: dict) -> None:
         for key, value in overrides.items()
         if isinstance(value, dict)
         and value.get("kernel_launcher")
-        and not (pm_helpers.REPO_ROOT / value["kernel_launcher"]).is_file()
+        and check_kernel_routing(
+            {"kernel_python": sys.executable, "kernel_launcher": value["kernel_launcher"]}
+        ).problem
     }
 
     assert unresolvable == {}
