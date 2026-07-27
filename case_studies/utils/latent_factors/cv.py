@@ -659,7 +659,13 @@ def run_latent_factor_cv(
             kwargs["macro_val"] = model_input["macro_val"]
         if model_name in model_kwargs:
             allowed = set(inspect.signature(runner).parameters)
-            explicit = {"device"}
+            # Values the caller passed explicitly win over the preset. Without
+            # n_factors here the preset silently overwrote it, which made the
+            # N_FACTORS notebook parameter a no-op wherever a preset declares
+            # one - every configured latent-factor notebook. Production presets
+            # all declare the same 5 the notebooks default to, so this changes
+            # no registered fit; it restores the parameter.
+            explicit = {"device", "n_factors"}
             if model_name in {"cae", "sae"}:
                 explicit.add("n_epochs")
             kwargs.update(

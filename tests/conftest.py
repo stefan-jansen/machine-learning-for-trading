@@ -289,7 +289,12 @@ _TEST_PRESET_PATCHES: dict[str, dict] = {
     "cae": {"n_epochs": 2, "checkpoint_interval": 1},
     "sdf": {"n_epochs": 2, "checkpoint_interval": 1},
     "sae": {"n_epochs": 2, "checkpoint_interval": 1},
-    "ipca": {"n_epochs": 2, "checkpoint_interval": 1},
+    # IPCA's ALS needs far more sweeps on a fixture cross-section than on the
+    # production one: the pinned ml4t-models build caps max_iter at 100, and on
+    # sp500_equity_option_analytics's 21-asset panel K=2 converges only after
+    # 259-693 iterations depending on the fold. Raising the cap here rather than
+    # in the notebook keeps the shipped notebook untouched.
+    "ipca": {"n_epochs": 2, "checkpoint_interval": 1, "max_iter": 800},
 }
 
 
