@@ -103,10 +103,20 @@ COPY pyproject.toml uv.lock /build/
 # held to the lock's torch-2.10.0-consistent versions. torch/torchvision/torchaudio +
 # lightgbm (CUDA-built separately) are excluded too. Everything else is pinned to the
 # lock. Generated BEFORE the strip so uv.lock still matches pyproject.toml for --frozen.
+#
+# lightgbm is excluded from the constraint but still has to match the lock, so its exact
+# version is written to /tmp/lightgbm-pin.txt for the two build steps below to install.
+# A floating "lightgbm>=4.6" there silently drifted 4.6.0 -> 4.7.0 on 2026-07-27, and 4.7
+# device-links the CUDA-13-built libnccl_static.a, which nvcc 12.6's nvlink cannot read
+# ("nvlink error: Uncompress failed (target: sm_80)"). Reading the version from the lock
+# means the image cannot drift off the version readers get from `uv sync`.
 RUN cd /build && uv export --frozen --no-emit-project --no-hashes --format requirements-txt \
-      | grep -iE '^[a-z0-9._-]+==' \
-      | grep -viE '^(torch|torchvision|torchaudio|lightgbm|triton|setuptools)==|^nvidia-' \
-      > /tmp/locked-constraints.txt
+      | grep -iE '^[a-z0-9._-]+==' > /tmp/locked-all.txt && \
+    grep -viE '^(torch|torchvision|torchaudio|lightgbm|triton|setuptools)==|^nvidia-' \
+      /tmp/locked-all.txt > /tmp/locked-constraints.txt && \
+    grep -iE '^lightgbm==' /tmp/locked-all.txt | head -1 | cut -d';' -f1 | tr -d '[:space:]' \
+      > /tmp/lightgbm-pin.txt && \
+    test -s /tmp/lightgbm-pin.txt && cat /tmp/lightgbm-pin.txt
 
 # Remove packages that need special handling from pyproject copy:
 # - lightgbm: installed separately with CUDA build on amd64
@@ -148,7 +158,7 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
       CUDACXX=/usr/local/cuda/bin/nvcc CUDAHOSTCXX=/usr/bin/g++-12 \
       /opt/ml4t/bin/pip install --no-cache-dir --force-reinstall --no-deps \
         --no-binary lightgbm \
-        --config-settings=cmake.define.USE_CUDA=ON "lightgbm>=4.6" && \
+        --config-settings=cmake.define.USE_CUDA=ON "$(cat /tmp/lightgbm-pin.txt)" && \
       /opt/ml4t/bin/python -c "\
 import lightgbm as lgb; \
 print(f'LightGBM {lgb.__version__}'); \
@@ -156,7 +166,7 @@ print('CUDA build: OK (runtime verification requires GPU)')"; \
     fi
 # arm64: standard pip wheel (no GPU on macOS)
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
-      /opt/ml4t/bin/pip install --no-cache-dir "lightgbm>=4.6"; \
+      /opt/ml4t/bin/pip install --no-cache-dir "$(cat /tmp/lightgbm-pin.txt)"; \
     fi
 
 # Install optional dependency groups (bayesian, advanced, mlops)
