@@ -1519,15 +1519,19 @@ def _run_htm_daily_mtm(
     import yaml
 
     from case_studies.sp500_options._htm_backtest import run_htm_daily_mtm
-    from utils import CASE_STUDIES_DIR
-    from utils.paths import REPO_ROOT
+    from utils import ML4T_DATA_PATH
+    from utils.paths import get_case_study_dir
 
-    cs_dir = CASE_STUDIES_DIR / case_study
+    # Case-study artifacts (labels, config) resolve through get_case_study_dir so
+    # they follow ML4T_OUTPUT_DIR. Anchoring them at CASE_STUDIES_DIR made this
+    # read the repo tree, where the labels are not written.
+    cs_dir = get_case_study_dir(case_study)
     labels_dir = cs_dir / "labels"
-    # Anchor on REPO_ROOT — same convention as every other case-study data
-    # path. Resolving relative to cwd masked real "data missing" errors as
-    # cwd-mismatch fallbacks pointing at a different (also-missing) path.
-    raw_options_dir = REPO_ROOT / "data" / "equities" / "market" / "sp500" / "options_straddles_raw"
+    # Downloaded market data resolves through ML4T_DATA_PATH, the same path
+    # data.equities.loader.load_sp500_options_straddles_raw reads. Anchoring on
+    # REPO_ROOT ignored a configured data directory, so the raw chains were only
+    # found when the data happened to sit inside the checkout.
+    raw_options_dir = ML4T_DATA_PATH / "equities" / "market" / "sp500" / "options_straddles_raw"
 
     method = str(signal_config.get("method", "equal_weight_top_k"))
     top_k = int(signal_config.get("top_k", 20))
