@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -224,10 +224,10 @@ carrier_returns = seal(registered_returns)
 # Measured on the UNSEALED frame. Sealing first makes the comparison one-sided: the
 # min/max of an already-trimmed frame can only fall short of the window, never past
 # it, so a registered artifact that overruns the seal reads as a clean match.
-registered_window = (
-    registered_returns["timestamp"].min(),
-    registered_returns["timestamp"].max(),
-)
+registered_dates = registered_returns["timestamp"].cast(pl.Date)
+if registered_dates.is_empty():
+    raise RuntimeError("The strategy carrier's registered daily-return artifact is empty")
+registered_window = (registered_dates.min(), registered_dates.max())
 if registered_window[0] > validation_window[0] or registered_window[1] < validation_window[1]:
     raise RuntimeError(
         "The registered strategy carrier does not cover the canonical validation window: "
@@ -778,7 +778,7 @@ assessment = pl.DataFrame(
         },
         {
             "gate": "Validation Sharpe uncertainty",
-            "status": "PASS",
+            "status": "PASS" if final_row["sharpe_ci95_lo"] > 0 else "INCONCLUSIVE",
             "evidence": (
                 f"{final_row['sharpe']:.3f} "
                 f"[{final_row['sharpe_ci95_lo']:.3f}, {final_row['sharpe_ci95_hi']:.3f}]"
