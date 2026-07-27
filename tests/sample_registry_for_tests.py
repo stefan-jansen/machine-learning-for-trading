@@ -8,7 +8,13 @@ Sampling strategy:
 - Model-side tables (training_runs, prediction_sets, prediction_metrics,
   fold_metrics): copied in full — small enough.
 - Backtest tables: top N per (family × stage) by Sharpe, plus ALL holdout
-  backtests. Includes corresponding backtest_fold_metrics.
+  backtests, plus the COMPLETE cost_sensitivity and risk_overlay set of every
+  prediction those two rules retain. Includes corresponding
+  backtest_fold_metrics.
+
+The last rule matters: strategy-analysis notebooks plan the full declared grid
+for the prediction they select and assert its exact row count, so a partially
+sampled downstream set fails a contract production satisfies.
 
 Usage:
     uv run python tests/sample_registry_for_tests.py
@@ -19,6 +25,7 @@ Writes to: <--output>/{cs}/run_log/registry.db
 
 import argparse
 import contextlib
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -107,18 +114,25 @@ def sample_registry(cs_id: str, intermediates_dir: Path = DEFAULT_INTERMEDIATES_
     dst_dir.mkdir(parents=True, exist_ok=True)
     dst_db = dst_dir / "registry.db"
 
-    # Remove old DB to start fresh
+    # Remove old DB to start fresh. The artifact dirs go too: they are keyed by
+    # backtest_hash, so a re-sample that changes hashes would otherwise leave the
+    # previous generation's directories behind alongside the new ones.
     dst_db.unlink(missing_ok=True)
+    shutil.rmtree(dst_dir / "backtest", ignore_errors=True)
 
     src = sqlite3.connect(str(src_db))
     try:
         dst = sqlite3.connect(str(dst_db))
         try:
-            return _populate_sample_db(src, dst, dst_db)
+            stats = _populate_sample_db(src, dst, dst_db)
         finally:
             dst.close()
     finally:
         src.close()
+
+    sampled = stats.pop("sampled_hashes", set())
+    stats["backtest_artifact_dirs"] = _copy_backtest_artifacts(src_db.parent, dst_dir, sampled)
+    return stats
 
 
 def _populate_sample_db(src, dst, dst_db) -> dict:
@@ -183,9 +197,35 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
     for row in src.execute(holdout_sql).fetchall():
         sampled_bt_hashes.add(row[0])
 
-    stats["backtest_runs_sampled"] = len(sampled_bt_hashes)
+    # 3c. Complete the downstream surface of every prediction sampled so far.
+    #
+    # Top-N-per-(family, stage) slices across predictions, so it can retain a
+    # prediction's signal and allocation rows while keeping only a few of its
+    # cost_sensitivity and risk_overlay rows. A strategy-analysis notebook plans
+    # the FULL declared grid for whichever prediction it selects (all 14 fixed
+    # risk controls, the whole cost grid) and asserts the exact row count, so a
+    # partial set fails a contract the production registry satisfies - the
+    # fixture would be testing its own sampling artifact. Whichever prediction
+    # survives sampling must therefore bring its complete downstream surface.
+    downstream_sql = """
+        SELECT backtest_hash FROM backtest_runs
+        WHERE stage IN ('cost_sensitivity', 'risk_overlay')
+          AND prediction_hash IN (
+              SELECT DISTINCT prediction_hash FROM backtest_runs
+              WHERE backtest_hash IN ({placeholders})
+          )
+    """
+    seed_hashes = list(sampled_bt_hashes)
+    for i in range(0, len(seed_hashes), 500):
+        batch = seed_hashes[i : i + 500]
+        sql = downstream_sql.format(placeholders=",".join(["?"] * len(batch)))
+        for row in src.execute(sql, batch).fetchall():
+            sampled_bt_hashes.add(row[0])
 
-    # 3c. Copy sampled backtest data (runs, metrics, fold_metrics)
+    stats["backtest_runs_sampled"] = len(sampled_bt_hashes)
+    stats["sampled_hashes"] = sampled_bt_hashes
+
+    # 3d. Copy sampled backtest data (runs, metrics, fold_metrics)
     if sampled_bt_hashes:
         hash_list = list(sampled_bt_hashes)
         batch_size = 500
@@ -207,6 +247,40 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
     stats["file_size_kb"] = dst_db.stat().st_size // 1024
     stats["status"] = "OK"
     return stats
+
+
+# Per-backtest artifact files a downstream notebook reads by hash. daily_returns is
+# what paired and cohort uncertainty are computed from; spec.json is the run's own
+# provenance. Anything larger stays out of the fixture.
+_BACKTEST_ARTIFACTS = ("daily_returns.parquet", "spec.json")
+
+
+def _copy_backtest_artifacts(src_run_log: Path, dst_run_log: Path, hashes: set) -> int:
+    """Copy each sampled backtest's artifact dir next to the sampled rows.
+
+    A registry row whose ``run_log/backtest/<hash>/`` is absent is worse than a
+    missing row: selection still reaches it and the read fails downstream, far from
+    the cause. Nothing in the repo used to place these, so the fixture's rows and its
+    artifact dirs were kept in step by hand and drifted apart whenever the registry
+    was re-sampled alone.
+    """
+    src_bt = src_run_log / "backtest"
+    if not src_bt.is_dir():
+        return 0
+    dst_bt = dst_run_log / "backtest"
+    copied = 0
+    for backtest_hash in hashes:
+        src_dir = src_bt / backtest_hash
+        if not src_dir.is_dir():
+            continue
+        dst_dir = dst_bt / backtest_hash
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for name in _BACKTEST_ARTIFACTS:
+            src_file = src_dir / name
+            if src_file.is_file():
+                shutil.copy2(src_file, dst_dir / name)
+        copied += 1
+    return copied
 
 
 def main() -> int:

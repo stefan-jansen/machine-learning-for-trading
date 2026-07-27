@@ -289,9 +289,15 @@ with sqlite3.connect(REGISTRY_DB) as db:
         connection=db,
         execute_options={"parameters": risk_hashes},
     )
+# An empty read comes back with a null-typed join key, which makes the join raise a
+# SchemaError before the row-count contract below can report what is actually missing.
+risk_metrics = risk_metrics.with_columns(pl.col("backtest_hash").cast(pl.String))
 risk_surface = pl.DataFrame(risk_plans).join(risk_metrics, on="backtest_hash", how="inner")
 if len(risk_surface) != len(risk_plans):
-    raise RuntimeError(f"Expected {len(risk_plans)} fixed risk rows, found {len(risk_surface)}")
+    raise RuntimeError(
+        f"Expected {len(risk_plans)} fixed risk rows for carrier "
+        f"{strategy_carrier['prediction_hash']}, found {len(risk_surface)}"
+    )
 if risk_surface.filter(pl.col("stage") != "risk_overlay").height:
     raise RuntimeError("A corrected risk hash has the wrong registry stage")
 no_overlay = {
@@ -503,9 +509,13 @@ with sqlite3.connect(REGISTRY_DB) as db:
         connection=db,
         execute_options={"parameters": cost_hashes},
     )
+cost_metrics = cost_metrics.with_columns(pl.col("backtest_hash").cast(pl.String))
 cost_surface = pl.DataFrame(cost_plans).join(cost_metrics, on="backtest_hash", how="inner")
 if len(cost_surface) != len(cost_plans):
-    raise RuntimeError(f"Expected {len(cost_plans)} cost rows, found {len(cost_surface)}")
+    raise RuntimeError(
+        f"Expected {len(cost_plans)} cost rows for carrier "
+        f"{strategy_carrier['prediction_hash']}, found {len(cost_surface)}"
+    )
 if cost_surface.filter(pl.col("stage") != "cost_sensitivity").height:
     raise RuntimeError("A corrected cost hash has the wrong registry stage")
 
