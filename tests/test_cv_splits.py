@@ -414,6 +414,72 @@ def test_temporal_fold_metadata_remap_restores_coverage(backward_temporal_fixtur
     assert remapped["value"].sort().to_list() == values_before
 
 
+@pytest.fixture
+def warmup_temporal_fixture() -> tuple[pl.DataFrame, list[dict]]:
+    """One fold whose artifact can be trimmed to simulate a burn-in prefix."""
+    dates = pd.date_range("2018-01-01", "2020-12-31", freq="B")
+    dataset = pl.DataFrame({"timestamp": dates, "symbol": ["A"] * len(dates)})
+    splits = [
+        {
+            "fold": 0,
+            "train_start": pd.Timestamp("2018-01-01"),
+            "train_end": pd.Timestamp("2019-12-31"),
+            "val_start": pd.Timestamp("2020-01-01"),
+            "val_end": pd.Timestamp("2020-12-31"),
+        }
+    ]
+    return dataset, splits
+
+
+def _temporal_from(dates: pd.DatetimeIndex) -> pl.DataFrame:
+    return pl.DataFrame({"timestamp": dates, "fold": 0})
+
+
+def test_temporal_warmup_prefix_within_bound_is_excused(warmup_temporal_fixture) -> None:
+    dataset, splits = warmup_temporal_fixture
+    dates = pd.DatetimeIndex(dataset["timestamp"].to_pandas())
+    train = dates[dates <= pd.Timestamp("2019-12-31")]
+    # 8% of the train window unavailable at its start, as a rolling warm-up is.
+    trimmed = dates[dates >= train[int(len(train) * 0.08)]]
+
+    validate_temporal_fold_coverage(dataset, _temporal_from(trimmed), splits, date_col="timestamp")
+
+
+def test_temporal_warmup_prefix_beyond_bound_still_fails(warmup_temporal_fixture) -> None:
+    dataset, splits = warmup_temporal_fixture
+    dates = pd.DatetimeIndex(dataset["timestamp"].to_pandas())
+    train = dates[dates <= pd.Timestamp("2019-12-31")]
+    # A shifted fold looks like this: a leading gap over half the train window.
+    trimmed = dates[dates >= train[int(len(train) * 0.5)]]
+
+    with pytest.raises(ValueError, match=r"fold 0 train: temporal date coverage"):
+        validate_temporal_fold_coverage(
+            dataset, _temporal_from(trimmed), splits, date_col="timestamp"
+        )
+
+
+def test_temporal_warmup_allowance_does_not_apply_to_validation(warmup_temporal_fixture) -> None:
+    dataset, splits = warmup_temporal_fixture
+    dates = pd.DatetimeIndex(dataset["timestamp"].to_pandas())
+    val = dates[dates >= pd.Timestamp("2020-01-01")]
+    # 8% at the start of the window: excused on train, fatal on validation.
+    keep = dates[(dates < pd.Timestamp("2020-01-01")) | (dates >= val[int(len(val) * 0.08)])]
+
+    with pytest.raises(ValueError, match=r"fold 0 validation: temporal date coverage"):
+        validate_temporal_fold_coverage(dataset, _temporal_from(keep), splits, date_col="timestamp")
+
+
+def test_temporal_interior_gap_is_not_excused(warmup_temporal_fixture) -> None:
+    dataset, splits = warmup_temporal_fixture
+    dates = pd.DatetimeIndex(dataset["timestamp"].to_pandas())
+    train = dates[dates <= pd.Timestamp("2019-12-31")]
+    gap = train[int(len(train) * 0.3) : int(len(train) * 0.5)]
+    keep = dates[~dates.isin(gap)]
+
+    with pytest.raises(ValueError, match=r"fold 0 train: temporal date coverage"):
+        validate_temporal_fold_coverage(dataset, _temporal_from(keep), splits, date_col="timestamp")
+
+
 def test_sp500_options_temporal_producer_uses_canonical_split_ids() -> None:
     source = Path("case_studies/sp500_options/04_model_based_features.py").read_text()
 
