@@ -808,8 +808,7 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
             for r in db.execute("SELECT prediction_hash FROM prediction_sets").fetchall()
         ]
     db.close()
-    hashes = [r[0] for r in hash_rows]
-    if not hashes:
+    if not hash_rows:
         return
 
     # Read symbols from setup.yaml (fall back to generic)
@@ -849,10 +848,18 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
             grid.append(days[-1])
         return grid
 
-    # Fallback grid, used only when a hash's window cannot be derived: two years
-    # before the holdout boundary through six months after.
+    # Fallback grids, used when a hash's window cannot be derived. They are keyed by
+    # split rather than universal: a single holdout-relative range spanning six months
+    # past the boundary hands a `validation` hash decisions inside the holdout, which
+    # is the defect this function exists to prevent. The degrade paths are ordinary
+    # (a NULL label, an absent label parquet, an older registry schema), so the
+    # contract has to hold on them too.
     ho = date.fromisoformat(holdout_start)
-    fallback_window = (ho - timedelta(days=730), ho + timedelta(days=180))
+    unknown_split_window = (ho - timedelta(days=730), ho + timedelta(days=180))
+    fallback_windows = {
+        "validation": (ho - timedelta(days=730), ho - timedelta(days=1)),
+        "holdout": (ho, ho + timedelta(days=180)),
+    }
 
     def _window_for(split: str | None, label: str | None) -> tuple[date, date]:
         """The date range a hash registered under ``split`` is allowed to cover.
@@ -860,16 +867,22 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         A seeded artifact that reaches past its own split's window is not a
         weaker fixture, it is a wrong one: notebooks that enforce the sealed
         validation/holdout boundary read the artifact's last decision date and
-        reject the carrier. Falls back to the holdout-relative grid only when
-        the case study has no derivable window for the label.
+        reject the carrier. Falls back to the split's own holdout-relative grid
+        when the case study has no derivable window for the label.
         """
-        if canonical_window is None or split not in {"validation", "holdout"} or not label:
-            return fallback_window
+        fallback = fallback_windows.get(split or "", unknown_split_window)
+        if canonical_window is None or split not in fallback_windows or not label:
+            return fallback
         try:
             window = canonical_window(cs_id, label, split=split)
         except Exception:  # noqa: BLE001 — a missing label parquet must not break seeding
-            return fallback_window
-        return window or fallback_window
+            return fallback
+        if not window:
+            return fallback
+        # A window that holds no weekday yields an empty grid and therefore an empty
+        # artifact. Degrading to this split's own fallback keeps the boundary; the
+        # global one used to be reached here and crossed it.
+        return window if _weekday_grid(*window) else fallback
 
     n_symbols = len(symbols)
     target_rng = np.random.default_rng(42)
@@ -880,7 +893,7 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         cached = templates.get(window)
         if cached is not None:
             return cached
-        dates = _weekday_grid(*window) or _weekday_grid(*fallback_window)
+        dates = _weekday_grid(*window)
         n_dates = len(dates)
         n = n_symbols * n_dates
         rows_symbol = [s for _ in dates for s in symbols]

@@ -2011,12 +2011,10 @@ case_studies/sp500_equity_option_analytics/11b_ipca:
   # not help either, so this is non-identification and not slow convergence.
   # K=1 does not converge either (still False at 600).
   #
-  # K=2 does, and the pinned ml4t-models build caps max_iter at 100, so the cap
-  # has to be raised with it - that lives in `_TEST_PRESET_PATCHES["ipca"]`
-  # (tests/conftest.py), because the notebook exposes no max_iter parameter and
-  # a shipped notebook should not grow one for CI's sake. Iterations to
-  # convergence, measured per fold: primary label 553 and 259; first variant 276
-  # and 693; second variant 573 and then one fold still False at 10,000 (41s) -
+  # K=2 does, well inside the 10,000-iteration default the pinned ml4t-models
+  # build already gives every fit on this path. Iterations to convergence,
+  # measured per fold: primary label 553 and 259; first variant 276 and 693;
+  # second variant 573 and then one fold still False at 10,000 (41s) -
   # non-identification again, so no cap reaches it. MAX_VARIANT_LABELS drops
   # that second variant rather than relaxing the guard, which keeps the
   # notebook's own convergence check passing on real fits: the primary label and

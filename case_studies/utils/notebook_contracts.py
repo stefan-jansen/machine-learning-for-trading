@@ -118,7 +118,14 @@ def canonical_coverage_days(
     if date_col is None:
         return None
     dates = pl.scan_parquet(path).select(date_col).unique().collect().to_series()
-    dates = dates if dates.dtype == pl.Date else dates.cast(pl.Date)
+    if dates.dtype != pl.Date:
+        try:
+            dates = dates.cast(pl.Date)
+        except pl.exceptions.PolarsError:
+            # A column named `timestamp` that is not a calendar date is one more
+            # "cannot evaluate" case, so it degrades to None like the others
+            # rather than raising past every caller.
+            return None
     lo, hi = window
     return int(((dates >= lo) & (dates <= hi)).sum())
 

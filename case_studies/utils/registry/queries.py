@@ -847,7 +847,12 @@ def _resolve_best_predictions_canonical(
         .select(["family", "config_name"])
     )
     ranked = (
-        per_prediction.join(top_cfgs, on=["family", "config_name"], how="inner")
+        # `nulls_equal` mirrors the raw path's `pp.config_name IS tc.config_name`
+        # (see `_resolve_best_predictions`). `config_name` is nullable, group_by
+        # keeps a null group, and a default inner join would then drop every row
+        # of it - silently removing that family from the ranking even when it
+        # holds the best Sharpe.
+        per_prediction.join(top_cfgs, on=["family", "config_name"], how="inner", nulls_equal=True)
         .sort(["sharpe", "checkpoint_value"], descending=[True, True])
         .with_columns(pl.int_range(pl.len()).over(["family", "config_name"]).alias("_rn"))
         .filter(pl.col("_rn") < max(1, int(checkpoints_per_config)))

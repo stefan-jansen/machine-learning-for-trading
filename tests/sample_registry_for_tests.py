@@ -131,7 +131,10 @@ def sample_registry(cs_id: str, intermediates_dir: Path = DEFAULT_INTERMEDIATES_
         src.close()
 
     sampled = stats.pop("sampled_hashes", set())
-    stats["backtest_artifact_dirs"] = _copy_backtest_artifacts(src_db.parent, dst_dir, sampled)
+    artifacts = _copy_backtest_artifacts(src_db.parent, dst_dir, sampled)
+    stats["backtest_artifact_dirs"] = artifacts["copied"]
+    stats["backtest_artifacts_missing_dir"] = artifacts["missing_dir"]
+    stats["backtest_artifacts_missing_returns"] = artifacts["missing_returns"]
     return stats
 
 
@@ -255,7 +258,7 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
 _BACKTEST_ARTIFACTS = ("daily_returns.parquet", "spec.json")
 
 
-def _copy_backtest_artifacts(src_run_log: Path, dst_run_log: Path, hashes: set) -> int:
+def _copy_backtest_artifacts(src_run_log: Path, dst_run_log: Path, hashes: set) -> dict:
     """Copy each sampled backtest's artifact dir next to the sampled rows.
 
     A registry row whose ``run_log/backtest/<hash>/`` is absent is worse than a
@@ -263,15 +266,22 @@ def _copy_backtest_artifacts(src_run_log: Path, dst_run_log: Path, hashes: set) 
     the cause. Nothing in the repo used to place these, so the fixture's rows and its
     artifact dirs were kept in step by hand and drifted apart whenever the registry
     was re-sampled alone.
+
+    Returns copied/missing counts. A hash whose source dir or ``daily_returns.parquet``
+    is absent is reported rather than skipped in silence - swallowing it here recreates
+    the same read-fails-far-from-the-cause shape one layer up.
     """
     src_bt = src_run_log / "backtest"
     if not src_bt.is_dir():
-        return 0
+        return {"copied": 0, "missing_dir": len(hashes), "missing_returns": 0}
     dst_bt = dst_run_log / "backtest"
     copied = 0
+    missing_dir = 0
+    missing_returns = 0
     for backtest_hash in hashes:
         src_dir = src_bt / backtest_hash
         if not src_dir.is_dir():
+            missing_dir += 1
             continue
         dst_dir = dst_bt / backtest_hash
         dst_dir.mkdir(parents=True, exist_ok=True)
@@ -279,8 +289,10 @@ def _copy_backtest_artifacts(src_run_log: Path, dst_run_log: Path, hashes: set) 
             src_file = src_dir / name
             if src_file.is_file():
                 shutil.copy2(src_file, dst_dir / name)
+            elif name == "daily_returns.parquet":
+                missing_returns += 1
         copied += 1
-    return copied
+    return {"copied": copied, "missing_dir": missing_dir, "missing_returns": missing_returns}
 
 
 def main() -> int:
@@ -326,7 +338,16 @@ def main() -> int:
             "backtest_fold_metrics",
         ]:
             print(f"  {table:30s} {stats.get(table, 0):>6}")
+        print(f"  {'backtest artifact dirs':30s} {stats.get('backtest_artifact_dirs', 0):>6}")
         print(f"  {'file size (KB)':30s} {stats['file_size_kb']:>6}")
+        missing_dir = stats.get("backtest_artifacts_missing_dir", 0)
+        missing_returns = stats.get("backtest_artifacts_missing_returns", 0)
+        if missing_dir or missing_returns:
+            print(
+                f"  WARNING: {missing_dir} sampled hashes have no source artifact dir, "
+                f"{missing_returns} have no daily_returns.parquet - a notebook that "
+                f"selects one of them fails on the read, not on the sample"
+            )
         total_size += stats["file_size_kb"]
 
     print(f"\nTotal registry size: {total_size} KB ({total_size / 1024:.1f} MB)")

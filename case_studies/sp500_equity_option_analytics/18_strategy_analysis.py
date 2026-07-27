@@ -370,7 +370,7 @@ with sqlite3.connect(REGISTRY_DB) as db:
 carrier = carrier.join(carrier_metrics, on="backtest_hash", how="left")
 
 with sqlite3.connect(REGISTRY_DB) as db:
-    carrier_family, carrier_config = db.execute(
+    carrier_identity = db.execute(
         """
         SELECT t.family, t.config_name
         FROM prediction_sets p
@@ -379,6 +379,14 @@ with sqlite3.connect(REGISTRY_DB) as db:
         """,
         (strategy_carrier["prediction_hash"],),
     ).fetchone()
+if carrier_identity is None:
+    msg = (
+        f"No validation training_runs row for carrier prediction "
+        f"{strategy_carrier['prediction_hash']}. The registry is missing the "
+        f"training run this prediction was registered under."
+    )
+    raise RuntimeError(msg)
+carrier_family, carrier_config = carrier_identity
 
 print(
     f"Carrier: prediction={strategy_carrier['prediction_hash']}; "

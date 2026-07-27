@@ -183,8 +183,17 @@ def build_modeling_input_lineage(
 ) -> dict[str, Any]:
     """Build the portable input identity carried by persisted training runs."""
     split_fields = ("fold", "train_start", "train_end", "val_start", "val_end")
+
+    def _normalize(key: str, value: Any) -> str:
+        # str() on a pd.Timestamp renders "2019-01-07 00:00:00" or "...+00:00"
+        # depending on whether the caller's boundaries are tz-aware, so the same
+        # window read two ways would fingerprint differently.
+        if key == "fold":
+            return str(value)
+        return pd.Timestamp(value).tz_localize(None).isoformat()
+
     normalized_splits = [
-        {key: str(split[key]) for key in split_fields if split.get(key) is not None}
+        {key: _normalize(key, split[key]) for key in split_fields if split.get(key) is not None}
         for split in splits
     ]
     payload: dict[str, Any] = {
@@ -741,6 +750,10 @@ def append_holdout_fold_if_needed(
         "val_end": ho_end_ts,
     }
     mds.splits.append(holdout_fold)
+    # input_lineage digests the fold set and memoizes on first access, so a caller
+    # that read it before this append would otherwise persist a spec whose lineage
+    # describes a fold set that no longer exists.
+    mds._input_lineage = None  # noqa: SLF001 — same module, and the cache is this call's to invalidate
 
 
 # ---------------------------------------------------------------------------
