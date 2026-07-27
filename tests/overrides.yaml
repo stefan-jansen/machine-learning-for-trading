@@ -2019,9 +2019,19 @@ case_studies/sp500_equity_option_analytics/11b_ipca:
   # that second variant rather than relaxing the guard, which keeps the
   # notebook's own convergence check passing on real fits: the primary label and
   # one variant, four folds, all genuinely converged.
+  #
+  # That margin is real but not zero-risk: every ALS iteration solves a Kron
+  # system through multi-threaded OpenBLAS, whose reduction order is not
+  # guaranteed identical run to run, and this fit sits close enough to the
+  # K=2/K=3 identification boundary that a few ULPs of drift can change how
+  # many iterations it needs. CI hit that once (2026-07-27, both folds of one
+  # label reported unconverged; three local reruns on the same fixture all
+  # converged inside the measured budget above). Reruns absorb that instead of
+  # widening MAX_VARIANT_LABELS or relaxing the guard.
   parameters:
     MAX_VARIANT_LABELS: 1
     N_FACTORS: 2
+  reruns: 2
   timeout: 600
 
 case_studies/sp500_equity_option_analytics/11d_stochastic_discount_factor:
