@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import polars as pl
 
 # Families excluded from ALL backtest sweeps — predictions lack y_score column
@@ -73,6 +75,52 @@ def full_coverage_prediction_sql(
               AND t_full.label = {training_run_alias}.label
         )
     """
+
+
+def canonical_coverage_days(
+    case_study: str,
+    label: str,
+    split: str,
+    prediction_hash: str,
+    case_dir: Path | None = None,
+) -> int | None:
+    """Count of a prediction set's decision dates inside ``canonical_window``.
+
+    ``ic_n_days`` (stored in ``prediction_metrics`` at registration time) counts every
+    date in the predictions parquet passed to the metrics function at write time, which
+    can include dates outside the *current* ``canonical_window`` when a prediction set
+    predates a CV-window change. Comparing that raw stored count across prediction sets
+    whose underlying arrays differ only by such out-of-window dates makes
+    ``full_coverage_prediction_sql`` exclude sets that cover the modeling window
+    identically to their peers (see
+    issues/2026-07-27-eoa-risk-sweep-is-stale-relative-to-the-current-carrier.md).
+
+    This recomputes coverage directly from the prediction parquet, bounded to the
+    window, for use by the ``coverage_window="canonical"`` path of
+    ``resolve_best_predictions`` / ``resolve_best_backtest_runs``.
+
+    Returns ``None`` when the window or the parquet file is unavailable — callers must
+    treat that as "cannot evaluate", not zero coverage.
+    """
+    from case_studies.utils.cv_window import canonical_window
+    from utils.paths import get_case_study_dir
+
+    window = canonical_window(case_study, label, split=split)
+    if window is None:
+        return None
+    if case_dir is None:
+        case_dir = get_case_study_dir(case_study)
+    path = case_dir / "run_log" / "predictions" / prediction_hash / "predictions.parquet"
+    if not path.exists():
+        return None
+    cols = pl.scan_parquet(path).collect_schema().names()
+    date_col = "timestamp" if "timestamp" in cols else ("date" if "date" in cols else None)
+    if date_col is None:
+        return None
+    dates = pl.scan_parquet(path).select(date_col).unique().collect().to_series()
+    dates = dates if dates.dtype == pl.Date else dates.cast(pl.Date)
+    lo, hi = window
+    return int(((dates >= lo) & (dates <= hi)).sum())
 
 
 def filter_active_model_rows(
