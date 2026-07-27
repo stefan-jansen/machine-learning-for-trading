@@ -755,6 +755,46 @@ def _finalize_predictions_frame(df: pl.DataFrame, case_study: str, case_dir: Pat
     return df
 
 
+def _canonical_family_coverage_bar(
+    case_study: str,
+    label: str,
+    split: str,
+    case_dir: Path,
+) -> dict[str, int]:
+    """Max in-window coverage per family, over EVERY prediction set for the label.
+
+    The eligibility bar has to be the family's best coverage, not the best among the
+    rows that happen to carry a backtest at the stage being resolved. Taking the max
+    after a stage filter lowers the bar whenever the family's full-coverage prediction
+    was never backtested at that stage, and a partial-coverage prediction then
+    qualifies - which is exactly what ``full_coverage_prediction_sql`` prevents on the
+    raw path, where the ``MAX(ic_n_days)`` subquery ranges over all of
+    ``(split, family, label)`` with no stage restriction.
+    """
+    exclude_clause, exclude_params = excluded_family_sql(case_study, "t.family")
+    degenerate_clause = degenerate_prediction_sql("p.prediction_hash")
+    query = f"""
+        SELECT p.prediction_hash, t.family
+        FROM prediction_sets p
+        JOIN training_runs t ON p.training_hash = t.training_hash
+        WHERE t.label = ?
+          AND p.split = ?
+          {exclude_clause}
+          {degenerate_clause}
+    """
+    universe = _query_table(case_dir, query, tuple([label, split] + exclude_params))
+    bar: dict[str, int] = {}
+    if universe.is_empty():
+        return bar
+    for prediction_hash, family in universe.select("prediction_hash", "family").iter_rows():
+        days = canonical_coverage_days(case_study, label, split, prediction_hash, case_dir)
+        if days is None:
+            continue
+        if days > bar.get(family, -1):
+            bar[family] = days
+    return bar
+
+
 def _resolve_best_predictions_canonical(
     case_study: str,
     label: str,
@@ -771,8 +811,7 @@ def _resolve_best_predictions_canonical(
 
     Re-ranks using ``canonical_coverage_days`` (in-canonical-window day counts recomputed
     from each prediction's parquet) in place of the SQL-embedded
-    ``full_coverage_prediction_sql`` comparison on stored ``ic_n_days``. See
-    issues/2026-07-27-eoa-risk-sweep-is-stale-relative-to-the-current-carrier.md. Requires
+    ``full_coverage_prediction_sql`` comparison on stored ``ic_n_days``. Requires
     an explicit ``split`` — the canonical window is per ``(case_study, label, split)``.
     """
     import polars as pl
@@ -830,14 +869,16 @@ def _resolve_best_predictions_canonical(
         h: canonical_coverage_days(case_study, label, split, h, case_dir)
         for h in per_prediction["prediction_hash"].unique().to_list()
     }
+    bar = _canonical_family_coverage_bar(case_study, label, split, case_dir)
     per_prediction = per_prediction.with_columns(
-        pl.col("prediction_hash").replace_strict(in_window, default=None).alias("_in_window_days")
+        pl.col("prediction_hash").replace_strict(in_window, default=None).alias("_in_window_days"),
+        pl.col("family").replace_strict(bar, default=None).alias("_family_bar"),
     ).filter(pl.col("_in_window_days").is_not_null())
     if per_prediction.is_empty():
         return pl.DataFrame(schema=_BEST_PREDICTIONS_SCHEMA)
-    per_prediction = per_prediction.filter(
-        pl.col("_in_window_days") == pl.col("_in_window_days").max().over("family")
-    ).drop("_in_window_days")
+    per_prediction = per_prediction.filter(pl.col("_in_window_days") == pl.col("_family_bar")).drop(
+        "_in_window_days", "_family_bar"
+    )
 
     top_cfgs = (
         per_prediction.group_by(["family", "config_name"])
@@ -924,8 +965,7 @@ def resolve_best_predictions(
         caller. "canonical": recomputes coverage from each prediction set's parquet,
         bounded to ``canonical_window(case_study, label, split)``. Use when a case
         study's prediction sets predate a canonical-window change and raw
-        ``ic_n_days`` differs across peers only by out-of-window dates (see
-        issues/2026-07-27-eoa-risk-sweep-is-stale-relative-to-the-current-carrier.md).
+        ``ic_n_days`` differs across peers only by out-of-window dates.
         Requires ``split``.
 
     Returns
@@ -1071,8 +1111,7 @@ def _resolve_best_backtest_runs_canonical(
 
     Same replacement as ``_resolve_best_predictions_canonical``: drops
     ``full_coverage_prediction_sql`` and re-filters in Python using
-    ``canonical_coverage_days``. See
-    issues/2026-07-27-eoa-risk-sweep-is-stale-relative-to-the-current-carrier.md.
+    ``canonical_coverage_days``.
     """
     import polars as pl
 
@@ -1126,14 +1165,16 @@ def _resolve_best_backtest_runs_canonical(
         h: canonical_coverage_days(case_study, label, split, h, case_dir)
         for h in df["prediction_hash"].unique().to_list()
     }
+    bar = _canonical_family_coverage_bar(case_study, label, split, case_dir)
     df = df.with_columns(
-        pl.col("prediction_hash").replace_strict(in_window, default=None).alias("_in_window_days")
+        pl.col("prediction_hash").replace_strict(in_window, default=None).alias("_in_window_days"),
+        pl.col("family").replace_strict(bar, default=None).alias("_family_bar"),
     ).filter(pl.col("_in_window_days").is_not_null())
     if df.is_empty():
         return df
-    df = df.filter(
-        pl.col("_in_window_days") == pl.col("_in_window_days").max().over("family")
-    ).drop("_in_window_days")
+    df = df.filter(pl.col("_in_window_days") == pl.col("_family_bar")).drop(
+        "_in_window_days", "_family_bar"
+    )
 
     df = filter_active_model_rows(df, case_study)
     if df.is_empty():

@@ -121,8 +121,7 @@ print(f"Case study: {CASE_STUDY}; corrected label: {LABEL}; mode: registry read-
 # (``coverage_window="canonical"``), not the raw stored day count: this
 # registry's sweep predates the outcome-horizon seal, and some checkpoints
 # carry a few pre-seal decision dates that inflate their raw count without
-# covering any more of the modeling window. See
-# `issues/2026-07-27-eoa-risk-sweep-is-stale-relative-to-the-current-carrier.md`.
+# covering any more of the modeling window.
 
 # %%
 top_predictions = resolve_best_predictions(
@@ -216,23 +215,31 @@ latest_decision = carrier_predictions["timestamp"].max()
 latest_decision_date = (
     latest_decision.date() if hasattr(latest_decision, "date") else latest_decision
 )
-carrier_returns = sealed_daily_returns(strategy_carrier["backtest_hash"])
-if carrier_returns is None:
-    raise RuntimeError("The strategy carrier has no registered daily-return artifact")
-registered_window = (
-    carrier_returns["timestamp"].min(),
-    carrier_returns["timestamp"].max(),
+registered_returns = load_daily_returns_with_timestamp(
+    CASE_STUDY, strategy_carrier["backtest_hash"]
 )
-if registered_window != validation_window:
+if registered_returns is None:
+    raise RuntimeError("The strategy carrier has no registered daily-return artifact")
+carrier_returns = seal(registered_returns)
+# Measured on the UNSEALED frame. Sealing first makes the comparison one-sided: the
+# min/max of an already-trimmed frame can only fall short of the window, never past
+# it, so a registered artifact that overruns the seal reads as a clean match.
+registered_window = (
+    registered_returns["timestamp"].min(),
+    registered_returns["timestamp"].max(),
+)
+if registered_window[0] > validation_window[0] or registered_window[1] < validation_window[1]:
     raise RuntimeError(
         "The registered strategy carrier does not cover the canonical validation window: "
         f"registered={registered_window}, canonical={validation_window}"
     )
 dropped = len(registered_predictions) - len(carrier_predictions)
+dropped_returns = len(registered_returns) - len(carrier_returns)
 print(
     f"Sealed validation window: {validation_window[0]} to {validation_window[1]}; "
     f"carrier latest decision: {latest_decision_date}; "
-    f"decisions dropped past the seal: {dropped}"
+    f"decisions dropped past the seal: {dropped}; "
+    f"return days dropped past the seal: {dropped_returns}"
 )
 
 # %%

@@ -92,8 +92,7 @@ def canonical_coverage_days(
     predates a CV-window change. Comparing that raw stored count across prediction sets
     whose underlying arrays differ only by such out-of-window dates makes
     ``full_coverage_prediction_sql`` exclude sets that cover the modeling window
-    identically to their peers (see
-    issues/2026-07-27-eoa-risk-sweep-is-stale-relative-to-the-current-carrier.md).
+    identically to their peers.
 
     This recomputes coverage directly from the prediction parquet, bounded to the
     window, for use by the ``coverage_window="canonical"`` path of
@@ -117,7 +116,7 @@ def canonical_coverage_days(
     date_col = "timestamp" if "timestamp" in cols else ("date" if "date" in cols else None)
     if date_col is None:
         return None
-    dates = pl.scan_parquet(path).select(date_col).unique().collect().to_series()
+    dates = pl.scan_parquet(path).select(date_col).collect().to_series()
     if dates.dtype != pl.Date:
         try:
             dates = dates.cast(pl.Date)
@@ -126,6 +125,11 @@ def canonical_coverage_days(
             # "cannot evaluate" case, so it degrades to None like the others
             # rather than raising past every caller.
             return None
+    # Deduplicate AFTER the cast, never before: on an intraday case study the
+    # column is a Datetime and every timestamp within a day is distinct, so
+    # deduplicating first counts one decision date many times and the count stops
+    # being comparable to the daily `ic_n_days` it stands in for.
+    dates = dates.unique()
     lo, hi = window
     return int(((dates >= lo) & (dates <= hi)).sum())
 
