@@ -19,12 +19,12 @@ Usage:
     python -m pytest tests/test_docker_notebooks.py -v -k "18_storage_benchmark_database or ..."
 """
 
-import os
 from pathlib import Path
 
 import pytest
 
 from tests.pm_helpers import (
+    check_kernel_routing,
     collect_chapter_notebooks,
     current_test_tier,
     get_overrides,
@@ -81,15 +81,13 @@ def test_docker_notebook(notebook_path, populated_data_dir, seeded_output_dir):
     timeout = overrides.get("timeout", 300)
     parameters = overrides.get("parameters", {})
 
-    # Some py312 notebooks need a venv other than the one running pytest. A
-    # missing interpreter means the image is stale or the override is mistyped;
-    # skipping there would let the job pass without ever running the notebook.
+    # Some py312 notebooks need a venv other than the one running pytest. Broken
+    # routing means the image is stale or the override is mistyped; skipping there
+    # would let the job pass without ever running the notebook.
+    routing_problem = check_kernel_routing(overrides)
+    if routing_problem:
+        pytest.fail(f"{rel_path}: {routing_problem}")
     kernel_python = overrides.get("kernel_python")
-    if kernel_python and not os.access(kernel_python, os.X_OK):
-        pytest.fail(
-            f"overrides.yaml routes {rel_path} to {kernel_python}, which is not "
-            f"executable in this image. Rebuild or repull the {overrides.get('docker_env')} image."
-        )
     launcher = overrides.get("kernel_launcher")
     kernel_launcher = REPO_ROOT / launcher if launcher else None
 

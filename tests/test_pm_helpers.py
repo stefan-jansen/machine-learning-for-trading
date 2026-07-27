@@ -9,6 +9,7 @@ from tests.pm_helpers import (
     TIER_ON_DEMAND,
     TIER_PER_COMMIT,
     TIER_WEEKLY,
+    check_kernel_routing,
     collect_chapter_notebooks,
     current_test_tier,
     get_record_mode,
@@ -163,3 +164,54 @@ def test_credential_gated_notebooks_declare_requires_env_not_skip() -> None:
     }
 
     assert hard_skipped_despite_a_gate == set()
+
+
+def test_check_kernel_routing_passes_when_no_interpreter_is_declared() -> None:
+    assert check_kernel_routing({"timeout": 300}) is None
+
+
+def test_check_kernel_routing_rejects_a_missing_interpreter() -> None:
+    problem = check_kernel_routing({"kernel_python": "/opt/nope/bin/python", "docker_env": "py312"})
+
+    assert problem is not None
+    assert "/opt/nope/bin/python" in problem
+    assert "py312" in problem
+
+
+def test_check_kernel_routing_names_no_image_when_the_override_declares_none() -> None:
+    """`docker_env` is optional, and "Rebuild the None image" is worse than silence."""
+    problem = check_kernel_routing({"kernel_python": "/opt/nope/bin/python"})
+
+    assert problem is not None
+    assert "None" not in problem
+
+
+def test_check_kernel_routing_rejects_a_missing_launcher(tmp_path: Path) -> None:
+    """The launcher goes into the kernelspec argv unchecked; a bad path kills the
+    kernel at startup with an error that says nothing about the launcher."""
+    interpreter = tmp_path / "python"
+    interpreter.write_text("#!/bin/sh\n")
+    interpreter.chmod(0o755)
+
+    problem = check_kernel_routing(
+        {"kernel_python": str(interpreter), "kernel_launcher": "envs/py312/does_not_exist.py"}
+    )
+
+    assert problem is not None
+    assert "does_not_exist.py" in problem
+
+
+def test_check_kernel_routing_accepts_a_resolvable_interpreter_and_launcher(tmp_path: Path) -> None:
+    interpreter = tmp_path / "python"
+    interpreter.write_text("#!/bin/sh\n")
+    interpreter.chmod(0o755)
+
+    assert (
+        check_kernel_routing(
+            {
+                "kernel_python": str(interpreter),
+                "kernel_launcher": "envs/py312/bsts_kernel.py",
+            }
+        )
+        is None
+    )
