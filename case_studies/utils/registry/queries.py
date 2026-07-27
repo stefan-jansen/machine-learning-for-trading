@@ -770,6 +770,10 @@ def _canonical_family_coverage_bar(
     qualifies - which is exactly what ``full_coverage_prediction_sql`` prevents on the
     raw path, where the ``MAX(ic_n_days)`` subquery ranges over all of
     ``(split, family, label)`` with no stage restriction.
+
+    Requires a ``prediction_metrics`` row, matching the raw path's implicit
+    requirement (``full_coverage_prediction_sql`` joins ``pm``): a prediction set
+    whose metrics were never computed can't set the bar other candidates must meet.
     """
     exclude_clause, exclude_params = excluded_family_sql(case_study, "t.family")
     degenerate_clause = degenerate_prediction_sql("p.prediction_hash")
@@ -777,6 +781,7 @@ def _canonical_family_coverage_bar(
         SELECT p.prediction_hash, t.family
         FROM prediction_sets p
         JOIN training_runs t ON p.training_hash = t.training_hash
+        JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
         WHERE t.label = ?
           AND p.split = ?
           {exclude_clause}

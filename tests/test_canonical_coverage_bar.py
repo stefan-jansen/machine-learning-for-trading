@@ -31,10 +31,15 @@ def case_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT
         );
         CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+        CREATE TABLE prediction_metrics (prediction_hash TEXT PRIMARY KEY);
     """)
     db.execute("INSERT INTO training_runs VALUES ('T1', 'gbm', 'fwd_ret_5d', 'leaves_7')")
     db.executemany(
         "INSERT INTO prediction_sets VALUES (?, 'T1', 'validation')",
+        [("full",), ("short",)],
+    )
+    db.executemany(
+        "INSERT INTO prediction_metrics VALUES (?)",
         [("full",), ("short",)],
     )
     db.commit()
@@ -71,6 +76,49 @@ def test_a_prediction_that_cannot_be_evaluated_does_not_set_the_bar(
     bar = queries._canonical_family_coverage_bar("fixture", "fwd_ret_5d", "validation", case_dir)
 
     assert bar == {"gbm": 480}
+
+
+def test_a_prediction_without_metrics_does_not_set_the_bar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prediction_set committed before its metrics finished computing must not set
+    the family bar - full_coverage_prediction_sql requires a prediction_metrics row
+    on the raw path (it joins pm), so the canonical bar must too."""
+    run_log = tmp_path / "run_log"
+    run_log.mkdir(parents=True)
+    db = sqlite3.connect(run_log / "registry.db")
+    db.executescript("""
+        CREATE TABLE training_runs (
+            training_hash TEXT PRIMARY KEY, family TEXT, label TEXT, config_name TEXT
+        );
+        CREATE TABLE prediction_sets (
+            prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT
+        );
+        CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+        CREATE TABLE prediction_metrics (prediction_hash TEXT PRIMARY KEY);
+    """)
+    db.execute("INSERT INTO training_runs VALUES ('T1', 'gbm', 'fwd_ret_5d', 'leaves_7')")
+    db.executemany(
+        "INSERT INTO prediction_sets VALUES (?, 'T1', 'validation')",
+        [("full",), ("short",)],
+    )
+    # Only 'short' has a prediction_metrics row - 'full' is metricless.
+    db.execute("INSERT INTO prediction_metrics VALUES ('short')")
+    db.commit()
+    db.close()
+
+    monkeypatch.setattr(
+        queries,
+        "canonical_coverage_days",
+        lambda cs, label, split, prediction_hash, cdir: COVERAGE.get(prediction_hash),
+    )
+
+    bar = queries._canonical_family_coverage_bar("fixture", "fwd_ret_5d", "validation", tmp_path)
+
+    assert bar == {"gbm": 480}, (
+        "the metricless 'full' prediction (coverage 500) must not set the bar - "
+        "only 'short' (coverage 480, has a prediction_metrics row) is eligible"
+    )
 
 
 def test_an_empty_universe_yields_no_bar(tmp_path: Path) -> None:
