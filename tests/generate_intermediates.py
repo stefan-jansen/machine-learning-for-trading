@@ -38,11 +38,11 @@ from pathlib import Path
 import yaml
 
 try:
-    from tests.conftest import _patch_presets_for_testing
     from tests.pm_helpers import get_overrides, run_notebook
+    from tests.preset_patches import _patch_presets_for_testing
 except ModuleNotFoundError:
-    from conftest import _patch_presets_for_testing
     from pm_helpers import get_overrides, run_notebook
+    from preset_patches import _patch_presets_for_testing
 
 REPO_ROOT = Path(__file__).parent.parent
 
