@@ -575,6 +575,13 @@ jobs:
             echo "Seeded $(du -sh $ML4T_OUTPUT_DIR | cut -f1) of intermediates"
           fi
 
+      # ml4t/ml4t:latest only bakes in pytest + pytest-timeout (envs/ml4t/Dockerfile);
+      # pytest-rerunfailures lives in the dev extra, which this image doesn't install.
+      # Without it, overrides.yaml's `reruns:` key (tests/conftest.py) silently adds no
+      # retry marker, so a notebook marked flaky just fails outright here.
+      - name: Install pytest-rerunfailures
+        run: pip install --no-cache-dir "pytest-rerunfailures>=15.0"
+
       - name: Run pipeline (${{ matrix.case-study }})
         env:
           PYTHONPATH: ${{ github.workspace }}
