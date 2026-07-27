@@ -394,9 +394,6 @@ fig.update_layout(
     height=400,
 )
 
-# Emit an inline PNG mimebundle so figure-extraction / publication tooling can
-# pick up a static raster, then show the interactive figure.
-fig.show("png")
 fig.show()
 
 # %% [markdown]
