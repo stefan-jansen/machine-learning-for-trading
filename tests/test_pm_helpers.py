@@ -145,7 +145,12 @@ def test_missing_required_env_reports_only_the_absent_ones(
     ]
 
 
-def test_credential_gated_notebooks_declare_requires_env_not_skip() -> None:
+@pytest.fixture(scope="module")
+def overrides() -> dict:
+    return yaml.safe_load((Path(__file__).parent / "overrides.yaml").read_text())
+
+
+def test_credential_gated_notebooks_declare_requires_env_not_skip(overrides: dict) -> None:
     """A notebook blocked only on a credential must be gated, never hard-skipped.
 
     ``skip: true`` is unconditional and is checked after tier routing, so a
@@ -156,8 +161,6 @@ def test_credential_gated_notebooks_declare_requires_env_not_skip() -> None:
     say: an entry carrying both keys is hard-skipped whatever reason it gives, and
     matching on the reason text would let it through under any other wording.
     """
-    overrides = yaml.safe_load((Path(__file__).parent / "overrides.yaml").read_text())
-
     hard_skipped_despite_a_gate = {
         key
         for key, value in overrides.items()
@@ -246,18 +249,36 @@ def test_check_kernel_routing_returns_what_it_validated(
     assert routing.launcher == launcher
 
 
-def test_no_override_declares_a_launcher_without_an_interpreter() -> None:
-    """check_kernel_routing only fires for a notebook a Docker job selects, and CI
-    runs those under -k. A static sweep catches the misconfiguration in an entry
-    nothing currently selects."""
-    overrides = yaml.safe_load((Path(__file__).parent / "overrides.yaml").read_text())
+def test_every_declared_kernel_launcher_resolves(overrides: dict) -> None:
+    """Launcher existence is checkable statically, and nothing else checks it.
 
-    launcher_without_interpreter = {
-        key
+    `check_kernel_routing` only runs for a notebook a Docker job selects, and CI
+    selects under `-k`, so a moved or mistyped launcher in an unselected entry stays
+    invisible. The interpreter cannot be swept this way - its executability depends
+    on the image - but the launcher lives in the repo.
+    """
+    unresolvable = {
+        key: value["kernel_launcher"]
         for key, value in overrides.items()
         if isinstance(value, dict)
         and value.get("kernel_launcher")
-        and not value.get("kernel_python")
+        and not (pm_helpers.REPO_ROOT / value["kernel_launcher"]).is_file()
     }
 
-    assert launcher_without_interpreter == set()
+    assert unresolvable == {}
+
+
+def test_no_override_declares_a_launcher_without_an_interpreter(overrides: dict) -> None:
+    """Driven through the real function rather than a copy of its predicate, so the
+    sweep cannot keep asserting a rule the runtime has stopped applying. Entries
+    without `kernel_python` never reach the executability branch, so this stays
+    independent of the image."""
+    rejected = {
+        key
+        for key, value in overrides.items()
+        if isinstance(value, dict)
+        and not value.get("kernel_python")
+        and check_kernel_routing({"kernel_launcher": value.get("kernel_launcher")}).problem
+    }
+
+    assert rejected == set()
