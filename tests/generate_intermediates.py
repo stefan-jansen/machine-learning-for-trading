@@ -72,10 +72,10 @@ DL_STAGE_PATTERNS = re.compile(
 # ---------------------------------------------------------------------------
 
 # _patch_presets_for_testing (and the _TEST_PRESET_PATCHES it reads) is
-# imported from tests/conftest.py rather than duplicated here: two copies of
-# the same workload-reduction table drift the moment one gets a fix the other
-# doesn't (e.g. IPCA's factor_ridge/gamma_ridge regularization), silently
-# regenerating fixtures against the stale values.
+# imported from tests/preset_patches.py rather than duplicated here: two
+# copies of the same workload-reduction table drift the moment one gets a
+# fix the other doesn't (e.g. IPCA's factor_ridge/gamma_ridge
+# regularization), silently regenerating fixtures against the stale values.
 
 _MAX_CONFIGS_PER_FAMILY = 2
 _TRIM_FAMILIES = {"linear", "gbm"}

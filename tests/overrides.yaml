@@ -2025,7 +2025,7 @@ case_studies/sp500_equity_option_analytics/11b_ipca:
   # attempts, 2026-07-27, ruling out run-to-run jitter: this is a genuine
   # cross-architecture floating-point divergence on a near-singular ALS
   # system, not noise). The real defect is under-regularization, not a
-  # convergence budget: _TEST_PRESET_PATCHES["ipca"] (tests/conftest.py) now
+  # convergence budget: _TEST_PRESET_PATCHES["ipca"] (tests/preset_patches.py) now
   # sets factor_ridge/gamma_ridge=1e-2 (up from the model's 1e-6 default),
   # which is test-only Tikhonov regularization on top of the shipped
   # notebook's own K=2/MAX_VARIANT_LABELS choice above - it does not touch
