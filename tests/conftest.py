@@ -295,7 +295,7 @@ _TEST_PRESET_PATCHES: dict[str, dict] = {
     # ml4t-models build defaults max_iter to 10,000 and nothing on this path
     # narrows it. Patching a smaller number here would lower the budget, not
     # raise it.
-    "ipca": {"n_epochs": 2, "checkpoint_interval": 1},
+    "ipca": {"n_epochs": 2, "checkpoint_interval": 1, "factor_ridge": 1e-2, "gamma_ridge": 1e-2},
 }
 
 
