@@ -15,9 +15,59 @@ ACCEPTED_DEEP_PRODUCERS: dict[str, tuple[str, str]] = {
     "patchtst": ("b19c49228948", "c592ca4defbb"),
 }
 
+# The deep cohort's composition: which configurations the sweep accepts, and that
+# each contributes exactly one registered validation prediction set. This holds
+# wherever the pipeline has run, including against retrained models.
+ACCEPTED_DEEP_CONFIGS: frozenset[str] = frozenset(ACCEPTED_DEEP_PRODUCERS)
 
-def validate_accepted_deep_predictions(prediction_index: pl.DataFrame) -> pl.DataFrame:
-    """Require the accepted LSTM and PatchTST identities in a full sweep."""
+
+def _check_deep_cohort(
+    pairs: list[tuple[str, str, str]],
+    *,
+    require_pinned_identity: bool,
+    source: str,
+) -> dict[str, tuple[str, str]]:
+    """Check cohort composition, and identity when the caller asks for it.
+
+    ``pairs`` is one ``(config_name, training_hash, prediction_hash)`` per registered
+    validation prediction set in the deep-learning family.
+
+    Composition - exactly the accepted configurations, one prediction set each - is
+    checked always. The pinned hashes identify the specific production execution and
+    are only checkable where that execution's artifacts are what is being read; a
+    retrained model registers different hashes by construction.
+    """
+    counts: dict[str, int] = {}
+    observed: dict[str, tuple[str, str]] = {}
+    for config_name, training_hash, prediction_hash in pairs:
+        counts[config_name] = counts.get(config_name, 0) + 1
+        observed[config_name] = (training_hash, prediction_hash)
+
+    if set(observed) != ACCEPTED_DEEP_CONFIGS:
+        raise RuntimeError(
+            f"{source} deep cohort is not the accepted set: "
+            f"expected {sorted(ACCEPTED_DEEP_CONFIGS)}, observed {sorted(observed)}"
+        )
+    duplicated = sorted(name for name, count in counts.items() if count > 1)
+    if duplicated:
+        raise RuntimeError(
+            f"{source} deep cohort has more than one validation prediction set for "
+            f"{duplicated}; prediction identity is ambiguous"
+        )
+    if require_pinned_identity and observed != ACCEPTED_DEEP_PRODUCERS:
+        raise RuntimeError(
+            f"{source} deep-producer identity mismatch: "
+            f"expected {ACCEPTED_DEEP_PRODUCERS!r}, observed {observed!r}"
+        )
+    return observed
+
+
+def validate_accepted_deep_predictions(
+    prediction_index: pl.DataFrame,
+    *,
+    require_pinned_identity: bool = True,
+) -> pl.DataFrame:
+    """Require the accepted LSTM and PatchTST cohort in a full sweep."""
     required = {"family", "config_name", "training_hash", "prediction_hash"}
     missing = required - set(prediction_index.columns)
     if missing:
@@ -25,17 +75,13 @@ def validate_accepted_deep_predictions(prediction_index: pl.DataFrame) -> pl.Dat
             f"Prediction index cannot validate accepted deep producers; missing {sorted(missing)}"
         )
 
-    observed = {
-        row["config_name"]: (row["training_hash"], row["prediction_hash"])
+    pairs = [
+        (row["config_name"], row["training_hash"], row["prediction_hash"])
         for row in prediction_index.filter(pl.col("family") == "deep_learning").iter_rows(
             named=True
         )
-    }
-    if observed != ACCEPTED_DEEP_PRODUCERS:
-        raise RuntimeError(
-            "Deep-producer identity mismatch: "
-            f"expected {ACCEPTED_DEEP_PRODUCERS!r}, observed {observed!r}"
-        )
+    ]
+    _check_deep_cohort(pairs, require_pinned_identity=require_pinned_identity, source="Prediction")
     return prediction_index
 
 
@@ -43,8 +89,12 @@ def _read_only_registry(db_path: Path) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
 
 
-def assert_accepted_deep_registry(db_path: Path) -> None:
-    """Fail unless the registry carries exactly the accepted deep producer pairs."""
+def assert_accepted_deep_registry(
+    db_path: Path,
+    *,
+    require_pinned_identity: bool = True,
+) -> dict[str, tuple[str, str]]:
+    """Fail unless the registry carries exactly the accepted deep cohort."""
     if not db_path.exists():
         raise FileNotFoundError(f"Registry does not exist: {db_path}")
     with _read_only_registry(db_path) as db:
@@ -56,20 +106,21 @@ def assert_accepted_deep_registry(db_path: Path) -> None:
             WHERE t.family = 'deep_learning' AND p.split = 'validation'
             """
         ).fetchall()
-    observed = {
-        config: (training_hash, prediction_hash) for config, training_hash, prediction_hash in rows
-    }
-    if observed != ACCEPTED_DEEP_PRODUCERS:
-        raise RuntimeError(
-            "Registry deep-producer identity mismatch: "
-            f"expected {ACCEPTED_DEEP_PRODUCERS!r}, observed {observed!r}"
-        )
+    return _check_deep_cohort(
+        list(rows), require_pinned_identity=require_pinned_identity, source="Registry"
+    )
 
 
-def assert_accepted_deep_baselines(db_path: Path) -> None:
+def assert_accepted_deep_baselines(
+    db_path: Path,
+    *,
+    require_pinned_identity: bool = True,
+) -> None:
     """Require baseline backtests for both accepted deep predictions."""
-    assert_accepted_deep_registry(db_path)
-    prediction_hashes = [pair[1] for pair in ACCEPTED_DEEP_PRODUCERS.values()]
+    observed = assert_accepted_deep_registry(
+        db_path, require_pinned_identity=require_pinned_identity
+    )
+    prediction_hashes = [pair[1] for pair in observed.values()]
     placeholders = ",".join("?" for _ in prediction_hashes)
     with _read_only_registry(db_path) as db:
         rows = db.execute(

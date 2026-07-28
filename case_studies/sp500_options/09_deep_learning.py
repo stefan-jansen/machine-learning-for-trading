@@ -41,6 +41,10 @@ warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_options"
+# The pinned training and prediction hashes identify the published execution. Set
+# False when reading a registry built by retraining these producers, which
+# registers different hashes; the cohort's composition is checked either way.
+REQUIRE_PINNED_DEEP_IDENTITY = True
 
 # %% [markdown]
 # ## Current Registered Result
@@ -52,7 +56,8 @@ accepted = validate_accepted_deep_predictions(
         label="ret_to_expiry",
         split="validation",
         family="deep_learning",
-    )
+    ),
+    require_pinned_identity=REQUIRE_PINNED_DEEP_IDENTITY,
 )
 if accepted.height != len(ACCEPTED_DEEP_PRODUCERS):
     raise RuntimeError(
