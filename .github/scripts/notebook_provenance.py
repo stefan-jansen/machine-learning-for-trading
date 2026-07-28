@@ -27,12 +27,19 @@ Notebooks WITHOUT a stamp are reported as "unverified" but do not fail unless
 as they are re-run through the canonical path, and the gate enforces only where
 provenance exists. Flip to ``--strict`` once the backfill is complete.
 
+**Where this gate runs.** It gates the *merge*, not the commit. Run on every local commit over every
+notebook in the repo, one stale notebook anywhere blocked every commit by every agent — including
+commits touching no notebook at all — so work could not be checkpointed. A stale render only reaches
+a reader through a merge, so the gate runs in CI on the pull request, over the notebooks that pull
+request changes. Run it locally against your branch whenever you want the same answer early.
+
 Usage::
 
     uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu
     uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --notes "..."
-    uv run python .github/scripts/notebook_provenance.py check          # gate (stamped-only)
-    uv run python .github/scripts/notebook_provenance.py check --strict  # also fail on unverified
+    uv run python .github/scripts/notebook_provenance.py check              # whole repo
+    uv run python .github/scripts/notebook_provenance.py check --strict     # also fail on unverified
+    uv run python .github/scripts/notebook_provenance.py check --since origin/main   # this branch only
 """
 
 from __future__ import annotations
@@ -87,6 +94,32 @@ def iter_notebooks() -> list[Path]:
     return sorted(out)
 
 
+def notebooks_changed_since(ref: str) -> list[Path]:
+    """Notebooks this branch is answerable for, relative to ``ref``.
+
+    A branch owns a notebook if it edited the notebook OR edited the paired
+    ``.py``, since changing the ``.py`` is exactly what makes the rendered
+    notebook stale. Notebooks nobody on this branch touched are somebody else's.
+    """
+    diff = subprocess.run(
+        ["git", "diff", "--name-only", f"{ref}...HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    owned: set[Path] = set()
+    for name in diff:
+        path = REPO_ROOT / name
+        if path.suffix == ".ipynb":
+            owned.add(path)
+        elif path.suffix == ".py":
+            nb = path.with_suffix(".ipynb")
+            if nb.exists():
+                owned.add(nb)
+    return sorted(p for p in owned if p.exists() and not (SKIP_PARTS & set(p.parts)))
+
+
 def paired_py(nb_path: Path) -> Path | None:
     """The .py jupytext-paired to this notebook (same dir + stem). None if absent."""
     cand = nb_path.with_suffix(".py")
@@ -124,12 +157,17 @@ def stamp_notebook(nb_path: Path, executor: str, notes: str | None = None) -> di
     return stamp
 
 
-def check_all(strict: bool = False) -> tuple[list[str], list[str], list[str]]:
-    """Return (stale, testmode, unverified) lists of repo-relative offenders."""
+def check_all(
+    strict: bool = False, notebooks: list[Path] | None = None
+) -> tuple[list[str], list[str], list[str]]:
+    """Return (stale, testmode, unverified) lists of repo-relative offenders.
+
+    ``notebooks`` restricts the scan; None means every tracked notebook.
+    """
     stale: list[str] = []
     testmode: list[str] = []
     unverified: list[str] = []
-    for nb_path in iter_notebooks():
+    for nb_path in iter_notebooks() if notebooks is None else notebooks:
         rel = str(nb_path.relative_to(REPO_ROOT))
         py = paired_py(nb_path)
         if py is None:
@@ -159,7 +197,17 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
-    stale, testmode, unverified = check_all(strict=args.strict)
+    scope = None
+    if args.since:
+        scope = notebooks_changed_since(args.since)
+        if not scope:
+            print(f"notebook sync OK: no notebook is changed relative to {args.since}")
+            return 0
+        print(f"checking {len(scope)} notebook(s) changed relative to {args.since}:")
+        for nb in scope:
+            print(f"  {nb.relative_to(REPO_ROOT)}")
+        print()
+    stale, testmode, unverified = check_all(strict=args.strict, notebooks=scope)
     fail = bool(stale or testmode) or (args.strict and bool(unverified))
     if stale:
         print(
@@ -203,6 +251,13 @@ def main() -> int:
 
     cp = sub.add_parser("check", help="gate: fail on stale or test-mode stamped notebooks")
     cp.add_argument("--strict", action="store_true", help="also fail on unstamped notebooks")
+    cp.add_argument(
+        "--since",
+        default=None,
+        metavar="REF",
+        help="check only notebooks this branch changed relative to REF (e.g. origin/main), "
+        "counting a notebook as changed when its paired .py changed",
+    )
     cp.set_defaults(func=_cmd_check)
 
     args = ap.parse_args()
