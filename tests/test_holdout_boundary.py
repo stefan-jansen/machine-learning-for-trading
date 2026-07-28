@@ -30,7 +30,7 @@ HOLDOUT_SCOPED_NOTEBOOKS = [
     ("08_financial_features/05_feature_selection.py", "ic_by_date"),
     ("08_financial_features/06_robustness_sensitivity.py", "def compute_momentum_ic_series"),
     ("case_studies/etfs/03_financial_features.py", "ic_matrix = np.full"),
-    ("case_studies/etfs/02_labels.py", "def compute_ic_by_date"),
+    ("case_studies/etfs/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/etfs/05_evaluation.py", "ic_series_data = {feat"),
 ]
 
