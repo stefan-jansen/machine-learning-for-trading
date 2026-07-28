@@ -353,8 +353,14 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
         # backtest_runs sample is. Filtering by leader_hash membership in the sample
         # is sufficient and correct: a row whose leader was not sampled would fail the
         # same JOIN downstream anyway, so it is dropped exactly like an FK would.
+        has_cohort_metrics = (
+            src.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cohort_metrics'"
+            ).fetchone()
+            is not None
+        )
         count = 0
-        try:
+        if has_cohort_metrics:
             for i in range(0, len(hash_list), batch_size):
                 batch = hash_list[i : i + batch_size]
                 placeholders = ",".join(["?"] * len(batch))
@@ -363,8 +369,6 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
                     batch,
                 ).fetchall()
                 count += _copy_rows(src, dst, "cohort_metrics", rows)
-        except sqlite3.OperationalError:
-            count = 0
         stats["cohort_metrics"] = count
 
     dst.commit()

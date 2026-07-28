@@ -37,8 +37,16 @@ def _build_source_db(path: Path) -> None:
         );
         CREATE TABLE backtest_metrics (backtest_hash TEXT PRIMARY KEY, sharpe REAL);
         CREATE TABLE backtest_fold_metrics (backtest_hash TEXT, fold INTEGER);
+        CREATE TABLE cohort_metrics (cohort_type TEXT, label TEXT, leader_hash TEXT);
     """)
     db.execute("INSERT INTO training_runs VALUES ('T1', 'gbm')")
+    # One leader whose backtest_hash survives sampling (P1's signal row, one of only
+    # two in its stage/family bucket) and one whose leader_hash was never a real
+    # backtest_run at all, standing in for a leader that sampling dropped - a
+    # strategy-analysis notebook's JOIN through leader_hash must drop the latter and
+    # keep the former.
+    db.execute("INSERT INTO cohort_metrics VALUES ('stagelabel', 'labelA', 'P1_signal_0')")
+    db.execute("INSERT INTO cohort_metrics VALUES ('stagelabel', 'labelA', 'GHOST_NOT_SAMPLED')")
     for pred in ("P1", "P2"):
         db.execute("INSERT INTO prediction_sets VALUES (?, 'T1', 'validation')", (pred,))
         db.execute("INSERT INTO prediction_metrics VALUES (?, 0.01)", (pred,))
@@ -126,6 +134,18 @@ def test_metrics_follow_every_completed_row(tmp_path: Path) -> None:
             WHERE m.backtest_hash IS NULL
         """).fetchone()[0]
         assert orphans == 0
+    finally:
+        dst.close()
+
+
+def test_cohort_metrics_keeps_only_sampled_leaders(tmp_path: Path) -> None:
+    """A cohort row's leader_hash must survive the JOIN a downstream notebook makes
+    against backtest_runs, or resolving the frozen carrier fails outright regardless
+    of how complete the rest of the sample is."""
+    dst = _sample(tmp_path)
+    try:
+        leaders = {r[0] for r in dst.execute("SELECT leader_hash FROM cohort_metrics").fetchall()}
+        assert leaders == {"P1_signal_0"}
     finally:
         dst.close()
 
