@@ -115,8 +115,8 @@ if missing_temporal:
 validation_frames = []
 for split in raw_splits:
     fold = int(split["fold"])
-    val_start = date.fromisoformat(split["val_start"])
-    val_end = date.fromisoformat(split["val_end"])
+    val_start = split["val_start"]
+    val_end = split["val_end"]
     validation_frames.append(
         model_based.filter(
             (pl.col("fold") == fold)
