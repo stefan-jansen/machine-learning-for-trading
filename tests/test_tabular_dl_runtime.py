@@ -187,7 +187,7 @@ def test_tabm_training_identity_covers_every_effective_input() -> None:
         "checkpoint_interval": 25,
     }
     runtime = tabular_dl.tabm_runtime_spec("cpu", seed=42)
-    baseline = tabular_dl._build_tabm_training_spec(
+    baseline = tabular_dl.build_tabm_training_spec(
         config,
         label_col="fwd_class_1m",
         n_folds=10,
@@ -204,7 +204,7 @@ def test_tabm_training_identity_covers_every_effective_input() -> None:
         {**config, "checkpoint_interval": 15},
     ]
     specs = [
-        tabular_dl._build_tabm_training_spec(
+        tabular_dl.build_tabm_training_spec(
             variant,
             label_col="fwd_class_1m",
             n_folds=10,
@@ -219,7 +219,7 @@ def test_tabm_training_identity_covers_every_effective_input() -> None:
     ]
     specs.extend(
         [
-            tabular_dl._build_tabm_training_spec(
+            tabular_dl.build_tabm_training_spec(
                 config,
                 label_col="fwd_class_1m",
                 n_folds=10,
@@ -230,7 +230,7 @@ def test_tabm_training_identity_covers_every_effective_input() -> None:
                 runtime_spec=runtime,
                 seed=42,
             ),
-            tabular_dl._build_tabm_training_spec(
+            tabular_dl.build_tabm_training_spec(
                 config,
                 label_col="fwd_class_1m",
                 n_folds=10,
@@ -241,7 +241,7 @@ def test_tabm_training_identity_covers_every_effective_input() -> None:
                 runtime_spec=runtime,
                 seed=42,
             ),
-            tabular_dl._build_tabm_training_spec(
+            tabular_dl.build_tabm_training_spec(
                 config,
                 label_col="fwd_class_1m",
                 n_folds=10,

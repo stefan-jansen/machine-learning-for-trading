@@ -90,7 +90,7 @@ def _tabm_checkpoint_epochs(config: dict[str, Any]) -> tuple[int, ...]:
     return tuple(checkpoints)
 
 
-def _build_tabm_training_spec(
+def build_tabm_training_spec(
     config: dict[str, Any],
     *,
     label_col: str,
@@ -759,7 +759,7 @@ def run_tabm_cv(
         }
     else:
         training_specs = {
-            cfg["config_name"]: _build_tabm_training_spec(
+            cfg["config_name"]: build_tabm_training_spec(
                 cfg,
                 label_col=label_col,
                 n_folds=len(splits),

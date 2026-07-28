@@ -48,14 +48,13 @@ from IPython.display import Markdown, display
 
 from case_studies.utils.latent_factors.case_study import _training_input_identity
 from case_studies.utils.registry import (
-    build_training_spec,
     load_prediction_metrics,
     load_prediction_sets,
     training_hash_from_spec,
     training_run_status,
 )
-from case_studies.utils.tabular_dl import run_tabm_cv
-from utils.modeling import load_configs, load_modeling_dataset
+from case_studies.utils.tabular_dl import build_tabm_training_spec, run_tabm_cv, tabm_runtime_spec
+from utils.modeling import RANDOM_SEED, load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
 from utils.style import COLORS
 
@@ -87,6 +86,10 @@ MODELS = tdl_config.get("models", ["tabm"])
 DEVICE = tdl_config.get("device", "gpu")
 
 device_str = "cuda" if DEVICE == "gpu" and torch.cuda.is_available() else "cpu"
+# Matches the runtime_spec run_tabm_cv computes internally (same device/seed/
+# num_threads defaults) — the registry lookup below must hash identically to
+# what training registers, or a freshly trained config can never be read back.
+runtime_spec = tabm_runtime_spec(device_str, seed=RANDOM_SEED, num_threads=8)
 print(f"Case study: {CASE_STUDY_ID}")
 print(f"Device: {device_str} | Models: {MODELS}")
 print(f"Retrain epoch budget: {N_EPOCHS} | Batch: {BATCH_SIZE} (used only for uncached configs)")
@@ -186,16 +189,18 @@ def _rebuild_from_registry(cfg: dict) -> dict | None:
     fresh reader who deleted the registry), in which case it is queued for
     training below.
     """
-    spec = build_training_spec(
-        cfg["family"],
-        cfg["config_name"],
-        label_col,
+    spec = build_tabm_training_spec(
+        cfg,
+        label_col=label_col,
         n_folds=len(splits),
-        n_epochs=cfg.get("n_epochs"),
-        extra_params={
-            "batch_size": cfg.get("batch_size", BATCH_SIZE),
-            "input_data_spec": input_data_spec,
-        },
+        feature_names=feature_names,
+        eval_label_col=None,
+        task_type="regression",
+        class_values=None,
+        runtime_spec=runtime_spec,
+        seed=RANDOM_SEED,
+        splits=splits,
+        input_data_spec=input_data_spec,
     )
     status = training_run_status(CASE_STUDY_ID, spec)
     t_hash = training_hash_from_spec(spec)
