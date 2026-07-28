@@ -768,7 +768,9 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     never claim decisions outside the split it is registered under. Predictions
     are random noise. Crypto artifacts are normalized even when copied
     intermediates exist because its model analysis requires one common key and
-    target panel.
+    target panel - except each label's cohort-leader prediction, which a
+    replay notebook pins by hash and checks against real historical values;
+    those keep whatever real artifact already exists on disk.
     """
     db_path = cs_dir / "run_log" / "registry.db"
     if not db_path.exists():
@@ -807,6 +809,26 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
             (r[0], None, None)
             for r in db.execute("SELECT prediction_hash FROM prediction_sets").fetchall()
         ]
+    # Cohort-leader predictions - the frozen carrier a strategy-analysis/portfolio/
+    # cost/risk notebook resolves via cohort_metrics(cohort_type='stagelabel',
+    # stage='signal') and pins by hash. Those notebooks check the carrier's real
+    # historical target against real raw prices (e.g. a >0.99 correlation gate), which
+    # synthetic noise can never satisfy - so these hashes keep whatever real artifact
+    # is already on disk instead of being swept into the generic rewrite below.
+    try:
+        cohort_leader_hashes = {
+            r[0]
+            for r in db.execute(
+                """
+                SELECT DISTINCT b.prediction_hash
+                FROM cohort_metrics c
+                JOIN backtest_runs b ON b.backtest_hash = c.leader_hash
+                WHERE c.cohort_type = 'stagelabel' AND c.stage = 'signal'
+                """
+            ).fetchall()
+        }
+    except sqlite3.OperationalError:
+        cohort_leader_hashes = set()
     db.close()
     if not hash_rows:
         return
@@ -928,7 +950,7 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     for p_hash, split, label in hash_rows:
         pred_dir = cs_dir / "run_log" / "predictions" / p_hash
         pred_file = pred_dir / "predictions.parquet"
-        if pred_file.exists() and not rewrite_existing:
+        if pred_file.exists() and (p_hash in cohort_leader_hashes or not rewrite_existing):
             continue
         template, n = _template_for(_window_for(split, label))
         pred_dir.mkdir(parents=True, exist_ok=True)

@@ -323,7 +323,14 @@ if not using_reduced_grid:
             ]
         )
     )
-if len(risk_cells) != EXPECTED_REPLAY_RISK_CELLS:
+if using_reduced_grid:
+    # EXPECTED_REPLAY_RISK_CELLS is the full production count (14 fixed rules plus one
+    # recalibrated MAE replacement). MAX_RISK_VARIANTS truncates risk_cells before this
+    # point specifically to skip that recalibration, so the reduced count is never 20 by
+    # design - only a sanity check applies here, not the production identity pin.
+    if not risk_cells:
+        raise RuntimeError("Reduced risk grid produced no eligible rules")
+elif len(risk_cells) != EXPECTED_REPLAY_RISK_CELLS:
     raise RuntimeError(
         f"Expected {EXPECTED_REPLAY_RISK_CELLS} eligible risk rules, found {len(risk_cells)}"
     )

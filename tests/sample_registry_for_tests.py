@@ -266,7 +266,35 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
     for row in src.execute(holdout_sql).fetchall():
         sampled_bt_hashes.add(row[0])
 
-    # 3c. Complete the downstream surface of every prediction sampled so far.
+    # 3c. Seed the FULL backtest grid (every stage) for each label's cohort leader -
+    # the frozen carrier a strategy-analysis notebook resolves via
+    # cohort_metrics(cohort_type='stagelabel', stage='signal'), same query
+    # `_baseline_leaders`-style notebooks use. Top-N-per-(family, stage) does not
+    # guarantee this specific prediction survives sampling: it may not dominate its
+    # family's |Sharpe| bucket in every stage. A notebook that pins an exact row
+    # count for the leader's own allocation/cost/risk grid then fails against an
+    # incomplete sample even though production satisfies it - the fixture would be
+    # testing its own sampling artifact, not the notebook.
+    leader_sql = """
+        SELECT DISTINCT b.prediction_hash
+        FROM cohort_metrics c
+        JOIN backtest_runs b ON b.backtest_hash = c.leader_hash
+        WHERE c.cohort_type = 'stagelabel' AND c.stage = 'signal'
+    """
+    leader_prediction_hashes = {row[0] for row in src.execute(leader_sql).fetchall()}
+    if leader_prediction_hashes:
+        ph_list = list(leader_prediction_hashes)
+        full_grid_sql = """
+            SELECT backtest_hash FROM backtest_runs
+            WHERE prediction_hash IN ({placeholders})
+        """
+        for i in range(0, len(ph_list), 500):
+            batch = ph_list[i : i + 500]
+            sql = full_grid_sql.format(placeholders=",".join(["?"] * len(batch)))
+            for row in src.execute(sql, batch).fetchall():
+                sampled_bt_hashes.add(row[0])
+
+    # 3d. Complete the downstream surface of every prediction sampled so far.
     #
     # Top-N-per-(family, stage) slices across predictions, so it can retain a
     # prediction's signal and allocation rows while keeping only a few of its
@@ -276,9 +304,12 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
     # partial set fails a contract the production registry satisfies - the
     # fixture would be testing its own sampling artifact. Whichever prediction
     # survives sampling must therefore bring its complete downstream surface.
+    # Includes 'allocation' alongside cost_sensitivity/risk_overlay: a portfolio-
+    # management notebook that pins an exact allocation-grid row count for one
+    # prediction needs the same completeness guarantee those two stages already get.
     downstream_sql = """
         SELECT backtest_hash FROM backtest_runs
-        WHERE stage IN ('cost_sensitivity', 'risk_overlay')
+        WHERE stage IN ('allocation', 'cost_sensitivity', 'risk_overlay')
           AND prediction_hash IN (
               SELECT DISTINCT prediction_hash FROM backtest_runs
               WHERE backtest_hash IN ({placeholders})
