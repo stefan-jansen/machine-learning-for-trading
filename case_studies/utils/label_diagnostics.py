@@ -22,14 +22,22 @@ def panel_autocorrelation(
 ) -> np.ndarray:
     """Autocorrelation of *column* at lags 1..max_lag, pooled across entities.
 
-    The lag is taken within an entity, so no pair spans two entities, but the
-    correlation is computed over the pooled pairs. A single-entity estimate is a
-    claim about that entity, and the two disagree most at the lag that matters.
+    The lag is taken within an entity, so no pair spans two entities, and the
+    column is demeaned within its entity before pooling. Without the demeaning a
+    panel whose entities sit at different levels reports that level dispersion as
+    persistence: a series that is constant inside every entity, and so has no
+    autocorrelation to speak of, would come back at 1.0.
+
+    A single-entity estimate is a claim about that entity, and the two disagree
+    most at the lag that matters - the label horizon.
     """
+    centred = frame.with_columns(
+        (pl.col(column) - pl.col(column).mean().over(entity_col)).alias("_centred")
+    )
     return np.array(
         [
-            frame.with_columns(pl.col(column).shift(-lag).over(entity_col).alias("_lagged"))
-            .select(pl.corr(column, "_lagged"))
+            centred.with_columns(pl.col("_centred").shift(-lag).over(entity_col).alias("_lagged"))
+            .select(pl.corr("_centred", "_lagged"))
             .item()
             for lag in range(1, max_lag + 1)
         ]
