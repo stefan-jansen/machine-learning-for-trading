@@ -345,6 +345,28 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
                 count += _copy_rows(src, dst, table, rows)
             stats[table] = count
 
+        # 3e. Copy cohort_metrics rows whose leader_hash survived sampling. A
+        # strategy-analysis/portfolio/cost/risk notebook resolves its frozen carrier
+        # via cohort_metrics(cohort_type='stagelabel'|'label', ...) JOIN backtest_runs
+        # ON leader_hash - an empty table here makes that JOIN return nothing and every
+        # such notebook raise "no frozen carrier" regardless of how complete the
+        # backtest_runs sample is. Filtering by leader_hash membership in the sample
+        # is sufficient and correct: a row whose leader was not sampled would fail the
+        # same JOIN downstream anyway, so it is dropped exactly like an FK would.
+        count = 0
+        try:
+            for i in range(0, len(hash_list), batch_size):
+                batch = hash_list[i : i + batch_size]
+                placeholders = ",".join(["?"] * len(batch))
+                rows = src.execute(
+                    f"SELECT * FROM cohort_metrics WHERE leader_hash IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                count += _copy_rows(src, dst, "cohort_metrics", rows)
+        except sqlite3.OperationalError:
+            count = 0
+        stats["cohort_metrics"] = count
+
     dst.commit()
 
     stats["file_size_kb"] = dst_db.stat().st_size // 1024
@@ -807,6 +829,7 @@ def main() -> int:
             "backtest_runs",
             "backtest_metrics",
             "backtest_fold_metrics",
+            "cohort_metrics",
         ]:
             print(f"  {table:30s} {stats.get(table, 0):>6}")
         print(f"  {'backtest artifact dirs':30s} {stats.get('backtest_artifact_dirs', 0):>6}")
