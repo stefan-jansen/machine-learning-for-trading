@@ -59,7 +59,7 @@ from case_studies.utils.backtest_runner import precompute_weights, run_backtest
 from case_studies.utils.cv_window import canonical_window
 from case_studies.utils.registry import read_predictions
 from case_studies.utils.sweep_config import calibrate_trailing_stops
-from utils.paths import get_case_study_source_dir
+from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
 
@@ -75,7 +75,7 @@ MAX_RISK_VARIANTS = 0
 
 # %%
 set_global_seeds(SEED)
-FROZEN_CASE_DIR = get_case_study_source_dir(CASE_STUDY)
+FROZEN_CASE_DIR = get_case_study_dir(CASE_STUDY, create=False)
 REGISTRY_PATH = FROZEN_CASE_DIR / "run_log" / "registry.db"
 config = get_backtest_config(CASE_STUDY)
 print(f"Registry: {REGISTRY_PATH.name} (read-only analysis)")
