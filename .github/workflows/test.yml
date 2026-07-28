@@ -422,16 +422,22 @@ jobs:
         run: |
           source .venv/bin/activate
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            base="origin/${{ github.base_ref }}"
-          else
-            base="${{ github.event.before }}"
-            # All-zero on a branch's first push, and absent after a force-push
-            # that dropped the old tip; fall back to the parent of HEAD.
-            if [[ "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-              base="HEAD~1"
-            fi
+            # What does this branch add on top of the base: merge-base diff.
+            python .github/scripts/notebook_provenance.py check \
+              --since "origin/${{ github.base_ref }}"
+            exit $?
           fi
-          python .github/scripts/notebook_provenance.py check --since "$base"
+          # What does the published tree become: diff the previous tip directly,
+          # so a force-push that reverts a notebook relative to it is still seen.
+          base="${{ github.event.before }}"
+          if [[ "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            # First push, or a force-push that dropped the old tip. There is no
+            # honest scope, so check everything rather than guess a narrower one.
+            echo "previous tip unavailable ($base) — checking every notebook"
+            python .github/scripts/notebook_provenance.py check
+            exit $?
+          fi
+          python .github/scripts/notebook_provenance.py check --since "$base" --no-merge-base
 
   # ---------------------------------------------------------------------------
   # Fast native unit tests — download-script logic (no Docker, no network,
