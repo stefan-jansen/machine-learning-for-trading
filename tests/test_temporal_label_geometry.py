@@ -148,6 +148,58 @@ def test_load_modeling_dataset_raises_when_label_absent_from_artifact(
         load_modeling_dataset(cs, VARIANT)
 
 
+def test_load_temporal_features_selects_rows_for_its_label(
+    isolated_case_study: Path,
+) -> None:
+    """load_temporal_features must select the same rows load_modeling_dataset does."""
+    from utils.modeling import load_temporal_features
+
+    cs = "test_cs_geometry_temporal_features"
+    cs_dir = isolated_case_study / cs
+    _seed_case_study(cs_dir)
+    _seed_features_and_temporal(cs_dir, labels=(PRIMARY, VARIANT))
+
+    for label, marker in ((PRIMARY, 1.0), (VARIANT, 2.0)):
+        temporal = load_temporal_features(cs, label)
+        assert "cv_label" not in temporal.columns
+        assert temporal["marker"].unique().to_list() == [marker]
+
+
+def test_load_temporal_features_raises_when_label_absent_from_artifact(
+    isolated_case_study: Path,
+) -> None:
+    from utils.modeling import load_temporal_features
+
+    cs = "test_cs_geometry_temporal_features_missing"
+    cs_dir = isolated_case_study / cs
+    _seed_case_study(cs_dir)
+    _seed_features_and_temporal(cs_dir, labels=(PRIMARY,))
+
+    with pytest.raises(ValueError, match=rf"carries no rows for label '{VARIANT}'"):
+        load_temporal_features(cs, VARIANT)
+
+
+def test_load_temporal_features_passes_through_when_no_cv_label_column(
+    isolated_case_study: Path,
+) -> None:
+    """A legacy artifact with no cv_label column is returned unfiltered."""
+    from utils.modeling import load_temporal_features
+
+    cs = "test_cs_geometry_temporal_features_legacy"
+    cs_dir = isolated_case_study / cs
+    _seed_case_study(cs_dir)
+
+    dates = pl.date_range(date(2020, 1, 1), date(2023, 12, 31), interval="1d", eager=True)
+    features_dir = cs_dir / "features"
+    features_dir.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {"timestamp": dates, "symbol": ["AAA"] * len(dates), "fold": [0] * len(dates)}
+    ).write_parquet(features_dir / "model_based.parquet")
+
+    temporal = load_temporal_features(cs, PRIMARY)
+    assert temporal.height == len(dates)
+
+
 def _seed_features_and_temporal(cs_dir: Path, *, labels: tuple[str, ...]) -> None:
     """Write a financial-feature parquet plus a per-label temporal artifact.
 
