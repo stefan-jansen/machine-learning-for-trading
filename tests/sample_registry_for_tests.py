@@ -281,7 +281,10 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
         JOIN backtest_runs b ON b.backtest_hash = c.leader_hash
         WHERE c.cohort_type = 'stagelabel' AND c.stage = 'signal'
     """
-    leader_prediction_hashes = {row[0] for row in src.execute(leader_sql).fetchall()}
+    try:
+        leader_prediction_hashes = {row[0] for row in src.execute(leader_sql).fetchall()}
+    except sqlite3.OperationalError:
+        leader_prediction_hashes = set()
     if leader_prediction_hashes:
         ph_list = list(leader_prediction_hashes)
         full_grid_sql = """
