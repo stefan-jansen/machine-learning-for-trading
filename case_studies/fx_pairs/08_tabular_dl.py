@@ -35,7 +35,6 @@
 """TabM capacity and checkpoint comparison for one-day FX rankings."""
 
 import hashlib
-import json
 
 import numpy as np
 import pandas as pd
@@ -47,7 +46,6 @@ import utils.style as style
 from case_studies.utils.analytics import load_best_ic_per_family
 from case_studies.utils.registry import compute_prediction_fold_metrics
 from case_studies.utils.tabular_dl import run_tabm_cv
-from utils.cv_splits import generate_cv_splits
 from utils.modeling import (
     ConfigError,
     _replace_temporal_columns,
@@ -86,8 +84,9 @@ print(f"Case study: {CASE_STUDY_ID} | Label: {PRIMARY_LABEL} | Device: {DEVICE}"
 # %% [markdown]
 # ## 1. Load the Signed Learning Task
 #
-# Fold boundaries come from `cv_config.json`, the same contract used to create
-# the fold-aware temporal features. The sealed holdout is not loaded or scored.
+# Fold boundaries are the canonical ones `04_model_based_features` derives from
+# the primary label's own parquet, the same contract used to create the
+# fold-aware temporal features. The sealed holdout is not loaded or scored.
 
 # %%
 mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
@@ -97,13 +96,6 @@ label_col = mds.label_col
 date_col = mds.date_col
 entity_col = mds.entity_cols[0] if mds.entity_cols else "symbol"
 
-cv_config = json.loads((CASE_DIR / "config" / "cv_config.json").read_text())
-splits = generate_cv_splits(
-    dataset,
-    cv_config=cv_config,
-    label_buffer=mds.label_buffer,
-    date_col=date_col,
-)
 splits = [
     {
         **split,
@@ -112,7 +104,7 @@ splits = [
             for key in ("train_start", "train_end", "val_start", "val_end")
         },
     }
-    for split in splits[: MAX_FOLDS or None]
+    for split in mds.splits[: MAX_FOLDS or None]
 ]
 
 print(f"Dataset: {len(dataset):,} rows x {len(feature_names)} features")

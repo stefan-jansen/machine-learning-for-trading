@@ -37,9 +37,11 @@
 # - `labels/fwd_ret_5d.parquet` -- Variant: 1-week forward returns
 # - `labels/fwd_ret_21d.parquet` -- Variant: 1-month forward returns
 #
-# The walk-forward CV configuration is defined in `config/setup.yaml` (mirrored in
-# `config/cv_config.json`, consumed by `04_model_based_features`); this notebook
+# The walk-forward CV configuration is defined in `config/setup.yaml`; this notebook
 # validates that config and materializes the splits via `generate_cv_splits`.
+# `config/cv_config.json` is a snapshot frozen at release time -- downstream
+# notebooks derive folds from `setup.yaml` via `modeling_fold_boundaries`, not
+# from that file, since `generate_cv_splits` no longer reproduces it exactly.
 
 # %%
 """FX Pairs: Label Engineering."""

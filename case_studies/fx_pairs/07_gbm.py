@@ -34,8 +34,6 @@
 # %%
 """GBM Grid Search - config-driven regularization profiles x loss functions."""
 
-import json
-
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -57,7 +55,6 @@ from case_studies.utils.registry import (
     training_hash_from_spec,
     training_run_status,
 )
-from utils.cv_splits import generate_cv_splits
 from utils.modeling import ConfigError, load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
 from utils.style import COLORS
@@ -111,13 +108,6 @@ if setup["labels"]["primary"] != PRIMARY_LABEL:
         f"{PRIMARY_LABEL!r} has no matching fold-aware temporal artifact. "
         f"Run this notebook with the primary label {setup['labels']['primary']!r}."
     )
-cv_config = json.loads((CASE_DIR / "config" / "cv_config.json").read_text())
-splits = generate_cv_splits(
-    dataset,
-    cv_config=cv_config,
-    label_buffer=mds.label_buffer,
-    date_col=date_col,
-)
 splits = [
     {
         **split,
@@ -126,7 +116,7 @@ splits = [
             for key in ("train_start", "train_end", "val_start", "val_end")
         },
     }
-    for split in splits[: MAX_FOLDS or None]
+    for split in mds.splits[: MAX_FOLDS or None]
 ]
 
 print(f"Dataset: {len(dataset):,} rows × {len(feature_names)} features")
@@ -151,9 +141,10 @@ config_table
 # %% [markdown]
 # ## 2. Prepare CV Folds
 #
-# GBM folds use float32, the native LightGBM precision. Their boundaries come
-# from `cv_config.json`, so each fold ID selects the matching temporal artifact.
-# LightGBM handles ordinary feature missingness without imputation or scaling.
+# GBM folds use float32, the native LightGBM precision. Their boundaries are the
+# canonical ones `04_model_based_features` derives from the primary label's own
+# parquet, so each fold ID selects the matching temporal artifact. LightGBM
+# handles ordinary feature missingness without imputation or scaling.
 
 # %%
 dataset_pd = dataset.to_pandas()

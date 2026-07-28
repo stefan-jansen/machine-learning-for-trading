@@ -91,7 +91,7 @@ from case_studies.utils.model_viz import (
     plot_learning_curves,
     plot_regime_bars,
 )
-from case_studies.utils.registry import compute_prediction_fold_metrics
+from case_studies.utils.registry import compute_prediction_fold_metrics, read_predictions
 from utils.paths import get_case_study_dir
 
 # %% [markdown]
@@ -229,8 +229,10 @@ def _load_physical_predictions() -> pl.DataFrame:
 
     frames = []
     for family, config, label, prediction_hash in rows:
-        path = CASE_DIR / "run_log" / "predictions" / prediction_hash / "predictions.parquet"
-        frame = pl.read_parquet(path)
+        # read_predictions normalizes the current fold/prediction/actual schema
+        # (or an older fold_id/y_score/y_true one) to fold_id/y_score/y_true, so
+        # this stays independent of which vintage produced the artifact.
+        frame = read_predictions("fx_pairs", prediction_hash, case_dir=CASE_DIR)
         checkpoint = pl.col("epoch").cast(pl.Int64) if "epoch" in frame.columns else pl.lit(None)
         frames.append(
             frame.with_columns(

@@ -37,7 +37,6 @@
 """NLinear model for one-day FX rankings."""
 
 import hashlib
-import json
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -52,7 +51,6 @@ from case_studies.utils.deep_learning import run_dl_cv
 from case_studies.utils.registry import compute_prediction_fold_metrics
 from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
 from case_studies.utils.tabular_dl import run_tabm_cv
-from utils.cv_splits import generate_cv_splits
 from utils.modeling import (
     ConfigError,
     _replace_temporal_columns,
@@ -95,7 +93,8 @@ print(
 # %% [markdown]
 # ## 1. Load the Current Learning Task
 #
-# `cv_config.json` supplies the fold boundaries used by the fold-aware temporal
+# `04_model_based_features` derives the fold boundaries from the primary label's
+# own parquet; those are also the boundaries used by the fold-aware temporal
 # features. The sealed 2024-2025 holdout is neither loaded nor scored.
 
 # %%
@@ -106,13 +105,6 @@ label_col = mds.label_col
 date_col = mds.date_col
 entity_col = mds.entity_cols[0] if mds.entity_cols else "symbol"
 
-cv_config = json.loads((CASE_DIR / "config" / "cv_config.json").read_text())
-splits = generate_cv_splits(
-    dataset,
-    cv_config=cv_config,
-    label_buffer=mds.label_buffer,
-    date_col=date_col,
-)
 splits = [
     {
         **split,
@@ -121,7 +113,7 @@ splits = [
             for key in ("train_start", "train_end", "val_start", "val_end")
         },
     }
-    for split in splits[: MAX_FOLDS or None]
+    for split in mds.splits[: MAX_FOLDS or None]
 ]
 
 print(f"Dataset: {len(dataset):,} rows x {len(feature_names)} features")

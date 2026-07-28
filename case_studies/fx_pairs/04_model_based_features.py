@@ -43,7 +43,6 @@
 # %%
 """FX Pairs: Temporal Features."""
 
-import json
 import logging
 import warnings
 from datetime import date
@@ -61,8 +60,9 @@ from scipy.optimize import minimize
 from scipy.stats import spearmanr
 from statsmodels.tsa.arima.model import ARIMA
 
+from case_studies.utils.cv_window import modeling_fold_boundaries
 from data import load_fx_pairs
-from utils.cv_splits import generate_cv_splits
+from utils.artifact_specs import resolve_label_buffer
 from utils.paths import get_case_study_dir
 from utils.style import COLORS
 
@@ -118,20 +118,9 @@ prices = (
 )
 
 # %% [markdown]
-# ### Load the Fold Configuration and Universe
+# ### Load the Universe
 
 # %%
-# Load CV config
-cv_path = CASE_DIR / "config" / "cv_config.json"
-if cv_path.exists():
-    cv_config = json.loads(cv_path.read_text())
-    n_splits = cv_config["n_splits"]
-    print(f"CV config: {n_splits} folds")
-else:
-    # Build splits manually from protocol
-    n_splits = 8
-    print(f"CV config not found, using {n_splits} folds from protocol")
-
 SYMBOLS = sorted(prices["symbol"].unique().to_list())
 if MAX_SYMBOLS:
     SYMBOLS = SYMBOLS[:MAX_SYMBOLS]
@@ -145,25 +134,27 @@ print(f"Period: {dates[0]} to {dates[-1]}")
 # %% [markdown]
 # ## 2. Load Canonical Walk-Forward Folds
 #
-# We use the exact boundaries materialized by the labels pipeline. Reconstructing
-# calendar-year approximations here would misalign fitted temporal state with the
-# folds used by downstream models.
+# `modeling_fold_boundaries` derives folds from the primary label's own parquet
+# and buffer -- the same derivation `load_modeling_dataset` uses when it later
+# reads this artifact, so producer and consumer agree by construction. This
+# case study's `config/cv_config.json` also carries a `splits` array, but it is
+# a snapshot frozen at release time that `generate_cv_splits` no longer
+# reproduces; reading it here would fit temporal models on a different set of
+# dates than validate_temporal_fold_coverage checks against.
 
 # %%
 all_dates = sorted(prices["timestamp"].unique().to_list())
-if not cv_path.exists():
-    raise FileNotFoundError(f"Canonical CV configuration not found: {cv_path}")
+PRIMARY_LABEL = "fwd_ret_1d"
+raw_folds = modeling_fold_boundaries("fx_pairs", PRIMARY_LABEL)
+if not raw_folds:
+    raise FileNotFoundError(
+        f"No fold boundaries derivable for fx_pairs/{PRIMARY_LABEL}; run 02_labels first."
+    )
+print(f"Label buffer: {resolve_label_buffer('fx_pairs', PRIMARY_LABEL)}")
 
-raw_folds = generate_cv_splits(prices, cv_config=cv_config)
 folds = []
 for split in raw_folds:
-    fold = {
-        "fold": int(split["fold"]),
-        "train_start": date.fromisoformat(split["train_start"]),
-        "train_end": date.fromisoformat(split["train_end"]),
-        "val_start": date.fromisoformat(split["val_start"]),
-        "val_end": date.fromisoformat(split["val_end"]),
-    }
+    fold = dict(split)
     fold["n_train"] = sum(fold["train_start"] <= d <= fold["train_end"] for d in all_dates)
     fold["n_val"] = sum(fold["val_start"] <= d <= fold["val_end"] for d in all_dates)
     folds.append(fold)

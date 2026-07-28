@@ -36,7 +36,6 @@
 # %%
 """Linear Models - walk-forward cross-validation."""
 
-import json
 import time
 from datetime import UTC, datetime
 
@@ -58,7 +57,6 @@ from case_studies.utils.registry import (
     training_hash_from_spec,
     training_run_status,
 )
-from utils.cv_splits import generate_cv_splits
 from utils.modeling import (
     ConfigError,
     load_configs,
@@ -112,13 +110,6 @@ if setup["labels"]["primary"] != PRIMARY_LABEL:
         f"{PRIMARY_LABEL!r} has no matching fold-aware temporal artifact. "
         f"Run this notebook with the primary label {setup['labels']['primary']!r}."
     )
-cv_config = json.loads((CASE_DIR / "config" / "cv_config.json").read_text())
-splits = generate_cv_splits(
-    dataset,
-    cv_config=cv_config,
-    label_buffer=mds.label_buffer,
-    date_col=date_col,
-)
 splits = [
     {
         **split,
@@ -127,7 +118,7 @@ splits = [
             for key in ("train_start", "train_end", "val_start", "val_end")
         },
     }
-    for split in splits[: MAX_FOLDS or None]
+    for split in mds.splits[: MAX_FOLDS or None]
 ]
 
 print(f"Dataset: {len(dataset):,} rows × {len(feature_names)} features")
@@ -146,9 +137,10 @@ for cfg in configs:
 # %% [markdown]
 # ## 2. Prepare CV Folds
 #
-# Each fold uses the boundaries materialized in `config/cv_config.json`, so its ID
-# selects the matching model-based artifact from notebook 04. Median imputation
-# and standard scaling fit on training rows and then transform validation rows.
+# Each fold uses the canonical boundaries `04_model_based_features` derives from the
+# primary label's own parquet, so its ID selects the matching model-based artifact.
+# Median imputation and standard scaling fit on training rows and then transform
+# validation rows.
 
 # %%
 dataset_pd = dataset.to_pandas()

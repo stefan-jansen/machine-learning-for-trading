@@ -39,7 +39,6 @@
 # %%
 """Evaluate FX financial and model-based features on canonical validation folds."""
 
-import json
 import warnings
 from datetime import date
 
@@ -52,6 +51,8 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats
 from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 
+from case_studies.utils.cv_window import modeling_fold_boundaries
+from utils.cv_splits import load_evaluation_config
 from utils.data_quality import validate_modeling_inputs
 from utils.paths import get_case_study_dir
 from utils.style import COLORS
@@ -90,11 +91,12 @@ financial = pl.read_parquet(CASE_DIR / "features" / "financial.parquet")
 model_based = pl.read_parquet(CASE_DIR / "features" / "model_based.parquet")
 labels = pl.read_parquet(CASE_DIR / "labels" / f"{LABEL_COL}.parquet")
 
-cv_path = CASE_DIR / "config" / "cv_config.json"
-if not cv_path.exists():
-    raise FileNotFoundError(f"Canonical CV configuration not found: {cv_path}")
-cv_config = json.loads(cv_path.read_text())
-raw_splits = sorted(cv_config["splits"], key=lambda split: int(split["fold"]))
+raw_splits = modeling_fold_boundaries(CASE_STUDY_ID, LABEL_COL)
+if not raw_splits:
+    raise FileNotFoundError(
+        f"No fold boundaries derivable for {CASE_STUDY_ID}/{LABEL_COL}; run 02_labels first."
+    )
+raw_splits = sorted(raw_splits, key=lambda split: int(split["fold"]))
 if MAX_FOLDS > 0:
     raw_splits = raw_splits[:MAX_FOLDS]
 
@@ -135,10 +137,10 @@ if len(duplicate_keys):
 
 # %%
 # A signal at t is eligible only when its one-day label endpoint is before the holdout.
-holdout_start_value = cv_config.get("test_start") or cv_config.get("holdout_start")
+holdout_start_value = load_evaluation_config(CASE_STUDY_ID).get("holdout_start")
 if not holdout_start_value:
     raise ValueError("Canonical CV configuration does not define a holdout start")
-holdout_start = date.fromisoformat(holdout_start_value)
+holdout_start = date.fromisoformat(str(holdout_start_value))
 label_endpoints = (
     labels.select(JOIN_COLS)
     .sort(["symbol", DATE_COL])
