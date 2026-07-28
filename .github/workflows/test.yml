@@ -383,12 +383,28 @@ jobs:
       # stale render one commit earlier, and a stale render only reaches a reader
       # through a merge, so the gate lives here and covers what this PR changed:
       # a notebook it edited, or one whose paired .py it edited.
-      - name: Notebooks this PR changed were executed from their current .py
-        if: github.event_name == 'pull_request'
+      #
+      # It runs on push to main as well as on the PR. Branch protection means
+      # everything should arrive via a PR, but this workflow's own history is
+      # that exports used to land on main as pushes and nothing CI ran had seen
+      # them — a gate that only fires on the path we believe is the only path is
+      # how that happened. On push the base is the previous main tip, so the
+      # scope is exactly what the push introduced.
+      - name: Notebooks this change touched were executed from their current .py
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
         run: |
           source .venv/bin/activate
-          python .github/scripts/notebook_provenance.py check \
-            --since "origin/${{ github.base_ref }}"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="origin/${{ github.base_ref }}"
+          else
+            base="${{ github.event.before }}"
+            # All-zero on a branch's first push, and absent after a force-push
+            # that dropped the old tip; fall back to the parent of HEAD.
+            if [[ "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+              base="HEAD~1"
+            fi
+          fi
+          python .github/scripts/notebook_provenance.py check --since "$base"
 
   # ---------------------------------------------------------------------------
   # Fast native unit tests — download-script logic (no Docker, no network,
