@@ -353,6 +353,15 @@ edge. The closing bookend to Chapter 1: the process is the edge.
 
 ## Quick Start
 
+**New here? Read these three, in order:**
+
+1. **[What this repository is, and what it is not](docs/what-this-is.md)** - what you can reproduce
+   with one command, what a configuration change buys you, what needs real compute or licensed data,
+   and what is not promised. Five minutes, and it sets expectations before you install anything.
+2. **[Installation](docs/installation.md)** - Linux, Windows WSL2, macOS, Docker, and GPU.
+3. **[Running notebooks](docs/running-notebooks.md)** - the case-study pipeline, the run log, and how
+   to experiment without disturbing the downloaded results.
+
 These commands are typed into a terminal on your own computer, not into GitHub. New to the command
 line? Start with **[Before You Begin](docs/installation.md#before-you-begin)**.
 
@@ -430,7 +439,7 @@ machine-learning-for-trading/
 ├── scripts/          reader utilities (install check, notebook sync, artifacts) → scripts/README.md
 ├── tests/            Papermill notebook execution + unit guards, run in CI → tests/README.md
 ├── envs/             Dockerfiles for every image                          → envs/README.md
-├── docs/             installation and notebook-execution guides
+├── docs/             what-this-is, installation, and notebook-execution guides
 ├── docker-compose.yml    all Docker services
 ├── pyproject.toml · uv.lock    pinned dependencies (uv)
 └── matplotlibrc      figure styling, auto-applied from the repo root
