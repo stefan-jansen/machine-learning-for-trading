@@ -94,15 +94,24 @@ def iter_notebooks() -> list[Path]:
     return sorted(out)
 
 
-def notebooks_changed_since(ref: str) -> list[Path]:
-    """Notebooks this branch is answerable for, relative to ``ref``.
+def notebooks_changed_since(ref: str, merge_base: bool = True) -> list[Path]:
+    """Notebooks this change is answerable for, relative to ``ref``.
 
-    A branch owns a notebook if it edited the notebook OR edited the paired
+    A change owns a notebook if it edited the notebook OR edited the paired
     ``.py``, since changing the ``.py`` is exactly what makes the rendered
-    notebook stale. Notebooks nobody on this branch touched are somebody else's.
+    notebook stale. Notebooks nobody touched are somebody else's.
+
+    ``merge_base`` picks which question is being asked. For a pull request it is
+    "what does this branch add on top of the base", so the diff runs from the
+    merge base (``ref...HEAD``) and commits that landed on the base meanwhile are
+    not this branch's problem. For a push it is "what does the published tree
+    become", so the diff must run against the previous tip itself
+    (``ref..HEAD``) — a force-push can revert a notebook relative to that tip
+    without the merge base ever seeing it.
     """
+    spec = f"{ref}...HEAD" if merge_base else f"{ref}..HEAD"
     diff = subprocess.run(
-        ["git", "diff", "--name-only", f"{ref}...HEAD"],
+        ["git", "diff", "--name-only", spec],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -199,7 +208,7 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
 def _cmd_check(args: argparse.Namespace) -> int:
     scope = None
     if args.since:
-        scope = notebooks_changed_since(args.since)
+        scope = notebooks_changed_since(args.since, merge_base=not args.no_merge_base)
         if not scope:
             print(f"notebook sync OK: no notebook is changed relative to {args.since}")
             return 0
@@ -257,6 +266,12 @@ def main() -> int:
         metavar="REF",
         help="check only notebooks this branch changed relative to REF (e.g. origin/main), "
         "counting a notebook as changed when its paired .py changed",
+    )
+    cp.add_argument(
+        "--no-merge-base",
+        action="store_true",
+        help="diff REF..HEAD instead of REF...HEAD — use for a push, where the question is what "
+        "the published tree becomes relative to the previous tip, not what a branch adds",
     )
     cp.set_defaults(func=_cmd_check)
 
