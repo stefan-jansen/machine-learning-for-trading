@@ -360,6 +360,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          # notebook_provenance.py --since needs the merge base, not a shallow tip.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
         with:
           version: "latest"
@@ -400,6 +403,19 @@ jobs:
           source .venv/bin/activate
           python -m pytest tests/test_notebook_output_hygiene.py -q \
             --deselect tests/test_notebook_output_hygiene.py::test_no_machine_specific_paths_in_committed_notebooks
+      # A committed .ipynb must be its CURRENT .py, executed for real. This used
+      # to be a pre-commit hook scanning every notebook in the repo, so one stale
+      # notebook anywhere blocked every commit by every agent — including commits
+      # touching no notebook. Checkpointing work matters more than catching a
+      # stale render one commit earlier, and a stale render only reaches a reader
+      # through a merge, so the gate lives here and covers what this PR changed:
+      # a notebook it edited, or one whose paired .py it edited.
+      - name: Notebooks this PR changed were executed from their current .py
+        if: github.event_name == 'pull_request'
+        run: |
+          source .venv/bin/activate
+          python .github/scripts/notebook_provenance.py check \
+            --since "origin/${{ github.base_ref }}"
 
   # ---------------------------------------------------------------------------
   # Fast native unit tests — download-script logic (no Docker, no network,
