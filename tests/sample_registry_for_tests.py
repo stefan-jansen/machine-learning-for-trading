@@ -112,6 +112,11 @@ PINNED_UNIVERSE_SOURCES = {
 # different column than the notebook loads it from.
 SYMBOL_COLUMN_CANDIDATES = ("ticker", "symbol")
 
+# The realized outcome a prediction artifact is scored against. Pinned artifacts
+# must agree on it row for row, not just on their keys - see
+# preflight_pinned_predictions.
+PREDICTION_TARGET_COLUMN = "actual"
+
 
 def _copy_rows(src, dst, table: str, rows: list) -> int:
     """Insert rows into dst table with proper column quoting."""
@@ -648,9 +653,33 @@ def preflight_pinned_predictions(cs_id: str, intermediates_dir: Path) -> None:
                     f"{cs_id}: {dst_pred_dir / prediction_hash} resolves to {resolved}, "
                     f"inside a case_studies tree. Refusing to write a production artifact."
                 )
-            frame = pl.read_parquet(artifact, columns=["symbol", "timestamp"]).filter(
-                pl.col("symbol").is_in(universe)
-            )
+            # The outcome column travels with the key on purpose. Comparing keys
+            # alone lets two streams carry different `actual` values for the same
+            # (symbol, timestamp) - a different label, or the same label from a
+            # different vintage - and the consuming notebooks would score model
+            # error and realized return against different outcomes while every
+            # breadth and key check passed. The identity assertion above pins each
+            # hash to a declared label, so today this cannot diverge; it is checked
+            # here because the pinned set is data and the next hash added to it
+            # need not share the label.
+            schema = pl.read_parquet_schema(artifact)
+            if PREDICTION_TARGET_COLUMN not in schema:
+                raise ValueError(
+                    f"{cs_id}: pinned artifact {prediction_hash} has no "
+                    f"'{PREDICTION_TARGET_COLUMN}' column, so the outcome the notebooks "
+                    f"score against cannot be checked for agreement with the other "
+                    f"pinned streams."
+                )
+            frame = pl.read_parquet(
+                artifact, columns=["symbol", "timestamp", PREDICTION_TARGET_COLUMN]
+            ).filter(pl.col("symbol").is_in(universe))
+            null_targets = frame[PREDICTION_TARGET_COLUMN].null_count()
+            if null_targets:
+                raise ValueError(
+                    f"{cs_id}: pinned artifact {prediction_hash} has {null_targets} null "
+                    f"'{PREDICTION_TARGET_COLUMN}' values inside the shared universe. A null "
+                    f"outcome drops silently out of every comparison that reaches it."
+                )
             keys.append(set(map(tuple, frame.unique().rows())))
     finally:
         src.close()
@@ -661,8 +690,10 @@ def preflight_pinned_predictions(cs_id: str, intermediates_dir: Path) -> None:
     # assets on that date.
     if any(k != keys[0] for k in keys[1:]):
         raise ValueError(
-            f"{cs_id}: the pinned artifacts do not share their (symbol, timestamp) keys, "
-            f"so the notebooks comparing them would score different cross-sections."
+            f"{cs_id}: the pinned artifacts do not agree on their "
+            f"(symbol, timestamp, {PREDICTION_TARGET_COLUMN}) rows, so the notebooks "
+            f"comparing them would score different cross-sections, or the same "
+            f"cross-section against different outcomes."
         )
 
 
