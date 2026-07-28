@@ -48,14 +48,13 @@ repos:
         entry: python3 .github/scripts/check_notebook_pair_sync.py
         files: \.(ipynb|py)$
 
-      # Sync gate: a stamped notebook must be its CURRENT .py executed in a
-      # production run. Fails if any provenance-stamped .ipynb is stale (its
-      # paired .py changed since execution) or was committed from a TEST-mode
-      # run. Unstamped notebooks are advisory only (gradual adoption). See
-      # .github/scripts/notebook_provenance.py.
-      - id: notebook-sync
-        name: notebook provenance sync gate
-        language: system
-        entry: python3 .github/scripts/notebook_provenance.py check
-        pass_filenames: false
-        always_run: true
+      # The provenance sync gate — a stamped notebook must be its CURRENT .py
+      # executed in a production run — deliberately does NOT run here. It ran on
+      # every commit over every notebook in the repo, so one stale notebook
+      # anywhere blocked every commit by every agent, including commits that
+      # touched no notebook. That stops work being checkpointed, which is how
+      # work gets lost. It gates the merge instead: the `guards` job in
+      # .github/workflows/test.yml runs
+      #   notebook_provenance.py check --since <base>
+      # on the pull request, over the notebooks that pull request changes. Run it
+      # locally against your branch whenever you want the same answer early.
