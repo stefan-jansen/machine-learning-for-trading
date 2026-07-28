@@ -51,6 +51,67 @@ CASE_STUDY_IDS = [
 # Keep top N backtests per (family, stage) by absolute Sharpe
 TOP_N_PER_GROUP = 3
 
+# Prediction hashes a shipped notebook names as a literal, per case study. These
+# need more than a registry row: the notebook checks that
+# run_log/predictions/<hash>/predictions.parquet exists and reads it. The
+# registry sample carries the row, the fixture tree carried no artifact, and
+# 26_mlops_governance/02_online_drift_detection failed on whichever of the two
+# was missing. Keep a hash here for as long as a notebook pins it.
+# The identity is declared here rather than read from the production registry,
+# because the notebooks do not resolve a hash on its own: they filter on family,
+# label, config_name and split. Comparing the fixture against production would
+# pass when production itself no longer satisfies those predicates, or when both
+# sides return nothing. Declaring it makes the sampler fail on the day a pinned
+# hash stops meaning what the notebook expects.
+PINNED_PREDICTION_HASHES = {
+    "us_equities_panel": {
+        # 26/02_online_drift_detection OLS_PREDICTION_HASH, and 26/03's FIXED_OLS
+        "f9e84a32a9f0": ("linear", "fwd_ret_1d", "ols", "validation"),
+        # 26/02_online_drift_detection RIDGE_PREDICTION_HASH
+        "c0b36ffb8f51": ("linear", "fwd_ret_1d", "ridge_a10000000.0", "validation"),
+        # 26/03_safe_model_rollout FIXED_RIDGE_PREDICTION_HASH
+        "b381d21ffa4a": ("linear", "fwd_ret_1d", "ridge_a100000.0", "validation"),
+    },
+}
+
+# Symbols to keep when subsampling a pinned prediction artifact. Production
+# predictions run 100+ MB each, so the fixture carries a slice.
+#
+# This is a ceiling, not a target - the binding constraint is normally the
+# fixture's own universe, which the pinned set is intersected against. A notebook
+# ranking one stream into long and short books needs more than 2 * its top_k
+# symbols *on every evaluated date*, or both legs hold the same assets and every
+# spread is zero. 26/03_safe_model_rollout uses TOP_K = 100 in production and is
+# overridden to 10 in tests/overrides.yaml for exactly this reason. Lower that
+# override if a pinned artifact stops clearing 2 * TOP_K per date.
+PINNED_PREDICTION_SYMBOLS = 200
+
+# Where the universe a pinned artifact must live inside comes from, per case
+# study, as paths relative to the test-data root. The market-data parquet is the
+# one that matters - 26/02_online_drift_detection re-derives its liquid universe
+# from ML4T_DATA_PATH, not from the intermediates - and the feature table is
+# intersected too because a prediction symbol absent from it has no features to
+# join. The symbol column is resolved from each file's schema rather than
+# declared: this market-data parquet still carries the legacy `ticker`, and a
+# canonical snapshot using `symbol` should regenerate rather than fail.
+#
+# The intersection is against the *whole* file, not against the notebook's ADV
+# window. Reproducing get_liquid_universe here would couple the sampler to one
+# notebook's liquidity rule and go stale the moment that rule changed; the
+# breadth floor inside the notebook is what catches a universe that survives
+# this check and collapses at the join.
+PINNED_UNIVERSE_SOURCES = {
+    "us_equities_panel": [
+        "data/equities/market/us_equities/us_equities.parquet",
+        "intermediates/us_equities_panel/features/financial.parquet",
+    ],
+}
+
+# Precedence matches data/equities/loader.py:69, which takes `ticker` when both
+# columns exist. Preferring `symbol` here would build the fixture universe from a
+# different column than the notebook loads it from.
+SYMBOL_COLUMN_CANDIDATES = ("ticker", "symbol")
+
 
 def _copy_rows(src, dst, table: str, rows: list) -> int:
     """Insert rows into dst table with proper column quoting."""
@@ -295,6 +356,316 @@ def _copy_backtest_artifacts(src_run_log: Path, dst_run_log: Path, hashes: set) 
     return {"copied": copied, "missing_dir": missing_dir, "missing_returns": missing_returns}
 
 
+def _copy_rows_onto_existing_schema(src, dst, table: str, where_col: str, value) -> int:
+    """Copy matching rows across schemas that have drifted apart.
+
+    A fixture registry written before a column was added to the production
+    schema is still usable, so this projects onto the columns the destination
+    actually has rather than failing on the ones it does not.
+    """
+    dst_cols = [row[1] for row in dst.execute(f"PRAGMA table_info({table})")]
+    src_cols = {row[1] for row in src.execute(f"PRAGMA table_info({table})")}
+    shared = [c for c in dst_cols if c in src_cols]
+    if not shared:
+        return 0
+    quoted = ",".join(f'"{c}"' for c in shared)
+    rows = src.execute(f"SELECT {quoted} FROM {table} WHERE {where_col} = ?", (value,)).fetchall()
+    if not rows:
+        return 0
+    ph = ",".join(["?"] * len(shared))
+    before = dst.total_changes
+    dst.executemany(f"INSERT OR IGNORE INTO {table} ({quoted}) VALUES ({ph})", rows)
+    # Rows the destination already had are ignored, not overwritten, so report
+    # what the database actually inserted rather than what was offered to it.
+    return dst.total_changes - before
+
+
+def _pinned_prediction_universe(
+    src_pred_dir: Path, hashes: list[str], universe_sources: list[Path]
+) -> list[str]:
+    """One universe shared by every pinned artifact and by the fixture's own data.
+
+    Two constraints, and missing either one produces a fixture that passes while
+    measuring nothing.
+
+    Every pinned artifact must carry the *same* symbols, or a notebook joining two
+    prediction streams compares different universes. Reading the universe off
+    whichever fixture artifact sorted first did not give that: the non-pinned
+    us_equities_panel artifacts carry 8 symbols against the OLS artifact's 50,
+    sharing 2.
+
+    And those symbols must be ones the fixture's own data covers. The consuming
+    notebooks re-derive a liquid universe from the market-data parquet and
+    intersect, so a set chosen only from production predictions survives the
+    first check and collapses at the second: truncating the production
+    intersection alphabetically gave 50 symbols that met the 56-symbol fixture
+    universe in AAL and AAPL alone, which would have left two assets per date and
+    made every cross-sectional correlation +/-1 by construction.
+
+    Every source is required. Skipping a missing one would silently fall back to
+    the alphabetical truncation that produced exactly that fixture.
+    """
+    import polars as pl
+
+    common: set[str] | None = None
+    for prediction_hash in hashes:
+        src = src_pred_dir / prediction_hash / "predictions.parquet"
+        if not src.exists():
+            continue
+        symbols = set(pl.read_parquet(src, columns=["symbol"])["symbol"].unique().to_list())
+        common = symbols if common is None else (common & symbols)
+    if not common:
+        raise ValueError(
+            f"Pinned prediction hashes {hashes} share no symbols in {src_pred_dir}; "
+            "a fixture built from them would compare different universes."
+        )
+    for path in universe_sources:
+        if not path.exists():
+            raise FileNotFoundError(
+                f"{path} is missing, and it declares part of the universe the consuming "
+                f"notebooks join against. Continuing without it would pick symbols "
+                f"alphabetically and leave the notebooks with almost none of them."
+            )
+        schema = pl.read_parquet_schema(path)
+        column = next((c for c in SYMBOL_COLUMN_CANDIDATES if c in schema), None)
+        if column is None:
+            raise ValueError(
+                f"{path} carries none of {SYMBOL_COLUMN_CANDIDATES}, so the universe it "
+                f"declares cannot be read."
+            )
+        covered = set(pl.read_parquet(path, columns=[column])[column].unique().to_list())
+        common &= covered
+        if not common:
+            raise ValueError(
+                f"No pinned prediction symbol survives the intersection with {path}; "
+                "the notebooks join against it and would be left with nothing."
+            )
+    return sorted(common)[:PINNED_PREDICTION_SYMBOLS]
+
+
+def ensure_pinned_predictions(cs_id: str, intermediates_dir: Path) -> dict:
+    """Give every pinned hash both a registry row and a materialized artifact.
+
+    Idempotent, and safe to run against a fixture the sampler did not just write.
+    Registry rows are additive; the pinned artifacts are rewritten every time,
+    because they only mean anything as a set that shares one universe and an
+    artifact left over from an earlier universe would silently break that.
+    """
+    import polars as pl
+
+    pinned = PINNED_PREDICTION_HASHES.get(cs_id, {})
+    hashes = list(pinned)
+    if not hashes:
+        return {"pinned": 0}
+    src_db = CODE_CS_DIR / cs_id / "run_log" / "registry.db"
+    dst_db = intermediates_dir / cs_id / "run_log" / "registry.db"
+    if not src_db.exists() or not dst_db.exists():
+        return {"pinned": 0, "reason": "no registry"}
+
+    src_pred_dir = CODE_CS_DIR / cs_id / "run_log" / "predictions"
+    dst_pred_dir = intermediates_dir / cs_id / "run_log" / "predictions"
+    parent_resolved = dst_pred_dir.parent.resolve()
+    if any(part.name == "case_studies" for part in (parent_resolved, *parent_resolved.parents)):
+        raise ValueError(
+            f"{cs_id}: {dst_pred_dir} sits under {parent_resolved}, inside a case_studies "
+            f"tree. Refusing to create prediction directories in production."
+        )
+    dst_pred_dir.mkdir(parents=True, exist_ok=True)
+
+    # The declared sources sit under the test-data root, of which the fixture
+    # intermediates are one subdirectory. Deriving that root by walking up one
+    # level only holds when the output is the repo's own intermediates/, so say
+    # so rather than silently reading a sibling of some other directory.
+    if intermediates_dir.name != "intermediates":
+        raise ValueError(
+            f"{intermediates_dir} is not named 'intermediates', so the test-data root the "
+            f"universe sources are relative to cannot be derived from it. Point --output at "
+            f"<test-data-root>/intermediates."
+        )
+    test_data_root = intermediates_dir.parent
+    universe_sources = [test_data_root / rel for rel in PINNED_UNIVERSE_SOURCES.get(cs_id, [])]
+    if not universe_sources:
+        raise ValueError(
+            f"{cs_id} pins prediction hashes but declares no PINNED_UNIVERSE_SOURCES. "
+            "Without one the pinned symbols need not be ones the notebooks can join to."
+        )
+    universe = _pinned_prediction_universe(src_pred_dir, hashes, universe_sources)
+    rows_added = 0
+    artifacts_written = 0
+    min_per_date = len(universe)
+    prepared: list = []
+    src = sqlite3.connect(str(src_db))
+    dst = sqlite3.connect(str(dst_db))
+    try:
+        for prediction_hash, expected_identity in pinned.items():
+            training_hash = src.execute(
+                "SELECT training_hash FROM prediction_sets WHERE prediction_hash = ?",
+                (prediction_hash,),
+            ).fetchone()
+            if training_hash is None:
+                raise ValueError(
+                    f"{cs_id}: pinned prediction hash {prediction_hash} is not in the "
+                    f"production registry. A notebook pins a hash nothing produces."
+                )
+            for table, column, value in (
+                ("training_runs", "training_hash", training_hash[0]),
+                ("prediction_sets", "prediction_hash", prediction_hash),
+                ("prediction_metrics", "prediction_hash", prediction_hash),
+            ):
+                rows_added += _copy_rows_onto_existing_schema(src, dst, table, column, value)
+
+            # INSERT OR IGNORE leaves a conflicting destination row in place, so
+            # asking whether the join returns *something* would pass on a stale
+            # row. Check both registries against the declared identity: the
+            # destination because that is what the notebook reads, and the source
+            # because a production registry that has drifted would otherwise be
+            # copied faithfully into a fixture the notebook still rejects.
+            identity_sql = (
+                "SELECT tr.family, tr.label, tr.config_name, ps.split "
+                "FROM training_runs tr JOIN prediction_sets ps "
+                "ON tr.training_hash = ps.training_hash WHERE ps.prediction_hash = ?"
+            )
+            for label, conn in (("production", src), ("fixture", dst)):
+                got = conn.execute(identity_sql, (prediction_hash,)).fetchone()
+                if got != expected_identity:
+                    raise RuntimeError(
+                        f"{cs_id}: the {label} registry resolves {prediction_hash} to {got}, "
+                        f"not the declared {expected_identity}. The consuming notebook filters "
+                        f"on exactly these columns, so it would reject this hash."
+                    )
+
+            src_parquet = src_pred_dir / prediction_hash / "predictions.parquet"
+            if not src_parquet.exists():
+                raise FileNotFoundError(
+                    f"{cs_id}: pinned prediction hash {prediction_hash} has a registry row "
+                    f"but no artifact at {src_parquet}"
+                )
+            frame = pl.read_parquet(src_parquet).filter(pl.col("symbol").is_in(universe))
+            if frame.is_empty():
+                raise ValueError(
+                    f"{cs_id}: {prediction_hash} carries no rows for the shared universe"
+                )
+            dst_parquet = dst_pred_dir / prediction_hash / "predictions.parquet"
+            # Already resolved and rejected in the preflight; mkdir is safe here.
+            dst_parquet.parent.mkdir(parents=True, exist_ok=True)
+            per_date = frame.group_by("timestamp").agg(pl.col("symbol").n_unique().alias("n"))
+            min_per_date = min(min_per_date, int(per_date["n"].min()))
+            prepared.append((dst_parquet, frame))
+
+        # Nothing is replaced until every hash has cleared its registry identity
+        # and produced a frame. The artifacts are only meaningful as a set that
+        # shares one universe, and a raise partway through the loop would have
+        # rewritten some of them and left the rest at the previous vintage - a
+        # state the database transaction rolling back does not undo.
+        staged: list[tuple[Path, Path]] = []
+        try:
+            for dst_parquet, frame in prepared:
+                tmp = dst_parquet.with_suffix(".parquet.tmp")
+                # Registered before the write, so a partial file left by a failed
+                # write is still cleaned up.
+                staged.append((tmp, dst_parquet))
+                frame.write_parquet(tmp)
+        except BaseException:
+            for tmp, _ in staged:
+                tmp.unlink(missing_ok=True)
+            raise
+        for tmp, dst_parquet in staged:
+            tmp.replace(dst_parquet)
+            artifacts_written += 1
+        dst.commit()
+    finally:
+        dst.close()
+        src.close()
+    return {
+        "pinned": len(hashes),
+        "pinned_rows": rows_added,
+        "pinned_artifacts": artifacts_written,
+        "pinned_symbols": len(universe),
+        "pinned_min_symbols_per_date": min_per_date,
+    }
+
+
+def preflight_pinned_predictions(cs_id: str, intermediates_dir: Path) -> None:
+    """Decide everything about a case study's pinned hashes before writing anything.
+
+    Raises rather than returning a verdict, so a caller that skips it still hits
+    the same failures - just later, once the destination has been mutated.
+    """
+    pinned = PINNED_PREDICTION_HASHES.get(cs_id, {})
+    if not pinned:
+        return
+    if intermediates_dir.name != "intermediates":
+        raise ValueError(
+            f"{intermediates_dir} is not named 'intermediates', and {cs_id} pins prediction "
+            f"hashes whose universe sources are declared relative to the test-data root. "
+            f"Point --output at <test-data-root>/intermediates."
+        )
+    sources = PINNED_UNIVERSE_SOURCES.get(cs_id)
+    if not sources:
+        raise ValueError(
+            f"{cs_id} pins prediction hashes but declares no PINNED_UNIVERSE_SOURCES. "
+            "Without one the pinned symbols need not be ones the notebooks can join to."
+        )
+    src_db = CODE_CS_DIR / cs_id / "run_log" / "registry.db"
+    if not src_db.exists():
+        return
+    src_pred_dir = CODE_CS_DIR / cs_id / "run_log" / "predictions"
+    # Raises on a missing source, an unreadable schema, or an empty intersection.
+    universe = _pinned_prediction_universe(
+        src_pred_dir, list(pinned), [intermediates_dir.parent / rel for rel in sources]
+    )
+    identity_sql = (
+        "SELECT tr.family, tr.label, tr.config_name, ps.split "
+        "FROM training_runs tr JOIN prediction_sets ps "
+        "ON tr.training_hash = ps.training_hash WHERE ps.prediction_hash = ?"
+    )
+    import polars as pl
+
+    dst_pred_dir = intermediates_dir / cs_id / "run_log" / "predictions"
+    src = sqlite3.connect(str(src_db))
+    keys: list[set] = []
+    try:
+        for prediction_hash, expected_identity in pinned.items():
+            got = src.execute(identity_sql, (prediction_hash,)).fetchone()
+            if got != expected_identity:
+                raise RuntimeError(
+                    f"{cs_id}: the production registry resolves {prediction_hash} to {got}, "
+                    f"not the declared {expected_identity}."
+                )
+            artifact = src_pred_dir / prediction_hash / "predictions.parquet"
+            if not artifact.exists():
+                raise FileNotFoundError(
+                    f"{cs_id}: pinned prediction hash {prediction_hash} has a registry row "
+                    f"but no artifact at {artifact}"
+                )
+            # resolve() works on a path that does not exist yet, so the
+            # destination can be rejected without creating anything: a
+            # `predictions/` symlinked into the canonical tree would otherwise
+            # have the hash directory made there before the guard fired.
+            resolved = (dst_pred_dir / prediction_hash).resolve()
+            if any(part.name == "case_studies" for part in (resolved, *resolved.parents)):
+                raise ValueError(
+                    f"{cs_id}: {dst_pred_dir / prediction_hash} resolves to {resolved}, "
+                    f"inside a case_studies tree. Refusing to write a production artifact."
+                )
+            frame = pl.read_parquet(artifact, columns=["symbol", "timestamp"]).filter(
+                pl.col("symbol").is_in(universe)
+            )
+            keys.append(set(map(tuple, frame.unique().rows())))
+    finally:
+        src.close()
+
+    # A shared symbol set is not a shared cross-section: two streams can hold
+    # different names on the same date and still pass every breadth check, which
+    # would leave the drift statistics and the rollout returns scoring different
+    # assets on that date.
+    if any(k != keys[0] for k in keys[1:]):
+        raise ValueError(
+            f"{cs_id}: the pinned artifacts do not share their (symbol, timestamp) keys, "
+            f"so the notebooks comparing them would score different cross-sections."
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -315,6 +686,29 @@ def main() -> int:
             "intermediates/ directory."
         )
 
+    # sample_registry() unlinks and recreates each destination registry, and
+    # us_equities_panel is sampled last, so anything raising during the loop
+    # leaves earlier registries current and their prediction artifacts at the
+    # previous vintage. Everything decidable from the sources alone is decided
+    # here: layout, declarations, schemas, the universe intersection, the
+    # production identities, and the artifacts.
+    missing = [
+        cs_id
+        for cs_id in CASE_STUDY_IDS
+        if not (CODE_CS_DIR / cs_id / "run_log" / "registry.db").exists()
+    ]
+    if missing:
+        parser.error(
+            f"No production registry.db for {', '.join(missing)} under {CODE_CS_DIR}. "
+            f"Sampling the rest would refresh those fixtures and leave these at the previous "
+            f"vintage, which is the mixed state the run is meant to avoid."
+        )
+    for cs_id in CASE_STUDY_IDS:
+        try:
+            preflight_pinned_predictions(cs_id, intermediates_dir)
+        except (ValueError, FileNotFoundError, RuntimeError) as exc:
+            parser.error(str(exc))
+
     print(f"Sampling registries from {CODE_CS_DIR}")
     print(f"Writing to {intermediates_dir}")
     print(f"Top {TOP_N_PER_GROUP} backtests per (family × stage) + all holdout\n")
@@ -328,6 +722,18 @@ def main() -> int:
             print(f"  {stats['status']}: {stats.get('reason', '')}")
             not_refreshed.append(cs_id)
             continue
+        stats.update(ensure_pinned_predictions(cs_id, intermediates_dir))
+        if stats.get("pinned"):
+            # The per-date figure is the one that decides whether a ranked book
+            # is degenerate, and it is a global minimum over every date in the
+            # artifact - including sparse early years no notebook evaluates. Read
+            # it against the window the consuming notebook actually uses.
+            print(
+                f"  {'pinned predictions':30s} {stats['pinned']:>6} "
+                f"({stats['pinned_artifacts']} artifact(s) written, "
+                f"{stats['pinned_symbols']} symbols, "
+                f"min {stats['pinned_min_symbols_per_date']} per date)"
+            )
         for table in [
             "training_runs",
             "prediction_sets",
