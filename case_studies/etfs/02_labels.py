@@ -485,10 +485,10 @@ print(
 # point it is written, which is the part this notebook owns; whether a stage that consumes
 # labels should also record the digest it consumed is a decision for that stage.
 #
-# **No `cv_config.json` is written here**: the folds that train models
-# are derived from `setup.yaml` plus the label file's own timeline by
-# `case_studies/utils/cv_window.py`, which reads neither this notebook's output nor anything
-# derived from it, and a committed copy would only drift from the one in force.
+# **No `cv_config.json` is written here**: the folds that train models are derived by
+# `case_studies/utils/cv_window.py` from `setup.yaml` and the label parquet's own timeline -
+# that is, from this notebook's artifact rather than from a second file describing it. A
+# committed copy would only drift from the folds actually in force.
 
 # %%
 for label_name in LABEL_NAMES:
