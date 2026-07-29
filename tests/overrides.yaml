@@ -1478,7 +1478,9 @@ case_studies/crypto_perps_funding/01_feasibility_analysis:
   timeout: 120
 case_studies/crypto_perps_funding/02_labels:
   parameters:
-    MAX_SYMBOLS: 5
+    # No MAX_SYMBOLS: the CI fixture is already only 5 symbols, and the baseline IC needs a
+    # cross-section per settlement to rank at all. The fixture is the reduction. The notebook
+    # now reads both parameters, so a value set here takes effect.
     START_DATE: '2000-01-01'
   timeout: 120
 case_studies/crypto_perps_funding/03_financial_features:
