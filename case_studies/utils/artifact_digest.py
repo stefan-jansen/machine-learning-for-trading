@@ -1,12 +1,14 @@
 """Value digests for the artifacts one case-study stage hands to the next.
 
-The registry records the *names* of the feature sets a model trained on and no
-digest of their values, so a model trained on leaky features and one trained on
-corrected features produce the identical ``training_hash``. A digest computed
-over content closes that gap going forward: every artifact a later stage reads
-is written with a ``<artifact>.digest.json`` sidecar, and the sidecar's
-``inputs`` field carries the digests of the artifacts it was built from. A value
-that changes anywhere upstream changes every digest downstream of it.
+A digest computed over content makes an artifact self-describing at the point it
+is written: the ``<artifact>.digest.json`` sidecar records what was written, and
+its ``inputs`` field records the digests of the artifacts it was built from.
+
+It is a record, not propagation. Nothing downstream reads these sidecars today -
+stage 02 writes them and the chain stops there - so an upstream value change does
+not yet flow into any later artifact's digest. Note also that a model run is
+separately pinned to its input bytes by ``_training_input_identity``, which
+hashes the label, feature and setup files directly rather than through a sidecar.
 
 The digest is over content, not file bytes: it is invariant to row order and to
 parquet metadata churn, and sensitive to any value change.

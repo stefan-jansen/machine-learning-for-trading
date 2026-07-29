@@ -150,12 +150,13 @@ print(f"market_data digest: {MARKET_DATA_DIGEST}")
 # $$\text{fwd\_ret}^{(h)}_{i,t} = \frac{P_{i,t+h}}{P_{i,t}} - 1$$
 #
 # where $P$ is the adjusted close and $t+h$ counts $h$ **trading sessions** for symbol $i$:
-# Chapter 7.2's close-to-close convention. It is a deliberate simplification of the
-# execution the backtest models - `setup.yaml` sets execution at the next open - and it is
-# the standard convention because it is what a daily bar supports without an intraday
-# assumption. The gap between it and the backtest's fill is a bounded cost quantified in
-# `16_costs`. Both labels share the anchor and differ only in $h$; Section H prints each
-# full definition.
+# Chapter 7.2's close-to-close convention. It is a deliberate choice of target rather than a
+# forced one - `setup.yaml` places execution at the next open, and these bars carry an open,
+# so a next-open target is expressible. Close-to-close is chosen because it is the
+# convention Chapter 7 develops and the one the literature reports. The difference between
+# it and the backtest's fill is a real gap and this case study does not measure it: `16_costs`
+# sweeps commission and half-spread, not the return definition. Both labels share the anchor
+# and differ only in $h$; Section H prints each full definition.
 #
 # The arithmetic stays local rather than calling `fixed_time_horizon_labels`, which computes
 # the algebraically identical $(P_{t+h}-P_t)/P_t$: the two agree only to within a
@@ -534,7 +535,7 @@ for label_name, horizon in HORIZONS.items():
 #    prices in the overlap is the number a feature has to clear.
 #
 # **Known limitations.** The close-to-close convention is not the next-open execution the
-# backtest models, and that difference is a cost measured in `16_costs`. The universe is a
+# backtest models, and nothing in this case study measures that difference. The universe is a
 # fixed, backward-looking list, so the label inherits the survivorship bias documented in
 # `01_feasibility_analysis`; and the baseline uses one signal at one lookback.
 #
