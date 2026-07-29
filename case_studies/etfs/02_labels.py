@@ -66,9 +66,13 @@ CASE_DIR = get_case_study_dir("etfs")
 LABELS_DIR = CASE_DIR / "labels"
 
 # %% tags=["parameters"]
-# Production runs both as None; CI overrides them to reduce the universe and the span.
+# Production runs the first two as None; CI overrides them to reduce the universe and span.
 MAX_SYMBOLS = None
 START_DATE = None
+# F4 takes a standard deviation across symbols on each date, and across two or three symbols
+# that is noise rather than dispersion, so thinner dates are dropped instead of being allowed
+# to set a year's level. CI reduces the universe below this floor and overrides it in step.
+MIN_SYMBOLS_FOR_DISPERSION = 10
 
 # %% [markdown]
 # ## Configuration
@@ -181,8 +185,16 @@ print(f"Constructed {', '.join(LABEL_NAMES)}")
 # A shift always returns something; the question is whether it is the quantity the label
 # claims. The four properties below all fail silently, so they are asserted rather than
 # described. The tolerance for the second is derived, not tuned: $h$ trading sessions span
-# about $7h/5$ calendar days on a five-session week, plus a week for exchange holidays. A
-# window wider than that has a hole in it.
+# about $7h/5$ calendar days on a five-session week, plus a week for exchange holidays.
+#
+# Note what that second property does and does not establish. It bounds how much *calendar*
+# time a window covers, so it catches a hole of a week or more - a delisting, a data outage,
+# a symbol that stops trading and resumes. It cannot catch one missing session, which widens
+# the window by a single day and stays well inside the tolerance. Proving the window spans
+# exactly $h$ *exchange* sessions would mean checking each endpoint against a session
+# calendar, which this notebook does not carry. The label's convention is $h$ sessions as
+# they appear in this data, and the assertion bounds how far that can drift from $h$ sessions
+# on the exchange.
 
 # %%
 for label_name, horizon in HORIZONS.items():
@@ -309,11 +321,22 @@ plt.show()
 # F4. Dispersion through time. A cross-sectional label is comparable across regimes only
 # if the spread the model ranks within is roughly stable; where it is not, the same IC buys
 # a different amount of return.
-annual = (
+#
+# The spread is taken across symbols on each date first, and only then averaged over the
+# year. Pooling every symbol-date in the year into one standard deviation instead would
+# measure something else - it would add the movement of the panel's own mean from date to
+# date to the spread across symbols on a date, and it is only the second that a
+# cross-sectional ranking model is scored on.
+daily_dispersion = (
     dev[PRIMARY_LABEL]
-    .with_columns(pl.col("timestamp").dt.year().alias("year"))
+    .group_by("timestamp")
+    .agg(pl.col(PRIMARY_LABEL).std().alias("dispersion"), pl.len().alias("n_symbols"))
+    .filter(pl.col("n_symbols") >= MIN_SYMBOLS_FOR_DISPERSION)
+)
+annual = (
+    daily_dispersion.with_columns(pl.col("timestamp").dt.year().alias("year"))
     .group_by("year")
-    .agg(pl.col(PRIMARY_LABEL).std().alias("dispersion"))
+    .agg(pl.col("dispersion").mean().alias("dispersion"))
     .sort("year")
 )
 peak = annual.sort("dispersion", descending=True).row(0, named=True)
@@ -324,12 +347,12 @@ ax.bar(annual["year"], annual["dispersion"], color=COLORS["blue"], width=0.7)
 ax.axhline(median_disp, color=COLORS["copper"], linestyle="--", linewidth=1.2, label="median year")
 ax.set_xticks(annual["year"].to_list()[::2])  # integer years, not a float axis
 ax.set_xlabel("Year")
-ax.set_ylabel(f"Cross-sectional std of {PRIMARY_LABEL}")
+ax.set_ylabel(f"Mean daily cross-sectional std of {PRIMARY_LABEL}")
 add_message_title(
     ax,
     f"Dispersion peaks at {peak['dispersion']:.1%} in {peak['year']:.0f}, about "
     f"{peak['dispersion'] / median_disp:.1f}x the median year",
-    subtitle="Crisis years widen the spread a ranking model is scored on",
+    subtitle="Spread across symbols on a date, averaged over the year",
 )
 ax.legend(loc="upper right", frameon=False)
 plt.show()
@@ -344,7 +367,7 @@ print(
 # On the development window the monthly label has a standard deviation of 0.0612 against
 # 0.0311 for the weekly label - a ratio of 1.97, close to the 2.05 that
 # square-root-of-horizon scaling would give. Cross-sectional dispersion is far from
-# constant: it peaks at 10.1% in 2008, against a median year of 4.9%.
+# constant: it peaks at 6.7% in 2008, against a median year of 3.9%.
 
 # %% [markdown]
 # ## F. Overlap and effective sample size
@@ -393,7 +416,7 @@ print(
 print(f"  autocorrelation at lag one {acf[0]:.3f}, at the horizon {acf[PRIMARY_HORIZON - 1]:.3f}")
 
 # %% [markdown] tags=["results"]
-# The monthly label's 418,362 development rows carry 19,064 effective observations - 4.56%
+# The monthly label's 418,362 development rows carry 19,112 effective observations - 4.57%
 # of the row count, against the 4.55% that a window this fully overlapped implies. The
 # autocorrelation runs from 0.942 at lag one to -0.019 at the horizon. Both say the same
 # thing in different units: the sample is worth about a twentieth of what its height

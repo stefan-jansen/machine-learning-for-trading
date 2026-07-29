@@ -75,6 +75,34 @@ def test_overlapping_windows_shrink_the_effective_count_toward_n_over_h() -> Non
     assert n_eff / rows == pytest.approx(1 / (horizon + 1), abs=0.005)
 
 
+@pytest.mark.parametrize(
+    ("n", "horizon", "expected"),
+    [
+        # n=3, h=1. Windows are closed at both ends over bars 0..3, so concurrency is
+        # (1, 2, 2, 1) and the uniqueness weights are (0.75, 0.5, 0.75).
+        (3, 1, 2.0),
+        # n=4, h=2. Concurrency over bars 0..5 is (1, 2, 3, 3, 2, 1); the weights are
+        # (11/18, 7/18, 7/18, 11/18).
+        (4, 2, 2.0),
+    ],
+)
+def test_effective_sample_size_matches_uniqueness_computed_by_hand(
+    n: int, horizon: int, expected: float
+) -> None:
+    """Pins the boundary convention, which is the whole difficulty here.
+
+    Every row of the frame carries a complete forward window, but the bars that
+    close the last `horizon` windows are not rows of the frame. Capping the
+    endpoints at `n` would shorten exactly those windows; a shorter window overlaps
+    fewer others, so the boundary rows would score as more independent than they
+    are and the total would come out above these values.
+    """
+    frame = _panel(n_per_symbol=n, symbols=("A",))
+    rows, n_eff = effective_sample_size(frame, horizon=horizon)
+    assert rows == n
+    assert n_eff == pytest.approx(expected)
+
+
 def test_effective_sample_size_is_computed_per_entity() -> None:
     """One symbol of 2n rows carries less independent information than two of n:
     concurrency stops at an entity boundary."""

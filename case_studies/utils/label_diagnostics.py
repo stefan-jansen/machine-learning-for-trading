@@ -57,12 +57,20 @@ def effective_sample_size(
     share of its forward window no concurrent label also spans. Concurrency is a
     property of one entity's overlapping windows, so the weights are computed per
     entity and summed.
+
+    *frame* is expected to hold only rows with a non-null label, so every row has a
+    complete ``horizon``-bar forward window even though the bars closing the last
+    ``horizon`` windows are not themselves rows of *frame*. The endpoints are
+    therefore left uncapped and the concurrency array is extended to ``n +
+    horizon``. Capping them at ``n`` instead would shorten exactly those windows,
+    and a shorter window overlaps fewer others, so the rows at the boundary would
+    be scored as more independent than they are and ``N_eff`` would come out high.
     """
     rows, weight = 0, 0.0
     for _, group in frame.sort(timestamp_col).group_by([entity_col], maintain_order=True):
         n = group.height
         events = np.arange(n)
-        weights = calculate_label_uniqueness(events, np.minimum(events + horizon, n), n_bars=n)
+        weights = calculate_label_uniqueness(events, events + horizon, n_bars=n + horizon)
         rows += n
         weight += float(weights.sum())
     return rows, weight
