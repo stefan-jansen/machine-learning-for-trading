@@ -1,7 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
-#     cell_metadata_filter: -all
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -66,12 +66,12 @@ CASE_DIR = get_case_study_dir("etfs")
 LABELS_DIR = CASE_DIR / "labels"
 
 # %% tags=["parameters"]
-# Production runs the first two as None; CI overrides them to reduce the universe and span.
+# Production runs both as None; CI overrides only START_DATE. MAX_SYMBOLS stays unset: the CI
+# fixture is already reduced, and stage 03 needs 10+ non-null labels per date to compute IC.
 MAX_SYMBOLS = None
 START_DATE = None
 # F4 takes a standard deviation across symbols on each date; across two or three symbols that
-# is noise, so thinner dates are dropped. CI reduces the universe below this floor and
-# overrides it in step.
+# is noise, so thinner dates are dropped. This floor holds in CI too.
 MIN_SYMBOLS_FOR_DISPERSION = 10
 
 # %% [markdown]
