@@ -69,10 +69,40 @@ def test_holdout_filter_precedes_first_ic_computation(rel_path: str, first_ic_ma
         "update HOLDOUT_SCOPED_NOTEBOOKS if the notebook was restructured"
     )
 
-    filter_pos = source.upper().find("HOLDOUT_START")
-    assert 0 <= filter_pos < ic_pos, (
+    # Require the boundary to be COMPARED against, not merely bound. Every one of these
+    # notebooks binds `HOLDOUT_START` from setup.yaml near the top, so searching for the
+    # bare name finds that assignment, which precedes the IC whether or not any filter
+    # exists — deleting the seal entirely used to pass here.
+    #
+    # The comparison is not always against the boundary name itself: one notebook narrows
+    # via `end_date = min(END_DATE, HOLDOUT_START)` and then filters on `end_date`, which
+    # is an equally sound seal. So taint the boundary name through assignments and accept a
+    # comparison against anything derived from it.
+    tree = ast.parse(source)
+    tainted = {"HOLDOUT_START", "holdout_start_dt", "holdout_start"}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        referenced = {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)}
+        if referenced & tainted:
+            tainted |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+
+    seal_lines = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Compare)
+        and {n.id for n in ast.walk(node) if isinstance(n, ast.Name)} & tainted
+    ]
+    assert seal_lines, (
+        f"{rel_path}: the holdout boundary is bound but never compared against. The seal must "
+        "be an applied filter — `.filter(pl.col('_label_end') < HOLDOUT_START)` or a narrowed "
+        "end date — not merely a constant read from setup.yaml"
+    )
+    ic_line = source.count("\n", 0, ic_pos) + 1
+    assert min(seal_lines) < ic_line, (
         f"{rel_path}: the holdout filter must be applied before the first IC "
-        "computation so selection decisions never see the sealed holdout"
+        f"computation so selection decisions never see the sealed holdout "
+        f"(earliest comparison at line {min(seal_lines)}, first IC at line {ic_line})"
     )
 
 
