@@ -189,14 +189,12 @@ print(f"Constructed {', '.join(LABEL_NAMES)}")
 # described. The tolerance for the second is derived, not tuned: $h$ trading sessions span
 # about $7h/5$ calendar days on a five-session week, plus a week for exchange holidays.
 #
-# Note what that second property does and does not establish. It bounds how much *calendar*
-# time a window covers, so it catches a hole of a week or more - a delisting, a data outage,
-# a symbol that stops trading and resumes. It cannot catch one missing session, which widens
-# the window by a single day and stays well inside the tolerance. Proving the window spans
-# exactly $h$ *exchange* sessions would mean checking each endpoint against a session
-# calendar, which this notebook does not carry. The label's convention is $h$ sessions as
-# they appear in this data, and the assertion bounds how far that can drift from $h$ sessions
-# on the exchange.
+# Note what that second property does and does not establish. It bounds a window's *calendar*
+# span, so it catches a hole of a week or more - a delisting, an outage, a symbol that stops
+# and resumes - but not one missing session, which widens the window by a day and stays
+# inside the tolerance. Proving exactly $h$ *exchange* sessions needs a session calendar this
+# notebook does not carry. The convention is $h$ sessions as they appear in this data, and
+# the assertion bounds how far that can drift from $h$ sessions on the exchange.
 
 # %%
 for label_name, horizon in HORIZONS.items():
@@ -515,7 +513,12 @@ for label_name, horizon in HORIZONS.items():
         f"\n  resolution   fixed at t+h; no tie-break needed on daily bars"
         f"\n  overlap      {horizon - 1} sessions shared by consecutive rows"
         f"\n  base rate    mean {frame[label_name].mean():.4f}, std "
-        f"{frame[label_name].std():.4f}\n  consumed by  03_financial_features.py"
+        f"{frame[label_name].std():.4f}\n  consumed by  "
+        + (
+            "03_financial_features.py, as `labels.primary`"
+            if label_name == PRIMARY_LABEL
+            else "no stage before modelling; stage 03 reads `labels.primary` only"
+        )
     )
 
 # %% [markdown]
@@ -530,7 +533,9 @@ for label_name, horizon in HORIZONS.items():
 # 3. **Seal on the label's endpoint.** A row observed before the holdout that resolves
 #    inside it is a holdout row; filtering on the observation date looks sealed and is not.
 # 4. **Count the information, not the rows.** Overlapping windows make the row count a poor
-#    guide to the evidence available, and the effective count sets the purge gap.
+#    guide to the evidence available, which is what the effective count measures. It does
+#    not set the purge gap - the label's forward window does, and only that: $N_{eff}$ moves
+#    with sampling density and panel length while the gap a fold needs stays at the horizon.
 # 5. **Establish the floor before building features.** A baseline IC whose standard error
 #    prices in the overlap is the number a feature has to clear.
 #
