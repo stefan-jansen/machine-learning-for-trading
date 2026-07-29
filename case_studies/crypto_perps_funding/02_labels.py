@@ -60,7 +60,7 @@ from case_studies.utils.label_diagnostics import effective_sample_size, panel_au
 from data import load_crypto_perps, load_crypto_premium
 from utils.artifact_specs import resolve_label_horizon
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -69,9 +69,9 @@ CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 LABELS_DIR = CASE_DIR / "labels"
 
 # %% [markdown]
-# Both parameters are `None` in production and both are read below. The CI override sets only
-# `START_DATE`: the fixture is already cut to five symbols, and thinning the cross-section again
-# would leave too few symbols per settlement for a rank correlation to mean anything.
+# Both parameters are unset by default, and both are read below. `START_DATE` trims the history
+# to a later start; `MAX_SYMBOLS` keeps only the first symbols in alphabetical order. Either one
+# shortens a run, at the cost of a thinner cross-section for the rank correlation in Section G.
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = None
@@ -303,9 +303,9 @@ print(f"Both direction labels null exactly where {PRIMARY_LABEL} does")
 # Position zero below is each symbol's last available bar. The non-null rate has to fall to
 # zero over exactly the last `horizon` positions and sit flat beyond them. A scalar count of
 # valid rows shows neither failure this catches: a tail fabricated instead of nulled, or a
-# short label masked by a longer one's null set. The flat level sits a little under one because
-# of the grid holes counted above, which is the only place in the notebook those rows appear;
-# they are too few to read off the chart, so the counts are printed rather than plotted.
+# short label masked by a longer one's null set. Beyond the horizon the rate is one at every
+# position drawn: the grid holes and missing closes Section D counts are too rare to fall in these
+# last few positions of any symbol, so they show up in that section's counts and not here.
 
 # %%
 profile = (
@@ -315,17 +315,19 @@ profile = (
     .sort("from_end")
 )
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
-for name, colour in zip(RETURN_LABELS, (COLORS["blue"], COLORS["amber"]), strict=True):
+for name, colour, fmt in zip(
+    RETURN_LABELS, (COLORS["blue"], COLORS["amber"]), ("o-", "s--"), strict=True
+):
     label = f"{name}, h={HORIZONS[name]}"
-    ax.step(profile["from_end"], profile[name], where="mid", color=colour, lw=2, label=label)
+    ax.plot(profile["from_end"], profile[name], fmt, ds="steps-mid", color=colour, label=label)
     ax.axvline(HORIZONS[name] - 0.5, color=colour, linestyle=":", lw=1)
 ax.set_xlabel("Settlement periods from the end of each symbol's series")
 ax.set_ylabel("Share of symbols with a non-null label")
 ax.set_ylim(-0.05, 1.08)
 note = "Dotted lines mark each horizon; a fabricated tail would sit flat across it"
-add_message_title(ax, "Each label nulls exactly its own horizon of trailing bars", subtitle=note)
+add_message_title(ax, "Each label nulls exactly its own horizon of trailing periods", subtitle=note)
 ax.legend(loc="center left", frameon=False)
-plt.show()
+show_with_alt(fig, "Non-null label rate by position from the end of each series.")
 
 # %% [markdown]
 # ## E. Distribution and base rate
@@ -350,18 +352,19 @@ for name, frame in dev.items():
 # %% [markdown]
 # Both return labels go on one axis with identical bins and a logarithmic count axis. The
 # difference that matters is not the width, which two dispersion scalars would carry, but the
-# shape: the longer horizon accumulates mass far out on one side that no table of moments
-# shows. The axis is symmetric and narrower than either label's range, so the asymmetry reads
-# as tail mass on the right with nothing facing it on the left.
+# shape: the longer horizon puts far more mass past the right edge of the axis than past the left,
+# which is the asymmetry its skew reports and no table of moments shows. The axis is symmetric and
+# narrower than either label's range, so the rows outside it are counted on each side below rather
+# than drawn.
 
 # %%
 bins = np.linspace(-0.45, 0.45, 91)
 styles = {
-    VARIANT_LABEL: dict(color=COLORS["amber"], alpha=0.6),
-    PRIMARY_LABEL: dict(color=COLORS["blue"], histtype="step", lw=2),
+    VARIANT_LABEL: dict(color=COLORS["amber"], alpha=0.6, zorder=1),
+    PRIMARY_LABEL: dict(color=COLORS["blue"], histtype="step", lw=2, zorder=2),
 }
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
-for name in (VARIANT_LABEL, PRIMARY_LABEL):
+for name in (PRIMARY_LABEL, VARIANT_LABEL):
     series = dev[name][name]
     label = f"{name}, std {series.std():.3f}, skew {series.skew():.1f}"
     ax.hist(series.to_numpy(), bins=bins, label=label, **styles[name])
@@ -370,13 +373,14 @@ ax.set_yscale("log")
 ax.set_xlabel("Forward return")
 ax.set_ylabel("Rows per bin, log scale")
 note = "Identical bins, development window; rows beyond the axis are counted below"
-add_message_title(ax, "The longer horizon widens the label and stretches its tail", subtitle=note)
+add_message_title(ax, "The longer horizon fattens both tails, not just the width", subtitle=note)
 ax.legend(loc="upper left", frameon=False)
-plt.show()
+show_with_alt(fig, "Histograms of both labels on identical bins and a log count axis.")
 
 for name in RETURN_LABELS:
-    s, beyond = dev[name][name], dev[name].filter(pl.col(name).abs() > bins[-1]).height
-    print(f"{name}: std {s.std():.5f}, skew {s.skew():.2f}, {beyond} rows beyond the axis")
+    col, series = pl.col(name), dev[name][name]
+    lo, hi = dev[name].filter(col < bins[0]).height, dev[name].filter(col > bins[-1]).height
+    print(f"{name}: std {series.std():.5f}, skew {series.skew():.2f}, {lo} left {hi} right of axis")
 
 # %% [markdown]
 # Chapter 7.2 asks for base rates tracked through time, and for a discrete label that means the
@@ -394,9 +398,9 @@ annual = (
 )
 years = annual["year"].unique().sort().to_list()
 classes = {
-    -1: ("down", COLORS["negative"]),
+    -1: ("down", COLORS["blue"]),
     0: ("middle", COLORS["neutral"]),
-    1: ("up", COLORS["positive"]),
+    1: ("up", COLORS["amber"]),
 }
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single_wide"])
@@ -407,11 +411,11 @@ for offset, (cls, (cls_name, colour)) in enumerate(classes.items()):
 ax.axhline(1 / 3, color=COLORS["copper"], linestyle="--", lw=1.2, label="pooled share")
 ax.set_xticks(np.arange(len(years)), [str(year) for year in years])
 ax.set_xlabel("Year")
-ax.set_ylabel(f"Share of {THREE_CLASS_LABEL} rows")
+ax.set_ylabel("Share of rows in each class")
 note = "Development window; the cuts are the pooled terciles, so only the mix moves"
 add_message_title(ax, "A fixed cut lets the class mix drift with volatility", subtitle=note)
 ax.legend(loc="upper left", frameon=False, ncols=4)
-plt.show()
+show_with_alt(fig, "Class shares of the three-class label, year by year.")
 
 middle = annual.filter(pl.col(THREE_CLASS_LABEL) == 0)["fraction"]
 print(f"{THREE_CLASS_LABEL} middle share runs {middle.min():.3f} to {middle.max():.3f} by year")
@@ -444,14 +448,14 @@ acf = {n: panel_autocorrelation(dev[n], n, max_lag=max_lag) for n in RETURN_LABE
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 for name, colour in zip(RETURN_LABELS, (COLORS["blue"], COLORS["amber"]), strict=True):
     ax.plot(np.arange(1, max_lag + 1), acf[name], marker="o", color=colour, lw=2, label=name)
+    ax.axvline(HORIZONS[name], color=colour, linestyle=":", lw=1.5)
 ax.axhline(0, color=COLORS["neutral"], lw=0.8)
-ax.axvline(HORIZONS[VARIANT_LABEL], color=COLORS["copper"], linestyle=":", lw=1.5, label="horizon")
 ax.set_xlabel("Lag in settlement periods")
 ax.set_ylabel("Panel autocorrelation")
-note = "Demeaned within symbol then pooled across the panel, development window"
-add_message_title(ax, "Overlap decays to zero exactly at the horizon it came from", subtitle=note)
+note = "Dotted lines mark each label's horizon; demeaned within symbol, then pooled"
+add_message_title(ax, "Only the overlapping label is autocorrelated", subtitle=note)
 ax.legend(loc="upper right", frameon=False)
-plt.show()
+show_with_alt(fig, "Panel autocorrelation of both labels against lag in periods.")
 
 for name, horizon in HORIZONS.items():
     n_rows, n_eff = effective_sample_size(dev[name], horizon=horizon)
@@ -545,15 +549,15 @@ ax.set_xlabel("Settlement date")
 ax.set_ylabel("Cross-sectional rank IC")
 note = "Rolling mean of the per-settlement IC, sealed on the label endpoint"
 add_message_title(ax, "Premium reversal runs through the whole window, unevenly", subtitle=note)
-ax.legend(loc="lower left", frameon=False)
-plt.show()
+ax.legend(loc="upper right", frameon=True, framealpha=0.9)
+show_with_alt(fig, "Rolling mean of the per-settlement rank IC over the window.")
 
 # %% [markdown] tags=["results"]
 # The premium z-score earns a mean IC of -0.0349 against the eight-hour label, negative as a
 # reversal signal implies. Under the naive standard error that is a t-statistic of -8.05; with
 # three Newey-West lags it is -8.10, and the two agree because the correction is small at this
-# bandwidth. The floor a feature has to clear is a rank correlation of about three and a half
-# hundredths, on a universe whose median cross-section is 16 symbols.
+# bandwidth. That -0.0349 is the floor a feature has to clear, measured on a universe whose median
+# cross-section is 16 symbols.
 
 # %% [markdown]
 # ## H. Artifacts and the audit record
@@ -608,16 +612,17 @@ for name, base in base_rates.items():
 # 1. **Put the provider's timestamps on the clock at which the data is known, before anything
 #    else.** A bar stamped with its open time carries a return you could not have traded, and
 #    every shift after that inherits the error.
-# 2. **Assert the forward window instead of describing it.** An incomplete window, a hole in
-#    the grid, a missing price and a label crossing a symbol boundary all leave plausible
-#    numbers behind, so each is an assertion, and unlabelled rows are reconciled to a cause
-#    rather than counted.
+# 2. **Check the forward window with assertions, and account for every row that has no label.**
+#    An incomplete window, a hole in the grid, a missing price and a label crossing a symbol
+#    boundary each fail without raising an error and leave plausible numbers behind, so a
+#    reconciliation that has to balance catches what an eye passing over a row count does not.
 # 3. **Seal a diagnostic on the label's endpoint.** A row observed before the holdout whose
 #    outcome resolves inside it is a holdout row, so the usable boundary is the boundary minus
 #    the horizon, counted on the market's own grid.
-# 4. **Count the information, not the rows.** Overlapping windows make a row count a poor guide
-#    to the evidence available. The one-period horizon, where the answer is known by inspection,
-#    is what shows the measurement itself is right.
+# 4. **A row count overstates the evidence when forward windows overlap, and the effective
+#    count says by how much.** Check the measurement at a horizon whose answer is known by
+#    inspection: consecutive one-period returns are disjoint, so the effective count has to come
+#    back equal to the row count, and a weighting that counts the anchor bar halves it instead.
 # 5. **Measure the floor on the signal the hypothesis names, under a standard error that prices
 #    in the overlap.** A naive t-statistic on a serially dependent IC series treats correlated
 #    settlements as independent evidence.
