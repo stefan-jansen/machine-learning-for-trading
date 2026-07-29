@@ -19,13 +19,14 @@
 #
 # ## Purpose
 # Connect path-risk theory to trade construction by implementing fixed-fractional
-# and volatility-based position sizing, then calibrating stop and target levels
-# from the realized excursion profile of the underlying price series.
+# and inverse-volatility sizing, then evaluating stop and target diagnostics on
+# calibration and future excursion samples.
 #
 # ## Learning Objectives
 # After completing this notebook, you will be able to:
-# - Implement fixed-fractional and volatility-based position sizing with concentration caps
-# - Analyze MAE/MFE distributions to calibrate stop-loss levels from trade outcomes
+# - Implement fixed-fractional sizing with concentration caps and reconciled stop risk
+# - Build lagged inverse-volatility allocations without implying covariance-aware risk parity
+# - Analyze MAE/MFE distributions without confusing class separation with financial value
 # - Compare full-exit and scale-out policies on a common entry set
 # - Translate horizon-conditional excursion percentiles into pre-trade TP/SL levels
 #
@@ -41,9 +42,8 @@
 # ## Setup
 
 # %%
-"""Position Sizing and MAE/MFE Analysis — implement sizing methods and calibrate stops via trade excursion analysis."""
+"""Implement position sizing and evaluate trade-excursion diagnostics."""
 
-import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -54,22 +54,18 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from data import load_etfs
-from utils.paths import get_case_study_dir, get_output_dir
-from utils.reproducibility import set_global_seeds
-
-warnings.filterwarnings("ignore")
+from utils.paths import get_output_dir
+from utils.style import COLORS, ml4t_palette
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
-SEED = 42
+# Production defaults; Papermill injects overrides for CI
+CALIBRATION_END = "2021-12-31"
+HOLDING_PERIOD = 20
+MAX_HOLDING_DAYS = 30
 
 # %%
-np.random.seed(SEED)
 OUTPUT_DIR = get_output_dir(19, "position_sizing_mae_mfe")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-# %%
-set_global_seeds(SEED)
 
 # %% [markdown]
 # ## 1. Data Preparation
@@ -80,46 +76,40 @@ SYMBOLS = ["SPY", "QQQ", "IWM", "TLT"]
 START_DATE = "2018-01-01"
 END_DATE = "2024-01-01"
 
-etf_data = load_etfs()
-
-# Filter to symbols and date range
-etf_filtered = (
-    etf_data.filter(pl.col("symbol").is_in(SYMBOLS))
-    .filter(pl.col("timestamp") >= pl.lit(START_DATE).str.to_datetime())
-    .filter(pl.col("timestamp") <= pl.lit(END_DATE).str.to_datetime())
-    .sort(["symbol", "timestamp"])
-)
-
-# Pivot each price column to wide format
-close_prices = (
-    etf_filtered.select(["timestamp", "symbol", "close"])
-    .pivot(on="symbol", index="timestamp", values="close")
-    .to_pandas()
-    .set_index("timestamp")
-)
-high_prices = (
-    etf_filtered.select(["timestamp", "symbol", "high"])
-    .pivot(on="symbol", index="timestamp", values="high")
-    .to_pandas()
-    .set_index("timestamp")
-)
-low_prices = (
-    etf_filtered.select(["timestamp", "symbol", "low"])
-    .pivot(on="symbol", index="timestamp", values="low")
-    .to_pandas()
-    .set_index("timestamp")
+etf_filtered = load_etfs(symbols=SYMBOLS, start_date=START_DATE, end_date=END_DATE).sort(
+    ["symbol", "timestamp"]
 )
 
 # %%
-# Ensure datetime index and forward fill
-for df in [close_prices, high_prices, low_prices]:
-    df.index = pd.to_datetime(df.index)
+duplicate_keys = etf_filtered.group_by(["symbol", "timestamp"]).len().filter(pl.col("len") > 1)
+ohlc_tolerance = 1e-10
+ohlc_violations = etf_filtered.filter(
+    (pl.col("low") > pl.min_horizontal("open", "close") + ohlc_tolerance)
+    | (pl.col("high") < pl.max_horizontal("open", "close") - ohlc_tolerance)
+    | (pl.col("high") < pl.col("low") - ohlc_tolerance)
+)
+assert duplicate_keys.is_empty(), "ETF data contains duplicate symbol/timestamp keys"
+assert ohlc_violations.is_empty(), "ETF data violates OHLC ordering"
 
-close_prices = close_prices.ffill().dropna()
-high_prices = high_prices.ffill().dropna()
-low_prices = low_prices.ffill().dropna()
+prices_wide = (
+    etf_filtered.select(["timestamp", "symbol", "close", "high", "low"])
+    .to_pandas()
+    .pivot(index="timestamp", columns="symbol", values=["close", "high", "low"])
+    .dropna()
+    .sort_index()
+)
+prices_wide.index = pd.to_datetime(prices_wide.index)
+close_prices = prices_wide["close"].reindex(columns=SYMBOLS)
+high_prices = prices_wide["high"].reindex(columns=SYMBOLS)
+low_prices = prices_wide["low"].reindex(columns=SYMBOLS)
 
-print(f"Loaded {len(close_prices):,} daily bars from canonical data")
+assert close_prices.index.equals(high_prices.index) and close_prices.index.equals(low_prices.index)
+assert close_prices.columns.equals(high_prices.columns) and close_prices.columns.equals(
+    low_prices.columns
+)
+assert not prices_wide.isna().any().any(), "Aligned OHLC panel contains missing values"
+
+print(f"Loaded {len(close_prices):,} aligned daily bars from canonical data")
 
 # %% [markdown]
 # **Interpretation**: The sample keeps the notebook tied to liquid ETFs with long
@@ -127,17 +117,20 @@ print(f"Loaded {len(close_prices):,} daily bars from canonical data")
 # single idiosyncratic name.
 
 # %%
-# Calculate volatility for each asset
+# The one-step shift makes this a next-session control: a weight dated t uses
+# returns observed through t-1.
 returns = close_prices.pct_change()
-volatility = returns.rolling(20).std() * np.sqrt(252)
+volatility = returns.rolling(20, min_periods=20).std().shift(1) * np.sqrt(252)
+latest_volatility = volatility.dropna().iloc[-1]
+volatility_as_of = volatility.dropna().index[-1]
 
-print("\nAnnualized Volatility (Recent):")
-print(volatility.iloc[-1].round(3))
+print(f"\nAnnualized volatility available before {volatility_as_of.date()}:")
+print(latest_volatility.round(3))
 
 # %% [markdown]
-# **Interpretation**: The recent volatility spread sets up the sizing problem.
-# TLT typically carries a different risk budget from equity ETFs, so a fixed share
-# count would misstate risk even before we calibrate stops.
+# **Interpretation**: The lagged estimate makes the event order explicit: the
+# displayed allocation can be decided before the dated session begins. A fixed
+# share count would otherwise misstate risk across assets with different volatility.
 
 # %% [markdown]
 # ## 2. Fixed Fractional Position Sizing
@@ -182,29 +175,32 @@ def calculate_fixed_fractional_size(
     Shares = (portfolio_value * risk_per_trade) / |entry - stop|, capped at
     max_position_pct of the portfolio.
     """
-    risk_amount = portfolio_value * config.risk_per_trade
+    if portfolio_value <= 0 or entry_price <= 0:
+        raise ValueError("portfolio_value and entry_price must be positive")
+
+    risk_budget = portfolio_value * config.risk_per_trade
     risk_per_share = abs(entry_price - stop_price)
 
     if risk_per_share <= 0:
-        return {"shares": 0, "position_value": 0, "position_pct": 0}
+        raise ValueError("entry_price and stop_price must differ")
 
-    # Raw position size
-    shares = risk_amount / risk_per_share
+    risk_limited_shares = risk_budget / risk_per_share
+    concentration_limited_shares = portfolio_value * config.max_position_pct / entry_price
+    shares = int(min(risk_limited_shares, concentration_limited_shares))
     position_value = shares * entry_price
     position_pct = position_value / portfolio_value
-
-    # Cap at max position
-    if position_pct > config.max_position_pct:
-        position_pct = config.max_position_pct
-        position_value = portfolio_value * position_pct
-        shares = position_value / entry_price
+    stop_risk = shares * risk_per_share
 
     return {
-        "shares": int(shares),
-        "position_value": shares * entry_price,
+        "shares": shares,
+        "position_value": position_value,
         "position_pct": position_pct,
-        "risk_amount": risk_amount,
+        "risk_budget": risk_budget,
+        "stop_risk": stop_risk,
         "risk_per_share": risk_per_share,
+        "binding_limit": (
+            "concentration" if concentration_limited_shares < risk_limited_shares else "risk budget"
+        ),
     }
 
 
@@ -214,133 +210,102 @@ portfolio = 100_000
 entry = 450.0  # SPY entry
 stop_levels = [445.0, 440.0, 435.0, 430.0]  # Different stop distances
 
-print("Fixed Fractional Position Sizing (1% Risk)")
-print("=" * 60)
-print(f"Portfolio: ${portfolio:,.0f}, Entry: ${entry:.2f}\n")
-
+fixed_fractional_rows = []
 for stop in stop_levels:
     config = FixedFractionalConfig(risk_per_trade=0.01)
     result = calculate_fixed_fractional_size(portfolio, entry, stop, config)
+    fixed_fractional_rows.append(
+        {
+            "stop_price": stop,
+            "stop_distance_pct": (entry - stop) / entry * 100,
+            **result,
+        }
+    )
 
-    stop_pct = (entry - stop) / entry * 100
-    print(f"Stop: ${stop:.2f} ({stop_pct:.1f}% below entry)")
-    print(f"  Shares: {result['shares']:,}")
-    print(f"  Position: ${result['position_value']:,.0f} ({result['position_pct']:.1%})")
-    print(f"  Risk: ${result['risk_amount']:,.0f}")
-    print()
-
-# %% [markdown]
-# **Interpretation**: A tighter stop allows more shares for the same dollar risk,
-# but the concentration cap quickly binds. That is the practical lesson of fixed
-# fractional sizing: the stop distance and the position cap must be designed together.
+fixed_fractional_df = pl.DataFrame(fixed_fractional_rows)
+fixed_fractional_df
 
 # %% [markdown]
-# ## 3. Volatility-Based Position Sizing
+# **Interpretation**: The table separates the target risk budget from realized
+# stop risk. When the concentration limit binds, integer shares keep both position
+# value and stop risk below their limits; wider stops eventually make risk budget
+# the binding constraint.
+
+# %% [markdown]
+# ## 3. Inverse-Volatility Allocation
 #
-# Adjust position size inversely to asset volatility.
+# A normalized inverse-volatility heuristic assigns smaller weights to assets with
+# higher lagged standalone volatility:
 #
-# **Logic**: More volatile assets → smaller positions (equal risk contribution)
+# $$\widetilde w_i = \frac{1}{\widehat\sigma_{i,t-1}}, \qquad
+# w_i = \frac{\widetilde w_i}{\sum_j \widetilde w_j}.$$
+#
+# This is not portfolio-volatility targeting or equal risk contribution because it
+# does not use the covariance matrix.
 
 
 # %% [markdown]
-# This configuration translates risk targeting into simple upper and lower bounds
-# on the final weight.
+# The helper validates the estimates and normalizes inverse volatility to a fully
+# invested long-only allocation.
 
 
 # %%
-@dataclass
-class VolatilityBasedConfig:
-    """Volatility-based position sizing configuration."""
+def calculate_inverse_volatility_weights(asset_volatility: pd.Series) -> pd.Series:
+    """Normalize inverse standalone volatility across assets."""
+    if asset_volatility.empty or not np.isfinite(asset_volatility).all():
+        raise ValueError("asset volatility must be finite and non-empty")
+    if (asset_volatility <= 0).any():
+        raise ValueError("asset volatility must be positive")
+    inverse_volatility = 1.0 / asset_volatility
+    return inverse_volatility / inverse_volatility.sum()
 
-    target_volatility: float = 0.10  # Target 10% portfolio volatility
-    max_position_pct: float = 0.30  # Max 30% in any position
-    min_position_pct: float = 0.02  # Min 2% in any position
 
+# %%
+inverse_volatility_weights = calculate_inverse_volatility_weights(latest_volatility)
+inverse_volatility_df = pl.DataFrame(
+    {
+        "symbol": inverse_volatility_weights.index,
+        "lagged_volatility_pct": latest_volatility.to_numpy() * 100,
+        "allocation_pct": inverse_volatility_weights.to_numpy() * 100,
+    }
+).sort("allocation_pct", descending=True)
+assert np.isclose(inverse_volatility_weights.sum(), 1.0)
+inverse_volatility_df
 
 # %% [markdown]
-# The volatility-based rule scales the weight inversely with realized volatility
-# and then clips the result to the allowed range.
-
-
-# %%
-def calculate_volatility_based_size(
-    asset_volatility: float,
-    config: VolatilityBasedConfig,
-) -> float:
-    """
-    Calculate position size based on asset volatility.
-
-    Position Weight = Target Vol / Asset Vol
-    """
-    if asset_volatility <= 0:
-        return 0
-
-    # Raw weight
-    weight = config.target_volatility / asset_volatility
-
-    # Apply constraints
-    weight = min(weight, config.max_position_pct)
-    weight = max(weight, config.min_position_pct)
-
-    return weight
-
+# **Interpretation**: The normalized weights sum to 100%. The least volatile ETF
+# receives the largest allocation, but correlations are absent, so this remains a
+# standalone-volatility heuristic rather than a risk-parity solution.
 
 # %%
-# Example: Volatility-based sizing across assets. Target vol is below the lowest
-# realized vol so that the inverse-vol rule produces a differentiated weight per
-# asset before any cap binds.
-config = VolatilityBasedConfig(target_volatility=0.04, max_position_pct=0.40)
-
-print("Volatility-Based Position Sizing")
-print("=" * 60)
-print(f"Target Portfolio Volatility: {config.target_volatility:.0%}\n")
-
-for symbol in SYMBOLS:
-    vol = volatility[symbol].iloc[-1]
-    weight = calculate_volatility_based_size(vol, config)
-
-    print(f"{symbol}:")
-    print(f"  Volatility: {vol:.1%}")
-    print(f"  Position Weight: {weight:.1%}")
-    print()
-
-# %% [markdown]
-# **Interpretation**: Weight scales inversely with realized volatility — the
-# lowest-vol asset receives the largest allocation, and the highest-vol asset the
-# smallest. The cap binds only when an asset's volatility falls below
-# target_vol / max_position_pct, which is the threshold separating the
-# risk-parity regime from the concentration-limited regime.
-
-# %%
-# Visualize how position size varies with volatility
-vol_range = np.linspace(0.05, 0.50, 50)
-weights = [calculate_volatility_based_size(v, config) for v in vol_range]
-
-fig = go.Figure()
-fig.add_trace(
-    go.Scatter(x=vol_range * 100, y=np.array(weights) * 100, mode="lines", line=dict(width=2))
+top_inverse_vol_symbol = inverse_volatility_df["symbol"][0]
+fig = go.Figure(
+    go.Bar(
+        x=inverse_volatility_df["allocation_pct"],
+        y=inverse_volatility_df["symbol"],
+        orientation="h",
+        marker_color=COLORS["blue"],
+    )
 )
 
-fig.add_hline(y=config.max_position_pct * 100, line_dash="dash", annotation_text="Max Position")
-fig.add_hline(y=config.min_position_pct * 100, line_dash="dash", annotation_text="Min Position")
-
 fig.update_layout(
-    title="Position Size vs Asset Volatility",
-    xaxis_title="Asset Volatility (%)",
-    yaxis_title="Position Size (%)",
+    title=f"Lagged volatility gives {top_inverse_vol_symbol} the largest allocation",
+    xaxis_title="Portfolio allocation (%)",
+    yaxis_title="ETF",
     height=400,
+    yaxis={"categoryorder": "total ascending"},
 )
 fig.show()
 
 # %% [markdown]
-# **Interpretation**: The curve is steep at low volatility and then flattens once
-# the cap binds. In practice, that means volatility targeting is most sensitive in
-# the middle of the risk spectrum rather than at the extremes.
+# **Interpretation**: The chart makes the ranking and budget constraint visible.
+# It should be read as a transparent heuristic; a covariance-aware allocator can
+# produce materially different weights when correlations are high.
 
 # %% [markdown]
 # ## 4. Kelly Criterion (Cross-Reference)
 #
-# Kelly sizing is covered in Chapter 17 (`kelly_criterion.ipynb`), where it
+# Kelly sizing is covered in Chapter 17 (`04_kelly_criterion`), where it
 # integrates with portfolio construction. Here we focus on volatility-based
 # and MAE/MFE methods specific to risk management.
 #
@@ -356,7 +321,7 @@ fig.show()
 # **Example Strategy**:
 # - Exit 1/3 at first target (lock in profits)
 # - Exit 1/3 at second target (capture more upside)
-# - Trail stop on remaining 1/3 (let winners run)
+# - Move the stop on the remainder to break-even after a target fires
 
 
 # %% [markdown]
@@ -438,8 +403,66 @@ def apply_scale_out_targets(
 
 
 # %% [markdown]
-# The simulator applies the stop first, then profit targets, and finally closes any
-# remaining position at the holding-period boundary.
+# Stop and timeout exits share the same weighted-return accounting, so a small
+# helper keeps that closeout invariant in one place.
+
+
+# %%
+def close_remaining_position(
+    exits: list[dict],
+    day: int,
+    current_price: float,
+    entry_price: float,
+    remaining_position: float,
+    exit_type: str,
+) -> float:
+    pnl = (current_price / entry_price - 1) * remaining_position
+    _append_exit(exits, day, current_price, remaining_position, exit_type, pnl)
+    return pnl
+
+
+# %% [markdown]
+# A single bar step enforces stop priority before checking the profit targets and
+# returns whether the position has closed.
+
+
+# %%
+def process_scale_out_bar(
+    config: ScaleOutConfig,
+    current_price: float,
+    entry_price: float,
+    day: int,
+    stop_price: float,
+    remaining_position: float,
+    total_return: float,
+    exits: list[dict],
+    executed_targets: set[int],
+) -> tuple[float, float, float, bool]:
+    if current_price <= stop_price:
+        total_return += close_remaining_position(
+            exits, day, current_price, entry_price, remaining_position, "stop_loss"
+        )
+        return 0.0, total_return, stop_price, True
+
+    previous_position = remaining_position
+    remaining_position, total_return = apply_scale_out_targets(
+        config,
+        current_price / entry_price - 1,
+        current_price,
+        day,
+        remaining_position,
+        total_return,
+        exits,
+        executed_targets,
+    )
+    if remaining_position < previous_position:
+        stop_price = max(stop_price, entry_price)
+    return remaining_position, total_return, stop_price, False
+
+
+# %% [markdown]
+# The simulator applies a close-based stop first, then profit targets. After a target
+# fires, the stop ratchets once to break-even; this is not a trailing stop.
 
 
 # %%
@@ -449,140 +472,162 @@ def simulate_scale_out(
     entry_price: float,
     config: ScaleOutConfig,
     stop_loss_pct: float = 0.02,
-    max_holding_days: int = 30,
+    max_holding_days: int = MAX_HOLDING_DAYS,
 ) -> dict:
-    """Simulate a partial-exit policy with stop-loss protection."""
-    remaining_position = 1.0
-    total_return = 0.0
-    exits = []
-    executed_targets: set[int] = set()
+    remaining_position, total_return = 1.0, 0.0
+    exits, executed_targets = [], set()
     stop_price = entry_price * (1 - stop_loss_pct)
     final_idx = min(entry_idx + max_holding_days, len(prices) - 1)
-
     for i in range(entry_idx + 1, final_idx + 1):
         current_price = prices[i]
-        if current_price <= stop_price:
-            pnl = (current_price / entry_price - 1) * remaining_position
-            total_return += pnl
-            _append_exit(exits, i - entry_idx, current_price, remaining_position, "stop_loss", pnl)
-            remaining_position = 0
-            break
-
-        prev_remaining = remaining_position
-        remaining_position, total_return = apply_scale_out_targets(
+        remaining_position, total_return, stop_price, closed = process_scale_out_bar(
             config,
-            current_price / entry_price - 1,
             current_price,
+            entry_price,
             i - entry_idx,
+            stop_price,
             remaining_position,
             total_return,
             exits,
             executed_targets,
         )
-        if remaining_position < prev_remaining:
-            stop_price = max(stop_price, entry_price)
-
+        if closed:
+            break
     if remaining_position > 0:
         final_price = prices[final_idx]
-        pnl = (final_price / entry_price - 1) * remaining_position
-        total_return += pnl
-        _append_exit(exits, final_idx - entry_idx, final_price, remaining_position, "timeout", pnl)
-
+        total_return += close_remaining_position(
+            exits,
+            final_idx - entry_idx,
+            final_price,
+            entry_price,
+            remaining_position,
+            "timeout",
+        )
     return {"total_return": total_return, "exits": exits, "n_exits": len(exits)}
 
 
-# %%
-# Compare full exit vs scale out
-spy_prices = close_prices["SPY"].values
-
-# Generate sample entries
-entry_indices = np.sort(np.random.choice(range(50, len(spy_prices) - 50), size=100, replace=False))
-
-# Full exit strategy
-full_exit_returns = []
-for entry_idx in entry_indices:
-    entry_price = spy_prices[entry_idx]
-    # Simple: exit at 3% profit or 2% loss
-    result = simulate_scale_out(
-        spy_prices,
-        entry_idx,
-        entry_price,
-        ScaleOutConfig(tranches=[(0.03, 1.0)]),  # Single exit at 3%
-        stop_loss_pct=0.02,
-    )
-    full_exit_returns.append(result["total_return"])
-
-# Scale out strategy
-scale_out_config = ScaleOutConfig(
-    tranches=[
-        (0.02, 0.33),  # 1/3 at 2%
-        (0.04, 0.33),  # 1/3 at 4%
-        (0.08, 0.34),  # 1/3 at 8%
-    ]
-)
-
-scale_out_returns = []
-for entry_idx in entry_indices:
-    entry_price = spy_prices[entry_idx]
-    result = simulate_scale_out(
-        spy_prices, entry_idx, entry_price, scale_out_config, stop_loss_pct=0.02
-    )
-    scale_out_returns.append(result["total_return"])
+# %% [markdown]
+# The boundary separates calibration from future evaluation. Entry candidates are
+# spaced beyond the longest holding period, and a 30-bar embargo follows the boundary.
 
 # %%
-print("Full Exit vs Scale Out Comparison")
-print("=" * 60)
-
-print("\nFull Exit (3% target):")
-print(f"  Mean Return: {np.mean(full_exit_returns) * 100:+.2f}%")
-print(f"  Std Return:  {np.std(full_exit_returns) * 100:.2f}%")
-print(
-    f"  Win Rate:    {sum(1 for r in full_exit_returns if r > 0) / len(full_exit_returns) * 100:.1f}%"
+spy_prices = close_prices["SPY"].to_numpy()
+calibration_end_idx = (
+    close_prices.index.searchsorted(pd.Timestamp(CALIBRATION_END), side="right") - 1
 )
+future_start_idx = calibration_end_idx + MAX_HOLDING_DAYS + 1
+entry_spacing = MAX_HOLDING_DAYS + 1
 
-print("\nScale Out (2%/4%/8% targets):")
-print(f"  Mean Return: {np.mean(scale_out_returns) * 100:+.2f}%")
-print(f"  Std Return:  {np.std(scale_out_returns) * 100:.2f}%")
+calibration_entry_indices = np.arange(
+    50,
+    calibration_end_idx - MAX_HOLDING_DAYS + 1,
+    entry_spacing,
+)
+future_entry_indices = np.arange(
+    future_start_idx,
+    len(spy_prices) - MAX_HOLDING_DAYS,
+    entry_spacing,
+)
+assert calibration_entry_indices[-1] + MAX_HOLDING_DAYS <= calibration_end_idx
+assert future_entry_indices[0] > calibration_end_idx + MAX_HOLDING_DAYS
 print(
-    f"  Win Rate:    {sum(1 for r in scale_out_returns if r > 0) / len(scale_out_returns) * 100:.1f}%"
+    f"Calibration entries: {len(calibration_entry_indices)} through {CALIBRATION_END}; "
+    f"future entries: {len(future_entry_indices)} after a {MAX_HOLDING_DAYS}-bar embargo"
 )
 
 # %% [markdown]
-# **Interpretation**: In the conventional account, scaling out trades right-tail
-# upside for a smoother distribution. On this SPY dataset the numbers above show
-# the trade-off differently — scale-out gives up upside (mean ≈ 0.44% vs 0.64%) at
-# essentially the same dispersion (std ≈ 3.13% vs 3.15%) and at a lower win rate
-# (54.0% vs 58.0%); the smoother-equity-curve story does not generalize to every
-# entry set, and the policy should be calibrated against the trade ledger, not
-# assumed.
+# This helper applies one fixed exit policy to a supplied entry set, keeping the
+# calibration and future samples explicit at the call site.
+
+
+# %%
+def simulate_entry_set(
+    prices: np.ndarray,
+    entries: np.ndarray,
+    config: ScaleOutConfig,
+) -> list[float]:
+    return [
+        simulate_scale_out(
+            prices,
+            entry_idx,
+            prices[entry_idx],
+            config,
+            stop_loss_pct=0.02,
+        )["total_return"]
+        for entry_idx in entries
+    ]
+
+
+# %%
+full_exit_config = ScaleOutConfig(tranches=[(0.03, 1.0)])
+scale_out_config = ScaleOutConfig(tranches=[(0.02, 0.33), (0.04, 0.33), (0.08, 0.34)])
+full_exit_returns = simulate_entry_set(spy_prices, future_entry_indices, full_exit_config)
+scale_out_returns = simulate_entry_set(spy_prices, future_entry_indices, scale_out_config)
+
+# %%
+exit_comparison = pl.DataFrame(
+    {
+        "policy": ["Full exit", "Scale out"],
+        "mean_return_pct": [np.mean(full_exit_returns) * 100, np.mean(scale_out_returns) * 100],
+        "std_return_pct": [np.std(full_exit_returns) * 100, np.std(scale_out_returns) * 100],
+        "win_rate_pct": [
+            np.mean(np.array(full_exit_returns) > 0) * 100,
+            np.mean(np.array(scale_out_returns) > 0) * 100,
+        ],
+        "future_trades": [len(full_exit_returns), len(scale_out_returns)],
+    }
+)
+exit_comparison
+
+# %% [markdown]
+# **Interpretation**: The future-sample table reports the trade-off without assuming
+# that partial exits smooth returns. The common, non-overlapping entry set isolates
+# exit-policy differences, while the small sample remains a limitation.
 
 # %%
 # Visualize return distributions
 fig = go.Figure()
 
 fig.add_trace(
-    go.Histogram(x=np.array(full_exit_returns) * 100, name="Full Exit", opacity=0.7, nbinsx=30)
+    go.Histogram(
+        x=np.array(full_exit_returns) * 100,
+        name="Full exit",
+        opacity=0.7,
+        nbinsx=20,
+        marker_color=COLORS["blue"],
+    )
 )
 
 fig.add_trace(
-    go.Histogram(x=np.array(scale_out_returns) * 100, name="Scale Out", opacity=0.7, nbinsx=30)
+    go.Histogram(
+        x=np.array(scale_out_returns) * 100,
+        name="Scale out",
+        opacity=0.7,
+        nbinsx=20,
+        marker_color=COLORS["amber"],
+    )
 )
 
+full_exit_mean = np.mean(full_exit_returns) * 100
+scale_out_mean = np.mean(scale_out_returns) * 100
+leading_policy = "Full exits" if full_exit_mean >= scale_out_mean else "Scale-outs"
+mean_return_gap = abs(full_exit_mean - scale_out_mean)
 fig.update_layout(
-    title="Return Distribution: Full Exit vs Scale Out",
+    title=(
+        f"{leading_policy} lead by {mean_return_gap:.2f} percentage points in the future sample"
+    ),
     xaxis_title="Trade Return (%)",
-    yaxis_title="Frequency",
+    yaxis_title="Future trades",
     barmode="overlay",
     height=400,
 )
+fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
 fig.show()
 
 # %% [markdown]
-# **Interpretation**: The histogram makes the trade-off visible. Full exits leave
-# more mass in the high-return tail; scaling out shifts trades toward modest wins
-# (mean return ≈ 0.44% vs 0.64% for full exit) at essentially unchanged dispersion
-# (std ≈ 3.13% vs 3.15%) — and on this dataset the scale-out win rate is actually
-# lower than full exit (54.0% vs 58.0%), the opposite of the textbook story.
+# **Interpretation**: The zero line and common bins show whether the policy changes
+# downside mass or mainly gives up upside. The computed title records the observed
+# mean difference without hardcoding a result that can drift after execution.
 
 # %% [markdown]
 # ## 6. MAE/MFE Analysis
@@ -590,12 +635,12 @@ fig.show()
 # **MAE (Maximum Adverse Excursion)**: Largest drawdown during a trade
 # **MFE (Maximum Favorable Excursion)**: Largest gain during a trade
 #
-# MAE/MFE analysis helps determine optimal stop loss and take profit levels.
+# MAE/MFE analysis describes realized paths and supplies calibration evidence; it
+# does not identify a financially optimal stop without a PnL objective.
 
 
 # %%
 def calculate_mae_mfe(
-    prices: np.ndarray,
     lows: np.ndarray,
     highs: np.ndarray,
     entry_idx: int,
@@ -611,15 +656,15 @@ def calculate_mae_mfe(
     if exit_idx <= entry_idx:
         return {"mae": 0, "mfe": 0, "mae_pct": 0, "mfe_pct": 0}
 
-    # Use highs/lows for accurate MAE/MFE
-    trade_lows = lows[entry_idx : exit_idx + 1]
-    trade_highs = highs[entry_idx : exit_idx + 1]
+    # A close entry cannot experience the entry bar's earlier high or low.
+    trade_lows = lows[entry_idx + 1 : exit_idx + 1]
+    trade_highs = highs[entry_idx + 1 : exit_idx + 1]
 
     lowest_price = trade_lows.min()
     highest_price = trade_highs.max()
 
-    mae = (lowest_price - entry_price) / entry_price  # Will be negative
-    mfe = (highest_price - entry_price) / entry_price  # Will be positive
+    mae = min(0.0, (lowest_price - entry_price) / entry_price)
+    mfe = max(0.0, (highest_price - entry_price) / entry_price)
 
     return {
         "mae": mae,
@@ -631,404 +676,376 @@ def calculate_mae_mfe(
     }
 
 
-# %%
-# Calculate MAE/MFE for sample trades
-spy_lows = low_prices["SPY"].values
-spy_highs = high_prices["SPY"].values
-
-mae_mfe_data = []
-holding_period = 20  # Fixed 20-day holding for analysis
-
-for entry_idx in entry_indices:
-    entry_price = spy_prices[entry_idx]
-    exit_idx = min(entry_idx + holding_period, len(spy_prices) - 1)
-    exit_price = spy_prices[exit_idx]
-
-    result = calculate_mae_mfe(spy_prices, spy_lows, spy_highs, entry_idx, exit_idx, entry_price)
-
-    trade_return = (exit_price / entry_price - 1) * 100
-
-    mae_mfe_data.append(
-        {
-            "entry_idx": entry_idx,
-            "mae_pct": result["mae_pct"],
-            "mfe_pct": result["mfe_pct"],
-            "trade_return": trade_return,
-            "is_winner": trade_return > 0,
-        }
-    )
-
-mae_mfe_df = pd.DataFrame(mae_mfe_data)
-
-# Persist MAE/MFE trade-level data for the figure-19.8 publication script (left panel).
-pl.from_pandas(mae_mfe_df).write_parquet(OUTPUT_DIR / "mae_mfe_trades.parquet")
-
-# %%
-print("MAE/MFE Summary")
-print("=" * 60)
-
-print(f"\nAll Trades (n={len(mae_mfe_df)}):")
-print(f"  Avg MAE: {mae_mfe_df['mae_pct'].mean():.2f}%")
-print(f"  Avg MFE: {mae_mfe_df['mfe_pct'].mean():.2f}%")
-
-winners = mae_mfe_df[mae_mfe_df["is_winner"]]
-losers = mae_mfe_df[~mae_mfe_df["is_winner"]]
-
-print(f"\nWinners (n={len(winners)}):")
-print(f"  Avg MAE: {winners['mae_pct'].mean():.2f}%")
-print(f"  Avg MFE: {winners['mfe_pct'].mean():.2f}%")
-print(f"  Avg Return: {winners['trade_return'].mean():.2f}%")
-
-print(f"\nLosers (n={len(losers)}):")
-print(f"  Avg MAE: {losers['mae_pct'].mean():.2f}%")
-print(f"  Avg MFE: {losers['mfe_pct'].mean():.2f}%")
-print(f"  Avg Return: {losers['trade_return'].mean():.2f}%")
-
 # %% [markdown]
-# **Interpretation**: Winners and losers separate quickly in excursion space. Trades
-# that finish positive tend to recover before drawing down deeply, while losers show
-# larger adverse moves with little offsetting upside.
-
-# %%
-# MAE vs Trade Return scatter
-fig = px.scatter(
-    mae_mfe_df,
-    x="mae_pct",
-    y="trade_return",
-    color="is_winner",
-    color_discrete_map={True: "green", False: "red"},
-    title="MAE vs Trade Return",
-    labels={"mae_pct": "MAE (%)", "trade_return": "Trade Return (%)", "is_winner": "Profitable"},
-)
-
-# Add reference lines
-fig.add_hline(y=0, line_dash="dash", line_color="gray")
-fig.add_vline(x=0, line_dash="dash", line_color="gray")
-
-fig.update_layout(height=450)
-fig.show()
-
-# %% [markdown]
-# **Interpretation**: The MAE scatter identifies the stop zone where negative-return
-# trades cluster. If many winners survive beyond that zone, the stop is too tight.
-
-# %%
-# MFE vs Trade Return scatter
-fig = px.scatter(
-    mae_mfe_df,
-    x="mfe_pct",
-    y="trade_return",
-    color="is_winner",
-    color_discrete_map={True: "green", False: "red"},
-    title="MFE vs Trade Return",
-    labels={"mfe_pct": "MFE (%)", "trade_return": "Trade Return (%)", "is_winner": "Profitable"},
-)
-
-fig.add_hline(y=0, line_dash="dash", line_color="gray")
-
-fig.update_layout(height=450)
-fig.show()
-
-# %% [markdown]
-# **Interpretation**: The MFE scatter shows how much upside winning trades reach
-# before exit. That helps separate realistic take-profit targets from aspirational ones.
-
-# %% [markdown]
-# ### 6.1 Optimal Stop Loss from MAE
-#
-# Find the stop level that maximizes the difference between:
-# - Losers stopped out (avoiding further loss)
-# - Winners stopped out (premature exit)
+# The trade builder keeps the calibration and future entry sets separate and
+# records entry/exit timestamps so every statistic is traceable to its split.
 
 
 # %%
-def analyze_stop_levels(mae_mfe_df: pd.DataFrame, stop_levels: np.ndarray) -> pd.DataFrame:
-    """
-    Analyze how different stop levels affect winners and losers.
-
-    For each stop level, calculate:
-    - % of losers that would have been stopped (good)
-    - % of winners that would have been stopped (bad)
-    - Net benefit = losers_stopped - winners_stopped
-    """
-    results = []
-
-    for stop in stop_levels:
-        # Stop is negative (e.g., -2% = stop if drops 2%)
-        stopped_losers = ((mae_mfe_df["mae_pct"] <= stop) & (~mae_mfe_df["is_winner"])).sum()
-        stopped_winners = ((mae_mfe_df["mae_pct"] <= stop) & (mae_mfe_df["is_winner"])).sum()
-
-        total_losers = (~mae_mfe_df["is_winner"]).sum()
-        total_winners = mae_mfe_df["is_winner"].sum()
-
-        pct_losers_stopped = stopped_losers / total_losers if total_losers > 0 else 0
-        pct_winners_stopped = stopped_winners / total_winners if total_winners > 0 else 0
-
-        results.append(
+def build_trade_excursions(
+    entries: np.ndarray,
+    split: str,
+    prices: np.ndarray,
+    lows: np.ndarray,
+    highs: np.ndarray,
+    timestamps: pd.DatetimeIndex,
+) -> pl.DataFrame:
+    records = []
+    for entry_idx in entries:
+        exit_idx = entry_idx + HOLDING_PERIOD
+        entry_price = prices[entry_idx]
+        result = calculate_mae_mfe(lows, highs, entry_idx, exit_idx, entry_price)
+        trade_return = (prices[exit_idx] / entry_price - 1) * 100
+        records.append(
             {
-                "stop_level": stop,
-                "losers_stopped_pct": pct_losers_stopped * 100,
-                "winners_stopped_pct": pct_winners_stopped * 100,
-                "net_benefit": (pct_losers_stopped - pct_winners_stopped) * 100,
+                "split": split,
+                "entry_timestamp": timestamps[entry_idx],
+                "exit_timestamp": timestamps[exit_idx],
+                "mae_pct": result["mae_pct"],
+                "mfe_pct": result["mfe_pct"],
+                "trade_return": trade_return,
+                "is_winner": bool(trade_return > 0),
             }
         )
-
-    return pd.DataFrame(results)
+    return pl.DataFrame(records)
 
 
 # %%
-# Analyze different stop levels
-stop_levels = np.linspace(-5, -0.5, 20)  # -5% to -0.5%
-stop_analysis = analyze_stop_levels(mae_mfe_df, stop_levels)
-stop_analysis.round(2)
+spy_lows = low_prices["SPY"].values
+spy_highs = high_prices["SPY"].values
+mae_mfe_df = pl.concat(
+    [
+        build_trade_excursions(
+            calibration_entry_indices,
+            "calibration",
+            spy_prices,
+            spy_lows,
+            spy_highs,
+            close_prices.index,
+        ),
+        build_trade_excursions(
+            future_entry_indices,
+            "future",
+            spy_prices,
+            spy_lows,
+            spy_highs,
+            close_prices.index,
+        ),
+    ]
+)
 
-# Persist stop-level tradeoff curve for the figure-19.8 publication script (right panel).
-pl.from_pandas(stop_analysis).write_parquet(OUTPUT_DIR / "stop_calibration_tradeoff.parquet")
+# Persist MAE/MFE trade-level data for the figure-19.8 publication script (left panel).
+mae_mfe_df.write_parquet(OUTPUT_DIR / "mae_mfe_trades.parquet")
+
+# %%
+excursion_summary = (
+    mae_mfe_df.with_columns(
+        outcome=pl.when("is_winner").then(pl.lit("Winner")).otherwise(pl.lit("Loser"))
+    )
+    .group_by(["split", "outcome"])
+    .agg(
+        trades=pl.len(),
+        avg_mae_pct=pl.col("mae_pct").mean(),
+        avg_mfe_pct=pl.col("mfe_pct").mean(),
+        avg_return_pct=pl.col("trade_return").mean(),
+    )
+    .sort(["split", "outcome"])
+)
+excursion_summary
 
 # %% [markdown]
-# **Interpretation**: The stop table quantifies the whipsaw trade-off
-# directly. Tighter stops catch more losers early but also stop out more
-# eventual winners; wider stops reduce whipsaws but let more losing trades
-# keep running before the stop binds.
+# **Interpretation**: The split-specific table shows whether the calibration pattern
+# survives into future trades. MAE/MFE remains a post-hoc diagnostic: the future
+# outcome label organizes the evidence but never enters a pre-trade feature.
 
 # %%
-# Visualize stop level tradeoff
+future_excursions = mae_mfe_df.filter(pl.col("split") == "future").with_columns(
+    outcome=pl.when("is_winner").then(pl.lit("Winner")).otherwise(pl.lit("Loser"))
+)
+future_excursions_pd = future_excursions.to_pandas()
+future_mae_by_outcome = future_excursions.group_by("outcome").agg(pl.col("mae_pct").mean())
+future_mae_gap = abs(
+    future_mae_by_outcome.filter(pl.col("outcome") == "Loser")["mae_pct"][0]
+) - abs(future_mae_by_outcome.filter(pl.col("outcome") == "Winner")["mae_pct"][0])
+
+fig = px.scatter(
+    future_excursions_pd,
+    x="mae_pct",
+    y="trade_return",
+    color="outcome",
+    color_discrete_map={"Winner": COLORS["positive"], "Loser": COLORS["negative"]},
+    title=f"Future losers absorb {future_mae_gap:.1f} points more adverse excursion",
+    labels={"mae_pct": "MAE (%)", "trade_return": "Trade return (%)", "outcome": "Outcome"},
+)
+
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
+fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
+
+fig.update_layout(height=450)
+fig.show()
+
+# %% [markdown]
+# **Interpretation**: The future scatter tests whether adverse excursion remains
+# associated with the realized outcome after calibration. It does not imply that a
+# stop at any particular MAE would improve PnL.
+
+# %%
+future_mfe_by_outcome = future_excursions.group_by("outcome").agg(pl.col("mfe_pct").mean())
+future_mfe_gap = (
+    future_mfe_by_outcome.filter(pl.col("outcome") == "Winner")["mfe_pct"][0]
+    - (future_mfe_by_outcome.filter(pl.col("outcome") == "Loser")["mfe_pct"][0])
+)
+fig = px.scatter(
+    future_excursions_pd,
+    x="mfe_pct",
+    y="trade_return",
+    color="outcome",
+    color_discrete_map={"Winner": COLORS["positive"], "Loser": COLORS["negative"]},
+    title=f"Future winners reach {future_mfe_gap:.1f} points more favorable excursion",
+    labels={"mfe_pct": "MFE (%)", "trade_return": "Trade return (%)", "outcome": "Outcome"},
+)
+
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
+
+fig.update_layout(height=450)
+fig.show()
+
+# %% [markdown]
+# **Interpretation**: The favorable-excursion gap describes the future sample. It
+# can inform a take-profit prior, but a deployable threshold still needs a frozen
+# PnL objective and cost-aware forward evaluation.
+
+# %% [markdown]
+# ### 6.1 Descriptive MAE Separation
+#
+# For each distance, compare the share of eventual losers and winners whose paths
+# breach that level. Their difference is a class-separation score, not financial
+# net benefit. We select on calibration trades and report the frozen distance on
+# future trades.
+
+
+# %%
+def analyze_stop_separation(
+    excursions: pl.DataFrame,
+    stop_distances: np.ndarray,
+    split: str,
+) -> pl.DataFrame:
+    """Compare loser and winner breach rates across stop distances."""
+    results = []
+    losers = excursions.filter(~pl.col("is_winner"))
+    winners = excursions.filter(pl.col("is_winner"))
+    if losers.is_empty() or winners.is_empty():
+        raise ValueError(f"{split} needs both winners and losers")
+    for distance in stop_distances:
+        loser_rate = losers.select((pl.col("mae_pct") <= -distance).mean()).item() * 100
+        winner_rate = winners.select((pl.col("mae_pct") <= -distance).mean()).item() * 100
+        results.append(
+            {
+                "split": split,
+                "stop_distance_pct": distance,
+                "loser_breach_rate_pct": loser_rate,
+                "winner_breach_rate_pct": winner_rate,
+                "separation_score_pct": loser_rate - winner_rate,
+            }
+        )
+    return pl.DataFrame(results)
+
+
+# %%
+stop_distances = np.linspace(0.5, 5.0, 20)
+calibration_stop_curve = analyze_stop_separation(
+    mae_mfe_df.filter(pl.col("split") == "calibration"), stop_distances, "calibration"
+)
+future_stop_curve = analyze_stop_separation(
+    mae_mfe_df.filter(pl.col("split") == "future"), stop_distances, "future"
+)
+stop_analysis = pl.concat([calibration_stop_curve, future_stop_curve])
+selected_stop_distance = calibration_stop_curve.sort("separation_score_pct", descending=True)[
+    "stop_distance_pct"
+][0]
+threshold_summary = stop_analysis.filter(
+    pl.col("stop_distance_pct") == selected_stop_distance
+).sort("split")
+stop_analysis.write_parquet(OUTPUT_DIR / "stop_calibration_tradeoff.parquet")
+threshold_summary
+
+# %% [markdown]
+# **Interpretation**: The calibration row chooses the distance with the largest
+# descriptive winner/loser separation; the future row shows whether that frozen
+# distinction persists. Neither row measures the PnL effect of executing a stop.
+
+# %%
 fig = go.Figure()
-
-fig.add_trace(
+_ = fig.add_trace(
     go.Scatter(
-        x=-stop_analysis["stop_level"],
-        y=stop_analysis["losers_stopped_pct"],
-        name="Losers Stopped",
-        line=dict(color="green"),
+        x=calibration_stop_curve["stop_distance_pct"],
+        y=calibration_stop_curve["separation_score_pct"],
+        name="Calibration",
+        line={"color": COLORS["blue"], "width": 2},
     )
 )
-
-fig.add_trace(
+_ = fig.add_trace(
     go.Scatter(
-        x=-stop_analysis["stop_level"],
-        y=stop_analysis["winners_stopped_pct"],
-        name="Winners Stopped",
-        line=dict(color="red"),
+        x=future_stop_curve["stop_distance_pct"],
+        y=future_stop_curve["separation_score_pct"],
+        name="Future",
+        line={"color": COLORS["amber"], "width": 2, "dash": "dash"},
     )
 )
-
-fig.add_trace(
-    go.Scatter(
-        x=-stop_analysis["stop_level"],
-        y=stop_analysis["net_benefit"],
-        name="Net Benefit",
-        line=dict(color="blue", dash="dash"),
-    )
-)
-
-# %%
-# Mark optimal stop (max net benefit)
-optimal_idx = stop_analysis["net_benefit"].idxmax()
-optimal_stop = -stop_analysis.loc[optimal_idx, "stop_level"]
-
+future_selected_score = threshold_summary.filter(pl.col("split") == "future")[
+    "separation_score_pct"
+][0]
 fig.add_vline(
-    x=optimal_stop,
+    x=selected_stop_distance,
     line_dash="dot",
-    line_color="purple",
-    annotation_text=f"Optimal: {optimal_stop:.1f}%",
+    line_color=COLORS["neutral"],
+    annotation_text=f"Calibration choice: {selected_stop_distance:.1f}%",
 )
-
 fig.update_layout(
-    title="Stop Loss Level Tradeoff",
-    xaxis_title="Stop Distance (%)",
-    yaxis_title="Percentage",
+    title=f"The frozen MAE threshold retains {future_selected_score:.1f} points of future separation",
+    xaxis_title="Stop distance (%)",
+    yaxis_title="Loser minus winner breach rate (percentage points)",
     height=450,
-    legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
 )
 fig.show()
 
-# %%
-print(f"\nOptimal Stop Loss: {optimal_stop:.1f}%")
-print("   (Maximizes net benefit of stopping losers vs stopping winners)")
+# %% [markdown]
+# **Interpretation**: A stable future separation supports the threshold as a
+# diagnostic prior, not as an executable optimum. A cost-aware stop simulation is
+# still required before the distance can be judged by return or utility.
 
 # %% [markdown]
-# **Interpretation**: The net-benefit peak is the practical calibration point. It
-# is not a universal optimum, but it gives a defensible stop level tied to the trade
-# distribution rather than a round-number heuristic.
-
-# %% [markdown]
-# ### 6.2 Pre-Trade Excursion Percentiles
+# ### 6.2 Calibration-Window Close-Path Percentiles
 #
-# The trade-level MAE/MFE analysis above is a post-hoc diagnostic on a closed
-# trade set. The complement is a path-level prior that depends on price history
-# alone, computed by sliding a fixed-horizon window across the series and
-# recording the realized minimum and maximum return inside each window.
-#
-# **Key distinction**:
-# - **Trade MAE/MFE** (above): per-trade post-hoc analysis on entries, exits, and excursion bounds.
-# - **Path excursion percentiles** (below): horizon-conditional return-path distribution for pre-trade TP/SL selection.
+# The trade-level MAE/MFE analysis above uses intraday highs and lows for specified
+# entries. The complementary close-path distribution uses only bars after a close
+# entry and estimates its percentiles on the calibration window. The future window
+# tests whether those descriptive priors remain representative.
 
 # %% [markdown]
-# The summary class packages the percentile matrix so later cells can pull horizon-
-# specific stop and target suggestions without repeating the table logic.
+# The builder records horizon-specific adverse and favorable close-path excursions.
+# It excludes the entry bar, matching the close-entry event order used above.
 
 
 # %%
-class ExcursionSummary:
-    def __init__(self, percentile_matrix: pd.DataFrame):
-        self.percentile_matrix = percentile_matrix
-
-    def summary(self) -> str:
-        rows = []
-        for horizon in self.percentile_matrix["horizon"].unique():
-            subset = self.percentile_matrix[self.percentile_matrix["horizon"] == horizon].set_index(
-                "side"
-            )
-            rows.append(
-                {
-                    "horizon": horizon,
-                    "mae_p25": subset.loc["mae", "p25"],
-                    "mfe_p75": subset.loc["mfe", "p75"],
-                    "mfe_p90": subset.loc["mfe", "p90"],
-                }
-            )
-        return pd.DataFrame(rows).round(4).to_string(index=False)
-
-    def get_percentile(self, horizon: int, percentile: int, side: str) -> float:
-        row = self.percentile_matrix.query("horizon == @horizon and side == @side").iloc[0]
-        return float(row[f"p{percentile}"])
-
-
-# %% [markdown]
-# The builder scans rolling windows and records the excursion percentiles we use for
-# pre-trade stop and target calibration.
-
-
-# %%
-def build_excursion_summary(prices: np.ndarray, horizons: list[int]) -> ExcursionSummary:
+def build_excursion_percentiles(
+    prices: np.ndarray,
+    horizons: list[int],
+    split: str,
+) -> pl.DataFrame:
     rows = []
     for horizon in horizons:
-        mae_vals = []
-        mfe_vals = []
-        for start in range(len(prices) - horizon):
-            window = prices[start : start + horizon + 1]
-            entry_price = window[0]
-            rel_path = window / entry_price - 1
-            mae_vals.append(rel_path.min())
-            mfe_vals.append(rel_path.max())
-        for side, values in [("mae", mae_vals), ("mfe", mfe_vals)]:
+        adverse = []
+        favorable = []
+        for entry_idx in range(len(prices) - horizon):
+            future_path = prices[entry_idx + 1 : entry_idx + horizon + 1] / prices[entry_idx] - 1
+            adverse.append(min(0.0, float(future_path.min())))
+            favorable.append(max(0.0, float(future_path.max())))
+        for side, values in [("mae", adverse), ("mfe", favorable)]:
             rows.append(
                 {
+                    "split": split,
                     "horizon": horizon,
                     "side": side,
-                    "p10": np.percentile(values, 10),
-                    "p25": np.percentile(values, 25),
-                    "p50": np.percentile(values, 50),
-                    "p75": np.percentile(values, 75),
-                    "p90": np.percentile(values, 90),
+                    **{
+                        f"p{percentile}": np.percentile(values, percentile)
+                        for percentile in [10, 25, 50, 75, 90]
+                    },
                 }
             )
-    return ExcursionSummary(pd.DataFrame(rows))
+    return pl.DataFrame(rows)
 
-
-excursion_result = build_excursion_summary(spy_prices, horizons=[10, 20, 40, 60])
-print(excursion_result.summary())
-
-# %% [markdown]
-# **Interpretation**: The percentile table turns raw path data into a calibration
-# prior. Longer horizons typically widen both favorable and adverse excursions, so
-# the stop and target should scale with holding period.
 
 # %%
-# Use the percentile matrix to pick horizon-conditional TP/SL levels
-print("\nSuggested TP/SL Levels from Path Excursion Percentiles")
-print("=" * 60)
+horizons = [10, 20, 40, 60]
+calibration_prices = spy_prices[: calibration_end_idx + 1]
+future_prices = spy_prices[future_start_idx:]
+calibration_percentiles = build_excursion_percentiles(calibration_prices, horizons, "calibration")
+future_percentiles = build_excursion_percentiles(future_prices, horizons, "future")
+excursion_percentiles = pl.concat([calibration_percentiles, future_percentiles])
 
+# %%
+level_rows = []
 for horizon in [20, 40, 60]:
-    tp_75 = excursion_result.get_percentile(horizon=horizon, percentile=75, side="mfe")
-    sl_25 = excursion_result.get_percentile(horizon=horizon, percentile=25, side="mae")
-
-    print(f"\nHorizon: {horizon} bars")
-    print(f"  Take Profit (75th MFE): {tp_75:+.2%}")
-    print(f"  Stop Loss (25th MAE):   {sl_25:+.2%}")
+    for split in ["calibration", "future"]:
+        subset = excursion_percentiles.filter(
+            (pl.col("split") == split) & (pl.col("horizon") == horizon)
+        )
+        level_rows.append(
+            {
+                "split": split,
+                "horizon": horizon,
+                "mae_p25_pct": subset.filter(pl.col("side") == "mae")["p25"][0] * 100,
+                "mfe_p75_pct": subset.filter(pl.col("side") == "mfe")["p75"][0] * 100,
+            }
+        )
+excursion_level_df = pl.DataFrame(level_rows).sort(["horizon", "split"])
+excursion_level_df
 
 # %% [markdown]
-# **Interpretation**: These horizon-level suggestions are useful as starting points,
-# not fixed rules. They should be compared with the strategy turnover, costs, and
-# holding-period assumptions before production use.
+# **Interpretation**: Calibration levels are historical priors, not labels attached
+# to the current bar. The future rows reveal distribution drift and prevent a
+# full-sample percentile from being presented as a pre-trade rule.
 
 # %%
-# Visualize percentile matrix from library
-percentile_matrix = excursion_result.percentile_matrix.copy()
-
-mfe_data = percentile_matrix[percentile_matrix["side"] == "mfe"].set_index("horizon")
-mae_data = percentile_matrix[percentile_matrix["side"] == "mae"].set_index("horizon")
-
-# %%
-# Create heatmap-style visualization
-
 fig = make_subplots(
     rows=1,
     cols=2,
-    subplot_titles=["MFE Percentiles", "MAE Percentiles"],
+    subplot_titles=["Favorable excursion", "Adverse excursion"],
     horizontal_spacing=0.12,
 )
-
-# MFE heatmap
-for col in ["p10", "p25", "p50", "p75", "p90"]:
-    if col in mfe_data.columns:
-        fig.add_trace(
-            go.Scatter(
-                x=mfe_data.index,
-                y=mfe_data[col] * 100,
-                name=col.upper(),
+percentile_colors = dict(zip(["p25", "p50", "p75"], ml4t_palette(3, categorical=True), strict=True))
+for col_idx, side in [(1, "mfe"), (2, "mae")]:
+    for percentile, color in percentile_colors.items():
+        for split, dash in [("calibration", "solid"), ("future", "dash")]:
+            subset = excursion_percentiles.filter(
+                (pl.col("split") == split) & (pl.col("side") == side)
+            ).sort("horizon")
+            fig.add_scatter(
+                x=subset["horizon"],
+                y=subset[percentile] * 100,
+                name=f"{percentile.upper()} {split}",
                 mode="lines+markers",
-            ),
-            row=1,
-            col=1,
-        )
-
-# MAE heatmap
-for col in ["p10", "p25", "p50", "p75", "p90"]:
-    if col in mae_data.columns:
-        fig.add_trace(
-            go.Scatter(
-                x=mae_data.index,
-                y=mae_data[col] * 100,
-                name=col.upper(),
-                mode="lines+markers",
-                showlegend=False,
-            ),
-            row=1,
-            col=2,
-        )
+                line={"color": color, "dash": dash},
+                legendgroup=f"{percentile}-{split}",
+                showlegend=col_idx == 1,
+                row=1,
+                col=col_idx,
+            )
 
 # %%
-fig.update_xaxes(title_text="Horizon (bars)", row=1, col=1)
-fig.update_xaxes(title_text="Horizon (bars)", row=1, col=2)
-fig.update_yaxes(title_text="Excursion (%)", row=1, col=1)
-fig.update_yaxes(title_text="Excursion (%)", row=1, col=2)
-
+future_60 = excursion_level_df.filter(
+    (pl.col("split") == "future") & (pl.col("horizon") == 60)
+).row(0, named=True)
+fig.update_xaxes(title_text="Horizon (bars)")
+fig.update_yaxes(title_text="Excursion (%)")
+fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"])
 fig.update_layout(
-    title="Path Excursion Percentiles Widen with Horizon",
-    height=400,
+    title=(
+        f"At 60 bars, future paths reach {future_60['mfe_p75_pct']:.1f}% favorable "
+        f"and {future_60['mae_p25_pct']:.1f}% adverse excursions"
+    ),
+    height=430,
 )
 fig.show()
 
 # %% [markdown]
-# **Interpretation**: The percentile curves show whether the trade path expands
-# symmetrically with horizon. When MAE widens faster than MFE, longer holding periods
-# demand smaller size or more conservative stops.
+# **Interpretation**: Solid calibration curves and dashed future curves make the
+# stability test visible. A strategy may use the calibration quantiles as starting
+# values, but it still needs a cost-aware PnL objective before deployment.
 
 # %% [markdown]
 # **Trade-level vs path-level analysis**:
 #
-# | Aspect    | Trade MAE/MFE (§6)              | Path excursion percentiles (§6.2)   |
-# |-----------|---------------------------------|-------------------------------------|
-# | Purpose   | Post-hoc trade diagnostics      | Pre-trade TP/SL parameter selection |
-# | Input     | Trade records with entry/exit   | Price series and a horizon          |
-# | Output    | Per-trade MAE/MFE               | Excursion percentile matrix         |
-# | Use case  | Why specific trades succeeded   | Setting future TP/SL targets        |
+# | Aspect | Trade MAE/MFE (§6) | Close-path percentiles (§6.2) |
+# |---|---|---|
+# | Purpose | Post-hoc trade diagnostics | Horizon-conditioned historical priors |
+# | Input | Entry, exit, future highs/lows | Close paths after a close entry |
+# | Output | Per-trade MAE/MFE | Calibration and future percentile matrices |
+# | Use | Explain realized trade paths | Test whether threshold priors remain stable |
 #
-# Run the trade-level analysis when reviewing a closed strategy. Run the
-# path-level analysis when picking horizon-appropriate stop and target levels
-# before deployment.
+# Neither diagnostic establishes stop-policy value without explicit execution,
+# transaction-cost, and PnL conventions.
 
 # %% [markdown]
 # ## 7. Dynamic Position Sizing Based on Conviction
@@ -1048,6 +1065,12 @@ def calculate_conviction_based_size(
 
     Position = base × (min_multiplier + conviction × (max_multiplier - min_multiplier))
     """
+    if base_position_pct < 0:
+        raise ValueError("base_position_pct must be nonnegative")
+    if not 0 <= conviction_score <= 1:
+        raise ValueError("conviction_score must lie in [0, 1]")
+    if min_multiplier < 0 or max_multiplier < min_multiplier:
+        raise ValueError("multipliers must be ordered and nonnegative")
     multiplier = min_multiplier + conviction_score * (max_multiplier - min_multiplier)
     return base_position_pct * multiplier
 
@@ -1063,17 +1086,17 @@ conviction_sizing_df = pl.DataFrame(
         "position_pct": [calculate_conviction_based_size(base_pct, c) for c in conviction_scores],
     }
 )
-conviction_sizing_df
 
 # %%
 fig = go.Figure(
     go.Bar(
         x=conviction_sizing_df["conviction"],
         y=conviction_sizing_df["position_pct"] * 100,
+        marker_color=COLORS["blue"],
     )
 )
 fig.update_layout(
-    title=f"Conviction-based position size (base {base_pct:.0%})",
+    title=f"Maximum conviction doubles the {base_pct:.0%} base allocation",
     xaxis_title="Conviction score",
     yaxis_title="Position size (% of portfolio)",
     height=350,
@@ -1081,15 +1104,16 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# **Interpretation**: Conviction-based sizing lets the signal control exposure without
-# rewriting the stop logic. The main risk is over-scaling weakly calibrated scores.
+# **Interpretation**: The deterministic mapping spans 1%-10% for a 5% base allocation.
+# The formula validates its input range, but the score itself still needs calibration
+# before larger values can justify more capital.
 
 # %% [markdown]
 # ## 8. Conformal Prediction Intervals and Position Sizing
 #
 # Conformal prediction (Chapter 11) produces calibrated uncertainty intervals
-# for return forecasts. Wider intervals indicate higher uncertainty — a natural
-# signal to reduce position size.
+# for return forecasts. Wider intervals can motivate smaller allocations, but the
+# interval provenance and calibration boundary are part of the sizing contract.
 #
 # **Concept**: Scale position inversely to conformal interval width:
 #
@@ -1097,55 +1121,9 @@ fig.show()
 #
 # where $\Delta_t$ is the conformal interval width at time $t$.
 #
-# See Chapter 17 (`conformal_position_sizing.ipynb`) for a full implementation
-# that integrates conformal intervals with portfolio construction. The key
-# risk management insight: conformal intervals provide a model-free uncertainty
-# estimate that adapts to non-stationarity — exactly the kind of signal risk
-# managers need for dynamic position sizing.
-
-# %%
-# Demonstrate the concept with real conformal widths from the ETF case study.
-# Each prediction hash under run_log/predictions/ stores a per-(symbol, fold,
-# timestamp) split-conformal width parquet; we slice the latest fold's
-# cross-section so the demo carries the same dispersion that production sees.
-_widths_paths = sorted(
-    (get_case_study_dir("etfs") / "run_log" / "predictions").glob("*/conformal_widths.parquet")
-)
-if not _widths_paths:
-    raise FileNotFoundError(
-        "No conformal_widths.parquet found in case_studies/etfs/run_log/predictions/. "
-        "Run the etfs case study conformal sweep first."
-    )
-
-_widths_df = pl.read_parquet(_widths_paths[0])
-_latest_fold = _widths_df.filter(pl.col("fold_id") == _widths_df["fold_id"].max())
-_latest_ts = _latest_fold["timestamp"].max()
-cross_section = _latest_fold.filter(pl.col("timestamp") == _latest_ts).sort("width")
-
-conformal_widths = cross_section["width"].to_numpy()
-n_periods = len(conformal_widths)
-base_weight = 0.05
-median_width = float(np.median(conformal_widths))
-
-adjusted_weights = base_weight * (median_width / conformal_widths)
-adjusted_weights = np.clip(adjusted_weights, 0.01, 0.15)
-
-print("Conformal-Adjusted Position Sizing")
-print("=" * 55)
-print(f"Universe size:         {n_periods} ETFs (cross-section at {_latest_ts.date()})")
-print(f"Base weight:           {base_weight:.1%}")
-print(f"Median interval width: {median_width:.4f}")
-print(f"Adjusted weight range: [{adjusted_weights.min():.1%}, {adjusted_weights.max():.1%}]")
-print(f"Mean adjusted weight:  {adjusted_weights.mean():.1%}")
-print(f"Tightest band:         {cross_section['symbol'][0]} width={conformal_widths[0]:.4f}")
-print(f"Widest band:           {cross_section['symbol'][-1]} width={conformal_widths[-1]:.4f}")
-
-# %% [markdown]
-# **Interpretation**: Real conformal widths separate the universe along an
-# uncertainty axis — short-duration fixed-income ETFs sit at the tight end,
-# single-commodity ETFs at the wide end — and inverse-width sizing rebalances
-# capital toward the narrow-band names. This is the same signal that drives
-# the conformal-weighted allocator in `case_studies/etfs/strategy/`.
+# See Chapter 17 (`07_conformal_position_sizing`) for the versioned implementation and
+# its data contract. This notebook deliberately does not load a case-study prediction
+# artifact: an opaque or unavailable conformal run cannot support a teaching result.
 
 # %% [markdown]
 # ## 9. Key Takeaways
@@ -1155,26 +1133,26 @@ print(f"Widest band:           {cross_section['symbol'][-1]} width={conformal_wi
 # | Method | Best For | Key Parameter |
 # |--------|----------|---------------|
 # | **Fixed Fractional** | General use | Risk per trade % |
-# | **Volatility-Based** | Multi-asset portfolios | Target volatility |
+# | **Inverse Volatility** | Transparent standalone-risk heuristic | Lagged volatility |
 # | **Kelly Criterion** | Maximizing growth | Win rate, W/L ratio (Ch17) |
 # | **Conviction-Based** | Signal-driven strategies | Signal strength |
-# | **Conformal-Adjusted** | Uncertainty-aware sizing | Interval width (Ch11/Ch17) |
+# | **Conformal-Adjusted** | Uncertainty-aware sizing | Versioned interval width (Ch11/Ch17) |
 #
 # ### MAE/MFE Insights
 #
-# - **MAE reveals optimal stop loss**: Find the level that stops losers without cutting winners
-# - **MFE reveals missed profits**: How much upside do winning trades typically see?
-# - **Winners have smaller MAE**: They don't drawdown as much before recovering
-# - **Losers have high MAE, low MFE**: They drawdown and never recover
+# - **MAE/MFE describes realized paths**: Entry timing excludes pre-entry bar extremes
+# - **Class separation is not financial value**: A stop requires an execution-aware PnL objective
+# - **Calibration must precede evaluation**: Freeze the threshold before testing future trades
+# - **Close-path percentiles are priors**: Future rows reveal whether the distribution drifts
 #
 # ### Best Practices
 #
 # 1. **Risk first**: Size positions based on acceptable loss, not profit potential
-# 2. **Adapt to volatility**: Smaller positions in volatile assets/markets
-# 3. **Use fractional Kelly**: Full Kelly is too aggressive; half Kelly is safer
-# 4. **Consider scaling out**: Lock in profits while letting winners run
-# 5. **Analyze your MAE/MFE**: Use your own trade data to optimize stops
-# 6. **Next**: Continue to [`08_ml_exit_signals`](08_ml_exit_signals.ipynb) to connect conviction and exit timing.
+# 2. **Lag adaptive controls**: A decision at $t$ uses information available by $t-1$
+# 3. **Name heuristics precisely**: Inverse volatility is not portfolio risk targeting
+# 4. **Reconcile execution units**: Integer shares determine position value and realized stop risk
+# 5. **Evaluate policies forward**: Threshold selection and assessment belong to separate windows
+# 6. **Next**: Continue to [`04_factor_exposure`](04_factor_exposure.ipynb) to measure portfolio risk sources.
 
 # %% [markdown]
 # ---

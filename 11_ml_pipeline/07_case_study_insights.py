@@ -25,8 +25,8 @@
 #
 # **Learning objectives**
 #
-# - For each case study, read the highest-IC linear configuration's
-#   daily-pooled Spearman IC with HAC 95 % CI on the primary label
+# - For each case study, read the highest-IC complete linear configuration's
+#   mean daily cross-sectional Spearman IC with HAC 95 % CI on the primary label
 # - Compare regularization families (OLS, Ridge, Lasso, ElasticNet) at
 #   each case study's primary label
 # - Inspect per-fold IC distributions and the ICIR diagnostic for
@@ -36,17 +36,16 @@
 # - Inspect coefficient sign consistency, Lasso sparsity, and the overlap
 #   of selected features across case studies
 #
-# **Book reference**: Section 11.6 — Linear Models Across Nine Case Studies.
+# **Book reference**: Section 11.6 - Linear Models Across Nine Case Studies.
 #
 # **Prerequisites**: each case study's `06_linear.py` pipeline has populated
-# `run_log/registry.db` for the linear family. Teaching notebooks NB01–NB06
+# `run_log/registry.db` for the linear family. Teaching notebooks NB01-NB06
 # cover the underlying techniques.
 
 # %% tags=[]
-"""Case Study Insights: Linear — cross-case-study aggregation from the registry."""
+"""Case Study Insights: Linear - cross-case-study aggregation from the registry."""
 
 import sqlite3
-import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -55,7 +54,9 @@ import polars as pl
 # ml4t.diagnostic dlopens cudart; load torch first so its bundled CUDA
 # runtime wins. Same precedence pattern as case_studies/utils/model_analysis.py.
 import torch  # noqa: F401
-from matplotlib.patches import Patch
+from IPython.display import Markdown, display
+from matplotlib.colors import LinearSegmentedColormap
+from scipy import stats
 from sklearn.metrics import roc_auc_score
 
 from case_studies.utils.analytics import (
@@ -64,23 +65,296 @@ from case_studies.utils.analytics import (
     SHORT_NAMES,
 )
 from case_studies.utils.insight_chapter import (
-    collect_fold_ic_per_cs,
-    collect_multi_label_per_cs,
-    collect_rank1_per_cs,
     plot_cross_cs_forest,
     plot_rolling_daily_ic,
 )
 from case_studies.utils.model_analysis import (
-    load_metrics_from_registry,
     load_predictions,
 )
 from utils.paths import get_case_study_dir
 from utils.style import COLORS
 
-warnings.filterwarnings("ignore")
-
 # %% tags=["parameters"]
 FAMILY = "linear"
+
+# %% [markdown] tags=[]
+# ## Complete-result guard
+#
+# A model result is eligible for comparison only when no fold has an undefined
+# IC and its validation-day coverage equals the maximum for that label. The
+# local loader excludes predictions with any null fold IC and rejects shorter,
+# partially populated results before ranking.
+
+
+# %% tags=[]
+METRICS_QUERY = """
+    SELECT t.training_hash, t.family, t.config_name, t.label,
+           p.prediction_hash, p.checkpoint_value, p.checkpoint_kind,
+           pm.ic_mean, pm.ic_std, pm.ic_mean_daily, pm.ic_se_hac,
+           pm.ic_ci_lo, pm.ic_ci_hi, pm.ic_t_hac, pm.ic_p_hac,
+           pm.ic_n_days, pm.ic_hac_lag,
+           (SELECT COUNT(*) FROM fold_metrics fm
+            WHERE fm.prediction_hash = p.prediction_hash AND fm.ic IS NULL) AS n_null_folds
+    FROM training_runs t
+    JOIN prediction_sets p ON p.training_hash = t.training_hash
+    JOIN prediction_metrics pm ON pm.prediction_hash = p.prediction_hash
+    WHERE t.family = ? AND p.split = 'validation'
+"""
+FINITE_METRIC_FIELDS = [
+    "ic_mean_daily",
+    "ic_se_hac",
+    "ic_ci_lo",
+    "ic_ci_hi",
+    "ic_t_hac",
+    "ic_p_hac",
+    "ic_n_days",
+    "ic_hac_lag",
+]
+
+
+# %% [markdown] tags=[]
+# The loader preserves exact training and prediction identities so every later
+# statistic and coefficient view can be traced to one registry-selected artifact.
+
+
+# %% tags=[]
+def load_complete_metrics(
+    case_study: str,
+    *,
+    label: str | None = None,
+) -> pl.DataFrame:
+    """Load nondegenerate linear metrics with maximum coverage per label."""
+    db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"
+    query = METRICS_QUERY
+    params: list[str] = [FAMILY]
+    if label is not None:
+        query += " AND t.label = ?"
+        params.append(label)
+    with sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = [dict(row) for row in connection.execute(query, params).fetchall()]
+    if not rows:
+        return pl.DataFrame()
+    df = pl.DataFrame(rows, infer_schema_length=None)
+    return (
+        df.filter(
+            (pl.col("n_null_folds") == 0)
+            & pl.all_horizontal(
+                pl.col(column).is_not_null() & pl.col(column).is_finite()
+                for column in FINITE_METRIC_FIELDS
+            )
+        )
+        .with_columns(_max_n_days=pl.col("ic_n_days").max().over("label"))
+        .filter(pl.col("ic_n_days") == pl.col("_max_n_days"))
+        .drop("_max_n_days", "n_null_folds")
+    )
+
+
+# %% [markdown] tags=[]
+# The primary-label collector applies the same completeness rule independently
+# to every case study before selecting the highest mean daily IC.
+
+
+# %% tags=[]
+def collect_complete_rank1(case_studies: list[str]) -> pl.DataFrame:
+    """Return the highest-IC complete linear result per primary label."""
+    frames = []
+    for cs in case_studies:
+        label = PRIMARY_LABELS[cs]
+        df = load_complete_metrics(cs, label=label)
+        if df.is_empty():
+            raise RuntimeError(f"{cs}: no complete linear result for {label}")
+        best_ic = df["ic_mean_daily"].max()
+        winner = df.filter(pl.col("ic_mean_daily") == best_ic)
+        if winner.height != 1:
+            raise RuntimeError(f"{cs}: primary linear rank one is ambiguous")
+        frames.append(
+            winner.with_columns(
+                case_study=pl.lit(cs),
+                short_name=pl.lit(SHORT_NAMES[cs]),
+            )
+        )
+    if len(frames) != len(case_studies):
+        raise RuntimeError("primary linear coverage is incomplete")
+    return pl.concat(frames, how="diagonal_relaxed")
+
+
+# %% [markdown] tags=[]
+# HAC inference is rebuilt from the exact selected prediction artifact. Daily
+# correlations are sorted before the Bartlett Newey-West calculation, avoiding
+# the fold-order dependence in several stored registry intervals.
+
+
+# %% tags=[]
+def _daily_ic_values(row: dict, target_column: str | None = None) -> np.ndarray:
+    """Load chronological daily IC values against an explicit artifact target."""
+    parquet = (
+        get_case_study_dir(row["case_study"])
+        / "run_log"
+        / "predictions"
+        / row["prediction_hash"]
+        / "predictions.parquet"
+    )
+    schema = pl.scan_parquet(parquet).collect_schema()
+    score = "y_score" if "y_score" in schema else "prediction"
+    actual = target_column or ("y_true" if "y_true" in schema else "actual")
+    if actual not in schema:
+        raise RuntimeError(
+            f"{row['case_study']}: prediction artifact lacks target column {actual!r}"
+        )
+    daily = (
+        pl.scan_parquet(parquet)
+        .select("timestamp", score, actual)
+        .group_by("timestamp")
+        .agg(
+            pl.corr(score, actual, method="spearman").alias("ic"),
+            (pl.col(score).is_finite() & pl.col(actual).is_finite()).sum().alias("n_obs"),
+        )
+        .filter((pl.col("n_obs") >= 5) & pl.col("ic").is_finite())
+        .sort("timestamp")
+        .collect()
+    )
+    return daily["ic"].to_numpy()
+
+
+# %% tags=[]
+def _bartlett_hac(values: np.ndarray, lag: int, case_study: str) -> dict[str, float]:
+    """Return mean and Bartlett Newey-West inference for ordered observations."""
+    n_days = len(values)
+    if n_days < 3:
+        raise RuntimeError(f"{case_study}: fewer than three daily IC observations")
+    mean_ic = float(values.mean())
+    residuals = values - mean_ic
+    lag = min(lag, n_days - 1)
+    long_run_sum = float(residuals @ residuals)
+    for offset in range(1, lag + 1):
+        weight = 1.0 - offset / (lag + 1.0)
+        long_run_sum += 2.0 * weight * float(residuals[offset:] @ residuals[:-offset])
+    variance = long_run_sum / n_days**2 * n_days / (n_days - 1)
+    if variance < -1e-15:
+        raise RuntimeError(f"{case_study}: negative HAC variance {variance}")
+    variance = max(variance, 0.0)
+    standard_error = float(np.sqrt(variance))
+    if not np.isfinite(standard_error) or standard_error == 0.0:
+        raise RuntimeError(f"{case_study}: degenerate HAC standard error")
+    t_hac = mean_ic / standard_error
+    critical = float(stats.t.ppf(0.975, n_days - 1))
+    return {
+        "ic_mean_daily": mean_ic,
+        "ic_n_days": float(n_days),
+        "ic_se_hac": standard_error,
+        "ic_ci_lo": mean_ic - critical * standard_error,
+        "ic_ci_hi": mean_ic + critical * standard_error,
+        "ic_t_hac": t_hac,
+        "ic_p_hac": float(2.0 * stats.t.sf(abs(t_hac), n_days - 1)),
+        "ic_hac_lag": float(lag),
+    }
+
+
+# %% tags=[]
+def chronological_hac(row: dict, target_column: str | None = None) -> dict[str, float]:
+    """Recompute daily IC and Bartlett Newey-West inference in time order."""
+    values = _daily_ic_values(row, target_column=target_column)
+    return _bartlett_hac(values, int(row["ic_hac_lag"]), row["case_study"])
+
+
+# %% [markdown] tags=[]
+# Recomputed inference replaces only the selected rows, preserving their exact
+# training and prediction identities for later coefficient and fold diagnostics.
+
+
+# %% tags=[]
+def replace_with_chronological_hac(
+    selected: pl.DataFrame, target_column: str | None = None
+) -> pl.DataFrame:
+    """Bind selected rows to inference recomputed against an explicit target."""
+    rows = []
+    for row in selected.iter_rows(named=True):
+        row.update(chronological_hac(row, target_column=target_column))
+        rows.append(row)
+    return pl.DataFrame(rows, infer_schema_length=None)
+
+
+# %% [markdown] tags=[]
+# Every grouped comparison fails closed when two artifacts tie for first place;
+# arbitrary row order must never determine the reported winner.
+
+
+# %% tags=[]
+def select_unique_best(frame: pl.DataFrame, groups: list[str]) -> pl.DataFrame:
+    """Select one unambiguous highest daily-IC row in every requested group."""
+    winners = []
+    for group in frame.partition_by(groups, maintain_order=True):
+        best_ic = group["ic_mean_daily"].max()
+        best = group.filter(pl.col("ic_mean_daily") == best_ic)
+        if best.height != 1:
+            identity = {column: group[0, column] for column in groups}
+            raise RuntimeError(f"ambiguous daily-IC rank one for {identity}")
+        winners.append(best)
+    return pl.concat(winners, how="diagonal_relaxed") if winners else pl.DataFrame()
+
+
+# %% [markdown] tags=[]
+# Fold diagnostics use the exact complete configurations selected above, rather
+# than independently ranking a second time.
+
+
+# %% tags=[]
+def collect_selected_fold_ic(selected: pl.DataFrame) -> pl.DataFrame:
+    """Load fold metrics for the exact primary-label selections."""
+    frames = []
+    for row in selected.iter_rows(named=True):
+        db_path = get_case_study_dir(row["case_study"]) / "run_log" / "registry.db"
+        with sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True) as connection:
+            records = connection.execute(
+                """
+                SELECT fold_id, ic, ic_std, n_entities, rmse, mae
+                FROM fold_metrics WHERE prediction_hash = ? ORDER BY fold_id
+                """,
+                (row["prediction_hash"],),
+            ).fetchall()
+        folds = pl.DataFrame(
+            records,
+            schema=["fold_id", "ic", "ic_std", "n_entities", "rmse", "mae"],
+            orient="row",
+        )
+        if folds.is_empty() or folds["ic"].null_count() > 0:
+            raise RuntimeError(f"{row['case_study']}: selected result has missing fold IC")
+        frames.append(
+            folds.with_columns(
+                case_study=pl.lit(row["case_study"]),
+                short_name=pl.lit(row["short_name"]),
+            )
+        )
+    return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+
+
+# %% [markdown] tags=[]
+# Multi-label comparisons repeat the complete-coverage selection within every
+# case-study and label pair.
+
+
+# %% tags=[]
+def collect_complete_multi_label(
+    case_studies: list[str],
+    label_resolver,
+) -> pl.DataFrame:
+    """Return the highest-IC complete result for each requested label."""
+    frames = []
+    for cs in case_studies:
+        for label in label_resolver(cs):
+            df = load_complete_metrics(cs, label=label)
+            if df.is_empty():
+                continue
+            winner = select_unique_best(df, ["label"])
+            frames.append(
+                winner.with_columns(
+                    case_study=pl.lit(cs),
+                    short_name=pl.lit(SHORT_NAMES[cs]),
+                )
+            )
+    return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+
 
 # %% [markdown] tags=[]
 # ## 1. Scope and Coverage
@@ -88,22 +362,22 @@ FAMILY = "linear"
 # The linear family is the baseline against which Ch12 (gradient boosting),
 # Ch13 (deep learning for time series), and Ch14 (latent factors) are
 # compared. Each case study's primary label is fixed in
-# `PRIMARY_LABELS`; the primary metric is the daily-pooled Spearman IC
-# with HAC 95 % confidence interval (from `prediction_metrics.ic_mean_daily`,
-# `ic_ci_lo`, `ic_ci_hi`, and `ic_t_hac`).
+# `PRIMARY_LABELS`; the primary metric is mean daily cross-sectional Spearman IC.
+# Selection uses registry coverage and IC fields, while HAC inference is recomputed
+# from each selected prediction artifact after sorting daily IC chronologically.
 
 # %% tags=[]
 coverage_rows = []
 for cs in CASE_STUDY_IDS:
     primary = PRIMARY_LABELS[cs]
-    df = load_metrics_from_registry(cs, families=[FAMILY])
+    df = load_complete_metrics(cs)
     if df.is_empty():
         coverage_rows.append(
             {
                 "case_study": SHORT_NAMES[cs],
                 "primary_label": primary,
                 "n_labels": 0,
-                "n_configs_primary": 0,
+                "n_complete_configs_primary": 0,
             }
         )
         continue
@@ -114,26 +388,27 @@ for cs in CASE_STUDY_IDS:
             "case_study": SHORT_NAMES[cs],
             "primary_label": primary,
             "n_labels": n_labels,
-            "n_configs_primary": n_configs_primary,
+            "n_complete_configs_primary": n_configs_primary,
         }
     )
 
 coverage_df = pl.DataFrame(coverage_rows)
-print("Linear coverage per case study (primary label and labels trained):")
+print("Complete linear coverage per case study (primary label and labels trained):")
 coverage_df
 
 # %% [markdown] tags=[]
 # ## 2. Cross-CS Forest of Highest-IC Linear Configurations
 #
 # For each case study, the linear configuration with the highest
-# daily-pooled IC on the primary label is plotted with its HAC 95 % CI.
+# mean daily IC on the primary label is plotted with its HAC 95 % CI.
 # Filled markers indicate $|t_{HAC}| > 2$ (CI excludes zero); open
 # markers indicate the CI overlaps zero.
 
 # %% tags=[]
-rank1 = collect_rank1_per_cs(CASE_STUDY_IDS, family=FAMILY)
+rank1 = replace_with_chronological_hac(collect_complete_rank1(CASE_STUDY_IDS))
 print(
-    "Highest-IC linear configuration per case study (primary label, daily-pooled IC ± HAC 95 % CI):"
+    "Highest-IC complete linear configuration per case study "
+    "(primary label, mean daily IC ± HAC 95 % CI):"
 )
 rank1.select(
     "short_name",
@@ -147,27 +422,28 @@ rank1.select(
 )
 
 # %% tags=[]
-fig, _ = plot_cross_cs_forest(
+fig, ax = plot_cross_cs_forest(
     rank1,
     family=FAMILY,
-    title="Highest-IC linear per case study (primary label, daily-pooled IC ± HAC 95 % CI)",
+    title="Most primary-label linear intervals overlap zero",
 )
+ax.set_xlabel("Mean daily IC (HAC 95 % CI)")
 fig.show()
 
-# %% [markdown] tags=[]
-# The IC CI excludes zero on three case studies: ETFs ($t_{HAC} = 2.38$),
-# US Equities ($t_{HAC} = 9.05$), and NASDAQ-100 microstructure
-# ($t_{HAC} = 4.27$). The CI overlaps zero on Crypto, FX, and SP500
-# Options. CME Futures, US Firm Characteristics, and SP500 Eq+Opt have
-# point estimates that are mildly negative with CIs spanning zero.
-# Ridge matches or exceeds OLS in daily-pooled IC in every case study
-# (tying with OLS in US Firms, where both fits coincide), and lands at or
-# above both L1-penalized fits (Lasso, ElasticNet) in five of the seven
-# case studies where those were trained — trailing only on CME Futures and
-# US Firms, where every linear IC sits near zero; selected $\alpha$ varies from
-# $10^{-3}$ to $10^{7}$, with most case studies at the high end of the
-# range, indicating that the regularization role is primarily shrinkage
-# of correlated features rather than feature selection.
+# %% tags=[]
+significant = rank1.filter((pl.col("ic_ci_lo") > 0) | (pl.col("ic_ci_hi") < 0))
+overlapping = rank1.filter(~((pl.col("ic_ci_lo") > 0) | (pl.col("ic_ci_hi") < 0)))
+sig_names = ", ".join(significant.sort("short_name")["short_name"].to_list())
+overlap_names = ", ".join(overlapping.sort("short_name")["short_name"].to_list())
+display(
+    Markdown(
+        f"The HAC interval excludes zero for **{significant.height} of {rank1.height}** primary "
+        f"labels ({sig_names}). It overlaps zero for {overlap_names}. The ETF result now selects "
+        "the full-coverage Ridge fit; shorter or degenerate L1 fits are not eligible for this "
+        "comparison. These are validation estimates read from the curated registries, not a new "
+        "cross-case-study model selection exercise."
+    )
+)
 
 # %% [markdown] tags=[]
 # ## 3. Regularization Comparison
@@ -175,7 +451,7 @@ fig.show()
 # How much does the choice of regularization family change the IC at
 # the primary label? For each case study we take the highest-IC OLS,
 # Ridge, Lasso, and ElasticNet configurations and compare their daily-
-# pooled IC with HAC 95 % CI, then trace the Ridge regularization path
+# mean daily IC with HAC 95 % CI, then trace the Ridge regularization path
 # with HAC 95 % CI bands.
 
 
@@ -198,7 +474,7 @@ def family_from_config(s: pl.Expr) -> pl.Expr:
 reg_rows = []
 for cs in CASE_STUDY_IDS:
     primary = PRIMARY_LABELS[cs]
-    df = load_metrics_from_registry(cs, label=primary, families=[FAMILY])
+    df = load_complete_metrics(cs, label=primary)
     if df.is_empty():
         continue
     df = df.filter(pl.col("ic_mean_daily").is_not_null())
@@ -212,30 +488,43 @@ for cs in CASE_STUDY_IDS:
 reg_df = pl.concat(reg_rows, how="diagonal_relaxed") if reg_rows else pl.DataFrame()
 
 # Rank-1 per (CS, regularization family)
-reg_best = (
-    reg_df.sort("ic_mean_daily", descending=True, nulls_last=True)
-    .unique(subset=["case_study", "reg_family"], keep="first")
-    .select(
-        "case_study",
-        "short_name",
-        "reg_family",
-        "config_name",
-        "ic_mean_daily",
-        "ic_ci_lo",
-        "ic_ci_hi",
-        "ic_t_hac",
-    )
+reg_best = replace_with_chronological_hac(
+    select_unique_best(reg_df, ["case_study", "reg_family"])
+).select(
+    "case_study",
+    "short_name",
+    "reg_family",
+    "config_name",
+    "prediction_hash",
+    "ic_mean_daily",
+    "ic_ci_lo",
+    "ic_ci_hi",
+    "ic_t_hac",
 )
 
 # Wide pivot for table
 ic_pivot = reg_best.pivot(on="reg_family", index="short_name", values="ic_mean_daily").sort(
     "short_name"
 )
-print("Daily-pooled IC by regularization family (primary regression labels):")
+print("Mean daily IC by regularization family (complete primary-label results):")
 ic_pivot
 
 # %% [markdown] tags=[]
 # ### Figure: Regularization Family Comparison
+#
+# Missing families remain gaps rather than zeros in the grouped chart.
+
+
+# %% tags=[]
+def regularization_metric(
+    frame: pl.DataFrame,
+    case_studies: list[str],
+    column: str,
+) -> np.ndarray:
+    """Align one regularization metric to the chart's case-study order."""
+    lookup = dict(zip(frame["short_name"].to_list(), frame[column].to_list(), strict=True))
+    return np.array([lookup.get(case_study, np.nan) for case_study in case_studies], dtype=float)
+
 
 # %% tags=[]
 families_present = ["ols", "ridge", "lasso", "elastic_net"]
@@ -256,29 +545,13 @@ fam_colors = {
 
 for i, fam in enumerate(families_present):
     sub = plot_data.filter(pl.col("reg_family") == fam)
-    ic = [
-        sub.filter(pl.col("short_name") == cs)["ic_mean_daily"][0]
-        if sub.filter(pl.col("short_name") == cs).height > 0
-        else np.nan
-        for cs in cs_order
-    ]
-    lo = [
-        sub.filter(pl.col("short_name") == cs)["ic_ci_lo"][0]
-        if sub.filter(pl.col("short_name") == cs).height > 0
-        else np.nan
-        for cs in cs_order
-    ]
-    hi = [
-        sub.filter(pl.col("short_name") == cs)["ic_ci_hi"][0]
-        if sub.filter(pl.col("short_name") == cs).height > 0
-        else np.nan
-        for cs in cs_order
-    ]
-    ic_a = np.array(ic, dtype=float)
-    err = np.vstack([ic_a - np.array(lo), np.array(hi) - ic_a])
+    ic = regularization_metric(sub, cs_order, "ic_mean_daily")
+    lo = regularization_metric(sub, cs_order, "ic_ci_lo")
+    hi = regularization_metric(sub, cs_order, "ic_ci_hi")
+    err = np.vstack([ic - lo, hi - ic])
     ax.bar(
         x + (i - 1.5) * width,
-        ic_a,
+        ic,
         width=width,
         yerr=err,
         capsize=2,
@@ -289,36 +562,41 @@ for i, fam in enumerate(families_present):
 
 ax.set_xticks(x)
 ax.set_xticklabels(cs_order, rotation=35, ha="right")
-ax.axhline(0, color="gray", linewidth=0.7, linestyle="--")
-ax.set_ylabel("Daily-pooled IC (HAC 95 % CI)")
-ax.set_title("Highest-IC linear configuration per (case study, regularization family)")
+ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
+ax.set_ylabel("Mean daily IC (HAC 95 % CI)")
+ax.set_title("Regularization shifts estimates less than their uncertainty")
 ax.legend(frameon=False, fontsize=8, loc="best")
-fig.tight_layout()
+if fig.get_layout_engine() is None:
+    fig.tight_layout()
 fig.show()
 
-# %% [markdown] tags=[]
-# Across the nine case studies the gap between OLS and Ridge is mostly
-# within one CI half-width of either side — the regularization choice
-# rarely changes whether the IC CI clears zero, but it does shift the
-# point estimate by a measurable margin in CME Futures and FX, where
-# Ridge achieves a higher daily-pooled IC than OLS by the largest
-# margin. Lasso and ElasticNet were trained for seven of the nine case
-# studies (all but NASDAQ-100 and US Equities). Ridge matches or exceeds
-# both L1-penalized fits in five of those seven; only on CME Futures and
-# US Firms — where every linear IC sits near or just below zero — do Lasso
-# and ElasticNet edge slightly ahead. Where the Lasso fit shifts noticeably
-# below Ridge (for example SP500 Options), it is selecting away correlated
-# features that Ridge keeps and shrinks.
+# %% tags=[]
+ridge_ols = reg_best.filter(pl.col("reg_family").is_in(["ridge", "ols"]))
+ridge_ols_wide = ridge_ols.pivot(
+    on="reg_family", index="short_name", values="ic_mean_daily"
+).drop_nulls(["ridge", "ols"])
+ridge_wins = ridge_ols_wide.filter(pl.col("ridge") >= pl.col("ols")).height
+l1_cases = reg_best.filter(pl.col("reg_family").is_in(["lasso", "elastic_net"]))[
+    "short_name"
+].n_unique()
+display(
+    Markdown(
+        f"Ridge matches or exceeds OLS in **{ridge_wins} of {ridge_ols_wide.height}** comparable "
+        f"case studies. Complete Lasso or ElasticNet results are available for {l1_cases} case "
+        "studies. Most family-to-family point-estimate shifts remain smaller than the displayed "
+        "uncertainty intervals, so regularization choice rarely changes the primary conclusion."
+    )
+)
 
 # %% [markdown] tags=[]
 # ### Ridge regularization path
 #
-# How does daily-pooled IC change as Ridge $\alpha$ increases? A flat
+# How does mean daily IC change as Ridge $\alpha$ increases? A flat
 # path means the conditioning of the feature matrix is already benign;
 # a pronounced peak indicates an optimal shrinkage strength.
 
 # %% tags=[]
-ridge_path = (
+ridge_path = replace_with_chronological_hac(
     reg_df.filter(pl.col("reg_family") == "ridge")
     .with_columns(
         alpha=pl.col("config_name").str.extract(r"ridge_a([\d.e+]+)", 1).cast(pl.Float64),
@@ -327,8 +605,22 @@ ridge_path = (
     .sort(["case_study", "alpha"])
 )
 
+palette = [
+    COLORS["blue"],
+    COLORS["copper"],
+    COLORS["amber"],
+    COLORS["positive"],
+    COLORS["negative"],
+    COLORS["slate"],
+    COLORS["amber_light"],
+    COLORS["neutral"],
+    COLORS["blue_light"],
+]
+ridge_markers = ["o", "s", "D", "^", "v", "P", "X", "*", "h"]
+ridge_styles = ["-", "--", "-.", ":", "-", "--", "-.", ":", "-"]
+
+# %% tags=[]
 fig, ax = plt.subplots(figsize=(10, 5))
-palette = list(COLORS.values())
 cs_list_sorted = sorted(ridge_path["case_study"].unique().to_list())
 for i, cs in enumerate(cs_list_sorted):
     sub = ridge_path.filter(pl.col("case_study") == cs).sort("alpha")
@@ -341,35 +633,41 @@ for i, cs in enumerate(cs_list_sorted):
     color = palette[i % len(palette)]
     name = SHORT_NAMES.get(cs, cs)
     ax.fill_between(a, lo, hi, color=color, alpha=0.10)
-    ax.plot(a, ic, "o-", color=color, label=name, linewidth=1.5, markersize=4, alpha=0.9)
+    ax.plot(
+        a,
+        ic,
+        marker=ridge_markers[i],
+        linestyle=ridge_styles[i],
+        color=color,
+        label=name,
+        linewidth=1.5,
+        markersize=4,
+        alpha=0.9,
+    )
 
 ax.set_xscale("log")
 ax.set_xlabel(r"Ridge $\alpha$ (log scale)")
-ax.set_ylabel("Daily-pooled IC (HAC 95 % CI band)")
-ax.axhline(0, color="gray", linewidth=0.7, linestyle="--")
-ax.set_title("Ridge regularization path per case study")
+ax.set_ylabel("Mean daily IC (HAC 95 % CI band)")
+ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
+ax.set_title("Ridge paths are mostly flat relative to uncertainty")
 ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=8)
 fig.show()
 
 # %% [markdown] tags=[]
-# The CI bands make the path's curvature legible. ETFs and US Equities
-# show a clear interior peak — heavy shrinkage helps. Crypto, FX, and
-# CME Futures have nearly flat paths whose CI bands span zero across the
-# whole range, indicating no $\alpha$ extracts a credibly nonzero linear
-# signal. SP500 Options has a shallow peak at low $\alpha$. The bands
-# also reveal when point-estimate differences are inside the CI — most
-# of the time, they are.
+# The confidence bands put the path curvature in context. An apparent optimum
+# matters only when its change is large relative to uncertainty; across these
+# panels, most neighboring Ridge settings remain statistically difficult to
+# distinguish.
 
 # %% [markdown] tags=[]
 # ## 4. Persistence and Stability
 #
-# A positive daily-pooled IC averaged over the whole validation period can
+# A positive mean daily IC averaged over the whole validation period can
 # still come from a few good stretches. The primary persistence view is a
 # three-month rolling mean of the daily IC, which traces how ranking quality
 # evolves over time. Because case studies cover different validation windows,
-# the comparison is clipped to a shared period — ETFs and FX both run
-# 2016–2023, one whose CI excludes zero and one that overlaps it. (Figure 11.8
-# in the chapter.) Per-fold IC and ICIR below are secondary stability
+# the comparison is clipped to the common validation period for ETFs and FX.
+# (Figure 11.8 in the chapter.) Per-fold IC and ICIR below are secondary stability
 # diagnostics.
 
 # %% tags=[]
@@ -377,23 +675,29 @@ fig, _ = plot_rolling_daily_ic(
     ["etfs", "fx_pairs"],
     window=63,
     common_window=True,
-    title="Persistence of linear ranking signal: ETFs vs FX (2016–2023)",
+    selected_prediction_hashes={
+        row["case_study"]: row["prediction_hash"]
+        for row in rank1.filter(pl.col("case_study").is_in(["etfs", "fx_pairs"])).iter_rows(
+            named=True
+        )
+    },
+    title="ETF and FX rolling IC vary through their shared window",
 )
 fig.show()
 
 # %% [markdown] tags=[]
-# The ETF rolling IC spends most of the period above zero, with sharp but
-# temporary drawdowns; the FX rolling IC is split almost evenly across zero
-# with no persistent sign. The ETF edge is a property of the whole period,
-# whereas the positive FX point estimate in the headline table averages a
-# series that is positive and negative in roughly equal measure.
+# The rolling view tests whether a full-period average is broadly persistent or
+# concentrated in a few stretches. Both paths cross zero here, so neither
+# full-period average describes every validation regime. Neither path is a
+# sealed holdout result.
 
 # %% tags=[]
-fold_df = collect_fold_ic_per_cs(CASE_STUDY_IDS, family=FAMILY)
+fold_df = collect_selected_fold_ic(rank1)
 fold_summary = (
     fold_df.group_by(["case_study", "short_name"])
     .agg(
         n_folds=pl.col("ic").count(),
+        mean=pl.col("ic").mean(),
         median=pl.col("ic").median(),
         std=pl.col("ic").std(),
         pct_positive=(pl.col("ic") > 0).mean(),
@@ -417,37 +721,38 @@ ax.boxplot(data, positions=positions, widths=0.55, showfliers=True)
 for i, arr in enumerate(data):
     if len(arr):
         ax.scatter(np.full(len(arr), i), arr, alpha=0.5, s=14, color=COLORS["blue"])
-ax.axhline(0, color="gray", linewidth=0.7, linestyle="--")
+ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
 ax.set_xticks(positions)
 ax.set_xticklabels(present, rotation=30, ha="right")
 ax.set_ylabel("Per-fold Spearman IC")
-ax.set_title("Per-fold IC distribution for the highest-IC linear configuration (primary label)")
-fig.tight_layout()
+ax.set_title("Selected linear fits vary widely across validation folds")
+if fig.get_layout_engine() is None:
+    fig.tight_layout()
 fig.show()
 
-# %% [markdown] tags=[]
-# ETFs and US Equities show consistent positive-fold IC — ETFs is
-# 100 % positive across folds with a moderate spread, US Equities is
-# 87.5 % positive at the smallest fold-level standard deviation among
-# the daily panels. NASDAQ-100 has the tightest fold-IC distribution
-# of the nine, at very small positive IC, which drives a high $t_{HAC}$
-# from a large $n_{\text{days}}$. CME Futures has a negative-median
-# fold IC (-0.03, positive in only 40 % of folds) and spreads widely, with its
-# CI in aggregate overlapping zero; SP500 Eq+Opt is below zero in every fold of its
-# narrow two-fold sample. Some case studies show only two folds — a
-# coverage fact reflecting how many folds the highest-IC
-# (config, checkpoint) was evaluated on, not a plot defect.
+# %% tags=[]
+most_positive = fold_summary.sort("pct_positive", descending=True).row(0, named=True)
+least_variable = fold_summary.sort("std").row(0, named=True)
+display(
+    Markdown(
+        f"**{most_positive['short_name']}** has the largest positive-fold share "
+        f"({most_positive['pct_positive']:.0%}), while **{least_variable['short_name']}** has the "
+        f"smallest fold-level standard deviation ({least_variable['std']:.4f}). Fold counts range "
+        f"from {fold_summary['n_folds'].min()} to {fold_summary['n_folds'].max()}, so the boxplots "
+        "are stability diagnostics rather than equal-precision estimates."
+    )
+)
 
 # %% [markdown] tags=[]
 # ### ICIR cross-CS bar
 #
-# The information ratio $\text{ICIR} = \overline{\text{IC}} / \sigma(\text{IC})$
-# is a stability-adjusted signal-strength summary. With 5–16 folds per
+# The information ratio $\text{ICIR} = |\overline{\text{IC}}| / \sigma(\text{IC})$
+# is a stability-adjusted signal-strength summary. With only a handful of folds per
 # case study it is sample-starved and should be read alongside the
-# daily-pooled IC and per-fold distribution, not as a standalone score.
+# mean daily IC and per-fold distribution, not as a standalone score.
 
 # %% tags=[]
-icir = fold_summary.with_columns(icir=(pl.col("median").abs() / pl.col("std")).round(3)).sort(
+icir = fold_summary.with_columns(icir=(pl.col("mean").abs() / pl.col("std")).round(3)).sort(
     "icir", descending=True, nulls_last=True
 )
 
@@ -457,17 +762,22 @@ ax.barh(y, icir["icir"].to_numpy(), color=COLORS["blue"], alpha=0.9, height=0.55
 ax.set_yticks(y)
 ax.set_yticklabels(icir["short_name"].to_list())
 ax.invert_yaxis()
-ax.set_xlabel("ICIR (|median IC| / fold std)")
-ax.set_title("ICIR per case study for the highest-IC linear configuration (primary label)")
-fig.tight_layout()
+ax.set_xlabel("ICIR (|mean fold IC| / fold standard deviation)")
+ax.set_title("Fold stability differs sharply across the selected linear fits")
+if fig.get_layout_engine() is None:
+    fig.tight_layout()
 fig.show()
 
-# %% [markdown] tags=[]
-# NASDAQ-100 has the highest ICIR among the nine case studies, driven
-# by the smallest fold-IC standard deviation; ETFs and US Equities
-# follow with both moderate IC and moderate spread. ICIR does not
-# change the conclusions from the daily-pooled IC view — it offers a
-# different cross-section of the same evidence.
+# %% tags=[]
+icir_leader = icir.row(0, named=True)
+display(
+    Markdown(
+        f"**{icir_leader['short_name']}** has the largest fold ICIR "
+        f"({icir_leader['icir']:.3f}). With only "
+        f"{icir_leader['n_folds']} folds for that estimate, ICIR remains a descriptive "
+        "stability diagnostic and does not replace the daily HAC interval."
+    )
+)
 
 # %% [markdown] tags=[]
 # ## 5. Multi-Label Horizon and Metric Symmetry
@@ -476,31 +786,34 @@ fig.show()
 # ### 5a. Linear IC across regression labels per case study
 #
 # Several case studies trained the linear pipeline on multiple regression
-# horizons. For each (case study, label), we take the highest daily-
-# pooled IC across linear configurations and compare across horizons —
+# horizons. For each (case study, label), we take the highest complete
+# mean daily IC across linear configurations and compare across horizons -
 # this diagnoses whether the cross-sectional signal strengthens or
 # weakens with the prediction window.
 
 
 # %% tags=[]
 def regression_labels(cs: str) -> list[str]:
-    df = load_metrics_from_registry(cs, families=[FAMILY])
+    df = load_complete_metrics(cs)
     if df.is_empty():
         return []
     return [
         lbl
         for lbl in df["label"].unique().to_list()
-        if lbl is not None and lbl.startswith("fwd_ret_") and "spot" not in lbl
+        if lbl is not None
+        and lbl.startswith("fwd_ret_")
+        and "spot" not in lbl
+        and "_win" not in lbl
+        and "risk_adj" not in lbl
     ]
 
 
-horizon_df = collect_multi_label_per_cs(
-    CASE_STUDY_IDS,
-    family=FAMILY,
-    labels=regression_labels,
+horizon_df = replace_with_chronological_hac(
+    collect_complete_multi_label(CASE_STUDY_IDS, regression_labels)
 )
 print(
-    f"Highest-IC linear configuration per (case study, regression label): {horizon_df.height} rows"
+    f"Highest-IC complete linear configuration per (case study, regression label): "
+    f"{horizon_df.height} rows"
 )
 horizon_df.select(
     "short_name",
@@ -539,9 +852,20 @@ plot_horizon = plot_horizon.filter(pl.col("short_name").is_in(multi_cs))
 
 # %% tags=[]
 if plot_horizon.height > 0:
+    palette = [
+        COLORS["blue"],
+        COLORS["copper"],
+        COLORS["amber"],
+        COLORS["positive"],
+        COLORS["negative"],
+        COLORS["slate"],
+        COLORS["amber_light"],
+        COLORS["neutral"],
+    ]
+
+# %% tags=[]
+if plot_horizon.height > 0:
     fig, ax = plt.subplots(figsize=(10, 5))
-    palette = list(COLORS.values())
-    horizons_sorted = sorted(plot_horizon["horizon_days"].unique().to_list())
     cs_sorted = sorted(plot_horizon["short_name"].unique().to_list())
     markers = ["o", "s", "D", "^", "v", "P", "X", "*"]
     linestyles = ["-", "--", "-.", ":", "-", "--", "-.", ":"]
@@ -568,24 +892,21 @@ if plot_horizon.height > 0:
         )
     ax.set_xscale("log")
     ax.set_xlabel("Horizon (trading days, log scale)")
-    ax.set_ylabel("Daily-pooled IC (HAC 95 % CI band)")
-    ax.axhline(0, color="gray", linewidth=0.7, linestyle="--")
-    ax.set_title("Highest-IC linear configuration across regression horizons")
+    ax.set_ylabel("Mean daily IC (HAC 95 % CI band)")
+    ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
+    ax.set_title("Linear ranking strength changes unevenly with horizon")
     ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=8)
     fig.show()
 
-# %% [markdown] tags=[]
-# Horizon dependence is heterogeneous. ETFs (5d→21d) and US Equities
-# (1d→5d→21d) show IC rising with horizon as noise averages out. NASDAQ-100
-# microstructure is roughly flat across intraday horizons, consistent
-# with a stationary microstructure signal. Crypto's two horizons sit
-# within each other's CI band. SP500 Eq+Opt rises 5d→10d but both CIs
-# overlap zero. US Firms shows a winsorization effect more than a
-# horizon effect: `fwd_ret_1m_win` clears zero while the unwinsorized
-# `fwd_ret_1m` does not at the same horizon. Treating the daily-pooled
-# IC at each horizon as a separate estimand (with its own CI) keeps the
-# comparison honest — the across-horizon ordering inside a case study
-# is rarely separated by more than one CI half-width.
+# %% tags=[]
+display(
+    Markdown(
+        f"The horizon view covers **{plot_horizon['short_name'].n_unique()}** case studies with "
+        "at least two comparable regression labels. Direction and magnitude vary by panel, and "
+        "the HAC bands show that many within-panel orderings remain uncertain. Each horizon is a "
+        "separate estimand; the chart does not treat a longer horizon as more observations."
+    )
+)
 
 # %% [markdown] tags=[]
 # ### 5b. Classification ↔ regression metric symmetry
@@ -595,14 +916,14 @@ if plot_horizon.height > 0:
 # direction label of the same horizon. Across the case studies that
 # carry binary direction labels, two questions are symmetric:
 #
-# - **Direction A** — the classification model's score, evaluated as
+# - **Direction A** - the classification model's score, evaluated as
 #   IC against the *continuous* return, asks whether the directional
 #   classifier is also a useful *cross-sectional ranker*. This number
 #   is on the registry as `prediction_metrics.ic_mean_daily` for
 #   `task_type='classification'` rows.
-# - **Direction B** — the regression model's score, evaluated as AUC
+# - **Direction B** - the regression model's score, evaluated as mean daily AUC
 #   against the *binary* direction, asks whether the continuous
-#   regression score is also a useful *binary classifier*. This number
+#   regression score is also a useful *cross-sectional binary classifier*. This number
 #   is computed on the fly here from raw OOF predictions, since the
 #   registry stores AUC only for classification training runs.
 #
@@ -623,7 +944,9 @@ SYMMETRY_PAIRS: dict[str, list[tuple[str, str]]] = {
 }
 
 
+# %% tags=[]
 def _load_binary_label(cs: str, dir_label: str) -> pl.DataFrame:
+    """Load one canonical binary direction label surface."""
     p = get_case_study_dir(cs) / "labels" / f"{dir_label}.parquet"
     if not p.exists():
         return pl.DataFrame()
@@ -632,16 +955,8 @@ def _load_binary_label(cs: str, dir_label: str) -> pl.DataFrame:
 
 
 # %% tags=[]
-def _direction_b_auc(cs: str, reg_label: str, dir_label: str) -> dict | None:
-    """Highest-IC linear regression config at reg_label → AUC vs binary dir_label."""
-    reg_metrics = load_metrics_from_registry(cs, label=reg_label, families=[FAMILY])
-    if reg_metrics.is_empty():
-        return None
-    reg_metrics = reg_metrics.filter(pl.col("ic_mean_daily").is_not_null())
-    if reg_metrics.is_empty():
-        return None
-    best = reg_metrics.sort("ic_mean_daily", descending=True).head(1).row(0, named=True)
-
+def _aligned_direction_scores(cs: str, reg_label: str, dir_label: str, best: dict) -> pl.DataFrame:
+    """Join one exact regression prediction artifact to its binary labels."""
     preds = load_predictions(
         cs,
         family=FAMILY,
@@ -651,10 +966,13 @@ def _direction_b_auc(cs: str, reg_label: str, dir_label: str) -> dict | None:
         split="validation",
     )
     if preds.height == 0:
-        return None
+        return pl.DataFrame()
+    preds = preds.filter(pl.col("prediction_hash") == best["prediction_hash"])
+    if preds.is_empty():
+        raise RuntimeError(f"{cs}: selected regression prediction artifact is missing")
     dir_df = _load_binary_label(cs, dir_label)
     if dir_df.is_empty():
-        return None
+        return pl.DataFrame()
 
     # Align timestamp + symbol dtypes for the join.
     if preds["timestamp"].dtype != dir_df["timestamp"].dtype:
@@ -664,11 +982,38 @@ def _direction_b_auc(cs: str, reg_label: str, dir_label: str) -> dict | None:
         preds = preds.with_columns(pl.col("symbol").cast(pl.Utf8))
         dir_df = dir_df.with_columns(pl.col("symbol").cast(pl.Utf8))
 
-    merged = preds.join(dir_df, on=["timestamp", "symbol"], how="inner")
-    merged = merged.filter(pl.col("y_dir").is_in([0, 1]) & pl.col("y_score").is_not_null())
+    return preds.join(dir_df, on=["timestamp", "symbol"], how="inner").filter(
+        pl.col("y_dir").is_in([0, 1]) & pl.col("y_score").is_not_null()
+    )
+
+
+# %% tags=[]
+def _mean_daily_auc(merged: pl.DataFrame) -> tuple[float, int] | None:
+    """Compute unweighted mean daily AUC on dates containing both classes."""
     if merged.height == 0 or merged["y_dir"].n_unique() < 2:
         return None
-    auc = float(roc_auc_score(merged["y_dir"].to_numpy(), merged["y_score"].to_numpy()))
+    daily_auc = []
+    for group in merged.sort("timestamp").partition_by("timestamp", maintain_order=True):
+        if group["y_dir"].n_unique() < 2:
+            continue
+        daily_auc.append(roc_auc_score(group["y_dir"].to_numpy(), group["y_score"].to_numpy()))
+    if not daily_auc:
+        return None
+    return float(np.mean(daily_auc)), len(daily_auc)
+
+
+# %% tags=[]
+def _direction_b_auc(cs: str, reg_label: str, dir_label: str) -> dict | None:
+    """Highest-IC complete regression config to mean daily binary AUC."""
+    reg_metrics = load_complete_metrics(cs, label=reg_label)
+    if reg_metrics.is_empty():
+        return None
+    best = select_unique_best(reg_metrics, ["label"]).row(0, named=True)
+    merged = _aligned_direction_scores(cs, reg_label, dir_label, best)
+    auc_result = _mean_daily_auc(merged)
+    if auc_result is None:
+        return None
+    auc, n_days = auc_result
     return {
         "case_study": cs,
         "short_name": SHORT_NAMES[cs],
@@ -678,6 +1023,7 @@ def _direction_b_auc(cs: str, reg_label: str, dir_label: str) -> dict | None:
         "reg_ic_mean_daily": best["ic_mean_daily"],
         "reg_score_auc": auc,
         "n": merged.height,
+        "n_days": n_days,
     }
 
 
@@ -685,20 +1031,25 @@ def _direction_b_auc(cs: str, reg_label: str, dir_label: str) -> dict | None:
 sym_rows = []
 for cs, pairs in SYMMETRY_PAIRS.items():
     for reg_lbl, dir_lbl in pairs:
-        # Direction A: classification model score → IC vs continuous return
-        cls_metrics = load_metrics_from_registry(cs, label=dir_lbl, families=[FAMILY])
+        # Direction A: classification model score to IC vs continuous return
+        cls_metrics = load_complete_metrics(cs, label=dir_lbl)
         cls_ic = cls_ic_lo = cls_ic_hi = cls_t = None
         cls_config = None
         if not cls_metrics.is_empty():
             cls_metrics = cls_metrics.filter(pl.col("ic_mean_daily").is_not_null())
             if not cls_metrics.is_empty():
-                top = cls_metrics.sort("ic_mean_daily", descending=True).head(1).row(0, named=True)
+                selected_cls = select_unique_best(cls_metrics, ["label"]).with_columns(
+                    case_study=pl.lit(cs)
+                )
+                top = replace_with_chronological_hac(selected_cls, target_column="eval_actual").row(
+                    0, named=True
+                )
                 cls_ic = top["ic_mean_daily"]
                 cls_ic_lo = top.get("ic_ci_lo")
                 cls_ic_hi = top.get("ic_ci_hi")
                 cls_t = top.get("ic_t_hac")
                 cls_config = top["config_name"]
-        # Direction B: regression model score → AUC vs binary direction
+        # Direction B: regression model score to AUC vs binary direction
         b = _direction_b_auc(cs, reg_lbl, dir_lbl)
         sym_rows.append(
             {
@@ -713,9 +1064,12 @@ for cs, pairs in SYMMETRY_PAIRS.items():
                 "reg_config": (b or {}).get("reg_config"),
                 "reg_score_auc": (b or {}).get("reg_score_auc"),
                 "n_b": (b or {}).get("n"),
+                "n_b_days": (b or {}).get("n_days"),
             }
         )
 
+
+# %% tags=[]
 sym_df = pl.DataFrame(
     sym_rows,
     schema_overrides={
@@ -725,9 +1079,10 @@ sym_df = pl.DataFrame(
         "cls_score_ic_t": pl.Float64,
         "reg_score_auc": pl.Float64,
         "n_b": pl.Int64,
+        "n_b_days": pl.Int64,
     },
 )
-print("Direction A (classification score → IC) and Direction B (regression score → AUC):")
+print("Direction A (classification score to IC) and Direction B (regression score to AUC):")
 sym_df.select(
     "short_name",
     "reg_label",
@@ -737,6 +1092,7 @@ sym_df.select(
     pl.col("cls_score_ic_hi").round(4).alias("A_hi"),
     pl.col("cls_score_ic_t").round(2).alias("A_t"),
     pl.col("reg_score_auc").round(4).alias("B_auc"),
+    "n_b_days",
 )
 
 # %% [markdown] tags=[]
@@ -747,7 +1103,7 @@ fig, axes = plt.subplots(1, 2, figsize=(13, 4.0))
 labels_y = [f"{r['short_name']} · {r['dir_label']}" for r in sym_df.iter_rows(named=True)]
 y = np.arange(sym_df.height)
 
-# Panel (a): Direction A — classification score IC vs continuous return
+# Panel (a): Direction A, classification score IC vs continuous return
 ax = axes[0]
 ic = sym_df["cls_score_ic"].to_numpy()
 lo = sym_df["cls_score_ic_lo"].to_numpy()
@@ -761,47 +1117,42 @@ ax.errorbar(
     capsize=3,
     lw=1,
 )
-ax.axvline(0, color="gray", lw=0.7, linestyle="--")
+ax.axvline(0, color=COLORS["neutral"], lw=0.7, linestyle="--")
 ax.set_yticks(y)
 ax.set_yticklabels(labels_y)
 ax.invert_yaxis()
-ax.set_xlabel("Daily-pooled IC (HAC 95 % CI)")
-ax.set_title("(a) Classification score → IC vs continuous return")
+ax.set_xlabel("Mean daily IC (HAC 95 % CI)")
+ax.set_title("(a) Classification scores can rank continuous returns")
 
-# Panel (b): Direction B — regression score AUC vs binary direction
+# Panel (b): Direction B, regression score AUC vs binary direction
 ax = axes[1]
 auc = sym_df["reg_score_auc"].to_numpy()
 ax.scatter(auc, y, color=COLORS["copper"], s=60, zorder=3)
-ax.axvline(0.5, color="gray", lw=0.7, linestyle="--")
+ax.axvline(0.5, color=COLORS["neutral"], lw=0.7, linestyle="--")
 ax.set_yticks(y)
 ax.set_yticklabels([])
 ax.invert_yaxis()
-ax.set_xlabel("AUC (regression score)")
-ax.set_title("(b) Regression score → AUC vs binary direction")
+ax.set_xlabel("Mean daily AUC (regression score)")
+ax.set_title("(b) Regression scores stay near chance on direction")
+ax.set_xlim(0.47, 0.53)
 
-fig.tight_layout()
+if fig.get_layout_engine() is None:
+    fig.tight_layout()
 fig.show()
 
-# %% [markdown] tags=[]
-# Reading the two panels together: the classification model's score
-# (Direction A) ranks meaningfully against the continuous return on
-# Crypto and US Firms ($t_{HAC} \geq 5$, CIs exclude zero), and is
-# indistinguishable from zero on SP500 Eq+Opt at both horizons (5d
-# point estimate slightly negative, 10d slightly positive, both with
-# CIs spanning zero). The regression model's score (Direction B)
-# differs: AUC against the binary direction sits within
-# $\pm 0.03$ of 0.5 in every case study and label tested. The two
-# metrics are not symmetric — continuous-return rank correlation that
-# clears $t_{HAC} \geq 5$ can coexist with a binary-direction AUC
-# whose CI overlaps 0.5. This reflects two facts: cross-sectional rank
-# correlation is driven by the relative ordering of magnitudes rather
-# than by separation of the positive- and negative-return groups, and
-# the classifier's logistic loss is more directly aligned with binary
-# AUC than the regressor's squared loss. Downstream, Ch16's signal-stage
-# backtest uses ranked predictions (the IC view), and direction-aware
-# classifiers continue to feed long–short construction in the strategy
-# chapters — both views remain first-class signals for portfolio
-# construction.
+# %% tags=[]
+direction_a_clear = sym_df.filter((pl.col("cls_score_ic_lo") > 0) | (pl.col("cls_score_ic_hi") < 0))
+max_auc_gap = float((sym_df["reg_score_auc"] - 0.5).abs().max())
+display(
+    Markdown(
+        f"Direction A's HAC interval excludes zero in **{direction_a_clear.height} of "
+        f"{sym_df.height}** comparisons. Direction B's mean daily AUC remains within "
+        f"**{max_auc_gap:.3f}** of 0.5 across the same pairs. Cross-sectional rank correlation "
+        "therefore does not collapse to binary-direction discrimination. The Ch16 equal-weight "
+        "baseline uses ranked predictions, while direction-aware classifiers can still inform "
+        "long-short construction."
+    )
+)
 
 # %% [markdown] tags=[]
 # ## 6. Coefficient Analysis
@@ -811,28 +1162,13 @@ fig.show()
 
 
 # %% tags=[]
-def load_coefficients(cs: str, label: str) -> pl.DataFrame | None:
-    """Load coefficients from registry-tracked training runs."""
+def load_coefficients(cs: str, training_hash: str, config_name: str) -> pl.DataFrame | None:
+    """Load coefficients from one exact registry-tracked training run."""
     cs_dir = get_case_study_dir(cs)
-    db_path = cs_dir / "run_log" / "registry.db"
-    if not db_path.exists():
+    coef_path = cs_dir / "run_log" / "training" / training_hash / "coefficients.parquet"
+    if not coef_path.exists():
         return None
-
-    with sqlite3.connect(str(db_path)) as conn:
-        rows = conn.execute(
-            "SELECT training_hash, config_name FROM training_runs "
-            "WHERE family='linear' AND label=?",
-            (label,),
-        ).fetchall()
-
-    frames = []
-    for hash_val, config_name in rows:
-        coef_path = cs_dir / "run_log" / "training" / hash_val / "coefficients.parquet"
-        if coef_path.exists():
-            frames.append(
-                pl.read_parquet(coef_path).with_columns(pl.lit(config_name).alias("config_name"))
-            )
-    return pl.concat(frames) if frames else None
+    return pl.read_parquet(coef_path).with_columns(pl.lit(config_name).alias("config_name"))
 
 
 # %% [markdown] tags=[]
@@ -848,9 +1184,8 @@ def load_coefficients(cs: str, label: str) -> pl.DataFrame | None:
 sign_rows = []
 for row in rank1.iter_rows(named=True):
     cs = row["case_study"]
-    label = row["label"]
     cfg = row["config_name"]
-    coef_df = load_coefficients(cs, label)
+    coef_df = load_coefficients(cs, row["training_hash"], cfg)
     if coef_df is None:
         continue
     coefs = coef_df.filter(pl.col("config_name") == cfg)
@@ -898,24 +1233,25 @@ if sign_df.height > 0:
     ax.set_yticklabels(plot_sign["short_name"].to_list())
     ax.invert_yaxis()
     ax.set_xlim(0.5, 1.0)
-    ax.axvline(0.8, color="gray", linewidth=0.7, linestyle="--")
+    ax.axvline(0.8, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
     ax.set_xlabel("Mean fold-level sign consistency")
-    ax.set_title("Sign consistency of highest-IC linear coefficients (primary label)")
-    fig.tight_layout()
+    ax.set_title("Most selected linear fits preserve coefficient signs across folds")
+    if fig.get_layout_engine() is None:
+        fig.tight_layout()
     fig.show()
 
-# %% [markdown] tags=[]
-# Mean fold-level sign consistency clears 0.8 on six of the nine case
-# studies (US Firms highest at 0.98, then CME Futures 0.95, Crypto 0.90,
-# SP500 Options 0.88, NASDAQ-100 0.81, US Equities 0.81) and falls between
-# 0.77 and 0.80 on the other three (FX 0.80, ETFs 0.78); SP500 Eq+Opt is the
-# lowest at 0.77. The same features carry the same sign in the large majority of
-# folds even on the case studies whose daily-pooled IC CI overlaps zero,
-# and even on ETFs, whose daily-pooled IC point estimate is among the
-# strongest of the regression-only panels. A negative or near-zero IC
-# is therefore not a sign of unstable estimation; it is evidence that
-# the directionally stable linear projection has no cross-sectional
-# ranking value on that target.
+# %% tags=[]
+stable_sign_count = sign_df.filter(pl.col("mean_consistency") >= 0.8).height
+sign_leader = sign_df.row(0, named=True)
+display(
+    Markdown(
+        f"Mean fold-level sign consistency reaches 0.8 in **{stable_sign_count} of "
+        f"{sign_df.height}** selected fits. **{sign_leader['short_name']}** is highest at "
+        f"{sign_leader['mean_consistency']:.2f}. Sign stability and predictive ranking are "
+        "different diagnostics: a stable coefficient direction does not by itself establish "
+        "a nonzero out-of-sample IC."
+    )
+)
 
 # %% [markdown] tags=[]
 # ### 6b. Lasso sparsity
@@ -930,11 +1266,15 @@ for cs in CASE_STUDY_IDS:
     label = PRIMARY_LABELS.get(cs)
     if label is None:
         continue
-    coef_df = load_coefficients(cs, label)
-    if coef_df is None:
+    lasso_metrics = load_complete_metrics(cs, label=label).filter(
+        pl.col("config_name").str.starts_with("lasso")
+    )
+    if lasso_metrics.is_empty():
         continue
-    lasso = coef_df.filter(pl.col("config_name").str.starts_with("lasso"))
-    if lasso.is_empty():
+    lasso_selected = select_unique_best(lasso_metrics, ["label"]).row(0, named=True)
+    lasso_config = lasso_selected["config_name"]
+    lasso = load_coefficients(cs, lasso_selected["training_hash"], lasso_config)
+    if lasso is None:
         continue
     n_total = lasso.height
     n_zero = lasso.filter(pl.col("coefficient").abs() < 1e-10).height
@@ -948,6 +1288,7 @@ for cs in CASE_STUDY_IDS:
     sparsity_rows.append(
         {
             "short_name": SHORT_NAMES[cs],
+            "config_name": lasso_config,
             "n_features": n_features,
             "zero_fraction": round(n_zero / n_total, 3),
             "features_always_zero": always_zero,
@@ -955,10 +1296,13 @@ for cs in CASE_STUDY_IDS:
         }
     )
 
+
+# %% tags=[]
 sparsity_df = pl.DataFrame(
     sparsity_rows,
     schema={
         "short_name": pl.Utf8,
+        "config_name": pl.Utf8,
         "n_features": pl.Int64,
         "zero_fraction": pl.Float64,
         "features_always_zero": pl.Int64,
@@ -969,17 +1313,17 @@ sparsity_df = sparsity_df.sort("zero_fraction", descending=True)
 print("Lasso sparsity per case study (at the highest-IC Lasso $\\alpha$):")
 sparsity_df
 
-# %% [markdown] tags=[]
-# Lasso/ElasticNet coefficient parquets are persisted for seven of the nine case
-# studies (ETFs, CME Futures, Crypto, US Firms, SP500 Options, FX, SP500 Eq+Opt),
-# and the highest-IC linear config is itself Lasso or ElasticNet for US Firms
-# (lasso) and CME Futures (elastic net). On SP500 Options, sparsity is
-# substantial: the highest-IC Lasso fit zeros out roughly 67 % of (feature, fold)
-# cells, though only ~11 % of features are zero in every fold. Sparser fits do not, however,
-# produce higher IC on this target — the SP500 Options Lasso IC sits
-# below Ridge at the same primary label, consistent with Lasso's gains
-# from feature selection being offset by the loss of information from
-# correlated features that Ridge keeps and shrinks.
+# %% tags=[]
+sparsest = sparsity_df.row(0, named=True)
+display(
+    Markdown(
+        f"Complete highest-IC Lasso coefficient artifacts are available for "
+        f"**{sparsity_df.height}** case studies. **{sparsest['short_name']}** is sparsest: "
+        f"{sparsest['zero_fraction']:.1%} of coefficient-by-fold cells are zero, while "
+        f"{sparsest['pct_always_zero']:.1f}% of features are zero in every fold. This comparison "
+        "now uses one selected Lasso configuration per case study rather than pooling all alphas."
+    )
+)
 
 # %% [markdown] tags=[]
 # ### 6c. Top-N feature overlap across case studies
@@ -996,9 +1340,8 @@ TOP_N = 10
 top_features: dict[str, set[str]] = {}
 for row in rank1.iter_rows(named=True):
     cs = row["case_study"]
-    label = row["label"]
     cfg = row["config_name"]
-    coef_df = load_coefficients(cs, label)
+    coef_df = load_coefficients(cs, row["training_hash"], cfg)
     if coef_df is None:
         continue
     coefs = coef_df.filter(pl.col("config_name") == cfg)
@@ -1017,6 +1360,7 @@ print(f"Top-{TOP_N} feature sets collected for {len(top_features)} case studies.
 
 # %% tags=[]
 def jaccard(a: set, b: set) -> float:
+    """Return Jaccard overlap for two nonempty feature sets."""
     if not a or not b:
         return float("nan")
     return len(a & b) / len(a | b)
@@ -1034,7 +1378,10 @@ for i, a in enumerate(cs_names):
 # %% tags=[]
 if cs_names:
     fig, ax = plt.subplots(figsize=(7, 6))
-    im = ax.imshow(J, cmap="Blues", vmin=0, vmax=1)
+    overlap_cmap = LinearSegmentedColormap.from_list(
+        "ml4t_overlap", [COLORS["bg_light"], COLORS["blue_light"], COLORS["blue"]]
+    )
+    im = ax.imshow(J, cmap=overlap_cmap, vmin=0, vmax=1)
     ax.set_xticks(np.arange(len(cs_names)))
     ax.set_yticks(np.arange(len(cs_names)))
     ax.set_xticklabels(cs_names, rotation=40, ha="right")
@@ -1052,62 +1399,42 @@ if cs_names:
                     fontsize=7,
                     color="white" if v > 0.5 else COLORS["blue"],
                 )
-    ax.set_title(f"Top-{TOP_N} feature overlap (Jaccard) across case studies")
-    fig.colorbar(im, ax=ax, fraction=0.045, pad=0.04)
+    ax.set_title(f"Top-{TOP_N} coefficient features overlap little across panels")
+    colorbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.04)
+    colorbar.set_label("Jaccard overlap")
     fig.show()
 
-# %% [markdown] tags=[]
-# Pairwise Jaccard overlaps are concentrated at the low end. Case studies
-# that share an asset class and feature set (the daily equity panels) sit
-# at the higher end of the off-diagonal; cross-class pairs (FX vs ETFs,
-# Crypto vs US Firms) are near zero. Each panel's highest-IC linear fit
-# is selecting from a panel-specific feature library, and the small
-# overlap is dominated by generic momentum and volatility primitives
-# that recur across feature sets rather than by a universal "ten best
-# alphas".
+# %% tags=[]
+off_diagonal = J[~np.eye(len(cs_names), dtype=bool)]
+max_overlap = float(np.nanmax(off_diagonal)) if off_diagonal.size else float("nan")
+display(
+    Markdown(
+        f"The largest off-diagonal top-{TOP_N} Jaccard overlap is **{max_overlap:.2f}**. "
+        "Each selected fit draws primarily on its panel-specific feature library; recurring "
+        "momentum or volatility primitives do not form a universal short list."
+    )
+)
 
 # %% [markdown] tags=[]
 # ## 7. Cross-CS Takeaways
 #
-# - **Daily-pooled IC CI excludes zero on three case studies** (ETFs,
-#   US Equities, NASDAQ-100) at the primary label; the CI overlaps zero
-#   on Crypto, FX, and SP500 Options; on CME Futures, US Firms, and
-#   SP500 Eq+Opt the point estimate is mildly negative with a CI that
-#   spans zero.
-# - **Ridge matches or exceeds OLS** in every case study (tying with OLS
-#   in US Firms, where the two fits coincide, and clearing OLS by the
-#   largest margin in CME Futures and FX), and lands at or above
-#   Lasso/ElasticNet in five of the seven case studies where those were
-#   trained (trailing only CME Futures and US Firms, where every linear IC
-#   sits near zero); the selected $\alpha$ varies
-#   from $10^{-3}$ to $10^{7}$. The role of regularization is primarily
-#   shrinkage of correlated features rather than feature selection.
-# - **Per-fold IC distributions and ICIR** are consistent with the
-#   daily-pooled IC view. NASDAQ-100's daily-pooled IC has a small
-#   point-estimate magnitude paired with the tightest fold-IC
-#   distribution of the nine panels; the high $t_{HAC}$ comes from
-#   the low denominator, not from a large mean.
-# - **Horizon dependence is heterogeneous**: some panels' IC rises with
-#   horizon as noise averages out, others are roughly flat across the
-#   horizons trained.
-# - **Direction A and Direction B are not symmetric**: classification
-#   scores rank meaningfully against continuous returns on Crypto and
-#   US Firms ($t_{HAC} \geq 5$), while regression scores' pooled AUC
-#   against the binary direction sits within $\pm 0.03$ of 0.5 in
-#   every (CS, label) tested. Cross-sectional rank correlation does
-#   not collapse to binary-direction discrimination; the loss-function
-#   choice (logistic vs squared) shifts which discriminative content
-#   the score carries.
-# - **Coefficient sign is stable across folds**: mean fold-level sign
-#   consistency clears 0.8 on six of the nine case studies and falls
-#   between 0.77 and 0.80 on the other three — well above the level a
-#   purely noisy fit would produce. A negative or near-zero IC is not
-#   an artefact of unstable estimation; it is a finding about the
-#   cross-section.
-# - **Top-feature overlap across case studies is small**, with the
-#   highest pairwise Jaccard scores between panels of the same asset
-#   class. Each panel's linear fit is panel-specific; there is no
-#   universal short list of dominant linear features.
-#
 # **Next**: Ch12 extends the comparison with gradient boosting and
 # tabular deep learning; Ch13 with temporal deep learning.
+
+# %% tags=[]
+display(
+    Markdown(
+        f"- **Primary-label evidence is selective:** {significant.height} of {rank1.height} "
+        "complete linear results have HAC intervals that exclude zero.\n"
+        f"- **Ridge is a durable baseline:** it matches or exceeds OLS in {ridge_wins} of "
+        f"{ridge_ols_wide.height} comparable panels, while most differences remain small relative "
+        "to uncertainty.\n"
+        f"- **Fold stability needs context:** {icir_leader['short_name']} leads ICIR, but its "
+        f"estimate uses only {icir_leader['n_folds']} folds.\n"
+        f"- **Ranking and direction are not symmetric:** regression-score mean daily AUC stays "
+        f"within {max_auc_gap:.3f} of chance in the tested pairs.\n"
+        f"- **Coefficient behavior is panel-specific:** {stable_sign_count} selected fits clear "
+        f"0.8 mean sign consistency, yet the largest top-{TOP_N} cross-panel feature overlap is "
+        f"only {max_overlap:.2f}."
+    )
+)

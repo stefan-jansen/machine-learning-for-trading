@@ -35,19 +35,26 @@
 # **Prerequisites**: ETF features (`case_studies/etfs/`)
 
 # %%
-"""Temporal Convolutional Network — build TCN with dilated causal convolutions for return prediction."""
+"""Build a TCN with dilated causal convolutions for return prediction."""
 
+import os
 import warnings
 
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import numpy as np
+import plotly.graph_objects as go
 import polars as pl
 import torch
 import torch.nn as nn
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
+from plotly.subplots import make_subplots
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
+from torch.nn.utils.parametrizations import weight_norm
 
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
 
@@ -62,6 +69,7 @@ N_CHANNELS = 32
 KERNEL_SIZE = 3
 DROPOUT = 0.1
 LR = 1e-3
+LABEL_HORIZON = 21
 
 # %%
 
@@ -69,6 +77,9 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {DEVICE}")
 
 set_global_seeds(SEED)
+torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
 
 # %% [markdown]
 # ## Data Loading
@@ -79,8 +90,21 @@ set_global_seeds(SEED)
 # %%
 mds = load_dl_dataset("etfs")
 
-FEATURE_COLS = mds.feature_names[:8]
+FEATURE_COLS = [
+    "ret_5d",
+    "ret_10d",
+    "ret_21d",
+    "ret_42d",
+    "ret_63d",
+    "ret_126d",
+    "ret_189d",
+    "ret_252d",
+]
 TARGET_COL = mds.label_col
+
+missing_features = sorted(set(FEATURE_COLS) - set(mds.feature_names))
+if missing_features:
+    raise ValueError(f"Missing required ETF momentum features: {missing_features}")
 
 print(f"Features ({len(FEATURE_COLS)}): {FEATURE_COLS}")
 print(f"Target: {TARGET_COL}")
@@ -102,19 +126,25 @@ X, y, timestamps, symbols = create_sequences_multi_asset(
 )
 print(f"Sequences: {X.shape[0]:,}, shape: {X.shape}")
 
-X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-y = np.nan_to_num(y, nan=0.0).astype(np.float32)
+sequence_order = np.lexsort((symbols.astype(str), timestamps))
+X = np.nan_to_num(X[sequence_order], nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+y = np.nan_to_num(y[sequence_order], nan=0.0).astype(np.float32)
+timestamps = timestamps[sequence_order]
+symbols = symbols[sequence_order]
 
 # %%
-# Date-based 60/20/20 temporal split: all asset-rows for dates < train_end_date
-# go to train, etc. Sample-order slicing on the asset-pooled sequences would
-# split cross-asset, not temporally.
+# Date-based 60/20/20 temporal split. The target is a 21-day forward return,
+# so labels whose outcome windows cross the next boundary are purged.
 unique_dates = np.sort(np.unique(timestamps))
-train_end_date = unique_dates[int(len(unique_dates) * 0.6)]
-val_end_date = unique_dates[int(len(unique_dates) * 0.8)]
+train_boundary_idx = int(len(unique_dates) * 0.6)
+val_boundary_idx = int(len(unique_dates) * 0.8)
+train_end_date = unique_dates[train_boundary_idx]
+val_end_date = unique_dates[val_boundary_idx]
+train_label_cutoff = unique_dates[train_boundary_idx - LABEL_HORIZON]
+val_label_cutoff = unique_dates[val_boundary_idx - LABEL_HORIZON]
 
-train_mask = timestamps < train_end_date
-val_mask = (timestamps >= train_end_date) & (timestamps < val_end_date)
+train_mask = timestamps < train_label_cutoff
+val_mask = (timestamps >= train_end_date) & (timestamps < val_label_cutoff)
 test_mask = timestamps >= val_end_date
 
 X_train, y_train = X[train_mask], y[train_mask]
@@ -123,12 +153,16 @@ X_test, y_test = X[test_mask], y[test_mask]
 test_dates, test_symbols = timestamps[test_mask], symbols[test_mask]
 
 print(f"Train: {len(X_train):,}, Val: {len(X_val):,}, Test: {len(X_test):,}")
+print(
+    f"Purged {LABEL_HORIZON} target dates before each boundary: "
+    f"validation starts {train_end_date}, test starts {val_end_date}"
+)
 
 
 # %% [markdown]
 # ### Cross-sectional IC helper
 #
-# Mean cross-sectional Spearman IC by date — TCN evaluation is on cross-asset
+# Mean cross-sectional Spearman IC by date - TCN evaluation is on cross-asset
 # ranking, not pooled point error, so the same date/entity-aware metric used in
 # `01_core_architectures` and `04_transformers` is the right comparison anchor.
 
@@ -151,9 +185,9 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 
 
 # %% [markdown]
-# > **Note**: This fixed 60/20/20 split is a pedagogical simplification. Production
-# > deployment requires the walk-forward validation protocol from Chapter 6, where
-# > the model is retrained on expanding windows to avoid temporal data leakage.
+# > **Note**: This fixed 60/20/20 split is a pedagogical simplification. Its
+# > 21-day purge keeps forward-label windows disjoint, but production deployment
+# > still requires the expanding walk-forward protocol from Chapter 6.
 
 # %% [markdown]
 # ## TCN Architecture
@@ -166,6 +200,8 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 # 2. **Dilated convolutions**: Dilation factors of 1, 2, 4, 8 give an
 #    exponentially growing receptive field
 # 3. **Residual connections**: Enable training deeper networks
+# 4. **Weight normalization and channel dropout**: Match the reference TCN
+#    residual block without mixing information across batch members
 #
 # The receptive field grows as:
 #
@@ -185,12 +221,14 @@ class CausalConv1d(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, dilation: int):
         super().__init__()
         self.causal_padding = (kernel_size - 1) * dilation
-        self.conv = nn.Conv1d(
-            in_channels,
-            out_channels,
-            kernel_size,
-            padding=self.causal_padding,
-            dilation=dilation,
+        self.conv = weight_norm(
+            nn.Conv1d(
+                in_channels,
+                out_channels,
+                kernel_size,
+                padding=self.causal_padding,
+                dilation=dilation,
+            )
         )
 
     def forward(self, x):
@@ -204,22 +242,9 @@ class CausalConv1d(nn.Module):
 # %% [markdown]
 # ### TCN Block
 #
-# Each block applies two causal convolutions with batch normalization,
-# ReLU activation, and dropout. A residual connection bypasses the block,
-# using a 1x1 convolution when channel dimensions change.
-#
-# > **Strict-online-causality footnote**: BatchNorm uses running batch
-# > statistics that are estimated during training and applied at inference
-# > time. For strict per-sample online causality (sample-by-sample inference
-# > with no dependence on what other samples looked like at training time),
-# > the published TCN reference (Bai, Kolter, Koltun 2018) uses WeightNorm
-# > on the conv weights instead. We keep BatchNorm here because the original
-# > paper's Conv1d activation statistics are load-bearing for the
-# > cross-sectional IC signal on this 8-feature ETF panel — alternative
-# > normalizations (LayerNorm-over-channels, GroupNorm(1)) were tried in
-# > the publication-polish pass and both collapsed TCN IC to near zero
-# > while leaving Ridge IC unchanged. The footnote is the right place to
-# > flag the strict-causality concern for production deployment.
+# Each block follows Bai, Kolter, and Koltun (2018): two weight-normalized
+# causal convolutions, ReLU activations, channel-wise dropout, and a residual
+# connection. A 1x1 convolution aligns channel dimensions when necessary.
 
 
 # %%
@@ -230,24 +255,23 @@ class TCNBlock(nn.Module):
         super().__init__()
         self.conv1 = CausalConv1d(in_ch, out_ch, kernel_size, dilation)
         self.conv2 = CausalConv1d(out_ch, out_ch, kernel_size, dilation)
-        self.bn1 = nn.BatchNorm1d(out_ch)
-        self.bn2 = nn.BatchNorm1d(out_ch)
         self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout1d(dropout)
         self.residual = nn.Conv1d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
 
     def forward(self, x):
         res = self.residual(x)
-        out = self.dropout(self.relu(self.bn1(self.conv1(x))))
-        out = self.dropout(self.relu(self.bn2(self.conv2(out))))
+        out = self.dropout(self.relu(self.conv1(x)))
+        out = self.dropout(self.relu(self.conv2(out)))
         return self.relu(out + res)
 
 
 # %% [markdown]
 # ### Full TCN Regressor
 #
-# Stacking blocks with dilations [1, 2, 4, 8] followed by adaptive average
-# pooling and a linear head for regression output.
+# Stacking blocks with dilations [1, 2, 4, 8] followed by a linear head on
+# the final causal state. The final state can use the full receptive field;
+# averaging across intermediate states would mix shorter effective histories.
 
 
 # %%
@@ -255,7 +279,7 @@ class TCNRegressor(nn.Module):
     """Temporal Convolutional Network for regression.
 
     Architecture: Input -> [CausalConv(d=2^i) + ReLU + Dropout] x 4
-                  -> AdaptiveAvgPool1d -> Linear -> scalar output.
+                  -> final causal state -> Linear -> scalar output.
     """
 
     def __init__(
@@ -273,14 +297,13 @@ class TCNRegressor(nn.Module):
             blocks.append(TCNBlock(in_ch, n_channels, kernel_size, d, dropout))
 
         self.tcn = nn.Sequential(*blocks)
-        self.pool = nn.AdaptiveAvgPool1d(1)
         self.fc = nn.Linear(n_channels, 1)
 
     def forward(self, x):
         # x input: (batch, seq_len, n_features) -> permute to (batch, n_features, seq_len)
         x = x.permute(0, 2, 1)
         x = self.tcn(x)
-        x = self.pool(x).squeeze(-1)  # (batch, n_channels)
+        x = x[:, :, -1]  # final causal state: (batch, n_channels)
         return self.fc(x).squeeze(-1)  # (batch,)
 
 
@@ -297,6 +320,7 @@ if receptive_field >= LOOKBACK:
 # ## Train the TCN
 
 # %%
+set_global_seeds(SEED)
 model = TCNRegressor(
     n_features=len(FEATURE_COLS),
     n_channels=N_CHANNELS,
@@ -312,6 +336,36 @@ print(
 )
 
 history = train_model(model, X_train, y_train, X_val, y_val, EPOCHS, LR, BATCH_SIZE, DEVICE)
+
+# %%
+epochs_axis = list(range(1, len(history["train_loss"]) + 1))
+fig = go.Figure()
+fig.add_trace(
+    go.Scatter(
+        x=epochs_axis,
+        y=history["train_loss"],
+        mode="lines+markers",
+        name="Train",
+        line_color=COLORS["blue"],
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=epochs_axis,
+        y=history["val_loss"],
+        mode="lines+markers",
+        name="Validation",
+        line_color=COLORS["amber"],
+    )
+)
+fig.update_layout(
+    title=f"TCN stops after {len(epochs_axis)} epochs with no sustained validation gain",
+    xaxis_title="Epoch",
+    yaxis_title="Mean squared error",
+    width=820,
+    height=470,
+)
+fig.show()
 
 # %% [markdown]
 # ## Evaluate on Test Set
@@ -346,70 +400,73 @@ y_ridge_pred = ridge.predict(X_test_scaled)
 
 ridge_mse = np.mean((y_ridge_pred - y_test) ** 2)
 ridge_ic = cross_sectional_ic_mean(y_test, y_ridge_pred, test_dates, test_symbols)
+zero_mse = float(np.mean(y_test**2))
 
 print("\nRidge Baseline Results:")
 print(f"  MSE: {ridge_mse:.6f}")
 print(f"  Spearman IC: {ridge_ic:.4f}")
 
 # %% [markdown]
-# ## sktime Alternative
-#
-# sktime wraps NeuralForecast's TCN implementation for quick prototyping.
-#
-# **Dependency note**: sktime's neural forecasters require `neuralforecast`, which
-# depends on `ray` — and ray does not yet support Python 3.14
-# ([ray-project/ray#56434](https://github.com/ray-project/ray/issues/56434)).
-# Once ray adds 3.14 wheels, install via `uv pip install neuralforecast`
-# and uncomment the demo below.
-
-# %%
-# import pandas as pd
-# from sktime.forecasting.neuralforecast import NeuralForecastTCN
-#
-# from data import load_etfs
-#
-# spy = load_etfs(symbols=["SPY"]).sort("timestamp")
-# spy_pd = spy.select(["timestamp", "close"]).to_pandas().set_index("timestamp")["close"]
-# split = int(len(spy_pd) * 0.8)
-# y_train_sk = spy_pd.iloc[:split]
-#
-# forecaster = NeuralForecastTCN(
-#     freq="B",
-#     input_size=LOOKBACK,
-#     max_steps=EPOCHS * 5,
-# )
-# forecaster.fit(y_train_sk)
-# y_pred_sk = forecaster.predict(fh=list(range(1, 11)))
-# print(f"sktime NeuralForecastTCN: predicted {len(y_pred_sk)} steps")
-
-# %% [markdown]
 # ## Summary
 
 # %%
-results_df = pl.DataFrame(
-    {
-        "Model": ["TCN", "Ridge"],
-        "Spearman IC": [test_ic, ridge_ic],
-        "MSE": [test_mse, ridge_mse],
-    }
+model_names = ["TCN", "Ridge"]
+ic_values = [test_ic, ridge_ic]
+mse_ratios = [test_mse / zero_mse, ridge_mse / zero_mse]
+bar_palette = {"TCN": COLORS["blue"], "Ridge": COLORS["slate"]}
+
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=("Mean cross-sectional Spearman IC", "MSE relative to zero-return forecast"),
 )
-results_df
+for model_name, ic_value, mse_ratio in zip(model_names, ic_values, mse_ratios, strict=True):
+    fig.add_trace(
+        go.Bar(
+            x=[model_name],
+            y=[ic_value],
+            name=model_name,
+            marker_color=bar_palette[model_name],
+            text=[f"{ic_value:.3f}"],
+            textposition="outside",
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=[model_name],
+            y=[mse_ratio],
+            name=model_name,
+            marker_color=bar_palette[model_name],
+            text=[f"{mse_ratio:.2f}x"],
+            textposition="outside",
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
+    )
+
+ic_leader = model_names[int(np.argmax(ic_values))]
+mse_winners = sum(ratio < 1 for ratio in mse_ratios)
+fig.add_hline(y=0, line_color=COLORS["neutral"], row=1, col=1)
+fig.add_hline(y=1, line_dash="dot", line_color=COLORS["neutral"], row=1, col=2)
+fig.update_layout(
+    title=f"{ic_leader} leads on rank IC; {mse_winners} of 2 models beat zero-return MSE",
+    width=950,
+    height=480,
+)
+fig.update_yaxes(title_text="Spearman IC", row=1, col=1)
+fig.update_yaxes(title_text="MSE / zero-return MSE", row=1, col=2)
+fig.show()
 
 # %% [markdown]
-# **Interpretation**: on this single-split multivariate ETF-feature setup
-# (eight cross-sectional momentum features per ETF, asset-pooled over the
-# 60-day lookback), the TCN's cross-sectional Spearman IC narrowly edges the
-# Ridge baseline (TCN 0.017 vs Ridge 0.016 — see `results_df` above), but the
-# margin is well within single-split noise and the ordering is not stable
-# across reruns. The cuDNN-non-deterministic path through the
-# dilated causal convolutions drives most of that run-to-run variation; the deeper
-# pedagogical point is that TCN's signal at this scale and 8-feature panel
-# is at the noise floor and that single-split point estimates are not
-# trustworthy. The receptive field of 61 timesteps fully covers the 60-day
-# lookback, so no information is discarded by the architecture itself.
-# Section 13.9's walk-forward evaluation across more case studies is the
-# authoritative TCN reading; treat this notebook as an architecture
-# demonstration, not a production estimate.
+# The left panel measures cross-sectional ranking, while the right panel asks
+# whether either fitted model improves squared error over predicting zero. These
+# are distinct questions. This purged single split demonstrates the architecture;
+# it does not establish a stable model ranking. Section 13.9 supplies the
+# walk-forward comparison across datasets.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -422,15 +479,13 @@ results_df
 #    simultaneously during both training and inference
 # 4. **Fixed receptive field**: The maximum lookback is determined at design
 #    time by the dilation schedule -- unlike attention, which adapts dynamically
-# 5. **BatchNorm vs strict online-causality**: BatchNorm's running-stats
-#    inference behaviour means a deployed model's per-sample output depends
-#    on aggregate training-batch statistics. The Bai et al. (2018) reference
-#    uses WeightNorm instead for that reason. We keep BatchNorm because, on
-#    this 8-feature ETF panel, alternative normalizations (LayerNorm-over-
-#    channels, GroupNorm(1)) both collapsed the TCN's cross-sectional IC to
-#    near zero. The footnote at the block definition is the right place to
-#    flag the strict-causality concern; production deployments targeting
-#    streaming inference should swap to WeightNorm and retune
+# 5. **Reference architecture matters**: Weight normalization, channel-wise
+#    dropout, and the final causal state preserve the TCN block's intended
+#    inductive bias without mixing batch statistics
+#
+# Deterministic PyTorch algorithms and a fixed cuBLAS workspace make repeated
+# executions reproducible on the same software and GPU stack; another environment
+# may still produce small floating-point differences.
 #
 # **Next**: See `06_tsmixer` for an MLP-only alternative that achieves
 # competitive results without convolutions or attention.

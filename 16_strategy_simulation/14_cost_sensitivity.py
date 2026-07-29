@@ -46,6 +46,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import polars as pl
 from _etf_baseline import (
     DEFAULT_FEES,
@@ -55,10 +56,7 @@ from _etf_baseline import (
     momentum_weights,
     simulate,
 )
-from ml4t.diagnostic.visualization.backtest.cost_attribution import (
-    plot_cost_sensitivity,
-    plot_cost_waterfall,
-)
+from ml4t.diagnostic.visualization.backtest.cost_attribution import plot_cost_sensitivity
 
 # %% tags=["parameters"]
 # Production defaults — Papermill injects overrides for CI
@@ -98,8 +96,10 @@ print(f"Annualized 2-way turnover: {turnover_2way * 100:.0f}% (sum |trades| / me
 
 # %%
 rows = []
+results_by_cost = {}
 for bp in COST_GRID_BP:
     res = simulate(panel.prices, weights, fees=bp / 10_000)
+    results_by_cost[bp] = res
     m = metrics(res.equity)
     rows.append(
         {
@@ -117,26 +117,26 @@ sweep
 # %% [markdown]
 # ## 3. Break-Even Cost
 #
-# The first-order approximation is
-#
-# $$\text{break-even}_{\text{bp/leg}} \approx \frac{\text{gross CAGR}}
-#                                                   {\text{annual turnover}} \times 10{,}000.$$
-#
-# Above this per-leg fee the strategy's net CAGR turns negative on this sample.
-# Treat the break-even as a fragility ceiling, not as a target.
+# The canonical break-even is the zero crossing of the simulator's CAGR sweep,
+# linearly interpolated between the last positive and first negative rows. This
+# keeps the quoted threshold tied to the same path-dependent calculation shown
+# in the figure. Treat it as a fragility ceiling, not as a target.
 
 # %%
-break_even_bp = gross["cagr"] / turnover_2way * 10_000
-print(f"Break-even cost (approx): {break_even_bp:.0f} bp per leg")
+positive = sweep.loc[sweep["cagr"] > 0].iloc[-1]
+negative = sweep.loc[sweep["cagr"] <= 0].iloc[0]
+break_even_bp = positive["cost_bp_per_leg"] + (0 - positive["cagr"]) * (
+    negative["cost_bp_per_leg"] - positive["cost_bp_per_leg"]
+) / (negative["cagr"] - positive["cagr"])
+print(f"Break-even cost (simulator interpolation): {break_even_bp:.0f} bp per leg")
 print(f"§16.4 protocol cost:       {DEFAULT_FEES * 10_000:.0f} bp per leg")
 print(f"Headroom multiplier:       {break_even_bp / (DEFAULT_FEES * 10_000):.0f}x")
 
 # %% [markdown]
 # A high headroom multiplier sounds reassuring, but two caveats apply.
 #
-# - The break-even uses *gross* return; small misestimates compound across
-#   many trades and the realized cost can also include slippage and
-#   spread-cost, not just commission.
+# - The interpolation is sample-specific; realized cost can also include
+#   slippage and spread cost, not just commission.
 # - The diagnostic is path-blind. A strategy with the same gross CAGR but
 #   front-loaded turnover may still be fragile if costs are above average in
 #   the years that contributed most of the return.
@@ -198,35 +198,38 @@ print(f"Realized drag at {fee_bp:.0f} bp:  {realized_drag_pct:.2f}% / yr")
 # ## 6. Library Equivalents — `ml4t-diagnostic`
 #
 # Sections 4 and 5 build the cost diagnostic from the equity curve so the
-# mechanics are explicit. `ml4t-diagnostic` ships the same two views as
-# one-call helpers, useful when the goal is a backtest report rather than a
-# teaching artifact:
+# mechanics are explicit. The exact simulator waterfall below keeps every bar
+# in dollars and reconciles to the 5 bp run. `ml4t-diagnostic` provides the
+# complementary one-call sensitivity view for a production report:
 #
-# - `plot_cost_waterfall` decomposes gross PnL into commission and slippage
-#   bars at the §16.4 operating cost.
 # - `plot_cost_sensitivity` reproduces the §4 Sharpe-vs-cost curve directly
 #   from the gross daily-return series, with a break-even annotation.
 #
-# Both are plotly figures and slot into the report bundle that
+# Both figures are Plotly artifacts and slot into the report bundle that
 # `09_performance_reporting` assembles for the same backtest.
 
 # %%
-# Cumulative gross PnL over the sample, as a fraction of starting equity.
-# `commission_frac` below is built as turnover × fees × years and is already
-# dimensionless (turnover = dollar_turnover / mean_equity / years), so
-# `gross_pnl` must be expressed in the same units for the waterfall bars to
-# compare. The previous form `equity[-1] - equity[0]` returned dollars and
-# made the commission bar invisible by ~equity[0] (~10⁵).
-gross_pnl_frac = float(result_gross.equity.iloc[-1] / result_gross.equity.iloc[0] - 1.0)
-# At the §16.4 operating cost, all cost is commission (no modeled slippage).
-sample_years = (panel.prices.index[-1] - panel.prices.index[0]).days / 365.25
-commission_frac = float(turnover_2way * DEFAULT_FEES * sample_years)
+# Use one dollar denominator throughout. The compounding/path term captures the
+# fact that fees paid earlier reduce capital available for subsequent returns.
+result_net = results_by_cost[fee_bp]
+gross_pnl_dollars = float(result_gross.equity.iloc[-1] - result_gross.equity.iloc[0])
+net_pnl_dollars = float(result_net.equity.iloc[-1] - result_net.equity.iloc[0])
+commission_dollars = float((result_net.trades_dollar * DEFAULT_FEES).sum())
+path_effect_dollars = gross_pnl_dollars - commission_dollars - net_pnl_dollars
+assert np.isclose(gross_pnl_dollars - commission_dollars - path_effect_dollars, net_pnl_dollars)
 
-waterfall = plot_cost_waterfall(
-    gross_pnl=gross_pnl_frac,
-    commission=commission_frac,
-    slippage=0.0,
-    title=f"§16.4 baseline: gross-to-net PnL ({DEFAULT_FEES * 10_000:.0f} bp/leg)",
+waterfall = go.Figure(
+    go.Waterfall(
+        measure=["absolute", "relative", "relative", "total"],
+        x=["Gross PnL", "Commissions", "Compounding/path effect", "Net PnL"],
+        y=[gross_pnl_dollars, -commission_dollars, -path_effect_dollars, net_pnl_dollars],
+        connector={"line": {"color": "#64748B"}},
+    )
+)
+waterfall.update_layout(
+    title=f"Exact gross-to-net PnL at {DEFAULT_FEES * 10_000:.0f} bp per leg",
+    yaxis_title="PnL (USD)",
+    showlegend=False,
 )
 waterfall.show()
 
@@ -234,9 +237,8 @@ waterfall.show()
 # `plot_cost_sensitivity` is used illustratively — it computes Sharpe from a
 # daily-drag approximation, while the manual sweep in Section 2 runs the
 # full simulator at each per-leg fee. The two figures show the same shape
-# but the library's break-even annotation can differ by a few basis points
-# from the simulator's measured break-even; treat the manual sweep as the
-# canonical source for any quoted break-even.
+# but its daily-drag approximation need not share the simulator's exact zero
+# crossing. Treat the manual sweep as the canonical source for quoted break-even.
 gross_returns_pl = pl.from_pandas(result_gross.returns.rename("returns").reset_index()).get_column(
     "returns"
 )

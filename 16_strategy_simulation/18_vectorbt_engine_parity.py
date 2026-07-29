@@ -243,8 +243,8 @@ def run_framework_benchmark(
 
 
 # %%
-def build_live_payload(ml4t_result: dict, vbt_result: dict, scenario_id: str) -> dict:
-    """Build the notebook payload from two live benchmark results."""
+def build_result_row(ml4t_result: dict, vbt_result: dict) -> dict:
+    """Build the VectorBT parity row from two live benchmark results."""
     reference_trades = max(int(vbt_result["num_trades"]), 1)
     reference_value = max(abs(float(vbt_result["final_value"])), 1.0)
     runtime_speedup = (
@@ -253,7 +253,36 @@ def build_live_payload(ml4t_result: dict, vbt_result: dict, scenario_id: str) ->
         else None
     )
     final_value_gap = float(abs(ml4t_result["final_value"] - vbt_result["final_value"]))
+    return {
+        "engine_id": "vectorbt",
+        "engine_label": "VectorBT OSS",
+        "profile": "vectorbt_strict",
+        "status": "production",
+        "ml4t_framework_id": "ml4t-vbt-strict",
+        "reference_framework_id": "vbt-oss",
+        "ml4t_num_trades": int(ml4t_result["num_trades"]),
+        "reference_num_trades": int(vbt_result["num_trades"]),
+        "trade_gap": int(ml4t_result["num_trades"] - vbt_result["num_trades"]),
+        "trade_gap_pct": float(
+            (ml4t_result["num_trades"] - vbt_result["num_trades"]) / reference_trades
+        ),
+        "ml4t_final_value": float(ml4t_result["final_value"]),
+        "reference_final_value": float(vbt_result["final_value"]),
+        "final_value_gap_abs": final_value_gap,
+        "final_value_gap_pct": float(final_value_gap / reference_value),
+        "ml4t_runtime_sec": float(ml4t_result["runtime_sec"]),
+        "reference_runtime_sec": float(vbt_result["runtime_sec"]),
+        "runtime_speedup": runtime_speedup,
+    }
 
+
+# %% [markdown]
+# Wrap the parity row with the live-run provenance and scope limitations.
+
+
+# %%
+def build_live_payload(ml4t_result: dict, vbt_result: dict, scenario_id: str) -> dict:
+    """Build the notebook payload from two live benchmark results."""
     return {
         "artifact_source": "live benchmark_suite.py rerun",
         "scenario_id": scenario_id,
@@ -265,29 +294,7 @@ def build_live_payload(ml4t_result: dict, vbt_result: dict, scenario_id: str) ->
             "VectorBT OSS matches terminal value to floating-point noise on the current benchmark surface.",
             "A small residual trade gap remains, so this is economic parity rather than exact order decomposition parity.",
         ],
-        "results": [
-            {
-                "engine_id": "vectorbt",
-                "engine_label": "VectorBT OSS",
-                "profile": "vectorbt_strict",
-                "status": "production",
-                "ml4t_framework_id": "ml4t-vbt-strict",
-                "reference_framework_id": "vbt-oss",
-                "ml4t_num_trades": int(ml4t_result["num_trades"]),
-                "reference_num_trades": int(vbt_result["num_trades"]),
-                "trade_gap": int(ml4t_result["num_trades"] - vbt_result["num_trades"]),
-                "trade_gap_pct": float(
-                    (ml4t_result["num_trades"] - vbt_result["num_trades"]) / reference_trades
-                ),
-                "ml4t_final_value": float(ml4t_result["final_value"]),
-                "reference_final_value": float(vbt_result["final_value"]),
-                "final_value_gap_abs": final_value_gap,
-                "final_value_gap_pct": float(final_value_gap / reference_value),
-                "ml4t_runtime_sec": float(ml4t_result["runtime_sec"]),
-                "reference_runtime_sec": float(vbt_result["runtime_sec"]),
-                "runtime_speedup": runtime_speedup,
-            }
-        ],
+        "results": [build_result_row(ml4t_result, vbt_result)],
         "sources": [
             "ml4t-backtest/validation/METHODOLOGY.md",
             "third_edition/code/16_strategy_simulation/18_vectorbt_engine_parity.py",

@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -22,7 +22,7 @@
 # This notebook demonstrates how causal inference methodology applies to trading
 # research, with honest assessment of what it can and cannot prove.
 #
-# **Book Reference**: Chapter 15, §15.2 (DML), §15.6 (Synthesis)
+# **Book Reference**: Chapter 15, §15.4 (Isolating Factor Effects with DML)
 #
 # **The Question**: Does momentum have a causal effect on forward returns, and
 # does this effect vary by volatility regime?
@@ -51,9 +51,9 @@
 # |---------------------------|----------------------------------------------------------------------------------------------|
 # | Unit                      | ETF-date row from the ETF modeling panel                                                     |
 # | Treatment                 | `skip_recent_6_1` momentum (continuous)                                                       |
-# | Outcome                   | `fwd_ret_21d` — 21-day forward return                                                         |
-# | Controls (W)              | `vol_21d`, `vol_126d`, `regime`, `yield_curve_slope`                                          |
-# | Effect modifiers (X)      | `vol_21d` (volatility regime via CausalForestDML)                                             |
+# | Outcome                   | `fwd_ret_21d` - 21-day forward return                                                         |
+# | Controls (W)              | `vol_21d`, `vol_63d`, `vol_126d`, `yield_curve_slope`                                         |
+# | Effect modifiers (X)      | `market_volatility` (SPY 63-day vol) + high-/low-vol regime indicators, via CausalForestDML   |
 # | Identification assumption | Selection on observables given the four controls; CATE varies smoothly with realized vol     |
 # | Main failure modes        | Unobserved confounding; CATE generalization failure out of sample; trading cost erosion       |
 # | Estimand                  | ATE and regime-conditional CATE from CausalForestDML; downstream trading rule scales position by sign-of-CATE × magnitude |
@@ -62,7 +62,7 @@
 # ## 1. Setup and Configuration
 
 # %% tags=[]
-"""Causal Analysis for Trading Decisions — apply DML-based causal estimates to a momentum trading strategy."""
+"""Causal Analysis for Trading Decisions - apply DML-based causal estimates to a momentum trading strategy."""
 
 import datetime
 import json
@@ -76,9 +76,11 @@ from plotly.subplots import make_subplots
 from scipy import stats
 from sklearn.ensemble import GradientBoostingRegressor
 
+import utils.style  # noqa: F401  # registers + activates the ml4t Plotly template
 from utils.modeling import load_modeling_dataset
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
 
@@ -277,7 +279,7 @@ if MAX_SAMPLES and train_df.height > MAX_SAMPLES:
 
 assert _train_end < _test_start, f"Train end {_train_end} must precede test start {_test_start}"
 assert train_df[date_col].max() < test_df[date_col].min(), (
-    "Train and test date ranges overlap — split logic is broken"
+    "Train and test date ranges overlap - split logic is broken"
 )
 
 print(f"\nTrain set: {len(train_df):,} observations")
@@ -572,7 +574,7 @@ def compute_regime_scaling(
     # Keep every regime in the same unit. If at least one regime has a usable
     # std, missing/zero stds are imputed with the median of the available ones
     # so all scores are signal-to-noise ratios. Only when NO regime has a usable
-    # std do we fall back to raw point estimates — uniformly, for every regime —
+    # std do we fall back to raw point estimates - uniformly, for every regime -
     # so ``max_abs_score`` never mixes S/N ratios (O(1-10)) with raw CATEs (~1e-2).
     stds = cate_std_by_regime or {}
     usable_stds = [float(s) for s in stds.values() if np.isfinite(s) and s > 0]
@@ -582,7 +584,7 @@ def compute_regime_scaling(
     for regime, cate in cate_by_regime.items():
         std = stds.get(regime, np.nan)
         if median_std is None:
-            # No usable std anywhere — raw point estimates for all regimes.
+            # No usable std anywhere - raw point estimates for all regimes.
             signal_to_noise[regime] = float(cate)
         elif not np.isfinite(std) or std <= 0:
             signal_to_noise[regime] = float(cate) / median_std
@@ -884,7 +886,11 @@ non_overlap = comparison.iloc[::FORWARD_DAYS].copy()
 for strat in ["naive", "causal", "heuristic"]:
     non_overlap[f"cum_{strat}"] = (1 + non_overlap[strat]).cumprod()
 
-colors = {"naive": "#1f77b4", "causal": "#2ca02c", "heuristic": "#ff7f0e"}
+colors = {
+    "naive": COLORS["blue"],
+    "causal": COLORS["amber"],
+    "heuristic": COLORS["copper"],
+}
 
 # %% tags=[]
 # Four-panel out-of-sample comparison

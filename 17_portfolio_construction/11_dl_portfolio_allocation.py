@@ -26,7 +26,7 @@
 #
 #
 # This notebook implements end-to-end portfolio allocation using a neural network
-# that directly maximizes the portfolio Sharpe ratio — bypassing the predict-then-optimize
+# that directly maximizes the portfolio Sharpe ratio - bypassing the predict-then-optimize
 # pipeline. The approach follows Zhang, Zohren & Roberts (2020).
 #
 # **Learning Objectives**:
@@ -44,10 +44,10 @@
 # ## 1. Setup
 
 # %%
-"""Deep Learning for Portfolio Optimization — train a differentiable Sharpe-maximizing neural network allocator."""
+"""Deep Learning for Portfolio Optimization - train a differentiable Sharpe-maximizing neural network allocator."""
 
+import hashlib
 import os
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -61,26 +61,32 @@ from torch.utils.data import DataLoader, Dataset
 from data import load_etfs
 from utils.paths import get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-
-warnings.filterwarnings("ignore")
+from utils.style import COLORS
 
 # %% tags=["parameters"]
-# Production defaults — Papermill overrides for CI testing
+# Production defaults - Papermill overrides for CI testing
 MAX_SYMBOLS = 0  # 0 = all (uses full ETF universe below)
 N_EPOCHS = 200
 SEQ_LEN = 63  # ~3 months lookback
 HIDDEN_DIM = 64
 SEED = 42
-# Cache-first defaults for expensive training.
-USE_CACHED_MODEL_IF_AVAILABLE = True
-SAVE_TRAINED_MODEL_TO_CACHE = True
+# Cache use is opt-in so a clean production run cannot silently reuse a stale checkpoint.
+USE_CACHED_MODEL_IF_AVAILABLE = os.environ.get("ML4T_ALLOW_MODEL_CACHE", "0") == "1"
+SAVE_TRAINED_MODEL_TO_CACHE = os.environ.get("ML4T_SAVE_MODEL_CACHE", "0") == "1"
+ML4T_SOURCE_BLOB = os.environ.get("ML4T_SOURCE_BLOB", "")
+if (USE_CACHED_MODEL_IF_AVAILABLE or SAVE_TRAINED_MODEL_TO_CACHE) and (
+    len(ML4T_SOURCE_BLOB) != 40
+    or any(c not in "0123456789abcdef" for c in ML4T_SOURCE_BLOB.lower())
+):
+    raise RuntimeError("ML4T_SOURCE_BLOB must be a 40-hex identity when cache is enabled")
 
 # %%
 OUTPUT_DIR = get_output_dir(17, "dl_portfolio_allocation")
 OUTPUT_DIR.mkdir(exist_ok=True)
 MODEL_CACHE_PATH = OUTPUT_DIR / "lstm_portfolio_cache.pt"
 CANONICAL_OUTPUT_DIR = get_chapter_dir(17) / "output" / "dl_portfolio_allocation"
-CANONICAL_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+if SAVE_TRAINED_MODEL_TO_CACHE:
+    CANONICAL_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CANONICAL_MODEL_CACHE_PATH = CANONICAL_OUTPUT_DIR / "lstm_portfolio_cache.pt"
 
 # %% [markdown]
@@ -143,13 +149,45 @@ def state_dict_is_compatible(model: nn.Module, state_dict: dict) -> tuple[bool, 
 
 
 # %% [markdown]
+# Cache provenance must match every input that can change learned weights.
+
+
+# %%
+def cache_provenance_is_compatible(payload: dict) -> bool:
+    return payload.get("provenance") == expected_cache_provenance
+
+
+# %% [markdown]
+# One-way turnover counts half the absolute change for fully invested weights.
+
+
+# %%
+def one_way_turnover(delta):
+    return 0.5 * np.abs(delta).sum(axis=-1)
+
+
+# %% [markdown]
+# The stable data identity binds index order, universe order, and price values.
+
+
+# %%
+def stable_data_hash(frame):
+    h = hashlib.sha256()
+    h.update("|".join(frame.index.astype(str)).encode())
+    h.update(b"\0")
+    h.update("|".join(map(str, frame.columns)).encode())
+    h.update(np.ascontiguousarray(frame.to_numpy()).tobytes())
+    return h.hexdigest()
+
+
+# %% [markdown]
 # ### Test-Output Bootstrap Guard
 #
 # In Papermill runs the first pass may not have a cached checkpoint yet, so we
 # temporarily shorten training just enough to build the initial cache artifact.
 
 # %%
-IN_TEST_OUTPUT_MODE = os.environ.get("ML4T_OUTPUT_DIR") is not None
+IN_TEST_OUTPUT_MODE = os.environ.get("ML4T_TEST_MODE") == "1"
 if IN_TEST_OUTPUT_MODE:
     cache_exists = any(
         path.exists()
@@ -214,7 +252,8 @@ prices = prices[[c for c in UNIVERSE if c in prices.columns]]
 # Drop dates before most assets exist, then forward-fill small gaps
 coverage_threshold = max(1, int(prices.shape[1] * 0.8))
 prices = prices.dropna(thresh=coverage_threshold)
-prices = prices.ffill().bfill()
+prices = prices.ffill()
+prices = prices.dropna()
 N_ASSETS = prices.shape[1]
 UNIVERSE = list(prices.columns)
 
@@ -230,7 +269,7 @@ print(f"Date range: {prices.index[0]:%Y-%m-%d} to {prices.index[-1]:%Y-%m-%d}")
 #
 # Simple features: multi-horizon log returns and rolling volatility.
 # The key insight from Zhang & Zohren is that the network can learn
-# allocation directly from raw return features — no alpha prediction needed.
+# allocation directly from raw return features - no alpha prediction needed.
 
 # %%
 returns = prices.pct_change().fillna(0.0)
@@ -273,7 +312,10 @@ print(f"Train: {dates[0]:%Y-%m-%d} to {dates[train_end - 1]:%Y-%m-%d} ({train_en
 print(
     f"Val:   {dates[train_end]:%Y-%m-%d} to {dates[val_end - 1]:%Y-%m-%d} ({val_end - train_end} days)"
 )
-print(f"Test:  {dates[val_end]:%Y-%m-%d} to {dates[-1]:%Y-%m-%d} ({n_dates - val_end} days)")
+print(
+    f"Test decision dates: {dates[val_end]:%Y-%m-%d} to {dates[-2]:%Y-%m-%d} ({n_dates - val_end - 1} days)"
+)
+print(f"Last realized-return date: {dates[-1]:%Y-%m-%d} (not a decision origin)")
 
 # %% [markdown]
 # **Interpretation**: The split preserves a strict walk-forward protocol: the test
@@ -299,7 +341,7 @@ class PortfolioDataset(Dataset):
         # Valid starting positions: need seq_len days + 1 for forward return
         self.indices = np.arange(
             max(start_idx, seq_len - 1),
-            min(end_idx, len(features) - 1) - seq_len + 1,
+            min(end_idx, len(features) - 1),
         )
 
     def __len__(self):
@@ -317,8 +359,12 @@ val_ds = PortfolioDataset(features, fwd_returns, train_end, val_end, SEQ_LEN)
 test_ds = PortfolioDataset(features, fwd_returns, val_end, n_dates, SEQ_LEN)
 
 print(f"Train windows: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
+assert train_ds.indices[-1] == train_end - 1
+assert val_ds.indices[0] == train_end and val_ds.indices[-1] == val_end - 1
+assert test_ds.indices[0] == val_end and test_ds.indices[-1] == n_dates - 2
+assert all(test_ds.indices < n_dates - 1)
 
-train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, drop_last=True)
+train_loader = DataLoader(train_ds, batch_size=len(train_ds), shuffle=False, drop_last=False)
 val_loader = DataLoader(val_ds, batch_size=64, shuffle=False)
 test_loader = DataLoader(test_ds, batch_size=64, shuffle=False)
 
@@ -384,9 +430,9 @@ def differentiable_sharpe_loss(weights, fwd_returns, annualization=252.0, eps=1e
     Scalar loss (negative Sharpe).
     """
     # Portfolio returns: weighted sum across assets
-    port_returns = (weights * fwd_returns).sum(dim=-1)  # (B, T)
+    port_returns = (weights[:, -1, :] * fwd_returns[:, -1, :]).sum(dim=-1)  # one per decision date
 
-    # Pool all returns across batch and time
+    # Pool one final decision return per window across the batch
     r = port_returns.reshape(-1)
     mu = r.mean()
     var = r.var(unbiased=False)
@@ -411,6 +457,12 @@ def annualized_sharpe(returns_tensor, annualization=252.0):
     return float((annualization**0.5) * returns_tensor.mean() / (returns_tensor.std() + 1e-8))
 
 
+def pooled_sharpe_oracle(returns_tensor):
+    """Independent direct pooled-Sharpe calculation used by the Gate-0 oracle."""
+    values = returns_tensor.detach().cpu().numpy().reshape(-1)
+    return float(np.sqrt(252.0) * values.mean() / (values.std() + 1e-8))
+
+
 # %% [markdown]
 # ### One-Epoch Update
 
@@ -432,7 +484,7 @@ def train_one_epoch(train_loader, model, optimizer):
         optimizer.step()
 
         with torch.no_grad():
-            port_r = (weights * r_batch).sum(dim=-1).reshape(-1)
+            port_r = (weights[:, -1, :] * r_batch[:, -1, :]).sum(dim=-1)
             epoch_returns.append(port_r.cpu())
 
     all_returns = torch.cat(epoch_returns)
@@ -453,7 +505,7 @@ def evaluate_sharpe(loader, model):
             x_batch = x_batch.to(DEVICE)
             r_batch = r_batch.to(DEVICE)
             weights = model(x_batch)
-            port_r = (weights * r_batch).sum(dim=-1).reshape(-1)
+            port_r = (weights[:, -1, :] * r_batch[:, -1, :]).sum(dim=-1)
             eval_returns.append(port_r.cpu())
     all_returns = torch.cat(eval_returns)
     return annualized_sharpe(all_returns)
@@ -465,6 +517,14 @@ val_sharpes = []
 best_val_sharpe = -np.inf
 best_state = None
 loaded_from_cache = False
+expected_cache_provenance = {
+    "source_py_blob": os.environ.get("ML4T_SOURCE_BLOB", ""),
+    "data_hash": stable_data_hash(prices),
+    "universe": list(UNIVERSE),
+    "split": [int(train_end), int(val_end)],
+    "seed": int(SEED),
+    "config": {"epochs": int(N_EPOCHS), "seq_len": int(SEQ_LEN), "hidden": int(HIDDEN_DIM)},
+}
 
 if USE_CACHED_MODEL_IF_AVAILABLE:
     for cache_path in iter_cache_candidates(MODEL_CACHE_PATH, CANONICAL_MODEL_CACHE_PATH):
@@ -472,6 +532,9 @@ if USE_CACHED_MODEL_IF_AVAILABLE:
             continue
         cache_payload = torch.load(cache_path, map_location="cpu")
         if isinstance(cache_payload, dict) and "best_state" in cache_payload:
+            if not cache_provenance_is_compatible(cache_payload):
+                print(f"Skipping cache at {cache_path}: provenance metadata missing")
+                continue
             candidate_state = cache_payload["best_state"]
             is_compatible, reason = state_dict_is_compatible(model, candidate_state)
             if not is_compatible:
@@ -510,6 +573,7 @@ if SAVE_TRAINED_MODEL_TO_CACHE and not loaded_from_cache and best_state is not N
         "train_sharpes": train_sharpes,
         "val_sharpes": val_sharpes,
         "best_val_sharpe": best_val_sharpe,
+        "provenance": expected_cache_provenance,
     }
     torch.save(cache_payload, MODEL_CACHE_PATH)
     print(f"Saved trained model cache to {MODEL_CACHE_PATH}")
@@ -528,8 +592,8 @@ print(f"\nBest validation Sharpe: {best_val_sharpe:.3f}")
 # %%
 fig, ax = plt.subplots(figsize=(10, 5))
 if train_sharpes and val_sharpes:
-    ax.plot(train_sharpes, label="Train", alpha=0.7)
-    ax.plot(val_sharpes, label="Validation", alpha=0.7)
+    ax.plot(train_sharpes, label="Train", color=COLORS["blue"], alpha=0.7)
+    ax.plot(val_sharpes, label="Validation", color=COLORS["amber"], alpha=0.7)
     ax.legend()
 else:
     ax.text(
@@ -540,10 +604,10 @@ else:
         va="center",
         transform=ax.transAxes,
     )
-ax.axhline(0, color="gray", linestyle="--", linewidth=0.5)
+ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
 ax.set_xlabel("Epoch")
 ax.set_ylabel("Sharpe Ratio")
-ax.set_title("Training Progress: Differentiable Sharpe Optimization")
+ax.set_title(f"Validation Sharpe peaks at {best_val_sharpe:.2f} across {len(val_sharpes)} epochs")
 fig.tight_layout()
 fig.show()
 
@@ -654,16 +718,16 @@ results
 
 # %%
 fig, ax = plt.subplots(figsize=(10, 5))
-for returns_arr, label in [
-    (lstm_returns, "LSTM Portfolio"),
-    (ew_returns, "Equal Weight"),
-    (iv_returns, "Inverse Volatility"),
+for returns_arr, label, color in [
+    (lstm_returns, "LSTM Portfolio", COLORS["blue"]),
+    (ew_returns, "Equal Weight", COLORS["amber"]),
+    (iv_returns, "Inverse Volatility", COLORS["positive"]),
 ]:
     cum = np.cumprod(1 + returns_arr)
-    ax.plot(cum, label=label)
+    ax.plot(cum, label=label, color=color)
 ax.set_xlabel("Test Window Index")
 ax.set_ylabel("Cumulative Return")
-ax.set_title("Out-of-Sample Equity Curves")
+ax.set_title("Simple allocators finish ahead of the held-out LSTM portfolio")
 ax.legend()
 fig.tight_layout()
 fig.show()
@@ -694,10 +758,15 @@ test_weights = np.concatenate(all_weights, axis=0)
 avg_weights = pd.Series(test_weights.mean(axis=0), index=UNIVERSE).sort_values(ascending=False)
 
 fig, ax = plt.subplots(figsize=(12, 5))
-avg_weights.plot(kind="bar", ax=ax)
+avg_weights.plot(kind="bar", ax=ax, color=COLORS["blue"])
 ax.set_ylabel("Average Weight")
-ax.set_title("LSTM Average Test-Period Allocation")
-ax.axhline(1.0 / N_ASSETS, color="red", linestyle="--", label=f"Equal weight ({1 / N_ASSETS:.1%})")
+ax.set_title(f"{avg_weights.index[0]} receives the largest mean LSTM allocation")
+ax.axhline(
+    1.0 / N_ASSETS,
+    color=COLORS["positive"],
+    linestyle="--",
+    label=f"Equal weight ({1 / N_ASSETS:.1%})",
+)
 ax.legend()
 fig.tight_layout()
 fig.show()
@@ -714,13 +783,16 @@ fig.show()
 hhi = (test_weights**2).sum(axis=1)
 
 fig, ax = plt.subplots(figsize=(10, 4))
-ax.plot(hhi, alpha=0.7)
+ax.plot(hhi, label="LSTM HHI", color=COLORS["blue"], alpha=0.7)
 ax.axhline(
-    1.0 / N_ASSETS, color="red", linestyle="--", label=f"Equal weight HHI ({1 / N_ASSETS:.4f})"
+    1.0 / N_ASSETS,
+    color=COLORS["neutral"],
+    linestyle="--",
+    label=f"Equal weight HHI ({1 / N_ASSETS:.4f})",
 )
 ax.set_xlabel("Test Window Index")
 ax.set_ylabel("Herfindahl Index")
-ax.set_title("Portfolio Concentration Over Time")
+ax.set_title(f"Mean LSTM concentration is {hhi.mean() / (1 / N_ASSETS):.1f}x equal weight")
 ax.legend()
 fig.tight_layout()
 fig.show()
@@ -741,9 +813,9 @@ fig.show()
 # %%
 # Mean per-rebalance Σ|Δw| across consecutive test-period weight vectors
 turnover = np.abs(np.diff(test_weights, axis=0)).sum(axis=1)
-avg_turnover = float(turnover.mean())
-print(f"Realized turnover (mean Σ|Δw| per rebalance): {avg_turnover:.4f}")
-print(f"Realized turnover (bps-equivalent, one-way): {avg_turnover * 10_000:.0f} bps")
+avg_turnover = float(one_way_turnover(np.diff(test_weights, axis=0)).mean())
+print(f"Realized one-way turnover (0.5 × mean Σ|Δw|): {avg_turnover:.4f}")
+print(f"Realized one-way turnover (bps-equivalent): {avg_turnover * 10_000:.1f} bps")
 
 # %% [markdown]
 # **Interpretation**: Turnover is the bridge from apparent model edge to live
@@ -756,13 +828,12 @@ print(f"Realized turnover (bps-equivalent, one-way): {avg_turnover * 10_000:.0f}
 #
 # 1. **End-to-end optimization is feasible but not free**: The LSTM directly maximizes
 #    Sharpe without intermediate predictions, yet it underperforms simple heuristics
-#    on this ETF universe — lower volatility and drawdown come at the cost of return.
+#    on this ETF universe - lower volatility and drawdown come at the cost of return.
 # 2. **Simplicity is the point**: The entire model is ~50 lines of PyTorch.
 #    The differentiable Sharpe loss is the innovation, not the architecture.
-# 3. **Realized turnover is ~325 bps-equivalent (one-way) per rebalance**: cost
+# 3. **Realized turnover is computed from half the absolute weight change**: cost
 #    stress lives in Ch18, but the LSTM trained without an explicit cost-aware
-#    loss tends to carry meaningfully higher turnover than equal-weight or
-#    inverse-vol.
+#    loss can produce substantial turnover; comparable baselines are not claimed here.
 # 4. **Interpretability tradeoff**: Unlike predict-then-optimize, you cannot
 #    separately diagnose signal failure vs allocation failure.
 #

@@ -47,15 +47,17 @@
 # %%
 """Canonical Backtrader and Zipline parity benchmark."""
 
+import hashlib
+import importlib.metadata
 import importlib.util
 import json
+import math
+import platform
 import subprocess
 import sys
-import warnings
 from pathlib import Path
 
-warnings.filterwarnings("ignore")
-
+# Keep engine warnings visible: they are part of the parity evidence.
 # %%
 import matplotlib.pyplot as plt
 import ml4t.backtest as ml4t_backtest_pkg
@@ -66,10 +68,33 @@ from utils.paths import get_chapter_dir, get_output_dir
 from utils.style import COLORS
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides after this cell
+# Production defaults - Papermill injects overrides after this cell
 RUN_LIVE = False
 SCENARIO_ID = "multi_250_20yr"
 REAL_DATA_PATH = ""
+
+HARNESS_SCENARIO_LABEL = "Multi-asset (250×20yr daily)"
+EXPECTED_IDENTITIES = {
+    "zipline": ("Zipline Reloaded", "zipline_strict", "ml4t-zipline-strict", "zipline"),
+    "backtrader": (
+        "Backtrader",
+        "backtrader_strict",
+        "ml4t-backtrader-strict",
+        "backtrader",
+    ),
+}
+CERTIFIED_COMMON_PROVENANCE = {
+    "harness_commit": "459abd81f2f30dc70cf38a40da7591af3da2d02a",
+    "harness_source_sha256": "4a4bd3815e1c1db50e0f5f476c72814e57e111c50d0e427734cf7f62c8e072c6",
+    "data_sha256": "bb82ee2eac24521544f78c418f86d9073ae4d54b56570eaf838c6e65c6621b90",
+    "ordered_universe_sha256": "49e54af392831a61b8c1a4c81b8caa44721aa29891b9219fb339d53cfd72298d",
+}
+CERTIFIED_RAW_REPORT_HASHES = {
+    "ml4t.backtest[zipline_strict]": "54183791cce15c995dd915f54ec65d95ea6f44dc148db3f960935e72e5969cd5",
+    "Zipline": "4e415cf52ffa4772ac9070e7dd49db6dd6b5295ec7de7cff6825d5f7c456a07e",
+    "ml4t.backtest[backtrader_strict]": "cc8e781e926fdd60c880c8ad15f6429bca9ddaf3c4f3b37c9a952d53c3e35f1c",
+    "Backtrader": "73a05e7996ae05a818e56a8b71b85c6bf2b7e56ae9f8c0fbccbab8fe61ad0940",
+}
 
 # %%
 OUTPUT_DIR = get_output_dir(16, "backtrader_zipline_engine_parity")
@@ -81,13 +106,18 @@ LIVE_ARTIFACT_PATH = OUTPUT_DIR / "backtrader_zipline_parity_live.json"
 #
 # These comparisons use the same source of truth as the LEAN notebook: the
 # library validation harness in `ml4t-backtest/validation/benchmark_suite.py`.
-# The benchmark is the canonical target-share daily ranking strategy on real
-# market data:
+# The benchmark is a fixed engine-only target-share fixture on real market
+# data. It compares execution semantics rather than estimating an investable
+# strategy return:
 #
-# - 250 US equities
+# - a deterministic retrospective cohort of 250 US equities
 # - 20 years of daily bars
 # - top-25 / bottom-25 cross-sectional ranking portfolio
 # - one external engine at a time against the matching `ml4t-backtest` profile
+#
+# The source parquet lacks the same market-wide session (2017-11-08) for every
+# selected asset. The harness fills that interior gap from the prior session;
+# its backward-fill step supplies zero values on this fixed cohort.
 
 
 # %%
@@ -119,11 +149,9 @@ def resolve_backtest_repo() -> Path | None:
 def find_real_data_path(explicit_path: str) -> Path | None:
     """Locate the real daily equity parquet used by the benchmark harness.
 
-    The benchmark reads the full US-equities survivorship-bias-free dataset
-    (the same `us_equities.parquet` that `data.equities.loader.load_us_equities`
-    serves) and slices the canonical 250-asset / 20-year window itself. We
-    resolve it at the canonical `ML4T_DATA_PATH` location rather than the
-    legacy Dropbox path the harness shipped with.
+    The benchmark reads the historical US-equities parquet and selects a fixed
+    retrospective cohort for an engine-only comparison. It does not claim a
+    point-in-time or survivorship-bias-free investment universe.
     """
     candidates: list[Path] = []
     if explicit_path:
@@ -168,12 +196,12 @@ def check_live_prerequisites() -> pl.DataFrame:
         {
             "requirement": "benchmark_suite.py",
             "ready": BENCHMARK_SUITE is not None and BENCHMARK_SUITE.exists(),
-            "detail": BENCHMARK_SUITE.as_posix() if BENCHMARK_SUITE else "not found",
+            "detail": "available" if BENCHMARK_SUITE else "not found",
         },
         {
             "requirement": "real daily parquet",
             "ready": REAL_DATA_FILE is not None,
-            "detail": REAL_DATA_FILE.as_posix() if REAL_DATA_FILE else "not found",
+            "detail": REAL_DATA_FILE.name if REAL_DATA_FILE else "not found",
         },
         {
             "requirement": "backtrader",
@@ -195,8 +223,9 @@ prereq_df
 # %% [markdown]
 # ## 3. Load the Cached Parity Snapshot
 #
-# The committed artifact below summarizes the latest canonical benchmark
-# numbers documented in the library validation methodology:
+# The committed artifact below records a cache-off benchmark run. Its
+# provenance binds the harness, data file, ordered cohort, raw reports, and
+# engine versions:
 #
 # - **Backtrader** now matches the canonical benchmark at trade count and final
 #   value to floating-point noise.
@@ -205,9 +234,118 @@ prereq_df
 
 
 # %%
+def require_finite(value: object, field: str, *, positive: bool = False) -> float:
+    """Return a validated finite numeric value."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{field} must be numeric")
+    number = float(value)
+    if not math.isfinite(number) or (positive and number <= 0):
+        raise ValueError(f"{field} is outside its valid range")
+    return number
+
+
+def sha256_file(path: Path) -> str:
+    """Return the SHA-256 digest of a file without loading it into memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+# %%
+def validate_pair_result(row: dict) -> None:
+    """Fail closed on identity, status, primitives, and derived arithmetic."""
+    engine_id = row.get("engine_id")
+    if engine_id not in EXPECTED_IDENTITIES:
+        raise ValueError("unexpected engine identity")
+    expected = EXPECTED_IDENTITIES[engine_id]
+    keys = ("engine_label", "profile", "ml4t_framework_id", "reference_framework_id")
+    if tuple(row.get(key) for key in keys) != expected or row.get("status") != "done":
+        raise ValueError("engine identity, profile, or status is invalid")
+    counts = [row.get("ml4t_num_trades"), row.get("reference_num_trades")]
+    if any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in counts):
+        raise TypeError("trade counts must be non-negative integers")
+    ml4t_value = require_finite(row.get("ml4t_final_value"), "ml4t_final_value", positive=True)
+    ref_value = require_finite(
+        row.get("reference_final_value"), "reference_final_value", positive=True
+    )
+    ml4t_time = require_finite(row.get("ml4t_runtime_sec"), "ml4t_runtime_sec", positive=True)
+    ref_time = require_finite(
+        row.get("reference_runtime_sec"), "reference_runtime_sec", positive=True
+    )
+    expected_metrics = {
+        "trade_gap": counts[0] - counts[1],
+        "trade_gap_pct": (counts[0] - counts[1]) / max(counts[1], 1),
+        "final_value_gap_abs": abs(ml4t_value - ref_value),
+        "final_value_gap_pct": abs(ml4t_value - ref_value) / max(abs(ref_value), 1.0),
+        "runtime_speedup": ref_time / ml4t_time,
+    }
+    for field, expected_value in expected_metrics.items():
+        actual_value = require_finite(row.get(field), field)
+        if not math.isclose(actual_value, expected_value, rel_tol=1e-12, abs_tol=1e-12):
+            raise ValueError(f"{field} is inconsistent with primitive values")
+
+
+# %%
+def validate_provenance(artifact: dict, *, certified_reports: bool) -> None:
+    """Validate the cache-off run and its exact data and report lineage."""
+    provenance = artifact.get("provenance", {})
+    if provenance.get("benchmark_cache_mode") != "off":
+        raise ValueError("benchmark artifact must come from a cache-off run")
+    for field, expected in CERTIFIED_COMMON_PROVENANCE.items():
+        if provenance.get(field) != expected:
+            raise ValueError(f"{field} does not match the certified fixture")
+    universe = provenance.get("ordered_universe")
+    if not isinstance(universe, list) or len(universe) != 250 or len(set(universe)) != 250:
+        raise ValueError("ordered 250-asset cohort is required")
+    encoded = json.dumps(universe, separators=(",", ":")).encode()
+    if hashlib.sha256(encoded).hexdigest() != provenance.get("ordered_universe_sha256"):
+        raise ValueError("ordered cohort hash does not match")
+    selection = provenance.get("selection_proof", {})
+    missing_sessions = selection.get("missing_market_sessions", [])
+    expected_forward = len(missing_sessions) * 250 * 5
+    if (
+        selection.get("observed_session_rows_per_asset") != 5039
+        or not missing_sessions
+        or selection.get("forward_filled_values") != expected_forward
+        or selection.get("backward_filled_values") != 0
+    ):
+        raise ValueError("cohort fill proof is incomplete or permits future filling")
+    raw = provenance.get("raw_reports", [])
+    if len(raw) != 4 or len({item.get("framework") for item in raw}) != 4:
+        raise ValueError("four unique raw benchmark reports are required")
+    if any(len(item.get("sha256", "")) != 64 for item in raw):
+        raise ValueError("raw benchmark report hashes are required")
+    if (
+        certified_reports
+        and {item["framework"]: item["sha256"] for item in raw} != CERTIFIED_RAW_REPORT_HASHES
+    ):
+        raise ValueError("raw reports do not match the certified fixture")
+    versions = provenance.get("versions", {})
+    required_versions = ("python", "ml4t-backtest", "zipline-reloaded", "backtrader")
+    if not all(isinstance(versions.get(k), str) and versions[k] for k in required_versions):
+        raise ValueError("engine and package versions are required")
+
+
+# %%
 def load_parity_artifact(path: Path) -> dict:
-    """Load a cached or live parity artifact."""
-    return json.loads(path.read_text(encoding="utf-8"))
+    """Load and validate the committed parity artifact."""
+    artifact = json.loads(path.read_text(encoding="utf-8"))
+    if artifact.get("scenario_id") != SCENARIO_ID:
+        raise ValueError("artifact scenario does not match requested scenario")
+    if artifact.get("scenario_label") != HARNESS_SCENARIO_LABEL:
+        raise ValueError("artifact scenario label is not canonical")
+    if artifact.get("data_source") != "real" or artifact.get("cached") is not True:
+        raise ValueError("committed artifact identity is incomplete")
+    results = artifact.get("results", [])
+    expected_engines = set(EXPECTED_IDENTITIES)
+    if len(results) != 2 or {row.get("engine_id") for row in results} != expected_engines:
+        raise ValueError("artifact must contain exactly one row per engine pair")
+    validate_provenance(artifact, certified_reports=True)
+    for row in results:
+        validate_pair_result(row)
+    return artifact
 
 
 payload = load_parity_artifact(CACHED_ARTIFACT_PATH)
@@ -246,10 +384,11 @@ ENGINE_PAIRS = [
 ]
 
 
+# %%
 def run_framework_benchmark(
     framework: str, scenario_id: str, output_path: Path, real_data_path: Path
-) -> dict:
-    """Run one benchmark-suite framework and return its single result row."""
+) -> tuple[dict, dict]:
+    """Run one framework and return its result plus report lineage."""
     cmd = [
         sys.executable,
         str(BENCHMARK_SUITE),
@@ -261,12 +400,20 @@ def run_framework_benchmark(
         "real",
         "--real-data-path",
         str(real_data_path),
+        "--cache-mode",
+        "off",
         "--output-json",
         str(output_path),
     ]
     subprocess.run(cmd, check=True, cwd=str(BACKTEST_REPO))
     report = json.loads(output_path.read_text(encoding="utf-8"))
-    return report["results"][0]
+    lineage = {
+        "file": output_path.name,
+        "framework": report["results"][0]["framework"],
+        "timestamp": report["meta"]["timestamp"],
+        "sha256": sha256_file(output_path),
+    }
+    return report["results"][0], lineage
 
 
 # %% [markdown]
@@ -276,64 +423,109 @@ def run_framework_benchmark(
 
 
 # %%
-def build_live_payload(rows: list[dict], scenario_id: str) -> dict:
+def validate_raw_result(result: dict, framework: str) -> None:
+    """Validate one row returned by the benchmark harness."""
+    if result.get("framework", "").lower() != framework.lower():
+        raise ValueError("benchmark framework identity mismatch")
+    if result.get("scenario") != HARNESS_SCENARIO_LABEL or result.get("error") is not None:
+        raise ValueError("benchmark scenario or completion status mismatch")
+    count = result.get("num_trades")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise TypeError("num_trades must be a non-negative integer")
+    require_finite(result.get("final_value"), "final_value", positive=True)
+    require_finite(result.get("runtime_sec"), "runtime_sec", positive=True)
+
+
+# %%
+def build_pair_result(pair: dict, ml4t_result: dict, ref_result: dict) -> dict:
+    validate_raw_result(ml4t_result, f"ml4t.backtest[{pair['profile']}]")
+    validate_raw_result(ref_result, pair["reference_framework"])
+    reference_trades = max(ref_result["num_trades"], 1)
+    reference_value = max(abs(float(ref_result["final_value"])), 1.0)
+    trade_gap = ml4t_result["num_trades"] - ref_result["num_trades"]
+    value_gap = abs(ml4t_result["final_value"] - ref_result["final_value"])
+    return {
+        "engine_id": pair["engine_id"],
+        "engine_label": pair["engine_label"],
+        "profile": pair["profile"],
+        "status": pair["status_label"],
+        "ml4t_framework_id": pair["ml4t_framework"],
+        "reference_framework_id": pair["reference_framework"],
+        "ml4t_num_trades": ml4t_result["num_trades"],
+        "reference_num_trades": ref_result["num_trades"],
+        "trade_gap": trade_gap,
+        "trade_gap_pct": float(trade_gap / reference_trades),
+        "ml4t_final_value": float(ml4t_result["final_value"]),
+        "reference_final_value": float(ref_result["final_value"]),
+        "final_value_gap_abs": float(value_gap),
+        "final_value_gap_pct": float(value_gap / reference_value),
+        "ml4t_runtime_sec": float(ml4t_result["runtime_sec"]),
+        "reference_runtime_sec": float(ref_result["runtime_sec"]),
+        "runtime_speedup": float(ref_result["runtime_sec"] / ml4t_result["runtime_sec"]),
+    }
+
+
+# %% [markdown]
+# Assemble validated engine-pair rows into the live comparison payload.
+
+
+# %%
+def build_live_payload(rows: list[dict], reports: list[dict], scenario_id: str) -> dict:
     """Build the notebook payload from live benchmark rows."""
+    expected_frameworks = {
+        "ml4t.backtest[zipline_strict]",
+        "Zipline",
+        "ml4t.backtest[backtrader_strict]",
+        "Backtrader",
+    }
+    if len(rows) != 4 or {row.get("framework") for row in rows} != expected_frameworks:
+        raise ValueError("live rerun must return exactly four unique frameworks")
+    if any(row.get("scenario") != HARNESS_SCENARIO_LABEL for row in rows):
+        raise ValueError("live rows must all match the requested scenario")
+    if BACKTEST_REPO is None or BENCHMARK_SUITE is None or REAL_DATA_FILE is None:
+        raise RuntimeError("live benchmark provenance inputs are unavailable")
+    harness_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], text=True, cwd=BACKTEST_REPO
+    ).strip()
+    common = {
+        "harness_commit": harness_commit,
+        "harness_source_sha256": sha256_file(BENCHMARK_SUITE),
+        "data_sha256": sha256_file(REAL_DATA_FILE),
+        "ordered_universe_sha256": payload["provenance"]["ordered_universe_sha256"],
+    }
+    if common != CERTIFIED_COMMON_PROVENANCE:
+        raise ValueError("live rerun inputs do not match the certified fixture")
     results = []
     for pair in ENGINE_PAIRS:
         ml4t_result = next(
             row for row in rows if row["framework"] == f"ml4t.backtest[{pair['profile']}]"
         )
-        # The benchmark suite labels the reference engines "Backtrader" / "Zipline"
-        # (not the display label "Zipline Reloaded"), so match on the framework id.
         ref_result = next(
-            row for row in rows if row["framework"].lower() == pair["reference_framework"].lower()
+            row for row in rows if row["framework"].lower() == pair["reference_framework"]
         )
-        reference_trades = max(int(ref_result["num_trades"]), 1)
-        reference_value = max(abs(float(ref_result["final_value"])), 1.0)
-        runtime_speedup = (
-            float(ref_result["runtime_sec"]) / float(ml4t_result["runtime_sec"])
-            if ml4t_result["runtime_sec"] > 0
-            else None
-        )
-        results.append(
-            {
-                "engine_id": pair["engine_id"],
-                "engine_label": pair["engine_label"],
-                "profile": pair["profile"],
-                "status": pair["status_label"],
-                "ml4t_framework_id": pair["ml4t_framework"],
-                "reference_framework_id": pair["reference_framework"],
-                "ml4t_num_trades": int(ml4t_result["num_trades"]),
-                "reference_num_trades": int(ref_result["num_trades"]),
-                "trade_gap": int(ml4t_result["num_trades"] - ref_result["num_trades"]),
-                "trade_gap_pct": float(
-                    (ml4t_result["num_trades"] - ref_result["num_trades"]) / reference_trades
-                ),
-                "ml4t_final_value": float(ml4t_result["final_value"]),
-                "reference_final_value": float(ref_result["final_value"]),
-                "final_value_gap_abs": float(
-                    abs(ml4t_result["final_value"] - ref_result["final_value"])
-                ),
-                "final_value_gap_pct": float(
-                    abs(ml4t_result["final_value"] - ref_result["final_value"]) / reference_value
-                ),
-                "ml4t_runtime_sec": float(ml4t_result["runtime_sec"]),
-                "reference_runtime_sec": float(ref_result["runtime_sec"]),
-                "runtime_speedup": runtime_speedup,
-            }
-        )
-
+        results.append(build_pair_result(pair, ml4t_result, ref_result))
     return {
         "artifact_source": "live benchmark_suite.py rerun",
         "scenario_id": scenario_id,
-        "scenario_label": rows[0]["scenario"] if rows else scenario_id,
+        "scenario_label": HARNESS_SCENARIO_LABEL,
         "data_source": "real",
         "cached": False,
         "limitations": [
-            "These results cover the canonical target-share benchmark, not the case-study weight adapters.",
-            "Backtrader now matches the canonical benchmark to floating-point noise on the cached report surface.",
-            "Zipline keeps exact trade-count parity and a small terminal-value residual on the current benchmark surface.",
+            "This fixed retrospective cohort is an engine fixture, not an investable universe.",
+            "The results cover target-share execution, not case-study weight adapters.",
+            "Runtime ratios are environment-specific diagnostics, not portable performance guarantees.",
         ],
+        "provenance": {
+            **payload["provenance"],
+            **common,
+            "raw_reports": reports,
+            "versions": {
+                "python": platform.python_version(),
+                "ml4t-backtest": importlib.metadata.version("ml4t-backtest"),
+                "zipline-reloaded": importlib.metadata.version("zipline-reloaded"),
+                "backtrader": importlib.metadata.version("backtrader"),
+            },
+        },
         "results": results,
     }
 
@@ -342,13 +534,17 @@ def build_live_payload(rows: list[dict], scenario_id: str) -> dict:
 ready_for_live = bool(prereq_df["ready"].all())
 if RUN_LIVE and ready_for_live and REAL_DATA_FILE is not None:
     live_rows = []
+    live_reports = []
     for pair in ENGINE_PAIRS:
         for framework in (pair["ml4t_framework"], pair["reference_framework"]):
             result_path = OUTPUT_DIR / f"{framework}_{SCENARIO_ID}.json"
-            live_rows.append(
-                run_framework_benchmark(framework, SCENARIO_ID, result_path, REAL_DATA_FILE)
+            row, report = run_framework_benchmark(
+                framework, SCENARIO_ID, result_path, REAL_DATA_FILE
             )
-    payload = build_live_payload(live_rows, SCENARIO_ID)
+            live_rows.append(row)
+            live_reports.append(report)
+    payload = build_live_payload(live_rows, live_reports, SCENARIO_ID)
+    validate_provenance(payload, certified_reports=False)
     LIVE_ARTIFACT_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"Saved live artifact: {LIVE_ARTIFACT_PATH}")
 elif RUN_LIVE and not ready_for_live:
@@ -419,49 +615,23 @@ trade_gap_bps = [row["trade_gap_pct"] * 10_000 for row in payload["results"]]
 value_gap_bps = [row["final_value_gap_pct"] * 10_000 for row in payload["results"]]
 speedup = [row["runtime_speedup"] for row in payload["results"]]
 
-fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+fig, axes = plt.subplots(1, 3, figsize=(14, 4), layout="constrained")
+panels = [
+    (trade_gap_bps, "Both engines match trade counts", "Trade gap (bps)"),
+    (value_gap_bps, "Terminal values agree within 0.16 bps", "Value gap (bps)"),
+    (speedup, "ml4t completes the fixture about 7x faster", "Runtime ratio (external / ml4t)"),
+]
+for ax, (values, title, ylabel) in zip(axes, panels, strict=True):
+    ax.bar(engine_labels, values, color=[COLORS["amber"], COLORS["blue"]])
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.tick_params(axis="x", rotation=20)
+    ax.axhline(0.0, color=COLORS["neutral"], linewidth=1.0)
+    if all(abs(value) < 1e-6 for value in values):
+        ax.text(0.5, 0.5, "Gap ≈ 0 bps", transform=ax.transAxes, ha="center", va="center")
 
-axes[0].bar(engine_labels, trade_gap_bps, color=[COLORS["amber"], COLORS["blue"]])
-axes[0].set_title("Trade Gap (bps)")
-axes[0].tick_params(axis="x", rotation=20)
-axes[0].axhline(0.0, color=COLORS["neutral"], linewidth=1.0)
-if all(abs(v) < 1e-6 for v in trade_gap_bps):
-    axes[0].text(
-        0.5,
-        0.5,
-        "Gap ≈ 0 bps",
-        transform=axes[0].transAxes,
-        ha="center",
-        va="center",
-        fontsize=11,
-        color=COLORS["slate"],
-        alpha=0.85,
-    )
-
-axes[1].bar(engine_labels, value_gap_bps, color=[COLORS["amber"], COLORS["blue"]])
-axes[1].set_title("Value Gap (bps)")
-axes[1].tick_params(axis="x", rotation=20)
-if all(abs(v) < 1e-6 for v in value_gap_bps):
-    axes[1].text(
-        0.5,
-        0.5,
-        "Gap ≈ 0 bps",
-        transform=axes[1].transAxes,
-        ha="center",
-        va="center",
-        fontsize=11,
-        color=COLORS["slate"],
-        alpha=0.85,
-    )
-
-axes[2].bar(engine_labels, speedup, color=[COLORS["amber"], COLORS["blue"]])
-axes[2].set_title("ml4t Speedup (×)")
-axes[2].set_ylabel("relative wall-clock (engine / ml4t)")
-axes[2].tick_params(axis="x", rotation=20)
-
-fig.suptitle("Canonical Benchmark Parity: Backtrader and Zipline", y=1.02)
-fig.tight_layout()
-fig.show()
+fig.suptitle("A fixed real-data fixture isolates engine parity", y=1.04)
+plt.show()
 
 # %% [markdown]
 # ## 7. Interpret the Results
@@ -490,8 +660,9 @@ interpretation_df
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **The canonical benchmark is the right reader-facing trust anchor.** It is
-#    the same large-scale target-share harness used by the library validation suite.
+# 1. **A fixed real-data fixture is a useful execution trust anchor.** It uses
+#    the same large-scale target-share harness as the library validation suite,
+#    but its retrospective cohort is not an investment-performance claim.
 #
 # 2. **Zipline reaches exact trade-count parity on that benchmark.** The
 #    residual dollar gap is small relative to the benchmark scale.

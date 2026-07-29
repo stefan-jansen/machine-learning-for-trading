@@ -14,41 +14,38 @@
 # ---
 
 # %% [markdown]
-# # Market Impact Calibration and Capacity Estimation
+# # Market Impact Scenarios and Capacity Analysis
 #
 # **Docker image**: `ml4t`
 #
-# This notebook calibrates market impact models using real market data,
-# estimates Kyle's lambda from NASDAQ-100 trade classification data,
-# maps intraday volume profiles, and estimates strategy capacity limits
-# for each asset class.
+# This notebook combines literature impact parameters with observed volatility, estimates a
+# normalized signed-flow association from NASDAQ-100 minute bars, maps intraday volume, and builds
+# capacity scenarios only where the data support dollar notional.
 #
 # **Learning Objectives:**
-# - Calibrate the square-root impact model $\text{Impact} = \sigma \cdot \eta \cdot \sqrt{Q/V}$
-# - Estimate Kyle's lambda ($\Delta P = \lambda Q$) from trade direction data
-# - Construct empirical intraday volume profiles (U-curve)
-# - Estimate strategy capacity (max AUM) per asset class
-# - Compare NoImpact, Linear, and SquareRoot impact models
+# - Parameterize $I = \sigma\eta\sqrt{Q/V}$ without mistaking assumptions for calibration
+# - Estimate a robust same-minute association from tick-rule signed flow
+# - Normalize cross-symbol impact and report slope uncertainty
+# - Distinguish shares, contracts, base volume, tick activity, and dollar notional
+# - Build bounded capacity scenarios and compare normalized impact-model shapes
 #
-# **Book Reference:** Chapter 18, Section 18.4 (Market Impact Models)
+# **Book Reference:** Chapter 18, Sections 18.3, 18.4, and 18.8
 #
-# **Prerequisites:** Access to all seven OHLCV datasets; NASDAQ-100 minute
-# bars with microstructure columns for trade classification.
+# **Prerequisites:** Access to six market panels, VIX, and licensed NASDAQ-100 minute bars with
+# tick-direction volume fields.
 
 # %%
-"""Market Impact Calibration & Capacity — sqrt-law, Kyle's lambda, and capacity frontiers."""
-
-import warnings
-
-warnings.filterwarnings("ignore")
+"""Unit-aware market-impact scenarios and capacity analysis."""
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+import yaml
 from _cost_analysis import (
     compute_adv,
     estimate_kyle_lambda,
 )
+from IPython.display import Markdown, display
 
 from data import (
     load_cme_futures,
@@ -59,153 +56,198 @@ from data import (
     load_nasdaq100_bars,
     load_sp500_daily_bars,
 )
+from utils.paths import REPO_ROOT
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 # %% tags=["parameters"]
-MAX_SYMBOLS = 50  # Symbols per dataset for cross-asset comparison (50 is plenty)
+MAX_SYMBOLS = 50
 SEED = 42
-NQ100_SYMBOLS = (
-    100  # Up to 100 (subject to data availability); needed for stable Kyle's-lambda slope
-)
-NQ100_START_DATE = "2021-10-01"  # Production microstructure window
+NQ100_SYMBOLS = 100
+NQ100_START_DATE = "2021-10-01"
 NQ100_END_DATE = "2021-12-31"
-VOL_WINDOW = 20  # Volatility estimation window
-ADV_WINDOW = 20  # ADV estimation window
+VOL_WINDOW = 20
+ADV_WINDOW = 20
+GROSS_ALPHA_BPS = 50
+TURNOVER_PER_REBALANCE = 0.30
+MAX_FEASIBLE_PARTICIPATION = 0.20
+MODEL_REFERENCE_PARTICIPATION = 0.01
 
 # %%
 set_global_seeds(SEED)
 
+
+def add_message_title(ax, message: str, subtitle: str | None = None) -> None:
+    """Apply the project message-title style with an available font weight."""
+    ax.set_title(
+        message,
+        loc="left",
+        color=COLORS["blue"],
+        fontweight="bold",
+        pad=15 if subtitle else 8,
+    )
+    if subtitle:
+        ax.annotate(
+            subtitle,
+            xy=(0, 1),
+            xycoords="axes fraction",
+            xytext=(0, 4),
+            textcoords="offset points",
+            ha="left",
+            va="bottom",
+            fontsize=9,
+            color=COLORS["neutral"],
+        )
+
+
 # %% [markdown]
-# ## 1. ADV Distributions
+# ## 1. Descriptive Market Panels
 #
-# We start by loading all seven datasets and computing daily volume
-# statistics. Average daily volume determines the denominator in all
-# impact models.
+# The panels below use native volume units. Full-window activity rankings keep the exercise
+# tractable; they are retrospective sample definitions, not point-in-time universes.
 
 
 # %%
-def keep_top_symbols(df: pl.DataFrame, symbol_col: str) -> pl.DataFrame:
-    """Optionally restrict a dataset to the most liquid symbols."""
+def keep_top_symbols(df: pl.DataFrame, entity_col: str) -> pl.DataFrame:
+    """Restrict a descriptive panel to its most active entities."""
     if MAX_SYMBOLS <= 0:
         return df
-    top = df.group_by(symbol_col).agg(pl.col("volume").mean()).sort("volume", descending=True)
-    return df.filter(pl.col(symbol_col).is_in(top.head(MAX_SYMBOLS)[symbol_col]))
+    top = df.group_by(entity_col).agg(pl.col("volume").mean()).sort("volume", descending=True)
+    top_entities = top.head(MAX_SYMBOLS)[entity_col].to_list()
+    return df.filter(pl.col(entity_col).is_in(top_entities))
 
 
 # %% [markdown]
-# ### Rolling Impact-Feature Helper
+# ### Rolling Descriptive Features
 #
-# **Interpretation**: This preprocessing cell defines the shared impact inputs for every
-# market: returns, ADV, and realized volatility. Standardizing those features first is what
-# makes the later cross-asset calibration economically comparable.
+# Rolling volatility and native-unit ADV include the current observation. They summarize the
+# historical sample; a live same-day decision would lag both features.
 
 
 # %%
-def add_impact_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Add returns, rolling ADV, and rolling volatility by symbol."""
-    return df.sort(["symbol", "timestamp"]).with_columns(
-        ret=pl.col("close").pct_change().over("symbol"),
-        adv=compute_adv(pl.col("volume"), ADV_WINDOW).over("symbol"),
-        sigma=pl.col("close").pct_change().over("symbol").rolling_std(VOL_WINDOW).over("symbol"),
+def add_impact_features(
+    df: pl.DataFrame,
+    entity_col: str,
+    time_col: str = "timestamp",
+) -> pl.DataFrame:
+    """Add returns, native-unit ADV, and volatility within each entity."""
+    return df.sort([entity_col, time_col]).with_columns(
+        ret=pl.col("close").pct_change().over(entity_col),
+        adv_native=compute_adv(pl.col("volume"), ADV_WINDOW).over(entity_col),
+        sigma=pl.col("close")
+        .pct_change()
+        .over(entity_col)
+        .rolling_std(VOL_WINDOW)
+        .over(entity_col),
     )
 
 
 # %% [markdown]
-# ### Build Daily Impact Panels for ETFs Through Futures
+# ### ETF and Crypto Panels
+#
+# ETF adjusted prices and observed share volume cannot reconstruct historical dollar turnover.
+# Crypto quote turnover is valid only when price times base volume is summed bar by bar.
 
 # %%
-# Every panel carries two price columns. `close` drives the return- and
-# volatility-based impact features. `traded_close` is the contemporaneous level a
-# trade would actually print at, and is what dollar notional (capacity, §6) must
-# use. They coincide for every dataset except CME futures, whose `close` is the
-# roll-adjusted series.
 daily_stats = {}
+entity_cols = {}
+time_cols = {}
+volume_units = {}
 
-# ETFs
 etfs = keep_top_symbols(load_etfs(), "symbol")
-etf_daily = add_impact_features(etfs.with_columns(date=pl.col("timestamp").dt.date()))
-daily_stats["ETFs"] = etf_daily.select(
-    "symbol",
-    "timestamp",
-    "close",
-    pl.col("close").alias("traded_close"),
-    "volume",
-    "ret",
-    "adv",
-    "sigma",
-)
+daily_stats["ETFs"] = add_impact_features(etfs, "symbol")
+entity_cols["ETFs"], time_cols["ETFs"] = "symbol", "timestamp"
+volume_units["ETFs"] = "shares with adjusted price; no historical USD notional"
 
-# Crypto Perps (8h → aggregate to daily for impact calibration)
 crypto = keep_top_symbols(load_crypto_perps(frequency="8h"), "symbol")
-
 crypto_daily = (
-    crypto.with_columns(date=pl.col("timestamp").dt.date())
-    .group_by(["symbol", "date"])
+    crypto.sort(["symbol", "timestamp"])
+    .with_columns(
+        activity_date=pl.col("timestamp").dt.date(),
+        bar_turnover_usd=pl.col("close") * pl.col("volume"),
+    )
+    .group_by(["symbol", "activity_date"])
     .agg(
         close=pl.col("close").last(),
         volume=pl.col("volume").sum(),
+        daily_turnover_usd=pl.col("bar_turnover_usd").sum(),
     )
-    .rename({"date": "timestamp"})
+    .rename({"activity_date": "timestamp"})
 )
-crypto_daily = add_impact_features(crypto_daily)
-daily_stats["Crypto Perps"] = crypto_daily.with_columns(traded_close=pl.col("close"))
-
-# CME Futures (front month). Impact features are return/volatility based, so use
-# the roll-adjusted series (adj_close → close). Dollar notional must instead use
-# the traded level: back-adjustment rescales historical prices (NG's adjusted 2011
-# close is ~47x what it traded at), which would inflate ADV in dollars.
-futures = keep_top_symbols(load_cme_futures(tenors=[0]), "product")
-daily_stats["CME Futures"] = add_impact_features(
-    futures.rename({"product": "symbol", "session_date": "timestamp"}).select(
-        "symbol",
-        "timestamp",
-        pl.col("adj_close").alias("close"),
-        pl.col("raw_close").alias("traded_close"),
-        "volume",
-    )
-)
+daily_stats["Crypto Perps"] = add_impact_features(crypto_daily, "symbol")
+entity_cols["Crypto Perps"], time_cols["Crypto Perps"] = "symbol", "timestamp"
+volume_units["Crypto Perps"] = "base asset; bar-level conversion to USDT turnover"
 
 # %% [markdown]
-# ### Add FX, Broad Equities, and NASDAQ-100 Daily Panels
+# ### CME Futures Panel
+#
+# Futures volume counts contracts. Dollar turnover requires the product multiplier, derived from
+# tick value divided by tick size. Returns use roll-adjusted prices; notional uses raw traded prices.
 
 # %%
-# FX Pairs (daily)
-fx = load_fx_pairs(frequency="daily")
-if "timestamp" in fx.columns and "date" not in fx.columns:
-    fx = fx.with_columns(date=pl.col("timestamp").dt.date())
-if MAX_SYMBOLS > 0:
-    fx = fx.filter(pl.col("symbol").is_in(fx["symbol"].unique().sort().head(MAX_SYMBOLS)))
-
-fx_daily = add_impact_features(fx).select(
-    "symbol",
-    "timestamp",
-    "close",
-    pl.col("close").alias("traded_close"),
-    "volume",
-    "ret",
-    "adv",
-    "sigma",
+spec_path = REPO_ROOT / "data" / "futures" / "market" / "futures_specs.yaml"
+product_specs = yaml.safe_load(spec_path.read_text())["products"]
+multiplier_df = pl.DataFrame(
+    [
+        {
+            "product": product,
+            "price_multiplier": float(spec["tick_value"]) / float(spec["tick_size"]),
+        }
+        for product, spec in product_specs.items()
+    ]
 )
-daily_stats["FX Pairs"] = fx_daily
 
-# S&P 500 Daily (representative US equities — smaller than load_us_equities)
-sp500 = load_sp500_daily_bars()
-if "timestamp" in sp500.columns and "date" not in sp500.columns:
-    sp500 = sp500.with_columns(date=pl.col("timestamp").dt.date())
-sp500 = keep_top_symbols(sp500, "symbol")
-
-sp_daily = add_impact_features(sp500).select(
-    "symbol",
-    "timestamp",
-    "close",
-    pl.col("close").alias("traded_close"),
-    "volume",
-    "ret",
-    "adv",
-    "sigma",
+futures = load_cme_futures(tenors=[0]).rename({"session_date": "timestamp"})
+futures = keep_top_symbols(futures, "product").join(
+    multiplier_df,
+    on="product",
+    how="left",
 )
-daily_stats["S&P 500 Equities"] = sp_daily
+missing_multipliers = futures.filter(pl.col("price_multiplier").is_null())["product"].unique()
+if len(missing_multipliers) > 0:
+    raise ValueError(f"Missing CME multipliers for: {sorted(missing_multipliers.to_list())}")
 
+# %%
+cme_daily = futures.select(
+    "product",
+    "timestamp",
+    pl.col("adj_close").alias("close"),
+    "raw_close",
+    "volume",
+    "price_multiplier",
+).with_columns(
+    daily_turnover_usd=pl.col("volume") * pl.col("raw_close") * pl.col("price_multiplier")
+)
+daily_stats["CME Futures"] = add_impact_features(cme_daily, "product")
+entity_cols["CME Futures"], time_cols["CME Futures"] = "product", "timestamp"
+volume_units["CME Futures"] = "contracts; multiplier-adjusted USD notional"
+
+# %% [markdown]
+# ### FX and S&P 500 Panels
+#
+# OANDA volume is tick activity, so FX remains outside dollar-capacity comparisons. S&P 500 bars
+# pair traded prices with share volume and support row-level dollar turnover.
+
+# %%
+fx = keep_top_symbols(load_fx_pairs(frequency="daily"), "symbol")
+daily_stats["FX Pairs"] = add_impact_features(fx, "symbol")
+entity_cols["FX Pairs"], time_cols["FX Pairs"] = "symbol", "timestamp"
+volume_units["FX Pairs"] = "OANDA ticks; no traded notional"
+
+sp500 = keep_top_symbols(load_sp500_daily_bars(), "symbol").with_columns(
+    daily_turnover_usd=pl.col("close") * pl.col("volume")
+)
+daily_stats["S&P 500 Equities"] = add_impact_features(sp500, "symbol")
+entity_cols["S&P 500 Equities"], time_cols["S&P 500 Equities"] = "symbol", "timestamp"
+volume_units["S&P 500 Equities"] = "shares; traded-price USD notional"
+
+# %% [markdown]
+# ### NASDAQ-100 Daily Panel
+#
+# The loader's default path keeps regular-session bars. Sorting before `last()` makes the daily
+# close explicit rather than relying on input order.
+
+# %%
 nq_daily = (
     load_nasdaq100_bars(
         start_date=NQ100_START_DATE,
@@ -213,380 +255,468 @@ nq_daily = (
         lazy=True,
     )
     .select("timestamp", "symbol", "close", "volume")
-    .with_columns(date=pl.col("timestamp").dt.date())
-    .group_by(["symbol", "date"])
+    .sort(["symbol", "timestamp"])
+    .with_columns(activity_date=pl.col("timestamp").dt.date())
+    .group_by(["symbol", "activity_date"])
     .agg(close=pl.col("close").last(), volume=pl.col("volume").sum())
-    .rename({"date": "timestamp"})
+    .rename({"activity_date": "timestamp"})
     .collect()
     .sort(["symbol", "timestamp"])
 )
-if MAX_SYMBOLS > 0:
-    nq_daily = keep_top_symbols(nq_daily, "symbol")
-
-nq_daily = add_impact_features(nq_daily)
-daily_stats["NASDAQ-100"] = nq_daily.with_columns(traded_close=pl.col("close"))
-
-print("Datasets loaded for impact calibration:")
-for name, df in daily_stats.items():
-    print(f"  {name}: {len(df):>10,} rows, {df['symbol'].n_unique():>5} symbols")
+nq_daily = keep_top_symbols(nq_daily, "symbol").with_columns(
+    daily_turnover_usd=pl.col("close") * pl.col("volume")
+)
+daily_stats["NASDAQ-100"] = add_impact_features(nq_daily, "symbol")
+entity_cols["NASDAQ-100"], time_cols["NASDAQ-100"] = "symbol", "timestamp"
+volume_units["NASDAQ-100"] = "shares; traded-price USD notional"
 
 # %% [markdown]
-# **Finding**: The panel sizes tell us how reliable each calibration will be.
-# Asset classes with fewer symbols or shorter histories can still illustrate the
-# economics, but they should not be treated as equally precise.
-
-# %% [markdown]
-# ## 2. Square-Root Impact Model
+# ### Panel Contract
 #
-# The square-root law is the standard model for institutional market impact:
+# Different histories and native units prevent a market-wide ranking. This table makes the sample
+# scope explicit before any scenario is plotted.
+
+# %%
+panel_summary = pl.DataFrame(
+    [
+        {
+            "market": name,
+            "rows": len(df),
+            "entities": df[entity_cols[name]].n_unique(),
+            "start": df[time_cols[name]].min(),
+            "end": df[time_cols[name]].max(),
+            "volume_contract": volume_units[name],
+            "supports_usd_capacity": "daily_turnover_usd" in df.columns,
+        }
+        for name, df in daily_stats.items()
+    ]
+)
+panel_summary
+
+# %% [markdown]
+# **Interpretation**: These are selected retrospective panels, not equally precise samples. Only
+# crypto, multiplier-adjusted CME futures, and the two US equity panels carry defensible dollar
+# turnover for the capacity exercise.
+
+# %% [markdown]
+# ## 2. Square-Root Impact Scenarios
+#
+# A common institutional baseline maps participation into expected price pressure:
 #
 # $$\text{Impact} = \sigma \cdot \eta \cdot \sqrt{\frac{Q}{V}}$$
 #
 # where $\sigma$ is daily volatility, $Q$ is trade size, $V$ is ADV, and
 # $\eta$ is the impact coefficient.
 #
-# Calibrating $\eta$ requires proprietary institutional execution data
-# (Frazzini, Israel, and Moskowitz 2018). Literature estimates range from
-# $\eta \approx 0.1$ (liquid large-caps) to $\eta \approx 0.5$ (less liquid
-# markets). We use representative values by asset class and compute
-# realized volatility from our data.
+# Calibrating $\eta$ requires execution records. We do not have those records here. The exercise
+# therefore combines literature starting values with each selected panel's median realized
+# volatility. It parameterizes a scenario; it does not test the square-root exponent or estimate
+# eta from these market data.
 
 # %%
-# Literature-based η values (Frazzini et al. 2018, Almgren et al. 2005)
+# Literature starting values for scenario analysis
 LITERATURE_ETA = {
-    "ETFs": 0.10,  # Very liquid, tight spreads
-    "S&P 500 Equities": 0.15,  # Large-cap, liquid
-    "NASDAQ-100": 0.12,  # Large-cap tech
-    "CME Futures": 0.08,  # Deep order books
-    "Crypto Perps": 0.30,  # Thinner liquidity, 24/7
-    "FX Pairs": 0.05,  # Deepest market
+    "ETFs": 0.10,
+    "S&P 500 Equities": 0.15,
+    "NASDAQ-100": 0.12,
+    "CME Futures": 0.08,
+    "Crypto Perps": 0.30,
+    "FX Pairs": 0.05,
 }
 
-eta_results = {}
+scenario_rows = []
 for name, df in daily_stats.items():
     valid = df.filter(pl.col("sigma").is_not_null() & (pl.col("sigma") > 0))
     med_sigma = valid["sigma"].median()
     if med_sigma is None:
-        print(f"{name:>20}: no valid volatility observations in current sample")
         continue
-    eta = LITERATURE_ETA.get(name, 0.15)
-    eta_results[name] = {
-        "eta": eta,
-        "med_sigma": med_sigma,
-        "n_obs": len(valid),
-        "asset_class": name,
-    }
-    print(f"{name:>20}: η = {eta:.2f} (literature), σ_med = {med_sigma:.4f}")
+    eta = LITERATURE_ETA[name]
+    scenario_rows.append(
+        {
+            "market": name,
+            "eta_assumption": eta,
+            "median_daily_sigma": med_sigma,
+            "impact_1pct_bps": med_sigma * eta * np.sqrt(0.01) * 10_000,
+            "observations": len(valid),
+        }
+    )
+
+scenario_df = pl.DataFrame(scenario_rows).sort("impact_1pct_bps")
+scenario_df
 
 # %% [markdown]
-# **Finding**: This calibration step combines literature priors for `η` with
-# realized volatility from the current sample. That keeps the notebook grounded
-# in real data without pretending we have proprietary execution logs.
+# **Interpretation**: `eta_assumption` is external to the sample. Differences in the table reflect
+# both that assumption and each selected panel's realized volatility, not empirical proof that one
+# market has a particular impact law.
 
 # %% [markdown]
-# ### Calibrated Impact Curves
+# ### Scenario Curves
 
 # %%
-# Plot impact curves for all asset classes
 participation_rates = np.linspace(0.001, 0.10, 100)
+market_colors = {
+    "ETFs": COLORS["blue"],
+    "Crypto Perps": COLORS["amber"],
+    "CME Futures": COLORS["copper"],
+    "FX Pairs": COLORS["slate"],
+    "S&P 500 Equities": COLORS["positive"],
+    "NASDAQ-100": COLORS["negative"],
+}
 
 fig, ax = plt.subplots(figsize=(10, 6))
-
-for name, result in eta_results.items():
-    eta = result["eta"]
-    med_sigma = result["med_sigma"]
-    if np.isnan(eta) or med_sigma is None:
-        continue
+for row in scenario_df.iter_rows(named=True):
+    name = row["market"]
+    eta = row["eta_assumption"]
+    med_sigma = row["median_daily_sigma"]
     impact_bps = med_sigma * eta * np.sqrt(participation_rates) * 10_000
-    ax.plot(participation_rates * 100, impact_bps, label=f"{name} (η={eta:.2f})")
+    ax.plot(
+        participation_rates * 100,
+        impact_bps,
+        color=market_colors[name],
+        label=f"{name} (eta={eta:.2f})",
+    )
 
 ax.set_xlabel("Participation Rate (%)")
-ax.set_ylabel("Expected Impact (bps)")
-ax.set_title("Calibrated Square-Root Impact Curves")
+ax.set_ylabel("Modeled Impact (bps)")
+add_message_title(
+    ax,
+    "Literature assumptions produce a wide scenario cost range",
+    subtitle="Square-root model with retrospective median daily volatility",
+)
 ax.legend(loc="upper left", fontsize=9)
 ax.set_xlim(0, 10)
 
-fig.tight_layout()
 fig.show()
 
-# %% [markdown]
-# **Finding**: Impact coefficients vary by asset class, but the square-root
-# shape is consistent. Less liquid assets (US equities, small ETFs) have
-# steeper curves; liquid futures and FX have flatter impact profiles.
-# At 1% participation, impact ranges from ~2-20 bps depending on the market.
+# %%
+lowest_scenario = scenario_df.row(0, named=True)
+highest_scenario = scenario_df.row(-1, named=True)
+display(
+    Markdown(
+        f"**Scenario reading:** At 1% participation, modeled impact spans "
+        f"{lowest_scenario['impact_1pct_bps']:.1f} bps for "
+        f"{lowest_scenario['market']} to {highest_scenario['impact_1pct_bps']:.1f} bps for "
+        f"{highest_scenario['market']}. This spread is conditional on the literature eta inputs; "
+        "it is not a cross-market calibration result."
+    )
+)
 
 # %% [markdown]
-# ## 3. Kyle's Lambda from NASDAQ-100 Trade Classification
+# ## 3. Normalized Signed-Flow Association
 #
-# The NASDAQ-100 minute bar data includes trade-at-bid/ask classification,
-# allowing us to construct signed order flow and estimate Kyle's lambda:
+# AlgoSeek reports volume classified by the tick rule. We subtract downtick from uptick volume and
+# relate that signed flow to the return ending in the same minute:
 #
-# $$\Delta P = \lambda Q + \varepsilon$$
+# $$r_t^{bps} = \lambda_{part}\left(10^4\frac{Q_t}{ADV}\right) + \varepsilon_t.$$
 #
-# where $Q$ is net order flow (buy-initiated minus sell-initiated volume).
+# Both sides are in basis points, so $\lambda_{part}$ is comparable across nominal stock prices.
+# Aggregated bars do not reveal whether the signed flow preceded the price move. The coefficient is
+# a robust contemporaneous association, not a causal impact estimate.
+
+
+# %% [markdown]
+# ### Restore the Regular Session
+#
+# Raw microstructure mode bypasses the loader's clock filter. The helper below applies the
+# documented 09:30 inclusive to 16:00 exclusive window before ranking symbols or fitting slopes.
 
 
 # %%
-def load_nq_kyle_microstructure() -> pl.DataFrame:
-    """Collect the most liquid NASDAQ-100 microstructure rows for Kyle calibration."""
-    n_symbols = NQ100_SYMBOLS if NQ100_SYMBOLS > 0 else 10
-    nq_lf_kyle = load_nasdaq100_bars(
+def regular_session_mask(timestamp_col: str = "timestamp") -> pl.Expr:
+    """Return the documented US-equity regular-session mask."""
+    hour = pl.col(timestamp_col).dt.hour()
+    minute = pl.col(timestamp_col).dt.minute()
+    return ((hour > 9) | ((hour == 9) & (minute >= 30))) & (hour < 16)
+
+
+# %% [markdown]
+# ### Load and Reconcile the Signed-Flow Sample
+
+
+# %%
+def session_integrity_ledger(
+    raw: pl.DataFrame,
+    regular: pl.DataFrame,
+    selected: pl.DataFrame,
+) -> pl.DataFrame:
+    """Reconcile raw, session-filtered, and selected minute rows."""
+    unique_keys = selected.select(pl.struct("symbol", "timestamp").n_unique()).item()
+    return pl.DataFrame(
+        {
+            "population": [
+                "Raw rows",
+                "Outside regular session",
+                "Regular rows",
+                "Selected rows",
+                "Duplicate keys",
+            ],
+            "rows": [
+                len(raw),
+                len(raw) - len(regular),
+                len(regular),
+                len(selected),
+                len(selected) - unique_keys,
+            ],
+        }
+    )
+
+
+# %%
+def load_nq_signed_flow_sample() -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Load a regular-session liquid sample and its row-conservation ledger."""
+    raw = load_nasdaq100_bars(
         start_date=NQ100_START_DATE,
         end_date=NQ100_END_DATE,
         include_microstructure=True,
-        lazy=True,
     ).select(
         "timestamp",
         "symbol",
         "volume",
         "last_trade_price",
-        "close_bid_price",
-        "close_ask_price",
         "uptick_volume",
         "downtick_volume",
     )
-    top_syms = (
-        nq_lf_kyle.group_by("symbol")
+    regular = raw.filter(regular_session_mask())
+    n_symbols = NQ100_SYMBOLS if NQ100_SYMBOLS > 0 else regular["symbol"].n_unique()
+    top_symbols = (
+        regular.group_by("symbol")
         .agg(pl.col("volume").sum())
         .sort("volume", descending=True)
-        .head(n_symbols)
-        .collect()["symbol"]
+        .head(n_symbols)["symbol"]
         .to_list()
     )
-    return nq_lf_kyle.filter(pl.col("symbol").is_in(top_syms)).collect()
+    selected = regular.filter(pl.col("symbol").is_in(top_symbols))
+    return selected, session_integrity_ledger(raw, regular, selected)
 
+
+# %%
+nq_micro, nq_integrity = load_nq_signed_flow_sample()
+if nq_micro.is_empty():
+    raise ValueError("No regular-session NASDAQ-100 microstructure rows in the selected window.")
+nq_integrity
 
 # %% [markdown]
-# ### Load the Kyle-Lambda Calibration Sample
+# The full-window activity ranking is a tractability choice. Every signed-flow result describes
+# this selected late-2021 sample rather than a point-in-time NASDAQ-100 universe.
+
+# %% [markdown]
+# ### Build Tick-Rule Signed Flow
 #
-# **Interpretation**: The helper above intentionally concentrates the sample in the most
-# liquid NASDAQ-100 names. That keeps the reduced notebook focused on the part of the universe
-# where signed-flow impact can be estimated reliably from the available minute bars.
+# Sorting and grouping keep the prior price within each symbol. The return and signed flow both end
+# in minute $t$, so this is a same-minute association.
 
 # %%
-nq_micro = load_nq_kyle_microstructure()
-print(
-    f"NASDAQ-100 microstructure ({NQ100_START_DATE} to {NQ100_END_DATE}): "
-    f"{len(nq_micro):,} rows, "
-    f"{nq_micro['symbol'].n_unique()} symbols"
-)
-if len(nq_micro) == 0:
-    raise ValueError(
-        "No NASDAQ-100 microstructure rows found in the selected window. "
-        "Adjust NQ100_START_DATE/NQ100_END_DATE to match available minute-bar data."
-    )
-
-# %% [markdown]
-# **Finding**: The microstructure sample is the scarce resource in this
-# notebook. Once this panel is available, we can estimate signed-flow impact
-# directly instead of leaning only on reduced-form volatility proxies.
-
-# %% [markdown]
-# ### Compute Signed Order Flow
-
-# %%
-# Signed volume from tick direction classification. Sort by (symbol, timestamp)
-# BEFORE the shift so the per-symbol price_change is computed in chronological
-# order — otherwise the shift can cross symbols or run out of order.
 nq_flow = (
     nq_micro.sort(["symbol", "timestamp"])
     .filter(
         pl.col("last_trade_price").is_not_null()
+        & (pl.col("last_trade_price") > 0)
         & pl.col("uptick_volume").is_not_null()
         & pl.col("downtick_volume").is_not_null()
     )
+    .with_columns(prior_price=pl.col("last_trade_price").shift(1).over("symbol"))
     .with_columns(
-        # Net order flow: uptick (buy-initiated) minus downtick (sell-initiated) volume
         signed_volume=(pl.col("uptick_volume") - pl.col("downtick_volume")).cast(pl.Float64),
-        price_change=(pl.col("last_trade_price") - pl.col("last_trade_price").shift(1)).over(
-            "symbol"
-        ),
-        mid_price=((pl.col("close_bid_price") + pl.col("close_ask_price")) / 2),
+        price_return_bps=(pl.col("last_trade_price") / pl.col("prior_price") - 1) * 10_000,
     )
     .filter(
-        pl.col("price_change").is_not_null()
+        pl.col("price_return_bps").is_not_null()
+        & pl.col("price_return_bps").is_finite()
         & pl.col("signed_volume").is_not_null()
         & (pl.col("signed_volume") != 0)
     )
 )
 
-print(f"Observations with signed flow: {len(nq_flow):,}")
+flow_summary = pl.DataFrame(
+    {
+        "regular_rows": [len(nq_micro)],
+        "signed_flow_rows": [len(nq_flow)],
+        "symbols": [nq_flow["symbol"].n_unique()],
+    }
+)
+flow_summary
 
 # %% [markdown]
-# **Finding**: Signed-flow filtering removes bars where Kyle-style impact is
-# not identified. That is desirable here because zero-flow bars add noise but
-# do not help estimate the price response to aggressive order flow.
-
-# %% [markdown]
-# ### Estimate Lambda Per Symbol
+# ### Estimate a Price-Normalized Coefficient
+#
+# Each symbol's signed flow is scaled by its average daily share volume. Price returns and signed
+# participation are both expressed in basis points before the robust Huber fit.
 
 
 # %%
-def estimate_lambda_row(symbol: str, nq_flow: pl.DataFrame) -> dict | None:
-    """Estimate Kyle's lambda and average daily volume for one symbol."""
-    sym_data = nq_flow.filter(pl.col("symbol") == symbol)
+def estimate_normalized_lambda(symbol: str, flow: pl.DataFrame) -> dict | None:
+    """Estimate return bps per signed-participation bps for one symbol."""
+    sym_data = flow.filter(pl.col("symbol") == symbol)
     if len(sym_data) < 100:
         return None
-    result = estimate_kyle_lambda(
-        price_changes=sym_data["price_change"].to_numpy(),
-        signed_volume=sym_data["signed_volume"].to_numpy(),
+    daily = (
+        sym_data.with_columns(
+            activity_date=pl.col("timestamp").dt.date(),
+            dollar_turnover=pl.col("last_trade_price") * pl.col("volume"),
+        )
+        .group_by("activity_date")
+        .agg(volume=pl.col("volume").sum(), dollar_turnover=pl.col("dollar_turnover").sum())
     )
-    result["symbol"] = symbol
-    # ADV = average daily volume in shares: sum minute volume per trading date,
-    # then average across dates. Dividing total volume by `timestamp.n_unique()`
-    # would divide by the minute count and undershoot ADV by ~390×.
-    sym_with_date = sym_data.with_columns(date=pl.col("timestamp").dt.date())
-    daily_vol = sym_with_date.group_by("date").agg(pl.col("volume").sum())
-    result["adv_shares"] = float(daily_vol["volume"].mean()) if len(daily_vol) > 0 else 0.0
-    return result
+    adv_shares = float(daily["volume"].mean())
+    adv_usd = float(daily["dollar_turnover"].mean())
+    scaled = sym_data.with_columns(
+        signed_participation_bps=pl.col("signed_volume") / adv_shares * 10_000
+    )
+    fit = estimate_kyle_lambda(
+        price_changes=scaled["price_return_bps"].to_numpy(),
+        signed_volume=scaled["signed_participation_bps"].to_numpy(),
+    )
+    return {
+        "symbol": symbol,
+        "lambda_participation": fit["lambda_"],
+        "r_squared": fit["r_squared"],
+        "std_err": fit["std_err"],
+        "n_obs": fit["n_obs"],
+        "adv_shares": adv_shares,
+        "adv_usd": adv_usd,
+    }
 
 
 # %%
 lambda_results = []
-
 for symbol in nq_flow["symbol"].unique().sort().to_list():
-    result = estimate_lambda_row(symbol, nq_flow)
+    result = estimate_normalized_lambda(symbol, nq_flow)
     if result is not None:
         lambda_results.append(result)
+lambda_df = pl.DataFrame(lambda_results).filter(
+    pl.col("lambda_participation").is_not_null()
+    & pl.col("lambda_participation").is_finite()
+    & (pl.col("adv_usd") > 0)
+)
+if lambda_df.is_empty():
+    raise ValueError("No valid normalized signed-flow regressions were estimated.")
 
-if lambda_results:
-    lambda_df = pl.DataFrame(lambda_results).filter(
-        pl.col("lambda_").is_not_null() & pl.col("lambda_").is_finite()
-    )
-else:
-    lambda_df = pl.DataFrame(
-        schema={
-            "symbol": pl.String,
-            "lambda_": pl.Float64,
-            "r_squared": pl.Float64,
-            "adv_shares": pl.Float64,
-        }
-    )
-
-print(f"Estimated lambda for {len(lambda_df)} symbols")
-if len(lambda_df) > 0:
-    print(f"Median lambda: {lambda_df['lambda_'].median():.2e}")
-    print(f"Median R²: {lambda_df['r_squared'].median():.4f}")
-else:
-    print(
-        "WARNING: No valid Kyle lambda estimates in current sample. "
-        "With more symbols or a longer date range, positive lambda estimates emerge."
-    )
-
-# %% [markdown]
-# **Finding**: The positive median lambda confirms that buy-initiated flow
-# moves prices upward, consistent with Kyle (1985). The near-zero minute-level
-# R² is expected — individual-bar price changes are dominated by noise, not
-# order flow alone. The economic value of lambda lies in the cross-symbol
-# pattern (larger stocks → smaller lambda) rather than per-bar prediction.
-
-# %% [markdown]
-# ### Lambda vs ADV: The Liquidity-Impact Relationship
+lambda_df.select(
+    "symbol",
+    "lambda_participation",
+    "r_squared",
+    "n_obs",
+    "adv_usd",
+).sort("lambda_participation")
 
 # %%
-lambda_pd = lambda_df.filter((pl.col("lambda_") > 0) & (pl.col("adv_shares") > 0)).to_pandas()
-if lambda_pd.empty:
-    print(
-        "No positive Kyle lambda estimates — too few symbols or dates for reliable calibration. "
-        "With the full NASDAQ-100 universe, expect ~50+ positive estimates."
+median_lambda = float(lambda_df["lambda_participation"].median())
+median_r2 = float(lambda_df["r_squared"].median())
+display(
+    Markdown(
+        f"**Association summary:** {len(lambda_df)} symbols have valid normalized Huber fits. "
+        f"The median slope is {median_lambda:.3f} return bps per signed-participation bp, while "
+        f"the median in-sample R-squared is {median_r2:.4f}. The low fit describes noisy "
+        "same-minute association and does not establish causality."
     )
-else:
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.scatter(
-        np.log10(lambda_pd["adv_shares"]),
-        np.log10(lambda_pd["lambda_"]),
-        alpha=0.6,
-        s=30,
-    )
-
-    # Fit regression line
-    x = np.log10(lambda_pd["adv_shares"].values)
-    y = np.log10(lambda_pd["lambda_"].values)
-    mask = np.isfinite(x) & np.isfinite(y)
-    if mask.sum() > 2:
-        coeffs = np.polyfit(x[mask], y[mask], 1)
-        x_line = np.linspace(x[mask].min(), x[mask].max(), 100)
-        ax.plot(x_line, np.polyval(coeffs, x_line), "r--", label=f"Slope = {coeffs[0]:.2f}")
-
-    ax.set_xlabel("log₁₀(ADV shares)")
-    ax.set_ylabel("log₁₀(Kyle's λ)")
-    ax.set_title("Kyle's Lambda vs Liquidity (NASDAQ-100)")
-    if ax.has_data():
-        ax.legend()
-
-    fig.tight_layout()
-    fig.show()
+)
 
 # %% [markdown]
-# **Finding**: Kyle's lambda scales inversely with ADV: more liquid stocks
-# have lower price impact per unit of order flow. The fitted slope on this
-# NASDAQ-100 sample is steeper than $-1$ in log-log space, indicating impact
-# decreases faster than strictly inverse-ADV across the universe. The exact
-# slope depends on universe breadth and sample period; the qualitative result
-# — a strong negative relationship — matches Kyle (1985) and the cross-sectional
-# evidence in Hasbrouck (2009).
-
-# %% [markdown]
-# ## 4. Representative Lambda Regression
+# ### Normalized Association Versus Dollar Liquidity
 #
-# Detailed scatter plot for a representative liquid NASDAQ-100 stock.
+# The cross-sectional log-log slope uses only positive normalized coefficients. Its analytic
+# covariance estimate supplies a 95% interval, so the sign is not inferred from the point estimate
+# alone.
 
 # %%
-if len(lambda_df) > 0:
-    fig, ax = plt.subplots(figsize=(8, 6))
-    median_lambda = lambda_df["lambda_"].median()
-    rep_symbol = (
-        lambda_df.with_columns(dist=(pl.col("lambda_") - median_lambda).abs())
-        .sort("dist")
-        .head(1)["symbol"]
-        .to_list()[0]
-    )
+lambda_cross = lambda_df.filter(pl.col("lambda_participation") > 0).to_pandas()
+if len(lambda_cross) < 4:
+    raise ValueError("Too few positive normalized coefficients for cross-sectional inference.")
 
-    rep_data = nq_flow.filter(pl.col("symbol") == rep_symbol)
-    sv = rep_data["signed_volume"].to_numpy()
-    dp = rep_data["price_change"].to_numpy()
-    mask = np.isfinite(sv) & np.isfinite(dp) & (sv != 0)
+log_adv = np.log10(lambda_cross["adv_usd"].to_numpy())
+log_lambda = np.log10(lambda_cross["lambda_participation"].to_numpy())
+coefficients, covariance = np.polyfit(log_adv, log_lambda, 1, cov=True)
+slope, intercept = coefficients
+slope_se = float(np.sqrt(covariance[0, 0]))
+slope_low, slope_high = slope - 1.96 * slope_se, slope + 1.96 * slope_se
+fitted = intercept + slope * log_adv
+r_squared_cross = 1 - np.sum((log_lambda - fitted) ** 2) / np.sum(
+    (log_lambda - log_lambda.mean()) ** 2
+)
 
-    if mask.sum() >= 2:
-        if len(sv) > 5000:
-            idx = np.random.choice(len(sv), 5000, replace=False)
-            sv_plot, dp_plot = sv[idx], dp[idx]
-        else:
-            sv_plot, dp_plot = sv, dp
-
-        ax.scatter(sv_plot, dp_plot, alpha=0.1, s=5)
-
-        coeffs = np.polyfit(sv[mask], dp[mask], 1)
-        x_range = np.linspace(sv[mask].min(), sv[mask].max(), 100)
-        ax.plot(
-            x_range, np.polyval(coeffs, x_range), "r-", linewidth=2, label=f"λ = {coeffs[0]:.2e}"
-        )
-
-        ax.set_xlabel("Signed Volume (buy - sell)")
-        ax.set_ylabel("Price Change ($)")
-        ax.set_title(f"Kyle's Lambda: {rep_symbol}")
-        ax.legend()
-
-        fig.tight_layout()
-        fig.show()
-    else:
-        print(
-            f"Representative symbol {rep_symbol}: insufficient signed-flow observations for scatter."
-        )
+# %%
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.scatter(log_adv, log_lambda, color=COLORS["blue"], alpha=0.65, s=30)
+x_line = np.linspace(log_adv.min(), log_adv.max(), 100)
+ax.plot(x_line, intercept + slope * x_line, color=COLORS["amber"], linestyle="--")
+ax.set_xlabel("log10(Average Daily Dollar Turnover)")
+ax.set_ylabel("log10(Return bps per Signed-Participation bp)")
+if slope_low <= 0 <= slope_high:
+    slope_message = "Normalized flow does not resolve a liquidity gradient"
 else:
-    print("Skipping representative lambda scatter — no valid lambda estimates.")
+    direction = "falls" if slope < 0 else "rises"
+    slope_message = f"Normalized flow association {direction} with dollar liquidity"
+add_message_title(
+    ax,
+    slope_message,
+    subtitle=f"Log-log OLS slope {slope:.2f}, 95% CI [{slope_low:.2f}, {slope_high:.2f}]",
+)
+fig.show()
+
+# %%
+interval_reading = "excludes zero" if slope_low * slope_high > 0 else "includes zero"
+display(
+    Markdown(
+        f"**Cross-sectional reading:** The slope is {slope:.2f} with a 95% interval from "
+        f"{slope_low:.2f} to {slope_high:.2f}; the interval {interval_reading}. The regression "
+        f"R-squared is {r_squared_cross:.3f}. This is descriptive evidence for the selected "
+        "late-2021 sample, not a universal liquidity law."
+    )
+)
 
 # %% [markdown]
-# **Interpretation**: The representative-stock scatter makes the regression noise visible.
-# Kyle's lambda is useful because the average slope is positive and persistent, not because
-# each individual bar lies neatly on the fitted line.
+# ## 4. A Representative Symbol
+#
+# A central symbol shows how noisy the minute-level relation remains. The plot clips both axes to
+# their central 99% solely for visibility; the Huber fit above used every valid observation.
+
+# %%
+rep_symbol = (
+    lambda_df.with_columns(distance=(pl.col("lambda_participation") - median_lambda).abs())
+    .sort("distance")
+    .item(0, "symbol")
+)
+rep_row = lambda_df.filter(pl.col("symbol") == rep_symbol).row(0, named=True)
+rep_data = nq_flow.filter(pl.col("symbol") == rep_symbol).with_columns(
+    signed_participation_bps=pl.col("signed_volume") / rep_row["adv_shares"] * 10_000
+)
+x = rep_data["signed_participation_bps"].to_numpy()
+y = rep_data["price_return_bps"].to_numpy()
+x_low, x_high = np.quantile(x, [0.005, 0.995])
+y_low, y_high = np.quantile(y, [0.005, 0.995])
+central = np.flatnonzero((x >= x_low) & (x <= x_high) & (y >= y_low) & (y <= y_high))
+if len(central) == 0:
+    raise ValueError(f"No finite central observations available for {rep_symbol}.")
+plot_idx = np.random.choice(central, min(5_000, len(central)), replace=False)
+
+# %%
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.scatter(x[plot_idx], y[plot_idx], color=COLORS["blue"], alpha=0.15, s=8)
+ax.axhline(0, color=COLORS["neutral"], linewidth=0.7)
+ax.axvline(0, color=COLORS["neutral"], linewidth=0.7)
+ax.set_xlabel("Tick-Rule Signed Participation (bps of ADV)")
+ax.set_ylabel("Same-Minute Return (bps)")
+add_message_title(
+    ax,
+    "Minute returns remain noisy around signed participation",
+    subtitle=(
+        f"{rep_symbol}; normalized Huber slope {rep_row['lambda_participation']:.3f}; "
+        "central 99% shown"
+    ),
+)
+fig.show()
+
+# %% [markdown]
+# **Interpretation**: Normalization removes nominal price and share-scale differences. It does not
+# solve event ordering: the minute aggregate still measures association, and the dispersion warns
+# against using this coefficient as a bar-level predictor.
 
 # %% [markdown]
 # ## 5. Intraday Volume Profile
 #
-# Institutional traders exploit the U-shaped intraday volume profile
-# to minimize impact. We construct the empirical profile from NASDAQ-100
-# minute bars.
+# The same regular-session sample reveals when market volume is available. A volume trough does not
+# by itself imply low impact: for a fixed order, lower $V$ raises $Q/V$. Spread, depth, urgency, and
+# adverse selection must be evaluated separately.
 
 # %%
 nq_volume_profile = (
@@ -606,7 +736,7 @@ nq_volume_profile = (
 )
 
 trading_hours = nq_volume_profile.filter(
-    (pl.col("minute_of_day") >= 570) & (pl.col("minute_of_day") <= 960)
+    (pl.col("minute_of_day") >= 570) & (pl.col("minute_of_day") < 960)
 )
 if trading_hours.is_empty():
     raise ValueError("No intraday volume profile available for the selected NASDAQ-100 sample.")
@@ -621,234 +751,262 @@ trading_hours = trading_hours.with_columns(
     ),
 )
 
+open_share = float(
+    trading_hours.filter(pl.col("minute_of_day").is_between(570, 599))["vol_fraction"].sum()
+)
+close_share = float(
+    trading_hours.filter(pl.col("minute_of_day").is_between(930, 959))["vol_fraction"].sum()
+)
+boundary_share = open_share + close_share
+
 # %%
 th_pd = trading_hours.to_pandas()
 
 fig, ax = plt.subplots(figsize=(12, 5))
-ax.fill_between(th_pd["minute_of_day"], th_pd["vol_fraction"], alpha=0.3)
-ax.plot(th_pd["minute_of_day"], th_pd["vol_fraction"], linewidth=1.5)
+ax.fill_between(th_pd["minute_of_day"], th_pd["vol_fraction"], color=COLORS["blue"], alpha=0.15)
+ax.plot(th_pd["minute_of_day"], th_pd["vol_fraction"], color=COLORS["blue"], linewidth=1.5)
+ax.axvspan(570, 600, color=COLORS["amber"], alpha=0.12)
+ax.axvspan(930, 960, color=COLORS["amber"], alpha=0.12)
+ax.set(xlabel="Time of Day", ylabel="Fraction of Regular-Session Volume")
+add_message_title(
+    ax,
+    f"Session boundaries concentrate {boundary_share:.1%} of observed volume",
+    subtitle="Mean minute volume across the selected NASDAQ-100 sample",
+)
 
-ax.set_xlabel("Time of Day")
-ax.set_ylabel("Fraction of Daily Volume")
-ax.set_title("Intraday Volume Profile (NASDAQ-100)")
+tick_times = [570, 600, 660, 720, 780, 840, 900, 960]
+ax.set_xticks(tick_times, [f"{minute // 60}:{minute % 60:02d}" for minute in tick_times])
 
-tick_times = [570, 600, 630, 660, 720, 780, 840, 900, 960]
-tick_labels = ["9:30", "10:00", "10:30", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00"]
-ax.set_xticks(tick_times)
-ax.set_xticklabels(tick_labels)
-
-vf = th_pd["vol_fraction"]
-ax.annotate("Open auction\n(high volume)", xy=(575, vf.max() * 0.9), fontsize=9, ha="left")
-ax.annotate("Close auction\n(high volume)", xy=(940, vf.values[-1] * 0.9), fontsize=9, ha="right")
 midday_idx = th_pd.loc[th_pd["minute_of_day"].between(700, 840), "vol_fraction"]
 if len(midday_idx) > 0:
     ax.annotate(
-        "Midday trough\n(low impact window)",
-        xy=(780, midday_idx.min() * 1.5),
+        "Lower volume raises Q/V\nfor a fixed order",
+        xy=(780, midday_idx.min()),
+        xytext=(780, th_pd["vol_fraction"].max() * 0.22),
+        arrowprops={"arrowstyle": "->", "color": COLORS["neutral"]},
         fontsize=9,
         ha="center",
     )
 
-fig.tight_layout()
 fig.show()
 
-# %% [markdown]
-# **Finding**: The classic U-shaped volume profile is clearly visible.
-# Volume is highest in the first 30 minutes (open auction) and last 30
-# minutes (close auction), with a midday trough. Shifting execution toward
-# higher-volume windows lowers participation-rate-driven impact, though
-# this trades off against adverse selection risk from informed traders.
+# %%
+display(
+    Markdown(
+        f"**Volume reading:** The first 30 minutes contribute {open_share:.1%} and the last "
+        f"30 minutes contribute {close_share:.1%} of the mean regular-session profile. The "
+        "midday trough raises participation-driven impact for a fixed order; whether midday is "
+        "cheaper overall also depends on spreads, depth, urgency, and adverse selection."
+    )
+)
 
 # %% [markdown]
-# ## 6. Capacity Estimation
+# ## 6. Bounded Capacity Scenarios
 #
-# Given calibrated impact coefficients, we estimate the maximum AUM each
-# asset class can support before impact erodes gross alpha.
+# Capacity is conditional on a gross-alpha budget, turnover, execution approach, and valid dollar
+# liquidity. We exclude ETF and FX panels because their available fields do not support historical
+# dollar turnover. The supported scenario assumes trades are distributed in proportion to each
+# selected instrument's average dollar volume.
 
 # %%
-# Compute median ADV in USD per asset class. Dollar notional uses traded_close,
-# the contemporaneous traded level, never the roll-adjusted close.
-capacity_inputs = []
-for name, df in daily_stats.items():
-    med_adv_shares = df.filter(pl.col("adv").is_not_null())["adv"].median()
-    med_close = df.filter(pl.col("traded_close").is_not_null())["traded_close"].median()
-    if med_adv_shares is None or med_close is None:
-        continue
-    med_adv_usd = med_adv_shares * med_close
-    n_symbols = df["symbol"].n_unique()
-    total_adv_usd = med_adv_usd * n_symbols  # Universe-level liquidity
-
-    eta = eta_results[name]["eta"]
-    capacity_inputs.append(
+capacity_markets = ["Crypto Perps", "CME Futures", "S&P 500 Equities", "NASDAQ-100"]
+capacity_rows = []
+for name in capacity_markets:
+    df = daily_stats[name]
+    entity_col = entity_cols[name]
+    per_entity = (
+        df.filter(pl.col("daily_turnover_usd").is_not_null())
+        .group_by(entity_col)
+        .agg(mean_daily_turnover_usd=pl.col("daily_turnover_usd").mean())
+    )
+    capacity_rows.append(
         {
-            "asset_class": name,
-            "n_symbols": n_symbols,
-            "med_adv_usd": med_adv_usd,
-            "total_adv_usd": total_adv_usd,
-            "eta": eta,
+            "market": name,
+            "entities": len(per_entity),
+            "total_addv_usd": float(per_entity["mean_daily_turnover_usd"].sum()),
+            "median_daily_sigma": float(df["sigma"].drop_nulls().median()),
+            "eta_assumption": LITERATURE_ETA[name],
         }
     )
 
-capacity_df = pl.DataFrame(capacity_inputs)
+capacity_df = pl.DataFrame(capacity_rows)
 capacity_df
 
+# %%
+unsupported_capacity = pl.DataFrame(
+    {
+        "market": ["ETFs", "FX Pairs"],
+        "reason_excluded": [
+            "Adjusted prices cannot be paired with observed shares for historical USD turnover",
+            "OANDA volume is tick activity, not traded currency or dollar notional",
+        ],
+    }
+)
+unsupported_capacity
+
 # %% [markdown]
-# **Finding**: The capacity table is the practical bridge from microstructure to
-# portfolio construction. It converts abstract impact coefficients into the AUM
-# range where a strategy can still plausibly preserve its edge.
+# ### Scenario Bounds
+#
+# The participation ceiling is a declared validity guard, not an estimated optimum. Net alpha is
+# shown only while the scenario order remains at or below 20% of the selected universe's ADDV.
 
 # %%
-gross_alpha_bps = 50  # Assume 50 bps gross alpha per rebalance
-aum_range = np.logspace(5, 11, 100)  # $100K to $100B
+capacity_summary_rows = []
+for row in capacity_df.iter_rows(named=True):
+    max_aum = row["total_addv_usd"] * MAX_FEASIBLE_PARTICIPATION / TURNOVER_PER_REBALANCE
+    zero_participation = (
+        GROSS_ALPHA_BPS / (row["median_daily_sigma"] * row["eta_assumption"] * 10_000)
+    ) ** 2
+    break_even_aum = (
+        zero_participation * row["total_addv_usd"] / TURNOVER_PER_REBALANCE
+        if zero_participation <= MAX_FEASIBLE_PARTICIPATION
+        else None
+    )
+    capacity_summary_rows.append(
+        {
+            **row,
+            "max_aum_at_participation_bound": max_aum,
+            "break_even_aum_within_bound": break_even_aum,
+        }
+    )
 
+capacity_summary = pl.DataFrame(capacity_summary_rows)
+capacity_summary
 
 # %% [markdown]
 # ### Capacity-Curve Helper
 
 
 # %%
-# Beyond this participation rate, the square-root impact model is extrapolated
-# outside the regime where it was calibrated; we mark the curve infeasible
-# rather than clipping participation at 100% (which silently caps impact at
-# the model's value at full ADV).
-MAX_FEASIBLE_PARTICIPATION = 0.20
-
-
-def capacity_curve(row: dict) -> np.ndarray | None:
-    """Compute net alpha across the AUM grid for one asset class."""
-    name = row["asset_class"]
-    eta = row["eta"]
-    total_adv = row["total_adv_usd"]
-    if np.isnan(eta) or total_adv <= 0:
-        return None
-    turnover = 0.30
-    participation = aum_range * turnover / total_adv
-    df = daily_stats[name]
-    med_sigma = df.filter(pl.col("sigma").is_not_null())["sigma"].median()
-    if med_sigma is None:
-        return None
+def capacity_curve(row: dict, aum_grid: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return participation and bounded net alpha for one scenario row."""
+    participation = aum_grid * TURNOVER_PER_REBALANCE / row["total_addv_usd"]
     feasible = participation <= MAX_FEASIBLE_PARTICIPATION
-    impact_bps = np.where(feasible, med_sigma * eta * np.sqrt(participation) * 10_000, np.nan)
-    return gross_alpha_bps - impact_bps
+    impact_bps = row["median_daily_sigma"] * row["eta_assumption"] * np.sqrt(participation) * 10_000
+    return participation, np.where(feasible, GROSS_ALPHA_BPS - impact_bps, np.nan)
 
+
+# %%
+max_scenario_aum = float(capacity_summary["max_aum_at_participation_bound"].max())
+aum_range = np.logspace(5, np.log10(max_scenario_aum * 1.15), 160)
+
+fig, ax = plt.subplots(figsize=(10, 6))
+for row in capacity_summary.iter_rows(named=True):
+    participation, net_alpha = capacity_curve(row, aum_range)
+    color = market_colors[row["market"]]
+    ax.plot(aum_range / 1e6, net_alpha, color=color, label=row["market"])
+    endpoint_net = GROSS_ALPHA_BPS - (
+        row["median_daily_sigma"]
+        * row["eta_assumption"]
+        * np.sqrt(MAX_FEASIBLE_PARTICIPATION)
+        * 10_000
+    )
+    ax.scatter(
+        row["max_aum_at_participation_bound"] / 1e6,
+        endpoint_net,
+        color=color,
+        s=25,
+    )
+
+ax.axhline(0, color=COLORS["neutral"], linewidth=0.7)
+ax.set_xscale("log")
+ax.set_xlabel("Scenario AUM ($M)")
+ax.set_ylabel("Net Alpha (bps per rebalance)")
+add_message_title(
+    ax,
+    "Capacity depends on valid notional and an explicit scenario contract",
+    subtitle="50 bps gross alpha, 30% turnover, 20% participation bound; dots mark the bound",
+)
+ax.legend(loc="lower left", fontsize=9)
+fig.show()
+
+# %%
+display(
+    Markdown(
+        "**Capacity reading:** The curves are conditional scenarios for four supported panels, "
+        "not asset-class limits. Their endpoints mark the declared participation bound. ETF and "
+        "FX capacity remain unreported because the available fields do not support historical "
+        "dollar turnover."
+    )
+)
+
+# %% [markdown]
+# ## 7. Normalize Before Comparing Model Shapes
+#
+# Linear and square-root coefficients are not interchangeable. To isolate shape, both ETF models
+# are matched to the same impact at a 1% reference participation. Away from that point, only the
+# functional form differs. `NoImpact` remains a frictionless lower bound.
+
+# %%
+etf_scenario = scenario_df.filter(pl.col("market") == "ETFs").row(0, named=True)
+participation_grid = np.logspace(-3, -1, 120)
+sqrt_impact = (
+    etf_scenario["median_daily_sigma"]
+    * etf_scenario["eta_assumption"]
+    * np.sqrt(participation_grid)
+)
+reference_impact = (
+    etf_scenario["median_daily_sigma"]
+    * etf_scenario["eta_assumption"]
+    * np.sqrt(MODEL_REFERENCE_PARTICIPATION)
+)
+linear_coefficient = reference_impact / MODEL_REFERENCE_PARTICIPATION
+linear_impact = linear_coefficient * participation_grid
 
 # %%
 fig, ax = plt.subplots(figsize=(10, 6))
-for row in capacity_df.iter_rows(named=True):
-    net_alpha = capacity_curve(row)
-    if net_alpha is None:
-        continue
-    ax.plot(aum_range / 1e6, net_alpha, label=row["asset_class"])
-
-ax.axhline(0, color="black", linewidth=0.5)
+ax.axhline(0, color=COLORS["neutral"], linewidth=1.0, label="NoImpact")
+ax.plot(
+    participation_grid * 100,
+    linear_impact * 10_000,
+    color=COLORS["amber"],
+    label="Linear, matched at 1%",
+)
+ax.plot(
+    participation_grid * 100,
+    sqrt_impact * 10_000,
+    color=COLORS["blue"],
+    label="Square-root, matched at 1%",
+)
+ax.axvline(1, color=COLORS["silver_muted"], linestyle="--", linewidth=1)
 ax.set_xscale("log")
-ax.set_xlabel("AUM ($M)")
-ax.set_ylabel("Net Alpha (bps per rebalance)")
-ax.set_title(f"Capacity Frontier (Gross Alpha = {gross_alpha_bps} bps)")
-ax.legend(loc="upper right", fontsize=9)
-ax.set_ylim(-50, gross_alpha_bps + 10)
-
-fig.tight_layout()
-fig.show()
-
-# %% [markdown]
-# **Finding**: Strategy capacity varies enormously by asset class. Liquid
-# futures and FX strategies can scale to billions in AUM before impact
-# erodes alpha; less liquid equity strategies may be capacity-limited
-# at $10-100M. This has direct implications for strategy selection:
-# a high-alpha but capacity-limited strategy may be personally valuable
-# but not institutionally scalable.
-
-# %% [markdown]
-# ## 7. Impact Model Comparison
-#
-# We compare three impact model specifications used in the `ml4t-backtest`
-# engine:
-#
-# - **NoImpact**: Zero market impact (optimistic baseline)
-# - **Linear**: $\text{Impact} = \eta \cdot (Q / V)$ — impact proportional to participation
-# - **SquareRoot**: $\text{Impact} = \sigma \cdot \eta \cdot \sqrt{Q / V}$ — concave impact
-
-# %%
-# Compare impact models at representative participation rates
-participation_pcts = [0.1, 0.5, 1.0, 2.0, 5.0]
-model_comparison = []
-
-for name, result in eta_results.items():
-    eta = result["eta"]
-    if np.isnan(eta):
-        continue
-
-    df = daily_stats[name]
-    med_sigma = df.filter(pl.col("sigma").is_not_null())["sigma"].median()
-    if med_sigma is None:
-        continue
-
-    for pct in participation_pcts:
-        p = pct / 100
-
-        no_impact = 0
-        linear_impact = eta * p * 10_000  # Linear in participation
-        sqrt_impact = med_sigma * eta * np.sqrt(p) * 10_000  # Standard sqrt model
-
-        model_comparison.append(
-            {
-                "asset_class": name,
-                "participation_pct": pct,
-                "no_impact": no_impact,
-                "linear_bps": linear_impact,
-                "sqrt_bps": sqrt_impact,
-            }
-        )
-
-model_df = pl.DataFrame(model_comparison)
-
-# %%
-# Grouped bar chart for 1% participation
-pct_1 = model_df.filter(pl.col("participation_pct") == 1.0).sort("sqrt_bps")
-pct_pd = pct_1.to_pandas()
-
-fig, ax = plt.subplots(figsize=(12, 5))
-x = np.arange(len(pct_pd))
-width = 0.25
-
-ax.bar(x - width, pct_pd["no_impact"], width, label="NoImpact")
-ax.bar(x, pct_pd["linear_bps"], width, label="Linear")
-ax.bar(x + width, pct_pd["sqrt_bps"], width, label="SquareRoot")
-
-ax.set_xticks(x)
-ax.set_xticklabels(pct_pd["asset_class"], rotation=25, ha="right")
-ax.set_ylabel("Impact (bps)")
-ax.set_title("Impact Model Comparison at 1% Participation")
+ax.set_xlabel("Participation Rate (%)")
+ax.set_ylabel("Modeled Impact (bps)")
+add_message_title(
+    ax,
+    "Model shape changes cost away from the shared reference point",
+    subtitle="ETF scenario; linear and square-root impact matched at 1% participation",
+)
 ax.legend()
-
-fig.tight_layout()
 fig.show()
 
-# %% [markdown]
-# **Finding**: At 1% participation, the SquareRoot model produces
-# moderate impact (2-15 bps) that varies by asset class. The Linear model
-# typically gives lower estimates at low participation but higher at high
-# participation — the crossover point matters for strategy sizing.
-# The NoImpact baseline is unrealistic for any strategy managing more
-# than a few hundred thousand dollars.
+# %%
+display(
+    Markdown(
+        f"**Shape reading:** Both models equal {reference_impact * 10_000:.2f} bps at 1%. "
+        f"At {participation_grid[0]:.1%}, linear impact is {linear_impact[0] * 10_000:.2f} "
+        f"bps and square-root impact is {sqrt_impact[0] * 10_000:.2f} bps; at "
+        f"{participation_grid[-1]:.0%}, they are {linear_impact[-1] * 10_000:.2f} and "
+        f"{sqrt_impact[-1] * 10_000:.2f} bps. Matching the reference separates shape from "
+        "coefficient scale."
+    )
+)
 
 # %% [markdown]
-# ## 8. Impact Rises by VIX Regime via Volatility Input
+# ## 8. VIX Buckets Change Sigma, Not Eta
 #
 # In the square-root model $I = \sigma \cdot \eta \cdot \sqrt{Q/V}$, impact
 # rises during stressed markets because realized volatility $\sigma$ rises.
+# The VIX buckets below use full-sample quartiles as a retrospective diagnostic.
 # We hold $\eta_{\text{base}}$ fixed at its ETF literature value and only let
-# realized volatility vary across VIX regimes; the resulting impact differs
-# regime-by-regime even with a constant impact coefficient.
+# realized volatility vary across buckets.
 
 # %%
 # Load VIX
 macro = load_macro(series=["vixcls"])
-date_col = "timestamp" if "timestamp" in macro.columns else "date"
 vix = (
     macro.select(
-        pl.col(date_col).cast(pl.Date).alias("timestamp"),
+        pl.col("timestamp").cast(pl.Date),
         pl.col("vixcls").alias("vix"),
     )
     .filter(pl.col("vix").is_not_null())
@@ -862,7 +1020,7 @@ vix_q25, vix_q50, vix_q75 = (
 )
 
 # %%
-# Calibrate η by VIX regime for ETFs (representative dataset)
+# Hold eta fixed and summarize the volatility channel for ETFs.
 etf_vix = (
     daily_stats["ETFs"]
     .join(vix, on="timestamp", how="inner")
@@ -885,7 +1043,7 @@ eta_base = LITERATURE_ETA["ETFs"]
 
 # %%
 def regime_impact_row(regime: str) -> dict:
-    """Estimate 1% participation impact for one VIX regime."""
+    """Summarize modeled 1% participation impact for one VIX bucket."""
     subset = etf_vix.filter(
         (pl.col("vix_regime") == regime)
         & pl.col("ret").is_not_null()
@@ -895,85 +1053,104 @@ def regime_impact_row(regime: str) -> dict:
     med_sigma = subset["sigma"].median()
     if med_sigma is None:
         return {
-            "med_sigma": np.nan,
+            "regime": regime,
+            "median_daily_sigma": np.nan,
             "impact_1pct_bps": np.nan,
-            "n_obs": len(subset),
+            "observations": len(subset),
         }
     impact_1pct = med_sigma * eta_base * np.sqrt(0.01) * 10_000
     return {
-        "med_sigma": med_sigma,
+        "regime": regime,
+        "median_daily_sigma": med_sigma,
         "impact_1pct_bps": impact_1pct,
-        "n_obs": len(subset),
+        "observations": len(subset),
     }
 
 
 # %%
-regime_impact = {}
-for regime in ["Q1 (Low)", "Q2", "Q3", "Q4 (High)"]:
-    regime_impact[regime] = regime_impact_row(regime)
-    if np.isnan(regime_impact[regime]["med_sigma"]):
-        print(f"VIX {regime}: insufficient data for regime-specific impact estimate")
-        continue
-    print(
-        f"VIX {regime}: σ_med = {regime_impact[regime]['med_sigma']:.4f}, "
-        f"impact@1% = {regime_impact[regime]['impact_1pct_bps']:.1f} bps "
-        f"(n = {regime_impact[regime]['n_obs']:,})"
-    )
+regimes = ["Q1 (Low)", "Q2", "Q3", "Q4 (High)"]
+regime_df = pl.DataFrame([regime_impact_row(regime) for regime in regimes])
+if (
+    regime_df["impact_1pct_bps"].null_count()
+    or not np.isfinite(regime_df["impact_1pct_bps"].to_numpy()).all()
+):
+    raise ValueError("Every VIX bucket needs a finite modeled impact estimate")
+
+regime_df
 
 # %% [markdown]
-# **Finding**: The regime printout makes the stress-channel explicit: the same
-# participation rate can cost materially more in high-VIX states because the
-# volatility input to the square-root model rises with market stress.
+# The calculation does not estimate a new impact coefficient for each bucket.
+# It isolates the modeled volatility channel by holding $\eta$ and participation
+# fixed while changing only the bucket-level median $\sigma$.
 
 # %%
-# Bar chart of impact by VIX regime
-regimes = ["Q1 (Low)", "Q2", "Q3", "Q4 (High)"]
-impacts = [regime_impact[r]["impact_1pct_bps"] for r in regimes]
+impacts = regime_df["impact_1pct_bps"].to_numpy()
+impact_ratio = impacts[-1] / impacts[0]
 
 fig, ax = plt.subplots(figsize=(8, 5))
-colors = plt.cm.RdYlGn_r(np.linspace(0.2, 0.8, 4))
+colors = [COLORS["blue"], COLORS["slate"], COLORS["amber"], COLORS["copper"]]
 ax.bar(regimes, impacts, color=colors)
 ax.set_ylabel("Impact at 1% Participation (bps)")
-ax.set_xlabel("VIX Regime")
-ax.set_title("ETF Market Impact by Volatility Regime (η=0.10)")
+ax.set_xlabel("Retrospective Full-Sample VIX Bucket")
+add_message_title(
+    ax,
+    f"Volatility alone raises modeled ETF impact {impact_ratio:.2f}x",
+    subtitle=f"Participation fixed at 1%; eta fixed at {eta_base:.2f}",
+)
 
-fig.tight_layout()
 fig.show()
 
-# %% [markdown]
-# **Finding**: Impact coefficients are highest in the Q4 (high-VIX) regime,
-# often 1.5-2x the low-volatility estimate. This means strategies face a
-# double penalty during stress: wider spreads *and* higher impact. Fixed
-# cost assumptions in backtests systematically understate the challenge
-# during the periods when portfolio adjustments are most critical.
+# %%
+display(
+    Markdown(
+        f"**Retrospective reading:** With eta fixed at {eta_base:.2f}, the modeled "
+        f"1% participation impact rises from {impacts[0]:.2f} bps in Q1 to "
+        f"{impacts[-1]:.2f} bps in Q4, a {impact_ratio:.2f}x ratio. This is a "
+        "volatility-scenario result, not evidence that eta itself changes with VIX. "
+        "A deployable regime rule would need thresholds estimated only from prior data."
+    )
+)
 
 # %% [markdown]
 # ## Key Takeaways
-#
-# 1. **Square-root law holds across asset classes**: The concave
-#    relationship between trade size and impact is confirmed for all
-#    six datasets, with literature $\eta$ ranging from 0.05 (FX) to 0.30
-#    (crypto), reflecting very different liquidity regimes.
-#
-# 2. **Kyle's lambda confirms liquidity hierarchy**: More liquid stocks
-#    have proportionally lower price impact per unit of order flow. On the
-#    full NASDAQ-100 sample the log-log slope is steeper than $-1$ —
-#    impact decreases faster than strictly inverse-ADV, consistent with
-#    the negative cross-sectional relationship documented in Hasbrouck (2009).
-#
-# 3. **Intraday volume is U-shaped**: The open and close concentrate
-#    ~40% of daily volume, creating a low-impact execution window at
-#    midday for patient traders.
-#
-# 4. **Capacity varies 100x**: From ~$10M for small-cap equity strategies
-#    to ~$10B for liquid futures/FX — this determines whether a strategy
-#    is personally or institutionally viable.
-#
-# 5. **Impact is regime-dependent**: High-VIX periods increase impact
-#    1.5-2x, compounding the cost challenge during market stress.
-#
-# **Next**: See `04_vwap_twap_execution` for execution algorithms that
-# manage the trade-off between impact and timing risk.
-#
-# **Book**: Chapter 18.4 covers market impact theory and the connection
-# to optimal execution.
+
+# %%
+low_scenario = scenario_df.sort("impact_1pct_bps").row(0, named=True)
+high_scenario = scenario_df.sort("impact_1pct_bps").row(-1, named=True)
+display(
+    Markdown(
+        "\n".join(
+            [
+                "1. **The square-root curves are scenarios, not calibrations.** "
+                f"At 1% participation they span {low_scenario['impact_1pct_bps']:.2f} bps "
+                f"for {low_scenario['market']} to {high_scenario['impact_1pct_bps']:.2f} bps "
+                f"for {high_scenario['market']}, using stated literature eta assumptions.",
+                "",
+                "2. **Normalized signed-flow estimates support a descriptive liquidity "
+                "comparison.** The cross-sectional log slope is "
+                f"{slope:.2f} with a 95% interval from {slope_low:.2f} to "
+                f"{slope_high:.2f}; same-minute returns and tick-rule signs do not "
+                "identify causal permanent impact.",
+                "",
+                "3. **Regular-session activity is concentrated near the boundaries.** "
+                f"The first and final 30 minutes contain {boundary_share:.1%} of the "
+                "sample's regular-session volume. Lower midday volume means a fixed order "
+                "raises participation unless execution is slowed.",
+                "",
+                "4. **USD capacity requires USD turnover.** The capacity exercise covers "
+                "Crypto, CME Futures, S&P 500, and NASDAQ 100. ETF share volume and FX tick "
+                "volume are excluded rather than mixed into a dollar comparison.",
+                "",
+                "5. **The VIX comparison holds eta fixed.** Moving from the retrospective "
+                f"Q1 to Q4 volatility bucket raises modeled ETF impact {impact_ratio:.2f}x "
+                "through sigma alone.",
+                "",
+                "**Next:** See `04_vwap_twap_execution` for execution algorithms that "
+                "balance impact and timing risk.",
+                "",
+                "**Book:** Chapter 18.4 covers market impact theory and its connection to "
+                "optimal execution.",
+            ]
+        )
+    )
+)

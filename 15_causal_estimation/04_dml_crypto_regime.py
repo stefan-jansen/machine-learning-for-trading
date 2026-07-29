@@ -32,7 +32,7 @@
 # $$\theta = \frac{\partial}{\partial t}\, E[Y(t)] \bigm|_{t = \text{premium z-score}}$$
 #
 # Regime-specific estimates apply this same estimand within volatility strata
-# (subgroup ATEs) — not Conditional Average Treatment Effects (CATE), which
+# (subgroup ATEs), not Conditional Average Treatment Effects (CATE), which
 # would require a single heterogeneity model rather than separate
 # regime-stratified fits.
 #
@@ -44,7 +44,7 @@
 # | Treatment                 | `premium_zscore_14d` (continuous)                                                                       |
 # | Outcome                   | `fwd_ret_8h` (next-bar return)                                                                          |
 # | Controls (W in EconML)    | `price_vol_14d`, `funding_rate`, `premium_dev_mean_14d`, `premium_vol_72h`, `vol_ratio_short`, `premium_persistence_7d` |
-# | Effect modifiers (X)      | Volatility regime (high vs low) — entered via regime-stratified DML and a single-model HAC interaction |
+# | Effect modifiers (X)      | Volatility regime (high vs low), entered via regime-stratified DML and a single-model HAC interaction |
 # | Identification assumption | Selection on observables given the six controls; controls are constructed strictly pre-treatment       |
 # | Main failure modes        | Bad-control bias from premium-derived controls; mistimed treatment relative to control horizons; cross-symbol contagion that the controls don't capture |
 # | Estimand                  | Marginal effect of a one-unit z-score change; ATE within each volatility regime; interaction coefficient on T × regime |
@@ -76,7 +76,7 @@
 # ## 1. Setup and Imports
 
 # %%
-"""Double Machine Learning on Crypto Premium Index with Regime Conditioning — estimate regime-conditional causal effects."""
+"""Double Machine Learning on Crypto Premium Index with Regime Conditioning: estimate regime-conditional causal effects."""
 
 import warnings
 
@@ -89,9 +89,11 @@ from ml4t.diagnostic.splitters import WalkForwardCV
 from plotly.subplots import make_subplots
 from sklearn.ensemble import GradientBoostingRegressor
 
+import utils.style  # noqa: F401  # registers + activates the ml4t Plotly template
 from case_studies.utils.causal import block_permute, manual_dml_timeseries
 from utils.modeling import load_modeling_dataset
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
 
@@ -135,12 +137,12 @@ print(f"  Embargo: {EMBARGO_PERIODS} bars (24h)")
 #
 # We use `load_modeling_dataset()` to load pre-computed premium features (Ch8)
 # and labels, joined and ready for analysis. This replaces manual OHLCV loading
-# and confounder engineering. Real-data only — no synthetic fallback. If the
+# and confounder engineering. Real-data only; no synthetic fallback. If the
 # modeling dataset is missing, the notebook fails loudly rather than silently
 # switching to a synthetic substitute.
 
 # %%
-# Real-data only — load failure is a fatal error.
+# Real-data only; load failure is a fatal error.
 mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
 
 treatment_col = "premium_zscore_14d"
@@ -195,7 +197,7 @@ if len(df) > MAX_SAMPLES:
 # threshold whenever the symbol composition shifts. We compute the
 # cross-sectional median vol per timestamp, then a rolling-median threshold
 # *shifted by 1 bar* so the regime label is known before the treated return
-# interval — a strictly pre-treatment construction.
+# interval, a strictly pre-treatment construction.
 market_vol = (
     df.groupby(date_col)["price_vol_14d"].median().sort_index().rename("market_vol").to_frame()
 )
@@ -311,7 +313,7 @@ comparison_df = pd.DataFrame(
 )
 display(comparison_df)
 
-print(f"Confounding bias (naive − DML): {bias:.4f} ({bias_pct:+.1f}%)")
+print(f"Confounding bias (naive - DML): {bias:.4f} ({bias_pct:+.1f}%)")
 
 # %% [markdown]
 # ## 7. Regime-Conditional Effects
@@ -325,7 +327,7 @@ print(f"Confounding bias (naive − DML): {bias:.4f} ({bias_pct:+.1f}%)")
 # $$
 #
 # Regime-specific estimates apply this same estimand within volatility
-# strata — these are **subgroup ATEs**, not Conditional Average Treatment
+# strata; these are **subgroup ATEs**, not Conditional Average Treatment
 # Effects (CATE). CATE refers to individual-level or covariate-conditional
 # heterogeneity estimated by a single model (Causal Forest, X-learner). We
 # repeat the estimand inside each regime rather than fitting a single
@@ -374,7 +376,7 @@ else:
 # %%
 # Naive regime difference: independence-of-subsets approximation.
 # This is fast and intuitive but assumes the two subset estimates are
-# independent draws — they are not, even though the subsets are disjoint,
+# independent draws; they are not, even though the subsets are disjoint,
 # because they come from the same market environment and the residualized
 # DML residuals carry shared variance.
 effect_diff = effect_high - effect_low
@@ -469,7 +471,7 @@ print(f"  Difference: {abs(econml_effect - dml_effect):.6f}")
 #
 # Because the treatment is a 14-day premium z-score and several controls
 # use multi-day windows, a 3-bar (24h) block preserves only short-range
-# autocorrelation. We sweep block sizes — 3, 21, 42 bars (1d / 7d / 14d) —
+# autocorrelation. We sweep block sizes of 3, 21, 42 bars (1d / 7d / 14d)
 # and check whether the placebo conclusion changes with block length.
 
 # %%
@@ -534,7 +536,7 @@ print(
     f"verdict: {'PASS' if headline['passes'] else 'CAUTION'}"
 )
 print(
-    "Compare to the shorter 3-bar block size — if the verdict moves from "
+    "Compare to the shorter 3-bar block size; if the verdict moves from "
     "PASS to CAUTION at the longer block sizes, short-block placebo was "
     "under-stating the autocorrelation null."
 )
@@ -556,7 +558,7 @@ fig.add_trace(
         x=T[sample_idx],
         y=Y[sample_idx],
         mode="markers",
-        marker=dict(size=3, opacity=0.3),
+        marker=dict(size=3, opacity=0.3, color=COLORS["blue"]),
         name="Raw",
     ),
     row=1,
@@ -573,7 +575,7 @@ if valid_res.sum() > 100:
             x=T_res[sample_res_idx],
             y=Y_res[sample_res_idx],
             mode="markers",
-            marker=dict(size=3, opacity=0.3, color="orange"),
+            marker=dict(size=3, opacity=0.3, color=COLORS["amber"]),
             name="Residualized",
         ),
         row=1,
@@ -588,7 +590,7 @@ fig.add_trace(
         x=x_range,
         y=naive_effect * x_range,
         mode="lines",
-        line=dict(color="red", width=2),
+        line=dict(color=COLORS["negative"], width=2),
         name=f"Naive: {naive_effect:.4f}",
     ),
     row=1,
@@ -602,17 +604,24 @@ if valid_res.sum() > 100:
             x=x_range_res,
             y=dml_effect * x_range_res,
             mode="lines",
-            line=dict(color="red", width=2),
+            line=dict(color=COLORS["negative"], width=2),
             name=f"DML: {dml_effect:.4f}",
         ),
         row=1,
         col=2,
     )
 
+fig.update_xaxes(title_text="Premium z-score (treatment)", row=1, col=1)
+fig.update_yaxes(title_text="Forward 8h return", row=1, col=1)
+fig.update_xaxes(title_text="Residualized premium (T_res)", row=1, col=2)
+fig.update_yaxes(title_text="Residualized return (Y_res)", row=1, col=2)
 fig.update_layout(
-    height=420,
-    title_text="DML reveals a slightly more negative premium-return slope, but HAC inference still overlaps zero",
-    margin=dict(t=80, b=60, l=60, r=40),
+    height=440,
+    title_text=(
+        "DML slightly steepens the negative premium-return slope,<br>"
+        "but HAC inference still overlaps zero"
+    ),
+    margin=dict(t=90, b=70, l=70, r=40),
 )
 fig.show()
 
@@ -624,15 +633,17 @@ fig2.add_trace(
         x=["Low Vol", "High Vol", "Overall"],
         y=[effect_low, effect_high, dml_effect],
         error_y=dict(type="data", array=[1.96 * se_low_hac, 1.96 * se_high_hac, 1.96 * dml_se_hac]),
-        marker_color=["steelblue", "coral", "gray"],
+        marker_color=[COLORS["blue"], COLORS["amber"], COLORS["neutral"]],
     )
 )
 fig2.update_layout(
-    title="Premium-index causal effect is indistinguishable from zero in every volatility regime",
+    title=(
+        "Premium-index causal effect is indistinguishable from zero<br>in every volatility regime"
+    ),
     xaxis_title="Volatility regime",
     yaxis_title="Causal effect (unit return per unit premium-index)",
-    height=420,
-    margin=dict(t=80, b=60, l=80, r=40),
+    height=440,
+    margin=dict(t=90, b=60, l=80, r=40),
 )
 fig2.show()
 
@@ -642,7 +653,7 @@ se_inflation_naive = se_naive_hac / se_naive_iid
 se_inflation_dml = dml_se_hac / dml_se_iid
 regime_ratio = effect_high / effect_low if effect_low != 0 else np.nan
 
-print(f"HAC/IID SE inflation — naive: {se_inflation_naive:.1f}x, DML: {se_inflation_dml:.1f}x")
+print(f"HAC/IID SE inflation, naive: {se_inflation_naive:.1f}x, DML: {se_inflation_dml:.1f}x")
 print(f"Confounding bias (naive vs DML): {bias_pct:+.1f}%")
 print(f"Regime effect ratio (high/low vol): {regime_ratio:.2f}x")
 
@@ -660,7 +671,7 @@ print(f"Regime effect ratio (high/low vol): {regime_ratio:.2f}x")
 # 3. **No regime heterogeneity in this sample**: regime stratification does not
 #    rescue the premium-return effect. Both the low- and high-volatility subgroup
 #    ATEs are statistically indistinguishable from zero, and the high-minus-low
-#    difference is not significant — the regime story does not survive the data.
+#    difference is not significant; the regime story does not survive the data.
 #
 # 4. **Refutation robustness**: Block permutation (preserving autocorrelation
 #    structure) provides a more conservative null distribution than random permutation.
@@ -673,10 +684,10 @@ print(f"Regime effect ratio (high/low vol): {regime_ratio:.2f}x")
 # %%
 # Consolidated results table
 summary_rows = [
-    ("Naive OLS", naive_effect, se_naive_hac, t_stat_naive, "—"),
+    ("Naive OLS", naive_effect, se_naive_hac, t_stat_naive, "n/a"),
     ("DML (overall)", dml_effect, dml_se_hac, dml_t_stat, f"{bias_pct:+.1f}%"),
-    ("DML (low vol)", effect_low, se_low_hac, t_low, "—"),
-    ("DML (high vol)", effect_high, se_high_hac, t_high, "—"),
+    ("DML (low vol)", effect_low, se_low_hac, t_low, "n/a"),
+    ("DML (high vol)", effect_high, se_high_hac, t_high, "n/a"),
 ]
 
 summary_df = pl.DataFrame(

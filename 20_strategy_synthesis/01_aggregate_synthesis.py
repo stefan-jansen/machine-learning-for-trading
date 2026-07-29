@@ -49,7 +49,7 @@ from case_studies.utils.benchmark import load_benchmark_returns
 from case_studies.utils.strategy_analysis import compute_cost_bps
 from utils.paths import get_case_study_dir, get_chapter_dir
 
-# %% tags=["parameters"]
+# %%
 MAX_SYMBOLS = 0
 # When non-empty, restricts the cross-CS iteration to the given subset.
 # Used by the per-CS pipeline driver to populate `backtest_paired_metrics`
@@ -207,17 +207,19 @@ from holdout import LABEL_RESTRICTIONS as _CLUSTER_LABEL_RESTRICTIONS  # noqa: E
 # have no entry here and skip the filter altogether.
 _RUNG3_PREDICATE = (pl.col("universe_filter") == "liquid") & pl.col("exit_at_max_days").is_null()
 
-# NASDAQ-100 carrier pin (Narrative B). The deployed strategy is the
-# cost-feasible **ensemble** slot design (10 slots / 8h hold / 0.90 entry),
-# validation Sharpe +1.13 / holdout +0.53. A `universe_filter=='cost_feasible'`
-# filter alone would pick the linear 5-slot config (validation +2.11) — the
-# in-sample star that collapses out of sample to holdout −0.21, the §20.4
-# cautionary example. Pinning to `family=='ensemble'` selects the stability
-# carrier deterministically (the ensemble's eqw rows all sit below its slot
-# row), encoding the deliberate stability choice rather than the validation
-# maximum.
-_NASDAQ_PREDICATE = (pl.col("universe_filter") == "cost_feasible") & (
-    pl.col("family") == "ensemble"
+# NASDAQ-100 carrier pin. The cost-feasible **ensemble** slot design was fixed
+# before holdout scoring as diversification under validation selection
+# uncertainty. Corrected validation Sharpe is +1.348 and sealed-holdout Sharpe
+# is +0.411; both confidence intervals straddle zero. Pin the exact corrected
+# validation row so the reader path fails closed instead of selecting a
+# historical family sibling. The corrected linear holdout is a comparator only
+# and is ineligible for reselection.
+_NASDAQ_ACTIVE_VAL_HASH = "9d111089aa27"
+_NASDAQ_ACTIVE_HOLDOUT_HASH = "eb3da38446fe"
+_NASDAQ_PREDICATE = (
+    (pl.col("universe_filter") == "cost_feasible")
+    & (pl.col("family") == "ensemble")
+    & (pl.col("backtest_hash") == _NASDAQ_ACTIVE_VAL_HASH)
 )
 
 _CLUSTER_RUNG_RESTRICTIONS: dict[str, dict[str, object]] = {
@@ -321,7 +323,7 @@ def _progression_for(
 _STAGES_NOT_APPLICABLE: dict[str, set[str]] = {
     "sp500_options": {"costs", "risk"},
     "us_firm_characteristics": {"risk"},
-    "nasdaq100_microstructure": {"allocation"},
+    "nasdaq100_microstructure": {"allocation", "costs", "risk"},
 }
 
 # Per-CS rationale strings for `not_applicable_reason` fields written into
@@ -336,6 +338,12 @@ _STAGE_NA_REASONS: dict[tuple[str, str], str] = {
     ),
     ("nasdaq100_microstructure", "allocation"): (
         "carrier is a signal-stage slot strategy; the slot mechanism is the sizing rule"
+    ),
+    ("nasdaq100_microstructure", "costs"): (
+        "timing-corrected broad carrier cost grid deferred to v3.1"
+    ),
+    ("nasdaq100_microstructure", "risk"): (
+        "timing-corrected broad carrier risk grid deferred to v3.1"
     ),
 }
 
@@ -692,6 +700,7 @@ def build_backtest_rows():
 
 # %%
 bt_rows = build_backtest_rows()
+
 # %%
 bt_df = pl.DataFrame(bt_rows)
 print("\nPipeline Comparison:")
@@ -713,8 +722,9 @@ print(
 # ETFs progresses 0.89 → 1.03 → 1.08 → 1.21 across signal → allocation →
 # cost_sensitivity → risk_overlay, with each stage adding incremental Sharpe
 # for that case study. Of the six case studies whose val rank-1 lands at the
-# risk-overlay stage, every managed Sharpe exceeds 1 — from NASDAQ-100's 1.06
-# up to Crypto's 2.57 — and CME Futures lifts to 1.36.
+# risk-overlay stage, every managed Sharpe exceeds 1. NASDAQ-100 is excluded
+# from that comparison in v3.0 because its timing-corrected broad cost and risk
+# grids are deferred to v3.1.
 
 # %% [markdown]
 # ## Paired-Bootstrap Comparison vs Equal-Weight Benchmark
@@ -818,7 +828,6 @@ def _aligned_returns(cs: str, h: str) -> pl.DataFrame | None:
 # %%
 import numpy as np
 
-from case_studies.utils.registry.registration import register_paired_metrics
 from case_studies.utils.uncertainty import (
     SIGNAL_BASELINE_BY_CASE_STUDY,
     compute_independent_diff_uncertainty,
@@ -942,14 +951,6 @@ for cs, explorer in explorers.items():
     # Side-artifact benchmark — deterministic across (cs, label), no
     # universe/rung ambiguity, no fallback-by-recency.
     benchmark_kind = f"{SIGNAL_BASELINE_BY_CASE_STUDY.get(cs, 'equal_weight')}_side_artifact"
-    register_paired_metrics(
-        cs,
-        leader_hash,
-        benchmark_hash,
-        paired,
-        benchmark_kind=benchmark_kind,
-        periods_per_year=ppy,
-    )
     paired_rows.append(
         {
             "case_study": DISPLAY_NAMES.get(cs, cs),
@@ -1404,7 +1405,7 @@ def _populate_pair(
     disjoint_windows: bool = False,
     benchmark_label: str | None = None,
 ):
-    """Compute and register one paired-metric row. Idempotent UPSERT.
+    """Compute one paired-metric row without mutating a case-study registry.
 
     With ``disjoint_windows=True`` (val→holdout decay), each side is
     bootstrapped independently over its full window and the difference
@@ -1482,14 +1483,6 @@ def _populate_pair(
             "benchmark_label": benchmark_label if benchmark_label is not None else label,
             "skip": "uncertainty_empty",
         }
-    register_paired_metrics(
-        cs,
-        challenger_hash,
-        benchmark_hash,
-        paired,
-        benchmark_kind=benchmark_kind,
-        periods_per_year=ppy,
-    )
     # For the disjoint path, paired carries n_c/n_b (post-coerce per-side
     # sizes); use min(n_c, n_b) so n_overlap reflects what the bootstrap
     # actually used, not the pre-coerce min from the populator. For the
@@ -1954,6 +1947,9 @@ def query_holdout_rows():
                     "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?"
                 )
                 params.append(rung["exit_at_max_days"])
+        if cs == "nasdaq100_microstructure":
+            clauses.append("b.backtest_hash = ?")
+            params.append(_NASDAQ_ACTIVE_HOLDOUT_HASH)
         # Pin the holdout pick to val rank-1's *full* strategy spec (signal
         # + allocation + risk) so the val/holdout comparison reads the same
         # full pipeline on both sides. Without this constraint, MAX(sharpe)
@@ -2034,6 +2030,7 @@ def query_holdout_rows():
 
 # %%
 holdout_rows = query_holdout_rows()
+
 # %%
 holdout_df = pl.DataFrame(holdout_rows)
 if not holdout_df.is_empty():
@@ -2045,7 +2042,7 @@ if not holdout_df.is_empty():
 # %% [markdown]
 # Six of nine holdout backtests are positive: US Firms (+1.77), CME Futures
 # (+1.11), ETFs (+1.00), sp500_options Rung-3 HTM+liquid (+0.97), NASDAQ-100
-# (+0.53), and FX Pairs (+0.19). The three negative holdouts are S&P 500
+# (+0.41), and FX Pairs (+0.19). The three negative holdouts are S&P 500
 # Eq+Opt (-0.73), US Equities Panel (-0.49), and Crypto Perps (-0.13). Holdout
 # IC is positive on five case studies (US Firms 0.048, CME 0.047, ETFs 0.046,
 # S&P Eq+Opt 0.036, NASDAQ-100 0.010) and negative on four (Crypto -0.029,
@@ -2267,6 +2264,7 @@ def build_variant_rows():
 
 # %%
 variant_rows = build_variant_rows()
+
 # %%
 variant_df = pl.DataFrame(variant_rows)
 print(f"\n=== Variant Analysis: {len(variant_df)} variants ===")

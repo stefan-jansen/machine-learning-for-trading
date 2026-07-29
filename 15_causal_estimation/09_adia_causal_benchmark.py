@@ -16,7 +16,7 @@
 # %% [markdown]
 # # Causal Discovery Under a Simulator: Lessons from the ADIA Lab Challenge
 #
-# **Chapter 15: Causal Estimation with ML**
+# **Chapter 15: Causal Machine Learning**
 # **Docker image**: `ml4t`
 #
 # This notebook explores the **ADIA Lab Causal Discovery Challenge** (Olivetti et al., 2026)
@@ -26,7 +26,7 @@
 # **The Key Insight**: ADIA is best interpreted as a benchmark for **amortized inference
 # under a known simulator family**, not as evidence that "AI can discover causal structure"
 # in the usual scientific sense. Supervised models won because they learned the simulator's
-# mapping from dependence patterns to labels—not because they discovered causality.
+# mapping from dependence patterns to labels, not because they discovered causality.
 #
 # **What ADIA Shows**:
 # - If you have many labeled dataset–DAG pairs from the same data-generating process,
@@ -43,29 +43,28 @@
 # - LO3: Apply discovery outputs as hypothesis generators, not final answers
 # - LO4: Integrate causal proposals into a finance-appropriate validation pipeline
 #
-# **Book Reference**: Chapter 15, Section 15.5 (Time Series Causal Discovery)
+# **Book Reference**: Chapter 15, Section 15.6 (Causal Discovery from Observational Data)
 #
-# **Prerequisites**: [`07_tigramite_time_series`](07_tigramite_time_series.ipynb) and
-# [`08_neural_causal_discovery`](08_neural_causal_discovery.ipynb) for discovery methods
+# **Prerequisites**: `07_tigramite_time_series` and `08_neural_causal_discovery`
 
 # %% [markdown]
 # ## 1. Setup and Configuration
 
 # %%
-"""Causal Discovery Under a Simulator — lessons from the ADIA Lab Challenge on synthetic benchmarks."""
+"""Causal discovery under a simulator: lessons from the ADIA Lab Challenge."""
 
 import warnings
 
 import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
+import polars as pl
+from IPython.display import Markdown, display
 from scipy import stats
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix
 from sklearn.model_selection import StratifiedGroupKFold
-from sklearn.preprocessing import StandardScaler
 
-import utils  # noqa: F401
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
 
@@ -79,8 +78,6 @@ N_ESTIMATORS = 500
 # %%
 set_global_seeds(SEED)
 
-print("ADIA Causal Discovery Benchmark")
-
 # %% [markdown]
 # ## 2. What ADIA Actually Measures (and What It Doesn't)
 #
@@ -90,7 +87,7 @@ print("ADIA Causal Discovery Benchmark")
 # from real-world causal discovery:
 #
 # 1. **Many labeled dataset–DAG pairs** from the same data-generating process
-# 2. **Task is role classification** (8 categories around X,Y), not full DAG recovery
+# 2. **Scoring reduces predicted DAGs to role classification** (8 categories around X and Y)
 # 3. **Synthetic data** with no unmeasured confounding, measurement error, or nonstationarity
 #
 # This design turns "causal discovery" into **high-dimensional pattern recognition**:
@@ -102,11 +99,11 @@ print("ADIA Causal Discovery Benchmark")
 # Supervised models dominate because:
 #
 # 1. **Training labels remove the identifiability bottleneck**: The learner doesn't
-#    need to solve identifiability—it learns any stable statistical signature
+#    need to solve identifiability; it learns any stable statistical signature
 # 2. **The task is narrower**: Role classification in a 1-hop neighborhood is easier
 #    than reconstructing an entire DAG up to Markov equivalence
 # 3. **Hybrid entries used classical outputs as features**: PC/NOTEARS outputs become
-#    inputs to boosted trees—classical discovery as feature engineering
+#    inputs to boosted trees as classical discovery feature engineering
 #
 # ### The "Varsortability" Critique
 #
@@ -144,7 +141,7 @@ print("ADIA Causal Discovery Benchmark")
 # | **Consequence of Y** | Direct child of Y | Y → Z |
 #
 # **Why This Is Hard**: Given only observational data, distinguishing these categories
-# requires inferring the underlying causal structure—exactly what traditional
+# requires inferring the underlying causal structure, which is exactly what traditional
 # algorithms like PC and NOTEARS struggle with.
 
 # %%
@@ -154,25 +151,21 @@ CAUSAL_CATEGORIES = {
     1: "Collider",  # Common effect of X and Y
     2: "Mediator",  # On causal path X → M → Y
     3: "Independent",  # No causal relationship
-    4: "Cause_of_X",  # Direct cause of treatment
-    5: "Consequence_of_X",  # Direct effect of treatment (not Y)
-    6: "Cause_of_Y",  # Direct cause of outcome (not X)
-    7: "Consequence_of_Y",  # Direct effect of outcome
+    4: "Cause of X",  # Direct cause of treatment
+    5: "Consequence of X",  # Direct effect of treatment (not Y)
+    6: "Cause of Y",  # Direct cause of outcome (not X)
+    7: "Consequence of Y",  # Direct effect of outcome
 }
 
-print("Causal Categories for Classification:")
-for idx, name in CAUSAL_CATEGORIES.items():
-    print(f"  {idx}: {name}")
-
 # %% [markdown]
-# ## 3. Generate Synthetic Training Data with Known DAGs
+# ## 4. Generate Synthetic Training Data with Known DAGs
 #
 # The ADIA challenge provided 25,000 training datasets with ground-truth DAGs.
 # We generate our own synthetic data to demonstrate the methodology.
 #
 # **Data Generation Protocol**:
-# 1. Generate random DAGs with 5-8 variables
-# 2. Designate treatment (X) and outcome (Y) variables
+# 1. Generate random DAGs with 5-8 variables and randomized topological order
+# 2. Designate treatment (X) and outcome (Y), enforcing the challenge's X → Y edge
 # 3. Classify each other variable into one of 8 categories
 # 4. Generate observational data from the DAG
 # 5. Create labeled training examples
@@ -181,19 +174,20 @@ for idx, name in CAUSAL_CATEGORIES.items():
 # %% [markdown]
 # ### Generate Random DAGs
 #
-# Generate random DAG adjacency matrices using topological ordering to
-# ensure acyclicity: edges can only go from lower-indexed to higher-indexed nodes.
+# A random topological permutation guarantees acyclicity without letting a variable's
+# numeric column position reveal whether it is upstream or downstream.
 
 
 # %%
-def generate_random_dag(n_vars: int, edge_prob: float = 0.3) -> np.ndarray:
-    """Generate a random DAG adjacency matrix (lower → higher index only)."""
+def generate_random_dag(n_vars: int, edge_prob: float = 0.3) -> tuple[np.ndarray, np.ndarray]:
+    """Generate a random DAG and return its hidden topological order."""
+    order = np.random.permutation(n_vars)
     W = np.zeros((n_vars, n_vars))
-    for i in range(n_vars):
-        for j in range(i + 1, n_vars):
+    for source_pos in range(n_vars):
+        for target_pos in range(source_pos + 1, n_vars):
             if np.random.random() < edge_prob:
-                W[i, j] = 1
-    return W
+                W[order[source_pos], order[target_pos]] = 1
+    return W, order
 
 
 # %% [markdown]
@@ -236,19 +230,22 @@ def classify_variable(W: np.ndarray, x_idx: int, y_idx: int, z_idx: int) -> int:
 # %% [markdown]
 # ### Generate Data from DAG
 #
-# Generate observational data from a linear Gaussian DAG in topological order.
+# Generate observational data from a linear Gaussian DAG in its hidden topological order.
 
 
 # %%
 def generate_data_from_dag(
-    W: np.ndarray, n_samples: int = 1000, noise_scale: float = 1.0
+    W: np.ndarray,
+    order: np.ndarray,
+    n_samples: int = 1000,
+    noise_scale: float = 1.0,
 ) -> np.ndarray:
     """Generate observational data from a linear Gaussian DAG."""
     n_vars = W.shape[0]
     W_weighted = W * np.random.uniform(0.5, 1.5, size=W.shape)
 
     X = np.zeros((n_samples, n_vars))
-    for j in range(n_vars):
+    for j in order:
         parents = np.where(W_weighted[:, j] > 0)[0]
         noise = np.random.randn(n_samples) * noise_scale
         if len(parents) == 0:
@@ -285,22 +282,14 @@ def generate_training_dataset(
     labels = []
     metadata = []
 
-    for dataset_id in range(n_datasets):
-        # Random number of variables
+    for _ in range(n_datasets):
         n_vars = np.random.randint(min_vars, max_vars + 1)
+        W, order = generate_random_dag(n_vars, edge_prob=0.35)
+        x_pos, y_pos = sorted(np.random.choice(n_vars, size=2, replace=False))
+        x_idx, y_idx = order[x_pos], order[y_pos]
+        W[x_idx, y_idx] = 1
+        X = generate_data_from_dag(W, order, n_samples)
 
-        # Generate DAG
-        W = generate_random_dag(n_vars, edge_prob=0.35)
-
-        # Ensure at least one path exists by potentially adding edges
-        # Pick X and Y such that X has lower index (can cause Y)
-        x_idx = np.random.randint(0, n_vars - 1)
-        y_idx = np.random.randint(x_idx + 1, n_vars)
-
-        # Generate data
-        X = generate_data_from_dag(W, n_samples)
-
-        # Classify each variable (except X and Y)
         dataset_labels = []
         for z_idx in range(n_vars):
             if z_idx in (x_idx, y_idx):
@@ -316,8 +305,6 @@ def generate_training_dataset(
 
 
 # %%
-print("\n=== GENERATING SYNTHETIC TRAINING DATA ===\n")
-
 datasets, labels, metadata = generate_training_dataset(
     n_datasets=N_DATASETS,
     min_vars=5,
@@ -325,32 +312,25 @@ datasets, labels, metadata = generate_training_dataset(
     n_samples=N_SAMPLES,
 )
 
-# Count category distribution
-all_labels = []
-for label_list in labels:
-    for _, cat in label_list:
-        all_labels.append(cat)
+all_labels = [category for label_list in labels for _, category in label_list]
+label_counts = np.bincount(all_labels, minlength=len(CAUSAL_CATEGORIES))
 
-label_counts = pd.Series(all_labels).value_counts().sort_index()
-print("Category Distribution in Training Data:")
-for cat_idx, count in label_counts.items():
-    print(f"  {CAUSAL_CATEGORIES[cat_idx]}: {count} ({count / len(all_labels):.1%})")
-
-print(f"\nTotal datasets: {len(datasets)}")
-print(f"Total labeled examples: {len(all_labels)}")
+print(f"Generated {len(datasets):,} DAG datasets with {len(all_labels):,} labeled nodes")
+print(f"Challenge invariant X -> Y satisfied: {all(W[x, y] == 1 for W, x, y in metadata)}")
 
 # %% [markdown]
-# ## 4. Feature Engineering: The Winning Approach
+# ## 5. Feature Engineering: Statistical Signatures of Causal Roles
 #
-# The 4th place solution (72.88% accuracy) used **923 engineered features** from:
+# Strong competition entries combined engineered statistical features and learned
+# representations. This compact surrogate uses four feature families:
 #
 # 1. **Correlation Statistics**: Pearson, Spearman, partial correlations
 # 2. **Conditional Independence**: CI test p-values, conditional correlations
-# 3. **Causal Discovery Outputs**: Use traditional algorithm outputs as features
-# 4. **Graph Properties**: In-degree, out-degree estimates
+# 3. **Regression Diagnostics**: directional coefficients and fit statistics
+# 4. **Distribution Shape**: variance, skewness, and kurtosis
 #
-# **Key Insight**: Traditional algorithms (PC, NOTEARS) achieve ~40% on their own,
-# but their *outputs* become valuable *features* for a supervised classifier.
+# Numeric column positions are deliberately excluded. Because the simulator uses a randomized
+# topological order, an identifier cannot reveal whether a variable is upstream or downstream.
 
 
 # %%
@@ -376,7 +356,7 @@ def compute_partial_correlation(data: np.ndarray, i: int, j: int, conditioning_s
 
 # %%
 def ci_test_pvalue(data: np.ndarray, i: int, j: int, conditioning_set: list) -> float:
-    """CI test using partial correlation + Fisher's z. Returns p-value for H0: i _|_ j | S."""
+    """Return the Fisher-z p-value for conditional independence."""
     n, k = len(data), len(conditioning_set)
     partial_corr = compute_partial_correlation(data, i, j, conditioning_set)
 
@@ -419,8 +399,7 @@ def _extract_correlation_features(data, x_idx, y_idx, z_idx):
 # %% [markdown]
 # ### Regression and Statistical Features
 #
-# Regression coefficients for directionality, plus higher-order statistics and
-# topological hints from variable ordering.
+# Regression coefficients for directionality plus higher-order distribution statistics.
 
 
 # %%
@@ -428,7 +407,6 @@ def extract_features(data: np.ndarray, x_idx: int, y_idx: int, z_idx: int) -> di
     """Extract all features for classifying variable Z relative to X and Y."""
     from sklearn.linear_model import LinearRegression
 
-    n_vars = data.shape[1]
     features = _extract_correlation_features(data, x_idx, y_idx, z_idx)
 
     # Regression coefficients (direction indicators)
@@ -457,30 +435,19 @@ def extract_features(data: np.ndarray, x_idx: int, y_idx: int, z_idx: int) -> di
     features["spearman_z_x"] = stats.spearmanr(data[:, z_idx], data[:, x_idx])[0]
     features["spearman_z_y"] = stats.spearmanr(data[:, z_idx], data[:, y_idx])[0]
 
-    # Position-based (topological hints)
-    features["z_idx_normalized"] = z_idx / n_vars
-    features["x_idx_normalized"] = x_idx / n_vars
-    features["y_idx_normalized"] = y_idx / n_vars
-    features["z_before_x"] = float(z_idx < x_idx)
-    features["z_between_x_y"] = float(x_idx < z_idx < y_idx)
-    features["z_after_y"] = float(z_idx > y_idx)
-
     for key, value in features.items():
-        if np.isnan(value):
+        if not np.isfinite(value):
             features[key] = 0.0
     return features
 
 
 # %%
-print("\n=== EXTRACTING FEATURES ===\n")
-
-# Build feature matrix and labels
 all_features = []
 all_targets = []
-all_dataset_ids = []  # For grouped CV
+all_dataset_ids = []
 
 for dataset_id, (data, label_list, (W, x_idx, y_idx)) in enumerate(
-    zip(datasets, labels, metadata, strict=False)
+    zip(datasets, labels, metadata, strict=True)
 ):
     for z_idx, category in label_list:
         features = extract_features(data, x_idx, y_idx, z_idx)
@@ -488,36 +455,35 @@ for dataset_id, (data, label_list, (W, x_idx, y_idx)) in enumerate(
         all_targets.append(category)
         all_dataset_ids.append(dataset_id)
 
-    # Progress indicator
     if (dataset_id + 1) % 500 == 0:
         print(f"  Processed {dataset_id + 1}/{len(datasets)} datasets")
 
-# Convert to arrays
-feature_df = pd.DataFrame(all_features)
-X_train = feature_df.values
+feature_df = pl.DataFrame(all_features)
+X_train = feature_df.to_numpy()
 y_train = np.array(all_targets)
 groups = np.array(all_dataset_ids)
 
 print(f"\nFeature matrix shape: {X_train.shape}")
 print(f"Number of features: {feature_df.shape[1]}")
-print(f"Feature names: {list(feature_df.columns)[:10]}...")
 
 # %% [markdown]
-# ## 5. Baseline: PC Algorithm Performance
+# ## 6. Baseline: Conditional-Independence Heuristic
 #
-# Traditional causal discovery algorithms like PC achieved ~37-40% balanced accuracy
-# on the ADIA benchmark. We implement a simplified baseline to demonstrate this.
+# Traditional constraint-based baselines achieved approximately 40% balanced accuracy in the
+# official challenge. The compact rule below is not the PC algorithm: it maps marginal and
+# conditional-independence tests directly to the eight roles. It provides an in-notebook baseline
+# on exactly the same simulated datasets as the supervised model.
 
 
 # %%
-def pc_algorithm_baseline(data: np.ndarray, x_idx: int, y_idx: int, z_idx: int) -> int:
-    """Simplified PC-algorithm classification using CI test heuristics."""
+def ci_heuristic_baseline(features: dict[str, float]) -> int:
+    """Map conditional-independence tests to one of the eight causal roles."""
     alpha = 0.05
-    p_zx = ci_test_pvalue(data, z_idx, x_idx, [])
-    p_zy = ci_test_pvalue(data, z_idx, y_idx, [])
-    p_zx_given_y = ci_test_pvalue(data, z_idx, x_idx, [y_idx])
-    p_zy_given_x = ci_test_pvalue(data, z_idx, y_idx, [x_idx])
-    p_xy_given_z = ci_test_pvalue(data, x_idx, y_idx, [z_idx])
+    p_zx = features["ci_pvalue_z_x"]
+    p_zy = features["ci_pvalue_z_y"]
+    p_zx_given_y = features["ci_pvalue_z_x_given_y"]
+    p_zy_given_x = features["ci_pvalue_z_y_given_x"]
+    p_xy_given_z = features["ci_pvalue_x_y_given_z"]
 
     if p_zx > alpha and p_zy > alpha:
         return 3  # Independent
@@ -538,65 +504,38 @@ def pc_algorithm_baseline(data: np.ndarray, x_idx: int, y_idx: int, z_idx: int) 
 
 
 # %%
-print("\n=== PC ALGORITHM BASELINE ===\n")
+baseline_predictions = [ci_heuristic_baseline(features) for features in all_features]
+baseline_true_labels = all_targets
 
-# Evaluate PC baseline on a subset
-N_EVAL = min(500, len(datasets))
-pc_predictions = []
-pc_true_labels = []
-
-for dataset_id in range(N_EVAL):
-    data = datasets[dataset_id]
-    W, x_idx, y_idx = metadata[dataset_id]
-
-    for z_idx, true_category in labels[dataset_id]:
-        pred = pc_algorithm_baseline(data, x_idx, y_idx, z_idx)
-        pc_predictions.append(pred)
-        pc_true_labels.append(true_category)
-
-pc_accuracy = balanced_accuracy_score(pc_true_labels, pc_predictions)
-print(f"PC Algorithm Balanced Accuracy: {pc_accuracy:.1%}")
-print("(ADIA benchmark PC baseline: 37.79%)")
-
-# Per-class accuracy
-print("\nPer-Category Accuracy (PC Baseline):")
-for cat_idx, cat_name in CAUSAL_CATEGORIES.items():
-    mask = np.array(pc_true_labels) == cat_idx
-    if mask.sum() > 0:
-        acc = (np.array(pc_predictions)[mask] == cat_idx).mean()
-        print(f"  {cat_name}: {acc:.1%}")
+baseline_accuracy = balanced_accuracy_score(baseline_true_labels, baseline_predictions)
+print(f"CI heuristic balanced accuracy: {baseline_accuracy:.1%}")
 
 # %% [markdown]
-# ## 6. Supervised Learning: LightGBM Classifier
+# ## 7. Supervised Learning: Group-Isolated LightGBM
 #
 # The winning solutions used supervised classifiers trained on the 25,000 datasets
-# with known ground truth. We use LightGBM following the 4th place solution approach.
+# with known ground truth. Here, grouped cross-validation keeps every node from a simulated DAG
+# in one fold. LightGBM operates on the unscaled features, so no preprocessing state can cross a
+# fold boundary. Deterministic CPU training fixes the histogram layout, thread count, and all
+# relevant seeds so repeated runs in the pinned environment reproduce the fitted models exactly.
 
 
 # %%
 import lightgbm as lgb
 
 # %%
-print("\n=== TRAINING SUPERVISED CLASSIFIER ===\n")
-
-# Standardize features
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X_train)
-
-# StratifiedGroupKFold: examples from same dataset stay in same fold
 cv = StratifiedGroupKFold(n_splits=N_SPLITS, shuffle=True, random_state=SEED)
-
 n_estimators = N_ESTIMATORS
 
 # %%
-# Training loop with out-of-fold predictions
 all_oof_preds = np.zeros(len(y_train), dtype=int)
-all_oof_probs = np.zeros((len(y_train), 8))
 fold_scores = []
+fold_importances = []
 
-for fold, (train_idx, val_idx) in enumerate(cv.split(X_scaled, y_train, groups)):
-    X_tr, X_val = X_scaled[train_idx], X_scaled[val_idx]
+for fold, (train_idx, val_idx) in enumerate(cv.split(X_train, y_train, groups)):
+    X_tr, X_val = X_train[train_idx], X_train[val_idx]
     y_tr, y_val = y_train[train_idx], y_train[val_idx]
+    assert not set(groups[train_idx]).intersection(groups[val_idx])
 
     model = lgb.LGBMClassifier(
         n_estimators=n_estimators,
@@ -605,104 +544,202 @@ for fold, (train_idx, val_idx) in enumerate(cv.split(X_scaled, y_train, groups))
         num_leaves=31,
         min_child_samples=20,
         subsample=0.8,
+        subsample_freq=1,
         colsample_bytree=0.8,
         random_state=SEED,
+        seed=SEED,
+        data_random_seed=SEED,
+        feature_fraction_seed=SEED,
+        bagging_seed=SEED,
+        drop_seed=SEED,
+        extra_seed=SEED,
+        objective_seed=SEED,
+        device_type="cpu",
+        deterministic=True,
+        force_col_wise=True,
+        n_jobs=1,
         verbose=-1,
         class_weight="balanced",
     )
 
     model.fit(X_tr, y_tr)
-    all_oof_preds[val_idx] = model.predict(X_val)
-    all_oof_probs[val_idx] = model.predict_proba(X_val)
-
-    fold_acc = balanced_accuracy_score(y_val, model.predict(X_val))
+    fold_predictions = model.predict(X_val)
+    all_oof_preds[val_idx] = fold_predictions
+    fold_acc = balanced_accuracy_score(y_val, fold_predictions)
     fold_scores.append(fold_acc)
+    gain = model.booster_.feature_importance(importance_type="gain")
+    fold_importances.append(gain / gain.sum())
     print(f"  Fold {fold + 1}: Balanced Accuracy = {fold_acc:.1%}")
 
 # %%
 oof_accuracy = balanced_accuracy_score(y_train, all_oof_preds)
 print(f"\nOverall OOF Balanced Accuracy: {oof_accuracy:.1%}")
-print(f"Mean +/- Std across folds: {np.mean(fold_scores):.1%} +/- {np.std(fold_scores):.1%}")
-print("\n(ADIA benchmark 4th place: 72.88%)")
-print("(ADIA benchmark winner: 76.70%)")
+print(f"Mean ± std across folds: {np.mean(fold_scores):.1%} ± {np.std(fold_scores):.1%}")
+print("ADIA winner (reported external benchmark): 76.70%")
 
 # %% [markdown]
-# ## 7. Model Analysis and Feature Importance
+# ## 8. Model Diagnostics
+#
+# Role-specific accuracy shows where supervised pattern recognition helps and where observational
+# equivalence remains difficult. The comparison uses identical generated datasets for both methods.
 
 # %%
-print("\n=== PER-CATEGORY ACCURACY COMPARISON ===\n")
-
 per_category_rows = []
-pc_true_arr = np.array(pc_true_labels)
-pc_pred_arr = np.array(pc_predictions)
+baseline_true_arr = np.array(baseline_true_labels)
+baseline_pred_arr = np.array(baseline_predictions)
 for cat_idx, cat_name in CAUSAL_CATEGORIES.items():
-    mask_pc = pc_true_arr == cat_idx
-    pc_acc = (pc_pred_arr[mask_pc] == cat_idx).mean() if mask_pc.sum() > 0 else 0.0
+    mask_baseline = baseline_true_arr == cat_idx
+    baseline_acc = (baseline_pred_arr[mask_baseline] == cat_idx).mean()
     mask_sup = y_train == cat_idx
-    sup_acc = (all_oof_preds[mask_sup] == cat_idx).mean() if mask_sup.sum() > 0 else 0.0
+    sup_acc = (all_oof_preds[mask_sup] == cat_idx).mean()
     per_category_rows.append(
         {
             "Category": cat_name,
-            "PC Baseline": pc_acc,
+            "CI heuristic": baseline_acc,
             "Supervised": sup_acc,
-            "Improvement": sup_acc - pc_acc,
+            "Improvement": sup_acc - baseline_acc,
         }
     )
 
-per_category_df = pd.DataFrame(per_category_rows).set_index("Category")
-per_category_df.style.format("{:.1%}")
+per_category_df = pl.DataFrame(per_category_rows)
 
 # %% [markdown]
-# ### Feature Importance
+# ### Fold-Stable Feature Importance
 #
-# Train a final model on all data to extract feature importances.
+# Gain importance can vary across fitted trees, so the chart reports the mean and standard deviation
+# across the five training folds rather than a single full-sample model.
 
 # %%
-final_model = lgb.LGBMClassifier(
-    n_estimators=n_estimators,
-    learning_rate=0.1,
-    max_depth=6,
-    random_state=SEED,
-    verbose=-1,
-    class_weight="balanced",
-)
-
-final_model.fit(X_scaled, y_train)
-
-importance_df = pd.DataFrame(
-    {"Feature": feature_df.columns, "Importance": final_model.feature_importances_}
-).sort_values("Importance", ascending=False)
-
-print("\nTop 15 Most Important Features:")
-importance_df.head(15)
+importance_array = np.vstack(fold_importances)
+importance_df = pl.DataFrame(
+    {
+        "Feature": feature_df.columns,
+        "Mean gain share": importance_array.mean(axis=0),
+        "Std gain share": importance_array.std(axis=0),
+    }
+).sort("Mean gain share", descending=True)
 
 # %% [markdown]
-# ## 8. Visualize Results
+# ## 9. Visual Evidence
 #
+# ### The Simulator Is Imbalanced
+#
+# Balanced accuracy is the appropriate score because independent nodes are much more frequent than
+# several directional roles. Raw accuracy would let the largest category dominate.
+
+# %%
+category_tick_labels = [
+    "Confounder",
+    "Collider",
+    "Mediator",
+    "Independent",
+    "Cause of X",
+    "Effect of X",
+    "Cause of Y",
+    "Effect of Y",
+]
+category_compact_labels = [
+    "Conf.",
+    "Coll.",
+    "Med.",
+    "Indep.",
+    "Cause X",
+    "Effect X",
+    "Cause Y",
+    "Effect Y",
+]
+category_shares = label_counts / label_counts.sum()
+largest_category = int(np.argmax(category_shares))
+
+fig = go.Figure(
+    go.Bar(
+        x=category_tick_labels,
+        y=category_shares,
+        marker_color=[
+            COLORS["amber"] if i == largest_category else COLORS["blue"]
+            for i in range(len(category_tick_labels))
+        ],
+        text=[f"{share:.1%}" for share in category_shares],
+        textposition="outside",
+    )
+)
+fig.update_layout(
+    title=(
+        f"{category_tick_labels[largest_category]} nodes make up "
+        f"{category_shares[largest_category]:.1%} of labeled roles"
+    ),
+    xaxis_title="Causal role",
+    yaxis_title="Share of labeled nodes",
+    yaxis=dict(range=[0, max(category_shares) * 1.18], tickformat=".0%"),
+    margin=dict(b=100),
+    showlegend=False,
+)
+fig.show()
+
+# %% [markdown]
+# ### Supervision Helps Across Roles
+#
+# Comparing each role on the same datasets reveals whether the aggregate gain is broad or driven by
+# one dominant class.
+
+# %%
+improved_count = int((per_category_df["Improvement"] > 0).sum())
+fig = go.Figure()
+for method, color in [("CI heuristic", COLORS["neutral"]), ("Supervised", COLORS["blue"])]:
+    fig.add_trace(
+        go.Bar(
+            x=category_compact_labels,
+            y=per_category_df[method].to_list(),
+            name=method,
+            marker_color=color,
+        )
+    )
+fig.update_layout(
+    title=f"Group-isolated supervision improves {improved_count} of 8 causal roles",
+    xaxis_title="Causal role",
+    yaxis_title="Role accuracy",
+    yaxis=dict(range=[0, 1], tickformat=".0%"),
+    barmode="group",
+    margin=dict(b=100, t=90),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+)
+fig.show()
+
+# %% [markdown]
 # ### Confusion Matrix
+#
+# Row-normalized rates expose which roles remain observationally difficult after supervised
+# training; hover text retains the underlying counts.
 
 # %%
 conf_matrix = confusion_matrix(y_train, all_oof_preds)
 conf_matrix_normalized = conf_matrix / conf_matrix.sum(axis=1, keepdims=True)
 
-cat_names = [CAUSAL_CATEGORIES[i] for i in range(8)]
 fig = go.Figure(
     data=go.Heatmap(
         z=conf_matrix_normalized,
-        x=cat_names,
-        y=cat_names,
-        colorscale="Blues",
-        text=conf_matrix,
-        texttemplate="%{text}",
-        hovertemplate="True: %{y}<br>Predicted: %{x}<br>Count: %{text}<br>Rate: %{z:.1%}<extra></extra>",
+        x=category_tick_labels,
+        y=category_tick_labels,
+        colorscale=[
+            [0.0, COLORS["silver"]],
+            [0.5, COLORS["slate"]],
+            [1.0, COLORS["blue"]],
+        ],
+        zmin=0,
+        zmax=1,
+        customdata=conf_matrix,
+        texttemplate="%{z:.0%}",
+        hovertemplate=(
+            "True: %{y}<br>Predicted: %{x}<br>Count: %{customdata}<br>Rate: %{z:.1%}<extra></extra>"
+        ),
     )
 )
 fig.update_layout(
-    title="Confusion Matrix: Supervised Causal Category Classification",
-    xaxis_title="Predicted Category",
-    yaxis_title="True Category",
-    height=500,
-    width=700,
+    title=f"Grouped cross-validation reaches {oof_accuracy:.1%} balanced accuracy",
+    xaxis_title="Predicted category",
+    yaxis_title="True category",
+    height=560,
+    margin=dict(l=115, b=100, t=90, r=60),
 )
 fig.show()
 
@@ -710,173 +747,114 @@ fig.show()
 # ### Feature Importance
 
 # %%
-top_features = importance_df.head(15)
+top_features = importance_df.head(12).sort("Mean gain share")
+top_feature_name = importance_df["Feature"][0].replace("_", " ")
+top_feature_labels = [name.replace("_", " ") for name in top_features["Feature"]]
 fig = go.Figure(
     data=go.Bar(
-        x=top_features["Importance"],
-        y=top_features["Feature"],
+        x=top_features["Mean gain share"].to_list(),
+        y=top_feature_labels,
         orientation="h",
-        marker_color="#1f77b4",
+        marker_color=COLORS["blue"],
+        error_x=dict(
+            type="data",
+            array=top_features["Std gain share"].to_list(),
+            color=COLORS["neutral"],
+        ),
     )
 )
 fig.update_layout(
-    title="Top 15 Features for Causal Category Classification",
-    xaxis_title="Importance Score",
+    title=f"{top_feature_name.title()} carries the most simulator-specific predictive gain",
+    xaxis_title="Share of LightGBM gain across folds",
     yaxis_title="Feature",
     height=500,
-    width=700,
-    yaxis=dict(autorange="reversed"),
+    xaxis=dict(tickformat=".0%"),
+    margin=dict(l=165, t=90),
 )
 fig.show()
 
 # %% [markdown]
 # ### Method Comparison
 #
-# Contrast our supervised approach against the PC baseline and ADIA competition results.
+# The first two bars share this notebook's simplified simulator. The final bar is the reported ADIA
+# winner and provides external context, not a like-for-like ranking.
 
 # %%
-methods_comparison = pd.DataFrame(
-    {
-        "Method": [
-            "PC Algorithm\n(Baseline)",
-            "Supervised\n(This Notebook)",
-            "ADIA 4th Place\n(LGBM)",
-            "ADIA Winner\n(CNN)",
-        ],
-        "Balanced Accuracy": [pc_accuracy, oof_accuracy, 0.7288, 0.7670],
-        "Type": ["Traditional", "Supervised", "Competition", "Competition"],
-    }
-)
+method_names = [
+    "Local CI heuristic",
+    "Local grouped-CV LightGBM",
+    "ADIA winner (reported)",
+]
+method_scores = [baseline_accuracy, oof_accuracy, 0.7670]
+method_colors = [COLORS["neutral"], COLORS["blue"], COLORS["amber"]]
 
-colors = {"Traditional": "#d62728", "Supervised": "#2ca02c", "Competition": "#1f77b4"}
-fig = go.Figure()
-for method_type in methods_comparison["Type"].unique():
-    mask = methods_comparison["Type"] == method_type
-    fig.add_trace(
-        go.Bar(
-            x=methods_comparison[mask]["Method"],
-            y=methods_comparison[mask]["Balanced Accuracy"],
-            name=method_type,
-            marker_color=colors[method_type],
-            text=methods_comparison[mask]["Balanced Accuracy"].apply(lambda x: f"{x:.1%}"),
-            textposition="outside",
-        )
+fig = go.Figure(
+    go.Bar(
+        x=method_names,
+        y=method_scores,
+        marker_color=method_colors,
+        text=[f"{score:.1%}" for score in method_scores],
+        textposition="outside",
     )
+)
 fig.update_layout(
-    title="Causal Discovery Method Comparison: Balanced Accuracy",
-    yaxis_title="Balanced Accuracy",
+    title=(
+        f"Supervision gains {oof_accuracy - baseline_accuracy:.0%} within the local simulator"
+        "<br><sup>The ADIA winner is external context, not a like-for-like comparison</sup>"
+    ),
+    xaxis_title="Method and benchmark",
+    yaxis_title="Balanced accuracy",
     yaxis=dict(range=[0, 1], tickformat=".0%"),
-    height=400,
-    showlegend=True,
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    showlegend=False,
 )
 fig.show()
 
 # %% [markdown]
-# ## 9. Key Takeaways: A Cautionary Example
+# ## 10. Results Reflection
 #
-# ### What ADIA Actually Demonstrates
-#
-# The ADIA Lab challenge supports a **conditional claim**:
-#
-# > **If** you can specify a data-generating family for which you can produce many
-# > labeled dataset–graph pairs, **then** supervised methods can outperform classical
-# > discovery on new samples from that same family.
-#
-# It does **not** support the stronger claim that observational data in the wild
-# is sufficient for reliable causal discovery.
-#
-# | Method Category | Balanced Accuracy | What It Shows |
-# |-----------------|-------------------|---------------|
-# | Traditional (PC, NOTEARS) | ~40% | Struggles even on clean synthetic data |
-# | Hybrid (classical as features) | ~74% | Classical outputs useful as inputs |
-# | Supervised (LGBM, CNN) | ~77% | Learns simulator's mapping, not causality |
-#
-# ### The "Amortized Inference" Framing
-#
-# The winning approaches are best viewed as **meta-models over a simulator**, not
-# plug-and-play tools for unknown real causal graphs. They learn:
-#
-# - Patterns specific to ADIA's synthetic DGP
-# - Mappings that may not transfer to real data
-# - Simulator quirks rather than universal causal principles
-#
-# ### Finance Translation: Proposal Generation, Not Truth
-#
-# There *is* one practical insight worth incorporating:
-#
-# **If you are willing to build a calibrated synthetic environment**, you can use it
-# to train amortized discovery models that produce **candidate proposals**—then
-# validate those proposals with domain constraints and out-of-sample checks.
-#
-# Discovery outputs might propose:
-# - Plausible confounders to control for
-# - Likely colliders to avoid conditioning on
-# - Candidate mediators to separate mechanism from spurious association
-#
-# But these proposals require your usual robustness pipeline:
-# - Walk-forward validation
-# - Regime splits
-# - Sensitivity analysis
-# - Placebo tests
-#
-# ### The Bottom Line
-#
-# ADIA reinforces—rather than weakens—the book's skepticism about causal discovery.
-# Treat discovery methods as **tools for reducing false discovery**, not as automatic
-# truth machines. The winning solutions learned a simulator, not causality.
+# The local score is an out-of-fold estimate for new datasets from this notebook's simulator, not
+# for real market data. The fold dispersion and weakest role make that scope visible.
 
 # %%
-print("\n" + "=" * 70)
-print("SUMMARY: ADIA AS A CAUTIONARY EXAMPLE")
-print("=" * 70)
-
-print(f"""
-METHODOLOGY COMPARISON (on synthetic data):
-  PC Algorithm (Traditional):     {pc_accuracy:.1%} balanced accuracy
-  Supervised Learning (LGBM):     {oof_accuracy:.1%} balanced accuracy
-
-ADIA COMPETITION RESULTS (Reference):
-  PC Algorithm (baseline):        37.79%
-  Supervised (CNN winner):        76.70%
-""")
-
-# %%
-print("""WHAT THIS SHOWS:
-  Supervised models learn the SIMULATOR'S mapping from dependence patterns
-  to role labels. This is amortized inference under a known DGP, not
-  general causal discovery.
-
-WHAT THIS DOES NOT SHOW:
-  - That these models transfer to real financial data
-  - That observational data alone is sufficient for causal discovery
-  - That synthetic benchmark performance predicts real-world performance
-
-BOTTOM LINE:
-  ADIA reinforces skepticism about causal discovery. Treat discovery
-  methods as hypothesis generators, not truth machines.
-""")
+weakest_row = per_category_df.sort("Supervised").row(0, named=True)
+display(
+    Markdown(
+        f"""
+The supervised classifier reaches **{oof_accuracy:.1%} balanced accuracy** under grouped
+cross-validation, compared with **{baseline_accuracy:.1%}** for the local CI heuristic. Its weakest
+role is **{weakest_row["Category"]}** at **{weakest_row["Supervised"]:.1%}**. Because every dataset
+comes from the same linear-Gaussian simulator family, this gap measures amortized inference under
+that family. It is not an estimate of causal-discovery accuracy on financial time series.
+"""
+    )
+)
 
 # %% [markdown]
-# ## 10. Further Reading and Resources
+# ## 11. Further Reading and Resources
 #
 # ### ADIA Competition Resources
-# - **Paper**: Olivetti et al. (2026). "Can AI Learn Causal Structure?"
-# - **Dataset**: Available via [CrunchDAO](https://hub.crunchdao.com/competitions/causality-discovery)
-# - **4th Place Writeup**: [Medium Article](https://medium.com/@alexkiechlecornish/4th-place-solution-100k-causal-discovery-challenge)
+# - **Paper**: Olivetti et al. (2026), "Can AI Learn Causal Structure?"
+# - **Task definition**: [CrunchDAO competition documentation](https://docs.crunchdao.com/competitions/competitions/adia-lab-causal-discovery)
 #
 # ### Critical Reading: Benchmark Limitations
-# - **Reisach et al. (2021)**. "Beware of the Simulated DAG! Causal Discovery Benchmarks
+# - **Reisach et al. (2021)**, "Beware of the Simulated DAG! Causal Discovery Benchmarks
 #   May Be Easy To Game." [arXiv:2102.13647](https://arxiv.org/abs/2102.13647)
-#   - Shows that common simulation schemes create exploitable artifacts
-#   - "Varsortability" allows models to learn shortcuts rather than causal principles
 #
 # ### Classical Causal Discovery References
-# - Spirtes et al. (2000). *Causation, Prediction, and Search* (PC algorithm)
-# - Zheng et al. (2018). "DAGs with NO TEARS" (NOTEARS)
-# - Runge et al. (2019). "Detecting and Quantifying Causal Associations" (PCMCI)
+# - Spirtes et al. (2000), *Causation, Prediction, and Search* (PC algorithm)
+# - Zheng et al. (2018), "DAGs with NO TEARS" (NOTEARS)
+# - Runge et al. (2019), "Detecting and Quantifying Causal Associations" (PCMCI)
 #
-# ### The Appropriate Posture
-# Causal discovery methods are most useful when embedded in a strict research protocol
-# and treated as **tools for reducing false discovery**, not as automatic truth machines.
-# See the DML and BSTS notebooks in this chapter for validation approaches.
+# ## 12. Key Takeaways
+#
+# - Grouped cross-validation must keep every node from one simulated DAG in the same fold.
+# - The ADIA task always includes the treatment-to-outcome edge; omitting it changes the generated
+#   dependence structure and invalidates the comparison.
+# - Supervised discovery estimates transfer within a simulator family, not causal validity under an
+#   unknown financial data-generating process.
+# - Feature importance is evidence about the classifier's shortcuts and signatures, not causal
+#   importance in the generated graph.
+# - Use discovered structures as hypotheses for robustness checks. `10_case_study_insights`
+#   applies that posture to the chapter's case studies.
+#
+# See Chapter 15, Section 15.6 for the assumptions behind causal discovery from observational data.

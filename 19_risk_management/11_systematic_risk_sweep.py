@@ -15,186 +15,183 @@
 
 # %% [markdown]
 # # Systematic Risk Parameter Sweep
-# **Docker image**: `ml4t`
+# **Chapter 19: Risk Management**
 #
 # ## Purpose
-# Calibrate position-level exit rules (StopLoss, TakeProfit, TrailingStop) by
-# sweeping the parameter space rather than hand-picking three or four configs.
-# 1D sweeps reveal each rule's sensitivity curve; 2D grids map joint behaviour;
-# MAE/MFE percentiles turn realized excursions into a data-driven prior. The
-# whole point is that a generic preference for "tighter exits" is a worse
-# selection rule than calibration.
+# Calibrate position-level exit rules on a chronological calibration window, then compare the
+# selected rules once on a later evaluation window. One-dimensional sweeps show sensitivity to
+# each rule width, joint grids expose interactions, and MAE/MFE percentiles provide a second
+# calibration method.
 #
 # ## Learning Objectives
 # After completing this notebook, you will be able to:
-# - Run 1D sweeps of StopLoss, TakeProfit, and TrailingStop and read the elbow.
-# - Build SL×TP and SL×Trail heatmaps to expose joint rule interactions.
-# - Use `MAEMFEAnalyzer.suggest_stop_loss / suggest_take_profit` to calibrate stops from realized trade paths.
-# - Compare grid-optimal vs MAE/MFE-calibrated configurations under one ranked Calmar table.
+# - separate exit-rule calibration from chronological evaluation;
+# - run one-dimensional and joint StopLoss, TakeProfit, and TrailingStop sweeps;
+# - derive stop and target priors from closed-trade MAE/MFE paths;
+# - compare preselected configurations with CAGR-based Calmar ratios.
 #
 # ## Book reference
-# §19.7 Adaptive Risk Controls — Figures 19.6 (1D sweeps) and 19.7 (joint SL×TP surface).
+# Section 19.7, "Adaptive Risk Controls Without Leakage," and Figures 19.6-19.7.
 #
 # ## Prerequisites
-# Complete [`02_exit_strategies`](02_exit_strategies.ipynb) and
-# [`03_position_sizing_mae_mfe`](03_position_sizing_mae_mfe.ipynb) first;
-# [`10_ml4t_backtest_risk_demo`](10_ml4t_backtest_risk_demo.ipynb) is the rule-API reference.
+# Complete [`02_exit_strategies`](02_exit_strategies.ipynb),
+# [`03_position_sizing_mae_mfe`](03_position_sizing_mae_mfe.ipynb), and
+# [`10_ml4t_backtest_risk_demo`](10_ml4t_backtest_risk_demo.ipynb) first.
 
 # %%
-"""Systematic Risk Parameter Sweep."""
+"""Calibrate and evaluate systematic position-exit rules without sample reuse."""
 
-import warnings
+from datetime import date
 
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
-from matplotlib import pyplot as plt
-from plotly.subplots import make_subplots
-
-warnings.filterwarnings("ignore")
-
-from ml4t.backtest import (
-    BacktestConfig,
-    DataFeed,
-    Engine,
-    ExecutionMode,
-    Strategy,
-)
-from ml4t.backtest.analytics.trades import MAEMFEAnalyzer, TradeAnalyzer
+from IPython.display import Markdown, display
+from ml4t.backtest import BacktestConfig, DataFeed, Engine, ExecutionMode, Strategy
+from ml4t.backtest.analytics.trades import MAEMFEAnalyzer
 from ml4t.backtest.execution.rebalancer import RebalanceConfig, TargetWeightExecutor
 from ml4t.backtest.risk.position import RuleChain, StopLoss, TakeProfit, TrailingStop
+from plotly.subplots import make_subplots
 
 from data import load_etfs
 from utils.paths import get_output_dir
-from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, ml4t_diverging
 
 # %% tags=["parameters"]
-# Data parameters --- override these for different assets
-N_ASSETS = 5
-N_BARS = 1260  # 5 years of daily bars
+START_DATE = "2019-01-02"
+END_DATE = "2023-12-31"
+CALIBRATION_END = "2021-12-31"
+N_BARS = 1260
+LOOKBACK_BARS = 60
+CADENCE_BARS = 21
 INITIAL_CASH = 100_000
-CADENCE_DAYS = 21
-SEED = 42
+
+# %%
 OUTPUT_DIR = get_output_dir(19, "risk_sweep")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-# %%
-set_global_seeds(SEED)
+SYMBOLS = ["SPY", "QQQ", "IWM", "XLF", "EEM"]
+calibration_end = date.fromisoformat(CALIBRATION_END)
 
 # %% [markdown]
-# ## Setup: Real Multi-Asset ETF Panel
+# ## 1. Point-in-Time ETF Panel and Split
 #
-# We use a five-ETF panel (SPY, QQQ, IWM, XLF, EEM) over 2019–2023 to expose
-# the calibration mechanics on real cross-sectional dispersion: broad equities,
-# tech, small-cap, financials, and emerging markets carry genuinely different
-# volatility and drawdown profiles. The same patterns flow into the ETF case
-# study (`strategy/risk_management.py`); this notebook is the parameter-search
-# layer that informs those production settings.
+# The fixed five-ETF panel is an illustrative, present-day universe rather than a
+# point-in-time membership reconstruction. It therefore supports a rule-calibration lesson, not
+# an unbiased claim about historical ETF selection. Momentum uses each close at time *t*, and the
+# engine executes resulting targets on the next bar.
 
 # %%
-SYMBOLS = ["SPY", "QQQ", "IWM", "XLF", "EEM"]
-prices_df = load_etfs(symbols=SYMBOLS, start_date="2019-01-02", end_date="2023-12-31").sort(
-    ["symbol", "timestamp"]
-)
-
-# Slice each symbol to N_BARS so the sweep window matches the parameters cell
+prices_df = load_etfs(
+    symbols=SYMBOLS,
+    start_date=START_DATE,
+    end_date=END_DATE,
+).sort(["symbol", "timestamp"])
 prices_df = (
     prices_df.with_columns(_bar=pl.col("timestamp").cum_count().over("symbol"))
     .filter(pl.col("_bar") <= N_BARS)
     .drop("_bar")
 )
 
-dates = prices_df.filter(pl.col("symbol") == SYMBOLS[0]).sort("timestamp")["timestamp"]
+# %% [markdown]
+# Before any backtest, fail closed on schema, duplicate keys, null OHLC data, and incomplete daily
+# snapshots. This makes a missing asset an input error instead of an exception to suppress inside
+# the executor.
+
+# %%
+required_columns = {"symbol", "timestamp", "open", "high", "low", "close", "volume"}
+assert required_columns <= set(prices_df.columns)
+assert prices_df["timestamp"].dtype == pl.Date
+assert set(prices_df["symbol"].unique()) == set(SYMBOLS)
+assert prices_df.select("symbol", "timestamp").is_duplicated().sum() == 0
+assert prices_df.select(sorted(required_columns)).null_count().row(0) == (0,) * len(
+    required_columns
+)
+panel_counts = prices_df.group_by("timestamp").agg(pl.col("symbol").n_unique().alias("n_symbols"))
+assert panel_counts.filter(pl.col("n_symbols") != len(SYMBOLS)).is_empty()
+
+all_dates = prices_df["timestamp"].unique().sort().to_list()
+calibration_dates = [ts for ts in all_dates if ts <= calibration_end]
+evaluation_dates = [ts for ts in all_dates if ts > calibration_end]
+assert len(calibration_dates) > LOOKBACK_BARS
+assert len(evaluation_dates) > LOOKBACK_BARS
+
+# %%
+calibration_prices = prices_df.filter(pl.col("timestamp") <= calibration_end)
+evaluation_prices = prices_df.filter(pl.col("timestamp") > calibration_end)
+calibration_schedule = calibration_dates[LOOKBACK_BARS::CADENCE_BARS]
+evaluation_schedule = evaluation_dates[::CADENCE_BARS]
+
+display(
+    Markdown(
+        f"Loaded **{prices_df.height:,} complete bars** for **{len(SYMBOLS)} ETFs**. "
+        f"Calibration ends on **{calibration_dates[-1]}**; the untouched evaluation window runs "
+        f"from **{evaluation_dates[0]}** through **{evaluation_dates[-1]}**. Rebalances are "
+        f"scheduled every **{CADENCE_BARS} trading bars**."
+    )
+)
 
 # %% [markdown]
-# Build momentum weights from real trailing returns: at each rebalance date,
-# pick the top three ETFs by 60-day return and equal-weight them. This is the
-# same family of signal as the ETF case study, scoped down to a five-name
-# universe so the sweep stays cheap.
+# The weight builder computes trailing returns independently within each symbol. Passing an
+# explicit schedule prevents the strategy from mixing trading-bar schedules with calendar-day
+# comparisons.
 
 
 # %%
-def build_momentum_weights(prices: pl.DataFrame, lookback: int, cadence: int) -> dict:
-    """Top-3 equal-weight momentum at each rebalance date."""
-
-    mom = (
+def build_momentum_weights(
+    prices: pl.DataFrame,
+    schedule: list[date],
+    lookback: int,
+    top_n: int = 3,
+) -> dict[date, dict[str, float]]:
+    """Return top-N equal weights for explicit decision timestamps."""
+    momentum = (
         prices.sort(["symbol", "timestamp"])
-        .with_columns(mom=(pl.col("close") / pl.col("close").shift(lookback) - 1).over("symbol"))
-        .select("timestamp", "symbol", "mom")
+        .with_columns(
+            momentum=(pl.col("close") / pl.col("close").shift(lookback) - 1).over("symbol")
+        )
+        .select("timestamp", "symbol", "momentum")
         .drop_nulls()
     )
-    rebalance_dates = dates.gather_every(cadence).to_list()
-    weight_dict: dict = {}
-    for ts in rebalance_dates:
-        snap = mom.filter(pl.col("timestamp") == ts).sort("mom", descending=True)
-        if snap.height == 0:
-            continue
-        picks = snap.head(3)["symbol"].to_list()
-        weight_dict[ts] = {s: 1.0 / len(picks) for s in picks}
-    return weight_dict
+    weights: dict[date, dict[str, float]] = {}
+    for timestamp in schedule:
+        snapshot = momentum.filter(pl.col("timestamp") == timestamp).sort(
+            "momentum", descending=True
+        )
+        assert snapshot.height == len(SYMBOLS)
+        selected = snapshot.head(top_n)["symbol"].to_list()
+        weights[timestamp] = {symbol: 1.0 / len(selected) for symbol in selected}
+    return weights
 
-
-weight_dict = build_momentum_weights(prices_df, lookback=60, cadence=CADENCE_DAYS)
-rebalance_dates = list(weight_dict.keys())
-
-print(f"Loaded {len(prices_df):,} price bars for {N_ASSETS} ETFs")
-print(f"Rebalance dates: {len(rebalance_dates)}, cadence: {CADENCE_DAYS} days")
-
-# %% [markdown]
-# **Interpretation**: The five-ETF panel carries genuine volatility dispersion
-# (QQQ and IWM run hotter than XLF and EEM during 2020 and 2022), which is
-# enough to expose the calibration trade-offs the stop and target sweeps probe.
-
-# %% [markdown]
-# ## 1. Sweep Runner
-#
-# The `run_risk_sweep()` function is the core utility: given prices, weights,
-# a config, and a set of position rules, it runs a full Engine backtest and
-# returns a metrics dictionary. All sweep sections below call this function.
-
-# %% [markdown]
-# Rebalancing can fail when an asset drops out of the current bar snapshot, so this
-# helper closes stale positions before handing control back to the executor.
 
 # %%
-ANN_FACTOR = np.sqrt(252)
-
-
-def _safe_execute(executor, targets, data, broker):
-    """Handle missing assets gracefully during rebalancing.
-
-    Closes any open position whose asset is no longer in the current bar's
-    `data` snapshot, then hands the remaining targets to the executor. The
-    only expected failure mode is `KeyError` from the executor when an
-    asset *requested* in `targets` is itself absent from `data` — this
-    happens transiently when a weight series is fixed pre-trade and the
-    market data for that bar is incomplete. We skip that asset's rebalance
-    for the bar; `TypeError` and other exceptions surface so real bugs are
-    visible.
-    """
-    for pos in list(broker.positions.values()):
-        if pos.asset not in data and pos.quantity != 0:
-            broker.submit_order(pos.asset, -pos.quantity)
-    try:
-        executor.execute(targets, data, broker)
-    except KeyError:
-        # Requested asset absent from this bar's snapshot — skip its rebalance.
-        pass
-
+calibration_weights = build_momentum_weights(
+    calibration_prices,
+    calibration_schedule,
+    LOOKBACK_BARS,
+)
+evaluation_weights = build_momentum_weights(
+    prices_df,
+    evaluation_schedule,
+    LOOKBACK_BARS,
+)
+assert list(calibration_weights) == calibration_schedule
+assert list(evaluation_weights) == evaluation_schedule
 
 # %% [markdown]
-# The strategy wrapper applies the chosen rule chain and rebalances on the requested cadence.
+# ## 2. Backtest Contract
+#
+# A target is submitted only on its scheduled trading bar. `NEXT_BAR` execution means the signal
+# formed from the current close cannot fill on that same close. The complete-panel assertion above
+# makes missing-symbol recovery unnecessary.
 
 
 # %%
 class SweepStrategy(Strategy):
-    """Strategy for parameter sweep: applies rules and rebalances."""
+    """Apply a fixed rule chain and rebalance on explicit decision timestamps."""
 
-    def __init__(self, weight_dict, rules=None, cadence_days=21):
-        self.cadence_days = cadence_days
-        self.last_rebalance = None
+    def __init__(self, weights: dict[date, dict[str, float]], rules=None):
         self.rules = rules
+        self.weights = weights
         self.executor = TargetWeightExecutor(
             config=RebalanceConfig(
                 min_trade_value=100.0,
@@ -202,718 +199,573 @@ class SweepStrategy(Strategy):
                 allow_fractional=True,
             )
         )
-        self._weights = weight_dict
 
     def on_start(self, broker):
         if self.rules is not None:
             broker.set_position_rules(self.rules)
 
     def on_data(self, timestamp, data, context, broker):
-        if self.last_rebalance and (timestamp - self.last_rebalance).days < self.cadence_days:
+        del context
+        if timestamp not in self.weights:
             return
-        self.last_rebalance = timestamp
-        if timestamp in self._weights:
-            targets = {a: w for a, w in self._weights[timestamp].items() if a in data}
-            if targets:
-                _safe_execute(self.executor, targets, data, broker)
+        assert set(data) == set(SYMBOLS)
+        self.executor.execute(self.weights[timestamp], data, broker)
 
 
 # %% [markdown]
-# The sweep runner executes one backtest configuration and returns the metrics used
-# throughout the one-dimensional and two-dimensional search surfaces.
+# The runner delegates annualization to `ml4t.backtest`. In particular, Calmar is the library's
+# CAGR divided by absolute maximum drawdown. Trade statistics and MAE/MFE inputs use only trades
+# whose status is `closed`; end-of-window marks are not completed observations.
 
 
 # %%
 def run_risk_sweep(
-    prices,
-    weight_dict,
+    prices: pl.DataFrame,
+    weights: dict[date, dict[str, float]],
     rules=None,
-    initial_cash=100_000,
-    commission_rate=0.001,
-    slippage_rate=0.001,
-    cadence_days=21,
-):
-    """Run one backtest configuration and return the metrics used by the sweep plots."""
+    initial_cash: float = 100_000,
+) -> dict:
+    """Run one exit-rule configuration and return closed-trade metrics."""
     config = BacktestConfig(
         initial_cash=initial_cash,
-        commission_rate=commission_rate,
-        slippage_rate=slippage_rate,
+        commission_rate=0.001,
+        slippage_rate=0.001,
         execution_mode=ExecutionMode.NEXT_BAR,
     )
-
-    feed = DataFeed(prices_df=prices)
-    strategy = SweepStrategy(weight_dict, rules=rules, cadence_days=cadence_days)
-    engine = Engine(feed=feed, strategy=strategy, config=config)
-    result = engine.run()
-
-    sharpe = result.metrics.get("sharpe", 0.0)
-    total_ret = result.equity.total_return
-    max_dd = result.equity.max_dd
-    calmar = abs(total_ret / max_dd) if max_dd != 0 else 0.0
-    n_trades = len(result.trades)
-    analyzer = TradeAnalyzer(result.trades) if result.trades else None
-    win_rate = analyzer.win_rate if analyzer else 0.0
-    return dict(
-        sharpe=float(sharpe),
-        max_dd=float(max_dd),
-        calmar=float(calmar),
-        total_return=float(total_ret),
-        n_trades=n_trades,
-        win_rate=float(win_rate),
-        trades=result.trades,
-    )
+    result = Engine(
+        feed=DataFeed(prices_df=prices),
+        strategy=SweepStrategy(weights, rules=rules),
+        config=config,
+    ).run()
+    closed_trades = [trade for trade in result.trades if trade.status == "closed"]
+    return {
+        "sharpe": float(result.metrics["sharpe"]),
+        "max_dd": float(result.equity.max_dd),
+        "calmar": float(result.metrics["calmar"]),
+        "cagr": float(result.metrics["cagr"]),
+        "total_return": float(result.metrics["total_return"]),
+        "n_trades": int(result.metrics["num_trades"]),
+        "win_rate": float(result.metrics["win_rate"]),
+        "trades": closed_trades,
+    }
 
 
 # %%
-# Run baseline (no rules)
-baseline = run_risk_sweep(
-    prices_df,
-    weight_dict,
-    rules=None,
+baseline_calibration = run_risk_sweep(
+    calibration_prices,
+    calibration_weights,
     initial_cash=INITIAL_CASH,
-    cadence_days=CADENCE_DAYS,
 )
-print(
-    f"Baseline: Sharpe={baseline['sharpe']:.3f}  MaxDD={baseline['max_dd']:.2%}  "
-    f"Calmar={baseline['calmar']:.2f}  Trades={baseline['n_trades']}"
+assert baseline_calibration["n_trades"] == len(baseline_calibration["trades"])
+assert baseline_calibration["trades"]
+
+display(
+    Markdown(
+        f"The calibration baseline has Sharpe **{baseline_calibration['sharpe']:.2f}**, "
+        f"CAGR **{baseline_calibration['cagr']:.1%}**, maximum drawdown "
+        f"**{baseline_calibration['max_dd']:.1%}**, and Calmar "
+        f"**{baseline_calibration['calmar']:.2f}** across "
+        f"**{baseline_calibration['n_trades']} closed trades**."
+    )
 )
 
 # %% [markdown]
-# **Interpretation**: The baseline is the reference point for every sweep. A rule only
-# earns its complexity if it improves drawdown-adjusted performance relative to this line.
-
-# %% [markdown]
-# ## 2. One-Dimensional Sweeps
+# ## 3. Calibration Sweeps
 #
-# Sweep each rule type independently to understand its individual effect.
-# For each parameter value we plot Sharpe and trade count vs the parameter.
+# Every candidate below is fit and ranked on the calibration window only. The evaluation window is
+# not consulted until one candidate from each calibration method has been frozen.
+
+# %% [markdown]
+# This helper runs a one-dimensional rule family while retaining the raw metrics needed for the
+# diagnostic and publication-data outputs.
+
 
 # %%
-# StopLoss sweep: 2% to 20%
+def run_1d_sweep(
+    rule_class,
+    levels: list[float],
+    name: str,
+) -> list[dict]:
+    """Evaluate one rule family on the calibration window."""
+    results = []
+    for level in levels:
+        metrics = run_risk_sweep(
+            calibration_prices,
+            calibration_weights,
+            rules=RuleChain([rule_class(pct=level)]),
+            initial_cash=INITIAL_CASH,
+        )
+        results.append({**metrics, "rule": name, "param": level})
+    return results
+
+
+# %%
 sl_levels = [0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.12, 0.15, 0.20]
-sl_results = []
-for pct in sl_levels:
-    rules = RuleChain([StopLoss(pct=pct)])
-    m = run_risk_sweep(
-        prices_df,
-        weight_dict,
-        rules=rules,
-        initial_cash=INITIAL_CASH,
-        cadence_days=CADENCE_DAYS,
-    )
-    m["param"] = pct
-    sl_results.append(m)
-    print(f"  SL={pct:.0%}: Sharpe={m['sharpe']:.3f}  MaxDD={m['max_dd']:.2%}")
-
-# %% [markdown]
-# **Interpretation**: The stop-loss sweep isolates how quickly tighter protection
-# turns into whipsaw rather than true downside control.
-
-# %%
-# TakeProfit sweep: 3% to 30%
 tp_levels = [0.03, 0.05, 0.07, 0.10, 0.12, 0.15, 0.20, 0.25, 0.30]
-tp_results = []
-for pct in tp_levels:
-    rules = RuleChain([TakeProfit(pct=pct)])
-    m = run_risk_sweep(
-        prices_df,
-        weight_dict,
-        rules=rules,
-        initial_cash=INITIAL_CASH,
-        cadence_days=CADENCE_DAYS,
-    )
-    m["param"] = pct
-    tp_results.append(m)
-    print(f"  TP={pct:.0%}: Sharpe={m['sharpe']:.3f}  MaxDD={m['max_dd']:.2%}")
+trail_levels = [0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.12, 0.15]
+
+sl_results = run_1d_sweep(StopLoss, sl_levels, "StopLoss")
+tp_results = run_1d_sweep(TakeProfit, tp_levels, "TakeProfit")
+trail_results = run_1d_sweep(TrailingStop, trail_levels, "TrailingStop")
 
 # %% [markdown]
-# **Interpretation**: The take-profit sweep shows how much upside is lost when profits
-# are harvested too early.
-
-# %%
-# TrailingStop sweep: 2% to 15%
-ts_levels = [0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.12, 0.15]
-ts_results = []
-for pct in ts_levels:
-    rules = RuleChain([TrailingStop(pct=pct)])
-    m = run_risk_sweep(
-        prices_df,
-        weight_dict,
-        rules=rules,
-        initial_cash=INITIAL_CASH,
-        cadence_days=CADENCE_DAYS,
-    )
-    m["param"] = pct
-    ts_results.append(m)
-    print(f"  Trail={pct:.0%}: Sharpe={m['sharpe']:.3f}  MaxDD={m['max_dd']:.2%}")
-
-# %% [markdown]
-# **Interpretation**: Trailing stops reveal whether the strategy benefits from dynamic
-# exits that follow winners instead of imposing a fixed cap on gains.
-
-# %% [markdown]
-# This plotting helper keeps the three sweep panels structurally identical and avoids one oversized visualization cell.
+# The solid line reports calibration Sharpe; the dotted line reports closed-trade count. Their
+# different axes make turnover changes visible without treating trade count as a performance
+# metric.
 
 
 # %%
-def add_sweep_panel(fig, col: int, sweep_data: list[dict], sweep_name: str, color: str) -> None:
-    params = [d["param"] for d in sweep_data]
-    sharpes = [d["sharpe"] for d in sweep_data]
-    n_trades = [d["n_trades"] for d in sweep_data]
+def add_sweep_panel(
+    fig,
+    row: int,
+    sweep: list[dict],
+    name: str,
+    color: str,
+) -> None:
+    """Add one calibrated sweep panel with a secondary trade-count axis."""
     fig.add_trace(
         go.Scatter(
-            x=[f"{p:.0%}" for p in params],
-            y=sharpes,
+            x=[row["param"] for row in sweep],
+            y=[row["sharpe"] for row in sweep],
             mode="lines+markers",
-            name=f"{sweep_name} Sharpe",
-            line=dict(color=color),
-            marker=dict(size=8),
+            line={"color": color},
+            name=f"{name} Sharpe",
         ),
-        row=1,
-        col=col,
+        row=row,
+        col=1,
         secondary_y=False,
     )
     fig.add_trace(
         go.Scatter(
-            x=[f"{p:.0%}" for p in params],
-            y=n_trades,
+            x=[row["param"] for row in sweep],
+            y=[row["n_trades"] for row in sweep],
             mode="lines+markers",
-            name=f"{sweep_name} Trades",
-            line=dict(color=color, dash="dot"),
-            marker=dict(size=6, symbol="square"),
-            opacity=0.6,
+            line={"color": COLORS["neutral"], "dash": "dot"},
+            marker={"symbol": "square"},
+            name=f"{name} closed trades",
         ),
-        row=1,
-        col=col,
+        row=row,
+        col=1,
         secondary_y=True,
     )
     fig.add_hline(
-        y=baseline["sharpe"],
-        line_dash="dash",
-        line_color="gray",
-        annotation_text="Baseline",
-        row=1,
-        col=col,
+        y=baseline_calibration["sharpe"],
+        line={"color": COLORS["slate"], "dash": "dash"},
+        row=row,
+        col=1,
         secondary_y=False,
     )
 
 
 # %%
-# Visualize 1D sweeps
 fig = make_subplots(
-    rows=1,
-    cols=3,
-    subplot_titles=["StopLoss Sweep", "TakeProfit Sweep", "TrailingStop Sweep"],
-    specs=[[{"secondary_y": True}] * 3],
+    rows=3,
+    cols=1,
+    specs=[[{"secondary_y": True}] for _ in range(3)],
+    subplot_titles=["StopLoss", "TakeProfit", "TrailingStop"],
+    vertical_spacing=0.09,
 )
-
-for col, (sweep_data, sweep_name, color) in enumerate(
+for row, (sweep, name, color) in enumerate(
     [
-        (sl_results, "StopLoss", "#1f77b4"),
-        (tp_results, "TakeProfit", "#2ca02c"),
-        (ts_results, "TrailingStop", "#ff7f0e"),
+        (sl_results, "StopLoss", COLORS["blue"]),
+        (tp_results, "TakeProfit", COLORS["positive"]),
+        (trail_results, "TrailingStop", COLORS["amber"]),
     ],
     start=1,
 ):
-    add_sweep_panel(fig, col, sweep_data, sweep_name, color)
+    add_sweep_panel(fig, row, sweep, name, color)
+    fig.update_xaxes(
+        title_text="Rule width" if row == 3 else None, tickformat=".0%", row=row, col=1
+    )
+    fig.update_yaxes(title_text="Sharpe ratio", secondary_y=False, row=row, col=1)
+    fig.update_yaxes(title_text="Closed trades", secondary_y=True, row=row, col=1)
+fig.update_layout(
+    height=900,
+    margin={"l": 75, "r": 85, "t": 105, "b": 70},
+    title=(
+        "Calibration Sharpe Depends on Exit Width"
+        "<br><sup>2019-2021 calibration only; dashed line is the no-rule baseline</sup>"
+    ),
+    showlegend=False,
+)
+fig.show()
 
 # %%
-fig.update_yaxes(title_text="Sharpe Ratio", secondary_y=False)
-fig.update_yaxes(title_text="# Trades", secondary_y=True)
-fig.update_layout(height=400, title="1D Risk Rule Sweeps", showlegend=False)
+sweep_rows = [
+    {
+        "rule": row["rule"],
+        "param": float(row["param"]),
+        "sharpe": float(row["sharpe"]),
+        "n_trades": int(row["n_trades"]),
+        "sample": "calibration",
+    }
+    for sweep in (sl_results, tp_results, trail_results)
+    for row in sweep
+]
+pl.DataFrame(sweep_rows).write_parquet(OUTPUT_DIR / "risk_rule_1d_sweeps.parquet")
+
+# %% [markdown]
+# Joint grids ask whether one rule's useful width depends on the other. The selection score is
+# calibration Calmar, but the later evaluation reports all candidates under one untouched window.
+
+
+# %%
+def run_rule_grid(
+    left_levels: list[float],
+    right_levels: list[float],
+    right_rule,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return calibration Sharpe and Calmar matrices for a two-rule grid."""
+    sharpe = np.zeros((len(left_levels), len(right_levels)))
+    calmar = np.zeros_like(sharpe)
+    for row, stop in enumerate(left_levels):
+        for column, right in enumerate(right_levels):
+            metrics = run_risk_sweep(
+                calibration_prices,
+                calibration_weights,
+                rules=RuleChain([StopLoss(pct=stop), right_rule(pct=right)]),
+                initial_cash=INITIAL_CASH,
+            )
+            sharpe[row, column] = metrics["sharpe"]
+            calmar[row, column] = metrics["calmar"]
+    return sharpe, calmar
+
+
+# %%
+sl_grid = [0.03, 0.05, 0.08, 0.10, 0.15]
+tp_grid = [0.05, 0.10, 0.15, 0.20, 0.30]
+trail_grid = [0.02, 0.04, 0.06, 0.08, 0.10]
+
+sl_tp_sharpe, sl_tp_calmar = run_rule_grid(sl_grid, tp_grid, TakeProfit)
+sl_trail_sharpe, sl_trail_calmar = run_rule_grid(sl_grid, trail_grid, TrailingStop)
+assert np.isfinite(sl_tp_sharpe).all() and np.isfinite(sl_tp_calmar).all()
+assert np.isfinite(sl_trail_sharpe).all() and np.isfinite(sl_trail_calmar).all()
+
+sl_tp_sharpe_delta = sl_tp_sharpe - baseline_calibration["sharpe"]
+sl_trail_sharpe_delta = sl_trail_sharpe - baseline_calibration["sharpe"]
+sl_tp_calmar_delta = sl_tp_calmar - baseline_calibration["calmar"]
+sl_trail_calmar_delta = sl_trail_calmar - baseline_calibration["calmar"]
+sharpe_limit = float(
+    np.max(np.abs(np.concatenate([sl_tp_sharpe_delta.ravel(), sl_trail_sharpe_delta.ravel()])))
+)
+calmar_limit = float(
+    np.max(np.abs(np.concatenate([sl_tp_calmar_delta.ravel(), sl_trail_calmar_delta.ravel()])))
+)
+
+# %% [markdown]
+# Each metric uses one pooled, symmetric scale across both rule pairs. Colors therefore encode the
+# change from the same no-rule baseline instead of re-normalizing every panel independently.
+
+
+# %%
+def add_surface(
+    fig,
+    data: np.ndarray,
+    x_labels: list[str],
+    y_labels: list[str],
+    row: int,
+    column: int,
+    limit: float,
+    colorbar_title: str,
+) -> None:
+    """Add one baseline-relative heatmap with an explicit pooled range."""
+    fig.add_trace(
+        go.Heatmap(
+            z=data,
+            x=x_labels,
+            y=y_labels,
+            zmin=-limit,
+            zmax=limit,
+            zmid=0,
+            colorscale=ml4t_diverging(),
+            text=np.round(data, 2),
+            texttemplate="%{text:+.2f}",
+            showscale=row == 1,
+            colorbar={
+                "title": colorbar_title,
+                "len": 0.8,
+                "y": 0.5,
+                "x": 1.03 if column == 1 else 1.17,
+                "thickness": 12,
+            },
+        ),
+        row=row,
+        col=column,
+    )
+
+
+# %% [markdown]
+# Explicit categorical ticks prevent Plotly's static renderer from dropping percentage signs.
+
+
+# %%
+def apply_surface_axes(
+    fig,
+    stop_labels: list[str],
+    take_profit_labels: list[str],
+    trailing_labels: list[str],
+) -> None:
+    """Apply explicit percentage categories and units to every grid axis."""
+    panels = [(1, 1, take_profit_labels), (1, 2, take_profit_labels)]
+    panels += [(2, 1, trailing_labels), (2, 2, trailing_labels)]
+    for row, column, labels in panels:
+        fig.update_xaxes(
+            type="category",
+            tickmode="array",
+            tickvals=labels,
+            ticktext=labels,
+            title_text="Second rule width (%)" if row == 2 else None,
+            row=row,
+            col=column,
+        )
+        fig.update_yaxes(
+            type="category",
+            tickmode="array",
+            tickvals=stop_labels,
+            ticktext=stop_labels,
+            title_text="StopLoss width (%)" if column == 1 else None,
+            row=row,
+            col=column,
+        )
+
+
+# %%
+sl_labels = [f"{value:.0%}" for value in sl_grid]
+tp_labels = [f"{value:.0%}" for value in tp_grid]
+trail_labels = [f"{value:.0%}" for value in trail_grid]
+fig = make_subplots(
+    rows=2,
+    cols=2,
+    subplot_titles=[
+        "SL x TP: Sharpe change",
+        "SL x TP: Calmar change",
+        "SL x Trail: Sharpe change",
+        "SL x Trail: Calmar change",
+    ],
+    vertical_spacing=0.16,
+    horizontal_spacing=0.14,
+)
+add_surface(fig, sl_tp_sharpe_delta, tp_labels, sl_labels, 1, 1, sharpe_limit, "Delta Sharpe")
+add_surface(fig, sl_tp_calmar_delta, tp_labels, sl_labels, 1, 2, calmar_limit, "Delta Calmar")
+add_surface(fig, sl_trail_sharpe_delta, trail_labels, sl_labels, 2, 1, sharpe_limit, "")
+add_surface(fig, sl_trail_calmar_delta, trail_labels, sl_labels, 2, 2, calmar_limit, "")
+apply_surface_axes(fig, sl_labels, tp_labels, trail_labels)
+fig.update_layout(
+    width=980,
+    height=720,
+    margin={"l": 80, "r": 190, "t": 100, "b": 75},
+    title=(
+        "Joint Exit Rules Move Calibration Performance Around the Baseline"
+        "<br><sup>Pooled ranges make colors comparable within each metric</sup>"
+    ),
+)
+fig.show()
+
+# %%
+best_sl_tp_index = np.unravel_index(np.nanargmax(sl_tp_calmar), sl_tp_calmar.shape)
+best_sl_trail_index = np.unravel_index(np.nanargmax(sl_trail_calmar), sl_trail_calmar.shape)
+best_sl_tp = (sl_grid[best_sl_tp_index[0]], tp_grid[best_sl_tp_index[1]])
+best_sl_trail = (sl_grid[best_sl_trail_index[0]], trail_grid[best_sl_trail_index[1]])
+
+display(
+    Markdown(
+        f"Calibration selects **SL {best_sl_tp[0]:.0%} / TP {best_sl_tp[1]:.0%}** "
+        f"at Calmar **{sl_tp_calmar[best_sl_tp_index]:.2f}**, and "
+        f"**SL {best_sl_trail[0]:.0%} / Trail {best_sl_trail[1]:.0%}** at Calmar "
+        f"**{sl_trail_calmar[best_sl_trail_index]:.2f}**. These are frozen before the "
+        "evaluation window is opened."
+    )
+)
+
+# %%
+grid_rows = [
+    {
+        "stop_loss": float(stop),
+        "take_profit": float(target),
+        "sharpe": float(sl_tp_sharpe[row, column]),
+        "calmar": float(sl_tp_calmar[row, column]),
+        "sample": "calibration",
+    }
+    for row, stop in enumerate(sl_grid)
+    for column, target in enumerate(tp_grid)
+]
+pl.DataFrame(grid_rows).write_parquet(OUTPUT_DIR / "stoploss_takeprofit_grid.parquet")
+
+# %% [markdown]
+# ## 4. MAE/MFE Calibration on Closed Trades
+#
+# MAE/MFE percentiles are another fitted rule. They use only closed calibration trades, so neither
+# an end-of-window mark nor any evaluation path can influence the selected stop and target.
+
+# %%
+calibration_trades = baseline_calibration["trades"]
+mae_mfe = MAEMFEAnalyzer(calibration_trades)
+suggested_sl = mae_mfe.suggest_stop_loss(percentile=90)
+suggested_tp = mae_mfe.suggest_take_profit(percentile=75)
+calibrated_sl_pct = abs(suggested_sl)
+calibrated_tp_pct = abs(suggested_tp)
+
+display(
+    Markdown(
+        f"Across **{mae_mfe.num_trades} closed calibration trades**, mean MAE is "
+        f"**{mae_mfe.mae_mean:.1%}** and mean MFE is **{mae_mfe.mfe_mean:.1%}**. The frozen "
+        f"percentile prior is **SL {calibrated_sl_pct:.1%} / TP {calibrated_tp_pct:.1%}**. "
+        "The small trade sample makes this a deliberately low-confidence prior."
+    )
+)
+
+# %%
+distribution = mae_mfe.distribution_data()
+realized_returns = [trade.pnl_percent for trade in calibration_trades]
+color_limit = max(abs(min(realized_returns)), abs(max(realized_returns)))
+fig = go.Figure(
+    go.Scatter(
+        x=distribution["mae"],
+        y=distribution["mfe"],
+        mode="markers",
+        marker={
+            "size": 8,
+            "color": realized_returns,
+            "colorscale": ml4t_diverging(),
+            "cmin": -color_limit,
+            "cmax": color_limit,
+            "colorbar": {"title": "Realized return", "tickformat": ".0%"},
+            "line": {"width": 0.5, "color": COLORS["neutral"]},
+        },
+        text=[f"Realized return: {value:.1%}" for value in realized_returns],
+        hovertemplate="MAE: %{x:.1%}<br>MFE: %{y:.1%}<br>%{text}<extra></extra>",
+    )
+)
+fig.add_vline(x=suggested_sl, line_dash="dash", line_color=COLORS["negative"])
+fig.add_hline(y=suggested_tp, line_dash="dash", line_color=COLORS["positive"])
+fig.update_layout(
+    height=480,
+    title=(
+        "Closed Calibration Trades Define the MAE/MFE Prior"
+        "<br><sup>Dashed lines are the 90th-percentile stop and 75th-percentile target</sup>"
+    ),
+    xaxis={"title": "Maximum adverse excursion", "tickformat": ".0%"},
+    yaxis={"title": "Maximum favorable excursion", "tickformat": ".0%"},
+)
 fig.show()
 
 # %% [markdown]
-# **Interpretation**: The interactive sweep highlights the elbow region where more
-# protection starts costing too much in Sharpe and trade count.
+# ## 5. One-Time Chronological Evaluation
+#
+# Only the no-rule baseline and the three configurations frozen above enter the 2022-2023 window.
+# This comparison estimates one realized-window outcome; it does not provide multiple-testing-
+# adjusted inference or establish that any rule is universally optimal.
 
 # %%
-fig_sweep, axes = plt.subplots(1, 3, figsize=(11, 3.8), constrained_layout=True)
-for ax, sweep_data, sweep_name, color in zip(
-    axes,
-    [sl_results, tp_results, ts_results],
-    ["StopLoss", "TakeProfit", "TrailingStop"],
-    [COLORS["blue"], COLORS["positive"], COLORS["amber"]],
-    strict=False,
-):
-    params = np.array([d["param"] for d in sweep_data]) * 100
-    sharpes = [d["sharpe"] for d in sweep_data]
-    trades = [d["n_trades"] for d in sweep_data]
-    ax.plot(params, sharpes, color=color, marker="o")
-    ax.axhline(baseline["sharpe"], color=COLORS["slate"], linestyle="--", linewidth=1.0)
-    ax.set_title(sweep_name)
-    ax.set_xlabel("Parameter (%)")
-    ax.set_ylabel("Sharpe ratio")
-    ax2 = ax.twinx()
-    ax2.plot(params, trades, color=COLORS["neutral"], marker="s", linestyle=":")
-    ax2.set_ylabel("Trades")
-fig_sweep.suptitle("One-dimensional risk sweeps reveal where protection becomes whipsaw")
-plt.show()
+evaluation_configs = {
+    "No rules": None,
+    f"Grid SL/TP {best_sl_tp[0]:.0%}/{best_sl_tp[1]:.0%}": RuleChain(
+        [StopLoss(pct=best_sl_tp[0]), TakeProfit(pct=best_sl_tp[1])]
+    ),
+    f"Grid SL/Trail {best_sl_trail[0]:.0%}/{best_sl_trail[1]:.0%}": RuleChain(
+        [StopLoss(pct=best_sl_trail[0]), TrailingStop(pct=best_sl_trail[1])]
+    ),
+    f"MAE/MFE {calibrated_sl_pct:.0%}/{calibrated_tp_pct:.0%}": RuleChain(
+        [StopLoss(pct=calibrated_sl_pct), TakeProfit(pct=calibrated_tp_pct)]
+    ),
+}
+evaluation_results = {
+    name: run_risk_sweep(
+        evaluation_prices,
+        evaluation_weights,
+        rules=rules,
+        initial_cash=INITIAL_CASH,
+    )
+    for name, rules in evaluation_configs.items()
+}
 
-# Persist 1D sweep data + baseline for the figure-19.6 publication script.
-sweep_rows_1d = []
-for sweep_data, sweep_name in (
-    (sl_results, "StopLoss"),
-    (tp_results, "TakeProfit"),
-    (ts_results, "TrailingStop"),
-):
-    for d in sweep_data:
-        sweep_rows_1d.append(
-            {
-                "rule": sweep_name,
-                "param": float(d["param"]),
-                "sharpe": float(d["sharpe"]),
-                "n_trades": int(d["n_trades"]),
-            }
-        )
-pl.DataFrame(sweep_rows_1d).write_parquet(OUTPUT_DIR / "risk_rule_1d_sweeps.parquet")
+# %%
+comparison = pl.DataFrame(
+    [
+        {
+            "configuration": name,
+            "sharpe": metrics["sharpe"],
+            "cagr": metrics["cagr"],
+            "max_dd": metrics["max_dd"],
+            "calmar": metrics["calmar"],
+            "closed_trades": metrics["n_trades"],
+            "win_rate": metrics["win_rate"],
+        }
+        for name, metrics in evaluation_results.items()
+    ]
+).sort("calmar", descending=True)
+winner = comparison.row(0, named=True)
+baseline_evaluation = evaluation_results["No rules"]
+
+# %%
+plot_rows = comparison.sort("calmar", descending=True)
+plot_labels = [name.replace(" ", "<br>", 1) for name in plot_rows["configuration"]]
+fig = go.Figure(
+    go.Bar(
+        x=plot_labels,
+        y=plot_rows["calmar"],
+        marker_color=[
+            COLORS["amber"] if name == winner["configuration"] else COLORS["blue"]
+            for name in plot_rows["configuration"]
+        ],
+        text=[f"{value:.2f}" for value in plot_rows["calmar"]],
+        textposition="outside",
+        cliponaxis=False,
+        customdata=np.column_stack([plot_rows["sharpe"], plot_rows["cagr"], plot_rows["max_dd"]]),
+        hovertemplate=(
+            "Calmar: %{y:.2f}<br>Sharpe: %{customdata[0]:.2f}<br>"
+            "CAGR: %{customdata[1]:.1%}<br>Max drawdown: %{customdata[2]:.1%}<extra></extra>"
+        ),
+    )
+)
+fig.update_layout(
+    width=850,
+    height=480,
+    margin={"l": 75, "r": 45, "t": 100, "b": 90},
+    title=(
+        f"{winner['configuration']} Leads the One-Time Evaluation"
+        "<br><sup>2022-2023; all rule choices frozen on 2019-2021 calibration data</sup>"
+    ),
+    xaxis={"title": None, "automargin": True},
+    yaxis={"title": "Calmar ratio (CAGR / |maximum drawdown|)", "zeroline": True},
+    showlegend=False,
+)
+fig.show()
+
+# %%
 pl.DataFrame(
-    [{"sharpe": float(baseline["sharpe"]), "n_trades": int(baseline["n_trades"])}]
+    [
+        {
+            "sample": "calibration",
+            "sharpe": baseline_calibration["sharpe"],
+            "n_trades": baseline_calibration["n_trades"],
+        },
+        {
+            "sample": "evaluation",
+            "sharpe": baseline_evaluation["sharpe"],
+            "n_trades": baseline_evaluation["n_trades"],
+        },
+    ]
 ).write_parquet(OUTPUT_DIR / "risk_rule_baseline.parquet")
 
 # %% [markdown]
-# **Interpretation**: The 1D sweeps reveal each rule's impact in isolation.
-# Tight stops (2-3%) typically hurt Sharpe by whipsawing out of positions
-# prematurely. Wider stops (8-15%) have less impact on Sharpe but provide
-# meaningful drawdown protection during tail events. TakeProfit and TrailingStop
-# show similar patterns --- overly aggressive targets sacrifice upside.
-
-# %% [markdown]
-# ## 3. Two-Dimensional Heatmaps
-#
-# Now we combine rules in 2D grids: StopLoss x TakeProfit and StopLoss x
-# TrailingStop. Heatmaps visualize Sharpe and Calmar across the full
-# parameter space.
-
-# %%
-# StopLoss x TakeProfit grid (5x5)
-sl_grid = [0.03, 0.05, 0.08, 0.10, 0.15]
-tp_grid = [0.05, 0.10, 0.15, 0.20, 0.30]
-
-sl_tp_sharpe = np.zeros((len(sl_grid), len(tp_grid)))
-sl_tp_calmar = np.zeros((len(sl_grid), len(tp_grid)))
-
-print("Running SL x TP grid (25 combinations)...")
-for i, sl in enumerate(sl_grid):
-    for j, tp in enumerate(tp_grid):
-        rules = RuleChain([StopLoss(pct=sl), TakeProfit(pct=tp)])
-        m = run_risk_sweep(
-            prices_df,
-            weight_dict,
-            rules=rules,
-            initial_cash=INITIAL_CASH,
-            cadence_days=CADENCE_DAYS,
-        )
-        sl_tp_sharpe[i, j] = m["sharpe"]
-        sl_tp_calmar[i, j] = m["calmar"]
-        print(f"  SL={sl:.0%} TP={tp:.0%}: Sharpe={m['sharpe']:.3f}  Calmar={m['calmar']:.2f}")
-
-# %% [markdown]
-# **Interpretation**: The SL x TP grid tests whether the best stop depends on the
-# profit target instead of behaving like an independent control.
-
-# %%
-# Visualize SL x TP heatmaps
-fig = make_subplots(
-    rows=1,
-    cols=2,
-    subplot_titles=["Sharpe: StopLoss x TakeProfit", "Calmar: StopLoss x TakeProfit"],
-)
-
-sl_labels = [f"{x:.0%}" for x in sl_grid]
-tp_labels = [f"{x:.0%}" for x in tp_grid]
-
-fig.add_trace(
-    go.Heatmap(
-        z=sl_tp_sharpe,
-        x=tp_labels,
-        y=sl_labels,
-        colorscale="RdYlGn",
-        text=np.round(sl_tp_sharpe, 3),
-        texttemplate="%{text}",
-        textfont=dict(size=11),
-        showscale=True,
-        colorbar=dict(title="Sharpe", x=0.45),
-    ),
-    row=1,
-    col=1,
-)
-
-# %%
-fig.add_trace(
-    go.Heatmap(
-        z=sl_tp_calmar,
-        x=tp_labels,
-        y=sl_labels,
-        colorscale="RdYlGn",
-        text=np.round(sl_tp_calmar, 2),
-        texttemplate="%{text}",
-        textfont=dict(size=11),
-        showscale=True,
-        colorbar=dict(title="Calmar", x=1.0),
-    ),
-    row=1,
-    col=2,
-)
-
-fig.update_xaxes(title_text="TakeProfit", row=1, col=1)
-fig.update_xaxes(title_text="TakeProfit", row=1, col=2)
-fig.update_yaxes(title_text="StopLoss", row=1, col=1)
-fig.update_yaxes(title_text="StopLoss", row=1, col=2)
-fig.update_layout(height=450, title="StopLoss x TakeProfit Grid")
-fig.show()
-
-# %% [markdown]
-# **Interpretation**: The heatmaps expose the stable region rather than a single best
-# point. Broad green zones are more trustworthy than isolated maxima.
-
-# %%
-fig_grid, axes = plt.subplots(1, 2, figsize=(10.5, 4.2), constrained_layout=True)
-im0 = axes[0].imshow(sl_tp_sharpe, cmap="RdYlGn", aspect="auto")
-axes[0].set_title("Sharpe: StopLoss x TakeProfit")
-axes[0].set_xticks(range(len(tp_grid)), tp_labels)
-axes[0].set_yticks(range(len(sl_grid)), sl_labels)
-axes[0].set_xlabel("TakeProfit")
-axes[0].set_ylabel("StopLoss")
-for i in range(len(sl_grid)):
-    for j in range(len(tp_grid)):
-        axes[0].text(j, i, f"{sl_tp_sharpe[i, j]:.2f}", ha="center", va="center", fontsize=8)
-im1 = axes[1].imshow(sl_tp_calmar, cmap="RdYlGn", aspect="auto")
-axes[1].set_title("Calmar: StopLoss x TakeProfit")
-axes[1].set_xticks(range(len(tp_grid)), tp_labels)
-axes[1].set_yticks(range(len(sl_grid)), sl_labels)
-axes[1].set_xlabel("TakeProfit")
-for i in range(len(sl_grid)):
-    for j in range(len(tp_grid)):
-        axes[1].text(j, i, f"{sl_tp_calmar[i, j]:.2f}", ha="center", va="center", fontsize=8)
-fig_grid.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
-fig_grid.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-fig_grid.suptitle("Stop-loss and take-profit interact across the risk surface")
-plt.show()
-
-# Persist SL x TP grid for the figure-19.7 publication script.
-grid_rows = []
-for i, sl in enumerate(sl_grid):
-    for j, tp in enumerate(tp_grid):
-        grid_rows.append(
-            {
-                "stop_loss": float(sl),
-                "take_profit": float(tp),
-                "sharpe": float(sl_tp_sharpe[i, j]),
-                "calmar": float(sl_tp_calmar[i, j]),
-            }
-        )
-pl.DataFrame(grid_rows).write_parquet(OUTPUT_DIR / "stoploss_takeprofit_grid.parquet")
-
-# Best SL x TP combination
-best_idx = np.unravel_index(sl_tp_calmar.argmax(), sl_tp_calmar.shape)
-best_sl_tp = (sl_grid[best_idx[0]], tp_grid[best_idx[1]])
-print(
-    f"\nBest SL x TP by Calmar: SL={best_sl_tp[0]:.0%}, TP={best_sl_tp[1]:.0%} "
-    f"(Sharpe={sl_tp_sharpe[best_idx]:.3f}, Calmar={sl_tp_calmar[best_idx]:.2f})"
-)
-
-# %% [markdown]
-# **Interpretation**: The publication figure and the best-point readout provide the
-# calibration recommendation the chapter can cite directly.
-
-# %%
-# StopLoss x TrailingStop grid (5x5)
-trail_grid = [0.02, 0.04, 0.06, 0.08, 0.10]
-
-sl_trail_sharpe = np.zeros((len(sl_grid), len(trail_grid)))
-sl_trail_calmar = np.zeros((len(sl_grid), len(trail_grid)))
-
-print("Running SL x Trail grid (25 combinations)...")
-for i, sl in enumerate(sl_grid):
-    for j, trail in enumerate(trail_grid):
-        rules = RuleChain([StopLoss(pct=sl), TrailingStop(pct=trail)])
-        m = run_risk_sweep(
-            prices_df,
-            weight_dict,
-            rules=rules,
-            initial_cash=INITIAL_CASH,
-            cadence_days=CADENCE_DAYS,
-        )
-        sl_trail_sharpe[i, j] = m["sharpe"]
-        sl_trail_calmar[i, j] = m["calmar"]
-
-# %% [markdown]
-# **Interpretation**: The SL x Trail grid tests whether dynamic exits preserve more
-# upside than fixed profit targets while still controlling drawdowns.
-
-# %%
-# Visualize SL x Trail heatmaps
-fig = make_subplots(
-    rows=1,
-    cols=2,
-    subplot_titles=["Sharpe: StopLoss x TrailingStop", "Calmar: StopLoss x TrailingStop"],
-)
-
-trail_labels = [f"{x:.0%}" for x in trail_grid]
-
-fig.add_trace(
-    go.Heatmap(
-        z=sl_trail_sharpe,
-        x=trail_labels,
-        y=sl_labels,
-        colorscale="RdYlGn",
-        text=np.round(sl_trail_sharpe, 3),
-        texttemplate="%{text}",
-        textfont=dict(size=11),
-        showscale=True,
-        colorbar=dict(title="Sharpe", x=0.45),
-    ),
-    row=1,
-    col=1,
-)
-
-# %%
-fig.add_trace(
-    go.Heatmap(
-        z=sl_trail_calmar,
-        x=trail_labels,
-        y=sl_labels,
-        colorscale="RdYlGn",
-        text=np.round(sl_trail_calmar, 2),
-        texttemplate="%{text}",
-        textfont=dict(size=11),
-        showscale=True,
-        colorbar=dict(title="Calmar", x=1.0),
-    ),
-    row=1,
-    col=2,
-)
-
-fig.update_xaxes(title_text="TrailingStop", row=1, col=1)
-fig.update_xaxes(title_text="TrailingStop", row=1, col=2)
-fig.update_yaxes(title_text="StopLoss", row=1, col=1)
-fig.update_yaxes(title_text="StopLoss", row=1, col=2)
-fig.update_layout(height=450, title="StopLoss x TrailingStop Grid")
-fig.show()
-
-# %% [markdown]
-# **Interpretation**: The trailing-stop surface shows whether dynamic exits create a
-# smoother frontier than fixed take-profit rules.
-
-# %%
-# Best SL x Trail combination
-best_idx = np.unravel_index(sl_trail_calmar.argmax(), sl_trail_calmar.shape)
-best_sl_trail = (sl_grid[best_idx[0]], trail_grid[best_idx[1]])
-print(
-    f"\nBest SL x Trail by Calmar: SL={best_sl_trail[0]:.0%}, Trail={best_sl_trail[1]:.0%} "
-    f"(Sharpe={sl_trail_sharpe[best_idx]:.3f}, Calmar={sl_trail_calmar[best_idx]:.2f})"
-)
-
-# %% [markdown]
-# **Interpretation**: The 2D heatmaps show the interaction between rules.
-# The color gradient reveals the "safe zone" --- parameter combinations that
-# improve risk-adjusted returns without excessively reducing Sharpe. The Calmar
-# heatmap is particularly informative: it rewards configurations that protect
-# against drawdowns while preserving return.
-
-# %% [markdown]
-# ## 4. MAE/MFE Calibration
-#
-# Instead of grid search, we use the data itself to suggest stop and target
-# levels. Run the baseline to collect trade-level MAE/MFE statistics, then
-# use `MAEMFEAnalyzer.suggest_stop_loss(90)` and
-# `suggest_take_profit(75)` to find data-driven levels.
-
-# %%
-# Analyze baseline trades
-if baseline["trades"]:
-    mae_mfe = MAEMFEAnalyzer(baseline["trades"])
-
-    print("=== MAE/MFE Analysis (Baseline Trades) ===")
-    print(f"  Trades analyzed: {mae_mfe.num_trades}")
-    print(f"  MAE mean:   {mae_mfe.mae_mean:.4f} ({mae_mfe.mae_mean:.2%})")
-    print(f"  MAE median: {mae_mfe.mae_median:.4f} ({mae_mfe.mae_median:.2%})")
-    print(f"  MFE mean:   {mae_mfe.mfe_mean:.4f} ({mae_mfe.mfe_mean:.2%})")
-    print(f"  MFE median: {mae_mfe.mfe_median:.4f} ({mae_mfe.mfe_median:.2%})")
-    print(f"  Edge ratio: {mae_mfe.edge_ratio:.2f}")
-    print(f"  Efficiency: {mae_mfe.efficiency:.2%}")
-
-    # Suggested levels
-    suggested_sl = mae_mfe.suggest_stop_loss(percentile=90)
-    suggested_tp = mae_mfe.suggest_take_profit(percentile=75)
-    optimal = mae_mfe.optimal_exit_levels(stop_percentile=90, target_percentile=75)
-
-    print(f"\n  Suggested StopLoss (90th pctl):   {suggested_sl:.4f} ({suggested_sl:.2%})")
-    print(f"  Suggested TakeProfit (75th pctl):  {suggested_tp:.4f} ({suggested_tp:.2%})")
-    print(f"  Risk/Reward ratio:                {optimal['risk_reward']:.2f}")
-else:
-    print("No trades in baseline --- cannot compute MAE/MFE")
-    suggested_sl = -0.05
-    suggested_tp = 0.10
-
-# %% [markdown]
-# **Interpretation**: The MAE/MFE summary turns realized trade paths into a data-driven
-# prior for stop and target placement. If the edge ratio is weak, the calibration
-# should be treated cautiously.
-
-# %%
-# MAE vs MFE scatter plot
-if baseline["trades"]:
-    dist = mae_mfe.distribution_data()
-    pnls = [t.pnl_percent for t in baseline["trades"]]
-
-# %%
-if baseline["trades"]:
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=dist["mae"],
-            y=dist["mfe"],
-            mode="markers",
-            marker=dict(
-                size=6,
-                color=pnls,
-                colorscale="RdYlGn",
-                colorbar=dict(title="PnL %"),
-                cmin=-max(abs(min(pnls)), abs(max(pnls))),
-                cmax=max(abs(min(pnls)), abs(max(pnls))),
-                line=dict(width=0.5, color="gray"),
-            ),
-            text=[f"PnL: {p:.2%}" for p in pnls],
-            hovertemplate="MAE: %{x:.2%}<br>MFE: %{y:.2%}<br>%{text}",
-        )
-    )
-    # Add suggested levels
-    fig.add_vline(
-        x=suggested_sl,
-        line_dash="dash",
-        line_color="red",
-        annotation_text=f"SL: {suggested_sl:.1%}",
-    )
-    fig.add_hline(
-        y=suggested_tp,
-        line_dash="dash",
-        line_color="green",
-        annotation_text=f"TP: {suggested_tp:.1%}",
-    )
-    fig.update_layout(
-        title="MAE vs MFE (colored by realized P&L)",
-        xaxis_title="Maximum Adverse Excursion",
-        yaxis_title="Maximum Favorable Excursion",
-        height=500,
-    )
-    fig.show()
-
-# %% [markdown]
-# **Interpretation**: The scatter separates trades that needed room from trades that
-# never recovered. The suggested levels should cut through that cloud rather than sit
-# in an empty part of the path distribution.
-
-# %%
-# Run backtest with MAE/MFE-calibrated levels
-calibrated_sl_pct = abs(suggested_sl)  # suggest_stop_loss returns negative
-calibrated_tp_pct = abs(suggested_tp)
-
-print(
-    f"\nRunning MAE/MFE-calibrated backtest: SL={calibrated_sl_pct:.1%}, TP={calibrated_tp_pct:.1%}"
-)
-calibrated_rules = RuleChain(
-    [
-        StopLoss(pct=calibrated_sl_pct),
-        TakeProfit(pct=calibrated_tp_pct),
-    ]
-)
-calibrated = run_risk_sweep(
-    prices_df,
-    weight_dict,
-    rules=calibrated_rules,
-    initial_cash=INITIAL_CASH,
-    cadence_days=CADENCE_DAYS,
-)
-print(
-    f"  Sharpe={calibrated['sharpe']:.3f}  MaxDD={calibrated['max_dd']:.2%}  "
-    f"Calmar={calibrated['calmar']:.2f}  Trades={calibrated['n_trades']}"
-)
-
-# %% [markdown]
-# **Interpretation**: The calibrated backtest is the fairness check. If percentile-based
-# levels are materially worse than the grid surface, the excursion prior is too crude.
-
-# %% [markdown]
-# ## 5. Comparison Table
-#
-# All configurations ranked by Calmar ratio. The MAE/MFE-calibrated levels
-# are compared against the grid-optimal and baseline configurations.
-
-# %%
-comparison = {
-    "Baseline (no rules)": baseline,
-    f"Grid-optimal SL x TP ({best_sl_tp[0]:.0%}/{best_sl_tp[1]:.0%})": run_risk_sweep(
-        prices_df,
-        weight_dict,
-        rules=RuleChain([StopLoss(pct=best_sl_tp[0]), TakeProfit(pct=best_sl_tp[1])]),
-        initial_cash=INITIAL_CASH,
-        cadence_days=CADENCE_DAYS,
-    ),
-    f"Grid-optimal SL x Trail ({best_sl_trail[0]:.0%}/{best_sl_trail[1]:.0%})": run_risk_sweep(
-        prices_df,
-        weight_dict,
-        rules=RuleChain(
-            [
-                StopLoss(pct=best_sl_trail[0]),
-                TrailingStop(pct=best_sl_trail[1]),
-            ]
-        ),
-        initial_cash=INITIAL_CASH,
-        cadence_days=CADENCE_DAYS,
-    ),
-    f"MAE/MFE-calibrated ({calibrated_sl_pct:.0%}/{calibrated_tp_pct:.0%})": calibrated,
-}
-
-ranked = sorted(comparison.items(), key=lambda x: x[1]["calmar"], reverse=True)
-ranked_table = pl.DataFrame(
-    {
-        "Configuration": [name + (" ←" if "MAE/MFE" in name else "") for name, _ in ranked],
-        "Sharpe": [round(m["sharpe"], 3) for _, m in ranked],
-        "MaxDD": [f"{m['max_dd']:.2%}" for _, m in ranked],
-        "Calmar": [round(m["calmar"], 2) for _, m in ranked],
-        "Return": [f"{m['total_return']:.2%}" for _, m in ranked],
-        "Trades": [m["n_trades"] for _, m in ranked],
-        "WinRate": [f"{m['win_rate']:.1%}" for _, m in ranked],
-    }
-)
-ranked_table
-
-# %% [markdown]
-# **Interpretation**: Ranked by Calmar, the grid-optimal SL×TP configuration
-# (3% SL / 15% TP) finishes first at 5.49, followed by the grid-optimal
-# SL×Trail (8%/10%) at 2.99, the no-rules baseline at 2.03, and the
-# MAE/MFE-calibrated configuration (26% SL / 16% TP) last at 0.81. Two findings
-# matter for §19.7. First, a targeted grid over the stop and take-profit axes
-# clearly improves risk-adjusted return over the baseline — the tight-stop /
-# moderate-take-profit corner (3%/15%) cuts max drawdown to ~5% while lifting
-# Sharpe above 1. Second, MAE/MFE percentile calibration is a cheap, data-driven
-# starting point but not a substitute for the sweep: realised excursions here
-# point to a wide stop (26%) and moderate target (16%) that underperform the
-# tuned grid. Use the calibration to seed the search, then sweep.
-
-# %% [markdown]
 # ## Key Takeaways
-#
-# 1. **Sharpe surfaces are non-monotone in stop and take-profit width.**
-#    The stop-loss sweep traces a U-shape — Sharpe falls from 0.38 at a 2%
-#    stop to ~0.20 around 5%, then recovers to ~0.50 by 15% — with no level
-#    driving it negative on this panel. TP and TrailingStop show similar
-#    non-monotone shapes. Calibration is required — a tighter stop is not
-#    automatically a safer stop.
-# 2. **The grid sweep beats MAE/MFE calibration by Calmar here.** The
-#    grid-optimal SL×TP (3%/15%) ranks first at Calmar 5.49, ahead of the
-#    no-rules baseline (2.03), while the MAE/MFE percentile levels (26%/16%)
-#    land last at 0.81. The realised-excursion percentiles give a fast prior,
-#    but on this panel they point too wide; a 25-cell grid still earns its keep.
-# 3. **Position rules, not portfolio limits, are what you sweep.** Every
-#    surface in this notebook varies position-level stops and exits.
-#    Portfolio-level governance (`MaxDrawdownLimit`, `DailyLossLimit`) is
-#    a kill switch set by the risk mandate — not a parameter to optimize.
-#    See `10_ml4t_backtest_risk_demo` §3 and §19.8.
-#
-# **Book reference**: §19.7 Adaptive Risk Controls (Figures 19.6 + 19.7).
-#
-# **Next**: [`10_ml4t_backtest_risk_demo`](10_ml4t_backtest_risk_demo.ipynb)
-# documents the full `ml4t.backtest.risk` rule API used by these sweeps.
+
+# %%
+display(
+    Markdown(
+        f"""
+1. **Calibrate before evaluating.** The grids and MAE/MFE percentiles use only 2019-2021 data;
+   the 2022-2023 window is opened once after all three rule configurations are frozen.
+2. **Use the metric you name.** The evaluation ranks configurations by CAGR-based Calmar. In this
+   run, **{winner["configuration"]}** ranks first at **{winner["calmar"]:.2f}**, while the no-rule
+   baseline records **{baseline_evaluation["calmar"]:.2f}**.
+3. **Treat small-sample excursion percentiles as priors.** The MAE/MFE levels come from only
+   **{mae_mfe.num_trades} closed calibration trades**, so they seed a search rather than settle it.
+4. **Keep the operational contract explicit.** Signals use completed closes, orders execute on the
+   next bar, schedules count trading bars, and incomplete panels fail before the backtest.
+
+This capstone closes the chapter's progression from risk measurement to calibrated controls.
+"""
+    )
+)

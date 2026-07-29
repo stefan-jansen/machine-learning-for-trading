@@ -19,12 +19,12 @@
 # **Docker image**: `ml4t`
 #
 # This notebook examines the empirical evidence for factor-based allocation using
-# a century of data from AQR Capital Management and Kenneth French's Data Library.
+# nearly a century of data from AQR Capital Management and Kenneth French's Data Library.
 # The key question for portfolio construction: which factors diversify, which provide
 # crisis insurance, and what does this mean for allocation decisions?
 #
 # **Learning Objectives**:
-# - Assess factor premia reality using 100+ years of pre-discovery data
+# - Assess factor premia using long pre-publication histories
 # - Analyze cross-asset evidence from 8 asset classes
 # - Quantify the value-momentum negative correlation for diversification
 # - Evaluate trend-following as portfolio insurance during crises
@@ -54,28 +54,46 @@
 # ## Setup
 
 # %%
-"""Factor Allocation Evidence — analyze diversification benefits across return sources using ETF and factor data."""
+"""Factor Allocation Evidence - assess diversification across published factor returns."""
 
+import importlib
+import logging
 import warnings
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
-
-# ML4T data providers
-from ml4t.data.providers import AQRFactorProvider, FamaFrenchProvider
+import structlog
+from IPython.display import Markdown, display
 from plotly.subplots import make_subplots
 from scipy import stats
 
 from utils import DATA_DIR
+from utils.style import COLORS, ml4t_diverging
 
-warnings.filterwarnings("ignore")
+structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING))
+
+# The provider package imports optional Oanda code whose Python 3.14 syntax warnings are
+# unrelated to these factor providers. Scope suppression to that one optional-package import.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", SyntaxWarning)
+    provider_module = importlib.import_module("ml4t.data.providers")
+
+AQRFactorProvider = provider_module.AQRFactorProvider
+FamaFrenchProvider = provider_module.FamaFrenchProvider
+
+
+def show_figure(figure: go.Figure) -> None:
+    """Render Plotly plus PNG while containing legacy Kaleido deprecations."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        figure.show()
+
 
 # %% tags=["parameters"]
-# Production defaults — Papermill overrides for CI testing
+# Production defaults - Papermill overrides for CI testing
 # This notebook uses AQR/Fama-French data (no case study data);
 # date range is governed by source-provider availability, no parameters needed.
 
@@ -86,23 +104,26 @@ warnings.filterwarnings("ignore")
 # AQR Capital Management and Kenneth French's Data Library.
 
 # %%
-# Initialize providers
-# Note: First time users should run:
-#   AQRFactorProvider.download()  # Downloads ~50MB of Excel files from AQR
-# Fama-French data is fetched on demand and cached locally
-
 try:
     aqr = AQRFactorProvider(data_path=DATA_DIR / "factors" / "aqr")
-    print(f"AQR Provider: {len(aqr.list_datasets())} datasets available")
-    print(f"  Categories: {aqr.list_categories()}")
 except FileNotFoundError as err:
     raise RuntimeError(
         "AQR factor data is required for this notebook. Run AQRFactorProvider.download() first."
     ) from err
 
-ff = FamaFrenchProvider(cache_path=DATA_DIR / "factors" / "fama-french")
-print(f"\nFama-French Provider: {len(ff.list_datasets())} datasets available")
-print(f"  Categories: {ff.list_categories()}")
+# Fetch French source archives afresh so the signed run exercises download and parsing
+# rather than certifying a stale local cache hit. AQR's downloaded workbooks are the
+# declared canonical inputs and are reconciled separately in the evidence bundle.
+ff = FamaFrenchProvider(cache_path=DATA_DIR / "factors" / "fama-french", use_cache=False)
+
+display(
+    Markdown(
+        f"The local AQR source exposes **{len(aqr.list_datasets())} datasets** across "
+        f"**{len(aqr.list_categories())} categories**. The French provider exposes "
+        f"**{len(ff.list_datasets())} datasets** across **{len(ff.list_categories())} "
+        "categories**."
+    )
+)
 
 # %% [markdown]
 # These provider checks look mundane, but they matter because the notebook combines
@@ -115,9 +136,9 @@ print(f"  Categories: {ff.list_categories()}")
 # We'll load the key factor datasets for our analysis:
 #
 # 1. **Fama-French factors**: FF3, FF5, Momentum (1926-present)
-# 2. **AQR factors**: QMJ, BAB, HML Devil (1926-present)
+# 2. **AQR equity factors**: QMJ and BAB
 # 3. **Cross-asset**: VME (1972-present), TSMOM (1985-present)
-# 4. **Long-history**: Century of Factor Premia (1920-present)
+# 4. **Long-history**: Century of Factor Premia (1926-2024 in this source vintage)
 
 # %%
 # Fama-French core factors
@@ -125,51 +146,33 @@ ff3 = ff.fetch("ff3")  # Market, SMB, HML, RF
 ff5 = ff.fetch("ff5")  # Adds RMW, CMA
 mom = ff.fetch("mom")  # Momentum factor
 
-# Combine into Carhart 4-factor and 6-factor models
-ff4 = ff.fetch_combined(["ff3", "mom"])
-ff6 = ff.fetch_combined(["ff5", "mom"])
+# Join once-fetched source frames on their common monthly timestamps.
+ff4 = ff3.join(mom, on="timestamp", how="inner")
+ff6 = ff5.join(mom, on="timestamp", how="inner")
 
-print("Fama-French Data Loaded:")
-print(
-    f"  FF3: {len(ff3)} months ({ff3['timestamp'].min():%Y-%m} to {ff3['timestamp'].max():%Y-%m})"
-)
-print(
-    f"  FF5: {len(ff5)} months ({ff5['timestamp'].min():%Y-%m} to {ff5['timestamp'].max():%Y-%m})"
-)
-print(
-    f"  MOM: {len(mom)} months ({mom['timestamp'].min():%Y-%m} to {mom['timestamp'].max():%Y-%m})"
+display(
+    Markdown(
+        f"French coverage spans **{len(ff3):,} FF3 months** "
+        f"({ff3['timestamp'].min():%Y-%m} to {ff3['timestamp'].max():%Y-%m}), "
+        f"**{len(ff5):,} FF5 months**, and **{len(mom):,} momentum months**."
+    )
 )
 
 # %%
 # AQR factors (if available)
-if aqr:
-    # Core equity factors
-    qmj = aqr.fetch("qmj_factors")
-    bab = aqr.fetch("bab_factors")
+qmj = aqr.fetch("qmj_factors")
+bab = aqr.fetch("bab_factors")
+vme = aqr.fetch("vme_factors")
+tsmom = aqr.fetch("tsmom")
+century = aqr.fetch("century_premia")
 
-    # Cross-asset factors
-    vme = aqr.fetch("vme_factors")
-    tsmom = aqr.fetch("tsmom")
-
-    # Long-history (century of data!)
-    century = aqr.fetch("century_premia")
-
-    print("\nAQR Data Loaded:")
-    print(
-        f"  QMJ: {len(qmj)} months ({qmj['timestamp'].min():%Y-%m} to {qmj['timestamp'].max():%Y-%m})"
+display(
+    Markdown(
+        f"AQR coverage includes **{len(qmj):,} QMJ months**, **{len(bab):,} BAB months**, "
+        f"**{len(vme):,} VME months**, **{len(tsmom):,} TSMOM months**, and "
+        f"**{len(century):,} Century months** through {century['timestamp'].max():%Y-%m}."
     )
-    print(
-        f"  BAB: {len(bab)} months ({bab['timestamp'].min():%Y-%m} to {bab['timestamp'].max():%Y-%m})"
-    )
-    print(
-        f"  VME: {len(vme)} months ({vme['timestamp'].min():%Y-%m} to {vme['timestamp'].max():%Y-%m})"
-    )
-    print(
-        f"  TSMOM: {len(tsmom)} months ({tsmom['timestamp'].min():%Y-%m} to {tsmom['timestamp'].max():%Y-%m})"
-    )
-    print(
-        f"  Century: {len(century)} months ({century['timestamp'].min():%Y-%m} to {century['timestamp'].max():%Y-%m})"
-    )
+)
 
 # %% [markdown]
 # ## Return Units and Conventions
@@ -179,6 +182,11 @@ if aqr:
 # - `FamaFrenchProvider`: Divides raw French data (percent) by 100 on fetch
 # - `AQRFactorProvider`: Returns data as-is (already decimal in source files)
 #
+# These are **current-vintage published research series**. Providers can revise,
+# backfill, or extend their histories. Observation timestamps identify return months,
+# not the dates on which the final research series became available to investors.
+# The notebook therefore presents historical evidence, not a live-vintage backtest.
+#
 # **Terminology**:
 # - `Mkt-RF`: Market excess return (market return minus risk-free rate)
 # - `HML`, `SMB`, `MOM`: Long-short factor portfolios (already excess returns)
@@ -186,6 +194,8 @@ if aqr:
 
 # %%
 # Convert to pandas for analysis (provider returns Polars)
+ff3_pd = ff3.to_pandas().set_index("timestamp")
+mom_pd = mom.to_pandas().set_index("timestamp")
 ff4_pd = ff4.to_pandas().set_index("timestamp")
 
 # Sanity check: verify decimal units (fail if provider has a bug)
@@ -196,8 +206,11 @@ for col in ["Mkt-RF", "HML", "SMB", "MOM"]:
             f"{col}: median |r| = {median_abs:.2f} suggests percent units (provider bug)"
         )
 
-print(
-    f"Loaded {len(ff4_pd)} months of Fama-French data, {ff4_pd.index.min():%Y-%m} to {ff4_pd.index.max():%Y-%m}"
+display(
+    Markdown(
+        f"The combined French panel contains **{len(ff4_pd):,} monthly observations** from "
+        f"**{ff4_pd.index.min():%Y-%m} through {ff4_pd.index.max():%Y-%m}**."
+    )
 )
 
 # %% [markdown]
@@ -209,7 +222,8 @@ print(
 # ## Reference Data: NBER Recessions
 #
 # Source: NBER Business Cycle Dating Committee (https://www.nber.org/research/data/us-business-cycle-expansions-and-contractions).
-# These are static dates current as of 2023; future recessions will need manual addition.
+# The static list includes NBER recessions through the 2020 contraction. Future
+# contractions require an explicit source update.
 
 # %%
 # NBER recession dates (peak to trough)
@@ -250,11 +264,11 @@ CRISES = {
 #
 # One of the strongest criticisms of factor investing is that factor premia were discovered
 # through data mining on the 1963-1990 period. The **Century of Factor Premia** dataset
-# from AQR addresses this: 100+ years of data starting in 1920, much of which predates
+# from AQR addresses this with a history beginning in 1926, much of which predates
 # the academic publication of these factors.
 #
 # > "The fact that value and momentum premia exist in data that predates their discovery
-# > provides compelling pre-publication evidence." — Ilmanen et al. (2021)
+# > provides compelling pre-publication evidence." - Ilmanen et al. (2021)
 #
 # **Important distinction**: This is "pre-discovery" or "pre-publication" evidence, not
 # strictly "out-of-sample" in the workflow sense (which would require pre-registration
@@ -262,21 +276,17 @@ CRISES = {
 # post hoc window selection.
 
 # %%
-# Visualization setup
-colors = {
-    "Mkt-RF": "#1f77b4",  # Blue - Market
-    "HML": "#2ca02c",  # Green - Value
-    "SMB": "#9467bd",  # Purple - Size
-    "MOM": "#d62728",  # Red - Momentum
-    "RMW": "#8c564b",  # Brown - Profitability
-    "CMA": "#e377c2",  # Pink - Investment
-    "QMJ": "#ff7f0e",  # Orange - Quality
-    "BAB": "#17becf",  # Cyan - Low-Vol
-    "TSMOM": "#bcbd22",  # Olive - Trend
-    "Value": "#2ca02c",  # Green
-    "Momentum": "#d62728",  # Red
-    "Carry": "#ff7f0e",  # Orange
-    "Defensive": "#17becf",  # Cyan
+# Consistent semantic emphasis across figures. Figures with more than five factors
+# use one focal color plus neutral context rather than a categorical rainbow.
+factor_colors = {
+    "Mkt-RF": COLORS["blue"],
+    "HML": COLORS["copper"],
+    "SMB": COLORS["neutral"],
+    "MOM": COLORS["amber"],
+    "Value": COLORS["copper"],
+    "Momentum": COLORS["amber"],
+    "Carry": COLORS["positive"],
+    "Defensive": COLORS["slate"],
 }
 
 labels = {
@@ -292,12 +302,8 @@ labels = {
 }
 
 # %%
-# Figure 1: Fama-French Factors - A Century of Performance
-# NOTE: These are long-short factor portfolios, not implementable strategies.
-# Actual implementation involves financing costs, leverage constraints, and capacity limits.
-
-# Calculate cumulative returns (ff4_pd already converted above)
 cum_returns = (1 + ff4_pd[["Mkt-RF", "HML", "SMB", "MOM"]]).cumprod()
+terminal_growth = cum_returns.iloc[-1]
 
 fig = go.Figure()
 
@@ -307,13 +313,13 @@ for col in ["Mkt-RF", "MOM", "HML", "SMB"]:
             x=cum_returns.index,
             y=cum_returns[col],
             name=labels.get(col, col),
-            line=dict(color=colors.get(col, "#333"), width=2),
+            line=dict(color=factor_colors[col], width=2),
             hovertemplate="%{x|%Y-%m}<br>%{y:.2f}x<extra></extra>",
         )
     )
 
 # %% [markdown]
-# ### Add Regime Context to Figure 1
+# ### Add recession context
 #
 # Recession shading separates secular compounding from crisis behavior.
 
@@ -324,150 +330,124 @@ for start, end in RECESSIONS:
     end_dt = datetime.strptime(end, "%Y-%m-%d")
     if start_dt >= cum_returns.index.min():
         fig.add_vrect(
-            x0=start_dt, x1=end_dt, fillcolor="gray", opacity=0.2, layer="below", line_width=0
+            x0=start_dt,
+            x1=end_dt,
+            fillcolor=COLORS["silver_muted"],
+            opacity=0.35,
+            layer="below",
+            line_width=0,
         )
 
+wealth_tick_values = [0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000]
+wealth_tick_text = [f"{value:g}x" for value in wealth_tick_values]
 fig.update_layout(
-    title=dict(
-        text="<b>Fama-French Factors: Nearly a Century of Evidence</b><br>"
-        "<sup>Cumulative returns (log scale) | Gray bands = NBER recessions | 1927-present</sup>",
-        x=0.5,
+    title=(
+        f"Market and momentum dominate long-run factor wealth<br><sup>Growth of $1 in "
+        f"published long-short factor returns, {cum_returns.index.min():%Y-%m} to "
+        f"{cum_returns.index.max():%Y-%m}; log scale; shaded bands are NBER recessions</sup>"
     ),
-    xaxis_title="",
-    yaxis_title="Cumulative Return ($1 invested)",
+    xaxis_title="Month",
+    yaxis_title="Growth of $1 (log scale)",
     yaxis_type="log",
-    yaxis=dict(tickformat=".0f", ticksuffix="x"),
-    legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor="rgba(255,255,255,0.8)"),
+    yaxis=dict(tickmode="array", tickvals=wealth_tick_values, ticktext=wealth_tick_text),
+    legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
     hovermode="x unified",
-    template="plotly_white",
     height=500,
 )
 
-# Annotation for size premium weakness
-fig.add_annotation(
-    x=cum_returns.index[-1],
-    y=cum_returns["SMB"].iloc[-1],
-    text="Size premium<br>has weakened",
-    showarrow=True,
-    arrowhead=2,
-    ax=50,
-    ay=-30,
-    font=dict(size=10),
-)
-
-fig.show()
+show_figure(fig)
 
 # %% [markdown]
-# ### Key Observations
+# ### What the wealth paths establish
 #
-# 1. **Market (Mkt-RF)**: The equity risk premium has compounded to ~700x over nearly
-#    a century — the foundation of long-term wealth creation.
-#
-# 2. **Value (HML)**: The value premium is positive over the full Fama-French sample
-#    used here, with an extended drawdown over 2017-2020 (the "value drawdown").
-#
-# 3. **Momentum (MOM)**: Strong long-term performance but with occasional severe crashes
-#    (1932, 2009). The 2009 "momentum crash" wiped out years of gains in months.
-#
-# 4. **Size (SMB)**: The size premium has largely disappeared since its discovery in 1981.
-#    This is a **cautionary tale** about factor decay after publication.
+# The market, value, size, and momentum series are published long-short research
+# portfolios. Their full-history wealth paths establish historical magnitude, not
+# implementable investor returns. The later inference and period-comparison sections
+# test whether the apparent premia are statistically distinguishable and whether SMB
+# weakened after its 1981 publication.
 #
 # > **Important**: These are **long-short factor portfolio returns**, not tradable
 # > strategies. The cumulative return charts above represent theoretical wealth paths
 # > assuming: (1) perfect rebalancing, (2) zero transaction costs, (3) unlimited
 # > leverage capacity, and (4) no financing costs for short positions. Actual
 # > implementation of factor strategies involves significant slippage, financing
-# > costs, and capacity constraints. Use this data as evidence of factor premia
-# > existence, not as a literal wealth trajectory.
+# > costs, and capacity constraints. Use this data as evidence about published factor
+# > returns, not as a literal investable wealth trajectory.
+
+# %%
+display(
+    Markdown(
+        f"Over the shared French history, $1 grows to **${terminal_growth['Mkt-RF']:,.0f}** "
+        f"in the market factor and **${terminal_growth['MOM']:,.0f}** in momentum. "
+        "Those magnitudes exclude implementation frictions and do not establish that a reader "
+        "could have earned the same paths."
+    )
+)
 
 # %% [markdown]
-# ## Figure 2: Century of Factor Premia — Pre-Discovery Evidence
+# ## Century of Factor Premia: Pre-Publication Evidence
 #
 # The AQR "Century of Factor Premia" dataset provides pre-discovery evidence for
-# factor premia. Much of this data (1920-1963) predates the academic publication
+# factor premia. Much of this data (1926-1963) predates the academic publication
 # of factors, making it less susceptible to post hoc window selection.
 #
 # Note: "Pre-discovery" is more accurate than "out-of-sample" here. True out-of-sample
 # would require pre-registration of the strategy before seeing any data.
 
 # %%
-if century is not None:
-    # Get the main factor columns (Stock Selection factors)
-    # Century data has columns like: Value Stock Selection, Momentum Stock Selection, etc.
-    century_pd = century.to_pandas().set_index("timestamp")
-    print(f"Century of Factor Premia: {len(century_pd.columns)} columns, {len(century_pd)} months")
-else:
-    print("Century data not available - run AQRFactorProvider.download()")
+century_pd = century.to_pandas().set_index("timestamp")
+century_columns = [
+    "All asset classes Value",
+    "All asset classes Momentum",
+    "All asset classes Carry",
+    "All asset classes Defensive",
+]
+assert set(century_columns) <= set(century_pd.columns)
+century_factors = century_pd[century_columns].dropna()
+cum_century = (1 + century_factors).cumprod()
+
+display(
+    Markdown(
+        f"The aggregate Century panel contributes **{len(century_factors):,} common months** "
+        f"from **{century_factors.index.min():%Y-%m} through "
+        f"{century_factors.index.max():%Y-%m}**."
+    )
+)
 
 # %% [markdown]
-# The century dataset is most persuasive when it covers the pre-publication window.
-# If it is unavailable, the notebook still runs, but the strongest argument against
-# post hoc story-telling becomes weaker.
+# The four exact aggregate columns keep the comparison aligned with the narrative.
+# They combine the underlying stock-selection and macro sleeves rather than mixing
+# regions or showing multiple variants of the same factor.
 
 # %%
-if century is not None:
-    # Select key factor series - looking for Stock Selection factors
-    factor_cols = []
-    for col in century_pd.columns:
-        if "Stock Selection" in col or col in ["Value", "Momentum", "Carry", "Defensive"]:
-            factor_cols.append(col)
+fig = go.Figure()
 
-    if not factor_cols:
-        # Try alternative column naming
-        factor_cols = [
-            c
-            for c in century_pd.columns
-            if any(f in c.lower() for f in ["value", "momentum", "carry", "defensive"])
-        ][:4]
-
-    if factor_cols:
-        century_factors = century_pd[factor_cols].dropna()
-        cum_century = (1 + century_factors).cumprod()
-    else:
-        print("Could not identify factor columns in Century data")
-else:
-    print("Skipping century-factor selection - data not available.")
-
-# %%
-if century is not None and "cum_century" in dir():
-    fig = go.Figure()
-
-    for col in cum_century.columns:
-        if "value" in col.lower():
-            color = colors["Value"]
-        elif "momentum" in col.lower():
-            color = colors["Momentum"]
-        elif "carry" in col.lower():
-            color = colors["Carry"]
-        elif "defensive" in col.lower():
-            color = colors["Defensive"]
-        else:
-            color = "#333"
-
-        fig.add_trace(
-            go.Scatter(
-                x=cum_century.index,
-                y=cum_century[col],
-                name=col.replace("Stock Selection", "").strip(),
-                line=dict(color=color, width=2),
-                hovertemplate="%{x|%Y-%m}<br>%{y:.2f}x<extra></extra>",
-            )
+for col in cum_century.columns:
+    short_name = col.removeprefix("All asset classes ")
+    fig.add_trace(
+        go.Scatter(
+            x=cum_century.index,
+            y=cum_century[col],
+            name=short_name,
+            line=dict(color=factor_colors[short_name], width=2),
+            hovertemplate="%{x|%Y-%m}<br>%{y:.2f}x<extra></extra>",
         )
-
-    fig.update_layout(
-        title=dict(
-            text="<b>A Century of Factor Premia: Pre-Discovery Evidence</b><br>"
-            "<sup>AQR data from 1920 | Factors predating their publication | Ilmanen et al. (2021)</sup>",
-            x=0.5,
-        ),
-        xaxis_title="",
-        yaxis_title="Cumulative Return",
-        yaxis_type="log",
-        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
-        template="plotly_white",
-        height=500,
     )
-    fig.show()
+
+fig.update_layout(
+    title=(
+        "Four aggregate premia persist across the Century sample"
+        f"<br><sup>AQR published factor returns, {cum_century.index.min():%Y-%m} to "
+        f"{cum_century.index.max():%Y-%m}; pre-publication history is not a "
+        "preregistered holdout</sup>"
+    ),
+    xaxis_title="Month",
+    yaxis_title="Growth of $1 (log scale)",
+    yaxis_type="log",
+    legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+    height=500,
+)
+show_figure(fig)
 
 # %% [markdown]
 # ---
@@ -486,23 +466,23 @@ if century is not None and "cum_century" in dir():
 # - **Implementation drag**: Rebalancing timing, corporate actions, index changes
 #
 # **The gap between "evidence of premium" and "tradable strategy" is addressed in**:
-# - Chapter 17: Strategy Simulation (transaction cost modeling)
+# - Chapter 16: Strategy Simulation (transaction cost modeling)
 # - Chapter 17: Portfolio Construction (leverage constraints)
-# - Chapter 19: Transaction Costs (market impact)
+# - Chapter 18: Transaction Costs (market impact)
 #
 # ---
 
 # %% [markdown]
 # ---
 #
-# # Part 2: Statistical Rigor — Do Factors Pass Significance Tests?
+# # Part 2: Statistical Rigor: Do Factors Pass Significance Tests?
 #
 # Harvey, Liu & Zhu (2016) propose a stricter statistical bar for factor discovery:
 # given hundreds of factors tested in the literature, a **t-stat > 3.0** (not 2.0)
 # is needed to account for multiple testing.
 #
 # > "Most claimed research findings in financial economics are likely false."
-# > — Harvey, Liu & Zhu (2016)
+# > - Harvey, Liu & Zhu (2016)
 #
 # **Important caveats on the t > 3 threshold**:
 #
@@ -562,10 +542,12 @@ def calculate_mean_return_tstat(returns, periods_per_year=12):
 
 
 # %% [markdown]
-# ### Sharpe Ratio Statistics (Lo 2002)
+# ### Sharpe Ratio Uncertainty
 #
-# The Sharpe ratio t-statistic is **different** from the Harvey threshold.
-# Lo (2002) derives the asymptotic distribution accounting for serial correlation.
+# The Sharpe ratio t-statistic is **different** from the Harvey threshold. The
+# approximation below rescales both the monthly estimate and its standard error to
+# annual units, then inflates uncertainty for return autocorrelation. It is a
+# transparent Lo-style diagnostic, not the full covariance expression in Lo (2002).
 
 
 # %%
@@ -592,21 +574,24 @@ def compute_autocorrelation_adjustment(returns, max_lag: int) -> tuple[list[floa
 
 # %%
 def calculate_sharpe_stats(returns, periods_per_year=12):
-    """Calculate annualized Sharpe statistics with Lo-style serial-correlation adjustment."""
+    """Calculate annualized Sharpe statistics with a serial-correlation adjustment."""
     if hasattr(returns, "values"):
         returns = returns.values
     returns = returns[~np.isnan(returns)]
 
     n = len(returns)
-    mean_ret = np.mean(returns) * periods_per_year
-    std_ret = np.std(returns, ddof=1) * np.sqrt(periods_per_year)
-    sharpe = mean_ret / std_ret if std_ret > 0 else 0
+    monthly_mean = np.mean(returns)
+    monthly_std = np.std(returns, ddof=1)
+    mean_ret = monthly_mean * periods_per_year
+    std_ret = monthly_std * np.sqrt(periods_per_year)
+    monthly_sharpe = monthly_mean / monthly_std if monthly_std > 0 else 0
+    sharpe = monthly_sharpe * np.sqrt(periods_per_year)
 
     max_lag = int(np.floor(4 * (n / 100) ** (2 / 9)))
     max_lag = max(1, min(max_lag, n // 4))
     autocorrs, lr_var_factor = compute_autocorrelation_adjustment(returns, max_lag)
-    se_iid = np.sqrt((1 + 0.5 * sharpe**2) / n)
-    se_sharpe = se_iid * np.sqrt(lr_var_factor)
+    se_monthly = np.sqrt((1 + 0.5 * monthly_sharpe**2) / n)
+    se_sharpe = se_monthly * np.sqrt(lr_var_factor * periods_per_year)
     sharpe_tstat = sharpe / se_sharpe if se_sharpe > 0 else 0
 
     ci_lower = sharpe - 1.96 * se_sharpe
@@ -627,6 +612,7 @@ def calculate_sharpe_stats(returns, periods_per_year=12):
         "n_months": n,
         "autocorr": rho1,
         "lr_var_factor": lr_var_factor,
+        "sharpe_se": se_sharpe,
     }
 
 
@@ -657,10 +643,11 @@ def calculate_max_drawdown(returns):
 # Calculate statistics for all factors
 factor_stats = {}
 
-# Fama-French factors (full history)
-for col in ["Mkt-RF", "HML", "SMB", "MOM"]:
-    if col in ff4_pd.columns:
-        factor_stats[col] = calculate_sharpe_stats(ff4_pd[col].dropna())
+# French factors use each source's full available history for inference. The
+# inner-joined FF4 panel remains appropriate only for shared-history comparisons.
+for col in ["Mkt-RF", "HML", "SMB"]:
+    factor_stats[col] = calculate_sharpe_stats(ff3_pd[col].dropna())
+factor_stats["MOM"] = calculate_sharpe_stats(mom_pd["MOM"].dropna())
 
 # FF5 additional factors (convert once, reuse)
 ff5_pd = ff5.to_pandas().set_index("timestamp")
@@ -684,132 +671,96 @@ if bab is not None:
         factor_stats["BAB"] = calculate_sharpe_stats(bab_pd["Global"].dropna())
 
 # %%
-# Format the factor summary for display.
 stats_df = pd.DataFrame(factor_stats).T
-stats_df["significant_harvey"] = stats_df["t_stat"] > 3.0  # Mean return t-stat
-
-# Format for display
-display_df = stats_df[
-    ["ann_return", "ann_vol", "sharpe", "t_stat", "sharpe_tstat", "significant_harvey"]
-].copy()
-display_df.columns = [
-    "Ann. Return",
-    "Ann. Vol",
-    "Sharpe",
-    "Mean t (NW)",
-    "Sharpe t",
-    "Harvey (t>3)",
-]
-
-# Style and display
-display_df.style.format(
-    {
-        "Ann. Return": "{:.1%}",
-        "Ann. Vol": "{:.1%}",
-        "Sharpe": "{:.2f}",
-        "Mean t (NW)": "{:.1f}",
-        "Sharpe t": "{:.1f}",
-    }
-)
-
-# %% [markdown]
-# **Column definitions:**
-# - *Mean t (NW)*: Newey-West HAC t-statistic for mean excess returns (Harvey threshold applies here)
-# - *Sharpe t*: t-stat for Sharpe ratio significance (Lo 2002 methodology)
-# - *Harvey (t>3)*: Whether mean return t-stat exceeds Harvey et al. (2016) threshold
-
-# %%
-display_df
-
-# %% [markdown]
-# **Interpretation**: The table separates economic magnitude from statistical strength.
-# Market and momentum usually clear the stricter Harvey-style bar, while size often
-# looks weak once serial correlation and multiple-testing concerns are acknowledged.
-
-# %%
+stats_df["significant_harvey"] = stats_df["t_stat"] > 3.0
 factor_order = ["Mkt-RF", "MOM", "HML", "RMW", "CMA", "QMJ", "BAB", "SMB"]
 factor_order = [f for f in factor_order if f in factor_stats]
 
+# %% [markdown]
+# The Harvey threshold belongs on the mean-return t-statistic itself. Bars above
+# three clear the conservative discovery screen; annualized Sharpe remains in the
+# hover text as a separate economic-magnitude diagnostic.
+
 # %%
-# Figure 3: Sharpe Ratios with Confidence Intervals
 fig = go.Figure()
-
-for i, factor in enumerate(factor_order):
-    s = factor_stats[factor]
-    color = colors.get(factor, "#333")
-
-    # Error bar (confidence interval)
-    fig.add_trace(
-        go.Scatter(
-            x=[i, i],
-            y=[s["ci_lower"], s["ci_upper"]],
-            mode="lines",
-            line=dict(color=color, width=4),
-            showlegend=False,
-            hoverinfo="skip",
-        )
+fig.add_trace(
+    go.Bar(
+        x=[labels.get(factor, factor) for factor in factor_order],
+        y=[factor_stats[factor]["t_stat"] for factor in factor_order],
+        marker_color=[
+            COLORS["blue"] if factor_stats[factor]["t_stat"] > 3 else COLORS["neutral"]
+            for factor in factor_order
+        ],
+        customdata=np.array([[factor_stats[factor]["sharpe"]] for factor in factor_order]),
+        hovertemplate="<b>%{x}</b><br>Mean t (NW): %{y:.2f}<br>Annualized Sharpe: "
+        "%{customdata[0]:.2f}<extra></extra>",
     )
-
-    # Point estimate
-    fig.add_trace(
-        go.Scatter(
-            x=[i],
-            y=[s["sharpe"]],
-            mode="markers",
-            marker=dict(color=color, size=15, line=dict(color="white", width=2)),
-            name=labels.get(factor, factor),
-            hovertemplate=f"<b>{labels.get(factor, factor)}</b><br>"
-            f"Sharpe: {s['sharpe']:.2f}<br>"
-            f"t-stat: {s['t_stat']:.1f}<br>"
-            f"95% CI: [{s['ci_lower']:.2f}, {s['ci_upper']:.2f}]<extra></extra>",
-        )
-    )
-
-# %%
-# Reference lines
-fig.add_hline(y=0, line_dash="solid", line_color="gray", line_width=1)
-# Note: Harvey's t>3 threshold applies to mean return t-stats, not Sharpe ratios.
-# The relationship between Sharpe and mean-return t-stat depends on sample size
-# and volatility. We show a reference line at SR=0.3 for visual orientation only.
+)
+fig.add_hline(y=3, line_dash="dash", line_color=COLORS["amber"], line_width=2)
+fig.add_hline(y=0, line_color=COLORS["neutral"], line_width=1)
 
 fig.update_layout(
-    title=dict(
-        text="<b>Factor Sharpe Ratios with 95% Confidence Intervals</b><br>"
-        "<sup>Harvey et al. (2016): Many factors may be statistical artifacts</sup>",
-        x=0.5,
+    title=(
+        f"{int(stats_df['significant_harvey'].sum())} of {len(stats_df)} factors clear the "
+        "conservative t > 3 screen<br><sup>Newey-West HAC t-statistics for mean monthly "
+        "returns; sample histories differ by factor</sup>"
     ),
-    xaxis=dict(
-        tickmode="array",
-        tickvals=list(range(len(factor_order))),
-        ticktext=[labels.get(f, f) for f in factor_order],
-    ),
-    yaxis_title="Sharpe Ratio",
+    xaxis_title="Published factor portfolio",
+    yaxis_title="Mean-return t-statistic (Newey-West)",
     showlegend=False,
-    template="plotly_white",
     height=450,
 )
 
-fig.show()
+show_figure(fig)
 
 # %% [markdown]
-# ### Key Observations on Statistical Significance
+# ### Test the SMB decay claim directly
 #
-# **Important methodological note**: The t-statistics above are Newey-West HAC
-# corrected t-stats for mean returns, which is what Harvey et al. (2016) use for
-# their t > 3 threshold under multiple testing. This is different from the t-stat
-# of the Sharpe ratio (Lo, 2002), which tests whether SR differs from zero.
-#
-# 1. **Market Risk Premium**: The most statistically significant factor, with mean
-#    return t-stat typically > 4.0. This is the foundation of equity investing.
-#
-# 2. **Momentum**: Strong statistical significance despite occasional crashes. The
-#    premium has persisted for nearly a century.
-#
-# 3. **Value (HML)**: Significant but with wider confidence intervals. Recent
-#    underperformance (2017-2020) has reduced its t-statistic.
-#
-# 4. **Size (SMB)**: The weakest statistical case. The premium has largely disappeared
-#    since its discovery, raising questions about data mining.
+# A full-sample SMB statistic cannot establish post-publication decay. Splitting at
+# the 1981 publication year makes the comparison visible while remaining explicitly
+# ex-post and descriptive.
+
+# %%
+smb_returns = ff3_pd["SMB"].dropna()
+smb_periods = {
+    "Pre-1981": smb_returns[smb_returns.index < "1981-01-01"],
+    "1981-present": smb_returns[smb_returns.index >= "1981-01-01"],
+}
+smb_period_stats = {name: calculate_sharpe_stats(values) for name, values in smb_periods.items()}
+
+fig = go.Figure(
+    go.Bar(
+        x=list(smb_period_stats),
+        y=[stats["ann_return"] * 100 for stats in smb_period_stats.values()],
+        marker_color=[COLORS["blue"], COLORS["neutral"]],
+        text=[f"t = {stats['t_stat']:.2f}" for stats in smb_period_stats.values()],
+        textposition="outside",
+        hovertemplate="<b>%{x}</b><br>Annualized mean: %{y:.2f}%<br>%{text}<extra></extra>",
+    )
+)
+fig.add_hline(y=0, line_color=COLORS["neutral"], line_width=1)
+fig.update_layout(
+    title=(
+        "SMB weakens after its 1981 publication"
+        "<br><sup>Annualized mean monthly return; labels show Newey-West t-statistics; "
+        "ex-post period split</sup>"
+    ),
+    xaxis_title="Sample period",
+    yaxis_title="Annualized mean return (%)",
+    height=420,
+)
+show_figure(fig)
+
+# %%
+display(
+    Markdown(
+        f"SMB's annualized mean falls from **{smb_period_stats['Pre-1981']['ann_return']:.1%}** "
+        f"before 1981 (t = {smb_period_stats['Pre-1981']['t_stat']:.2f}) to "
+        f"**{smb_period_stats['1981-present']['ann_return']:.1%}** afterward "
+        f"(t = {smb_period_stats['1981-present']['t_stat']:.2f}). The split was chosen ex post, "
+        "so it documents decay rather than proving publication caused it."
+    )
+)
 
 # %% [markdown]
 # ---
@@ -817,18 +768,20 @@ fig.show()
 # # Part 3: Value and Momentum Everywhere
 #
 # Asness, Moskowitz & Pedersen (2013) document value and momentum premia not just in US
-# equities, but across **8 different asset classes globally** — a result that mitigates
+# equities, but across **8 different asset classes globally** - a result that mitigates
 # the single-market data-mining critique applied to factor work on US equities alone.
 #
 # > "We find consistent value and momentum return premia across eight diverse markets
-# > and asset classes." — Asness, Moskowitz & Pedersen (2013)
+# > and asset classes." - Asness, Moskowitz & Pedersen (2013)
 
 # %%
-if vme is not None:
-    vme_pd = vme.to_pandas().set_index("timestamp")
-    print(f"VME data: {len(vme_pd.columns)} columns, {len(vme_pd)} months")
-else:
-    print("VME data not available - run AQRFactorProvider.download()")
+vme_pd = vme.to_pandas().set_index("timestamp")
+display(
+    Markdown(
+        f"The VME panel contains **{len(vme_pd):,} months** and "
+        f"**{len(vme_pd.columns)} published series**."
+    )
+)
 
 # %% [markdown]
 # Map AQR VME column suffixes (`VALLS_VME_XX90`, `MOMLS_VME_XX90`) to
@@ -836,32 +789,31 @@ else:
 # `US90`, `UK90`, `ROE90`, `JP90` cover regional equity blocks.
 
 # %%
-if vme is not None:
-    asset_class_map = {
-        "US90": "US Equities",
-        "UK90": "UK Equities",
-        "ROE90": "Europe ex-UK",
-        "JP90": "Japan",
-        "EQ": "All Equities",
-        "FX": "Currencies",
-        "FI": "Fixed Income",
-        "COM": "Commodities",
-    }
-    vme_stats = []
+asset_class_map = {
+    "US90": "US Equities",
+    "UK90": "UK Equities",
+    "ROE90": "Europe ex-UK",
+    "JP90": "Japan",
+    "EQ": "All Equities",
+    "FX": "Currencies",
+    "FI": "Fixed Income",
+    "COM": "Commodities",
+}
+vme_stats = []
 
 # %% [markdown]
-# Aggregate value/momentum row (the "Everywhere" line) — uses the bundled
+# Aggregate value/momentum row (the "Everywhere" line) - uses the bundled
 # `VAL` / `MOM` columns rather than any single asset class.
 
 # %%
-if vme is not None and "VAL" in vme_pd.columns and "MOM" in vme_pd.columns:
+if "VAL" in vme_pd.columns and "MOM" in vme_pd.columns:
     val_data = vme_pd["VAL"].dropna()
     mom_data = vme_pd["MOM"].dropna()
     if len(val_data) > 12 and len(mom_data) > 12:
-        val_stats = calculate_sharpe_stats(val_data)
-        mom_stats = calculate_sharpe_stats(mom_data)
         common_idx = val_data.index.intersection(mom_data.index)
-        corr = val_data[common_idx].corr(mom_data[common_idx])
+        val_stats = calculate_sharpe_stats(val_data.loc[common_idx])
+        mom_stats = calculate_sharpe_stats(mom_data.loc[common_idx])
+        corr = val_data.loc[common_idx].corr(mom_data.loc[common_idx])
         vme_stats.append(
             {
                 "Asset Class": "EVERYWHERE",
@@ -870,138 +822,136 @@ if vme is not None and "VAL" in vme_pd.columns and "MOM" in vme_pd.columns:
                 "Momentum SR": mom_stats["sharpe"],
                 "Momentum t": mom_stats["t_stat"],
                 "Val-Mom Corr": corr,
+                "Common Months": len(common_idx),
             }
         )
 
 # %%
-if vme is not None:
-    # Then add by asset class
-    for suffix, display_name in asset_class_map.items():
-        val_col = f"VALLS_VME_{suffix}"
-        mom_col = f"MOMLS_VME_{suffix}"
-
-        if val_col in vme_pd.columns and mom_col in vme_pd.columns:
-            val_data = vme_pd[val_col].dropna()
-            mom_data = vme_pd[mom_col].dropna()
-
-            if len(val_data) > 12 and len(mom_data) > 12:
-                val_stats = calculate_sharpe_stats(val_data)
-                mom_stats = calculate_sharpe_stats(mom_data)
-                common_idx = val_data.index.intersection(mom_data.index)
-                corr = val_data[common_idx].corr(mom_data[common_idx])
-
-                vme_stats.append(
-                    {
-                        "Asset Class": display_name,
-                        "Value SR": val_stats["sharpe"],
-                        "Value t": val_stats["t_stat"],
-                        "Momentum SR": mom_stats["sharpe"],
-                        "Momentum t": mom_stats["t_stat"],
-                        "Val-Mom Corr": corr,
-                    }
-                )
+# Then add by asset class.
+for suffix, display_name in asset_class_map.items():
+    val_col = f"VALLS_VME_{suffix}"
+    mom_col = f"MOMLS_VME_{suffix}"
+    assert val_col in vme_pd.columns and mom_col in vme_pd.columns
+    val_data = vme_pd[val_col].dropna()
+    mom_data = vme_pd[mom_col].dropna()
+    common_idx = val_data.index.intersection(mom_data.index)
+    assert len(common_idx) > 12
+    val_stats = calculate_sharpe_stats(val_data.loc[common_idx])
+    mom_stats = calculate_sharpe_stats(mom_data.loc[common_idx])
+    vme_stats.append(
+        {
+            "Asset Class": display_name,
+            "Value SR": val_stats["sharpe"],
+            "Value t": val_stats["t_stat"],
+            "Momentum SR": mom_stats["sharpe"],
+            "Momentum t": mom_stats["t_stat"],
+            "Val-Mom Corr": val_data.loc[common_idx].corr(mom_data.loc[common_idx]),
+            "Common Months": len(common_idx),
+        }
+    )
 
 # %%
-if vme is not None and "vme_stats" in dir():
-    if vme_stats:
-        vme_df = pd.DataFrame(vme_stats)
-        vme_df
-    else:
-        print("Could not parse VME factor columns - check column naming convention")
-else:
-    print("Skipping VME analysis - data not available.")
+assert len(vme_stats) == 9
+vme_df = pd.DataFrame(vme_stats)
+class_corr = vme_df.loc[vme_df["Asset Class"] != "EVERYWHERE", "Val-Mom Corr"]
+median_vme_corr = float(class_corr.median())
+min_vme_corr = float(class_corr.min())
+max_vme_corr = float(class_corr.max())
 
 # %% [markdown]
-# **Interpretation**: The cross-asset table matters more than any single region. If
-# value and momentum both survive across equities, rates, FX, and commodities, the
-# case for a shared underlying premium is much stronger than a US-only backtest.
+# The cross-asset comparison matters more than any single region. The figure below
+# separates economic magnitude (Sharpe) from the diversification statistic (correlation).
 
 # %% [markdown]
-# Figure 4 setup — two-panel subplot frame: Sharpe ratios by asset class
+# Two-panel frame: Sharpe ratios by asset class
 # on the left, value-momentum correlation on the right.
 
 # %%
-if vme is not None and "vme_stats" in dir() and vme_stats:
-    fig = make_subplots(
-        rows=1,
-        cols=2,
-        subplot_titles=("Sharpe Ratios by Asset Class", "Value-Momentum Correlation"),
-    )
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=("Annualized Sharpe", "Value-Momentum Correlation"),
+)
 
 # %% [markdown]
-# Left panel — Sharpe-ratio bars for Value and Momentum side-by-side.
+# Left panel - Sharpe-ratio bars for Value and Momentum side-by-side.
 
 # %%
-if vme is not None and "vme_stats" in dir() and vme_stats:
-    fig.add_trace(
-        go.Bar(
-            x=vme_df["Asset Class"],
-            y=vme_df["Value SR"],
-            name="Value",
-            marker_color=colors["Value"],
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Bar(
-            x=vme_df["Asset Class"],
-            y=vme_df["Momentum SR"],
-            name="Momentum",
-            marker_color=colors["Momentum"],
-        ),
-        row=1,
-        col=1,
-    )
+_ = fig.add_trace(
+    go.Bar(
+        x=vme_df["Asset Class"],
+        y=vme_df["Value SR"],
+        name="Value",
+        marker_color=factor_colors["Value"],
+    ),
+    row=1,
+    col=1,
+)
+_ = fig.add_trace(
+    go.Bar(
+        x=vme_df["Asset Class"],
+        y=vme_df["Momentum SR"],
+        name="Momentum",
+        marker_color=factor_colors["Momentum"],
+    ),
+    row=1,
+    col=1,
+)
 
 # %% [markdown]
-# Right panel — value-momentum correlation, colored green for negative
-# (diversifying) and red for positive.
+# Right panel - value-momentum correlation, with blue for negative
+# (diversifying) observations and red for positive observations.
 
 # %%
-if vme is not None and "vme_stats" in dir() and vme_stats:
-    fig.add_trace(
-        go.Bar(
-            x=vme_df["Asset Class"],
-            y=vme_df["Val-Mom Corr"],
-            name="Correlation",
-            marker_color=vme_df["Val-Mom Corr"].apply(lambda x: "#d62728" if x > 0 else "#2ca02c"),
-            showlegend=False,
-        ),
-        row=1,
-        col=2,
+_ = fig.add_trace(
+    go.Bar(
+        x=vme_df["Asset Class"],
+        y=vme_df["Val-Mom Corr"],
+        name="Correlation",
+        marker_color=[
+            COLORS["negative"] if value > 0 else COLORS["blue"] for value in vme_df["Val-Mom Corr"]
+        ],
+        showlegend=False,
+    ),
+    row=1,
+    col=2,
+)
+
+# %%
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=1, col=2)
+fig.update_layout(
+    title=(
+        "Value and momentum diversify in every VME asset class"
+        f"<br><sup>Monthly published returns; median correlation {median_vme_corr:.2f}; "
+        f"range {min_vme_corr:.2f} to {max_vme_corr:.2f}</sup>"
+    ),
+    barmode="group",
+    height=480,
+    legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.45),
+)
+fig.update_xaxes(title_text="Asset class", tickangle=-30)
+fig.update_yaxes(title_text="Annualized Sharpe ratio", row=1, col=1)
+_ = fig.update_yaxes(title_text="Correlation", range=[-1, 1], row=1, col=2)
+
+# %%
+show_figure(fig)
+
+# %%
+display(
+    Markdown(
+        f"Across the eight regional and cross-asset sleeves, value-momentum correlation ranges "
+        f"from **{min_vme_corr:.2f} to {max_vme_corr:.2f}**, with a median of "
+        f"**{median_vme_corr:.2f}**. The separate aggregate `EVERYWHERE` series has correlation "
+        f"**{vme_df.loc[vme_df['Asset Class'] == 'EVERYWHERE', 'Val-Mom Corr'].iloc[0]:.2f}**."
     )
-
-# %%
-if vme is not None and "vme_stats" in dir() and vme_stats:
-    fig.add_hline(y=0, line_dash="dash", line_color="gray", row=1, col=2)
-
-    fig.update_layout(
-        title=dict(
-            text="<b>Value and Momentum Everywhere: Cross-Asset Evidence</b><br>"
-            "<sup>Negative correlation enables diversification | Asness, Moskowitz & Pedersen (2013)</sup>",
-            x=0.5,
-        ),
-        barmode="group",
-        template="plotly_white",
-        height=450,
-        legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.45),
-    )
-    fig.update_yaxes(title_text="Sharpe Ratio", row=1, col=1)
-    fig.update_yaxes(title_text="Correlation", row=1, col=2)
-else:
-    print("Skipping VME figure - data not available or no valid asset classes found.")
-
-# %%
-if vme is not None and "vme_stats" in dir() and vme_stats:
-    fig.show()
+)
 
 # %% [markdown]
 # ### The Diversification Benefit
 #
-# A crucial finding is that **value and momentum are negatively correlated** both
-# within and across asset classes. This natural diversification means combining
-# value and momentum strategies improves risk-adjusted returns.
+# A crucial finding is that **value and momentum are negatively correlated** in
+# every VME sleeve shown. This creates diversification potential, but the published
+# long-short returns do not include a reader's implementation costs or constraints.
 #
 # The negative correlation arises because:
 # - Value buys beaten-down assets (past losers that are now cheap)
@@ -1024,7 +974,7 @@ combined_pl = ff6.select(["timestamp", "Mkt-RF", "SMB", "HML", "RMW", "CMA", "MO
     pl.col("timestamp").cast(pl.Datetime("us"))
 )
 
-# Add AQR factors if available
+# Add the AQR factors to the common-period panel.
 if qmj is not None and "USA" in qmj.columns:
     qmj_usa = qmj.select([pl.col("timestamp"), pl.col("USA").alias("QMJ")]).with_columns(
         pl.col("timestamp").cast(pl.Datetime("us"))
@@ -1040,17 +990,19 @@ if bab is not None and "USA" in bab.columns:
 # Filter to common period (1972+) and drop nulls
 combined_pl = combined_pl.filter(pl.col("timestamp") >= pl.date(1972, 1, 1)).drop_nulls()
 
-print(
-    f"Common period for correlation analysis: {combined_pl['timestamp'].min():%Y-%m} to {combined_pl['timestamp'].max():%Y-%m}"
+display(
+    Markdown(
+        f"The common eight-factor panel contains **{len(combined_pl):,} months** from "
+        f"**{combined_pl['timestamp'].min():%Y-%m} through "
+        f"{combined_pl['timestamp'].max():%Y-%m}**."
+    )
 )
-print(f"Factors: {[c for c in combined_pl.columns if c != 'timestamp']}")
-print(f"Observations: {len(combined_pl)} months")
 
 # Convert to pandas only for correlation and visualization
 combined_data = combined_pl.to_pandas().set_index("timestamp")
 
 # %%
-# Figure 5: Factor Correlation Matrix
+# Compute the common-period factor correlation matrix.
 corr_matrix = combined_data.corr()
 
 # Create labels for display
@@ -1060,62 +1012,52 @@ corr_display.index = [corr_labels.get(c, c) for c in corr_display.index]
 corr_display.columns = [corr_labels.get(c, c) for c in corr_display.columns]
 
 # %% [markdown]
-# Draw the heatmap with a diverging red-blue palette centered at zero.
+# Mask the duplicate upper triangle and use a fixed diverging scale centered at zero.
 
 # %%
-fig = px.imshow(
-    corr_display,
-    text_auto=".2f",
-    color_continuous_scale="RdBu_r",
-    zmin=-1,
-    zmax=1,
-    aspect="equal",
+corr_plot = corr_display.mask(np.triu(np.ones(corr_display.shape, dtype=bool), k=1))
+corr_text = corr_plot.apply(
+    lambda column: column.map(lambda value: "" if pd.isna(value) else f"{value:.2f}")
 )
-
-# %% [markdown]
-# Layout — title, template, dimensions.
-
-# %%
-fig.update_layout(
-    title=dict(
-        text="<b>Factor Correlation Matrix (1972-Present)</b><br>"
-        "<sup>Negative correlations (blue) enable diversification</sup>",
-        x=0.5,
-    ),
-    template="plotly_white",
-    height=550,
-    width=650,
-)
-
-# %% [markdown]
-# Annotation — call out the headline value-momentum negative correlation.
-
-# %%
-val_mom_corr = (
-    corr_matrix.loc["HML", "MOM"]
-    if "HML" in corr_matrix.index and "MOM" in corr_matrix.columns
-    else None
-)
-if val_mom_corr is not None:
-    fig.add_annotation(
-        x=1,
-        y=2,
-        text=f"Value-Momentum<br>ρ = {val_mom_corr:.2f}",
-        showarrow=True,
-        arrowhead=2,
-        ax=60,
-        ay=-30,
-        font=dict(size=11, color="darkblue"),
-        arrowcolor="darkblue",
+fig = go.Figure(
+    go.Heatmap(
+        z=corr_plot.to_numpy(),
+        x=corr_plot.columns,
+        y=corr_plot.index,
+        text=corr_text.to_numpy(),
+        texttemplate="%{text}",
+        colorscale=ml4t_diverging(),
+        zmin=-1,
+        zmax=1,
+        zmid=0,
+        colorbar=dict(title="Correlation"),
+        hovertemplate="%{y} vs %{x}<br>Correlation: %{z:.2f}<extra></extra>",
     )
+)
 
-fig.show()
+# %% [markdown]
+# Add a message-first title and explicit dimensions.
+
+# %%
+_ = fig.update_layout(
+    title=(
+        f"Value and momentum remain diversifying in the common factor panel"
+        f"<br><sup>Pairwise correlations on {len(combined_data):,} common monthly rows, "
+        f"{combined_data.index.min():%Y-%m} to {combined_data.index.max():%Y-%m}</sup>"
+    ),
+    height=560,
+    margin=dict(l=135, r=90, b=120),
+    xaxis_title="Factor",
+    yaxis_title="Factor",
+)
+
+show_figure(fig)
 
 # %% [markdown]
 # ### Key Correlation Insights
 #
-# 1. **Value vs. Momentum (ρ ≈ -0.2)**: The famous negative correlation that enables
-#    diversification. Combining these factors smooths returns.
+# 1. **Value vs. Momentum**: The French common-period estimate appears in the visible
+#    lower triangle. It is distinct from the stronger cross-asset VME estimates.
 #
 # 2. **Quality (QMJ) vs. Market**: QMJ has low market beta, providing defensive
 #    characteristics during equity downturns.
@@ -1126,14 +1068,14 @@ fig.show()
 # %% [markdown]
 # ---
 #
-# # Part 5: Crisis Performance — Who Provides "Crisis Alpha"?
+# # Part 5: Crisis Performance: Who Provides "Crisis Alpha"?
 #
 # One of the most important questions for portfolio construction: **Which factors
-# perform well during market crises?** True "crisis alpha" — positive returns during
-# equity market drawdowns — is extremely valuable.
+# perform well during market crises?** True "crisis alpha" - positive returns during
+# equity market drawdowns - is extremely valuable.
 #
-# Trend-following (time series momentum) has historically provided the best crisis
-# alpha, essentially acting as portfolio insurance.
+# These windows are selected ex post. They describe historical co-movement; they do
+# not establish that a factor will insure a future crisis.
 
 # %%
 # Calculate crisis period returns
@@ -1163,88 +1105,52 @@ for crisis_name, (start, end) in CRISES.items():
 crisis_df = pd.DataFrame(crisis_returns).T
 
 # %%
-# Add TSMOM if available
-if tsmom is not None:
-    tsmom_pd = tsmom.to_pandas().set_index("timestamp")
-
-    # Find the aggregate TSMOM column
-    tsmom_col = None
-    for col in tsmom_pd.columns:
-        if "TSMOM" in col.upper() or col == "TSMOM":
-            tsmom_col = col
-            break
-
-    if tsmom_col is None and len(tsmom_pd.columns) > 0:
-        # Use first column or create aggregate
-        tsmom_col = tsmom_pd.columns[0]
-
-    if tsmom_col:
-        for crisis_name, (start, end) in CRISES.items():
-            start_dt = pd.to_datetime(start)
-            end_dt = pd.to_datetime(end)
-
-            mask = (tsmom_pd.index >= start_dt) & (tsmom_pd.index <= end_dt)
-            tsmom_crisis = tsmom_pd[mask][tsmom_col].dropna()
-
-            if len(tsmom_crisis) > 0:
-                cum_ret = (1 + tsmom_crisis).prod() - 1
-                if crisis_name in crisis_df.index:
-                    crisis_df.loc[crisis_name, "TSMOM"] = cum_ret
+tsmom_pd = tsmom.to_pandas().set_index("timestamp")
+assert "TSMOM" in tsmom_pd.columns
+for crisis_name, (start, end) in CRISES.items():
+    tsmom_crisis = tsmom_pd.loc[pd.to_datetime(start) : pd.to_datetime(end), "TSMOM"].dropna()
+    if len(tsmom_crisis) > 0:
+        crisis_df.loc[crisis_name, "TSMOM"] = (1 + tsmom_crisis).prod() - 1
 
 # %% [markdown]
-# Figure 6 data prep — collect the factors that have crisis data and set
-# bar-grouping geometry.
+# A signed-return heatmap makes the crisis pattern legible without assigning seven
+# categorical colors. Blank cells denote factor histories that had not started.
 
 # %%
-fig = go.Figure()
-
 available_factors = [
     f for f in ["Mkt-RF", "MOM", "HML", "QMJ", "BAB", "TSMOM", "SMB"] if f in crisis_df.columns
 ]
-x = np.arange(len(crisis_df))
-bar_width = 0.12
+crisis_plot = crisis_df[available_factors].rename(columns=labels) * 100
+tsmom_positive = int((crisis_df["TSMOM"].dropna() > 0).sum())
+tsmom_observed = int(crisis_df["TSMOM"].notna().sum())
 
-# %% [markdown]
-# Add one grouped-bar trace per available factor.
-
-# %%
-for i, factor in enumerate(available_factors):
-    fig.add_trace(
-        go.Bar(
-            name=labels.get(factor, factor),
-            x=x + i * bar_width,
-            y=crisis_df[factor] * 100,
-            marker_color=colors.get(factor, "#333"),
-            width=bar_width,
-            hovertemplate=f"<b>{labels.get(factor, factor)}</b><br>%{{y:.1f}}%<extra></extra>",
-        )
+fig = go.Figure(
+    go.Heatmap(
+        z=crisis_plot.to_numpy(),
+        x=crisis_plot.columns,
+        y=crisis_plot.index,
+        text=np.round(crisis_plot.to_numpy(), 1),
+        texttemplate="%{text:.1f}%",
+        colorscale=ml4t_diverging(),
+        zmid=0,
+        colorbar=dict(title="Return (%)"),
+        hovertemplate="%{y}<br>%{x}: %{z:.1f}%<extra></extra>",
     )
-
-# %% [markdown]
-# Layout — title, crisis-name ticks, percentage y-axis, zero reference line.
+)
 
 # %%
 fig.update_layout(
-    title=dict(
-        text="<b>Factor Performance During Market Crises</b><br>"
-        '<sup>Who provides "crisis alpha"? | Positive returns during drawdowns are valuable</sup>',
-        x=0.5,
+    title=(
+        f"TSMOM is positive in {tsmom_positive} of {tsmom_observed} observed crisis windows"
+        "<br><sup>Ex-post cumulative monthly returns; blanks predate a factor's history; "
+        "windows are descriptive, not prospective insurance tests</sup>"
     ),
-    xaxis=dict(
-        tickmode="array",
-        tickvals=x + len(available_factors) * bar_width / 2,
-        ticktext=crisis_df.index,
-        tickangle=-30,
-    ),
-    yaxis_title="Cumulative Return (%)",
-    yaxis=dict(ticksuffix="%"),
-    barmode="group",
-    legend=dict(yanchor="bottom", y=0.01, xanchor="right", x=0.99, bgcolor="rgba(255,255,255,0.8)"),
-    template="plotly_white",
-    height=500,
+    xaxis_title="Published factor portfolio",
+    yaxis_title="Selected crisis window",
+    height=520,
+    margin=dict(l=105, r=75, b=100),
 )
-fig.add_hline(y=0, line_color="gray", line_width=1)
-fig.show()
+show_figure(fig)
 
 # %% [markdown]
 # **Interpretation**: Crisis performance is where correlations and premia become
@@ -1262,21 +1168,21 @@ fig.show()
 # 3. **Value (HML)**: Generally negative during crises as cheap stocks get cheaper.
 #    The 2020 COVID crash was particularly painful for value.
 #
-# 4. **Quality (QMJ)**: Tends to provide some downside protection as investors
-#    "flight to quality" — preferring profitable, low-debt companies.
+# 4. **Quality (QMJ)**: Its observed crisis returns vary by episode; the heatmap
+#    shows when the historical "flight to quality" description does and does not fit.
 #
-# 5. **Trend (TSMOM)**: When available, often provides the most consistent crisis
-#    alpha. The strategy naturally goes short when trends are down.
+# 5. **Trend (TSMOM)**: The aggregate published series is positive in most, but not
+#    all, observed windows. Its 1985 start leaves earlier crises unmeasured.
 
 # %% [markdown]
 # ---
 #
-# # Part 6: Comprehensive Summary Statistics
+# # Part 6: Risk and Return in One View
 
 # %% [markdown]
-# ### Summary-Table Helper
+# ### Summary Helper
 #
-# The final table uses one row layout across French and AQR sources.
+# The final chart uses one numeric row layout across French and AQR sources.
 
 
 # %%
@@ -1287,18 +1193,18 @@ def append_summary_row(
     returns: pd.Series,
     stats_dict: dict[str, float],
 ) -> None:
-    """Append one formatted summary row for a factor series."""
+    """Append one numeric summary row for a factor series."""
     summary_stats.append(
         {
             "Factor": labels.get(factor, factor),
             "Source": source,
             "Period": f"{returns.index.min():%Y}-{returns.index.max():%Y}",
-            "Ann. Return": f"{stats_dict['ann_return']:.1%}",
-            "Ann. Volatility": f"{stats_dict['ann_vol']:.1%}",
-            "Sharpe Ratio": f"{stats_dict['sharpe']:.2f}",
-            "t-statistic": f"{stats_dict['t_stat']:.1f}",
-            "Max Drawdown": f"{calculate_max_drawdown(returns):.1%}",
-            "Skewness": f"{returns.skew():.2f}",
+            "Ann. Return": stats_dict["ann_return"],
+            "Ann. Volatility": stats_dict["ann_vol"],
+            "Sharpe Ratio": stats_dict["sharpe"],
+            "t-statistic": stats_dict["t_stat"],
+            "Max Drawdown": calculate_max_drawdown(returns),
+            "Skewness": returns.skew(),
             "Months": len(returns),
         }
     )
@@ -1311,7 +1217,8 @@ summary_stats = []
 # Fama-French factors
 for factor in ["Mkt-RF", "HML", "SMB", "MOM"]:
     if factor in factor_stats:
-        returns = ff4_pd[factor].dropna()
+        source_data = mom_pd if factor == "MOM" else ff3_pd
+        returns = source_data[factor].dropna()
         s = factor_stats[factor]
 
         append_summary_row(summary_stats, factor, "French", returns, s)
@@ -1335,25 +1242,88 @@ for factor, data in [("QMJ", qmj), ("BAB", bab)]:
         append_summary_row(summary_stats, factor, "AQR", returns, s)
 
 summary_df = pd.DataFrame(summary_stats).set_index("Factor")
-summary_df
+label_positions = {
+    "Market (Mkt-RF)": "middle left",
+    "Momentum (MOM)": "top center",
+    "Value (HML)": "top center",
+    "Size (SMB)": "bottom center",
+    "Profitability (RMW)": "top right",
+    "Investment (CMA)": "bottom right",
+    "Quality (QMJ)": "top right",
+    "Low-Vol (BAB)": "top center",
+}
+
+# %% [markdown]
+# A labeled risk-return map replaces the redundant summary dump. Comparisons remain
+# historical and descriptive because factor histories begin on different dates.
+
+# %%
+fig = go.Figure(
+    go.Scatter(
+        x=summary_df["Ann. Volatility"] * 100,
+        y=summary_df["Ann. Return"] * 100,
+        mode="markers+text",
+        text=summary_df.index,
+        textposition=[label_positions[label] for label in summary_df.index],
+        marker=dict(
+            size=12,
+            color=[
+                COLORS["blue"] if value > 3 else COLORS["neutral"]
+                for value in summary_df["t-statistic"]
+            ],
+        ),
+        customdata=summary_df[["Sharpe Ratio", "t-statistic", "Max Drawdown", "Period"]],
+        hovertemplate=(
+            "<b>%{text}</b><br>Annualized return: %{y:.1f}%<br>Annualized volatility: "
+            "%{x:.1f}%<br>Sharpe: %{customdata[0]:.2f}<br>Mean t (NW): "
+            "%{customdata[1]:.2f}<br>Max drawdown: %{customdata[2]:.1%}<br>Period: "
+            "%{customdata[3]}<extra></extra>"
+        ),
+    )
+)
+fig.update_layout(
+    title=(
+        "BAB and QMJ lead the historical factor risk-return trade-off"
+        "<br><sup>Published monthly factor returns; blue markers clear mean t > 3; "
+        "sample histories differ</sup>"
+    ),
+    xaxis_title="Annualized volatility (%)",
+    yaxis_title="Annualized mean return (%)",
+    height=500,
+    margin=dict(l=75, r=75, b=80),
+    showlegend=False,
+)
+show_figure(fig)
+
+# %%
+display(
+    Markdown(
+        f"The cross-asset VME evidence supplies the clearest allocation result: median "
+        f"value-momentum correlation is **{median_vme_corr:.2f}** across eight sleeves. "
+        f"The inference screen is more selective: **{int(stats_df['significant_harvey'].sum())} "
+        f"of {len(stats_df)}** factor means exceed t = 3. TSMOM is positive in "
+        f"**{tsmom_positive} of {tsmom_observed}** observed crisis windows, while the explicit "
+        "SMB split documents weaker post-1981 performance without claiming publication caused it."
+    )
+)
 
 # %% [markdown]
 # ---
 #
 # ## Key Takeaways
 #
-# - **Factor-return diagnostics**: Harvey-style Newey-West t-statistics on the
-#   long pre-publication AQR/French series confirm that value, momentum, quality,
-#   and BAB premia clear the t > 3 bar, while the size premium (SMB) has decayed
-#   to economic and statistical insignificance post-1981.
-# - **Crisis behavior**: No factor delivers consistent crisis alpha. TSMOM
-#   provides the most reliable downside hedge; QMJ partially offsets
-#   "flight-to-quality" episodes; HML and MOM are crisis-sensitive (notably
-#   2009 momentum crash, 2020 value drawdown).
-# - **Correlation structure**: Value-momentum correlation hovers near
-#   ρ ≈ −0.2 across regions and asset classes (cross-asset "Value and Momentum
-#   Everywhere" evidence), driving the diversification rationale for combining
-#   the two in allocation.
+# - **Diversification**: Value and momentum are negatively correlated in every
+#   regional and cross-asset VME sleeve shown, making the pair a stronger allocation
+#   building block than either factor alone.
+# - **Inference**: Historical Sharpe ratios and conservative mean-return t-statistics
+#   answer different questions. Long samples help, but they do not remove source
+#   revision, publication, financing, turnover, or capacity concerns.
+# - **Regime evidence**: TSMOM is the most frequent positive crisis companion in the
+#   selected post-1985 windows, not universal insurance. SMB weakens after 1981 in an
+#   ex-post split that documents decay without identifying its cause.
+#
+# **Next**: `08_library_comparison` compares portfolio-construction implementations.
+# **Book**: Section 17.4 develops baseline allocators and factor diversification.
 #
 # ## References
 #

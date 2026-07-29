@@ -13,1420 +13,802 @@
 #     name: python3
 # ---
 
-# %% [markdown] tags=[]
-# # Conditional Autoencoder in the Two-Step Framework
+# %% [markdown]
+# # Conditional Autoencoders: Nonlinear Factor Loadings
 #
 # **Docker image**: `ml4t-gpu`
 #
-# **Chapter 14: Latent Factors**
+# **Chapter 14: Latent Factor Models**
 #
-# > **GPU recommended**: This notebook trains PyTorch models. CPU works but is
-# > slow. For GPU acceleration:
-# > ```bash
-# > docker compose run --rm ml4t-gpu python 14_latent_factors/06_conditional_autoencoder.py
-# > ```
+# The conditional autoencoder (CAE) of Gu, Kelly, and Xiu replaces IPCA's
+# linear characteristic map with a neural beta network:
 #
-# This notebook implements the Conditional Autoencoder (CAE) of Gu, Kelly,
-# and Xiu (2021) "Autoencoder Asset Pricing Models" and slots it into the
-# chapter's two-step factor-forecasting framework. The CAE realises Stage 1
-# with a *neural* characteristics-to-loadings map; the same Stage 2 forecaster
-# catalog used in the IPCA and RP-PCA notebooks plugs in directly.
+# $$r_{i,t}=g_\theta(z_{i,t-1})^{\top}f_t+\varepsilon_{i,t}.$$
 #
-# ## Prediction protocol — contemporaneous demo (read first)
+# A factor network extracts $f_t$ from characteristic-managed portfolio
+# returns. Stage 1 is trained as a contemporaneous reconstruction model. A
+# separate walk-forward adapter then uses information observed at $t$ to
+# forecast $f_{t+1}$ and maps that forecast through $g_\theta(z_{i,t})$ to
+# predict $r_{i,t+1}$.
 #
-# This pedagogical notebook uses a **contemporaneous** prediction protocol:
-# characteristics $z_{i,t}$, managed-portfolio returns $x_t$, and the realized
-# return $r_{i,t}$ are all indexed at the same timestamp $t$. The CAE Stage 1
-# objective is exactly that — *reconstruct* $r_{i,t}$ from $z_{i,t}$ and $x_t$.
-# Stage 3 in §9 then scores the asset map $\hat\mu_{i,t} = \beta_{i,t} \cdot
-# \hat\lambda_t$ against the same-period $r_{i,t}$, so the reported Stage 3 IC
-# measures *cross-sectional rank fit of the factor reconstruction*, not
-# one-step-ahead forecasting skill. This number is therefore a Stage 1 fit
-# diagnostic on the test panel, not a tradable signal — characteristics built
-# from prices at $t$ already share information with the same-day return, and
-# the IC inherits that overlap.
+# **Learning objectives**
 #
-# The honest forecasting evaluation (lagged characteristics, walk-forward CV,
-# forward returns) lives in the `us_firm_characteristics` case study
-# (`08_latent_factors`); chapter §14.6 explicitly cites the case-study CAE
-# Mean IC (≈ −0.057 on `fwd_ret_1m`) as the headline number, not the
-# contemporaneous value shown here. Treat this notebook's §9 table as
-# pedagogical illustration of the framework wiring, not as evidence of CAE
-# forecasting performance.
+# - construct managed portfolios with the joint cross-sectional least-squares
+#   solve from GKX Equation 16;
+# - train a validation-selected CAE ensemble without test-window state;
+# - align current characteristics and factors with next-day stock returns; and
+# - distinguish reconstruction quality from forward rank IC and squared error.
 #
-# ## The Two-Step Framework (recap)
+# **Evaluation contract**: liquidity selection, return clipping thresholds,
+# network parameters, and early stopping use training/validation data only.
+# The test window is used once for a one-trading-day walk-forward demonstration.
+# It does not select the ensemble, factor count, or Stage 2 forecaster.
 #
-# Asset return forecasting decomposes into three stages (see **Figure 14.9**):
+# **Universe limitation**: the source includes delisted firms, but it does not
+# encode historical index membership or every stock's investability state. The
+# notebook demonstrates model mechanics, not an investable historical strategy.
 #
-# 1. **Stage 1 — Factor Model.** Compresses an $(T \times N)$ returns panel to
-#    a $(T \times K)$ factor history $F$ and a per-asset loading map. The CAE
-#    realises this as $r_{i,t} = \beta_{i,t}' f_t + \varepsilon$ with
-#    $\beta_{i,t} = g_\theta(z_{i,t})$, a neural function of stock
-#    characteristics, and $f_t = \mathrm{FactorNet}(x_t)$ extracted from
-#    *managed-portfolio* returns $x_t = (Z_t'Z_t)^{-1} Z_t' r_t$ (GKX Eq. 16).
-# 2. **Stage 2 — Factor Premium Forecaster.** In a forward-looking deployment
-#    this stage predicts $\hat\lambda_{t+1}$ from the training factor history
-#    $F_{1:t}$; the case study runs it that way. In this notebook the same
-#    forecasters (Constant, AR(1), EWMA) are fit on training-window factors
-#    $F_{\text{train}}$ and broadcast a single $\hat\lambda$ over the test
-#    window — see **Figure 14.10**.
-# 3. **Stage 3 — Asset Mapper.** Combines the factor estimate with the
-#    contemporaneous beta to produce a per-asset signal
-#    $\hat\mu_{i,t} = g_\theta(z_{i,t}) \cdot \hat\lambda$ scored against the
-#    same-period return $r_{i,t}$. The shift to $z_{i,t-1}$ and $r_{i,t}$ (the
-#    forecasting protocol) is what the case study implements.
+# **GPU note**: the production configuration trains five members for at most
+# 200 epochs. On an RTX 3090, early stopping usually completes in a few minutes.
 #
-# ## Why CAE? (Stage 1 contrast with PCA / IPCA)
+# **Prerequisites**: [`04_ipca`](04_ipca.ipynb) and
+# [`05_rp_pca`](05_rp_pca.ipynb)
 #
-# | Method | Loadings | Loading dynamics |
-# |--------|----------|------------------|
-# | PCA    | Static $B$ | None |
-# | IPCA   | $\beta_{i,t} = z_{i,t}\,\Gamma$ | Linear in $z$ |
-# | CAE    | $\beta_{i,t} = g_\theta(z_{i,t})$ | Non-linear (NN) in $z$ |
+# **Book sections**: Sections 14.6-14.7, conditional autoencoders and the
+# implementation workshop
 #
-# A linear CAE with no hidden layers reduces to IPCA. The hidden ReLU layers
-# add capacity to learn interactions and non-linearities between
-# characteristics, which IPCA's bilinear specification cannot capture.
-#
-# ## Engel 2025 connection
-#
-# Engel (2025) *"Forecasting Latent Factors of Asset Returns"*
-# studies exactly this framework on top of CAE: holding Stage 1 fixed at
-# CAE-extracted factors, swap Stage 2 between IID-BS (= our Constant), AR(1),
-# Q-Boost (a quantile gradient-boosting learner built on LightGBM), and a
-# zero-shot transformer forecaster. The reframe
-# in this notebook is the same idea applied symmetrically to all LF
-# estimators in the chapter.
-#
-# ## Architecture Overview (Figure 14.5, existing)
-#
-# ```
-# Characteristics Z_t              Returns r_t × Characteristics Z_t
-#        │                                   │
-#        ▼                                   ▼
-# [Beta Network]                  [Managed Portfolios x_t]
-# Dense(32) + ReLU + L1                       │
-#        │                                   ▼
-#        ▼                          [Factor Network]
-#    β_t (K-dim)                     Linear(K) → f_t
-#        │                                   │
-#        └──────── Dot Product ──────────────┘
-#                       │
-#                       ▼
-#               Predicted r̂_t
-# ```
-#
-# **Why two networks?** PCA/IPCA condition $\beta$ on a fixed function of
-# characteristics. The CAE's beta network is a *learned* function. The factor
-# network's input — managed portfolios — keeps the factor extraction
-# market-wide and dimension-controlled (one row per characteristic + market,
-# regardless of $N$).
-#
-# **Why L1 on beta-net weights?** Promotes sparse loadings: each factor
-# concentrates on a few characteristics, mirroring the interpretability of
-# Fama-French-style sorts.
-#
-# ## Data
-#
-# US Equities, top 500 by dollar volume, 5 simple characteristics computed
-# from prices (LME, Variance, ST_REV, r12_2, AvgRet21). For the full GKX 46
-# Datashop characteristics with walk-forward CV, see
-# [`08_latent_factors`](../case_studies/us_firm_characteristics/08_latent_factors.ipynb).
-#
-# ## Learning Objectives
-#
-# - LO1: Recognise the CAE as a non-linear Stage 1 — same role as PCA/IPCA,
-#   richer functional class
-# - LO2: Implement the dual-network architecture in PyTorch with managed
-#   portfolios, ensemble training, and L1 regularisation
-# - LO3: Apply the Stage 2 forecaster catalog (Constant / AR(1) / EWMA) to
-#   the CAE factor series and observe the Stage 3 IC differences
-# - LO4: Read CAE-specific Stage 1 diagnostics (factor-characteristic
-#   correlations, beta dispersion, ensemble variance, SHAP attributions)
-#
-# **Prerequisites**: PCA ([`01_pca_equity_sectors`](01_pca_equity_sectors.ipynb)),
-# IPCA in framework ([`04_ipca`](04_ipca.ipynb)). Requires US equities data.
-#
-# **Book Reference**: Chapter 14, §14.6–14.7 (Conditional Autoencoders,
-# Implementation Workshop)
+# **Next**: [`07_stochastic_discount_factor`](07_stochastic_discount_factor.ipynb)
+# learns the pricing object directly instead of using the three-stage adapter.
 
-# %% [markdown] tags=[]
-# ## 1. Setup and Imports
+# %% [markdown]
+# ## 1. Setup
 
-# %% tags=[]
-"""Conditional Autoencoder in the two-step framework — neural Stage 1, swappable Stage 2 forecasters."""
+# %%
+"""Train a conditional autoencoder and evaluate next-day factor forecasts."""
 
-import warnings
-from time import time
+from copy import deepcopy
+from datetime import timedelta
+from time import perf_counter
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import polars as pl
-import seaborn as sns
-
-import torch  # isort:skip  # must be imported before shap (CUDA runtime conflict)
-import torch.nn as nn  # isort:skip
-import torch.optim as optim  # isort:skip
-import shap
-from ml4t.diagnostic.metrics import cross_sectional_ic, cross_sectional_ic_series
-from scipy.stats import spearmanr  # used for char-vs-beta correlation, not IC
-
-warnings.filterwarnings("ignore")
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from matplotlib.colors import LinearSegmentedColormap
+from ml4t.diagnostic.metrics import cross_sectional_ic_series
+from ml4t.diagnostic.metrics.uncertainty import compute_ic_uncertainty
+from scipy.stats import spearmanr
 
 from data import load_us_equities
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
-
-# %% [markdown] tags=[]
-# ### Universe-Size Scaling
-#
-# CAE training cost scales as $O(\text{N\_EPOCHS} \cdot T \cdot
-# \text{TOP\_N\_STOCKS} \cdot d_{\text{char}})$ per ensemble member, plus
-# `ENSEMBLE_SIZE` parallel fits. The default 500-stock × 200-epoch × 5-member
-# configuration runs ~4 minutes on the local 3090. Halving `TOP_N_STOCKS` to 250
-# (or `ENSEMBLE_SIZE` to 1 for a quick smoke) cuts wall-time linearly. CPU-only
-# runs are 10–30× slower; the Papermill CI override drops `N_EPOCHS` and
-# `ENSEMBLE_SIZE` rather than the universe size to preserve the cross-sectional
-# structure the autoencoder needs to learn.
+from utils.style import (
+    COLORS,
+    FIGSIZE,
+    add_message_title,
+    ml4t_diverging,
+    ml4t_palette,
+    zero_line,
+)
 
 # %% tags=["parameters"]
-# Production defaults (Papermill overrides for CI testing)
 TOP_N_STOCKS = 500
 N_FACTORS = 5
 N_EPOCHS = 200
-BATCH_SIZE = 10000
+BATCH_SIZE = 10_000
 ENSEMBLE_SIZE = 5
 LEARNING_RATE = 0.001
-LAMBDA_L1 = 0.001
+LAMBDA_L1 = 0.0001
+EARLY_STOPPING_PATIENCE = 30
+RETURN_CLIP_QUANTILES = (0.001, 0.999)
+EWMA_HALF_LIFE = 60
+N_BOOTSTRAP = 2_000
 SEED = 42
 
-# %% tags=[]
+# %%
 set_global_seeds(SEED)
-RANDOM_SEED = SEED
-rng = np.random.default_rng(SEED)
 torch.manual_seed(SEED)
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
     torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 print(
-    f"Device: {device}, {TOP_N_STOCKS} stocks, {N_FACTORS} factors, {N_EPOCHS} epochs, ensemble={ENSEMBLE_SIZE}"
+    f"Device={device}, stocks={TOP_N_STOCKS}, factors={N_FACTORS}, "
+    f"epochs={N_EPOCHS}, ensemble={ENSEMBLE_SIZE}"
 )
 
-# %% [markdown] tags=[]
-# ## 2. Data Loading
+# %% [markdown]
+# ## 2. Point-in-time panel construction
 #
-# Load US Equities and compute a small panel of characteristics — a
-# pedagogical 5-feature subset of the GKX 46-characteristic dataset.
+# Calendar boundaries are fixed before model fitting. The last 180 calendar
+# days form the test window, the preceding 185 days form validation, and all
+# earlier observations form training.
 
-# %% [markdown] tags=[]
-# ### Load and filter US equities data
+# %%
+equities_raw = load_us_equities(start_date="2005-01-01", end_date="2018-03-27")
+sample_end = equities_raw["timestamp"].max()
+train_end = sample_end - timedelta(days=365)
+valid_end = sample_end - timedelta(days=180)
 
-# %% tags=[]
-equities = load_us_equities(start_date="2005-01-01", end_date="2018-03-27")
+# %% [markdown]
+# Liquidity is estimated only before the validation boundary. This avoids the
+# full-sample top-500 selection that would let future volume and price
+# information determine the historical universe.
 
-dollar_volume = (
-    equities.group_by("symbol")
+# %%
+liquidity = (
+    equities_raw.filter(pl.col("timestamp") < train_end)
+    .group_by("symbol")
     .agg(
-        pl.col("adj_close").mean().alias("avg_price"),
-        pl.col("volume").mean().alias("avg_volume"),
-        pl.col("timestamp").count().alias("n_days"),
+        (pl.col("close") * pl.col("volume")).mean().alias("dollar_volume"),
+        pl.len().alias("n_days"),
     )
-    .with_columns((pl.col("avg_price") * pl.col("avg_volume")).alias("dollar_volume"))
     .filter(pl.col("n_days") >= 252)
-    .sort("dollar_volume", descending=True)
+    .sort(["dollar_volume", "symbol"], descending=[True, False])
 )
-selected_assets = dollar_volume.head(TOP_N_STOCKS)["symbol"].to_list()
-equities = equities.filter(pl.col("symbol").is_in(selected_assets))
+selected_symbols = liquidity.head(TOP_N_STOCKS)["symbol"].to_list()
+equities = equities_raw.filter(pl.col("symbol").is_in(selected_symbols))
+print(f"Training-defined universe: {len(selected_symbols)} stocks")
 
-print(f"Loaded {len(equities):,} rows for {len(selected_assets)} assets")
+# %% [markdown]
+# Five price-derived characteristics are available at the close of each day.
+# Stage 1 aligns them with the following trading day's return, matching the
+# information set used by the forward adapter.
 
-# %% [markdown] tags=[]
-# ### Compute characteristics
-#
-# Five characteristics that proxy well-known risk factors:
-#
-# - **LME**: Log market equity (size proxy)
-# - **Variance**: 21-day rolling volatility
-# - **ST_REV**: Short-term reversal (21-day return)
-# - **r12_2**: Momentum (12-month minus 1-month return)
-# - **AvgRet21**: Mean return over 21 days
-
-# %% tags=[]
-equities_sorted = equities.sort(["symbol", "timestamp"])
-equities_chars = (
-    equities_sorted.with_columns(
+# %%
+characteristic_names = ["LME", "Variance", "ST_REV", "r12_2", "AvgRet21"]
+feature_panel = (
+    equities.sort(["symbol", "timestamp"])
+    .with_columns(
         pl.col("adj_close").pct_change().over("symbol").alias("return"),
-        (pl.col("adj_close") * pl.col("volume")).alias("dollar_vol"),
+        (pl.col("close") * pl.col("volume")).alias("dollar_volume"),
     )
     .with_columns(
-        pl.col("dollar_vol").log().rolling_mean(window_size=21).over("symbol").alias("LME"),
-        pl.col("return").rolling_std(window_size=21).over("symbol").alias("Variance"),
-        pl.col("adj_close").pct_change(n=21).over("symbol").alias("ST_REV"),
+        pl.when(pl.col("dollar_volume") > 0)
+        .then(pl.col("dollar_volume").log())
+        .otherwise(None)
+        .rolling_mean(21)
+        .over("symbol")
+        .alias("LME"),
+        pl.col("return").rolling_std(21).over("symbol").alias("Variance"),
+        pl.col("adj_close").pct_change(21).over("symbol").alias("ST_REV"),
         (
             pl.col("adj_close") / pl.col("adj_close").shift(252)
             - 1
-            - pl.col("adj_close").pct_change(n=21)
+            - pl.col("adj_close").pct_change(21)
         )
         .over("symbol")
         .alias("r12_2"),
-        pl.col("return").rolling_mean(window_size=21).over("symbol").alias("AvgRet21"),
+        pl.col("return").rolling_mean(21).over("symbol").alias("AvgRet21"),
     )
-    .drop_nulls(subset=["return", "LME", "Variance", "ST_REV", "r12_2", "AvgRet21"])
+    .drop_nulls(subset=["return", *characteristic_names])
 )
 
-char_names = ["LME", "Variance", "ST_REV", "r12_2", "AvgRet21"]
-print(f"Computed {len(char_names)} characteristics: {char_names}")
-print(f"After dropping nulls: {len(equities_chars):,} observations")
+# %% [markdown]
+# Cross-sectional ranks are timestamp-local. A global trading-date map then
+# joins $z_{i,t-1}$ to $r_{i,t}$ for the same symbol, excluding gaps rather
+# than carrying stale characteristics forward. Return clipping limits isolated
+# corporate-action artifacts; both thresholds come from training returns.
 
-# %% [markdown] tags=[]
-# **Note on data limitations**: The US Equities universe may contain
-# survivorship bias — delisted stocks are excluded, potentially inflating
-# apparent predictability. The chapter text (Section 14.6) discusses microcap
-# sensitivity in detail.
-
-# %% [markdown] tags=[]
-# ### Rank-normalise and split into train/valid/test
-
-# %% tags=[]
-equities_pd = equities_chars.to_pandas()
-equities_pd["timestamp"] = pd.to_datetime(equities_pd["timestamp"])
-equities_pd = equities_pd.set_index(["timestamp", "symbol"])
-
-features = equities_pd[char_names]
-returns = equities_pd["return"]
-
-# Rank-normalise characteristics cross-sectionally
-features = features.groupby(level="timestamp").rank(pct=True) - 0.5
-
-# %% [markdown] tags=[]
-# Final year held out for testing; six months before that for early-stopping
-# validation; the rest is training.
-
-# %% tags=[]
-train_end = features.index.get_level_values("timestamp").max() - pd.Timedelta(days=365)
-valid_end = features.index.get_level_values("timestamp").max() - pd.Timedelta(days=180)
-
-data = {
-    "train": {
-        "characteristics": features.loc[features.index.get_level_values("timestamp") < train_end],
-        "returns": returns.loc[returns.index.get_level_values("timestamp") < train_end],
-    },
-    "valid": {
-        "characteristics": features.loc[
-            (features.index.get_level_values("timestamp") >= train_end)
-            & (features.index.get_level_values("timestamp") < valid_end)
-        ],
-        "returns": returns.loc[
-            (returns.index.get_level_values("timestamp") >= train_end)
-            & (returns.index.get_level_values("timestamp") < valid_end)
-        ],
-    },
-    "test": {
-        "characteristics": features.loc[features.index.get_level_values("timestamp") >= valid_end],
-        "returns": returns.loc[returns.index.get_level_values("timestamp") >= valid_end],
-    },
-}
-
-n_characteristics = len(char_names)
-for split in data:
-    print(f"  {split}: {len(data[split]['returns']):,} observations")
-print(f"Using {n_characteristics} characteristics: {char_names}")
-
-# %% [markdown] tags=[]
-# ## 3. Stage 1 Component — Managed Portfolios (GKX Eq. 16)
-#
-# The factor network needs market-wide information without exploding with $N$.
-# We project returns onto characteristic space using *managed portfolios*:
-#
-# $$x_t = (Z_t'Z_t)^{-1} Z_t' r_t$$
-#
-# Each managed portfolio's return is a zero-cost long-short strategy weighted
-# by one characteristic. Conditioning on characteristics extracts market-wide
-# factor returns without needing stock identities. The factor network learns
-# which linear combinations of these portfolio returns best explain the
-# cross-section.
-
-
-# %% tags=[]
-def get_managed_portfolios(characteristics, returns):
-    """Compute managed portfolios per GKX Equation 16: x_t = (Z'Z)^{-1} Z' r_t.
-
-    Adds an all-ones "market" column. Returns one row per timestamp with K =
-    n_characteristics + 1 columns.
-    """
-    chars_with_market = characteristics.assign(market=1)
-    numerator = chars_with_market.mul(returns, axis=0).groupby(level="timestamp").sum()
-    denominator = chars_with_market.pow(2).groupby(level="timestamp").sum()
-    return numerator.div(denominator)
-
-
-# %% tags=[]
-print("Computing managed portfolios...")
-for split in data:
-    data[split]["portfolios"] = get_managed_portfolios(
-        data[split]["characteristics"], data[split]["returns"]
+# %%
+rank_expressions = [
+    (pl.col(name).rank("average").over("timestamp") / pl.len().over("timestamp") - 0.5).alias(name)
+    for name in characteristic_names
+]
+feature_panel = feature_panel.with_columns(rank_expressions)
+available_dates = feature_panel["timestamp"].unique().sort().to_list()
+lag_pairs = pl.DataFrame(
+    {"feature_timestamp": available_dates[:-1], "timestamp": available_dates[1:]}
+)
+model_panel = (
+    feature_panel.select(
+        pl.col("timestamp").alias("feature_timestamp"), "symbol", *characteristic_names
     )
-    dates = data[split]["returns"].index.get_level_values("timestamp")
-    data[split]["portfolios_aligned"] = data[split]["portfolios"].reindex(dates)
-    print(f"  {split} portfolios: {data[split]['portfolios'].shape}")
+    .join(lag_pairs, on="feature_timestamp", how="inner")
+    .join(feature_panel.select("timestamp", "symbol", "return"), on=["timestamp", "symbol"])
+    .sort(["timestamp", "symbol"])
+)
+training_returns_raw = model_panel.filter(pl.col("timestamp") < train_end)["return"]
+clip_lower = float(training_returns_raw.quantile(RETURN_CLIP_QUANTILES[0]))
+clip_upper = float(training_returns_raw.quantile(RETURN_CLIP_QUANTILES[1]))
+feature_panel = feature_panel.with_columns(pl.col("return").clip(clip_lower, clip_upper))
+model_panel = model_panel.with_columns(pl.col("return").clip(clip_lower, clip_upper))
 
-n_instruments = data["train"]["portfolios"].shape[1]
-print(f"\nManaged portfolios: {n_instruments} instruments (characteristics + market)")
+# %%
+splits = {
+    "train": model_panel.filter(pl.col("timestamp") < train_end),
+    "valid": model_panel.filter(
+        (pl.col("timestamp") >= train_end) & (pl.col("timestamp") < valid_end)
+    ),
+    "test": model_panel.filter(pl.col("timestamp") >= valid_end),
+}
+for name, frame in splits.items():
+    print(
+        f"{name}: observations={frame.height:,}, dates={frame['timestamp'].n_unique()}, "
+        f"symbols={frame['symbol'].n_unique()}"
+    )
+print(f"Training return clip: [{clip_lower:.4f}, {clip_upper:.4f}]")
 
-# %% [markdown] tags=[]
-# ## 4. Stage 1 Component — CAE Architecture
+# %% [markdown]
+# ## 3. Joint managed portfolios
 #
-# The CAE has two networks that meet at a dot product:
+# For each date, append a market column to the lagged characteristic matrix and
+# solve the joint cross-sectional system
 #
-# 1. **Beta Network** $g_\theta : Z \to \mathbb{R}^K$ — characteristics to
-#    factor loadings. Hidden ReLU layers + L1-regularised weights for
-#    sparsity.
-# 2. **Factor Network** $\mathrm{FactorNet} : x \to \mathbb{R}^K$ — managed
-#    portfolios to factor returns. Single linear layer (no activation).
+# $$x_t=(Z_t^{\top}Z_t)^{-1}Z_t^{\top}r_t.$$
 #
-# Output: $\hat r_{i,t} = g_\theta(z_{i,t}) \cdot \mathrm{FactorNet}(x_t)$.
+# A joint least-squares solve is essential: dividing each numerator by its own
+# squared-characteristic sum ignores correlation among characteristics.
+
+# %%
+portfolio_names = [f"mp_{name}" for name in characteristic_names] + ["mp_market"]
 
 
-# %% [markdown] tags=[]
-# ### Beta Network — characteristics → factor loadings
+def managed_portfolios(frame: pl.DataFrame) -> pl.DataFrame:
+    """Compute the joint characteristic-managed return vector at each timestamp."""
+    timestamps = []
+    portfolio_rows = []
+    for cross_section in frame.sort(["timestamp", "symbol"]).partition_by(
+        "timestamp", maintain_order=True
+    ):
+        characteristics = cross_section.select(characteristic_names).to_numpy()
+        design = np.column_stack([characteristics, np.ones(len(cross_section))])
+        realized_returns = cross_section["return"].to_numpy()
+        coefficients = np.linalg.lstsq(design, realized_returns, rcond=None)[0]
+        timestamps.append(cross_section.item(0, "timestamp"))
+        portfolio_rows.append(coefficients)
+    values = np.asarray(portfolio_rows)
+    return pl.DataFrame(
+        {"timestamp": timestamps}
+        | {name: values[:, index] for index, name in enumerate(portfolio_names)}
+    )
+
+
+# %%
+portfolios = {name: managed_portfolios(frame) for name, frame in splits.items()}
+model_frames = {
+    name: frame.join(portfolios[name], on="timestamp", how="inner").sort(["timestamp", "symbol"])
+    for name, frame in splits.items()
+}
+for name in splits:
+    print(f"{name} managed portfolios: {portfolios[name].shape}")
+
+# %% [markdown]
+# ## 4. CAE architecture
 #
-# > **Library shortcut**: This class is also available as
-# > `from case_studies.config.cae.cae import ConditionalAutoencoder` for use
-# > outside this notebook. The inline definition below is shown for
-# > pedagogical exposition.
+# The beta network maps characteristics to conditional loadings. The factor
+# network maps managed portfolios to contemporaneous factor realizations. Their
+# row-wise dot product reconstructs the observed return.
 
 
-# %% tags=[]
+# %%
 class BetaNetwork(nn.Module):
-    """Beta Network: maps characteristics to factor loadings."""
+    """Map characteristics to nonlinear factor loadings."""
 
-    def __init__(self, n_characteristics: int, n_factors: int, hidden_units: tuple = (32,)):
+    def __init__(self, n_characteristics: int, n_factors: int):
         super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(n_characteristics, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, n_factors),
+        )
 
-        layers = []
-        in_features = n_characteristics
-
-        for units in hidden_units:
-            layers.append(nn.Linear(in_features, units))
-            layers.append(nn.BatchNorm1d(units))
-            layers.append(nn.ReLU())
-            in_features = units
-
-        layers.append(nn.Linear(in_features, n_factors))
-        self.network = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.network(x)
+    def forward(self, characteristics: torch.Tensor) -> torch.Tensor:
+        return self.network(characteristics)
 
 
-# %% [markdown] tags=[]
-# ### Factor Network — managed portfolios → factor returns
+# %% [markdown]
+# The factor network uses the six jointly estimated portfolio returns as
+# instruments for the latent realization on each date.
 
 
-# %% tags=[]
+# %%
 class FactorNetwork(nn.Module):
-    """Factor Network: maps managed portfolio returns to factor returns."""
+    """Map managed portfolios to latent factor realizations."""
 
     def __init__(self, n_instruments: int, n_factors: int):
         super().__init__()
         self.linear = nn.Linear(n_instruments, n_factors, bias=False)
 
-    def forward(self, x):
-        return self.linear(x)
+    def forward(self, portfolios: torch.Tensor) -> torch.Tensor:
+        return self.linear(portfolios)
 
 
-# %% [markdown] tags=[]
-# ### Conditional Autoencoder — joins both networks via dot product
+# %% [markdown]
+# The complete model combines both subnetworks through the pricing equation's
+# row-wise inner product.
 
 
-# %% tags=[]
+# %%
 class ConditionalAutoencoder(nn.Module):
-    """Dual-network CAE per GKX (2021): predicted return = β(z) · f(x)."""
+    """Join conditional betas and factor realizations through a dot product."""
 
-    def __init__(
-        self,
-        n_characteristics: int,
-        n_instruments: int,
-        n_factors: int = 6,
-        hidden_units: tuple = (32,),
-    ):
+    def __init__(self, n_characteristics: int, n_instruments: int, n_factors: int):
         super().__init__()
-
-        self.n_factors = n_factors
-        self.n_characteristics = n_characteristics
-        self.n_instruments = n_instruments
-
-        self.beta_net = BetaNetwork(n_characteristics, n_factors, hidden_units)
+        self.beta_net = BetaNetwork(n_characteristics, n_factors)
         self.factor_net = FactorNetwork(n_instruments, n_factors)
 
-    def forward(self, characteristics, portfolios):
+    def forward(self, characteristics: torch.Tensor, portfolios: torch.Tensor) -> torch.Tensor:
         betas = self.beta_net(characteristics)
         factors = self.factor_net(portfolios)
         return (betas * factors).sum(dim=1)
 
-    def get_betas(self, characteristics):
-        """Stage 1 / Stage 3 helper: extract per-stock factor loadings."""
-        return self.beta_net(characteristics)
 
-    def get_factors(self, portfolios):
-        """Stage 1 helper: extract market-wide factor returns from managed portfolios."""
-        return self.factor_net(portfolios)
-
-
-# %% [markdown] tags=[]
-# ## 5. Stage 1 Training Utilities
+# %% [markdown]
+# ## 5. Train a validation-selected ensemble
+#
+# L1 regularization is normalized by the number of beta-network weights so its
+# magnitude does not grow mechanically with architecture size. Early stopping
+# stores a deep copy of the best parameters.
 
 
-# %% tags=[]
-def prepare_tensors(data_split, device):
-    """Convert data split to PyTorch tensors."""
-    chars = torch.tensor(data_split["characteristics"].values, dtype=torch.float32).to(device)
-    portfolios = torch.tensor(data_split["portfolios_aligned"].values, dtype=torch.float32).to(
+# %%
+def prepare_tensors(frame: pl.DataFrame) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Move one long panel and its aligned portfolios to the selected device."""
+    characteristics = torch.tensor(
+        frame.select(characteristic_names).to_numpy(), dtype=torch.float32, device=device
+    )
+    portfolio_values = torch.tensor(
+        frame.select(portfolio_names).to_numpy(), dtype=torch.float32, device=device
+    )
+    realized_returns = torch.tensor(frame["return"].to_numpy(), dtype=torch.float32, device=device)
+    return characteristics, portfolio_values, realized_returns
+
+
+# %% [markdown]
+# Normalizing the sparsity penalty makes its scale independent of the number of
+# trainable loading parameters.
+
+
+# %%
+def normalized_l1_penalty(model: ConditionalAutoencoder) -> torch.Tensor:
+    """Return the mean absolute beta-network weight multiplied by lambda."""
+    weights = [
+        parameter.reshape(-1)
+        for name, parameter in model.beta_net.named_parameters()
+        if "weight" in name
+    ]
+    return LAMBDA_L1 * torch.cat(weights).abs().mean()
+
+
+# %% [markdown]
+# Mini-batch updates shuffle observations but preserve the timestamp-aligned
+# managed-portfolio vector attached to every row.
+
+
+# %%
+def train_epoch(
+    model: ConditionalAutoencoder,
+    optimizer: optim.Optimizer,
+    tensors: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+) -> float:
+    """Run one shuffled reconstruction epoch."""
+    characteristics, portfolio_values, returns = tensors
+    model.train()
+    order = torch.randperm(len(returns), device=device)
+    losses = []
+    for start in range(0, len(returns), BATCH_SIZE):
+        index = order[start : start + BATCH_SIZE]
+        optimizer.zero_grad()
+        prediction = model(characteristics[index], portfolio_values[index])
+        mse = nn.functional.mse_loss(prediction, returns[index])
+        loss = mse + normalized_l1_penalty(model)
+        loss.backward()
+        optimizer.step()
+        losses.append(float(loss.detach()))
+    return float(np.mean(losses))
+
+
+# %% [markdown]
+# Validation evaluates the unpenalized reconstruction error used for checkpoint
+# selection.
+
+
+# %%
+def reconstruction_mse(
+    model: ConditionalAutoencoder,
+    tensors: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+) -> float:
+    """Evaluate reconstruction MSE without changing network state."""
+    characteristics, portfolio_values, returns = tensors
+    model.eval()
+    with torch.no_grad():
+        prediction = model(characteristics, portfolio_values)
+    return float(nn.functional.mse_loss(prediction, returns))
+
+
+# %% [markdown]
+# Each ensemble member starts from a distinct deterministic seed and restores
+# the deep-copied state with the lowest validation error.
+
+
+# %%
+def train_single_model(
+    member: int,
+    train_tensors: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    valid_tensors: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+) -> tuple[ConditionalAutoencoder, dict[str, list[float] | int]]:
+    """Train one member and restore its minimum-validation-MSE state."""
+    torch.manual_seed(SEED + member)
+    model = ConditionalAutoencoder(len(characteristic_names), len(portfolio_names), N_FACTORS).to(
         device
     )
-    returns = torch.tensor(data_split["returns"].values, dtype=torch.float32).to(device)
-    return chars, portfolios, returns
-
-
-# %% tags=[]
-def l1_regularization(model, lambda_l1=0.001):
-    """L1 penalty on beta-network weights — drives sparse factor loadings."""
-    l1_loss = 0
-    for name, param in model.beta_net.named_parameters():
-        if "weight" in name:
-            l1_loss += param.abs().sum()
-    return lambda_l1 * l1_loss
-
-
-# %% tags=[]
-def compute_metrics(returns_arr, predictions_arr, period_idx, symbols=None):
-    """Per-date Spearman IC summary + pooled R² over flat (n_obs,) arrays.
-
-    Returns dict with keys: ic_mean, ic_std, ic_t, p_value, pct_positive,
-    ic_ir, n_periods, r2.
-    """
-    nan_summary = {
-        "ic_mean": np.nan,
-        "ic_std": np.nan,
-        "ic_t": np.nan,
-        "p_value": np.nan,
-        "pct_positive": np.nan,
-        "ic_ir": np.nan,
-        "n_periods": 0,
-        "r2": np.nan,
-    }
-    mask = np.isfinite(returns_arr) & np.isfinite(predictions_arr)
-    if mask.sum() < 10:
-        return nan_summary
-    r = returns_arr[mask]
-    p = predictions_arr[mask]
-    pi = np.asarray(period_idx)[mask]
-    sy = np.arange(mask.sum()) if symbols is None else np.asarray(symbols)[mask]
-    df = pl.DataFrame({"date": pi, "symbol": sy, "y_pred": p, "y_true": r})
-    summary = cross_sectional_ic(
-        predictions=df,
-        returns=df,
-        pred_col="y_pred",
-        ret_col="y_true",
-        date_col="date",
-        entity_col="symbol",
-        method="spearman",
-        min_obs=5,
-    )
-    ss_res = np.sum((r - p) ** 2)
-    ss_tot = np.sum((r - r.mean()) ** 2)
-    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
-    return {**summary, "r2": float(r2)}
-
-
-# %% [markdown] tags=[]
-# ## 6. Stage 1 Training — CAE Ensemble
-
-# %% tags=[]
-hidden_units = (32,)
-
-print(
-    f"Model: {N_FACTORS} factors, hidden={hidden_units}, {N_EPOCHS} epochs, ensemble={ENSEMBLE_SIZE}"
-)
-
-# %% tags=[]
-train_chars, train_portfolios, train_returns = prepare_tensors(data["train"], device)
-valid_chars, valid_portfolios, valid_returns = prepare_tensors(data["valid"], device)
-test_chars, test_portfolios, test_returns = prepare_tensors(data["test"], device)
-
-# Per-obs (timestamp, symbol) indexing for cross-sectional IC during training and eval.
-valid_dates_idx = data["valid"]["returns"].index.get_level_values("timestamp").factorize()[0]
-valid_symbols_idx = data["valid"]["returns"].index.get_level_values("symbol").factorize()[0]
-
-print(f"\nTraining data: {train_chars.shape[0]:,} observations")
-print(f"Validation data: {valid_chars.shape[0]:,} observations")
-print(f"Test data: {test_chars.shape[0]:,} observations")
-
-
-# %% [markdown] tags=[]
-# ### Train one CAE with early stopping
-#
-# Each ensemble member uses a different seed. Different initialisations and
-# minibatch orderings produce slightly different $\beta$ networks and factor
-# series; averaging across members reduces variance.
-
-
-# %% tags=[]
-def train_single_model(model_no, verbose=True):
-    """Train one CAE ensemble member with early stopping on validation MSE."""
-    if verbose:
-        print(f"\n{'=' * 50}")
-        print(f"Training model {model_no}/{ENSEMBLE_SIZE}")
-        print("=" * 50)
-
-    torch.manual_seed(RANDOM_SEED + model_no)
-
-    model = ConditionalAutoencoder(
-        n_characteristics=n_characteristics,
-        n_instruments=n_instruments,
-        n_factors=N_FACTORS,
-        hidden_units=hidden_units,
-    ).to(device)
-
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    criterion = nn.MSELoss()
-
-    history = {"train_loss": [], "val_loss": [], "val_ic": []}
-    best_val_loss = float("inf")
-    patience = 50
-    patience_counter = 0
-    best_state = None
-
-    start_time = time()
-    n_train = len(train_returns)
-
-    for epoch in range(N_EPOCHS):
-        model.train()
-        indices = torch.randperm(n_train)
-        epoch_loss = 0.0
-        n_batches = 0
-
-        for i in range(0, n_train, BATCH_SIZE):
-            batch_idx = indices[i : i + BATCH_SIZE]
-            batch_chars = train_chars[batch_idx]
-            batch_portfolios = train_portfolios[batch_idx]
-            batch_returns = train_returns[batch_idx]
-
-            optimizer.zero_grad()
-            pred = model(batch_chars, batch_portfolios)
-            loss = criterion(pred, batch_returns) + l1_regularization(model, LAMBDA_L1)
-            loss.backward()
-            optimizer.step()
-
-            epoch_loss += loss.item()
-            n_batches += 1
-
-        train_loss = epoch_loss / n_batches
+    history: dict[str, list[float] | int] = {"train_loss": [], "valid_mse": [], "best_epoch": 0}
+    best_mse = float("inf")
+    best_state = deepcopy(model.state_dict())
+    patience = 0
+    started = perf_counter()
+    for epoch in range(1, N_EPOCHS + 1):
+        train_loss = train_epoch(model, optimizer, train_tensors)
+        valid_mse = reconstruction_mse(model, valid_tensors)
         history["train_loss"].append(train_loss)
-
-        model.eval()
-        with torch.no_grad():
-            val_pred = model(valid_chars, valid_portfolios)
-            val_loss = criterion(val_pred, valid_returns).item()
-            history["val_loss"].append(val_loss)
-
-            val_pred_np = val_pred.cpu().numpy()
-            val_returns_np = valid_returns.cpu().numpy()
-            val_metrics = compute_metrics(
-                val_returns_np, val_pred_np, valid_dates_idx, valid_symbols_idx
-            )
-            history["val_ic"].append(val_metrics["ic_mean"])
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-            best_state = model.state_dict().copy()
+        history["valid_mse"].append(valid_mse)
+        if valid_mse < best_mse - 1e-9:
+            best_mse, best_state, patience = valid_mse, deepcopy(model.state_dict()), 0
+            history["best_epoch"] = epoch
         else:
-            patience_counter += 1
-
-        if patience_counter >= patience:
-            if verbose:
-                print(f"  Early stopping at epoch {epoch + 1}")
-            break
-
-        if verbose and (epoch + 1) % 20 == 0:
-            elapsed = time() - start_time
+            patience += 1
+        if epoch % 20 == 0:
             print(
-                f"  Epoch {epoch + 1:3d} | "
-                f"Train: {train_loss:.6f} | Val: {val_loss:.6f} | "
-                f"IC: {val_metrics['ic_mean']:.4f} | Time: {elapsed:.1f}s"
+                f"member={member} epoch={epoch:3d} train={train_loss:.6f} "
+                f"valid={valid_mse:.6f} elapsed={perf_counter() - started:.1f}s"
             )
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
-
+        if patience >= EARLY_STOPPING_PATIENCE:
+            break
+    model.load_state_dict(best_state)
+    print(f"member={member} best_epoch={history['best_epoch']} best_valid_mse={best_mse:.6f}")
     return model, history
 
 
-# %% [markdown] tags=[]
-# ### Train the ensemble
-
-# %% tags=[]
+# %%
+train_tensors = prepare_tensors(model_frames["train"])
+valid_tensors = prepare_tensors(model_frames["valid"])
 models = []
 histories = []
-
-for model_no in range(1, ENSEMBLE_SIZE + 1):
-    model, history = train_single_model(model_no)
+for member in range(1, ENSEMBLE_SIZE + 1):
+    model, history = train_single_model(member, train_tensors, valid_tensors)
     models.append(model)
     histories.append(history)
 
-print(f"\nTrained {len(models)} ensemble members.")
+# %% [markdown]
+# The first member illustrates optimization without turning wall-clock time
+# into a stable claim. The selected epoch comes from validation reconstruction,
+# not test IC.
 
-# %% [markdown] tags=[]
-# ## 7. Stage 1 Outputs — Factor Series and Loading Maps
-#
-# After training, every ensemble member exposes two Stage 1 artefacts that
-# downstream stages consume:
-#
-# - **$F_{\text{train}}^{(m)} \in \mathbb{R}^{T_{\text{train}} \times K}$** — the
-#   training-window factor history, one row per trading day.
-# - **$\beta^{(m)}_{i,t} = g_{\theta^{(m)}}(z_{i,t}) \in \mathbb{R}^K$** — the
-#   per-stock loadings, evaluated at any date by passing characteristics
-#   through the beta network.
-#
-# Stage 2 fits forecasters to $F_{\text{train}}^{(m)}$; Stage 3 multiplies
-# $\beta^{(m)}_{i,t}$ by $\hat\lambda_{t+1}$. The asset-level prediction is
-# therefore a per-member quantity; we average across members at the end of
-# Stage 3.
+# %%
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.plot(histories[0]["train_loss"], color=COLORS["blue"], label="Training objective")
+ax.plot(histories[0]["valid_mse"], color=COLORS["amber"], label="Validation MSE")
+ax.set_xlabel("Epoch")
+ax.set_ylabel("Return squared error")
+ax.legend()
+add_message_title(ax, "Validation selects the reconstruction checkpoint before test evaluation")
+fig.show()
 
-# %% tags=[]
-# Build the unique training-window managed-portfolio sequence (T_train rows).
-train_portfolios_unique = data["train"]["portfolios"].dropna()
-train_portfolios_unique_t = torch.tensor(train_portfolios_unique.values, dtype=torch.float32).to(
-    device
+# %% [markdown]
+# ## 6. Construct the next-day evaluation panel
+#
+# Current close characteristics are joined to the same symbol's return on the
+# next test trading date. The last date has no forward label and is excluded.
+
+# %%
+test_dates = splits["test"]["timestamp"].unique().sort().to_list()
+date_pairs = pl.DataFrame({"timestamp": test_dates[:-1], "target_timestamp": test_dates[1:]})
+test_features = feature_panel.filter(pl.col("timestamp") >= valid_end)
+targets = test_features.select(
+    pl.col("timestamp").alias("target_timestamp"),
+    "symbol",
+    pl.col("return").alias("forward_return"),
 )
-
-member_outputs = []
-for m, model in enumerate(models):
-    model.eval()
-    with torch.no_grad():
-        f_train_m = model.get_factors(train_portfolios_unique_t).cpu().numpy()
-        betas_test_m = model.get_betas(test_chars).cpu().numpy()
-        betas_train_m = model.get_betas(train_chars).cpu().numpy()
-    member_outputs.append(
-        {
-            "F_train": f_train_m,
-            "betas_test": betas_test_m,
-            "betas_train": betas_train_m,
-        }
-    )
-
-print(f"F_train per member: shape {member_outputs[0]['F_train'].shape}  (T_train days × K factors)")
+forecast_frame = (
+    test_features.join(date_pairs, on="timestamp", how="inner")
+    .join(targets, on=["target_timestamp", "symbol"], how="inner")
+    .sort(["timestamp", "symbol"])
+)
+decision_dates = forecast_frame["timestamp"].unique().sort().to_list()
+date_to_period = {timestamp: period for period, timestamp in enumerate(decision_dates)}
+observation_periods = np.array(
+    [date_to_period[timestamp] for timestamp in forecast_frame["timestamp"].to_list()]
+)
 print(
-    f"β per test obs (per member): shape {member_outputs[0]['betas_test'].shape}  (n_test_obs × K)"
+    f"Forward panel: observations={forecast_frame.height:,}, "
+    f"decision_dates={len(decision_dates)}, horizon=1 trading day"
 )
 
-# Ensemble-averaged β at test obs (used for Stage 1 diagnostics in §10).
-ensemble_betas = np.mean([m["betas_test"] for m in member_outputs], axis=0)
-
-# %% [markdown] tags=[]
-# ## 8. Stage 2 — Factor Premium Forecasters
+# %% [markdown]
+# ## 7. Walk-forward factor-premium forecasts
 #
-# Stage 2 takes the training factor history $F_{1:T}$ and emits a one-step-ahead
-# factor-premium forecast $\hat\lambda_{t+1} \in \mathbb{R}^K$. We implement
-# three Tier-1 forecasters from the catalog (**Figure 14.10**).
-#
-# **Constant** (the implicit choice in GKX 2021, = Engel 2025's IID-BS):
-# $$\hat\lambda_{t+1} = \frac{1}{T}\sum_{s=1}^{T} f_s$$
-#
-# **AR(1)** (per-factor first-order autoregression):
-# $$\hat\lambda_{k,t+1} = c_k + \phi_k\, f_{k,t}$$
-#
-# **EWMA** (exponentially weighted average, half-life $h = 60$ trading days
-# ≈ 12 weeks for daily data):
-# $$\hat\lambda_{k,t+1} = (1 - \alpha)\sum_{s=1}^{T} \alpha^{T-s}\, f_{k,s},
-# \quad \alpha = \exp(-\ln 2 / h)$$
-#
-# All three are **paper-faithful in shape** with the IPCA and RP-PCA
-# notebooks — the forecaster API does not depend on which Stage 1 produced
-# $F_{1:T}$.
+# All training and validation factors are observable before the test window.
+# At each test decision, the current managed-portfolio vector produces $f_t$;
+# Stage 2 appends it and forecasts $f_{t+1}$.
 
 
-# %% tags=[]
-class ConstantForecaster:
-    """Sample mean of training factors (= GKX 2021 implicit, Engel 2025 IID-BS)."""
-
-    def fit(self, F: np.ndarray) -> "ConstantForecaster":
-        self.lam_ = F.mean(axis=0)
-        return self
-
-    def predict(self, n_steps: int) -> np.ndarray:
-        return np.tile(self.lam_, (n_steps, 1))
+# %%
+def expanding_mean_forecast(history: np.ndarray) -> np.ndarray:
+    """Forecast the next factor vector with its expanding mean."""
+    return history.mean(axis=0)
 
 
-# %% tags=[]
-class AR1Forecaster:
-    """Per-factor AR(1): λ̂_{k,t+1} = c_k + φ_k · f_{k,t}."""
-
-    def fit(self, F: np.ndarray) -> "AR1Forecaster":
-        K = F.shape[1]
-        self.c_ = np.zeros(K)
-        self.phi_ = np.zeros(K)
-        for k in range(K):
-            x = F[:-1, k]
-            y = F[1:, k]
-            phi, c = np.polyfit(x, y, deg=1)
-            self.phi_[k] = phi
-            self.c_[k] = c
-        self.last_ = F[-1]
-        return self
-
-    def predict(self, n_steps: int) -> np.ndarray:
-        out = np.zeros((n_steps, len(self.last_)))
-        prev = self.last_.copy()
-        for s in range(n_steps):
-            prev = self.c_ + self.phi_ * prev
-            out[s] = prev
-        return out
+# %% [markdown]
+# An AR(1) adapter allows each latent premium to depend on its latest observed
+# realization.
 
 
-# %% tags=[]
-class EWMAForecaster:
-    """EWMA with half-life h periods (default 60 daily ≈ 12-week half-life)."""
-
-    def __init__(self, half_life: float = 60.0):
-        self.half_life = half_life
-
-    def fit(self, F: np.ndarray) -> "EWMAForecaster":
-        T = len(F)
-        alpha = np.exp(-np.log(2) / self.half_life)
-        weights = alpha ** np.arange(T - 1, -1, -1)
-        weights /= weights.sum()
-        self.lam_ = (weights[:, None] * F).sum(axis=0)
-        return self
-
-    def predict(self, n_steps: int) -> np.ndarray:
-        return np.tile(self.lam_, (n_steps, 1))
+# %%
+def ar1_forecast(history: np.ndarray) -> np.ndarray:
+    """Refit one AR(1) with intercept per factor."""
+    forecasts = np.empty(history.shape[1])
+    for factor in range(history.shape[1]):
+        design = np.column_stack([np.ones(len(history) - 1), history[:-1, factor]])
+        coefficients = np.linalg.lstsq(design, history[1:, factor], rcond=None)[0]
+        forecasts[factor] = coefficients[0] + coefficients[1] * history[-1, factor]
+    return forecasts
 
 
-# %% [markdown] tags=[]
-# ### Inspect Stage 2 fits on member 1
-#
-# A quick sanity check before running Stage 3 across the ensemble: fit each
-# forecaster on the first ensemble member's $F_{\text{train}}$ and read off
-# the predicted $\hat\lambda$ for the first test period.
-
-# %% tags=[]
-test_periods = data["test"]["portfolios"].dropna().index
-n_test_periods = len(test_periods)
-
-F_train_m0 = member_outputs[0]["F_train"]
-demo_forecasters = {
-    "Constant": ConstantForecaster().fit(F_train_m0),
-    "AR(1)": AR1Forecaster().fit(F_train_m0),
-    "EWMA(h=60)": EWMAForecaster(half_life=60.0).fit(F_train_m0),
-}
-for name, f in demo_forecasters.items():
-    lam0 = f.predict(1)[0]
-    print(f"  {name:12s}  λ̂_1 = {lam0.round(6)}")
-
-# %% [markdown] tags=[]
-# **Reading the numbers**: Constant collapses the entire training history to
-# a single vector (the sample mean). EWMA(h=60) puts weight ≈ 50% on the
-# last 60 days, giving a faster-moving estimate of what factors are paying
-# right now. AR(1) starts from the most recent factor value and iterates
-# forward via per-factor coefficients — its forecast evolves with $t$, while
-# Constant and EWMA are flat across the test window.
-
-# %% [markdown] tags=[]
-# ## 9. Stage 3 — Asset Prediction Across Forecasters
-#
-# Stage 3 combines the factor estimate $\hat\lambda$ with the contemporaneous
-# beta to produce a per-asset signal $\hat\mu_{i,t} = \beta_{i,t} \cdot
-# \hat\lambda$. For the CAE, $\beta_{i,t} = g_\theta(z_{i,t})$ — the beta
-# network evaluated at the stock's characteristics on date $t$. As the
-# preamble protocol note flagged, this notebook scores $\hat\mu_{i,t}$ against
-# the *same-period* return $r_{i,t}$; the resulting IC measures
-# cross-sectional rank fit of the factor reconstruction, not forecasting
-# skill. The walk-forward forecasting evaluation lives in the
-# `us_firm_characteristics` case study.
-#
-# We loop over forecasters, then over ensemble members, and average the
-# member-level $\hat\mu$ surfaces. This parallels how GKX 2021 use ensemble
-# averaging to reduce variance in single-model neural-network predictions.
-
-# %% tags=[]
-# Map each test obs to its period index in [0, n_test_periods).
-test_obs_dates = data["test"]["returns"].index.get_level_values("timestamp")
-test_period_index = pd.Index(test_periods)
-obs_period_idx = test_period_index.get_indexer(test_obs_dates)
-assert (obs_period_idx >= 0).all(), "all test obs should map to a known test period"
-
-forecaster_factories = {
-    "Constant": lambda: ConstantForecaster(),
-    "AR(1)": lambda: AR1Forecaster(),
-    "EWMA(h=60)": lambda: EWMAForecaster(half_life=60.0),
-}
-
-mu_hat_by_forecaster = {}
-mu_hat_per_member = {name: [] for name in forecaster_factories}
-
-for fname, fcls in forecaster_factories.items():
-    for mem in member_outputs:
-        # Stage 2: fit Tier-1 forecaster on this member's F_train.
-        forecaster = fcls()
-        forecaster.fit(mem["F_train"])
-        lam_periods = forecaster.predict(n_test_periods)  # (T_test, K)
-
-        # Stage 3: broadcast λ̂_t to per-obs vectors and dot with β.
-        lam_per_obs = lam_periods[obs_period_idx]  # (n_obs, K)
-        mu_hat_member = (mem["betas_test"] * lam_per_obs).sum(axis=1)  # (n_obs,)
-        mu_hat_per_member[fname].append(mu_hat_member)
-
-    mu_hat_by_forecaster[fname] = np.mean(mu_hat_per_member[fname], axis=0)
-
-print("Stage 3 complete — ensemble-averaged μ̂ available per forecaster.")
-
-# %% [markdown] tags=[]
-# ### Score forecasters by per-date Spearman IC
-#
-# Headline IC is the **per-date cross-sectional Spearman rank correlation**
-# averaged across test periods. Reporting Mean IC alongside IC IR (mean/std,
-# non-annualised), t-stat, and p-value follows the same convention used by
-# the chapter case studies and by Ch7's IC introduction. We also report
-# pooled OOS R² so reconstruction quality is visible separately from rank IC.
+# %% [markdown]
+# An exponentially weighted mean offers a smoother recency-sensitive adapter
+# without fitting coefficients.
 
 
-# %% tags=[]
-def per_period_ic(predictions, actuals, period_idx, symbols=None):
-    """Per-date Spearman IC series via the diagnostic library."""
-    mask = np.isfinite(actuals) & np.isfinite(predictions)
-    if mask.sum() < 20:
-        return np.array([])
-    pi = np.asarray(period_idx)[mask]
-    sy = np.arange(mask.sum()) if symbols is None else np.asarray(symbols)[mask]
-    df = pl.DataFrame(
-        {"date": pi, "symbol": sy, "y_pred": predictions[mask], "y_true": actuals[mask]}
-    )
-    series = cross_sectional_ic_series(
-        predictions=df,
-        returns=df,
-        pred_col="y_pred",
-        ret_col="y_true",
-        date_col="date",
-        entity_col="symbol",
-        method="spearman",
-        min_obs=20,
-    )
-    return series.drop_nulls("ic")["ic"].to_numpy()
+# %%
+def ewma_forecast(history: np.ndarray, half_life: int = EWMA_HALF_LIFE) -> np.ndarray:
+    """Forecast with an exponentially weighted mean of available factors."""
+    ages = np.arange(len(history) - 1, -1, -1)
+    weights = np.exp(-np.log(2) * ages / half_life)
+    weights /= weights.sum()
+    return weights @ history
 
 
-test_returns_np = test_returns.cpu().numpy()
-test_symbols_idx = data["test"]["returns"].index.get_level_values("symbol").factorize()[0]
+# %% [markdown]
+# Walk-forward evaluation refits or updates each adapter using only the factor
+# history available at that decision time.
 
-results_rows = []
-ic_series_by_forecaster = {}
-for fname, mu_hat in mu_hat_by_forecaster.items():
-    summary = compute_metrics(test_returns_np, mu_hat, obs_period_idx, test_symbols_idx)
-    ic_series_by_forecaster[fname] = per_period_ic(
-        mu_hat, test_returns_np, obs_period_idx, test_symbols_idx
-    )
-    results_rows.append(
-        {
-            "Forecaster": fname,
-            "Mean IC": f"{summary['ic_mean']:.4f}",
-            "IC IR": f"{summary['ic_ir']:.4f}",
-            "t-stat": f"{summary['ic_t']:.2f}",
-            "p-value": f"{summary['p_value']:.3f}",
-            "R²": f"{summary['r2']:.5f}",
-            "Periods": int(summary["n_periods"]),
-        }
-    )
 
-pl.DataFrame(results_rows)
-
-# %% [markdown] tags=[]
-# ### Cache Stage 3 Predictions
-#
-# Save the stacked long-form prediction frame so re-running the visualisation
-# and ensemble-decomposition cells doesn't re-train the CAE ensemble. Cache
-# key includes the universe size, factor count, training schedule, and the
-# forecaster set; see `utils/predictions_cache.py` for the contract.
-
-# %% tags=[]
-from utils.predictions_cache import predictions_cache_key, save_predictions
-
-predictions_spec = {
-    "notebook": "cae",
-    "data": {
-        "source": "us_equities",
-        "top_n_stocks": TOP_N_STOCKS,
-    },
-    "model": {
-        "name": "conditional_autoencoder",
-        "n_factors": N_FACTORS,
-        "n_epochs": N_EPOCHS,
-        "batch_size": BATCH_SIZE,
-        "ensemble_size": ENSEMBLE_SIZE,
-        "learning_rate": LEARNING_RATE,
-        "lambda_l1": LAMBDA_L1,
-    },
-    "forecasters": list(mu_hat_by_forecaster.keys()),
-}
-
-stacked_frames = []
-for fname, mu_hat in mu_hat_by_forecaster.items():
-    mask = np.isfinite(test_returns_np) & np.isfinite(mu_hat)
-    stacked_frames.append(
-        pl.DataFrame(
-            {
-                "date": np.asarray(obs_period_idx)[mask],
-                "symbol": np.asarray(test_symbols_idx)[mask],
-                "y_pred": mu_hat[mask].astype(np.float64),
-                "y_true": test_returns_np[mask].astype(np.float64),
-                "forecaster": np.full(mask.sum(), fname),
-            }
-        )
-    )
-stacked = pl.concat(stacked_frames)
-save_predictions(chapter=14, notebook_id="cae", spec=predictions_spec, frame=stacked)
-print(f"Cached {len(stacked):,} rows under key {predictions_cache_key(predictions_spec)}")
-
-# %% [markdown] tags=[]
-# **Reading the table**: The three forecasters do *not* land at the same place
-# on this panel. The Constant forecaster yields a small positive Mean IC
-# $\approx 0.019$ (IC IR $\approx 0.15$, $t \approx 1.7$, $p \approx 0.09$ —
-# not significant), while AR(1) and EWMA both produce significantly *negative*
-# contemporaneous IC ($\approx -0.042$ and $-0.049$, $t \approx -4.6$ and
-# $-5.4$) over 123 test periods. Two reading caveats: (1) this is the
-# contemporaneous protocol described in the preamble — $\hat\mu_{i,t}$ is scored
-# against $r_{i,t}$, so the IC measures Stage 1 reconstruction quality and
-# overstates what the framework can deliver one step ahead; characteristics
-# built from prices at $t$ share mechanical overlap with the same-day return.
-# (2) Stage 2 choice is *not* irrelevant here: the Constant forecaster holds
-# the training-factor mean, while the dynamic forecasters (AR(1), EWMA)
-# extrapolate the factor paths in a way that flips the sign of the test-window
-# reconstruction. The
-# pooled OOS $R^2$ is essentially zero ($\approx -10^{-5}$) because the
-# variance of one-day returns is dominated by an idiosyncratic component the
-# model does not try to predict. The
-# [`us_firm_characteristics`](../case_studies/us_firm_characteristics/08_latent_factors.ipynb)
-# case study with GKX 46 characteristics, walk-forward CV, lagged
-# characteristics, and forward returns is where the honest forecasting IC is
-# reported (≈ $-0.057$ on `fwd_ret_1m`); the contrast with the
-# contemporaneous IC here makes the protocol distinction concrete.
-
-# %% [markdown] tags=[]
-# ### Engel 2025 connection
-#
-# Engel (2025) runs exactly this pairing on monthly CAE
-# factors with Q-Boost (a quantile gradient-boosting learner built on
-# LightGBM) and ZS-Chronos (a zero-shot transformer forecaster) added on top
-# of IID-BS / AR(1). The key empirical claim of the paper: Tier-2/3
-# forecasters add measurable signal *only when the factors carry forecastable
-# structure*. On daily US-equity factor returns extracted from a small
-# 5-characteristic CAE, that structure is weak, so the Tier-1 spread is the
-# relevant comparison. Tier-2/3 forecasters are surveyed as natural drop-in
-# extensions and are not implemented in this edition's pipeline.
-
-# %% [markdown] tags=[]
-# ## 10. Stage 1 / Stage 3 Diagnostics
-
-# %% [markdown] tags=[]
-# ### 10a. Training curves and prediction distribution
-
-# %% tags=[]
-fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-
-ax1 = axes[0]
-ax1.plot(histories[0]["train_loss"], label="Train", color=COLORS["blue"], linewidth=1.5)
-ax1.plot(histories[0]["val_loss"], label="Valid", color=COLORS["amber"], linewidth=1.5)
-ax1.set_xlabel("Epoch")
-ax1.set_ylabel("MSE Loss")
-ax1.set_title("Stage 1 Training Loss (member 1)")
-ax1.legend()
-
-ax2 = axes[1]
-for i, hist in enumerate(histories):
-    ax2.plot(hist["val_ic"], alpha=0.5, label=f"Model {i + 1}")
-ax2.axhline(y=0, color="gray", linestyle="--")
-ax2.set_xlabel("Epoch")
-ax2.set_ylabel("Validation IC (in-sample)")
-ax2.set_title("Per-member Validation IC")
-ax2.legend(fontsize=8)
-
-ax3 = axes[2]
-# Overlay all three Stage 2 forecasters' μ̂ distributions so the panel shows the
-# spread each forecaster induces (Constant collapses to a near-zero spike;
-# AR(1) and EWMA inject time-varying scale).
-_forecaster_colors = {
-    "Constant": COLORS["blue"],
-    "AR(1)": COLORS["amber"],
-    "EWMA(h=60)": COLORS["positive"],
-}
-_all_mu = np.concatenate(list(mu_hat_by_forecaster.values()))
-# Predictions concentrate around 1e-4 with extremely narrow per-forecaster
-# spreads. Center the histogram on the joint mean and use std-based limits +
-# many bins so the per-forecaster mass differences are visible.
-_mu, _sigma = float(_all_mu.mean()), float(_all_mu.std()) or 1e-6
-_lo, _hi = _mu - 4 * _sigma, _mu + 4 * _sigma
-_edges = np.linspace(_lo, _hi, 81)
-for fname, mu_hat in mu_hat_by_forecaster.items():
-    ax3.hist(
-        mu_hat,
-        bins=_edges,
-        color=_forecaster_colors.get(fname, COLORS["blue"]),
-        alpha=0.45,
-        label=fname,
-        edgecolor="white",
-        density=True,
-    )
-ax3.axvline(x=0, color="gray", linestyle="--")
-ax3.set_xlabel("Stage 3 μ̂")
-ax3.set_ylabel("Density")
-ax3.set_title("Stage 3 prediction distributions (forecaster comparison)")
-ax3.legend(fontsize=8)
-
-fig.show()
-
-# %% [markdown] tags=[]
-# **Reading the curves**: training and validation MSE should descend together
-# until the validation curve flattens — that's the early-stopping point.
-# Diverging validation loss = overfitting; flat training = learning rate
-# too low. The per-member validation IC is in-sample to the CAE's joint
-# fit (predicting same-period returns from same-period managed portfolios).
-# The Stage 3 IC table in §9 evaluates the same contemporaneous protocol on
-# the held-out test window — out-of-sample relative to training, but still a
-# Stage 1 fit diagnostic rather than a forecasting result. The honest
-# forecasting evaluation requires lagged characteristics and forward returns
-# (the case-study protocol).
-
-# %% [markdown] tags=[]
-# ### 10b. Stage 3 IC distribution per forecaster
-
-# %% tags=[]
-fig, ax = plt.subplots(figsize=(9, 5))
-for name, ics in ic_series_by_forecaster.items():
-    ax.hist(ics, bins=24, alpha=0.45, label=f"{name}  (mean={ics.mean():.3f})", edgecolor="white")
-ax.axvline(0, color="gray", linestyle=":", linewidth=1)
-ax.set_xlabel("Per-period IC (Spearman)")
-ax.set_ylabel("Frequency")
-ax.set_title("Stage 3 IC Distribution per Stage 2 Forecaster")
-ax.legend()
-fig.show()
-
-# %% [markdown] tags=[]
-# **Reading the histograms**: width tells you how variable the signal is
-# day-to-day; centre tells you the mean IC; tail asymmetry flags whether
-# alpha concentrates in a few periods. A forecaster whose distribution is
-# centred at zero with high variance produces no rank signal on average; a
-# positive centre with comparable variance produces a positive mean IC at
-# the magnitude of the centre.
-
-# %% [markdown] tags=[]
-# ### 10c. Ensemble improvement (Stage 1 variance reduction)
-#
-# Each ensemble member has its own $\beta^{(m)}$ and $F^{(m)}$, so its Stage 3
-# prediction is noisy. Averaging across members reduces variance without
-# changing bias. We illustrate this for the Constant forecaster — same
-# pattern holds for AR(1) and EWMA.
-
-# %% tags=[]
-constant_per_member = mu_hat_per_member["Constant"]
-member_ics = []
-for mu_m in constant_per_member:
-    member_summary = compute_metrics(test_returns_np, mu_m, obs_period_idx, test_symbols_idx)
-    member_ics.append(member_summary["ic_mean"])
-ensemble_ic_constant = compute_metrics(
-    test_returns_np, mu_hat_by_forecaster["Constant"], obs_period_idx, test_symbols_idx
-)["ic_mean"]
-median_member_ic = float(np.median(member_ics))
-improvement_pct = (
-    (ensemble_ic_constant - median_member_ic) / abs(median_member_ic) * 100
-    if median_member_ic != 0
-    else np.nan
-)
-
-# %% tags=[]
-fig, ax = plt.subplots(figsize=(8, 5))
-x = np.arange(1, ENSEMBLE_SIZE + 1)
-ax.bar(x, member_ics, color=COLORS["silver_muted"], edgecolor="white", label="Individual models")
-ax.axhline(
-    y=ensemble_ic_constant, color=COLORS["amber"], linewidth=2.5, linestyle="--", label="Ensemble"
-)
-_improve_label = (
-    f"{improvement_pct:+.0f}% vs median" if np.isfinite(improvement_pct) else "vs median (n/a)"
-)
-ax.annotate(
-    _improve_label,
-    xy=(ENSEMBLE_SIZE, ensemble_ic_constant),
-    xytext=(ENSEMBLE_SIZE - 0.5, ensemble_ic_constant + 0.025),
-    fontsize=10,
-    fontweight="bold",
-    color=COLORS["amber"],
-    ha="right",
-)
-# Reserve headroom so the annotation sits clear of the dashed reference line.
-# Guard against non-finite ICs (e.g. degenerate folds) leaving autoscale in place.
-_finite = [v for v in [*member_ics, ensemble_ic_constant] if np.isfinite(v)]
-if _finite:
-    ax.set_ylim(min(_finite) - 0.02, max(_finite) + 0.06)
-ax.set_xlabel("Ensemble Member")
-ax.set_ylabel("Mean IC (Constant forecaster)")
-ax.set_title("Ensemble Improvement Over Individual Members")
-ax.set_xticks(x)
-ax.set_xticklabels([f"M{i}" for i in x])
-ax.legend()
-fig.show()
-
-# %% [markdown] tags=[]
-# **Reading the bars**: individual members fluctuate around a centre
-# determined by Stage 1 fit quality + Stage 2 forecaster choice. The
-# ensemble (gold) lies above the median by reducing variance in the
-# $\beta^{(m)}$ surface. GKX recommend 10+ members for production runs;
-# 5 is a budget-friendly demonstration.
-
-# %% [markdown] tags=[]
-# ### 10d. Factor–characteristic correlations
-#
-# What does the beta network learn? If a CAE factor's loadings $\beta_k$
-# correlate strongly with a single characteristic $z_\ell$, the model has
-# discovered that characteristic as a risk dimension. Diffuse correlations
-# imply the model captures interactions that single sorts miss.
-
-# %% tags=[]
-test_chars_np = test_chars.cpu().numpy()
-
-corr_data = []
-for k in range(min(N_FACTORS, 5)):
-    for c in range(n_characteristics):
-        corr, _ = spearmanr(ensemble_betas[:, k], test_chars_np[:, c])
-        corr_data.append(
-            {"Factor": f"F{k + 1}", "Characteristic": char_names[c], "Correlation": corr}
-        )
-
-corr_df = pd.DataFrame(corr_data).pivot(
-    index="Characteristic", columns="Factor", values="Correlation"
-)
-
-fig, ax = plt.subplots(figsize=(8, 5))
-sns.heatmap(
-    corr_df,
-    annot=True,
-    fmt=".2f",
-    cmap="RdYlBu_r",
-    center=0,
-    vmin=-1,
-    vmax=1,
-    ax=ax,
-)
-ax.set_title("Factor Loading — Characteristic Correlations (ensemble β)")
-fig.show()
-
-# %% [markdown] tags=[]
-# **Reading the heatmap**: a row dominated by one strong cell means that
-# characteristic *is* one of the factors. A row with several mid-magnitude
-# cells means the factor is a learned blend of characteristics — the
-# non-linear-CAE-versus-linear-IPCA distinction visible empirically. Low or
-# diffuse correlations may indicate the model captures interaction effects
-# beyond simple characteristic sorts.
-
-# %% [markdown] tags=[]
-# ### 10e. Beta-dispersion diagnostic (mode collapse check)
-#
-# If a factor's loadings $\beta_k$ have near-zero cross-sectional dispersion,
-# the model is no longer conditioning on characteristics for that factor —
-# it has collapsed to a constant. Flag any factor where $\sigma(\beta_k) <
-# 0.01$.
-
-# %% tags=[]
-beta_stds = ensemble_betas.std(axis=0)
-collapse_threshold = 0.01
-
-dispersion_df = pd.DataFrame(
-    {
-        "Factor": [f"F{k + 1}" for k in range(len(beta_stds))],
-        "Beta Std (cross-sectional)": beta_stds,
-        "Status": [
-            "WARNING: possible collapse" if s < collapse_threshold else "OK" for s in beta_stds
-        ],
+# %%
+def walk_forward_forecasts(
+    initial_history: np.ndarray,
+    current_factors: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Append each current factor before forecasting the following one."""
+    forecasters = {
+        "Expanding mean": expanding_mean_forecast,
+        "AR(1)": ar1_forecast,
+        "EWMA": ewma_forecast,
     }
-).set_index("Factor")
-dispersion_df
+    predictions = {name: np.empty_like(current_factors) for name in forecasters}
+    history = initial_history.copy()
+    for step, current_factor in enumerate(current_factors):
+        history = np.vstack([history, current_factor])
+        for name, forecaster in forecasters.items():
+            predictions[name][step] = forecaster(history)
+    return predictions
 
-# %% [markdown] tags=[]
-# **Interpretation**: All five factors have ensemble-averaged $\sigma(\beta_k)$
-# at the $10^{-5}$ scale — well below the $0.01$ collapse threshold. Two
-# things are going on. First, ensemble averaging compresses beta dispersion
-# by construction: independently-trained members partially cancel out
-# direction-sensitive loadings even though each member's individual betas
-# carry richer dispersion. Second, the threshold ($0.01$) was set assuming
-# loadings on the order of unity; the L1 penalty here pushes loadings to a
-# much smaller absolute scale, so a more honest collapse check would compare
-# $\sigma(\beta_k)$ to the cross-sectional *median* $|\beta_k|$ rather than
-# a fixed cut-off. The Stage 3 contemporaneous IC of the Constant forecaster
-# ($\approx 0.019$, not significant; AR(1) and EWMA both negative — Section 9)
-# is consistent with per-member betas carrying little net cross-sectional
-# variation that averages into a near-zero ensemble reconstruction — recall from §9 that this is rank fit of the
-# same-period factor reconstruction, not forecasting skill. The diagnostic
-# is best read as *flag for closer inspection* rather than confirmation of
-# pathology — see the case study notebook for the per-member-versus-ensemble
-# decomposition under the forecasting protocol.
 
-# %% [markdown] tags=[]
-# ### 10f. Factor correlation diagnostic
-#
-# Highly correlated CAE factors signal $K$ may be too large — the model is
-# using multiple factors to capture the same risk dimension. Pairs with
-# $|\rho| > 0.5$ are flagged.
+# %% [markdown]
+# Each member retains its own latent coordinate system. We therefore combine
+# asset predictions, not raw factors or betas, across the ensemble.
 
-# %% tags=[]
-factor_returns = []
+
+# %%
+def portfolio_tensor(frame: pl.DataFrame) -> torch.Tensor:
+    """Convert a unique managed-portfolio sequence to a device tensor."""
+    return torch.tensor(
+        frame.select(portfolio_names).to_numpy(), dtype=torch.float32, device=device
+    )
+
+
+# %%
+past_portfolios = pl.concat([portfolios["train"], portfolios["valid"]]).sort("timestamp")
+current_portfolios = portfolios["test"].filter(pl.col("timestamp").is_in(decision_dates))
+past_portfolio_tensor = portfolio_tensor(past_portfolios)
+current_portfolio_tensor = portfolio_tensor(current_portfolios)
+forecast_characteristics = torch.tensor(
+    forecast_frame.select(characteristic_names).to_numpy(), dtype=torch.float32, device=device
+)
+
+member_predictions = {name: [] for name in ("Expanding mean", "AR(1)", "EWMA")}
 for model in models:
     model.eval()
     with torch.no_grad():
-        factors = model.get_factors(test_portfolios).cpu().numpy()
-        factor_returns.append(factors)
-mean_factor_returns = np.mean(factor_returns, axis=0)
+        initial_factors = model.factor_net(past_portfolio_tensor).cpu().numpy()
+        current_factors = model.factor_net(current_portfolio_tensor).cpu().numpy()
+        current_betas = model.beta_net(forecast_characteristics).cpu().numpy()
+    factor_predictions = walk_forward_forecasts(initial_factors, current_factors)
+    for name, period_prediction in factor_predictions.items():
+        per_observation = period_prediction[observation_periods]
+        member_predictions[name].append((current_betas * per_observation).sum(axis=1))
 
-factor_corr = np.corrcoef(mean_factor_returns.T)
-factor_corr_df = pd.DataFrame(
-    factor_corr,
-    index=[f"F{k + 1}" for k in range(factor_corr.shape[0])],
-    columns=[f"F{k + 1}" for k in range(factor_corr.shape[1])],
-)
-factor_corr_df.style.format("{:.3f}").background_gradient(cmap="RdYlBu_r", vmin=-1, vmax=1)
+ensemble_predictions = {
+    name: np.mean(predictions, axis=0) for name, predictions in member_predictions.items()
+}
 
-# %% [markdown] tags=[]
-# **Interpretation**: Several pairs exceed the $|\rho| > 0.5$ flag — F1–F3
-# at $+0.89$, F1–F4 at $-0.70$, F2–F5 at $-0.87$. With
-# only five characteristics in this pedagogical panel, the model does not
-# have enough independent signal to populate $K=5$ orthogonal factors,
-# and the redundancy surfaces as high pairwise correlation. The remedy
-# is either fewer factors ($K=3$ would likely de-correlate cleanly) or a
-# richer characteristic set — both of which the case study explores with
-# 46 GKX characteristics and walk-forward $K$ tuning.
-
-# %% [markdown] tags=[]
-# ### 10g. SHAP attributions for the beta network
+# %% [markdown]
+# ## 8. Forward metrics with time-series uncertainty
 #
-# SHAP assigns each characteristic an attribution value for its contribution
-# to factor loadings. We use KernelExplainer on the last ensemble member's
-# beta network. Attributions describe *how the model uses features*, not
-# causal effects.
+# Rank IC is computed within each decision-date cross-section. MSE uses the
+# zero-return forecast as its benchmark. HAC intervals reflect serial
+# dependence in the daily IC sequence.
 
-# %% tags=[]
-shap_model = models[-1]
-shap_model.eval()
-
-
-def beta_predict(x):
-    """SHAP wrapper: characteristics → factor loadings."""
-    with torch.no_grad():
-        t = torch.tensor(x, dtype=torch.float32).to(device)
-        return shap_model.get_betas(t).cpu().numpy()
+# %%
+# %% [markdown]
+# The evaluator derives a daily cross-sectional IC series before computing HAC
+# uncertainty, rather than treating all stock-day rows as independent.
 
 
-# %% tags=[]
-n_background = min(100, len(test_chars))
-background = test_chars[:n_background].cpu().numpy()
-explainer = shap.KernelExplainer(beta_predict, background)
+# %%
+def evaluate_forward_prediction(
+    name: str,
+    prediction: np.ndarray,
+    seed: int,
+) -> dict[str, float | str]:
+    """Evaluate one ensemble forecast on the aligned next-day panel."""
+    metric_frame = pl.DataFrame(
+        {
+            "timestamp": forecast_frame["timestamp"],
+            "symbol": forecast_frame["symbol"],
+            "prediction": prediction,
+            "forward_return": forecast_frame["forward_return"],
+        }
+    )
+    ic_frame = cross_sectional_ic_series(
+        metric_frame,
+        metric_frame,
+        pred_col="prediction",
+        ret_col="forward_return",
+        date_col="timestamp",
+        entity_col="symbol",
+        min_obs=20,
+    )
+    uncertainty = compute_ic_uncertainty(ic_frame, horizon=1, n_boot=N_BOOTSTRAP, seed=seed)
+    realized = forecast_frame["forward_return"].to_numpy()
+    mse_ratio = float(np.mean((realized - prediction) ** 2) / np.mean(realized**2))
+    return {
+        "name": name,
+        "mse_ratio": mse_ratio,
+        "mean_ic": uncertainty["mean_ic"],
+        "ci_low": uncertainty["ci_hac_lower"],
+        "ci_high": uncertainty["ci_hac_upper"],
+        "p_hac": uncertainty["p_hac"],
+    }
 
-n_explain = min(200, len(test_chars))
-shap_values = explainer.shap_values(test_chars[:n_explain].cpu().numpy())
 
-# %% tags=[]
-n_factors_to_show = min(N_FACTORS, 5)
-# shap >= 0.48 returns a single ndarray of shape (n_samples, n_features, n_outputs)
-# for multi-output KernelExplainer; index the output axis last.
-importance_matrix = np.column_stack(
-    [np.abs(shap_values[..., k]).mean(axis=0) for k in range(n_factors_to_show)]
+# %%
+forecast_results = []
+for index, (name, prediction) in enumerate(ensemble_predictions.items()):
+    result = evaluate_forward_prediction(name, prediction, SEED + index)
+    forecast_results.append(result)
+    print(
+        f"{name}: MSE ratio={result['mse_ratio']:.5f}, "
+        f"IC={result['mean_ic']:.4f} "
+        f"[{result['ci_low']:.4f}, {result['ci_high']:.4f}], "
+        f"HAC p={result['p_hac']:.3f}"
+    )
+
+# %%
+names = [result["name"] for result in forecast_results]
+mse_ratios = np.array([result["mse_ratio"] for result in forecast_results])
+mean_ics = np.array([result["mean_ic"] for result in forecast_results])
+ci_low = np.array([result["ci_low"] for result in forecast_results])
+ci_high = np.array([result["ci_high"] for result in forecast_results])
+colors = ml4t_palette(len(names), categorical=True)
+
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+axes[0].scatter(names, mse_ratios, color=colors, s=55)
+zero_line(axes[0], at=1.0)
+axes[0].set_ylabel("MSE ratio vs zero")
+maximum_mse_deviation = 100 * np.max(np.abs(mse_ratios - 1))
+add_message_title(
+    axes[0],
+    f"All MSE ratios remain within {maximum_mse_deviation:.1f}% of zero",
 )
-total_importance = importance_matrix.sum(axis=1)
-top_idx = np.argsort(total_importance)[-15:]
-importance_top = importance_matrix[top_idx]
-feature_labels = [char_names[i] for i in top_idx]
-factor_labels = [f"Factor {k + 1}" for k in range(n_factors_to_show)]
-
-col_max = importance_top.max(axis=0, keepdims=True)
-col_max[col_max == 0] = 1
-importance_norm = importance_top / col_max
-
-fig, ax = plt.subplots(figsize=(14, 6))
-# Absolute SHAP magnitudes on this test slice round to zero in any reasonable
-# display precision (below ~5e-5; `.2e` formats them as "0.00e+00"). The
-# narrative cell beneath reads this as a real low-signal finding — the trained
-# beta network has effectively collapsed to a bias-driven mapping under the
-# contemporaneous protocol with only five characteristics.
-sns.heatmap(
-    importance_norm,
-    annot=importance_top,
-    fmt=".2e",
-    cmap="YlOrRd",
-    xticklabels=factor_labels,
-    yticklabels=feature_labels,
-    linewidths=0.5,
-    ax=ax,
+axes[1].errorbar(
+    names,
+    mean_ics,
+    yerr=np.vstack([mean_ics - ci_low, ci_high - mean_ics]),
+    fmt="o",
+    color=COLORS["blue"],
+    capsize=4,
 )
-ax.set_title(
-    "SHAP feature importance per latent factor (column-normalized; annotations are raw |SHAP| magnitudes)"
-)
-ax.set_xlabel("")
-ax.set_ylabel("")
+zero_line(axes[1])
+axes[1].set_ylabel("Mean next-day rank IC")
+axes[1].set_xlabel("Walk-forward Stage 2 forecaster")
+add_message_title(axes[1], "Every next-day rank-IC interval includes zero")
 fig.show()
 
-# %% [markdown] tags=[]
-# **Reading the SHAP heatmap**: on this 5-characteristic / 5-factor slice the
-# raw |SHAP| magnitudes round to zero at any reasonable display precision —
-# the beta network has effectively collapsed to a bias-driven mapping, so the
-# characteristic→factor attributions carry no signal beyond noise. The
-# pattern is consistent with the broader §10d diagnostic: when validation IC
-# spreads across members are this wide and ensemble lift is modest, SHAP
-# attributions should not be over-interpreted. Together with §10d, the
-# diagnostic answers a sharper question — whether the trained network
-# actually uses its characteristic inputs — and the honest answer here is
-# "barely."
+# %% [markdown]
+# The forward test does not support a predictive claim. The expanding mean's
+# 0.99968 error ratio is effectively tied with predicting zero. EWMA has the
+# largest mean rank IC at 0.0116, but its 95% HAC interval of
+# $[-0.0130, 0.0362]$ includes zero. The CAE can reconstruct the panel while
+# its simple factor-premium adapters do not deliver statistically resolved
+# next-day cross-sectional forecasts.
 
-# %% [markdown] tags=[]
-# ## 11. Robustness Checklist
+# %% [markdown]
+# ## 9. Ensemble and loading diagnostics
 #
-# Before trusting CAE results, verify along six dimensions (see §14.7):
-#
-# | Check | Demonstrated Here | Full Implementation |
-# |-------|-------------------|---------------------|
-# | Universe dependence | Top 500 by liquidity | Case study (with/without microcaps) |
-# | Feature leakage | Point-in-time prices only | Case study (94 lagged characteristics) |
-# | Regime dependence | Single test period | Case study (walk-forward across regimes) |
-# | HP sensitivity | Fixed K=5, lr=0.001 | Case study (Optuna 50+ trials) |
-# | Test-asset span | US Equities | Case study (us_firm_characteristics) |
-# | Metric consistency | IC + R² | Case study (IC, quintiles, pricing errors) |
+# Ensemble averaging is valid at the asset-prediction surface. Averaging raw
+# beta columns across members is not: each latent model has its own rotation
+# and scale. We therefore compare member prediction ICs and inspect the first
+# member's loading map as a representative coordinate system.
 
-# %% [markdown] tags=[]
-# ## 12. Key Takeaways
+
+# %%
+def mean_rank_ic(prediction: np.ndarray) -> float:
+    """Return the mean decision-date Spearman IC for one prediction surface."""
+    values = []
+    realized = forecast_frame["forward_return"].to_numpy()
+    for period in range(len(decision_dates)):
+        mask = observation_periods == period
+        correlation = spearmanr(prediction[mask], realized[mask]).statistic
+        if np.isfinite(correlation):
+            values.append(correlation)
+    return float(np.mean(values))
+
+
+# %%
+member_ics = [mean_rank_ic(prediction) for prediction in member_predictions["Expanding mean"]]
+ensemble_ic = mean_rank_ic(ensemble_predictions["Expanding mean"])
+print(
+    f"Expanding-mean member IC range=[{min(member_ics):.4f}, {max(member_ics):.4f}], "
+    f"ensemble IC={ensemble_ic:.4f}"
+)
+
+# %%
+representative = models[0]
+representative.eval()
+with torch.no_grad():
+    representative_betas = representative.beta_net(forecast_characteristics).cpu().numpy()
+
+characteristic_values = forecast_frame.select(characteristic_names).to_numpy()
+loading_correlations = np.empty((len(characteristic_names), N_FACTORS))
+for characteristic in range(len(characteristic_names)):
+    for factor in range(N_FACTORS):
+        loading_correlations[characteristic, factor] = spearmanr(
+            characteristic_values[:, characteristic], representative_betas[:, factor]
+        ).statistic
+
+loading_min = loading_correlations.min()
+loading_max = loading_correlations.max()
+
+# %%
+correlation_cmap = LinearSegmentedColormap.from_list("ml4t_diverging", ml4t_diverging())
+fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
+image = ax.imshow(loading_correlations, cmap=correlation_cmap, vmin=-1, vmax=1, aspect="auto")
+ax.set_xticks(range(N_FACTORS), [f"F{factor + 1}" for factor in range(N_FACTORS)])
+ax.set_yticks(range(len(characteristic_names)), characteristic_names)
+ax.set_xlabel("Representative latent factor")
+ax.set_ylabel("Current characteristic rank")
+for row in range(loading_correlations.shape[0]):
+    for column in range(loading_correlations.shape[1]):
+        ax.text(column, row, f"{loading_correlations[row, column]:.2f}", ha="center", va="center")
+fig.colorbar(image, ax=ax, label="Spearman correlation")
+add_message_title(
+    ax,
+    f"Within-member loading correlations span {loading_min:.2f} to {loading_max:.2f}",
+)
+fig.show()
+
+# %% [markdown]
+# ## 10. Takeaways
 #
-# 1. **CAE is Stage 1 of the same framework**: $\beta_{i,t} = g_\theta(z_{i,t})$
-#    is a non-linear analogue of IPCA's $\beta_{i,t} = z_{i,t}\,\Gamma$.
-#    Everything downstream — Stage 2 forecasters, Stage 3 mapper — is
-#    estimator-agnostic.
-# 2. **Stage 2 is swappable**: Constant (= GKX 2021's implicit choice =
-#    Engel 2025's IID-BS), AR(1), and EWMA all consume the same
-#    $F_{\text{train}}$ and emit a $\hat\lambda$. Engel 2025
-#    extends this to Q-Boost and ZS-Chronos; Tier-2/3 forecasters live in
-#    the case study.
-# 3. **Managed portfolios solve dimensionality, not prediction**: Equation 16
-#    is a Stage 1 implementation detail — it makes the factor network
-#    feasible by collapsing $N$ stocks into $K_{\text{managed}}$
-#    characteristic-projected portfolios.
-# 4. **Ensemble averaging is a Stage 1 variance reducer**: different seeds
-#    yield different $\beta^{(m)}$ and $F^{(m)}$; per-member Stage 2/3
-#    predictions averaged across members is the noise-floor recipe.
-# 5. **Diagnostics are Stage 1 checks**: factor-characteristic correlations,
-#    beta dispersion, factor correlation, SHAP — all probe whether the CAE
-#    learned a sensible loading function. None of them tells you whether
-#    Stage 2/3 produced a tradable signal; for that, see §9 and the case
-#    study.
+# 1. **Managed portfolios require a joint solve.** The factor network receives
+#    the full cross-sectional least-squares coefficients, not marginal ratios.
+# 2. **Structural learned state is pre-test.** Liquidity selection and clipping
+#    are training-only; network checkpoints use validation reconstruction only.
+# 3. **Reconstruction and forecasting are different tasks.** The CAE learns
+#    contemporaneous conditional factors, then a separate adapter forecasts
+#    their next realization.
+# 4. **Walk-forward timing is explicit.** Current managed returns update the
+#    factor history before the next trading day's return is predicted.
+# 5. **Ensemble predictions are identified.** Raw latent columns may rotate and
+#    rescale across members, so the notebook averages asset predictions and
+#    keeps loading diagnostics inside one representative coordinate system.
 #
-# **Next**: [`07_stochastic_discount_factor`](07_stochastic_discount_factor.ipynb)
-# — paper-faithful CPZ 2024 SDF with end-to-end beta network (an exception
-# to the framework's Stage 2 / Stage 3 split), and
-# [`08_latent_factors`](../case_studies/us_firm_characteristics/08_latent_factors.ipynb)
-# for full-scale walk-forward application across all five LF estimators
-# with the complete forecaster catalog.
+# See Sections 14.6-14.7 for the model derivation. The next notebook,
+# [`07_stochastic_discount_factor`](07_stochastic_discount_factor.ipynb),
+# learns a pricing kernel instead of forecasting latent factor premia.
