@@ -35,7 +35,9 @@
 # ## Prerequisites
 #
 # - [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) (produces `eligibility.csv`)
-# - [`02_labels`](02_labels.ipynb) (produces label parquet files and `config/cv_config.json`)
+# - [`02_labels`](02_labels.ipynb) (produces the label parquet files, each with a
+#   `.digest.json` sidecar; CV folds are derived from `setup.yaml` and the label timeline by
+#   `case_studies/utils/cv_window.py`, not from a persisted config)
 
 # %%
 """ETFs: Feature Engineering."""

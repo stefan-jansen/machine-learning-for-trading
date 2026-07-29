@@ -1581,7 +1581,9 @@ case_studies/etfs/01_feasibility_analysis:
   timeout: 120
 case_studies/etfs/02_labels:
   parameters:
-    MAX_SYMBOLS: 5
+    # No MAX_SYMBOLS: the CI fixture is already only 24 ETFs, and stage 03 needs at least
+    # 10 non-null labels per date to accumulate an IC series at all. Reducing here starves
+    # it. The fixture is the reduction; MIN_SYMBOLS_FOR_DISPERSION keeps its production 10.
     START_DATE: '2000-01-01'
   timeout: 120
 case_studies/etfs/03_financial_features:

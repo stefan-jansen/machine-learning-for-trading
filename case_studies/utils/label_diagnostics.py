@@ -1,0 +1,88 @@
+"""Panel diagnostics for overlapping labels, shared across the case studies.
+
+Both statistics here answer the same question - how much independent information a
+per-bar label with a multi-bar horizon actually carries - and both are wrong in the
+same way when computed carelessly: on one entity rather than the panel, or with the
+concurrency of overlapping windows ignored.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import polars as pl
+from ml4t.engineer.labeling import calculate_label_uniqueness
+
+
+def panel_autocorrelation(
+    frame: pl.DataFrame,
+    column: str,
+    *,
+    max_lag: int,
+    entity_col: str = "symbol",
+) -> np.ndarray:
+    """Autocorrelation of *column* at lags 1..max_lag, pooled across entities.
+
+    The lag is taken within an entity, so no pair spans two entities, and the
+    column is demeaned within its entity before pooling. Without the demeaning a
+    panel whose entities sit at different levels reports that level dispersion as
+    persistence: a series that is constant inside every entity, and so has no
+    autocorrelation to speak of, would come back at 1.0.
+
+    A single-entity estimate is a claim about that entity, and the two disagree
+    most at the lag that matters - the label horizon.
+    """
+    centred = frame.with_columns(
+        (pl.col(column) - pl.col(column).mean().over(entity_col)).alias("_centred")
+    )
+    return np.array(
+        [
+            centred.with_columns(pl.col("_centred").shift(-lag).over(entity_col).alias("_lagged"))
+            .select(pl.corr("_centred", "_lagged"))
+            .item()
+            for lag in range(1, max_lag + 1)
+        ]
+    )
+
+
+def effective_sample_size(
+    frame: pl.DataFrame,
+    *,
+    horizon: int,
+    entity_col: str = "symbol",
+    timestamp_col: str = "timestamp",
+) -> tuple[int, float]:
+    """Return (rows, N_eff) for a label sampled every bar over *horizon* bars.
+
+    ``N_eff`` is Chapter 7.2's average-uniqueness sum: each row is weighted by the
+    share of its forward window no concurrent label also spans. Concurrency is a
+    property of one entity's overlapping windows, so the weights are computed per
+    entity and summed.
+
+    **What a label occupies is ``horizon`` return intervals, not ``horizon + 1``
+    bars.** The label at bar *i* is $P_{i+h}/P_i - 1$, so it consumes the returns
+    realised over bars $i{+}1 \\ldots i{+}h$ - *h* of them - and the label at *i+1*
+    shares $h-1$ of those, which is the overlap the audit record prints. Passing a
+    closed bar interval ``[i, i+h]`` instead counts the anchor bar as consumed and
+    makes every label span ``h+1`` units, so consecutive labels appear to share one
+    interval even when they share none.
+
+    The one-session horizon is the case that settles it: consecutive one-day
+    forward returns are built from disjoint returns and are fully independent, so
+    every weight must be 1 and ``N_eff`` must equal ``N``. The closed-bar form
+    returns ``N/2`` there. Average uniqueness converges to ``1/h``, so ``N_eff``
+    tends to ``N/h`` - which is the reference value the stage standard cites.
+
+    *frame* is expected to hold only rows with a non-null label, so every row has a
+    complete forward window even though the bars closing the last few are not
+    themselves rows of *frame*; the endpoints are left uncapped and the concurrency
+    array extended to ``n + horizon - 1`` rather than truncated, which would shorten
+    exactly those windows.
+    """
+    rows, weight = 0, 0.0
+    for _, group in frame.sort(timestamp_col).group_by([entity_col], maintain_order=True):
+        n = group.height
+        events = np.arange(n)
+        weights = calculate_label_uniqueness(events, events + horizon - 1, n_bars=n + horizon - 1)
+        rows += n
+        weight += float(weights.sum())
+    return rows, weight
