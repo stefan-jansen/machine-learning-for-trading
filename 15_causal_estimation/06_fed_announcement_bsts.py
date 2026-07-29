@@ -131,6 +131,11 @@ tf.get_logger().setLevel("ERROR")
 # | Main failure modes        | Control spillover (Fed shocks the dollar and global risk; international ETFs are not unaffected); placebo-date contamination by other macro releases; daily bars mix pre- and post-announcement trading |
 # | Estimand                  | Cumulative abnormal log return attributable to the FOMC event; reported with the BSTS posterior credible interval |
 #
+# The panel is whatever `TARGET_ETF` and `CONTROL_ETFS` name in the parameters
+# cell. This table describes the production defaults - IEF against VEA, EFA and
+# DBC - which is what the committed run studies; change those parameters and the
+# unit, outcome and controls change with them.
+#
 # FOMC decisions are announced before the market close. The event-day close-to-close
 # return therefore contains both the pre-announcement portion of that trading day and
 # the post-announcement response. This timing is part of the estimand, not a claim that
@@ -140,7 +145,10 @@ tf.get_logger().setLevel("ERROR")
 #
 # Fed decisions can affect broad US financial markets. Using SPY or VNQ as
 # controls is problematic because they may react to the same announcement.
-# This example instead uses:
+# The argument rests on two categories, international and commodity, rather than
+# on the particular tickers, so `CONTROL_ETFS` should cover both. The default set
+# and the panel the CI run substitutes are both two international controls and one
+# commodity control. The defaults are:
 # - **International ETFs** (VEA, EFA): Correlated through global risk factors
 #   but less directly affected by FOMC (which targets US policy rates)
 # - **Commodities** (DBC): Affected by USD but different transmission mechanism
@@ -161,6 +169,8 @@ POST_PERIOD_DAYS = 20
 START_DATE = "2020-01-01"
 END_DATE = "2024-06-01"
 TARGET_ETF = "IEF"
+# Control ETFs: international + commodity (see rationale in markdown above)
+CONTROL_ETFS = ["VEA", "EFA", "DBC"]
 # Zero means all configured dates; CI injects smaller positive limits.
 MAX_FOMC_EVENTS = 0
 MAX_PLACEBO_DATES = 0
@@ -168,9 +178,6 @@ MAX_PLACEBO_DATES = 0
 # %%
 set_global_seeds(SEED)
 tf.random.set_seed(SEED)
-
-# Control ETFs: international + commodity (see rationale in markdown above)
-CONTROL_ETFS = ["VEA", "EFA", "DBC"]
 
 # Selected FOMC announcement dates
 FOMC_EVENTS = [
@@ -204,8 +211,9 @@ if MAX_PLACEBO_DATES > 0:
 # %% [markdown]
 # ## 1. Load ETF Price Data
 #
-# We need daily prices for IEF (target) and control ETFs.
-# Data loaded from curated ETF universe (book data pipeline).
+# We need daily prices for the target ETF and its controls - IEF against VEA,
+# EFA and DBC by default. Data loaded from curated ETF universe (book data
+# pipeline).
 
 # %%
 
@@ -652,9 +660,9 @@ if not event_df.empty:
     fig.show()
 
 # %% [markdown]
-# **Interpretation**: The FOMC event results above show whether bond ETFs (IEF)
-# moved significantly after rate decisions, after constructing a counterfactual
-# from international controls. The causal impact estimates capture the *additional*
+# **Interpretation**: The FOMC event results above show whether the target ETF
+# (IEF by default) moved significantly after rate decisions, after constructing a
+# counterfactual from its controls. The causal impact estimates capture the *additional*
 # movement attributable to the announcement beyond what correlated assets predicted.
 # The uncertainty intervals, rather than a macro narrative about each date, determine
 # whether the model distinguishes an event response from market-wide risk.
