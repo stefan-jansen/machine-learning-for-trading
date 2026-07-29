@@ -68,10 +68,15 @@ def effective_sample_size(
     changes only the boundary windows, by discarding their closing bars. Those bars
     are the tail, where the fewest windows are still open, so they carry the largest
     ``1/c_t`` terms in the average; dropping them removes a window's most unique
-    part and lowers its weight. Capping therefore *understates* ``N_eff`` here,
-    checked at 19 combinations of ``n`` and ``horizon`` and strictly lower in every
-    one. On the etfs monthly label it is 19,064 against 19,112, a quarter of a
-    percent.
+    part and lowers its weight. Capping therefore *understates* ``N_eff`` whenever
+    ``horizon <= n`` - checked exhaustively for every such pair up to ``n = 59``,
+    and 19,064 against 19,112 on the etfs monthly label.
+
+    It reverses once the horizon is long relative to the group, where capping
+    removes most of every window rather than a tail: at ``n = 2, horizon = 4`` the
+    capped sum is 1.25 against 1.20. A group here is one entity's *labelled* rows,
+    so a symbol with barely more bars than the horizon reaches that regime, and no
+    directional claim should be made about it.
     """
     rows, weight = 0, 0.0
     for _, group in frame.sort(timestamp_col).group_by([entity_col], maintain_order=True):

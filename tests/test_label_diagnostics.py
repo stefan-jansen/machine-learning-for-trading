@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 import pytest
+from ml4t.engineer.labeling import calculate_label_uniqueness
 
 from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
 
@@ -95,12 +96,33 @@ def test_effective_sample_size_matches_uniqueness_computed_by_hand(
     close the last `horizon` windows are not rows of the frame. Capping the
     endpoints at `n` leaves concurrency on the retained bars untouched and discards
     those closing bars, which are the least concurrent and so the most unique part
-    of each boundary window - it can only come out below these values.
+    of each boundary window - so for these cases, where the horizon is well under
+    the group size, it comes out below these values.
     """
     frame = _panel(n_per_symbol=n, symbols=("A",))
     rows, n_eff = effective_sample_size(frame, horizon=horizon)
     assert rows == n
     assert n_eff == pytest.approx(expected)
+
+
+def test_a_horizon_longer_than_the_group_is_not_the_ordinary_regime() -> None:
+    """Guards the bound on the docstring's directional claim.
+
+    Capping the endpoints understates N_eff while the horizon fits inside the
+    group, because it discards the low-concurrency tail of each window. Once the
+    horizon is long relative to the group it removes most of every window instead
+    and the comparison reverses. A group is one entity's *labelled* rows, so a
+    symbol with barely more bars than the horizon lands here.
+    """
+    ev = np.arange(2)
+    uncapped = calculate_label_uniqueness(ev, ev + 4, n_bars=2 + 4).sum()
+    capped = calculate_label_uniqueness(ev, np.minimum(ev + 4, 2), n_bars=2).sum()
+    assert capped > uncapped
+
+    ev = np.arange(50)
+    uncapped = calculate_label_uniqueness(ev, ev + 10, n_bars=60).sum()
+    capped = calculate_label_uniqueness(ev, np.minimum(ev + 10, 50), n_bars=50).sum()
+    assert capped < uncapped
 
 
 def test_effective_sample_size_is_computed_per_entity() -> None:
