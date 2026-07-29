@@ -63,16 +63,15 @@ def effective_sample_size(
     ``horizon`` windows are not themselves rows of *frame*. The endpoints are
     therefore left uncapped and the concurrency array is extended to ``n + horizon``.
 
-    Capping the endpoints at ``n`` instead changes two things at once, and they pull
-    against each other: the boundary windows get shorter, which raises their
-    uniqueness, while the concurrency array loses the closing bars, which piles
-    those same labels onto fewer bars and lowers it. Which one wins depends on the
-    panel, so the reason to leave the endpoints uncapped is not a bias to correct
-    but the construction itself - the windows are complete and the bars that close
-    them exist. On the etfs monthly label the two nearly cancel: capped gives an
-    ``N_eff`` of 19,064 against 19,112 uncapped, a difference of a quarter of a
-    percent, in the opposite direction from what shortening the windows alone
-    suggests.
+    Capping the endpoints at ``n`` instead leaves concurrency on the retained bars
+    exactly as it was - a label covers bar ``t < n`` under both conventions - and
+    changes only the boundary windows, by discarding their closing bars. Those bars
+    are the tail, where the fewest windows are still open, so they carry the largest
+    ``1/c_t`` terms in the average; dropping them removes a window's most unique
+    part and lowers its weight. Capping therefore *understates* ``N_eff`` here,
+    checked at 19 combinations of ``n`` and ``horizon`` and strictly lower in every
+    one. On the etfs monthly label it is 19,064 against 19,112, a quarter of a
+    percent.
     """
     rows, weight = 0, 0.0
     for _, group in frame.sort(timestamp_col).group_by([entity_col], maintain_order=True):
