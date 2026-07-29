@@ -58,33 +58,31 @@ def effective_sample_size(
     property of one entity's overlapping windows, so the weights are computed per
     entity and summed.
 
+    **What a label occupies is ``horizon`` return intervals, not ``horizon + 1``
+    bars.** The label at bar *i* is $P_{i+h}/P_i - 1$, so it consumes the returns
+    realised over bars $i{+}1 \\ldots i{+}h$ - *h* of them - and the label at *i+1*
+    shares $h-1$ of those, which is the overlap the audit record prints. Passing a
+    closed bar interval ``[i, i+h]`` instead counts the anchor bar as consumed and
+    makes every label span ``h+1`` units, so consecutive labels appear to share one
+    interval even when they share none.
+
+    The one-session horizon is the case that settles it: consecutive one-day
+    forward returns are built from disjoint returns and are fully independent, so
+    every weight must be 1 and ``N_eff`` must equal ``N``. The closed-bar form
+    returns ``N/2`` there. Average uniqueness converges to ``1/h``, so ``N_eff``
+    tends to ``N/h`` - which is the reference value the stage standard cites.
+
     *frame* is expected to hold only rows with a non-null label, so every row has a
-    complete ``horizon``-bar forward window even though the bars closing the last
-    ``horizon`` windows are not themselves rows of *frame*. The endpoints are
-    therefore left uncapped and the concurrency array is extended to ``n + horizon``.
-
-    Capping the endpoints at ``n`` instead leaves concurrency on the retained bars
-    exactly as it was - a label covers bar ``t < n`` under both conventions - and
-    changes only the boundary windows, by discarding their closing bars. Those bars
-    are the tail, where the fewest windows are still open, so they carry the largest
-    ``1/c_t`` terms in the average; dropping them removes a window's most unique
-    part and lowers its weight. Capping therefore *understates* ``N_eff`` whenever
-    ``horizon <= n`` and ``n >= 2`` - checked exhaustively for every such pair from
-    ``n = 2`` to ``n = 59``, and 19,064 against 19,112 on the etfs monthly label. At
-    ``n = 1`` the two agree for any horizon: a lone label overlaps nothing and is
-    fully unique either way.
-
-    It reverses once the horizon is long relative to the group, where capping
-    removes most of every window rather than a tail: at ``n = 2, horizon = 4`` the
-    capped sum is 1.25 against 1.20. A group here is one entity's *labelled* rows,
-    so a symbol with barely more bars than the horizon reaches that regime, and no
-    directional claim should be made about it.
+    complete forward window even though the bars closing the last few are not
+    themselves rows of *frame*; the endpoints are left uncapped and the concurrency
+    array extended to ``n + horizon - 1`` rather than truncated, which would shorten
+    exactly those windows.
     """
     rows, weight = 0, 0.0
     for _, group in frame.sort(timestamp_col).group_by([entity_col], maintain_order=True):
         n = group.height
         events = np.arange(n)
-        weights = calculate_label_uniqueness(events, events + horizon, n_bars=n + horizon)
+        weights = calculate_label_uniqueness(events, events + horizon - 1, n_bars=n + horizon - 1)
         rows += n
         weight += float(weights.sum())
     return rows, weight

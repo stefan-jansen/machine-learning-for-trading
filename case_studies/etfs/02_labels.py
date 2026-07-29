@@ -407,17 +407,17 @@ add_message_title(
 ax.legend(loc="upper right", frameon=False)
 plt.show()
 
-# A horizon-h window is closed at both ends, so it spans h+1 bars and the average
-# uniqueness of a per-bar label converges to 1/(h+1), not to 1/h.
+# A horizon-h label consumes the h returns realised over its window, and its neighbour
+# one bar later shares h-1 of them, so average uniqueness converges to 1/h.
 print(
     f"{PRIMARY_LABEL}: N={n_rows:,} N_eff={n_eff:,.0f} ({n_eff / n_rows:.2%} of N, against "
-    f"{1 / (PRIMARY_HORIZON + 1):.2%} for windows that overlap as fully as this one)"
+    f"{1 / PRIMARY_HORIZON:.2%} for windows that overlap as fully as this one)"
 )
 print(f"  autocorrelation at lag one {acf[0]:.3f}, at the horizon {acf[PRIMARY_HORIZON - 1]:.3f}")
 
 # %% [markdown] tags=["results"]
-# The monthly label's 418,362 development rows carry 19,112 effective observations - 4.57%
-# of the row count, against the 4.55% that a window this fully overlapped implies. The
+# The monthly label's 418,362 development rows carry 20,017 effective observations - 4.78%
+# of the row count, against the 4.76% that a window this fully overlapped implies. The
 # autocorrelation runs from 0.942 at lag one to -0.019 at the horizon. Both say the same
 # thing in different units: the sample is worth about a twentieth of what its height
 # suggests, and the purge gap between folds must be at least the horizon.

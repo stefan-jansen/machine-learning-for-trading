@@ -56,14 +56,19 @@ def test_level_differences_between_entities_are_not_persistence() -> None:
     assert np.all(np.isnan(acf)), acf
 
 
-def test_a_one_bar_horizon_halves_the_effective_count() -> None:
-    """The library's window is closed at both ends, so a horizon-h label spans h+1
-    bars and consecutive labels always share one. At h=1 that is half the window,
-    which is why average uniqueness converges to 1/(h+1) rather than to 1/h."""
+def test_a_one_session_horizon_loses_no_information() -> None:
+    """The case that fixes the convention.
+
+    A one-session forward return at t is built from the single return realised
+    between t and t+1, and the one at t+1 from the next. They share nothing, so
+    every label is fully unique and N_eff equals N. Treating a horizon-h label as
+    a closed bar interval [i, i+h] instead makes it span h+1 units, so consecutive
+    labels appear to share one even here, and this returns N/2.
+    """
     frame = _panel(n_per_symbol=50)
     rows, n_eff = effective_sample_size(frame, horizon=1)
     assert rows == 100
-    assert n_eff == pytest.approx(rows / 2, rel=0.02)
+    assert n_eff == pytest.approx(rows)
 
 
 def test_overlapping_windows_shrink_the_effective_count_toward_n_over_h() -> None:
@@ -72,64 +77,48 @@ def test_overlapping_windows_shrink_the_effective_count_toward_n_over_h() -> Non
     rows, n_eff = effective_sample_size(frame, horizon=horizon)
     assert rows == 2000
     assert n_eff < rows
-    # Each row lends most of its window to its neighbours; the limit is N/(h+1).
-    assert n_eff / rows == pytest.approx(1 / (horizon + 1), abs=0.005)
+    # A label spans h return intervals and its neighbour shares h-1 of them, so
+    # average uniqueness tends to 1/h - the reference the stage standard cites.
+    assert n_eff / rows == pytest.approx(1 / horizon, abs=0.005)
 
 
 @pytest.mark.parametrize(
     ("n", "horizon", "expected"),
     [
-        # n=3, h=1. Windows are closed at both ends over bars 0..3, so concurrency is
-        # (1, 2, 2, 1) and the uniqueness weights are (0.75, 0.5, 0.75).
-        (3, 1, 2.0),
-        # n=4, h=2. Concurrency over bars 0..5 is (1, 2, 3, 3, 2, 1); the weights are
-        # (11/18, 7/18, 7/18, 11/18).
-        (4, 2, 2.0),
+        # h=1: each label occupies one return interval and no two coincide, so every
+        # weight is 1.
+        (3, 1, 3.0),
+        # n=4, h=2: intervals [0,1], [1,2], [2,3], [3,4] over bars 0..4, so
+        # concurrency is (1, 2, 2, 2, 1) and the weights are (3/4, 1/2, 1/2, 3/4).
+        (4, 2, 2.5),
+        # n=5, h=3: weights (11/18, 7/18, 1/3, 7/18, 11/18).
+        (5, 3, 7 / 3),
     ],
 )
 def test_effective_sample_size_matches_uniqueness_computed_by_hand(
     n: int, horizon: int, expected: float
 ) -> None:
-    """Pins the boundary convention, which is the whole difficulty here.
-
-    Every row of the frame carries a complete forward window, but the bars that
-    close the last `horizon` windows are not rows of the frame. Capping the
-    endpoints at `n` leaves concurrency on the retained bars untouched and discards
-    those closing bars, which are the least concurrent and so the most unique part
-    of each boundary window - so for these cases, where the horizon is well under
-    the group size, it comes out below these values.
-    """
+    """Pins both conventions at once: h intervals per label, and complete windows
+    at the boundary rather than endpoints truncated at the row count."""
     frame = _panel(n_per_symbol=n, symbols=("A",))
     rows, n_eff = effective_sample_size(frame, horizon=horizon)
     assert rows == n
     assert n_eff == pytest.approx(expected)
 
 
-def test_a_horizon_longer_than_the_group_is_not_the_ordinary_regime() -> None:
-    """Guards the bound on the docstring's directional claim.
+def test_the_anchor_bar_is_not_counted_as_consumed() -> None:
+    """Regression guard for the off-by-one this helper was built with.
 
-    Capping the endpoints understates N_eff while the horizon fits inside the
-    group, because it discards the low-concurrency tail of each window. Once the
-    horizon is long relative to the group it removes most of every window instead
-    and the comparison reverses. A group is one entity's *labelled* rows, so a
-    symbol with barely more bars than the horizon lands here.
+    Counting the anchor makes a label span horizon + 1 units, which inflates the
+    apparent overlap by exactly one interval at every horizon and drives N_eff to
+    N/(h+1) instead of N/h.
     """
-    ev = np.arange(2)
-    uncapped = calculate_label_uniqueness(ev, ev + 4, n_bars=2 + 4).sum()
-    capped = calculate_label_uniqueness(ev, np.minimum(ev + 4, 2), n_bars=2).sum()
-    assert capped > uncapped
-
-    ev = np.arange(50)
-    uncapped = calculate_label_uniqueness(ev, ev + 10, n_bars=60).sum()
-    capped = calculate_label_uniqueness(ev, np.minimum(ev + 10, 50), n_bars=50).sum()
-    assert capped < uncapped
-
-    # A lone label overlaps nothing, so it is fully unique either way and the
-    # strict claim needs n >= 2. Reachable: a symbol with horizon + 1 bars.
-    ev = np.arange(1)
-    uncapped = calculate_label_uniqueness(ev, ev + 3, n_bars=4).sum()
-    capped = calculate_label_uniqueness(ev, np.minimum(ev + 3, 1), n_bars=1).sum()
-    assert capped == uncapped == 1.0
+    n, horizon = 400, 4
+    ev = np.arange(n)
+    correct = calculate_label_uniqueness(ev, ev + horizon - 1, n_bars=n + horizon - 1).sum()
+    with_anchor = calculate_label_uniqueness(ev, ev + horizon, n_bars=n + horizon).sum()
+    assert correct / n == pytest.approx(1 / horizon, abs=0.005)
+    assert with_anchor / n == pytest.approx(1 / (horizon + 1), abs=0.005)
 
 
 def test_effective_sample_size_is_computed_per_entity() -> None:
