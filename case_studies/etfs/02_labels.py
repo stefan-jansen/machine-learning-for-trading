@@ -38,8 +38,8 @@
 # [`01_feasibility_analysis`](01_feasibility_analysis.ipynb)) and `config/setup.yaml`,
 # which declares the label set, horizons and holdout boundary. Writes
 # `labels/fwd_ret_21d.parquet` and `labels/fwd_ret_5d.parquet`, each with a `.digest.json`
-# sidecar. `03_financial_features.py` reads the two parquet files; nothing reads the
-# sidecars yet - see section H.
+# sidecar. `03_financial_features.py` reads whichever is `labels.primary`, for its feature
+# evaluation only; nothing reads the sidecars yet - see section H.
 
 # %%
 """ETFs: Label Engineering."""
@@ -482,12 +482,13 @@ print(
 # training stages (`07`-`10`, and the latent-factor path) record in their spec. Two runs on
 # different label vintages are distinguishable there.
 #
-# What no artifact records is the step between. `03_financial_features` reads the label
-# parquet and writes `financial.parquet` with no note of which label it read, so a feature
-# file cannot be traced to a label vintage on its own - only the training stages close that
-# gap, and only by re-hashing everything at once. The sidecar makes the label
-# self-describing where it is written; carrying it forward is a change to stage 03 and
-# later, not to this one.
+# The one step between here and training where a label is read is stage 03's feature
+# *evaluation*. `03_financial_features` writes `financial.parquet` before it opens any label,
+# so the feature artifact does not depend on a label vintage at all; what does is the IC
+# ranking and BH-FDR screen that decide which features are promoted, and the promoted set
+# records no digest for the label that ranked it. The sidecar makes the label
+# self-describing where it is written; having that screen say which vintage it used is a
+# change to stage 03, not to this one.
 #
 # **No `cv_config.json` is written here**: the folds that train models
 # are derived from `setup.yaml` plus the label file's own timeline by
