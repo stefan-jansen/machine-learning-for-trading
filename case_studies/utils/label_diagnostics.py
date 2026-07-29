@@ -69,8 +69,10 @@ def effective_sample_size(
     are the tail, where the fewest windows are still open, so they carry the largest
     ``1/c_t`` terms in the average; dropping them removes a window's most unique
     part and lowers its weight. Capping therefore *understates* ``N_eff`` whenever
-    ``horizon <= n`` - checked exhaustively for every such pair up to ``n = 59``,
-    and 19,064 against 19,112 on the etfs monthly label.
+    ``horizon <= n`` and ``n >= 2`` - checked exhaustively for every such pair from
+    ``n = 2`` to ``n = 59``, and 19,064 against 19,112 on the etfs monthly label. At
+    ``n = 1`` the two agree for any horizon: a lone label overlaps nothing and is
+    fully unique either way.
 
     It reverses once the horizon is long relative to the group, where capping
     removes most of every window rather than a tail: at ``n = 2, horizon = 4`` the

@@ -124,6 +124,13 @@ def test_a_horizon_longer_than_the_group_is_not_the_ordinary_regime() -> None:
     capped = calculate_label_uniqueness(ev, np.minimum(ev + 10, 50), n_bars=50).sum()
     assert capped < uncapped
 
+    # A lone label overlaps nothing, so it is fully unique either way and the
+    # strict claim needs n >= 2. Reachable: a symbol with horizon + 1 bars.
+    ev = np.arange(1)
+    uncapped = calculate_label_uniqueness(ev, ev + 3, n_bars=4).sum()
+    capped = calculate_label_uniqueness(ev, np.minimum(ev + 3, 1), n_bars=1).sum()
+    assert capped == uncapped == 1.0
+
 
 def test_effective_sample_size_is_computed_per_entity() -> None:
     """One symbol of 2n rows carries less independent information than two of n:
