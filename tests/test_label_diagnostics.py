@@ -93,9 +93,11 @@ def test_effective_sample_size_matches_uniqueness_computed_by_hand(
 
     Every row of the frame carries a complete forward window, but the bars that
     close the last `horizon` windows are not rows of the frame. Capping the
-    endpoints at `n` would shorten exactly those windows; a shorter window overlaps
-    fewer others, so the boundary rows would score as more independent than they
-    are and the total would come out above these values.
+    endpoints at `n` shortens exactly those windows and drops the closing bars from
+    the concurrency array, and those two push uniqueness in opposite directions, so
+    the sign of the error is a property of the panel rather than a fixed bias.
+    These are the values the complete-window construction gives; that is what makes
+    them worth pinning by hand.
     """
     frame = _panel(n_per_symbol=n, symbols=("A",))
     rows, n_eff = effective_sample_size(frame, horizon=horizon)
