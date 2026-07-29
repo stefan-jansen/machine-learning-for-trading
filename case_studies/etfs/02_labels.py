@@ -482,13 +482,9 @@ print(
 # training stages (`07`-`10`, and the latent-factor path) record in their spec. Two runs on
 # different label vintages are distinguishable there.
 #
-# The one step between here and training where a label is read is stage 03's feature
-# *evaluation*. `03_financial_features` writes `financial.parquet` before it opens any label,
-# so the feature artifact does not depend on a label vintage at all; what does is the IC
-# ranking and BH-FDR screen that decide which features are promoted, and the promoted set
-# records no digest for the label that ranked it. The sidecar makes the label
-# self-describing where it is written; having that screen say which vintage it used is a
-# change to stage 03, not to this one.
+# The sidecar itself is not read anywhere yet. It makes the label self-describing at the
+# point it is written, which is the part this notebook owns; whether a stage that consumes
+# labels should also record the digest it consumed is a decision for that stage.
 #
 # **No `cv_config.json` is written here**: the folds that train models
 # are derived from `setup.yaml` plus the label file's own timeline by
