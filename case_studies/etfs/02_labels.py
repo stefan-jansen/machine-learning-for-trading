@@ -475,9 +475,16 @@ print(
 # Each label is written with a digest sidecar recording its content hash, row count, key
 # columns and the digest of the price data it was built from. The registry records the
 # *names* of the artifacts a model trained on and nothing about their values, so two runs on
-# different label vintages are indistinguishable there; the sidecar is what makes a
-# prediction traceable to the numbers it was fitted on, and `03_financial_features` carries
-# these digests forward. **No `cv_config.json` is written here**: the folds that train models
+# different label vintages are indistinguishable there; the sidecar is what a later stage
+# needs in order to make a prediction traceable to the numbers it was fitted on.
+#
+# It is a record, not yet a chain. Nothing downstream reads these sidecars today:
+# `03_financial_features` opens the label parquet and writes `financial.parquet` with no
+# sidecar of its own, so the digest stops here. Carrying it forward means each stage
+# recording its inputs' digests in its own sidecar and the training identity including them,
+# which is a change to those stages, not to this one.
+#
+# **No `cv_config.json` is written here**: the folds that train models
 # are derived from `setup.yaml` plus the label file's own timeline by
 # `case_studies/utils/cv_window.py`, which reads neither this notebook's output nor anything
 # derived from it, and a committed copy would only drift from the one in force.
