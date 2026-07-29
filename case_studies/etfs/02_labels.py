@@ -38,7 +38,8 @@
 # [`01_feasibility_analysis`](01_feasibility_analysis.ipynb)) and `config/setup.yaml`,
 # which declares the label set, horizons and holdout boundary. Writes
 # `labels/fwd_ret_21d.parquet` and `labels/fwd_ret_5d.parquet`, each with a `.digest.json`
-# sidecar, both read by `03_financial_features.py`.
+# sidecar. `03_financial_features.py` reads the two parquet files; nothing reads the
+# sidecars yet - see section H.
 
 # %%
 """ETFs: Label Engineering."""
@@ -473,16 +474,20 @@ print(
 # ## H. Artifacts and the audit record
 #
 # Each label is written with a digest sidecar recording its content hash, row count, key
-# columns and the digest of the price data it was built from. The registry records the
-# *names* of the artifacts a model trained on and nothing about their values, so two runs on
-# different label vintages are indistinguishable there; the sidecar is what a later stage
-# needs in order to make a prediction traceable to the numbers it was fitted on.
+# columns and the digest of the price data it was built from.
 #
-# It is a record, not yet a chain. Nothing downstream reads these sidecars today:
-# `03_financial_features` opens the label parquet and writes `financial.parquet` with no
-# sidecar of its own, so the digest stops here. Carrying it forward means each stage
-# recording its inputs' digests in its own sidecar and the training identity including them,
-# which is a change to those stages, not to this one.
+# A model run is already pinned to the label *bytes* it trained on:
+# `_training_input_identity` in `case_studies/utils/latent_factors/case_study.py` hashes the
+# label parquet, the feature parquets and `setup.yaml` into one aggregate digest, which the
+# training stages (`07`-`10`, and the latent-factor path) record in their spec. Two runs on
+# different label vintages are distinguishable there.
+#
+# What no artifact records is the step between. `03_financial_features` reads the label
+# parquet and writes `financial.parquet` with no note of which label it read, so a feature
+# file cannot be traced to a label vintage on its own - only the training stages close that
+# gap, and only by re-hashing everything at once. The sidecar makes the label
+# self-describing where it is written; carrying it forward is a change to stage 03 and
+# later, not to this one.
 #
 # **No `cv_config.json` is written here**: the folds that train models
 # are derived from `setup.yaml` plus the label file's own timeline by
