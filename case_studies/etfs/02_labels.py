@@ -158,6 +158,12 @@ print(f"market_data digest: {MARKET_DATA_DIGEST}")
 # The arithmetic stays local rather than calling `fixed_time_horizon_labels`, which computes
 # the identical $(P_{t+h}-P_t)/P_t$ but agrees only to a rounding step - enough to change the
 # digest and everything derived from it. Adopting it is one deliberate change across all nine.
+#
+# Two bookkeeping columns are numbered here, on the complete price series, because both mean
+# something only before a row is dropped: `from_end` counts back from each symbol's last
+# session for Section D's boundary profile, and `session` numbers its bars forward so
+# Section F's overlap statistics keep counting trading sessions once the null tail and the
+# holdout are filtered out. Neither reaches the label parquet, which selects three columns.
 
 
 # %%
@@ -169,7 +175,8 @@ def forward_return(df: pl.DataFrame, horizon: int, name: str) -> pl.DataFrame:
 
 
 labels_df = prices.with_columns(
-    (pl.len().over("symbol") - 1 - pl.int_range(pl.len()).over("symbol")).alias("from_end")
+    (pl.len().over("symbol") - 1 - pl.int_range(pl.len()).over("symbol")).alias("from_end"),
+    pl.int_range(pl.len()).over("symbol").alias("session"),
 )
 for label_name, horizon in HORIZONS.items():
     labels_df = forward_return(labels_df, horizon, label_name)
@@ -369,13 +376,22 @@ print(
 # overlap decays, and what the row count is worth once it is priced in. `effective_sample_size`
 # applies Ch7.2's average-uniqueness weighting per symbol - concurrency is a property of one
 # entity's windows.
+#
+# Both are counted on `session`, the grid the label was built on, not on position among the
+# rows that survive to `dev`. The distinction is vacuous here - property 3 above proves the
+# only null labels are each symbol's last $h$ sessions, and the holdout filter cuts a prefix,
+# so `dev` holds an unbroken run per symbol - and it is not vacuous on a case study whose
+# bars can go missing mid-series, where closing over a hole would pair windows that share
+# nothing and report the overlap as larger than it is.
 
 # %%
 # F3. Overlap decay across the panel. Computed on one asset this would be a claim about
 # that asset: pooled and single-symbol estimates disagree most at the lag that matters.
 max_lag = PRIMARY_HORIZON + 4
-acf = panel_autocorrelation(dev[PRIMARY_LABEL], PRIMARY_LABEL, max_lag=max_lag)
-n_rows, n_eff = effective_sample_size(dev[PRIMARY_LABEL], horizon=PRIMARY_HORIZON)
+acf = panel_autocorrelation(dev[PRIMARY_LABEL], PRIMARY_LABEL, max_lag=max_lag, bar_col="session")
+n_rows, n_eff = effective_sample_size(
+    dev[PRIMARY_LABEL], horizon=PRIMARY_HORIZON, bar_col="session"
+)
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 ax.bar(np.arange(1, max_lag + 1), acf, color=COLORS["blue"], width=0.7)
