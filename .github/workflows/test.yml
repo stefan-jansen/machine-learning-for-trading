@@ -427,6 +427,7 @@ jobs:
             tests/test_download_scripts_registry.py \
             tests/test_compose_mounts.py \
             tests/test_download_coverage.py \
+            tests/test_plotly_renderer.py \
             -v --tb=short
       # The Chapter 21 environments reached readers as broken imports partly
       # because no job ran the tests that name them: test_import_coverage.py

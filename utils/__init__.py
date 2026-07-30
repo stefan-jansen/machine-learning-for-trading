@@ -27,15 +27,36 @@ from utils.config import (
 # Backward compatibility alias
 DATA_DIR = ML4T_DATA_PATH
 
+
 # Plotly: include PNG in cell output so GitHub can render .ipynb figures.
 # Override with PLOTLY_RENDERER env var (e.g. "json" for headless CI).
+#
+# The "png" half goes through kaleido, and kaleido v1 drives a Chrome it does not
+# bundle. Where no Chrome is installed - the Docker images, a slim server - every
+# `fig.show()` died on ChromeNotFoundError (#432), which made the figure-producing
+# notebooks unrunnable rather than merely PNG-less. So ask for PNG only when a
+# Chrome is actually resolvable and otherwise fall back to "plotly_mimetype",
+# which still renders interactively in Jupyter and is inert in a plain script.
+# A probe that raises is treated as "no Chrome": this must never be what breaks
+# the import.
+def _default_plotly_renderer() -> str:
+    try:
+        from choreographer.browsers.chromium import Chromium
+
+        if Chromium.find_browser(skip_local=False):
+            return "plotly_mimetype+png"
+    except Exception:  # noqa: BLE001
+        pass
+    return "plotly_mimetype"
+
+
 try:
     import os as _os
 
     import plotly.io as _pio
 
     if not _os.environ.get("PLOTLY_RENDERER"):
-        _pio.renderers.default = "plotly_mimetype+png"
+        _pio.renderers.default = _default_plotly_renderer()
 except ImportError:
     pass
 

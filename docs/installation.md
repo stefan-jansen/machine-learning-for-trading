@@ -397,6 +397,29 @@ export HTTPS_PROXY=http://proxy:port
 docker compose pull ml4t
 ```
 
+### "Kaleido requires Google Chrome to be installed"
+
+Notebooks pick their Plotly renderer automatically and no longer ask for static
+PNGs where Chrome is missing, so this should not appear. If you are on an older
+image, either pull the current one or set the renderer explicitly:
+
+```bash
+docker compose pull ml4t
+docker compose run --rm -e PLOTLY_RENDERER=json ml4t python case_studies/etfs/05_evaluation.py
+```
+
+Chrome installed on your *host* has no bearing on this: the notebook runs inside
+the container, which ships without one.
+
+Only static image export (`fig.write_image`, `fig.to_image`) genuinely needs
+Chrome. Install it into a *running* container, since `docker compose run --rm`
+discards the download when the container exits:
+
+```bash
+docker compose up -d ml4t
+docker compose exec ml4t plotly_get_chrome -y
+```
+
 ---
 
 ## Local Setup with uv (Alternative to Docker)
