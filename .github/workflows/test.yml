@@ -490,6 +490,24 @@ jobs:
         run: |
           .venv/bin/python -m pytest tests/test_pvalue_tail_precision.py -v --tb=short
 
+      # The methodology ratchet. Both files are static AST/source scans over the
+      # notebook tree, so they need no data and no model deps, and both were
+      # ungated: nothing invoked either one. The cost of that showed up the first
+      # time they were run from CI's perspective — the random-split bucket still
+      # listed an occurrence that no longer exists in the source, which is the
+      # ratchet's own staleness check firing after the drift, not before it.
+      # A leak-shaped call added to any notebook now fails the PR that adds it.
+      - name: Run leakage and holdout-boundary detectors
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          ML4T_PATH: ${{ github.workspace }}
+          ML4T_DATA_PATH: ${{ github.workspace }}/data
+        run: |
+          .venv/bin/python -m pytest \
+            tests/test_leakage_detectors.py \
+            tests/test_holdout_boundary.py \
+            -v --tb=short
+
   # ---------------------------------------------------------------------------
   # Chapter notebook tests — inside Docker (ml4t/ml4t:latest)
   #
