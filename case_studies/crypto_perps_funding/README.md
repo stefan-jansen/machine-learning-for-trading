@@ -23,7 +23,7 @@ costs, and uncertainty from only two validation folds.
 | Stage | Notebook | Chapter | Description | Writes |
 |---|---|---|---|---|
 | Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Tests funding persistence, cost feasibility, and strict completed-bar endpoints. | `config/exploration/feasibility_report.json` |
-| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | Builds forward returns and class labels without admitting holdout-ending observations. | One parquet per label in `labels/` (`fwd_ret_8h` plus the `fwd_ret_24h`, `fwd_dir_8h`, `fwd_dir_8h_3c` variants), and `config/cv_config.json` |
+| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | Builds forward returns and class labels without admitting holdout-ending observations; folds are derived from `setup.yaml` and the label timeline, not written here | One parquet per label in `labels/` (`fwd_ret_8h` plus the `fwd_ret_24h`, `fwd_dir_8h`, `fwd_dir_8h_3c` variants), each with a `.digest.json` sidecar |
 | Financial features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | Produces 39 premium, funding, momentum, volatility, and liquidity features. | `features/financial.parquet` |
 | Model-based features | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Adds five fold-specific volatility and regime features fit on prior data. | `features/model_based.parquet` |
 | Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7-9 | Evaluates the exact 44-feature training frame on the canonical label clock. | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
