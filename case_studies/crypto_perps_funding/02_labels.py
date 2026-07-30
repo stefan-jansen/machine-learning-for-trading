@@ -436,10 +436,23 @@ print(f"{THREE_CLASS_LABEL} middle share runs {middle.min():.3f} to {middle.max(
 # in. `effective_sample_size` applies Chapter 7.2's average-uniqueness weighting per symbol,
 # because concurrency is a property of one symbol's own overlapping windows.
 #
-# The one-period label is the case that checks the measurement rather than the data.
-# Consecutive one-period forward returns are built from disjoint returns, so they are fully
-# independent and the effective count has to come back equal to the row count. A weighting that
-# counted the anchor bar as consumed would halve it instead, and would read as a refinement.
+# The one-period label is the case that checks the measurement rather than the data. Consecutive
+# one-period forward returns are built from disjoint return intervals, so no row shares any part
+# of its window with a neighbour, every uniqueness weight must be 1, and the effective count has
+# to come back equal to the row count. A weighting that counted the anchor bar as consumed would
+# halve it instead, and would read as a refinement.
+#
+# Disjoint is not independent, and the figure below is what says so: the one-period label shares
+# no part of its window with any other row, and its autocorrelation is small but not zero at any
+# lag drawn. Average uniqueness prices shared windows, not serial dependence, so nothing measured
+# here discounts the second, and a fold gap sized from the horizon does not either.
+#
+# One approximation to declare, because both statistics rest on it. Each indexes a row by its
+# position among the rows that survived, not by where it sits on the settlement clock, so the
+# holes Section D counts read as adjacency. Indexing by the slot instead leaves the pooled
+# autocorrelations unchanged at the precision reported below and raises the variant's effective
+# count slightly, because two windows separated by a hole overlap less than two adjacent rows do.
+# The agreement with 1/h is therefore a three-decimal statement, not a four-decimal one.
 
 # %%
 max_lag = HORIZONS[VARIANT_LABEL] + 4
@@ -453,15 +466,15 @@ ax.axhline(0, color=COLORS["neutral"], lw=0.8)
 ax.set_xlabel("Lag in settlement periods")
 ax.set_ylabel("Panel autocorrelation")
 note = "Dotted lines mark each label's horizon; demeaned within symbol, then pooled"
-add_message_title(ax, "Only the overlapping label is autocorrelated", subtitle=note)
+add_message_title(ax, "Overlap drives the autocorrelation and ends at the horizon", subtitle=note)
 ax.legend(loc="upper right", frameon=False)
 show_with_alt(fig, "Panel autocorrelation of both labels against lag in periods.")
 
 for name, horizon in HORIZONS.items():
     n_rows, n_eff = effective_sample_size(dev[name], horizon=horizon)
     print(
-        f"{name}: N={n_rows:,}, N_eff={n_eff:,.0f}, ratio {n_eff / n_rows:.4f} against "
-        f"{1 / horizon:.4f} for windows overlapping this fully; autocorrelation "
+        f"{name}: N={n_rows:,}, N_eff={n_eff:,.0f}, ratio {n_eff / n_rows:.3f} against "
+        f"{1 / horizon:.3f} for windows overlapping this fully; autocorrelation "
         f"{acf[name][0]:.3f} at lag one, {acf[name][horizon - 1]:.3f} at its horizon"
     )
 
@@ -469,7 +482,7 @@ for name, horizon in HORIZONS.items():
 # The eight-hour label's 66,216 development rows carry 66,216 effective observations: at a
 # one-period horizon consecutive windows are disjoint, which is the answer that confirms the
 # weighting rather than the data. The twenty-four-hour label's 66,040 rows carry 22,026, a ratio
-# of 0.3335 against the 0.3333 a fully overlapped three-period window implies, and its
+# of 0.334 against the 0.333 a fully overlapped three-period window implies, and its
 # autocorrelation falls from 0.674 at lag one to -0.019 at lag three. The purge gap a fold needs
 # is set by the forward window itself, not by this count.
 
