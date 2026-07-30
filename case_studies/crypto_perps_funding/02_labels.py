@@ -202,6 +202,12 @@ print(f"market_data digest: {MARKET_DATA_DIGEST}")
 # exact, the endpoint is required to land on `t` plus the horizon, and a row whose next stamp
 # does not is left null instead of labelled across the hole.
 #
+# The same exactness is what makes `slot` well defined: with every stamp on the grid the
+# assertion above checks, hours since a symbol's first bar divide by the period without
+# remainder, so `slot` is the settlement the row sits on rather than its position among the
+# rows that happen to survive. Section F's overlap statistics are counted on it, and Section D
+# counts how many settlements are absent. Neither it nor `from_end` reaches a label parquet.
+#
 # The digest recorded above becomes every label's `inputs` entry. It covers the keys and the one
 # price column this formula reads, so a re-run against a refreshed download is distinguishable
 # from a re-run against the same one.
@@ -223,7 +229,9 @@ def forward_return(df: pl.DataFrame, horizon: int, name: str) -> pl.DataFrame:
 
 
 from_end = pl.len().over("symbol") - 1 - pl.int_range(pl.len()).over("symbol")
-labels_df = prices.with_columns(from_end.alias("from_end"))
+elapsed = pl.col("timestamp") - pl.col("timestamp").min().over("symbol")
+slot = (elapsed.dt.total_hours() // BAR_HOURS).cast(pl.Int64)
+labels_df = prices.with_columns(from_end.alias("from_end"), slot.alias("slot"))
 for name, horizon in HORIZONS.items():
     labels_df = forward_return(labels_df, horizon, name).drop(["_label_end", "_close_end"])
 labels_df = labels_df.with_columns(
@@ -447,16 +455,16 @@ print(f"{THREE_CLASS_LABEL} middle share runs {middle.min():.3f} to {middle.max(
 # lag drawn. Average uniqueness prices shared windows, not serial dependence, so nothing measured
 # here discounts the second, and a fold gap sized from the horizon does not either.
 #
-# One approximation to declare, because both statistics rest on it. Each indexes a row by its
-# position among the rows that survived, not by where it sits on the settlement clock, so the
-# holes Section D counts read as adjacency. Indexing by the slot instead leaves the pooled
-# autocorrelations unchanged at the precision reported below and raises the variant's effective
-# count slightly, because two windows separated by a hole overlap less than two adjacent rows do.
-# The agreement with 1/h is therefore a three-decimal statement, not a four-decimal one.
+# Both statistics are counted on `slot`, the settlement each row sits on, so the holes Section D
+# counts stay holes: a pair enters the autocorrelation only where two settlements are exactly the
+# lag apart, and a window's uniqueness is weighted over the settlements it actually spans. That is
+# also why the variant's ratio sits just above 1/h rather than matching it to four decimals - a
+# hole ends an overlap early, and the rows either side of it keep evidence a fully overlapped
+# window would have shared away.
 
 # %%
 max_lag = HORIZONS[VARIANT_LABEL] + 4
-acf = {n: panel_autocorrelation(dev[n], n, max_lag=max_lag) for n in RETURN_LABELS}
+acf = {n: panel_autocorrelation(dev[n], n, max_lag=max_lag, bar_col="slot") for n in RETURN_LABELS}
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 for name, colour in zip(RETURN_LABELS, (COLORS["blue"], COLORS["amber"]), strict=True):
@@ -471,7 +479,7 @@ ax.legend(loc="upper right", frameon=False)
 show_with_alt(fig, "Panel autocorrelation of both labels against lag in periods.")
 
 for name, horizon in HORIZONS.items():
-    n_rows, n_eff = effective_sample_size(dev[name], horizon=horizon)
+    n_rows, n_eff = effective_sample_size(dev[name], horizon=horizon, bar_col="slot")
     print(
         f"{name}: N={n_rows:,}, N_eff={n_eff:,.0f}, ratio {n_eff / n_rows:.3f} against "
         f"{1 / horizon:.3f} for windows overlapping this fully; autocorrelation "
@@ -481,7 +489,7 @@ for name, horizon in HORIZONS.items():
 # %% [markdown] tags=["results"]
 # The eight-hour label's 66,216 development rows carry 66,216 effective observations: at a
 # one-period horizon consecutive windows are disjoint, which is the answer that confirms the
-# weighting rather than the data. The twenty-four-hour label's 66,040 rows carry 22,026, a ratio
+# weighting rather than the data. The twenty-four-hour label's 66,040 rows carry 22,072, a ratio
 # of 0.334 against the 0.333 a fully overlapped three-period window implies, and its
 # autocorrelation falls from 0.674 at lag one to -0.019 at lag three. The purge gap a fold needs
 # is set by the forward window itself, not by this count.
