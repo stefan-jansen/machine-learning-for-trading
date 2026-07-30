@@ -184,13 +184,18 @@ X_val_raw = df.filter(val_mask).select(FEATURE_COLS).to_numpy()
 y_val = df.filter(val_mask)[TARGET_COL].to_numpy()
 
 if MAX_TRAIN_ROWS > 0 and len(y_train) > MAX_TRAIN_ROWS:
-    idx = np.sort(
-        np.random.default_rng(42).choice(len(y_train), size=MAX_TRAIN_ROWS, replace=False)
-    )
+    # Whole symbols, never individual rows: the lag-1 and lag-21 diagnostics below
+    # read off each symbol's own series, and a random draw of rows would leave gaps.
+    symbols_arr = train_meta[ASSET_COL].to_numpy()
+    unique_symbols = np.unique(symbols_arr)
+    rows_per_symbol = max(1, len(y_train) // len(unique_symbols))
+    n_keep = max(1, min(len(unique_symbols), MAX_TRAIN_ROWS // rows_per_symbol))
+    keep = np.random.default_rng(42).choice(unique_symbols, size=n_keep, replace=False)
+    idx = np.flatnonzero(np.isin(symbols_arr, keep))
     X_train_raw = X_train_raw[idx]
     y_train = y_train[idx]
     train_meta = train_meta[idx]
-    print(f"Subsampled training rows to {MAX_TRAIN_ROWS:,} for faster diagnostics")
+    print(f"Subsampled to {n_keep} whole symbols ({len(idx):,} rows) for faster diagnostics")
 
 # Standardize features (fitted on training data only)
 scaler = StandardScaler()
@@ -399,19 +404,36 @@ vif_df.head(15)
 # - **OLS** (default): assumes homoscedastic, uncorrelated errors
 # - **HC3** (heteroscedasticity-consistent): corrects for non-constant variance
 # - **Clustered by date**: allows arbitrary correlation among all observations
-#   sharing a date, which is the dependence the previous section found
+#   sharing a date — the cross-sectional dependence
+# - **Clustered two ways, by date and by symbol**: additionally allows arbitrary
+#   correlation within a symbol across time — the serial dependence
+#
+# The two diagnostics above found two different violations, and the estimator has
+# to answer both. Clustering by date alone handles the first and assumes the
+# residuals of one symbol are independent across dates, which is exactly what the
+# lag-21 autocorrelation shows is false: the 21-day label makes consecutive
+# observations of a symbol share 20 of 21 days of outcome window. Two-way
+# clustering drops both independence assumptions and makes no assumption about
+# the form of either dependence, so it is the estimator this panel needs.
 #
 # HAC (Newey-West) is the usual answer to autocorrelation, but it reads its lags
 # off the row order of a single time series. On a pooled panel stored in date
 # order those lags run across the cross-section, so it does not estimate what its
-# name promises here. Clustering by date makes no assumption about the form of
-# the within-date dependence and is the appropriate correction for this panel.
+# name promises here. It becomes the right tool once the panel is collapsed to
+# one observation per date, which is what the IC calculation below does.
 
 # %%
 ols_hc3 = sm.OLS(y_train_s, X_train_c).fit(cov_type="HC3")
 date_groups = train_meta["timestamp"].to_physical().to_numpy()
-ols_cluster = sm.OLS(y_train_s, X_train_c).fit(cov_type="cluster", cov_kwds={"groups": date_groups})
-print(f"Clusters (distinct dates): {len(np.unique(date_groups)):,}")
+symbol_groups = train_meta[ASSET_COL].cast(pl.Categorical).to_physical().to_numpy()
+ols_cluster_date = sm.OLS(y_train_s, X_train_c).fit(
+    cov_type="cluster", cov_kwds={"groups": date_groups}
+)
+ols_cluster = sm.OLS(y_train_s, X_train_c).fit(
+    cov_type="cluster", cov_kwds={"groups": np.column_stack([date_groups, symbol_groups])}
+)
+print(f"Date clusters:   {len(np.unique(date_groups)):,}")
+print(f"Symbol clusters: {len(np.unique(symbol_groups)):,}")
 
 # Compare SEs and t-stats for features (skip constant at index 0)
 se_comparison = pl.DataFrame(
@@ -420,6 +442,7 @@ se_comparison = pl.DataFrame(
         "coef": ols_model.params[1:],
         "se_ols": ols_model.bse[1:],
         "se_hc3": ols_hc3.bse[1:],
+        "se_date": ols_cluster_date.bse[1:],
         "se_cluster": ols_cluster.bse[1:],
         "t_ols": ols_model.tvalues[1:],
         "t_cluster": ols_cluster.tvalues[1:],
@@ -428,29 +451,44 @@ se_comparison = pl.DataFrame(
     se_ratio_cluster=pl.col("se_cluster") / pl.col("se_ols"),
 )
 
+# %% [markdown]
+# The features whose robust standard errors differ most from their OLS ones.
+# Reading left to right across the SE columns shows what each dependence the
+# estimator admits costs in precision.
+
 # %%
-# Show features where robust SEs differ most from OLS SEs.
 cluster_ranked = (
     se_comparison.sort("se_ratio_cluster", descending=True)
     .head(10)
-    .select("feature", "coef", "se_ols", "se_cluster", "se_ratio_cluster", "t_ols", "t_cluster")
+    .select(
+        "feature",
+        "coef",
+        "se_ols",
+        "se_hc3",
+        "se_date",
+        "se_cluster",
+        "se_ratio_cluster",
+        "t_cluster",
+    )
 )
 cluster_ranked
 
 # %%
 # Count how many features change significance at 5% level
 n_sig_ols = int((np.abs(ols_model.tvalues[1:]) > 1.96).sum())
+n_sig_date = int((np.abs(ols_cluster_date.tvalues[1:]) > 1.96).sum())
 n_sig_cluster = int((np.abs(ols_cluster.tvalues[1:]) > 1.96).sum())
 
 print("\nFeatures significant at 5% level:")
-print(f"  OLS standard errors:       {n_sig_ols} / {len(FEATURE_COLS)}")
-print(f"  Date-clustered standard errors: {n_sig_cluster} / {len(FEATURE_COLS)}")
+print(f"  OLS standard errors:            {n_sig_ols} / {len(FEATURE_COLS)}")
+print(f"  Date-clustered:                 {n_sig_date} / {len(FEATURE_COLS)}")
+print(f"  Two-way clustered (date+symbol): {n_sig_cluster} / {len(FEATURE_COLS)}")
 print(f"  Difference: {n_sig_ols - n_sig_cluster} features lose significance")
 
 # %% [markdown]
 # ### Coefficients with Clustered Confidence Intervals
 #
-# Rank features by absolute coefficient magnitude and show the date-clustered
+# Rank features by absolute coefficient magnitude and show the two-way clustered
 # confidence interval around each estimate. The interval width is set by the
 # `CONF_Z` multiplier below; a bar that crosses the dashed line at zero is a
 # coefficient whose sign the data does not pin down.
@@ -484,10 +522,16 @@ ax.axvline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.8)
 ax.set_yticks(y_pos)
 ax.set_yticklabels(coef_plot["feature"].to_list())
 ax.set_xlabel("Coefficient estimate (standardized feature, 21-day forward return)")
-ax.set_title("The largest coefficients keep their intervals clear of zero")
+ax.set_title("Even the largest coefficients include some the data cannot sign")
 ax.grid(axis="x", alpha=0.3)
 plt.tight_layout()
 plt.show()
+
+n_crosses_zero = int((np.abs(coef_values) <= CONF_Z * cluster_se).sum())
+print(
+    f"Of the {TOP_COEFS} largest coefficients, {n_crosses_zero} have a two-way "
+    f"clustered interval that includes zero."
+)
 
 # %% [markdown]
 # Robust standard errors are typically *larger* than OLS standard errors, making
@@ -503,8 +547,9 @@ plt.show()
 # - **HAC (Newey-West)**: the standard correction for autocorrelation in a single
 #   time series, and the right tool once the panel is collapsed to one series per
 #   date — which is exactly what the IC calculation in the next section does
-# - **Two-way clustering**: by date and by asset together, when both the
-#   cross-sectional and the within-asset dependence matter
+# - **Driscoll-Kraay**: an alternative to the two-way clustering used above that
+#   imposes a decaying lag structure on the serial dependence rather than leaving
+#   it unrestricted, which buys precision when the number of symbols is small
 #
 # These are valuable tools for the data modeling culture — but they fix *inference*
 # quality, not *prediction* quality. A coefficient with correct standard errors
@@ -565,7 +610,7 @@ print(f"Out-of-sample IC IR:     {ic_ir:.2f}")
 print(f"IC t-stat, HAC:          {ic_stats['t_stat']:.2f}  (p = {ic_stats['p_value']:.3f},")
 print(f"                          {ic_stats['effective_lags']} lags, n={n_periods} dates)")
 print(f"IC t-stat, naive:        {ic_stats['naive_t_stat']:.2f}  (treats dates as independent)")
-print(f"Significant features:    {n_sig_cluster} (date-clustered)")
+print(f"Significant features:    {n_sig_cluster} (two-way clustered)")
 
 # %% [markdown]
 # ### Validation Predictions and Residuals
@@ -678,8 +723,9 @@ plt.show()
 # 3. **A statistic computed on a panel measures what its row order says it
 #    measures.** Durbin-Watson on a date-ordered panel reports cross-sectional
 #    dependence under the name of serial correlation; the same ordering makes
-#    Newey-West lag across assets rather than across time. Regroup by asset, or
-#    cluster by date, and say which one the number came from.
+#    Newey-West lag across assets rather than across time. Regroup by asset,
+#    cluster on every dimension the diagnostics found dependence in, and say
+#    which one the number came from.
 #
 # 4. **Robust standard errors repair one failure only.** They fix the variance
 #    estimate when errors are non-spherical. They cannot rescue a model whose
