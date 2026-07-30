@@ -307,6 +307,19 @@ def add_message_title(
         )
 
 
+def show_with_alt(fig: object, alt: str) -> None:
+    """Render *fig* carrying alt text for screen readers, then close it.
+
+    `plt.show()` emits an `<img>` with no alternative text, which nbconvert warns
+    about and a screen reader cannot describe. The alt text is a sentence saying
+    what the chart shows, not a repeat of the title.
+    """
+    from IPython.display import display
+
+    display(fig, metadata={"image/png": {"alt": alt}})
+    plt.close(fig)
+
+
 def label_line_ends(ax: Axes, xpad_points: int = 4, expand_right: float = 0.10) -> None:
     """Direct-label each labeled line at its last finite point; use instead of a legend.
 
@@ -942,6 +955,7 @@ __all__ = [
     "add_regime_shading",
     "format_pct_axis",
     "add_message_title",
+    "show_with_alt",
     "label_line_ends",
     "zero_line",
     "upper_triangle_mask",
