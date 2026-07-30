@@ -32,6 +32,7 @@ HOLDOUT_SCOPED_NOTEBOOKS = [
     ("case_studies/etfs/03_financial_features.py", "ic_matrix = np.full"),
     ("case_studies/etfs/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/etfs/05_evaluation.py", "ic_series_data = {feat"),
+    ("case_studies/crypto_perps_funding/02_labels.py", "cross_sectional_ic_series("),
 ]
 
 
@@ -116,16 +117,17 @@ def test_holdout_filter_precedes_first_ic_computation(rel_path: str, first_ic_ma
 # they truncate the price frame first and compute forward returns on the
 # truncated frame, so the boundary rows come out null and drop. That is a
 # different, equally sound mechanism, and asserting this one against them would
-# be wrong. The other eight case studies have not been audited for this class of
-# leak; add their notebooks here as each is checked.
+# be wrong. Seven case studies have not been audited for this class of leak; add
+# their notebooks here as each is checked.
 LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
     "case_studies/etfs/02_labels.py",
     "case_studies/etfs/03_financial_features.py",
     "case_studies/etfs/05_evaluation.py",
+    "case_studies/crypto_perps_funding/02_labels.py",
 ]
 
-# Of the three above, 02 and 03 derive the endpoint PER SYMBOL; 05 still uses a
-# market-wide calendar. The two are equivalent exactly while no symbol misses a
+# Of the four above, only etfs/05 uses a market-wide calendar; the other three
+# derive the endpoint PER SYMBOL. The two are equivalent exactly while no symbol misses a
 # session inside the label window before the boundary, which is a property of the
 # data and not of the code -- so it is executed, not asserted here:
 # ``test_the_two_purges_agree_on_the_shipped_label_panel`` runs both filters over
@@ -141,6 +143,7 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
 PER_SYMBOL_ENDPOINT_NOTEBOOKS = [
     "case_studies/etfs/02_labels.py",
     "case_studies/etfs/03_financial_features.py",
+    "case_studies/crypto_perps_funding/02_labels.py",
 ]
 
 
