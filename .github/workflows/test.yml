@@ -341,6 +341,11 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "latest"
+      # A path Windows cannot represent makes the whole repo unclonable there,
+      # not just that file (#433). Stdlib-only and instant, so it runs before
+      # anything is installed.
+      - name: Every tracked path is checkout-able on Windows (#433 regression gate)
+        run: python .github/scripts/check_windows_safe_paths.py
       - name: Install guard deps
         # jupytext only: check_notebook_pair_sync.py shells out to the `jupytext`
         # binary, so it must be on PATH. Deliberately not the project env — this
