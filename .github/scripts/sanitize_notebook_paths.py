@@ -8,8 +8,26 @@ rewrites them in place:
 * repo-internal paths -> repo-relative (matching ``utils.paths.display_path``)
 * anything else under ``~/ml4t`` -> a ``~``-prefixed generic path
 
-It edits the raw ``.ipynb`` text (no JSON reserialization) so the only diff is
-the replaced substrings — formatting, key order and outputs are untouched.
+Outputs and metadata only; ``source`` is never touched
+------------------------------------------------------
+
+A notebook's ``source`` is code the reader runs, and a path in it can be load
+bearing. An earlier version of this script rewrote the raw ``.ipynb`` text and so
+rewrote source along with everything else: it turned the real Docker mount path
+in ``02_financial_data_universe/16_provider_comparison`` into a relative path.
+That is why the companion test was deselected in CI rather than fixed.
+
+So the notebook is parsed, and only strings reachable through notebook metadata,
+cell metadata and cell outputs are candidates. Two strings in this repository's
+source survive precisely because of that: the mount path above, and a comment in
+``12_gradient_boosting/02_gbm_comparison`` that names ``/app/`` to explain it.
+
+The rewrite itself is still done on the raw text, one substring at a time, so the
+diff is the replaced paths and nothing else - no JSON reserialization, no
+reflowed formatting, no reordered keys. A string that also occurs inside the
+notebook's source is skipped and reported instead of replaced, because a raw-text
+edit cannot tell the two occurrences apart. Nothing in the repository trips that
+today; the check is here so the guarantee holds without being re-verified by hand.
 
 Idempotent: running twice is a no-op. A companion test
 (``tests/test_notebook_output_hygiene.py``) fails CI if any leak survives.
@@ -22,6 +40,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -58,11 +77,76 @@ def _iter_notebooks() -> list[Path]:
 
 
 def sanitize_text(text: str) -> tuple[str, int]:
+    """Apply the path rules to one string. Says nothing about where it came from."""
     n = 0
     for pat, new in REPLACEMENTS:
         text, k = pat.subn(new, text)
         n += k
     return text, n
+
+
+def _strings(obj: object, out: list[str]) -> None:
+    """Every string reachable from ``obj``."""
+    if isinstance(obj, str):
+        out.append(obj)
+    elif isinstance(obj, list):
+        for item in obj:
+            _strings(item, out)
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            _strings(value, out)
+
+
+def _partition(nb: dict) -> tuple[list[str], list[str]]:
+    """(strings this tool may rewrite, strings it must leave alone).
+
+    The second list is the notebook's ``source``. Everything in the first is
+    reachable only through notebook metadata, cell metadata or cell outputs.
+    """
+    rewritable: list[str] = []
+    protected: list[str] = []
+    _strings(nb.get("metadata", {}), rewritable)
+    for cell in nb.get("cells", []):
+        _strings(cell.get("metadata", {}), rewritable)
+        _strings(cell.get("outputs", []), rewritable)
+        _strings(cell.get("source", []), protected)
+    return rewritable, protected
+
+
+def _encoded(text: str) -> str:
+    """``text`` as it appears inside a JSON string literal, without the quotes."""
+    return json.dumps(text)[1:-1]
+
+
+def sanitize_notebook(raw: str) -> tuple[str, int, list[str]]:
+    """Rewrite the machine-specific paths in one notebook's outputs and metadata.
+
+    Args:
+        raw: the notebook file's text.
+
+    Returns:
+        (new text, paths rewritten, strings skipped because the notebook's
+        ``source`` contains them too).
+    """
+    rewritable, protected = _partition(json.loads(raw))
+    protected_encoded = [_encoded(s) for s in protected]
+
+    targets = {value: sanitize_text(value) for value in rewritable}
+    targets = {value: cleaned for value, (cleaned, n) in targets.items() if n}
+
+    replaced = 0
+    skipped: list[str] = []
+    # Longest first: one leaked string is often a substring of another, and
+    # rewriting the shorter one first would leave the longer one unfindable.
+    for original in sorted(targets, key=len, reverse=True):
+        encoded = _encoded(original)
+        if any(encoded in candidate for candidate in protected_encoded):
+            skipped.append(original)
+            continue
+        occurrences = raw.count(encoded)
+        raw = raw.replace(encoded, _encoded(targets[original]))
+        replaced += occurrences * sanitize_text(original)[1]
+    return raw, replaced, skipped
 
 
 def main() -> int:
@@ -71,24 +155,31 @@ def main() -> int:
     args = ap.parse_args()
 
     dirty: list[tuple[Path, int]] = []
+    blocked: list[tuple[Path, str]] = []
     for nb in _iter_notebooks():
         raw = nb.read_text(encoding="utf-8")
-        new, n = sanitize_text(raw)
+        new, n, skipped = sanitize_notebook(raw)
+        blocked += [(nb.relative_to(REPO_ROOT), s) for s in skipped]
         if n:
             dirty.append((nb.relative_to(REPO_ROOT), n))
             if not args.check:
                 nb.write_text(new, encoding="utf-8")
 
-    if not dirty:
-        print("clean: no /home/<user> paths in any notebook")
-        return 0
+    if blocked:
+        print("NOT rewritten - the same string appears in the notebook's source:")
+        for rel, s in blocked:
+            print(f"  {rel}\n    {s}")
 
-    verb = "would rewrite" if args.check else "rewrote"
-    total = sum(n for _, n in dirty)
-    print(f"{verb} {total} occurrence(s) across {len(dirty)} notebook(s):")
-    for rel, n in dirty:
-        print(f"  {n:4d}  {rel}")
-    return 1 if args.check else 0
+    if dirty:
+        verb = "would rewrite" if args.check else "rewrote"
+        total = sum(n for _, n in dirty)
+        print(f"{verb} {total} occurrence(s) across {len(dirty)} notebook(s):")
+        for rel, n in dirty:
+            print(f"  {n:4d}  {rel}")
+    else:
+        print("clean: no machine-specific paths in any notebook's outputs or metadata")
+
+    return 1 if blocked or (args.check and dirty) else 0
 
 
 if __name__ == "__main__":

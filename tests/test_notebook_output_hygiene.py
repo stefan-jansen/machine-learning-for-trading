@@ -25,7 +25,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 
-from sanitize_notebook_paths import _iter_notebooks, sanitize_text  # noqa: E402
+from sanitize_notebook_paths import _iter_notebooks, sanitize_notebook  # noqa: E402
 from strip_empty_cell_tags import paired_py_has_fossil, strip_text  # noqa: E402
 
 
@@ -37,10 +37,11 @@ def test_strip_empty_cell_tags_handles_a_metadata_only_tag():
 
 
 def test_no_machine_specific_paths_in_committed_notebooks() -> None:
+    """Outputs and metadata only. A path in `source` may be load bearing."""
     offenders: list[str] = []
     for nb in _iter_notebooks():
         raw = nb.read_text(encoding="utf-8")
-        _, n = sanitize_text(raw)
+        _, n, _ = sanitize_notebook(raw)
         if n:
             offenders.append(f"{nb.relative_to(REPO_ROOT)} ({n})")
     assert not offenders, (
@@ -48,6 +49,34 @@ def test_no_machine_specific_paths_in_committed_notebooks() -> None:
         "outputs/metadata. Run `uv run python .github/scripts/sanitize_notebook_paths.py` "
         "to fix:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_the_sanitizer_reports_a_string_it_cannot_safely_rewrite() -> None:
+    """A leak the source shares is skipped, not rewritten, and it is named.
+
+    The raw-text edit is what keeps the diff to the replaced paths, and it is
+    also what makes a string that appears in both places ambiguous. Skipping is
+    the safe answer; going quiet about it is not.
+    """
+    shared = "/home/someone/ml4t/code/data/prices.parquet"
+    raw = json.dumps(
+        {
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "source": [f'pl.read_parquet("{shared}")'],
+                    "outputs": [{"output_type": "stream", "text": [shared]}],
+                }
+            ],
+            "metadata": {},
+        }
+    )
+
+    new, replaced, skipped = sanitize_notebook(raw)
+
+    assert skipped == [shared]
+    assert replaced == 0
+    assert new == raw
 
 
 # Debt list for notebooks still carrying the empty-tag fossil. Emptied when the
