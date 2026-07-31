@@ -324,9 +324,13 @@ for label_name, frame in dev.items():
 # %% [markdown]
 # All three labels go on one axis with identical bins and a logarithmic count axis. The claim
 # the figure has to support is about shape rather than width, which three dispersion scalars
-# would carry: spot returns are close to symmetric at every horizon, and the horizon buys
-# width rather than skew. The axis is narrower than the longest label's range, so rows
-# outside it are counted below rather than drawn.
+# would carry: each longer horizon spreads the same centred body wider. The axis is narrower
+# than every label's range, so rows outside it are counted below rather than drawn, and the
+# figure is therefore evidence about the body and not about the tails. The skew printed
+# beneath it is the quantity that does read the tails, and for the one-session label the two
+# disagree: a handful of sessions of sharp depreciation sit outside the drawn range and pull
+# it well negative. That asymmetry is a property of a daily FX label, and a plot of its
+# central mass cannot show it.
 
 # %%
 bins = np.linspace(-0.06, 0.06, 81)
@@ -407,8 +411,11 @@ print(
 # the monthly label 0.02664, a ratio of 4.37 against the 4.58 that square-root-of-horizon
 # scaling implies. All three are close to balanced around zero - the share of positive rows
 # runs 0.503 to 0.504 - so the task is not one of predicting a drift but of ranking small
-# deviations from it. The spread the ranking happens inside is not constant: cross-pair
-# dispersion peaks at 0.65% in 2011 against 0.36% in 2019, a ratio of 1.79.
+# deviations from it. The tails are not balanced at the daily horizon: skew runs -0.762 at
+# one session against -0.173 at five and +0.021 at twenty-one, so the one-session label
+# carries a left tail the longer two average away. The spread the ranking happens inside is
+# not constant either: cross-pair dispersion peaks at 0.65% in 2011 against 0.36% in 2019, a
+# ratio of 1.79.
 
 # %% [markdown]
 # ## F. Overlap and effective sample size
