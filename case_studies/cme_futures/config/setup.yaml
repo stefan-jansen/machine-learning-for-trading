@@ -164,6 +164,137 @@ backtest:
         - {name: time_exit_20,    type: time_exit,     bars: 20}
         - {name: time_exit_40,    type: time_exit,     bars: 40}
 
+# The feature specification for 03_financial_features. Every window the notebook
+# uses is declared here and read from here, and each family carries the ten fields
+# the register renders: what it reads, how far back, with what delay, and what it
+# is claimed to do. ``role`` separates a signal — something the carry thesis says
+# ranks products against each other — from a state variable describing the
+# environment a ranking is formed in. Windows are CME settlement sessions.
+features:
+  windows:
+    momentum: [21, 63, 126, 252]     # each carries a risk-adjusted twin
+    short_return: 5                  # the weekly return, no Sharpe twin
+    volatility: [21, 63, 126]
+    skip_recent: 21                  # skip-month momentum runs t-252 to t-21
+    skip_start: 252
+    carry_smoothing: 21
+    carry_zscore: [63, 126]
+    carry_momentum: [5, 21]
+    trend_sign: [63, 126, 252]
+    moving_average: [21, 50, 200]
+    high: 252                        # dist_from_52w_high
+    low: 126                         # dist_from_6m_low
+    rsi: 14
+    yang_zhang: 21
+    variance_ratio: {horizon: 5, window: 63}
+  # Source column -> the name its within-date percentile is written under. The
+  # names predate this register and later stages select by them, so the mapping
+  # is explicit rather than a suffix rule.
+  ranked:
+    ret_21d: mom_rank_21d
+    ret_63d: mom_rank_63d
+    ret_126d: mom_rank_126d
+    ret_252d: mom_rank_252d
+    sharpe_63d: sharpe_rank_63d
+    sharpe_126d: sharpe_rank_126d
+    sharpe_252d: sharpe_rank_252d
+    vol_21d: vol_rank
+    rsi_14: rsi_rank
+    carry_pct: carry_rank
+    curve_curvature_norm: curvature_rank
+  composites:
+    momentum_composite: [mom_rank_63d, mom_rank_126d, mom_rank_252d]
+    sharpe_composite: [sharpe_rank_63d, sharpe_rank_126d, sharpe_rank_252d]
+  thresholds:
+    carry_regime_band: 0.01          # annualized carry separating the two regimes
+    signal_long: 60                  # percentile of the carry-momentum composite
+    signal_short: 40
+    roll_proximity_day: 25           # calendar day from which the roll week is flagged
+  # Planting, harvest, heating and cooling cycles are documented for these two
+  # sectors and not for the financial ones.
+  seasonal_sectors: [agriculture, energy]
+  families:
+    - name: term structure
+      pattern: carry_pct|carry_21d|carry_momentum_*|carry_zscore_*|carry_regime_num|curve_curvature_norm|curvature_21d
+      role: signal
+      hypothesis: A product whose curve is in backwardation earns the roll the shape implies
+      inputs: unadjusted front, second and third settlement prices
+      lookback: 146
+      lag: 0
+      frame: term structure
+      representation: annualized spread, its smoothed level, z-score and change
+      failure_mode: the spread inverts around a supply shock faster than the smoothing follows
+    - name: momentum
+      pattern: ret_*d|skip_month_mom|mom_accel_*|ts_mom_*
+      role: signal
+      hypothesis: Trends in futures persist over horizons of a quarter to a year
+      inputs: roll-adjusted settlement price
+      lookback: 252
+      lag: 0
+      frame: time series
+      representation: simple return, its sign, and differences between horizons
+      failure_mode: reverses over the most recent month, which skip-month momentum drops
+    - name: risk-adjusted momentum
+      pattern: sharpe_[0-9]*d
+      role: signal
+      hypothesis: A trend earned with less dispersion repeats more reliably than a raw one
+      inputs: log return
+      lookback: 252
+      lag: 0
+      frame: time series
+      representation: mean log return over its own dispersion, annualized
+      failure_mode: unbounded as dispersion approaches zero
+    - name: volatility and regime
+      pattern: vol_[0-9]*d|vol_ratio_*|vol_yz_*|vr_*d
+      role: state
+      hypothesis: Dispersion and the trending-or-reverting regime set what a ranking can earn
+      inputs: OHLC settlement bars, log return
+      lookback: 126
+      lag: 0
+      frame: time series
+      representation: annualized standard deviation, ratios of windows, variance ratio
+      failure_mode: close-to-close misses the overnight gap Yang-Zhang is here to catch
+    - name: trend and range
+      pattern: rsi_[0-9]*|ma_ratio_*|dist_from_*
+      role: signal
+      hypothesis: Price against its own recent path separates a trend from an exhausted one
+      inputs: roll-adjusted settlement price
+      lookback: 252
+      lag: 0
+      frame: time series
+      representation: bounded oscillator, ratio to a moving average or a rolling extreme
+      failure_mode: saturates in a sustained trend, where every product reads the same
+    - name: calendar and season
+      pattern: month_*|day_of_year_norm|quarter|roll_proximity|is_seasonal_sector
+      role: state
+      hypothesis: Agricultural and energy curves move with planting, harvest and heating cycles
+      inputs: the session date and the product's sector
+      lookback: 1
+      lag: 0
+      frame: calendar
+      representation: circular month encoding, quarter, roll-week and sector flags
+      failure_mode: says when in the year it is and never which product to prefer
+    - name: cross-sectional position
+      pattern: '*_rank|mom_rank_*|sharpe_rank_*|carry_rank_sector'
+      role: signal
+      hypothesis: Only relative standing is tradable in a long-short cross-sectional strategy
+      inputs: the levels this register's other families produce
+      lookback: 252
+      lag: 0
+      frame: cross-section
+      representation: percentile within the decision date and contract position
+      failure_mode: discards the level the state families carry instead
+    - name: composite
+      pattern: momentum_composite|sharpe_composite|carry_mom_composite|carry_mom_interaction|risk_adj_score|ls_signal
+      role: signal
+      hypothesis: Carry and momentum are separate premia, so their agreement is itself information
+      inputs: the percentiles of the cross-sectional family
+      lookback: 252
+      lag: 0
+      frame: cross-section
+      representation: mean of percentiles, their product, and a banded discretization
+      failure_mode: hides which of the two components moved the score
+
 evaluation:
   n_splits: 5
   train_size: 8Y
