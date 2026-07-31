@@ -31,21 +31,21 @@ name: Reader install
 
 on:
   workflow_dispatch:
-    inputs:
-      platforms:
-        description: "Comma-separated subset to run (blank = all)"
-        type: string
-        default: ""
   schedule:
     - cron: '0 5 * * 1'   # Weekly Monday 5 AM UTC, ahead of the Tests cron
   pull_request:
+    # Everything the walk actually touches, so a change to any of it is re-walked.
     paths:
       - 'pyproject.toml'
       - 'uv.lock'
       - '.env.example'
       - 'docs/installation.md'
       - 'README.md'
+      - 'data/README.md'
+      - 'data/**.py'
+      - 'utils/**.py'
       - 'scripts/verify_installation.py'
+      - '01_process_is_edge/factor_regimes.py'
       - '.github/workflows/reader-install.yml'
 
 concurrency:
@@ -151,3 +151,6 @@ jobs:
             exit 1
           }
           Write-Host "uv sync failed as documented (exit $LASTEXITCODE); native Windows remains unsupported."
+          # GitHub's pwsh shell appends `exit $LASTEXITCODE`, so the non-zero status from
+          # the expected failure would fail this step. Clear it deliberately.
+          exit 0
