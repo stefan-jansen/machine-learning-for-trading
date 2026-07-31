@@ -107,6 +107,19 @@ def test_float_matches_its_decimal_string() -> None:
     assert contradicts_injected_cell(nb, {"TRAIN_SAMPLE_FRAC": 0.2}) is not None
 
 
+def test_non_finite_values_reach_one_normal_form() -> None:
+    """A Decimal NaN does not equal itself, so these have to compare as text.
+
+    Papermill spells a non-finite override ``float('nan')``, which is not a literal
+    and so reaches the comparison as that source text on the injected side. Every
+    form that *is* a number normalizes together; the call form compares as itself.
+    """
+    nb = _notebook([_injected_cell("# Parameters\nCAP = inf\n")])
+    assert contradicts_injected_cell(nb, {"CAP": float("inf")}) is None
+    assert contradicts_injected_cell(nb, {"CAP": "Infinity"}) is None
+    assert contradicts_injected_cell(nb, {"CAP": 5}) is not None
+
+
 def test_string_parameters_compare_by_value() -> None:
     nb = _notebook([_injected_cell('# Parameters\nSTART_DATE = "2024-06-01"\n')])
     assert contradicts_injected_cell(nb, {"START_DATE": "2024-06-01"}) is None

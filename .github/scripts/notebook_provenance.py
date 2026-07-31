@@ -126,22 +126,23 @@ def _normalize_value(value: object) -> tuple[str, object]:
 
     Numbers compare as ``Decimal`` rather than ``float``, so two integers that differ
     above 2**53 stay different. Floats route through ``str`` first, so the literal
-    ``0.1`` matches the string ``"0.1"`` instead of its binary expansion.
+    ``0.1`` matches the string ``"0.1"`` instead of its binary expansion. NaN and the
+    infinities compare as lowercased text, because a Decimal NaN does not equal
+    itself and every form of a non-finite value has to reach the same normal form.
     """
     if isinstance(value, bool):
         return ("bool", value)
-    if isinstance(value, int):
-        return ("num", Decimal(value))
-    if isinstance(value, float):
-        return ("num", Decimal(str(value)))
-    if isinstance(value, str):
-        text = value.strip()
+    if isinstance(value, (int, float, str)):
+        text = str(value).strip()
         try:
-            number = Decimal(text)
-        except InvalidOperation:
-            return ("str", text)
-        # NaN never equals itself, so a literal "nan" would never match itself.
-        return ("num", number) if number.is_finite() else ("str", text)
+            number = Decimal(value if isinstance(value, int) else text)
+        except (InvalidOperation, ValueError):
+            return ("str", text)  # not a number at all
+        if number.is_finite():
+            return ("num", number)
+        # Decimal's own spelling is the normal form that makes `inf`, `Infinity`
+        # and `float("inf")` agree, and NaN compare equal to itself at all.
+        return ("str", str(number).lower())
     return ("str", str(value))
 
 
