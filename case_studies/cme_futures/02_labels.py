@@ -572,7 +572,7 @@ print(
 
 # %% [markdown] tags=["results"]
 # Raw carry earns a mean information coefficient of 0.0069 against the weekly label over
-# 3,352 scored sessions on a median cross-section of 14 products, positive as the
+# 3,352 scored sessions on a cross-section of at least 14 products, positive as the
 # backwardation hypothesis implies. Under the naive standard error that is a t-statistic of
 # 1.61; the Newey-West rule picks 8 lags here, above the four the horizon alone requires,
 # and the HAC statistic is 0.87 with a p-value of 0.387. The floor a feature has to clear is
