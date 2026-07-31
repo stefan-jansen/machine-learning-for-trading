@@ -266,13 +266,20 @@ def notebooks_changed_since(ref: str, merge_base: bool = True) -> list[Path]:
     without the merge base ever seeing it.
     """
     spec = f"{ref}...HEAD" if merge_base else f"{ref}..HEAD"
-    diff = subprocess.run(
-        ["git", "diff", "--name-only", spec],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.split()
+    # -z, because the gate must not lose a notebook for having a space in its name.
+    # Plain --name-only quotes such a path and .split() then tears it into fragments
+    # that match no suffix, so the notebook drops out of scope and passes unchecked.
+    diff = [
+        name
+        for name in subprocess.run(
+            ["git", "diff", "--name-only", "-z", spec],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split("\0")
+        if name
+    ]
     owned: set[Path] = set()
     for name in diff:
         path = REPO_ROOT / name
