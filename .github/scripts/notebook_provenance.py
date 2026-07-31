@@ -250,6 +250,45 @@ def iter_notebooks() -> list[Path]:
     return sorted(out)
 
 
+def _changed_paths(ref: str, merge_base: bool, diff_filter: str | None = None) -> list[str]:
+    """Repo-relative paths changed relative to ``ref``, optionally by change type.
+
+    -z, because the gate must not lose a notebook for having a space in its name.
+    Plain --name-only quotes such a path and .split() then tears it into fragments
+    that match no suffix, so the notebook drops out of scope and passes unchecked.
+    --no-renames for the same reason: rename detection reports only the destination,
+    so moving a .py would hide the source path whose notebook is now stale.
+    """
+    spec = f"{ref}...HEAD" if merge_base else f"{ref}..HEAD"
+    cmd = ["git", "diff", "--name-only", "-z", "--no-renames"]
+    if diff_filter:
+        cmd.append(f"--diff-filter={diff_filter}")
+    cmd.append(spec)
+    out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, check=True).stdout
+    return [name for name in out.split("\0") if name]
+
+
+def notebooks_orphaned_since(ref: str, merge_base: bool = True) -> list[str]:
+    """Notebooks this change left with no source: the paired ``.py`` was deleted
+    and the committed ``.ipynb`` was kept.
+
+    This is the strongest form of the staleness the gate exists to catch - a render
+    whose source is gone can never be re-derived - and ``check_all`` cannot see it,
+    because its ``paired_py() is None`` branch cannot tell a notebook that was just
+    orphaned from one that was never paired. Three tracked notebooks are deliberately
+    unpaired, so the distinction has to come from the diff rather than from the tree.
+    A rename arrives here as a delete plus an add, which is why --no-renames matters.
+    """
+    orphaned: list[str] = []
+    for name in _changed_paths(ref, merge_base, diff_filter="D"):
+        if not name.endswith(".py"):
+            continue
+        nb = (REPO_ROOT / name).with_suffix(".ipynb")
+        if nb.exists() and not (SKIP_PARTS & set(nb.parts)):
+            orphaned.append(f"{nb.relative_to(REPO_ROOT)} (deleted source: {name})")
+    return sorted(orphaned)
+
+
 def notebooks_changed_since(ref: str, merge_base: bool = True) -> list[Path]:
     """Notebooks this change is answerable for, relative to ``ref``.
 
@@ -265,23 +304,7 @@ def notebooks_changed_since(ref: str, merge_base: bool = True) -> list[Path]:
     (``ref..HEAD``) — a force-push can revert a notebook relative to that tip
     without the merge base ever seeing it.
     """
-    spec = f"{ref}...HEAD" if merge_base else f"{ref}..HEAD"
-    # -z, because the gate must not lose a notebook for having a space in its name.
-    # Plain --name-only quotes such a path and .split() then tears it into fragments
-    # that match no suffix, so the notebook drops out of scope and passes unchecked.
-    # --no-renames for the same reason: rename detection reports only the destination,
-    # so moving a .py would hide the source path whose notebook is now stale.
-    diff = [
-        name
-        for name in subprocess.run(
-            ["git", "diff", "--name-only", "-z", "--no-renames", spec],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.split("\0")
-        if name
-    ]
+    diff = _changed_paths(ref, merge_base)
     owned: set[Path] = set()
     for name in diff:
         path = REPO_ROOT / name
@@ -424,17 +447,31 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
 
 def _cmd_check(args: argparse.Namespace) -> int:
     scope = None
+    orphaned: list[str] = []
     if args.since:
-        scope = notebooks_changed_since(args.since, merge_base=not args.no_merge_base)
-        if not scope:
+        merge_base = not args.no_merge_base
+        # Before the scope check returns early: an orphaned notebook is invisible to
+        # check_all by construction, so it has to be found from the diff, and the
+        # change that deletes only a .py leaves nothing in scope to report it.
+        orphaned = notebooks_orphaned_since(args.since, merge_base=merge_base)
+        scope = notebooks_changed_since(args.since, merge_base=merge_base)
+        if not scope and not orphaned:
             print(f"notebook sync OK: no notebook is changed relative to {args.since}")
             return 0
-        print(f"checking {len(scope)} notebook(s) changed relative to {args.since}:")
-        for nb in scope:
-            print(f"  {nb.relative_to(REPO_ROOT)}")
-        print()
+        if scope:
+            print(f"checking {len(scope)} notebook(s) changed relative to {args.since}:")
+            for nb in scope:
+                print(f"  {nb.relative_to(REPO_ROOT)}")
+            print()
     stale, testmode, contradicted, unverified = check_all(strict=args.strict, notebooks=scope)
-    fail = bool(stale or testmode or contradicted) or (args.strict and bool(unverified))
+    fail = bool(stale or testmode or contradicted or orphaned) or (args.strict and bool(unverified))
+    if orphaned:
+        print(
+            "ORPHANED (the paired .py was deleted but the rendered .ipynb was kept — "
+            "restore the source or delete the notebook with it):"
+        )
+        for r in orphaned:
+            print(f"  {r}")
     if stale:
         print(
             "STALE (paired .py changed since the notebook was executed — re-run in the canonical env):"
