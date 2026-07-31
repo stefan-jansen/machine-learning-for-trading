@@ -1,0 +1,149 @@
+# Reader install — walk the documented setup on a clean machine, on every platform
+#
+# The install instructions are the one part of the repo that no other job exercises:
+# `test.yml` runs notebooks inside the pre-built ml4t image, which already has the
+# environment baked in, so it can stay green while `uv sync` is broken for every
+# reader. That gap is what this workflow closes.
+#
+# Each job runs the commands a reader is told to run, in the order the docs give
+# them, on a runner that starts with nothing installed:
+#
+#   install uv  ->  uv sync  ->  cp .env.example .env  ->  verify_installation.py
+#   ->  download the free data  ->  run the first notebook
+#
+# If a step here fails, the corresponding paragraph of docs/installation.md is
+# wrong. Fix the docs or fix the dependency; do not relax the job.
+#
+# Platform coverage and what it deliberately does not cover:
+#   ubuntu-latest  the Linux uv path
+#   macos-15       Apple Silicon
+#   macos-13       Intel
+#   windows-latest native Windows, PowerShell, no WSL
+#
+# GitHub-hosted Windows runners have no WSL2 and no Docker Desktop, so the
+# recommended Windows path (WSL2) and the Docker path cannot be tested here.
+# Those are covered by the manual VM walk recorded in the install validation notes.
+# Runners also ship git, a C toolchain and Xcode, so this workflow cannot see the
+# "reader has no compiler" class of failure; that is why the docs must still state
+# the toolchain requirement explicitly.
+
+name: Reader install
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Comma-separated subset to run (blank = all)"
+        type: string
+        default: ""
+  schedule:
+    - cron: '0 5 * * 1'   # Weekly Monday 5 AM UTC, ahead of the Tests cron
+  pull_request:
+    paths:
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.env.example'
+      - 'docs/installation.md'
+      - 'README.md'
+      - 'scripts/verify_installation.py'
+      - '.github/workflows/reader-install.yml'
+
+concurrency:
+  group: reader-install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unix:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Linux x86_64
+          - os: macos-15
+            label: macOS Apple Silicon
+          - os: macos-13
+            label: macOS Intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reclaim runner disk
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost \
+                      /usr/local/lib/android "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      # docs/installation.md, "Local Setup with uv"
+      - name: Install uv as the docs instruct
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+
+      - name: uv sync
+        run: |
+          set -o pipefail
+          time uv sync 2>&1 | tail -30
+
+      - name: Copy the environment template
+        run: cp .env.example .env
+
+      - name: Verify the installation
+        run: uv run python scripts/verify_installation.py
+
+      - name: Download the free datasets
+        run: uv run python data/download_all.py --free-only
+
+      - name: Run the first notebook
+        env:
+          MPLBACKEND: Agg
+          PLOTLY_RENDERER: json
+        run: uv run python 01_process_is_edge/factor_regimes.py
+
+      - name: Report the footprint a reader pays
+        if: always()
+        run: |
+          du -sh .venv data 2>/dev/null || true
+          df -h . | tail -1
+
+  windows:
+    name: Windows native (PowerShell)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      # The docs give no Windows uv command; this is uv's own documented installer.
+      # That gap is itself a finding — see the install validation notes.
+      - name: Install uv
+        run: |
+          irm https://astral.sh/uv/install.ps1 | iex
+          "$env:USERPROFILE\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: uv sync
+        run: uv sync
+
+      - name: Copy the environment template
+        run: Copy-Item .env.example .env
+
+      - name: Verify the installation
+        run: uv run python scripts/verify_installation.py
+
+      - name: Download the free datasets
+        run: uv run python data/download_all.py --free-only
+
+      - name: Run the first notebook
+        env:
+          MPLBACKEND: Agg
+          PLOTLY_RENDERER: json
+        run: uv run python 01_process_is_edge/factor_regimes.py
+
+      - name: Report the footprint a reader pays
+        if: always()
+        run: Get-PSDrive C | Select-Object Used,Free
