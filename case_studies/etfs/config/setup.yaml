@@ -306,3 +306,109 @@ causal:
   treatment: skip_recent_6_1
   confounders: [vol_21d, vol_126d, regime, yield_curve_slope]
   method: walk_forward_dml
+
+# The feature-specification register. One row per family: what it reads, how far
+# back, with what delay, and whether it ranks assets against each other (signal) or
+# describes the environment a ranking is formed in (state). `03_financial_features`
+# builds the matrix from `windows` and audits it against `lookback`; nothing outside
+# the notebook could state what this case study's feature set is until it lived here.
+features:
+  windows:
+    momentum: [5, 10, 21, 42, 63, 126, 189, 252]
+    volatility: [21, 63, 126, 252]
+    skip_recent: 21
+    drawdown: [63, 126]
+    volume: [21, 63]
+  ranked: [ret_126d, sharpe_126d, vol_63d]
+  regime_threshold: 0.005  # 10y-2y spread separating the two curve regimes
+  families:
+    - name: momentum
+      pattern: ret_*d|skip_recent_*|mom_accel_*
+      role: signal
+      hypothesis: Relative performance persists over a one-month hold
+      inputs: adjusted close
+      lookback: 252
+      lag: 0
+      frame: time series
+      representation: simple return, and differences between horizons
+      failure_mode: reverses at the shortest horizons
+    - name: risk-adjusted momentum
+      pattern: sharpe_*d
+      role: signal
+      hypothesis: Trend earned with less dispersion repeats more reliably
+      inputs: log return
+      lookback: 252
+      lag: 0
+      frame: time series
+      representation: window return over its own dispersion
+      failure_mode: unbounded when dispersion approaches zero
+    - name: volatility
+      pattern: vol_[0-9]*d|vol_ratio_short|vol_ratio_medium
+      role: state
+      hypothesis: Dispersion sets how far apart the cross-section can spread
+      inputs: log return
+      lookback: 252
+      lag: 0
+      frame: time series
+      representation: annualized standard deviation, and ratios of windows
+      failure_mode: lags a shock by roughly half its window
+    - name: oscillator and trend
+      pattern: rsi_*|macd_*|adx_*|cci_*|stoch_*|aroon_*|sma_ratio_*|ema_ratio_*|bb_pctb_*
+      role: signal
+      hypothesis: Price against its own recent path separates trend from exhaustion
+      inputs: OHLC
+      lookback: 200
+      lag: 0
+      frame: time series
+      representation: bounded oscillator, ratio to a moving average
+      failure_mode: saturates in a sustained trend
+    - name: range and drawdown
+      pattern: natr_*|chop_*|hurst_*|max_dd_*
+      role: state
+      hypothesis: Trending and mean-reverting regimes reward different signals
+      inputs: OHLC
+      lookback: 126
+      lag: 0
+      frame: time series
+      representation: normalized range, Hurst exponent, share below trailing peak
+      failure_mode: the exponent needs a long window to settle
+    - name: volume
+      pattern: vol_ratio_[0-9]*d|obv_*
+      role: state
+      hypothesis: Participation confirms or contradicts a price move
+      inputs: share volume
+      lookback: 63
+      lag: 0
+      frame: time series
+      representation: ratio to trailing mean, z-score of on-balance volume
+      failure_mode: index events put one date orders of magnitude out
+    - name: extremes and consistency
+      pattern: pct_positive_*|dist_52w_*
+      role: signal
+      hypothesis: Proximity to a 52-week extreme is itself a positioning signal
+      inputs: adjusted close
+      lookback: 252
+      lag: 0
+      frame: time series
+      representation: ratio to a rolling extreme, share of positive sessions
+      failure_mode: piles up at one during a sustained trend
+    - name: cross-sectional position
+      pattern: '*_rank'
+      role: signal
+      hypothesis: Only relative standing is tradable in a cross-sectional strategy
+      inputs: carrier features
+      lookback: 252
+      lag: 0
+      frame: cross-section
+      representation: percentile within the decision date
+      failure_mode: discards the level the state families carry instead
+    - name: macro and cross-asset regime
+      pattern: corr_spy_tlt_*|regime|yield_curve_*
+      role: state
+      hypothesis: Rotation depends on the macro regime and on assets still diversifying
+      inputs: SPY and TLT log returns, 10y and 2y constant-maturity yields
+      lookback: 252
+      lag: 0
+      frame: cross-asset
+      representation: rolling correlation, level, z-score, indicator
+      failure_mode: one equity-bond pair stands in for the whole universe
