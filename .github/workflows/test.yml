@@ -496,6 +496,7 @@ jobs:
             tests/test_pm_helpers.py \
             tests/test_create_test_data.py \
             tests/test_sample_registry_for_tests.py \
+            tests/test_toolchain_pins.py \
             -v --tb=short
       # A two-tailed p-value written as `2 * (1 - dist.cdf(abs(t)))` returns
       # exactly 0.0 above |t| ~8.35, so a notebook teaching inference printed

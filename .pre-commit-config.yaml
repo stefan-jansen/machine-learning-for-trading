@@ -3,8 +3,10 @@
 # Run manually: pre-commit run --all-files
 
 repos:
+  # Keep in lockstep with the `ruff==` pin in pyproject.toml's dev extra;
+  # tests/test_toolchain_pins.py fails when the two drift.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.8
+    rev: v0.15.14
     hooks:
       - id: ruff
         args: [--fix]

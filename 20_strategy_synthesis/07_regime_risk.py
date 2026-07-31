@@ -57,7 +57,7 @@ from case_studies.utils.analytics import (
 
 warnings.filterwarnings("ignore")
 
-# %%
+# %% tags=["parameters"]
 MAX_CASE_STUDIES = 0  # 0 = all
 
 # %%
