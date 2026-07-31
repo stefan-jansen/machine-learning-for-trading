@@ -118,10 +118,9 @@ does not work on Intel Macs or in native Windows Python.
 **Most readers need only `ml4t`.** The other images are for specific notebooks.
 
 **Apple Silicon users**: `signatory` and `esig` have no ARM64 builds, so the `ml4t-py312`
-notebooks do not run natively. Every one of them ships pre-executed, so reading the `.ipynb` on
-GitHub or in Jupyter is the intended route. To execute them anyway, enable Docker Desktop →
-Settings → General → **Use Rosetta for x86_64/amd64 emulation** and pull the amd64 image; it
-works, at emulation speed. Nothing else in the book needs this.
+notebooks do not run natively. They all ship pre-executed, and
+[Py312 Image](#py312-image-specific-notebooks) covers both reading them and running them under
+Rosetta. Nothing else in the book needs this.
 
 ---
 
@@ -422,7 +421,15 @@ docker compose --profile py312 run --rm py312 \
 Chapter 15 notebook 06 uses the isolated `/opt/bsts` interpreter so its NumPy 1 and
 pandas 2.2 constraints do not replace dependencies required by the other py312 notebooks.
 
-**Apple Silicon**: These notebooks cannot run natively. View the pre-executed `.ipynb` files in Jupyter or on GitHub.
+The `py312` service reserves no GPU, so it runs anywhere the amd64 image does. On a machine with
+an NVIDIA GPU, `--profile py312-gpu run --rm py312-gpu` is the same image with the GPU attached,
+which Ch21 `05_deep_hedging_pfhedge` benefits from.
+
+**Apple Silicon**: these notebooks have no arm64 build and all of them ship pre-executed, so
+reading the `.ipynb` in Jupyter or on GitHub is the intended route. To execute them anyway,
+enable Docker Desktop → Settings → General → **Use Rosetta for x86_64/amd64 emulation** and
+prefix the commands above with `DOCKER_DEFAULT_PLATFORM=linux/amd64`. It works, at emulation
+speed and without a GPU.
 
 ---
 
