@@ -14,8 +14,10 @@ double::
 A notebook that teaches inference must not print ``p=0`` for a value no
 computation produced, and ``p_value_hac`` must not be stored as ``0.0``.
 
-The static scan below is stdlib-only so it runs in the always-on ``guards`` job.
-The numeric tests need scipy and the modelling stack and skip without them.
+Both halves run in the always-on ``test-unit`` job, which installs scipy,
+statsmodels and scikit-learn for the numeric case. The ``importorskip`` calls
+keep the static scan usable from a stdlib-only environment; they are not the CI
+path, and a skip there would mean the modelling stack went missing.
 """
 
 from __future__ import annotations
