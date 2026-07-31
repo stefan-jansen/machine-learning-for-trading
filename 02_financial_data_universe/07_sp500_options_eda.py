@@ -58,6 +58,7 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from data import load_sp500_daily_bars, load_sp500_options_eda
+from utils.style import COLORS
 
 # %% tags=["parameters"]
 DAILY_START_DATE = "2020-01-01"
@@ -234,7 +235,7 @@ fig = px.histogram(
     labels={"n_options": "Number of Options per Symbol/Day", "count": "Frequency"},
 )
 median_options = float(options_per_symbol["n_options"].median())
-fig.add_vline(x=median_options, line_dash="dash", line_color="red")
+fig.add_vline(x=median_options, line_dash="dash", line_color=COLORS["negative"])
 fig.add_annotation(x=median_options, y=0.95, yref="paper", text="Median", showarrow=False)
 fig.update_layout(showlegend=False)
 fig.show()
@@ -351,7 +352,7 @@ fig = px.scatter(
     labels={"moneyness": "Moneyness (Strike/Spot)", "implied_vol": "Implied Volatility"},
     trendline="lowess",
 )
-fig.add_vline(x=1.0, line_dash="dash", line_color="gray")
+fig.add_vline(x=1.0, line_dash="dash", line_color=COLORS["neutral"])
 fig.add_annotation(x=1.0, y=0.95, yref="paper", text="ATM", showarrow=False)
 fig.show()
 
@@ -375,7 +376,7 @@ fig = px.scatter(
     title="AAPL IV Smile Across Expirations",
     labels={"moneyness": "Moneyness", "implied_vol": "Implied Volatility"},
 )
-fig.add_vline(x=1.0, line_dash="dash", line_color="gray")
+fig.add_vline(x=1.0, line_dash="dash", line_color=COLORS["neutral"])
 fig.show()
 
 # %% [markdown]
@@ -502,7 +503,7 @@ fig = px.histogram(
     labels={"iv_atm": "ATM Implied Volatility", "count": "Number of Symbols"},
 )
 median_iv = float(cross_section["iv_atm"].median())
-fig.add_vline(x=median_iv, line_dash="dash", line_color="red")
+fig.add_vline(x=median_iv, line_dash="dash", line_color=COLORS["negative"])
 fig.add_annotation(x=median_iv, y=0.95, yref="paper", text="Median", showarrow=False)
 fig.show()
 
@@ -542,7 +543,7 @@ fig.add_trace(
         y=daily_iv["iv_p90"].to_list(),
         fill=None,
         mode="lines",
-        line_color="lightblue",
+        line_color=COLORS["slate"],
         name="P90",
     )
 )
@@ -552,7 +553,7 @@ fig.add_trace(
         y=daily_iv["iv_p10"].to_list(),
         fill="tonexty",
         mode="lines",
-        line_color="lightblue",
+        line_color=COLORS["slate"],
         name="P10-P90 Range",
     )
 )
@@ -561,14 +562,14 @@ fig.add_trace(
         x=daily_iv["timestamp"].to_list(),
         y=daily_iv["iv_median"].to_list(),
         mode="lines",
-        line_color="darkblue",
+        line_color=COLORS["blue"],
         line_width=2,
         name="Median IV",
     )
 )
 
-fig.add_vline(x="2020-03-16", line_dash="dash", line_color="red")
-fig.add_vline(x="2020-03-23", line_dash="dash", line_color="green")
+fig.add_vline(x="2020-03-16", line_dash="dash", line_color=COLORS["negative"])
+fig.add_vline(x="2020-03-23", line_dash="dash", line_color=COLORS["positive"])
 fig.add_annotation(x="2020-03-16", y=0.95, yref="paper", text="COVID Low", showarrow=False)
 fig.add_annotation(x="2020-03-23", y=0.90, yref="paper", text="Market Bottom", showarrow=False)
 
@@ -629,7 +630,7 @@ fig = px.bar(
     title="Median Bid-Ask Spread by Moneyness",
     labels={"moneyness": "Moneyness", "median_spread": "Median Spread (%)"},
 )
-fig.add_vline(x=1.0, line_dash="dash", line_color="gray")
+fig.add_vline(x=1.0, line_dash="dash", line_color=COLORS["neutral"])
 fig.add_annotation(x=1.0, y=0.95, yref="paper", text="ATM", showarrow=False)
 fig.show()
 
@@ -677,7 +678,6 @@ fig.update_layout(
     title="IV Convergence Status Distribution",
     xaxis_title="Share of rows (%)",
     yaxis_title="Convergence status",
-    template="plotly_white",
     height=460,
     margin=dict(l=170, r=100),
     xaxis=dict(range=[0, max(convergence_pd["pct"]) * 1.15]),

@@ -57,6 +57,7 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from data import load_sp500_options_eda
+from utils.style import COLORS
 
 # %% tags=["parameters"]
 DEMO_SYMBOL = "AAPL"
@@ -275,7 +276,7 @@ fig.add_trace(
         y=nonroll_prices,
         mode="markers",
         name="Same contract",
-        marker=dict(size=4, color="#3498db"),
+        marker=dict(size=4, color=COLORS["blue"]),
         opacity=0.7,
     ),
     row=1,
@@ -287,7 +288,7 @@ fig.add_trace(
         y=roll_prices,
         mode="markers",
         name="Contract switch",
-        marker=dict(size=6, color="#e74c3c", symbol="diamond"),
+        marker=dict(size=6, color=COLORS["negative"], symbol="diamond"),
         opacity=0.9,
     ),
     row=1,
@@ -299,7 +300,7 @@ fig.add_trace(
         y=prices,
         mode="lines",
         name="Price",
-        line=dict(width=1, color="#95a5a6"),
+        line=dict(width=1, color=COLORS["neutral"]),
         showlegend=False,
     ),
     row=1,
@@ -311,7 +312,7 @@ fig.add_trace(
         y=dtes,
         mode="lines+markers",
         name="DTE",
-        marker=dict(size=3, color="#2ecc71"),
+        marker=dict(size=3, color=COLORS["positive"]),
         line=dict(width=1),
     ),
     row=2,
@@ -321,7 +322,7 @@ fig.add_trace(
 fig.update_yaxes(title_text="Straddle Mid ($)", row=1, col=1)
 fig.update_yaxes(title_text="DTE", row=2, col=1)
 fig.update_xaxes(title_text="Date", row=2, col=1)
-fig.update_layout(template="plotly_white", height=600, legend=dict(x=0.01, y=0.99))
+fig.update_layout(height=600, legend=dict(x=0.01, y=0.99))
 fig.show()
 
 # %% [markdown]
@@ -524,7 +525,7 @@ fig.add_trace(
         x=comparison["naive_ret"].to_list(),
         y=comparison["same_contract_ret"].to_list(),
         mode="markers",
-        marker=dict(size=3, color="#3498db", opacity=0.4),
+        marker=dict(size=3, color=COLORS["blue"], opacity=0.4),
         name="Returns",
     )
 )
@@ -533,12 +534,11 @@ fig.add_trace(
         x=[-0.5, 0.5],
         y=[-0.5, 0.5],
         mode="lines",
-        line=dict(dash="dash", color="gray"),
+        line=dict(dash="dash", color=COLORS["neutral"]),
         name="45° line",
     )
 )
 fig.update_layout(
-    template="plotly_white",
     title=f"{DEMO_SYMBOL}: Naive vs Same-Contract {HOLDING_PERIOD}d Returns",
     xaxis_title="Naive (chained constant-maturity)",
     yaxis_title="Same-contract holding return",
@@ -636,7 +636,7 @@ fig.add_trace(
         y=adjusted["instr_mid"].to_list(),
         mode="lines",
         name="Raw",
-        line=dict(color="#e74c3c", width=1.5),
+        line=dict(color=COLORS["negative"], width=1.5),
     ),
     row=1,
     col=1,
@@ -647,7 +647,7 @@ fig.add_trace(
         y=adjusted["price_adjusted"].to_list(),
         mode="lines",
         name="Adjusted",
-        line=dict(color="#3498db", width=1.5),
+        line=dict(color=COLORS["blue"], width=1.5),
     ),
     row=2,
     col=1,
@@ -656,7 +656,6 @@ fig.add_trace(
 fig.update_yaxes(title_text="Straddle Mid ($)", row=1, col=1)
 fig.update_yaxes(title_text="Adjusted Price ($)", row=2, col=1)
 fig.update_layout(
-    template="plotly_white",
     height=500,
     title=f"{DEMO_SYMBOL} Straddle: Raw vs Continuous (Roll-Adjusted)",
 )

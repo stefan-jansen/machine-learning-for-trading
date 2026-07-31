@@ -51,6 +51,7 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from data import load_crypto_premium
+from utils.style import COLORS
 
 # %% tags=["parameters"]
 # Production defaults — Papermill injects overrides for CI
@@ -141,7 +142,7 @@ fig.add_trace(
         x=btc_close_bps,
         nbinsx=100,
         name="BTC Premium",
-        marker_color="#F7931A",
+        marker_color=COLORS["copper"],
     )
 )
 
@@ -150,18 +151,21 @@ mean_val = np.mean(btc_close_bps)
 std_val = np.std(btc_close_bps)
 
 fig.add_vline(
-    x=mean_val, line_dash="dash", line_color="red", annotation_text=f"Mean: {mean_val:.1f} bps"
+    x=mean_val,
+    line_dash="dash",
+    line_color=COLORS["negative"],
+    annotation_text=f"Mean: {mean_val:.1f} bps",
 )
 fig.add_vline(
     x=mean_val + 2 * std_val,
     line_dash="dot",
-    line_color="green",
+    line_color=COLORS["positive"],
     annotation_text=f"+2σ: {mean_val + 2 * std_val:.1f} bps",
 )
 fig.add_vline(
     x=mean_val - 2 * std_val,
     line_dash="dot",
-    line_color="green",
+    line_color=COLORS["positive"],
     annotation_text=f"-2σ: {mean_val - 2 * std_val:.1f} bps",
 )
 
@@ -170,7 +174,6 @@ fig.update_layout(
     xaxis_title="Premium Index (bps)",
     yaxis_title="Frequency",
     height=400,
-    template="plotly_white",
 )
 fig.show()
 
@@ -204,7 +207,6 @@ fig.update_layout(
     title="Premium Index Distributions (bps) - Major Cryptos",
     height=500,
     showlegend=False,
-    template="plotly_white",
 )
 fig.show()
 
@@ -251,7 +253,7 @@ fig.add_trace(
         y=btc_bps["premium_bps"].to_list(),
         mode="lines",
         name="8h Premium",
-        line=dict(color="#F7931A", width=1),
+        line=dict(color=COLORS["copper"], width=1),
         opacity=0.6,
     ),
     row=1,
@@ -263,14 +265,14 @@ fig.add_trace(
         y=(btc_bps["rolling_30d"] * 10000).to_list(),
         mode="lines",
         name="30-Day Rolling Avg",
-        line=dict(color="red", width=2),
+        line=dict(color=COLORS["negative"], width=2),
     ),
     row=2,
     col=1,
 )
-fig.add_hline(y=0, line_dash="dash", line_color="gray", row=1, col=1)
-fig.add_hline(y=0, line_dash="dash", line_color="gray", row=2, col=1)
-fig.update_layout(height=600, template="plotly_white", showlegend=False)
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=1, col=1)
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=2, col=1)
+fig.update_layout(height=600, showlegend=False)
 fig.update_yaxes(title_text="Premium (bps)", row=1, col=1)
 fig.update_yaxes(title_text="Premium (bps)", row=2, col=1)
 fig.show()
@@ -365,7 +367,6 @@ fig = px.scatter(
 
 fig.update_layout(
     height=600,
-    template="plotly_white",
     legend=dict(
         orientation="h",
         yanchor="top",
@@ -426,7 +427,6 @@ fig.update_layout(
     xaxis_title="Month",
     yaxis_title="Symbol",
     height=600,
-    template="plotly_white",
 )
 fig.show()
 
@@ -491,14 +491,14 @@ fig.add_trace(
         y=btc_funding["annualized_pct"].to_list(),
         mode="lines",
         name="Annualized Funding Return",
-        line=dict(color="#F7931A", width=1),
+        line=dict(color=COLORS["copper"], width=1),
     )
 )
 
 # Add horizontal lines for reference
-fig.add_hline(y=0, line_dash="dash", line_color="gray")
-fig.add_hline(y=20, line_dash="dot", line_color="green", annotation_text="20% APY")
-fig.add_hline(y=-20, line_dash="dot", line_color="red", annotation_text="-20% APY")
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
+fig.add_hline(y=20, line_dash="dot", line_color=COLORS["positive"], annotation_text="20% APY")
+fig.add_hline(y=-20, line_dash="dot", line_color=COLORS["negative"], annotation_text="-20% APY")
 
 y_padding = 10
 fig.update_layout(
@@ -507,7 +507,6 @@ fig.update_layout(
     yaxis_title="Annualized Return (%)",
     yaxis=dict(range=[ann_min - y_padding, ann_max + y_padding]),
     height=400,
-    template="plotly_white",
 )
 fig.show()
 

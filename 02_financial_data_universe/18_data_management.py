@@ -198,7 +198,7 @@ for sym in etf_symbols:
     seen.add(cls)
 fig.add_hline(y=100, line=dict(color=COLORS["neutral"], width=1, dash="dot"))
 fig.update_layout(
-    title="One batch_load call, three asset classes: 2024 total return (rebased to 100)",
+    title="One batch_load call returns three asset classes on one axis",
     xaxis_title="Date",
     yaxis_title="Rebased close (Jan 2 2024 = 100)",
     height=420,
@@ -377,7 +377,7 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title=f"AAPL Hive storage: one Parquet partition per month ({len(aapl_sizes)} files)",
+    title="AAPL Hive storage: one Parquet partition per month",
     xaxis_title="Partition (year-month)",
     yaxis_title="Partition size (KB)",
     height=420,
