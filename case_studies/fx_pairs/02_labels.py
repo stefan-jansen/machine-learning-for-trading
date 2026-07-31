@@ -450,8 +450,8 @@ ax.set_xlabel("Lag in venue sessions")
 ax.set_ylabel("Panel autocorrelation")
 add_message_title(
     ax,
-    "Each label's autocorrelation is the overlap, and it ends at the horizon",
-    subtitle="Dotted lines mark each horizon; demeaned within pair, then pooled",
+    "The overlap in each label decays to zero at its own horizon",
+    subtitle="Dotted lines mark each horizon; what remains past one is not overlap",
 )
 ax.legend(loc="upper right", frameon=False)
 show_with_alt(fig, "Panel autocorrelation of the three labels against lag in sessions.")
@@ -541,9 +541,11 @@ print(
 # of the price data it was built from. That last field is what ties a label to its data
 # vintage.
 #
-# The folds that train models are derived per label by `case_studies/utils/cv_window.py` from
-# `config/setup.yaml` and the timeline of the label parquet written here, so which rows land
-# in these files is what sets where the fold boundaries fall.
+# The folds that train models are fixed boundaries in `config/cv_config.json`, which
+# `06_linear`, `07_gbm` and `09_dl_tcn` each read directly, and which follow the walk-forward
+# shape `config/setup.yaml` declares. They are not derived from the timeline of the label
+# parquet written here, so a label whose coverage changes does not move a fold with it, and
+# the two have to be checked against each other rather than assumed consistent.
 
 # %%
 for label_name in LABEL_NAMES:
