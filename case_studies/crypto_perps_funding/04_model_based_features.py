@@ -52,7 +52,8 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats
 from scipy.stats import spearmanr
 
 from data import load_crypto_perps
-from utils.cv_splits import load_evaluation_config
+from utils.artifact_specs import load_setup_config, resolve_label_buffer
+from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.modeling import load_modeling_dataset
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
@@ -80,32 +81,45 @@ HMM_N_STATES = 2
 set_global_seeds(SEED)
 
 # %% [markdown]
-# ## 1. Load the Emitted and Training Frames
+# ## 1. Load the Feature and Label Frames
 #
-# The financial notebook emits 39 features. The shared modeling loader is the
-# reader-facing assembly path used by every downstream model notebook. Comparing
-# those two views here prevents a feature file from silently diverging from the
-# frame that is actually trained.
+# The financial notebook emits 39 features. This notebook reads them together
+# with the primary label and the raw 8-hour bars, and adds nothing to the
+# universe: the symbols are exactly those the financial frame and the label
+# frame agree on.
+#
+# The shared modeling loader is deliberately **not** called here. It reads
+# `features/model_based.parquet`, which is this notebook's own output, so
+# calling it before the write would validate the previous run's artifact
+# against the current fold geometry. The assembly check runs after the write
+# instead, in section 7.
 
 # %%
-mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
 financial = pl.read_parquet(FEATURES_DIR / "financial.parquet")
 labels = pl.read_parquet(LABELS_DIR / f"{PRIMARY_LABEL}.parquet")
+label_col = PRIMARY_LABEL
 
-symbols = sorted(mds.dataset["symbol"].unique().to_list())
-financial = financial.filter(pl.col("symbol").is_in(symbols))
 financial_feature_cols = [c for c in financial.columns if c not in ("timestamp", "symbol")]
 assert len(financial_feature_cols) == 39, (
     f"Financial feature contract changed: expected 39, got {len(financial_feature_cols)}"
 )
 
-emit_frame = financial.join(labels, on=["timestamp", "symbol"], how="inner").select(
-    ["timestamp", "symbol", *financial_feature_cols, mds.label_col]
+training_frame = financial.join(labels, on=["timestamp", "symbol"], how="inner").select(
+    ["timestamp", "symbol", *financial_feature_cols, label_col]
 )
-training_frame = mds.dataset.select(["timestamp", "symbol", *financial_feature_cols, mds.label_col])
-emit_frame = emit_frame.sort(["timestamp", "symbol"])
+if MAX_SYMBOLS > 0:
+    # Same rule the shared loader applies: keep the symbols with the most rows.
+    keep = (
+        training_frame.group_by("symbol")
+        .len()
+        .sort("len", descending=True)
+        .head(MAX_SYMBOLS)["symbol"]
+        .to_list()
+    )
+    training_frame = training_frame.filter(pl.col("symbol").is_in(keep))
+symbols = sorted(training_frame["symbol"].unique().to_list())
+financial = financial.filter(pl.col("symbol").is_in(symbols))
 training_frame = training_frame.sort(["timestamp", "symbol"])
-assert emit_frame.equals(training_frame), "Emitted financial frame differs from training assembly"
 
 prices = (
     load_crypto_perps(frequency="8h")
@@ -117,7 +131,6 @@ n_symbols = len(symbols)
 
 print(f"Financial emit: {len(financial):,} rows x {len(financial_feature_cols)} features")
 print(f"Training frame: {len(training_frame):,} rows, {n_symbols} symbols")
-print("Emit vs training frame: exact match [OK]")
 print(f"Available price period: {prices['timestamp'].min()} to {prices['timestamp'].max()}")
 
 # Schema validation: assert expected columns from 02_labels.py
@@ -126,13 +139,21 @@ _missing = _required - set(prices.columns)
 assert not _missing, f"Loader missing columns: {_missing}"
 
 # %% [markdown]
-# ## 2. Use the Canonical Walk-Forward Boundaries
+# ## 2. Resolve the Walk-Forward Boundaries Before Anything Is Fitted
 #
-# The temporal models use the exact purged folds returned by the shared modeling
-# loader. This keeps the feature artifact keyed to the same fold identifiers and
-# boundaries consumed by downstream training.
+# `generate_cv_splits` derives the folds from the label frame and the window in
+# `setup.yaml`, so the feature artifact is keyed to the same fold identifiers and
+# boundaries downstream training reads. Resolving them here, before any model
+# runs, is what lets every fit below be sealed against a boundary rather than
+# checked against one afterwards.
+#
+# Each fold is asserted rather than described: the embargo between training and
+# validation is at least the label buffer, and the last label a validation
+# decision resolves into lands before the holdout opens.
 
 # %%
+LABEL_BUFFER = resolve_label_buffer(CASE_STUDY_ID, PRIMARY_LABEL, load_setup_config(CASE_STUDY_ID))
+assert LABEL_BUFFER, f"No label buffer configured for {PRIMARY_LABEL}"
 active_folds = [
     {
         "fold": split["fold"],
@@ -141,15 +162,17 @@ active_folds = [
         "test_start": split["val_start"],
         "test_end": split["val_end"],
     }
-    for split in mds.splits
+    for split in generate_cv_splits(
+        labels, case_study_id=CASE_STUDY_ID, label_buffer=LABEL_BUFFER, date_col="timestamp"
+    )
 ]
 holdout_start = pd.Timestamp(load_evaluation_config(CASE_STUDY_ID)["holdout_start"], tz="UTC")
 
 print(f"Canonical purged folds: {len(active_folds)}")
 for f in active_folds:
     embargo = f["test_start"] - f["train_end"]
-    label_endpoint = f["test_end"] + pd.Timedelta(mds.label_buffer)
-    assert embargo >= pd.Timedelta(mds.label_buffer)
+    label_endpoint = f["test_end"] + pd.Timedelta(LABEL_BUFFER)
+    assert embargo >= pd.Timedelta(LABEL_BUFFER)
     assert label_endpoint < holdout_start
     print(
         f"  Fold {f['fold']}: train [{f['train_start']} to {f['train_end']}], "
@@ -528,9 +551,32 @@ hmm_df = (
 print(f"\nHMM features: {len(hmm_df):,} timestamps")
 
 # %% [markdown]
-# Validation stress probability averages 16.4% in the earlier window and 22.0%
-# in the later window. The regime state is therefore time-varying, not a fixed
-# market label, and the forward filter can adapt as each settlement arrives.
+# The mean filtered stress probability differs between the two validation
+# windows, so the regime state is time-varying rather than a fixed market label,
+# and the forward filter adapts as each settlement arrives.
+
+# %% [markdown] tags=["results"]
+# **Mean filtered stress probability, per validation window**
+
+# %%
+stress_by_fold = (
+    hmm_df.join(
+        pl.DataFrame(
+            {
+                "fold": [f["fold"] for f in active_folds],
+                "test_start": [f["test_start"] for f in active_folds],
+                "test_end": [f["test_end"] for f in active_folds],
+            }
+        ),
+        on="fold",
+        how="inner",
+    )
+    .filter(pl.col("timestamp").is_between(pl.col("test_start"), pl.col("test_end")))
+    .group_by("fold")
+    .agg(pl.col("hmm_regime_prob_stress").mean().alias("mean_stress_prob"))
+    .sort("fold")
+)
+print(stress_by_fold)
 
 # %% [markdown]
 # ## 5. Combine Temporal Features
@@ -671,8 +717,14 @@ plt.show()
 # ## 7. Save and Reassemble the Training Frame
 #
 # The output carries a fold column because each learned feature has fold-specific
-# parameters. Reloading through the shared modeling path verifies that all five
-# temporal columns join the same 39-feature financial frame used above.
+# parameters. The schema is frozen against the expected five names, and no
+# `(timestamp, symbol, fold)` key may appear twice.
+#
+# Reloading through the shared modeling path after the write is what makes this
+# a check rather than a claim: `load_modeling_dataset` is the route every
+# downstream model notebook takes, and it re-derives the fold geometry from the
+# label frame. If the artifact just written disagreed with that geometry, or the
+# financial frame had drifted from the one assembled here, this cell would fail.
 
 # %%
 expected_temporal = {
@@ -694,8 +746,19 @@ assert set(assembled.temporal_feature_names) == expected_temporal
 assert sorted(assembled.temporal_by_fold["fold"].unique()) == sorted(
     fold["fold"] for fold in active_folds
 )
+assert assembled.label_col == label_col
+
+# The financial columns the loader assembles must be the ones read at the top.
+reassembled_frame = assembled.dataset.select(
+    ["timestamp", "symbol", *financial_feature_cols, label_col]
+).sort(["timestamp", "symbol"])
+assert reassembled_frame.equals(training_frame), (
+    "Reassembled financial frame differs from the frame this notebook read"
+)
+
 print(f"Saved temporal artifact: {temporal.shape}")
 print("Training assembly: 39 financial + 5 fold-specific temporal features [OK]")
+print("Reassembled financial frame matches the frame read in section 1 [OK]")
 
 # %% [markdown]
 # ## 8. Measure Out-of-Sample Incremental IC
@@ -714,30 +777,48 @@ for fold in active_folds:
             & pl.col("timestamp").is_between(fold["test_start"], fold["test_end"], closed="both")
         )
     )
-validation_temporal = pl.concat(validation_slices).sort(["timestamp", "symbol"])
-eval_df = validation_temporal.with_columns(
-    pl.col("timestamp").cast(training_frame.schema["timestamp"])
-).join(
-    training_frame.select("timestamp", "symbol", mds.label_col),
-    on=["timestamp", "symbol"],
-    how="inner",
+validation_temporal = pl.concat(validation_slices)
+eval_df = (
+    validation_temporal.with_columns(pl.col("timestamp").cast(training_frame.schema["timestamp"]))
+    .join(
+        training_frame.select("timestamp", "symbol", label_col),
+        on=["timestamp", "symbol"],
+        how="inner",
+    )
+    .sort(["timestamp", "symbol"])
 )
-print(f"Validation diagnostic: {len(eval_df):,} rows, label={mds.label_col}")
+print(f"Validation diagnostic: {len(eval_df):,} rows, label={label_col}")
+
+# %% [markdown]
+# The IC series must be in time order before the HAC correction is applied:
+# `compute_ic_hac_stats` reads row order as time order and does not sort, and a
+# Polars `partition_by` returns groups in the frame's order rather than in sorted
+# key order. The sort above is therefore load-bearing, not cosmetic - without it
+# the Newey-West standard error is computed over an arbitrary permutation of the
+# timeline and the t-statistic is not even stable across runs.
+#
+# The HAC lag comes from the label buffer rather than a hand-picked constant:
+# the 8-hour forward return means consecutive decision timestamps do not share an
+# outcome window, so the lag is what `label_horizon` implies.
 
 # %%
+LABEL_HORIZON_BARS = 1  # fwd_ret_8h resolves in exactly one 8-hour bar
+
 temporal_ic = {}
 partitions = eval_df.partition_by("timestamp", as_dict=True, maintain_order=True)
 for feature in temporal_feature_cols:
     ic_values = []
     for group in partitions.values():
-        values = group.select(feature, mds.label_col).drop_nulls()
+        values = group.select(feature, label_col).drop_nulls()
         if len(values) < 10 or values[feature].n_unique() < 2:
             continue
-        ic, _ = spearmanr(values[feature].to_numpy(), values[mds.label_col].to_numpy())
+        ic, _ = spearmanr(values[feature].to_numpy(), values[label_col].to_numpy())
         if np.isfinite(ic):
             ic_values.append(ic)
     if len(ic_values) >= 20:
-        temporal_ic[feature] = compute_ic_hac_stats(np.asarray(ic_values), maxlags=3)
+        temporal_ic[feature] = compute_ic_hac_stats(
+            np.asarray(ic_values), label_horizon=LABEL_HORIZON_BARS
+        )
 
 temporal_summary = pl.DataFrame(
     {
@@ -766,10 +847,16 @@ fig.tight_layout()
 plt.show()
 
 # %% [markdown]
-# Conditional volatility has the largest validation IC magnitude at -0.0396,
-# while GARCH asymmetry is +0.0043 and the volatility z-score is -0.0039.
-# Market-wide HMM probabilities are intentionally absent from this cross-sectional
-# screen because they do not vary across symbols at a decision timestamp.
+# Market-wide HMM probabilities are absent from this cross-sectional screen
+# because they take the same value for every symbol at a decision timestamp, so
+# a rank correlation across the cross-section is undefined for them. Their value
+# is as conditioning variables for a nonlinear model, which is what
+# `05_evaluation` and the model notebooks test.
+
+# %% [markdown] tags=["results"]
+# **Validation rank IC per temporal feature, HAC-corrected** - the table printed
+# above. The magnitudes are small in absolute terms, which is the expected shape
+# for a volatility-state feature screened as a stand-alone directional signal.
 
 # %% [markdown]
 # ## Key Takeaways
