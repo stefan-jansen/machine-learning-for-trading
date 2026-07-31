@@ -558,6 +558,10 @@ features = (
     .sort(PANEL_KEY)
 )
 assert features.select(PANEL_KEY).is_duplicated().sum() == 0, "duplicate panel key"
+# The front month, which F3, F6, F7 and F8 read: carry is one value per product-date, and a
+# cross-section taken over all three positions is an ordering of 90 contracts rather than the
+# 30 a decision is taken over.
+front = features.filter(pl.col("position") == 0)
 assignment = assign_families(feature_cols, FAMILIES)
 register_frame(FAMILIES, feature_cols).select(["family", "columns", "role", "representation"])
 
@@ -672,7 +676,7 @@ plot_feature_distributions(
 
 # %%
 plot_cross_sectional_dispersion(
-    features.filter(pl.col("position") == 0),
+    front,
     "carry_pct",
     every="1mo",
     title="The cross-section of carry never collapses to one view",
@@ -726,10 +730,15 @@ print(f"{len(set(clusters.values()))} clusters over {len(feature_cols)} features
 # `config/setup.yaml` declares as `weekly_friday_close`. The autocorrelation on the left is of the
 # feature, not of the return, and it runs to four decision cycles. A feature whose value has
 # decayed before the next rebalance cannot support that cadence, however well it predicts on the
-# day it is computed. It is estimated per contract on pairs of dates exactly one lag apart and
-# summarized by the median over contracts, with a bootstrap interval over contracts: a correlation
-# pooled over every contract-date pair would read high whenever contracts sit at different levels,
+# day it is computed. It is estimated per product on pairs of dates exactly one lag apart and
+# summarized by the median over products, with a bootstrap interval over products: a correlation
+# pooled over every product-date pair would read high whenever products sit at different levels,
 # whether or not any one of them persists.
+#
+# Both panels read the front month alone, for the same reason C.5 partitions every percentile by
+# contract position. The right-hand panel ranks within a date, and a ranking taken over all three
+# positions at once would be an ordering of 90 contracts - not the one a decision is taken over,
+# and not the one the matrix carries.
 
 # %%
 DECISION_DATES = (
@@ -740,20 +749,22 @@ DECISION_DATES = (
 )
 
 plot_persistence(
-    features,
+    front,
     ["carry_pct", "carry_zscore_63d", "ret_63d", "vol_21d", "rsi_14"],
-    entity=ENTITY,
+    entity="product",
     max_lag=4 * DECISION_CYCLE,
     decision_dates=DECISION_DATES,
     title="Carry's ordering is the least stable across rebalances",
-    subtitle=f"Median over contracts to {4 * DECISION_CYCLE} sessions, and across rebalances",
+    subtitle=f"Front month; median over products to {4 * DECISION_CYCLE} sessions",
     alt=(
         "Two panels. On the left, autocorrelation against lag: all five features start near one "
-        "and decay, the one-month volatility slowest, still near 0.65 at twenty sessions, and the "
-        "raw carry fastest, down to about 0.25. The bootstrap ribbons are narrow. On the right, "
-        "the cross-sectional rank correlation between consecutive weekly rebalances puts "
-        "volatility highest at roughly 0.95 and raw carry lowest at roughly 0.6, with the "
-        "oscillator, the six-month return and the carry z-score in between."
+        "and decay over twenty sessions. The six-month return and the one-month volatility fall "
+        "slowest, to roughly 0.6, while the carry z-score falls fastest and reaches zero; the raw "
+        "carry drops steeply over the first ten sessions and then flattens near 0.27, and the "
+        "oscillator ends near 0.2. The bootstrap ribbon is widest around the raw carry and narrow "
+        "elsewhere. On the right, the cross-sectional rank correlation between consecutive weekly "
+        "rebalances puts the one-month volatility highest at nearly one and the raw carry lowest "
+        "at roughly 0.6, with the oscillator, the six-month return and the carry z-score between."
     ),
 )
 
@@ -774,7 +785,6 @@ KEY_PRODUCTS = {
     "ES": COLORS["positive"],
     "ZC": COLORS["copper"],
 }
-front = features.filter(pl.col("position") == 0)
 decisions = front.filter(pl.col("timestamp").is_in(DECISION_DATES)).sort("timestamp")
 fig = make_subplots(
     rows=2,
