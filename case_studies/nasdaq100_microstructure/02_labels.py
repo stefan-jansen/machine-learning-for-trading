@@ -533,8 +533,10 @@ for key, tag in classes.items():
 # horizon was converted into, and both treat the symbol-session as the entity, because a
 # window cannot be concurrent with one on the other side of an overnight gap.
 #
-# Read the decay as a straight line running out to each horizon: consecutive rows share all
-# but one bar of their window, and the share they have in common falls off by one bar per lag.
+# What a label consumes is return intervals, and it consumes one fewer than its horizon in
+# bars: entering a bar after the decision and leaving at the horizon spans the moves between
+# those two prices, not the move into the entry. Consecutive rows share all but one of those
+# intervals, so the decay reads as a straight line falling by one interval per lag.
 # The longest label does not stop at zero when it gets there but keeps going negative, and
 # that is a property of the session rather than of the label - a one-hour window is a fifth of
 # a trading day, so each session holds few independent windows, and subtracting the session's
@@ -565,24 +567,25 @@ show_with_alt(fig, "Panel autocorrelation of each forward-return label against l
 
 # %%
 for name in RETURN_LABELS:
-    h_bars = HORIZON_BARS[name]
+    h_bars, spans = HORIZON_BARS[name], HORIZON_BARS[name] - 1
     n_rows, n_eff = effective_sample_size(
-        dev[name], horizon=h_bars, bar_col="bar_in_session", entity_col="entity"
+        dev[name], horizon=spans, bar_col="bar_in_session", entity_col="entity"
     )
     print(
         f"{name}: N={n_rows:,}, N_eff={n_eff:,.0f}, ratio {n_eff / n_rows:.4f} against "
-        f"{1 / h_bars:.4f} for windows overlapping this fully; autocorrelation "
+        f"{1 / spans:.4f} for {spans} intervals overlapping fully; autocorrelation "
         f"{acf[name][0]:.3f} at lag one and {acf[name][h_bars - 1]:.3f} at its horizon"
     )
 
 # %% [markdown] tags=["results"]
-# The primary label's 14,370,375 development rows carry 993,791 effective observations, a
-# ratio of 0.0692 against the 0.0667 a fully overlapped 15-bar window implies; the 5-minute
-# label's 14,753,585 rows carry 2,981,374 at 0.2021 against 0.2000, and the 60-minute label's
-# 12,645,930 carry 248,448 at 0.0196 against 0.0167. Each sits above its reference because a
-# session end closes an overlap early, and the longest label sits furthest above it because
-# the session ends most often relative to its window. Fourteen million rows are worth about a
-# million: the row count overstates the evidence by a factor of fifteen, which is the horizon.
+# The primary label's 14,370,375 development rows carry 1,062,039 effective observations, a
+# ratio of 0.0739 against the 0.0714 that fourteen fully overlapping intervals imply; the
+# 5-minute label's 14,753,585 rows carry 3,717,137 at 0.2519 against 0.2500, and the
+# 60-minute label's 12,645,930 carry 252,009 at 0.0199 against 0.0169. Each sits above its
+# reference because a session end closes an overlap early, and the longest label sits
+# furthest above it because the session ends most often relative to its window. Fourteen
+# million rows are worth about a million: the row count overstates the evidence by roughly
+# the number of intervals each label spans.
 #
 # Autocorrelation falls from 0.920 at lag one to -0.038 at lag fifteen for the primary label
 # and from 0.741 to -0.023 at lag five for the fast one. The 60-minute label falls from 0.976
@@ -696,7 +699,7 @@ for name in LABEL_NAMES:
         f"\n{name}\n  anchor       quote midpoint one bar after the decision bar"
         f"\n  horizon      {horizon}, which is {h_bars} bars on this grid"
         f"\n  resolution   fixed at t+{horizon}; the closing NBBO quote breaks the within-bar tie"
-        f"\n  overlap      {h_bars - 1} bars shared by consecutive rows"
+        f"\n  overlap      {h_bars - 2} of its {h_bars - 1} return intervals, with the next row"
         f"\n  base rate    {scale}"
         f"\n  consumed by  {readers.get(name, 'the model stages, as a variant')}"
     )
@@ -725,7 +728,9 @@ for name in LABEL_NAMES:
 # **Known limitations.** The midprice is not a fill: a marketable order crosses the spread,
 # and the round trip charted in Section E is the quoted spread rather than a measured
 # execution cost - it carries no commission, no market impact and no queue position, so it
-# is a floor on what trading costs. The universe is the fixed NASDAQ-100 membership list
+# is a floor on what trading costs. It is also the spread quoted at the decision bar, doubled,
+# rather than the two spreads actually crossed at the entry and exit bars, so it prices the
+# round trip at the moment the decision is taken and not at the moments it is filled. The universe is the fixed NASDAQ-100 membership list
 # `setup.yaml` declares, not a
 # point-in-time index reconstruction, so a name that joined or left mid-sample is present
 # throughout. The flat band is a single constant across every symbol and every regime,
