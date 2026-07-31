@@ -4,13 +4,17 @@ Chapter directories are number-prefixed (``25_live_trading``), so they are not
 Python packages and their helper modules (``async_utils`` etc.) are only
 importable when the chapter directory is on ``sys.path``. ``sitecustomize.py``
 (declared as a top-level py-module in pyproject) arranges that at interpreter
-startup in every environment. This test pins that contract: a bare
-``import async_utils`` must succeed in a fresh interpreter started from the
-repo root, with no chapter directory injected onto the path.
+startup. This test pins that contract: a bare ``import async_utils`` must
+succeed in a fresh interpreter started from the repo root, with no chapter
+directory injected onto the path.
 
 If this fails, ``sitecustomize.py`` or its ``[tool.setuptools] py-modules``
-declaration was likely removed, or the package needs reinstalling
-(``uv pip install -e .``).
+declaration was likely removed, the package needs reinstalling
+(``uv pip install -e .``), or the venv was built on a Debian/Ubuntu system
+interpreter whose own ``/usr/lib/pythonX.Y/sitecustomize.py`` shadows this
+repo's. ``pyproject.toml`` pins ``python-preference = "only-managed"`` against
+that last case; ``tests/test_data_root_anchor.py`` covers the other half of the
+same hook.
 """
 
 from __future__ import annotations

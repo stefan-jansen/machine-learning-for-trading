@@ -248,6 +248,15 @@ dev = [
 # warning on every single `uv run` a reader types.
 prerelease = "if-necessary"
 
+# Download CPython rather than reusing whatever the machine already has. uv reuses
+# the system interpreter whenever it satisfies requires-python, so on a distro that
+# ships 3.14 (Ubuntu 26.04 does) a reader inherits Debian's interpreter behaviour:
+# missing Python.h unless python3-dev is installed, and a distro sitecustomize.py in
+# the stdlib directory that shadows this repo's and silently disables chapter imports
+# and the data-root anchor. Pinning the interpreter gives every reader the environment
+# the book was validated on.
+python-preference = "only-managed"
+
 # Force protobuf >= 5.0 for Python 3.14 compatibility.
 # protobuf 4.x has a C extension metaclass bug on Python 3.14.
 # opentelemetry-proto 1.27.0 pins protobuf<5; override until it upgrades.

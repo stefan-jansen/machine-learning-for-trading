@@ -557,7 +557,40 @@ def check_runtime():
     except Exception as exc:
         results.append((cat, "Plotly ML4T template", "FAIL", str(exc)[:120]))
 
-    # 7. ML4T_DATA_PATH set and exists
+    # 7. The startup hook. sitecustomize.py is what puts the chapter directories on
+    # sys.path and anchors ML4T_DATA_PATH to the repo. Debian and Ubuntu ship their
+    # own sitecustomize.py in the stdlib directory, which shadows this repo's when the
+    # venv is built on the system interpreter — and nothing else reports that it did
+    # not load. Everything downstream of it then fails for reasons that name the
+    # symptom rather than the cause, so this check names the cause.
+    try:
+        import sitecustomize
+
+        loaded = Path(sitecustomize.__file__).resolve()
+        expected = (repo_root / "sitecustomize.py").resolve()
+        if loaded == expected:
+            results.append((cat, "sitecustomize (startup hook)", "PASS", str(loaded)))
+        else:
+            results.append(
+                (
+                    cat,
+                    "sitecustomize (startup hook)",
+                    "FAIL",
+                    f"shadowed by {loaded}; rebuild the venv with `uv sync`",
+                )
+            )
+    except Exception as exc:
+        results.append((cat, "sitecustomize (startup hook)", "FAIL", str(exc)[:120]))
+
+    # 8. Chapter helper imports, the contract sitecustomize exists to provide.
+    try:
+        importlib.import_module("limit_orderbook")
+        results.append((cat, "Chapter helper imports", "PASS", "import limit_orderbook"))
+    except Exception as exc:
+        results.append((cat, "Chapter helper imports", "FAIL", str(exc)[:120]))
+
+    # 9. ML4T_DATA_PATH set and exists. sitecustomize anchors it to the repo at
+    # interpreter startup, so an unset value means the startup hook did not run.
     data_path = os.environ.get("ML4T_DATA_PATH")
     if data_path:
         p = Path(data_path)
@@ -568,21 +601,11 @@ def check_runtime():
                 (cat, "ML4T_DATA_PATH", "FAIL", f"Set to {data_path} but directory does not exist")
             )
     else:
-        # Check .env fallback
-        env_file = repo_root / ".env"
-        if env_file.exists():
-            results.append(
-                (
-                    cat,
-                    "ML4T_DATA_PATH",
-                    "PASS",
-                    "Not in env but .env file found (loaded at runtime)",
-                )
-            )
-        else:
-            results.append((cat, "ML4T_DATA_PATH", "FAIL", "Not set and no .env file found"))
+        results.append(
+            (cat, "ML4T_DATA_PATH", "FAIL", "not set - the startup hook above did not run")
+        )
 
-    # 8. Python version
+    # 10. Python version
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     results.append((cat, "Python version", "PASS", py_ver))
 

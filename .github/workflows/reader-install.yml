@@ -42,6 +42,7 @@ on:
       - 'pyproject.toml'
       - 'uv.lock'
       - '.env.example'
+      - 'sitecustomize.py'
       - 'docs/installation.md'
       - 'README.md'
       - 'data/**'
@@ -97,6 +98,23 @@ jobs:
         run: |
           set -o pipefail
           time uv sync 2>&1 | tail -30
+
+      # What no earlier walk checked: a process whose working directory is a chapter
+      # directory, which is what Jupyter Lab gives every kernel. The data root used to
+      # resolve to <repo>/<chapter>/data there, so every data-loading notebook failed
+      # on the local uv path while the same notebook run from the repo root worked.
+      - name: The data root is anchored to the repo, not to the working directory
+        run: |
+          set -euo pipefail
+          root=$(uv run python -c "import os;print(os.environ['ML4T_DATA_PATH'])")
+          chapter=$(cd 01_process_is_edge && uv run python -c "import os;print(os.environ['ML4T_DATA_PATH'])")
+          echo "repo root: $root"
+          echo "chapter:   $chapter"
+          test "$root" = "$PWD/data"
+          test "$chapter" = "$root"
+          hook=$(uv run python -c "import sitecustomize;print(sitecustomize.__file__)")
+          echo "sitecustomize: $hook"
+          test "$hook" = "$PWD/sitecustomize.py"
 
       - name: Copy the environment template
         run: cp .env.example .env
