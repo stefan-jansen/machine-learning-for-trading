@@ -86,7 +86,7 @@ print(f"Universe {SETUP['universe']['n_assets']} names, floor {BREADTH_FLOOR}, h
 # The options market prices the distribution of a share's future returns and the equity market
 # prices its level. This case study reads the first and trades the second, so signal and cost
 # arrive from two venues that need not cover the same names on the same days. Does the universe
-# exist on the dates the strategy acts on, once a usable surface is required as well as a price?
+# exist on the dates the strategy acts on, once an ATM volatility is required as well as a price?
 # Is a typical move large next to what crossing the spread costs? Are there enough decision
 # dates for a walk-forward that never reads the holdout?
 
@@ -96,8 +96,9 @@ print(f"Universe {SETUP['universe']['n_assets']} names, floor {BREADTH_FLOOR}, h
 # ### B.1 Load and verify the declared universe
 #
 # The surface carries implied volatility interpolated to fixed tenors, one row per name and
-# session; the bars carry `close` as printed plus `adj_factor`, the factor that makes it
-# comparable across time. A name is in the universe on a date only if both exist.
+# session, with `qc_converged_share` scoring how cleanly the points behind it solved; the bars
+# carry `close` as printed plus `adj_factor`. A name is in the universe on a date where the
+# interpolation produced a value and a bar exists, the condition `03_financial_features` reads.
 
 # %%
 surface = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
@@ -139,13 +140,13 @@ fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 ax.plot(breadth["timestamp"], breadth["n_names"], color=COLORS["blue"], linewidth=1.0)
 ax.axhline(BREADTH_FLOOR, color=COLORS["copper"], ls="--", lw=1.5, label="largest position count")
 ax.set_ylim(0, SETUP["universe"]["n_assets"])
-ax.set_ylabel("Names quoting a usable surface")
+ax.set_ylabel("Names with an interpolated ATM volatility")
 ax.xaxis.set_major_locator(mdates.YearLocator())
 ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
 ax.legend(frameon=False, fontsize=8, loc="upper right")
 add_message_title(
     ax,
-    "Usable option coverage halves and recovers on a monthly cycle",
+    "Option coverage halves and recovers on a monthly cycle",
     subtitle="Names carrying an interpolated ATM volatility and a share price, at the weekly decision",
 )
 plt.show()
@@ -385,10 +386,9 @@ print(
 # ## Key takeaways
 #
 # 1. **Count the universe by what the strategy can rank**, not by what the files contain. Here
-#    that means a converged option surface, absent for half the names on half the weeks.
-# 2. **A percentage and a per-share cost model are different assumptions about the
-#    cross-section**, and choosing between them claims that friction does or does not scale
-#    with price.
+#    that means an interpolated ATM volatility, absent for half the names on half the weeks.
+# 2. **A percentage and a per-share cost model are different assumptions about the cross-section**:
+#    choosing between them claims that friction does or does not scale with price.
 # 3. **Adjust prices, keep to one security, and take a panel autocorrelation inside each entity.**
 #
 # ### Known limitations
