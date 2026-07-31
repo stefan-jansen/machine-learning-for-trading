@@ -100,6 +100,8 @@ uv run python data/futures/positioning/cot_download.py                    # ~2-3
 
 **Note on crypto download time**: The Binance public API returns max 1,500 rows per request with ~1s server response time. Downloading 5 years of hourly data for 19 symbols requires ~700 API calls. Downloads run in parallel (5 concurrent), but the total still takes 10-15 minutes. This is a Binance server-side rate limit, not a bug.
 
+If some symbols do not arrive, the script names them and exits non-zero. Re-running fetches only what is missing. Pass `--allow-partial` to keep what arrived and exit 0.
+
 ### Free API Key Required
 
 ```bash

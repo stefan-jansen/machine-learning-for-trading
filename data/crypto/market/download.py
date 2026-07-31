@@ -163,6 +163,11 @@ def main() -> None:
         action="store_true",
         help="Extend the configured end date to today and append new rows",
     )
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Exit 0 even if some symbols failed (keeps what arrived; re-run to resume)",
+    )
     args = parser.parse_args()
 
     load_dotenv()
@@ -217,6 +222,8 @@ def main() -> None:
     storage_path.mkdir(parents=True, exist_ok=True)
     dictionary_path = write_dictionary(storage_path, symbol_groups)
     summary: dict[str, object] = {"dictionary_file": str(dictionary_path)}
+    perps_failed: list[str] = []
+    premium_failed: list[str] = []
 
     if download_perps_flag:
         perps_output = storage_path / perps_template.format(frequency="1h")
@@ -229,7 +236,7 @@ def main() -> None:
                 perps_df = (
                     pl.read_parquet(perps_output) if perps_output.exists() else pl.DataFrame()
                 )
-                perps_failed: list[str] = []
+                perps_failed = []
             else:
                 start_date = incremental_start
                 print(f"\nAppending perpetual OHLCV from {start_date}...")
@@ -277,7 +284,7 @@ def main() -> None:
                 premium_df = (
                     pl.read_parquet(premium_output) if premium_output.exists() else pl.DataFrame()
                 )
-                premium_failed: list[str] = []
+                premium_failed = []
             else:
                 start_date = incremental_start
                 print(f"\nAppending premium index from {start_date}...")
@@ -319,6 +326,22 @@ def main() -> None:
             summary["premium_profile"] = str(profile_path)
 
     print_download_summary(summary)
+
+    # Exit non-zero when any symbol is missing. Binance rate-limits this download —
+    # roughly 700 calls over 10-15 minutes — so coming back short is the expected
+    # failure, and exiting 0 makes it indistinguishable from a complete download to
+    # download_all.py, to CI, and to a reader who checks the status rather than
+    # reading the summary. --allow-partial keeps what arrived; re-running resumes.
+    if perps_failed or premium_failed:
+        for label, failed in (("perpetual OHLCV", perps_failed), ("premium index", premium_failed)):
+            if failed:
+                print(f"\n{len(failed)} {label} symbol(s) failed: {', '.join(sorted(failed))}")
+        if args.allow_partial:
+            print("\nPartial download accepted (--allow-partial). Re-run to fetch the rest.")
+        else:
+            print("\nPartial download. Re-run to fetch the missing symbols,")
+            print("or pass --allow-partial to accept what arrived.")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
