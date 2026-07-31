@@ -50,7 +50,8 @@ The Chapter 15 command uses the isolated `/opt/bsts` interpreter. The default
 `/opt/ml4t` interpreter and its NumPy 2 signature, gensim, and pfhedge dependencies
 remain unchanged for every other py312 notebook.
 
-Not available on Apple Silicon — view pre-executed `.ipynb` files instead.
+No native arm64 image. On Apple Silicon, read the committed `.ipynb` outputs, or run the
+amd64 image under Rosetta with `DOCKER_DEFAULT_PLATFORM=linux/amd64`.
 
 ### benchmark (Storage Benchmarks)
 

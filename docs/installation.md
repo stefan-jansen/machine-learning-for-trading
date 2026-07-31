@@ -83,9 +83,11 @@ does not work at all — see the note under [Platform Support](#platform-support
 | **Linux x86_64**        |  ✅  |   ✅   |    ✅     | ✅* |
 | **Windows 11 (WSL2)**   |  ✅  |   ✅   |    ✅     | ✅* |
 | **macOS Intel**         |  ✅  |   ✅   |    ✅     |  -  |
-| **macOS Apple Silicon** |  ✅  |   -    |    ✅     |  -  |
+| **macOS Apple Silicon** |  ✅  |   †    |    ✅     |  -  |
 
 \* Requires NVIDIA GPU + nvidia-container-toolkit
+† `ml4t-py312` is amd64 only. It has no native build on Apple Silicon and runs under Rosetta
+emulation, which [Py312 Image](#py312-image-specific-notebooks) covers.
 
 The table is about the **Docker images**, which work on all four rows. The local `uv` path is
 narrower: it works on Linux, on Apple Silicon, and inside WSL2 (which is the Linux path), and it
@@ -98,11 +100,14 @@ does not work on Intel Macs or in native Windows Python.
 > machine that already has the Visual Studio Build Tools. Inside WSL2 you are on the Linux path
 > above, which is the one that is tested.
 
-> **Intel Macs: use Docker, not the local `uv` path.** PyTorch stopped publishing macOS x86_64
-> wheels, so `uv sync` on an Intel Mac stops immediately with `Distribution torch==2.10.0 ...
-> doesn't have a source distribution or wheel for the current platform`. There is nothing to
-> configure around it. The `ml4t` image is amd64 and runs fine, so Docker is the Intel Mac path.
-> Apple Silicon has native wheels and the local `uv` path works there.
+> **macOS: which path depends on the chip.** On **Apple Silicon**, use the local `uv`
+> environment: it builds natively against the Xcode command-line tools. Docker is worth adding
+> there only for the twelve `ml4t-py312` notebooks, which have no arm64 build, and for Chapter
+> 2's containerized database benchmarks. On
+> an **Intel Mac**, Docker is the only option, because PyTorch stopped publishing macOS x86_64
+> wheels and `uv sync` stops immediately with `Distribution torch==2.10.0 ... doesn't have a
+> source distribution or wheel for the current platform`. There is nothing to configure around
+> it. See [macOS](#macos).
 
 ### Which image do I need?
 
@@ -115,7 +120,10 @@ does not work on Intel Macs or in native Windows Python.
 
 **Most readers need only `ml4t`.** The other images are for specific notebooks.
 
-**Apple Silicon users**: The notebooks requiring `ml4t-py312` are not runnable on ARM64 because the underlying libraries (signatory, esig) have no ARM64 builds. View the pre-executed `.ipynb` files on GitHub or in Jupyter instead.
+**Apple Silicon users**: `signatory` and `esig` have no ARM64 builds, so the `ml4t-py312`
+notebooks do not run natively. They all ship pre-executed, and
+[Py312 Image](#py312-image-specific-notebooks) covers both reading them and running them under
+Rosetta. Nothing else in the book needs this.
 
 ---
 
@@ -287,21 +295,43 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
 
 **Tip**: Keep the repo at `~/machine-learning-for-trading` in WSL, not under `/mnt/c/...`. Windows drives reach WSL through the 9P protocol bridge, which costs roughly 8x on a 512 MB sequential write, 240x on creating two thousand small files, and 470x on reading their metadata. `git clone` and `uv sync` are almost entirely small-file and metadata work, so those last two ratios are the ones a reader pays. Access WSL files from Windows Explorer via `\\wsl$\Ubuntu\home\<username>\machine-learning-for-trading`.
 
-### macOS (Intel and Apple Silicon)
+### macOS
 
-1. **Install Docker Desktop** from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/)
-   - Choose the correct chip: **Intel** or **Apple chip**
-   - Recommended resources: 4+ CPUs, 8+ GB memory, 64+ GB disk
+**Apple Silicon: use the local `uv` path, not Docker.** Everything in the main environment either
+has an arm64 wheel or builds from source against the Xcode command-line tools, the same way it
+does on Linux, so Docker would add an image you have no use for. Go to
+[Local Setup with uv](#local-setup-with-uv-alternative-to-docker); this is the path walked on
+real hardware before every release. Two things still want Docker on that machine: the twelve
+`ml4t-py312` notebooks, which have no arm64 build at all and are covered under
+[Py312 Image](#py312-image-specific-notebooks), and Chapter 2's storage benchmarks, which compare
+databases that run as containers. Everything else is `uv`.
 
-2. **Apple Silicon only**: In Docker Desktop Settings → General, enable **Use Rosetta for x86_64/amd64 emulation** (needed only for the `ml4t-py312` image, which most readers won't use).
+```bash
+xcode-select --install                        # compiler, if you do not have it already
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env                   # puts uv on PATH in this shell
+git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
+cd machine-learning-for-trading
+cp .env.example .env
+uv sync
+```
 
-3. **Clone and pull**:
+**Intel Macs: Docker is the only local option.** PyTorch publishes no macOS x86_64 wheel, so the
+`uv` path cannot be made to work on that hardware. The `ml4t` image is amd64 and runs, so:
+
+1. Install Docker Desktop from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/),
+   choosing the **Intel chip** download. Give it 4+ CPUs, 8+ GB memory and 64+ GB disk in
+   Settings → Resources, and note that the image plus data wants about 17 GB of that disk.
+2. Clone and pull:
    ```bash
    git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
    cd machine-learning-for-trading
    cp .env.example .env
    docker compose pull ml4t
    ```
+
+If that machine is tight on memory or disk, a Linux box or a cloud instance is the more
+comfortable route, and it is the same Linux path documented above.
 
 ---
 
@@ -388,17 +418,44 @@ A small number of notebooks require Python 3.12 libraries not available on Pytho
 | `05_deep_hedging_pfhedge` | pfhedge (unmaintained, numpy<2) | Ch21 |
 
 ```bash
-# x86 systems only (Linux, Windows WSL2, macOS Intel)
+# On x86 (Linux, Windows WSL2, Intel Mac) run these as they stand. On Apple Silicon
+# prefix each with DOCKER_DEFAULT_PLATFORM=linux/amd64, see below.
 docker compose --profile py312 pull py312
-docker compose --profile py312 run --rm py312 python 05_synthetic_data/03_sigcwgan_signatures.py
+docker compose --profile py312 run --rm py312 python 09_model_based_features/06_path_signatures.py
 docker compose --profile py312 run --rm py312 \
   /opt/bsts/bin/python 15_causal_estimation/06_fed_announcement_bsts.py
+
+# The seven GPU-tagged notebooks, on a machine with an NVIDIA GPU:
+docker compose --profile py312-gpu run --rm py312-gpu \
+  python 05_synthetic_data/03_sigcwgan_signatures.py
 ```
 
 Chapter 15 notebook 06 uses the isolated `/opt/bsts` interpreter so its NumPy 1 and
 pandas 2.2 constraints do not replace dependencies required by the other py312 notebooks.
 
-**Apple Silicon**: These notebooks cannot run natively. View the pre-executed `.ipynb` files in Jupyter or on GitHub.
+The `py312` service reserves no GPU, so it runs anywhere the amd64 image does. Seven of the
+twelve are GPU-tagged and run faster with one, whether they train or only do inference: Ch05
+`01_timegan`,
+`03_sigcwgan_signatures` and `07_dp_gan`, Ch10 `03_sentiment_evolution`, Ch12
+`10_shap_nlp_sentiment`, Ch14 `06_conditional_autoencoder` and Ch21
+`05_deep_hedging_pfhedge`. The `py312-gpu` service is the same image with an NVIDIA GPU
+attached, for those.
+
+**Apple Silicon**: these notebooks have no arm64 build and all of them ship pre-executed, so
+reading the `.ipynb` in Jupyter or on GitHub is the intended route, and the local `uv` path
+covers everything else in the book. To execute them anyway you need Docker, which the Apple
+Silicon setup above does not install:
+
+1. Install Docker Desktop from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/),
+   choosing the **Apple chip** download.
+2. Enable Settings → General → **Use Rosetta for x86_64/amd64 emulation**.
+3. Prefix the **`py312`** commands above with `DOCKER_DEFAULT_PLATFORM=linux/amd64`, for example
+   `DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose --profile py312 pull py312`. Skip the
+   `py312-gpu` one: it reserves an NVIDIA device, which no Mac has, so all twelve notebooks go
+   through the CPU-only service here.
+
+It runs at emulation speed. Apart from Chapter 2's database benchmarks, this is the only thing
+on an Apple Silicon Mac that Docker is needed for.
 
 ---
 
@@ -517,6 +574,9 @@ Docker is recommended because it guarantees a consistent environment. But if you
 # Install uv — use this installer, not `pip install uv`. Most current systems either
 # ship no `pip` at all or refuse the install with `externally-managed-environment`.
 curl -LsSf https://astral.sh/uv/install.sh | sh
+# The installer puts uv in ~/.local/bin, which your current shell does not know about
+# yet. Load it now rather than opening a new terminal:
+source $HOME/.local/bin/env        # sh, bash, zsh;  env.fish for fish
 # Windows PowerShell: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # Clone and enter the repository (about 0.9 GB of history)

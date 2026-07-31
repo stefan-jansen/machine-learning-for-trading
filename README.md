@@ -16,6 +16,10 @@ strategy you can actually run, and keep running, in a live market.
   and [six production Python libraries](https://ml4trading.io/libraries/)
   that facilitate substantial parts of the workflow.
 
+**Start here: [Installation](docs/installation.md)** walks a blank Linux, Windows or macOS
+machine to a running notebook, prerequisites included. The short version is under
+[Quick Start](#quick-start) below.
+
 > **Free reader's guide:** Join [Navigate ML for Trading, 3rd Edition](https://maven.com/p/c6e0e7/navigate-ml-for-trading-3rd-edition)
 > on **July 30, 2026 at 11:00 AM ET** for a 30-minute map of the book, case studies, code, and companion resources.
 > See all current [courses and workshops](https://maven.com/stefan-jansen); the cohort courses are listed under
@@ -381,6 +385,7 @@ systems:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env   # the installer's own line; puts uv on PATH here and now
 uv sync
 ```
 
@@ -388,6 +393,12 @@ Option B compiles several dependencies from source, `scikit-learn` among them, s
 **C/C++ compiler and the Python headers**: on Ubuntu, Debian and WSL2
 `sudo apt install build-essential python3-dev`, on macOS `xcode-select --install`. Docker
 carries its own and needs none of this.
+
+**macOS readers:** on **Apple Silicon** take Option B. It is the path walked on real hardware
+before each release, and it needs only the Xcode command-line tools for the packages that build
+from source. Docker there is worth its disk only for the twelve `ml4t-py312` notebooks, which have no
+arm64 build and ship pre-executed, and for Chapter 2's containerized database benchmarks. On an **Intel Mac** take Option A: PyTorch publishes
+no macOS x86_64 wheel, so Option B cannot work there.
 
 **Windows readers:** both options run inside WSL2, not in PowerShell. Run
 `wsl --install -d Ubuntu` from an Administrator PowerShell, restart, run it a second time
