@@ -209,16 +209,20 @@ def test_an_empty_retry_against_a_complete_dataset_exits_zero(
     _run(downloader, monkeypatch, tmp_path, arrived=[], failed=configured_symbols)
 
 
+@pytest.mark.parametrize("dataset", ["--perps", "--premium"])
 def test_an_empty_forced_download_exits_nonzero(
-    downloader, monkeypatch, tmp_path, configured_symbols
+    downloader, monkeypatch, tmp_path, configured_symbols, dataset
 ):
     """--force replaces rather than merges, so there is nothing to fall back to.
 
     A forced refresh that returned nothing has failed. Reporting success on the
     strength of the rows it was about to replace would present stale data as the
     result of the run.
+
+    One dataset at a time: perps and premium have separate fallbacks, and a run
+    covering both would exit 1 on either, so it could not tell which was fixed.
     """
-    _run(downloader, monkeypatch, tmp_path, arrived=configured_symbols)
+    _run(downloader, monkeypatch, tmp_path, arrived=configured_symbols, cli=(dataset,))
     with pytest.raises(SystemExit) as exc:
         _run(
             downloader,
@@ -226,7 +230,7 @@ def test_an_empty_forced_download_exits_nonzero(
             tmp_path,
             arrived=[],
             failed=configured_symbols,
-            cli=("--force",),
+            cli=(dataset, "--force"),
         )
     assert exc.value.code == 1
 
