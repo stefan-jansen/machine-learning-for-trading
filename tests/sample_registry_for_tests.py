@@ -281,10 +281,19 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
         JOIN backtest_runs b ON b.backtest_hash = c.leader_hash
         WHERE c.cohort_type = 'stagelabel' AND c.stage = 'signal'
     """
-    try:
+    # Registries predating cohort_metrics have no table to read; that is the only
+    # condition this step tolerates. Catching OperationalError outright would also
+    # swallow a schema drift, a locked database or a typo in leader_sql and report a
+    # successful sample built without any cohort leader.
+    src_has_cohort_metrics = (
+        src.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cohort_metrics'"
+        ).fetchone()
+        is not None
+    )
+    leader_prediction_hashes: set = set()
+    if src_has_cohort_metrics:
         leader_prediction_hashes = {row[0] for row in src.execute(leader_sql).fetchall()}
-    except sqlite3.OperationalError:
-        leader_prediction_hashes = set()
     if leader_prediction_hashes:
         ph_list = list(leader_prediction_hashes)
         full_grid_sql = """

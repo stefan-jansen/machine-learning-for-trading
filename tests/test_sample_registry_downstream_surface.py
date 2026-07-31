@@ -11,11 +11,17 @@ fixture defect only at the next full regeneration.
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from tests.sample_registry_for_tests import _copy_backtest_artifacts, _populate_sample_db
 
 # The declared risk grid a strategy-analysis notebook plans in full for its carrier.
 RISK_GRID = 14
 COST_GRID = 5
+# Above TOP_N_PER_GROUP (3), so top-N alone leaves the allocation grid partial too.
+# At one row per prediction the grid survived sampling by accident and the
+# completeness assertion below held without step 3c doing anything.
+ALLOC_GRID = 4
 
 
 def _build_source_db(path: Path) -> None:
@@ -37,7 +43,9 @@ def _build_source_db(path: Path) -> None:
         );
         CREATE TABLE backtest_metrics (backtest_hash TEXT PRIMARY KEY, sharpe REAL);
         CREATE TABLE backtest_fold_metrics (backtest_hash TEXT, fold INTEGER);
-        CREATE TABLE cohort_metrics (cohort_type TEXT, label TEXT, leader_hash TEXT);
+        CREATE TABLE cohort_metrics (
+            cohort_type TEXT, label TEXT, stage TEXT, leader_hash TEXT
+        );
     """)
     db.execute("INSERT INTO training_runs VALUES ('T1', 'gbm')")
     # One leader whose backtest_hash survives sampling (P1's signal row, one of only
@@ -45,14 +53,20 @@ def _build_source_db(path: Path) -> None:
     # backtest_run at all, standing in for a leader that sampling dropped - a
     # strategy-analysis notebook's JOIN through leader_hash must drop the latter and
     # keep the former.
-    db.execute("INSERT INTO cohort_metrics VALUES ('stagelabel', 'labelA', 'P1_signal_0')")
-    db.execute("INSERT INTO cohort_metrics VALUES ('stagelabel', 'labelA', 'GHOST_NOT_SAMPLED')")
+    # stage='signal' is part of the leader query's WHERE clause, so a cohort_metrics
+    # table without that column makes step 3c raise rather than run.
+    db.execute(
+        "INSERT INTO cohort_metrics VALUES ('stagelabel', 'labelA', 'signal', 'P1_signal_0')"
+    )
+    db.execute(
+        "INSERT INTO cohort_metrics VALUES ('stagelabel', 'labelA', 'signal', 'GHOST_NOT_SAMPLED')"
+    )
     for pred in ("P1", "P2"):
         db.execute("INSERT INTO prediction_sets VALUES (?, 'T1', 'validation')", (pred,))
         db.execute("INSERT INTO prediction_metrics VALUES (?, 0.01)", (pred,))
         for stage, n in (
             ("signal", 1),
-            ("allocation", 1),
+            ("allocation", ALLOC_GRID),
             ("risk_overlay", RISK_GRID),
             ("cost_sensitivity", COST_GRID),
         ):
@@ -79,14 +93,18 @@ def _sample(tmp_path: Path) -> sqlite3.Connection:
     return dst
 
 
-def test_top_n_alone_would_keep_a_partial_risk_grid(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("stage", "grid"), [("risk_overlay", RISK_GRID), ("allocation", ALLOC_GRID)]
+)
+def test_top_n_alone_would_keep_a_partial_grid(tmp_path: Path, stage: str, grid: int) -> None:
     """Pins the defect's precondition, so this suite fails loudly rather than
     vacuously if the source fixture stops exercising the slicing at all."""
     src_path = tmp_path / "src.db"
     _build_source_db(src_path)
     src = sqlite3.connect(str(src_path))
     try:
-        kept = src.execute("""
+        kept = src.execute(
+            """
             WITH ranked AS (
                 SELECT b.backtest_hash, ROW_NUMBER() OVER (
                     PARTITION BY b.stage, t.family ORDER BY ABS(bm.sharpe) DESC
@@ -98,11 +116,13 @@ def test_top_n_alone_would_keep_a_partial_risk_grid(tmp_path: Path) -> None:
                 WHERE p.split != 'holdout'
             )
             SELECT COUNT(*) FROM ranked WHERE rn <= 3
-              AND backtest_hash LIKE 'P1_risk_overlay_%'
-        """).fetchone()[0]
+              AND backtest_hash LIKE ?
+            """,
+            (f"P1_{stage}_%",),
+        ).fetchone()[0]
     finally:
         src.close()
-    assert 0 < kept < RISK_GRID
+    assert 0 < kept < grid
 
 
 def test_every_retained_prediction_keeps_its_complete_grid(tmp_path: Path) -> None:
@@ -114,7 +134,11 @@ def test_every_retained_prediction_keeps_its_complete_grid(tmp_path: Path) -> No
         ]
         assert retained, "sampling kept no prediction at all"
         for pred in retained:
-            for stage, expected in (("risk_overlay", RISK_GRID), ("cost_sensitivity", COST_GRID)):
+            for stage, expected in (
+                ("allocation", ALLOC_GRID),
+                ("risk_overlay", RISK_GRID),
+                ("cost_sensitivity", COST_GRID),
+            ):
                 n = dst.execute(
                     "SELECT COUNT(*) FROM backtest_runs WHERE prediction_hash=? AND stage=?",
                     (pred, stage),
