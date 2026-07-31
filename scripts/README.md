@@ -18,11 +18,15 @@ reader runs. The checks CI enforces and the tools that repair committed notebook
 live in [`.github/scripts/`](../.github/scripts). Reading the book needs none of
 them; opening a pull request can, and the failure tells you which:
 
-- `notebook_provenance.py stamp <nb.ipynb> --executor <env>` — re-stamps a
-  notebook. The pre-commit gate fails a stamped notebook whose `.py` source has
-  moved on since, and any notebook committed from a test-mode run. An unstamped
-  notebook is reported but does not fail, until the backfill is complete and the
-  gate moves to `--strict`.
+- `notebook_provenance.py stamp <nb.ipynb> --executor <env> --production` — re-stamps
+  a notebook. Pass `--parameters '{"MAX_SYMBOLS": 5}'` instead of `--production` when
+  the run did use overrides; one of the two is required, because the notebook's own
+  `metadata.papermill.parameters` can outlive the run it describes. The pre-commit
+  gate fails a stamped notebook whose `.py` source has moved on since, any notebook
+  committed from a test-mode run, and any stamp that contradicts the
+  `injected-parameters` cell in the committed notebook. An unstamped notebook is
+  reported but does not fail, until the backfill is complete and the gate moves to
+  `--strict`.
 - `strip_empty_cell_tags.py` — run when the pair-sync gate reports a notebook
   whose `.ipynb` carries empty `tags: []` its `.py` does not.
 - `sanitize_notebook_paths.py` — strips machine-specific absolute paths out of

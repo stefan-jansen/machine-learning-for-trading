@@ -16,9 +16,11 @@ This is the same class as the empty ``tags: []`` fossil handled by
 being tracked. Timing of a past run carries no information for a reader, so
 removing it is lossless.
 
-**Notebook-level** ``metadata.papermill`` is NOT touched: ``notebook_provenance.py``
-reads ``metadata.papermill.parameters`` to decide whether a run was production or
-TEST-mode. Only per-cell blocks are removed.
+**Notebook-level** ``metadata.papermill`` is NOT touched; only per-cell blocks are
+removed. ``notebook_provenance.py`` no longer decides production-vs-TEST from
+``metadata.papermill.parameters`` — that key is a fossil, and the executor now
+declares the parameters instead — but it does rewrite the key when it stamps, and
+rewriting it here as well would mean two tools racing over one value.
 
 Unlike ``strip_empty_cell_tags.py`` this reserializes the JSON rather than
 editing raw text, because the block is nested and regex-matching nested objects
