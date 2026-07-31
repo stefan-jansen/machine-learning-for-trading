@@ -21,6 +21,9 @@ These tests lock in:
 - Headline aggregation: ``ic_mean`` = mean across folds, ``ic_t`` =
   Newey-West-free pooled t, ``pct_positive`` = fraction of folds with
   IC > 0, ``n_folds`` = count, ``task_type`` = 'classification' for classification.
+- Folds with an undefined IC (constant scores ⇒ no rank correlation) are
+  excluded from every headline aggregate instead of poisoning it with NaN,
+  and ``ic_t`` is None rather than 0.0 when it cannot be computed.
 
 All fixtures are hermetic — no real data, no setup.yaml.
 """
@@ -267,13 +270,140 @@ def test_classification_auc_is_computed_on_binary_label(classification_predictio
 # -----------------------------------------------------------------------------
 
 
-def test_single_fold_returns_zero_ic_std_and_zero_t(regression_predictions) -> None:
-    """With only one fold, cross-fold stddev is undefined; the function reports 0."""
+def test_single_fold_reports_zero_ic_std_and_null_t(regression_predictions) -> None:
+    """One fold gives no cross-fold dispersion, so there is no t to report."""
     fold0_only = regression_predictions.filter(pl.col("fold_id") == 0)
     headline, _ = compute_prediction_fold_metrics(fold0_only, task_type="regression")
     assert headline["n_folds"] == 1
+    assert headline["n_folds_ic"] == 1
     assert headline["ic_std"] == 0.0
-    assert headline["ic_t"] == 0.0
+    assert headline["ic_t"] is None
+
+
+# -----------------------------------------------------------------------------
+# Folds with an undefined IC
+# -----------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def fourfold_predictions() -> pl.DataFrame:
+    """4 folds × 10 dates × 10 entities with y_score ≈ y_true."""
+    rng = np.random.default_rng(7)
+    rows = []
+    for fold in range(4):
+        for d in range(10):
+            for e in range(10):
+                y_true = float(rng.normal())
+                rows.append(
+                    {
+                        "timestamp": f"2024-{fold + 1:02d}-{d + 1:02d}",
+                        "symbol": f"S{e}",
+                        "fold_id": fold,
+                        "y_true": y_true,
+                        "y_score": 0.8 * y_true + 0.2 * float(rng.normal()),
+                    }
+                )
+    return pl.DataFrame(rows).with_columns(pl.col("timestamp").str.to_date())
+
+
+@pytest.fixture(scope="module")
+def predictions_with_one_constant_fold(fourfold_predictions) -> pl.DataFrame:
+    """Fold 3 scores every entity identically, so it has no cross-sectional IC.
+
+    This is what an L1 config does when its penalty zeroes every coefficient on
+    one fold: the predictions become constant, the per-date rank correlation is
+    undefined, and ``cross_sectional_ic`` returns NaN for that fold.
+    """
+    return fourfold_predictions.with_columns(
+        y_score=pl.when(pl.col("fold_id") == 3).then(1.0).otherwise(pl.col("y_score"))
+    )
+
+
+def test_constant_fold_yields_nan_fold_ic(predictions_with_one_constant_fold) -> None:
+    """Precondition for the tests below: the constant fold really does produce NaN."""
+    _, folds = compute_prediction_fold_metrics(
+        predictions_with_one_constant_fold, task_type="regression"
+    )
+    assert all(np.isfinite(folds[f]["ic"]) for f in (0, 1, 2))
+    assert not np.isfinite(folds[3]["ic"])
+
+
+def test_undefined_fold_ic_does_not_zero_the_headline_t(
+    predictions_with_one_constant_fold,
+) -> None:
+    """A NaN fold must not send ``ic_t`` to a sentinel 0.0.
+
+    Regression test. Aggregating with plain ``np.mean``/``np.std`` propagated the
+    NaN, and because ``np.nan > 0`` is False the dispersion guard fell through to
+    ``0.0`` — storing "t = 0", i.e. "this IC is indistinguishable from zero", for
+    configurations whose IC was simply never aggregated. Six rows in the shipped
+    ETF registry carried ``ic_t = 0.0`` alongside a mean IC of +0.054 over 8 folds.
+    """
+    headline, folds = compute_prediction_fold_metrics(
+        predictions_with_one_constant_fold, task_type="regression"
+    )
+    defined = np.array([folds[f]["ic"] for f in (0, 1, 2)])
+    expected_t = float(np.mean(defined) / (np.std(defined) / np.sqrt(len(defined))))
+    assert headline["ic_t"] is not None
+    assert headline["ic_t"] != 0.0
+    assert math.isclose(headline["ic_t"], expected_t, rel_tol=1e-12)
+
+
+def test_headline_aggregates_over_the_folds_with_a_defined_ic(
+    predictions_with_one_constant_fold,
+) -> None:
+    """``ic_mean`` / ``ic_std`` come from the folds that produced an IC."""
+    headline, folds = compute_prediction_fold_metrics(
+        predictions_with_one_constant_fold, task_type="regression"
+    )
+    defined = [folds[f]["ic"] for f in (0, 1, 2)]
+    assert math.isclose(headline["ic_mean"], float(np.mean(defined)), rel_tol=1e-12)
+    assert math.isclose(headline["ic_std"], float(np.std(defined)), rel_tol=1e-12)
+
+
+def test_n_folds_ic_counts_only_folds_with_an_ic(predictions_with_one_constant_fold) -> None:
+    """``n_folds`` stays the fold count; ``n_folds_ic`` exposes partial coverage."""
+    headline, _ = compute_prediction_fold_metrics(
+        predictions_with_one_constant_fold, task_type="regression"
+    )
+    assert headline["n_folds"] == 4
+    assert headline["n_folds_ic"] == 3
+
+
+def test_pct_positive_ignores_folds_without_an_ic(predictions_with_one_constant_fold) -> None:
+    """A NaN fold must not be counted as a non-positive one.
+
+    ``np.nan > 0`` is False, so the old expression silently scored every
+    undefined fold against the signal.
+    """
+    headline, folds = compute_prediction_fold_metrics(
+        predictions_with_one_constant_fold, task_type="regression"
+    )
+    assert all(folds[f]["ic"] > 0 for f in (0, 1, 2))
+    assert headline["pct_positive"] == 1.0
+
+
+def test_single_defined_fold_reports_null_t(fourfold_predictions) -> None:
+    """Three of four folds constant ⇒ one IC ⇒ no dispersion ⇒ no t."""
+    one_left = fourfold_predictions.with_columns(
+        y_score=pl.when(pl.col("fold_id") == 0).then(pl.col("y_score")).otherwise(1.0)
+    )
+    headline, _ = compute_prediction_fold_metrics(one_left, task_type="regression")
+    assert headline["n_folds"] == 4
+    assert headline["n_folds_ic"] == 1
+    assert headline["ic_mean"] is not None
+    assert headline["ic_t"] is None
+
+
+def test_headline_ic_is_null_when_no_fold_defines_one(fourfold_predictions) -> None:
+    """Every fold constant ⇒ nothing to average, and NULL rather than 0.0."""
+    all_constant = fourfold_predictions.with_columns(y_score=pl.lit(1.0))
+    headline, _ = compute_prediction_fold_metrics(all_constant, task_type="regression")
+    assert headline["n_folds"] == 4
+    assert headline["n_folds_ic"] == 0
+    assert headline["ic_mean"] is None
+    assert headline["ic_t"] is None
+    assert headline["pct_positive"] is None
 
 
 def test_accepts_pandas_dataframe(regression_predictions) -> None:
