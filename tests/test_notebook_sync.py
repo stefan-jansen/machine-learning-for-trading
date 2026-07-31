@@ -93,6 +93,20 @@ def test_bool_coercion_does_not_reach_ordinary_numeric_parameters() -> None:
     assert contradicts_injected_cell(nb, {"MAX_SYMBOLS": 2}) is not None
 
 
+def test_large_integers_do_not_collapse_onto_each_other() -> None:
+    """Above 2**53 a float round-trip would make two distinct values compare equal."""
+    nb = _notebook([_injected_cell("# Parameters\nSEED = 9007199254740993\n")])
+    assert contradicts_injected_cell(nb, {"SEED": 9007199254740993}) is None
+    assert contradicts_injected_cell(nb, {"SEED": "9007199254740993"}) is None
+    assert contradicts_injected_cell(nb, {"SEED": 9007199254740992}) is not None
+
+
+def test_float_matches_its_decimal_string() -> None:
+    nb = _notebook([_injected_cell("# Parameters\nTRAIN_SAMPLE_FRAC = 0.1\n")])
+    assert contradicts_injected_cell(nb, {"TRAIN_SAMPLE_FRAC": "0.1"}) is None
+    assert contradicts_injected_cell(nb, {"TRAIN_SAMPLE_FRAC": 0.2}) is not None
+
+
 def test_string_parameters_compare_by_value() -> None:
     nb = _notebook([_injected_cell('# Parameters\nSTART_DATE = "2024-06-01"\n')])
     assert contradicts_injected_cell(nb, {"START_DATE": "2024-06-01"}) is None

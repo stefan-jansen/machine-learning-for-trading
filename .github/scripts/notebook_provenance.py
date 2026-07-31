@@ -71,6 +71,7 @@ import json
 import subprocess
 import sys
 from datetime import UTC, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -122,17 +123,25 @@ def _normalize_value(value: object) -> tuple[str, object]:
     The tag is what keeps ``True`` distinct from the number 1. Python treats them as
     equal — ``bool`` subclasses ``int`` — so an untagged form would let a numeric
     override match a boolean one.
+
+    Numbers compare as ``Decimal`` rather than ``float``, so two integers that differ
+    above 2**53 stay different. Floats route through ``str`` first, so the literal
+    ``0.1`` matches the string ``"0.1"`` instead of its binary expansion.
     """
     if isinstance(value, bool):
         return ("bool", value)
-    if isinstance(value, (int, float)):
-        return ("num", float(value))
+    if isinstance(value, int):
+        return ("num", Decimal(value))
+    if isinstance(value, float):
+        return ("num", Decimal(str(value)))
     if isinstance(value, str):
         text = value.strip()
         try:
-            return ("num", float(text))
-        except ValueError:
+            number = Decimal(text)
+        except InvalidOperation:
             return ("str", text)
+        # NaN never equals itself, so a literal "nan" would never match itself.
+        return ("num", number) if number.is_finite() else ("str", text)
     return ("str", str(value))
 
 
