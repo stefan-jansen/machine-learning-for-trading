@@ -17,8 +17,7 @@
 # # S&P 500 Options: Feasibility Analysis
 #
 # `config/setup.yaml` declares a cross-sectional short-volatility strategy: sell the at-the-money
-# straddle on S&P 500 constituents, delta-hedge the underlying, hold to maturity. This notebook
-# asks whether the data supports it, and fits nothing.
+# straddle on S&P 500 constituents, delta-hedge, hold to maturity. Does the data support it?
 #
 # ## Learning objectives
 #
@@ -105,9 +104,9 @@ print(f"Breadth floor {BREADTH_FLOOR} straddles | horizons {HORIZONS} sessions")
 # %% [markdown]
 # ## B. Universe and cost feasibility
 #
-# ### B.1 Load and verify the declared universe. The straddle panel holds one row per symbol and
-# session: the call and put nearest the money at the target maturity, paired at a common strike and
-# expiration, with the two-leg mid and quoted spread, where a listed expiry falls in that window.
+# ### B.1 Load and verify the declared universe. The straddle panel holds one row per symbol and session
+# where a listed expiry falls in the target window: the call and put nearest the money, paired at a
+# common strike and expiration, with the two-leg mid and the two-leg quoted spread.
 
 # %%
 straddles = load_sp500_options_straddles(start_date=START_DATE, end_date=END_DATE)
@@ -121,10 +120,9 @@ print(
 )
 
 # %% [markdown]
-# ### B.2 Breadth at every decision date. `setup.yaml::decision.entry_cadence` acts on the last
-# session of each week, so that is where the universe has to exist. One count over the whole
-# sample would hide the question, because a chain carries a target maturity only on the weeks a
-# listed expiry falls there.
+# ### B.2 Breadth at every decision date. `setup.yaml::decision.entry_cadence` acts on the last session
+# of each week, so that is where the universe has to exist, and a chain carries a target maturity only
+# on the weeks a listed expiry falls in the window.
 
 # %%
 decisions = research.group_by(pl.col("timestamp").dt.truncate("1w")).agg(
@@ -153,9 +151,10 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# ### B.3 What the round trip costs, and what a move is worth. Selling the straddle crosses half the
-# quoted spread on each leg and buying it back crosses the other half, so a round trip costs one full
-# two-leg spread. Over the straddle mid, that is the share of the position's own return base the trade
+# ### B.3 What the round trip costs, and what a move is worth. Every quote here stands at the decision,
+# which `setup.yaml::decision.execution_delay` fills on the next open. Selling the straddle crosses half
+# the quoted spread on each leg and buying it back crosses the other half, so a round trip costs one
+# full two-leg spread. Over the straddle mid, that is the share of the position's own return base the trade
 # gives up before anything happens - `setup.yaml::costs.components.option_spread` assumed, and
 # measured here. Against it sits the move in the premium of the straddles the panel selected on a
 # decision date, followed through their own strike and expiration, indexed by session, and divided by
@@ -221,15 +220,14 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# ### B.4 How long the premium stays put. Re-ranking weekly is worth the turnover only if what the
-# data says at one decision date still says something at the next. The carrier is at-the-money
-# implied volatility less the volatility the underlying has just realized, computed inside each
-# stable security identity so a ticker succession does not become a return. It reads implied
-# volatility from the daily surface summary, which records the contract nearest the money in the
-# target maturity bucket every session, where the paired panel above needs both legs quotable and so
-# has holes. How long the gap lasts is an autocorrelation inside each symbol, since the panel
-# correlated as one series measures its joins; a lag is a row offset, so the filter keeps only the
-# symbols observed on every session over half the window or more.
+# ### B.4 How long the premium stays put. Re-ranking weekly is worth the turnover only if what the data
+# says at one decision date still says something at the next. The carrier is at-the-money implied
+# volatility less the volatility the underlying has just realized, computed inside each stable security
+# identity so a ticker succession does not become a return, and read from the daily surface summary,
+# which records the contract nearest the money in the maturity bucket every session where the paired
+# panel above needs both legs quotable. How long the gap lasts is an autocorrelation inside each
+# symbol, since the panel correlated as one series measures its joins; a lag is a row offset, so the
+# filter keeps only symbols observed on every session over half the window or more.
 
 # %%
 bars = load_sp500_daily_bars(start_date=START_DATE, end_date=HOLDOUT_START)
@@ -262,15 +260,15 @@ ax.set_xlabel("Lag (sessions)")
 ax.set_ylabel("Autocorrelation of the volatility premium")
 add_message_title(
     ax,
-    "A week of decay leaves most of the volatility premium in place",
+    "A week on, the volatility premium still tracks where it was",
     subtitle="Mean within-symbol autocorrelation, shaded 10th-90th percentile across symbols",
 )
 plt.show()
 
 # %% [markdown]
-# ### B.5 Move scale against cost. The ratio divides the median absolute move at the shorter horizon
-# by the median round trip, and the clearance shares count entries above each cost line. Neither says
-# the position is profitable: the move is unsigned, and a seller keeps the premium only if it is small.
+# ### B.5 Move scale against cost. The ratio divides the median absolute move at the shorter horizon by
+# the median round trip, and the clearance shares count entries above each cost line. Neither says the
+# position is profitable: the move is unsigned, and a seller keeps the premium only if it stays small.
 
 # %%
 short = moves[f"h{HORIZONS[0]}"].drop_nulls()
@@ -287,21 +285,24 @@ print(
 # The median symbol gives up 0.1184 of the straddle premium to cross the two-leg spread twice, which
 # is 70.1 bps of underlying notional. The median five-session move matches that round trip at 1.00x
 # and 0.497 of entries clear it; at the entry leg's cheapest rung, 0.948 clear. The premium averages
-# -0.0003 volatility points over 194 symbols, positive on 0.598 of days, 0.703 of it left a week on.
+# -0.0003 volatility points over 194 symbols, is positive on 0.598 of days, and autocorrelates 0.703 at
+# a lag of one week.
 
 # %% [markdown]
 # ## C. Design decisions
 #
 # ### C.1 Cadence. `setup.yaml::decision.entry_cadence` enters at the Friday close and executes at the
-# Monday open; `hedge_cadence` re-hedges the delta at each close. B.4 supports weekly entry, because the
-# premium decays slowly enough that a week-old reading still ranks the cross-section; B.2 constrains
-# it, since the universe available to rank doubles and halves week to week.
+# Monday open; `hedge_cadence` re-hedges the delta at each close. B.4 supports weekly entry: within a
+# symbol the premium still resembles itself a rebalance later, so the cadence is not sampling noise.
+# Whether the ranking across symbols is as stable belongs to the label evaluation, which scores a
+# signal rather than a carrier. B.2 constrains the cadence from the other side, since the universe
+# available to rank doubles and halves week to week.
 #
 # ### C.2 Kill conditions. Three thresholds send the strategy back to the drawing board: the premium
 # compressing below its floor for longer than a rebalance cycle, tested at label evaluation in Chapter
 # 7; cost consuming more of the premium than the cascade's cheapest rung leaves, at the cost stage in
 # Chapter 18; and gamma losses over a rolling window exceeding the premium collected, under the risk
-# overlay in Chapter 19. B.3 and B.5 set the first two baselines.
+# overlay in Chapter 19. B.3, B.4 and B.5 set the baselines they are read against.
 #
 # ### C.3 Mapping class. `setup.yaml::mapping.class` ranks symbols by expected short-straddle return
 # and holds the top `top_k`, sized on vega so a high-priced name does not dominate a book of
@@ -327,10 +328,10 @@ print(
 )
 
 # %% [markdown]
-# ### D.2 Fold demonstration. `generate_cv_splits` derives the folds from `setup.yaml::evaluation`
-# alone, numbering them backwards from the holdout. Between each training and validation block sits
-# a purge gap the width of the label buffer, stopping a straddle sold inside training from expiring
-# inside validation. The figure draws the boundaries the splitter returns, not a second copy.
+# ### D.2 Fold demonstration. `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone,
+# numbering them backwards from the holdout. Between each training and validation block sits a purge gap
+# the width of the label buffer, stopping a straddle sold inside training from expiring inside
+# validation. The figure draws the boundaries the splitter returns, not a second copy.
 
 # %%
 splits = generate_cv_splits(
@@ -368,7 +369,7 @@ plt.show()
 # %%
 print(
     f"universe.underlying {SETUP['universe']['underlying']}, {research['symbol'].n_unique()} symbols"
-    f" quoted, liquid-quintile cutoff {LIQUID_CUT:.4f} of premium\n"
+    f" quoted, cheapest fifth of them at or under {LIQUID_CUT:.4f} of premium\n"
     f"decision.entry_cadence {SETUP['decision']['entry_cadence']} | labels.primary {PRIMARY_LABEL} |"
     f" labels.buffer {LABEL_BUFFER} | top_k {CASCADE['top_k']} of the cheapest "
     f"{CASCADE['liquid_quantile']}, cost_fractions {CASCADE['cost_fractions']}\n"
@@ -379,22 +380,21 @@ print(
 # %% [markdown] tags=["results"]
 # The development window quotes 605 symbols, of which the cheapest fifth crosses at or under 0.0887 of
 # premium. Breadth runs from 77 to 469 straddles per decision date and falls under the floor a top-20
-# book needs on 4 of 209. Two folds are generated, the last validation ending 2020-11-10, the same
-# date after which an entry's outcome would land inside the holdout.
+# book needs on 4 of 209. Two folds are generated, the last validation ending 2020-11-10, which is also
+# the last date whose outcome resolves before the holdout.
 
 # %% [markdown]
 # ## Key takeaways
 #
 # 1. **Read cost against the base the position earns on**, not against the notional it is quoted on.
-# 2. **Count the universe on the session the strategy acts on**, because a chain carries a target
-#    maturity only on the weeks a listed expiry falls in the window.
-# 3. **Follow a contract by its own strike and expiration**, index its horizon by sessions not rows,
-#    and correlate inside each entity, never across the stack.
+# 2. **Count the universe on the session the strategy acts on**, never anywhere in the week.
+# 3. **Follow a contract by its own strike and expiration**, index its horizon by sessions not rows, and
+#    correlate inside each entity, never across the stack.
 #
 # ### Known limitations. Cost here is the quoted spread alone: commission, the equity leg of the daily
 # hedge and the margin the position ties up need a notional and enter at the cost stage. The B.3 moves
 # are unhedged marks, and re-hedging the delta each close removes part of what a seller would take.
-# B.4's implied volatility is the nearest-the-money contract in a maturity bucket, not a fixed tenor,
-# so a change of expiry moves the carrier alongside the premium.
+# B.4's implied volatility is the nearest-the-money contract in a maturity bucket, not a fixed tenor, so
+# a change of expiry moves the carrier alongside the premium.
 #
 # **Next**: labels at the declared horizon, built on this development window.
