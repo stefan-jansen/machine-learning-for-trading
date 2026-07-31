@@ -1715,9 +1715,6 @@ case_studies/etfs/17_risk_management:
   timeout: 120
 case_studies/etfs/18_strategy_analysis:
 case_studies/fx_pairs/01_feasibility_analysis:
-  parameters:
-    MAX_SYMBOLS: 5
-    START_DATE: '2000-01-01'
   timeout: 120
 case_studies/fx_pairs/02_labels:
   parameters:
