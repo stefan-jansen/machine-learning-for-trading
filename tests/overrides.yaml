@@ -1361,10 +1361,7 @@
 26_mlops_governance/06_mlflow_experiments:
   timeout: 300
 case_studies/cme_futures/01_feasibility_analysis:
-  parameters:
-    MAX_SYMBOLS: 5
-    START_DATE: '2000-01-01'
-  timeout: 120
+  timeout: 180
 case_studies/cme_futures/02_labels:
   parameters:
     MAX_SYMBOLS: 5
