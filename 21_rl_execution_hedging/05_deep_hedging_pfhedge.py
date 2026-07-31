@@ -16,20 +16,22 @@
 # %% [markdown]
 # # Deep Hedging with pfhedge
 #
-# **Docker image**: `ml4t`
+# **Docker image**: `ml4t-gpu`
 #
 # > `pfhedge` is a main dependency of the project (`pfhedge>=0.22.0` in
-# > `pyproject.toml`), so this notebook runs in the default environment, which
-# > is what the committed outputs were produced in:
+# > `pyproject.toml`), so this notebook needs no special image. The hedger
+# > trains on the GPU, so use the passthrough service:
 # >
 # > ```bash
-# > docker compose run --rm ml4t \
+# > docker compose run --rm ml4t-gpu \
 # >     python 21_rl_execution_hedging/05_deep_hedging_pfhedge.py
 # > ```
 # >
-# > The package is unmaintained, so the version the lock resolves may lag the
-# > newest release; the environment recorded at the end of this notebook is the
-# > one the committed numbers come from.
+# > It runs on `ml4t` without a GPU, but seeded PyTorch training is
+# > device-dependent, so the P&L will not match what is committed here. The
+# > import cell prints the Python, pfhedge, torch, CUDA and GPU versions that
+# > produced the committed numbers; a run that differs on any of them should be
+# > expected to differ on the P&L.
 #
 #
 # This notebook demonstrates the Deep Hedging framework for derivative risk
@@ -48,6 +50,7 @@
 """Deep Hedging with pfhedge - Learn hedging policies under transaction costs."""
 
 # Core imports
+import platform
 import warnings
 
 import numpy as np
@@ -77,11 +80,19 @@ except ImportError as exc:
     raise ImportError(
         "`pfhedge` is not available in the current environment, though it is a\n"
         "main dependency. Re-sync it, or run in the default image:\n"
-        "  docker compose run --rm ml4t \\\n"
+        "  docker compose run --rm ml4t-gpu \\\n"
         "      python 21_rl_execution_hedging/05_deep_hedging_pfhedge.py"
     ) from exc
 
-print(f"pfhedge version: {pfhedge.__version__}")
+# Seeded training is device-dependent, so the committed P&L is only meaningful
+# alongside what produced it.
+print(
+    f"python {platform.python_version()} | pfhedge {pfhedge.__version__} | torch {torch.__version__}"
+)
+print(
+    f"cuda build {torch.version.cuda} | device "
+    + (torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu")
+)
 
 # ML4T paths
 from utils.paths import get_output_dir
