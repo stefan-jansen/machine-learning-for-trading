@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -15,728 +16,766 @@
 # %% [markdown]
 # # S&P 500 Options: Label Engineering
 #
-# This notebook constructs labels for the S&P 500 Options case study using
-# **same-contract returns** built directly from the slim daily straddle panel
-# and the slim lifecycle-preserving raw straddle slice. Labels are short straddle
-# returns: sell a 30D ATM straddle at mid, buy back the **same contract** at mid
-# after h days. Positive return = profitable short vol position before costs.
+# The label is a short straddle's return, and an option position is not a share position:
+# the thing sold at entry has to be the thing bought back at exit, and it stops existing
+# on a date fixed when it is sold. This notebook writes that convention down as a formula,
+# proves each labelled trade has a complete round trip inside one contract, measures how
+# much independent information overlapping trades carry, establishes the floor a feature
+# has to clear, and writes the files stage 03 reads.
 #
-# **Learning Objectives**:
-# - Construct instrument-level labels from same-contract exit prices
-# - Implement delta-hedged returns using the held contract's delta path
-# - Generate walk-forward CV splits with a buffer that spans the ~30-day horizon
-# - Establish a VRP baseline IC that engineered features must beat
+# ## Learning objectives
 #
-# **Book Reference**: Chapter 7, Section 7.2 (Label Engineering)
+# - Express an option label as a round trip in one contract, and say what each leg costs
+# - Assert - rather than describe - that every labelled window closes on a real quote
+# - Seal a diagnostic on the date a position settles, not the date it is opened, when the
+#   settlement date is a property of the contract rather than a fixed offset
+# - Price the overlap in a label held for a month and sampled every session
+# - Establish the floor a feature has to clear, under a standard error that prices in that
+#   overlap
 #
-# **Prerequisites**: [`01_feasibility_analysis`](01_feasibility_analysis.ipynb)
+# ## Book reference, prerequisites and artifacts
 #
-# **Primary label**: `ret_to_expiry` - the hold-to-expiry (HTM) short-straddle
-# return declared in `setup.yaml::labels.primary`. Every downstream model in this
-# case study trains on it. The horizon-based variants (`fwd_ret_{5,10}d`, their
-# delta-hedged and executable counterparts) are also built here to characterise
-# the pricing and hedging mechanics, but they are diagnostic, not modelled.
+# Chapter 7, Section 7.2. Reads the daily matched-strike straddle panel and the raw option
+# chain through `load_sp500_options_straddles()` and `load_sp500_options_straddles_raw()`,
+# whose coverage [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) establishes,
+# the underlying closes through `load_sp500_daily_bars()`, and `config/setup.yaml`, which
+# declares the label set, the cross-validation buffer and the holdout boundary.
 #
-# **Pricing Convention**: Mid-to-mid labels measure the economic signal.
-# Executable labels (sell at bid, close at ask) bake in the per-contract
-# bid-ask spread and reveal that the unconditional 10-day short straddle return
-# falls to **-9.6%** per trade, even though its mid-to-mid counterpart is +5.7%.
-# The exit-leg spread is what `ret_to_expiry` avoids: cash settlement at
-# expiration converts the option to intrinsic value with no market exit. Whether
-# ML selection plus the O'Donovan-Yu cost-mitigation cascade turns this into a
-# viable strategy is the subject of Chapter 18 (Section 18.8), not this notebook.
+# Writes five label files - `labels/ret_to_expiry.parquet`, `labels/fwd_ret_5d.parquet`,
+# `labels/fwd_ret_10d.parquet`, `labels/fwd_ret_dh_5d.parquet` and
+# `labels/fwd_ret_dh_10d.parquet` - each with a `.digest.json` sidecar beside it.
+# `03_financial_features.py` reads the primary and `fwd_ret_dh_10d`, `05_evaluation.py`
+# reads `fwd_ret_dh_10d`, and `90_ic_diagnostic.py` reads `fwd_ret_10d` and
+# `fwd_ret_dh_10d`. The two intermediate frames the labels are built from,
+# `labels/contract_returns.parquet` and `labels/hedge_path.parquet`, are produced by
+# `_label_artifacts.py`, which exists because the round trip below is not a shift.
 
 # %%
-"""S&P 500 Options: Label Engineering - Same-Contract Short Straddle Returns."""
+"""S&P 500 Options: Label Engineering."""
 
-import json
-import subprocess
 import warnings
-from datetime import UTC, datetime
+from datetime import date
 
+import matplotlib.pyplot as plt
 import numpy as np
-import plotly.graph_objects as go
 import polars as pl
-from ml4t.diagnostic.metrics import compute_ic_hac_stats
-from plotly.subplots import make_subplots
-from scipy.stats import spearmanr
+import yaml
+from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
-from case_studies.sp500_options._label_artifacts import ensure_label_artifacts
+from case_studies.sp500_options._label_artifacts import accrued_hedge_pnl, ensure_label_artifacts
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
+from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
 from data import load_sp500_daily_bars, load_sp500_options_straddles
-from utils.cv_splits import load_evaluation_config
+from utils.artifact_specs import resolve_label_horizon
 from utils.paths import get_case_study_dir
-from utils.style import COLORS  # registers the ml4t Plotly template on import
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
-# %% tags=["parameters"]
-START_DATE = None  # None = use full dataset
-
-# %%
-CASE_DIR = get_case_study_dir("sp500_options")
+CASE_STUDY_ID = "sp500_options"
+CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 LABELS_DIR = CASE_DIR / "labels"
 
-STRATEGY_ID = "sp500_options"
+# %% [markdown]
+# Both parameters are unset by default, and both are read below - they reach the artifact
+# builder rather than the frames it returns, because the builder caches its output and a
+# window applied after the fact would leave the cached full panel in place. `START_DATE`
+# trims the history to a later start; `MAX_SYMBOLS` keeps the most-quoted symbols only.
+# Either one shortens a run at the cost of a thinner panel: the rank correlation in Section
+# G and the cross-sectional dispersion in Section E both need a wide cross-section on each
+# session to mean anything.
+
+# %% tags=["parameters"]
+MAX_SYMBOLS = 0
+START_DATE = None
+
+# %% [markdown]
+# ## Configuration
+#
+# Everything that defines a label is declared in `config/setup.yaml` and bound here. A
+# horizon or a boundary typed into a cell is a second copy of a value the rest of the
+# pipeline reads from the file, and the two drift apart the first time either is edited.
+#
+# The primary label and the four diagnostic variants are declared separately, and the
+# distinction is what they are for rather than how they are built: models train on
+# `ret_to_expiry`, while the fixed-horizon variants exist to show what the same trade earns
+# when it is closed early and when its directional exposure is hedged away. `labels.buffer`
+# is the gap that keeps a training fold independent of the validation fold after it, and
+# `generate_cv_splits` takes it separately from the horizon an outcome resolves over -
+# here they are different quantities, and Section H prints both.
+
+# %%
+setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+
+PRIMARY_LABEL = setup["labels"]["primary"]
+VARIANT_LABELS = list(setup["labels"]["variant_buffers"])
+LABEL_NAMES = [PRIMARY_LABEL, *VARIANT_LABELS]
+HORIZONS = {
+    name: int(resolve_label_horizon(CASE_STUDY_ID, name, setup).rstrip("Dd"))
+    for name in VARIANT_LABELS
+}
+LABEL_BUFFER = setup["labels"]["buffer"]
+HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
 INSTRUMENT_ID = "straddle_30d_atm"
-FORWARD_HORIZONS = (5, 10)
+
+# One style per label, shared by every figure: the primary in the focal colour, each
+# fixed-horizon family in its own, and the delta-hedged member of a family dashed.
+SHORT = min(HORIZONS.values(), default=0)
+STYLES = {
+    name: dict(
+        color=COLORS["blue"]
+        if name == PRIMARY_LABEL
+        else COLORS["amber" if HORIZONS[name] == SHORT else "copper"],
+        linestyle="--" if "_dh_" in name else "-",
+        lw=2.2 if name == PRIMARY_LABEL else 1.4,
+    )
+    for name in LABEL_NAMES
+}
+
+print(f"Primary {PRIMARY_LABEL}; diagnostic variants {HORIZONS} sessions")
+print(f"Cross-validation buffer {LABEL_BUFFER}; holdout opens {HOLDOUT_START}")
 
 # %% [markdown]
-# ## 1. Build and Load Same-Contract Returns
+# ## A. The learning task
 #
-# The slim reader dataset already includes the inputs needed for same-contract
-# label construction:
+# The hypothesis is that an option's implied volatility is, on average, above the volatility
+# the underlying goes on to realise, and that the excess is not uniform across the S&P 500:
+# some names are priced further above their own subsequent moves than others. Selling a
+# straddle - one call and one put at the same strike and expiration - is the position that
+# earns that difference and is close to neutral on direction at the moment it is opened. The
+# label is therefore the return on a short straddle held over a fixed window, ranked across
+# names rather than judged in isolation, and the strategy that consumes it sells the names
+# it ranks highest.
 #
-# - `options_straddles_daily.parquet`
-# - `options_straddles_raw/year=*.parquet`
+# The decision cadence comes from `setup.yaml`: a Friday close is observed and the position
+# is opened at the next session's open, on a straddle written about a month out. That fixes
+# the primary label's outcome: the position is carried to expiration and settles into cash
+# at whatever the underlying is worth that day. Labels are sampled every session rather than
+# only on Fridays - that buys five times the rows at the price of overlapping trades, and
+# Section F measures what they are worth.
+
+# %% [markdown]
+# ## B. Preparation before the label
 #
-# We build the persisted same-contract artifacts from those inputs here, then
-# read them for the downstream label calculations.
+# **A forward return on an option is a round trip in one contract, and that is the mistake
+# this dataset invites.** The daily panel carries a 30-day at-the-money straddle for each
+# name on each session, but the contract behind that row changes as the calendar moves: the
+# thing that is 30 days out today is 29 days out tomorrow, so tomorrow's row is a different
+# strike and often a different expiration. Shifting the panel's price column forward would
+# difference two prices from two different contracts and report the change of instrument as
+# profit. What the label needs instead is the price of *today's* contract on a later date,
+# which only the raw chain holds, so `_label_artifacts.py` looks each held contract up by
+# `(symbol, strike, expiration)` and returns the entry premium, the exit premium at each
+# horizon, and the contract's own delta on each day it is held.
+#
+# The entity a label may not cross is that contract. Entry is at the session after the
+# signal, so the whole window sits strictly in the future of the row that carries it, and no
+# eligibility filter runs before the label is built: dropping rows first would make a
+# forward offset count survivors rather than sessions, and the window would silently span
+# whatever was removed. Point-in-time liquidity screening is applied downstream, where
+# `setup.yaml: backtest.sweep.universe_filter` declares it.
 
 # %%
-artifact_paths = ensure_label_artifacts()
+ensure_label_artifacts(max_symbols=MAX_SYMBOLS, start_date=START_DATE)
 contract_returns = pl.read_parquet(LABELS_DIR / "contract_returns.parquet")
-print(f"Contract returns: {len(contract_returns):,} entries")
-print(f"  Symbols: {contract_returns['symbol'].n_unique()}")
-print(
-    f"  Date range: {contract_returns['feature_date'].min()} to {contract_returns['feature_date'].max()}"
-)
-
-for h in FORWARD_HORIZONS:
-    found = contract_returns[f"exit_found_{h}d"].sum()
-    total = len(contract_returns)
-    print(f"  Exit {h}d coverage: {found:,}/{total:,} ({found / total:.1%})")
-
-# %% [markdown]
-# ## 2. Unhedged Short Straddle Labels
-#
-# The unhedged label uses the same-contract mid-to-mid return directly from
-# the same-contract artifact builder. No additional computation needed - just filter to valid
-# exits and format for downstream consumption.
-#
-# $$r_{short} = \frac{(C_{entry} + P_{entry}) - (C_{exit} + P_{exit})}{C_{entry} + P_{entry}}$$
-
-# %%
-unhedged_labels = {}
-for h in FORWARD_HORIZONS:
-    label_col = f"fwd_ret_{h}d"
-    lbl = (
-        contract_returns.filter(pl.col(f"exit_found_{h}d"))
-        .select(
-            [
-                pl.col("feature_date").alias("timestamp"),
-                "symbol",
-                pl.lit(INSTRUMENT_ID).alias("instrument_id"),
-                label_col,
-            ]
-        )
-        .drop_nulls(subset=[label_col])
-    )
-    unhedged_labels[label_col] = lbl
-    stats = lbl[label_col]
-    print(
-        f"{label_col}: {len(lbl):,} rows, "
-        f"mean={stats.mean():.4f}, std={stats.std():.4f}, median={stats.median():.4f}"
-    )
-
-# %% [markdown]
-# ## 2b. Executable Short Straddle Labels (Bid/Ask)
-#
-# The mid-to-mid labels measure the economic signal. The **executable** labels
-# measure what a trader actually receives: sell at bid (entry), buy back at ask
-# (exit). The difference is the full bid-ask spread - the dominant cost for
-# single-stock options (~11% of premium round-trip).
-#
-# $$r_{exec} = \frac{(C_{bid}^{entry} + P_{bid}^{entry}) - (C_{ask}^{exit} + P_{ask}^{exit})}{C_{bid}^{entry} + P_{bid}^{entry}}$$
-
-# %%
-exec_labels = {}
-for h in FORWARD_HORIZONS:
-    label_col = f"fwd_ret_exec_{h}d"
-    valid = contract_returns.filter(pl.col(f"exit_found_{h}d"))
-    lbl = (
-        valid.with_columns(
-            (pl.col("entry_call_bid") + pl.col("entry_put_bid")).alias("_entry_bid"),
-            (pl.col(f"exit_call_{h}d_ask") + pl.col(f"exit_put_{h}d_ask")).alias("_exit_ask"),
-        )
-        .with_columns(
-            ((pl.col("_entry_bid") - pl.col("_exit_ask")) / pl.col("_entry_bid")).alias(label_col)
-        )
-        .select(
-            [
-                pl.col("feature_date").alias("timestamp"),
-                "symbol",
-                pl.lit(INSTRUMENT_ID).alias("instrument_id"),
-                label_col,
-            ]
-        )
-        .drop_nulls(subset=[label_col])
-    )
-    exec_labels[label_col] = lbl
-    stats = lbl[label_col]
-    print(
-        f"{label_col}: {len(lbl):,} rows, "
-        f"mean={stats.mean():.4f}, std={stats.std():.4f}, "
-        f"hit_rate={(stats > 0).mean():.1%}"
-    )
-
-# %% [markdown]
-# The executable returns are substantially lower than mid-to-mid because the
-# full bid-ask spread is baked into entry and exit prices. The unconditional
-# executable return is negative - the average straddle is unprofitable after
-# spreads. The ML model's value is selecting the subset that remains profitable.
-
-# %% [markdown]
-# ## 3. Delta-Hedged Short Straddle Labels
-#
-# The delta-hedged variant isolates the volatility bet by removing directional
-# exposure. We use the **held contract's** delta path from the same-contract artifacts,
-# not the constant-maturity delta that jumps between contracts daily.
-#
-# $$r_{dh} = r_{short} + \sum_{d=0}^{h-1} \Delta_d \cdot \frac{S_{d+1} - S_d}{P_{entry}}$$
-#
-# where $\Delta_d$ is the held contract's net delta on holding day $d$,
-# and $S_d$ is the underlying price.
-
-# %%
 hedge_path = pl.read_parquet(LABELS_DIR / "hedge_path.parquet")
-print(f"Hedge path: {len(hedge_path):,} rows")
-
-# %%
-# Compute daily underlying price changes along each holding path
-hedge_sorted = hedge_path.sort(["symbol", "feature_date", "holding_day"])
-
-# dS at each holding day: S[d] - S[d-1]
-hedge_sorted = hedge_sorted.with_columns(
-    (
-        pl.col("underlying_price")
-        - pl.col("underlying_price").shift(1).over(["symbol", "feature_date"])
-    ).alias("dS")
-)
-
-# Hedge P&L each day: delta[d-1] * dS[d] (hedge established at previous close)
-# For d=0, no dS (it's the entry day), so dS is null and excluded
-hedge_sorted = hedge_sorted.with_columns(
-    (pl.col("instr_delta").shift(1).over(["symbol", "feature_date"]) * pl.col("dS")).alias(
-        "daily_hedge_pnl"
-    )
-)
-
-# %%
-# Accumulate daily hedge P&L over each horizon before joining the option return.
-hedge_pnl_by_horizon = {}
-for h in FORWARD_HORIZONS:
-    hedge_pnl_by_horizon[h] = (
-        hedge_sorted.filter((pl.col("holding_day") >= 1) & (pl.col("holding_day") <= h))
-        .group_by(["feature_date", "symbol"])
-        .agg(pl.col("daily_hedge_pnl").sum().alias("hedge_pnl"))
-    )
-
-
-# %% [markdown]
-# Each horizon now combines the accumulated hedge P&L with its same-contract
-# option return and scales the hedge by the entry premium.
-
-# %%
-dh_labels = {}
-for h in FORWARD_HORIZONS:
-    label_col = f"fwd_ret_dh_{h}d"
-    dh = (
-        contract_returns.filter(pl.col(f"exit_found_{h}d"))
-        .select(
-            [
-                "feature_date",
-                "symbol",
-                f"fwd_ret_{h}d",
-                "entry_straddle_mid",
-            ]
-        )
-        .join(hedge_pnl_by_horizon[h], on=["feature_date", "symbol"], how="left")
-        .with_columns(
-            (
-                pl.col(f"fwd_ret_{h}d")
-                + pl.col("hedge_pnl").fill_null(0) / pl.col("entry_straddle_mid")
-            ).alias(label_col)
-        )
-    )
-
-    lbl = dh.select(
-        [
-            pl.col("feature_date").alias("timestamp"),
-            "symbol",
-            pl.lit(INSTRUMENT_ID).alias("instrument_id"),
-            label_col,
-        ]
-    ).drop_nulls(subset=[label_col])
-
-    dh_labels[label_col] = lbl
-    stats = lbl[label_col]
-    print(
-        f"{label_col}: {len(lbl):,} rows, "
-        f"mean={stats.mean():.4f}, std={stats.std():.4f}, median={stats.median():.4f}"
-    )
-
-# %% [markdown]
-# ## 3c. Hold-to-Expiry Short Straddle Label
-#
-# The horizon-based labels above close the position at $t + h$ days and pay the
-# full exit bid-ask spread. The **hold-to-expiry** (HTM) variant avoids the exit
-# spread entirely: cash settlement at expiration converts the option to
-# intrinsic value without any market transaction.
-#
-# $$r_{\text{htm}} = \frac{P_{\text{entry}} - |S_T - K|}{P_{\text{entry}}}$$
-#
-# where $S_T$ is the underlying close on the expiration date and $K$ is the
-# strike. Sign convention matches the other labels in this notebook: positive =
-# profitable short straddle. Verified on row (symbol=A, $K=50$, $S_T=51.63$,
-# $P_{\text{entry}}=3.60$): intrinsic $=1.63$, $r_{\text{htm}}=+54.7\%$.
-# Settlement uses the unadjusted historical close because the listed strike and
-# expiration spot are expressed in the same contemporaneous price basis.
-#
-# Days-to-expiry is tight by design (25–35 calendar days, mean 30, std 2.6),
-# so no per-day normalization. We add DTE as a feature in `03_financial_features`.
-#
-# This label grounds the cost-mitigation cascade introduced by O'Donovan & Yu
-# (2025): under conservative option transaction costs, HTM recovers 3 of 17
-# single-name option anomalies that fail at fixed holding periods.
-
-# %%
-underlying_close = load_sp500_daily_bars().select(
-    [
-        pl.col("symbol"),
-        pl.col("timestamp").alias("expiration"),
-        pl.col("close").alias("underlying_close_at_expiry"),
-    ]
-)
-
-htm_label = (
-    contract_returns.join(underlying_close, on=["symbol", "expiration"], how="inner")
-    .with_columns(
-        (pl.col("underlying_close_at_expiry") - pl.col("strike"))
-        .abs()
-        .alias("intrinsic_at_expiry"),
-        ((pl.col("expiration") - pl.col("feature_date")).dt.total_days()).alias("dte_calendar"),
-    )
-    .with_columns(
-        (
-            (pl.col("entry_straddle_mid") - pl.col("intrinsic_at_expiry"))
-            / pl.col("entry_straddle_mid")
-        ).alias("ret_to_expiry")
-    )
-    .select(
-        [
-            pl.col("feature_date").alias("timestamp"),
-            "symbol",
-            pl.lit(INSTRUMENT_ID).alias("instrument_id"),
-            "ret_to_expiry",
-            pl.col("dte_calendar").cast(pl.Int32),
-        ]
-    )
-    .drop_nulls(subset=["ret_to_expiry"])
-)
-
-htm_labels = {"ret_to_expiry": htm_label}
-
-
-# %% [markdown]
-# The summary confirms the available expiration coverage and the label's
-# return and horizon distribution.
-
-# %%
-_htm_dropped = len(contract_returns) - len(htm_label)
-_ret_htm = htm_label["ret_to_expiry"]
-print(
-    f"ret_to_expiry: {len(htm_label):,} rows "
-    f"(dropped {_htm_dropped:,} for expirations beyond underlying bars range)"
-)
-print(
-    f"  mean={_ret_htm.mean():.4f}, std={_ret_htm.std():.4f}, "
-    f"median={_ret_htm.median():.4f}, hit_rate={(_ret_htm > 0).mean():.1%}"
-)
-print(
-    f"  dte_calendar: min={htm_label['dte_calendar'].min()}, "
-    f"max={htm_label['dte_calendar'].max()}, "
-    f"mean={htm_label['dte_calendar'].mean():.1f}"
-)
-
-# %% [markdown]
-# ## 4. Label Quality Diagnostics
-#
-# Check distributions and the fraction of profitable trades.
-
-# %%
-_all_labels = {**unhedged_labels, **dh_labels, **exec_labels, **htm_labels}
-# The modelled label is the hold-to-expiry return (setup.yaml::labels.primary);
-# the diagnostics below characterise it, not the horizon-based variants.
-_primary_name = "ret_to_expiry"
-primary = _all_labels[_primary_name]
-y_col = _primary_name
-
-n_total = len(primary)
-n_positive = primary.filter(pl.col(y_col) > 0).height
-hit_rate = n_positive / n_total if n_total > 0 else 0
-
-print(f"Primary label: {y_col}")
-print(f"  Observations: {n_total:,}")
-print(f"  Mean: {primary[y_col].mean():.4f}")
-print(f"  Std: {primary[y_col].std():.4f}")
-print(f"  Hit rate (positive): {hit_rate:.1%}")
-
-# %% [markdown]
-# ### Delta hedging narrows 10-day returns
-#
-# Hold-to-expiry outcomes retain a pronounced loss tail, while delta hedging
-# concentrates the 10-day distribution by removing directional P&L.
-
-# %%
-fig = make_subplots(
-    rows=1,
-    cols=2,
-    horizontal_spacing=0.13,
-    subplot_titles=["Hold-to-Expiry (primary label)", "10-Day: hedged vs unhedged"],
-)
-
-htm_edges = np.arange(-3.0, 3.1, 0.1)
-htm_counts, _ = np.histogram(primary[y_col].to_numpy(), bins=htm_edges)
-htm_centers = (htm_edges[:-1] + htm_edges[1:]) / 2
-fig.add_trace(
-    go.Bar(
-        x=htm_centers,
-        y=htm_counts,
-        width=0.1,
-        marker_color=COLORS["blue"],
-        opacity=0.85,
-        name="ret_to_expiry",
-    ),
-    row=1,
-    col=1,
-)
-_ = fig.add_vline(x=0, line_dash="dash", line_color=COLORS["negative"], row=1, col=1)
-# %% [markdown]
-# The 10-day panel overlays unhedged and held-contract delta-hedged outcomes
-# using identical bins and limits for a direct dispersion comparison.
-
-# %%
-uh_10d = unhedged_labels["fwd_ret_10d"]["fwd_ret_10d"]
-dh_10d = dh_labels["fwd_ret_dh_10d"]["fwd_ret_dh_10d"]
-ten_day_edges = np.arange(-1.5, 1.55, 0.05)
-uh_counts, _ = np.histogram(uh_10d.to_numpy(), bins=ten_day_edges)
-dh_counts, _ = np.histogram(dh_10d.to_numpy(), bins=ten_day_edges)
-ten_day_centers = (ten_day_edges[:-1] + ten_day_edges[1:]) / 2
-fig.add_trace(
-    go.Bar(
-        x=ten_day_centers,
-        y=uh_counts,
-        width=0.05,
-        opacity=0.55,
-        marker_color=COLORS["amber"],
-        name="unhedged_10d",
-    ),
-    row=1,
-    col=2,
-)
-fig.add_trace(
-    go.Bar(
-        x=ten_day_centers,
-        y=dh_counts,
-        width=0.05,
-        opacity=0.55,
-        marker_color=COLORS["blue"],
-        name="dh_10d",
-    ),
-    row=1,
-    col=2,
-)
-_ = fig.add_vline(x=0, line_dash="dash", line_color=COLORS["negative"], row=1, col=2)
-# %% [markdown]
-# Both panels focus on their central mass. The rendered note states the exact
-# displayed ranges so the omitted extreme tails remain explicit to readers.
-
-# %%
-fig.update_layout(
-    template="ml4t",
-    height=470,
-    barmode="overlay",
-    title="Delta hedging narrows 10-day returns while HTM retains a loss tail",
-    margin=dict(b=105),
-)
-fig.update_xaxes(title_text="Return (fraction of entry premium)", range=[-3, 3], row=1, col=1)
-fig.update_xaxes(title_text="Return (fraction of entry premium)", range=[-1.5, 1.5], row=1, col=2)
-fig.update_yaxes(title_text="Count", row=1, col=1)
-fig.update_yaxes(title_text="Count", row=1, col=2)
-fig.add_annotation(
-    text="Displayed ranges truncate HTM outside [-3, 3] and 10-day returns outside [-1.5, 1.5].",
-    x=0.5,
-    y=-0.28,
-    xref="paper",
-    yref="paper",
-    showarrow=False,
-    font=dict(color=COLORS["neutral"], size=11),
-)
-fig.show()
-
-# %% [markdown]
-# ### Label Autocorrelation
-#
-# The ~30-day hold-to-expiry horizon on daily data creates heavily overlapping
-# returns (consecutive entry dates share most of their holding window). This is
-# why `setup.yaml::labels.buffer` is 35D - the CV purge/embargo must span the
-# full label horizon to keep training and validation windows independent.
-
-# %%
-max_lag = 20
-lag_acf = {}
-for lag in range(1, max_lag + 1):
-    acf_by_sym = []
-    for sym in primary["symbol"].unique().to_list():
-        sym_data = primary.filter(pl.col("symbol") == sym).sort("timestamp")
-        y = sym_data[y_col].to_numpy()
-        if len(y) > lag + 10:
-            corr, _ = spearmanr(y[:-lag], y[lag:])
-            if np.isfinite(corr):
-                acf_by_sym.append(corr)
-    if acf_by_sym:
-        lag_acf[lag] = float(np.mean(acf_by_sym))
-
-print("Label autocorrelation (avg across symbols):")
-for lag, acf in lag_acf.items():
-    marker = " ***" if lag <= 2 else ""
-    print(f"  Lag {lag:2d}: {acf:+.3f}{marker}")
-
-# Effective sample size
-_acf_vals = [v for v in lag_acf.values() if v > 0]
-_n_eff_denom = 1 + 2 * sum(_acf_vals)
-n_eff = int(n_total / _n_eff_denom)
-print(f"\nEffective sample size: N_eff = {n_eff:,} (N/{_n_eff_denom:.1f})")
-
-# %% [markdown]
-# ### Baseline IC: VRP Proxy
-#
-# The simplest VRP proxy ($IV_{atm} - RV_{21d}$) is the naive predictor of the
-# short-straddle return. Its rank IC against `ret_to_expiry` sets the floor that
-# engineered features must beat. **The floor is measured on the pre-2021
-# cross-validation window only** (`setup.yaml::evaluation.holdout_start`), so the
-# 2021 holdout stays sealed against every quantity used to motivate feature work.
-# Realized volatility uses split-adjusted closes within stable `sec_id`
-# segments. Returns are null at identity changes, so an adjustment-factor reset
-# cannot masquerade as a market move. The hold-to-expiry label spans roughly 21
-# trading days, so inference uses a 20-lag Newey-West adjustment.
-
-# %%
 straddles = load_sp500_options_straddles()
 underlying = load_sp500_daily_bars()
-underlying_rv = (
+
+# Recorded as each label's `inputs`: a re-run against a refreshed download is otherwise
+# indistinguishable from this one.
+CONTRACT_DIGEST = value_digest(contract_returns)
+HEDGE_DIGEST = value_digest(hedge_path)
+MARKET_DATA_DIGEST = value_digest(underlying, ["symbol", "timestamp", "close"])
+
+signals = contract_returns["feature_date"]
+print(
+    f"{contract_returns.height:,} round trips on {contract_returns['symbol'].n_unique()} names, "
+    f"signalled {signals.min()} to {signals.max()}\nDigests - contract_returns "
+    f"{CONTRACT_DIGEST}, hedge_path {HEDGE_DIGEST}, market_data {MARKET_DATA_DIGEST}"
+)
+
+# %% [markdown]
+# Every window below is counted on the straddle panel's own session calendar, numbered once
+# here on the source panel rather than on the rows that survive to a label. A name is quoted
+# on roughly half the sessions in this panel, so counting positions among surviving rows
+# would make the two rows either side of a gap adjacent and report windows that share
+# nothing as overlapping.
+
+# %%
+calendar = straddles.select("timestamp").unique().sort("timestamp").with_row_index("_bar")
+N_SESSIONS = calendar.height
+# Entry is the session after the signal, so a horizon-h trade closes h+1 sessions out.
+calendar = calendar.with_columns(
+    (N_SESSIONS - 1 - pl.col("_bar")).alias("from_end"),
+    *(
+        pl.col("timestamp").shift(-horizon - 1).alias(f"_end_{horizon}d")
+        for horizon in set(HORIZONS.values())
+    ),
+)
+
+panel = contract_returns.rename({"feature_date": "timestamp"}).join(
+    calendar, on="timestamp", how="left"
+)
+print(f"{N_SESSIONS:,} panel sessions; {panel['timestamp'].n_unique():,} carry a signal")
+
+# %% [markdown]
+# ## C. Label construction
+#
+# One execution convention, written once. A straddle sold at $t{+}1$ for the premium
+# $P_{t+1} = C_{t+1} + Q_{t+1}$ and bought back $h$ sessions later at $P_{t+1+h}$, with both
+# prices taken at the mid of the *same* contract, returns
+#
+# $$r^{(h)}_{i,t} = \frac{P_{i,t+1} - P_{i,t+1+h}}{P_{i,t+1}}$$
+#
+# for contract $i$. The sign convention is the seller's throughout: a positive number is a
+# profitable short straddle. The denominator is the premium collected, so the label is
+# already a return on the capital the trade puts at risk and needs no further scaling.
+#
+# The delta-hedged variant subtracts the directional part of that P&L. Holding the straddle
+# leaves a residual exposure $\Delta_d$ to the underlying that changes every day, so the
+# hedge is rebalanced at each close along the path the contract actually took:
+#
+# $$r^{(h),\text{dh}}_{i,t} = r^{(h)}_{i,t}
+#   + \frac{1}{P_{i,t+1}}\sum_{d=1}^{h} \Delta_{i,d-1}\,(S_{i,d} - S_{i,d-1})$$
+#
+# The delta is the held contract's own, not the panel's constant-maturity delta, which
+# jumps between contracts daily and would hedge a position nobody holds. `accrued_hedge_pnl`
+# returns the number of days it found a quote on as well as the accrued P&L, because a sum
+# over a path with holes is a partial hedge: a label built from one is not the quantity the
+# formula names, and Section D nulls it rather than presenting it as fully hedged.
+#
+# The primary label replaces the exit leg altogether. Carried to expiration, the straddle
+# settles into cash at its intrinsic value and there is no closing trade at all:
+#
+# $$r^{\text{exp}}_{i,t} = \frac{P_{i,t+1} - |S_{i,T} - K_i|}{P_{i,t+1}}$$
+#
+# where $K_i$ is the strike, $T$ the expiration, and $S_{i,T}$ the underlying's close that
+# day. Settlement reads the unadjusted historical close, because the listed strike and the
+# expiration spot are quoted in the same contemporaneous price basis and adjusting one
+# without the other would put them on different scales.
+#
+# **The three conventions divide by the price at entry rather than differencing a price
+# series, so none of them is a shift, and `fixed_time_horizon_labels` cannot express any of
+# them.** That is why the round trips are built in `_label_artifacts.py` and read back here.
+
+# %%
+panel = panel.join(accrued_hedge_pnl(hedge_path), on=["timestamp", "symbol"], how="left")
+
+# %% [markdown]
+# Each label is then one expression over the round-trip frame, and each carries `_label_end`
+# - the date its outcome is fully observed. For a fixed-horizon trade that is the session it
+# is closed on; for the primary label it is the expiration date, which is written into the
+# contract at entry and varies from trade to trade. Section D checks both against the
+# calendar, and everything from Section E onwards is sealed on this column.
+
+# %%
+settlement = underlying.select(
+    "symbol",
+    pl.col("timestamp").alias("expiration"),
+    pl.col("close").alias("_close_at_expiry"),
+)
+panel = panel.join(settlement, on=["symbol", "expiration"], how="left").with_columns(
+    (
+        (pl.col("entry_straddle_mid") - (pl.col("_close_at_expiry") - pl.col("strike")).abs())
+        / pl.col("entry_straddle_mid")
+    ).alias(PRIMARY_LABEL),
+    (pl.col("expiration") - pl.col("timestamp"))
+    .dt.total_days()
+    .cast(pl.Int32)
+    .alias("dte_calendar"),
+)
+for name, horizon in HORIZONS.items():
+    exit_mid = pl.col(f"exit_straddle_mid_{horizon}d")
+    ret = (pl.col("entry_straddle_mid") - exit_mid) / pl.col("entry_straddle_mid")
+    if name.startswith("fwd_ret_dh_"):
+        complete = pl.col(f"hedge_days_{horizon}d") == horizon
+        hedge = pl.col(f"hedge_pnl_{horizon}d") / pl.col("entry_straddle_mid")
+        ret = pl.when(complete).then(ret + hedge)
+    panel = panel.with_columns(ret.alias(name))
+
+END_OF = {PRIMARY_LABEL: pl.col("expiration")} | {
+    name: pl.col(f"_end_{horizon}d") for name, horizon in HORIZONS.items()
+}
+
+# %% [markdown]
+# The primary label settles on a date the contract fixes rather than a fixed number of
+# sessions out, so how long the money is committed is itself a distribution. Chapter 7.2
+# asks for it wherever the resolution time varies: a label whose window is sometimes a third
+# longer than at other times is not one horizon, and the spread is what the purge gap and
+# the cost of carry both have to cover.
+
+# %%
+# Entry is one session after the signal, so a trade settling on bar e is exposed to the
+# e - bar - 1 return intervals realised between them.
+expiry_bar = calendar.select(pl.col("timestamp").alias("expiration"), pl.col("_bar").alias("_e"))
+panel = panel.join(expiry_bar, on="expiration", how="left").with_columns(
+    (pl.col("_e") - pl.col("_bar") - 1).alias("window")
+)
+resolution = panel.drop_nulls(PRIMARY_LABEL)
+PRIMARY_WINDOW = int(resolution["window"].median())
+LONGEST_WINDOW = int(resolution["window"].max())
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.hist(resolution["dte_calendar"].to_numpy(), bins=np.arange(24.5, 36.5, 1), color=COLORS["blue"])
+ax.axvline(resolution["dte_calendar"].median(), color=COLORS["copper"], linestyle="--", lw=1.2)
+ax.set_xlabel("Calendar days from signal to expiration")
+ax.set_ylabel("Trades")
+ax.yaxis.set_major_formatter(lambda v, _: f"{v:,.0f}")
+add_message_title(
+    ax,
+    "How long a trade is held varies by about a third of its own window",
+    subtitle="Dashed line marks the median; the label resolves when the contract expires",
+)
+show_with_alt(fig, "Histogram of calendar days between the signal date and expiration.")
+
+print(
+    f"Settlement: {resolution['dte_calendar'].min()}-{resolution['dte_calendar'].max()} calendar days, "
+    f"{resolution['window'].min()}-{LONGEST_WINDOW} sessions of exposure, "
+    f"median {PRIMARY_WINDOW}"
+)
+
+# %% [markdown]
+# ## D. Window validity
+#
+# A join always returns something; the question is whether what it returns is the quantity
+# the label claims. Each property below fails silently and leaves plausible numbers behind,
+# so each is asserted rather than described.
+#
+# The second assertion is a full reconciliation rather than a bound. Every row carrying no
+# label is attributed to exactly one cause - no premium quoted at entry, no quote for the
+# held contract on the exit date, a hedge path the contract was not quoted on every day of,
+# an expiration past the end of the underlying panel, or an expiration on which the
+# underlying itself did not trade - and the counts have to sum to the height of the frame. A label built from a stale exit, or one that had silently taken
+# its exit price from a neighbouring contract, would break that identity.
+#
+# The third assertion is what ties the recorded exit dates to the declared horizons. The
+# round-trip builder writes each exit date into the artifact, so the notebook can check it
+# rather than trust it: shifting the panel calendar by the horizon has to land on the same
+# session, and the whole window has to close on or before the contract expires.
+
+# %%
+NO_PREMIUM = pl.col("entry_straddle_mid").is_null()
+CAUSES = {
+    PRIMARY_LABEL: {
+        "no entry premium": NO_PREMIUM,
+        "expiry past the underlying panel": pl.col("expiration") > underlying["timestamp"].max(),
+        "no underlying close at expiry": pl.col("_close_at_expiry").is_null(),
+    }
+} | {
+    name: {
+        "no entry premium": NO_PREMIUM,
+        "no quote at exit": pl.col(f"exit_straddle_mid_{HORIZONS[name]}d").is_null(),
+    }
+    | (
+        {"incomplete hedge path": pl.col(f"hedge_days_{HORIZONS[name]}d") != HORIZONS[name]}
+        if "_dh_" in name
+        else {}
+    )
+    for name in VARIANT_LABELS
+}
+for name, causes in CAUSES.items():
+    # 1. An incomplete window is null, never a value.
+    unlabelled = panel.filter(pl.any_horizontal(*causes.values()))
+    assert unlabelled[name].null_count() == unlabelled.height, name
+
+    # 2. Labelled rows plus the causes, each counted once, account for every row.
+    seen, counts = pl.lit(False), {}
+    for cause, cond in causes.items():
+        counts[cause] = panel.filter(cond & ~seen).height
+        seen = seen | cond
+    assert panel.drop_nulls(name).height + sum(counts.values()) == panel.height, (name, counts)
+
+    # 3. Each recorded exit lands where the declared horizon says, inside the contract.
+    if name in HORIZONS:
+        assert panel.filter(pl.col(f"exit_{HORIZONS[name]}d_date") != END_OF[name]).height == 0
+    assert panel.filter(END_OF[name] > pl.col("expiration")).height == 0, name
+
+    # 4. No discrete label is derived from a null return - vacuous by dtype here, since
+    #    this notebook writes continuous labels only.
+    assert panel.schema[name] == pl.Float64, name
+
+    unlabelled = ", ".join(f"{n:,} {c}" for c, n in counts.items())
+    print(f"{name}: {panel.drop_nulls(name).height:,} labelled; unlabelled {unlabelled}")
+
+# %% [markdown]
+# Position zero below is the panel's last session. Every label has to fall to zero over its
+# own closing window and sit flat before it. A scalar count of valid rows shows neither
+# failure this catches - a tail fabricated instead of nulled, or a short label masked by a
+# longer one's null set - and two things it does show here. The primary label recovers much
+# deeper in than the others, because it needs an expiration the underlying panel still
+# covers rather than an exit session. And the five- and ten-session labels fall away at the
+# same depth rather than at their own, because the round-trip builder lays out one set of
+# exit and hedge dates sized for the longest window it has to fill, and stops every label
+# where that one runs out. The figure reads only the null structure and never a value, so it
+# is not sealed.
+
+# %%
+profile = (
+    calendar.select("timestamp", "from_end")
+    .join(panel.select("timestamp", *LABEL_NAMES), on="timestamp", how="left")
+    .filter(pl.col("from_end") <= 40)
+    .group_by("from_end")
+    .agg([pl.col(name).is_not_null().mean().alias(name) for name in LABEL_NAMES])
+    .sort("from_end")
+)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for name in LABEL_NAMES:
+    ax.plot(profile["from_end"], profile[name], ds="steps-mid", label=name, **STYLES[name])
+ax.axvline(PRIMARY_WINDOW, color=COLORS["neutral"], linestyle=":", lw=1.2)
+ax.set_xlabel("Sessions from the end of the straddle panel")
+ax.set_ylabel("Share of rows with a non-null label")
+ax.set_ylim(-0.05, 1.08)
+add_message_title(
+    ax,
+    "Every label nulls its tail rather than fabricating one",
+    subtitle="Dotted line marks the median settlement; a fabricated tail would sit flat across it",
+)
+ax.legend(loc="center right", frameon=False, fontsize=7)
+show_with_alt(fig, "Non-null label rate by session position from the end of the straddle panel.")
+
+# %% [markdown]
+# ## E. Distribution and base rate
+#
+# What scale is the label, and does it mean the same thing across names and across regimes?
+# Everything from here through Section G is computed on the development window only, sealed
+# on the date each trade **settles** rather than the date its signal is observed. A straddle
+# sold in the first week of December expires in January, so a filter on the signal date
+# looks sealed and is not: the holdout's own prices decide the outcome. The label files keep
+# every row, because the seal governs what this notebook looks at rather than what it
+# writes.
+
+# %%
+dev = {
+    name: panel.with_columns(END_OF[name].alias("_label_end"))
+    .drop_nulls(name)
+    .filter(pl.col("_label_end") < HOLDOUT_START)
+    for name in LABEL_NAMES
+}
+for name, frame in dev.items():
+    print(f"{name}: {frame.height:,} development rows through {frame['timestamp'].max()}")
+
+# %% [markdown]
+# All five labels go on one axis with identical bins and a logarithmic count axis. The claim
+# is about shape rather than width: closing the trade early truncates the distribution on
+# both sides, and hedging the direction away pulls the body in without moving the centre,
+# while carrying to expiration keeps a loss tail several times the premium collected. The
+# axis is narrower than the primary label's range, so rows outside it are counted below
+# rather than drawn.
+
+# %%
+bins = np.linspace(-2.0, 1.0, 121)
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for name in LABEL_NAMES:
+    series = dev[name][name]
+    label = f"{name}, std {series.std():.2f}"
+    ax.hist(series.to_numpy(), bins=bins, histtype="step", label=label, **STYLES[name])
+ax.axvline(0, color=COLORS["neutral"], linestyle="--", lw=0.8)
+ax.set_yscale("log")
+ax.set_ylim(top=ax.get_ylim()[1] * 40)
+ax.set_xlabel("Return as a fraction of the premium collected")
+ax.set_ylabel("Trades per bin, log scale")
+add_message_title(
+    ax,
+    "Carrying to expiration keeps a loss tail the early exits truncate",
+    subtitle="Identical bins, development window; trades beyond the axis are counted below",
+)
+ax.legend(loc="upper left", frameon=False, fontsize=7)
+show_with_alt(fig, "Histograms of all five labels on identical bins and a log count axis.")
+
+for name, frame in dev.items():
+    beyond = frame.filter(~pl.col(name).is_between(bins[0], bins[-1])).height
+    print(
+        f"{name}: mean {frame[name].mean():+.4f}, std {frame[name].std():.4f}, "
+        f"share positive {(frame[name] > 0).mean():.1%}, {beyond:,} beyond the axis"
+    )
+
+# %% [markdown]
+# Chapter 7.2 asks for the base rate to be tracked through time. For a continuous label
+# ranked across a cross-section, the quantity that has to be stable is the spread the model
+# ranks within: where it is not, the same rank correlation buys a different amount of
+# return. The spread is taken across names on each session first and only then averaged over
+# the year. Pooling every name-session in a year into one standard deviation instead adds
+# the movement of the panel's own mean from session to session to the spread across names on
+# a session, and a ranking model is scored on the second alone.
+
+# %%
+annual = (
+    dev[PRIMARY_LABEL]
+    .group_by("timestamp")
+    .agg(pl.col(PRIMARY_LABEL).std().alias("dispersion"), pl.len().alias("names"))
+    .with_columns(pl.col("timestamp").dt.year().alias("year"))
+    .group_by("year")
+    .agg(pl.col("dispersion").mean(), pl.col("names").median())
+    .sort("year")
+)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single_wide"])
+ax.bar(annual["year"], annual["dispersion"], color=COLORS["blue"], width=0.6)
+ax.axhline(
+    annual["dispersion"].median(),
+    color=COLORS["copper"],
+    linestyle="--",
+    lw=1.2,
+    label="median year",
+)
+ax.set_xticks(annual["year"].to_list())
+ax.set_ylim(0, annual["dispersion"].max() * 1.45)
+ax.set_xlabel("Year")
+ax.set_ylabel("Cross-sectional std, mean over sessions")
+add_message_title(
+    ax,
+    "The spread a model ranks within is stable across the development years",
+    subtitle=f"Daily spread across names in {PRIMARY_LABEL}, averaged over each year",
+)
+ax.legend(loc="upper right", frameon=False)
+show_with_alt(fig, "Annual mean of the daily cross-sectional dispersion of the primary label.")
+
+print(annual)
+
+# %% [markdown] tags=["results"]
+# On the development window the hold-to-expiry label has a mean of -0.0487 of the premium
+# collected against a standard deviation of 1.0369, while 58.5% of trades end profitable:
+# most positions expire worth keeping and the ones that do not are several times the size of
+# the ones that do. Closing at ten sessions instead leaves a mean of +0.0552 on a standard
+# deviation of 0.3547, and hedging that trade's direction away cuts the standard deviation
+# to 0.2182 while moving the mean to +0.0159 - the hedge takes out the moves in both
+# directions. Cross-sectional dispersion is steady across the development years, running from
+# 0.727038 in the quietest to 0.860721 in the loudest.
+
+# %% [markdown]
+# ## F. Overlap and effective sample size
+#
+# Sampling a month-long trade at every session makes consecutive rows share almost all of
+# their holding window, so the row count overstates the evidence. Two measurements answer
+# that in different units: how fast the overlap decays, and what the rows are worth once it
+# is priced in. `effective_sample_size` applies Chapter 7.2's average-uniqueness weighting
+# per name, because concurrency is a property of one name's own overlapping trades.
+#
+# Both are counted on `_bar`, the panel calendar the windows were built on. A name is quoted
+# on roughly half the sessions here, and closing over the gaps would pair trades that share
+# nothing and report the overlap as larger than it is.
+
+# %%
+max_lag = LONGEST_WINDOW + 4
+acf = {
+    name: panel_autocorrelation(dev[name], name, max_lag=max_lag, bar_col="_bar")
+    for name in LABEL_NAMES
+}
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+lags = np.arange(1, max_lag + 1)
+for name in LABEL_NAMES:
+    window = PRIMARY_WINDOW if name == PRIMARY_LABEL else HORIZONS[name]
+    ax.plot(lags, acf[name], label=name, **STYLES[name])
+    ax.axvline(window, color=STYLES[name]["color"], linestyle=":", lw=1.0)
+ax.axhline(0, color=COLORS["neutral"], lw=0.8)
+ax.set_xlabel("Lag in panel sessions")
+ax.set_ylabel("Panel autocorrelation")
+add_message_title(
+    ax,
+    "Each label's overlap decays to zero at its own holding window",
+    subtitle="Dotted lines mark each holding window; what remains past one is not overlap",
+)
+ax.legend(loc="upper right", frameon=False, fontsize=7)
+show_with_alt(fig, "Panel autocorrelation of all five labels against lag in panel sessions.")
+
+# A trade exposed for h sessions consumes the h returns realised over them, and the trade
+# one session later shares h-1 of those, so average uniqueness converges to 1/h on a dense
+# grid. The primary label is weighted by each trade's own window rather than by the median,
+# because a median window prices the overlap of a trade none of these rows is.
+for name in LABEL_NAMES:
+    window = PRIMARY_WINDOW if name == PRIMARY_LABEL else HORIZONS[name]
+    per_row = {"horizon_col": "window"} if name == PRIMARY_LABEL else {"horizon": window}
+    n_rows, n_eff = effective_sample_size(dev[name], bar_col="_bar", **per_row)
+    print(
+        f"{name}: N={n_rows:,}, N_eff={n_eff:,.0f}, ratio {n_eff / n_rows:.4f} against "
+        f"{1 / window:.4f} for windows of {window} sessions overlapping fully; "
+        f"autocorrelation {acf[name][0]:.3f} at lag one, {acf[name][window - 1]:.3f} at that lag"
+    )
+
+# %% [markdown] tags=["results"]
+# The primary label's 282,470 development rows carry 22,897 effective observations, a ratio
+# of 0.0811 against the 0.0500 a fully overlapped 20-session window implies, weighting each
+# trade by its own exposure rather than by the median. The gap is the panel's own sparsity
+# rather than a shorter window: a name quoted on half the sessions has fewer concurrent
+# trades open than a dense grid would give it, and the shorter labels sit above their own
+# reference values for the same reason - 0.2463 against 0.2000 at five sessions.
+# Autocorrelation falls from 0.915 at lag one to -0.009 at the median window, so a purge
+# shorter than the exposure would leave training and validation sharing an outcome. That gap
+# is set by the window itself, not by these counts.
+
+# %% [markdown]
+# ## G. Baseline floor
+#
+# One signal against the primary label on the sealed development window, with no feature
+# engineering: the variance risk premium the hypothesis names, computed as the difference
+# between the at-the-money implied volatility quoted on the signal date and the volatility
+# the underlying realised over the previous month. Realised volatility is measured on
+# split-adjusted closes within stable `sec_id` segments, so a corporate action resetting the
+# adjustment factor cannot masquerade as a market move. Measuring the floor before building
+# features is what makes a later improvement meaningful.
+#
+# The information coefficient is the cross-sectional rank correlation on each session,
+# averaged over sessions, which is the quantity a ranking model is scored on; pooling every
+# name-session instead mixes a cross-sectional claim with a time-series one. The library call
+# returns its series ordered by time, which the standard error depends on. The minimum
+# cross-section is half the median rather than a bare count, so it means the same thing on a
+# universe of another size. The standard error is HAC-adjusted, because the IC series
+# inherits the label's overlap and a naive statistic would treat a month of consecutive
+# sessions as a month of independent evidence; the bandwidth is set from the longest window
+# any trade runs for, so it covers every overlap the series carries rather than half of them.
+
+# %%
+annualised_rv = pl.col("clean_log_return").rolling_std(21).over(["symbol", "sec_id"]) * np.sqrt(252)
+realised = (
     reconcile_underlying_log_returns(underlying)
     .sort(["symbol", "sec_id", "timestamp"])
-    .with_columns(
-        (
-            pl.col("clean_log_return").rolling_std(21).over(["symbol", "sec_id"]) * np.sqrt(252)
-        ).alias("rv_21d")
+    .with_columns(annualised_rv.alias("rv_21d"))
+)
+baseline = (
+    straddles.select(["timestamp", "symbol", "iv_atm"])
+    .join(
+        realised.select(["timestamp", "symbol", "rv_21d"]).drop_nulls(), on=["timestamp", "symbol"]
     )
-    .sort(["symbol", "timestamp"])
+    .with_columns((pl.col("iv_atm") - pl.col("rv_21d")).alias("vrp_proxy"))
+    .join(
+        dev[PRIMARY_LABEL].select(["timestamp", "symbol", PRIMARY_LABEL]),
+        on=["timestamp", "symbol"],
+    )
+    .drop_nulls(["vrp_proxy", PRIMARY_LABEL])
+)
+median_cross_section = int(baseline.group_by("timestamp").len()["len"].median())
+min_obs = median_cross_section // 2
+
+ic = cross_sectional_ic_series(
+    baseline,
+    baseline,
+    pred_col="vrp_proxy",
+    ret_col=PRIMARY_LABEL,
+    date_col="timestamp",
+    entity_col="symbol",
+    min_obs=min_obs,
+).sort("timestamp")  # HAC autocovariances are meaningless over a permutation of time
+stats = compute_ic_hac_stats(ic, ic_col="ic", label_horizon=LONGEST_WINDOW)
+
+print(
+    f"Baseline: implied minus realised volatility against {PRIMARY_LABEL}, {baseline.height:,} rows"
+)
+print(f"  median cross-section {median_cross_section} names, minimum {min_obs}")
+print(f"  sessions scored {ic.height:,}, mean IC {stats['mean_ic']:.4f}")
+print(
+    f"  HAC t {stats['t_stat']:.2f} on {stats['effective_lags']} Bartlett lags, "
+    f"naive t {stats['naive_t_stat']:.2f}, p {stats['p_value']:.3g}"
 )
 
-vrp_baseline = straddles.select(["timestamp", "symbol", "iv_atm"]).join(
-    underlying_rv.select(["timestamp", "symbol", "rv_21d"]).drop_nulls(),
-    on=["timestamp", "symbol"],
-    how="inner",
-)
-vrp_baseline = vrp_baseline.with_columns(
-    (pl.col("iv_atm") - pl.col("rv_21d")).alias("vrp_proxy"),
-)
-
-_holdout_start = (
-    pl.Series([load_evaluation_config("sp500_options")["holdout_start"]]).str.to_date().item()
-)
-vrp_eval = vrp_baseline.join(
-    primary.select(["timestamp", "symbol", y_col]),
-    on=["timestamp", "symbol"],
-    how="inner",
-).filter(pl.col("timestamp") < _holdout_start)  # seal the 2021 holdout
-
+# %% [markdown] tags=["results"]
+# The variance risk premium earns a mean information coefficient of -0.0100 against the
+# hold-to-expiry label over 968 scored sessions on a cross-section of at least 123 names.
+# The sign is the opposite of what the hypothesis implies: names whose options are priced
+# furthest above their recent realised volatility are, if anything, the ones whose short
+# straddles pay least. Under the naive standard error that is a t-statistic of -3.21, which
+# the Newey-West rule on 23 Bartlett lags reduces to -1.06 with a p-value of 0.291 - the
+# whole apparent significance was the overlap being counted as evidence. The floor a feature
+# has to clear is a mean IC of -0.0100 the data cannot separate from zero.
 
 # %% [markdown]
-# Daily rank IC is computed within each cross-section. Carrying the timestamp
-# with each estimate makes chronological ordering explicit before HAC inference.
+# ## H. Artifacts and the audit record
+#
+# Each label is written with a digest sidecar beside it, recording the content digest of the
+# values written, the row count, the key columns, the notebook that wrote it and the digests
+# of the artifacts it was built from. That last field is what ties a label to its data
+# vintage. `instrument_id` stays in the key alongside the name and the date because a symbol
+# can carry more than one option structure, and it is part of the identity stage 03 joins on.
+#
+# The folds that train models are derived per label by `case_studies/utils/cv_window.py`
+# from `config/setup.yaml` and the timeline of the label parquet written here, so which rows
+# land in these files is what sets where the fold boundaries fall.
 
 # %%
-ic_rows = []
-for _key, group in vrp_eval.partition_by("timestamp", as_dict=True).items():
-    valid = group.select(["vrp_proxy", y_col]).drop_nulls()
-    if len(valid) >= 3:
-        p = valid["vrp_proxy"].to_numpy()
-        r = valid[y_col].to_numpy()
-        if np.std(p) > 0 and np.std(r) > 0:
-            corr, _ = spearmanr(p, r)
-            if np.isfinite(corr):
-                ic_rows.append({"timestamp": _key[0], "ic": float(corr)})
-
+KEYS = ["timestamp", "symbol", "instrument_id"]
+for name in LABEL_NAMES:
+    extra = {"market_data": MARKET_DATA_DIGEST} if name == PRIMARY_LABEL else {}
+    inputs = {"contract_returns": CONTRACT_DIGEST} | (
+        {"hedge_path": HEDGE_DIGEST} if "_dh_" in name else extra
+    )
+    # The primary label carries its own settlement date: the notebooks that model it
+    # derive each row's label endpoint from it rather than from a fixed horizon.
+    columns = [name, "dte_calendar"] if name == PRIMARY_LABEL else [name]
+    record = write_artifact(
+        panel.drop_nulls(name).select(
+            "timestamp", "symbol", pl.lit(INSTRUMENT_ID).alias("instrument_id"), *columns
+        ),
+        LABELS_DIR / f"{name}.parquet",
+        keys=KEYS,
+        written_by="02_labels",
+        inputs=inputs,
+    )
+    print(f"{name}.parquet: {record['n_rows']:,} rows, digest {record['digest']}")
 
 # %% [markdown]
-# Horizon-aware HAC treats the overlapping daily IC observations as a time
-# series rather than independent draws.
+# The record Chapter 7.2 requires to close a label definition, one row per label, built from
+# the values computed above rather than written by hand. The buffer and the outcome horizon
+# are separate rows because they are separate numbers here: the buffer is declared in
+# calendar days and has to cover the longest settlement, while the outcome horizon is what
+# the label's overlap is measured in.
 
 # %%
-if ic_rows:
-    ic_series = pl.DataFrame(ic_rows).sort("timestamp")
-    baseline_stats = compute_ic_hac_stats(ic_series, ic_col="ic", label_horizon=21)
-    baseline_ic_mean = float(baseline_stats["mean_ic"])
-    baseline_ic_std = float(ic_series["ic"].std())
-    baseline_ic_tstat = float(baseline_stats["t_stat"])
-    baseline_ic_pvalue = float(baseline_stats["p_value"])
-    baseline_ic_lags = int(baseline_stats["effective_lags"])
-    print(f"Baseline VRP proxy IC vs {y_col} (pre-2021 CV window):")
-    print(f"  Mean IC: {baseline_ic_mean:.4f}")
-    print(f"  IC std: {baseline_ic_std:.4f}")
+READERS = {
+    PRIMARY_LABEL: "03_financial_features.py and every model stage, as labels.primary",
+    "fwd_ret_10d": "90_ic_diagnostic.py",
+    "fwd_ret_dh_10d": "03_financial_features.py, 05_evaluation.py, 90_ic_diagnostic.py",
+}
+print(f"\nLabel audit record - cross-validation buffer {LABEL_BUFFER} for every label")
+for name in LABEL_NAMES:
+    primary, frame = name == PRIMARY_LABEL, dev[name]
+    window = PRIMARY_WINDOW if primary else HORIZONS[name]
+    exit_leg = "cash settlement at intrinsic value" if primary else "mid of the same contract"
+    when = (
+        f"variable: {resolution['window'].min()}-{LONGEST_WINDOW} sessions of exposure"
+        if primary
+        else f"fixed at {window} sessions from entry"
+    )
     print(
-        f"  HAC t-stat: {baseline_ic_tstat:.2f} "
-        f"(p={baseline_ic_pvalue:.3f}, lags={baseline_ic_lags}, n_dates={len(ic_series)})"
+        f"\n{name}\n  anchor       mid of the straddle sold one session after the signal"
+        f"\n  exit         {exit_leg}"
+        f"\n  horizon      {window} sessions{' (median)' if primary else ''}"
+        f"\n  resolution   {when}"
+        f"\n  overlap      {window - 1} sessions shared by consecutive trades in one name"
+        f"\n  base rate    mean {frame[name].mean():+.5f}, share positive {(frame[name] > 0).mean():.3f}"
+        f"\n  consumed by  {READERS.get(name, 'the diagnostic notebooks, as a variant')}"
     )
-else:
-    baseline_ic_mean = 0.0
-    baseline_ic_tstat = 0.0
-    baseline_ic_pvalue = 1.0
-    baseline_ic_lags = 0
-    print("Insufficient data for baseline IC computation")
 
 # %% [markdown]
-# ## 5. Save Artifacts
-
-# %%
-LABELS_DIR.mkdir(parents=True, exist_ok=True)
-
-# Save label files
-for name, label_df in {**unhedged_labels, **dh_labels, **exec_labels, **htm_labels}.items():
-    label_path = LABELS_DIR / f"{name}.parquet"
-    label_df.write_parquet(label_path)
-    print(f"Saved labels/{name}.parquet ({len(label_df):,} rows)")
-
-# CV config from setup.yaml evaluation section
-_eval_cfg = load_evaluation_config("sp500_options")
-_cv_config_dict = {
-    "n_splits": _eval_cfg["n_splits"],
-    "train_size": str(_eval_cfg["train_size"]),
-    "test_size": str(_eval_cfg["val_size"]),
-    "holdout_start": _eval_cfg.get("holdout_start", ""),
-    "holdout_end": _eval_cfg.get("holdout_end", ""),
-    "calendar": _eval_cfg.get("calendar", "NYSE"),
-}
-_cv_path = CASE_DIR / "config" / "cv_config.json"
-_cv_path.parent.mkdir(parents=True, exist_ok=True)
-_cv_path.write_text(json.dumps(_cv_config_dict, indent=2))
-print(f"Saved cv_config.json (n_splits={_cv_config_dict['n_splits']})")
-
-# %% [markdown]
-# ## 6. Results Collection
-
-
-# %%
-def _git_commit_hash():
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], text=True, timeout=5
-        ).strip()
-    except Exception:
-        return "unknown"
-
-
-# %% [markdown]
-# Assemble the label, method, and diagnostic summaries separately so each
-# result group remains easy to inspect and reuse.
-
-# %%
-results_summary = {
-    "n_observations": n_total,
-    "n_symbols": primary["symbol"].n_unique(),
-    "primary_label": _primary_name,
-    "primary_mean": float(primary[y_col].mean()),
-    "primary_std": float(primary[y_col].std()),
-    "hit_rate": float(hit_rate),
-    "label_variants": (
-        list(unhedged_labels.keys())
-        + list(dh_labels.keys())
-        + list(exec_labels.keys())
-        + list(htm_labels.keys())
-    ),
-}
-results_techniques = {
-    "instrument": "30D ATM matched-strike straddle",
-    "sign_convention": "short straddle (positive = profitable)",
-    "entry": "t+1 mid (selling) - same contract as feature date",
-    "exit": "t+1+h mid (buying to close) - same contract looked up in raw chain",
-    "pricing": "mid-to-mid (execution costs deferred to Ch18)",
-    "hedging": "delta-hedged using held contract's delta path (not constant-maturity)",
-}
-results_diagnostics = {
-    "horizons": list(FORWARD_HORIZONS),
-    "n_cv_splits": _cv_config_dict["n_splits"],
-    "straddle_coverage": f"{primary['symbol'].n_unique()} symbols",
-}
-
-
-# %% [markdown]
-# The final record combines stable metadata with the current baseline estimate
-# and its overlap-aware uncertainty fields.
-
-# %%
-results = {
-    "case_study_id": STRATEGY_ID,
-    "chapter": 7,
-    "stage": "labels",
-    "timestamp": datetime.now(UTC).isoformat(),
-    "git_commit": _git_commit_hash(),
-    "notebook": f"case_studies/{STRATEGY_ID}/02_labels.py",
-    "data_version": "v2_matched_strike_same_contract",
-    "summary": results_summary,
-    "techniques": results_techniques,
-    "diagnostics": results_diagnostics,
-    "key_findings": [
-        f"Hold-to-expiry mean return: {float(primary[y_col].mean()):.4f}",
-        f"Hit rate: {hit_rate:.1%} of trades profitable",
-        f"Label std: {float(primary[y_col].std()):.4f}",
-        "Same-contract returns (v2) - no contract-roll contamination",
-        f"Baseline VRP IC: {baseline_ic_mean:.4f} (HAC t={baseline_ic_tstat:.2f})",
-    ],
-    "baseline_ic": {
-        "signal": "vrp_proxy",
-        "mean_ic": baseline_ic_mean,
-        "t_stat": baseline_ic_tstat,
-        "p_value": baseline_ic_pvalue,
-        "hac_lags": baseline_ic_lags,
-    },
-}
-
-
-# %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **Primary label is `ret_to_expiry`** (hold-to-expiry): the short straddle is
-#    held to its natural expiration and settles at intrinsic value, eliminating
-#    the exit-leg bid-ask cost. DTE at entry is tight (25–35 days) so no
-#    variable-horizon normalization is needed. Every downstream model in this case
-#    study trains on this label; it is the pedagogical anchor for the O'Donovan-Yu
-#    cost-mitigation cascade in Ch18.
+# 1. **On an option panel, a forward return is a round trip in one contract, not a shift of
+#    a price column.** The 30-day at-the-money row is a different instrument every session,
+#    so a shifted difference reports the change of contract as profit. Look the held
+#    contract up in the raw chain instead.
+# 2. **Reconcile every unlabelled row to one cause.** A missing quote at exit, a premium
+#    that was never quoted, a hedge path with a hole in it and an expiration past the end
+#    of the price panel all fail without raising, and a reconciliation that has to balance
+#    catches what a row count passed over does not.
+# 3. **Seal a diagnostic on the date the position settles.** When the settlement date is
+#    written into the contract rather than fixed at a number of sessions, that date is the
+#    boundary - a trade opened before the holdout and expiring inside it is a holdout trade.
+# 4. **A row count overstates the evidence when holding windows overlap.** The effective
+#    count says by how much in rows, and the same overlap priced into a standard error is
+#    what turns a t-statistic that reads as decisive into one that cannot be separated from
+#    zero.
+# 5. **Check the sign of a baseline before assuming its size is the question.** The variance
+#    risk premium points the opposite way to the hypothesis on this universe, which is a
+#    fact about the cross-section that a mean-level argument about the premium would miss.
 #
-# 2. **Same-contract returns** (v2): Labels use the actual held contract's exit
-#    price from the raw option chain, not shift-based returns that mix contracts.
-#    Force-rebuilding the artifacts from the raw chain reproduces them exactly.
+# **Known limitations.** Mid-to-mid pricing is not what a trader receives; the entry
+# half-spread and the commission are swept in `14_costs.py`, and the primary label avoids
+# the exit half-spread only because cash settlement needs no closing trade. The delta hedge
+# is rebalanced at the close and charges nothing for doing so. The universe is every name
+# with a quoted matched-strike straddle, with the liquidity screen applied downstream rather
+# than here. The baseline is one signal, on one month of realised volatility.
 #
-# 3. **Diagnostic horizon variants**: the 5- and 10-day mid-to-mid, executable,
-#    and delta-hedged returns are also built to expose the pricing and hedging
-#    mechanics. Delta hedging (held contract's delta path) tightens the return
-#    distribution by removing directional P&L. These variants are not modelled.
-#
-# 4. **Mid-to-mid vs executable**: mid-to-mid pricing measures the economic signal
-#    (10-day mean +5.7%); the executable label (sell at bid, buy back at ask) bakes
-#    in the full round-trip spread and the same unconditional return falls to
-#    -9.6%. This single-stock-option microstructure is exactly what `ret_to_expiry`
-#    and the Ch18 cost cascade address.
-#
-# 5. **Baseline floor**: the naive VRP proxy ($IV_{atm} - RV_{21d}$) has a small
-#    *negative* rank IC against `ret_to_expiry` on the pre-2021 CV window, but
-#    the estimate is not statistically resolved after horizon-aware HAC
-#    adjustment. Its realized-volatility leg uses split-adjusted closes, so
-#    engineered features must do more than replay the raw premium to add value.
-#
-# **Next**: [`03_financial_features`](03_financial_features.ipynb) builds VRP, surface dynamics, and instrument
-# state features for predicting which straddles to sell.
+# **Next**: `03_financial_features.py` builds the volatility-surface, term-structure and
+# instrument-state features and evaluates them against these labels.

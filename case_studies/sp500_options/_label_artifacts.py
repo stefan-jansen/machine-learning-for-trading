@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import time
+import json
 from pathlib import Path
 
 import polars as pl
@@ -33,7 +33,15 @@ def ensure_label_artifacts(
     prices_path = labels_dir / "prices.parquet"
 
     required = [contract_returns_path, hedge_path_path]
-    if not force_rebuild and all(path.exists() for path in required):
+    # A cached artifact was built over whatever window the run that wrote it saw, so the
+    # scope is recorded beside it and the cache is only reused for the same request.
+    # Without that, a narrower run returns the full panel and leaves the reduction
+    # silently unapplied, and the reduced files a narrower run writes are then accepted
+    # by the next default run as if they covered everything.
+    scope_path = labels_dir / "contract_returns.scope.json"
+    scope = {"max_symbols": max_symbols, "start_date": start_date}
+    cached_scope = json.loads(scope_path.read_text()) if scope_path.exists() else None
+    if not force_rebuild and cached_scope == scope and all(path.exists() for path in required):
         return {
             "contract_returns": contract_returns_path,
             "hedge_path": hedge_path_path,
@@ -41,6 +49,15 @@ def ensure_label_artifacts(
         }
 
     straddles = load_sp500_options_straddles()
+    if start_date is not None:
+        straddles = straddles.filter(pl.col("timestamp") >= pl.lit(start_date).str.to_date())
+
+    # Horizons are counted in market sessions, so the calendar comes from the whole panel
+    # and `max_symbols` thins only the entries it is applied to. Deriving the offsets from
+    # a symbol subset instead would drop every session none of those symbols was quoted
+    # on, and the exit dates would then be that many sessions further out than declared.
+    trading_dates = straddles["timestamp"].unique().sort().to_list()
+    entry_rows = straddles
     if max_symbols > 0:
         top_syms = (
             straddles.group_by("symbol")
@@ -49,11 +66,7 @@ def ensure_label_artifacts(
             .head(max_symbols)["symbol"]
             .to_list()
         )
-        straddles = straddles.filter(pl.col("symbol").is_in(top_syms))
-    if start_date is not None:
-        straddles = straddles.filter(pl.col("timestamp") >= pl.lit(start_date).str.to_date())
-
-    trading_dates = straddles["timestamp"].unique().sort().to_list()
+        entry_rows = straddles.filter(pl.col("symbol").is_in(top_syms))
     valid_range = len(trading_dates) - (1 + MAX_HOLDING)
     offset_data = {"feature_date": trading_dates[:valid_range]}
     offset_data["entry_date"] = trading_dates[1 : valid_range + 1]
@@ -66,7 +79,7 @@ def ensure_label_artifacts(
 
     date_offsets = pl.DataFrame(offset_data)
     entries = (
-        straddles.select(["timestamp", "symbol", "strike", "expiration"])
+        entry_rows.select(["timestamp", "symbol", "strike", "expiration"])
         .join(date_offsets.rename({"feature_date": "timestamp"}), on="timestamp", how="inner")
         .rename({"timestamp": "feature_date"})
     )
@@ -223,6 +236,8 @@ def ensure_label_artifacts(
     ).sort(["symbol", "feature_date", "holding_day"])
     hedge_path_out.write_parquet(hedge_path_path)
 
+    scope_path.write_text(json.dumps(scope, sort_keys=True) + "\n")
+
     if save_prices:
         straddles.write_parquet(prices_path)
 
@@ -231,6 +246,46 @@ def ensure_label_artifacts(
         "hedge_path": hedge_path_path,
         "prices": prices_path,
     }
+
+
+def accrued_hedge_pnl(
+    hedge_path: pl.DataFrame, horizons: tuple[int, ...] = HORIZONS
+) -> pl.DataFrame:
+    """Hedge P&L accrued over each horizon, with the number of days it was observed on.
+
+    The hedge is rebalanced at each close, so the P&L on holding day ``d`` is the delta
+    set on day ``d-1`` applied to that day's move in the underlying. A day the contract
+    was not quoted on contributes nothing and is *counted*: a sum over a path with holes
+    is a partial hedge, and the count is what lets the caller null the label rather than
+    present it as fully hedged.
+
+    Summed in day order. An unordered parallel sum re-associates the floating point, which
+    moves the label's last bit and its content digest from one run to the next.
+    """
+    cohort = ["symbol", "feature_date"]
+    move = pl.col("underlying_price") - pl.col("underlying_price").shift(1).over(cohort)
+    daily = hedge_path.sort([*cohort, "holding_day"]).with_columns(
+        (pl.col("instr_delta").shift(1).over(cohort) * move).alias("daily_pnl")
+    )
+    accrued = daily.group_by(cohort).agg(
+        *[
+            expr
+            for horizon in horizons
+            for expr in (
+                pl.col("daily_pnl")
+                .filter(pl.col("holding_day").is_between(1, horizon))
+                .sort_by(pl.col("holding_day").filter(pl.col("holding_day").is_between(1, horizon)))
+                .sum()
+                .alias(f"hedge_pnl_{horizon}d"),
+                pl.col("daily_pnl")
+                .filter(pl.col("holding_day").is_between(1, horizon))
+                .is_not_null()
+                .sum()
+                .alias(f"hedge_days_{horizon}d"),
+            )
+        ]
+    )
+    return accrued.rename({"feature_date": "timestamp"})
 
 
 def summarize_label_artifacts(
