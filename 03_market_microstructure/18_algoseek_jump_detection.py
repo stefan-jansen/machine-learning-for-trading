@@ -75,7 +75,7 @@ import polars as pl
 from scipy.stats import norm
 
 from data import load_nasdaq100_bars
-from utils.paths import get_output_dir
+from utils.paths import display_path, get_output_dir
 from utils.style import COLORS
 
 # %% tags=["parameters"]
@@ -524,7 +524,9 @@ features = daily_jump_counts.select(
     pl.col("bv").alias("continuous_variance"),
 ).sort(["symbol", "date"])
 features.write_parquet(OUTPUT_DIR / "daily_jump_features.parquet")
-print(f"Wrote {features.height:,} rows to {OUTPUT_DIR / 'daily_jump_features.parquet'}")
+print(
+    f"Wrote {features.height:,} rows to {display_path(OUTPUT_DIR / 'daily_jump_features.parquet')}"
+)
 features.head(10)
 
 # %% [markdown]

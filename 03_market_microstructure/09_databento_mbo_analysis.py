@@ -77,7 +77,7 @@ import seaborn as sns
 from tqdm.auto import tqdm
 
 from data import load_mbo_data
-from utils.paths import get_output_dir
+from utils.paths import display_path, get_output_dir
 from utils.reproducibility import set_global_seeds
 
 # %% tags=["parameters"]
@@ -119,7 +119,7 @@ if SYMBOL_DIR and SYMBOL_DIR.exists():
         dates = [f.stem.split("-")[-1].split(".")[0] for f in data_files]
         print(f"Date range: {dates[0]} to {dates[-1]}")
 else:
-    print(f"DataBento data not found at {SYMBOL_DIR}")
+    print(f"DataBento data not found at {display_path(SYMBOL_DIR)}")
     data_files = []
 
 # %% [markdown]

@@ -86,7 +86,7 @@ import seaborn as sns
 from matplotlib.ticker import FuncFormatter
 
 from data import load_nasdaq_itch
-from utils.paths import get_output_dir
+from utils.paths import display_path, get_output_dir
 
 sns.set_style("whitegrid")
 
@@ -113,13 +113,13 @@ SYMBOL = "AAPL"
 # MAX_ORDERS: Optional row limit for testing (None = no limit after symbol filter)
 MAX_ORDERS = None
 
-print(f"Input directory (messages): {MESSAGE_DIR}")
-print(f"Output directory (analysis): {OUTPUT_DIR}")
+print(f"Input directory (messages): {display_path(MESSAGE_DIR)}")
+print(f"Output directory (analysis): {display_path(OUTPUT_DIR)}")
 print(f"Analyzing symbol: {SYMBOL}")
 
 # %%
 if not MESSAGE_DIR.exists():
-    print(f"\nWARNING: Message directory not found: {MESSAGE_DIR}")
+    print(f"\nWARNING: Message directory not found: {display_path(MESSAGE_DIR)}")
     print("   Run 01_itch_parser first to parse ITCH data.")
     available = []
 else:
@@ -1037,7 +1037,7 @@ if ENRICHED_DIR.exists():
         enriched_c = lf.collect()
         print(f"Loaded {len(enriched_c):,} enriched C messages for {SYMBOL}")
 else:
-    print(f"Enriched data not found at {ENRICHED_DIR}")
+    print(f"Enriched data not found at {display_path(ENRICHED_DIR)}")
     print("Run 05_itch_trading_activity first to generate the enriched E/C/X parquets.")
     enriched_e = None
     enriched_c = None

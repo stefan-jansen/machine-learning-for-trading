@@ -63,12 +63,12 @@ from ml4t.data.providers import WikiPricesProvider, YahooFinanceProvider
 
 from data import load_crypto_perps
 from utils import DATA_DIR
-from utils.paths import get_output_dir
+from utils.paths import display_path, get_output_dir
 from utils.style import COLORS
 
 # Reproducibility: a fixed AS_OF_DATE keeps outputs stable between book editions.
 AS_OF_DATE = "2025-01-15"
-print(f"Data path: {DATA_DIR}")
+print(f"Data path: {display_path(DATA_DIR)}")
 
 
 # %% tags=["parameters"]
@@ -731,8 +731,8 @@ plt.show()
 # %%
 # Save pipeline outputs (example)
 print("Storage Example:")
-print(f"  ETF output: {etf_pipeline.storage_path}")
-print(f"  Crypto output: {crypto_pipeline.storage_path}")
+print(f"  ETF output: {display_path(etf_pipeline.storage_path)}")
+print(f"  Crypto output: {display_path(crypto_pipeline.storage_path)}")
 
 # %% [markdown]
 # ---

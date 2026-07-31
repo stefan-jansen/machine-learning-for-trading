@@ -73,7 +73,7 @@ import pyarrow.dataset as ds
 import seaborn as sns
 from IPython.display import display  # noqa: F401
 
-from utils.paths import get_output_dir
+from utils.paths import display_path, get_output_dir
 
 sns.set_style("whitegrid")
 
@@ -95,11 +95,11 @@ MESSAGE_DIR = load_nasdaq_itch(get_base_path=True)
 # Input: Trade summary from notebook 05 (trading_activity_overview)
 TRADING_ACTIVITY_DIR = NASDAQ_ITCH_OUTPUT / "trading_activity"
 
-print(f"Input directory (messages): {MESSAGE_DIR}")
-print(f"Input directory (trade summary): {TRADING_ACTIVITY_DIR}")
+print(f"Input directory (messages): {display_path(MESSAGE_DIR)}")
+print(f"Input directory (trade summary): {display_path(TRADING_ACTIVITY_DIR)}")
 
 if not MESSAGE_DIR.exists():
-    print(f"\nWARNING: Message directory not found: {MESSAGE_DIR}")
+    print(f"\nWARNING: Message directory not found: {display_path(MESSAGE_DIR)}")
     print("   Run 01_itch_parser first.")
 
 # %% [markdown]

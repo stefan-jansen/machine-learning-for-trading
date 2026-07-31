@@ -95,7 +95,7 @@ COLORS = {
 # %%
 # Configuration - Unified output directory structure
 from data.equities.loader import load_nasdaq_itch
-from utils.paths import get_output_dir
+from utils.paths import display_path, get_output_dir
 
 # All ITCH-related outputs under a single chapter directory
 NASDAQ_ITCH_OUTPUT = get_output_dir(3, "nasdaq_itch")
@@ -133,7 +133,7 @@ def discover_available_symbols(base_dir: Path) -> list[str]:
 
 AVAILABLE_SYMBOLS = discover_available_symbols(ORDER_BOOK_DIR)
 
-print(f"Data directory: {ORDER_BOOK_DIR}")
+print(f"Data directory: {display_path(ORDER_BOOK_DIR)}")
 print(
     f"Available symbols: {AVAILABLE_SYMBOLS if AVAILABLE_SYMBOLS else 'None (run notebook 02 first)'}"
 )
@@ -1177,7 +1177,9 @@ if len(multi_stock_results) >= 3:
     results_path = OUTPUT_DIR / "figure_3_3_ofi_correlation_50_stocks.parquet"
     results_path.parent.mkdir(parents=True, exist_ok=True)
     results_df.write_parquet(results_path)
-    print(f"Persisted Fig 3.3 cross-section: {results_path} ({len(results_df)} symbols)")
+    print(
+        f"Persisted Fig 3.3 cross-section: {display_path(results_path)} ({len(results_df)} symbols)"
+    )
 
     # Generate Figure 3.3 from actual data
     plot_ofi_vs_returns(multi_stock_results)
