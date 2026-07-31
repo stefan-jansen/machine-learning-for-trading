@@ -53,7 +53,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 from hmmlearn.hmm import GaussianHMM
-from IPython.display import Markdown, display
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats
 from ml4t.diagnostic.splitters.calendar import TradingCalendar
@@ -62,7 +61,8 @@ from scipy.stats import spearmanr
 from statsmodels.tsa.arima.model import ARIMA
 
 from data import load_fx_pairs
-from utils.cv_splits import generate_cv_splits
+from utils.artifact_specs import load_setup_config, resolve_label_buffer
+from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.paths import get_case_study_dir
 from utils.style import COLORS
 
@@ -70,6 +70,8 @@ warnings.filterwarnings("ignore")
 logging.getLogger("hmmlearn.base").setLevel(logging.ERROR)
 
 # %% tags=["parameters"]
+CASE_STUDY_ID = "fx_pairs"
+PRIMARY_LABEL = "fwd_ret_1d"
 # Use 0 for all symbols/folds. Test mode uses 3 symbols and 2 folds.
 MAX_SYMBOLS = 0
 MAX_FOLDS = 0
@@ -79,7 +81,7 @@ START_DATE = "2011-01-01"
 N_HMM_RESTARTS = 10
 
 # %%
-CASE_DIR = get_case_study_dir("fx_pairs")
+CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 LABELS_DIR = CASE_DIR / "labels"
 FEATURES_DIR = CASE_DIR / "features"
 
@@ -118,20 +120,9 @@ prices = (
 )
 
 # %% [markdown]
-# ### Load the Fold Configuration and Universe
+# ### Select the Universe
 
 # %%
-# Load CV config
-cv_path = CASE_DIR / "config" / "cv_config.json"
-if cv_path.exists():
-    cv_config = json.loads(cv_path.read_text())
-    n_splits = cv_config["n_splits"]
-    print(f"CV config: {n_splits} folds")
-else:
-    # Build splits manually from protocol
-    n_splits = 8
-    print(f"CV config not found, using {n_splits} folds from protocol")
-
 SYMBOLS = sorted(prices["symbol"].unique().to_list())
 if MAX_SYMBOLS:
     SYMBOLS = SYMBOLS[:MAX_SYMBOLS]
@@ -143,26 +134,39 @@ print(f"Loaded: {n_symbols} pairs, {len(dates)} dates")
 print(f"Period: {dates[0]} to {dates[-1]}")
 
 # %% [markdown]
-# ## 2. Load Canonical Walk-Forward Folds
+# ## 2. Resolve the Walk-Forward Folds Before Anything Is Fitted
 #
-# We use the exact boundaries materialized by the labels pipeline. Reconstructing
-# calendar-year approximations here would misalign fitted temporal state with the
-# folds used by downstream models.
+# The boundaries come from `generate_cv_splits` reading the label frame and the
+# window in `setup.yaml`. This is the same route the downstream loader takes, so
+# a `fold` id in this artifact selects the same window there as it does here.
+#
+# An earlier version of this notebook replayed a stored `config/cv_config.json`
+# instead. A stored splits array cannot track a changed calendar, and this one
+# had drifted furthest of all: it numbers folds oldest-first while the canonical
+# route numbers them newest-first, so `fold = 0` named opposite windows on the
+# two sides of the join.
 
 # %%
 all_dates = sorted(prices["timestamp"].unique().to_list())
-if not cv_path.exists():
-    raise FileNotFoundError(f"Canonical CV configuration not found: {cv_path}")
 
-raw_folds = generate_cv_splits(prices, cv_config=cv_config)
+SETUP = load_setup_config(CASE_STUDY_ID)
+LABEL_BUFFER = resolve_label_buffer(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
+assert LABEL_BUFFER, f"No label buffer configured for {PRIMARY_LABEL}"
+
+label_frame = pl.read_parquet(LABELS_DIR / f"{PRIMARY_LABEL}.parquet")
+raw_folds = generate_cv_splits(
+    label_frame.select("timestamp").unique().sort("timestamp"),
+    case_study_id=CASE_STUDY_ID,
+    label_buffer=LABEL_BUFFER,
+)
 folds = []
 for split in raw_folds:
     fold = {
         "fold": int(split["fold"]),
-        "train_start": date.fromisoformat(split["train_start"]),
-        "train_end": date.fromisoformat(split["train_end"]),
-        "val_start": date.fromisoformat(split["val_start"]),
-        "val_end": date.fromisoformat(split["val_end"]),
+        "train_start": pd.Timestamp(split["train_start"]).date(),
+        "train_end": pd.Timestamp(split["train_end"]).date(),
+        "val_start": pd.Timestamp(split["val_start"]).date(),
+        "val_end": pd.Timestamp(split["val_end"]).date(),
     }
     fold["n_train"] = sum(fold["train_start"] <= d <= fold["train_end"] for d in all_dates)
     fold["n_val"] = sum(fold["val_start"] <= d <= fold["val_end"] for d in all_dates)
@@ -486,10 +490,22 @@ def extract_hmm_features(fold: dict) -> tuple[list[dict], GaussianHMM, np.ndarra
     return rows, model, order, score, unstable
 
 
+# %% [markdown]
+# The HMM observations are expressed in **percent**, not in native decimal
+# returns. `GaussianHMM` floors the emission covariance at `min_covar=1e-3`, and
+# a daily FX log return has a standard deviation near 0.005, so its variance is
+# about 2.4e-5 - roughly four hundred times smaller than the floor. Fitted in
+# native units the covariance is set by the regularizer rather than by the data,
+# and on the shortest fold EM loses positive definiteness outright and no
+# restart survives the stability check. Scaling by 100 puts the variance above
+# the floor and every fold converges.
+
 # %%
+HMM_SCALE = 100.0  # decimal returns -> percent, so min_covar does not dominate
+
 valid_usd = usd_daily.drop_nulls(subset=["usd_ret", "usd_vol_21d"])
 valid_dates = valid_usd["timestamp"].to_list()
-usd_arr = valid_usd.select(["usd_ret", "usd_vol_21d"]).to_numpy()
+usd_arr = valid_usd.select(["usd_ret", "usd_vol_21d"]).to_numpy() * HMM_SCALE
 hmm_results = []
 unstable_hmm_fits = 0
 best_model = None
@@ -668,14 +684,15 @@ eval_duplicates = eval_features.select(
 ).item()
 assert eval_duplicates == 0, f"Overlapping validation features: {eval_duplicates}"
 
-label_path = LABELS_DIR / "fwd_ret_1d.parquet"
-label_df = pl.read_parquet(label_path)
-label_col = [c for c in label_df.columns if c not in {"timestamp", "symbol"}][0]
-label_endpoints = label_df.sort(["symbol", "timestamp"]).with_columns(
+label_col = [c for c in label_frame.columns if c not in {"timestamp", "symbol"}][0]
+label_endpoints = label_frame.sort(["symbol", "timestamp"]).with_columns(
     pl.col("timestamp").shift(-1).over("symbol").alias("_label_end")
 )
 eval_df = eval_features.join(label_endpoints, on=["timestamp", "symbol"], how="inner")
-assert eval_df["_label_end"].max() < date(2024, 1, 1)
+HOLDOUT_START = pd.Timestamp(load_evaluation_config(CASE_STUDY_ID)["holdout_start"]).date()
+assert eval_df["_label_end"].max() < HOLDOUT_START, (
+    "A validation decision resolves its label inside the holdout window"
+)
 print(
     f"Out-of-sample eval set: {len(eval_df):,} rows, "
     f"{eval_df['timestamp'].n_unique():,} dates, label: {label_col}"
@@ -753,7 +770,7 @@ if len(eval_summary):
         for row in plot_summary.to_dicts()
     ]
     ic_title = (
-        f"{n_fdr_sig} model-based features survive FDR on out-of-sample folds"
+        "Some model-based features survive FDR on out-of-sample folds"
         if n_fdr_sig
         else "No model-based feature survives FDR on out-of-sample folds"
     )
@@ -782,7 +799,7 @@ if len(eval_summary):
     )
     fig.show()
 else:
-    display(Markdown("*Validation IC chart omitted in the reduced-symbol test run.*"))
+    print("Validation IC chart omitted: the reduced-symbol test run has too few pairs per date.")
 
 # %% [markdown]
 # ## 9. High-Volatility Regime Diagnostic
@@ -811,7 +828,7 @@ if "hmm_regime_prob_high_vol" in eval_features.columns:
     )
     fig.add_hline(y=0.5, line_dash="dash", line_color=COLORS["amber"])
     fig.update_layout(
-        title=f"High-volatility state exceeds 50% on {high_vol_share:.0%} of validation days",
+        title="The filtered high-volatility state switches on and off through validation",
         xaxis_title="Validation date",
         yaxis_title="Filtered high-volatility probability",
         yaxis_range=[0, 1],
@@ -820,7 +837,7 @@ if "hmm_regime_prob_high_vol" in eval_features.columns:
     fig.show()
 else:
     high_vol_share = float("nan")
-    display(Markdown("*HMM diagnostic omitted because the reduced run has no USD factor.*"))
+    print("HMM diagnostic omitted: the reduced run produces no USD factor series.")
 
 
 # %% [markdown]
@@ -832,23 +849,27 @@ else:
 # The HMM variables condition the full cross-section, while the remaining
 # features receive an exploratory FDR-controlled validation screen.
 
+# %% [markdown] tags=["results"]
+# **What the artifact contains, and what survived the validation screen.** The
+# counts and the leading estimate are printed below rather than typed here, so a
+# re-run that moves them cannot leave a stale number in the prose.
+
 # %%
+print(f"Model-based features written: {len(temporal_feature_cols)}")
+print(f"Canonical folds:              {len(folds)}")
 if len(eval_summary):
     top_result = eval_summary.row(0, named=True)
-    result_text = (
-        f"**Result.** The artifact contains **{len(temporal_feature_cols)} model-based features** "
-        f"across **{len(folds)} canonical folds**. Of {len(feature_names)} features with "
-        f"cross-sectional variation, **{n_fdr_sig} survive BH-FDR at 5%**. The largest absolute "
-        f"validation estimate is `{top_result['feature']}` "
-        f"(IC {top_result['ic_mean']:+.4f}, HAC t {top_result['hac_tstat']:+.2f})."
+    print(f"Features with cross-sectional variation: {len(feature_names)}")
+    print(f"Surviving BH-FDR at 5%:                  {n_fdr_sig}")
+    print(
+        f"Largest absolute validation estimate:    {top_result['feature']} "
+        f"(IC {top_result['ic_mean']:+.4f}, HAC t {top_result['hac_tstat']:+.2f})"
     )
 else:
-    result_text = (
-        f"**Result.** The reduced run produced **{len(temporal_feature_cols)} model-based "
-        f"features** across **{len(folds)} canonical folds**. Validation IC requires at least "
-        "eight pairs per date and is therefore omitted."
+    print(
+        "Validation IC omitted: a daily cross-sectional IC needs at least eight pairs "
+        "per date and the reduced run has fewer."
     )
-display(Markdown(result_text))
 
 # %% [markdown]
 # **Next**: [`05_evaluation.py`](05_evaluation.ipynb) combines these fold-aware
