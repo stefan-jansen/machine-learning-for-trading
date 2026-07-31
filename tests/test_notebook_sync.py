@@ -85,6 +85,20 @@ def test_numeric_and_string_bools_are_the_same_override() -> None:
     assert contradicts_injected_cell(nb, {"FORCE_RETRAIN": 0}) is not None
 
 
+def test_bool_coercion_does_not_reach_ordinary_numeric_parameters() -> None:
+    """``MAX_SYMBOLS = 1`` is a count, not a flag, so it must not match ``true``."""
+    nb = _notebook([_injected_cell("# Parameters\nMAX_SYMBOLS = 1\n")])
+    assert contradicts_injected_cell(nb, {"MAX_SYMBOLS": "1"}) is None
+    assert contradicts_injected_cell(nb, {"MAX_SYMBOLS": True}) is not None
+    assert contradicts_injected_cell(nb, {"MAX_SYMBOLS": 2}) is not None
+
+
+def test_string_parameters_compare_by_value() -> None:
+    nb = _notebook([_injected_cell('# Parameters\nSTART_DATE = "2024-06-01"\n')])
+    assert contradicts_injected_cell(nb, {"START_DATE": "2024-06-01"}) is None
+    assert contradicts_injected_cell(nb, {"START_DATE": "2020-01-01"}) is not None
+
+
 # -----------------------------------------------------------------------------
 # The injected-parameters cell — the record that belongs to the execution
 # -----------------------------------------------------------------------------

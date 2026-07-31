@@ -116,18 +116,46 @@ def production_parameters(parameters: dict[str, object]) -> bool:
     )
 
 
+def _normalize_value(value: object) -> tuple[str, object]:
+    """Tagged scalar form: ``("bool", …)``, ``("num", …)`` or ``("str", …)``.
+
+    The tag is what keeps ``True`` distinct from the number 1. Python treats them as
+    equal — ``bool`` subclasses ``int`` — so an untagged form would let a numeric
+    override match a boolean one.
+    """
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, (int, float)):
+        return ("num", float(value))
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            return ("num", float(text))
+        except ValueError:
+            return ("str", text)
+    return ("str", str(value))
+
+
 def _normalize_parameters(parameters: dict[str, object]) -> dict[str, object]:
     """Comparable form of a parameter set.
 
-    Papermill's ``-p`` passes every value as a string, so the same override reaches
-    ``metadata`` as ``True`` through one entry point and ``"true"`` through another.
-    Bool-like values collapse to the bool; everything else compares as its repr, so
-    ``5`` and ``"5"`` are the same override.
+    Papermill's ``-p`` stringifies every value, so one override arrives as ``True``
+    through a YAML file and ``"true"`` through the CLI. Normalizing lets the two
+    compare equal, so a declaration is not reported as contradicting the injected
+    cell that recorded the same run.
+
+    Only the parameters in ``PRODUCTION_SAFE_PARAMETERS`` are read as booleans.
+    Every other name keeps its type, so ``MAX_SYMBOLS = 1`` still contradicts a
+    declared ``{"MAX_SYMBOLS": true}`` while matching ``{"MAX_SYMBOLS": "1"}``.
     """
     out: dict[str, object] = {}
     for name, value in parameters.items():
-        coerced = _coerce_bool(value)
-        out[name] = coerced if coerced is not None else str(value)
+        if name in PRODUCTION_SAFE_PARAMETERS:
+            coerced = _coerce_bool(value)
+            if coerced is not None:
+                out[name] = ("bool", coerced)
+                continue
+        out[name] = _normalize_value(value)
     return out
 
 
