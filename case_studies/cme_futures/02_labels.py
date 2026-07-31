@@ -489,8 +489,8 @@ ax.set_xlabel("Lag in trading sessions")
 ax.set_ylabel("Panel autocorrelation")
 add_message_title(
     ax,
-    "Each label's autocorrelation is the overlap, and it ends at the horizon",
-    subtitle="Dotted lines mark each horizon; demeaned within product, then pooled",
+    "The overlap in each label decays to zero at its own horizon",
+    subtitle="Dotted lines mark each horizon; what remains past one is not overlap",
 )
 ax.legend(loc="upper right", frameon=False)
 show_with_alt(fig, "Panel autocorrelation of both labels against lag in trading sessions.")
