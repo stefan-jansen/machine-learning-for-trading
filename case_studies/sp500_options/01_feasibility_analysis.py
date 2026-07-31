@@ -266,9 +266,9 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# ### B.5 Move scale against cost. The ratio divides the median absolute move at the shorter horizon by
-# the median round trip, and the clearance shares count entries above each cost line. Neither says the
-# position is profitable: the move is unsigned, and a seller keeps the premium only if it stays small.
+# ### B.5 Move scale against cost. The statistic is the median across entries of the move at the shorter
+# horizon over the round trip that entry crosses; the clearance shares count entries above each cost
+# line. Neither says the position is profitable: the move is unsigned and a seller keeps only small ones.
 
 # %%
 short = moves[f"h{HORIZONS[0]}"].drop_nulls()
@@ -283,8 +283,8 @@ print(
 
 # %% [markdown] tags=["results"]
 # The median symbol gives up 0.1184 of the straddle premium to cross the two-leg spread twice, which
-# is 70.1 bps of underlying notional. The median five-session move matches that round trip at 1.00x
-# and 0.497 of entries clear it; at the entry leg's cheapest rung, 0.948 clear. The premium averages
+# is 70.1 bps of underlying notional. The median entry's five-session move matches the round trip it
+# crosses, at 1.00x, and 0.497 of entries clear it; at the entry leg's cheapest rung, 0.948 clear. The premium averages
 # -0.0003 volatility points over 194 symbols, is positive on 0.598 of days, and autocorrelates 0.703 at
 # a lag of one week.
 
