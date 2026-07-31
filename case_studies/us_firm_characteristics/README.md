@@ -22,7 +22,7 @@ The teaching arc threads four claims that must be evaluated jointly: regression-
 
 | Stage | Notebook | Chapter | Description | Writes |
 |-------|----------|---------|-------------|--------|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Monthly decision cadence, 6-month accounting lag, long-short decile protocol; feasibility evidence vs `config/setup.yaml` | `config/exploration/feasibility_report.json` |
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Cross-sectional breadth, move scale against the assumed round trip, rank persistence, and the walk-forward folds, against `config/setup.yaml` | Nothing |
 | Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 1-month forward returns with winsorized regression and median-split classification variants | `labels/prices.parquet`, `labels/fwd_ret_1m.parquet`, `labels/fwd_ret_1m_win.parquet`, `labels/fwd_class_1m.parquet`, `config/cv_config.json` |
 | Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | 57 firm characteristics across value, quality, momentum, risk, and investment families | `features/financial.parquet`, `features/feature_doc.json` |
 | Evaluation | [`04_evaluation`](04_evaluation.ipynb) | Ch7–9 | HAC-adjusted feature IC with FDR control across the characteristic panel | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
