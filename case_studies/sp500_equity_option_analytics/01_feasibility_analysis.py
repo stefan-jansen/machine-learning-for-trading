@@ -86,18 +86,18 @@ print(f"Universe {SETUP['universe']['n_assets']} names, floor {BREADTH_FLOOR}, h
 # The options market prices the distribution of a share's future returns and the equity market
 # prices its level. This case study reads the first and trades the second, so signal and cost
 # arrive from two venues that need not cover the same names on the same days. Does the universe
-# exist on the dates the strategy acts on? Is a typical move large next to the spread? Are there
-# enough decision dates for a walk-forward clear of the holdout?
+# exist when the strategy acts? Is a move large next to the spread? Are the decision dates enough
+# for a walk-forward clear of the holdout?
 
 # %% [markdown]
 # ## B. Universe and cost feasibility
 #
 # ### B.1 Load and verify the declared universe
 #
-# The surface carries implied volatility interpolated to fixed tenors, one row per name and
-# session, with `qc_converged_share` scoring how cleanly the points behind it solved; the bars
-# carry `close` as printed plus `adj_factor`. A name is present where the interpolation produced a
-# value and a bar exists, the condition `03_financial_features` reads it under.
+# The carrier is not a quoted number: `materialize_options.py` picks the call and the put nearest
+# at-the-money among contracts maturing in twenty-five to thirty-five days and averages their
+# implied volatilities, so it exists only where that window holds contracts. The bars carry
+# `close` as printed plus `adj_factor`.
 
 # %%
 surface = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
@@ -122,17 +122,18 @@ print(
 #
 # `setup.yaml::universe.n_assets` counts the names appearing anywhere in the sample; what a
 # cross-sectional strategy spends is the names it can rank *on the session it acts on*, against
-# the sweep's largest position count as the floor it clears to fill a book. Ranking reads the
-# volatility a session late and `03_financial_features` carries it forward over a short gap, so a
-# name counts here under that lag and that tolerance.
+# the sweep's largest position count. Ranking reads the volatility a session late and
+# `03_financial_features` carries it forward over a short gap, so a name counts here under that
+# lag and that tolerance, on the surface's own rows.
 
 # %%
 rankable = (
-    quotes.select("timestamp", "symbol")
-    .join(panel.select("timestamp", "symbol", CARRIER), ["timestamp", "symbol"], how="left")
+    surface.filter(sealed)
+    .select("timestamp", "symbol", CARRIER)
     .sort(["symbol", "timestamp"])
     .with_columns(pl.col(CARRIER).shift(IV_LAG).forward_fill(limit=IV_STALE).over("symbol"))
     .drop_nulls(CARRIER)
+    .join(quotes.select("timestamp", "symbol"), ["timestamp", "symbol"])
 )
 decisions = rankable.group_by(pl.col("timestamp").dt.truncate("1w")).agg(
     pl.col("timestamp").max().alias("decision_date")
@@ -162,15 +163,15 @@ plt.show()
 # %% [markdown]
 # Breadth never approaches the floor, so it is not what limits this strategy. What the swing
 # changes is *which* names can be ranked: on the narrow weeks the cross-section is about half the
-# panel, so a statistic averaged over decision dates spans two universes.
+# panel, so a statistic averaged over decision dates spans two universes; the fill does not close
+# the narrow blocks, which run longer than it does.
 #
 # ### B.3 What the trade costs, and what a move is worth
 #
 # `setup.yaml::costs.model` declares a percentage regime: a flat round trip in basis points for
-# every name. The companion the sweep keeps is a per-share regime, where the charge is a number
-# of cents and the basis points follow from the price, so a cent buys a different fraction of a
-# cheap share than of an expensive one. Both come off the bars, not the joined panel, where a
-# horizon counted in rows stretches; and what follows is a move's size, not a payoff.
+# every name. The companion the sweep keeps is a per-share regime, where the charge is a number of
+# cents and the basis points follow from the price, so a cent buys a different fraction of a cheap
+# share than of an expensive one. Both come off the bars, and what follows is a move's size.
 
 # %%
 prices = (
@@ -208,8 +209,8 @@ plt.show()
 # %% [markdown]
 # The two cross, so no single cent figure reproduces the flat line across a universe this wide in
 # price, which is why the percentage regime is the headline. Returns run close to close on the
-# adjusted series and within one security: a split cuts the printed close by its ratio, and a
-# ticker can change hands between two `sec_id` values.
+# adjusted series and within one security: a split cuts the printed close, and a ticker can change
+# hands between two `sec_id` values.
 
 # %%
 returns = prices.with_columns(
@@ -268,8 +269,8 @@ plt.show()
 # %% [markdown]
 # ### B.5 Move scale against cost
 #
-# The ratio divides the median absolute move at the primary horizon by the declared round trip
-# and the clearance share counts moves above it. Neither says total cost clears.
+# The ratio divides the median absolute move at the primary horizon by the declared round trip and
+# the clearance share counts moves above it. Neither says total cost clears.
 
 # %%
 primary = f"h{HORIZONS[0]}"
@@ -356,9 +357,8 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# ## E. Derived artifacts
-#
-# None. `03_financial_features` derives the same universe from the same loader.
+# ## E. Derived artifacts. None: `03_financial_features` derives the same universe from the same
+# loader.
 #
 # ## F. Findings vs `setup.yaml`
 # | Knob | Evidence | Revise it when |
@@ -394,7 +394,7 @@ print(
 #
 # ### Known limitations
 #
-# - The development window is four years, and a slow carrier shortens it further in effect.
+# - The development window is four years, and a slow carrier shortens it in effect.
 # - Cost is the declared spread and commission; impact enters at the cost stage.
 #
 # **Next**: labels at the declared horizons, on this development window.
