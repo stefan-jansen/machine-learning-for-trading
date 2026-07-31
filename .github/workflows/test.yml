@@ -378,6 +378,18 @@ jobs:
           source .venv/bin/activate
           python -m pytest tests/test_notebook_output_hygiene.py -q \
             --deselect tests/test_notebook_output_hygiene.py::test_no_machine_specific_paths_in_committed_notebooks
+      # A two-tailed p-value written as `2 * (1 - dist.cdf(abs(t)))` returns
+      # exactly 0.0 above |t| ~8.35, so a notebook teaching inference printed
+      # `p=0` for a number no computation produced. `dist.sf` is the correct
+      # call. The pattern is grep-visible, and the scan is unfiltered for the
+      # same reason as the pair-sync check: it is reintroduced by copying an
+      # expression from one chapter into another, not by editing one file.
+      # The scan is stdlib-only; the numeric tests in the same file skip here
+      # for want of scipy and the modelling stack.
+      - name: No tail probability computed as 1 - cdf
+        run: |
+          source .venv/bin/activate
+          python -m pytest tests/test_pvalue_tail_precision.py -q
 
   # ---------------------------------------------------------------------------
   # Fast native unit tests — download-script logic (no Docker, no network,
