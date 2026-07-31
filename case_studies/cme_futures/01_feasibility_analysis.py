@@ -17,20 +17,20 @@
 # # CME Futures: Feasibility Analysis
 #
 # `config/setup.yaml` declares a cross-sectional futures strategy: which products trade,
-# how often positions change, what a round trip costs, and how the sample is split for
-# evaluation. This notebook asks whether the data supports it, and fits nothing.
+# how often positions change, what a round trip costs, how the sample is split. This
+# notebook asks whether the data supports it, and fits nothing.
 #
 # ## Learning objectives
 #
-# - Count the universe on the session the strategy acts on, against the breadth a
-#   two-sided book needs, and price a round trip from the contract's own tick
-# - Read off an exceedance curve what fraction of moves clears its own product's cost
-# - Measure how long the term-structure slope a carry strategy reads stays put
+# - Count the universe on the session the strategy acts on, price a round trip from the
+#   contract's own tick, and read clearance off an exceedance curve scaled by that cost
+# - Measure how long the term-structure slope a carry strategy reads stays put, and
+#   confirm the declared folds fit the sample without touching the holdout
 #
 # ## Book reference
 #
 # Chapter 6, Sections 6.2-6.6. Reads CME settlements via `load_cme_futures()` and
-# `config/setup.yaml`, the strategy declaration this notebook never writes.
+# `config/setup.yaml`, which it never writes.
 
 # %%
 """CME Futures Case Study - Feasibility Analysis."""
@@ -73,7 +73,8 @@ PRIMARY_LABEL = SETUP["labels"]["primary"]
 LABEL_BUFFER = SETUP["labels"]["buffer"]
 DECLARED_PRODUCTS = sorted(p for g in SETUP["universe"]["product_groups"].values() for p in g)
 BREADTH_FLOOR = 2 * max(SETUP["backtest"]["sweep"]["top_k_grid"][PRIMARY_LABEL])
-SPREAD_TICKS = SETUP["costs"]["spread_ticks"]["liquid"]
+SPREAD_TICKS = SETUP["costs"]["spread_ticks"]
+ILLIQUID = set(SETUP["costs"]["illiquid_products"])
 LABELS = [PRIMARY_LABEL, *SETUP["labels"]["variants"]]
 HORIZONS = sorted(int(re.search(r"(\d+)d$", name).group(1)) for name in LABELS)
 
@@ -87,10 +88,10 @@ print(f"{len(DECLARED_PRODUCTS)} products, floor {BREADTH_FLOOR} | horizons {HOR
 # currencies, agriculture and livestock through one order type and one clearing house. A
 # front-month position earns the spot move plus the roll yield the term structure implies,
 # so ranking products against each other trades a difference in carry as much as one in
-# direction. Three questions decide whether that is worth building here: does the declared
-# universe exist on every decision date, is a typical move large next to what it costs to
-# capture, and does the sample carry enough decision dates for a walk-forward evaluation
-# that never reads the holdout? Section C records which `setup.yaml` value each motivates.
+# direction. Three questions decide whether that is worth building here: does the universe
+# exist on every decision date, is a typical move large next to what it costs to capture,
+# and are there enough decision dates for a walk-forward evaluation that never reads the
+# holdout? Section C records which `setup.yaml` value each answer motivates.
 
 # %% [markdown]
 # ## B. Universe and cost feasibility
@@ -99,8 +100,7 @@ print(f"{len(DECLARED_PRODUCTS)} products, floor {BREADTH_FLOOR} | horizons {HOR
 #
 # The loader returns one row per product, tenor and session; `tenor == 0` is the front
 # month. Two price columns matter and are not interchangeable: `raw_close` is the printed
-# settlement, while `adj_close` is back-adjusted, so its differences are price moves
-# rather than roll gaps.
+# settlement, while `adj_close` is back-adjusted, so its differences are moves not rolls.
 
 # %%
 futures = load_cme_futures(start_date=START_DATE, end_date=END_DATE)
@@ -122,10 +122,9 @@ print(
 # ### B.2 Breadth at every decision date
 #
 # One count of the universe hides the question a cross-sectional strategy has to answer,
-# which is whether the products are there *on the session it acts on*. Counting anywhere
-# in the week hides exactly the dates that matter, because the week's final session is
-# sometimes a holiday session on which most of the universe does not settle. The line is
-# what the widest sweep holds across both legs.
+# which is whether the products are there *on the session it acts on*. Counting anywhere in
+# the week hides the dates that matter, because the week's final session is sometimes a
+# holiday on which most of the universe does not settle.
 
 # %%
 decisions = research.group_by(pl.col("session_date").dt.truncate("1w")).agg(
@@ -154,12 +153,10 @@ plt.show()
 # %% [markdown]
 # ### B.3 What a round trip costs, and what a move is worth
 #
-# `setup.yaml::costs` prices a trade as a commission plus a spread quoted in ticks, and the
-# tick is a contract specification: `futures_specs.yaml` carries the exchange value per
-# product. Do not infer it from the data - the smallest settlement increment is a half-tick
-# on several contracts, which halves the cost you charge yourself. A one-tick spread costs
-# half a tick per leg, so a round trip is one tick, and the typical price converts it to
-# basis points. The commission needs a notional and enters at the cost stage.
+# `setup.yaml::costs` prices a trade as a commission plus a spread in ticks: one for most of
+# the universe, two for the products it lists as illiquid. The tick is a contract
+# specification and `futures_specs.yaml` carries it. Do not infer it - the smallest
+# settlement increment is a half-tick on several contracts, halving the cost you charge.
 
 # %%
 products = yaml.safe_load((REPO_ROOT / "data/futures/market/futures_specs.yaml").read_text())
@@ -169,11 +166,13 @@ ticks = pl.DataFrame(
         "tick": [p["tick_size"] for p in products["products"].values()],
     }
 )
+illiquid, liquid = SPREAD_TICKS["illiquid"], SPREAD_TICKS["liquid"]
+spread = pl.when(pl.col("product").is_in(ILLIQUID)).then(illiquid).otherwise(liquid)
 cost = (
     research.group_by("product")
     .agg(pl.col("raw_close").median().alias("price"))
     .join(ticks, "product")
-    .with_columns((SPREAD_TICKS * pl.col("tick") / pl.col("price") * 1e4).alias("round_trip_bps"))
+    .with_columns((spread * pl.col("tick") / pl.col("price") * 1e4).alias("round_trip_bps"))
     .sort("round_trip_bps")
 )
 COST_BPS = float(cost["round_trip_bps"].median())
@@ -192,28 +191,33 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# Against that cost sits the move a position is trying to capture: the fraction of absolute
-# returns at or above each magnitude, per horizon, against the universe-median spread.
+# Costs differ by an order of magnitude across the universe, so one cost line on raw returns
+# answers the question for no product in particular. Each move is divided by its own
+# product's round trip instead, putting break-even at one on a shared scale.
 
 # %%
-returns = research.with_columns(
-    pl.col("adj_close").pct_change(h).abs().over("product").alias(f"h{h}") for h in HORIZONS
+returns = (
+    research.with_columns(
+        pl.col("adj_close").pct_change(h).abs().over("product").alias(f"h{h}") for h in HORIZONS
+    )
+    .join(cost.select("product", "round_trip_bps"), "product")
+    .with_columns(pl.col(f"h{h}") * 1e4 / pl.col("round_trip_bps") for h in HORIZONS)
 )
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 for h, color in zip(HORIZONS, (COLORS["blue"], COLORS["amber"]), strict=True):
-    magnitude, fraction = exceedance_curve(returns[f"h{h}"].drop_nulls().to_numpy())
-    ax.plot(magnitude * 10_000, fraction, color=color, lw=1.6, label=f"{h}-session move")
-ax.axvline(COST_BPS, color=COLORS["copper"], ls="--", lw=1.5, label="round-trip spread")
+    multiple, fraction = exceedance_curve(returns[f"h{h}"].drop_nulls().to_numpy())
+    ax.plot(multiple, fraction, color=color, lw=1.6, label=f"{h}-session move")
+ax.axvline(1, color=COLORS["copper"], ls="--", lw=1.5, label="break-even on the round trip")
 ax.set_xscale("log")
-ax.set_xlim(0.4, 3_000)
-ax.set_xlabel("Absolute return (bps, log scale)")
+ax.set_xlim(0.02, 2_000)
+ax.set_xlabel("Absolute move as a multiple of the product's round trip (log scale)")
 ax.set_ylabel("Fraction of moves at least this large")
 ax.legend(frameon=False, fontsize=8, loc="lower left")
 add_message_title(
     ax,
-    "Almost every move at either horizon is larger than the spread it crosses",
-    subtitle="Exceedance of absolute front-month returns, development window",
+    "Almost every move at either horizon is worth more than crossing costs",
+    subtitle="Exceedance of absolute returns scaled by each product's own round trip",
 )
 plt.show()
 
@@ -224,8 +228,8 @@ plt.show()
 # still says something at the next. This strategy reads carry, visible in the raw prices as
 # the slope between the front contract and the one behind it: a positive slope means a long
 # position rolls into a more expensive contract and gives back part of the spot move. How
-# long that reading lasts is an autocorrelation, computed inside each product; stacking
-# thirty products and correlating the result measures their joins instead.
+# long that lasts is an autocorrelation, computed inside each product; stacking thirty and
+# correlating the result measures their joins instead.
 
 # %%
 sealed = pl.col("session_date") < pl.lit(HOLDOUT_START).str.to_date()
@@ -255,19 +259,20 @@ plt.show()
 # %% [markdown]
 # ### B.5 Move scale against cost
 #
-# The ratio below divides the median absolute move at the primary horizon by the median
-# round-trip spread; the clearance share compares each move with *its own* product's
-# spread, because the two ends of the universe differ by an order of magnitude. Both run
-# on realised moves rather than forecasts, so neither says the sign is predictable.
+# The ratio divides the median absolute move at the primary horizon by the median spread,
+# and the clearance share counts moves above their own product's round trip. Both run on
+# realised moves, so neither says the sign is predictable.
 
 # %%
-move_bps = pl.col(f"h{HORIZONS[0]}") * 1e4
-priced = returns.drop_nulls(f"h{HORIZONS[0]}").join(
-    cost.select("product", "round_trip_bps"), "product"
+multiple = pl.col(f"h{HORIZONS[0]}")
+median_move_bps, clears_cost = (
+    returns.drop_nulls(f"h{HORIZONS[0]}")
+    .select(
+        (multiple * pl.col("round_trip_bps")).median().alias("mid"),
+        (multiple > 1).mean().alias("share"),
+    )
+    .row(0)
 )
-median_move_bps, clears_cost = priced.select(
-    move_bps.median().alias("mid"), (move_bps > pl.col("round_trip_bps")).mean().alias("share")
-).row(0)
 print(
     f"Round-trip spread {cost['round_trip_bps'].min():.2f} to "
     f"{cost['round_trip_bps'].max():.2f} bps, median {COST_BPS:.2f} bps | median "
@@ -278,7 +283,7 @@ print(
 # %% [markdown] tags=["results"]
 # The median round-trip spread across the thirty products is 1.13 bps, from 0.43 bps on
 # the two-year note to 5.80 bps on corn. The median absolute five-session move is 121.2
-# bps, and 0.992 of moves exceed the spread their own product would charge to cross.
+# bps, and 0.991 of moves exceed the spread their own product would charge to cross.
 
 # %% [markdown]
 # ## C. Design decisions
@@ -286,31 +291,30 @@ print(
 # ### C.1 Cadence
 #
 # `setup.yaml::decision.cadence` rebalances at the Friday settlement and executes at the
-# Monday open. B.3 supports that from the cost side: moves at both horizons sit far above
-# the spread, so the signal sets the cadence rather than cost.
+# Monday open. B.3 supports that: moves at both horizons clear their own round trip, so the
+# signal sets the cadence rather than cost.
 #
 # ### C.2 Kill conditions
 #
 # Three thresholds send the strategy back to the drawing board, tested where the evidence
 # exists rather than here: a combined carry-and-momentum information coefficient below its
 # floor across folds; long-backwardation carry turning profitable over the full sample,
-# which would make an inverted-carry reading a regime artifact; and round-trip cost above
-# the median absolute move for most of the universe.
+# which would make an inverted-carry reading a regime artifact; and cost above the median
+# move for most of the universe.
 #
 # ### C.3 Mapping class
 #
-# `setup.yaml::mapping.class` ranks products by carry or momentum and holds both legs.
-# Shorting a future carries no borrow, so the short leg costs what the long leg costs.
-# Sizing is equal-risk rather than equal-notional because volatilities across the universe
-# differ by an order of magnitude, and notional weighting would hand the book to energy
-# and grains. A quintile of thirty holds six, which is the real limit here.
+# `setup.yaml::mapping.class` ranks products by carry or momentum and holds both legs, and
+# shorting a future carries no borrow, so the short leg costs what the long leg costs.
+# Sizing is equal-risk because volatilities differ by an order of magnitude and notional
+# weighting would hand the book to energy and grains. A quintile of thirty holds six.
 
 # %% [markdown]
 # ## D. Walk-forward structure
 #
 # ### D.1 Effective sample size
 #
-# What evaluation spends is decision dates, not rows: one a week here.
+# What evaluation spends is decision dates, not rows: one a week.
 
 # %%
 print(
@@ -321,10 +325,9 @@ print(
 # %% [markdown]
 # ### D.2 Fold demonstration
 #
-# `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone, so the
-# boundaries are the declared design rather than a copy of it. Between each training and
-# validation block sits a purge gap the width of the label horizon, which stops a label
-# computed inside training from resolving inside validation. The figure draws those
+# `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone. Between each
+# training and validation block sits a purge gap the width of the label horizon, which stops
+# a label computed inside training from resolving inside validation. The figure draws those
 # boundaries rather than recomputing them, so it and the folds cannot disagree.
 
 # %%
@@ -348,9 +351,8 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# ## E. Derived artifacts
-#
-# Nothing: exchange listings fix the universe, so no later stage reads an eligibility file.
+# ## E. Derived artifacts. Nothing: exchange listings fix the universe, so no later stage
+# reads an eligibility file from here.
 
 # %% [markdown]
 # ## F. Findings vs `setup.yaml`
@@ -361,7 +363,7 @@ plt.show()
 # |---|---|---|
 # | `universe.n_products` | B.2 breadth per decision date | breadth falls below the position count the sweep asks for on either leg |
 # | `decision.cadence` | B.3 exceedance, B.4 persistence | moves stop clearing the spread, or the slope decays inside one rebalancing interval |
-# | `costs.spread_ticks` | B.3 tick per product from `futures_specs.yaml` | the exchange changes a tick, or the desk pays more than one tick to cross |
+# | `costs.spread_ticks` | B.3 tick per product from `futures_specs.yaml` | the exchange changes a tick, or a product moves between the liquid and illiquid class |
 # | `evaluation.n_splits` | D.1 decision dates, D.2 boundaries | the folds no longer fit the development window |
 
 # %%
@@ -375,26 +377,23 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# Breadth is 30 products on nearly every decision date and 8 at its worst, a Good Friday;
-# the floor of 20 binds on 7 of 678 dates, every one of them a holiday session. Five folds
-# are generated from the declared design, the last validation block ending 2023-12-21.
+# Breadth is 29 products until the small-cap index contract lists in 2017 and 30 after, with
+# 8 at its worst on a Good Friday; the floor of 20 binds on 7 of 678 decision dates, every
+# one a holiday session. Five folds are generated, the last validation ending 2023-12-21.
 
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **Count the universe on the session the strategy acts on.** Anywhere-in-the-week
+# 1. **Count the universe on the session the strategy acts on**, since anywhere-in-the-week
 #    hides the holiday dates where a two-sided book cannot be filled.
 # 2. **Take the tick from the contract specification, not from the prices.** Several
 #    contracts settle on half-ticks, so the observed grid understates what you pay.
-# 3. **Compare moves to cost with an exceedance curve, not a histogram**, and against each
-#    product's own spread where the universe spans an order of magnitude in cost.
-# 4. **Autocorrelation on a panel is computed inside each entity**, and a fold figure is
-#    drawn from the boundaries it reports, or it can contradict them.
+# 3. **Scale moves by each product's own round trip before comparing them to cost**, and
+#    compute a panel autocorrelation inside each entity, never across the stack.
 #
 # ### Known limitations
 #
-# - Cost here is spread only; commission and roll slippage enter at the cost stage.
-# - A persistent carry reading is not a profitable one; whether the slope predicts the
-#   next move's sign is what the modelling stages test.
+# - Cost here is spread only, and a persistent carry reading is not a profitable one; the
+#   cost and modelling stages test the rest.
 #
 # **Next**: labels at the declared horizons, built on this development window.

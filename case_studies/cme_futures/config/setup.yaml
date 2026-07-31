@@ -94,6 +94,9 @@ costs:
   spread_ticks:
     liquid: 1
     illiquid: 2
+  # Products charged the illiquid spread. Livestock and soybean oil quote wider than
+  # the rest of the universe; every other product pays the liquid one tick.
+  illiquid_products: [LE, GF, ZL]
 
 backtest:
   rebalance:
