@@ -1916,9 +1916,6 @@ case_studies/nasdaq100_microstructure/18_strategy_analysis:
     MAX_SYMBOLS: 5
   timeout: 180
 case_studies/sp500_equity_option_analytics/01_feasibility_analysis:
-  parameters:
-    MAX_SYMBOLS: 5
-    START_DATE: '2000-01-01'
   timeout: 120
 case_studies/sp500_equity_option_analytics/02_labels:
   parameters:
