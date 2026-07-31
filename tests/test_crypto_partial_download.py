@@ -209,6 +209,28 @@ def test_an_empty_retry_against_a_complete_dataset_exits_zero(
     _run(downloader, monkeypatch, tmp_path, arrived=[], failed=configured_symbols)
 
 
+def test_an_empty_forced_download_exits_nonzero(
+    downloader, monkeypatch, tmp_path, configured_symbols
+):
+    """--force replaces rather than merges, so there is nothing to fall back to.
+
+    A forced refresh that returned nothing has failed. Reporting success on the
+    strength of the rows it was about to replace would present stale data as the
+    result of the run.
+    """
+    _run(downloader, monkeypatch, tmp_path, arrived=configured_symbols)
+    with pytest.raises(SystemExit) as exc:
+        _run(
+            downloader,
+            monkeypatch,
+            tmp_path,
+            arrived=[],
+            failed=configured_symbols,
+            cli=("--force",),
+        )
+    assert exc.value.code == 1
+
+
 def test_an_empty_first_run_exits_nonzero(downloader, monkeypatch, tmp_path, configured_symbols):
     """The converse: nothing on disk and nothing arrived is still a failure."""
     with pytest.raises(SystemExit) as exc:

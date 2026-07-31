@@ -309,8 +309,15 @@ def main() -> None:
                 # check rather than exiting, so the status reflects what is on disk
                 # and --allow-partial still applies. The provider returns a frame
                 # with no columns at all, so it can be neither combined nor sorted.
+                # --force means replace, not merge, so there is nothing to fall
+                # back to: a forced refresh that returned nothing has failed, and
+                # keeping the old rows would report stale data as the result.
                 print("No perpetual OHLCV rows returned; falling back to what is on disk.")
-                perps_df = pl.read_parquet(perps_output) if perps_output.exists() else new_df
+                perps_df = (
+                    pl.read_parquet(perps_output)
+                    if perps_output.exists() and not args.force
+                    else new_df
+                )
             else:
                 perps_df = (
                     combine_existing(perps_output, new_df)
@@ -368,7 +375,11 @@ def main() -> None:
             )
             if new_df.is_empty():
                 print("No premium index rows returned; falling back to what is on disk.")
-                premium_df = pl.read_parquet(premium_output) if premium_output.exists() else new_df
+                premium_df = (
+                    pl.read_parquet(premium_output)
+                    if premium_output.exists() and not args.force
+                    else new_df
+                )
             else:
                 premium_df = (
                     combine_existing(premium_output, new_df)
