@@ -106,12 +106,14 @@ all: the four `crypto_perps_funding` model notebooks (`07_gbm`, `08_tabular_dl`,
 deep notebooks are marked GPU-only. Gradient boosting on GPU is also not bitwise reproducible against
 a CPU run. See [installation](installation.md) for the GPU setup.
 
-**Licensed data.** Three case studies read AlgoSeek data that requires a license:
-`nasdaq100_microstructure`, `sp500_options`, and `sp500_equity_option_analytics`. The reduced
-reader-facing versions of those datasets are marked `Soon` in the
-[data guide](../data/README.md) and are not downloadable yet. Until they are, those three case
-studies cannot be rebuilt from raw data, though their published results download and their analysis
-stages run normally.
+**AlgoSeek data.** Three case studies read AlgoSeek data: `nasdaq100_microstructure`,
+`sp500_options` and `sp500_equity_option_analytics`. AlgoSeek publishes the NASDAQ-100 minute bars
+and the S&P 500 option chains openly — no account, no API key, no license request — and one script
+converts them to what the loaders read; see
+[AlgoSeek datasets](../data/README.md#algoseek-datasets). Two of the four datasets are not published
+yet: the S&P 500 daily bars, without which `sp500_equity_option_analytics` cannot backtest and three
+Chapter 18 notebooks cannot run, and the NASDAQ-100 TAQ ticks, without which the two Chapter 3
+order-book notebooks cannot run. Everything else in those case studies rebuilds from raw data.
 
 ## 4. Not promised
 

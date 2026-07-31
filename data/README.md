@@ -34,10 +34,10 @@ cross-asset (factors, macro, prediction markets, news, text).
 | ------------------------ | ------------ | ------------- | ------------ | ------- | --------- | ---------------- | ------ |
 | ETF Universe             | Equity       | Market        | Daily        | 100     | 2006-2025 | Yahoo Finance    | No     |
 | US Equities              | Equity       | Market        | Daily        | 3,199   | 1962-2018 | NASDAQ DL        | Free   |
-| S&P 500 Bars             | Equity       | Market        | Daily        | ~638    | 2017-2021 | AlgoSeek         | Soon   |
-| S&P 500 Options          | Equity       | Market        | Daily        | ~500    | 2017-2021 | AlgoSeek         | Soon   |
-| NASDAQ-100 Bars          | Equity       | Market        | Minute       | ~100    | 2020-2021 | AlgoSeek         | Soon   |
-| TAQ Tick                 | Equity       | Market        | Tick         | 1       | Mar 2020  | AlgoSeek         | Soon   |
+| S&P 500 Bars             | Equity       | Market        | Daily        | ~638    | 2017-2021 | AlgoSeek         | Pending|
+| S&P 500 Options          | Equity       | Market        | Daily        | 634     | 2017-2021 | AlgoSeek         | Convert|
+| NASDAQ-100 Bars          | Equity       | Market        | Minute       | ~100    | 2020-2021 | AlgoSeek         | Convert|
+| TAQ Tick                 | Equity       | Market        | Tick         | 1       | Mar 2020  | AlgoSeek         | Pending|
 | MBO Tick                 | Equity       | Market        | Tick         | 1       | Nov 2024  | Databento        | Manual |
 | NASDAQ ITCH              | Equity       | Market        | Tick         | all     | varies    | NASDAQ FTP       | No     |
 | IEX DEEP/TOPS            | Equity       | Market        | Tick         | all     | varies    | IEX public       | No     |
@@ -69,9 +69,10 @@ unauthenticated script. `Free` — script-download, free API key required.
 `Paid` — script-download, billed API (see per-dataset estimates).
 `Manual` — reader downloads from a hosted URL or provider portal and
 places the files under `$ML4T_DATA_PATH` (no script); the DataBento MBO
-one-off has step-by-step instructions below. `Soon` — the reduced
-reader-facing AlgoSeek datasets are being prepared for hosting; the
-download URL and instructions will be published before launch.
+one-off has step-by-step instructions below. `Convert` — AlgoSeek hosts
+the archive openly, and one script turns it into what the loaders read; see
+[AlgoSeek datasets](#algoseek-datasets). `Pending` — AlgoSeek has not
+published this one yet, and nothing you can run substitutes for it.
 
 ---
 
@@ -133,6 +134,49 @@ total cost is under $10 and the files stay available for 30 days.
 See `data/equities/market/microstructure/MBO_DOWNLOAD.md` for step-by-step
 instructions. An API-based alternative (`mbo_download.py`) is available
 for users who already have a `DATABENTO_API_KEY`.
+
+### AlgoSeek datasets
+
+AlgoSeek publishes two of the four datasets this book uses at
+<https://algoseek.com/ml-for-trading/> — plain download links, no account, no
+API key. Both are CSV; every loader reads parquet, so one conversion step sits
+between the download and the notebooks.
+
+| Archive | Size | What it is |
+| --- | --- | --- |
+| `nasdaq-100-constituents-taq-ext.zip` | 5.9 GB | NASDAQ-100 extended minute bars, 505 days, 2020-01-02 to 2021-12-31 |
+| `options_daily_greeks_sp500.zip` | 13.8 GB | S&P 500 daily option chains with Greeks, 1,259 days 2017-2021, 634 symbols |
+
+```bash
+# NASDAQ-100 minute bars -> equities/market/nasdaq100/minute_bars/
+uv run python data/equities/market/algoseek_convert.py \
+    --dataset nasdaq100-minute-bars --source ~/Downloads/nasdaq-100-constituents-taq-ext.zip
+
+# S&P 500 raw option chains -> equities/market/sp500/options/
+uv run python data/equities/market/algoseek_convert.py \
+    --dataset sp500-options --source ~/Downloads/options_daily_greeks_sp500.zip
+
+# then build what the options notebooks actually load
+uv run python data/equities/market/sp500/build_options_eda.py
+uv run python data/equities/market/sp500/build_options_straddles_raw.py
+uv run python data/equities/market/sp500/materialize_options.py
+```
+
+`--source` also takes a directory you have already extracted, which is
+considerably faster for the options archive: it holds 1,275,314 gzipped files,
+and reading them out of the zip pays the archive's index on every open. Both
+conversions resume, so an interrupted run continues where it stopped.
+
+**Two datasets are not published yet.** AlgoSeek staged them for hosting and has
+not packaged them; nothing in this repo substitutes for either.
+
+| Missing | Blocks |
+| --- | --- |
+| S&P 500 daily bars | `18_transaction_costs/01_cost_taxonomy`, `02_spread_estimation`, `03_market_impact_calibration`, and the `sp500_equity_option_analytics` backtest |
+| NASDAQ-100 TAQ ticks | `03_market_microstructure/11_algoseek_taq_eda`, `12_algoseek_taq_lob_reconstruction` |
+
+The published minute-bar archive cannot stand in for the ticks: it is
+quote-aware bar aggregates, and reconstructing an order book needs the events.
 
 ### Update Existing Data
 
