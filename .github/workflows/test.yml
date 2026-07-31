@@ -73,13 +73,34 @@ jobs:
         id: filter
         with:
           filters: |
+            # "shared" fans the matrix out to every chapter and every case study.
+            # Only files that can change what test-chapters or test-case-studies
+            # DO belong here. Those two jobs run exactly one test module each
+            # (test_chapter_notebooks.py, test_case_studies.py), and the harness
+            # they import is conftest -> preset_patches and pm_helpers ->
+            # overrides.yaml. The other ~100 files in tests/ are unit tests owned
+            # by test-unit, which is required and runs on every commit anyway, so
+            # listing 'tests/**' here re-ran nine notebook pipelines to re-test
+            # something that had already been tested in ninety seconds.
             shared:
               - 'utils/**'
               - 'data/**'
-              - 'tests/**'
               - 'pyproject.toml'
               - '.github/workflows/test.yml'
               - 'matplotlibrc'
+              - 'tests/__init__.py'
+              - 'tests/conftest.py'
+              - 'tests/pm_helpers.py'
+              - 'tests/preset_patches.py'
+              - 'tests/overrides.yaml'
+              - 'tests/fixtures/**'
+              - 'tests/test_case_studies.py'
+              - 'tests/test_chapter_notebooks.py'
+            # test-py312, test-neo4j and test-benchmark all run this module. It is
+            # not in `shared` because it drives none of the chapter or case-study
+            # matrix; it gets its own filter, wired into run_py312 below.
+            docker-notebooks:
+              - 'tests/test_docker_notebooks.py'
             ch01:
               - '01_process_is_edge/**'
             ch02-03:
@@ -238,6 +259,7 @@ jobs:
              || [[ "${{ steps.filter.outputs.ch08-09 }}" == "true" ]] \
              || [[ "${{ steps.filter.outputs.ch10 }}" == "true" ]] \
              || [[ "${{ steps.filter.outputs.ch14-15 }}" == "true" ]] \
+             || [[ "${{ steps.filter.outputs.docker-notebooks }}" == "true" ]] \
              || [[ "${{ steps.filter.outputs.ch21 }}" == "true" ]]; then
             run_py312="true"
           fi
