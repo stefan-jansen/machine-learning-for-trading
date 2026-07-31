@@ -29,8 +29,9 @@
 # **Learning objectives**
 #
 # - Interpret a statsmodels OLS summary: coefficients, standard errors, t-statistics, p-values
-# - Run the Gauss-Markov diagnostic battery (heteroscedasticity, serial correlation, normality)
+# - Test the spherical-errors condition on a panel: heteroscedasticity and residual autocorrelation
 # - Identify multicollinearity via Variance Inflation Factors (VIF)
+# - Separate what robust standard errors repair from what they cannot
 # - Understand why inference diagnostics do not answer the prediction question
 #
 # **Book reference**
@@ -59,9 +60,9 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import statsmodels.api as sm
-from ml4t.diagnostic.metrics import cross_sectional_ic_series
+from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 from sklearn.preprocessing import StandardScaler
-from statsmodels.stats.diagnostic import acorr_breusch_godfrey, het_breuschpagan
+from statsmodels.stats.diagnostic import het_breuschpagan
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.stats.stattools import durbin_watson, jarque_bera
 
@@ -101,6 +102,7 @@ labels_df = pl.read_parquet(LABELS_PATH).with_columns(pl.col("timestamp").cast(p
 # %%
 TARGET_COL = "fwd_ret_21d"
 ASSET_COL = "symbol"
+LABEL_HORIZON_DAYS = 21  # the forward window in TARGET_COL; sets every overlap correction below
 
 df = features_df.join(labels_df, on=["timestamp", ASSET_COL], how="inner")
 
@@ -126,12 +128,15 @@ df = df.with_columns(
 )
 df = df.drop_nulls(subset=FEATURE_COLS + [TARGET_COL]).sort(["timestamp", ASSET_COL])
 
+# %% [markdown]
+# Ch8 builds the `skip_recent` and `mom_accel` features as differences of return
+# horizons, so `skip_recent_12_1` is `ret_252d - ret_21d`. Keeping both the raw
+# returns and the derived differences makes the design matrix singular, which is
+# a violation of the no-perfect-multicollinearity assumption severe enough that
+# the robust covariance estimators below cannot be computed at all. We drop the
+# five composites.
+
 # %%
-# Drop features that are exact linear combinations of others.
-# Ch8 constructs skip_recent and mom_accel features as differences of return
-# horizons (e.g., skip_recent_12_1 = ret_252d - ret_21d). Including both the
-# raw returns and these derived differences makes the design matrix singular,
-# which prevents computation of robust standard errors.
 REDUNDANT = {
     "mom_accel_short",
     "mom_accel_medium",
@@ -172,16 +177,26 @@ dates_np = df["timestamp"].to_numpy()
 train_mask = (dates_np >= tr_start) & (dates_np <= tr_end)
 val_mask = (dates_np >= val_start) & (dates_np <= val_end)
 
-X_train_raw = df.filter(train_mask).select(FEATURE_COLS).to_numpy()
-y_train = df.filter(train_mask)[TARGET_COL].to_numpy()
+train_df = df.filter(train_mask)
+X_train_raw = train_df.select(FEATURE_COLS).to_numpy()
+y_train = train_df[TARGET_COL].to_numpy()
+train_meta = train_df.select(["timestamp", ASSET_COL])
 X_val_raw = df.filter(val_mask).select(FEATURE_COLS).to_numpy()
 y_val = df.filter(val_mask)[TARGET_COL].to_numpy()
 
 if MAX_TRAIN_ROWS > 0 and len(y_train) > MAX_TRAIN_ROWS:
-    idx = np.random.default_rng(42).choice(len(y_train), size=MAX_TRAIN_ROWS, replace=False)
+    # Whole symbols, never individual rows: the lag-1 and lag-21 diagnostics below
+    # read off each symbol's own series, and a random draw of rows would leave gaps.
+    symbols_arr = train_meta[ASSET_COL].to_numpy()
+    unique_symbols = np.unique(symbols_arr)
+    rows_per_symbol = max(1, len(y_train) // len(unique_symbols))
+    n_keep = max(1, min(len(unique_symbols), MAX_TRAIN_ROWS // rows_per_symbol))
+    keep = np.random.default_rng(42).choice(unique_symbols, size=n_keep, replace=False)
+    idx = np.flatnonzero(np.isin(symbols_arr, keep))
     X_train_raw = X_train_raw[idx]
     y_train = y_train[idx]
-    print(f"Subsampled training rows to {MAX_TRAIN_ROWS:,} for faster diagnostics")
+    train_meta = train_meta[idx]
+    print(f"Subsampled to {n_keep} whole symbols ({len(idx):,} rows) for faster diagnostics")
 
 # Standardize features (fitted on training data only)
 scaler = StandardScaler()
@@ -219,16 +234,26 @@ print(ols_model.summary())
 # the remaining features are still pervasively correlated (as VIF will confirm),
 # so coefficient estimates are unstable across samples.
 #
-# Crucially, these standard errors assume the **Gauss-Markov conditions** hold:
-# homoscedastic, uncorrelated errors with no multicollinearity. We now test each.
+# Crucially, these standard errors assume **spherical errors**: constant variance,
+# uncorrelated across observations. We now test that condition, and the
+# no-perfect-multicollinearity condition alongside it.
 
 # %% [markdown]
 # ## Section 2: Gauss-Markov Diagnostic Battery
 #
-# The Gauss-Markov theorem guarantees that OLS is the Best Linear Unbiased
-# Estimator (BLUE) — but only when its assumptions hold. Financial return data
-# routinely violates them. Each failed assumption has a specific consequence for
-# the reliability of standard errors and, therefore, t-statistics and p-values.
+# Section 11.1 states the four Gauss-Markov assumptions: linearity in the
+# parameters, strict exogeneity, no perfect multicollinearity, and spherical
+# errors. When all four hold, OLS is the Best Linear Unbiased Estimator (BLUE).
+#
+# Only two of the four are testable from residuals. Spherical errors decompose
+# into constant variance (Breusch-Pagan, below) and no correlation across
+# observations (residual autocorrelation, below); multicollinearity is read off
+# the design matrix via VIF. Linearity and exogeneity are assumptions about the
+# data-generating process that residuals cannot confirm — a misspecified model
+# can produce well-behaved residuals.
+#
+# We also test normality, which is **not** a Gauss-Markov assumption. It is
+# required for exact finite-sample t and F distributions, not for BLUE.
 
 # %% [markdown]
 # ### Heteroscedasticity: Breusch-Pagan Test
@@ -251,34 +276,63 @@ else:
     print("\nResult: Cannot reject homoscedasticity at 5% level.")
 
 # %% [markdown]
-# ### Serial Correlation: Durbin-Watson and Breusch-Godfrey
+# ### Correlated Errors: Residual Autocorrelation Within Each Asset
 #
-# Panel data (multiple symbols observed on the same dates) creates cross-sectional
-# correlation, and financial returns exhibit short-term autocorrelation.
-# Durbin-Watson tests for first-order autocorrelation; Breusch-Godfrey extends
-# this to higher orders.
+# This is a panel: many symbols observed on the same dates. The residual vector
+# is stored in date order, so its neighbouring entries are *different assets on
+# the same day*, not consecutive observations of one asset. A Durbin-Watson or
+# Breusch-Godfrey statistic computed on that vector measures cross-sectional
+# dependence and reports it under the name of serial correlation.
+#
+# To test serial correlation we regroup the residuals into one time-ordered
+# series per symbol and measure autocorrelation within each. Two lags are
+# informative here. Lag 1 asks whether yesterday's error predicts today's. Lag
+# 21 sits at the label horizon: `fwd_ret_21d` is a 21-day forward return, so
+# consecutive daily observations of one asset share 20 of 21 days of outcome
+# window. That overlap induces autocorrelation by construction out to lag 20 and
+# is the dominant source of the correlation we find.
 
 # %%
-dw_stat = durbin_watson(residuals)
-print(f"Durbin-Watson statistic: {dw_stat:.4f}")
+resid_panel = train_meta.with_columns(residual=pl.Series(np.asarray(residuals))).sort(
+    [ASSET_COL, "timestamp"]
+)
+
+LAGS = (1, 5, 21)
+per_symbol = {lag: [] for lag in LAGS}
+dw_per_symbol = []
+for (_symbol,), group in resid_panel.group_by([ASSET_COL], maintain_order=True):
+    r = group["residual"].to_numpy()
+    if len(r) < max(LAGS) + 2:
+        continue
+    dw_per_symbol.append(durbin_watson(r))
+    for lag in LAGS:
+        per_symbol[lag].append(np.corrcoef(r[:-lag], r[lag:])[0, 1])
+
+autocorr_df = pl.DataFrame(
+    {
+        "lag": list(LAGS),
+        "median_autocorr": [float(np.median(per_symbol[lag])) for lag in LAGS],
+        "share_positive": [float(np.mean(np.array(per_symbol[lag]) > 0)) for lag in LAGS],
+    }
+)
+
+print(f"Symbols with enough history for the test: {len(dw_per_symbol)}")
+print(f"Median within-symbol Durbin-Watson: {float(np.median(dw_per_symbol)):.4f}")
 print("  (2.0 = no autocorrelation; <2 = positive; >2 = negative)")
-
-bg_results = acorr_breusch_godfrey(ols_model, nlags=5)
-bg_stat, bg_pvalue = bg_results[0], bg_results[1]
-print(f"\nBreusch-Godfrey LM statistic (5 lags): {bg_stat:.1f}")
-print(f"p-value: {bg_pvalue:.2e}")
-
-if bg_pvalue < 0.05:
-    print("\nResult: REJECT no serial correlation.")
-    print("Consequence: OLS standard errors understate uncertainty — tests are too liberal.")
-else:
-    print("\nResult: Cannot reject no serial correlation at 5% level.")
+autocorr_df
 
 # %% [markdown]
 # ### Normality: Jarque-Bera Test
 #
-# Tests whether residuals are normally distributed. Financial returns have fat
-# tails and excess kurtosis, so this will almost certainly reject.
+# Normality of the errors is not one of the four Gauss-Markov assumptions, and
+# OLS remains BLUE without it. It is what makes the t and F statistics follow
+# exactly those distributions in a finite sample. At this sample size the
+# central limit theorem delivers approximate normality of the coefficient
+# estimates regardless, so a rejection here is the least consequential of the
+# diagnostics in this section.
+#
+# Financial returns have fat tails and excess kurtosis, so this will almost
+# certainly reject.
 
 # %%
 jb_stat, jb_pvalue, skew, kurtosis = jarque_bera(residuals)
@@ -290,7 +344,8 @@ print(f"Excess kurtosis: {kurtosis:.3f} (normal = 0)")
 
 if jb_pvalue < 0.05:
     print("\nResult: REJECT normality.")
-    print("Consequence: Confidence intervals and F-tests based on normality are approximate.")
+    print("Consequence: exact finite-sample t and F distributions do not hold; at this")
+    print("sample size the central limit theorem makes the normal approximation adequate.")
 else:
     print("\nResult: Cannot reject normality at 5% level.")
 
@@ -330,22 +385,80 @@ vif_df.head(15)
 # %% [markdown]
 # ## Section 3: When Standard Errors Fail — Robust Alternatives
 #
-# When Gauss-Markov assumptions fail, the coefficient estimates remain consistent
-# but their standard errors are wrong. Robust standard error methods fix inference
-# without changing the point estimates.
+# Robust standard errors address exactly one failure: non-spherical errors. The
+# point estimates are unchanged and, if linearity and exogeneity hold, they stay
+# consistent; only the variance estimate around them is repaired.
+#
+# They do nothing for the other two assumptions. If the model omits a relevant
+# variable or gets the functional form wrong, exogeneity fails, the coefficients
+# themselves are not consistent, and a robust standard error is a more careful
+# statement about the wrong quantity. Section 11.1 makes this point directly:
+# when the model is misspecified, the unbiasedness guarantee fails and the
+# coefficients stop being interpretable as structural parameters. No covariance
+# estimator recovers it.
 
 # %% [markdown]
 # ### Comparing Standard Error Estimates
 #
-# We compare three standard error estimates:
+# Each estimator below assumes some pairs of residuals are uncorrelated, and the
+# question is whether the diagnostics above have already shown that assumption to
+# be false.
 #
-# - **OLS** (default): assumes homoscedastic, uncorrelated errors
-# - **HC3** (heteroscedasticity-consistent): corrects for non-constant variance
-# - **HAC (Newey-West)**: corrects for both heteroscedasticity and autocorrelation
+# - **OLS** (default): every pair uncorrelated, and equal variance throughout
+# - **HC3**: still every pair uncorrelated, but variance may vary with the regressors
+# - **Clustered by date**: any two observations sharing a date may correlate;
+#   different dates may not
+# - **Clustered by date and symbol**: adds any two observations of one symbol;
+#   still assumes independence when the symbol *and* the date both differ
+# - **Driscoll-Kraay**: no independence assumption within a window of nearby
+#   dates, across the whole cross-section
+#
+# That last assumption is the one this panel breaks in a way the others do not.
+# `fwd_ret_21d` is a 21-day forward return, so one symbol on date *t* and a
+# *different* symbol on date *t+5* share sixteen days of outcome window, and
+# whatever moved the market in those sixteen days is in both residuals. Two-way
+# clustering treats that pair as independent. Driscoll-Kraay does not: it sums
+# the moment conditions across the cross-section within each date and then applies
+# a Newey-West correction over dates, so arbitrary cross-sectional correlation and
+# serial correlation out to the lag length are both admitted. We set that lag to
+# the label horizon, which is where the mechanical overlap ends.
+#
+# Plain HAC (Newey-West) is the usual answer to autocorrelation, but it reads its
+# lags off the row order of a single time series. On a pooled panel stored in date
+# order those lags run across the cross-section, so it does not estimate what its
+# name promises here. It becomes the right tool once the panel is collapsed to
+# one observation per date, which is what the IC calculation below does.
 
 # %%
 ols_hc3 = sm.OLS(y_train_s, X_train_c).fit(cov_type="HC3")
-ols_hac = sm.OLS(y_train_s, X_train_c).fit(cov_type="HAC", cov_kwds={"maxlags": 10})
+date_groups = train_meta["timestamp"].to_physical().to_numpy()
+symbol_groups = train_meta[ASSET_COL].cast(pl.Categorical).to_physical().to_numpy()
+# Driscoll-Kraay sums within each date, so it needs consecutive period codes and
+# rows already ordered by date — which is how `df` was sorted on load.
+time_codes = np.unique(date_groups, return_inverse=True)[1]
+
+ols_cluster_date = sm.OLS(y_train_s, X_train_c).fit(
+    cov_type="cluster", cov_kwds={"groups": date_groups}
+)
+# A second cluster dimension needs at least two of it, which a reduced run
+# (MAX_SYMBOLS=1, or a small MAX_TRAIN_ROWS) may not leave.
+n_symbols_train = int(len(np.unique(symbol_groups)))
+if n_symbols_train >= 2:
+    ols_cluster_2way = sm.OLS(y_train_s, X_train_c).fit(
+        cov_type="cluster", cov_kwds={"groups": np.column_stack([date_groups, symbol_groups])}
+    )
+    se_2way = ols_cluster_2way.bse[1:]
+    n_sig_2way = int((np.abs(ols_cluster_2way.tvalues[1:]) > 1.96).sum())
+else:
+    se_2way = np.full(len(FEATURE_COLS), np.nan)
+    n_sig_2way = None
+
+ols_cluster = sm.OLS(y_train_s, X_train_c).fit(
+    cov_type="nw-groupsum", cov_kwds={"time": time_codes, "maxlags": LABEL_HORIZON_DAYS}
+)
+print(f"Dates:  {len(np.unique(date_groups)):,}")
+print(f"Symbols: {n_symbols_train:,}")
+print(f"Driscoll-Kraay lags: {LABEL_HORIZON_DAYS} (the label horizon)")
 
 # Compare SEs and t-stats for features (skip constant at index 0)
 se_comparison = pl.DataFrame(
@@ -354,41 +467,64 @@ se_comparison = pl.DataFrame(
         "coef": ols_model.params[1:],
         "se_ols": ols_model.bse[1:],
         "se_hc3": ols_hc3.bse[1:],
-        "se_hac": ols_hac.bse[1:],
+        "se_date": ols_cluster_date.bse[1:],
+        "se_2way": se_2way,
+        "se_cluster": ols_cluster.bse[1:],
         "t_ols": ols_model.tvalues[1:],
-        "t_hac": ols_hac.tvalues[1:],
+        "t_cluster": ols_cluster.tvalues[1:],
     }
 ).with_columns(
-    se_ratio_hac=pl.col("se_hac") / pl.col("se_ols"),
+    se_ratio_cluster=pl.col("se_cluster") / pl.col("se_ols"),
 )
 
+# %% [markdown]
+# The features whose robust standard errors differ most from their OLS ones.
+# Reading left to right across the SE columns shows what each dependence the
+# estimator admits costs in precision.
+
 # %%
-# Show features where robust SEs differ most from OLS SEs.
-hac_ranked = (
-    se_comparison.sort("se_ratio_hac", descending=True)
+cluster_ranked = (
+    se_comparison.sort("se_ratio_cluster", descending=True)
     .head(10)
-    .select("feature", "coef", "se_ols", "se_hac", "se_ratio_hac", "t_ols", "t_hac")
+    .select(
+        "feature",
+        "coef",
+        "se_ols",
+        "se_hc3",
+        "se_date",
+        "se_2way",
+        "se_cluster",
+        "se_ratio_cluster",
+        "t_cluster",
+    )
 )
-hac_ranked
+cluster_ranked
 
 # %%
 # Count how many features change significance at 5% level
 n_sig_ols = int((np.abs(ols_model.tvalues[1:]) > 1.96).sum())
-n_sig_hac = int((np.abs(ols_hac.tvalues[1:]) > 1.96).sum())
+n_sig_date = int((np.abs(ols_cluster_date.tvalues[1:]) > 1.96).sum())
+n_sig_cluster = int((np.abs(ols_cluster.tvalues[1:]) > 1.96).sum())
 
 print("\nFeatures significant at 5% level:")
-print(f"  OLS standard errors: {n_sig_ols} / {len(FEATURE_COLS)}")
-print(f"  HAC standard errors: {n_sig_hac} / {len(FEATURE_COLS)}")
-print(f"  Difference: {n_sig_ols - n_sig_hac} features lose significance")
+print(f"  OLS standard errors:         {n_sig_ols} / {len(FEATURE_COLS)}")
+print(f"  Clustered by date:           {n_sig_date} / {len(FEATURE_COLS)}")
+if n_sig_2way is not None:
+    print(f"  Clustered by date + symbol:  {n_sig_2way} / {len(FEATURE_COLS)}")
+print(f"  Driscoll-Kraay:              {n_sig_cluster} / {len(FEATURE_COLS)}")
+print(f"  Difference: {n_sig_ols - n_sig_cluster} features lose significance")
 
 # %% [markdown]
-# ### Coefficients with 95% HAC Confidence Intervals
+# ### Coefficients with Panel-Robust Confidence Intervals
 #
-# Rank features by absolute coefficient magnitude and show robust 95% confidence
-# intervals around each estimate.
+# Rank features by absolute coefficient magnitude and show the Driscoll-Kraay
+# confidence interval around each estimate. The interval width is set by the
+# `CONF_Z` multiplier below; a bar that crosses the dashed line at zero is a
+# coefficient whose sign the data does not pin down.
 
 # %%
 TOP_COEFS = 20
+CONF_Z = 1.96  # two-sided 5% normal critical value
 
 coef_plot = (
     se_comparison.with_columns(abs_coef=pl.col("coef").abs())
@@ -399,13 +535,13 @@ coef_plot = (
 
 y_pos = np.arange(coef_plot.height)
 coef_values = coef_plot["coef"].to_numpy()
-hac_se = coef_plot["se_hac"].to_numpy()
+cluster_se = coef_plot["se_cluster"].to_numpy()
 
 fig, ax = plt.subplots(figsize=(8, 7))
 ax.errorbar(
     x=coef_values,
     y=y_pos,
-    xerr=1.96 * hac_se,
+    xerr=CONF_Z * cluster_se,
     fmt="o",
     capsize=3,
     linewidth=1.5,
@@ -414,25 +550,35 @@ ax.errorbar(
 ax.axvline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.8)
 ax.set_yticks(y_pos)
 ax.set_yticklabels(coef_plot["feature"].to_list())
-ax.set_xlabel("Coefficient Estimate")
-ax.set_title("Top Coefficients with HAC 95% Confidence Intervals")
+ax.set_xlabel("Coefficient estimate (standardized feature, 21-day forward return)")
+ax.set_title("Most large coefficients cannot be signed once dependence is admitted")
 ax.grid(axis="x", alpha=0.3)
 plt.tight_layout()
 plt.show()
+
+n_crosses_zero = int((np.abs(coef_values) <= CONF_Z * cluster_se).sum())
+print(
+    f"Of the {TOP_COEFS} largest coefficients, {n_crosses_zero} have a "
+    f"Driscoll-Kraay interval that includes zero."
+)
 
 # %% [markdown]
 # Robust standard errors are typically *larger* than OLS standard errors, making
 # fewer features appear significant. This is the correct adjustment: OLS was
 # overstating precision by ignoring the correlation structure in the errors.
 #
-# Beyond HAC, the econometric toolkit offers further specialized corrections:
+# The econometric toolkit offers further specialized corrections:
 #
 # - **WLS** (Weighted Least Squares): explicitly models heteroscedasticity when
 #   the variance function is known or estimable
 # - **GLS/FGLS** (Generalized / Feasible GLS): corrects for both heteroscedasticity
 #   and autocorrelation by transforming the model
-# - **Clustered standard errors**: accounts for within-group correlation (e.g.,
-#   by date or by asset) common in panel data
+# - **HAC (Newey-West)**: the standard correction for autocorrelation in a single
+#   time series, and the right tool once the panel is collapsed to one series per
+#   date — which is exactly what the IC calculation in the next section does
+# - **Fama-MacBeth**: estimates the cross-section separately on each date and
+#   draws inference from the time series of those estimates, which sidesteps the
+#   within-date dependence rather than modelling it
 #
 # These are valuable tools for the data modeling culture — but they fix *inference*
 # quality, not *prediction* quality. A coefficient with correct standard errors
@@ -447,6 +593,14 @@ plt.show()
 # between predicted and realized returns *within* each date — and then summarized
 # across the validation period via mean, IR ($\bar{IC} / \sigma_{IC}$), and a
 # t-statistic on the IC time series.
+#
+# That t-statistic needs the same care Section 2 demanded. Each date's IC is
+# measured against a 21-day forward return, so consecutive daily ICs share 20 of
+# 21 days of outcome window and the series is autocorrelated by construction.
+# Dividing by $\sigma_{IC} / \sqrt{n}$ treats the dates as independent and
+# overstates significance by roughly the square root of the overlap. We report
+# the HAC-corrected statistic with the lag set to the label horizon, and the
+# naive one beside it to show the size of the error.
 
 # %%
 X_val_c = sm.add_constant(X_val_df, has_constant="add")
@@ -464,22 +618,27 @@ ic_per_date = cross_sectional_ic_series(
     date_col="timestamp",
     entity_col=ASSET_COL,
 )
-ic_clean = ic_per_date.drop_nulls("ic")
+# The HAC autocovariance is computed on the row order, so the series must be
+# sorted by date before it is passed on.
+ic_clean = ic_per_date.drop_nulls("ic").sort("timestamp")
 ic_mean = float(ic_clean["ic"].mean())
 ic_std = float(ic_clean["ic"].std())
 n_periods = ic_clean.height
 ic_ir = ic_mean / ic_std if ic_std > 0 else float("nan")
-ic_t = ic_mean / (ic_std / np.sqrt(n_periods)) if ic_std > 0 else float("nan")
+
+ic_stats = compute_ic_hac_stats(ic_clean, ic_col="ic", label_horizon=LABEL_HORIZON_DAYS)
 
 r2_train = ols_model.rsquared
 r2_val = 1 - np.sum((y_val - y_pred_val) ** 2) / np.sum((y_val - y_val.mean()) ** 2)
 
-print(f"In-sample R²:           {r2_train:.4f}")
-print(f"Out-of-sample R²:       {r2_val:.4f}")
-print(f"Out-of-sample IC mean:  {ic_mean:.4f}")
-print(f"Out-of-sample IC IR:    {ic_ir:.2f}")
-print(f"Out-of-sample IC t-stat: {ic_t:.2f}  (n={n_periods} dates)")
-print(f"Significant features:   {n_sig_hac} (HAC-corrected)")
+print(f"In-sample R²:            {r2_train:.4f}")
+print(f"Out-of-sample R²:        {r2_val:.4f}")
+print(f"Out-of-sample IC mean:   {ic_mean:.4f}")
+print(f"Out-of-sample IC IR:     {ic_ir:.2f}")
+print(f"IC t-stat, HAC:          {ic_stats['t_stat']:.2f}  (p = {ic_stats['p_value']:.3f},")
+print(f"                          {ic_stats['effective_lags']} lags, n={n_periods} dates)")
+print(f"IC t-stat, naive:        {ic_stats['naive_t_stat']:.2f}  (treats dates as independent)")
+print(f"Significant features:    {n_sig_cluster} (Driscoll-Kraay)")
 
 # %% [markdown]
 # ### Validation Predictions and Residuals
@@ -507,14 +666,14 @@ diag_max = max(y_pred_plot.max(), y_val_plot.max())
 axes[0].plot([diag_min, diag_max], [diag_min, diag_max], linestyle="--", linewidth=1.2)
 axes[0].set_xlabel("Predicted Return")
 axes[0].set_ylabel("Realized Return")
-axes[0].set_title("Validation: Predicted vs Realized")
+axes[0].set_title("Predictions span a fraction of the realized return range")
 axes[0].grid(alpha=0.3)
 
 axes[1].scatter(y_pred_plot, residuals_plot, s=8, alpha=0.25, edgecolor="none")
 axes[1].axhline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.8)
 axes[1].set_xlabel("Predicted Return")
 axes[1].set_ylabel("Residual (Realized - Predicted)")
-axes[1].set_title("Validation Residuals")
+axes[1].set_title("The largest predictions carry the largest negative residuals")
 axes[1].grid(alpha=0.3)
 
 plt.tight_layout()
@@ -548,20 +707,25 @@ plt.show()
 # the wrong level. This level error inflates $SS_{\text{res}}$ even if the model
 # ranks returns correctly.
 #
-# That is exactly what happens here: the negative out-of-sample $R^2$ means the
-# model's magnitude predictions are worse than the naive mean, driven by
-# overfitting 52 coefficients and a stale intercept. Yet the IC is positive —
-# the model ranks returns slightly better than chance. IC (Spearman rank
-# correlation) is invariant to level shifts and scaling, which is why it, not
-# $R^2$, is the standard metric for cross-sectional return prediction in
-# quantitative finance.
+# The out-of-sample $R^2$ printed above is negative: the model's magnitude
+# predictions are worse than the naive mean, driven by overfitting 52
+# coefficients and a stale intercept.
 #
-# None of the diagnostic tests — Breusch-Pagan, Durbin-Watson, Jarque-Bera,
-# VIF — measure out-of-sample ranking accuracy. A coefficient can be statistically
-# significant yet contribute nothing to prediction (large sample, tiny effect), and
-# vice versa. The diagnostics tell us whether our *inference* about parameter
-# values is reliable; they say nothing about whether those parameters produce
-# useful *forecasts*.
+# The IC answers a different question, and the two can disagree. IC (Spearman
+# rank correlation) is invariant to level shifts and scaling, so a model whose
+# magnitudes are badly calibrated can still rank correctly — which is why it,
+# not $R^2$, is the standard metric for cross-sectional return prediction in
+# quantitative finance. Read the IC against its HAC p-value rather than its
+# sign: this is one validation fold of one case study, and the naive statistic
+# printed beside it overstates the evidence, because it counts overlapping
+# windows as independent observations.
+#
+# None of the diagnostic tests — Breusch-Pagan, residual autocorrelation,
+# Jarque-Bera, VIF — measure out-of-sample ranking accuracy. A coefficient can be
+# statistically significant yet contribute nothing to prediction (large sample,
+# tiny effect), and vice versa. The diagnostics tell us whether our *inference*
+# about parameter values is reliable; they say nothing about whether those
+# parameters produce useful *forecasts*.
 #
 # This is the core insight of Section 11.1: the inferential toolkit and the
 # predictive toolkit answer different questions. For algorithmic trading, the
@@ -578,17 +742,26 @@ plt.show()
 #    t-statistics, p-values, F-tests, and a battery of diagnostic tests that
 #    scikit-learn intentionally omits.
 #
-# 2. **The ETF feature set violates multiple Gauss-Markov assumptions**:
-#    heteroscedasticity (Breusch-Pagan rejects), serial correlation
-#    (Breusch-Godfrey rejects), non-normality (Jarque-Bera rejects), and
-#    multicollinearity (many features with VIF > 10).
+# 2. **The ETF panel violates the spherical-errors assumption in both of its
+#    parts**: the error variance depends on the regressors (Breusch-Pagan
+#    rejects) and residuals are autocorrelated within each asset, largely
+#    because a 21-day forward label makes consecutive observations overlap.
+#    Features are also pervasively collinear (many with VIF > 10).
 #
-# 3. **Robust standard errors (HAC, HC3) fix inference** by correcting for
-#    the violated assumptions, but they don't improve predictions.
+# 3. **A statistic computed on a panel measures what its row order says it
+#    measures.** Durbin-Watson on a date-ordered panel reports cross-sectional
+#    dependence under the name of serial correlation; the same ordering makes
+#    Newey-West lag across assets rather than across time. Regroup by asset, pick
+#    a covariance estimator that assumes independence only where the diagnostics
+#    did not find dependence, and say which one the number came from. Here the
+#    overlapping label correlates residuals across symbols *and* across nearby
+#    dates, which rules out clustering on either dimension and leaves
+#    Driscoll-Kraay.
 #
-# 4. **WLS, GLS, FGLS** address specific inference problems — specialized
-#    tools for the data modeling culture that improve parameter estimation
-#    under non-ideal conditions.
+# 4. **Robust standard errors repair one failure only.** They fix the variance
+#    estimate when errors are non-spherical. They cannot rescue a model whose
+#    exogeneity or functional form is wrong, where the point estimates
+#    themselves are not consistent — and they do not improve predictions.
 #
 # 5. **For prediction, we need a different approach**: regularization +
 #    out-of-sample evaluation. The next notebook introduces Ridge, LASSO,
