@@ -298,9 +298,10 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
 has an arm64 wheel or builds from source against the Xcode command-line tools, the same way it
 does on Linux, so Docker would add a 13 GB image and change nothing. Go to
 [Local Setup with uv](#local-setup-with-uv-alternative-to-docker); this is the path walked on
-real hardware before every release. The one exception is the ten or so `ml4t-py312` notebooks,
-which have no arm64 build at all: they ship pre-executed, and
-[Py312 Image](#py312-image-specific-notebooks) covers running them under Rosetta if you want to.
+real hardware before every release. The one exception is the twelve `ml4t-py312` notebooks, which
+have no arm64 build at all: they ship pre-executed, and
+[Py312 Image](#py312-image-specific-notebooks) covers running them under Rosetta if you want to,
+which is the only reason to install Docker Desktop on an Apple Silicon Mac.
 
 ```bash
 xcode-select --install                        # compiler, if you do not have it already
@@ -413,7 +414,8 @@ A small number of notebooks require Python 3.12 libraries not available on Pytho
 | `05_deep_hedging_pfhedge` | pfhedge (unmaintained, numpy<2) | Ch21 |
 
 ```bash
-# x86 systems only (Linux, Windows WSL2, macOS Intel)
+# On x86 (Linux, Windows WSL2, Intel Mac) run these as they stand. On Apple Silicon
+# prefix each with DOCKER_DEFAULT_PLATFORM=linux/amd64, see below.
 docker compose --profile py312 pull py312
 docker compose --profile py312 run --rm py312 python 05_synthetic_data/03_sigcwgan_signatures.py
 docker compose --profile py312 run --rm py312 \
@@ -428,10 +430,18 @@ an NVIDIA GPU, `--profile py312-gpu run --rm py312-gpu` is the same image with t
 which Ch21 `05_deep_hedging_pfhedge` benefits from.
 
 **Apple Silicon**: these notebooks have no arm64 build and all of them ship pre-executed, so
-reading the `.ipynb` in Jupyter or on GitHub is the intended route. To execute them anyway,
-enable Docker Desktop → Settings → General → **Use Rosetta for x86_64/amd64 emulation** and
-prefix the commands above with `DOCKER_DEFAULT_PLATFORM=linux/amd64`. It works, at emulation
-speed and without a GPU.
+reading the `.ipynb` in Jupyter or on GitHub is the intended route, and the local `uv` path
+covers everything else in the book. To execute them anyway you need Docker, which the Apple
+Silicon setup above does not install:
+
+1. Install Docker Desktop from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/),
+   choosing the **Apple chip** download.
+2. Enable Settings → General → **Use Rosetta for x86_64/amd64 emulation**.
+3. Prefix each command above with `DOCKER_DEFAULT_PLATFORM=linux/amd64`, for example
+   `DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose --profile py312 pull py312`.
+
+It runs at emulation speed and without a GPU. This is the only thing on an Apple Silicon Mac
+that Docker is needed for.
 
 ---
 

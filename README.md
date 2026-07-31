@@ -395,7 +395,7 @@ carries its own and needs none of this.
 
 **macOS readers:** on **Apple Silicon** take Option B. It is the path walked on real hardware
 before each release, and it needs only the Xcode command-line tools for the packages that build
-from source. Docker there is worth a 13 GB image only for the ten `ml4t-py312` notebooks, which
+from source. Docker there is worth a 13 GB image only for the twelve `ml4t-py312` notebooks, which
 have no arm64 build and ship pre-executed. On an **Intel Mac** take Option A: PyTorch publishes
 no macOS x86_64 wheel, so Option B cannot work there.
 
