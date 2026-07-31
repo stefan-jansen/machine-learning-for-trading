@@ -2184,9 +2184,6 @@ case_studies/sp500_options/90_ic_diagnostic:
     MAX_SYMBOLS: 5
   timeout: 120
 case_studies/us_equities_panel/01_feasibility_analysis:
-  parameters:
-    MAX_SYMBOLS: 5
-    START_DATE: '2000-01-01'
   timeout: 120
 case_studies/us_equities_panel/02_labels:
   parameters:
