@@ -179,8 +179,7 @@ prices = (
     .sort([ENTITY, "session"])
 )
 
-# Recorded as every label's `inputs`: a re-run against a refreshed download is otherwise
-# indistinguishable from this one.
+# Every label's `inputs`: without it a re-run against a refreshed download is invisible.
 PRICE_COLS = ["symbol", "sec_id", "timestamp", "open", "close", "adj_factor"]
 MARKET_DATA_DIGEST = value_digest(bars, PRICE_COLS)
 print(f"market_data digest: {MARKET_DATA_DIGEST}")
@@ -226,9 +225,10 @@ def forward_return(df: pl.DataFrame, horizon: int, name: str) -> pl.DataFrame:
     )
 
 
+ONE_SESSION = pl.col("session").diff().over(ENTITY) == 1
 labels_df = prices.with_columns(
     (pl.len().over(ENTITY) - 1 - pl.int_range(pl.len()).over(ENTITY)).alias("from_end"),
-    pl.col("adj_close").pct_change().over(ENTITY).alias("_daily_ret"),
+    pl.when(ONE_SESSION).then(pl.col("adj_close").pct_change().over(ENTITY)).alias("_daily_ret"),
 )
 for label_name in PLAIN_RETURNS:
     labels_df = forward_return(labels_df, HORIZONS[label_name], label_name)
@@ -237,9 +237,12 @@ for label_name in PLAIN_RETURNS:
 # The scaled variant divides the weekly return by the volatility realized over the previous
 # month, annualized on the sessions per year `setup.yaml` declares, so that a five percent week
 # in a quiet utility and a five percent week in a semiconductor are not the same target value.
-# The denominator is guarded rather than floored at a constant: a security that did not move at
-# all over the lookback has an undefined ratio, and a floor answers with a very large number
-# instead of admitting that.
+# The denominator is guarded twice. A daily return is only a daily return between two adjacent
+# sessions, so it is null wherever the security missed the session before - seven do here, one
+# of them for a month - and the rolling window stays null until it holds a full month of
+# consecutive returns rather than closing over the gap. And a security that did not move at all
+# over the lookback has an undefined ratio, which is left undefined rather than floored at a
+# constant that would answer with a very large number instead.
 #
 # The direction variants are the sign of the return they come from, and
 # `setup.yaml::labels.classification_eval_label` says which return that is. **The guard on the
@@ -257,11 +260,8 @@ labels_df = labels_df.with_columns(
     .alias(SCALED_LABEL)
 )
 for label_name, source in DIRECTION_SOURCE.items():
-    labels_df = labels_df.with_columns(
-        pl.when(pl.col(source).is_not_null())
-        .then((pl.col(source) > 0).cast(pl.Int32))
-        .alias(label_name)
-    )
+    sign = pl.when(pl.col(source).is_not_null()).then((pl.col(source) > 0).cast(pl.Int32))
+    labels_df = labels_df.with_columns(sign.alias(label_name))
 
 # %% [markdown]
 # ## D. Window validity
@@ -404,9 +404,8 @@ ax.legend(loc="upper left", frameon=False)
 show_with_alt(fig, "Histograms of the two forward-return labels on identical bins, log counts.")
 
 for label_name in [*PLAIN_RETURNS, SCALED_LABEL]:
-    series = dev[label_name][label_name]
-    n_out = 0 if label_name == SCALED_LABEL else int((series.abs() > bins[-1]).sum())
-    beyond = "" if label_name == SCALED_LABEL else f", {n_out:,} rows beyond the axis"
+    series, on_axis = dev[label_name][label_name], label_name != SCALED_LABEL
+    beyond = f", {int((series.abs() > bins[-1]).sum()):,} rows beyond the axis" if on_axis else ""
     print(f"{label_name}: std {series.std():.5f}, kurtosis {series.kurtosis():.2f}{beyond}")
 short, long_ = (dev[n][n].std() for n in PLAIN_RETURNS)
 root_h = (HORIZONS[PLAIN_RETURNS[1]] / PRIMARY_HORIZON) ** 0.5
@@ -577,6 +576,12 @@ for label_name in PLAIN_RETURNS:
 # to clear, and measuring it before building them is what makes a later improvement mean
 # something.
 #
+# The lag is a market session inside the security, not one row of the surface. Coverage of the
+# surface swings on a monthly cycle, so on the narrow weeks a name's previous quoted row can be
+# a fortnight back, and a shift taken over the surface's own rows would hand the model a
+# fortnight-old volatility while calling it yesterday's. Joining the surface onto the dense
+# price panel first makes the missing sessions visible as nulls, and the guard drops them.
+#
 # The information coefficient is the cross-sectional rank correlation on each session, averaged
 # over sessions, which is the quantity a ranking model is scored on; pooling every name-session
 # instead mixes a cross-sectional claim with a time-series one. The library call returns its
@@ -587,15 +592,19 @@ for label_name in PLAIN_RETURNS:
 # evidence.
 
 # %%
+surface = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
 carrier = (
-    load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
-    .select("timestamp", "symbol", CARRIER)
-    .sort("symbol", "timestamp")
-    .with_columns(pl.col(CARRIER).shift(IV_LAG).over("symbol").alias("signal"))
-    .drop(CARRIER)
+    prices.select("timestamp", "symbol", ENTITY, "session")
+    .join(surface.select("timestamp", "symbol", CARRIER), on=["timestamp", "symbol"], how="left")
+    .sort([ENTITY, "session"])
+    .with_columns(
+        pl.when(ONE_SESSION).then(pl.col(CARRIER).shift(IV_LAG).over(ENTITY)).alias("signal")
+    )
     .drop_nulls("signal")
 )
-baseline = dev[PRIMARY_LABEL].join(carrier, on=["timestamp", "symbol"], how="inner")
+baseline = dev[PRIMARY_LABEL].join(
+    carrier.select("timestamp", "symbol", "signal"), on=["timestamp", "symbol"], how="inner"
+)
 min_obs = int(baseline.group_by("timestamp").len()["len"].median() // 2)
 
 ic = cross_sectional_ic_series(
@@ -618,11 +627,11 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# The lagged at-the-money volatility earns a mean information coefficient of -0.0065 against the
-# weekly label over 1,001 scored sessions on a cross-section of at least 131 names. Under the
-# naive standard error that is a t-statistic of -0.84; the Newey-West rule picks 6 lags here,
-# above the four the horizon alone requires, and the HAC statistic is -0.45 with a p-value of
-# 0.651. The floor a feature has to clear is a mean IC the data cannot separate from zero, so the
+# The lagged at-the-money volatility earns a mean information coefficient of -0.0067 against the
+# weekly label over 1,001 scored sessions on a cross-section of at least 130 names. Under the
+# naive standard error that is a t-statistic of -0.87; the Newey-West rule picks 6 lags here,
+# above the four the horizon alone requires, and the HAC statistic is -0.47 with a p-value of
+# 0.638. The floor a feature has to clear is a mean IC the data cannot separate from zero, so the
 # sign of it carries nothing either.
 
 # %% [markdown]
