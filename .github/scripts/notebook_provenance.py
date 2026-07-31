@@ -269,10 +269,12 @@ def notebooks_changed_since(ref: str, merge_base: bool = True) -> list[Path]:
     # -z, because the gate must not lose a notebook for having a space in its name.
     # Plain --name-only quotes such a path and .split() then tears it into fragments
     # that match no suffix, so the notebook drops out of scope and passes unchecked.
+    # --no-renames for the same reason: rename detection reports only the destination,
+    # so moving a .py would hide the source path whose notebook is now stale.
     diff = [
         name
         for name in subprocess.run(
-            ["git", "diff", "--name-only", "-z", spec],
+            ["git", "diff", "--name-only", "-z", "--no-renames", spec],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
