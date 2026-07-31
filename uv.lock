@@ -6,6 +6,9 @@ resolution-markers = [
     "python_full_version < '3.15'",
 ]
 
+[options]
+prerelease-mode = "if-necessary"
+
 [manifest]
 overrides = [{ name = "protobuf", specifier = ">=5.0" }]
 

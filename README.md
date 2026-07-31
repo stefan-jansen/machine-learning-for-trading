@@ -385,12 +385,14 @@ uv sync
 ```
 
 Option B compiles several dependencies from source, `scikit-learn` among them, so it needs a
-**C/C++ compiler**: on Ubuntu, Debian and WSL2 `sudo apt install build-essential`, on macOS
-`xcode-select --install`. Docker carries its own and needs none of this.
+**C/C++ compiler and the Python headers**: on Ubuntu, Debian and WSL2
+`sudo apt install build-essential python3-dev`, on macOS `xcode-select --install`. Docker
+carries its own and needs none of this.
 
-**Windows readers:** both options run inside WSL2, not in PowerShell. Install it once with
-`wsl --install -d Ubuntu` from an Administrator PowerShell, restart, and then follow the Linux
-instructions in the Ubuntu terminal. Installing into Windows Python is not supported and does
+**Windows readers:** both options run inside WSL2, not in PowerShell. Run
+`wsl --install -d Ubuntu` from an Administrator PowerShell, restart, run it a second time
+(the first run usually installs the WSL runtime without a distribution), and then follow the
+Linux instructions in the Ubuntu terminal. Installing into Windows Python is not supported and does
 not work — `scikit-learn` has no Windows wheel for this Python version and its source build
 fails. The [installation guide](docs/installation.md) has the full WSL2 walkthrough.
 

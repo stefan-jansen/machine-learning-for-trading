@@ -36,7 +36,7 @@ macOS (`xcode-select --install`).
 |---|---|---|
 | `git` | yes | yes |
 | Docker Desktop or Docker Engine | yes | no |
-| **C/C++ compiler** | no, the image carries one | **yes** |
+| **C/C++ compiler and Python headers** | no, the image carries both | **yes** |
 | Disk | ~13 GB image + ~4 GB data | ~11 GB environment + ~4 GB data + ~1 GB git history |
 
 The compiler is not optional on the local path and it is the most common way a first install
@@ -51,13 +51,27 @@ error: command 'c++' failed: No such file or directory
 Install one first:
 
 ```bash
-sudo apt install build-essential      # Ubuntu, Debian, and inside WSL2
-xcode-select --install                # macOS
+sudo apt install build-essential python3-dev   # Ubuntu, Debian, and inside WSL2
+xcode-select --install                         # macOS
 ```
 
+`python3-dev` is the second half of the requirement on any distribution whose own `python3` is
+already 3.14 or newer, Ubuntu 26.04 being the first. `uv` downloads a managed CPython only when
+no installed interpreter satisfies the project's floor; when the system one does, `uv` builds
+against it, and Debian and Ubuntu ship that interpreter without its headers. Every source build
+then stops with:
+
+```
+fatal error: Python.h: No such file or directory
+```
+
+On a distribution whose Python is older, such as Ubuntu 24.04, the package changes nothing:
+`uv` fetches its own CPython, which carries its headers with it. Installing both is correct in
+either case.
+
 **Docker is the one path that avoids this**, because the image ships its own toolchain. WSL2
-does not avoid it: a local `uv` environment inside WSL2 is the Linux path, so it needs
-`build-essential` exactly as native Linux does. What WSL2 avoids is the *Windows* build, which
+does not avoid it: a local `uv` environment inside WSL2 is the Linux path, so it needs the same
+two packages that native Linux does. What WSL2 avoids is the *Windows* build, which
 does not work at all — see the note under [Platform Support](#platform-support).
 
 ---
@@ -192,26 +206,40 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
    wsl --install -d Ubuntu
    ```
 
-   Two dashes, no space: `--install`, not `-- install`. The `-d Ubuntu` is required. Without it,
-   some Windows builds install the WSL runtime but no Linux distribution, and later steps fail
-   with `Windows Subsystem for Linux has no installed distributions`.
+   Two dashes, no space: `--install`, not `-- install`. Keep the `-d Ubuntu`: without it, some
+   Windows builds install the WSL runtime and no Linux distribution at all.
+
+   On a machine that has never had WSL, expect this run to enable the Windows features and
+   install the WSL runtime **without** installing Ubuntu. It prints `Changes will not be
+   effective until the system is rebooted` and says nothing about a distribution. That is the
+   normal path, and step 3 completes it.
 
 2. **Restart your computer.** This is a required step, not a conditional one. `wsl --install`
    enables a Windows feature that does not take effect until you reboot, and Windows does not
    always prompt you. If the command printed `The operation completed successfully`, restart now.
 
-   After the restart, Ubuntu opens and asks you to create a username and password. The password
-   is not echoed as you type, which is expected.
+   Nothing opens by itself after the restart.
 
-3. **Verify WSL2 before installing Docker.** In PowerShell:
+3. **Run the same command again**, in an Administrator PowerShell:
+   ```powershell
+   wsl --install -d Ubuntu
+   ```
+   This is the run that prints `Downloading: Ubuntu`, `Installing: Ubuntu` and `Distribution
+   successfully installed`. If the first run already installed Ubuntu, this one reports that it
+   is already installed and changes nothing.
+
+   Then open **Ubuntu** from the Start menu. Its first launch asks you to create a username and
+   password; the password is not echoed as you type, which is expected.
+
+4. **Verify WSL2 before installing Docker.** In PowerShell:
    ```powershell
    wsl --list --verbose
    ```
-   You should see `Ubuntu` with `STATE  Running` (or `Stopped`) and `VERSION  2`. If the list is
-   empty, repeat step 1 and confirm you restarted. If `VERSION` reads `1`, run
-   `wsl --set-version Ubuntu 2`.
+   You should see `Ubuntu` with `STATE  Running` (or `Stopped`) and `VERSION  2`. If you get
+   `Windows Subsystem for Linux has no installed distributions`, step 3 did not complete, so run
+   it again. If `VERSION` reads `1`, run `wsl --set-version Ubuntu 2`.
 
-4. **Increase WSL2 memory limit** *(optional — skip unless a notebook runs out of memory; most
+5. **Increase WSL2 memory limit** *(optional — skip unless a notebook runs out of memory; most
    chapters are fine on the default)*: WSL2 defaults to 50% of host RAM, which may not be enough for
    data-heavy notebooks. The `%USERPROFILE%\.wslconfig` file lives in your **Windows** home folder, so
    create it from **Windows** PowerShell (a regular window, not admin), not from inside Ubuntu. Paste
@@ -227,7 +255,7 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
    ```
    Then apply it by restarting WSL: `wsl --shutdown` from PowerShell, then reopen your terminal.
 
-5. **Install Docker Desktop.** This is a **Windows program you download in your web browser** — not
+6. **Install Docker Desktop.** This is a **Windows program you download in your web browser** — not
    a command you type into a terminal. Open [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/)
    in Edge or Chrome, click **Download for Windows**, and run the downloaded `Docker Desktop
    Installer.exe`. Do **not** type `docker.com/...` into PowerShell or the Ubuntu terminal — that
@@ -240,13 +268,13 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
    - In Settings → Resources → WSL Integration, enable your Ubuntu distribution
    - In Settings → Resources, allocate at least 8 GB memory and 60 GB disk
 
-6. **Verify Docker Desktop integration**: Open your WSL Ubuntu terminal and run:
+7. **Verify Docker Desktop integration**: Open your WSL Ubuntu terminal and run:
    ```bash
    docker version
    ```
-   If this fails with "Cannot connect to the Docker daemon", Docker Desktop's WSL integration is not enabled for your distribution. Check step 5 above.
+   If this fails with "Cannot connect to the Docker daemon", Docker Desktop's WSL integration is not enabled for your distribution. Check step 6 above.
 
-7. **Clone in WSL** (not on Windows drives — much faster):
+8. **Clone in WSL** (not on Windows drives — much faster):
    ```bash
    cd ~
    git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
@@ -257,7 +285,7 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
 
 **Important**: Always run `docker` commands from inside a WSL terminal (Ubuntu), not from Windows PowerShell or Command Prompt. Docker Desktop exposes the Docker socket to WSL distributions, but the Docker CLI in Windows may behave differently.
 
-**Tip**: Keep the repo at `~/machine-learning-for-trading` in WSL, not `/mnt/c/...`. The Windows filesystem (`/mnt/c/`) is dramatically slower due to the 9P protocol bridge. Access WSL files from Windows Explorer via `\\wsl$\Ubuntu\home\<username>\machine-learning-for-trading`.
+**Tip**: Keep the repo at `~/machine-learning-for-trading` in WSL, not under `/mnt/c/...`. Windows drives reach WSL through the 9P protocol bridge, which costs roughly 8x on a 512 MB sequential write, 240x on creating two thousand small files, and 470x on reading their metadata. `git clone` and `uv sync` are almost entirely small-file and metadata work, so those last two ratios are the ones a reader pays. Access WSL files from Windows Explorer via `\\wsl$\Ubuntu\home\<username>\machine-learning-for-trading`.
 
 ### macOS (Intel and Apple Silicon)
 
@@ -387,7 +415,8 @@ backend rather than Docker itself. Work through it in this order:
    [Windows setup](#windows-11-wsl2) above.
 2. **Pending reboot.** If you ran `wsl --install` and did not restart, restart now.
 3. **No Linux distribution.** Run `wsl --list --verbose` in PowerShell. If it prints
-   `has no installed distributions`, run `wsl --install -d Ubuntu` and restart.
+   `has no installed distributions`, run `wsl --install -d Ubuntu` again. On a machine that has
+   already rebooted, this second run is what downloads and installs Ubuntu.
 4. **WSL2 backend not selected.** Docker Desktop → Settings → General → "Use the WSL 2
    based engine".
 
