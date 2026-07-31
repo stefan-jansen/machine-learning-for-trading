@@ -804,7 +804,6 @@ def plot_persistence(
     title: str,
     alt: str,
     subtitle: str | None = None,
-    max_entities: int = 40,
     seed: int = 42,
 ) -> Figure | None:
     """F6. Feature autocorrelation with bootstrap intervals, plus rank stability.
@@ -820,15 +819,15 @@ def plot_persistence(
     is per date rather than per entity: one cross-sectional rank correlation for each
     consecutive pair in ``decision_dates`` - the schedule the strategy rebalances on -
     summarized by the median over those pairs.
+
+    Both panels read every entity in *df*. An earlier version sampled 40 of them,
+    which put a number in front of the reader that was not the universe the notebook
+    had just described - and sampled an unsorted ``unique()``, so it was not even the
+    same 40 across runs.
     """
     keys = [entity] if isinstance(entity, str) else list(entity)
     columns = list(columns)
     frame = df.select([*keys, time, *columns]).sort([*keys, time])
-
-    entities = frame.select(keys).unique()
-    if entities.height > max_entities:
-        entities = entities.sample(max_entities, seed=seed)
-        frame = frame.join(entities, on=keys, how="semi")
 
     lags = np.unique(np.linspace(1, max_lag, min(max_lag, 24)).astype(int))
     # Lags are counted along the panel's decision dates, not along each entity's own
@@ -945,6 +944,6 @@ def plot_persistence(
     right.axvline(0, color=COLORS["neutral"], linewidth=0.8)
     right.set_xlabel("rank correlation, consecutive rebalances", fontsize=8)
     add_message_title(left, title, subtitle=subtitle)
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     show_with_alt(fig, alt)
     return None

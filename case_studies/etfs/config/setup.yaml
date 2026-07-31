@@ -408,7 +408,7 @@ features:
       hypothesis: Rotation depends on the macro regime and on assets still diversifying
       inputs: SPY and TLT log returns, 10y and 2y constant-maturity yields
       lookback: 252
-      lag: 0
+      lag: 1
       frame: cross-asset
       representation: rolling correlation, level, z-score, indicator
       failure_mode: >-

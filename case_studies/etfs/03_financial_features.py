@@ -136,8 +136,10 @@ print(f"Holdout starts {HOLDOUT_START}; Section D rebuilds the panel without it"
 #
 # The register is declared in `config/setup.yaml`, one row per family: what it reads, how far
 # back, and with what delay. A `lag` of zero means the input is on the tape at the decision
-# itself, and every family here is zero - the decision is taken at the close, the Treasury
-# series publishes at the end of the session it describes, and execution is at the next open.
+# itself, which every price-derived family here is: the decision is taken at the close and
+# executes at the next open. The macro family is the one exception, at one session - the
+# Treasury series for a given day is treated as available from the following close, which is
+# what `config/setup.yaml` declares as the case study's macro policy.
 
 # %%
 register_frame(FAMILIES).select(
@@ -316,8 +318,12 @@ def regime_and_state(df: pl.DataFrame) -> pl.DataFrame:
             ),
         )
     )
+    # Shifted one session before the join. `config/setup.yaml` declares the macro
+    # policy as `alfred_initial_release_close_lagged`: an observation dated t is
+    # available for a decision at the close of t+1, not t. Joining it at t reads a
+    # number the decision could not have had.
     curve = yield_curve.select(
-        "timestamp",
+        pl.col("timestamp").shift(-1),
         pl.when(pl.col("slope") > REGIME_THRESHOLD).then(1).otherwise(0).alias("regime"),
         pl.col("slope").alias("yield_curve_slope"),
         (
@@ -603,8 +609,7 @@ plot_persistence(
     decision_dates=DECISION_DATES,
     title="The long-window carriers still hold their ordering a month out",
     subtitle=(
-        f"Autocorrelation to {2 * DECISION_CYCLE} sessions, median over ETFs with a bootstrap "
-        "interval; rank correlation across consecutive month-end rebalances"
+        f"Median over ETFs to {2 * DECISION_CYCLE} sessions; rank correlation across rebalances"
     ),
     alt=(
         "Two panels. On the left, autocorrelation against lag: the six-month return, the "
@@ -646,7 +651,7 @@ print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}")
 
 # %% [markdown] tags=["results"]
 # The matrix carries **57 features** on **396,186 rows** across **99 ETFs**, from **2007-01-03**
-# to **2025-12-31**, under content digest **a03feca8d6fe7bbd**. Cutting the redundancy tree
+# to **2025-12-31**, under content digest **a1e90493a7de9d0f**. Cutting the redundancy tree
 # leaves **28 clusters**, so half the columns repeat an ordering another column already
 # carries.
 
@@ -677,8 +682,8 @@ print(f"{len(set(clusters.values()))} redundancy clusters")
 #   universe.
 # - The eligibility gate is annual, so an ETF that lost liquidity in June stays in the
 #   cross-section until December.
-# - The yield-curve features read the revised Treasury history, not the initial release. The
-#   timing is right - the series publishes at the close of the session it describes - but a
-#   value revised later is not the value a decision at that close could have seen.
+# - The yield-curve features carry the configured one-session availability lag, but they read
+#   the revised Treasury history rather than the initial release. A value revised later is not
+#   the value the decision could have seen, whatever its timestamp says.
 # - Every feature here is a rule written in advance. `04_model_based_features` adds the features
 #   that are themselves model outputs, where the rule is estimated from the data.
