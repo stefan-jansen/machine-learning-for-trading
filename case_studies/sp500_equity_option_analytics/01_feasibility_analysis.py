@@ -245,7 +245,7 @@ plt.show()
 ranked = rankable.with_columns((pl.col(CARRIER).rank() / pl.len()).over("timestamp").alias("iv"))
 whole = ranked.group_by("symbol").len().filter(pl.col("len") == ranked["timestamp"].n_unique())
 acf = panel_acf(
-    ranked.filter(pl.col("symbol").is_in(whole["symbol"])),
+    ranked.filter(pl.col("symbol").is_in(whole["symbol"])).sort(["symbol", "timestamp"]),
     entity_col="symbol",
     value_col="iv",
     max_lags=max(HORIZONS),
