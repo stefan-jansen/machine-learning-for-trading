@@ -589,16 +589,22 @@ plot_persistence(
     ["ret_21d", "ret_126d", "sharpe_126d", "vol_63d", "rsi_14"],
     entity="symbol",
     max_lag=2 * DECISION_CYCLE,
+    stability_lag=DECISION_CYCLE,
     title="The long-window carriers still hold their ordering a month out",
-    subtitle=f"Feature autocorrelation to {2 * DECISION_CYCLE} sessions, with a 95% interval",
+    subtitle=(
+        f"Autocorrelation to {2 * DECISION_CYCLE} sessions; rank correlation across one "
+        f"{DECISION_CYCLE}-session cycle"
+    ),
     alt=(
         "Two panels. On the left, autocorrelation against lag: the six-month return, the "
         "three-month volatility and the six-month risk-adjusted return are all still above "
         "0.7 at 42 sessions, while the one-month return reaches zero at exactly 21 sessions - "
         "the length of its own window - and the 14-day oscillator levels off near 0.2. The "
-        "shaded interval is narrow, about four hundredths either side of zero. On the right, "
-        "the cross-sectional rank correlation between consecutive decision dates, above 0.9 "
-        "for all five features."
+        "shaded interval is narrow, a few hundredths either side of zero. On the right, the "
+        "cross-sectional rank correlation across one full decision cycle separates the "
+        "features sharply: about 0.95 for the three-month volatility and 0.85 for the two "
+        "six-month carriers, but 0.2 for the oscillator and essentially zero for the one-month "
+        "return, whose window is exactly one cycle long."
     ),
 )
 

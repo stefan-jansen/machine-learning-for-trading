@@ -781,6 +781,19 @@ def plot_redundancy_clusters(
     return dict(zip(columns, (int(v) for v in labels), strict=True))
 
 
+def _bootstrap_median_halfwidth(
+    values: np.ndarray, *, seed: int, draws: int = 500, level: float = 0.95
+) -> float:
+    """Half-width of a percentile bootstrap interval for the median of *values*."""
+    if values.size < 3:
+        return float("nan")
+    rng = np.random.default_rng(seed)
+    resampled = rng.choice(values, size=(draws, values.size), replace=True)
+    medians = np.median(resampled, axis=1)
+    lo, hi = np.quantile(medians, [(1 - level) / 2, (1 + level) / 2])
+    return float((hi - lo) / 2)
+
+
 def plot_persistence(
     df: pl.DataFrame,
     columns: Sequence[str],
@@ -788,6 +801,7 @@ def plot_persistence(
     entity: str | Sequence[str],
     time: str = "timestamp",
     max_lag: int,
+    stability_lag: int,
     title: str,
     alt: str,
     subtitle: str | None = None,
@@ -800,8 +814,9 @@ def plot_persistence(
     decision dates exactly *k* apart and summarized by the median over entities, out
     to at least one decision cycle: a feature whose value has decayed before the next
     rebalance cannot support that cadence. The right-hand panel asks the same question
-    of the ordering - one cross-sectional rank correlation per consecutive pair of
-    decision dates, again summarized by the median.
+    of the ordering - one cross-sectional rank correlation per pair of dates
+    ``stability_lag`` apart, which is the cadence the strategy actually re-forms its
+    ordering at, again summarized by the median.
     """
     keys = [entity] if isinstance(entity, str) else list(entity)
     columns = list(columns)
@@ -849,21 +864,21 @@ def plot_persistence(
         )
         counts.append(per_entity.height)
         for column in columns:
-            rho = per_entity[column].drop_nulls().drop_nans()
-            acf[column].append(float(rho.median()) if rho.len() else np.nan)
-            spread[column].append(
-                float(rho.std() / np.sqrt(rho.len())) if rho.len() > 1 else np.nan
-            )
+            rho = per_entity[column].drop_nulls().drop_nans().to_numpy()
+            acf[column].append(float(np.median(rho)) if rho.size else np.nan)
+            spread[column].append(_bootstrap_median_halfwidth(rho, seed=seed))
     acf["_n"] = counts
 
-    fig, (left, right) = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
+    width, height = FIGSIZE["dual_h_tall"]
+    fig, (left, right) = plt.subplots(1, 2, figsize=(width, height + 0.5))
     for (color, style), column in zip(_cycle(len(columns)), columns, strict=False):
         left.plot(lags, acf[column], label=column, color=color, ls=style, linewidth=1.2, ms=2.5)
-    # The band is the widest standard error of the plotted median across entities, not
-    # a white-noise band over pooled pairs: an entity's successive observations are not
-    # independent draws, so pooling them makes any band far too narrow.
+    # The band is the widest bootstrap half-width of the plotted statistic, which is a
+    # median: `std / sqrt(n)` is the standard error of a *mean* and does not describe
+    # it. A white-noise band over pooled pairs would be narrower still and wrong for a
+    # different reason - an entity's successive observations are not independent draws.
     errors = [v for c in columns for v in spread[c] if np.isfinite(v)]
-    band = 1.96 * max(errors) if errors else 0.0
+    band = max(errors) if errors else 0.0
     left.axhspan(
         -band,
         band,
@@ -875,8 +890,16 @@ def plot_persistence(
     left.axhline(0, color=COLORS["neutral"], linewidth=0.8)
     left.set_xlabel("lag (bars)")
     left.set_ylabel("autocorrelation")
+    # Below the axes, not inside them. A persistent feature fills the upper half and a
+    # decaying one fills the lower left, so every in-axes position covers either a
+    # curve or the y-axis label depending on the data - which is not something the
+    # caller should have to tune per notebook.
     left.legend(
-        fontsize=6, loc="best", frameon=True, facecolor="white", framealpha=0.9, edgecolor="none"
+        fontsize=6,
+        ncol=3,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.22),
+        frameon=False,
     )
 
     # One cross-sectional rank correlation per consecutive pair of decision dates,
@@ -884,8 +907,10 @@ def plot_persistence(
     # correlation measures how stable an entity's rank is against the whole panel,
     # which is high whenever entities differ from each other at all, and a shift
     # within an entity silently bridges dates that entity was absent for.
-    dates = frame[time].unique().sort()
-    step = dict(zip(dates[1:].to_list(), dates[:-1].to_list(), strict=True))
+    # At the decision cadence, not at one session. The strategy re-forms its ordering
+    # every `stability_lag` sessions, so a one-session correlation answers a question
+    # nobody rebalancing monthly is asking, and answers it far too favourably.
+    step = dict(zip(dates[stability_lag:].to_list(), dates[:-stability_lag].to_list(), strict=True))
     stability = []
     for column in columns:
         ranked = frame.select(
@@ -908,7 +933,7 @@ def plot_persistence(
     right.set_yticklabels(columns, fontsize=6)
     lowest = float(np.nanmin(stability))
     right.set_xlim(max(0.0, lowest - 0.15), 1.0)
-    right.set_xlabel("rank correlation, one bar apart", fontsize=8)
+    right.set_xlabel(f"rank correlation, {stability_lag} bars apart", fontsize=8)
     add_message_title(left, title, subtitle=subtitle)
     fig.tight_layout()
     show_with_alt(fig, alt)
