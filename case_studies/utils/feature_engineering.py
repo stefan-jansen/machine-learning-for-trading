@@ -703,19 +703,35 @@ def plot_timing_contract(
             edgecolor="none",
         )
         if family.lag:
+            # Hatched and unfilled. A solid bar over the lag makes the family look like
+            # it reads right up to the decision, which is the opposite of what a lag is.
             ax.barh(
                 i,
                 width=family.lag,
                 left=-family.lag,
                 height=0.55,
-                color=COLORS["amber"],
-                edgecolor="none",
-                alpha=0.75,
+                facecolor="none",
+                edgecolor=COLORS["amber"],
+                hatch="////",
+                linewidth=0.8,
+                label="_nolegend_",
             )
     ax.set_yticks(range(len(families)))
     ax.set_yticklabels([f.name for f in reversed(families)], fontsize=7)
     ax.axvline(0, color=COLORS["negative"], linewidth=1)
     ax.set_xlabel(f"{bar_unit} before the decision timestamp")
+    if any(f.lag for f in families):
+        ax.barh(
+            0,
+            width=0,
+            left=0,
+            facecolor="none",
+            edgecolor=COLORS["amber"],
+            hatch="////",
+            linewidth=0.8,
+            label="published but not yet available",
+        )
+        ax.legend(fontsize=7, frameon=False, loc="lower left")
     ax.annotate(
         "decision",
         xy=(0, -0.45),
@@ -751,7 +767,12 @@ def plot_redundancy_clusters(
     frame = df.select(columns)
     if frame.height > max_rows:
         frame = frame.sample(max_rows, seed=seed)
-    matrix = frame.to_numpy().astype(float)
+    # Ranked before correlating, so the distance is Spearman. The claim the figure makes
+    # is that two features carry the same *ordering*, and Pearson on raw values answers a
+    # narrower question: it misses a monotone but curved relation, which would leave two
+    # interchangeable features in separate clusters and inflate the reported count.
+    ranked = frame.with_columns(pl.col(c).rank().alias(c) for c in columns)
+    matrix = ranked.to_numpy().astype(float)
     corr = np.ma.corrcoef(np.ma.masked_invalid(matrix), rowvar=False).filled(0.0)
     corr = np.clip(np.nan_to_num(corr, nan=0.0), -1.0, 1.0)
     distance = 1.0 - np.abs(corr)
@@ -772,7 +793,7 @@ def plot_redundancy_clusters(
         ax=ax,
     )
     ax.axvline(height, color=COLORS["amber"], linestyle="--", linewidth=1)
-    ax.set_xlabel(r"distance $1 - |\rho|$")
+    ax.set_xlabel(r"distance $1 - |\rho_s|$")
     ax.tick_params(axis="y", labelsize=6)
     add_message_title(ax, title, subtitle=subtitle)
     fig.tight_layout()
