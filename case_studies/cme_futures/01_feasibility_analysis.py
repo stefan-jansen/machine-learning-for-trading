@@ -17,13 +17,13 @@
 # # CME Futures: Feasibility Analysis
 #
 # `config/setup.yaml` declares a cross-sectional futures strategy: which products trade,
-# how often positions change, what a round trip costs, how the sample is split. This
+# how often positions change, what crossing costs, and how the sample is split. This
 # notebook asks whether the data supports it, and fits nothing.
 #
 # ## Learning objectives
 #
-# - Count the universe on the session the strategy acts on, price a round trip from the
-#   contract's own tick, and read clearance off an exceedance curve scaled by that cost
+# - Count the universe on the session the strategy acts on, price the spread from the
+#   contract's own tick, and read clearance off an exceedance curve scaled by that spread
 # - Measure how long the term-structure slope a carry strategy reads stays put, and
 #   confirm the declared folds fit the sample without touching the holdout
 #
@@ -151,12 +151,12 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# ### B.3 What a round trip costs, and what a move is worth
+# ### B.3 What the spread costs, and what a move is worth
 #
 # `setup.yaml::costs` prices a trade as a commission plus a spread in ticks: one for most of
-# the universe, two for the products it lists as illiquid. The tick is a contract
-# specification and `futures_specs.yaml` carries it. Do not infer it - the smallest
-# settlement increment is a half-tick on several contracts, halving the cost you charge.
+# the universe, two for the products it lists as illiquid. The tick is a contract spec and
+# `futures_specs.yaml` carries it - do not infer it, since the smallest settlement increment
+# is a half-tick on several contracts, halving the cost you charge yourself.
 
 # %%
 products = yaml.safe_load((REPO_ROOT / "data/futures/market/futures_specs.yaml").read_text())
@@ -172,52 +172,52 @@ cost = (
     research.group_by("product")
     .agg(pl.col("raw_close").median().alias("price"))
     .join(ticks, "product")
-    .with_columns((spread * pl.col("tick") / pl.col("price") * 1e4).alias("round_trip_bps"))
-    .sort("round_trip_bps")
+    .with_columns((spread * pl.col("tick") / pl.col("price") * 1e4).alias("spread_bps"))
+    .sort("spread_bps")
 )
-COST_BPS = float(cost["round_trip_bps"].median())
+COST_BPS = float(cost["spread_bps"].median())
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
-ax.bar(cost["product"], cost["round_trip_bps"], color=COLORS["blue"], width=0.7)
+ax.bar(cost["product"], cost["spread_bps"], color=COLORS["blue"], width=0.7)
 ax.axhline(COST_BPS, color=COLORS["copper"], ls="--", lw=1.5, label="universe median")
 ax.set_ylabel("Round-trip spread (bps)")
 ax.tick_params(axis="x", labelsize=6, rotation=90)
 ax.legend(frameon=False, fontsize=8)
 add_message_title(
     ax,
-    "The same universe spans an order of magnitude in what a round trip costs",
+    "The same universe spans an order of magnitude in what the spread costs",
     subtitle="The configured spread over the median settlement price: one tick, two if illiquid",
 )
 plt.show()
 
 # %% [markdown]
-# Costs differ by an order of magnitude across the universe, so one cost line on raw returns
-# answers the question for no product in particular. Each move is divided by its own
-# product's round trip instead, putting break-even at one on a shared scale.
+# Spreads differ by an order of magnitude across the universe, so one cost line on raw
+# returns answers the question for no product in particular. Each move is divided by its own
+# product's spread instead, putting break-even at one on a shared scale.
 
 # %%
 returns = (
     research.with_columns(
         pl.col("adj_close").pct_change(h).abs().over("product").alias(f"h{h}") for h in HORIZONS
     )
-    .join(cost.select("product", "round_trip_bps"), "product")
-    .with_columns(pl.col(f"h{h}") * 1e4 / pl.col("round_trip_bps") for h in HORIZONS)
+    .join(cost.select("product", "spread_bps"), "product")
+    .with_columns(pl.col(f"h{h}") * 1e4 / pl.col("spread_bps") for h in HORIZONS)
 )
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 for h, color in zip(HORIZONS, (COLORS["blue"], COLORS["amber"]), strict=True):
     multiple, fraction = exceedance_curve(returns[f"h{h}"].drop_nulls().to_numpy())
     ax.plot(multiple, fraction, color=color, lw=1.6, label=f"{h}-session move")
-ax.axvline(1, color=COLORS["copper"], ls="--", lw=1.5, label="break-even on the round trip")
+ax.axvline(1, color=COLORS["copper"], ls="--", lw=1.5, label="break-even on the spread")
 ax.set_xscale("log")
 ax.set_xlim(0.02, 2_000)
-ax.set_xlabel("Absolute move as a multiple of the product's round trip (log scale)")
+ax.set_xlabel("Absolute move as a multiple of the product's spread (log scale)")
 ax.set_ylabel("Fraction of moves at least this large")
 ax.legend(frameon=False, fontsize=8, loc="lower left")
 add_message_title(
     ax,
-    "Almost every move at either horizon is worth more than crossing costs",
-    subtitle="Exceedance of absolute returns scaled by each product's own round trip",
+    "Almost every move at either horizon is larger than the spread it crosses",
+    subtitle="Exceedance of absolute returns scaled by each product's own spread",
 )
 plt.show()
 
@@ -260,24 +260,24 @@ plt.show()
 # ### B.5 Move scale against cost
 #
 # The ratio divides the median absolute move at the primary horizon by the median spread,
-# and the clearance share counts moves above their own product's round trip. Both run on
-# realised moves, so neither says the sign is predictable.
+# and the clearance share counts moves above their own product's spread. Both are
+# spread-only, so neither says total cost clears; the cost stage tests that.
 
 # %%
 multiple = pl.col(f"h{HORIZONS[0]}")
 median_move_bps, clears_cost = (
     returns.drop_nulls(f"h{HORIZONS[0]}")
     .select(
-        (multiple * pl.col("round_trip_bps")).median().alias("mid"),
+        (multiple * pl.col("spread_bps")).median().alias("mid"),
         (multiple > 1).mean().alias("share"),
     )
     .row(0)
 )
 print(
-    f"Round-trip spread {cost['round_trip_bps'].min():.2f} to "
-    f"{cost['round_trip_bps'].max():.2f} bps, median {COST_BPS:.2f} bps | median "
+    f"Round-trip spread {cost['spread_bps'].min():.2f} to "
+    f"{cost['spread_bps'].max():.2f} bps, median {COST_BPS:.2f} bps | median "
     f"{HORIZONS[0]}-session move {median_move_bps:.1f} bps, ratio "
-    f"{median_move_bps / COST_BPS:.0f}x, clears its own product's spread {clears_cost:.3f}"
+    f"{median_move_bps / COST_BPS:.0f}x, over its own product's spread {clears_cost:.3f}"
 )
 
 # %% [markdown] tags=["results"]
@@ -291,7 +291,7 @@ print(
 # ### C.1 Cadence
 #
 # `setup.yaml::decision.cadence` rebalances at the Friday settlement and executes at the
-# Monday open. B.3 supports that: moves at both horizons clear their own round trip, so the
+# Monday open. B.3 supports that: moves at both horizons clear their own spread, so the
 # signal sets the cadence rather than cost.
 #
 # ### C.2 Kill conditions
@@ -388,12 +388,13 @@ print(
 #    hides the holiday dates where a two-sided book cannot be filled.
 # 2. **Take the tick from the contract specification, not from the prices.** Several
 #    contracts settle on half-ticks, so the observed grid understates what you pay.
-# 3. **Scale moves by each product's own round trip before comparing them to cost**, and
+# 3. **Scale moves by each product's own spread before comparing them to cost**, and
 #    compute a panel autocorrelation inside each entity, never across the stack.
 #
 # ### Known limitations
 #
-# - Cost here is spread only, and a persistent carry reading is not a profitable one; the
-#   cost and modelling stages test the rest.
+# - Cost here is the spread alone; the commission and roll slippage `setup.yaml::costs`
+#   declares need a notional and enter at the cost stage, which is also where a persistent
+#   carry reading is tested for being a profitable one.
 #
 # **Next**: labels at the declared horizons, built on this development window.
