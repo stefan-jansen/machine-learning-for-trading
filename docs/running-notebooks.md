@@ -563,16 +563,25 @@ Test parameter overrides are defined in `tests/overrides.yaml`, keyed by noteboo
 ```yaml
 # Example entries
 11_ml_pipeline/01_ols_inference:
-  timeout: 180
-  parameters:
-    MAX_SYMBOLS: 15
-
-case_studies/etfs/07_gbm:
   timeout: 300
   parameters:
-    MAX_SYMBOLS: 15
-    START_DATE: "2020-01-01"
+    MAX_SYMBOLS: 10
+    MAX_TRAIN_ROWS: 5000
+
+case_studies/etfs/07_gbm:
+  timeout: 180
+  parameters:
+    MAX_FOLDS: 2
+    MAX_SYMBOLS: 5
 ```
+
+Papermill injects these values in a cell placed right after the notebook's
+`# %% tags=["parameters"]` cell, so each name has to be one the notebook reads
+below that point and does not overwrite before reading. Anything else is either
+an unused variable or is discarded before it is used.
+`tests/test_pm_helpers.py` rejects names that fail either condition, so a
+mistyped or renamed parameter turns the build red instead of quietly running the
+notebook at full scale.
 
 **To customize for your machine**: copy `tests/overrides.yaml` to `tests/overrides.local.yaml` (gitignored) and adjust timeouts or parameter values. The test runner checks for the local file first.
 
