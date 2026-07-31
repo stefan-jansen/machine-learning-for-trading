@@ -81,10 +81,22 @@ def missing_symbols(
 
 
 def get_update_start(output_path: Path, end_date: str, interval_hours: int) -> str | None:
+    """Where an incremental update has to start so no symbol is skipped.
+
+    The *earliest* per-symbol last timestamp, not the dataset-wide maximum. Those
+    differ exactly when an earlier update was partial: the symbols that succeeded
+    carry the dataset maximum, so starting there would step over the gap left by
+    the ones that failed and never fill it, while the run reported success. The
+    cost of starting earlier is refetching rows for symbols that are already
+    current, which combine_existing() dedups on (symbol, timestamp).
+    """
     if not output_path.exists():
         return None
 
-    last_ts = pl.read_parquet(output_path).select(pl.col("timestamp").max()).item()
+    per_symbol = pl.read_parquet(output_path).group_by("symbol").agg(pl.col("timestamp").max())
+    if per_symbol.is_empty():
+        return None
+    last_ts = per_symbol["timestamp"].min()
     if last_ts is None:
         return None
 
@@ -276,8 +288,11 @@ def main() -> None:
             print("\nDownloading perpetual OHLCV...")
             new_df, perps_failed = download_perps(provider, symbols, start_date, perps_end)
             if new_df.is_empty():
-                print("ERROR: no perpetual OHLCV data downloaded")
-                sys.exit(1)
+                # Not necessarily a failure: a fully rate-limited retry against a
+                # complete dataset arrives here. Fall through to the merged-dataset
+                # check rather than exiting, so the status reflects what is on disk
+                # and --allow-partial still applies.
+                print("No perpetual OHLCV rows returned; falling back to what is on disk.")
             perps_df = (
                 combine_existing(perps_output, new_df)
                 if perps_output.exists() and not args.force
@@ -331,8 +346,7 @@ def main() -> None:
                 provider, symbols, start_date, premium_end, premium_interval
             )
             if new_df.is_empty():
-                print("ERROR: no premium index data downloaded")
-                sys.exit(1)
+                print("No premium index rows returned; falling back to what is on disk.")
             premium_df = (
                 combine_existing(premium_output, new_df)
                 if premium_output.exists() and not args.force

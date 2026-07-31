@@ -189,6 +189,45 @@ def test_update_that_extends_everything_exits_zero(
     _run(downloader, monkeypatch, tmp_path, arrived=configured_symbols, cli=("--update",))
 
 
+def test_an_empty_retry_against_a_complete_dataset_exits_zero(
+    downloader, monkeypatch, tmp_path, configured_symbols
+):
+    """A fully rate-limited retry is not a failed download.
+
+    Nothing arrives, but everything is already on disk from the first run. This
+    used to exit 1 before the status logic ran, and ignored --allow-partial too.
+    """
+    _run(downloader, monkeypatch, tmp_path, arrived=configured_symbols)
+    _run(downloader, monkeypatch, tmp_path, arrived=[], failed=configured_symbols)
+
+
+def test_an_empty_first_run_exits_nonzero(downloader, monkeypatch, tmp_path, configured_symbols):
+    """The converse: nothing on disk and nothing arrived is still a failure."""
+    with pytest.raises(SystemExit) as exc:
+        _run(downloader, monkeypatch, tmp_path, arrived=[], failed=configured_symbols)
+    assert exc.value.code == 1
+
+
+def test_update_starts_from_the_earliest_symbol(downloader, tmp_path):
+    """An update must not step over a gap a previous partial update left.
+
+    Symbols that succeeded carry the dataset maximum; the ones that failed sit
+    behind it. Starting from the maximum would skip the gap permanently while
+    reporting success, so the start comes from the earliest symbol.
+    """
+    output = tmp_path / "perps_1h.parquet"
+    pl.DataFrame(
+        {
+            "symbol": ["BTCUSDT", "ETHUSDT"],
+            "timestamp": [datetime(2021, 6, 10), datetime(2021, 6, 1)],
+            "close": [30000.0, 2000.0],
+        }
+    ).write_parquet(output)
+
+    start = downloader.get_update_start(output, "2021-12-31", interval_hours=1)
+    assert start == "2021-06-01", "must resume from the symbol that is furthest behind"
+
+
 def test_a_single_requested_symbol_that_arrives_is_complete(downloader, monkeypatch, tmp_path):
     """--symbol narrows what was asked for, so nothing else can be missing."""
     _run(
