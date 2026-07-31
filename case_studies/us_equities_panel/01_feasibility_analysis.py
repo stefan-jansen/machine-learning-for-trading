@@ -259,14 +259,16 @@ ax.set_xlabel("Lag (sessions)")
 ax.set_ylabel("Autocorrelation of daily returns")
 add_message_title(
     ax,
-    "A stock's own past barely moves what its next return will be",
+    "Only the one-session lag clears the band, and it points down",
     subtitle="Mean within-stock autocorrelation, shaded 10th-90th percentile, over its band",
 )
 plt.show()
 
 # %% [markdown]
-# The bars sit close to zero against the spread of the per-stock curves behind them, so what the
-# strategy ranks on has to come from the cross-section, which `mapping.class` builds.
+# One session back is the only lag whose mean clears the band, and it is negative: a weak reversal,
+# an order of magnitude smaller than the spread of the per-stock curves behind it, and not something
+# a book can be built on alone. Every longer lag sits inside the band. So what the strategy ranks on
+# has to come from the cross-section, which `mapping.class` builds.
 #
 # ### B.5 Move scale against cost
 #
@@ -346,7 +348,8 @@ fold_timeline(ax, splits, holdout=(HOLDOUT_START, HOLDOUT_END))
 add_message_title(
     ax,
     "The folds roll back from the sealed holdout and never reach into it",
-    subtitle="Training, purge and validation blocks exactly as generate_cv_splits returns them",
+    subtitle=f"Blocks as generate_cv_splits returns them; the {LABEL_BUFFER} purge is a session wide "
+    "and narrower than a pixel here",
 )
 plt.show()
 
