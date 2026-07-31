@@ -14,66 +14,52 @@
 # ---
 
 # %% [markdown]
-# # Factor Zoo Validation via Double-Selection LASSO
+# # Factor Zoo Validation via Post-Double-Selection LASSO
 #
-# **Chapter 15: Causal Estimation**
-# **Docker image**: `ml4t`
+# **Chapter 15: Causal Machine Learning**
 #
-# This notebook applies the double-selection LASSO framework from Feng, Giglio,
-# and Xiu (2020) to test whether candidate factors have genuine marginal pricing
-# power after controlling for existing factors. This connects the causal inference
-# machinery of this chapter to the latent factor models of Chapter 14.
+# This notebook uses post-double-selection LASSO to ask whether managed-portfolio
+# factor returns add incremental time-series explanatory power for SPY after ten
+# principal-component controls. It is a compact factor-spanning application of the
+# Belloni-Chernozhukov-Hansen selection logic discussed in this chapter.
 #
-# ## The Problem
+# ## Learning objectives
 #
-# A factor that appears significant against a simple benchmark (e.g., CAPM) may
-# lose significance when tested against the full factor zoo. Naive sequential
-# testing suffers from omitted variable bias — the candidate may proxy for an
-# existing factor that was excluded from the benchmark.
+# - distinguish a naive single-factor association from a conditional factor loading;
+# - implement both LASSO selections with time-ordered cross-validation;
+# - carry the selected union into an intercept-inclusive OLS regression with HAC inference;
+# - interpret what the exercise does and does not establish about the factor zoo.
 #
-# ## The Solution: Post-Double-Selection (BCH 2014)
+# **Book references**: Chapter 14, Section 14.5 (Taming the Factor Zoo), and
+# Chapter 15, Section 15.3 (Double Machine Learning).
 #
-# The Belloni-Chernozhukov-Hansen (2014) procedure, adapted by Feng-Giglio-Xiu
-# for asset pricing, is a special case of the DML framework from §15.3:
-#
-# 1. **Pricing LASSO**: Select which existing factors best explain asset returns
-# 2. **Correlation LASSO**: Select which existing factors correlate most with
-#    the candidate — these would cause omitted variable bias if excluded
-# 3. **OLS on union**: Test the candidate's coefficient on the union of both
-#    selected sets, providing robust inference
-#
-# ## Learning Objectives
-#
-# - Understand why naive factor testing produces false positives
-# - Implement post-double-selection for factor validation using sklearn
-# - Apply the framework to real ETF factor returns from Chapter 14
-# - Connect the BCH procedure to the DML framework of §15.3
-#
-# **Data**: ETF daily returns (same 100-ETF universe as Ch14 NB01/NB05).
-#
-# **Book Reference**: Chapter 14, §14.5 (Taming the Factor Zoo);
-# Chapter 15, §15.3 (Double Machine Learning)
-#
-# **Prerequisites**: [`01_pca_equity_sectors`](../14_latent_factors/01_pca_equity_sectors.ipynb),
-# [`03_econml_dml`](03_econml_dml.ipynb)
+# **Prerequisites**: [`01_pca_equity_sectors`](../14_latent_factors/01_pca_equity_sectors.ipynb)
+# and [`03_econml_dml`](03_econml_dml.ipynb).
 
 # %% [markdown]
 # ## Setup
+#
+# The ETF data are daily, so the cube-root Newey-West bandwidth provides a transparent
+# default for serial dependence. The bandwidth is computed after the 60-day warm-up.
 
 # %%
-"""Factor Zoo Validation — Post-Double-Selection LASSO for marginal factor testing."""
+"""Factor-spanning validation with post-double-selection LASSO."""
 
 import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import polars as pl
-from sklearn.linear_model import LassoCV, LinearRegression
+import statsmodels.api as sm
+from sklearn.decomposition import PCA
+from sklearn.linear_model import Lasso
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
 
 warnings.filterwarnings("ignore")
 
@@ -82,209 +68,259 @@ START_DATE = "2006-01-01"
 END_DATE = "2024-12-31"
 MIN_OBSERVATIONS = 252
 N_PCA_FACTORS = 10
+N_CV_SPLITS = 5
+N_ALPHAS = 60
 SIGNIFICANCE_LEVEL = 0.05
-MAX_SYMBOLS = 0  # 0 = all
-HOLDOUT_SYMBOL = "SPY"  # broad-market ETF held out as the pricing outcome
+MAX_SYMBOLS = 0  # 0 = all eligible symbols
+OUTCOME_SYMBOL = "SPY"
+WARMUP = 60
 SEED = 42
 
 # %%
 set_global_seeds(SEED)
 
 # %% [markdown]
-# ## 1. Build Factor Returns from ETF Data
+# ## 1. Build a balanced, disjoint ETF panel
 #
-# We hold out a single broad-market ETF (`SPY` by default) as the *pricing
-# outcome* and build the factor zoo from the remaining ETFs. Holding out the
-# outcome is essential: if we used an equal-weight mean of the same ETFs that
-# define the PCA factors, the outcome would lie in the column span of the
-# controls and the post-double-selection regression would be tautological
-# (R² ≈ 1, t-stats spuriously inflated). Pricing a held-out asset with a
-# zoo built from disjoint ones is the FGX (2020) workflow.
+# SPY is excluded from the factor-building universe and retained only as the outcome.
+# The source contains ETFs with different inception dates. Replacing pre-inception
+# observations with zero would manufacture returns, so the analysis retains the
+# long-history symbols observed on every date in the requested sample.
+#
+# This eligibility rule uses the current curated ETF list and is not a point-in-time
+# historical universe. The result is an in-sample teaching exercise, not a
+# survivorship-free backtest or a sealed holdout estimate.
 
 # %%
-etf_data = load_etfs(start_date=START_DATE, end_date=END_DATE)
+etf_data = load_etfs(start_date=START_DATE, end_date=END_DATE).sort(["symbol", "timestamp"])
 
-# Daily returns
-etf_returns = (
-    etf_data.sort("timestamp")
-    .with_columns(pl.col("close").pct_change().over("symbol").alias("return"))
-    .drop_nulls(subset=["return"])
+duplicate_keys = etf_data.select(pl.struct("symbol", "timestamp").is_duplicated().sum()).item()
+if duplicate_keys:
+    raise ValueError(f"ETF input contains {duplicate_keys} duplicate symbol-timestamp keys")
+
+etf_returns = etf_data.with_columns(
+    pl.col("close").pct_change().over("symbol").alias("return")
+).drop_nulls(subset=["return"])
+
+n_source_dates = etf_returns["timestamp"].n_unique()
+symbol_coverage = etf_returns.group_by("symbol").len().sort("symbol")
+eligible_symbols = symbol_coverage.filter(
+    (pl.col("len") == n_source_dates) & (pl.col("len") >= MIN_OBSERVATIONS)
+)["symbol"].to_list()
+
+if OUTCOME_SYMBOL not in eligible_symbols:
+    raise ValueError(f"Outcome {OUTCOME_SYMBOL!r} lacks complete sample coverage")
+if MAX_SYMBOLS > 0:
+    eligible_symbols = eligible_symbols[:MAX_SYMBOLS]
+    if OUTCOME_SYMBOL not in eligible_symbols:
+        eligible_symbols.append(OUTCOME_SYMBOL)
+
+# %% [markdown]
+# Pivoting after the coverage filter produces a genuinely balanced panel. The null
+# and finite-value assertions make the no-imputation contract executable.
+
+# %%
+return_wide = (
+    etf_returns.filter(pl.col("symbol").is_in(eligible_symbols))
+    .pivot(on="symbol", index="timestamp", values="return")
+    .sort("timestamp")
 )
 
-# Filter to symbols with sufficient history
-symbol_counts = etf_returns.group_by("symbol").len()
-valid_symbols = symbol_counts.filter(pl.col("len") >= MIN_OBSERVATIONS)["symbol"].to_list()
-if HOLDOUT_SYMBOL not in valid_symbols:
-    raise ValueError(f"Holdout {HOLDOUT_SYMBOL!r} missing from ETF universe")
-if MAX_SYMBOLS > 0:
-    valid_symbols = valid_symbols[:MAX_SYMBOLS]
-    if HOLDOUT_SYMBOL not in valid_symbols:
-        valid_symbols = valid_symbols + [HOLDOUT_SYMBOL]
-etf_returns = etf_returns.filter(pl.col("symbol").is_in(valid_symbols))
+symbols_all = [column for column in return_wide.columns if column != "timestamp"]
+if len(symbols_all) <= N_PCA_FACTORS + 1:
+    raise ValueError("The balanced universe is too small for the requested PCA basis")
+if return_wide.select(pl.sum_horizontal(pl.exclude("timestamp").null_count())).item() != 0:
+    raise ValueError("Balanced return panel contains missing values")
 
-# Pivot to wide-format return matrix
-return_wide = etf_returns.pivot(on="symbol", index="timestamp", values="return").sort("timestamp")
-symbols_all = [c for c in return_wide.columns if c != "timestamp"]
 returns_all = return_wide.select(symbols_all).to_numpy().astype(np.float64)
-returns_all = np.nan_to_num(returns_all, nan=0.0)
+if not np.isfinite(returns_all).all():
+    raise ValueError("Balanced return panel contains non-finite values")
 
-# Split: held-out outcome vs. zoo universe.
-holdout_idx = symbols_all.index(HOLDOUT_SYMBOL)
-holdout_return = returns_all[:, holdout_idx]
+outcome_idx = symbols_all.index(OUTCOME_SYMBOL)
+outcome_return = returns_all[:, outcome_idx]
 zoo_mask = np.ones(returns_all.shape[1], dtype=bool)
-zoo_mask[holdout_idx] = False
-returns_np = returns_all[:, zoo_mask]
-symbols = [s for s in symbols_all if s != HOLDOUT_SYMBOL]
-T, N = returns_np.shape
+zoo_mask[outcome_idx] = False
+zoo_returns = returns_all[:, zoo_mask]
+zoo_symbols = [symbol for symbol in symbols_all if symbol != OUTCOME_SYMBOL]
+T, N = zoo_returns.shape
 
-print(f"Outcome: {HOLDOUT_SYMBOL} returns ({T} days)")
-print(f"Zoo universe: {N} ETFs (SPY held out)")
+print(
+    f"Analysis window: {return_wide['timestamp'].min()} to {return_wide['timestamp'].max()} "
+    f"({T:,} trading days)"
+)
+print(f"Outcome: {OUTCOME_SYMBOL}; factor-building universe: {N} long-history ETFs")
+print("Missing returns imputed: 0")
+
+# %% [markdown]
+# ## 2. Extract principal-component controls
+#
+# Standardization prevents high-volatility ETFs from dominating the covariance
+# structure. The final basis is fitted on the full post-warm-up inference sample
+# because these are explicitly in-sample controls; uncertainty is conditional on
+# this estimated basis. Selection below refits both transformations inside each fold.
 
 # %%
-# PCA factor returns
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
-
-scaler = StandardScaler()
-returns_scaled = scaler.fit_transform(returns_np)
-pca = PCA(n_components=N_PCA_FACTORS)
-pca.fit(returns_scaled)
-factor_returns = returns_scaled @ pca.components_.T  # T × K
+pca_scaler = StandardScaler()
+zoo_returns_inference = zoo_returns[WARMUP:]
+zoo_returns_scaled = pca_scaler.fit_transform(zoo_returns_inference)
+pca = PCA(n_components=N_PCA_FACTORS, random_state=SEED)
+factor_returns = pca.fit_transform(zoo_returns_scaled)
 
 factor_names = [f"PC{i + 1}" for i in range(N_PCA_FACTORS)]
-var_explained = pca.explained_variance_ratio_
+variance_table = pl.DataFrame(
+    {
+        "factor": factor_names,
+        "variance_explained": pca.explained_variance_ratio_,
+        "cumulative_variance": np.cumsum(pca.explained_variance_ratio_),
+    }
+).with_columns(pl.selectors.numeric().round(4))
 
-print(f"PCA factors: {N_PCA_FACTORS} components, cumulative variance: {var_explained.sum():.1%}")
-for i in range(min(5, N_PCA_FACTORS)):
-    sr = factor_returns[:, i].mean() / factor_returns[:, i].std() * np.sqrt(252)
-    print(f"  {factor_names[i]}: var={var_explained[i]:.1%}, Sharpe={sr:+.2f}")
+print(
+    f"Cumulative variance explained by {N_PCA_FACTORS} PCs: {pca.explained_variance_ratio_.sum():.1%}"
+)
+variance_table
 
 # %% [markdown]
-# ## 2. Construct Candidate Factors
+# ## 3. Construct lagged managed-portfolio factors
 #
-# Beyond PCA, we build characteristic-sorted managed portfolios as candidate
-# factors. These mimic the practitioner's situation: "I have a new signal —
-# is it redundant given the existing factor structure?"
+# Each portfolio uses information ending at $t-1$ to set long and short baskets,
+# then records their return at $t$. The four candidates differ only in the ranking
+# statistic and lookback window.
 
 # %%
-# Managed-portfolio factor construction from ETF characteristics
-# 20-day momentum: long top quintile, short bottom quintile
 momentum_20d = np.zeros(T)
 for t in range(20, T):
-    mom = returns_np[t - 20 : t].sum(axis=0)
-    top = mom >= np.percentile(mom, 80)
-    bot = mom <= np.percentile(mom, 20)
-    if top.sum() > 0 and bot.sum() > 0:
-        momentum_20d[t] = returns_np[t, top].mean() - returns_np[t, bot].mean()
+    momentum = zoo_returns[t - 20 : t].sum(axis=0)
+    top = momentum >= np.percentile(momentum, 80)
+    bottom = momentum <= np.percentile(momentum, 20)
+    momentum_20d[t] = zoo_returns[t, top].mean() - zoo_returns[t, bottom].mean()
 
-# 60-day momentum
 momentum_60d = np.zeros(T)
 for t in range(60, T):
-    mom = returns_np[t - 60 : t].sum(axis=0)
-    top = mom >= np.percentile(mom, 80)
-    bot = mom <= np.percentile(mom, 20)
-    if top.sum() > 0 and bot.sum() > 0:
-        momentum_60d[t] = returns_np[t, top].mean() - returns_np[t, bot].mean()
-
-# %%
-# Low-volatility factor: long low-vol quintile, short high-vol quintile
-low_vol = np.zeros(T)
-for t in range(60, T):
-    vol = returns_np[t - 60 : t].std(axis=0)
-    low = vol <= np.percentile(vol, 20)
-    high = vol >= np.percentile(vol, 80)
-    if low.sum() > 0 and high.sum() > 0:
-        low_vol[t] = returns_np[t, low].mean() - returns_np[t, high].mean()
-
-# Mean-reversion factor: short recent winners, long recent losers (contrarian)
-mean_rev = np.zeros(T)
-for t in range(5, T):
-    ret5 = returns_np[t - 5 : t].sum(axis=0)
-    top = ret5 >= np.percentile(ret5, 80)
-    bot = ret5 <= np.percentile(ret5, 20)
-    if top.sum() > 0 and bot.sum() > 0:
-        mean_rev[t] = returns_np[t, bot].mean() - returns_np[t, top].mean()
-
-candidate_names = ["Mom_20d", "Mom_60d", "LowVol", "MeanRev"]
-candidates = np.column_stack([momentum_20d, momentum_60d, low_vol, mean_rev])
-
-for i, name in enumerate(candidate_names):
-    sr = (
-        candidates[60:, i].mean() / candidates[60:, i].std() * np.sqrt(252)
-        if candidates[60:, i].std() > 0
-        else 0
-    )
-    print(f"  {name}: Sharpe={sr:+.2f}")
+    momentum = zoo_returns[t - 60 : t].sum(axis=0)
+    top = momentum >= np.percentile(momentum, 80)
+    bottom = momentum <= np.percentile(momentum, 20)
+    momentum_60d[t] = zoo_returns[t, top].mean() - zoo_returns[t, bottom].mean()
 
 # %% [markdown]
-# ## 3. Naive Factor Testing (Why It Fails)
-#
-# A naive test regresses returns on a single candidate factor and checks
-# significance. This produces false positives because the candidate may
-# proxy for an existing factor — classic omitted variable bias.
+# Low-volatility and mean-reversion portfolios reverse the ranking direction: they
+# buy the low-volatility or recent-loser quintile and sell the opposite quintile.
 
 # %%
-from scipy.stats import ttest_1samp
+low_vol = np.zeros(T)
+for t in range(60, T):
+    volatility = zoo_returns[t - 60 : t].std(axis=0)
+    low = volatility <= np.percentile(volatility, 20)
+    high = volatility >= np.percentile(volatility, 80)
+    low_vol[t] = zoo_returns[t, low].mean() - zoo_returns[t, high].mean()
 
-# Build the "factor zoo" — all PCA factors + all candidates
-zoo = np.hstack([factor_returns, candidates])
-zoo_names = factor_names + candidate_names
-n_zoo = zoo.shape[1]
+mean_reversion = np.zeros(T)
+for t in range(5, T):
+    recent_return = zoo_returns[t - 5 : t].sum(axis=0)
+    losers = recent_return <= np.percentile(recent_return, 20)
+    winners = recent_return >= np.percentile(recent_return, 80)
+    mean_reversion[t] = zoo_returns[t, losers].mean() - zoo_returns[t, winners].mean()
+
+# %% [markdown]
+# The common warm-up removes the initialized zeros before any inference. Annualized
+# Sharpe ratios here are descriptive summaries, not selection criteria.
+
+# %%
+candidate_names = ["Mom_20d", "Mom_60d", "LowVol", "MeanRev"]
+candidates = np.column_stack([momentum_20d, momentum_60d, low_vol, mean_reversion])[WARMUP:]
+outcome_trimmed = outcome_return[WARMUP:]
+controls_trimmed = factor_returns
+HAC_LAGS = max(1, int(len(outcome_trimmed) ** (1 / 3)))
+
+candidate_summary = pl.DataFrame(
+    {
+        "factor": candidate_names,
+        "annualized_sharpe": [
+            candidates[:, i].mean() / candidates[:, i].std(ddof=1) * np.sqrt(252)
+            for i in range(len(candidate_names))
+        ],
+        "daily_volatility": [candidates[:, i].std(ddof=1) for i in range(len(candidate_names))],
+    }
+).with_columns(pl.selectors.numeric().round(4))
+
+print(f"Inference sample: {len(outcome_trimmed):,} days; Newey-West bandwidth: {HAC_LAGS} lags")
+candidate_summary
+
+# %% [markdown]
+# ## 4. Match the naive and conditional estimands
+#
+# A factor-mean test and a regression loading answer different questions. The
+# comparison below holds the target fixed: the naive slope comes from SPY on one
+# candidate, while the post-selection slope adds selected PCA controls. Both models
+# include an intercept and use the same Newey-West covariance estimator.
 
 
-# Naive test: is each factor's mean return significantly different from zero?
-def _significance_marker(p: float) -> str:
-    if p < 0.01:
-        return "***"
-    if p < 0.05:
-        return "**"
-    if p < 0.10:
-        return "*"
-    return ""
-
-
-naive_rows = []
-for i, name in enumerate(zoo_names):
-    series = zoo[60:, i]  # skip warmup
-    t_stat, p_val = ttest_1samp(series, 0)
-    naive_rows.append(
-        {
-            "factor": name,
-            "mean": series.mean(),
-            "t_stat": t_stat,
-            "p_value": p_val,
-            "sig": _significance_marker(p_val),
-        }
+# %%
+def ols_hac_test(outcome: np.ndarray, design: np.ndarray, hac_lags: int) -> dict[str, float]:
+    """Estimate the first slope in an intercept-inclusive OLS-HAC regression."""
+    design_2d = design.reshape(-1, 1) if design.ndim == 1 else design
+    model = sm.OLS(outcome, sm.add_constant(design_2d)).fit(
+        cov_type="HAC", cov_kwds={"maxlags": hac_lags}
     )
+    return {
+        "coef": float(model.params[1]),
+        "se": float(model.bse[1]),
+        "t_stat": float(model.tvalues[1]),
+        "p_value": float(model.pvalues[1]),
+    }
 
-naive_table = pd.DataFrame(naive_rows)
-print("Naive t-test (H0: factor mean = 0):")
+
+# %%
+naive_results = []
+for index, name in enumerate(candidate_names):
+    result = ols_hac_test(outcome_trimmed, candidates[:, index], HAC_LAGS)
+    naive_results.append({"factor": name, **result})
+
+naive_table = pl.DataFrame(naive_results).with_columns(
+    pl.col("coef", "se").round(4),
+    pl.col("t_stat").round(2),
+    pl.col("p_value").round(4),
+)
 naive_table
 
 # %% [markdown]
-# **Problem**: Many factors appear significant in isolation. But some of these
-# may be redundant — their significance disappears once you control for existing
-# factors. This is the factor zoo problem: false positives from testing one
-# factor at a time.
+# ## 5. Select controls without leaking future folds
+#
+# Each LASSO uses an expanding time-series split. Its pipeline refits the input
+# scaler, PCA basis, and control scaler on each training fold, so later observations
+# cannot change an earlier validation prediction. A fixed broad alpha grid avoids
+# using the full target series to calibrate the candidate penalties.
+
+
+# %%
+def fit_lasso_selector(target: np.ndarray, pca_inputs: np.ndarray) -> dict:
+    """Tune a fold-local PCA-LASSO pipeline and return its full-sample support."""
+    alpha_grid = np.geomspace(1e-8, 1e-2, N_ALPHAS)
+    pipeline = make_pipeline(
+        StandardScaler(),
+        PCA(n_components=N_PCA_FACTORS, random_state=SEED),
+        StandardScaler(),
+        Lasso(max_iter=20_000, random_state=SEED),
+    )
+    search = GridSearchCV(
+        pipeline,
+        {"lasso__alpha": alpha_grid},
+        cv=TimeSeriesSplit(n_splits=N_CV_SPLITS),
+        scoring="neg_mean_squared_error",
+        n_jobs=-1,
+    )
+    search.fit(pca_inputs, target)
+    coefficients = search.best_estimator_.named_steps["lasso"].coef_
+    return {
+        "selected": np.flatnonzero(np.abs(coefficients) > 1e-10),
+        "alpha": float(search.best_params_["lasso__alpha"]),
+    }
+
 
 # %% [markdown]
-# ## 4. Post-Double-Selection LASSO
-#
-# The Feng-Giglio-Xiu (2020) procedure adapted from Belloni-Chernozhukov-Hansen:
-#
-# For each candidate factor $f_{new}$, we test its marginal pricing power
-# against all other factors $\{f_1, \ldots, f_K\}$:
-#
-# 1. **Pricing LASSO**: $\hat{S}_1 = \text{LASSO}(R \sim f_1, \ldots, f_K)$ —
-#    select which existing factors best explain returns
-# 2. **Correlation LASSO**: $\hat{S}_2 = \text{LASSO}(f_{new} \sim f_1, \ldots, f_K)$ —
-#    select which existing factors predict the candidate
-# 3. **OLS on union**: $R \sim f_{new} + f_{\hat{S}_1 \cup \hat{S}_2}$ —
-#    test $f_{new}$'s coefficient with robust standard errors
-#
-# This is the DML/BCH orthogonalization applied to cross-sectional factor
-# pricing. Step 1 handles the "outcome equation" and Step 2 handles the
-# "treatment equation" — the same two-model structure as §15.3.
+# The first selection finds PCA controls that explain SPY. The second finds PCA
+# controls related to the candidate. Their union protects the candidate slope from
+# controls that one predictive equation alone might omit.
 
 
 # %%
@@ -292,221 +328,151 @@ def double_selection_test(
     outcome: np.ndarray,
     candidate: np.ndarray,
     controls: np.ndarray,
+    pca_inputs: np.ndarray,
     control_names: list[str],
-    alpha: float = 0.05,
+    hac_lags: int,
 ) -> dict:
-    """Post-double-selection LASSO test for a candidate factor.
+    """Run post-double-selection and HAC inference for one candidate slope."""
+    outcome_selection = fit_lasso_selector(outcome, pca_inputs)
+    candidate_selection = fit_lasso_selector(candidate, pca_inputs)
+    selected_union = sorted(
+        set(outcome_selection["selected"]) | set(candidate_selection["selected"])
+    )
 
-    Parameters
-    ----------
-    outcome : (T,) array — dependent variable (e.g., market return or cross-sectional return)
-    candidate : (T,) array — the factor being tested
-    controls : (T, K) array — existing factor zoo
-    control_names : list of K names
-    alpha : significance level
-
-    Returns
-    -------
-    dict with test results: coefficient, t-stat, p-value, selected controls
-    """
-    T_obs = len(outcome)
-
-    # Step 1: Pricing LASSO — which controls explain the outcome?
-    lasso_outcome = LassoCV(cv=5, max_iter=10000, random_state=SEED)
-    lasso_outcome.fit(controls, outcome)
-    selected_outcome = np.where(np.abs(lasso_outcome.coef_) > 1e-10)[0]
-
-    # Step 2: Correlation LASSO — which controls predict the candidate?
-    lasso_candidate = LassoCV(cv=5, max_iter=10000, random_state=SEED)
-    lasso_candidate.fit(controls, candidate)
-    selected_candidate = np.where(np.abs(lasso_candidate.coef_) > 1e-10)[0]
-
-    # Union of selected controls
-    selected_union = sorted(set(selected_outcome) | set(selected_candidate))
-
-    # Step 3: OLS on candidate + union of selected controls
+    final_design = candidate.reshape(-1, 1)
     if selected_union:
-        X_ols = np.column_stack([candidate, controls[:, selected_union]])
-    else:
-        X_ols = candidate.reshape(-1, 1)
-
-    ols = LinearRegression()
-    ols.fit(X_ols, outcome)
-
-    # Coefficient and standard error for the candidate (first column)
-    residuals = outcome - ols.predict(X_ols)
-    # Heteroskedasticity-robust (HC1) standard errors
-    n, k = X_ols.shape
-    leverage = X_ols @ np.linalg.pinv(X_ols.T @ X_ols) @ X_ols.T
-    hc1_var = (X_ols.T @ np.diag(residuals**2 * n / (n - k)) @ X_ols) / n**2
-    bread = np.linalg.pinv(X_ols.T @ X_ols / n)
-    sandwich = bread @ hc1_var @ bread
-    se_candidate = np.sqrt(sandwich[0, 0])
-
-    coef = ols.coef_[0]
-    t_stat = coef / se_candidate if se_candidate > 0 else 0
-    from scipy.stats import t as t_dist
-
-    p_value = 2 * (1 - t_dist.cdf(abs(t_stat), df=n - k))
+        final_design = np.column_stack([candidate, controls[:, selected_union]])
+    inference = ols_hac_test(outcome, final_design, hac_lags)
 
     return {
-        "coef": coef,
-        "se": se_candidate,
-        "t_stat": t_stat,
-        "p_value": p_value,
-        "significant": p_value < alpha,
-        "n_selected_outcome": len(selected_outcome),
-        "n_selected_candidate": len(selected_candidate),
+        **inference,
+        "n_outcome": len(outcome_selection["selected"]),
+        "n_candidate": len(candidate_selection["selected"]),
         "n_union": len(selected_union),
+        "outcome_alpha": outcome_selection["alpha"],
+        "candidate_alpha": candidate_selection["alpha"],
         "selected_names": [control_names[i] for i in selected_union],
     }
 
 
 # %% [markdown]
-# ## 5. Run Double-Selection on All Candidate Factors
-#
-# For each factor in the zoo, we test it as a "candidate" against all others.
-# This reveals which factors have genuine marginal pricing power and which
-# are redundant given the rest of the zoo.
+# ## 6. Run post-double-selection for the four candidates
 
 # %%
-# Outcome: held-out broad-market ETF (`HOLDOUT_SYMBOL`).
-outcome_return = holdout_return[60:]
-zoo_trimmed = zoo[60:]  # skip warmup period
-
-results = []
-for i, name in enumerate(zoo_names):
-    candidate = zoo_trimmed[:, i]
-    # Controls: all other factors
-    control_idx = [j for j in range(n_zoo) if j != i]
-    controls = zoo_trimmed[:, control_idx]
-    cnames = [zoo_names[j] for j in control_idx]
-
-    res = double_selection_test(
-        outcome_return, candidate, controls, cnames, alpha=SIGNIFICANCE_LEVEL
+post_results = []
+for index, name in enumerate(candidate_names):
+    result = double_selection_test(
+        outcome_trimmed,
+        candidates[:, index],
+        controls_trimmed,
+        zoo_returns_inference,
+        factor_names,
+        HAC_LAGS,
     )
-    res["factor"] = name
-    results.append(res)
+    post_results.append({"factor": name, **result})
 
-ds_table = pd.DataFrame(
-    [
-        {
-            "factor": r["factor"],
-            "coef": r["coef"],
-            "t_stat": r["t_stat"],
-            "p_value": r["p_value"],
-            "n_union": r["n_union"],
-            "survives": "YES" if r["significant"] else "",
-        }
-        for r in results
-    ]
+post_table = pl.DataFrame(post_results).select(
+    "factor",
+    pl.col("coef").round(4),
+    pl.col("se").round(4),
+    pl.col("t_stat").round(2),
+    pl.col("p_value").round(4),
+    "n_outcome",
+    "n_candidate",
+    "n_union",
 )
-print(
-    f"\nPost-Double-Selection LASSO Results — outcome: {HOLDOUT_SYMBOL} (α={SIGNIFICANCE_LEVEL}):"
-)
-ds_table
+post_table
 
 # %% [markdown]
-# ## 6. Comparison: Naive vs Double-Selection
+# ## 7. Compare uncertainty and selection breadth
+#
+# The left panel compares the same SPY loading before and after PCA conditioning;
+# error bars are Newey-West 95% intervals. The right panel shows how many of the ten
+# PCA controls enter the post-selection union.
 
 # %%
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+factor_positions = np.arange(len(candidate_names))
+naive_coef = np.array([result["coef"] for result in naive_results])
+naive_se = np.array([result["se"] for result in naive_results])
+post_coef = np.array([result["coef"] for result in post_results])
+post_se = np.array([result["se"] for result in post_results])
+union_size = np.array([result["n_union"] for result in post_results])
+figure_subtitle = (
+    f"HAC estimates; {N}-ETF factor zoo; {return_wide['timestamp'].min()} "
+    f"to {return_wide['timestamp'].max()}"
+)
 
-# Panel (a): Naive t-statistics
-naive_tstats = []
-for i in range(n_zoo):
-    series = zoo_trimmed[:, i]
-    t_stat, _ = ttest_1samp(series, 0)
-    naive_tstats.append(t_stat)
+# %% [markdown]
+# The coefficient panel uses position and marker shape as well as color, so the
+# comparison remains legible in grayscale. The selection bars start at zero.
 
-ax = axes[0]
-colors_naive = [COLORS["blue"] if abs(t) > 1.96 else "#94a3b8" for t in naive_tstats]
-ax.barh(range(n_zoo), naive_tstats, color=colors_naive, alpha=0.8)
-ax.axvline(-1.96, color="gray", linestyle="--", alpha=0.5)
-ax.axvline(1.96, color="gray", linestyle="--", alpha=0.5, label="±1.96")
-ax.set_yticks(range(n_zoo))
-ax.set_yticklabels(zoo_names, fontsize=8)
-ax.set_xlabel("t-statistic")
-ax.set_title("(a) Naive: Factor Mean ≠ 0?")
-ax.legend(fontsize=8)
-ax.invert_yaxis()
+# %%
+fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"], sharey=True)
 
-# Panel (b): Double-selection t-statistics
-ds_tstats = [r["t_stat"] for r in results]
-colors_ds = [COLORS["blue"] if r["significant"] else "#94a3b8" for r in results]
-ax = axes[1]
-ax.barh(range(n_zoo), ds_tstats, color=colors_ds, alpha=0.8)
-ax.axvline(-1.96, color="gray", linestyle="--", alpha=0.5)
-ax.axvline(1.96, color="gray", linestyle="--", alpha=0.5, label="±1.96")
-ax.set_yticks(range(n_zoo))
-ax.set_yticklabels(zoo_names, fontsize=8)
-ax.set_xlabel("t-statistic (HC1)")
-ax.set_title("(b) Double-Selection: Marginal Pricing Power?")
-ax.legend(fontsize=8)
-ax.invert_yaxis()
+axes[0].errorbar(
+    naive_coef,
+    factor_positions - 0.12,
+    xerr=1.96 * naive_se,
+    fmt="o",
+    color=COLORS["neutral"],
+    capsize=3,
+    label="Naive",
+)
+axes[0].errorbar(
+    post_coef,
+    factor_positions + 0.12,
+    xerr=1.96 * post_se,
+    fmt="s",
+    color=COLORS["blue"],
+    capsize=3,
+    label="Post-double-selection",
+)
+zero_line(axes[0], axis="x")
+axes[0].set_yticks(factor_positions, candidate_names)
+axes[0].set_xlabel("SPY loading (slope)")
+_ = axes[0].legend(loc="best")
 
-fig.suptitle("Factor Zoo Validation: Naive vs Post-Double-Selection LASSO", y=1.02)
-fig.tight_layout()
+axes[1].barh(factor_positions, union_size, color=COLORS["blue"], alpha=0.85)
+axes[1].set_xlim(0, N_PCA_FACTORS)
+axes[1].set_xlabel("Selected PCA controls (count)")
+axes[1].invert_yaxis()
+
+add_message_title(
+    axes[0],
+    "PCA controls erase naive SPY loadings",
+    subtitle=figure_subtitle,
+)
 fig.show()
 
 # %% [markdown]
-# **Finding**: Panels (a) and (b) test different null hypotheses. Panel (a)
-# asks whether each factor's *time-series mean* is non-zero — a question
-# about expected return. Panel (b) asks whether each factor has *marginal
-# pricing power for `HOLDOUT_SYMBOL`* after orthogonalizing against the rest
-# of the zoo. Most PCA factors retain large t-stats in panel (b): the
-# held-out broad-market ETF is well approximated by a low-rank projection
-# onto the 99-ETF panel, so every principal component carries a distinct
-# (and statistically detectable) loading. The managed-portfolio candidates
-# (`Mom_20d`, `Mom_60d`, `MeanRev`) instead collapse to insignificance once
-# orthogonalized against the PCA basis — they do not add information beyond
-# what the unsupervised decomposition already captures. `LowVol` is the lone
-# managed-portfolio survivor, picking up a defensive-tilt residual that is
-# not spanned by the leading PCs.
+# **Interpretation**: the naive slopes mix each managed factor's association with
+# SPY and its correlation with broad co-movement. Once the PCA basis enters, the
+# coefficient magnitudes contract toward zero and their HAC intervals include zero.
+# The outcome-selection LASSO retains the full ten-component basis, so this
+# low-dimensional example effectively becomes a conservative all-PC spanning test.
+#
+# This is not a direct replication of Feng, Giglio, and Xiu (2020). Their target is
+# a cross-sectional SDF loading estimated from many test assets. Here the target is
+# a conditional time-series loading for one disjoint ETF, which isolates the
+# post-double-selection mechanics without claiming an SDF or causal estimand.
 
 # %% [markdown]
-# ## 7. Which Controls Were Selected?
+# ## Key takeaways
 #
-# The LASSO selection pattern reveals the structure of the factor zoo. If the
-# pricing LASSO and correlation LASSO select similar controls, the candidate
-# is entangled with the zoo. If they select different controls, the candidate
-# captures a distinct dimension.
-
-# %%
-for r in results:
-    if r["n_union"] > 0:
-        print(
-            f"{r['factor']:>10}: {r['n_union']} controls selected → {', '.join(r['selected_names'][:5])}"
-        )
-
-# %% [markdown]
-# ## Key Takeaways
+# 1. **Compare like with like**: both columns test the SPY loading on a candidate;
+#    the conditional version differs only by the selected PCA controls.
+# 2. **Temporal validation matters inside selection**: expanding folds and
+#    fold-local scaling and PCA keep later observations out of earlier validation.
+# 3. **Serial dependence changes uncertainty**: intercept-inclusive Newey-West
+#    inference replaces both IID mean tests and a manual HC1 calculation.
+# 4. **Missing data are part of the estimand**: the analysis uses a balanced
+#    long-history panel instead of converting pre-inception observations to zeros.
+# 5. **Scope remains limited**: the coefficients are in-sample associations,
+#    conditional on estimated PCs and a current curated ETF universe. Cross-sectional
+#    SDF inference and point-in-time asset-pricing validation require a richer design.
 #
-# 1. **Naive factor testing overstates significance** because it ignores
-#    correlations with existing factors (omitted variable bias)
-# 2. **Post-double-selection LASSO** (Feng, Giglio, and Xiu 2020) is a
-#    special case of the DML framework (§15.3): two LASSO models handle the
-#    outcome and treatment equations, then OLS tests the candidate on the
-#    union of selected controls
-# 3. **The procedure is conservative**: it controls for the hardest confounders
-#    (those that correlate with both returns AND the candidate)
-# 4. **Implementation requires only sklearn + statsmodels**: `LassoCV` for
-#    selection, `LinearRegression` for the final test, HC1 standard errors
-#    for robust inference
-# 5. **The results are data-dependent**: with a held-out broad-market ETF
-#    as the outcome and PCA factors built from the rest of the universe,
-#    most PCs retain pricing power because the held-out asset is nearly
-#    spanned by the panel. Among the managed-portfolio candidates only the
-#    low-volatility tilt survives — momentum and mean-reversion variants
-#    lose significance once the procedure orthogonalizes them against the
-#    principal-component basis
-#
-# **Connection to §15.3**: The double-selection procedure is the BCH (2014)
-# precursor to DML. Where DML uses cross-fitting for general ML nuisance
-# models, post-double-selection uses LASSO's built-in sparsity for variable
-# selection. Both solve the same problem: removing confounding bias from
-# high-dimensional settings.
-#
-# **Back to Chapter 14**: This validates the "Taming the Factor Zoo" discussion
-# in §14.5. Any new latent factor discovered via IPCA, CAE, or SDF should be
-# tested with this procedure before being deployed in production.
+# **Connection to Section 15.3**: post-double-selection protects one target
+# coefficient by taking the union of controls predictive of the outcome and of the
+# focal factor. The next step for a production study would add a point-in-time
+# universe, cross-sectional test assets, and inference designed for estimated SDF
+# loadings.

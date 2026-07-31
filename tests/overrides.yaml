@@ -788,12 +788,15 @@
 19_risk_management/04_factor_exposure:
   timeout: 300
 19_risk_management/05_trade_shap_diagnostics:
+  gpu: true
   timeout: 300
 19_risk_management/06_stress_testing:
   timeout: 300
 19_risk_management/07_drift_detection:
+  gpu: true
   timeout: 300
 19_risk_management/08_ml_exit_signals:
+  gpu: true
   timeout: 300
 19_risk_management/09_deep_hedging:
   gpu: true

@@ -18,7 +18,7 @@
 #
 # **Docker image**: `ml4t`
 #
-# **Book Reference**: Chapter 16, §16.7 — strategy-level overfitting control.
+# **Book Reference**: Chapter 16, §16.7 - strategy-level overfitting control.
 #
 # This notebook demonstrates comprehensive **backtest validation using the Deflated Sharpe Ratio (DSR)** from `ml4t-diagnostic`.
 #
@@ -26,15 +26,15 @@
 #
 # 1. **Selection Bias Correction**: Adjust for multiple strategy testing
 # 2. **Non-Normality Adjustments**: Account for skewness and kurtosis
-# 3. **Probabilistic Interpretation**: Probability of true skill vs luck
+# 3. **Probabilistic Interpretation**: One-sided evidence against a selection benchmark
 # 4. **Practical Thresholds**: When is a Sharpe ratio statistically significant?
 #
 # ## The Multiple Testing Problem
 #
 # When we test N strategies and pick the best:
 # - **Expected max Sharpe under null**: E[max(SR₁,...,SRₙ)] ≈ √(2 log N) × σ_SR
-# - **Sharpe of 1.5 from testing 100 strategies**: Likely due to luck alone
-# - **DSR corrects**: Probability that true Sharpe > 0 after accounting for trials
+# - **A selected Sharpe can be misleading**: Its null benchmark rises with the trial count
+# - **DSR corrects**: Tests the observed Sharpe against a trial-adjusted benchmark
 #
 # ## References
 #
@@ -42,9 +42,10 @@
 # - López de Prado, M. (2018). "Advances in Financial Machine Learning", Ch. 14
 
 # %%
-"""Deflated Sharpe Ratio Validation — correct for selection bias and non-normality in backtest evaluation."""
+"""Validate Sharpe-ratio corrections for selection bias and non-normal returns."""
 
 import os
+from itertools import combinations
 
 import numpy as np
 import plotly.graph_objects as go
@@ -60,9 +61,10 @@ from scipy import stats
 
 import utils  # noqa: F401
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS, ml4t_diverging
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides after this cell
+# Production defaults - Papermill injects overrides after this cell
 N_SIMULATIONS = 10000
 SEED = 42
 
@@ -84,7 +86,47 @@ def show_plot(fig: go.Figure) -> None:
 # ### Deflated Sharpe Ratio Helper
 #
 # A self-contained DSR implementation for demonstrating the math
-# step by step — the production helper in `ml4t-diagnostic` is compared below.
+# step by step. The production helper in `ml4t-diagnostic` is compared below.
+
+
+# %%
+def _expected_max_sharpe(variance_trials: float, n_trials: int) -> float:
+    """Expected maximum trial Sharpe in its native sampling frequency."""
+    if n_trials <= 1 or variance_trials <= 0:
+        return 0.0
+    z1 = stats.norm.ppf(1.0 - (1.0 / n_trials))
+    z2 = stats.norm.ppf(1.0 - (np.exp(-1.0) / n_trials))
+    weight = (1.0 - EULER_MASCHERONI) * z1 + EULER_MASCHERONI * z2
+    return float(np.sqrt(variance_trials) * weight)
+
+
+# %% [markdown]
+# Format the DSR components on the annualized reporting scale.
+
+
+# %%
+def _format_dsr_result(
+    probability: float,
+    z_score: float,
+    expected_max: float,
+    annualizer: float,
+    observed_sharpe: float,
+    confidence_level: float,
+) -> dict[str, float | bool]:
+    """Expose DSR components on the annualized scale used by the notebook."""
+    expected_max_annual = expected_max * annualizer
+    return {
+        "dsr": probability,
+        "z_score": z_score,
+        "p_value": 1.0 - probability,
+        "expected_max_sharpe": expected_max_annual,
+        "adjusted_sharpe": observed_sharpe - expected_max_annual,
+        "is_significant": probability >= confidence_level,
+    }
+
+
+# %% [markdown]
+# Compute the deflated Sharpe ratio from annualized inputs and native observations.
 
 
 # %%
@@ -98,58 +140,30 @@ def deflated_sharpe_ratio(
     confidence_level: float = 0.95,
     return_format: str = "probability",
     return_components: bool = False,
+    periods_per_year: int = 252,
 ) -> float | dict[str, float | bool]:
-    """Step-by-step DSR helper preserved for pedagogical exposition.
-
-    Expects `observed_sharpe` and `variance_trials` to be expressed in the
-    *same* time unit as `n_samples` (e.g., annualized values with `n_samples`
-    counting trading years). The library helper
-    `ml4t.diagnostic.evaluation.stats.deflated_sharpe_ratio_from_statistics`
-    operates on native-frequency inputs; the Library Comparison below
-    converts annualized → native by dividing Sharpe and variance by 252.
-    Use the library for production numerical claims; this helper exists
-    only so the chapter can walk through each component of the formula.
-    """
-    if n_trials <= 1 or variance_trials <= 0:
-        expected_max = 0.0
-    else:
-        z1 = stats.norm.ppf(1.0 - (1.0 / n_trials))
-        z2 = stats.norm.ppf(1.0 - (np.exp(-1.0) / n_trials))
-        expected_max = np.sqrt(max(variance_trials, 0.0)) * (
-            (1.0 - EULER_MASCHERONI) * z1 + EULER_MASCHERONI * z2
-        )
-
-    denom = np.sqrt(
-        max(
-            1.0 - skewness * observed_sharpe + ((kurtosis - 1.0) / 4.0) * observed_sharpe**2,
-            1e-12,
-        )
-    )
-    z_score = ((observed_sharpe - expected_max) * np.sqrt(max(n_samples - 1, 1))) / denom
+    """Compute DSR from annualized Sharpe statistics and native observations."""
+    annualizer = np.sqrt(periods_per_year)
+    observed_native = observed_sharpe / annualizer
+    variance_native = max(variance_trials, 0.0) / periods_per_year
+    expected_max = _expected_max_sharpe(variance_native, n_trials)
+    variance = 1.0 - skewness * observed_native + ((kurtosis - 1.0) / 4.0) * observed_native**2
+    denominator = np.sqrt(max(variance, 1e-12))
+    z_score = (observed_native - expected_max) * np.sqrt(max(n_samples - 1, 1)) / denominator
     probability = float(stats.norm.cdf(z_score))
-    p_value = float(1.0 - probability)
-    adjusted_sharpe = float(observed_sharpe - expected_max)
-
+    components = _format_dsr_result(
+        probability, float(z_score), expected_max, annualizer, observed_sharpe, confidence_level
+    )
     if return_components:
-        return {
-            "dsr": probability,
-            "z_score": float(z_score),
-            "p_value": p_value,
-            "expected_max_sharpe": float(expected_max),
-            "adjusted_sharpe": adjusted_sharpe,
-            "is_significant": probability >= confidence_level,
-        }
-
+        return components
     if return_format == "probability":
         return probability
     if return_format == "zscore":
         return float(z_score)
-    if return_format == "adjusted_sharpe":
-        return adjusted_sharpe
-    if return_format == "adjusted":
-        return adjusted_sharpe
+    if return_format in {"adjusted_sharpe", "adjusted"}:
+        return float(components["adjusted_sharpe"])
     if return_format == "p_value":
-        return p_value
+        return float(components["p_value"])
     raise ValueError(f"Unknown return_format: {return_format}")
 
 
@@ -158,18 +172,19 @@ def deflated_sharpe_ratio(
 #
 # The implementation above shows the math explicitly. In practice (and in the
 # case study notebooks), we use `ml4t-diagnostic` directly. The library is not
-# a drop-in match for the bare formula above: it operates on native-frequency
-# inputs and adds an autocorrelation correction plus a minimum-track-record
-# (MinTRL) check, so its probability differs from the pedagogical helper below.
-# Use the library for production numbers; the helper is for walking through the
-# formula.
+# a drop-in match for the bare formula above. It rescales the cross-trial Sharpe
+# variance with its finite-sample multiple-trial convention and evaluates the
+# non-normal variance at the adjusted benchmark. It also supports autocorrelation
+# and returns a minimum-track-record (MinTRL) diagnostic. The local helper uses
+# the observed Sharpe in the non-normal variance term to expose the paper's
+# equation directly.
 
 # %%
 from ml4t.diagnostic.evaluation.stats import (
     deflated_sharpe_ratio_from_statistics,
 )
 
-# Quick equivalence test with known parameters
+# Fixed-input comparison of the two documented conventions.
 _test_sr, _test_skew, _test_kurt, _test_n = 1.5, -0.3, 4.0, 252
 _test_trials, _test_var = 50, 0.5
 
@@ -195,7 +210,7 @@ _lib_result = deflated_sharpe_ratio_from_statistics(
 print("=== Library Comparison ===")
 print(f"Local DSR probability:   {_local_prob:.4f}")
 print(f"Library DSR probability: {_lib_result.probability:.4f}")
-print("\nThe library adds autocorrelation correction and MinTRL in a single call:")
+print("\nThe library also supports autocorrelation and returns MinTRL:")
 print(f"  Min track record:      {_lib_result.min_trl_years:.1f} years")
 print(f"  Adequate sample:       {_lib_result.has_adequate_sample}")
 print("\nIn practice, use the library:")
@@ -216,33 +231,15 @@ def probabilistic_sharpe_ratio(
     n_observations: int = 252,
     skewness: float = 0.0,
     kurtosis: float = 3.0,
+    periods_per_year: int = 252,
 ) -> float:
-    """
-    Compute the Probabilistic Sharpe Ratio (PSR).
-
-    PSR is the probability that the true Sharpe ratio is greater than the benchmark,
-    given the observed Sharpe ratio and return distribution characteristics.
-
-    Args:
-        observed_sr: Observed Sharpe ratio
-        benchmark_sr: Benchmark Sharpe ratio (default 0)
-        n_observations: Number of return observations
-        skewness: Return distribution skewness
-        kurtosis: Return distribution kurtosis (excess kurtosis + 3)
-
-    Returns:
-        Probability that true SR > benchmark SR
-    """
-    # Standard error of Sharpe ratio (Lo, 2002)
-    se_sr = np.sqrt(
-        (1 + 0.5 * observed_sr**2 - skewness * observed_sr + ((kurtosis - 3) / 4) * observed_sr**2)
-        / (n_observations - 1)
-    )
-
-    # Z-score
-    z = (observed_sr - benchmark_sr) / se_sr
-
-    # Probability
+    """Compute PSR from annualized Sharpes and native-frequency observations."""
+    annualizer = np.sqrt(periods_per_year)
+    observed_native = observed_sr / annualizer
+    benchmark_native = benchmark_sr / annualizer
+    variance = 1.0 - skewness * observed_native + ((kurtosis - 1.0) / 4.0) * observed_native**2
+    se_sr = np.sqrt(max(variance, 1e-12) / max(n_observations - 1, 1))
+    z = (observed_native - benchmark_native) / se_sr
     return float(stats.norm.cdf(z))
 
 
@@ -256,7 +253,11 @@ np.random.seed(42)
 # 2. **Non-normality**: Skewed/fat-tailed returns inflate Sharpe
 # 3. **Variance of trials**: High variance among tested strategies
 #
-# $$DSR = P\left(SR^* > 0 \mid \hat{SR}, \sigma^2_{\hat{SR}}, K\right)$$
+# $$DSR = \Phi\!\left(\frac{(\widehat{SR}-SR_0^*)\sqrt{T-1}}
+# {\sqrt{1-\gamma_3\widehat{SR}+\frac{\gamma_4-1}{4}\widehat{SR}^{\,2}}}\right)$$
+#
+# The Sharpe quantities in this expression use the return series' native
+# frequency. The helper accepts annualized Sharpes and converts them internally.
 
 
 # %%
@@ -273,7 +274,7 @@ def demonstrate_selection_bias(n_strategies: int = 100, n_periods: int = 252) ->
     for _ in range(n_strategies):
         # Generate random returns (no edge)
         returns = np.random.normal(0, 0.01, n_periods)
-        sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252)
+        sharpe = np.mean(returns) / np.std(returns, ddof=1) * np.sqrt(252)
         all_sharpes.append(sharpe)
 
     all_sharpes = np.array(all_sharpes)
@@ -282,8 +283,8 @@ def demonstrate_selection_bias(n_strategies: int = 100, n_periods: int = 252) ->
         "mean_sharpe": np.mean(all_sharpes),
         "max_sharpe": np.max(all_sharpes),
         "min_sharpe": np.min(all_sharpes),
-        "std_sharpe": np.std(all_sharpes),
-        "expected_max_theory": np.sqrt(2 * np.log(n_strategies)),  # Approximation
+        "std_sharpe": np.std(all_sharpes, ddof=1),
+        "expected_max_theory": np.sqrt(252 / n_periods) * np.sqrt(2 * np.log(n_strategies)),
         "all_sharpes": all_sharpes,
     }
 
@@ -310,22 +311,27 @@ fig.add_trace(
         x=results["all_sharpes"],
         nbinsx=30,
         name="Observed Sharpes",
-        marker_color="steelblue",
+        marker_color=COLORS["blue"],
         opacity=0.7,
     )
 )
 
 # Add markers
-fig.add_vline(x=0, line_dash="dash", line_color="gray", annotation_text="True SR=0")
+fig.add_vline(
+    x=0,
+    line_dash="dash",
+    line_color=COLORS["neutral"],
+    annotation_text="True SR=0",
+)
 fig.add_vline(
     x=results["max_sharpe"],
     line_dash="dash",
-    line_color="red",
+    line_color=COLORS["negative"],
     annotation_text=f"Max={results['max_sharpe']:.2f}",
 )
 
 fig.update_layout(
-    title="Distribution of Sharpe Ratios from 100 Zero-Skill Strategies",
+    title=f"Best of 100 null strategies reaches {results['max_sharpe']:.2f} Sharpe",
     xaxis_title="Observed Sharpe Ratio",
     yaxis_title="Count",
     height=400,
@@ -347,11 +353,8 @@ daily_vol = 0.01
 daily_mean = (target_sharpe * daily_vol) / np.sqrt(252)
 returns = np.random.normal(daily_mean, daily_vol, n_periods)
 
-# Add some skewness and kurtosis (realistic)
-returns = returns + 0.01 * (returns**2)  # Slight positive skew
-
 # Calculate statistics
-observed_sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252)
+observed_sharpe = np.mean(returns) / np.std(returns, ddof=1) * np.sqrt(252)
 skewness = stats.skew(returns)
 kurtosis = stats.kurtosis(returns) + 3  # Excess to raw kurtosis
 
@@ -384,7 +387,7 @@ for k in trials_list:
 dsr_df = pl.DataFrame(dsr_results)
 
 # %% [markdown]
-# **DSR vs number of trials** (multiple-testing haircut — same observed Sharpe,
+# **DSR vs number of trials** (multiple-testing haircut: same observed Sharpe,
 # more trials means a higher null bound and a lower DSR):
 
 # %%
@@ -393,26 +396,34 @@ dsr_df
 # %%
 # Visualize DSR decay with number of trials
 fig = go.Figure()
-
 fig.add_trace(
     go.Scatter(
         x=dsr_df.get_column("n_trials").to_list(),
         y=(dsr_df.get_column("dsr_probability") * 100).to_list(),
         mode="lines+markers",
         name="DSR Probability",
-        line={"color": "blue", "width": 2},
-        marker={"size": 10},
+        line={"color": COLORS["blue"], "width": 2},
     )
 )
-
-# Add significance threshold
-fig.add_hline(y=95, line_dash="dash", line_color="green", annotation_text="95% Confidence")
-fig.add_hline(y=50, line_dash="dash", line_color="red", annotation_text="50-50 Chance")
-
+fig.add_hline(
+    y=95,
+    line_dash="dash",
+    line_color=COLORS["positive"],
+    annotation_text="95% confidence",
+)
+fig.add_hline(
+    y=50,
+    line_dash="dash",
+    line_color=COLORS["negative"],
+    annotation_text="50-50 chance",
+)
 fig.update_layout(
-    title=f"Deflated Sharpe Ratio vs Number of Trials (Observed SR={observed_sharpe:.2f})",
+    title=(
+        f"DSR falls from {dsr_df['dsr_probability'][0]:.0%} to "
+        f"{dsr_df['dsr_probability'][-1]:.0%} as trials rise"
+    ),
     xaxis_title="Number of Strategies Tested",
-    yaxis_title="Probability of True Skill (%)",
+    yaxis_title="DSR probability (%)",
     xaxis_type="log",
     height=500,
 )
@@ -430,46 +441,23 @@ show_plot(fig)
 # The DSR function supports multiple output formats for different use cases.
 
 # %%
-# Test different output formats
-k = 50  # 50 strategies tested
-
-# Probability format
-dsr_prob = deflated_sharpe_ratio(
-    observed_sharpe=observed_sharpe,
-    skewness=skewness,
-    kurtosis=kurtosis,
-    n_samples=n_periods,
-    n_trials=k,
-    variance_trials=variance_trials,
-    return_format="probability",
-)
-
-# Z-score format
-dsr_zscore = deflated_sharpe_ratio(
-    observed_sharpe=observed_sharpe,
-    skewness=skewness,
-    kurtosis=kurtosis,
-    n_samples=n_periods,
-    n_trials=k,
-    variance_trials=variance_trials,
-    return_format="zscore",
-)
-
-# Adjusted Sharpe format
-dsr_adjusted = deflated_sharpe_ratio(
-    observed_sharpe=observed_sharpe,
-    skewness=skewness,
-    kurtosis=kurtosis,
-    n_samples=n_periods,
-    n_trials=k,
-    variance_trials=variance_trials,
-    return_format="adjusted",
-)
+k = 50
+dsr_inputs = {
+    "observed_sharpe": observed_sharpe,
+    "skewness": skewness,
+    "kurtosis": kurtosis,
+    "n_samples": n_periods,
+    "n_trials": k,
+    "variance_trials": variance_trials,
+}
+dsr_prob = deflated_sharpe_ratio(**dsr_inputs, return_format="probability")
+dsr_zscore = deflated_sharpe_ratio(**dsr_inputs, return_format="zscore")
+dsr_adjusted = deflated_sharpe_ratio(**dsr_inputs, return_format="adjusted")
 
 print("=" * 60)
 print(f"DSR RESULTS (Observed SR={observed_sharpe:.3f}, K={k} trials)")
 print("=" * 60)
-print(f"\nProbability of true skill: {dsr_prob:.1%}")
+print(f"\nProbability above the selection benchmark: {dsr_prob:.1%}")
 print(f"Z-score: {dsr_zscore:.3f}")
 print(f"Adjusted Sharpe: {dsr_adjusted:.3f}")
 
@@ -519,7 +507,7 @@ fig = go.Figure(
         z=z_values,
         x=[f"k={k}" for k in kurt_cols],
         y=[f"s={s:.1f}" for s in skew_col],
-        colorscale="RdYlGn",
+        colorscale=ml4t_diverging(),
         colorbar={"title": "DSR %"},
         text=np.round(z_values, 1),
         texttemplate="%{text}%",
@@ -528,7 +516,7 @@ fig = go.Figure(
 )
 
 fig.update_layout(
-    title="DSR Probability vs Skewness and Kurtosis (SR=1.5, K=50)",
+    title=f"Sub-50% DSR shifts only {z_values.max() - z_values.min():.1f} pp across moments",
     xaxis_title="Kurtosis",
     yaxis_title="Skewness",
     height=400,
@@ -539,53 +527,38 @@ show_plot(fig)
 # ## 5. Synthetic Sweep: Selecting the Best of 30 Variants
 #
 # **Scope**: this section demonstrates the DSR adjustment on a *synthetic* set of
-# 30 strategy variants drawn from `np.random.normal` around a known true Sharpe
-# of 0.5. No ETF prices are loaded and no momentum signal is computed; the input
-# is parametric return draws over 504 days. The point is to show how the DSR
-# correction shrinks the observed Sharpe of the best-of-30 variant back toward
-# the true Sharpe. For the real-data ETF momentum sweep wired through
+# 30 strategy variants with the same known true Sharpe of 0.5. No ETF prices are
+# loaded and no momentum signal is computed; the input is parametric return draws
+# over 504 days. The point is to show how selecting the largest observed Sharpe
+# raises the relevant null benchmark. For the real-data ETF momentum sweep in
 # `case_studies/etfs/14_backtest.py` and the cohort-level DSR computation, see
 # the Ch16 helper `_etf_baseline.py` and `case_studies/etfs/18_strategy_analysis.py`.
 
 # %%
-# Generate 30 synthetic strategy variants with a known true Sharpe of 0.5.
-n_variants = 30  # 30 parameter combinations sampled
-
-# Returns are np.random.normal draws around the true Sharpe; no real data is used.
+# Generate 30 synthetic variants that share the same true Sharpe.
+n_variants = 30
 true_sharpe = 0.5
-n_periods = 504  # 2 years
+n_periods = 504
+daily_vol = 0.015
+daily_mean = true_sharpe * daily_vol / np.sqrt(252)
 
 variant_results = []
+variant_returns = np.empty((n_periods, n_variants))
 
 for i in range(n_variants):
-    # Add noise around true Sharpe
-    variant_sharpe = true_sharpe + np.random.normal(0, 0.3)
-
-    # Generate returns
-    daily_vol = 0.015
-    daily_mean = (variant_sharpe * daily_vol) / np.sqrt(252)
-    returns = np.random.normal(daily_mean, daily_vol, n_periods)
-
-    # Add realistic non-normality
-    returns = returns - 0.02 * (returns**2)  # Slight negative skew (typical)
-
-    obs_sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252)
-    skew = stats.skew(returns)
-    kurt = stats.kurtosis(returns) + 3
-
+    candidate_returns = np.random.normal(daily_mean, daily_vol, n_periods)
+    variant_returns[:, i] = candidate_returns
+    obs_sharpe = candidate_returns.mean() / candidate_returns.std(ddof=1) * np.sqrt(252)
     variant_results.append(
         {
             "variant": i + 1,
             "observed_sharpe": obs_sharpe,
-            "skewness": skew,
-            "kurtosis": kurt,
-            "returns": returns,
+            "skewness": stats.skew(candidate_returns),
+            "kurtosis": stats.kurtosis(candidate_returns) + 3,
         }
     )
 
 variants_df = pl.DataFrame(variant_results)
-
-# Select the best variant (Polars doesn't have idxmax, use filter)
 best = variants_df.filter(pl.col("observed_sharpe") == pl.col("observed_sharpe").max()).row(
     0, named=True
 )
@@ -629,7 +602,7 @@ print(f"\nBest variant Sharpe: {best['observed_sharpe']:.3f}")
 print("\nWithout multiple-testing correction (PSR):")
 print(f"  Probability SR > 0: {psr_best:.1%}")
 print("\nWith multiple-testing correction (DSR):")
-print(f"  Probability SR > 0: {dsr_best:.1%}")
+print(f"  Probability above selection benchmark: {dsr_best:.1%}")
 print(f"\n{'SIGNIFICANT' if dsr_best > 0.95 else 'NOT SIGNIFICANT'} at 95% confidence")
 
 # %% [markdown]
@@ -637,16 +610,15 @@ print(f"\n{'SIGNIFICANT' if dsr_best > 0.95 else 'NOT SIGNIFICANT'} at 95% confi
 #
 # Both DSR and RAS address backtest overfitting, but from different perspectives:
 # - **DSR**: Multiple testing correction (how many strategies tested?)
-# - **RAS**: Complexity penalty (how complex is the strategy?)
+# - **RAS**: Complexity penalty (how readily the candidate return class fits random signs)
 
 # %%
-# Compare DSR and RAS adjustments
-# Assume we have feature matrix X for computing Rademacher complexity
-n_features = 10
-X = np.random.randn(n_periods, n_features)
-
-# Compute Rademacher complexity
-R_hat = rademacher_complexity(X, n_simulations=1000)
+# Compute complexity from the same candidate return class selected above.
+R_hat = rademacher_complexity(
+    variant_returns,
+    n_simulations=1000,
+    random_state=SEED,
+)
 
 # Apply RAS adjustment (expects array input)
 ras_adjusted = ras_sharpe_adjustment(
@@ -677,7 +649,7 @@ print(f"RAS Adjusted Sharpe: {ras_adjusted:.3f}")
 print(f"\nRademacher Complexity: {R_hat:.4f}")
 print("\nInterpretation:")
 print(f"  DSR penalizes for {n_variants} trials tested")
-print(f"  RAS penalizes for strategy complexity (R={R_hat:.4f})")
+print(f"  RAS penalizes the candidate return class (R={R_hat:.4f})")
 
 # %%
 # Visualize adjustments across range of observed Sharpes
@@ -711,39 +683,39 @@ for sr in observed_range:
 # %%
 # Plot DSR vs RAS adjustments
 fig = go.Figure()
-
 fig.add_trace(
     go.Scatter(
         x=observed_range,
         y=observed_range,
         mode="lines",
         name="Observed (no adjustment)",
-        line={"dash": "dash", "color": "gray"},
+        line={"dash": "dash", "color": COLORS["neutral"]},
     )
 )
-
 fig.add_trace(
     go.Scatter(
         x=observed_range,
         y=dsr_adjusted_list,
         mode="lines+markers",
         name="DSR Adjusted",
-        line={"color": "blue"},
+        line={"color": COLORS["blue"]},
     )
 )
-
 fig.add_trace(
     go.Scatter(
         x=observed_range,
         y=ras_adjusted_list,
         mode="lines+markers",
         name="RAS Adjusted",
-        line={"color": "red"},
+        line={"color": COLORS["amber"]},
     )
 )
 
 fig.update_layout(
-    title="DSR vs RAS Sharpe Adjustments",
+    title=(
+        f"At SR {observed_range[-1]:.1f}, DSR retains {dsr_adjusted_list[-1]:.2f} "
+        f"vs RAS {ras_adjusted_list[-1]:.2f}"
+    ),
     xaxis_title="Observed Sharpe Ratio",
     yaxis_title="Adjusted Sharpe Ratio",
     height=500,
@@ -765,12 +737,9 @@ show_plot(fig)
 #
 # ### Minimum Sharpe Thresholds (After Adjustment)
 #
-# | Trials | Minimum DSR-Adjusted Sharpe for 95% Confidence |
-# |--------|------------------------------------------------|
-# | 10 | ~0.8 |
-# | 50 | ~1.2 |
-# | 100 | ~1.5 |
-# | 500 | ~2.0 |
+# The required observed Sharpe is not a universal lookup value. It depends on
+# sample length, trial dispersion, skewness, and kurtosis. The calculation below
+# holds those assumptions fixed and solves the threshold for each trial count.
 
 # %%
 # Compute minimum Sharpe for significance at different trial counts
@@ -811,121 +780,145 @@ min_sharpe_df
 # %% [markdown]
 # ## 8. Probability of Backtest Overfitting (PBO)
 #
-# PBO complements DSR by asking a *selection-process* question: if we split
-# data into K folds and pick the in-sample best strategy in each fold, how
-# often does that strategy rank in the bottom half **out-of-sample**?
+# PBO complements DSR with a *selection-process* question. After partitioning
+# observations into an even number of blocks, combinatorial symmetric
+# cross-validation (CSCV) assigns half the blocks to IS and the complement to
+# OOS. How often does the IS winner rank in the bottom half OOS?
 #
-# Concretely, PBO operates on a $(K, N)$ matrix of *fold-level Sharpe ratios*
-# — one IS-Sharpe and one OOS-Sharpe per (fold, strategy) cell. Each cell
-# must be computed from an actual return series; an abstract `randn` performance
-# matrix cannot be used because PBO's diagnostic value depends on the IS/OOS
-# Sharpes having the right joint distribution under the truth.
+# Each row of the input matrices must represent one complementary CSCV split,
+# and each cell must be computed from the corresponding strategy return series.
+# Independent random IS/OOS score matrices do not implement this mechanism.
 #
 # We construct two diagnostic scenarios using real simulated return series:
 #
 # 1. **All-noise universe.** Every candidate has true SR = 0. Selection on the
-#    in-sample maximum is selection on noise; PBO should be near 50%.
+#    in-sample maximum is selection on noise.
 # 2. **Mixed universe.** A handful of candidates have a real edge; the rest are
-#    noise. The truly skilled candidates show up in both IS and OOS; PBO
-#    should fall well below 50%.
+#    noise. Stable candidates can retain an advantage in both IS and OOS.
 
 # %%
 from ml4t.diagnostic.evaluation.stats import compute_pbo
 
-PBO_PERIODS_PER_FOLD = 504  # 2 years per IS half (and 2y per OOS half)
-N_FOLDS = 20  # more folds tighten the PBO estimator
+PBO_OBSERVATIONS = 4800
+N_BLOCKS = 10
 N_STRATEGIES = 20
-PBO_TRUE_SR_SIGNAL = 1.5  # large enough that signal/noise separate over PBO_PERIODS_PER_FOLD
+PBO_TRUE_SR_SIGNAL = 1.5
+DSR_PASS_THRESHOLD = 0.95
+PBO_REJECT_THRESHOLD = 0.25
+
+
+# %% [markdown]
+# Simulate candidate return histories for the DSR and PBO comparison.
 
 
 # %%
-def simulate_fold_sharpes(
-    n_folds: int,
-    n_strategies: int,
-    n_periods_per_fold: int,
+def simulate_strategy_returns(
     true_sr_by_strategy: np.ndarray,
+    n_observations: int,
     daily_vol: float = 0.01,
     seed: int = 0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Build (n_folds, n_strategies) IS / OOS Sharpe matrices from returns.
-
-    For each strategy and each fold, simulate ``2 * n_periods_per_fold`` daily
-    returns with a known annualized true Sharpe (``true_sr_by_strategy[j]``).
-    Split into a training half (IS) and a testing half (OOS) per fold, compute
-    Sharpe on each half. This produces non-degenerate IS / OOS Sharpe matrices
-    suitable for ``compute_pbo``.
-    """
+) -> np.ndarray:
+    """Simulate one return history for every candidate strategy."""
     rng = np.random.default_rng(seed)
-    is_sharpes = np.zeros((n_folds, n_strategies))
-    oos_sharpes = np.zeros((n_folds, n_strategies))
-    half = n_periods_per_fold
-    annual = np.sqrt(252)
+    daily_means = true_sr_by_strategy * daily_vol / np.sqrt(252)
+    return rng.normal(
+        loc=daily_means,
+        scale=daily_vol,
+        size=(n_observations, len(true_sr_by_strategy)),
+    )
 
-    for j in range(n_strategies):
-        true_sr_annual = float(true_sr_by_strategy[j])
-        daily_mean = true_sr_annual * daily_vol / annual
-        for k in range(n_folds):
-            rets = rng.normal(daily_mean, daily_vol, 2 * half)
-            is_block = rets[:half]
-            oos_block = rets[half:]
-            is_sharpes[k, j] = float(is_block.mean() / is_block.std(ddof=1) * annual)
-            oos_sharpes[k, j] = float(oos_block.mean() / oos_block.std(ddof=1) * annual)
 
+# %%
+def _sharpe_from_moments(count: int, sums: np.ndarray, sums_sq: np.ndarray) -> np.ndarray:
+    """Compute annualized sample Sharpes from sufficient statistics."""
+    means = sums / count
+    variances = np.maximum((sums_sq - sums**2 / count) / (count - 1), 1e-12)
+    return means / np.sqrt(variances) * np.sqrt(252)
+
+
+# %% [markdown]
+# Construct complementary in-sample and out-of-sample CSCV Sharpe matrices.
+
+
+# %%
+def cscv_sharpe_matrices(
+    strategy_returns: np.ndarray,
+    n_blocks: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build complementary IS/OOS Sharpe rows for every CSCV combination."""
+    if n_blocks < 2 or n_blocks % 2:
+        raise ValueError("n_blocks must be an even integer of at least 2")
+    blocks = np.array_split(strategy_returns, n_blocks, axis=0)
+    counts = np.array([len(block) for block in blocks])
+    sums = np.stack([block.sum(axis=0) for block in blocks])
+    sums_sq = np.stack([(block**2).sum(axis=0) for block in blocks])
+    total_count, total_sums = counts.sum(), sums.sum(axis=0)
+    total_sums_sq = sums_sq.sum(axis=0)
+    split_indices = list(combinations(range(n_blocks), n_blocks // 2))
+    is_sharpes = np.empty((len(split_indices), strategy_returns.shape[1]))
+    oos_sharpes = np.empty_like(is_sharpes)
+    for row, selected in enumerate(split_indices):
+        selected = np.asarray(selected)
+        is_count = int(counts[selected].sum())
+        is_sums = sums[selected].sum(axis=0)
+        is_sums_sq = sums_sq[selected].sum(axis=0)
+        is_sharpes[row] = _sharpe_from_moments(is_count, is_sums, is_sums_sq)
+        oos_sharpes[row] = _sharpe_from_moments(
+            total_count - is_count, total_sums - is_sums, total_sums_sq - is_sums_sq
+        )
     return is_sharpes, oos_sharpes
 
 
 # %% [markdown]
-# ### Scenario 1 — All Strategies Are Noise (true SR = 0)
+# ### Scenario 1 - All Strategies Are Noise (true SR = 0)
 #
-# Selection on in-sample maximum is selection on noise; PBO should be high.
+# Selection on the in-sample maximum is selection on noise. The output reports
+# the resulting rank-instability frequency for this simulated panel.
 
 # %%
 true_sr_noise = np.zeros(N_STRATEGIES)
-is_noise, oos_noise = simulate_fold_sharpes(
-    n_folds=N_FOLDS,
-    n_strategies=N_STRATEGIES,
-    n_periods_per_fold=PBO_PERIODS_PER_FOLD,
-    true_sr_by_strategy=true_sr_noise,
+noise_returns = simulate_strategy_returns(
+    true_sr_noise,
+    n_observations=PBO_OBSERVATIONS,
     seed=42,
 )
+is_noise, oos_noise = cscv_sharpe_matrices(noise_returns, N_BLOCKS)
 pbo_noise = compute_pbo(is_performance=is_noise, oos_performance=oos_noise)
 pbo_noise_dict = pbo_noise.to_dict() if hasattr(pbo_noise, "to_dict") else pbo_noise
 
 print(
     f"All-noise PBO: {pbo_noise_dict['pbo']:.1%} "
-    f"(expected ~50% — selection on noise produces no OOS persistence)"
+    "(selection on noise has no persistent OOS advantage)"
 )
 
 # %% [markdown]
-# ### Scenario 2 — Three Strategies Carry True Edge
+# ### Scenario 2 - Three Strategies Carry True Edge
 #
-# Hidden ground truth: strategies 0, 7, 14 have annualized SR = 1.5; the rest
-# are noise. PBO should fall meaningfully below 50%.
+# Hidden ground truth: strategies 0, 7, 14 have a stable positive expected
+# return; the rest are noise. The output measures the resulting PBO.
 
 # %%
 true_sr_mixed = np.zeros(N_STRATEGIES)
 true_sr_mixed[[0, 7, 14]] = PBO_TRUE_SR_SIGNAL
-is_mixed, oos_mixed = simulate_fold_sharpes(
-    n_folds=N_FOLDS,
-    n_strategies=N_STRATEGIES,
-    n_periods_per_fold=PBO_PERIODS_PER_FOLD,
-    true_sr_by_strategy=true_sr_mixed,
+mixed_returns = simulate_strategy_returns(
+    true_sr_mixed,
+    n_observations=PBO_OBSERVATIONS,
     seed=42,
 )
+is_mixed, oos_mixed = cscv_sharpe_matrices(mixed_returns, N_BLOCKS)
 pbo_mixed = compute_pbo(is_performance=is_mixed, oos_performance=oos_mixed)
 pbo_mixed_dict = pbo_mixed.to_dict() if hasattr(pbo_mixed, "to_dict") else pbo_mixed
 
 print(
     f"Mixed-edge PBO: {pbo_mixed_dict['pbo']:.1%} "
-    f"(expected < 50% — real edge persists from IS to OOS)"
+    "(stable edge can persist across complementary samples)"
 )
 
 # %% [markdown]
 # ### Scenario Comparison
 #
-# The table below contrasts the two scenarios. The PBO value falls sharply
-# once a small number of genuinely skilled candidates are mixed into the
-# universe — exactly the discriminative property §16.7 attributes to PBO.
+# The table below contrasts the two scenarios and shows whether adding stable
+# positive-mean candidates changes PBO for this draw.
 
 # %%
 # Headline scenario for the rest of the section / figure.
@@ -956,147 +949,159 @@ pl.DataFrame(
 # %% [markdown]
 # ### 8.1 PBO Parameter Sensitivity
 #
-# The number of folds affects PBO. More folds give more IS/OOS combinations
-# but each fold's Sharpe is noisier. We re-run the mixed-edge scenario across
-# different fold counts.
+# The number of blocks changes the number of complementary CSCV splits. We
+# repartition the same mixed-edge return panel so the data and IS/OOS sample
+# sizes remain fixed.
 
 # %%
-fold_counts = [4, 6, 8, 10, 12, 16]
-pbo_by_folds = []
+block_counts = [4, 6, 8, 10, 12, 16]
+pbo_by_blocks = []
 
-for n_fold in fold_counts:
-    is_perf, oos_perf = simulate_fold_sharpes(
-        n_folds=n_fold,
-        n_strategies=N_STRATEGIES,
-        n_periods_per_fold=PBO_PERIODS_PER_FOLD,
-        true_sr_by_strategy=true_sr_mixed,
-        seed=42 + n_fold,
-    )
-
+for n_blocks in block_counts:
+    is_perf, oos_perf = cscv_sharpe_matrices(mixed_returns, n_blocks)
     pbo_res = compute_pbo(is_performance=is_perf, oos_performance=oos_perf)
     pbo_res_dict = pbo_res.to_dict() if hasattr(pbo_res, "to_dict") else pbo_res
-
-    pbo_by_folds.append(
+    pbo_by_blocks.append(
         {
-            "n_folds": n_fold,
+            "n_blocks": n_blocks,
             "pbo": pbo_res_dict["pbo"],
             "n_combinations": pbo_res_dict.get("n_combinations", 0),
         }
     )
 
-pbo_folds_df = pl.DataFrame(pbo_by_folds)
+pbo_blocks_df = pl.DataFrame(pbo_by_blocks)
 
 # %% [markdown]
-# **PBO vs number of CV folds** (probability of backtest overfitting under
-# combinatorial purging):
+# **PBO vs number of CSCV blocks** for the same simulated return panel:
 
 # %%
-pbo_folds_df
+pbo_blocks_df
 
 # %%
-# Visualize PBO stability
+# Visualize PBO sensitivity to the CSCV partition count.
 fig = make_subplots(specs=[[{"secondary_y": True}]])
-
 fig.add_trace(
-    go.Bar(
-        x=pbo_folds_df["n_folds"].to_list(),
-        y=(pbo_folds_df["pbo"] * 100).to_list(),
+    go.Scatter(
+        x=pbo_blocks_df["n_blocks"].to_list(),
+        y=(pbo_blocks_df["pbo"] * 100).to_list(),
         name="PBO (%)",
-        marker_color="crimson",
+        mode="lines+markers",
+        line={"color": COLORS["blue"]},
     ),
     secondary_y=False,
 )
 
 fig.add_trace(
     go.Scatter(
-        x=pbo_folds_df["n_folds"].to_list(),
-        y=pbo_folds_df["n_combinations"].to_list(),
+        x=pbo_blocks_df["n_blocks"].to_list(),
+        y=pbo_blocks_df["n_combinations"].to_list(),
         name="Combinations",
         mode="lines+markers",
-        line={"color": "blue"},
+        line={"color": COLORS["amber"]},
     ),
     secondary_y=True,
 )
 
 fig.update_layout(
-    title="PBO Sensitivity to Number of Folds",
-    xaxis_title="Number of Folds",
+    title="Stable edge keeps PBO at 0% across partition counts",
+    xaxis_title="Number of CSCV blocks",
     height=400,
 )
-fig.update_yaxes(title_text="PBO (%)", secondary_y=False)
-fig.update_yaxes(title_text="Number of Combinations", secondary_y=True)
+fig.add_hline(y=50, line_dash="dash", line_color=COLORS["neutral"], secondary_y=False)
+fig.update_yaxes(title_text="PBO (%)", range=[-5, 100], secondary_y=False)
+fig.update_yaxes(
+    title_text="Number of combinations",
+    type="log",
+    tickmode="array",
+    tickvals=pbo_blocks_df["n_combinations"].to_list(),
+    ticktext=["6", "20", "70", "252", "924", "12.9k"],
+    secondary_y=True,
+)
 show_plot(fig)
 
 # %% [markdown]
-# ### 8.2 Case Study: When PBO Catches What DSR Misses
+# ### 8.2 Case Study: DSR and PBO Answer Different Questions
 #
-# PBO can detect overfitting that DSR misses when:
-# - The strategy was selected from many alternatives on in-sample data
-# - The in-sample performance doesn't generalize out-of-sample
-# - The selected in-sample Sharpe is large enough that DSR clears its 95 %
-#   threshold even at the *true* trial count
-#
-# Below, the best of 200 variants posts a high in-sample Sharpe but a
-# near-zero out-of-sample Sharpe. DSR deploys it — the selection-inflated
-# IS Sharpe overwhelms the multiple-testing penalty even when the true trial
-# count is used — while PBO, which compares in- and out-of-sample CV
-# performance directly, flags the overfit.
+# DSR evaluates the selected Sharpe against a multiple-testing benchmark. PBO
+# evaluates whether IS selection is stable across complementary samples. The
+# return panel below gives each candidate a different block-specific edge with
+# zero average across blocks, creating temporal instability without inventing
+# independent IS/OOS score matrices. The computed diagnostics determine the
+# verdict; the example does not force either method to pass or fail.
+
 
 # %%
-# Simulate overfitted strategy that passes DSR but fails PBO
-np.random.seed(123)
+def simulate_regime_sensitive_returns(
+    n_observations: int,
+    n_strategies: int,
+    n_blocks: int,
+    seed: int,
+    block_sharpe_scale: float = 3.0,
+    daily_vol: float = 0.01,
+) -> np.ndarray:
+    """Simulate candidates whose expected returns vary across time blocks."""
+    rng = np.random.default_rng(seed)
+    block_sharpes = rng.normal(0, block_sharpe_scale, (n_blocks, n_strategies))
+    block_sharpes -= block_sharpes.mean(axis=0, keepdims=True)
+    result = np.empty((n_observations, n_strategies))
+    for indices, block_sr in zip(
+        np.array_split(np.arange(n_observations), n_blocks), block_sharpes
+    ):
+        daily_means = block_sr * daily_vol / np.sqrt(252)
+        result[indices] = rng.normal(daily_means, daily_vol, (len(indices), n_strategies))
+    return result
 
-# Strategy was actually selected from 200 variants, but only 10 reported
+
+# %%
 true_n_trials = 200
-reported_n_trials = 10  # Under-reported
-
-# Generate IS and OOS performance (heavily overfitted)
-n_cv_folds = 10
-is_perf_overfit = np.random.randn(n_cv_folds, true_n_trials) + 1.5  # Strong IS bias
-oos_perf_overfit = np.random.randn(n_cv_folds, true_n_trials)  # No bias in OOS
-
-# Pick the "best" strategy (max IS average)
-is_means = is_perf_overfit.mean(axis=0)
-oos_means = oos_perf_overfit.mean(axis=0)
-best_idx = np.argmax(is_means)
-
-# is_perf_overfit / oos_perf_overfit are per-fold Sharpe-scale scores (IS bias
-# +1.5, OOS unbiased), so the selected strategy's Sharpe is the fold mean directly.
-best_is_sharpe = float(is_means[best_idx])
-best_oos_sharpe = float(oos_means[best_idx])
+reported_n_trials = 10
+overfit_returns = simulate_regime_sensitive_returns(
+    n_observations=PBO_OBSERVATIONS,
+    n_strategies=true_n_trials,
+    n_blocks=N_BLOCKS,
+    seed=123,
+)
+is_perf_overfit, oos_perf_overfit = cscv_sharpe_matrices(overfit_returns, N_BLOCKS)
+best_idx = int(np.argmax(is_perf_overfit[0]))
+best_is_sharpe = float(is_perf_overfit[0, best_idx])
+best_oos_sharpe = float(oos_perf_overfit[0, best_idx])
+first_blocks = np.array_split(overfit_returns, N_BLOCKS, axis=0)[: N_BLOCKS // 2]
+first_is_returns = np.concatenate(first_blocks)[:, best_idx]
+is_skewness = float(stats.skew(first_is_returns))
+is_kurtosis = float(stats.kurtosis(first_is_returns) + 3)
+is_sharpe_variance = float(np.var(is_perf_overfit[0], ddof=1))
 
 # %%
 # Compute DSR with under-reported and true trial counts, compare to PBO
 dsr_underreported = deflated_sharpe_ratio(
     observed_sharpe=best_is_sharpe,
-    skewness=-0.3,
-    kurtosis=4.0,
-    n_samples=504,
-    n_trials=reported_n_trials,  # Under-reported!
-    variance_trials=0.3,
+    skewness=is_skewness,
+    kurtosis=is_kurtosis,
+    n_samples=len(first_is_returns),
+    n_trials=reported_n_trials,
+    variance_trials=is_sharpe_variance,
     return_format="probability",
 )
 
-# Compute DSR with true trial count
 dsr_true = deflated_sharpe_ratio(
     observed_sharpe=best_is_sharpe,
-    skewness=-0.3,
-    kurtosis=4.0,
-    n_samples=504,
-    n_trials=true_n_trials,  # True count
-    variance_trials=0.3,
+    skewness=is_skewness,
+    kurtosis=is_kurtosis,
+    n_samples=len(first_is_returns),
+    n_trials=true_n_trials,
+    variance_trials=is_sharpe_variance,
     return_format="probability",
 )
 
-# Compute PBO (doesn't need trial count - uses actual CV data)
 pbo_overfit = compute_pbo(
     is_performance=is_perf_overfit,
     oos_performance=oos_perf_overfit,
 )
 pbo_overfit_dict = pbo_overfit.to_dict() if hasattr(pbo_overfit, "to_dict") else pbo_overfit
 
+# %%
 print("\n" + "=" * 70)
-print("CASE STUDY: PBO CATCHES HIDDEN OVERFITTING")
+print("CASE STUDY: TRIAL CORRECTION AND TEMPORAL STABILITY")
 print("=" * 70)
 print(f"\nTrue trials tested: {true_n_trials}")
 print(f"Reported trials: {reported_n_trials}")
@@ -1104,49 +1109,35 @@ print(f"\nBest strategy IS Sharpe: {best_is_sharpe:.2f}")
 print(f"Best strategy OOS Sharpe: {best_oos_sharpe:.2f}")
 print(f"Performance degradation: {(best_is_sharpe - best_oos_sharpe):.2f}")
 
-_dsr_pass = 0.95  # deploy threshold from the decision tree in 8.3
-_pbo_reject = 0.25
-_ur_verdict = "PASSES (would deploy)" if dsr_underreported >= _dsr_pass else "fails"
-_true_verdict = "fails (correctly rejects)" if dsr_true < _dsr_pass else "PASSES"
-_pbo_verdict = "FLAGS OVERFITTING" if pbo_overfit_dict["pbo"] > _pbo_reject else "does not flag"
+_ur_verdict = "passes" if dsr_underreported >= DSR_PASS_THRESHOLD else "fails"
+_true_verdict = "passes" if dsr_true >= DSR_PASS_THRESHOLD else "fails"
+_pbo_verdict = (
+    "flags instability" if pbo_overfit_dict["pbo"] > PBO_REJECT_THRESHOLD else "does not flag"
+)
 
 print("\n--- DETECTION RESULTS ---")
-print(f"DSR (under-reported trials={reported_n_trials}): {dsr_underreported:.1%} → {_ur_verdict}")
-print(f"DSR (true trial count={true_n_trials}): {dsr_true:.1%} → {_true_verdict}")
-print(f"PBO (from CV data): {pbo_overfit_dict['pbo']:.1%} → {_pbo_verdict}")
-
-print("\nLesson: DSR can clear its threshold on a selection-inflated in-sample")
-print("   Sharpe even at the true trial count. PBO uses actual CV performance,")
-print("   so it catches the overfit the multiple-testing penalty misses.")
+print(f"DSR (under-reported trials={reported_n_trials}): {dsr_underreported:.1%}, {_ur_verdict}")
+print(f"DSR (true trial count={true_n_trials}): {dsr_true:.1%}, {_true_verdict}")
+print(f"PBO (all CSCV splits): {pbo_overfit_dict['pbo']:.1%}, {_pbo_verdict}")
+print("\nDSR tests the selected split against its trial benchmark.")
+print("PBO tests whether selection persists across complementary time blocks.")
 
 # %% [markdown]
 # ### 8.3 DSR vs PBO: When to Use Each
 #
 # | Method | Best For | Measures |
 # |--------|----------|----------|
-# | **DSR** | Known trial count, parameter sweeps | Probability observed Sharpe is luck |
-# | **PBO** | Strategy selection from alternatives | Probability best IS overfit to IS period |
-# | **RAS** | Complex models, feature engineering | Sensitivity to return randomization |
+# | **DSR** | Known trial count and dispersion | Evidence above a selection benchmark |
+# | **PBO** | CSCV strategy selection | Frequency IS winner ranks below median OOS |
+# | **RAS** | Candidate performance matrix | Complexity-based lower performance bound |
 #
 # **Decision Framework**:
-# ```
-# ┌─────────────────────────────────────────────────────────────────┐
-# │              BACKTEST VALIDATION DECISION TREE                 │
-# ├─────────────────────────────────────────────────────────────────┤
-# │                                                                 │
-# │  1. Check DSR (if trial count known)                           │
-# │     └─ DSR < 95%? → REJECT: Selection bias too high            │
-# │                                                                 │
-# │  2. Check PBO (if CV results available)                        │
-# │     └─ PBO > 25%? → REJECT: Overfitting detected               │
-# │                                                                 │
-# │  3. Check RAS (if model complexity known)                      │
-# │     └─ RAS adjustment > 50%? → CAUTION: Model too complex      │
-# │                                                                 │
-# │  4. All pass? → PAPER TRADE before live deployment             │
-# │                                                                 │
-# └─────────────────────────────────────────────────────────────────┘
-# ```
+#
+# 1. Use DSR when the trial count and cross-trial dispersion are known.
+# 2. Use PBO when complementary CSCV performance is available.
+# 3. Use RAS when the candidate return or prediction class is available.
+# 4. Set decision thresholds before looking at the diagnostic results.
+# 5. Treat these diagnostics as complementary evidence, not deployment rules.
 #
 # **Recommendation**: Use multiple methods. If any raises red flags, investigate further.
 
@@ -1155,18 +1146,21 @@ print("   so it catches the overfit the multiple-testing penalty misses.")
 #
 # ### Critical Insights
 #
-# 1. **Selection bias is real**: Testing 100 strategies, the best will have SR > 2 by luck
-# 2. **Non-normality matters**: Negative skew and fat tails reduce reliability
-# 3. **DSR provides probability**: Not just "is it significant" but "probability of skill"
-# 4. **PBO uses cross-validation**: Estimates overfitting through combinatorial splits
+# 1. **Selection bias is measurable**: The best null Sharpe rises with the number of trials
+# 2. **Non-normality is conditional**: Skew and kurtosis change the DSR denominator.
+#    When the observed Sharpe is below its benchmark, a larger denominator moves the
+#    negative z-score toward zero and can raise the probability slightly; above the
+#    benchmark, the direction reverses.
+# 3. **DSR provides a calibrated statistic**: Its benchmark includes the selection process
+# 4. **PBO uses CSCV**: Every IS block assignment is paired with its OOS complement
 # 5. **Combine methods**: DSR, PBO, and RAS for comprehensive overfitting detection
 #
 # ### Practical Rules
 #
 # 1. **Always track trials**: Record every strategy variant tested
-# 2. **Report DSR alongside raw Sharpe**: Be honest about multiple testing
+# 2. **Report DSR alongside raw Sharpe**: Disclose the full trial count
 # 3. **Use realistic parameters**: Include non-normality in calculations
-# 4. **Set minimum thresholds**: Require DSR > 95% for production deployment
+# 4. **Pre-register thresholds**: Choose decision criteria before inspecting results
 #
 # ### Integration Checklist
 #
@@ -1174,9 +1168,9 @@ print("   so it catches the overfit the multiple-testing penalty misses.")
 # - [ ] Calculate Sharpe variance across variants
 # - [ ] Measure return skewness and kurtosis
 # - [ ] Compute DSR with all parameters
-# - [ ] Compute PBO with combinatorial cross-validation
+# - [ ] Compute PBO with complementary CSCV splits
 # - [ ] Compare DSR, PBO, and RAS results
-# - [ ] Only deploy if DSR > 95% AND PBO < 25%
+# - [ ] Apply pre-registered decision criteria and investigate disagreements
 
 # %%
 # Summary
@@ -1186,7 +1180,7 @@ print("=" * 80)
 
 print("\n1. SELECTION BIAS DEMONSTRATION:")
 print(f"   - Tested 100 null strategies, best had SR = {results['max_sharpe']:.2f}")
-print("   - This is pure luck, no skill!")
+print("   - Every candidate was generated with zero expected return")
 
 print("\n2. DSR DECAY WITH TRIALS:")
 print(f"   - 1 trial: DSR = {dsr_df.row(0, named=True)['dsr_probability']:.1%}")
@@ -1194,7 +1188,7 @@ print(f"   - 100 trials: DSR = {dsr_df.row(5, named=True)['dsr_probability']:.1%
 print(f"   - 500 trials: DSR = {dsr_df.row(7, named=True)['dsr_probability']:.1%}")
 
 print("\n3. CASE STUDY RESULT:")
-print(f"   - Best momentum variant: SR = {best['observed_sharpe']:.2f}")
+print(f"   - Best synthetic variant: SR = {best['observed_sharpe']:.2f}")
 print(f"   - Without correction (PSR): {psr_best:.1%}")
 print(f"   - With DSR correction: {dsr_best:.1%}")
 
@@ -1204,6 +1198,6 @@ print(f"   - RAS adjusted Sharpe: {ras_adjusted:.3f}")
 
 print("\n5. PBO ANALYSIS:")
 print(f"   - Probability of Backtest Overfitting: {pbo_value:.1%}")
-print("   - Threshold: Deploy only if PBO < 25%")
+print("   - Computed from all complementary CSCV splits")
 
 print("\n" + "=" * 80)

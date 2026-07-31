@@ -18,15 +18,14 @@
 #
 # **Docker image**: `ml4t`
 #
-# This notebook compares three popular Python libraries for portfolio optimization:
-# PyPortfolioOpt, Riskfolio-Lib, and skfolio. It demonstrates how different libraries
-# approach the same optimization problems and evaluates results with ml4t-diagnostic.
+# This notebook compares PyPortfolioOpt, Riskfolio-Lib, and skfolio on one training
+# panel, then evaluates their frozen allocations on later observations.
 #
 # **Learning Objectives**:
-# - Use PyPortfolioOpt for classic MVO and Black-Litterman
-# - Apply Riskfolio-Lib for 22 risk measures and factor models
-# - Explore skfolio's sklearn-compatible API (supports built-in cross-validation)
-# - Compare turnover, concentration, and Sharpe across libraries
+# - Fit comparable mean-risk allocators through three library APIs
+# - Keep walk-forward model assessment inside the training window
+# - Compare frozen test-period risk, return, and concentration
+# - Reconcile a vectorized allocation with execution-aware daily targets
 #
 # **Book Reference**: Chapter 17, §17.7 (Comparing Allocator Performance)
 #
@@ -35,19 +34,14 @@
 # %% [markdown]
 # ## Library Overview
 #
-# | Feature | PyPortfolioOpt | Riskfolio-Lib | skfolio |
-# |---------|----------------|---------------|----------|
-# | **Focus** | Accessible MVO | Comprehensive risk measures | ML integration |
-# | **Risk Measures** | Variance, CVaR, Semi-variance | 22 convex measures | Variance, CVaR, MDD |
-# | **ML Integration** | Limited | Limited | sklearn API |
-# | **Cross-validation** | Manual | Manual | Built-in (walk-forward, CPCV) |
-# | **Black-Litterman** | Yes | Yes (+ Bayesian variants) | Yes |
-# | **HRP/HERC** | Yes | Yes | Yes |
-# | **Constraints** | Flexible | Very flexible | sklearn pipeline |
-# | **Maintenance** | Lower activity | Active | Very active |
+# | Library | Role in this notebook | Interface used |
+# |---------|-----------------------|----------------|
+# | **PyPortfolioOpt** | Classical, tail-risk, HRP, and penalized allocations | Optimizer objects |
+# | **Riskfolio-Lib** | Multiple risk measures and risk parity | Portfolio object |
+# | **skfolio** | Mean-risk, HRP, and walk-forward assessment | sklearn-style estimators |
 #
-# All three libraries remain widely used and capable. For production systems,
-# evaluate each library's recent commit history and release cadence.
+# The comparison concerns the versions pinned by the `ml4t` image. Package breadth and
+# release cadence can change independently of the methods demonstrated here.
 
 # %% [markdown]
 # ## Imports & Settings
@@ -59,10 +53,13 @@
 # if the installed cvxpy is incompatible, rather than failing deep inside an optimizer.
 
 # %%
-"""Portfolio Optimization Library Comparison — benchmark cvxpy, riskfolio-lib, and PyPortfolioOpt on the same data."""
+"""Compare three portfolio libraries with train-only fitting and later evaluation."""
 
 import warnings
+from contextlib import contextmanager
+from unittest.mock import patch
 
+import cvxpy as cp
 import cvxpy.reductions.matrix_stuffing as cvxpy_matrix_stuffing
 from cvxpy.problems.problem import Problem as _CvxpyProblem
 
@@ -86,13 +83,10 @@ if missing_cvxpy_symbols:
 # %%
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
 import riskfolio as rp
-from plotly.subplots import make_subplots
-
-warnings.filterwarnings("ignore")
+from IPython.display import Markdown, display
 
 # Portfolio optimization libraries
 # %% [markdown]
@@ -110,29 +104,51 @@ from ml4t.backtest import (
 from ml4t.backtest.config import SlippageType
 from ml4t.backtest.execution.rebalancer import RebalanceConfig, TargetWeightExecutor
 from ml4t.diagnostic.evaluation import PortfolioAnalysis
+from plotly.subplots import make_subplots
 from pypfopt import (
     EfficientCVaR,
     EfficientFrontier,
     HRPOpt,
-    expected_returns,
     objective_functions,
     risk_models,
 )
+from scipy.optimize import linprog, minimize
 from skfolio import RiskMeasure
 from skfolio.cluster import HierarchicalClustering, LinkageMethod
 from skfolio.distance import PearsonDistance
 from skfolio.model_selection import WalkForward
-from skfolio.model_selection import cross_val_predict as skf_cross_val_predict
+from skfolio.moments import EmpiricalCovariance, EmpiricalMu
 from skfolio.optimization import HierarchicalRiskParity, MeanRisk, ObjectiveFunction
+from skfolio.prior import EmpiricalPrior
+from sklearn.base import clone
 
 from data import load_etfs
-from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS, ml4t_palette
 
 # %% tags=["parameters"]
-# Production defaults — Papermill overrides for CI testing
+# Production defaults - Papermill overrides for CI testing
 MAX_SYMBOLS = 0  # 0 = all
 SEED = 42
+TRAIN_END = "2021-12-31"
+TRADING_DAYS = 252
+RISK_FREE_RATE = 0.04
+CVAR_CONFIDENCE = 0.95
+FRONTIER_POINTS = 50
+COMMISSION_RATE = 0.0005
+SLIPPAGE_RATE = 0.0005
+TRANSACTION_COST_PENALTY = 0.01
+L2_GAMMA = 0.5
+ACTIVE_WEIGHT_THRESHOLD = 0.001
+WEIGHT_TOLERANCE = 1e-5
+COMMON_WEIGHT_TOLERANCE = 5e-4
+COMMON_OBJECTIVE_TOLERANCE = 1e-7
+MAX_SHARPE_EXCESS_TOLERANCE = 1e-12
+INFEASIBLE_MAX_SHARPE_POLICY = "cash"
+
+# All common moments are arithmetic daily estimates. Dividing the annual hurdle by
+# the annualization factor preserves exactly the same linear excess-return objective.
+RISK_FREE_RATE_DAILY = RISK_FREE_RATE / TRADING_DAYS
 
 # %%
 set_global_seeds(SEED)
@@ -146,7 +162,7 @@ set_global_seeds(SEED)
 # ### Universe and Date Range
 
 # %%
-# ETF Universe - diversified across asset classes
+# Fixed teaching universe diversified across asset classes
 _FULL_UNIVERSE = [
     "SPY",
     "QQQ",
@@ -161,7 +177,7 @@ _FULL_UNIVERSE = [
     "DBC",  # Alternatives
 ]
 # Configuration
-SYMBOLS = _FULL_UNIVERSE
+SYMBOLS = _FULL_UNIVERSE[:MAX_SYMBOLS] if MAX_SYMBOLS else _FULL_UNIVERSE
 START_DATE = "2018-01-01"
 END_DATE = "2024-12-01"
 
@@ -169,56 +185,56 @@ END_DATE = "2024-12-01"
 # ### Load and Filter ETF Panel
 
 # %%
-print(f"Loading {len(SYMBOLS)} ETFs from canonical data...")
-etf_data = load_etfs()
-etf_filtered = etf_data.filter(
-    (pl.col("symbol").is_in(SYMBOLS))
-    & (pl.col("timestamp") >= pl.lit(START_DATE).str.to_datetime())
-    & (pl.col("timestamp") <= pl.lit(END_DATE).str.to_datetime())
+etf_data = load_etfs(symbols=SYMBOLS, start_date=START_DATE, end_date=END_DATE).sort(
+    ["timestamp", "symbol"]
 )
+print(f"Loaded {etf_data.height:,} rows for {len(SYMBOLS)} fixed teaching ETFs")
 
 # %% [markdown]
 # ### Pivot to Wide Returns Matrix
 
 # %%
-# Pivot to wide format for returns
-prices = (
-    etf_filtered.select(["timestamp", "symbol", "close"])
+# Prepare the canonical panel in Polars before crossing into pandas-native optimizer APIs.
+prices_wide = (
+    etf_data.select(["timestamp", "symbol", "close"])
     .pivot(on="symbol", index="timestamp", values="close")
     .sort("timestamp")
-    .to_pandas()
-    .set_index("timestamp")
-    .ffill()
-    .dropna()
+    .fill_null(strategy="forward")
+    .drop_nulls()
 )
-print(f"Loaded {prices.shape[1]} ETFs, {prices.shape[0]} days")
+prices = prices_wide.to_pandas().set_index("timestamp")
 
-# Daily returns
 returns = prices.pct_change().dropna()
 tickers = prices.columns.tolist()
 num_stocks = len(tickers)
+train_prices = prices.loc[:TRAIN_END]
+train_returns = returns.loc[:TRAIN_END]
+test_returns = returns.loc[returns.index > TRAIN_END]
+
+if train_returns.empty or test_returns.empty:
+    raise RuntimeError("The declared training and test windows must both contain returns.")
+
+print(
+    f"Training: {train_returns.index.min().date()} to {train_returns.index.max().date()} "
+    f"({len(train_returns):,} returns)"
+)
+print(
+    f"Test: {test_returns.index.min().date()} to {test_returns.index.max().date()} "
+    f"({len(test_returns):,} returns)"
+)
 
 # %% [markdown]
-# The shared dataset is important for a fair comparison. Any performance differences
-# below come from the optimizer APIs and objectives, not from different asset universes
-# or sample windows.
+# The fixed list is a teaching universe, not a point-in-time index reconstruction. Every
+# allocator sees the same training rows, arithmetic sample moments, and economic hurdle.
 
 # %%
-# Risk-free rate from FREDProvider (fallback to 4% if API key not available)
-try:
-    from ml4t.data.providers.fred import FREDProvider
-
-    fred = FREDProvider()
-    dgs3mo = fred.fetch_ohlcv("DGS3MO", START_DATE, END_DATE)
-    if dgs3mo.is_empty():
-        raise ValueError("Empty result")
-    risk_free_rate = dgs3mo["close"].mean() / 100
-    print("Loaded risk-free rate from FREDProvider")
-except (ImportError, ValueError, KeyError, OSError, RuntimeError):
-    risk_free_rate = 0.04
-    print("FREDProvider not available, using fallback rate: 4%")
-
-print(f"Risk-free rate: {risk_free_rate:.2%}")
+display(
+    Markdown(
+        f"All Max-Sharpe optimizers use an annual risk-free hurdle of "
+        f"**{RISK_FREE_RATE:.1%}**. The daily APIs receive "
+        f"**{RISK_FREE_RATE_DAILY:.6%}** under the same arithmetic annualization contract."
+    )
+)
 
 # %% [markdown]
 # ## Part 1: PyPortfolioOpt
@@ -226,19 +242,233 @@ print(f"Risk-free rate: {risk_free_rate:.2%}")
 # PyPortfolioOpt is the most accessible library with good defaults.
 
 # %% [markdown]
+# Every library returns weights in a different container. Aligning them by symbol before
+# evaluation prevents silent column-order errors and makes the allocation contract explicit.
+
+
+# %%
+def align_weights(weights, name: str) -> pd.Series:
+    """Align a library weight result to the canonical symbol order and validate it."""
+    if isinstance(weights, pd.Series):
+        aligned = weights.reindex(tickers).fillna(0.0).astype(float)
+    elif isinstance(weights, dict):
+        aligned = pd.Series(weights, dtype=float).reindex(tickers).fillna(0.0)
+    else:
+        aligned = pd.Series(np.asarray(weights, dtype=float), index=tickers)
+
+    if not np.isfinite(aligned).all():
+        raise RuntimeError(f"{name} returned non-finite weights.")
+    if (aligned < -WEIGHT_TOLERANCE).any():
+        raise RuntimeError(f"{name} violates the declared long-only bounds.")
+    if not np.isclose(aligned.sum(), 1.0, atol=WEIGHT_TOLERANCE):
+        raise RuntimeError(f"{name} weights sum to {aligned.sum():.8f}, not one.")
+    return aligned
+
+
+# %% [markdown]
+# Solver wrappers keep diagnostics visible. Only the two pinned-library warnings named below are
+# scoped to their responsible calls; exposed optimizer problems must report exact optimal status.
+
+
+# %%
+def assert_optimal_status(problem: cp.Problem, name: str) -> None:
+    """Require an exact optimal status from an exposed cvxpy problem."""
+    if problem.status != cp.OPTIMAL:
+        raise RuntimeError(f"{name} solver status is {problem.status!r}, not {cp.OPTIMAL!r}.")
+
+
+CVXPY_STAR_WARNING_PATTERN = (
+    r"(?s)\A\s*This use of ``\*`` has resulted in matrix multiplication\.\n"
+    r"Using ``\*`` for matrix multiplication has been deprecated since CVXPY 1\.1\.\n"
+    r"    Use ``\*`` for matrix-scalar and vector-scalar multiplication\.\n"
+    r"    Use ``@`` for matrix-matrix and matrix-vector multiplication\.\n"
+    r"    Use ``multiply`` for elementwise multiplication\.\n"
+    r"This code path has been hit [0-9]+ times so far\.\s*\Z"
+)
+PPO_MAX_SHARPE_WARNING = (
+    "max_sharpe transforms the optimization problem so additional objectives may not work "
+    "as expected."
+)
+PPO_MAX_SHARPE_WARNING_PATTERN = (
+    r"\Amax_sharpe transforms the optimization problem so additional objectives may not work "
+    r"as expected\.\Z"
+)
+
+
+# %%
+@contextmanager
+def suppress_riskfolio_cvxpy_star_warning():
+    """Suppress only Riskfolio's pinned cvxpy star-multiplication warning."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=CVXPY_STAR_WARNING_PATTERN,
+            category=UserWarning,
+            module=r"\Acvxpy\.expressions\.expression\Z",
+        )
+        yield
+
+
+@contextmanager
+def suppress_ppo_max_sharpe_objective_warning():
+    """Suppress only PPO's warning for the intentional regularized Max-Sharpe call."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=PPO_MAX_SHARPE_WARNING_PATTERN,
+            category=UserWarning,
+            module=r"\Apypfopt\.efficient_frontier\.efficient_frontier\Z",
+        )
+        yield
+
+
+# %%
+def run_riskfolio(operation, name: str):
+    """Run Riskfolio with scoped warnings and observable cvxpy statuses."""
+    solver_statuses = []
+    original_solve = cp.Problem.solve
+
+    def solve_and_capture(problem, *args, **kwargs):
+        value = original_solve(problem, *args, **kwargs)
+        solver_statuses.append(problem.status)
+        return value
+
+    with (
+        suppress_riskfolio_cvxpy_star_warning(),
+        patch.object(cp.Problem, "solve", solve_and_capture),
+    ):
+        result = operation()
+    if not solver_statuses:
+        raise RuntimeError(f"Riskfolio exposed no solver status for {name}.")
+    if any(status != cp.OPTIMAL for status in solver_statuses):
+        raise RuntimeError(f"Riskfolio solver statuses for {name}: {solver_statuses}.")
+    if result is None or result.empty:
+        raise RuntimeError(f"Riskfolio returned no solution for {name}.")
+    return result
+
+
+# %%
+# Prove that the scopes reject only the exact pinned warnings. The unrelated RuntimeWarning is
+# captured as visible evidence instead of being emitted to the notebook's strict stderr stream.
+cvxpy_warning_oracle_message = """
+This use of ``*`` has resulted in matrix multiplication.
+Using ``*`` for matrix multiplication has been deprecated since CVXPY 1.1.
+    Use ``*`` for matrix-scalar and vector-scalar multiplication.
+    Use ``@`` for matrix-matrix and matrix-vector multiplication.
+    Use ``multiply`` for elementwise multiplication.
+This code path has been hit 1 times so far.
+"""
+unrelated_warning_message = "warning-scope oracle: unrelated warning remains visible"
+
+# %%
+with warnings.catch_warnings(record=True) as warning_oracle:
+    warnings.simplefilter("always")
+    with suppress_riskfolio_cvxpy_star_warning():
+        warnings.warn_explicit(
+            cvxpy_warning_oracle_message,
+            UserWarning,
+            filename="cvxpy/expressions/expression.py",
+            lineno=830,
+            module="cvxpy.expressions.expression",
+        )
+    with suppress_ppo_max_sharpe_objective_warning():
+        warnings.warn_explicit(
+            PPO_MAX_SHARPE_WARNING,
+            UserWarning,
+            filename="pypfopt/efficient_frontier/efficient_frontier.py",
+            lineno=259,
+            module="pypfopt.efficient_frontier.efficient_frontier",
+        )
+    warnings.warn(unrelated_warning_message, RuntimeWarning, stacklevel=2)
+
+visible_warning_messages = [str(item.message) for item in warning_oracle]
+if cvxpy_warning_oracle_message in visible_warning_messages:
+    raise RuntimeError("The exact cvxpy library warning escaped its local scope.")
+if PPO_MAX_SHARPE_WARNING in visible_warning_messages:
+    raise RuntimeError("The exact PyPortfolioOpt library warning escaped its local scope.")
+if visible_warning_messages != [unrelated_warning_message]:
+    raise RuntimeError(f"Warning-scope oracle observed unexpected warnings: {warning_oracle!r}.")
+print("Warning-scope oracle: 2 exact library warnings suppressed; unrelated warning visible")
+
+
+# %% [markdown]
+# skfolio receives explicit empirical estimators so its moment contract does not depend on defaults.
+
+
+# %%
+def common_empirical_prior() -> EmpiricalPrior:
+    """Return skfolio's explicit arithmetic sample-moment estimators."""
+    return EmpiricalPrior(
+        mu_estimator=EmpiricalMu(),
+        covariance_estimator=EmpiricalCovariance(ddof=1, nearest=False),
+    )
+
+
+# %% [markdown]
 # ### Expected Returns & Covariance
 
 # %%
-# Historical mean returns (annualized with compounding)
-mu = expected_returns.mean_historical_return(
-    prices, returns_data=False, compounding=True, frequency=252
-)
-
-# Sample covariance (annualized)
-S = risk_models.sample_cov(prices, frequency=252)
+# Define the shared estimator once in daily units. PyPortfolioOpt consumes annual
+# moments, while Riskfolio and skfolio consume the daily observations directly.
+common_mean_daily = train_returns.mean()
+common_cov_daily = train_returns.cov(ddof=1)
+mu = common_mean_daily * TRADING_DAYS
+S = common_cov_daily * TRADING_DAYS
 
 print(f"Expected returns range: [{mu.min():.2%}, {mu.max():.2%}]")
 print(f"Covariance matrix shape: {S.shape}")
+
+# %% [markdown]
+# A long-only Max-Sharpe risky portfolio requires at least one positive expected excess return.
+# When that precondition fails, every library receives the same decision before its API boundary:
+# allocate 100% to cash at the declared hurdle and report `cash_precheck` instead of invoking a
+# ratio solver. This is an economic policy, not a fallback to a different risky objective.
+
+
+# %%
+def max_sharpe_regime(expected_returns: pd.Series, risk_free_rate: float) -> str:
+    """Choose the predeclared risky-optimization or cash regime."""
+    best_excess_return = float((expected_returns - risk_free_rate).max())
+    if best_excess_return <= MAX_SHARPE_EXCESS_TOLERANCE:
+        return INFEASIBLE_MAX_SHARPE_POLICY
+    return "optimize"
+
+
+# Independent nonzero-hurdle microcase: neither risky asset clears the 4% cash rate.
+oracle_means = pd.Series(
+    [RISK_FREE_RATE_DAILY - 2e-5, RISK_FREE_RATE_DAILY - 1e-5],
+    index=["asset_a", "asset_b"],
+)
+oracle_expected_regime = (
+    "cash" if float(np.max(oracle_means.to_numpy() - RISK_FREE_RATE_DAILY)) <= 0 else "optimize"
+)
+oracle_regimes = {
+    library: max_sharpe_regime(oracle_means, RISK_FREE_RATE_DAILY)
+    for library in ("PyPortfolioOpt", "Riskfolio", "skfolio")
+}
+if set(oracle_regimes.values()) != {oracle_expected_regime}:
+    raise RuntimeError(f"Library-independent feasibility oracle failed: {oracle_regimes}.")
+oracle_feasible_means = pd.Series(
+    [RISK_FREE_RATE_DAILY - 1e-5, RISK_FREE_RATE_DAILY + 2e-5],
+    index=["asset_a", "asset_b"],
+)
+if max_sharpe_regime(oracle_feasible_means, RISK_FREE_RATE_DAILY) != "optimize":
+    raise RuntimeError("Feasible-window oracle did not reach the Max-Sharpe solver regime.")
+oracle_cash_weight = 1.0
+oracle_risky_weight = 0.0
+oracle_period_return = oracle_cash_weight * RISK_FREE_RATE_DAILY
+if oracle_risky_weight != 0 or not np.isclose(oracle_period_return, RISK_FREE_RATE_DAILY):
+    raise RuntimeError("Cash policy does not preserve the declared economic hurdle.")
+print(
+    f"Max-Sharpe regime oracle at {RISK_FREE_RATE:.1%}: "
+    f"infeasible={oracle_regimes}, feasible=optimize"
+)
+
+# %%
+full_training_regime = max_sharpe_regime(common_mean_daily, RISK_FREE_RATE_DAILY)
+if full_training_regime != "optimize":
+    raise RuntimeError("The full training window requires the predeclared all-cash policy.")
+print(f"Full-training Max-Sharpe regime: {full_training_regime}")
 
 # %% [markdown]
 # PyPortfolioOpt is easiest to read because it exposes the classical MVO inputs
@@ -250,10 +480,9 @@ print(f"Covariance matrix shape: {S.shape}")
 
 # %%
 ef = EfficientFrontier(mu, S)
-weights_sharpe = ef.max_sharpe(risk_free_rate=risk_free_rate)
-ret, vol, sr = ef.portfolio_performance(verbose=True, risk_free_rate=risk_free_rate)
-
-weights_pypfopt_sharpe = pd.Series(weights_sharpe)
+weights_sharpe = ef.max_sharpe(risk_free_rate=RISK_FREE_RATE)
+assert_optimal_status(ef._opt, "PPO Max Sharpe")
+weights_pypfopt_sharpe = align_weights(weights_sharpe, "PPO: Max Sharpe")
 
 # %% [markdown]
 # ### Min Volatility Portfolio
@@ -261,65 +490,73 @@ weights_pypfopt_sharpe = pd.Series(weights_sharpe)
 # %%
 ef = EfficientFrontier(mu, S)
 weights_minvol = ef.min_volatility()
-ret, vol, sr = ef.portfolio_performance(verbose=True, risk_free_rate=risk_free_rate)
-
-weights_pypfopt_minvol = pd.Series(weights_minvol)
+assert_optimal_status(ef._opt, "PPO minimum volatility")
+weights_pypfopt_minvol = align_weights(weights_minvol, "PPO: Min Vol")
 
 # %% [markdown]
 # ### CVaR Optimization
 
 # %%
-cvar = EfficientCVaR(mu, returns, beta=0.95)
-weights_cvar = cvar.efficient_return(target_return=0.15)
-cvar.portfolio_performance(verbose=True)
-
-weights_pypfopt_cvar = pd.Series(cvar.clean_weights())
+cvar = EfficientCVaR(
+    mu,
+    train_returns,
+    beta=CVAR_CONFIDENCE,
+    weight_bounds=(0.0, 1.0),
+)
+weights_cvar = cvar.min_cvar()
+assert_optimal_status(cvar._opt, "PPO minimum CVaR")
+weights_pypfopt_cvar = align_weights(weights_cvar, "PPO: Min CVaR")
 
 # %% [markdown]
 # ### Hierarchical Risk Parity (HRP)
 
 # %%
-hrp = HRPOpt(returns)
+hrp = HRPOpt(train_returns)
 hrp.optimize(linkage_method="ward")
-hrp.portfolio_performance(verbose=True)
-
-weights_pypfopt_hrp = pd.Series(hrp.clean_weights())
+weights_pypfopt_hrp = align_weights(hrp.clean_weights(), "PPO: HRP")
 
 # %% [markdown]
 # ### Covariance Shrinkage (Ledoit-Wolf)
 
 # %%
 # Shrinkage estimator for more robust covariance
-S_shrunk = risk_models.CovarianceShrinkage(prices).ledoit_wolf()
+S_shrunk = risk_models.CovarianceShrinkage(train_prices).ledoit_wolf()
 
 ef_shrunk = EfficientFrontier(mu, S_shrunk)
-weights_shrunk = ef_shrunk.max_sharpe(risk_free_rate=risk_free_rate)
-ef_shrunk.portfolio_performance(verbose=True, risk_free_rate=risk_free_rate)
-
-weights_pypfopt_shrunk = pd.Series(weights_shrunk)
+weights_shrunk = ef_shrunk.max_sharpe(risk_free_rate=RISK_FREE_RATE)
+assert_optimal_status(ef_shrunk._opt, "PPO shrinkage Max Sharpe")
+weights_pypfopt_shrunk = align_weights(weights_shrunk, "PPO: Shrinkage")
 
 # %% [markdown]
 # ## Part 2: Riskfolio-Lib
 #
-# Riskfolio-Lib offers the most comprehensive set of risk measures.
+# Riskfolio-Lib exposes several risk families through one portfolio object.
 
 # %%
-# Create portfolio object
-port = rp.Portfolio(returns=returns)
-
-# Estimate statistics
-port.assets_stats(method_mu="hist", method_cov="hist")
-
-# Set solver
+# Create the portfolio object and pass the already-defined sample moments explicitly.
+port = rp.Portfolio(returns=train_returns)
+port.mu = common_mean_daily.to_frame().T
+port.cov = common_cov_daily
+port.alpha = 1 - CVAR_CONFIDENCE
+port.sht = False
+port.budget = 1.0
 port.solvers = ["CLARABEL"]
+
+if not np.allclose(port.mu.to_numpy().ravel(), common_mean_daily.to_numpy()):
+    raise RuntimeError("Riskfolio expected returns drifted from the common daily estimator.")
+if not np.allclose(port.cov.to_numpy(), common_cov_daily.to_numpy()):
+    raise RuntimeError("Riskfolio covariance drifted from the common daily estimator.")
 
 # %% [markdown]
 # ### Available Risk Measures
 #
-# Riskfolio supports 22 risk measures:
+# The pinned Riskfolio runtime includes multiple risk families. This notebook uses:
 # - **Deviation-based**: MV, MAD, MSV, GMD, KT, SKT
 # - **Quantile-based**: CVaR, EVaR, RLVaR, WR
 # - **Drawdown-based**: MDD, ADD, CDaR, EDaR, RLDaR, UCI
+#
+# Standard deviation, maximum drawdown, and CDaR appear as ratio objectives. CVaR is
+# handled separately as the same minimum-risk task used by the other two libraries.
 
 # %% [markdown]
 # ### Max Sharpe with Different Risk Measures
@@ -327,45 +564,61 @@ port.solvers = ["CLARABEL"]
 # %%
 risk_measures = {
     "MV": "Standard Deviation",
-    "CVaR": "Conditional VaR",
     "MDD": "Max Drawdown",
     "CDaR": "Conditional DaR",
 }
 
-# Riskfolio 7.2.1 fails this sample's Sharpe solve when a positive rf is supplied directly.
-riskfolio_rf = 0.0
-
 riskfolio_weights = {}
 for rm, name in risk_measures.items():
-    result = port.optimization(
-        model="Classic",
-        rm=rm,
-        obj="Sharpe",
-        rf=riskfolio_rf,
-        hist=True,
+    result = run_riskfolio(
+        lambda rm=rm: port.optimization(
+            model="Classic",
+            rm=rm,
+            obj="Sharpe",
+            rf=RISK_FREE_RATE_DAILY,
+            hist=True,
+        ),
+        f"Max Sharpe with {name}",
     )
-    if result is None or "weights" not in result.columns:
-        raise RuntimeError(f"Riskfolio optimization returned no weights for {name}.")
-    riskfolio_weights[name] = result["weights"].values.flatten()
-    n_pos = int((result["weights"] > 0.001).sum())
+    weights = align_weights(result["weights"], f"RF: {name}")
+    riskfolio_weights[name] = weights
+    n_pos = int((weights > ACTIVE_WEIGHT_THRESHOLD).sum())
     print(f"{name}: {n_pos} positions")
+
+# Match PyPortfolioOpt and skfolio: long-only, fully invested, minimum empirical CVaR.
+result_cvar = run_riskfolio(
+    lambda: port.optimization(
+        model="Classic",
+        rm="CVaR",
+        obj="MinRisk",
+        rf=RISK_FREE_RATE_DAILY,
+        hist=True,
+    ),
+    "minimum CVaR",
+)
+riskfolio_weights["Minimum CVaR"] = align_weights(result_cvar["weights"], "RF: Min CVaR")
+print(
+    "Minimum CVaR: "
+    f"{int((riskfolio_weights['Minimum CVaR'] > ACTIVE_WEIGHT_THRESHOLD).sum())} positions"
+)
 
 # %% [markdown]
 # ### Risk Parity
 
 # %%
 # Risk parity: equal risk contribution from each asset
-weights_rp = port.rp_optimization(
-    model="Classic",
-    rm="MV",
-    rf=riskfolio_rf,
-    b=None,  # Equal risk contribution
-    hist=True,
+weights_rp = run_riskfolio(
+    lambda: port.rp_optimization(
+        model="Classic",
+        rm="MV",
+        rf=RISK_FREE_RATE_DAILY,
+        b=None,  # Equal risk contribution
+        hist=True,
+    ),
+    "risk parity",
 )
-if weights_rp is None or "weights" not in weights_rp.columns:
-    raise RuntimeError("Riskfolio risk parity optimization returned no weights.")
-riskfolio_weights["Risk Parity"] = weights_rp["weights"].values.flatten()
-n_pos = int((weights_rp["weights"] > 0.001).sum())
+riskfolio_weights["Risk Parity"] = align_weights(weights_rp["weights"], "RF: Risk Parity")
+n_pos = int((riskfolio_weights["Risk Parity"] > ACTIVE_WEIGHT_THRESHOLD).sum())
 print(f"Risk Parity: {n_pos} positions")
 
 # %% [markdown]
@@ -373,30 +626,44 @@ print(f"Risk Parity: {n_pos} positions")
 
 # %%
 # Compute efficient frontiers for different risk measures
-frontier_mv = port.efficient_frontier(
-    model="Classic", rm="MV", points=50, rf=riskfolio_rf, hist=True
+frontier_mv = run_riskfolio(
+    lambda: port.efficient_frontier(
+        model="Classic",
+        rm="MV",
+        points=FRONTIER_POINTS,
+        rf=RISK_FREE_RATE_DAILY,
+        hist=True,
+    ),
+    "mean-variance frontier",
 )
-frontier_cvar = port.efficient_frontier(
-    model="Classic", rm="CVaR", points=50, rf=riskfolio_rf, hist=True
+frontier_cvar = run_riskfolio(
+    lambda: port.efficient_frontier(
+        model="Classic",
+        rm="CVaR",
+        points=FRONTIER_POINTS,
+        rf=RISK_FREE_RATE_DAILY,
+        hist=True,
+    ),
+    "CVaR frontier",
 )
 
 
 # Convert to plottable format
-def frontier_to_df(frontier, cov, name):
+def frontier_to_df(frontier, mean_returns, covariance, name):
     """Convert riskfolio frontier to DataFrame with risk-return."""
     results = []
-    mu_flat = port.mu.values.flatten()  # Ensure 1D array
+    mean_flat = mean_returns.values.flatten()
     for col in frontier.columns:
         w = frontier[col].values
-        ret = (w @ mu_flat) * 252
-        vol = np.sqrt(w @ cov @ w) * np.sqrt(252)
+        ret = (w @ mean_flat) * TRADING_DAYS
+        vol = np.sqrt(w @ covariance @ w) * np.sqrt(TRADING_DAYS)
         results.append({"return": ret, "volatility": vol, "frontier": name})
     return pd.DataFrame(results)
 
 
 cov_np = port.cov.values
-ef_mv = frontier_to_df(frontier_mv, cov_np, "Mean-Variance")
-ef_cvar = frontier_to_df(frontier_cvar, cov_np, "CVaR")
+ef_mv = frontier_to_df(frontier_mv, port.mu, cov_np, "Mean-Variance")
+ef_cvar = frontier_to_df(frontier_cvar, port.mu, cov_np, "CVaR")
 
 # %%
 # Plot both efficient frontiers
@@ -407,7 +674,7 @@ fig.add_scatter(
     y=ef_mv["return"],
     mode="lines",
     name="Mean-Variance",
-    line=dict(color="blue", width=2),
+    line=dict(color=COLORS["blue"], width=3),
 )
 
 fig.add_scatter(
@@ -415,13 +682,13 @@ fig.add_scatter(
     y=ef_cvar["return"],
     mode="lines",
     name="CVaR",
-    line=dict(color="red", width=2, dash="dash"),
+    line=dict(color=COLORS["amber"], width=2, dash="dash"),
 )
 
 fig.update_layout(
-    title="Efficient Frontiers: Mean-Variance vs CVaR",
-    xaxis_title="Volatility",
-    yaxis_title="Return",
+    title="Training frontiers depend on the chosen risk measure",
+    xaxis_title="Annualized volatility",
+    yaxis_title="Annualized expected return",
     xaxis_tickformat=".0%",
     yaxis_tickformat=".0%",
     height=500,
@@ -429,9 +696,8 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# **Interpretation**: The frontier comparison makes the objective-function trade-off
-# visible. CVaR-aware portfolios usually accept a slightly worse variance-based fit
-# in exchange for better behavior in the left tail.
+# The two curves are training diagnostics, not test performance. They show which allocations
+# each risk definition considers efficient before any later return is observed.
 
 # %% [markdown]
 # ## Part 3: skfolio
@@ -449,31 +715,158 @@ fig.show()
 model_sharpe = MeanRisk(
     objective_function=ObjectiveFunction.MAXIMIZE_RATIO,
     risk_measure=RiskMeasure.VARIANCE,
+    prior_estimator=common_empirical_prior(),
+    min_weights=0.0,
+    max_weights=1.0,
+    budget=1.0,
+    risk_free_rate=RISK_FREE_RATE_DAILY,
+    solver="CLARABEL",
+    save_problem=True,
+    raise_on_failure=True,
 )
-model_sharpe.fit(returns)
+model_sharpe.fit(train_returns)
+assert_optimal_status(model_sharpe.problem_, "skfolio Max Sharpe")
+
+skfolio_distribution = model_sharpe.prior_estimator_.return_distribution_
+if not np.allclose(skfolio_distribution.mu, common_mean_daily.to_numpy()):
+    raise RuntimeError("skfolio expected returns drifted from the common daily estimator.")
+if not np.allclose(skfolio_distribution.covariance, common_cov_daily.to_numpy()):
+    raise RuntimeError("skfolio covariance drifted from the common daily estimator.")
 
 print(f"skfolio Max Sharpe - Fitted {len(model_sharpe.weights_)} assets")
-weights_skfolio_sharpe = pd.Series(model_sharpe.weights_, index=tickers)
+weights_skfolio_sharpe = align_weights(model_sharpe.weights_, "SKF: Max Sharpe")
 
 # %%
 # Min Variance with skfolio
 model_minvar = MeanRisk(
     objective_function=ObjectiveFunction.MINIMIZE_RISK,
     risk_measure=RiskMeasure.VARIANCE,
+    prior_estimator=common_empirical_prior(),
+    min_weights=0.0,
+    max_weights=1.0,
+    budget=1.0,
+    solver="CLARABEL",
+    save_problem=True,
+    raise_on_failure=True,
 )
-model_minvar.fit(returns)
+model_minvar.fit(train_returns)
+assert_optimal_status(model_minvar.problem_, "skfolio minimum variance")
 
-weights_skfolio_minvar = pd.Series(model_minvar.weights_, index=tickers)
+weights_skfolio_minvar = align_weights(model_minvar.weights_, "SKF: Min Var")
 
 # %%
 # CVaR optimization
 model_cvar = MeanRisk(
     objective_function=ObjectiveFunction.MINIMIZE_RISK,
     risk_measure=RiskMeasure.CVAR,
+    prior_estimator=common_empirical_prior(),
+    min_weights=0.0,
+    max_weights=1.0,
+    budget=1.0,
+    cvar_beta=CVAR_CONFIDENCE,
+    solver="CLARABEL",
+    save_problem=True,
+    raise_on_failure=True,
 )
-model_cvar.fit(returns)
+model_cvar.fit(train_returns)
+assert_optimal_status(model_cvar.problem_, "skfolio minimum CVaR")
 
-weights_skfolio_cvar = pd.Series(model_cvar.weights_, index=tickers)
+weights_skfolio_cvar = align_weights(model_cvar.weights_, "SKF: Min CVaR")
+
+# %% [markdown]
+# ### Independent Common-Objective Checks
+#
+# The libraries use different parameter units and solver wrappers. These independent
+# optimizations verify that the boundaries still represent one economic problem.
+
+
+# %%
+def negative_common_sharpe(weights: np.ndarray) -> float:
+    """Evaluate the shared daily arithmetic excess-return-to-volatility objective."""
+    excess_return = weights @ common_mean_daily.to_numpy() - RISK_FREE_RATE_DAILY
+    volatility = np.sqrt(weights @ common_cov_daily.to_numpy() @ weights)
+    return -float(excess_return / volatility)
+
+
+common_sharpe_oracle = minimize(
+    negative_common_sharpe,
+    np.full(num_stocks, 1 / num_stocks),
+    method="SLSQP",
+    bounds=[(0.0, 1.0)] * num_stocks,
+    constraints={"type": "eq", "fun": lambda weights: weights.sum() - 1.0},
+    options={"ftol": 1e-13, "maxiter": 2_000},
+)
+if not common_sharpe_oracle.success:
+    raise RuntimeError(f"Independent Max-Sharpe oracle failed: {common_sharpe_oracle.message}")
+
+common_sharpe_weights = {
+    "PPO": weights_pypfopt_sharpe,
+    "Riskfolio": riskfolio_weights["Standard Deviation"],
+    "skfolio": weights_skfolio_sharpe,
+}
+for library, weights in common_sharpe_weights.items():
+    weight_difference = float(np.max(np.abs(weights.to_numpy() - common_sharpe_oracle.x)))
+    if weight_difference > COMMON_WEIGHT_TOLERANCE:
+        raise RuntimeError(
+            f"{library} Max-Sharpe weights differ from the common oracle by "
+            f"{weight_difference:.8f}."
+        )
+    print(f"{library} Max-Sharpe vs independent oracle: {weight_difference:.2e}")
+
+# %% [markdown]
+# The matching CVaR task minimizes the historical loss tail at the same 95% confidence,
+# with long-only weights that sum to one and no return target or ratio objective.
+
+# %%
+# Minimum empirical CVaR is a linear program over weights, the VaR threshold, and tail slacks.
+training_scenarios = train_returns.to_numpy()
+n_scenarios = len(training_scenarios)
+tail_coefficient = 1 / ((1 - CVAR_CONFIDENCE) * n_scenarios)
+cvar_objective = np.r_[
+    np.zeros(num_stocks),
+    1.0,
+    np.full(n_scenarios, tail_coefficient),
+]
+cvar_inequality = np.hstack(
+    [
+        -training_scenarios,
+        -np.ones((n_scenarios, 1)),
+        -np.eye(n_scenarios),
+    ]
+)
+cvar_oracle = linprog(
+    cvar_objective,
+    A_ub=cvar_inequality,
+    b_ub=np.zeros(n_scenarios),
+    A_eq=np.r_[np.ones(num_stocks), np.zeros(1 + n_scenarios)][None, :],
+    b_eq=np.array([1.0]),
+    bounds=[(0.0, 1.0)] * num_stocks + [(None, None)] + [(0.0, None)] * n_scenarios,
+    method="highs",
+)
+if not cvar_oracle.success:
+    raise RuntimeError(f"Independent minimum-CVaR oracle failed: {cvar_oracle.message}")
+
+
+# %%
+def empirical_cvar(weights: pd.Series) -> float:
+    """Evaluate the same historical-loss CVaR minimized by the independent LP."""
+    losses = -(training_scenarios @ weights.to_numpy())
+    threshold = np.quantile(losses, CVAR_CONFIDENCE, method="lower")
+    return float(threshold + tail_coefficient * np.maximum(losses - threshold, 0).sum())
+
+
+common_cvar_weights = {
+    "PPO": weights_pypfopt_cvar,
+    "Riskfolio": riskfolio_weights["Minimum CVaR"],
+    "skfolio": weights_skfolio_cvar,
+}
+for library, weights in common_cvar_weights.items():
+    objective_gap = empirical_cvar(weights) - cvar_oracle.fun
+    if objective_gap > COMMON_OBJECTIVE_TOLERANCE:
+        raise RuntimeError(
+            f"{library} minimum-CVaR objective exceeds the common oracle by {objective_gap:.8e}."
+        )
+    print(f"{library} minimum-CVaR objective gap: {objective_gap:.2e}")
 
 # %% [markdown]
 # ### Hierarchical Risk Parity
@@ -485,50 +878,100 @@ model_hrp = HierarchicalRiskParity(
     distance_estimator=PearsonDistance(),
     hierarchical_clustering_estimator=HierarchicalClustering(linkage_method=LinkageMethod.WARD),
 )
-model_hrp.fit(returns)
+model_hrp.fit(train_returns)
 
-weights_skfolio_hrp = pd.Series(model_hrp.weights_, index=tickers)
+weights_skfolio_hrp = align_weights(model_hrp.weights_, "SKF: HRP")
 
 # %% [markdown]
 # ### sklearn Integration: Walk-Forward Cross-Validation
 #
 # One of skfolio's key advantages is native sklearn compatibility,
 # including built-in walk-forward and combinatorial purged cross-validation.
-# Here we run walk-forward CV to evaluate the Max Sharpe model out-of-sample.
+# Here we apply the same Max-Sharpe feasibility policy before every fold fit.
 
 # %%
-# Walk-forward cross-validation: 1 year train, 1 quarter test
-cv = WalkForward(train_size=252, test_size=63)
-n_splits = cv.get_n_splits(returns)
-print(f"Walk-forward CV: {n_splits} splits (252d train / 63d test)")
-
-# Run CV on the Max Sharpe model — produces out-of-sample Portfolio per fold
-pred = skf_cross_val_predict(model_sharpe, returns, cv=cv)
-
-# pred is a skfolio Population (collection of test-fold Portfolios)
-print(f"\nOut-of-sample results across {n_splits} folds:")
-print(f"  Mean return (ann.): {pred.annualized_mean:.4f}")
-print(f"  Sharpe ratios per fold: {[f'{p.annualized_sharpe_ratio:.2f}' for p in pred]}")
+# Walk-forward cross-validation: one trading year for fitting, then one quarter for validation.
+CV_TRAIN_SIZE = 252
+CV_TEST_SIZE = 63
+cv = WalkForward(train_size=CV_TRAIN_SIZE, test_size=CV_TEST_SIZE)
+n_splits = cv.get_n_splits(train_returns)
+print(
+    f"Training-only walk-forward CV: {n_splits} splits "
+    f"({CV_TRAIN_SIZE}d fit / {CV_TEST_SIZE}d validation)"
+)
+fold_records = []
 
 # %% [markdown]
-# **Interpretation**: This is the main reason to care about skfolio. It treats
-# portfolio construction as an estimator that can be cross-validated, which is a
-# better fit for ML workflows than judging allocations on one full-sample backtest.
+# Feasible folds invoke the unchanged 4% Max-Sharpe estimator and require an exact solver status.
+# Infeasible folds hold cash at the same daily hurdle without calling a ratio solver.
 
 # %%
-# Display skfolio portfolio performance
-print("\n=== skfolio Portfolio Summary ===")
+for fold, (train_indices, test_indices) in enumerate(cv.split(train_returns)):
+    fold_train = train_returns.iloc[train_indices]
+    fold_test = train_returns.iloc[test_indices]
+    regime = max_sharpe_regime(fold_train.mean(), RISK_FREE_RATE_DAILY)
+
+    if regime == "cash":
+        fold_returns = np.full(len(fold_test), RISK_FREE_RATE_DAILY)
+        solver_status = "cash_precheck"
+        active_positions = 0
+    else:
+        fold_model = clone(model_sharpe).fit(fold_train)
+        assert_optimal_status(fold_model.problem_, f"skfolio fold {fold} Max Sharpe")
+        fold_returns = fold_test.to_numpy() @ fold_model.weights_
+        solver_status = fold_model.problem_.status
+        active_positions = int((np.abs(fold_model.weights_) > ACTIVE_WEIGHT_THRESHOLD).sum())
+
+    fold_volatility = float(np.std(fold_returns, ddof=1))
+    fold_sharpe = (
+        None
+        if fold_volatility <= np.finfo(float).eps
+        else float(
+            np.mean(fold_returns - RISK_FREE_RATE_DAILY) / fold_volatility * np.sqrt(TRADING_DAYS)
+        )
+    )
+    fold_records.append(
+        {
+            "fold": fold,
+            "regime": regime,
+            "solver_status": solver_status,
+            "active_positions": active_positions,
+            "annual_return": float(np.mean(fold_returns) * TRADING_DAYS),
+            "annual_sharpe": fold_sharpe,
+        }
+    )
+
+# %%
+fold_summary = pl.DataFrame(fold_records)
+cash_folds = fold_summary.filter(pl.col("regime") == "cash").height
+if cash_folds == 0:
+    raise RuntimeError("The walk-forward oracle did not exercise the predeclared cash policy.")
+print(f"\nWalk-forward regimes: {n_splits - cash_folds} optimized, {cash_folds} cash")
+fold_summary
+
+# %% [markdown]
+# This demonstration stays inside the training window. Cash rows are explicit feasibility
+# decisions at the same 4% hurdle, while optimized rows expose the solver status and breadth.
+
+# %%
 portfolios_skf = {
     "Max Sharpe": weights_skfolio_sharpe,
     "Min Variance": weights_skfolio_minvar,
-    "CVaR": weights_skfolio_cvar,
+    "Min CVaR": weights_skfolio_cvar,
     "HRP": weights_skfolio_hrp,
 }
 
-for name, w in portfolios_skf.items():
-    n_pos = (w.abs() > 0.001).sum()
-    max_w = w.max()
-    print(f"{name}: {n_pos} positions, max weight {max_w:.1%}")
+skfolio_summary = pl.DataFrame(
+    [
+        {
+            "portfolio": name,
+            "positions": int((weights.abs() > ACTIVE_WEIGHT_THRESHOLD).sum()),
+            "max_weight": float(weights.max()),
+        }
+        for name, weights in portfolios_skf.items()
+    ]
+)
+skfolio_summary
 
 # %% [markdown]
 # These summary lines are a quick implementation check: if one model keeps producing
@@ -544,32 +987,34 @@ for name, w in portfolios_skf.items():
 # Collect all portfolio weights
 all_portfolios = {
     # PyPortfolioOpt
-    "PPO: Max Sharpe": weights_pypfopt_sharpe.values,
-    "PPO: Min Vol": weights_pypfopt_minvol.values,
-    "PPO: CVaR": weights_pypfopt_cvar.values,
-    "PPO: HRP": weights_pypfopt_hrp.values,
-    "PPO: Shrinkage": weights_pypfopt_shrunk.values,
+    "PPO: Max Sharpe": weights_pypfopt_sharpe,
+    "PPO: Min Vol": weights_pypfopt_minvol,
+    "PPO: Min CVaR": weights_pypfopt_cvar,
+    "PPO: HRP": weights_pypfopt_hrp,
+    "PPO: Shrinkage": weights_pypfopt_shrunk,
     # Riskfolio-Lib
     "RF: Std Dev": riskfolio_weights["Standard Deviation"],
-    "RF: CVaR": riskfolio_weights["Conditional VaR"],
+    "RF: Min CVaR": riskfolio_weights["Minimum CVaR"],
     "RF: Max DD": riskfolio_weights["Max Drawdown"],
+    "RF: Conditional DaR": riskfolio_weights["Conditional DaR"],
     "RF: Risk Parity": riskfolio_weights["Risk Parity"],
     # skfolio
-    "SKF: Max Sharpe": weights_skfolio_sharpe.values,
-    "SKF: Min Var": weights_skfolio_minvar.values,
-    "SKF: CVaR": weights_skfolio_cvar.values,
-    "SKF: HRP": weights_skfolio_hrp.values,
+    "SKF: Max Sharpe": weights_skfolio_sharpe,
+    "SKF: Min Var": weights_skfolio_minvar,
+    "SKF: Min CVaR": weights_skfolio_cvar,
+    "SKF: HRP": weights_skfolio_hrp,
+    # Benchmark
+    "Equal Weight": pd.Series(1 / num_stocks, index=tickers),
 }
 
 # %%
 # Compute portfolio returns for each strategy
-returns_np = returns.values
-dates = returns.index.tolist()
+test_returns_np = test_returns.values
+test_dates = test_returns.index.tolist()
 
 portfolio_returns = {}
 for name, weights in all_portfolios.items():
-    pf_ret = returns_np @ weights
-    portfolio_returns[name] = pf_ret
+    portfolio_returns[name] = test_returns_np @ weights.reindex(tickers).values
 
 # %% [markdown]
 # ### Evaluate with ml4t-diagnostic
@@ -581,35 +1026,35 @@ evaluation_results = []
 for name, pf_returns in portfolio_returns.items():
     pa = PortfolioAnalysis(
         returns=pl.Series("returns", pf_returns),
-        dates=pl.Series("date", dates),
-        risk_free=risk_free_rate / 252,
-        periods_per_year=252,
+        dates=pl.Series("timestamp", test_dates),
+        risk_free=RISK_FREE_RATE,
+        periods_per_year=TRADING_DAYS,
     )
 
     metrics = pa.compute_summary_stats()
 
     evaluation_results.append(
         {
-            "Portfolio": name,
-            "Annual Return": metrics.annual_return,
-            "Annual Vol": metrics.annual_volatility,
-            "Sharpe": metrics.sharpe_ratio,
-            "Sortino": metrics.sortino_ratio,
-            "Calmar": metrics.calmar_ratio,
-            "Max DD": metrics.max_drawdown,
-            "VaR 95%": metrics.var_95,
-            "CVaR 95%": metrics.cvar_95,
-            "Win Rate": metrics.win_rate,
+            "portfolio": name,
+            "library": name.split(":", maxsplit=1)[0] if ":" in name else "Benchmark",
+            "annual_return": metrics.annual_return,
+            "annual_volatility": metrics.annual_volatility,
+            "sharpe": metrics.sharpe_ratio,
+            "sortino": metrics.sortino_ratio,
+            "calmar": metrics.calmar_ratio,
+            "max_drawdown": metrics.max_drawdown,
+            "var_95": metrics.var_95,
+            "cvar_95": metrics.cvar_95,
+            "win_rate": metrics.win_rate,
         }
     )
 
-eval_df = pl.DataFrame(evaluation_results)
+eval_df = pl.DataFrame(evaluation_results).sort("sharpe", descending=True)
 eval_df
 
 # %% [markdown]
-# **Interpretation**: Differences across libraries are often smaller than the marketing
-# suggests. The practical decision usually comes down to workflow fit, constraints, and
-# validation tooling rather than to a large persistent edge in raw portfolio metrics.
+# These metrics describe frozen allocations on later returns. They support comparison of
+# implementations, but this single historical test is not a license to select a permanent winner.
 
 # %% [markdown]
 # ### Execution-Aware Bridge with ml4t-backtest
@@ -618,31 +1063,27 @@ eval_df
 # To connect this to deployable execution, replay one optimized portfolio through Engine.
 
 # %% [markdown]
-# The bridge strategy submits the chosen library weights once and lets the engine
-# model fills, slippage, and commissions.
+# The bridge strategy restores the same frozen target each day. The engine then adds
+# next-bar timing, slippage, and commissions without changing the allocation policy.
 
 
 # %%
-class StaticWeightStrategy(Strategy):
+class DailyTargetWeightStrategy(Strategy):
     def __init__(self, target_weights: dict[str, float], allow_short: bool):
         self.target_weights = target_weights
         self.executor = TargetWeightExecutor(
             config=RebalanceConfig(
-                min_trade_value=100.0,
-                min_weight_change=0.001,
+                min_trade_value=0.0,
+                min_weight_change=0.0,
                 allow_fractional=True,
                 allow_short=allow_short,
             )
         )
-        self._submitted = False
 
     def on_data(self, timestamp, data, context, broker):
-        if self._submitted:
-            return
         targets = {asset: weight for asset, weight in self.target_weights.items() if asset in data}
         if targets:
             self.executor.execute(targets, data, broker)
-            self._submitted = True
 
 
 # %%
@@ -650,41 +1091,31 @@ class StaticWeightStrategy(Strategy):
 bridge_name = "PPO: Max Sharpe"
 engine_target_weights = {
     ticker: float(weight)
-    for ticker, weight in zip(tickers, all_portfolios[bridge_name], strict=False)
+    for ticker, weight in all_portfolios[bridge_name].items()
     if abs(float(weight)) > 1e-8
 }
 allow_short_engine = any(weight < 0 for weight in engine_target_weights.values())
 
-prices_panel = pl.from_pandas(prices.reset_index())
-ts_col = prices_panel.columns[0]
-if ts_col != "timestamp":
-    prices_panel = prices_panel.rename({ts_col: "timestamp"})
-prices_long = (
-    prices_panel.unpivot(index="timestamp", variable_name="symbol", value_name="close")
-    .with_columns(
-        [
-            pl.col("timestamp").cast(pl.Datetime("us")),
-            pl.col("close").alias("open"),
-            pl.col("close").alias("high"),
-            pl.col("close").alias("low"),
-            pl.lit(1_000_000).alias("volume"),
-        ]
-    )
+test_prices_long = (
+    etf_data.filter(pl.col("timestamp") > pl.lit(TRAIN_END).str.to_date())
+    .select(["timestamp", "symbol", "open", "high", "low", "close", "volume"])
+    .drop_nulls()
+    .with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
     .sort(["timestamp", "symbol"])
 )
 
 # %%
 # Run the execution-aware simulation and collect daily returns.
 engine = Engine(
-    feed=DataFeed(prices_df=prices_long),
-    strategy=StaticWeightStrategy(engine_target_weights, allow_short=allow_short_engine),
+    feed=DataFeed(prices_df=test_prices_long),
+    strategy=DailyTargetWeightStrategy(engine_target_weights, allow_short=allow_short_engine),
     config=BacktestConfig(
         initial_cash=100_000.0,
         execution_mode=ExecutionMode.NEXT_BAR,
         commission_type=CommissionType.PERCENTAGE,
-        commission_rate=0.0005,
+        commission_rate=COMMISSION_RATE,
         slippage_type=SlippageType.PERCENTAGE,
-        slippage_rate=0.0005,
+        slippage_rate=SLIPPAGE_RATE,
         allow_short_selling=allow_short_engine,
     ),
 )
@@ -693,89 +1124,136 @@ engine_daily = (
     engine.run()
     .to_daily_pnl()
     .select(
-        pl.col("date").cast(pl.Datetime("us")).alias("date"),
+        pl.col("date").cast(pl.Datetime("us")).alias("timestamp"),
         pl.col("return_pct").alias("engine_return"),
     )
 )
+# NEXT_BAR cannot hold the target during the first test return. Exclude that warm-up
+# observation from both paths, then require an identical one-to-one scored date set.
+warmup_timestamp = pl.Series("timestamp", [test_dates[0]]).cast(pl.Datetime("us")).item()
 vectorized_daily = pl.DataFrame(
     {
-        "date": pl.Series(dates).cast(pl.Datetime("us")),
-        "vectorized_return": portfolio_returns[bridge_name],
+        "timestamp": pl.Series(test_dates[1:]).cast(pl.Datetime("us")),
+        "vectorized_return": portfolio_returns[bridge_name][1:],
     }
 )
+engine_scored = engine_daily.filter(pl.col("timestamp") > warmup_timestamp).sort("timestamp")
+
+if engine_scored["timestamp"].to_list() != vectorized_daily["timestamp"].to_list():
+    raise RuntimeError("Engine and vectorized bridge do not contain identical scored bars.")
 
 # %%
-# Compare vectorized and engine results on overlapping dates.
+# Compare vectorized and engine results on the asserted common date set.
 bridge = (
-    vectorized_daily.join(engine_daily, on="date", how="inner")
+    vectorized_daily.join(engine_scored, on="timestamp", how="inner", validate="1:1")
     .drop_nulls(["vectorized_return", "engine_return"])
-    .sort("date")
+    .sort("timestamp")
 )
+if bridge.height != len(test_dates) - 1:
+    raise RuntimeError("Execution bridge lost rows after the matched-bar assertion.")
 
 vec_pa = PortfolioAnalysis(
-    returns=bridge["vectorized_return"], dates=bridge["date"], periods_per_year=252
+    returns=bridge["vectorized_return"],
+    dates=bridge["timestamp"],
+    risk_free=RISK_FREE_RATE,
+    periods_per_year=TRADING_DAYS,
 )
 eng_pa = PortfolioAnalysis(
-    returns=bridge["engine_return"], dates=bridge["date"], periods_per_year=252
+    returns=bridge["engine_return"],
+    dates=bridge["timestamp"],
+    risk_free=RISK_FREE_RATE,
+    periods_per_year=TRADING_DAYS,
 )
 vec_stats = vec_pa.compute_summary_stats()
 eng_stats = eng_pa.compute_summary_stats()
 
 print(f"Execution bridge ({bridge_name}):")
 print(
+    f"  Matched bars={bridge.height}, "
+    f"window={bridge['timestamp'].min().date()} to {bridge['timestamp'].max().date()}"
+)
+print(
     f"  Vectorized Sharpe={vec_stats.sharpe_ratio:.3f}, Engine Sharpe={eng_stats.sharpe_ratio:.3f}"
 )
 print(f"  Vectorized MaxDD={vec_stats.max_drawdown:.2%}, Engine MaxDD={eng_stats.max_drawdown:.2%}")
 
 # %% [markdown]
-# **Interpretation**: Library rankings only matter if they survive the same execution
-# assumptions. This bridge filters out optimizers that win on paper but degrade quickly
-# once fills and trading costs are applied.
+# The first test return is an explicit NEXT_BAR warm-up and is absent from both scored paths.
+# Every reported bridge observation therefore has prior target exposure in the vectorized and
+# Engine paths; any remaining gap reflects fills and declared costs on identical bars.
 
 # %% [markdown]
 # ### Visualization: Portfolio Comparison
+#
+# The growth chart focuses on the comparable Max-Sharpe implementations and an equal-weight
+# benchmark. Showing four lines preserves the cross-library comparison without a thirteen-line
+# legend obscuring the evidence.
 
 # %%
-# Cumulative returns comparison
+growth_methods = ["PPO: Max Sharpe", "RF: Std Dev", "SKF: Max Sharpe", "Equal Weight"]
+growth_colors = {
+    "PPO: Max Sharpe": COLORS["blue"],
+    "RF: Std Dev": COLORS["amber"],
+    "SKF: Max Sharpe": COLORS["copper"],
+    "Equal Weight": COLORS["neutral"],
+}
+cumulative_growth = {name: np.cumprod(1 + portfolio_returns[name]) for name in growth_methods}
+growth_leader = max(cumulative_growth, key=lambda name: cumulative_growth[name][-1])
+
 fig = go.Figure()
-
-colors = px.colors.qualitative.Set2
-
-for i, (name, pf_ret) in enumerate(portfolio_returns.items()):
-    cum_ret = (1 + pf_ret).cumprod()
+for name in growth_methods:
     fig.add_scatter(
-        x=dates,
-        y=cum_ret,
+        x=test_dates,
+        y=cumulative_growth[name],
         mode="lines",
         name=name,
-        line=dict(color=colors[i % len(colors)]),
+        line=dict(
+            color=growth_colors[name],
+            width=3 if name == growth_leader else 2,
+            dash="dash" if name == "Equal Weight" else "solid",
+        ),
     )
 
 fig.update_layout(
-    title="Cumulative Returns: All Portfolios",
-    xaxis_title="Date",
-    yaxis_title="Growth of $1",
-    height=600,
-    legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+    title=f"{growth_leader} leads growth across comparable frozen allocations",
+    xaxis_title="Test timestamp",
+    yaxis_title="Growth of $1 (multiple)",
+    height=500,
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
 )
 fig.show()
 
-# %%
-# Risk-Return scatter
-eval_pd = eval_df.to_pandas()
+# %% [markdown]
+# The risk-return map retains every configuration but uses color only for library identity.
+# Hover labels carry the optimizer name, avoiding a thirteen-color legend.
 
-fig = px.scatter(
-    eval_pd,
-    x="Annual Vol",
-    y="Annual Return",
-    color="Portfolio",
-    size="Sharpe",
-    size_max=20,
-    hover_data=["Sharpe", "Sortino", "Max DD"],
-    title="Risk-Return Profile: All Portfolios",
-)
+# %%
+eval_pd = eval_df.to_pandas()
+library_order = ["PPO", "RF", "SKF", "Benchmark"]
+library_colors = dict(zip(library_order, ml4t_palette(4, categorical=True), strict=True))
+test_leader = str(eval_df.row(0, named=True)["portfolio"])
+
+fig = go.Figure()
+for library in library_order:
+    subset = eval_pd.loc[eval_pd["library"] == library]
+    fig.add_scatter(
+        x=subset["annual_volatility"],
+        y=subset["annual_return"],
+        mode="markers",
+        name=library,
+        text=subset["portfolio"],
+        customdata=subset[["sharpe", "max_drawdown"]],
+        marker=dict(color=library_colors[library], size=11, line=dict(width=1)),
+        hovertemplate=(
+            "%{text}<br>Annual return=%{y:.1%}<br>Annual volatility=%{x:.1%}"
+            "<br>Sharpe=%{customdata[0]:.2f}<br>Max drawdown=%{customdata[1]:.1%}<extra></extra>"
+        ),
+    )
 
 fig.update_layout(
+    title=f"{test_leader} has the highest Sharpe on the frozen test window",
+    xaxis_title="Annualized volatility",
+    yaxis_title="Annualized return",
     xaxis_tickformat=".0%",
     yaxis_tickformat=".0%",
     height=500,
@@ -783,230 +1261,287 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# **Interpretation**: The scatter plot is useful for spotting dominance relationships.
-# If several portfolios occupy the same neighborhood, the library choice should be
-# driven by tooling and constraints rather than by tiny performance differences.
+# Overlapping points reveal when API choice matters less than objective choice. The chart reports
+# a historical test, while the training-only walk-forward exercise provides the stability context.
+
+# %% [markdown]
+# A rank heatmap compares unlike metrics without pretending their raw scales are commensurate.
+# Higher ranks are better for every displayed column, including less-negative loss measures.
 
 # %%
-# Metrics heatmap
-metrics_cols = ["Sharpe", "Sortino", "Calmar", "Max DD", "VaR 95%"]
-
-# Normalize for heatmap (higher is better except Max DD and VaR)
-heatmap_data = eval_pd.set_index("Portfolio")[metrics_cols].copy()
-heatmap_data["Max DD"] = -heatmap_data["Max DD"]  # Flip sign
-heatmap_data["VaR 95%"] = -heatmap_data["VaR 95%"]  # Flip sign
-
-# Rank (higher = better)
+metrics_cols = ["sharpe", "sortino", "calmar", "max_drawdown", "var_95"]
+metric_labels = ["Sharpe", "Sortino", "Calmar", "Max drawdown", "VaR 95%"]
+heatmap_data = eval_pd.set_index("portfolio")[metrics_cols]
 ranked = heatmap_data.rank(axis=0)
+consistency_leader = str(ranked.mean(axis=1).idxmax())
 
-fig = px.imshow(
-    ranked.T,
-    x=ranked.index,
-    y=ranked.columns,
-    color_continuous_scale="RdYlGn",
-    title="Portfolio Per-Metric Position Among Configurations",
-    text_auto=".0f",
+fig = go.Figure(
+    data=go.Heatmap(
+        z=ranked.values,
+        x=metric_labels,
+        y=ranked.index,
+        text=np.rint(ranked.values).astype(int),
+        texttemplate="%{text}",
+        colorscale=[
+            [0, COLORS["bg_light"]],
+            [0.5, COLORS["blue_light"]],
+            [1, COLORS["blue"]],
+        ],
+        zmin=1,
+        zmax=len(ranked),
+        colorbar=dict(title="Rank<br>(higher is better)"),
+        hovertemplate="%{y}<br>%{x}: rank %{z:.0f}<extra></extra>",
+    )
 )
-fig.update_layout(height=400)
+fig.update_layout(
+    title=f"{consistency_leader} ranks most consistently across test metrics",
+    xaxis_title="Test metric",
+    height=620,
+    margin=dict(l=150, r=80, t=90, b=60),
+)
 fig.show()
 
 # %% [markdown]
-# The ranking heatmap is a compact way to see whether a portfolio is consistently good
-# or merely wins one metric. Production selection usually favors methods that stay near
-# the top across several criteria instead of topping a single column.
+# Consistency across metrics is more informative than winning one column, but it remains a
+# diagnostic of this test period rather than a second selection stage.
 
 # %% [markdown]
 # ### Weight Distribution Comparison
 
 # %%
-# Compare concentration across portfolios
 concentration_stats = []
 
 for name, weights in all_portfolios.items():
-    n_positions = (np.abs(weights) > 0.001).sum()
-    max_weight = np.max(weights)
-    top5_weight = np.sort(weights)[-5:].sum()
-    hhi = (weights**2).sum()  # Herfindahl-Hirschman Index
+    values = weights.reindex(tickers).to_numpy()
+    n_positions = int((np.abs(values) > ACTIVE_WEIGHT_THRESHOLD).sum())
+    max_weight = float(np.max(values))
+    top5_weight = float(np.sort(values)[-5:].sum())
+    hhi = float((values**2).sum())
 
     concentration_stats.append(
         {
-            "Portfolio": name,
-            "Positions": n_positions,
-            "Max Weight": max_weight,
-            "Top 5 Weight": top5_weight,
-            "HHI": hhi,
+            "portfolio": name,
+            "positions": n_positions,
+            "max_weight": max_weight,
+            "top5_weight": top5_weight,
+            "hhi": hhi,
         }
     )
 
-conc_df = pl.DataFrame(concentration_stats)
+conc_df = pl.DataFrame(concentration_stats).sort("hhi", descending=True)
 conc_df
 
 # %% [markdown]
-# **Interpretation**: Concentration is an implementation risk, not just a stylistic
-# concern. Portfolios with very high HHI or a dominant top-5 weight are more exposed
-# to estimation error, turnover, and mandate breaches.
+# HHI turns visual concentration into a comparable statistic. A value near the equal-weight
+# reference indicates broad diversification; larger values expose greater single-name dependence.
 
 # %% [markdown]
-# ### Concentration Bar Chart — Subplot Scaffolding
+# ### Concentration by Frozen Allocation
 
 # %%
-# Bar chart: positions and concentration
 fig = make_subplots(
     rows=1,
     cols=2,
-    subplot_titles=["Number of Positions", "Portfolio Concentration (HHI)"],
+    shared_yaxes=True,
+    horizontal_spacing=0.08,
+    subplot_titles=["Active positions", "Herfindahl-Hirschman index"],
 )
-portfolios = conc_df["Portfolio"].to_list()
+portfolios = conc_df["portfolio"].to_list()
+lowest_allocator = (
+    conc_df.filter(pl.col("portfolio") != "Equal Weight")
+    .sort("hhi")
+    .row(0, named=True)["portfolio"]
+)
+equal_weight_hhi = 1 / num_stocks
 
 # %% [markdown]
-# ### Populate Position-Count and HHI Traces
+# Horizontal bars keep all portfolio labels readable. The second panel adds the equal-weight
+# HHI as a reference rather than treating the benchmark as another optimized method.
 
 # %%
 fig.add_bar(
-    x=portfolios,
-    y=conc_df["Positions"].to_list(),
+    x=conc_df["positions"].to_list(),
+    y=portfolios,
+    orientation="h",
     name="Positions",
-    marker_color="steelblue",
+    marker_color=COLORS["blue"],
     row=1,
     col=1,
 )
 
 fig.add_bar(
-    x=portfolios,
-    y=conc_df["HHI"].to_list(),
+    x=conc_df["hhi"].to_list(),
+    y=portfolios,
+    orientation="h",
     name="HHI",
-    marker_color="coral",
+    marker_color=COLORS["amber"],
     row=1,
     col=2,
 )
 
-# Add reference line for equal weight HHI
-equal_weight_hhi = 1 / num_stocks
-fig.add_hline(
-    y=equal_weight_hhi,
+fig.add_vline(
+    x=equal_weight_hhi,
     line_dash="dash",
-    line_color="gray",
-    annotation_text=f"Equal Weight: {equal_weight_hhi:.3f}",
+    line_color=COLORS["neutral"],
+    annotation_text=f"EW reference {equal_weight_hhi:.3f}",
+    annotation_position="bottom right",
     row=1,
     col=2,
 )
 
-fig.update_layout(height=400, showlegend=False)
-fig.update_xaxes(tickangle=45)
+fig.update_layout(
+    title=f"{lowest_allocator} is the least concentrated optimized allocation",
+    height=600,
+    showlegend=False,
+    margin=dict(l=150, r=40, t=100, b=60),
+)
+fig.update_xaxes(title_text="Count", row=1, col=1, rangemode="tozero")
+fig.update_xaxes(title_text="HHI (0 to 1)", row=1, col=2, rangemode="tozero")
 fig.show()
 
 # %% [markdown]
 # ## Part 5: Practical Considerations
 #
-# ### Transaction Costs
+# PyPortfolioOpt exposes objective penalties directly. Comparing two matched pairs shows how a
+# turnover penalty changes trading distance and how L2 regularization changes Max-Sharpe breadth.
+# The library warns that this deliberate objective combination uses its transformed formulation;
+# only that exact warning is scoped to the regularized call below.
 
 # %%
-# Optimize with transaction costs
 ef = EfficientFrontier(mu, S)
-
-# Starting from equal-weight portfolio
 initial_weights = np.full(num_stocks, 1 / num_stocks)
+ef.add_objective(
+    objective_functions.transaction_cost,
+    w_prev=initial_weights,
+    k=TRANSACTION_COST_PENALTY,
+)
+weights_with_cost = align_weights(ef.min_volatility(), "PPO: Min Vol with turnover penalty")
+assert_optimal_status(ef._opt, "PPO minimum volatility with turnover penalty")
 
-# Add transaction cost penalty (1% commission)
-ef.add_objective(objective_functions.transaction_cost, w_prev=initial_weights, k=0.01)
-
-ef.min_volatility()
-weights_with_cost = pd.Series(ef.clean_weights())
-
-# Compare to without cost
 ef_no_cost = EfficientFrontier(mu, S)
-ef_no_cost.min_volatility()
-weights_no_cost = pd.Series(ef_no_cost.clean_weights())
+weights_no_cost = align_weights(ef_no_cost.min_volatility(), "PPO: Min Vol without penalty")
+assert_optimal_status(ef_no_cost._opt, "PPO minimum volatility without penalty")
 
-# Turnover comparison
 turnover_with = np.abs(weights_with_cost.values - initial_weights).sum()
 turnover_without = np.abs(weights_no_cost.values - initial_weights).sum()
+turnover_reduction = 1 - turnover_with / turnover_without
 
-print(f"Turnover without cost penalty: {turnover_without:.2%}")
-print(f"Turnover with cost penalty:    {turnover_with:.2%}")
+ef_sharpe_unregularized = EfficientFrontier(mu, S)
+weights_sharpe_unregularized = align_weights(
+    ef_sharpe_unregularized.max_sharpe(risk_free_rate=RISK_FREE_RATE),
+    "PPO: Unregularized Max Sharpe",
+)
+assert_optimal_status(ef_sharpe_unregularized._opt, "PPO unregularized Max Sharpe")
 
-# %% [markdown]
-# **Interpretation**: Even a simple transaction-cost penalty can materially shrink
-# turnover. In practice that often matters more than squeezing a few extra basis
-# points from an unconstrained optimum.
-
-# %% [markdown]
-# ### L2 Regularization for Diversification
+ef_reg = EfficientFrontier(mu, S)
+ef_reg.add_objective(objective_functions.L2_reg, gamma=L2_GAMMA)
+with suppress_ppo_max_sharpe_objective_warning():
+    weights_regularized = align_weights(
+        ef_reg.max_sharpe(risk_free_rate=RISK_FREE_RATE),
+        "PPO: Regularized Max Sharpe",
+    )
+assert_optimal_status(ef_reg._opt, "PPO regularized Max Sharpe")
+unregularized_positions = int((weights_sharpe_unregularized > ACTIVE_WEIGHT_THRESHOLD).sum())
+regularized_positions = int((weights_regularized > ACTIVE_WEIGHT_THRESHOLD).sum())
 
 # %%
-# Regularized optimization
-ef_reg = EfficientFrontier(mu, S)
-ef_reg.add_objective(objective_functions.L2_reg, gamma=0.5)
-ef_reg.max_sharpe(risk_free_rate=risk_free_rate)
-weights_regularized = pd.Series(ef_reg.clean_weights())
-
-print(f"Unregularized positions: {(weights_pypfopt_sharpe > 0.001).sum()}")
-print(f"Regularized positions:   {(weights_regularized > 0.001).sum()}")
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=["Turnover from equal weight", "Active Max-Sharpe positions"],
+)
+fig.add_bar(
+    x=["No penalty", "Turnover penalty"],
+    y=[turnover_without, turnover_with],
+    marker_color=[COLORS["neutral"], COLORS["blue"]],
+    showlegend=False,
+    row=1,
+    col=1,
+)
+fig.add_bar(
+    x=["Unregularized", "L2 regularized"],
+    y=[unregularized_positions, regularized_positions],
+    marker_color=[COLORS["neutral"], COLORS["amber"]],
+    showlegend=False,
+    row=1,
+    col=2,
+)
+fig.update_layout(
+    title=f"The turnover penalty cuts trading distance by {turnover_reduction:.0%}",
+    height=430,
+)
+fig.update_yaxes(title_text="One-way turnover", tickformat=".0%", rangemode="tozero", row=1, col=1)
+fig.update_yaxes(
+    title_text=f"Positions above {ACTIVE_WEIGHT_THRESHOLD:.1%}",
+    rangemode="tozero",
+    row=1,
+    col=2,
+)
+fig.show()
 
 # %% [markdown]
 # ## API Ergonomics Comparison
 #
-# Having used all three libraries on the same data and objectives, a clear picture
-# of their respective strengths emerges:
+# Using all three libraries on the same training and test windows reveals different workflow
+# strengths without treating a one-period ranking as permanent:
 #
 # **PyPortfolioOpt** has the most intuitive API for standard tasks. Creating an
 # `EfficientFrontier`, calling `max_sharpe()`, and inspecting `portfolio_performance()`
-# requires minimal boilerplate. Its `clean_weights()` method and built-in transaction
-# cost objectives are practical touches. The trade-off is a narrower set of risk
-# measures and no native cross-validation support.
+# requires minimal boilerplate. Its built-in objective penalties make turnover and
+# regularization experiments explicit.
 #
-# **Riskfolio-Lib** excels in breadth: 22 risk measures, multiple covariance estimators,
-# and factor model support via a single `Portfolio` object. The `optimization()` method
+# **Riskfolio-Lib** exposes multiple risk families through a single `Portfolio` object.
+# The `optimization()` method
 # accepts string codes for risk measures (`"MV"`, `"CVaR"`, `"MDD"`), making it easy
-# to sweep across objectives programmatically. The API is slightly more verbose, but
-# the efficient frontier and risk-contribution tools are the most complete of the three.
+# to sweep across objectives programmatically and compare training frontiers.
 #
 # **skfolio** stands out for ML integration. Models are sklearn estimators with `fit()` /
 # `predict()` semantics, meaning they slot into `Pipeline`, `GridSearchCV`, and
 # walk-forward cross-validation without adapters. This is a decisive advantage when
-# portfolio construction is one stage in a larger ML workflow. The trade-off is
-# higher overhead for simple one-shot optimizations.
+# portfolio construction is one stage in a larger ML workflow.
 #
 # | Criterion | PyPortfolioOpt | Riskfolio-Lib | skfolio |
 # |-----------|----------------|---------------|---------|
-# | Quickest to prototype | Best | Good | Good |
-# | Risk measure breadth | ~5 | 22 | ~8 |
-# | ML pipeline integration | Manual | Manual | Native (sklearn) |
+# | Optimizer-object workflow | Native | Portfolio object | Estimator object |
+# | Multiple risk families | Selected classes | Unified interface | Selected estimators |
+# | ML pipeline integration | Manual | Manual | Native sklearn style |
 # | Cross-validation | Manual | Manual | Built-in (WalkForward, CPCV) |
-# | Factor models | No | Yes | Limited |
-# | Transaction cost objectives | Yes | Yes | Via constraints |
-# | Maintainer activity (2025) | Lower | Active | Very active |
-
-# %% [markdown]
-# ## Persist Evaluation Table
-
-# %%
-# Save comparison results for downstream chapters and case studies.
-output_dir = get_output_dir(17, "portfolio_comparison")
-output_dir.mkdir(exist_ok=True)
-eval_df.write_parquet(output_dir / "portfolio_comparison_results.parquet")
-print(f"Saved results to {output_dir / 'portfolio_comparison_results.parquet'}")
+# | Objective penalties | Native | Via model settings | Via constraints/settings |
 
 # %% [markdown]
 # ## Key Takeaways
+
+# %%
+ppo_test_sharpe = float(eval_df.filter(pl.col("portfolio") == "PPO: Max Sharpe")["sharpe"].item())
+skfolio_test_sharpe = float(
+    eval_df.filter(pl.col("portfolio") == "SKF: Max Sharpe")["sharpe"].item()
+)
+max_sharpe_test_gap = abs(ppo_test_sharpe - skfolio_test_sharpe)
+display(
+    Markdown(
+        "\n".join(
+            [
+                f"- **Matched Max-Sharpe implementations agree here**: PyPortfolioOpt records "
+                f"{ppo_test_sharpe:.6f} and skfolio {skfolio_test_sharpe:.6f} on the frozen test, "
+                f"an absolute gap of {max_sharpe_test_gap:.6f} under the common contract.",
+                f"- **Execution changes the realized path**: the matched daily-target bridge "
+                f"moves Sharpe from {vec_stats.sharpe_ratio:.3f} vectorized to "
+                f"{eng_stats.sharpe_ratio:.3f} with {COMMISSION_RATE * 1e4:.0f} bp commission "
+                f"and {SLIPPAGE_RATE * 1e4:.0f} bp slippage.",
+                f"- **Turnover belongs in the objective**: the declared penalty reduces "
+                f"one-way trading distance from {turnover_without:.1%} to {turnover_with:.1%}.",
+                f"- **Regularization changes breadth**: an L2 penalty of {L2_GAMMA:.1f} moves "
+                f"the active Max-Sharpe allocation from {unregularized_positions} to "
+                f"{regularized_positions} positions.",
+                "- **Workflow fit remains the durable distinction**: optimizer objects, broad "
+                "risk interfaces, and sklearn-style validation solve different research needs.",
+            ]
+        )
+    )
+)
+
+# %% [markdown]
+# **Next**: [`09_allocator_comparison`](09_allocator_comparison.ipynb) extends the comparison
+# with explicit estimation-risk controls.
 #
-# - **Cross-library convergence on Max Sharpe**: PyPortfolioOpt and skfolio land on
-#   essentially identical Max-Sharpe portfolios on this 11-ETF panel (Sharpe 1.072 vs
-#   1.074), confirming that the differences between the libraries are workflow and
-#   risk-measure breadth rather than numerical disagreement on the shared objective.
-# - **Execution friction is the real penalty**: routing the PPO Max Sharpe weights
-#   through the ml4t-backtest Engine at 5 bp commission plus 5 bp slippage on
-#   NEXT_BAR fills erodes the Sharpe from 1.073 (vectorized) to 0.999, and pulls
-#   max drawdown from -22.3% to -25.9%.
-# - **Transaction-cost objective slashes turnover**: adding the PyPortfolioOpt
-#   transaction-cost penalty cuts portfolio turnover from 161% to 50% — roughly
-#   a 3x reduction relative to the unconstrained re-optimization.
-# - **L2 regularization spreads concentration**: a `gamma=0.5` L2 penalty on the
-#   Max Sharpe objective lifts the active position count from 2 to 7 of the
-#   11 candidates, providing diversification without changing the objective family.
-# - **HRP and risk parity stay fully diversified**: both libraries' HRP solutions
-#   and Riskfolio's risk-parity allocation hold all 11 ETFs, in contrast to the
-#   2-position concentration of unregularized Max Sharpe.
-#
-# **Next**: Chapter 17, §17.7 uses these cross-library results to motivate the
-# controlled comparison framework that the case studies adopt downstream.
+# **Book**: Chapter 17, §17.7 develops the controlled allocator comparison framework.

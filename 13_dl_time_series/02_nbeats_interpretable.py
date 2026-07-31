@@ -35,21 +35,25 @@
 # **Prerequisites**: ETF price data (via `load_etfs()` canonical loader)
 
 # %%
-"""Interpretable Forecasting with N-BEATS — decompose forecasts into trend and seasonality components."""
+"""Interpretable Forecasting with N-BEATS - trend and seasonality decomposition."""
 
+import os
 import warnings
 from datetime import datetime
 
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
+
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import torch
 import torch.nn as nn
-from ml4t.diagnostic.metrics import pooled_ic
 from plotly.subplots import make_subplots
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
 
@@ -69,6 +73,15 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
 set_global_seeds(SEED)
+torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
+
+# %% [markdown]
+# **Reproducibility.** The fixed seed controls stochastic initialization and
+# mini-batch order. Strict PyTorch kernels and a fixed cuBLAS workspace make
+# this training path reproducible on the pinned environment; other PyTorch,
+# CUDA, or hardware versions can still shift the final decimals.
 
 # %% [markdown]
 # ## Data Preparation
@@ -90,24 +103,23 @@ spy_data = (
 prices = spy_data["close"].to_numpy().astype(np.float32)
 timestamps = spy_data["timestamp"].to_numpy()
 
-# Train/val/test split sizes (70/15/15) defined here so normalization can use
-# training-window stats only — no leakage from validation or test prices.
+# Fixed forecast-origin boundaries keep every lookback comparison on the same
+# calendar windows. Sequences whose targets straddle a boundary are purged.
 n_sequences = len(prices) - LOOKBACK - HORIZON + 1
 train_seq_end = int(n_sequences * 0.70)
 val_seq_end = int(n_sequences * 0.85)
+train_target_cutoff = LOOKBACK + train_seq_end
+val_target_cutoff = LOOKBACK + val_seq_end
 
-# The last training sequence consumes prices up to and including index
-# train_seq_end + LOOKBACK + HORIZON - 2; slice prices[:train_price_cutoff]
-# (exclusive upper bound) covers exactly that range without leaking val/test
-# prices into the z-score statistics.
-train_price_cutoff = train_seq_end + LOOKBACK + HORIZON - 1
-price_mean = prices[:train_price_cutoff].mean()
-price_std = prices[:train_price_cutoff].std()
+# The training target ends before train_target_cutoff. Its exclusive boundary
+# is therefore also the latest safe observation for fitted normalization.
+price_mean = prices[:train_target_cutoff].mean()
+price_std = prices[:train_target_cutoff].std()
 prices_norm = (prices - price_mean) / price_std
 
 print(f"SPY data: {len(prices)} observations")
 print(f"Date range: {timestamps[0]} to {timestamps[-1]}")
-print(f"Normalization fit on prices[:{train_price_cutoff}] (training window only)")
+print(f"Normalization fit on prices[:{train_target_cutoff}] (training window only)")
 
 
 # %% [markdown]
@@ -129,11 +141,24 @@ def create_univariate_sequences(data, lookback, horizon):
 X, y = create_univariate_sequences(prices_norm, LOOKBACK, HORIZON)
 print(f"Sequences: X={X.shape}, y={y.shape}")
 
-X_train, y_train = X[:train_seq_end], y[:train_seq_end]
-X_val, y_val = X[train_seq_end:val_seq_end], y[train_seq_end:val_seq_end]
-X_test, y_test = X[val_seq_end:], y[val_seq_end:]
+target_start = np.arange(LOOKBACK, len(prices) - HORIZON + 1)
+target_end = target_start + HORIZON - 1
+
+train_mask = target_end < train_target_cutoff
+val_mask = (target_start >= train_target_cutoff) & (target_end < val_target_cutoff)
+test_mask = target_start >= val_target_cutoff
+
+X_train, y_train = X[train_mask], y[train_mask]
+X_val, y_val = X[val_mask], y[val_mask]
+X_test, y_test = X[test_mask], y[test_mask]
 
 print(f"Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
+train_val_overlap = max(0, int(target_end[train_mask].max() - target_start[val_mask].min() + 1))
+val_test_overlap = max(0, int(target_end[val_mask].max() - target_start[test_mask].min() + 1))
+print(
+    "Target overlap at train/validation and validation/test boundaries: "
+    f"{train_val_overlap}/{val_test_overlap} observations"
+)
 
 
 # %% [markdown]
@@ -375,11 +400,11 @@ nbeats_g = train_nbeats(nbeats_g, X_train, y_train, X_val, y_val, EPOCHS, BATCH_
 # %% [markdown]
 # ## Evaluation
 #
-# We compare N-BEATS-I (interpretable) vs. N-BEATS-G (generic) using two
-# metrics: MSE (point-forecast accuracy) and a price-path Spearman rank
-# correlation between mean predicted and mean realised price levels over the
-# 10-step horizon. This is a temporal rank metric on one SPY series, not the
-# cross-sectional IC used elsewhere in Chapter 13.
+# A persistence forecast repeats the last observed price through the horizon.
+# It is the minimum credible benchmark for a price-level model: a flexible
+# architecture has not earned its complexity unless it improves on that rule.
+# We report RMSE in training-window standard deviations and the MAE ratio to
+# persistence. A ratio above 1 means the model is worse than persistence.
 
 # %%
 X_test_t = torch.FloatTensor(X_test).to(DEVICE)
@@ -395,36 +420,56 @@ pred_i = pred_i.cpu().numpy()
 pred_g = pred_g.cpu().numpy()
 
 # %%
-# Compute IC on mean forecast vs mean actual (per sample)
-pred_i_mean = pred_i.mean(axis=1)
-pred_g_mean = pred_g.mean(axis=1)
-y_test_mean = y_test.mean(axis=1)
-
-ic_i = pooled_ic(pred_i_mean, y_test_mean)
-ic_g = pooled_ic(pred_g_mean, y_test_mean)
-
-mse_i = np.mean((pred_i - y_test) ** 2)
-mse_g = np.mean((pred_g - y_test) ** 2)
+persistence_pred = np.repeat(X_test[:, -1:], HORIZON, axis=1)
+persistence_mae = float(np.mean(np.abs(persistence_pred - y_test)))
 
 comparison_df = pl.DataFrame(
     {
-        "Model": ["N-BEATS-I", "N-BEATS-G"],
-        "MSE": [mse_i, mse_g],
-        "Price-path Spearman ρ": [ic_i, ic_g],
+        "Model": ["Persistence", "N-BEATS-I", "N-BEATS-G"],
+        "RMSE (z)": [
+            float(np.sqrt(np.mean((pred - y_test) ** 2)))
+            for pred in [persistence_pred, pred_i, pred_g]
+        ],
+        "MAE / persistence": [
+            float(np.mean(np.abs(pred - y_test)) / persistence_mae)
+            for pred in [persistence_pred, pred_i, pred_g]
+        ],
     }
 )
-comparison_df
+
+model_ratios = comparison_df.filter(pl.col("Model") != "Persistence")["MAE / persistence"]
+benchmark_title = (
+    "Both N-BEATS variants trail persistence on the SPY holdout"
+    if (model_ratios > 1).all()
+    else "At least one N-BEATS variant improves on persistence"
+)
+
+fig_benchmark = go.Figure(
+    go.Bar(
+        x=comparison_df["Model"].to_list(),
+        y=comparison_df["MAE / persistence"].to_list(),
+        marker_color=[COLORS["neutral"], COLORS["blue"], COLORS["amber"]],
+        text=[f"{value:.2f}x" for value in comparison_df["MAE / persistence"]],
+        textposition="outside",
+    )
+)
+fig_benchmark.add_hline(y=1.0, line_dash="dash", line_color=COLORS["neutral"])
+fig_benchmark.update_layout(
+    title=benchmark_title,
+    xaxis_title="Forecast",
+    yaxis_title="MAE relative to persistence (x)",
+    showlegend=False,
+)
+fig_benchmark.update_yaxes(rangemode="tozero")
+fig_benchmark.show()
 
 # %% [markdown]
-# **Interpretation**: on this single SPY split, N-BEATS-G's MSE is lower than
-# N-BEATS-I (see table) and its price-path Spearman ρ is marginally higher —
-# both gaps are point estimates with no fold-level dispersion reported here.
-# The interpretable variant constrains its forecasts to polynomial trend +
-# Fourier seasonality; the generic variant learns arbitrary basis functions
-# and pays for that flexibility with lower interpretability. Whether either
-# gap survives walk-forward evaluation across instruments is not tested in
-# this notebook; the practical tradeoff here is interpretability versus
-# point-forecast accuracy on one univariate price series.
+# **Interpretation**: the persistence line at 1.0 is the relevant floor. In
+# this single SPY holdout, neither neural model clears it, although the generic
+# variant is closer. The former price-level rank correlation was near one even
+# for persistence because adjacent SPY levels share a trend; it was therefore
+# not evidence of forecast skill and has been removed. This experiment supports
+# the decomposition lesson, not a trading-performance claim.
 
 # %% [markdown]
 # ## Component Decomposition
@@ -463,26 +508,49 @@ fig = make_subplots(
 )
 
 fig.add_trace(
-    go.Scatter(x=x_axis, y=trend_denorm, name="Trend", line=dict(color="blue")), row=1, col=1
+    go.Scatter(x=x_axis, y=trend_denorm, name="Trend", line=dict(color=COLORS["blue"])),
+    row=1,
+    col=1,
 )
 fig.add_trace(
-    go.Scatter(x=x_axis, y=seasonal_denorm, name="Seasonality", line=dict(color="orange")),
+    go.Scatter(
+        x=x_axis,
+        y=seasonal_denorm,
+        name="Seasonality",
+        line=dict(color=COLORS["amber"]),
+    ),
     row=2,
     col=1,
 )
 fig.add_trace(
-    go.Scatter(x=x_axis, y=actual_denorm, name="Actual", line=dict(color="black", width=2)),
+    go.Scatter(
+        x=x_axis,
+        y=actual_denorm,
+        name="Actual",
+        line=dict(color=COLORS["neutral"], width=2),
+    ),
     row=3,
     col=1,
 )
 fig.add_trace(
-    go.Scatter(x=x_axis, y=total_denorm, name="N-BEATS-I", line=dict(color="blue", dash="dash")),
+    go.Scatter(
+        x=x_axis,
+        y=total_denorm,
+        name="N-BEATS-I",
+        line=dict(color=COLORS["blue"], dash="dash"),
+    ),
     row=3,
     col=1,
 )
 
-fig.update_layout(title="N-BEATS-I Forecast Decomposition", template="plotly_white", height=600)
+fig.update_layout(
+    title="N-BEATS-I exposes the trend and seasonal terms behind its forecast",
+    height=650,
+)
 fig.update_xaxes(title_text="Forecast Step", row=3, col=1)
+fig.update_yaxes(title_text="Trend contribution ($)", row=1, col=1)
+fig.update_yaxes(title_text="Seasonal contribution ($)", row=2, col=1)
+fig.update_yaxes(title_text="SPY price ($)", row=3, col=1)
 fig.show()
 
 # %% [markdown]
@@ -533,109 +601,111 @@ fig_bc.update_xaxes(title_text="Lookback Step", row=2, col=1)
 fig_bc.update_yaxes(title_text="Price ($)", row=1, col=1)
 fig_bc.update_yaxes(title_text="Residual (z)", row=2, col=1)
 fig_bc.update_layout(
-    title="Doubly-Residual Learning: Input vs Final Residual",
-    template="plotly_white",
+    title="Six blocks reduce the input but leave visible residual structure",
     height=500,
 )
 fig_bc.show()
 
 # %% [markdown]
-# **Interpretation**: The final residual should be close to noise — the trend
-# and seasonality stacks have extracted the structured signal. If significant
-# structure remains, the model may need more blocks or a different configuration.
+# **Interpretation**: the final residual is smaller than the normalized input,
+# but it is neither centered at zero nor visually structureless. A backcast is
+# what the fitted blocks chose to explain; it is not a guarantee that the
+# remainder is white noise. The remaining pattern cautions against treating the
+# displayed trend and seasonality as a complete economic decomposition.
 
 # %% [markdown]
 # ## Lookback Sensitivity
 #
 # N-BEATS is sensitive to the lookback-to-horizon ratio. Too short a lookback
 # starves the decomposition of context; very long lookbacks can introduce noise.
+# This is a validation-set model-selection diagnostic. All candidates use the
+# same target-date boundaries, and the sealed test window is not touched.
 
 # %%
 lookback_values = [20, 40, 60, 120]
 sensitivity_results = []
 
 for lb in lookback_values:
-    # Re-normalize per-lookback using training-window-only stats: the training
-    # sequence range and therefore the safe normalization cutoff both depend on lb.
-    n_s = len(prices) - lb - HORIZON + 1
-    tr_end = int(n_s * 0.70)
-    val_end = int(n_s * 0.85)
-    cutoff_s = tr_end + lb + HORIZON - 1
-    pm_s = prices[:cutoff_s].mean()
-    ps_s = prices[:cutoff_s].std()
+    pm_s = prices[:train_target_cutoff].mean()
+    ps_s = prices[:train_target_cutoff].std()
     prices_norm_s = (prices - pm_s) / ps_s
 
     X_s, y_s = create_univariate_sequences(prices_norm_s, lb, HORIZON)
+    target_start_s = np.arange(lb, len(prices) - HORIZON + 1)
+    target_end_s = target_start_s + HORIZON - 1
+    train_mask_s = target_end_s < train_target_cutoff
+    val_mask_s = (target_start_s >= train_target_cutoff) & (target_end_s < val_target_cutoff)
 
+    set_global_seeds(SEED)
     model_s = NBEATS(lb, HORIZON, HIDDEN_SIZE, N_BLOCKS, N_LAYERS, interpretable=True).to(DEVICE)
     model_s = train_nbeats(
         model_s,
-        X_s[:tr_end],
-        y_s[:tr_end],
-        X_s[tr_end:val_end],
-        y_s[tr_end:val_end],
+        X_s[train_mask_s],
+        y_s[train_mask_s],
+        X_s[val_mask_s],
+        y_s[val_mask_s],
         EPOCHS,
         BATCH_SIZE,
     )
 
     model_s.eval()
     with torch.no_grad():
-        pred_s, _ = model_s(torch.FloatTensor(X_s[val_end:]).to(DEVICE))
+        pred_s, _ = model_s(torch.FloatTensor(X_s[val_mask_s]).to(DEVICE))
     pred_s = pred_s.cpu().numpy()
-    y_s_test = y_s[val_end:]
+    y_s_val = y_s[val_mask_s]
+    persistence_s = np.repeat(X_s[val_mask_s, -1:], HORIZON, axis=1)
 
-    mse_s = float(np.mean((pred_s - y_s_test) ** 2))
-    ic_s = pooled_ic(pred_s.mean(axis=1), y_s_test.mean(axis=1))
-    sensitivity_results.append(
-        {"Lookback": lb, "Ratio": lb / HORIZON, "MSE": mse_s, "Price-path Spearman ρ": ic_s}
+    rmse_s = float(np.sqrt(np.mean((pred_s - y_s_val) ** 2)))
+    mae_ratio_s = float(
+        np.mean(np.abs(pred_s - y_s_val)) / np.mean(np.abs(persistence_s - y_s_val))
     )
-    print(f"  Lookback={lb} (ratio={lb / HORIZON:.1f}): MSE={mse_s:.6f}, ρ={ic_s:.4f}")
+    sensitivity_results.append(
+        {
+            "Lookback": lb,
+            "Ratio": lb / HORIZON,
+            "Validation RMSE (z)": rmse_s,
+            "Validation MAE / persistence": mae_ratio_s,
+        }
+    )
+    print(
+        f"  Lookback={lb} (ratio={lb / HORIZON:.1f}): "
+        f"validation RMSE={rmse_s:.4f}, MAE/persistence={mae_ratio_s:.2f}x"
+    )
 
 sensitivity_df = pl.DataFrame(sensitivity_results)
-sensitivity_df
+best_lookback = sensitivity_df.sort("Validation MAE / persistence").row(0, named=True)
+all_trail_persistence = (sensitivity_df["Validation MAE / persistence"] > 1).all()
+
+fig_sensitivity = go.Figure(
+    go.Scatter(
+        x=sensitivity_df["Ratio"].to_list(),
+        y=sensitivity_df["Validation MAE / persistence"].to_list(),
+        mode="lines+markers+text",
+        line=dict(color=COLORS["blue"], width=3),
+        marker=dict(size=9),
+        text=[f"{value:.2f}x" for value in sensitivity_df["Validation MAE / persistence"]],
+        textposition="top center",
+    )
+)
+fig_sensitivity.add_hline(y=1.0, line_dash="dash", line_color=COLORS["neutral"])
+fig_sensitivity.update_layout(
+    title=(
+        f"A {best_lookback['Lookback']}-day lookback comes closest, but none beats persistence"
+        if all_trail_persistence
+        else f"Validation favors a {best_lookback['Lookback']}-day lookback"
+    ),
+    xaxis_title="Lookback / forecast-horizon ratio (x)",
+    yaxis_title="Validation MAE relative to persistence (x)",
+    showlegend=False,
+)
+fig_sensitivity.show()
 
 # %% [markdown]
-# **Finding**: ratios in the 2–6× range recommended by Oreshkin et al. all
-# produce a price-path Spearman ρ ≈ 0.96 on this SPY split (0.962 at 2×,
-# 0.955 at 4×, 0.957 at 6×). The 12× ratio drops to 0.892 and MSE rises from
-# ~0.07 (mean across 2–6×) to 0.181 — a ~2.6× increase — consistent with
-# longer input windows adding noise without compensating signal. The optimal
-# ratio depends on the frequency and memory structure of the data; this
-# notebook does not search beyond a single equity index.
-
-# %% [markdown]
-# ## sktime Alternative
-#
-# sktime wraps PyTorch Forecasting's N-BEATS implementation, providing the same
-# architecture via a unified `fit()`/`predict()` API.
-#
-# **Dependency note**: sktime's neural forecasters require `neuralforecast`, which
-# depends on `ray` — and ray does not yet support Python 3.14
-# ([ray-project/ray#56434](https://github.com/ray-project/ray/issues/56434)).
-# Once ray adds 3.14 wheels, install via `uv pip install neuralforecast`
-# and uncomment the demo below.
-
-# %%
-# import pandas as pd
-# from sktime.forecasting.pytorchforecasting import PytorchForecastingNBeats
-#
-# # Prepare univariate series for sktime
-# spy_close = spy_data.to_pandas().set_index("timestamp")["close"].dropna()
-# split = int(len(spy_close) * 0.8)
-# y_train_sk = spy_close.iloc[:split]
-# y_test_sk = spy_close.iloc[split : split + HORIZON]
-#
-# forecaster = PytorchForecastingNBeats(
-#     max_prediction_length=HORIZON,
-#     max_encoder_length=LOOKBACK,
-#     max_epochs=min(EPOCHS, 10),
-#     trainer_kwargs={"enable_progress_bar": False, "accelerator": "auto"},
-# )
-# forecaster.fit(y_train_sk)
-# y_pred_sk = forecaster.predict(fh=list(range(1, HORIZON + 1)))
-#
-# mae_sk = float(np.mean(np.abs(y_test_sk.values - y_pred_sk.values)))
-# print(f"sktime PytorchForecastingNBeats: MAE = {mae_sk:.4f}")
+# **Finding**: lookback length changes the validation error, but this sweep is
+# selection evidence rather than a final performance estimate. Persistence is
+# the reference line, and the chart makes clear whether added temporal context
+# helps enough to clear that elementary forecast. The fixed calendar boundaries
+# ensure the candidates face the same validation dates.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -647,13 +717,11 @@ sensitivity_df
 # 3. **Generic mode**: Learns arbitrary basis functions, potentially more accurate
 #    but loses interpretability
 # 4. **No feature engineering**: N-BEATS works directly on the raw price series;
-#    forecast targets are price levels, so the price-path Spearman ρ reported
-#    here is a temporal rank metric, not a cross-sectional return IC
+#    that makes persistence the essential benchmark for forecast accuracy
 # 5. **Lookback-to-horizon ratio**: Performance is sensitive to this ratio;
-#    values of 2-7 work well in practice
-# 6. **sktime wraps PyTorch Forecasting** for production N-BEATS in 3 lines
+#    validation comparison must keep target dates fixed and the test set sealed
 #
-# **Caveat**: Results on a single equity index (SPY) are not generalizable —
+# **Caveat**: Results on a single equity index (SPY) are not generalizable -
 # benchmark on your specific dataset before drawing architecture conclusions.
 #
 # **Next**: See `03_great_debate` for the Linear vs. Transformer controversy.

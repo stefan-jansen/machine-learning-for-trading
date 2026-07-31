@@ -41,14 +41,17 @@
 # ## 1. Setup
 
 # %%
-"""DeePM: Regime-Robust Deep Portfolio Management — extend DeePM with regime conditioning and walk-forward evaluation."""
+"""DeePM: regime-robust portfolio management with chronological evaluation."""
 
 import warnings
 
 warnings.filterwarnings("ignore")
 
 # %%
+import hashlib
+import json
 import os
+from dataclasses import asdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -63,15 +66,18 @@ from deepm.graph import adjacency_to_attn_mask, build_macro_adjacency
 from deepm.inference import infer_risk_weights_rolling
 from deepm.model import DeepmPolicy
 from deepm.train import train_model
+from IPython.display import display
+from matplotlib.colors import ListedColormap
 from matplotlib.ticker import PercentFormatter
 from torch.utils.data import DataLoader
 
 from data import load_etfs
 from utils.paths import get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 # %% tags=["parameters"]
-# Production defaults — Papermill overrides for CI testing
+# Production defaults - Papermill overrides for CI testing
 MAX_SYMBOLS = 0
 MAX_ITERS = 500
 SEQ_LEN = 84
@@ -88,7 +94,6 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 FULL_MODEL_CACHE_PATH = OUTPUT_DIR / "deepm_full_cache.pt"
 NOSM_MODEL_CACHE_PATH = OUTPUT_DIR / "deepm_no_softmin_cache.pt"
 CANONICAL_OUTPUT_DIR = get_chapter_dir(17) / "output" / "deepm_regime_robust"
-CANONICAL_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CANONICAL_FULL_MODEL_CACHE_PATH = CANONICAL_OUTPUT_DIR / "deepm_full_cache.pt"
 CANONICAL_NOSM_MODEL_CACHE_PATH = CANONICAL_OUTPUT_DIR / "deepm_no_softmin_cache.pt"
 
@@ -151,10 +156,57 @@ def state_dict_is_compatible(model, state_dict: dict) -> tuple[bool, str]:
     return True, ""
 
 
+# %% [markdown]
+# ### Cache Provenance
+#
+# Shape compatibility is necessary but insufficient. Bind each checkpoint to the
+# exact feature panel, universe, split, architecture, and training configuration.
+
+
+# %%
+def stable_panel_hash(feature_panel) -> str:
+    """Hash the complete ordered training panel and its labels."""
+    digest = hashlib.sha256()
+    digest.update(json.dumps(feature_panel.assets).encode())
+    digest.update(np.asarray(feature_panel.dates.view("i8")).tobytes())
+    for values in [
+        feature_panel.x,
+        feature_panel.y_fwd1,
+        feature_panel.vol_scale,
+        feature_panel.mask,
+    ]:
+        array = np.ascontiguousarray(values)
+        digest.update(str(array.dtype).encode())
+        digest.update(json.dumps(array.shape).encode())
+        digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+# %%
+def expected_cache_provenance(model, training_cfg, variant: str) -> dict:
+    """Return the exact identity required before loading a checkpoint."""
+    return {
+        "schema": "deepm-v2-unique-validation",
+        "variant": variant,
+        "panel_sha256": PANEL_SHA256,
+        "universe": list(panel.assets),
+        "train_end": str(train_end_date),
+        "validation_end": str(val_end_date),
+        "model": asdict(model_cfg),
+        "training": asdict(training_cfg),
+        "state_shapes": {key: tuple(value.shape) for key, value in model.state_dict().items()},
+    }
+
+
 # %%
 IN_TEST_OUTPUT_MODE = (
-    os.environ.get("ML4T_CHAPTER_OUTPUT_DIR") is not None
-    or os.environ.get("ML4T_OUTPUT_DIR") is not None
+    os.environ.get("ML4T_CHAPTER_OUTPUT_DIR") is not None or os.environ.get("ML4T_TEST_MODE") == "1"
+)
+USE_CACHED_CHECKPOINTS_IF_AVAILABLE = (
+    os.environ.get("ML4T_ALLOW_MODEL_CACHE", str(int(USE_CACHED_CHECKPOINTS_IF_AVAILABLE))) == "1"
+)
+SAVE_CHECKPOINTS_TO_CACHE = (
+    os.environ.get("ML4T_SAVE_MODEL_CACHE", str(int(SAVE_CHECKPOINTS_TO_CACHE))) == "1"
 )
 if IN_TEST_OUTPUT_MODE:
     cache_exists = any(
@@ -288,12 +340,17 @@ print(f"Groups: {sorted(set(macro_graph.groups))}")
 # %%
 # Visualize adjacency matrix
 fig, ax = plt.subplots(figsize=(8, 7))
-im = ax.imshow(macro_graph.adjacency.astype(float), cmap="Blues", aspect="equal")
+graph_density = float(macro_graph.adjacency.mean())
+im = ax.imshow(
+    macro_graph.adjacency.astype(float),
+    cmap=ListedColormap([COLORS["silver_muted"], COLORS["blue"]]),
+    aspect="equal",
+)
 ax.set_xticks(range(N_ASSETS))
 ax.set_xticklabels(panel.assets, rotation=90, fontsize=7)
 ax.set_yticks(range(N_ASSETS))
 ax.set_yticklabels(panel.assets, fontsize=7)
-ax.set_title("Macro Graph Adjacency (Asset-Class Prior)")
+ax.set_title(f"Macro prior retains {graph_density:.0%} of possible attention links")
 fig.tight_layout()
 fig.show()
 
@@ -307,9 +364,9 @@ n_dates = len(dates)
 train_end_date = dates[int(n_dates * 0.6)]
 val_end_date = dates[int(n_dates * 0.8)]
 
-print(f"Train: ... to {train_end_date:%Y-%m-%d}")
-print(f"Val:   to {val_end_date:%Y-%m-%d}")
-print(f"Test:  to {dates[-1]:%Y-%m-%d}")
+print(f"Train: before {train_end_date:%Y-%m-%d}")
+print(f"Val:   {train_end_date:%Y-%m-%d} to before {val_end_date:%Y-%m-%d}")
+print(f"Test:  {val_end_date:%Y-%m-%d} to {dates[-1]:%Y-%m-%d}")
 
 # %%
 train_ds = DeepmWindowDataset(panel, seq_len=SEQ_LEN, end_date=train_end_date)
@@ -318,7 +375,23 @@ val_ds = DeepmWindowDataset(
 )
 test_ds = DeepmWindowDataset(panel, seq_len=SEQ_LEN, start_date=val_end_date)
 
+assert train_ds.start_indices[-1] + SEQ_LEN <= val_ds.start_indices[0]
+assert val_ds.start_indices[-1] + SEQ_LEN <= test_ds.start_indices[0]
+
+train_endpoints = train_ds.start_indices + SEQ_LEN - 1
+val_endpoints = val_ds.start_indices + SEQ_LEN - 1
+test_endpoints = test_ds.start_indices + SEQ_LEN - 1
+assert dates[train_endpoints].max() < train_end_date
+assert dates[val_endpoints].min() >= train_end_date
+assert dates[val_endpoints].max() < val_end_date
+assert dates[test_endpoints].min() >= val_end_date
+assert dates[test_endpoints].max() < dates[-1]
+
 print(f"Train windows: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
+print(
+    f"Unique validation endpoints: {len(val_endpoints)} "
+    f"({dates[val_endpoints[0]]:%Y-%m-%d} to {dates[val_endpoints[-1]]:%Y-%m-%d})"
+)
 
 train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, drop_last=True)
 val_loader = DataLoader(val_ds, batch_size=64, shuffle=False)
@@ -397,7 +470,7 @@ print(f"DeePM parameters: {n_params:,}")
 
 
 # %%
-def save_training_cache(cache_path, state_dict, history_obj):
+def save_training_cache(cache_path, state_dict, history_obj, provenance):
     """Persist best state plus lightweight diagnostics for cache-first reruns."""
     torch.save(
         {
@@ -408,6 +481,7 @@ def save_training_cache(cache_path, state_dict, history_obj):
                 "train_sharpe_pool": list(history_obj.train_sharpe_pool),
                 "val_sharpe_pool": list(history_obj.val_sharpe_pool),
             },
+            "provenance": provenance,
         },
         cache_path,
     )
@@ -437,6 +511,11 @@ print(f"Training for up to {MAX_ITERS} iterations...")
 print(f"SoftMin: tau={train_cfg.softmin_tau}, lambda={train_cfg.softmin_lambda}")
 
 # %%
+PANEL_SHA256 = stable_panel_hash(panel)
+full_cache_provenance = expected_cache_provenance(model, train_cfg, "full")
+print(f"Training panel SHA-256: {PANEL_SHA256[:16]}...")
+
+# %%
 best_state = None
 history = None
 history_steps = []
@@ -450,6 +529,9 @@ if USE_CACHED_CHECKPOINTS_IF_AVAILABLE:
             continue
         cache_payload = torch.load(cache_path, map_location="cpu")
         if isinstance(cache_payload, dict) and "best_state" in cache_payload:
+            if cache_payload.get("provenance") != full_cache_provenance:
+                print(f"Skipping wrong-provenance full-model cache at {cache_path}")
+                continue
             candidate_state = cache_payload["best_state"]
             is_compatible, reason = state_dict_is_compatible(model, candidate_state)
             if not is_compatible:
@@ -492,11 +574,8 @@ if best_state is None:
 
 # %%
 if SAVE_CHECKPOINTS_TO_CACHE and best_state and history is not None:
-    save_training_cache(FULL_MODEL_CACHE_PATH, best_state, history)
+    save_training_cache(FULL_MODEL_CACHE_PATH, best_state, history, full_cache_provenance)
     print(f"Saved full DeePM checkpoint cache to {FULL_MODEL_CACHE_PATH}")
-    if FULL_MODEL_CACHE_PATH.resolve() != CANONICAL_FULL_MODEL_CACHE_PATH.resolve():
-        save_training_cache(CANONICAL_FULL_MODEL_CACHE_PATH, best_state, history)
-        print(f"Saved full DeePM checkpoint cache to {CANONICAL_FULL_MODEL_CACHE_PATH}")
 
 # %% [markdown]
 # ### Training Diagnostics
@@ -505,19 +584,39 @@ if SAVE_CHECKPOINTS_TO_CACHE and best_state and history is not None:
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
 ax = axes[0]
-ax.plot(history_steps, history_train_objective, label="Train objective", alpha=0.7)
+ax.plot(
+    history_steps,
+    history_train_objective,
+    label="Train objective",
+    color=COLORS["blue"],
+    alpha=0.8,
+)
 ax.set_xlabel("Iteration")
 ax.set_ylabel("Objective (higher = better)")
-ax.set_title("Training Objective")
+final_training_objective = history_train_objective[-1] if history_train_objective else float("nan")
+ax.set_title(f"Training objective finishes at {final_training_objective:.2f}")
 ax.legend()
 
 ax = axes[1]
-ax.plot(history_steps, history_train_sharpe, label="Train Sharpe", alpha=0.7)
-ax.plot(history_steps, history_val_sharpe, label="Val Sharpe", alpha=0.7)
-ax.axhline(0, color="gray", linestyle="--", linewidth=0.5)
+ax.plot(
+    history_steps,
+    history_train_sharpe,
+    label="Train Sharpe",
+    color=COLORS["blue"],
+    alpha=0.8,
+)
+ax.plot(
+    history_steps,
+    history_val_sharpe,
+    label="Validation Sharpe",
+    color=COLORS["amber"],
+    alpha=0.8,
+)
+ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
 ax.set_xlabel("Iteration")
 ax.set_ylabel("Pooled Sharpe")
-ax.set_title("Sharpe Ratio Convergence")
+best_training_val = max(history_val_sharpe) if history_val_sharpe else float("nan")
+ax.set_title(f"Validation Sharpe peaks at {best_training_val:.2f}")
 ax.legend()
 
 fig.tight_layout()
@@ -533,10 +632,10 @@ fig.show()
 # We isolate the contribution of the SoftMin penalty with a single architectural
 # ablation, then compare both DeePM configurations against two non-deep baselines:
 #
-# 1. **Full DeePM** — SoftMin + macro graph + all components
-# 2. **No SoftMin** — Same architecture but trained with plain Sharpe loss ($\lambda = 0$)
-# 3. **Equal Weight** — $w_i = 1/N$, daily rebalanced
-# 4. **Inverse Volatility** — $w_i \propto 1/\sigma_i^{21d}$, daily rebalanced
+# 1. **Full DeePM** - SoftMin + macro graph + all components
+# 2. **No SoftMin** - Same architecture but trained with plain Sharpe loss ($\lambda = 0$)
+# 3. **Equal Weight** - $w_i = 1/N$, daily rebalanced
+# 4. **Inverse Volatility** - $w_i \propto 1/\sigma_i^{21d}$, daily rebalanced
 #
 # Per-component ablations within the DeePM architecture (FiLM, V-VSN, Directed Delay)
 # are not run here; the chapter cites Wood, Roberts & Zohren (2026) for those.
@@ -572,6 +671,9 @@ nosm_cfg = TrainingConfig(
 )
 
 # %%
+nosm_cache_provenance = expected_cache_provenance(model_no_softmin, nosm_cfg, "no-softmin")
+
+# %%
 print("Training No-SoftMin ablation...")
 best_state_nosm = None
 history_nosm = None
@@ -582,6 +684,9 @@ if USE_CACHED_CHECKPOINTS_IF_AVAILABLE:
             continue
         cache_payload_nosm = torch.load(cache_path, map_location="cpu")
         if isinstance(cache_payload_nosm, dict) and "best_state" in cache_payload_nosm:
+            if cache_payload_nosm.get("provenance") != nosm_cache_provenance:
+                print(f"Skipping wrong-provenance no-SoftMin cache at {cache_path}")
+                continue
             candidate_state_nosm = cache_payload_nosm["best_state"]
             is_compatible, reason = state_dict_is_compatible(model_no_softmin, candidate_state_nosm)
             if not is_compatible:
@@ -609,11 +714,13 @@ if best_state_nosm is None:
 
 # %%
 if SAVE_CHECKPOINTS_TO_CACHE and best_state_nosm and history_nosm is not None:
-    save_training_cache(NOSM_MODEL_CACHE_PATH, best_state_nosm, history_nosm)
+    save_training_cache(
+        NOSM_MODEL_CACHE_PATH,
+        best_state_nosm,
+        history_nosm,
+        nosm_cache_provenance,
+    )
     print(f"Saved no-SoftMin checkpoint cache to {NOSM_MODEL_CACHE_PATH}")
-    if NOSM_MODEL_CACHE_PATH.resolve() != CANONICAL_NOSM_MODEL_CACHE_PATH.resolve():
-        save_training_cache(CANONICAL_NOSM_MODEL_CACHE_PATH, best_state_nosm, history_nosm)
-        print(f"Saved no-SoftMin checkpoint cache to {CANONICAL_NOSM_MODEL_CACHE_PATH}")
 
 # %% [markdown]
 # ### Compute Test-Period Returns for All Models
@@ -624,7 +731,7 @@ model.load_state_dict(best_state)
 model_no_softmin.load_state_dict(best_state_nosm)
 
 # Rolling-window inference on the full panel (test period extracted later)
-risk_weights_deepm = infer_risk_weights_rolling(
+risk_signals_deepm = infer_risk_weights_rolling(
     model,
     panel,
     static_meta=static_meta,
@@ -633,7 +740,7 @@ risk_weights_deepm = infer_risk_weights_rolling(
     device=DEVICE,
 )
 
-risk_weights_nosm = infer_risk_weights_rolling(
+risk_signals_nosm = infer_risk_weights_rolling(
     model_no_softmin,
     panel,
     static_meta=static_meta,
@@ -647,40 +754,67 @@ risk_weights_nosm = infer_risk_weights_rolling(
 
 # %%
 # Forward raw returns
-raw_returns = prices.pct_change().shift(-1).fillna(0.0)
+raw_returns = prices.pct_change(fill_method=None).shift(-1)
+
+# Convert policy outputs to the volatility-scaled target weights used by the loss.
+vol_scale = pd.DataFrame(panel.vol_scale, index=panel.dates, columns=panel.assets)
+risk_weights_deepm = risk_signals_deepm * vol_scale
+risk_weights_nosm = risk_signals_nosm * vol_scale
 
 # Test period mask
 test_start = val_end_date
-test_mask = raw_returns.index >= test_start
+test_mask = (raw_returns.index >= test_start) & (raw_returns.index < raw_returns.index[-1])
+
+# %% [markdown]
+# ### Common Net-Return Function
+#
+# Normalize each target-weight vector, apply its forward return, and charge the same
+# per-asset one-way cost schedule to every allocator.
 
 
+# %%
 # DeePM returns (risk-weighted, equal-weighted across assets)
-def portfolio_returns_from_weights(weights_df, returns_df, mask):
-    """Compute portfolio returns from risk weight DataFrames."""
+def portfolio_returns_from_weights(weights_df, returns_df, mask, cost_bps):
+    """Compute net returns from target weights and per-asset one-way costs."""
     w = weights_df.loc[mask]
     r = returns_df.loc[mask]
     # Align columns
     common = w.columns.intersection(r.columns)
     w, r = w[common], r[common]
+    w = w.where(r.notna(), 0.0).fillna(0.0)
+    r = r.fillna(0.0)
     # Normalize weights per timestep (absolute values sum to 1)
     w_abs = w.abs()
     w_norm = w.div(w_abs.sum(axis=1).clip(lower=1e-8), axis=0)
-    port_r = (w_norm * r).sum(axis=1)
-    return port_r
+    gross = (w_norm * r).sum(axis=1)
+    prior = w_norm.shift(1).fillna(0.0)
+    turnover = (w_norm - prior).abs()
+    cost_rates = pd.Series(cost_bps, dtype=float).reindex(common).fillna(0.0) / 10_000.0
+    costs = turnover.mul(cost_rates, axis=1).sum(axis=1)
+    return gross - costs
 
 
-deepm_returns = portfolio_returns_from_weights(risk_weights_deepm, raw_returns, test_mask)
-nosm_returns = portfolio_returns_from_weights(risk_weights_nosm, raw_returns, test_mask)
+# %% [markdown]
+# ### Held-Out Allocator Returns
+#
+# Apply the common function to both learned policies and both heuristic baselines.
+
+# %%
+deepm_returns = portfolio_returns_from_weights(risk_weights_deepm, raw_returns, test_mask, COST_BPS)
+nosm_returns = portfolio_returns_from_weights(risk_weights_nosm, raw_returns, test_mask, COST_BPS)
 
 # Equal weight baseline
-ew_returns = raw_returns.loc[test_mask].mean(axis=1)
+ew_weights = pd.DataFrame(
+    1.0 / len(raw_returns.columns), index=raw_returns.index, columns=raw_returns.columns
+)
+ew_returns = portfolio_returns_from_weights(ew_weights, raw_returns, test_mask, COST_BPS)
 ew_returns.name = "EqualWeight"
 
 # Inverse volatility baseline
 vol_21 = prices.pct_change().rolling(21, min_periods=5).std()
 inv_vol = 1.0 / vol_21.clip(lower=1e-6)
 iv_weights = inv_vol.div(inv_vol.sum(axis=1), axis=0)
-iv_returns = (iv_weights.loc[test_mask] * raw_returns.loc[test_mask]).sum(axis=1)
+iv_returns = portfolio_returns_from_weights(iv_weights, raw_returns, test_mask, COST_BPS)
 iv_returns.name = "InvVol"
 
 # %% [markdown]
@@ -718,32 +852,46 @@ results = pd.DataFrame(
 results
 
 # %% [markdown]
-# **Finding**: Full DeePM Sharpe 0.98 vs no-SoftMin 0.74 vs heuristics 0.69 — the SoftMin loss
-# accounts for the ~0.24 Sharpe gap between full DeePM and the no-SoftMin ablation, with both
-# deep models clearing the equal-weight / inverse-vol heuristics by a comfortable margin.
+# **Finding**: The table is the primary held-out comparison. Validation checkpointing uses
+# one chronological endpoint per window, and held-out evaluation uses each date once. Because
+# this is one seeded
+# SoftMin-vs-no-SoftMin ablation, the observed gap is evidence for this run rather than a
+# population estimate of the SoftMin effect.
 
 # %%
 fig, ax = plt.subplots(figsize=(10, 5))
-for r, label in [
-    (deepm_returns, "DeePM (full)"),
-    (nosm_returns, "DeePM (no SoftMin)"),
-    (ew_returns, "Equal Weight"),
-    (iv_returns, "Inverse Volatility"),
-]:
+method_returns = {
+    "DeePM (full)": deepm_returns,
+    "DeePM (no SoftMin)": nosm_returns,
+    "Equal Weight": ew_returns,
+    "Inverse Volatility": iv_returns,
+}
+method_colors = {
+    "DeePM (full)": COLORS["blue"],
+    "DeePM (no SoftMin)": COLORS["copper"],
+    "Equal Weight": COLORS["amber"],
+    "Inverse Volatility": COLORS["positive"],
+}
+sharpe_by_method = {
+    name: float(series.mean() / (series.std() + 1e-8) * np.sqrt(252))
+    for name, series in method_returns.items()
+}
+for label, r in method_returns.items():
     cum = (1 + r.dropna()).cumprod()
-    ax.plot(cum.index, cum.values, label=label)
+    ax.plot(cum.index, cum.values, label=label, color=method_colors[label])
 
+winner = max(sharpe_by_method, key=sharpe_by_method.get)
 ax.set_xlabel("Date")
 ax.set_ylabel("Cumulative Return")
-ax.set_title("Out-of-Sample Equity Curves")
+ax.set_title(f"{winner} leads held-out Sharpe at {sharpe_by_method[winner]:.2f} net of costs")
 ax.legend()
 fig.tight_layout()
 fig.show()
 
 # %% [markdown]
-# **Trading implication**: The full DeePM curve trades terminal return for drawdown reduction,
-# confirming that the SoftMin robust objective shifts capital away from tail-risk exposures
-# at the cost of some upside capture.
+# **Trading implication**: Read terminal wealth together with Sharpe and drawdown. A
+# single seeded path can motivate a robustness hypothesis, but it cannot establish that
+# the SoftMin term will dominate across seeds or market samples.
 
 # %% [markdown]
 # ## 11. Regime-Sliced Evaluation
@@ -780,21 +928,15 @@ regime_results = pd.DataFrame(
             "Crisis Sharpe": f"{regime_sharpe(r, crisis_mask):.2f}",
             "Gap": f"{regime_sharpe(r, calm_mask) - regime_sharpe(r, crisis_mask):.2f}",
         }
-        for r, name in [
-            (deepm_returns, "DeePM (full)"),
-            (nosm_returns, "DeePM (no SoftMin)"),
-            (ew_returns, "Equal Weight"),
-            (iv_returns, "Inverse Volatility"),
-        ]
+        for name, r in method_returns.items()
     ]
 )
 regime_results
 
 # %% [markdown]
-# **Finding**: The calm-versus-crisis Sharpe gap is the direct test of regime robustness; lower
-# gap indicates less fragile allocation behavior under stress. Full DeePM narrows the
-# calm/crisis Sharpe gap from 0.69 (no-SoftMin) to 0.21, with crisis-window Sharpe rising from
-# 0.57 to 1.00 once the SoftMin loss is engaged.
+# **Finding**: The calm-versus-crisis gap is the direct diagnostic. A smaller gap in
+# this seeded run is consistent with the SoftMin objective, but attribution requires
+# replication across seeds and samples.
 
 # %% [markdown]
 # ## 12. Drawdown Analysis
@@ -843,6 +985,7 @@ pl.from_pandas(drawdowns_panel).write_parquet(OUTPUT_DIR / "drawdowns.parquet")
 
 # %%
 fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+plt.close(fig)
 
 ax = axes[0]
 for dd, label, linestyle, linewidth in [
@@ -850,25 +993,44 @@ for dd, label, linestyle, linewidth in [
     (dd_nosm, "DeePM (no SoftMin)", "--", 1.4),
     (dd_ew, "Equal Weight", ":", 1.6),
 ]:
-    ax.plot(dd.index, dd.values, label=label, linestyle=linestyle, linewidth=linewidth)
+    ax.plot(
+        dd.index,
+        dd.values,
+        label=label,
+        color=method_colors[label],
+        linestyle=linestyle,
+        linewidth=linewidth,
+    )
 ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
 ax.set_ylabel("Drawdown")
-ax.set_title("Drawdown Comparison")
+ax.set_title(f"Full DeePM max drawdown {dd_deepm.min():.1%} vs {dd_nosm.min():.1%} without SoftMin")
 ax.legend()
 
+# %%
 ax = axes[1]
-ax.fill_between(spy_vol_test.index, 0, spy_vol_test.values, alpha=0.3, label="SPY Vol (21d ann.)")
+ax.fill_between(
+    spy_vol_test.index,
+    0,
+    spy_vol_test.values,
+    color=COLORS["blue"],
+    alpha=0.3,
+    label="SPY Vol (21d ann.)",
+)
 ax.axhline(
-    vol_median, color="red", linestyle="--", linewidth=0.8, label=f"Median: {vol_median:.0%}"
+    vol_median,
+    color=COLORS["amber"],
+    linestyle="--",
+    linewidth=0.8,
+    label=f"Median: {vol_median:.0%}",
 )
 ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
 ax.set_ylabel("Volatility")
 ax.set_xlabel("Date")
-ax.set_title("Market Volatility (Regime Indicator)")
+ax.set_title(f"Median SPY volatility threshold separates regimes at {vol_median:.0%}")
 ax.legend()
 
 fig.tight_layout()
-fig.show()
+display(fig)
 
 # %% [markdown]
 # **Trading implication**: Drawdown shape matters as much as terminal Sharpe when allocator
@@ -877,20 +1039,17 @@ fig.show()
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **SoftMin narrows the regime gap on this 2022-2025 test window**: the full
-#    DeePM model's calm-vs-crisis Sharpe gap is 0.21 (calm 1.21, crisis 1.00); the
-#    no-SoftMin ablation's gap is 0.69 (calm 1.26, crisis 0.57). Most of the 0.48
-#    gap reduction comes from the crisis side (0.57 → 1.00, +0.43); the calm-side
-#    Sharpe is essentially unchanged (1.26 → 1.21, −0.05). The full-window Sharpe
-#    is 0.98 for full DeePM vs 0.74 for the no-SoftMin ablation.
+# 1. **SoftMin targets the weak-window path**: compare the full and no-SoftMin rows
+#    in both the held-out and regime-sliced tables. This single seeded ablation is a
+#    diagnostic, not an estimate of the effect across seeds.
 # 2. **Macro graph prior constrains cross-asset attention** to within-asset-class
 #    and economically motivated cross-class edges. This embeds structure into the
 #    model rather than asking it to recover groupings from data; whether that prior
 #    is binding versus a fully learnable attention matrix is not tested here.
-# 3. **Cost awareness is built into the loss** via the per-turnover penalty
-#    ($\gamma_{\text{cost}}=0.5$ over 5 bps one-way for liquid ETFs, 10 bps for less
-#    liquid). The model is trained against this cost specification rather than
-#    receiving a separate post-hoc cost adjustment.
+# 3. **Cost awareness enters training as a differentiable turnover penalty**
+#    ($\gamma_{\text{cost}}=0.5$ over the asset-specific cost schedule). Held-out
+#    evaluation then applies the full one-way basis-point schedule to normalized
+#    target-weight changes, including the initial entry trade.
 # 4. **Component-level ablations are out of scope for this notebook**. The
 #    SoftMin-vs-no-SoftMin comparison isolates the regime-robustness mechanism;
 #    isolating FiLM, V-VSN, or Directed Delay individually would require additional

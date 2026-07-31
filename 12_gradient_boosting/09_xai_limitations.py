@@ -53,10 +53,10 @@ from sklearn.ensemble import RandomForestRegressor
 
 from utils.modeling import load_modeling_dataset
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLOR_CYCLER
 
 # %% tags=["parameters"]
-MAX_SYMBOLS = 0
+MAX_SYMBOLS = 0  # 0 = full universe (production); test override reduces for a fast smoke run
 SEED = 42
 
 
@@ -67,7 +67,7 @@ set_global_seeds(SEED)
 # ## 2. Load Data
 
 # %%
-mds = load_modeling_dataset("etfs", "fwd_ret_21d")
+mds = load_modeling_dataset("etfs", "fwd_ret_21d", max_symbols=MAX_SYMBOLS)
 df = mds.dataset.to_pandas()
 date_col = mds.date_col
 FEATURE_COLS = mds.feature_names
@@ -256,7 +256,7 @@ feat_names = [FEATURE_COLS[idx] for idx in top_feats_idx]
 
 x = np.arange(n_feat)
 width = 0.2
-colors = [COLORS["blue"], COLORS["slate"], COLORS["copper"], COLORS["amber"]]
+colors = COLOR_CYCLER[:4]  # four distinct categorical hues (blue, amber, copper, green)
 
 for i, (name, _) in enumerate(model_configs):
     vals = [importance_arrays[i][idx] for idx in top_feats_idx]
@@ -265,7 +265,7 @@ for i, (name, _) in enumerate(model_configs):
 ax.set_xticks(x + width * 1.5)
 ax.set_xticklabels(feat_names, rotation=45, ha="right", fontsize=9)
 ax.set_ylabel("Mean |SHAP|")
-ax.set_title("Rashomon Effect: SHAP Importance Across Models")
+ax.set_title("Feature-importance magnitudes shift across seeds and model family (Rashomon effect)")
 ax.legend(fontsize=8)
 plt.tight_layout()
 plt.show()

@@ -16,90 +16,100 @@
 # %% [markdown]
 # # Interpreting Financial NLP Models with SHAP
 #
-# **Docker image**: `ml4t-gpu`
-#
-# **Chapter 12: Gradient Boosting - Inside the Black Box**
-# **Section Reference**: See Section 12.5 for SHAP theory and methodology
+# **Chapter 12: Advanced Models for Tabular Data**
+# **Section 12.5: Model Explainability with SHAP**
 #
 # ## Purpose
-# This notebook demonstrates how to use SHAP (SHapley Additive exPlanations)
-# to interpret Transformer model predictions on financial text. Understanding
-# why a model makes specific predictions is essential for risk management,
-# debugging, and discovering new alpha signals.
 #
-# ## Learning Objectives
+# This notebook extends SHAP from tabular models to a pretrained financial language model. It
+# examines whether token attributions support FinBERT's sentiment decisions and shows how a token's
+# contribution can change with context.
+#
+# ## Learning objectives
+#
 # After completing this notebook, you will be able to:
-# - Apply SHAP to explain Transformer text classification predictions
-# - Interpret token-level feature attributions for sentiment analysis
-# - Identify which words drive positive vs negative predictions
-# - Understand the "net loss narrowed" paradox (context overrides keywords)
-# - Apply interpretability insights to model validation and alpha discovery
 #
-# **Book Reference**: Chapter 12, Section 12.5 (SHAP beyond tabular data)
+# - explain Transformer sentiment probabilities with token-level SHAP values;
+# - distinguish a token's contribution to one prediction from its standalone sentiment;
+# - test a contextual explanation with a controlled text perturbation; and
+# - state what attribution can, and cannot, establish in model validation.
 #
-# **Prerequisites**: Requires `transformers` and `shap` packages; downloads
-# FinBERT weights (~420 MB) on first run. GPU recommended but not required.
-#
-# ## Cross-References
-# - **Foundation**: Section 12.5 explains SHAP theory (Shapley values, additivity)
-# - **Related**: Chapter 10 covers text feature engineering and FinBERT
-# - **Application**: Extends SHAP from tabular features to text tokens
+# **Prerequisites**: Sections 12.5 on SHAP and Chapter 10 on financial text features. The notebook
+# downloads the pinned FinBERT-tone checkpoint on first use. A CUDA-capable PyTorch environment is
+# faster, but the same inference path runs on CPU.
 
 # %%
-"""Interpreting Financial NLP Models with SHAP — apply SHAP to FinBERT for token-level sentiment attribution."""
-
-import warnings
+"""Apply SHAP to FinBERT for token-level financial sentiment attribution."""
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
-import torch  # isort:skip  # must be imported before shap (CUDA runtime conflict)
+import torch  # isort:skip  # Import before SHAP to initialize the CUDA runtime first.
 import shap
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
-
-warnings.filterwarnings("ignore")
-
-device = 0 if torch.cuda.is_available() else -1
-print(f"Using device: {'GPU' if device == 0 else 'CPU'}")
+from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
 
 # %% tags=["parameters"]
-MAX_SENTENCES = 0  # 0 = all sentences
-
+MAX_SENTENCES = 0  # 0 uses the full teaching sample
 SEED = 42
-
 
 # %%
 set_global_seeds(SEED)
+
+MODEL_NAME = "yiyanghkust/finbert-tone"
+MODEL_REVISION = "4921590d3c0c3832c0efea24c8381ce0bda7844b"
+LABEL_ORDER = ("Negative", "Neutral", "Positive")
+TORCH_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+print(f"Inference device: {'CUDA GPU' if TORCH_DEVICE.type == 'cuda' else 'CPU'}")
+print(f"FinBERT revision: {MODEL_REVISION[:12]}")
+
 # %% [markdown]
-# ## Load Pre-trained FinBERT
+# ## Load a pinned FinBERT checkpoint
 #
-# We use FinBERT-tone which is already fine-tuned for financial sentiment.
+# FinBERT-tone is already fine-tuned for three-way financial sentiment. Pinning the model revision
+# makes the weights and tokenizer part of the notebook's reproducibility contract. The checkpoint's
+# native class indices are validated, then outputs are reordered once into the reader-facing order
+# Negative, Neutral, Positive.
 
 # %%
-# Load model and create pipeline
-model_name = "yiyanghkust/finbert-tone"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, revision=MODEL_REVISION)
+model = AutoModelForSequenceClassification.from_pretrained(
+    MODEL_NAME,
+    revision=MODEL_REVISION,
+).to(TORCH_DEVICE)
+model.eval()
 
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForSequenceClassification.from_pretrained(model_name)
+model_labels = tuple(model.config.id2label[index] for index in range(model.config.num_labels))
+if set(model_labels) != set(LABEL_ORDER):
+    raise ValueError(f"Unexpected FinBERT labels: {model_labels}")
 
-# Create sentiment analysis pipeline
-classifier = pipeline(
-    "sentiment-analysis",
-    model=model,
-    tokenizer=tokenizer,
-    device=device,
-    top_k=None,
-)
+# %% [markdown]
+# The probability wrapper is the single class-order boundary between FinBERT and SHAP. It batches
+# inference, applies softmax to the native logits, and reorders columns by the checkpoint's label
+# metadata rather than assuming that model indices have a particular meaning.
 
-# Label mapping
-label_map = {0: "Negative", 1: "Neutral", 2: "Positive"}
 
 # %%
-# Test the model
+def predict_proba(texts):
+    """Return FinBERT probabilities in LABEL_ORDER for SHAP."""
+    text_batch = [str(text) for text in texts]
+    encoded = tokenizer(text_batch, padding=True, return_tensors="pt").to(TORCH_DEVICE)
+    with torch.inference_mode():
+        native_probabilities = torch.softmax(model(**encoded).logits, dim=-1).cpu().numpy()
+    display_indices = [model_labels.index(label) for label in LABEL_ORDER]
+    return native_probabilities[:, display_indices]
+
+
+# %% [markdown]
+# Five short sentences establish the model's behavior before attribution. These are constructed
+# teaching examples, not a labeled evaluation sample, so confidence describes model certainty on
+# each example rather than out-of-sample accuracy.
+
+# %%
 test_sentences = [
     "Revenue growth exceeded analyst expectations.",
     "The company announced significant layoffs.",
@@ -108,176 +118,154 @@ test_sentences = [
     "Management expressed concerns about margin pressure.",
 ]
 
-pred_rows = []
-for text in test_sentences:
-    result = classifier(text)[0]
-    best = max(result, key=lambda x: x["score"])
-    pred_rows.append(
-        {"text": text[:50], "prediction": best["label"], "confidence": round(best["score"], 3)}
-    )
+test_probabilities = predict_proba(test_sentences)
+winner_indices = test_probabilities.argmax(axis=1)
 
-pl.DataFrame(pred_rows)
+prediction_summary = pl.DataFrame(
+    {
+        "text": test_sentences,
+        "prediction": [LABEL_ORDER[index] for index in winner_indices],
+        "confidence": test_probabilities.max(axis=1),
+    }
+)
+prediction_summary
 
 # %% [markdown]
-# ## SHAP Explainer for Text Classification
+# ## Explain individual predictions
 #
-# SHAP explains predictions by computing the contribution of each token
-# to the final prediction. Positive SHAP values push toward a class,
-# negative values push away from it.
+# The text masker creates coalitions by hiding token groups and querying the probability wrapper.
+# Because the explained outputs are probabilities, each SHAP value is a contribution in probability
+# points relative to the explainer's baseline. A positive value pushes toward the named class; a
+# negative value pushes away from it.
 
 # %%
-# Create SHAP explainer
-# Use a wrapper function that returns probabilities
-
-
-def predict_proba(texts):
-    """Wrapper for SHAP compatibility."""
-    results = []
-    for text in texts:
-        output = classifier(text)[0]
-        # Sort by label order: Negative, Neutral, Positive
-        probs = sorted(output, key=lambda x: x["label"])
-        results.append([p["score"] for p in probs])
-    return np.array(results)
-
-
-# Create explainer with a small background dataset
-background_texts = [
-    "The company reported quarterly results.",
-    "Shares were trading today.",
-    "The CEO made a statement.",
-]
-
-print("Initializing SHAP explainer...")
 explainer = shap.Explainer(
     predict_proba,
     tokenizer,
-    output_names=["Negative", "Neutral", "Positive"],
+    output_names=list(LABEL_ORDER),
+    algorithm="partition",
 )
 
-# %% [markdown]
-# ## Explaining Individual Predictions
-#
-# Let's examine which words drove specific predictions.
-
-# %%
-# Sentences to explain
 explain_sentences = [
     "Net loss narrowed significantly from the prior year.",
     "Revenue growth slowed amid weakening demand.",
     "The company raised its full-year guidance.",
 ]
 
+explain_probabilities = predict_proba(explain_sentences)
+explain_winners = explain_probabilities.argmax(axis=1)
 shap_values = explainer(explain_sentences)
 
+# %% [markdown]
+# Each panel ranks tokens by absolute contribution to that sentence's predicted class. Direction is
+# relative to the predicted class: green pushes its probability higher and red pushes it lower.
+
 # %%
-# Top token contributions per sentence — render as a single DataFrame
-top_rows = []
-for i, text in enumerate(explain_sentences):
-    result = classifier(text)[0]
-    best = max(result, key=lambda x: x["score"])
-    class_idx = {"Negative": 0, "Neutral": 1, "Positive": 2}[best["label"]]
+fig, axes = plt.subplots(3, 1, figsize=FIGSIZE["grid_3x2"], sharex=True)
 
-    values = shap_values[i, :, class_idx].values
-    tokens = shap_values[i].data
-
+panel_rows = []
+max_abs_contribution = 0.0
+for sentence_index, (sentence, class_index) in enumerate(
+    zip(explain_sentences, explain_winners, strict=True)
+):
+    tokens = shap_values[sentence_index].data
+    values = shap_values[sentence_index, :, class_index].values
     contributions = [
-        (tok, float(val))
-        for tok, val in zip(tokens, values, strict=False)
-        if tok not in ("[CLS]", "[SEP]", "[PAD]")
+        (str(token).strip(), float(value))
+        for token, value in zip(tokens, values, strict=True)
+        if str(token).strip() and str(token).strip() not in {"[CLS]", "[SEP]", "[PAD]"}
     ]
-    contributions.sort(key=lambda x: abs(x[1]), reverse=True)
+    strongest = sorted(contributions, key=lambda item: abs(item[1]), reverse=True)[:6]
+    max_abs_contribution = max(max_abs_contribution, *(abs(value) for _, value in strongest))
+    predicted = LABEL_ORDER[class_index]
+    panel_rows.append((sentence, predicted, strongest))
 
-    for token, value in contributions[:8]:
-        top_rows.append(
-            {
-                "sentence": text,
-                "predicted": best["label"],
-                "confidence": round(best["score"], 3),
-                "token": token,
-                "shap_value": round(value, 4),
-                "direction": "+" if value > 0 else "−",
-            }
-        )
+for ax, (_, predicted, strongest) in zip(axes, panel_rows, strict=True):
+    tokens = [token for token, _ in strongest]
+    contributions = [value for _, value in strongest]
+    colors = [COLORS["positive"] if value >= 0 else COLORS["negative"] for value in contributions]
 
-token_attr_df = pl.DataFrame(top_rows)
-token_attr_df
+    ax.barh(tokens, contributions, color=colors)
+    ax.invert_yaxis()
+    ax.set_xlim(-1.05 * max_abs_contribution, 1.05 * max_abs_contribution)
+    ax.set_title(f"Predicted: {predicted}", loc="left")
+    zero_line(ax, axis="x")
 
-# %%
-# SHAP text plot for visualization
-# This creates an HTML visualization of token attributions
-
-for i, text in enumerate(explain_sentences):
-    result = classifier(text)[0]
-    best = max(result, key=lambda x: x["score"])
-    class_idx = {"Negative": 0, "Neutral": 1, "Positive": 2}[best["label"]]
-
-    print(f"\n--- {best['label']} prediction for: '{text[:40]}...'")
-
-    # Simple text visualization
-    values = shap_values[i, :, class_idx].values
-    tokens = shap_values[i].data
-
-    # Color tokens by contribution
-    output = []
-    for token, value in zip(tokens, values, strict=False):
-        if token in ["[CLS]", "[SEP]", "[PAD]"]:
-            continue
-        if value > 0.05:
-            output.append(f"[+{token}]")
-        elif value < -0.05:
-            output.append(f"[-{token}]")
-        else:
-            output.append(token)
-
-    print("Tokens: " + " ".join(output))
-    print("Legend: [+token] = positive contribution, [-token] = negative")
+axes[1].set_ylabel("Token")
+axes[-1].set_xlabel("SHAP contribution to predicted-class probability")
+fig.suptitle("Different phrases drive each FinBERT sentiment decision", x=0.06, ha="left")
+plt.show()
 
 # %% [markdown]
-# ## Case Study: "Net loss narrowed"
+# ## Controlled context test: narrowed versus widened
 #
-# This phrase is a classic example of context-dependent sentiment.
-# A dictionary-based approach might flag "loss" as negative, but the
-# full phrase indicates improvement (positive). The token-level SHAP
-# table below shows that "narrowed" has the highest positive attribution
-# and "loss" itself pushes the prediction *toward* Positive — the model
-# reads "loss narrowed" as a unit rather than as the word "loss" in
-# isolation, which a dictionary approach cannot do.
+# A token's SHAP value belongs to a complete input, not to the token in isolation. To test that
+# distinction, hold the sentence template fixed and replace only *narrowed* with *widened*. The
+# resulting predictions and Positive-class attributions provide an adversarial check on the
+# contextual interpretation. A sensible-looking local explanation does not guarantee that the model
+# will respond sensibly to a nearby input.
 
 # %%
-# Detailed analysis of "net loss narrowed"
-text = "Net loss narrowed significantly from the prior year."
-result = classifier(text)[0]
-best = max(result, key=lambda x: x["score"])
+context_sentences = [
+    "Net loss narrowed significantly from the prior year.",
+    "Net loss widened significantly from the prior year.",
+]
+context_probabilities = predict_proba(context_sentences)
+context_shap = explainer(context_sentences)
+positive_index = LABEL_ORDER.index("Positive")
 
-print(f"Text: {text}")
-print(f"Prediction: {best['label']} ({best['score']:.1%})")
-
-sv = explainer([text])
-values = sv[0, :, 2].values  # Index 2 = Positive
-tokens = sv[0].data
-
-net_loss_df = pl.DataFrame(
+context_summary = pl.DataFrame(
     {
-        "token": [t for t in tokens if t not in ("[CLS]", "[SEP]", "[PAD]")],
-        "shap_value_positive": [
-            round(float(v), 3)
-            for t, v in zip(tokens, values, strict=False)
-            if t not in ("[CLS]", "[SEP]", "[PAD]")
-        ],
+        "wording": ["narrowed", "widened"],
+        "prediction": [LABEL_ORDER[index] for index in context_probabilities.argmax(axis=1)],
+        "positive_probability": context_probabilities[:, positive_index],
     }
 )
-net_loss_df
-
-# %% [markdown]
-# ## Global Feature Importance
-#
-# Beyond individual predictions, we can aggregate SHAP values across
-# many sentences to understand which words generally drive predictions.
+context_summary
 
 # %%
-# Aggregate analysis on more sentences
-many_sentences = [
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+
+context_panels = []
+context_limit = 0.0
+for sentence_index, wording in enumerate(("narrowed", "widened")):
+    tokens = context_shap[sentence_index].data
+    values = context_shap[sentence_index, :, positive_index].values
+    contributions = [
+        (str(token).strip(), float(value))
+        for token, value in zip(tokens, values, strict=True)
+        if str(token).strip() and str(token).strip() not in {"[CLS]", "[SEP]", "[PAD]"}
+    ]
+    strongest = sorted(contributions, key=lambda item: abs(item[1]), reverse=True)[:7]
+    context_limit = max(context_limit, *(abs(value) for _, value in strongest))
+    context_panels.append((wording, strongest))
+
+for ax, (wording, strongest) in zip(axes, context_panels, strict=True):
+    tokens = [token for token, _ in strongest]
+    contributions = [value for _, value in strongest]
+    colors = [COLORS["positive"] if value >= 0 else COLORS["negative"] for value in contributions]
+
+    ax.barh(tokens, contributions, color=colors)
+    ax.invert_yaxis()
+    ax.set_xlim(-1.05 * context_limit, 1.05 * context_limit)
+    ax.set_title(wording.capitalize(), loc="left")
+    zero_line(ax, axis="x")
+
+fig.supylabel("Token")
+fig.supxlabel("SHAP contribution to Positive probability")
+fig.suptitle("A one-word perturbation exposes a counterintuitive response", x=0.06, ha="left")
+plt.show()
+
+# %% [markdown]
+# ## Aggregate a small teaching sample
+#
+# Aggregating signed Positive-class contributions can reveal recurring patterns, but the ten
+# constructed sentences below are too small and too curated to support claims about a global finance
+# vocabulary. The chart is therefore a diagnostic of this teaching sample only. Repeated corpus
+# tokens contribute repeatedly to the sum.
+
+# %%
+teaching_sentences = [
     "Revenue exceeded expectations.",
     "Profit margins improved significantly.",
     "The company beat analyst estimates.",
@@ -289,108 +277,75 @@ many_sentences = [
     "Revenue missed forecasts.",
     "Guidance was lowered.",
 ]
+if MAX_SENTENCES > 0:
+    teaching_sentences = teaching_sentences[:MAX_SENTENCES]
 
-print("Analyzing aggregate feature importance...")
-many_shap = explainer(many_sentences)
+teaching_shap = explainer(teaching_sentences)
 
-# Aggregate positive attribution
-positive_words = {}
-negative_words = {}
-
-for i in range(len(many_sentences)):
-    for j in range(many_shap[i].values.shape[0]):
-        token = many_shap[i].data[j]
-        if token in ["[CLS]", "[SEP]", "[PAD]"]:
+token_totals: dict[str, float] = {}
+for sentence_index in range(len(teaching_sentences)):
+    tokens = teaching_shap[sentence_index].data
+    values = teaching_shap[sentence_index, :, positive_index].values
+    for token, value in zip(tokens, values, strict=True):
+        normalized = str(token).strip().lower()
+        if not normalized or normalized in {"[cls]", "[sep]", "[pad]"}:
             continue
+        token_totals[normalized] = token_totals.get(normalized, 0.0) + float(value)
 
-        # Sum contributions across all classes
-        value = float(many_shap[i, j, 2].values)  # Positive class
-        if token not in positive_words:
-            positive_words[token] = 0
-            negative_words[token] = 0
-
-        if value > 0:
-            positive_words[token] += value
-        else:
-            negative_words[token] += abs(value)
-
-# %%
-sorted_pos = sorted(positive_words.items(), key=lambda x: x[1], reverse=True)[:10]
-sorted_neg = sorted(negative_words.items(), key=lambda x: x[1], reverse=True)[:10]
-
-global_attr_df = pl.DataFrame(
-    {
-        "rank": list(range(1, 11)),
-        "word_pos": [w for w, _ in sorted_pos],
-        "score_pos": [round(float(s), 3) for _, s in sorted_pos],
-        "word_neg": [w for w, _ in sorted_neg],
-        "score_neg": [round(float(s), 3) for _, s in sorted_neg],
-    }
+top_positive = sorted(
+    ((token, value) for token, value in token_totals.items() if value > 0),
+    key=lambda item: item[1],
+    reverse=True,
+)[:6]
+top_negative = sorted(
+    ((token, value) for token, value in token_totals.items() if value < 0),
+    key=lambda item: item[1],
+)[:6]
+ranked_tokens = sorted(
+    ((token, value) for token, value in top_negative + top_positive if abs(value) >= 0.01),
+    key=lambda item: item[1],
 )
-global_attr_df
-
-# %% [markdown]
-# **Interpretation**: Words with high positive attribution (e.g., "exceeded",
-# "growth", "raised") align with financial improvement language. Words with
-# high negative attribution signal deterioration. The contextual nature of
-# these attributions — "narrowed" is positive when modifying "loss" — is what
-# separates Transformer-based models from dictionary approaches.
-
-# %% [markdown]
-# ## Applications in Finance
-#
-# ### 1. Risk Management
-# - Validate model relies on sensible features, not spurious correlations
-# - Ensure no leakage of forbidden information (e.g., forward-looking data)
-# - Audit model behavior before production deployment
-#
-# ### 2. Model Debugging
-# - When model fails, SHAP reveals which tokens misled it
-# - Identify data quality issues (noise tokens, encoding errors)
-# - Guide retraining with cleaned data
-#
-# ### 3. Alpha Discovery
-# - Words that consistently drive predictions may indicate patterns
-# - Unexpected SHAP attributions → potential new signal hypotheses
-# - Quantify which linguistic features matter for returns
 
 # %%
-fig, ax = plt.subplots(figsize=(10, 5))
+fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
 
-all_words = list(set(list(positive_words.keys())[:5] + list(negative_words.keys())[:5]))
-pos_scores = [positive_words.get(w, 0) for w in all_words]
-neg_scores = [-negative_words.get(w, 0) for w in all_words]
+tokens = [token for token, _ in ranked_tokens]
+contributions = [value for _, value in ranked_tokens]
+colors = [COLORS["positive"] if value >= 0 else COLORS["negative"] for value in contributions]
 
-x = np.arange(len(all_words))
-width = 0.35
-
-ax.barh(x - width / 2, pos_scores, width, label="Positive attribution", color=COLORS["amber"])
-ax.barh(x + width / 2, neg_scores, width, label="Negative attribution", color=COLORS["slate"])
-
-ax.set_yticks(x)
-ax.set_yticklabels(all_words)
-ax.set_xlabel("SHAP Value")
-ax.set_title("SHAP Token Contributions to Sentiment Prediction")
-ax.legend()
-ax.axvline(x=0, color="gray", linestyle="--", linewidth=0.5)
-
-plt.tight_layout()
+ax.barh(tokens, contributions, color=colors)
+zero_line(ax, axis="x")
+ax.set_xlabel("Summed SHAP contribution to Positive probability")
+ax.set_ylabel("Token")
+add_message_title(
+    ax,
+    "A few tokens dominate Positive-class attribution in this sample",
+    subtitle=f"Top signed token totals across {len(teaching_sentences)} constructed sentences",
+)
 plt.show()
 
 # %% [markdown]
-# ## Key Takeaways
+# ## What attribution can support
 #
-# 1. **SHAP** provides principled, theoretically-grounded feature attribution
-#    based on game-theoretic Shapley values.
-#
-# 2. **Token-level explanations** reveal how models understand context:
-#    "narrowed" outweighs "loss" in "net loss narrowed."
-#
-# 3. **Risk management** requires explainability: SHAP validates that models
-#    rely on sensible linguistic features, not spurious correlations.
-#
-# 4. **Alpha discovery**: Consistent SHAP patterns across many documents
-#    may reveal predictive linguistic features not obvious to analysts.
+# - **Model validation**: token attributions can reveal reliance on implausible artifacts or language
+#   that deserves further testing. They cannot prove that training data were leak-free.
+# - **Debugging**: controlled text perturbations can identify brittle or counterintuitive decisions,
+#   but the explanation is still local to the model, masker, and input.
+# - **Research hypotheses**: recurring attributions in a representative corpus may motivate a
+#   candidate signal. They are predictive associations, not causal effects or evidence of alpha by
+#   themselves.
 
-# %%
-print("\nSHAP NLP sentiment notebook complete")
+# %% [markdown]
+# ## Key takeaways
+#
+# 1. SHAP can decompose FinBERT class probabilities into token-level contributions using the same
+#    coalition logic applied to tabular features.
+# 2. The narrowed-versus-widened perturbation shows why attribution needs an adversarial check: a
+#    locally plausible explanation can coexist with a counterintuitive nearby prediction.
+# 3. Aggregated token scores depend on the sampled documents. This constructed sample demonstrates
+#    the workflow, not a stable finance-domain vocabulary.
+# 4. Attribution is a diagnostic layer. Leakage checks, representative validation, and economic
+#    testing remain separate requirements before using text predictions in a strategy.
+#
+# These examples complete the token-attribution extension in **Section 12.5**. Next,
+# `11_conformal_gbm` adds calibrated uncertainty intervals to gradient-boosting predictions.

@@ -21,11 +21,13 @@
 # This notebook demonstrates comprehensive portfolio performance analysis using
 # `ml4t-diagnostic` as a modern Plotly-based replacement for pyfolio. The strategy
 # under analysis is the highest-validation-Sharpe ETF allocation backtest as recorded in
-# `case_studies/etfs/run_log/registry.db` — resolved at runtime via
+# `case_studies/etfs/run_log/registry.db` - resolved at runtime via
 # `resolve_best_backtest_runs(...)` so the metrics always reflect the current
 # best-Sharpe allocator on validation, not a baked-in hash. Daily portfolio
 # returns are loaded from the case study's run-log, so every metric below traces
-# to a real OOS strategy on real ETF data.
+# to a registered, cost-aware engine backtest on real ETF data. The validation
+# ranking chooses the artifact; the displayed return series is a strategy diagnostic,
+# not a fresh unbiased model-selection estimate.
 #
 # **Learning Objectives**:
 # - Compute summary statistics (Sharpe, Sortino, Calmar, max drawdown)
@@ -40,12 +42,13 @@
 # to produce `run_log/backtest/<hash>/daily_returns.parquet`.
 
 # %%
-"""Portfolio Performance Analysis — compute risk-return metrics, drawdowns, and stress-period analysis for ETF portfolios."""
+"""Compute risk-return metrics, drawdowns, and stress-period analysis for ETF portfolios."""
 
+import hashlib
+import json
 import warnings
 
 warnings.filterwarnings("ignore")
-
 
 import numpy as np
 import pandas as pd
@@ -77,9 +80,10 @@ from case_studies.utils.registry.queries import resolve_best_backtest_runs
 from data import load_etfs
 from utils.paths import get_case_study_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 # %% tags=["parameters"]
-# Production defaults — Papermill overrides for CI testing.
+# Production defaults - Papermill overrides for CI testing.
 # BACKTEST_HASH = None lets the notebook resolve the highest-validation-Sharpe allocation backtest
 # from registry.db at runtime; pass a specific 12-char hash via Papermill to pin
 # the strategy under analysis (useful for deterministic CI testing).
@@ -105,10 +109,16 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 # run with the highest validation Sharpe. The strategy is therefore whatever
 # the current case-study pipeline considers the best ETF allocator on real OOS
 # data; see `case_studies/etfs/run_log/backtest/<hash>/spec.json` for its full
-# specification.
+# specification. The backtest artifact already includes its registered commission,
+# slippage, and next-bar execution assumptions; this notebook does not subtract costs again.
 
 # %%
-# Resolve the backtest hash from the registry unless one was injected by Papermill
+# Record the immutable registry before selecting its registered artifact.
+registry_path = get_case_study_dir(ETF_CASE_STUDY) / "run_log" / "registry.db"
+registry_sha256 = hashlib.sha256(registry_path.read_bytes()).hexdigest()
+print(f"ETF registry SHA-256: {registry_sha256}")
+
+# Resolve the backtest hash from the registry unless one was injected by Papermill.
 if BACKTEST_HASH is None:
     best_runs = resolve_best_backtest_runs(
         case_study=ETF_CASE_STUDY,
@@ -124,9 +134,21 @@ if BACKTEST_HASH is None:
         )
     best_row = best_runs.row(0, named=True)
     BACKTEST_HASH = best_row["backtest_hash"]
+    backtest_spec = json.loads(best_row["spec_json"])
+    execution = backtest_spec["backtest_config"]["execution"]
+    commission = backtest_spec["backtest_config"]["commission"]
+    slippage = backtest_spec["backtest_config"]["slippage"]
+    allocator = backtest_spec["strategy"]["allocation"]
+    if execution["execution_mode"] != "next_bar":
+        raise RuntimeError("Selected backtest is not a causal next-bar execution artifact")
     print(
         f"Resolved highest-validation-Sharpe allocation backtest: {BACKTEST_HASH} "
         f"(prediction={best_row['prediction_hash']}, Sharpe={best_row['sharpe']:.3f})"
+    )
+    print(
+        f"Registered assumptions: allocator={allocator['method']}, top_k={allocator['top_k']}, "
+        f"execution={execution['execution_mode']}/{execution['execution_price']}, "
+        f"commission={commission['model']}, slippage={slippage['model']}"
     )
 else:
     print(f"Using user-pinned BACKTEST_HASH={BACKTEST_HASH}")
@@ -149,6 +171,8 @@ strategy_df = (
 )
 # Trim the leading pre-trade window where daily_return == 0 (before the first rebalance)
 first_active = strategy_df.filter(pl.col("strategy") != 0)["timestamp"].min()
+if first_active is None:
+    raise RuntimeError(f"Registered backtest {BACKTEST_HASH} contains no active strategy returns")
 strategy_df = strategy_df.filter(pl.col("timestamp") >= first_active)
 
 strategy_returns = strategy_df.to_pandas().set_index("timestamp")["strategy"].astype(float)
@@ -205,50 +229,26 @@ print("  Risk-free rate: 0%")
 # with 22 performance metrics.
 
 # %%
-# Compute all metrics
+# Compute all metrics.
 metrics = analysis.compute_summary_stats()
 
-# Display key metrics from the dataclass
-print("\n" + "=" * 70)
-print("PORTFOLIO PERFORMANCE SUMMARY")
-print("=" * 70)
-print("\nReturns")
-print(f"  Total Return:        {metrics.total_return * 100:.2f}%")
-print(f"  Annual Return:       {metrics.annual_return * 100:.2f}%")
-print(f"  Annual Volatility:   {metrics.annual_volatility * 100:.2f}%")
-print("\nRisk-Adjusted")
-print(f"  Sharpe Ratio:        {metrics.sharpe_ratio:.3f}")
-print(f"  Sortino Ratio:       {metrics.sortino_ratio:.3f}")
-print(f"  Calmar Ratio:        {metrics.calmar_ratio:.3f}")
-print(f"  Omega Ratio:         {metrics.omega_ratio:.3f}")
-print("\nRisk")
-print(f"  Max Drawdown:        {metrics.max_drawdown * 100:.2f}%")
-print(f"  VaR (95%):           {metrics.var_95 * 100:.2f}%")
-print(f"  CVaR (95%):          {metrics.cvar_95 * 100:.2f}%")
-print("\nDistribution")
-print(f"  Skewness:            {metrics.skewness:.3f}")
-print(f"  Kurtosis:            {metrics.kurtosis:.3f}")
-print(f"  Stability (R²):      {metrics.stability:.3f}")
-print("\nWin/Loss")
-print(f"  Win Rate:            {metrics.win_rate * 100:.2f}%")
-print(f"  Profit Factor:       {metrics.profit_factor:.2f}")
-
-# %%
-# Access individual metrics programmatically
-print("\nKey Metrics:")
-print(f"  Total Return:      {metrics.total_return * 100:.2f}%")
-print(f"  Annual Return:     {metrics.annual_return * 100:.2f}%")
-print(f"  Annual Volatility: {metrics.annual_volatility * 100:.2f}%")
-print(f"  Sharpe Ratio:      {metrics.sharpe_ratio:.3f}")
-print(f"  Sortino Ratio:     {metrics.sortino_ratio:.3f}")
-print(f"  Calmar Ratio:      {metrics.calmar_ratio:.3f}")
-print(f"  Max Drawdown:      {metrics.max_drawdown * 100:.2f}%")
-
-if metrics.alpha is not None:
-    print("\nBenchmark-Relative:")
-    print(f"  Alpha:             {metrics.alpha * 100:.2f}%")
-    print(f"  Beta:              {metrics.beta:.3f}")
-    print(f"  Information Ratio: {metrics.information_ratio:.3f}")
+headline_metrics = pd.DataFrame(
+    {
+        "Total Return": [f"{metrics.total_return:.2%}"],
+        "Annual Return": [f"{metrics.annual_return:.2%}"],
+        "Annual Volatility": [f"{metrics.annual_volatility:.2%}"],
+        "Sharpe": [f"{metrics.sharpe_ratio:.3f}"],
+        "Sortino": [f"{metrics.sortino_ratio:.3f}"],
+        "Max Drawdown": [f"{metrics.max_drawdown:.2%}"],
+        "Alpha": [f"{metrics.alpha:.2%}" if metrics.alpha is not None else "N/A"],
+        "Beta": [f"{metrics.beta:.3f}" if metrics.beta is not None else "N/A"],
+        "Information Ratio": [
+            f"{metrics.information_ratio:.3f}" if metrics.information_ratio is not None else "N/A"
+        ],
+    },
+    index=[BACKTEST_HASH],
+)
+headline_metrics
 
 # %% [markdown]
 # ### 3.1 Metrics Explained
@@ -299,12 +299,16 @@ for window in [21, 63, 252]:
             )
         )
 
-fig.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.3)
-fig.add_hline(y=1, line_dash="dot", line_color="green", opacity=0.3, annotation_text="Sharpe = 1")
-fig.add_hline(y=2, line_dash="dot", line_color="blue", opacity=0.3, annotation_text="Sharpe = 2")
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], opacity=0.3)
+fig.add_hline(
+    y=1, line_dash="dot", line_color=COLORS["amber"], opacity=0.3, annotation_text="Sharpe = 1"
+)
+fig.add_hline(
+    y=2, line_dash="dot", line_color=COLORS["positive"], opacity=0.3, annotation_text="Sharpe = 2"
+)
 
 fig.update_layout(
-    title="Rolling Sharpe Ratio",
+    title="Long-horizon Sharpe is steadier than short-window estimates",
     xaxis_title="Date",
     yaxis_title="Sharpe Ratio",
     height=450,
@@ -329,7 +333,7 @@ for window in [21, 63, 252]:
         )
 
 fig.update_layout(
-    title="Rolling Annualized Volatility",
+    title="Volatility spikes reveal when aggregate risk estimates break down",
     xaxis_title="Date",
     yaxis_title="Volatility (%)",
     height=400,
@@ -383,7 +387,7 @@ fig.add_trace(
         y=dd_series * 100,
         name="Strategy",
         fill="tozeroy",
-        line=dict(color="crimson", width=1),
+        line=dict(color=COLORS["negative"], width=1),
     )
 )
 
@@ -392,12 +396,12 @@ fig.add_trace(
         x=dd_benchmark.index,
         y=dd_benchmark * 100,
         name="Benchmark (SPY)",
-        line=dict(color="gray", width=1, dash="dash"),
+        line=dict(color=COLORS["neutral"], width=1, dash="dash"),
     )
 )
 
 fig.update_layout(
-    title="Underwater Curve (Drawdown)",
+    title="Strategy and SPY follow distinct drawdown and recovery paths",
     xaxis_title="Date",
     yaxis_title="Drawdown (%)",
     height=400,
@@ -409,13 +413,13 @@ fig.show()
 fig = px.histogram(
     dd_series * 100,
     nbins=50,
-    title="Drawdown Distribution",
+    title="Most observations stay near prior peaks despite episodic losses",
     labels={"value": "Drawdown (%)", "count": "Frequency"},
 )
 fig.add_vline(
     x=metrics.max_drawdown * 100,
     line_dash="dash",
-    line_color="red",
+    line_color=COLORS["negative"],
     annotation_text=f"Max DD: {metrics.max_drawdown * 100:.1f}%",
 )
 fig.update_layout(height=350, showlegend=False)
@@ -453,7 +457,11 @@ fig = go.Figure(
         z=heatmap_data.values,
         x=month_names,
         y=heatmap_data.index,
-        colorscale="RdYlGn",
+        colorscale=[
+            [0.0, COLORS["negative"]],
+            [0.5, COLORS["silver"]],
+            [1.0, COLORS["positive"]],
+        ],
         zmid=0,
         text=np.round(heatmap_data.values, 1),
         texttemplate="%{text:.1f}%",
@@ -463,7 +471,7 @@ fig = go.Figure(
 )
 
 fig.update_layout(
-    title="Monthly Returns Heatmap",
+    title="Monthly returns expose an uneven path hidden by annual averages",
     xaxis_title="Month",
     yaxis_title="Year",
     height=400,
@@ -486,7 +494,7 @@ fig.add_trace(
         x=annual_df["year"],
         y=annual_df["annual_return"] * 100,
         name="Strategy",
-        marker_color="steelblue",
+        marker_color=COLORS["blue"],
     )
 )
 
@@ -495,12 +503,12 @@ fig.add_trace(
         x=spy_annual.index,
         y=spy_annual.values * 100,
         name="Benchmark (SPY)",
-        marker_color="lightgray",
+        marker_color=COLORS["silver_muted"],
     )
 )
 
 fig.update_layout(
-    title="Annual Returns Comparison",
+    title="Strategy and SPY leadership varies from year to year",
     xaxis_title="Year",
     yaxis_title="Return (%)",
     barmode="group",
@@ -564,11 +572,11 @@ print(f"  Down Capture: {down_capture * 100:.1f}%")
 capture_spread = up_capture - down_capture
 print(f"\n  Capture Spread: {capture_spread * 100:.1f}pp")
 if capture_spread > 0.2:
-    print("  Capture profile: asymmetric — captures >20pp more upside than downside")
+    print("  Capture profile: asymmetric - captures >20pp more upside than downside")
 elif capture_spread > 0:
-    print("  Capture profile: asymmetric — captures more upside than downside")
+    print("  Capture profile: asymmetric - captures more upside than downside")
 elif capture_spread < 0:
-    print("  Capture profile: asymmetric — captures more downside than upside")
+    print("  Capture profile: asymmetric - captures more downside than upside")
 else:
     print("  Capture profile: symmetric (up capture == down capture)")
 
@@ -590,15 +598,17 @@ fig.add_trace(
         x=rolling_beta.index,
         y=rolling_beta,
         name="Rolling 1Y Beta",
-        line=dict(color="purple", width=2),
+        line=dict(color=COLORS["copper"], width=2),
     )
 )
 
-fig.add_hline(y=1, line_dash="dash", line_color="gray", annotation_text="Beta = 1 (Market)")
-fig.add_hline(y=0, line_dash="dot", line_color="black", opacity=0.3)
+fig.add_hline(
+    y=1, line_dash="dash", line_color=COLORS["neutral"], annotation_text="Beta = 1 (Market)"
+)
+fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"], opacity=0.3)
 
 fig.update_layout(
-    title="Rolling 1-Year Beta to S&P 500",
+    title="Market exposure changes materially through the backtest",
     xaxis_title="Date",
     yaxis_title="Beta",
     height=400,
@@ -635,31 +645,31 @@ fig = go.Figure()
 # Histogram of returns
 fig.add_trace(go.Histogram(x=strategy_returns * 100, nbinsx=100, name="Daily Returns", opacity=0.7))
 
-# VaR lines — stagger annotation y-positions to prevent overlap at the top
+# VaR lines - stagger annotation y-positions to prevent overlap at the top
 fig.add_vline(
     x=var_95 * 100,
     line_dash="dash",
-    line_color="orange",
+    line_color=COLORS["amber"],
     annotation_text="95% VaR",
     annotation_position="top right",
 )
 fig.add_vline(
     x=var_99 * 100,
     line_dash="dash",
-    line_color="red",
+    line_color=COLORS["negative"],
     annotation_text="99% VaR",
     annotation_position="bottom right",
 )
 fig.add_vline(
     x=cvar_95 * 100,
     line_dash="dot",
-    line_color="darkred",
+    line_color=COLORS["copper"],
     annotation_text="95% CVaR",
     annotation_position="top left",
 )
 
 fig.update_layout(
-    title="Return Distribution with VaR",
+    title="Tail losses extend beyond the 95% VaR threshold",
     xaxis_title="Daily Return (%)",
     yaxis_title="Frequency",
     height=400,
@@ -732,7 +742,7 @@ if period_results:
             x=period_df["period"],
             y=period_df["strategy_return"] * 100,
             name="Strategy",
-            marker_color="steelblue",
+            marker_color=COLORS["blue"],
         )
     )
 
@@ -741,12 +751,12 @@ if period_results:
             x=period_df["period"],
             y=period_df["benchmark_return"] * 100,
             name="Benchmark",
-            marker_color="lightgray",
+            marker_color=COLORS["silver_muted"],
         )
     )
 
     fig.update_layout(
-        title="Performance During Market Events",
+        title="Relative performance changes across stress and recovery windows",
         yaxis_title="Return (%)",
         barmode="group",
         height=450,
@@ -784,7 +794,7 @@ fig.add_trace(
         x=cumulative.index,
         y=cumulative,
         name="Cumulative Return",
-        line=dict(color="steelblue", width=2),
+        line=dict(color=COLORS["blue"], width=2),
     )
 )
 
@@ -793,12 +803,12 @@ fig.add_trace(
         x=cumulative.index,
         y=trend,
         name=f"Trend (R² = {stability:.3f})",
-        line=dict(color="red", dash="dash"),
+        line=dict(color=COLORS["negative"], dash="dash"),
     )
 )
 
 fig.update_layout(
-    title="Cumulative Returns with Stability Trend",
+    title="A stable trend can coexist with meaningful path risk",
     xaxis_title="Date",
     yaxis_title="Cumulative Return",
     height=400,
@@ -868,18 +878,14 @@ for name, value in other_metrics:
 
 # %%
 summary_df = pd.DataFrame(summary_data)
-print("\n" + "=" * 70)
-print("COMPREHENSIVE PERFORMANCE REPORT")
-print("=" * 70)
 summary_df
 
 # %% [markdown]
-# **Interpretation**: The comprehensive report shows the strategy from four angles — absolute
-# returns, risk, risk-adjusted performance, and benchmark-relative attribution. Positive
-# absolute alpha (7.32%) and defensive beta (0.494) with an IR ≈ 0.008 indicates little
-# differentiated active return after accounting for tracking error (12.95%). The up/down
-# capture asymmetry (if visible) reveals whether the residual return profile comes from
-# upside participation or downside avoidance — the latter is more robust.
+# **Interpretation**: The comprehensive report separates absolute return, total risk,
+# risk-adjusted performance, and benchmark-relative attribution. Read alpha together with beta,
+# tracking error, and the information ratio: positive alpha alone does not establish that active
+# deviations earned their keep. Up/down capture then shows whether the residual profile comes
+# from upside participation or downside avoidance.
 
 # %% [markdown]
 # ## 12. Standalone Metric Functions
@@ -940,7 +946,16 @@ print(f"Alpha: {ts.alpha * 100:.2f}%  |  Beta: {ts.beta:.3f}  |  IR: {ts.informa
 for name in ["Cumulative Returns", "Drawdown", "Monthly Returns Heatmap"]:
     if name in tear_sheet.figures:
         fig = tear_sheet.figures[name]
-        fig.update_layout(title=f"Dashboard: {name}")
+        dashboard_titles = {
+            "Cumulative Returns": "Compounding paths separate strategy from benchmark",
+            "Drawdown": "Drawdowns reveal the cost of the strategy's return path",
+            "Monthly Returns Heatmap": "Monthly returns reveal the consistency of compounding",
+        }
+        fig.update_layout(
+            title=dashboard_titles[name],
+            paper_bgcolor=COLORS["bg_light"],
+            plot_bgcolor=COLORS["bg_light"],
+        )
         fig.show()
 
 # %% [markdown]
@@ -952,7 +967,7 @@ for name in ["Cumulative Returns", "Drawdown", "Monthly Returns Heatmap"]:
 # Export to HTML (self-contained, shareable file)
 html_path = OUTPUT_DIR / "portfolio_dashboard.html"
 tear_sheet.save_html(html_path, include_plotlyjs="cdn")
-print(f"Dashboard saved to: {html_path}")
+print(f"Dashboard saved to: {html_path.name}")
 
 # %% [markdown]
 # ## 14. Report Generation
@@ -977,7 +992,7 @@ fig_cum.add_trace(
         x=strategy_returns.index,
         y=(1 + strategy_returns).cumprod(),
         name="Strategy",
-        line=dict(color="steelblue", width=2),
+        line=dict(color=COLORS["blue"], width=2),
     )
 )
 fig_cum.add_trace(
@@ -985,11 +1000,11 @@ fig_cum.add_trace(
         x=spy_returns.index,
         y=(1 + spy_returns).cumprod(),
         name="Benchmark (SPY)",
-        line=dict(color="gray", width=1, dash="dash"),
+        line=dict(color=COLORS["neutral"], width=1, dash="dash"),
     )
 )
 fig_cum.update_layout(
-    title="Cumulative Returns",
+    title="Compounding paths separate strategy from benchmark",
     xaxis_title="Date",
     yaxis_title="Cumulative Return",
     height=400,
@@ -1016,12 +1031,12 @@ fig_dd.add_trace(
         x=dd_series.index,
         y=dd_series * 100,
         fill="tozeroy",
-        line=dict(color="crimson", width=1),
+        line=dict(color=COLORS["negative"], width=1),
         name="Drawdown",
     )
 )
 fig_dd.update_layout(
-    title="Drawdown",
+    title="Drawdowns reveal the cost of the strategy's return path",
     xaxis_title="Date",
     yaxis_title="Drawdown (%)",
     height=350,
@@ -1050,7 +1065,7 @@ combine_figures_to_html(
     theme="default",
     include_toc=True,
 )
-print(f"Custom report saved to: {report_path}")
+print(f"Custom report saved to: {report_path.name}")
 
 # %% [markdown]
 # ## Key Takeaways
@@ -1059,15 +1074,14 @@ print(f"Custom report saved to: {report_path}")
 #    drawdown profiles, tail risk (VaR/CVaR), and benchmark-relative attribution.
 #    Always report at least Sharpe, max drawdown, and Sortino together.
 # 2. **Rolling metrics expose regime dependence.** Aggregate Sharpe can be positive
-#    while rolling windows show extended negative periods — a critical warning for
+#    while rolling windows show extended negative periods - a critical warning for
 #    investors with finite horizons.
-# 3. **Benchmark comparison separates alpha from beta.** The ETF allocator above posts
-#    Sharpe ≈ 1.12 with beta 0.494 and alpha 7.32% but IR 0.008 — defensive market
-#    exposure with little differentiated active return once tracking error is priced in.
-#    Up/down capture ratios reveal asymmetric exposure that aggregate alpha misses.
-# 4. **Stress-period analysis tests robustness.** A max drawdown of −27.94% on this
-#    strategy is the kind of timing and recovery question that matters more to real
-#    investors than aggregate statistics suggest.
+# 3. **Benchmark comparison separates alpha from beta.** Alpha, beta, tracking error,
+#    and information ratio must be read together. Up/down capture reveals asymmetric
+#    exposure that aggregate alpha misses.
+# 4. **Stress-period analysis tests robustness.** The maximum drawdown and event panels
+#    turn an aggregate performance score into the timing and recovery questions that
+#    matter to investors.
 #
 # **Next**: These metrics are used throughout Ch17-19 to evaluate allocation methods,
 # transaction cost impact, and risk controls.

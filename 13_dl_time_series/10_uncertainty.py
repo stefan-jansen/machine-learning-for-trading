@@ -37,7 +37,7 @@
 # **Prerequisites**: ETF features (`case_studies/etfs/`)
 
 # %%
-"""Prediction Uncertainty — implement MC Dropout and Deep Ensembles for confidence estimation."""
+"""Prediction Uncertainty - implement MC Dropout and Deep Ensembles for confidence estimation."""
 
 import warnings
 
@@ -53,8 +53,8 @@ from scipy.stats import norm, spearmanr
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
-import utils  # noqa: F401
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS  # activates the ml4t Plotly template on import
 
 warnings.filterwarnings("ignore")
 
@@ -110,7 +110,7 @@ X, y, timestamps, symbols = create_sequences_multi_asset(
     symbol_col=mds.entity_cols[0],
 )
 
-# Replace NaN/inf with zero — acceptable here because features are already
+# Replace NaN/inf with zero - acceptable here because features are already
 # standardized returns where NaN typically indicates missing data at series
 # boundaries. Forward-fill is an alternative but risks lookahead in panel data.
 n_nan = np.isnan(X).sum() + np.isinf(X).sum()
@@ -401,12 +401,12 @@ def compute_calibration_table(std: np.ndarray, abs_error: np.ndarray) -> tuple[p
 mc_abs_error = np.abs(mc_mean - y_test)
 mc_cal_table, unc_err_corr_mc = compute_calibration_table(mc_std, mc_abs_error)
 
-print(f"MC Dropout — Uncertainty-Error correlation (Spearman): {unc_err_corr_mc:+.3f}")
+print(f"MC Dropout - Uncertainty-Error correlation (Spearman): {unc_err_corr_mc:+.3f}")
 mc_cal_table
 
 # %% [markdown]
 # **Interpretation**: the Spearman correlation printed above is the headline
-# calibration diagnostic — it asks whether the model's predicted std orders
+# calibration diagnostic - it asks whether the model's predicted std orders
 # absolute errors. The quartile table makes the same question concrete: does
 # mean |error| rise monotonically as you move from the low-std quartile (Q1) to
 # the high-std quartile (Q4)? With dropout active on only two LSTM layers, the
@@ -455,7 +455,7 @@ fig.add_trace(
         y=mc_mean[slice_idx],
         mode="lines",
         name="MC Mean",
-        line=dict(color="blue"),
+        line=dict(color=COLORS["blue"]),
     ),
     row=1,
     col=2,
@@ -470,7 +470,7 @@ fig.add_trace(
             ]
         ),
         fill="toself",
-        fillcolor="rgba(0,100,250,0.15)",
+        fillcolor=COLORS["blue_light"],
         line=dict(width=0),
         name="95% CI",
     ),
@@ -482,7 +482,7 @@ fig.add_trace(
         x=x_range,
         y=y_test[slice_idx],
         mode="markers",
-        marker=dict(size=3, color="red"),
+        marker=dict(size=3, color=COLORS["copper"]),
         name="Actual",
     ),
     row=1,
@@ -491,7 +491,10 @@ fig.add_trace(
 fig.update_xaxes(title_text="Test Sample Index", row=1, col=2)
 fig.update_yaxes(title_text="Forward Return", row=1, col=2)
 fig.update_layout(
-    width=900, height=400, title_text="MC Dropout Uncertainty Analysis", showlegend=True
+    width=900,
+    height=400,
+    title_text="MC Dropout's spread is tiny relative to the scale of forward returns",
+    showlegend=True,
 )
 fig.show()
 
@@ -608,7 +611,7 @@ for i in range(N_ENSEMBLE):
 
 # %% [markdown]
 # **Interpretation**: The ensemble mean typically outperforms individual members
-# through error averaging — the diversity among members cancels correlated
+# through error averaging - the diversity among members cancels correlated
 # errors. The spread of member-level ICs reflects the functional diversity that
 # makes ensemble uncertainty informative: wider spread means members learned
 # genuinely different functions from the same data.
@@ -620,7 +623,7 @@ for i in range(N_ENSEMBLE):
 ens_abs_error = np.abs(ens_mean - y_test)
 ens_cal_table, unc_err_corr_ens = compute_calibration_table(ens_std, ens_abs_error)
 
-print(f"Deep Ensemble — Uncertainty-Error correlation (Spearman): {unc_err_corr_ens:+.3f}")
+print(f"Deep Ensemble - Uncertainty-Error correlation (Spearman): {unc_err_corr_ens:+.3f}")
 print(f"  vs MC Dropout above: {unc_err_corr_mc:+.3f}")
 ens_cal_table
 
@@ -629,8 +632,8 @@ ens_cal_table
 # Dropout figure. Each ensemble member converges to a genuinely different local
 # optimum, so ensemble disagreement captures more functional diversity than the
 # subnetwork sampling inside a single MC Dropout model. On this run the
-# ensemble's correlation is positive while MC Dropout's is near zero — the
-# expected ordering — but neither is large enough to be a strong calibration
+# ensemble's correlation is positive while MC Dropout's is near zero - the
+# expected ordering - but neither is large enough to be a strong calibration
 # signal on its own. The split-conformal section below converts these raw
 # spreads into intervals with controlled coverage.
 
@@ -664,7 +667,7 @@ print(f"Mean total variance:     {total_var.mean():.8f}")
 # %% [markdown]
 # **Note**: Without heteroscedastic output heads (where each member predicts both
 # $\mu$ and $\sigma^2$), total variance equals epistemic variance. A production
-# model would add per-member variance heads to separate aleatoric noise — the
+# model would add per-member variance heads to separate aleatoric noise - the
 # irreducible uncertainty inherent in the data generating process. See section
 # 13.8 for the full variance decomposition equation.
 
@@ -704,7 +707,7 @@ fig.add_trace(
         y=ens_mean[:50],
         mode="lines",
         name="Ensemble Mean",
-        line=dict(color="black", width=2),
+        line=dict(color=COLORS["slate"], width=2),
     ),
     row=1,
     col=1,
@@ -715,7 +718,7 @@ fig.add_trace(
         y=y_test[:50],
         mode="markers",
         name="Actual",
-        marker=dict(size=4, color="red"),
+        marker=dict(size=4, color=COLORS["copper"]),
     ),
     row=1,
     col=1,
@@ -725,13 +728,17 @@ fig.update_yaxes(title_text="Forward Return", row=1, col=1)
 
 # Uncertainty distribution
 fig.add_trace(
-    go.Histogram(x=ens_std, nbinsx=40, name="Ensemble Std", showlegend=False),
+    go.Histogram(
+        x=ens_std, nbinsx=40, name="Ensemble Std", marker_color=COLORS["blue"], showlegend=False
+    ),
     row=1,
     col=2,
 )
 fig.update_xaxes(title_text="Ensemble Std Dev", row=1, col=2)
 fig.update_yaxes(title_text="Count", row=1, col=2)
-fig.update_layout(width=900, height=400, title_text="Deep Ensemble: Member Agreement Analysis")
+fig.update_layout(
+    width=900, height=400, title_text="Ensemble members disagree, giving a spread of uncertainties"
+)
 fig.show()
 
 # %% [markdown]
@@ -776,7 +783,7 @@ fig.add_trace(
         x=mc_std[idx],
         y=mc_abs_error[idx],
         mode="markers",
-        marker=dict(size=2, opacity=0.3, color="steelblue"),
+        marker=dict(size=2, opacity=0.3, color=COLORS["blue"]),
         name="MC Dropout",
     ),
     row=1,
@@ -787,7 +794,7 @@ fig.add_trace(
         x=ens_std[idx],
         y=ens_abs_error[idx],
         mode="markers",
-        marker=dict(size=2, opacity=0.3, color="darkorange"),
+        marker=dict(size=2, opacity=0.3, color=COLORS["amber"]),
         name="Deep Ensemble",
     ),
     row=1,
@@ -799,7 +806,9 @@ fig.update_xaxes(title_text="Predicted Uncertainty (std)", row=1, col=2)
 fig.update_yaxes(title_text="Absolute Error", row=1, col=1)
 fig.update_yaxes(title_text="Absolute Error", row=1, col=2)
 fig.update_layout(
-    width=900, height=400, title_text="Calibration Comparison: MC Dropout vs Deep Ensemble"
+    width=900,
+    height=400,
+    title_text="Both raw spreads track error weakly; the ensemble's is the wider, more informative one",
 )
 fig.show()
 
@@ -843,8 +852,8 @@ coverage_df
 # **Interpretation**: both methods severely underestimate uncertainty under the
 # Gaussian assumption. The dropout-spread is tiny in absolute terms, so MC
 # Dropout's intervals are essentially zero-width and capture almost none of
-# the actual returns. The ensemble does better — its members genuinely
-# disagree — but the resulting intervals are still far too narrow at every
+# the actual returns. The ensemble does better - its members genuinely
+# disagree - but the resulting intervals are still far too narrow at every
 # nominal level. The pattern is consistent across reruns: raw LSTM
 # uncertainty estimates are **not usable for risk management without
 # post-hoc calibration**. The next section uses split-conformal prediction to
@@ -871,11 +880,11 @@ coverage_df
 # We need validation predictions from MC Dropout and the ensemble. We re-run
 # inference on the val split.
 #
-# **Caveat — calibration set overlaps the early-stopping set.** The conformal
+# **Caveat - calibration set overlaps the early-stopping set.** The conformal
 # quantiles below are computed on the same `X_val` split that `train_lstm` used
 # for early stopping. The models have therefore been tuned to minimize error on
 # exactly these points, so the residuals $|y_{\text{val}} - \hat\mu_{\text{val}}|$
-# are biased *downward* and the resulting intervals are mildly optimistic — they
+# are biased *downward* and the resulting intervals are mildly optimistic - they
 # slightly under-cover relative to a strict split-conformal guarantee, which
 # requires a calibration set exchangeable with the test set and untouched during
 # training. A production pipeline carves a third, dedicated calibration split
@@ -916,7 +925,7 @@ ens_std_val = member_preds_val.std(axis=0)
 ens_resid_val = np.abs(ens_mean_val - y_val)
 
 print(
-    f"Val residuals — MC: mean |error| = {mc_resid_val.mean():.5f}, "
+    f"Val residuals - MC: mean |error| = {mc_resid_val.mean():.5f}, "
     f"Ensemble: mean |error| = {ens_resid_val.mean():.5f}"
 )
 
@@ -930,7 +939,7 @@ print(
 
 # %%
 def conformal_quantile(residuals: np.ndarray, alpha: float) -> float:
-    """Finite-sample (1-α)·(n+1)/n quantile of |y − μ| — split-conformal width."""
+    """Finite-sample (1-α)·(n+1)/n quantile of |y − μ| - split-conformal width."""
     n = len(residuals)
     k = int(np.ceil((1 - alpha) * (n + 1)))
     k = min(k, n)
@@ -984,20 +993,26 @@ conformal_df = pl.DataFrame(conf_rows)
 conformal_df
 
 # %% [markdown]
-# **Interpretation**: split-conformal calibration **restores nominal coverage**
-# at every level — the Gaussian intervals were under-covered by an order of
-# magnitude, and the conformal intervals land within a percentage point or two
-# of the target rate. The plain variant gives the same width to every test
-# point; the normalized variant scales width by the model's own $\hat\sigma$,
-# producing narrower intervals where the model is confident and wider intervals
-# where it is uncertain. Compare the per-method widths above: when MC Dropout's
-# raw spread is small the normalized intervals do not change much relative to
-# the plain ones; when the ensemble's spread varies more across the test set,
-# the normalized variant exploits that variation to produce locally adaptive
-# intervals at roughly the same average width.
+# **Interpretation**: split-conformal calibration **restores coverage**. The plain
+# variant reaches its nominal rate at every level - the raw Gaussian intervals were
+# under-covered by an order of magnitude - and it assigns the same width to every
+# test point. The normalized variant scales width by the model's own $\hat\sigma$,
+# which pays off only when $\hat\sigma$ carries real, well-conditioned information.
+# For the Deep Ensemble, whose member disagreement gives a genuine spread of predicted
+# std, normalized conformal holds coverage near nominal at roughly the plain average
+# width while adapting locally. For MC Dropout it is a cautionary case: its predicted
+# std collapses toward zero, so the normalized variant has almost nothing to adapt to,
+# and dividing validation residuals by a near-degenerate $\hat\sigma$ is numerically
+# fragile - the normalized quantile is dominated by the smallest std values, so the MC
+# normalized width is unstable from run to run (sometimes close to the plain width,
+# sometimes inflated by orders of magnitude when a single validation std lands near
+# zero). Either way it buys nothing over plain conformal, whose coverage is already at
+# nominal. The lesson is that normalized (locally adaptive) conformal needs a
+# non-degenerate uncertainty estimate; when the base spread is uninformative, plain
+# conformal is the safer choice.
 #
 # The marginal coverage guarantee is distribution-free under exchangeability
-# (Vovk et al. 2005) — the only assumption is that validation and test residuals
+# (Vovk et al. 2005) - the only assumption is that validation and test residuals
 # come from the same distribution, which is the same assumption underlying any
 # held-out evaluation.
 
@@ -1044,7 +1059,7 @@ filter_df = pl.DataFrame(filter_rows)
 filter_df
 
 # %% [markdown]
-# **Interpretation**: the filtering table above answers a concrete question —
+# **Interpretation**: the filtering table above answers a concrete question -
 # does excluding the most uncertain quartile improve IC? The expected direction
 # is yes for a well-calibrated method; the realised direction and magnitude
 # vary across reruns at this signal-to-noise ratio. The result that does
@@ -1065,14 +1080,14 @@ filter_df
 # - **Conformal allocation** (Chapter 17 case studies): the
 #   `conformal_weighted` allocator (`case_studies/utils/allocation.py`) consumes
 #   per-prediction Mondrian widths produced by `case_studies/utils/conformal.py`
-#   — the same construction shown here, generalized to (symbol, fold)-stratified
+#   - the same construction shown here, generalized to (symbol, fold)-stratified
 #   calibration on the registry's stored predictions.
 # - **Foundation model calibration**: The base architectures in `01_core_architectures`
 #   and `04_transformers` can be wrapped with these uncertainty methods. TSFMs
 #   (section 13.6) face additional calibration challenges from pretraining
-#   distribution mismatch — see section 13.8 for discussion.
+#   distribution mismatch - see section 13.8 for discussion.
 # - **Position sizing** (Chapter 19): Scale exposure inversely with ensemble
-#   uncertainty — when ensemble members strongly agree, increase allocation.
+#   uncertainty - when ensemble members strongly agree, increase allocation.
 # - **Model saving**: For production use, save ensemble members via
 #   `torch.save(model.state_dict(), path)` and reload with matching architecture.
 
@@ -1080,7 +1095,7 @@ filter_df
 # ## Key Takeaways
 #
 # 1. **MC Dropout is cheap**: Run $T$ forward passes through a single trained model.
-#    No extra training cost — just keep dropout active via `model.train()` at inference.
+#    No extra training cost - just keep dropout active via `model.train()` at inference.
 #
 # 2. **Deep Ensembles are better-calibrated**: Training $M$ independent models from
 #    different initializations captures functional diversity. Ensemble disagreement
@@ -1089,12 +1104,12 @@ filter_df
 #
 # 3. **Both capture epistemic uncertainty**: Uncertainty is highest where the model
 #    has seen less data or where patterns are ambiguous. This maps directly to
-#    **position sizing** — reduce exposure when the model is uncertain.
+#    **position sizing** - reduce exposure when the model is uncertain.
 #
 # 4. **Raw uncertainty is not calibrated**: Gaussian intervals from either method
-#    are severely under-covered (~0–20% empirical against 50%/80%/95% nominal).
-#    The qualitative ordering — ensemble correlation positive, MC Dropout near
-#    zero — is stable across reruns; the precise magnitudes are not.
+#    are severely under-covered (~0-20% empirical against 50%/80%/95% nominal).
+#    The qualitative ordering - ensemble correlation positive, MC Dropout near
+#    zero - is stable across reruns; the precise magnitudes are not.
 #
 # 5. **Split-conformal restores coverage**: Calibrating either method's spreads
 #    against validation residuals produces intervals that achieve their nominal

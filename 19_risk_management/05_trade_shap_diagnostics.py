@@ -14,8 +14,8 @@
 # ---
 
 # %% [markdown]
-# # Trade SHAP Diagnostics: ML→Trading Feedback Loop
-# **Docker image**: `ml4t`
+# # Trade SHAP Diagnostics: Model-to-Trading Feedback
+# **Docker image**: `ml4t-gpu`
 #
 # **Purpose**: Demonstrate the `TradeShapAnalyzer` workflow that converts post-hoc
 # trade failures into actionable model-improvement hypotheses by clustering SHAP
@@ -33,31 +33,25 @@
 # boosting on cross-sectional features, and the ML4T trade-record contract
 # (`ml4t.diagnostic.integration.backtest_contract.TradeRecord`).
 #
-# **Data**: Real SPY daily OHLCV (`load_etfs`) joined with real macro features
-# (`load_macro`: 10Y-2Y yield slope and VIX-derived high-volatility regime).
-# Features are momentum, realized volatility, volume z-score, regime indicator,
-# and yield slope; the target is the next-day SPY return. In a production setup
-# the inputs would come from a backtest's trade ledger and the model trained on
-# the full case-study feature set.
+# **Data**: Real SPY daily OHLCV (`load_etfs`) joined with a fixed local FRED
+# snapshot (`load_macro`: 10Y-2Y yield slope and VIX-derived volatility regime).
+# Predictors are lagged one trading session before forecasting the next-session
+# SPY return. The macro snapshot is finalized rather than point-in-time vintage
+# data, so this is a diagnostic teaching example, not an unbiased macro backtest.
 
 # %% [markdown]
 # ## Setup
 
 # %%
-"""Trade SHAP Diagnostics — connect SHAP explanations to trade outcomes for systematic improvement."""
-
-import warnings
-
-import numpy as np
-import pandas as pd
-import plotly.graph_objects as go
-import polars as pl
-from plotly.subplots import make_subplots
-
-warnings.filterwarnings("ignore")
+"""Connect trade outcomes to their decision-time SHAP explanations."""
 
 import lightgbm as lgb
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import polars as pl
 import shap
+from IPython.display import Markdown, display
 from ml4t.diagnostic.config import TradeConfig
 from ml4t.diagnostic.config.trade_analysis_config import ExtractionSettings
 from ml4t.diagnostic.evaluation import TradeAnalysis, TradeShapAnalyzer
@@ -65,11 +59,23 @@ from ml4t.diagnostic.integration.backtest_contract import TradeRecord
 
 from data import load_etfs, load_macro
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 # %% tags=["parameters"]
-MAX_SYMBOLS = 0
+START_DATE = "2006-01-01"
+END_DATE = "2025-12-31"
 N_ESTIMATORS = 100
+TRAIN_FRACTION = 0.70
+WORST_N = 20
+MIN_EXPECTED_RETURN_BPS = 5
 SEED = 42
+
+# %%
+FEATURE_COLS = ["momentum", "volatility", "volume_zscore", "regime", "yield_slope"]
+LABEL_HORIZON = 1
+GPU_DEVICE = "cuda"
+GPU_MAX_BIN = 63
+MIN_EXPECTED_RETURN = MIN_EXPECTED_RETURN_BPS / 10_000
 
 # %%
 set_global_seeds(SEED)
@@ -78,28 +84,42 @@ set_global_seeds(SEED)
 # ## 1. Build a Real Single-Asset Feature Panel
 #
 # We build a single-asset SPY feature panel from real OHLCV joined with real
-# macro features and train an LGBM regressor on the next-day return. Keeping
+# macro features and train an LGBM regressor on the next-session return. Keeping
 # the panel single-asset (one row per timestamp) makes the `TradeShapAnalyzer`
 # alignment unambiguous: each trade has exactly one SHAP vector to attach. In
 # practice you would feed in a multi-asset panel with composite
 # `(timestamp, symbol)` keys, or pre-aggregate to one row per trade before
-# calling the analyzer.
+# calling the analyzer. All predictors are shifted by one session. A signal for
+# close $t$ therefore uses information through close $t-1$, and its label is the
+# close-to-close return from $t$ to the next market session.
 
 # %%
-# Real SPY OHLCV + real macro features (10Y-2Y yield slope and VIX-derived
-# high-volatility regime indicator). Features are computed at the daily bar
-# and the target is SPY's next-day return.
-spy = load_etfs(symbols=["SPY"]).sort("timestamp")
-macro = load_macro()
-macro.columns = [c.lower() for c in macro.columns]
+# Load a bounded, unique SPY panel and the two required macro fields.
+spy = load_etfs(symbols=["SPY"], start_date=START_DATE, end_date=END_DATE).sort("timestamp")
+macro = load_macro(series=["t10y2y", "vixcls"], start_date=START_DATE, end_date=END_DATE).sort(
+    "timestamp"
+)
+macro = macro.rename({column: column.lower() for column in macro.columns})
 macro = macro.select(
     "timestamp",
     yield_slope="t10y2y",
     regime=(pl.col("vixcls") > 25).cast(pl.Int8),
 )
+assert spy.n_unique(["symbol", "timestamp"]) == spy.height
+assert macro["timestamp"].n_unique() == macro.height
 
+# %% [markdown]
+# The transformation retains actual entry and next-session exit prices for the
+# trade ledger, computes the forward label directly from those prices, and then
+# lags every predictor one session before dropping incomplete rows.
+
+# %%
 features_df = (
-    spy.with_columns(_ret=pl.col("close").pct_change())
+    spy.with_columns(
+        _ret=pl.col("close").pct_change(),
+        exit_timestamp=pl.col("timestamp").shift(-1),
+        exit_price=pl.col("close").shift(-1),
+    )
     .with_columns(
         momentum=(pl.col("close") / pl.col("close").shift(20) - 1),
         volatility=pl.col("_ret").rolling_std(20),
@@ -107,117 +127,177 @@ features_df = (
             (pl.col("volume") - pl.col("volume").rolling_mean(60))
             / pl.col("volume").rolling_std(60)
         ),
-        fwd_return=pl.col("_ret").shift(-1),
+        fwd_return=(pl.col("exit_price") / pl.col("close") - 1),
     )
-    .join(macro, on="timestamp", how="left")
-    .drop(["_ret", "open", "high", "low", "close", "volume", "symbol"])
+    .join_asof(macro, on="timestamp", strategy="backward")
+    .with_columns(pl.col(FEATURE_COLS).shift(1))
+    .select(
+        pl.col("timestamp").cast(pl.Datetime("us")),
+        pl.col("exit_timestamp").cast(pl.Datetime("us")),
+        pl.col("close").alias("entry_price"),
+        "exit_price",
+        "fwd_return",
+        *FEATURE_COLS,
+    )
     .drop_nulls()
+    .sort("timestamp")
 )
 
-FEATURE_COLS = ["momentum", "volatility", "volume_zscore", "regime", "yield_slope"]
-features_df = features_df.select(
-    [pl.col("timestamp").cast(pl.Datetime("us")), "fwd_return", *FEATURE_COLS]
+# %%
+np.testing.assert_allclose(
+    features_df["fwd_return"],
+    features_df["exit_price"] / features_df["entry_price"] - 1,
+    rtol=0,
+    atol=1e-15,
 )
+assert features_df["timestamp"].n_unique() == features_df.height
+assert features_df["exit_timestamp"].n_unique() == features_df.height
+assert features_df.select((pl.col("exit_timestamp") > pl.col("timestamp")).all()).item()
 
-print(f"Features DataFrame: {features_df.shape}")
-print(f"Date range: {features_df['timestamp'].min()} to {features_df['timestamp'].max()}")
+display(
+    Markdown(
+        f"The lagged feature panel contains **{features_df.height:,} sessions** from "
+        f"{features_df['timestamp'].min().date()} through {features_df['timestamp'].max().date()}. "
+        "Each row carries its exact next-market-session exit timestamp."
+    )
+)
 
 # %% [markdown]
 # ## 2. Train ML Model
 #
-# The panel is already in chronological order (one row per day), so a
-# row-based split is a clean time split: the first 70% of days train,
-# the last 30% test. No future information leaks into the training set.
+# A chronological boundary separates model fitting from the diagnostic sample.
+# Because each label spans one session, the row immediately before the
+# test boundary is purged: its return ends on the first test decision date.
 
 # %%
-# Time-ordered split (rows are sorted by timestamp).
 features_df = features_df.sort("timestamp")
-split_idx = int(len(features_df) * 0.7)
-train_df = features_df[:split_idx]
+split_idx = int(len(features_df) * TRAIN_FRACTION)
+train_df = features_df[: split_idx - LABEL_HORIZON]
+embargo_df = features_df[split_idx - LABEL_HORIZON : split_idx]
 test_df = features_df[split_idx:]
+assert embargo_df.height == LABEL_HORIZON
+assert train_df["exit_timestamp"].max() < test_df["timestamp"].min()
 
 X_train = train_df.select(FEATURE_COLS).to_numpy()
 y_train = train_df["fwd_return"].to_numpy()
 X_test = test_df.select(FEATURE_COLS).to_numpy()
 y_test = test_df["fwd_return"].to_numpy()
 
-# Train LightGBM
+# %% [markdown]
+# LightGBM trains on CUDA with GPU-oriented histogram bins. Fixed seeds control
+# its statistical choices, but CUDA histogram reductions are not bitwise
+# deterministic. The evidence bundle reports raw prediction drift and requires
+# identical buffered trade selections and explanation identities across fresh
+# GPU processes in the same pinned image.
+
+# %%
 model = lgb.LGBMRegressor(
     n_estimators=N_ESTIMATORS,
     max_depth=3,
     learning_rate=0.1,
+    max_bin=GPU_MAX_BIN,
+    device_type=GPU_DEVICE,
     random_state=SEED,
+    data_random_seed=SEED,
+    feature_fraction_seed=SEED,
+    bagging_seed=SEED,
+    n_jobs=1,
     verbose=-1,
 )
 model.fit(X_train, y_train)
+assert model.booster_.params["device_type"] == GPU_DEVICE
 
-# Predictions
-predictions = model.predict(X_test)
-print(f"Model trained on {len(X_train):,} samples")
-print(f"Test predictions: {len(predictions):,} samples")
+predictions = model.booster_.predict(X_test)
+display(
+    Markdown(
+        f"CUDA LightGBM fits **{len(X_train):,} training rows** and diagnoses "
+        f"**{len(X_test):,} later rows**. The one-session purge ends training labels before "
+        f"the test boundary at {test_df['timestamp'].min().date()}."
+    )
+)
 
 # %% [markdown]
-# ## 3. Simulate Trade Records
+# ## 3. Construct Model-Directed Trade Records
 #
-# Create trade records based on model predictions:
-# - Long when predicted return > 0
-# - Record actual PnL based on realized returns
+# A market-on-close order for session $t$ is determined from predictors through
+# $t-1$. A forecast must clear a fixed execution-and-noise buffer before opening
+# a 100-share long at close $t$; smaller positive forecasts are economically
+# negligible for this one-session example. The trade exits at the next observed
+# market close. Exact timestamps avoid calendar-day assumptions around weekends
+# and holidays.
 
 # %%
-# Extract test data arrays
-test_timestamps = test_df["timestamp"].to_list()
-test_returns = test_df["fwd_return"].to_numpy()
+entry_timestamps = test_df["timestamp"].to_list()
+exit_timestamps = test_df["exit_timestamp"].to_list()
+entry_prices = test_df["entry_price"].to_numpy()
+exit_prices = test_df["exit_price"].to_numpy()
+test_returns = y_test
 SYMBOL = "SPY"
+QUANTITY = 100
 
 # %%
-# Build trade records from model predictions (long when predicted return > 0)
-trade_records = []
 trade_dicts = []
-for i, (ts, pred, actual) in enumerate(
-    zip(test_timestamps, predictions, test_returns, strict=False)
+for row_id, (entry_time, exit_time, entry_price, exit_price, pred, actual) in enumerate(
+    zip(
+        entry_timestamps,
+        exit_timestamps,
+        entry_prices,
+        exit_prices,
+        predictions,
+        test_returns,
+        strict=True,
+    )
 ):
-    sym = SYMBOL
-    if pred > 0:  # Only long trades when model predicts positive
-        entry_time = ts
-        exit_time = ts + pd.Timedelta(days=1)
-        duration = exit_time - entry_time
-
-        trade_records.append(
-            TradeRecord(
-                timestamp=exit_time,
-                symbol=sym,
-                entry_price=100.0,
-                exit_price=100.0 * (1 + actual),
-                pnl=actual * 100 * 100,
-                duration=duration,
-                direction="long",
-                quantity=100,
-                entry_timestamp=entry_time,
-                metadata={
-                    "trade_id": i,
-                    "predicted_return": float(pred),
-                    "actual_return": float(actual),
-                },
-            )
-        )
+    if pred > MIN_EXPECTED_RETURN:
+        pnl = (exit_price - entry_price) * QUANTITY
         trade_dicts.append(
             {
-                "trade_id": i,
+                "row_id": row_id,
                 "entry_time": entry_time,
                 "exit_time": exit_time,
-                "symbol": sym,
-                "pnl": actual * 100 * 100,
+                "symbol": SYMBOL,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "pnl": pnl,
                 "return": actual,
                 "predicted_return": pred,
             }
         )
 
 # %%
-# Summarize trade records
+trade_records = [
+    TradeRecord(
+        timestamp=trade["exit_time"],
+        symbol=trade["symbol"],
+        entry_price=float(trade["entry_price"]),
+        exit_price=float(trade["exit_price"]),
+        pnl=float(trade["pnl"]),
+        duration=trade["exit_time"] - trade["entry_time"],
+        direction="long",
+        quantity=QUANTITY,
+        entry_timestamp=trade["entry_time"],
+        metadata={
+            "row_id": trade["row_id"],
+            "predicted_return": float(trade["predicted_return"]),
+            "actual_return": float(trade["return"]),
+        },
+    )
+    for trade in trade_dicts
+]
+
+# %%
 trades_df = pl.DataFrame(trade_dicts)
-print(f"Total trades: {len(trades_df):,}")
-print(f"Winning trades: {(trades_df['pnl'] > 0).sum()}")
-print(f"Losing trades: {(trades_df['pnl'] < 0).sum()}")
+winning_trades = int((trades_df["pnl"] > 0).sum())
+losing_trades = int((trades_df["pnl"] < 0).sum())
+flat_trades = trades_df.height - winning_trades - losing_trades
+display(
+    Markdown(
+        f"Forecasts above the fixed **{MIN_EXPECTED_RETURN_BPS} bp buffer** produce "
+        f"**{trades_df.height:,} long trades**: "
+        f"**{winning_trades:,} winners**, **{losing_trades:,} losers**, and "
+        f"**{flat_trades:,} flat**."
+    )
+)
 
 # %% [markdown]
 # ## 4. Identify Worst Trades with TradeAnalysis
@@ -225,10 +305,12 @@ print(f"Losing trades: {(trades_df['pnl'] < 0).sum()}")
 # TradeAnalysis extracts the worst-performing trades for diagnosis.
 
 # %%
-# Use TradeAnalysis to identify worst trades (expects list of TradeRecord objects)
 analyzer = TradeAnalysis(trade_records)
-WORST_N = 20
 worst_trades = analyzer.worst_trades(n=WORST_N)
+assert len(worst_trades) == min(WORST_N, len(trade_records))
+assert all(
+    left.pnl <= right.pnl for left, right in zip(worst_trades, worst_trades[1:], strict=False)
+)
 
 worst_summary = pl.DataFrame(
     [
@@ -245,18 +327,34 @@ worst_summary = pl.DataFrame(
 worst_summary
 
 # %% [markdown]
-# ## 5. Compute SHAP Values
+# ## 5. Compute Decision-Time SHAP Values
+#
+# TreeSHAP explains the model output for every diagnostic row. The additivity
+# check verifies that base value plus feature contributions reconstructs each
+# prediction. For library alignment, each entry-feature vector is indexed by
+# its trade's exact exit timestamp because `TradeRecord.timestamp` is the exit
+# field in the integration contract.
 
 # %%
-# Compute SHAP values for test set
 explainer = shap.TreeExplainer(model)
 shap_values = explainer.shap_values(X_test)
+expected_value = float(np.asarray(explainer.expected_value).reshape(-1)[0])
+np.testing.assert_allclose(
+    expected_value + shap_values.sum(axis=1),
+    predictions,
+    rtol=1e-7,
+    atol=1e-9,
+)
+assert shap_values.shape == X_test.shape
 
-print(f"SHAP values shape: {shap_values.shape}")
-
-# Prepare features DataFrame with timestamps for alignment
-test_features = test_df.select(["timestamp"] + FEATURE_COLS)
-print(f"Test features for alignment: {test_features.shape}")
+test_features = test_df.select(pl.col("exit_timestamp").alias("timestamp"), *FEATURE_COLS)
+assert test_features["timestamp"].n_unique() == test_features.height
+display(
+    Markdown(
+        f"TreeSHAP reconstructs all **{shap_values.shape[0]:,} predictions** across "
+        f"**{shap_values.shape[1]} features** within numerical tolerance."
+    )
+)
 
 # %% [markdown]
 # ## 6. Run TradeShapAnalyzer
@@ -264,159 +362,249 @@ print(f"Test features for alignment: {test_features.shape}")
 # Now we connect SHAP explanations to trade outcomes.
 
 # %%
-# Configure TradeShapAnalyzer with nested settings
 config = TradeConfig(
     extraction=ExtractionSettings(n_worst=WORST_N),
 )
 
-# Initialize analyzer
 shap_analyzer = TradeShapAnalyzer(
     model=model,
     features_df=test_features,
     shap_values=shap_values,
     config=config,
 )
-
-print("TradeShapAnalyzer initialized")
-print(f"  Features: {shap_analyzer.feature_names}")
-print(f"  Samples: {len(test_features)}")
+assert shap_analyzer.feature_names == FEATURE_COLS
 
 # %% [markdown]
 # ## 7. Full Pipeline: explain_worst_trades()
 #
 # `explain_worst_trades()` runs the complete SHAP forensics pipeline in one call:
-# align timestamps → extract SHAP vectors → cluster patterns → characterize →
+# align timestamps, extract SHAP vectors, cluster patterns, characterize, and
 # generate hypotheses.
 
 # %%
 result = shap_analyzer.explain_worst_trades(worst_trades)
-
-print(f"Analyzed: {result.n_trades_analyzed} trades")
-print(f"Explained: {result.n_trades_explained} trades")
-print(f"Failed: {result.n_trades_failed} trades")
-print(f"Error patterns found: {len(result.error_patterns)}")
+assert result.n_trades_analyzed == len(worst_trades)
+assert result.n_trades_explained == len(worst_trades)
+assert result.n_trades_failed == 0
+display(
+    Markdown(
+        f"All **{result.n_trades_explained} worst trades** align to their decision-time SHAP "
+        f"vectors. The library returns **{len(result.error_patterns)} algorithmic hierarchical "
+        "clusters**, then annotates them with separation scores and corrected feature tests."
+    )
+)
 
 # %% [markdown]
 # ## 8. Inspect Individual Explanations
 #
-# Each explained trade gets a SHAP decomposition showing which features
-# drove the (incorrect) prediction.
+# Each explanation is joined back to its trade by the library's stable trade ID,
+# never by list position. This keeps PnL, prediction, entry, and SHAP values tied
+# to the same completed trade even if an analyzer returns a reordered subset.
 
 # %%
-for i, explanation in enumerate(result.explanations[:5], 1):
-    trade = worst_trades[i - 1]
-    pred_return = trade.metadata.get("predicted_return", 0) if trade.metadata else 0
+worst_by_id = {f"{trade.symbol}_{trade.timestamp.isoformat()}": trade for trade in worst_trades}
+assert set(worst_by_id) == {explanation.trade_id for explanation in result.explanations}
+feature_rows_by_exit = {
+    row["timestamp"]: np.array([row[feature] for feature in FEATURE_COLS])
+    for row in test_features.iter_rows(named=True)
+}
 
-    print(f"\n{i}. Trade at {explanation.timestamp} (PnL: ${trade.pnl:.2f})")
-    print(f"   Predicted: {pred_return * 100:.2f}%, Actual: {trade.return_pct * 100:.2f}%")
-    print("   Top SHAP contributions:")
-    for feat, shap_val in explanation.top_features[:3]:
-        direction = "+" if shap_val > 0 else ""
-        print(f"      {feat}: {direction}{shap_val:.4f}")
+explanation_rows = []
+for explanation in result.explanations:
+    trade = worst_by_id[explanation.trade_id]
+    metadata = trade.metadata or {}
+    np.testing.assert_allclose(
+        np.array([explanation.feature_values[feature] for feature in FEATURE_COLS]),
+        feature_rows_by_exit[trade.timestamp],
+        rtol=0,
+        atol=0,
+    )
+    explanation_rows.append(
+        {
+            "trade_id": explanation.trade_id,
+            "entry_time": trade.entry_timestamp,
+            "exit_time": trade.timestamp,
+            "pnl": trade.pnl,
+            "predicted_return": metadata["predicted_return"],
+            "actual_return": metadata["actual_return"],
+            "top_feature": explanation.top_features[0][0],
+            "top_shap": explanation.top_features[0][1],
+        }
+    )
+
+explanation_df = pl.DataFrame(explanation_rows).sort("actual_return")
+explanation_df.head(5)
 
 # %% [markdown]
 # ## 9. Error Pattern Clustering
 #
 # The library uses hierarchical clustering on normalized SHAP vectors to find
-# recurring error modes. Each cluster represents a distinct failure pattern
-# with statistically tested feature attributions.
+# recurring error modes. Every cluster returned by the algorithm is characterized
+# and reported. Separation scores and false-discovery-rate-corrected feature tests
+# are diagnostics and annotations, not report-or-reject gates. When no tested
+# feature is significant, the characterizer falls back to its top-ranked features
+# when constructing the description.
 
 # %%
-for pattern in result.error_patterns:
-    print(f"\nPattern {pattern.cluster_id} — {pattern.n_trades} trades")
-    print(f"  Description:       {pattern.description}")
-    print(f"  Separation score:  {pattern.separation_score:.3f}")
-    print(f"  Distinctiveness:   {pattern.distinctiveness:.3f}")
-    print("  Top features (statistically tested):")
-    for feat, mean_shap, p_t, p_mw, sig in pattern.top_features[:5]:
-        marker = "*" if sig else " "
-        print(f"    {marker} {feat:>16}: SHAP={mean_shap:+.4f}  t-test p={p_t:.3f}")
-
-    if pattern.hypothesis:
-        print(f"  Hypothesis: {pattern.hypothesis}")
-    if pattern.actions:
-        print("  Suggested actions:")
-        for action in pattern.actions:
-            print(f"    - {action}")
-
-# %% [markdown]
-# On real SPY data the SHAP signal is much smaller than on a synthetic linear
-# DGP, and the hierarchical clustering does not surface statistically distinct
-# error patterns at this sample size (20 worst trades). The per-trade
-# decompositions still tell a consistent story: the worst trades cluster
-# around the COVID crash window (Feb-Apr 2020) and the April 2025 selloff,
-# with `momentum` and `volume_zscore` as the dominant SHAP contributors — the
-# model is repeatedly burned by following recent positive momentum into
-# exogenous shocks. The workflow lesson is that clustering thresholds tuned
-# on synthetic signals can return zero patterns on real residuals; either
-# pool more trades or relax the separation threshold before reading the
-# absence of patterns as evidence.
+if result.error_patterns:
+    pattern_summary = pl.DataFrame(
+        [
+            {
+                "cluster": pattern.cluster_id,
+                "trades": pattern.n_trades,
+                "separation": pattern.separation_score,
+                "distinctiveness": pattern.distinctiveness,
+                "hypothesis": pattern.hypothesis,
+            }
+            for pattern in result.error_patterns
+        ]
+    )
+    display(pattern_summary)
+else:
+    display(
+        Markdown(
+            f"With **{len(result.explanations)} explained worst trades**, the pipeline returned no "
+            "error pattern because clustering did not run or raised a clustering error. This does "
+            "not represent rejection by a statistical or separation threshold."
+        )
+    )
 
 # %% [markdown]
-# ## 10. Visualize SHAP Patterns
+# ## 10. Visualize Prediction Failures
+#
+# Grouped bars compare forecasts with outcomes for the ten worst trades without
+# compressing the small positive forecasts against the much larger losses.
 
 # %%
-# Extract SHAP vectors for visualization
-shap_vectors = shap_analyzer.extract_shap_vectors(result.explanations)
-mean_shap = np.abs(shap_vectors).mean(axis=0)
-sorted_idx = np.argsort(mean_shap)[::-1]
-
-fig = make_subplots(
-    rows=1,
-    cols=2,
-    subplot_titles=("Mean |SHAP| (Worst Trades)", "Error Pattern Sizes"),
-    specs=[[{"type": "xy"}, {"type": "domain"}]],
+explanation_pd = explanation_df.to_pandas()
+explanation_pd["predicted_pct"] = explanation_pd["predicted_return"] * 100
+explanation_pd["actual_pct"] = explanation_pd["actual_return"] * 100
+worst_miss = explanation_pd.loc[
+    (explanation_pd["actual_pct"] - explanation_pd["predicted_pct"]).idxmin()
+]
+forecast_plot = explanation_pd.nsmallest(10, "actual_pct").copy()
+forecast_plot["trade_label"] = [
+    f"#{rank:02d} | {entry_time:%Y-%m-%d}"
+    for rank, entry_time in enumerate(forecast_plot["entry_time"], 1)
+]
+forecast_long = forecast_plot.melt(
+    id_vars=["trade_label", "pnl"],
+    value_vars=["predicted_pct", "actual_pct"],
+    var_name="series",
+    value_name="return_pct",
 )
+forecast_long["series"] = forecast_long["series"].map(
+    {"predicted_pct": "Predicted", "actual_pct": "Realized"}
+)
+entry_order = forecast_plot.sort_values("actual_pct", ascending=False)["trade_label"].tolist()
 
-fig.add_trace(
-    go.Bar(
-        x=mean_shap[sorted_idx],
-        y=[FEATURE_COLS[i] for i in sorted_idx],
-        orientation="h",
-        marker_color="crimson",
+# %%
+fig = px.bar(
+    forecast_long,
+    x="return_pct",
+    y="trade_label",
+    color="series",
+    orientation="h",
+    barmode="group",
+    color_discrete_map={"Predicted": COLORS["blue"], "Realized": COLORS["amber"]},
+    category_orders={"trade_label": entry_order},
+    title=(
+        f"The worst miss on {worst_miss['entry_time']:%Y-%m-%d} forecast "
+        f"{worst_miss['predicted_pct']:+.1f}% before {worst_miss['actual_pct']:+.1f}% realized"
     ),
-    row=1,
-    col=1,
+    labels={
+        "return_pct": "Next-session return (%)",
+        "trade_label": "",
+        "series": "Return",
+    },
 )
-
-pattern_labels = [f"Pattern {p.cluster_id}" for p in result.error_patterns]
-pattern_sizes = [p.n_trades for p in result.error_patterns]
-
-fig.add_trace(
-    go.Pie(labels=pattern_labels, values=pattern_sizes, hole=0.4),
-    row=1,
-    col=2,
-)
-
+fig.add_vline(x=0, line_color=COLORS["neutral"], line_dash="dot")
+fig.update_yaxes(automargin=True)
 fig.update_layout(
-    title="Momentum and volume dominate the SHAP profile of failed SPY trades",
-    showlegend=False,
-    height=400,
+    height=520,
+    margin=dict(l=150, r=30, t=85, b=55),
+    legend=dict(orientation="h", y=1.08),
 )
-
 fig.show()
 
 # %% [markdown]
+# ## 11. Inspect Attribution Variability
+#
+# Signed SHAP distributions show both direction and trade-to-trade dispersion.
+# Features are ordered by mean absolute contribution; values are expressed in
+# basis points of predicted next-session return.
+
+# %%
+shap_vectors = shap_analyzer.extract_shap_vectors(result.explanations, normalization=None)
+mean_abs_shap = np.abs(shap_vectors).mean(axis=0)
+feature_order = [FEATURE_COLS[index] for index in np.argsort(mean_abs_shap)[::-1]]
+dominant_feature = feature_order[0]
+
+shap_long = pd.DataFrame(shap_vectors, columns=FEATURE_COLS).melt(
+    var_name="feature", value_name="shap_value"
+)
+shap_long["shap_bps"] = shap_long["shap_value"] * 10_000
+fig = px.box(
+    shap_long,
+    x="shap_bps",
+    y="feature",
+    category_orders={"feature": feature_order},
+    points="all",
+    title=f"{dominant_feature} has the largest mean |SHAP| across the worst trades",
+    labels={"shap_bps": "SHAP contribution to predicted return (bps)", "feature": "Feature"},
+)
+fig.update_traces(marker_color=COLORS["blue"], line_color=COLORS["blue"], opacity=0.75)
+fig.add_vline(x=0, line_color=COLORS["neutral"], line_dash="dash")
+fig.update_layout(height=470, showlegend=False)
+fig.show()
+
+# %% [markdown]
+# The forecast gaps confirm that these selected trades are genuine model
+# failures, not merely low-PnL trades. The signed distributions then show which
+# features drove each forecast and how unstable those contributions are across
+# failures. SHAP remains predictive attribution, not a causal explanation.
+
+# %% [markdown]
 # ## Key Takeaways
+
+# %%
+top_feature_counts = explanation_df.group_by("top_feature").len().sort("len", descending=True)
+top_feature_name = top_feature_counts["top_feature"][0]
+top_feature_trades = top_feature_counts["len"][0]
+cluster_takeaway = (
+    f"The default pipeline returns {len(result.error_patterns)} algorithmic hierarchical clusters. "
+    "Separation scores and corrected feature tests annotate them rather than gate reporting, and "
+    "the characterizer may fall back to top non-significant features. Their composition supports "
+    "model-review hypotheses, not causal claims."
+    if result.error_patterns
+    else "The pipeline returned no error pattern because clustering did not run or failed, not "
+    "because a statistical or separation threshold rejected every cluster."
+)
+display(
+    Markdown(
+        f"""
+1. **Alignment is complete by construction.** Exact next-session timestamps connect all
+   {result.n_trades_explained} worst trades to their entry-decision feature vectors, with no
+   positional joins or calendar-day guesses.
+2. **A fixed {MIN_EXPECTED_RETURN_BPS} bp economic buffer leaves {trades_df.height:,}
+   model-directed longs and {losing_trades:,} losses.** It screens economically negligible forecasts;
+   the one-session purge keeps training labels outside the later diagnostic boundary.
+3. **{top_feature_name} is the largest absolute SHAP contributor for {top_feature_trades} of the
+   {len(result.explanations)} explained worst trades.** The box plots show signed dispersion, so
+   predictive attribution is not mistaken for a universal failure mechanism.
+4. **{cluster_takeaway}**
+5. **CUDA execution is best-effort reproducible, not bitwise deterministic.** Fixed seeds and pinned
+   inputs do not erase raw prediction drift. Fresh-process evidence therefore reports that drift and
+   requires identical buffered trade selections and explanation identities; this campaign does not
+   rerun a CPU configuration.
+"""
+    )
+)
+
+# %% [markdown]
+# **Previous**: `04_factor_exposure` decomposes portfolio-level factor risk and return.
 #
-# 1. `TradeShapAnalyzer.explain_worst_trades()` returns a `TradeShapResult`
-#    with per-trade SHAP decompositions; on real residuals the SHAP magnitudes
-#    are an order of magnitude smaller than on a synthetic linear DGP.
-# 2. On the SPY panel, 1,267 long trades produce 558 losers; the 20 worst
-#    cluster around the COVID selloff (Feb-Apr 2020) and the April 2025
-#    drawdown, with `momentum` and `volume_zscore` dominating the SHAP
-#    decomposition of the failing predictions.
-# 3. Hierarchical clustering finds zero statistically distinct error patterns
-#    at 20 trades on real data — the separation thresholds the library ships
-#    with are tuned for stronger synthetic signals. Either pool more trades
-#    across symbols and folds or relax the separation threshold before
-#    treating zero patterns as evidence of a homogeneous failure mode.
-# 4. The workflow is the right shape — explain → cluster → hypothesize → act
-#    — but the size and quality of the trade ledger matter as much as the
-#    SHAP machinery; production use should pool worst trades from a full
-#    case-study sweep, not a single asset.
-#
-# **Next**: `06_stress_testing.ipynb` extends single-trade diagnostics to portfolio-
+# **Next**: `06_stress_testing` extends single-trade diagnostics to portfolio-
 # level stress scenarios.
 #
 # **Book reference**: §19.5 (Trade-Level SHAP as Diagnostic Tool).

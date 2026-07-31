@@ -15,7 +15,7 @@
 
 # %% [markdown]
 # # ML-Based Exit Signals: Two-Model Architecture
-# **Docker image**: `ml4t`
+# **Docker image**: `ml4t-gpu`
 #
 # ## Purpose
 # Demonstrate a two-model exit architecture in which entry-model confidence becomes an
@@ -30,7 +30,7 @@
 # - Recognize when an architectural change does not pay off on AUC but still matters operationally.
 #
 # ## Book reference
-# §19.7 Adaptive Risk Controls — Figure 19.5 (signal-strength-conditioned barrier outcomes).
+# §19.7 Adaptive Risk Controls, Figure 19.5 (signal-strength-conditioned barrier outcomes).
 #
 # ## Prerequisites
 # Complete [`02_exit_strategies`](02_exit_strategies.ipynb) first for the rule-based exit
@@ -41,16 +41,15 @@
 # ## Setup
 
 # %%
-"""ML-Based Exit Signals — train a two-model architecture where entry confidence drives exit timing."""
+"""Train a causal two-model architecture where entry confidence drives exit timing."""
 
-import warnings
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import lightgbm as lgb
 import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
+from IPython.display import Markdown, display
 from matplotlib import pyplot as plt
 from plotly.subplots import make_subplots
 from sklearn.metrics import roc_auc_score
@@ -60,20 +59,19 @@ from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
 
-warnings.filterwarnings("ignore")
-
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
-MAX_SYMBOLS = 0
+# Production defaults - Papermill injects overrides for CI
 SEED = 42
-
-# %%
-np.random.seed(SEED)
-OUTPUT_DIR = get_output_dir(19, "ml_exit_signals")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+LGB_DEVICE = "cuda"
+FORWARD_HOURS = 24
+N_OOF_FOLDS = 5
+N_IMPORTANCE_REPEATS = 5
 
 # %%
 set_global_seeds(SEED)
+OUTPUT_DIR = get_output_dir(19, "ml_exit_signals")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+print(f"LightGBM device: {LGB_DEVICE} (GPU production path required)")
 
 # %% [markdown]
 # ## 1. Data Loading
@@ -155,7 +153,7 @@ def create_features(df: pl.DataFrame, forward_hours: int = 24) -> pl.DataFrame:
 
 # %%
 # Create features
-df_feat = create_features(df, forward_hours=24)
+df_feat = create_features(df, forward_hours=FORWARD_HOURS)
 
 # Define feature columns
 FEATURE_COLS = [
@@ -175,11 +173,13 @@ FEATURE_COLS = [
 ]
 
 print(f"Feature dataset: {len(df_feat):,} samples")
-print("Forward return stats:")
-print(f"  Mean:   {df_feat['fwd_return'].mean():.4%}")
-print(f"  Std:    {df_feat['fwd_return'].std():.4%}")
-print(f"  5th:    {df_feat['fwd_return'].quantile(0.05):.4%}")
-print(f"  95th:   {df_feat['fwd_return'].quantile(0.95):.4%}")
+df_feat.select(
+    pl.len().alias("Samples"),
+    pl.col("fwd_return").mean().alias("Mean forward return"),
+    pl.col("fwd_return").std().alias("Forward-return volatility"),
+    pl.col("fwd_return").quantile(0.05).alias("5th percentile"),
+    pl.col("fwd_return").quantile(0.95).alias("95th percentile"),
+)
 
 # %% [markdown]
 # **Interpretation**: The forward-return distribution is heavy enough in both tails to
@@ -187,104 +187,260 @@ print(f"  95th:   {df_feat['fwd_return'].quantile(0.95):.4%}")
 # the exit model especially useful.
 
 # %% [markdown]
-# ## 3. Label Creation
+# ## 3. Chronological Split and Train-Only Labels
 #
-# **Entry Label**: Top 5% returns (exceptional opportunities)
-# **Exit Label**: Negative returns (should exit to avoid loss)
+# The final 20% of timestamps is a fixed demonstration test interval. The preceding
+# 24 hours are purged because each label looks forward 24 hours. The entry threshold
+# is then estimated on the purged training interval only and applied unchanged to test.
+# This is a teaching split, not a sealed holdout used for model selection.
 
 # %%
-# Calculate thresholds
-top_5pct_threshold = df_feat["fwd_return"].quantile(0.95)
+timestamps = df_feat["timestamp"].unique().sort()
+test_start = timestamps[int(0.8 * len(timestamps))]
+purge_start = test_start - timedelta(hours=FORWARD_HOURS)
 
-# Create labels
-df_labeled = df_feat.with_columns(
-    [
-        # Entry: top 5% returns
-        (pl.col("fwd_return") >= top_5pct_threshold).cast(pl.Int8).alias("y_entry"),
-        # Exit: negative returns
+train_df = df_feat.filter(pl.col("timestamp") < purge_start).sort(["timestamp", "symbol"])
+test_df = df_feat.filter(pl.col("timestamp") >= test_start).sort(["timestamp", "symbol"])
+embargo_rows = df_feat.filter(
+    (pl.col("timestamp") >= purge_start) & (pl.col("timestamp") < test_start)
+).height
+top_5pct_threshold = train_df["fwd_return"].quantile(0.95)
+
+
+# %% [markdown]
+# The same train-only threshold creates both label frames. Exit labels need no fitted
+# threshold: they indicate whether the next 24-hour return is negative.
+
+
+# %%
+def add_labels(frame: pl.DataFrame, entry_threshold: float) -> pl.DataFrame:
+    """Attach entry and exit labels using a threshold learned outside the frame."""
+
+    return frame.with_columns(
+        (pl.col("fwd_return") >= entry_threshold).cast(pl.Int8).alias("y_entry"),
         (pl.col("fwd_return") < 0).cast(pl.Int8).alias("y_exit"),
+    )
+
+
+# %%
+train_df = add_labels(train_df, top_5pct_threshold)
+test_df = add_labels(test_df, top_5pct_threshold)
+
+X_train = train_df.select(FEATURE_COLS).to_numpy()
+X_test = test_df.select(FEATURE_COLS).to_numpy()
+y_entry_train = train_df["y_entry"].to_numpy()
+y_entry_test = test_df["y_entry"].to_numpy()
+y_exit_train = train_df["y_exit"].to_numpy()
+y_exit_test = test_df["y_exit"].to_numpy()
+
+split_summary = pl.DataFrame(
+    {
+        "Interval": ["Purged train", "Embargo", "Demonstration test"],
+        "Start": [train_df["timestamp"].min(), purge_start, test_df["timestamp"].min()],
+        "End": [train_df["timestamp"].max(), test_start, test_df["timestamp"].max()],
+        "Rows": [train_df.height, embargo_rows, test_df.height],
+    }
+)
+split_summary
+
+# %%
+label_summary = pl.DataFrame(
+    {
+        "Sample": ["Train", "Test"],
+        "Entry positive share": [train_df["y_entry"].mean(), test_df["y_entry"].mean()],
+        "Exit positive share": [train_df["y_exit"].mean(), test_df["y_exit"].mean()],
+        "Train-only entry threshold": [top_5pct_threshold, top_5pct_threshold],
+    }
+)
+label_summary
+
+# %% [markdown]
+# The split is chronological by timestamp across all three symbols. The 24-hour gap
+# prevents a training label from reaching into the test interval; the threshold and
+# every fitted model state are learned without test rows.
+
+# %% [markdown]
+# ## 4. Train Entry Model
+#
+# Predicts exceptional positive returns (top 5%). The enhanced exit model must not
+# receive entry probabilities fitted on the same rows, so an expanding-window OOF
+# pass generates its training feature with a 24-hour purge at every fold boundary.
+
+
+# %%
+def make_classifier(seed: int) -> lgb.LGBMClassifier:
+    """Create the pinned CUDA LightGBM classifier used throughout the notebook."""
+
+    return lgb.LGBMClassifier(
+        n_estimators=100,
+        learning_rate=0.05,
+        num_leaves=31,
+        max_depth=5,
+        min_child_samples=20,
+        subsample=0.8,
+        subsample_freq=1,
+        colsample_bytree=0.8,
+        max_bin=63,
+        importance_type="gain",
+        device_type=LGB_DEVICE,
+        n_jobs=1,
+        verbosity=-1,
+        random_state=seed,
+        data_random_seed=seed,
+        feature_fraction_seed=seed,
+        bagging_seed=seed,
+        extra_seed=seed,
+    )
+
+
+# %% [markdown]
+# Probability extraction uses the fitted LightGBM booster directly so inference follows
+# the same pinned one-thread path without sklearn feature-name conversion warnings.
+
+
+# %%
+def predict_positive_probability(model: lgb.LGBMClassifier, features: np.ndarray) -> np.ndarray:
+    """Predict binary positive-class probabilities without sklearn name warnings."""
+
+    probability = np.asarray(model.booster_.predict(features, num_threads=1))
+    if probability.shape != (len(features),) or not np.isfinite(probability).all():
+        raise ValueError("binary LightGBM prediction must return one finite value per row")
+    if np.any((probability < 0) | (probability > 1)):
+        raise ValueError("binary LightGBM probabilities must lie in [0, 1]")
+    return probability
+
+
+# %% [markdown]
+# Expanding validation blocks preserve order. Each fold model stops at least one
+# label horizon before its validation block, so the entry-probability feature is
+# point-in-time for every row used to train the enhanced exit model.
+
+
+# %% [markdown]
+# Each validation block is contiguous in timestamp space. This helper types its boundaries
+# to the frame schema and returns purged fit rows plus the bounded validation interval.
+
+
+# %%
+def chronological_fold_rows(
+    ordered: pl.DataFrame,
+    validation_times: list[datetime],
+    label_horizon_hours: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return purged fit rows and dtype-safe validation rows for one fold."""
+
+    timestamp_dtype = ordered.schema["timestamp"]
+    validation_values = pl.Series("validation_timestamp", validation_times, dtype=timestamp_dtype)
+    validation_start, validation_end = validation_values[0], validation_values[-1]
+    fit_end = validation_start - timedelta(hours=label_horizon_hours)
+    fit_rows = ordered.filter(pl.col("timestamp") < pl.lit(fit_end, dtype=timestamp_dtype))[
+        "row_id"
+    ].to_numpy()
+    validation_rows = ordered.filter(
+        (pl.col("timestamp") >= pl.lit(validation_start, dtype=timestamp_dtype))
+        & (pl.col("timestamp") <= pl.lit(validation_end, dtype=timestamp_dtype))
+    )["row_id"].to_numpy()
+    if not len(fit_rows) or not len(validation_rows):
+        raise ValueError("each OOF fold requires nonempty fit and validation rows")
+    return fit_rows, validation_rows
+
+
+# %% [markdown]
+# Each OOF model defines its rare-event label from that fold's purged fit rows. Later
+# outer-training returns therefore cannot move an earlier fold's cutoff or fit labels.
+
+
+# %%
+def fold_entry_labels(ordered: pl.DataFrame, fit_rows: np.ndarray) -> tuple[np.ndarray, float]:
+    """Build binary entry labels from one fold's purged fit-return distribution."""
+
+    fit_returns = ordered[fit_rows, "fwd_return"]
+    threshold = float(fit_returns.quantile(0.95))
+    labels = (fit_returns >= threshold).cast(pl.Int8).to_numpy()
+    if len(np.unique(labels)) != 2:
+        raise ValueError("each OOF fit requires both entry-label classes")
+    return labels, threshold
+
+
+# %% [markdown]
+# The OOF driver stays focused on expanding folds, local label fits, model fits, and
+# prediction placement.
+
+
+# %%
+def chronological_oof_entry_probabilities(
+    frame: pl.DataFrame,
+    feature_cols: list[str],
+    n_folds: int,
+    label_horizon_hours: int,
+    seed: int,
+) -> tuple[np.ndarray, list[lgb.LGBMClassifier], list[float]]:
+    """Generate purged expanding-window entry probabilities for stacking."""
+
+    ordered = frame.sort(["timestamp", "symbol"]).with_row_index("row_id")
+    unique_times = ordered["timestamp"].unique().sort().to_list()
+    initial = max(int(0.4 * len(unique_times)), label_horizon_hours + 1)
+    validation_blocks = [
+        [unique_times[index] for index in block]
+        for block in np.array_split(np.arange(initial, len(unique_times)), n_folds)
     ]
-)
+    features = ordered.select(feature_cols).to_numpy()
+    oof = np.full(ordered.height, np.nan)
+    models: list[lgb.LGBMClassifier] = []
+    thresholds: list[float] = []
 
-print("\nLabel Distribution:")
-print(f"  Entry (top 5%):     {df_labeled['y_entry'].mean():.1%} positive")
-print(f"  Exit (negative):    {df_labeled['y_exit'].mean():.1%} positive")
-print(f"  Top 5% threshold:   {top_5pct_threshold:.2%}")
+    for fold, validation_times in enumerate(validation_blocks):
+        if not validation_times:
+            continue
+        fit_rows, validation_rows = chronological_fold_rows(
+            ordered, validation_times, label_horizon_hours
+        )
+        fit_labels, fold_threshold = fold_entry_labels(ordered, fit_rows)
+        model = make_classifier(seed + fold)
+        model.fit(features[fit_rows], fit_labels)
+        oof[validation_rows] = predict_positive_probability(model, features[validation_rows])
+        models.append(model)
+        thresholds.append(fold_threshold)
 
-# %% [markdown]
-# **Interpretation**: The label split is intentionally asymmetric. Entry targets rare
-# high-payoff opportunities, while exit targets the much larger set of adverse moves.
+    if not models or np.isnan(oof).all():
+        raise ValueError("chronological OOF construction produced no predictions")
+    return oof, models, thresholds
 
-# %% [markdown]
-# ## 4. Train/Test Split
-#
-# Time-series aware split - no future leakage.
-
-# %%
-# Convert to pandas for sklearn
-df_pd = df_labeled.select(
-    ["timestamp", "symbol"]
-    + FEATURE_COLS
-    + ["y_entry", "y_exit", "fwd_return", "realized_ret_1step"]
-).to_pandas()
-
-# Time-based split on a timestamp cutoff (not row position). df_labeled is
-# sorted by (symbol, timestamp), so a positional iloc split would be a
-# symbol split — most assets entirely in train, a few entirely in test.
-# A timestamp cutoff gives a genuine cross-sectional time split.
-cutoff_ts = df_pd["timestamp"].quantile(0.8)
-train_df = df_pd[df_pd["timestamp"] <= cutoff_ts].sort_values(["timestamp", "symbol"])
-test_df = df_pd[df_pd["timestamp"] > cutoff_ts].sort_values(["timestamp", "symbol"])
-
-X_train = train_df[FEATURE_COLS].values
-X_test = test_df[FEATURE_COLS].values
-
-y_entry_train = train_df["y_entry"].values
-y_entry_test = test_df["y_entry"].values
-
-y_exit_train = train_df["y_exit"].values
-y_exit_test = test_df["y_exit"].values
-
-print(
-    f"Train: {len(X_train):,} samples ({train_df['timestamp'].min()} to {train_df['timestamp'].max()})"
-)
-print(
-    f"Test:  {len(X_test):,} samples ({test_df['timestamp'].min()} to {test_df['timestamp'].max()})"
-)
-
-# %% [markdown]
-# **Interpretation**: The chronological split keeps the exit architecture honest.
-# Entry-model probabilities are generated on past data only, so the enhanced exit
-# model cannot borrow future information through the feedback loop.
-
-# %% [markdown]
-# ## 5. Train Entry Model
-#
-# Predicts exceptional positive returns (top 5%).
 
 # %%
-entry_model = lgb.LGBMClassifier(
-    n_estimators=100,
-    learning_rate=0.05,
-    num_leaves=31,
-    max_depth=5,
-    min_child_samples=20,
-    verbosity=-1,
-    random_state=42,
+entry_proba_oof, entry_fold_models, entry_fold_thresholds = chronological_oof_entry_probabilities(
+    train_df,
+    FEATURE_COLS,
+    n_folds=N_OOF_FOLDS,
+    label_horizon_hours=FORWARD_HOURS,
+    seed=SEED,
+)
+meta_train_mask = np.isfinite(entry_proba_oof)
+print(
+    f"Purged chronological OOF coverage: {meta_train_mask.sum():,}/{len(meta_train_mask):,} "
+    f"rows across {len(entry_fold_models)} folds"
+)
+print(
+    f"Fold-local entry cutoffs: {min(entry_fold_thresholds):.6f} to "
+    f"{max(entry_fold_thresholds):.6f}"
 )
 
+# %%
+entry_model = make_classifier(SEED)
 entry_model.fit(X_train, y_entry_train)
-
-entry_proba_train = entry_model.predict_proba(X_train)[:, 1]
-entry_proba_test = entry_model.predict_proba(X_test)[:, 1]
+entry_model_device = str(entry_model.booster_.params.get("device_type", "")).lower()
+if entry_model_device != LGB_DEVICE:
+    raise RuntimeError(
+        f"LightGBM device mismatch: required {LGB_DEVICE}, observed {entry_model_device or 'unset'}"
+    )
+print(
+    f"GPU completeness: LightGBM {lgb.__version__}; "
+    f"trained booster device_type={entry_model_device}; CPU helper threads=1"
+)
+entry_proba_test = predict_positive_probability(entry_model, X_test)
 
 entry_auc = roc_auc_score(y_entry_test, entry_proba_test)
 print(f"Entry Model AUC-ROC: {entry_auc:.4f}")
-
-entry_importance = pd.DataFrame(
-    {"feature": FEATURE_COLS, "importance": entry_model.feature_importances_}
-).sort_values("importance", ascending=False)
-entry_importance.head(5).reset_index(drop=True)
 
 # %% [markdown]
 # **Interpretation**: The entry model sets the benchmark for conviction. Its AUC and
@@ -292,24 +448,16 @@ entry_importance.head(5).reset_index(drop=True)
 # input to the exit model.
 
 # %% [markdown]
-# ## 6. Train Exit Model (Basic)
+# ## 5. Train Exit Model (Basic)
 #
-# Predicts negative returns using same features.
+# Predicts negative returns from technical features. For a fair comparison, it uses
+# exactly the OOF-covered training rows available to the enhanced model.
 
 # %%
-exit_model_basic = lgb.LGBMClassifier(
-    n_estimators=100,
-    learning_rate=0.05,
-    num_leaves=31,
-    max_depth=5,
-    min_child_samples=20,
-    verbosity=-1,
-    random_state=42,
-)
+exit_model_basic = make_classifier(SEED + 100)
+exit_model_basic.fit(X_train[meta_train_mask], y_exit_train[meta_train_mask])
 
-exit_model_basic.fit(X_train, y_exit_train)
-
-exit_proba_basic = exit_model_basic.predict_proba(X_test)[:, 1]
+exit_proba_basic = predict_positive_probability(exit_model_basic, X_test)
 
 exit_auc_basic = roc_auc_score(y_exit_test, exit_proba_basic)
 print(f"Basic Exit Model AUC-ROC: {exit_auc_basic:.4f}")
@@ -319,33 +467,23 @@ print(f"Basic Exit Model AUC-ROC: {exit_auc_basic:.4f}")
 # already present in the raw feature set before we feed in entry conviction.
 
 # %% [markdown]
-# ## 7. Train Enhanced Exit Model
+# ## 6. Train Enhanced Exit Model
 #
 # Add the entry-model probability as an extra feature. The hypothesis is that fading
-# conviction is informative about adverse moves on its own — independent of the raw
-# technicals — so the exit model should be able to exploit it.
+# conviction is informative about adverse moves beyond the raw technicals. Training
+# uses only OOF entry probabilities; the final entry model supplies test probabilities.
 
 # %%
-# Add entry prediction as feature
-X_train_enhanced = np.column_stack([X_train, entry_proba_train])
+X_train_enhanced = np.column_stack([X_train[meta_train_mask], entry_proba_oof[meta_train_mask]])
 X_test_enhanced = np.column_stack([X_test, entry_proba_test])
 
 FEATURE_COLS_ENHANCED = FEATURE_COLS + ["entry_prediction"]
 
-exit_model_enhanced = lgb.LGBMClassifier(
-    n_estimators=100,
-    learning_rate=0.05,
-    num_leaves=31,
-    max_depth=5,
-    min_child_samples=20,
-    verbosity=-1,
-    random_state=42,
-)
-
-exit_model_enhanced.fit(X_train_enhanced, y_exit_train)
+exit_model_enhanced = make_classifier(SEED + 200)
+exit_model_enhanced.fit(X_train_enhanced, y_exit_train[meta_train_mask])
 
 # Predictions
-exit_proba_enhanced = exit_model_enhanced.predict_proba(X_test_enhanced)[:, 1]
+exit_proba_enhanced = predict_positive_probability(exit_model_enhanced, X_test_enhanced)
 
 # Evaluate
 exit_auc_enhanced = roc_auc_score(y_exit_test, exit_proba_enhanced)
@@ -354,22 +492,18 @@ improvement = (exit_auc_enhanced - exit_auc_basic) / exit_auc_basic * 100
 print(f"Enhanced Exit Model AUC-ROC: {exit_auc_enhanced:.4f}")
 print(f"AUC delta vs basic:          {improvement:+.2f}%")
 
-enhanced_importance = pd.DataFrame(
-    {"feature": FEATURE_COLS_ENHANCED, "importance": exit_model_enhanced.feature_importances_}
-).sort_values("importance", ascending=False)
-enhanced_importance.head(5).reset_index(drop=True)
+# %%
+display(
+    Markdown(
+        f"""**Interpretation**: The enhanced exit AUC is {exit_auc_enhanced:.3f} versus
+{exit_auc_basic:.3f} for the basic model, a relative change of {improvement:+.2f}%. These values
+describe one fixed demonstration test interval, not a sealed holdout or a model-selection result.
+The realized trade-path comparison below is a separate operational diagnostic."""
+    )
+)
 
 # %% [markdown]
-# **Interpretation**: The enhanced AUC barely moves — 0.494 versus the basic
-# baseline's 0.487 (+1.45%), with both sitting essentially at the 0.5 no-skill
-# line on this short sample, so AUC cannot meaningfully separate the two models.
-# Yet `entry_prediction` ends up among the top features, which means the
-# gradient-boosted exit model *is* using it; whatever the architectural benefit,
-# AUC at this scale is too coarse to register it. Sections 8–10 weigh that
-# benefit on realized trades instead, which is where §19.7 tells us to look.
-
-# %% [markdown]
-# ## 8. Model Comparison
+# ## 7. Model Comparison
 #
 # The summary table puts the three models on one page so we can judge whether the
 # extra architecture earns its complexity.
@@ -394,17 +528,18 @@ comparison_summary = pl.DataFrame(
 )
 comparison_summary
 
-# %% [markdown]
-# **Interpretation**: AUC alone is not the decision rule. On this sample the enhanced
-# exit model's AUC is a hair *above* the basic baseline (0.494 vs 0.487) but both
-# sit at the no-skill line, yet `entry_prediction` still ranks among the top
-# features — the architecture is contributing information that the raw classification
-# metric is too coarse to reward either way. The §19.7 claim that learned exits
-# should be judged by *realized trade paths*, not classification scores in isolation,
-# is the operating principle: Section 10's backtest is the binding evaluation.
+# %%
+display(
+    Markdown(
+        f"""**Interpretation**: Entry AUC is {entry_auc:.3f}; basic and enhanced exit AUC are
+{exit_auc_basic:.3f} and {exit_auc_enhanced:.3f}. AUC measures ranking on the fixed test interval,
+while Section 9 asks a different question: how the predeclared exit rules change realized holding
+periods and compounded trade returns."""
+    )
+)
 
 # %% [markdown]
-# ## 9. Signal Analysis
+# ## 8. Signal Analysis
 #
 # How do entry and exit signals interact?
 
@@ -412,7 +547,7 @@ comparison_summary
 # The entry label marks the top 5% of forward returns, so a 0.5 probability
 # threshold is deliberately severe: it admits only bars where the model is
 # more confident than not that a rare top-5% move is coming. This is a
-# sparse-entry policy by design — it trades coverage for precision rather
+# sparse-entry policy by design: it trades coverage for precision rather
 # than trying to be in the market most of the time.
 
 # %%
@@ -454,102 +589,151 @@ signal_counts = pl.DataFrame(
 )
 signal_counts
 
-# %% [markdown]
-# **Interpretation**: The confidence-drop clause fires on the overwhelming majority of
-# bars because entry-probability rarely exceeds 0.3 — the entry label is the top 5% of
-# returns, so most bars are "not an entry" by construction. As a result, the
-# combined-OR rule is dominated by the confidence-drop clause and behaves close to
-# *exit on almost every bar*. This is a calibration problem the chapter flags rather
-# than a victory: Section 10 measures whether that aggressive exit policy actually
-# hurts realized P&L.
+# %%
+display(
+    Markdown(
+        f"""**Interpretation**: The confidence-drop clause fires on
+{exit_signal_confidence.mean():.1%} of test bars and the combined rule fires on
+{exit_signal_combined.mean():.1%}. Because the rare-event entry model usually assigns low
+probability, the fixed 0.30 confidence threshold can dominate the OR rule. The next section checks
+the resulting holding periods and trade returns rather than assuming that more exits are better."""
+    )
+)
 
 # %% [markdown]
-# ## 10. Backtest Simulation
+# ## 9. Backtest Simulation
 #
 # Compare exit strategies on actual returns.
 
 
 # %% [markdown]
-# The trade recorder keeps the backtest summary compact and makes the exit-reason counts consistent across strategies.
+# Signals are observed at an hourly close. An entry at close t earns the return from
+# close t to close t+1. An exit at close u does not earn the return from u to u+1.
+# This explicit ordering makes a k-bar holding period contain exactly k one-step returns.
 
 
 # %%
-def build_trade(entry_idx: int, exit_idx: int, returns: np.ndarray, exit_reason: str) -> dict:
-    """Create a standardized trade record for the strategy simulation."""
+def build_trade(
+    symbol: str,
+    entry_idx: int,
+    exit_idx: int,
+    timestamps: np.ndarray,
+    returns: np.ndarray,
+    exit_reason: str,
+) -> dict:
+    """Create one close-to-close trade with compounded simple returns."""
+
+    path = returns[entry_idx:exit_idx]
+    if not len(path) or np.any(path <= -1) or not np.isfinite(path).all():
+        raise ValueError("a trade requires finite simple returns above -100%")
     return {
+        "symbol": symbol,
+        "entry_timestamp": timestamps[entry_idx],
+        "exit_timestamp": timestamps[exit_idx],
         "entry_idx": entry_idx,
         "exit_idx": exit_idx,
-        "return": returns[entry_idx : exit_idx + 1].sum(),
+        "return": np.prod(1 + path) - 1,
         "holding_bars": exit_idx - entry_idx,
         "exit_reason": exit_reason,
     }
 
 
 # %% [markdown]
-# The strategy simulator treats the entry model as the position opener and the exit model as the position closer.
+# The simulator processes each symbol independently, so a position can never cross an
+# asset boundary. Open positions close at the last observed close without inventing a
+# return beyond the evaluation sample.
+
+
+# %% [markdown]
+# A separate summary step keeps variable-duration trade accounting explicit and avoids
+# burying the reported statistics inside the event loop.
+
+
+# %%
+def summarize_trades(trades: list[dict]) -> dict:
+    """Summarize compounded trade paths without annualizing unequal horizons."""
+
+    if not trades:
+        return {
+            "n_trades": 0,
+            "mean_return": 0.0,
+            "median_return": 0.0,
+            "win_rate": 0.0,
+            "avg_holding": 0.0,
+            "signal_exits": 0,
+            "timeout_exits": 0,
+            "sample_end_exits": 0,
+            "trades": [],
+        }
+    trade_returns = np.array([trade["return"] for trade in trades])
+    return {
+        "n_trades": len(trades),
+        "mean_return": float(trade_returns.mean()),
+        "median_return": float(np.median(trade_returns)),
+        "win_rate": float((trade_returns > 0).mean()),
+        "avg_holding": float(np.mean([trade["holding_bars"] for trade in trades])),
+        "signal_exits": sum(trade["exit_reason"] == "signal" for trade in trades),
+        "timeout_exits": sum(trade["exit_reason"] == "timeout" for trade in trades),
+        "sample_end_exits": sum(trade["exit_reason"] == "sample_end" for trade in trades),
+        "trades": trades,
+    }
+
+
+# %% [markdown]
+# The event loop handles only entry, signal/timeout exits, and sample-end closure by symbol.
 
 
 # %%
 def simulate_strategy(
+    symbols: np.ndarray,
+    timestamps: np.ndarray,
     returns: np.ndarray,
     entry_signals: np.ndarray,
     exit_signals: np.ndarray,
     max_hold: int = 24,
 ) -> dict:
-    """
-    Simulate simple strategy with entry/exit signals.
+    """Simulate independent symbol paths with explicit close-time event ordering."""
 
-    Enter on entry signal, exit on exit signal or max hold.
-    """
-    trades = []
-    position = False
-    entry_idx = 0
+    lengths = {len(symbols), len(timestamps), len(returns), len(entry_signals), len(exit_signals)}
+    if lengths != {len(returns)}:
+        raise ValueError("strategy arrays must have equal length")
+    trades: list[dict] = []
 
-    for i in range(len(returns)):
-        if not position and entry_signals[i]:
-            position = True
-            entry_idx = i
-            continue
-        if not position:
-            continue
-        holding_time = i - entry_idx
-        if not (exit_signals[i] or holding_time >= max_hold):
-            continue
-        exit_reason = "signal" if exit_signals[i] else "timeout"
-        trades.append(build_trade(entry_idx, i, returns, exit_reason))
+    for symbol in dict.fromkeys(symbols):
+        symbol_rows = np.flatnonzero(symbols == symbol)
         position = False
+        entry_idx = -1
+        for i in symbol_rows:
+            if not position and entry_signals[i]:
+                position = True
+                entry_idx = i
+                continue
+            if not position:
+                continue
+            holding_time = i - entry_idx
+            if not (exit_signals[i] or holding_time >= max_hold):
+                continue
+            exit_reason = "signal" if exit_signals[i] else "timeout"
+            trades.append(build_trade(symbol, entry_idx, i, timestamps, returns, exit_reason))
+            position = False
 
-    if not trades:
-        return {"n_trades": 0, "mean_return": 0, "sharpe": 0, "win_rate": 0}
+        final_idx = symbol_rows[-1]
+        if position and final_idx > entry_idx:
+            trades.append(
+                build_trade(symbol, entry_idx, final_idx, timestamps, returns, "sample_end")
+            )
 
-    trade_returns = [t["return"] for t in trades]
-    return {
-        "n_trades": len(trades),
-        "mean_return": np.mean(trade_returns),
-        "sharpe": np.mean(trade_returns) / (np.std(trade_returns) + 1e-6) * np.sqrt(252),
-        "win_rate": np.mean([r > 0 for r in trade_returns]),
-        "avg_holding": np.mean([t["holding_bars"] for t in trades]),
-        "signal_exits": sum(1 for t in trades if t["exit_reason"] == "signal"),
-        "timeout_exits": sum(1 for t in trades if t["exit_reason"] == "timeout"),
-    }
+    return summarize_trades(trades)
 
 
 # %%
-# The train/test split above is a pure timestamp cutoff, so test_df is ordered
-# by (timestamp, symbol): consecutive rows are different symbols at the same
-# bar. simulate_strategy walks the return array as one contiguous price path,
-# so before backtesting we reorder the test set by (symbol, timestamp). Each
-# symbol's bars are then contiguous and time-ordered, and a "trade" no longer
-# sums next-bar returns across interleaved assets. Train/test membership is
-# unchanged — it is defined entirely by the cutoff. The realized one-step
-# (next-bar) return avoids the look-ahead that dividing the 24-hour forward
-# label by 24 would introduce.
-bt_pos = (
-    test_df.reset_index(drop=True)
-    .sort_values(["symbol", "timestamp"], kind="stable")
-    .index.to_numpy()
-)
-actual_returns = test_df["realized_ret_1step"].values[bt_pos]
+# Test predictions align with test_df's timestamp-major order. A row index preserves
+# that alignment while the simulator input is regrouped into independent symbol paths.
+bt_frame = test_df.with_row_index("model_row").sort(["symbol", "timestamp"])
+bt_pos = bt_frame["model_row"].to_numpy()
+bt_symbols = bt_frame["symbol"].to_numpy()
+bt_timestamps = bt_frame["timestamp"].to_numpy()
+actual_returns = bt_frame["realized_ret_1step"].to_numpy()
 entry_signal_bt = entry_signal[bt_pos]
 exit_basic_bt = (exit_proba_basic > 0.5)[bt_pos]
 exit_model_bt = exit_signal_model[bt_pos]
@@ -559,62 +743,145 @@ exit_combined_bt = exit_signal_combined[bt_pos]
 # Strategy variants
 strategies = {
     "No Exit Signal": simulate_strategy(
-        actual_returns, entry_signal_bt, np.zeros_like(entry_signal_bt, dtype=bool)
+        bt_symbols,
+        bt_timestamps,
+        actual_returns,
+        entry_signal_bt,
+        np.zeros_like(entry_signal_bt, dtype=bool),
     ),
-    "Basic Exit Model": simulate_strategy(actual_returns, entry_signal_bt, exit_basic_bt),
-    "Enhanced Exit Model": simulate_strategy(actual_returns, entry_signal_bt, exit_model_bt),
-    "Entry Confidence Drop": simulate_strategy(actual_returns, entry_signal_bt, exit_confidence_bt),
-    "Combined Exit": simulate_strategy(actual_returns, entry_signal_bt, exit_combined_bt),
+    "Basic Exit Model": simulate_strategy(
+        bt_symbols, bt_timestamps, actual_returns, entry_signal_bt, exit_basic_bt
+    ),
+    "Enhanced Exit Model": simulate_strategy(
+        bt_symbols, bt_timestamps, actual_returns, entry_signal_bt, exit_model_bt
+    ),
+    "Entry Confidence Drop": simulate_strategy(
+        bt_symbols, bt_timestamps, actual_returns, entry_signal_bt, exit_confidence_bt
+    ),
+    "Combined Exit": simulate_strategy(
+        bt_symbols, bt_timestamps, actual_returns, entry_signal_bt, exit_combined_bt
+    ),
 }
 
 # %%
-results_df = pd.DataFrame(strategies).T
-results_df["mean_return"] = results_df["mean_return"].apply(lambda x: f"{x:.2%}")
-results_df["win_rate"] = results_df["win_rate"].apply(lambda x: f"{x:.1%}")
-results_df["sharpe"] = results_df["sharpe"].apply(lambda x: f"{x:.2f}")
+results_df = pl.DataFrame(
+    [
+        {
+            "Strategy": name,
+            **{key: value for key, value in result.items() if key != "trades"},
+        }
+        for name, result in strategies.items()
+    ]
+)
 results_df
 
-# %% [markdown]
-# **Interpretation**: The realized-trade view tells a different story than AUC alone.
-# The enhanced exit model preserves the basic exit's win rate while raising Sharpe;
-# the confidence-drop and combined rules cut every position to ~1 bar and chop the
-# mean trade return down with it (from ~3% to under 1%) — the AUC-blind aggression
-# of the OR rule shows up as a *lower* realized Sharpe than the enhanced model. The
-# exercise illustrates §19.7's point: position-level
-# controls have to be judged by their effect on realized trade paths, not by AUC.
+# %%
+best_mean_row = results_df.sort("mean_return", descending=True).row(0, named=True)
+shortest_row = results_df.sort("avg_holding").row(0, named=True)
+display(
+    Markdown(
+        f"""**Interpretation**: {best_mean_row["Strategy"]} has the highest mean compounded trade
+return ({best_mean_row["mean_return"]:.2%}) on this fixed test interval. {shortest_row["Strategy"]}
+has the shortest average holding period ({shortest_row["avg_holding"]:.1f} hourly bars). These are
+descriptive trade-level metrics, not an annualized Sharpe ratio or a sealed strategy estimate."""
+    )
+)
 
 # %% [markdown]
-# ## 11. Visualization
+# ## 10. Visualization
 #
-# The figures test whether the model lift is explainable rather than accidental.
+# The figures test whether the architecture's behavior is explainable. GPU LightGBM
+# is best-effort reproducible rather than bitwise deterministic, so importance is
+# summarized across seeded repeats with random row and feature subsampling.
+
 
 # %%
-# Feature importance comparison
+def repeated_gain_importance(
+    features: np.ndarray,
+    labels: np.ndarray,
+    feature_names: list[str],
+    seed: int,
+    repeats: int,
+) -> pl.DataFrame:
+    """Estimate normalized gain importance dispersion across seeded GPU repeats."""
+
+    records = []
+    for repeat in range(repeats):
+        model = make_classifier(seed + repeat)
+        model.fit(features, labels)
+        gain = model.feature_importances_.astype(float)
+        if not np.isfinite(gain).all() or gain.sum() <= 0:
+            raise ValueError("gain importance must be finite with positive total")
+        for feature, importance in zip(feature_names, 100 * gain / gain.sum(), strict=True):
+            records.append({"feature": feature, "repeat": repeat, "importance": importance})
+
+    return (
+        pl.DataFrame(records)
+        .group_by("feature")
+        .agg(
+            pl.col("importance").mean().alias("mean_importance"),
+            pl.col("importance").std().fill_null(0).alias("std_importance"),
+        )
+        .sort("mean_importance")
+    )
+
+
+# %%
+entry_importance = repeated_gain_importance(
+    X_train,
+    y_entry_train,
+    FEATURE_COLS,
+    seed=SEED + 300,
+    repeats=N_IMPORTANCE_REPEATS,
+)
+enhanced_importance = repeated_gain_importance(
+    X_train_enhanced,
+    y_exit_train[meta_train_mask],
+    FEATURE_COLS_ENHANCED,
+    seed=SEED + 400,
+    repeats=N_IMPORTANCE_REPEATS,
+)
+entry_prediction_rank = (
+    enhanced_importance.sort("mean_importance", descending=True)
+    .with_row_index("rank", offset=1)
+    .filter(pl.col("feature") == "entry_prediction")["rank"]
+    .item()
+)
+
+# %%
 fig = make_subplots(
     rows=1, cols=2, subplot_titles=["Entry Model Features", "Enhanced Exit Model Features"]
 )
 
-# Entry model
-entry_imp_sorted = entry_importance.sort_values("importance", ascending=True)
-fig.add_trace(
+entry_imp_plot = entry_importance.to_pandas()
+_ = fig.add_trace(
     go.Bar(
-        x=entry_imp_sorted["importance"],
-        y=entry_imp_sorted["feature"],
+        x=entry_imp_plot["mean_importance"],
+        y=entry_imp_plot["feature"],
+        error_x={"type": "data", "array": entry_imp_plot["std_importance"], "visible": True},
         orientation="h",
-        marker_color="#0a1628",
+        marker_color=COLORS["blue"],
         name="Entry",
     ),
     row=1,
     col=1,
 )
 
-# Exit model
-exit_imp_sorted = enhanced_importance.sort_values("importance", ascending=True)
-colors = ["#D4A84B" if f == "entry_prediction" else "#0a1628" for f in exit_imp_sorted["feature"]]
+# %% [markdown]
+# The second panel uses the same normalized-gain scale and highlights only the stacked
+# entry-prediction feature before both panels receive a common range and title.
+
+# %%
+exit_imp_plot = enhanced_importance.to_pandas()
+colors = [
+    COLORS["amber"] if feature == "entry_prediction" else COLORS["blue"]
+    for feature in exit_imp_plot["feature"]
+]
 fig.add_trace(
     go.Bar(
-        x=exit_imp_sorted["importance"],
-        y=exit_imp_sorted["feature"],
+        x=exit_imp_plot["mean_importance"],
+        y=exit_imp_plot["feature"],
+        error_x={"type": "data", "array": exit_imp_plot["std_importance"], "visible": True},
         orientation="h",
         marker_color=colors,
         name="Exit",
@@ -623,18 +890,33 @@ fig.add_trace(
     col=2,
 )
 
-# %%
+importance_xmax = 1.1 * max(
+    (entry_importance["mean_importance"] + entry_importance["std_importance"]).max(),
+    (enhanced_importance["mean_importance"] + enhanced_importance["std_importance"]).max(),
+)
 fig.update_layout(
-    title="Feature Importance: Entry vs Exit Models<br><sup>Entry prediction (amber) ranks among the top exit-model features</sup>",
-    height=450,
+    title=(
+        f"Entry confidence ranks #{entry_prediction_rank} in the enhanced exit model"
+        f"<br><sup>Mean normalized gain across {N_IMPORTANCE_REPEATS} seeded GPU repeats; "
+        "error bars show ±1 SD</sup>"
+    ),
+    width=950,
+    height=500,
+    margin={"l": 120, "r": 40, "t": 110, "b": 70},
     showlegend=False,
 )
+fig.update_xaxes(title_text="Mean normalized gain importance (%)", range=[0, importance_xmax])
 fig.show()
 
-# %% [markdown]
-# **Interpretation**: `entry_prediction` (amber) ranks among the top exit-model
-# features, alongside the dominant volatility signals. The exit model uses fading
-# conviction even though that use does not lift AUC over the basic baseline.
+# %%
+display(
+    Markdown(
+        f"""**Interpretation**: Across {N_IMPORTANCE_REPEATS} seeded GPU fits,
+`entry_prediction` ranks #{entry_prediction_rank} by mean normalized gain in the enhanced exit
+model. Gain importance is an impurity-based allocation measure, not a signed or causal effect; the
+error bars show its repeat-to-repeat dispersion."""
+    )
+)
 
 # %%
 # Signal distribution
@@ -643,63 +925,106 @@ fig = make_subplots(
 )
 
 fig.add_trace(
-    go.Histogram(x=entry_proba_test, nbinsx=50, name="Entry Prob", marker_color="#0a1628"),
+    go.Histogram(
+        x=entry_proba_test,
+        xbins={"start": 0, "end": 1, "size": 0.02},
+        name="Entry probability",
+        marker_color=COLORS["blue"],
+    ),
     row=1,
     col=1,
 )
-fig.add_vline(x=entry_threshold, line_dash="dash", line_color="#D4A84B", row=1, col=1)
+fig.add_vline(x=entry_threshold, line_dash="dash", line_color=COLORS["amber"], row=1, col=1)
 
 fig.add_trace(
-    go.Histogram(x=exit_proba_enhanced, nbinsx=50, name="Exit Prob", marker_color="#152238"),
+    go.Histogram(
+        x=exit_proba_enhanced,
+        xbins={"start": 0, "end": 1, "size": 0.02},
+        name="Exit probability",
+        marker_color=COLORS["slate"],
+    ),
     row=1,
     col=2,
 )
-fig.add_vline(x=exit_threshold, line_dash="dash", line_color="#D4A84B", row=1, col=2)
+fig.add_vline(x=exit_threshold, line_dash="dash", line_color=COLORS["amber"], row=1, col=2)
 
 fig.update_layout(
-    title="Signal Probability Distributions",
-    height=350,
+    title="Fixed 0.50 rules select only the upper probability tail",
+    height=400,
     showlegend=False,
 )
+fig.update_xaxes(title_text="Predicted probability", range=[0, 1])
+fig.update_yaxes(title_text="Test bars (count)")
 fig.show()
 
 # %% [markdown]
-# **Interpretation**: The probability histograms show whether the thresholds separate
-# high-conviction and low-conviction states cleanly enough to be used as trading rules.
+# **Interpretation**: Both panels use identical 0.02-wide bins and a common [0, 1]
+# probability scale, so the fixed thresholds can be compared without auto-bin or axis effects.
 
 # %%
-publication_df = pd.DataFrame(
+signal_quintile_breaks = np.quantile(entry_proba_test, [0.2, 0.4, 0.6, 0.8])
+signal_quintile_labels = ["Q1 (Weak)", "Q2", "Q3", "Q4", "Q5 (Strong)"]
+publication_df = pl.DataFrame(
     {
         "signal": entry_proba_test,
-        "fwd_return": test_df["fwd_return"].to_numpy(),
+        "fwd_return": test_df["fwd_return"],
+        "signal_quintile": [
+            signal_quintile_labels[index]
+            for index in np.digitize(entry_proba_test, signal_quintile_breaks)
+        ],
     }
+).with_columns(
+    pl.when(pl.col("fwd_return") < 0)
+    .then(pl.lit("Adverse move"))
+    .when(pl.col("fwd_return") >= top_5pct_threshold)
+    .then(pl.lit("Strong upside"))
+    .otherwise(pl.lit("Neutral"))
+    .alias("outcome")
 )
-publication_df["signal_quintile"] = pd.qcut(
-    publication_df["signal"],
-    q=5,
-    labels=["Q1 (Weak)", "Q2", "Q3", "Q4", "Q5 (Strong)"],
-)
-publication_df["outcome"] = np.where(
-    publication_df["fwd_return"] < 0,
-    "Adverse move",
-    np.where(publication_df["fwd_return"] >= top_5pct_threshold, "Strong upside", "Neutral"),
-)
+
+# %% [markdown]
+# Aggregate each ordered quintile into exhaustive outcome shares and persist the exact
+# table used by the publication figure.
+
+# %%
 plot_data = (
-    publication_df.groupby(["signal_quintile", "outcome"], observed=False)
-    .size()
-    .unstack(fill_value=0)
-    .reindex(["Q1 (Weak)", "Q2", "Q3", "Q4", "Q5 (Strong)"])
+    publication_df.group_by("signal_quintile", "outcome")
+    .len()
+    .pivot(on="outcome", index="signal_quintile", values="len")
+    .join(
+        pl.DataFrame({"signal_quintile": signal_quintile_labels, "quintile_order": range(5)}),
+        on="signal_quintile",
+        how="right",
+    )
+    .fill_null(0)
+    .sort("quintile_order")
+    .with_columns(pl.sum_horizontal("Adverse move", "Neutral", "Strong upside").alias("total"))
+    .with_columns(
+        (100 * pl.col(outcome) / pl.col("total")).alias(outcome)
+        for outcome in ["Adverse move", "Neutral", "Strong upside"]
+    )
 )
-plot_data = plot_data.div(plot_data.sum(axis=1), axis=0).mul(100.0).fillna(0.0)
 
 # Persist quintile-conditioned outcome shares for the figure-19.5 publication script.
-pl.from_pandas(plot_data.reset_index()).write_parquet(
+plot_data.drop("quintile_order", "total").write_parquet(
     OUTPUT_DIR / "signal_quintile_outcomes.parquet"
 )
 
 # %%
+strong_upside = plot_data["Strong upside"].to_numpy()
+adverse_move = plot_data["Adverse move"].to_numpy()
+strong_direction = (
+    "rises monotonically" if np.all(np.diff(strong_upside) >= 0) else "is non-monotonic"
+)
+adverse_direction = "declines" if adverse_move[-1] < adverse_move[0] else "increases"
+outcome_title = (
+    "Stronger entry signals concentrate strong-upside outcomes"
+    if np.all(np.diff(strong_upside) >= 0)
+    else "Signal quintiles reveal non-monotonic outcome conditioning"
+)
+
 fig_pub, ax_pub = plt.subplots(figsize=(8.2, 4.4), constrained_layout=True)
-bottom = np.zeros(len(plot_data))
+bottom = np.zeros(plot_data.height)
 for label, color in zip(
     ["Adverse move", "Neutral", "Strong upside"],
     [COLORS["negative"], COLORS["silver_muted"], COLORS["positive"]],
@@ -707,7 +1032,7 @@ for label, color in zip(
 ):
     values = plot_data[label].to_numpy()
     ax_pub.bar(
-        plot_data.index,
+        plot_data["signal_quintile"].to_list(),
         values,
         bottom=bottom,
         label=label,
@@ -718,22 +1043,25 @@ for label, color in zip(
     bottom = bottom + values
 ax_pub.set_ylabel("Outcome share (%)")
 ax_pub.set_xlabel("Signal quintile")
-ax_pub.set_title("Stronger signals improve realized trade outcomes")
-ax_pub.legend(loc="upper left", ncols=3)
+ax_pub.set_title(outcome_title)
+ax_pub.set_ylim(0, 112)
+ax_pub.set_yticks(range(0, 101, 20))
+ax_pub.legend(loc="upper center", ncols=3, frameon=False)
 plt.show()
 
-# %% [markdown]
-# **Interpretation**: Bucketing test bars by entry-probability quintile shows
-# that the share of *strong-upside* outcomes rises monotonically from 0.6% in
-# the weakest quintile to 7.4% in the strongest. The *adverse-move* share is
-# roughly flat (it drifts up through Q4 then dips at Q5), so the lift comes
-# from **upside selection**, not from avoiding adverse moves. The conditioning
-# is real even though the basic exit model's AUC does not capture it: the
-# chapter's framing in §19.7 — judge exit logic by realized trade paths, not
-# by classification scores — is exactly what this figure illustrates.
+# %%
+display(
+    Markdown(
+        f"""**Interpretation**: Across test-sample probability quintiles, the strong-upside share
+{strong_direction} from {strong_upside[0]:.1f}% to {strong_upside[-1]:.1f}%. The adverse-move share
+{adverse_direction} from {adverse_move[0]:.1f}% to {adverse_move[-1]:.1f}%. These are descriptive
+test-sample bins whose cut points are estimated from the displayed test probabilities; they are not
+an independently validated trading rule."""
+    )
+)
 
 # %% [markdown]
-# ## 12. Key Takeaways
+# ## 11. Key Takeaways
 
 # %%
 takeaways = pl.DataFrame(
@@ -756,25 +1084,22 @@ takeaways = pl.DataFrame(
 )
 takeaways
 
-# %% [markdown]
-# 1. **Entry-conviction is informative for the exit model.** `entry_prediction`
-#    ranks among the top features of the enhanced exit model, yet the enhanced
-#    and basic exit AUCs are nearly identical (0.494 vs 0.487, both at the
-#    no-skill line) on this sample (see the table above). AUC is the wrong
-#    scoreboard for this kind of architectural change.
-# 2. **Realized trade paths are the binding evaluation.** The Section-10 backtest
-#    separates the exit rules where AUC does not: the enhanced exit keeps the basic
-#    win rate while lifting Sharpe, the confidence-drop clause fires on the
-#    overwhelming majority of bars and chops every position to a few holding-bars,
-#    and the combined-OR rule inherits that aggression. Position-level controls have
-#    to be judged operationally (§19.7).
-# 3. **Signal-strength conditioning is the durable lesson.** Figure 19.5 shows the
-#    fraction of adverse moves declining and the fraction of strong upside rising as
-#    entry-probability climbs. Even when AUC for the exit model is silent, this
-#    conditioning is real and exploitable.
-# 4. **Implementation pattern.** Train entry and exit on the same feature set; pass
-#    the entry prediction to the exit model as an extra feature; use only lagged
-#    information so the feedback loop is causal.
+# %%
+display(
+    Markdown(
+        f"""1. **The stacking feature is causal.** Purged expanding-window OOF predictions cover
+{meta_train_mask.sum():,} training rows, so the enhanced exit model never receives an in-sample
+entry prediction for its own row.
+2. **AUC and realized paths answer different questions.** Basic and enhanced exit AUC are
+{exit_auc_basic:.3f} and {exit_auc_enhanced:.3f}; {best_mean_row["Strategy"]} has the highest mean
+compounded trade return ({best_mean_row["mean_return"]:.2%}) on this demonstration test interval.
+3. **Rule calibration matters.** The fixed confidence-drop rule fires on
+{exit_signal_confidence.mean():.1%} of bars and produces an average holding period of
+{strategies["Entry Confidence Drop"]["avg_holding"]:.1f} hourly bars.
+4. **Importance is diagnostic, not causal.** Entry confidence ranks #{entry_prediction_rank} by
+mean normalized gain across seeded GPU repeats, with dispersion shown in the figure."""
+    )
+)
 
 # %% [markdown]
 # **Next**: [`11_systematic_risk_sweep`](11_systematic_risk_sweep.ipynb) compares

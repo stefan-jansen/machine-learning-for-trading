@@ -31,8 +31,8 @@
 # - Compare rule-based, ML-driven, and hybrid exit policies on the same trades
 #
 # ## Book reference
-# - Section 19.4 — Drawdowns, Path Risk, and Time-to-Recovery
-# - Section 19.7 — Adaptive Risk Controls Without Leakage
+# - Section 19.4 - Drawdowns, Path Risk, and Time-to-Recovery
+# - Section 19.7 - Adaptive Risk Controls Without Leakage
 #
 # ## Prerequisites
 # - Familiarity with OHLCV bars, ATR, and simple classification metrics
@@ -45,33 +45,18 @@
 # ## Setup
 
 # %%
-"""Exit Strategies for Risk Management — compare fixed, trailing, and volatility-adjusted stop-loss rules."""
+"""Compare fixed, trailing, and volatility-adjusted exit rules."""
 
 import warnings
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
+from IPython.display import Markdown, display
+from ml4t.backtest import risk
 from ml4t.backtest.analytics import MAEMFEAnalyzer
-from ml4t.backtest.risk import (
-    ActionType,
-    AllOf,
-    AnyOf,
-    PositionState,
-    RuleChain,
-    SignalExit,
-    StopLoss,
-    TakeProfit,
-    TighteningTrailingStop,
-    TimeExit,
-    TrailingStop,
-    VolatilityStop,
-    VolatilityTrailingStop,
-)
 from ml4t.backtest.types import Trade
 from ml4t.diagnostic.config import (
     BarrierAnalysisSettings,
@@ -82,17 +67,21 @@ from ml4t.diagnostic.evaluation import BarrierAnalysis
 from plotly.subplots import make_subplots
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import classification_report, roc_auc_score
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 
 from data import load_etfs
-from utils.paths import get_case_study_dir, get_output_dir
+from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
+# %%
 warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+# Production defaults; Papermill injects overrides for CI
 SEED = 42
+LABEL_HORIZON = 5
 
 # %%
 np.random.seed(SEED)
@@ -119,35 +108,11 @@ df = etf_data.filter(
 print(f"Loaded {len(df):,} daily bars")
 
 # %%
-# Try to load upstream ML predictions (Ch12/Ch13) for integration
 OUTPUT_DIR = get_output_dir(19, "exit_strategies")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # %%
 set_global_seeds(SEED)
-
-UPSTREAM_PREDS_AVAILABLE = False
-upstream_preds = None
-
-# Check for ETF predictions from Ch12 (GBM) or Ch13 (DL)
-CASE_DIR = get_case_study_dir("etfs")
-for stage_dir, pred_file in [
-    ("models/gbm", "gbm_predictions.parquet"),
-    ("models/deep_learning", "dl_predictions.parquet"),
-]:
-    pred_path = CASE_DIR / stage_dir / pred_file
-    if pred_path.exists():
-        upstream_preds = pl.read_parquet(pred_path)
-        # Filter to our symbol if multi-asset
-        if "symbol" in upstream_preds.columns:
-            upstream_preds = upstream_preds.filter(pl.col("symbol") == SYMBOL)
-        print(f"[OK] Loaded predictions from {stage_dir}: {len(upstream_preds):,} rows")
-        UPSTREAM_PREDS_AVAILABLE = True
-        break
-
-if not UPSTREAM_PREDS_AVAILABLE:
-    print("[WARN] No upstream ML predictions found - using standalone exit model")
-    print("  Run Ch12/Ch13 ETF notebooks to generate predictions for integration")
 
 # %%
 # Add the base price and volatility features used by the exit rules.
@@ -224,6 +189,36 @@ def build_exit_result(
 
 
 # %% [markdown]
+# A shared OHLC oracle makes gap handling and same-bar ordering explicit for
+# every fixed barrier simulation.
+
+
+# %%
+def long_barrier_fill(
+    open_price: float,
+    high_price: float,
+    low_price: float,
+    stop_price: float,
+    take_profit_price: float,
+) -> tuple[float, str] | None:
+    """Return a gap-aware long-position barrier fill for one OHLC bar."""
+    if open_price <= stop_price:
+        return open_price, "stop_loss"
+    if open_price >= take_profit_price:
+        return open_price, "take_profit"
+
+    stop_hit = low_price <= stop_price
+    take_profit_hit = high_price >= take_profit_price
+    if stop_hit:
+        # Daily bars do not reveal whether the high or low occurred first.
+        # Use the conservative stop-first convention when both are touched.
+        return stop_price, "stop_loss"
+    if take_profit_hit:
+        return take_profit_price, "take_profit"
+    return None
+
+
+# %% [markdown]
 # ## 2. Fixed Take Profit / Stop Loss
 #
 # The simplest exit strategy: exit when price hits a fixed percentage target or stop.
@@ -243,12 +238,17 @@ class FixedExitConfig:
 
 
 # %% [markdown]
-# The simulator scans forward from each entry until either barrier is hit or the holding limit expires.
+# The simulator treats the stop and target as resting orders from the entry close. Overnight gaps
+# fill at the next open; intraday touches fill at the barrier. When a daily bar touches both, the
+# conservative stop-first convention resolves the unknown ordering.
 
 
 # %%
 def simulate_fixed_exits(
     prices: np.ndarray,
+    opens: np.ndarray,
+    highs: np.ndarray,
+    lows: np.ndarray,
     entry_indices: np.ndarray,
     config: FixedExitConfig,
     max_holding_days: int = 20,
@@ -262,25 +262,16 @@ def simulate_fixed_exits(
         tp_price = entry_price * (1 + config.take_profit_pct)
         sl_price = entry_price * (1 - config.stop_loss_pct)
         exit_idx = window_end
+        exit_price = prices[window_end]
         exit_type = "timeout"
 
         for i in range(entry_idx + 1, window_end + 1):
-            if prices[i] >= tp_price:
+            fill = long_barrier_fill(opens[i], highs[i], lows[i], sl_price, tp_price)
+            if fill is not None:
                 exit_idx = i
-                exit_type = "take_profit"
-                break
-            if prices[i] <= sl_price:
-                exit_idx = i
-                exit_type = "stop_loss"
+                exit_price, exit_type = fill
                 break
 
-        exit_price = (
-            tp_price
-            if exit_type == "take_profit"
-            else sl_price
-            if exit_type == "stop_loss"
-            else prices[exit_idx]
-        )
         results.append(build_exit_result(entry_idx, exit_idx, entry_price, exit_price, exit_type))
 
     return results
@@ -294,6 +285,9 @@ entry_indices = np.sort(np.random.choice(range(50, len(df) - 50), size=n_trades,
 
 # Simulate with different stop loss levels
 prices = df["close"].to_numpy()
+opens = df["open"].to_numpy()
+highs = df["high"].to_numpy()
+lows = df["low"].to_numpy()
 # Timestamp per bar (df coordinate). The ML section keys exit probabilities
 # by timestamp because df_ml drops additional warm-up / forward-target rows
 # and therefore does NOT share df's integer index.
@@ -310,13 +304,12 @@ configs = [
 
 results_by_config = {}
 for config in configs:
-    results = simulate_fixed_exits(prices, entry_indices, config)
+    results = simulate_fixed_exits(prices, opens, highs, lows, entry_indices, config)
     results_by_config[f"SL={config.stop_loss_pct:.0%}"] = results
 
 # %% [markdown]
-# Tighter fixed stops cut more trades short, so the stop-loss count rises and the
-# timeout count falls as `SL` shrinks. Mean return is non-monotone in stop width
-# because tight stops avoid deep drawdowns but also exit profitable trades early.
+# The summary separates stop-outs, targets, and timeouts so the cost of tightening
+# the downside barrier is visible rather than inferred from mean return alone.
 
 # %%
 fixed_summary_rows = []
@@ -333,8 +326,8 @@ for name, results in results_by_config.items():
             "timeouts": exit_types.count("timeout"),
         }
     )
-fixed_summary_df = pd.DataFrame(fixed_summary_rows)
-fixed_summary_df.round(2)
+fixed_summary_df = pl.DataFrame(fixed_summary_rows).with_columns(pl.exclude("config").round(2))
+fixed_summary_df
 
 # %%
 # Persist trade-return distribution by stop-loss config for the figure-19.4 publication script.
@@ -344,15 +337,64 @@ for name, results in results_by_config.items():
         fixed_returns_rows.append({"config": name, "return_pct": r["return"] * 100})
 pl.DataFrame(fixed_returns_rows).write_parquet(OUTPUT_DIR / "fixed_stop_loss_returns.parquet")
 
+# %% [markdown]
+# All three panels use bins derived once from the pooled returns. Identical bin
+# edges and axis limits make differences in shape and tail mass comparable.
+
 # %%
-# Visualize exit distribution
-fig = make_subplots(rows=1, cols=3, subplot_titles=list(results_by_config.keys()))
+pooled_fixed_returns = np.concatenate(
+    [
+        np.asarray([result["return"] * 100 for result in results], dtype=float)
+        for results in results_by_config.values()
+    ]
+)
+pooled_range = float(np.ptp(pooled_fixed_returns))
+histogram_padding = 0.02 * pooled_range
+histogram_start = float(pooled_fixed_returns.min() - histogram_padding)
+histogram_end = float(pooled_fixed_returns.max() + histogram_padding)
+histogram_size = (histogram_end - histogram_start) / 30
 
-for i, (name, results) in enumerate(results_by_config.items(), 1):
+fig = make_subplots(
+    rows=1,
+    cols=3,
+    subplot_titles=list(results_by_config.keys()),
+    shared_xaxes=True,
+    shared_yaxes=True,
+)
+
+# %% [markdown]
+# The aligned panels now isolate distributional differences rather than changes
+# introduced by Plotly's panel-specific automatic binning.
+
+# %%
+stop_colors = [COLORS["blue"], COLORS["amber"], COLORS["copper"]]
+for i, ((name, results), color) in enumerate(
+    zip(results_by_config.items(), stop_colors, strict=True), 1
+):
     returns = [r["return"] * 100 for r in results]
-    fig.add_trace(go.Histogram(x=returns, nbinsx=30, name=name), row=1, col=i)
+    fig.add_trace(
+        go.Histogram(
+            x=returns,
+            xbins={"start": histogram_start, "end": histogram_end, "size": histogram_size},
+            name=name,
+            marker_color=color,
+        ),
+        row=1,
+        col=i,
+    )
+    fig.update_xaxes(
+        title_text="Trade return (%)", range=[histogram_start, histogram_end], row=1, col=i
+    )
+    fig.update_yaxes(title_text="Trades" if i == 1 else None, row=1, col=i)
 
-fig.update_layout(title="Return Distribution by Stop Loss Level", height=350, showlegend=False)
+fig.update_layout(
+    title={
+        "text": "Stop width reshapes realized trade outcomes"
+        "<br><sup>All panels use 30 bins derived from the pooled returns</sup>"
+    },
+    height=400,
+    showlegend=False,
+)
 fig.show()
 
 # %% [markdown]
@@ -374,14 +416,27 @@ class TrailingStopConfig:
     trail_pct: float = 0.015  # Trailing distance
 
 
+def trailing_stop_fill(open_price: float, low_price: float, stop_price: float) -> float | None:
+    """Return a gap-aware trailing-stop fill, if the resting stop is touched."""
+    if open_price <= stop_price:
+        return open_price
+    if low_price <= stop_price:
+        return stop_price
+    return None
+
+
 # %% [markdown]
-# The trailing-stop simulator updates the stop as new highs arrive and exits once price crosses that moving floor.
+# The trailing-stop simulator applies today's resting stop before using a new
+# high to tighten tomorrow's stop. This avoids assuming the unknown order of a
+# daily bar's high and low.
 
 
 # %%
 def simulate_trailing_stops(
     prices: np.ndarray,
+    opens: np.ndarray,
     highs: np.ndarray,
+    lows: np.ndarray,
     entry_indices: np.ndarray,
     config: TrailingStopConfig,
     max_holding_days: int = 50,
@@ -395,36 +450,30 @@ def simulate_trailing_stops(
         highest_since_entry = entry_price
         stop_price = entry_price * (1 - config.initial_stop_pct)
         exit_idx = window_end
+        exit_price = prices[window_end]
         exit_type = "timeout"
 
         for i in range(entry_idx + 1, window_end + 1):
+            fill = trailing_stop_fill(opens[i], lows[i], stop_price)
+            if fill is not None:
+                exit_idx = i
+                exit_price = fill
+                exit_type = "trailing_stop"
+                break
+
             if highs[i] > highest_since_entry:
                 highest_since_entry = highs[i]
                 stop_price = max(stop_price, highest_since_entry * (1 - config.trail_pct))
 
-            if prices[i] <= stop_price:
-                exit_idx = i
-                exit_type = "trailing_stop"
-                break
-
+        extra = {"highest_seen": highest_since_entry, "final_stop": stop_price}
         results.append(
-            build_exit_result(
-                entry_idx,
-                exit_idx,
-                entry_price,
-                prices[exit_idx],
-                exit_type,
-                {"highest_seen": highest_since_entry, "final_stop": stop_price},
-            )
+            build_exit_result(entry_idx, exit_idx, entry_price, exit_price, exit_type, extra)
         )
 
     return results
 
 
 # %%
-# Simulate trailing stops
-highs = df["high"].to_numpy()
-
 trailing_configs = [
     TrailingStopConfig(initial_stop_pct=0.02, trail_pct=0.01),  # Tight trail
     TrailingStopConfig(initial_stop_pct=0.02, trail_pct=0.02),  # Medium trail
@@ -433,18 +482,22 @@ trailing_configs = [
 
 trailing_results = {}
 for config in trailing_configs:
-    results = simulate_trailing_stops(prices, highs, entry_indices, config)
+    results = simulate_trailing_stops(prices, opens, highs, lows, entry_indices, config)
     trailing_results[f"Trail={config.trail_pct:.0%}"] = results
 
 # Compare to fixed stop
 fixed_results = simulate_fixed_exits(
-    prices, entry_indices, FixedExitConfig(take_profit_pct=0.10, stop_loss_pct=0.02)
+    prices,
+    opens,
+    highs,
+    lows,
+    entry_indices,
+    FixedExitConfig(take_profit_pct=0.10, stop_loss_pct=0.02),
 )
 
 # %% [markdown]
-# Trailing stops let winners run by ratcheting the stop upward. Tight trails take
-# fewer dollars off the table but exit on minor pullbacks; wider trails hold positions
-# longer and on this sample finish closer to the fixed-stop baseline.
+# Trailing stops ratchet upward after favorable moves. The comparison shows how
+# tighter and wider trails exchange quicker protection for more room to recover.
 
 # %%
 trailing_rows = []
@@ -466,8 +519,8 @@ trailing_rows.append(
         "avg_hold_days": float(np.mean([r["holding_days"] for r in fixed_results])),
     }
 )
-trailing_summary_df = pd.DataFrame(trailing_rows)
-trailing_summary_df.round(2)
+trailing_summary_df = pl.DataFrame(trailing_rows).with_columns(pl.exclude("config").round(2))
+trailing_summary_df
 
 # %% [markdown]
 # ## 4. Volatility-Adjusted Stops (ATR-Based)
@@ -496,6 +549,9 @@ class ATRStopConfig:
 # %%
 def simulate_atr_exits(
     prices: np.ndarray,
+    opens: np.ndarray,
+    highs: np.ndarray,
+    lows: np.ndarray,
     atr: np.ndarray,
     entry_indices: np.ndarray,
     config: ATRStopConfig,
@@ -511,25 +567,16 @@ def simulate_atr_exits(
         stop_price = entry_price - config.atr_multiplier * current_atr
         tp_price = entry_price + config.take_profit_multiplier * current_atr
         exit_idx = window_end
+        exit_price = prices[window_end]
         exit_type = "timeout"
 
         for i in range(entry_idx + 1, window_end + 1):
-            if prices[i] >= tp_price:
+            fill = long_barrier_fill(opens[i], highs[i], lows[i], stop_price, tp_price)
+            if fill is not None:
                 exit_idx = i
-                exit_type = "take_profit"
-                break
-            if prices[i] <= stop_price:
-                exit_idx = i
-                exit_type = "stop_loss"
+                exit_price, exit_type = fill
                 break
 
-        exit_price = (
-            tp_price
-            if exit_type == "take_profit"
-            else stop_price
-            if exit_type == "stop_loss"
-            else prices[exit_idx]
-        )
         extra = {
             "atr_at_entry": current_atr,
             "stop_distance_pct": (entry_price - stop_price) / entry_price,
@@ -553,7 +600,7 @@ atr_configs = [
 
 atr_results = {}
 for config in atr_configs:
-    results = simulate_atr_exits(prices, atr, entry_indices, config)
+    results = simulate_atr_exits(prices, opens, highs, lows, atr, entry_indices, config)
     atr_results[f"ATR×{config.atr_multiplier}"] = results
 
 # %% [markdown]
@@ -575,19 +622,20 @@ for name, results in atr_results.items():
             "stop_distance_std_pct": float(np.std(stop_distances)),
         }
     )
-atr_summary_df = pd.DataFrame(atr_rows)
-atr_summary_df.round(2)
+atr_summary_df = pl.DataFrame(atr_rows).with_columns(pl.exclude("config").round(2))
+atr_summary_df
 
 # %%
 # Visualize how stop distance varies with volatility
 fig = go.Figure()
 
-for name, results in atr_results.items():
+for (name, results), color in zip(atr_results.items(), stop_colors, strict=True):
     stop_distances = [r["stop_distance_pct"] * 100 for r in results]
-    fig.add_trace(go.Box(y=stop_distances, name=name))
+    fig.add_trace(go.Box(y=stop_distances, name=name, marker_color=color, line_color=color))
 
 fig.update_layout(
-    title="Stop Distance Distribution (ATR-Based)",
+    title="ATR scaling makes stop distance state-dependent",
+    xaxis_title="ATR multiplier",
     yaxis_title="Stop Distance (%)",
     height=400,
 )
@@ -601,16 +649,17 @@ fig.show()
 # **Approach**:
 # - Target: Will price drop >2% in next 5 days?
 # - Features: Technical indicators, recent returns, volatility
-# - **Integration**: If Ch12/Ch13 entry predictions available, use as additional feature
 # - Model: Gradient Boosting
-# - Exit: When model predicts high probability of adverse move
+# - Exit: Use today's close-based probability at the next session's open
 
 # %%
 # Prepare ML features and target
 df_ml = df.with_columns(
     [
         # Target: price drops >2% in next 5 days
-        (pl.col("close").shift(-5) / pl.col("close") - 1 < -0.02).cast(pl.Int32).alias("target"),
+        (pl.col("close").shift(-LABEL_HORIZON) / pl.col("close") - 1 < -0.02)
+        .cast(pl.Int32)
+        .alias("target"),
         # Features
         pl.col("returns").alias("ret_1d"),
         pl.col("returns_5d").alias("ret_5d"),
@@ -625,26 +674,8 @@ df_ml = df.with_columns(
 ).drop_nulls()
 
 # %%
-# Integrate upstream ML predictions as additional feature (if available)
-if UPSTREAM_PREDS_AVAILABLE and upstream_preds is not None:
-    # Join upstream predictions to our dataset
-    upstream_for_join = upstream_preds.select(
-        [
-            pl.col("timestamp").cast(pl.Date),
-            pl.col("y_pred_proba").alias("entry_signal"),  # Entry model's confidence
-        ]
-    )
-    df_ml = df_ml.join(upstream_for_join, on="timestamp", how="left")
-    # Fill missing with neutral value
-    df_ml = df_ml.with_columns(pl.col("entry_signal").fill_null(0.5))
-    print(
-        f"[OK] Added upstream entry signal as feature (coverage: {(df_ml['entry_signal'] != 0.5).mean() * 100:.1f}%)"
-    )
-else:
-    # Add placeholder for consistent feature list
-    df_ml = df_ml.with_columns(pl.lit(0.5).alias("entry_signal"))
-
-# Features list - entry_signal from Ch12/13 adds value: low entry confidence → consider exit
+# This notebook deliberately uses a self-contained exit model. The companion
+# 08_ml_exit_signals notebook covers a two-model entry/exit architecture.
 FEATURES = [
     "ret_1d",
     "ret_5d",
@@ -655,27 +686,26 @@ FEATURES = [
     "dist_sma20",
     "dist_sma50",
     "vol_ratio",
-    "entry_signal",  # Upstream ML prediction (0.5 if unavailable)
 ]
 
 print(f"ML dataset: {len(df_ml):,} samples")
 print(f"Target rate: {df_ml['target'].mean() * 100:.1f}% (adverse moves)")
 
 # %%
-# Train/test split (time series aware). df_ml is sorted by timestamp, so a
-# row-based split is chronological. We keep the test timestamps to align
-# probabilities back to price-bar indices, since df_ml has dropped warm-up
-# and forward-target rows and no longer shares df's integer index.
+# Train/test split. Five rows are purged before the test boundary because each
+# training label reads five closes forward. This keeps every training outcome
+# strictly before the first test feature row.
 df_pd = df_ml.to_pandas()
-train_size = int(len(df_pd) * 0.7)
+test_start = int(len(df_pd) * 0.7)
+train_end = test_start - LABEL_HORIZON
 
-X_train = df_pd[FEATURES].iloc[:train_size]
-y_train = df_pd["target"].iloc[:train_size]
-X_test = df_pd[FEATURES].iloc[train_size:]
-y_test = df_pd["target"].iloc[train_size:]
-test_timestamps = df_pd["timestamp"].iloc[train_size:].to_numpy().astype("datetime64[ns]")
+X_train = df_pd[FEATURES].iloc[:train_end]
+y_train = df_pd["target"].iloc[:train_end]
+X_test = df_pd[FEATURES].iloc[test_start:]
+y_test = df_pd["target"].iloc[test_start:]
+test_timestamps = df_pd["timestamp"].iloc[test_start:].to_numpy().astype("datetime64[ns]")
 
-print(f"Train: {len(X_train):,} samples, Test: {len(X_test):,} samples")
+print(f"Train: {len(X_train):,} samples, Purged: {LABEL_HORIZON}, Test: {len(X_test):,} samples")
 
 # %%
 # Train model
@@ -687,42 +717,89 @@ model = GradientBoostingClassifier(
     n_estimators=100,
     max_depth=4,
     learning_rate=0.1,
-    random_state=42,
+    random_state=SEED,
 )
 model.fit(X_train_scaled, y_train)
 
 # Predictions
 y_pred_proba = model.predict_proba(X_test_scaled)[:, 1]
 y_pred = (y_pred_proba > 0.5).astype(int)
+test_auc = roc_auc_score(y_test, y_pred_proba)
 
 # Evaluation
 print("\nModel Performance (Test Set):")
-print(f"AUC-ROC: {roc_auc_score(y_test, y_pred_proba):.3f}")
+print(f"AUC-ROC: {test_auc:.3f}")
 print("\nClassification Report:")
 print(classification_report(y_test, y_pred, target_names=["Hold", "Exit Signal"]))
 
-# %%
-# Feature importance
-importance_df = pd.DataFrame(
-    {"feature": FEATURES, "importance": model.feature_importances_}
-).sort_values("importance", ascending=True)
+# %% [markdown]
+# Mean decrease in impurity is recomputed on expanding chronological training
+# folds. The test period remains untouched, and fold dispersion shows how stable
+# each feature's attribution is across training vintages.
 
-fig = px.bar(
-    importance_df,
-    x="importance",
-    y="feature",
-    orientation="h",
-    title="Feature Importance for Adverse Move Prediction",
+# %%
+importance_rows = []
+importance_splitter = TimeSeriesSplit(n_splits=5, gap=LABEL_HORIZON)
+for fold, (fold_fit_idx, _) in enumerate(importance_splitter.split(X_train), start=1):
+    fold_scaler = StandardScaler()
+    X_fold_scaled = fold_scaler.fit_transform(X_train.iloc[fold_fit_idx])
+    fold_model = GradientBoostingClassifier(
+        n_estimators=100,
+        max_depth=4,
+        learning_rate=0.1,
+        random_state=SEED,
+    )
+    fold_model.fit(X_fold_scaled, y_train.iloc[fold_fit_idx])
+    importance_rows.extend(
+        {
+            "fold": fold,
+            "feature": feature,
+            "importance": float(importance),
+        }
+        for feature, importance in zip(FEATURES, fold_model.feature_importances_, strict=True)
+    )
+
+importance_summary = (
+    pl.DataFrame(importance_rows)
+    .group_by("feature")
+    .agg(
+        pl.col("importance").mean().alias("mean_importance"),
+        pl.col("importance").std().alias("std_importance"),
+    )
+    .sort("mean_importance")
 )
-fig.update_layout(height=350)
+
+# %%
+fig = go.Figure(
+    go.Bar(
+        x=importance_summary["mean_importance"].to_list(),
+        y=importance_summary["feature"].to_list(),
+        orientation="h",
+        error_x={
+            "type": "data",
+            "array": importance_summary["std_importance"].to_list(),
+            "visible": True,
+        },
+        marker_color=COLORS["blue"],
+    )
+)
+fig.update_layout(
+    title={
+        "text": "Exit-signal importance varies across training vintages"
+        "<br><sup>Mean decrease in impurity across five expanding chronological folds; "
+        "error bars show +/-1 SD</sup>"
+    },
+    xaxis_title="Mean decrease in impurity",
+    yaxis_title="Feature",
+    height=400,
+)
 fig.show()
 
 
 # %% [markdown]
 # The exit probabilities are keyed by timestamp, not by row position. The
-# helper looks up the bar's timestamp in `proba_by_ts`; bars without a
-# test-set probability (training period, or warm-up rows dropped from
-# `df_ml`) never trigger an ML exit.
+# mapping delays each close-based probability until the next session's open.
+# Bars without an out-of-sample execution signal never trigger an ML exit.
 
 
 # %%
@@ -732,7 +809,7 @@ def ml_exit_triggered(
     exit_threshold: float,
     bar_timestamps: np.ndarray,
 ) -> bool:
-    """Return True when the bar's timestamped exit probability exceeds the threshold."""
+    """Return True when the bar has a prior-close exit signal above the threshold."""
     proba = proba_by_ts.get(bar_timestamps[idx])
     return proba is not None and proba > exit_threshold
 
@@ -744,6 +821,7 @@ def ml_exit_triggered(
 # %%
 def simulate_ml_exits(
     prices: np.ndarray,
+    opens: np.ndarray,
     proba_by_ts: dict,
     entry_indices: np.ndarray,
     bar_timestamps: np.ndarray,
@@ -753,9 +831,9 @@ def simulate_ml_exits(
     """
     Simulate exits based on ML predictions.
 
-    Exit when the model's timestamped adverse-move probability exceeds the
-    threshold. Only entries whose bars carry a test-set probability are
-    simulated; the caller restricts ``entry_indices`` to the test period.
+    Exit at the next session's open when the prior close's adverse-move
+    probability exceeds the threshold. Only entries in the test period are
+    simulated.
     """
     results = []
 
@@ -768,29 +846,34 @@ def simulate_ml_exits(
         for i in range(entry_idx + 1, window_end + 1):
             if ml_exit_triggered(proba_by_ts, i, exit_threshold, bar_timestamps):
                 exit_idx = i
+                exit_price = opens[i]
                 exit_type = "ml_signal"
                 break
+        else:
+            exit_price = prices[exit_idx]
 
-        results.append(
-            build_exit_result(entry_idx, exit_idx, entry_price, prices[exit_idx], exit_type)
-        )
+        results.append(build_exit_result(entry_idx, exit_idx, entry_price, exit_price, exit_type))
 
     return results
 
 
 # %%
-# Map each test bar's timestamp to its exit probability, then restrict the
-# entry universe to bars on or after the first test timestamp. This aligns
-# probabilities to price-bar indices through timestamps rather than assuming
-# df and df_ml share an integer index (they do not).
-proba_by_ts = dict(zip(test_timestamps, y_pred_proba, strict=True))
-test_cutoff_ts = test_timestamps.min()
+# Map each test close's probability to the next session, when it can first be
+# executed. The timestamp lookup avoids assuming df and df_ml share row indices.
+bar_index_by_timestamp = {timestamp: i for i, timestamp in enumerate(bar_timestamps)}
+proba_by_ts = {}
+for signal_timestamp, probability in zip(test_timestamps, y_pred_proba, strict=True):
+    signal_idx = bar_index_by_timestamp[signal_timestamp]
+    if signal_idx + 1 < len(bar_timestamps):
+        proba_by_ts[bar_timestamps[signal_idx + 1]] = probability
+
+test_cutoff_ts = min(proba_by_ts)
 test_entries = entry_indices[bar_timestamps[entry_indices] >= test_cutoff_ts]
 
 ml_results = {}
 for threshold in [0.3, 0.5, 0.7]:
     results = simulate_ml_exits(
-        prices, proba_by_ts, test_entries, bar_timestamps, exit_threshold=threshold
+        prices, opens, proba_by_ts, test_entries, bar_timestamps, exit_threshold=threshold
     )
     if results:
         ml_results[f"ML (p>{threshold})"] = results
@@ -798,7 +881,8 @@ for threshold in [0.3, 0.5, 0.7]:
 # Baseline: no ML exit (just timeout)
 baseline_results = simulate_ml_exits(
     prices,
-    {},  # Empty map → no bar ever triggers an ML exit
+    opens,
+    {},  # Empty map means no bar ever triggers an ML exit
     test_entries,
     bar_timestamps,
     exit_threshold=2.0,  # Never triggers
@@ -827,15 +911,18 @@ for name, results in ml_results.items():
             "timeouts": exit_types.count("timeout"),
         }
     )
-ml_summary_df = pd.DataFrame(ml_rows)
-ml_summary_df.round(2)
+ml_summary_df = pl.DataFrame(ml_rows).with_columns(pl.exclude("config").round(2))
+ml_summary_df
 
-# %% [markdown]
-# Lowering the threshold makes the ML rule fire on more bars (more
-# `ml_exits`, fewer `timeouts`), but on this single-symbol sample the
-# mean-return and win-rate differences across thresholds and against the
-# no-signal baseline are small — consistent with the near-coin-flip AUC.
-# The ML exit earns its place as an overlay, not as a standalone policy.
+# %%
+display(
+    Markdown(
+        f"The chronological test AUC is {test_auc:.3f}. Lower thresholds fire on more bars, "
+        "while higher thresholds defer more trades to the time exit. These threshold results "
+        "are a descriptive sensitivity analysis on one test interval, not a second round of "
+        "model selection."
+    )
+)
 
 # %% [markdown]
 # ## 6. Combining Exit Strategies
@@ -873,9 +960,87 @@ class HybridExitConfig:
 
 
 # %%
+def hybrid_bar_fill(
+    open_price: float,
+    high_price: float,
+    low_price: float,
+    stop_price: float,
+    take_profit_price: float,
+    ml_exit: bool,
+    stop_type: str,
+) -> tuple[float, str] | None:
+    """Return the first executable hybrid exit under the documented priority."""
+    if open_price <= stop_price:
+        return open_price, stop_type
+    if open_price >= take_profit_price:
+        return open_price, "take_profit"
+    if ml_exit:
+        return open_price, "ml_signal"
+    if low_price <= stop_price:
+        return stop_price, stop_type
+    if high_price >= take_profit_price:
+        return take_profit_price, "take_profit"
+    return None
+
+
+# %% [markdown]
+# A single-trade helper owns the event ordering. Keeping it separate makes the
+# portfolio-level simulator a transparent application over entry timestamps.
+
+
+# %%
+def simulate_one_hybrid_exit(
+    prices: np.ndarray,
+    opens: np.ndarray,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    proba_by_ts: dict | None,
+    entry_idx: int,
+    config: HybridExitConfig,
+    bar_timestamps: np.ndarray,
+    max_holding_days: int,
+) -> dict:
+    """Simulate one trade under the hybrid event-ordering contract."""
+    window_end = min(entry_idx + max_holding_days, len(prices) - 1)
+    entry_price = prices[entry_idx]
+    highest_since_entry = entry_price
+    initial_stop_price = entry_price * (1 - config.initial_stop_pct)
+    stop_price = initial_stop_price
+    tp_price = entry_price * (1 + config.take_profit_pct)
+    exit_idx, exit_price, exit_type = window_end, prices[window_end], "timeout"
+
+    for i in range(entry_idx + 1, window_end + 1):
+        ml_exit = (
+            config.enable_ml
+            and proba_by_ts is not None
+            and ml_exit_triggered(proba_by_ts, i, config.ml_threshold, bar_timestamps)
+        )
+        is_trailing = config.enable_trailing and stop_price > initial_stop_price
+        stop_type = "trailing_stop" if is_trailing else "stop_loss"
+        fill = hybrid_bar_fill(
+            opens[i], highs[i], lows[i], stop_price, tp_price, ml_exit, stop_type
+        )
+        if fill is not None:
+            exit_idx, (exit_price, exit_type) = i, fill
+            break
+        if config.enable_trailing and highs[i] > highest_since_entry:
+            highest_since_entry = highs[i]
+            stop_price = max(stop_price, highest_since_entry * (1 - config.trail_pct))
+
+    return build_exit_result(entry_idx, exit_idx, entry_price, exit_price, exit_type)
+
+
+# %% [markdown]
+# The outer simulator applies the single-trade contract to each entry without
+# adding any alternative timing or fill behavior.
+
+
+# %%
 def simulate_hybrid_exits(
     prices: np.ndarray,
+    opens: np.ndarray,
     highs: np.ndarray,
+    lows: np.ndarray,
     proba_by_ts: dict | None,
     entry_indices: np.ndarray,
     config: HybridExitConfig,
@@ -884,38 +1049,19 @@ def simulate_hybrid_exits(
 ) -> list:
     """Simulate hybrid exit strategy combining multiple signals."""
     results = []
-
     for entry_idx in entry_indices:
-        window_end = min(entry_idx + max_holding_days, len(prices) - 1)
-        entry_price = prices[entry_idx]
-        highest_since_entry = entry_price
-        stop_price = entry_price * (1 - config.initial_stop_pct)
-        tp_price = entry_price * (1 + config.take_profit_pct)
-        exit_idx = window_end
-        exit_type = "timeout"
-
-        for i in range(entry_idx + 1, window_end + 1):
-            if config.enable_trailing and highs[i] > highest_since_entry:
-                highest_since_entry = highs[i]
-                stop_price = max(stop_price, highest_since_entry * (1 - config.trail_pct))
-
-            if prices[i] <= stop_price:
-                exit_idx = i
-                exit_type = "stop_loss"
-                break
-            if prices[i] >= tp_price:
-                exit_idx = i
-                exit_type = "take_profit"
-                break
-            if config.enable_ml and proba_by_ts is not None:
-                if ml_exit_triggered(proba_by_ts, i, config.ml_threshold, bar_timestamps):
-                    exit_idx = i
-                    exit_type = "ml_signal"
-                    break
-
-        results.append(
-            build_exit_result(entry_idx, exit_idx, entry_price, prices[exit_idx], exit_type)
+        result = simulate_one_hybrid_exit(
+            prices,
+            opens,
+            highs,
+            lows,
+            proba_by_ts,
+            entry_idx,
+            config,
+            bar_timestamps,
+            max_holding_days,
         )
+        results.append(result)
 
     return results
 
@@ -932,15 +1078,19 @@ hybrid_configs = {
 hybrid_results = {}
 for name, config in hybrid_configs.items():
     results = simulate_hybrid_exits(
-        prices, highs, proba_by_ts, test_entries, config=config, bar_timestamps=bar_timestamps
+        prices,
+        opens,
+        highs,
+        lows,
+        proba_by_ts,
+        test_entries,
+        config=config,
+        bar_timestamps=bar_timestamps,
     )
     if results:
         hybrid_results[name] = results
 
 # %%
-print("\nHybrid Exit Strategy Comparison")
-print("=" * 60)
-
 comparison_data = []
 for name, results in hybrid_results.items():
     returns = [r["return"] for r in results]
@@ -950,50 +1100,58 @@ for name, results in hybrid_results.items():
         {
             "Strategy": name,
             "Mean Return": f"{np.mean(returns) * 100:+.2f}%",
-            "Sharpe": f"{np.mean(returns) / np.std(returns) * np.sqrt(252):.2f}",
+            "Trade Return / SD": f"{np.mean(returns) / np.std(returns):.2f}",
             "Win Rate": f"{sum(1 for r in returns if r > 0) / len(returns) * 100:.1f}%",
             "Stop Losses": exit_types.count("stop_loss"),
+            "Trailing Stops": exit_types.count("trailing_stop"),
             "Take Profits": exit_types.count("take_profit"),
             "ML Exits": exit_types.count("ml_signal"),
         }
     )
 
-comparison_df = pd.DataFrame(comparison_data)
-print(comparison_df.to_markdown(index=False))
+comparison_df = pl.DataFrame(comparison_data)
+comparison_df
 
 # %%
-# Exit type breakdown
-# Pie charts need 'domain' type subplots, not 'xy'
-fig = make_subplots(
-    rows=1,
-    cols=len(hybrid_results),
-    subplot_titles=list(hybrid_results.keys()),
-    specs=[[{"type": "domain"} for _ in range(len(hybrid_results))]],
-)
-
+# Exit type breakdown as comparable shares across strategies.
 exit_type_colors = {
-    "stop_loss": "red",
-    "take_profit": "green",
-    "ml_signal": "blue",
-    "timeout": "gray",
+    "stop_loss": COLORS["negative"],
+    "trailing_stop": COLORS["amber"],
+    "take_profit": COLORS["positive"],
+    "ml_signal": COLORS["blue"],
+    "timeout": COLORS["neutral"],
 }
-
-for i, (name, results) in enumerate(hybrid_results.items(), 1):
-    exit_types = [r["exit_type"] for r in results]
-    type_counts = pd.Series(exit_types).value_counts()
-
+exit_labels = {
+    "stop_loss": "Stop Loss",
+    "trailing_stop": "Trailing Stop",
+    "take_profit": "Take Profit",
+    "ml_signal": "ML Signal",
+    "timeout": "Timeout",
+}
+exit_order = ["stop_loss", "trailing_stop", "take_profit", "ml_signal", "timeout"]
+fig = go.Figure()
+for exit_type in exit_order:
+    shares = []
+    for results in hybrid_results.values():
+        exit_types = [result["exit_type"] for result in results]
+        shares.append(exit_types.count(exit_type) / len(exit_types))
     fig.add_trace(
-        go.Pie(
-            labels=type_counts.index,
-            values=type_counts.values,
-            marker_colors=[exit_type_colors.get(t, "gray") for t in type_counts.index],
-            showlegend=(i == 1),
+        go.Bar(
+            x=list(hybrid_results),
+            y=shares,
+            name=exit_labels[exit_type],
+            marker_color=exit_type_colors[exit_type],
         ),
-        row=1,
-        col=i,
     )
 
-fig.update_layout(title="Exit Type Distribution by Strategy", height=350)
+fig.update_layout(
+    title="Exit composition shifts as overlays are added",
+    xaxis_title="Exit policy",
+    yaxis_title="Share of trades",
+    yaxis_tickformat=".0%",
+    barmode="stack",
+    height=400,
+)
 fig.show()
 
 # %% [markdown]
@@ -1024,11 +1182,11 @@ fig.show()
 #
 # RuleChain evaluates rules in order, first to trigger wins
 
-basic_exit = RuleChain(
+basic_exit = risk.RuleChain(
     rules=[
-        StopLoss(pct=0.02),  # 2% stop loss
-        TakeProfit(pct=0.05),  # 5% take profit
-        TimeExit(max_bars=20),  # Exit after 20 bars if neither triggered
+        risk.StopLoss(pct=0.02),  # 2% stop loss
+        risk.TakeProfit(pct=0.05),  # 5% take profit
+        risk.TimeExit(max_bars=20),  # Exit after 20 bars if neither triggered
     ]
 )
 
@@ -1040,12 +1198,12 @@ print(f"  Rules: {[type(r).__name__ for r in basic_exit.rules]}")
 #
 # Trailing stop locks in profits as position moves favorably
 
-trailing_exit = RuleChain(
+trailing_exit = risk.RuleChain(
     rules=[
-        StopLoss(pct=0.03),  # Initial 3% stop (safety net)
-        TrailingStop(pct=0.015),  # Trail 1.5% below peak
-        TakeProfit(pct=0.10),  # Take 10% profit
-        TimeExit(max_bars=50),  # Max 50 bar hold
+        risk.StopLoss(pct=0.03),  # Initial 3% stop (safety net)
+        risk.TrailingStop(pct=0.015),  # Trail 1.5% below peak
+        risk.TakeProfit(pct=0.10),  # Take 10% profit
+        risk.TimeExit(max_bars=50),  # Max 50 bar hold
     ]
 )
 
@@ -1059,19 +1217,19 @@ print(f"  Rules: {[type(r).__name__ for r in trailing_exit.rules]}")
 # AllOf: Exit if ALL conditions are true (AND logic)
 
 # AnyOf example: Exit if stop OR profit target hit
-any_of_exit = AnyOf(
+any_of_exit = risk.AnyOf(
     rules=[
-        StopLoss(pct=0.02),
-        TakeProfit(pct=0.05),
+        risk.StopLoss(pct=0.02),
+        risk.TakeProfit(pct=0.05),
     ]
 )
 
 # AllOf example: Exit only if BOTH time exceeded AND trailing triggered
 # (Useful for: "after 10 bars, start trailing")
-all_of_exit = AllOf(
+all_of_exit = risk.AllOf(
     rules=[
-        TimeExit(max_bars=10),  # Must be past 10 bars
-        TrailingStop(pct=0.02),  # AND trailing triggered
+        risk.TimeExit(max_bars=10),  # Must be past 10 bars
+        risk.TrailingStop(pct=0.02),  # AND trailing triggered
     ]
 )
 
@@ -1084,11 +1242,11 @@ print(f"  AllOf (AND): {[type(r).__name__ for r in all_of_exit.rules]}")
 #
 # VolatilityStop uses ATR for adaptive stop levels
 
-vol_exit = RuleChain(
+vol_exit = risk.RuleChain(
     rules=[
-        VolatilityStop(multiplier=2.0),  # Stop = entry - 2*ATR
-        TakeProfit(pct=0.08),  # 8% take profit
-        TimeExit(max_bars=30),
+        risk.VolatilityStop(multiplier=2.0),  # Stop = entry - 2*ATR
+        risk.TakeProfit(pct=0.08),  # 8% take profit
+        risk.TimeExit(max_bars=30),
     ]
 )
 
@@ -1101,17 +1259,17 @@ print(f"  Rules: {[type(r).__name__ for r in vol_exit.rules]}")
 # This rule uses a schedule: list of (return_threshold, trail_pct) tuples.
 # The trail percentage decreases at higher profit levels, locking in more gains.
 
-tightening_exit = RuleChain(
+tightening_exit = risk.RuleChain(
     rules=[
-        StopLoss(pct=0.03),  # 3% initial stop
-        TighteningTrailingStop(
+        risk.StopLoss(pct=0.03),  # 3% initial stop
+        risk.TighteningTrailingStop(
             schedule=[
                 (0.00, 0.03),  # At 0% profit: 3% trail
                 (0.05, 0.02),  # At 5%+ profit: 2% trail
                 (0.10, 0.01),  # At 10%+ profit: 1% trail
             ]
         ),
-        TakeProfit(pct=0.15),  # 15% take profit
+        risk.TakeProfit(pct=0.15),  # 15% take profit
     ]
 )
 
@@ -1139,11 +1297,11 @@ def create_position_state(
     high_water_mark: float | None = None,
     bars_held: int = 10,
     context: dict | None = None,
-) -> PositionState:
+) -> risk.PositionState:
     """Create a PositionState for rule evaluation."""
     hwm = high_water_mark or max(entry_price, current_price)
     lwm = min(entry_price, current_price)
-    return PositionState(
+    return risk.PositionState(
         asset="TEST",
         side="long",
         entry_price=entry_price,
@@ -1169,50 +1327,53 @@ def create_position_state(
 # %%
 def should_exit(result) -> bool:
     """Check if result indicates an exit action."""
-    return result.action != ActionType.HOLD
+    return result.action != risk.ActionType.HOLD
 
+
+# %% [markdown]
+# `VolatilityStop` widens its fixed stop as ATR rises. The same current price can
+# therefore trigger an exit in a calm regime but remain inside the risk budget in
+# a volatile regime.
 
 # %%
-# Example 6: VolatilityStop and VolatilityTrailingStop evaluation
-print("VolatilityStop: ATR-Based Fixed Stop")
-print("=" * 60)
-
-stop_2x = VolatilityStop(multiplier=2.0, atr_key="atr")
+# Use current-ATR mode so each independent scenario evaluates its displayed ATR.
+# Production code can instead keep entry ATR in one rule instance per position.
+stop_2x = risk.VolatilityStop(multiplier=2.0, atr_key="atr", use_entry_atr=False)
 
 scenarios = [
     ("Low volatility (ATR=1.0)", 1.0, 98.0),
     ("Normal volatility (ATR=2.0)", 2.0, 98.0),
     ("High volatility (ATR=4.0)", 4.0, 98.0),
 ]
-
-print("\nEntry: $100.00, Stop multiplier: 2x ATR")
-print(f"{'Scenario':<30} {'ATR':>8} {'Stop Level':>12} {'Current':>10} {'Exit?':>8}")
-print("-" * 70)
-
+volatility_stop_rows = []
 for name, atr_val, current_price in scenarios:
     state = create_position_state(
         entry_price=100.0, current_price=current_price, context={"atr": atr_val}
     )
     result = stop_2x.evaluate(state)
     stop_level = 100.0 - (atr_val * 2.0)
-    exit_flag = "YES" if should_exit(result) else "No"
-    print(f"{name:<30} {atr_val:>8.1f} ${stop_level:>10.2f} ${current_price:>9.2f} {exit_flag:>8}")
+    volatility_stop_rows.append(
+        {
+            "Scenario": name,
+            "ATR": atr_val,
+            "Stop Level ($)": stop_level,
+            "Current ($)": current_price,
+            "Decision": "Exit" if should_exit(result) else "Hold",
+        }
+    )
+pl.DataFrame(volatility_stop_rows)
+
+# %% [markdown]
+# `VolatilityTrailingStop` follows the high-water mark while preserving an
+# ATR-scaled cushion. The path display makes the ratchet and eventual exit visible.
 
 # %%
-# VolatilityTrailingStop: trail rises with high-water mark
-print("\nVolatilityTrailingStop: ATR-Based Trailing Stop")
-print("=" * 60)
-
-trail_rule = VolatilityTrailingStop(multiplier=2.0, atr_key="atr")
+trail_rule = risk.VolatilityTrailingStop(multiplier=2.0, atr_key="atr")
 entry_price = 100.0
 sim_prices = [100, 102, 104, 106, 105, 103, 101, 99]
 atr_val = 2.0
-
-print(f"\nEntry: ${entry_price:.2f}, Trail: 2x ATR = ${atr_val * 2:.2f}")
-print(f"{'Bar':>5} {'Price':>10} {'HWM':>10} {'Trail Stop':>12} {'Exit?':>8}")
-print("-" * 50)
-
 hwm = entry_price
+trailing_stop_rows = []
 for i, price in enumerate(sim_prices):
     hwm = max(hwm, price)
     trail_stop = hwm - (atr_val * 2)
@@ -1223,68 +1384,75 @@ for i, price in enumerate(sim_prices):
         context={"atr": atr_val},
     )
     result = trail_rule.evaluate(state)
-    exit_flag = "EXIT" if should_exit(result) else "-"
-    print(f"{i:>5} ${price:>9.2f} ${hwm:>9.2f} ${trail_stop:>11.2f} {exit_flag:>8}")
+    trailing_stop_rows.append(
+        {
+            "Bar": i,
+            "Price ($)": price,
+            "High-Water Mark ($)": hwm,
+            "Trail Stop ($)": trail_stop,
+            "Decision": "Exit" if should_exit(result) else "Hold",
+        }
+    )
+pl.DataFrame(trailing_stop_rows)
+
+# %% [markdown]
+# `SignalExit` maps the signed model signal to a discrete exit decision. Values
+# below the negative threshold trigger an exit for the long position.
 
 # %%
-# Example 7: SignalExit — ML-driven exit via context signal
-print("\nSignalExit: ML-Driven Exit")
-print("=" * 60)
-
-signal_rule = SignalExit(signal_name="exit_signal", threshold=0.3)
-
-print("\nLONG Position: Exits when exit_signal < -threshold")
-print(f"{'Signal Value':>15} {'Exit?':>10} {'Reason':>30}")
-print("-" * 60)
-
+signal_rule = risk.SignalExit(signal_name="exit_signal", threshold=0.3)
+signal_exit_rows = []
 for signal_value in [0.5, 0.0, -0.2, -0.4, -0.8]:
     state = create_position_state(context={"exit_signal": signal_value})
     result = signal_rule.evaluate(state)
-    exit_flag = "EXIT" if should_exit(result) else "Hold"
-    reason = result.reason if should_exit(result) else "-"
-    print(f"{signal_value:>15.2f} {exit_flag:>10} {reason:>30}")
+    signal_exit_rows.append(
+        {
+            "Signal": signal_value,
+            "Decision": "Exit" if should_exit(result) else "Hold",
+            "Reason": result.reason if should_exit(result) else None,
+        }
+    )
+pl.DataFrame(signal_exit_rows)
 
 # %% [markdown]
 # ### MAE/MFE-Calibrated Exit Rules
 #
-# Use historical Maximum Adverse Excursion (MAE) and Maximum Favorable
-# Excursion (MFE) to set data-driven stop and target levels. The
-# `MAEMFEAnalyzer` from ml4t-backtest computes optimal exit thresholds
-# from a set of `Trade` objects.
+# Use the realized SPY paths from the representative ATR x2.0 trades to set
+# data-driven stop and target levels. The `MAEMFEAnalyzer` from
+# ml4t-backtest computes thresholds from the resulting `Trade` objects.
 
 # %%
-# Create synthetic trades for MAE/MFE analysis
-n_mae_trades = 100
-
 trades_list = []
 trades_data = []
-
-for i in range(n_mae_trades):
-    entry_p = 100.0
-    qty = 100
-    returns_path = np.random.normal(0.001, 0.02, 20)
-    price_path = entry_p * np.cumprod(1 + returns_path)
-
-    exit_p = float(price_path[-1])
-    mae = (entry_p - price_path.min()) / entry_p
-    mfe = (price_path.max() - entry_p) / entry_p
-    pnl = (exit_p - entry_p) * qty
-
+for result in atr_results["ATR×2.0"]:
+    entry_idx = result["entry_idx"]
+    exit_idx = result["exit_idx"]
+    entry_price = result["entry_price"]
+    exit_price = result["exit_price"]
+    # A barrier exit can occur before the exit bar's later high or low. Include
+    # full OHLC only through the preceding bar, then add the observed fill.
+    full_bar_end = exit_idx + 1 if result["exit_type"] == "timeout" else exit_idx
+    path_lows = lows[entry_idx + 1 : full_bar_end]
+    path_highs = highs[entry_idx + 1 : full_bar_end]
+    adverse_prices = np.append(path_lows, exit_price)
+    favorable_prices = np.append(path_highs, exit_price)
+    mae = min(float(adverse_prices.min() / entry_price - 1), 0.0)
+    mfe = max(float(favorable_prices.max() / entry_price - 1), 0.0)
     trade = Trade(
-        symbol="TEST",
-        entry_time=datetime(2023, 1, 1) + timedelta(days=i),
-        exit_time=datetime(2023, 1, 1) + timedelta(days=i, hours=20),
-        entry_price=entry_p,
-        exit_price=exit_p,
-        quantity=qty,
-        pnl=pnl,
-        pnl_percent=(exit_p - entry_p) / entry_p,
-        bars_held=20,
+        symbol=SYMBOL,
+        entry_time=pd.Timestamp(bar_timestamps[entry_idx]).to_pydatetime(),
+        exit_time=pd.Timestamp(bar_timestamps[exit_idx]).to_pydatetime(),
+        entry_price=entry_price,
+        exit_price=exit_price,
+        quantity=1,
+        pnl=exit_price - entry_price,
+        pnl_percent=result["return"],
+        bars_held=result["holding_days"],
         mfe=mfe,
-        mae=-mae,
+        mae=mae,
     )
     trades_list.append(trade)
-    trades_data.append({"pnl_pct": (exit_p - entry_p) / entry_p, "mae": mae, "mfe": mfe})
+    trades_data.append({"pnl_pct": result["return"], "mae": abs(mae), "mfe": mfe})
 
 mae_df = pl.DataFrame(trades_data)
 print(f"Trades: {len(mae_df)}, Win rate: {(mae_df['pnl_pct'] > 0).mean():.1%}")
@@ -1297,18 +1465,23 @@ stop_val = levels["stop_loss"]
 target_val = levels["take_profit"]
 
 print(f"Edge Ratio: {analyzer.edge_ratio:.2f}")
-print(f"90th percentile |MAE| (stop): {stop_val:.2%}")
+print(f"90th percentile |MAE| (stop): {abs(stop_val):.2%}")
 print(f"75th percentile MFE (target): {target_val:.2%}")
 
 # Assemble calibrated exit strategy
-calibrated_exit = RuleChain(
+calibrated_exit = risk.RuleChain(
     rules=[
-        StopLoss(pct=abs(stop_val)),
-        TakeProfit(pct=target_val),
-        TimeExit(max_bars=30),
+        risk.StopLoss(pct=abs(stop_val)),
+        risk.TakeProfit(pct=target_val),
+        risk.TimeExit(max_bars=30),
     ]
 )
 print(f"\nCalibrated rules: SL={abs(stop_val):.2%}, TP={target_val:.2%}, max 30 bars")
+
+# %% [markdown]
+# These thresholds are in-sample calibration candidates, not an out-of-sample
+# performance claim. A strategy would freeze them on a training interval before
+# evaluating the resulting exit policy on later trades.
 
 # %% [markdown]
 # ### Integrating with ml4t-backtest Engine
@@ -1491,7 +1664,11 @@ outcome_pct = outcome_summary.div(outcome_summary.sum(axis=1), axis=0) * 100
 
 fig = go.Figure()
 
-for col, color in zip(["TP Hit", "Timeout", "SL Hit"], ["green", "gray", "red"], strict=False):
+for col, color in zip(
+    ["TP Hit", "Timeout", "SL Hit"],
+    [COLORS["positive"], COLORS["neutral"], COLORS["negative"]],
+    strict=True,
+):
     fig.add_trace(
         go.Bar(
             x=outcome_pct.index.astype(str),
@@ -1502,7 +1679,7 @@ for col, color in zip(["TP Hit", "Timeout", "SL Hit"], ["green", "gray", "red"],
     )
 
 fig.update_layout(
-    title="Barrier Outcomes by Signal Strength",
+    title="Barrier outcomes reveal how signal strength changes exit paths",
     xaxis_title="Signal Quintile",
     yaxis_title="Percentage",
     barmode="stack",
@@ -1530,7 +1707,7 @@ fig.show()
 # | **Fixed SL/TP** | Simple, predictable | Ignores volatility |
 # | **Trailing Stop** | Locks in profits | May exit too early in trends |
 # | **ATR-Based** | Adapts to volatility | Requires calibration |
-# | **ML-Based** | Can flag regime changes | Needs training data; AUC marginal |
+# | **ML-Based** | Can flag regime changes | Requires purged temporal validation |
 # | **Hybrid** | Combines signals | Inherits the most aggressive rule |
 #
 # 1. **Tighter stops reduce per-trade loss but increase whipsaws;** wider
@@ -1538,13 +1715,12 @@ fig.show()
 #    timeframe and the asset's volatility rather than a generic preference.
 # 2. **ATR-based stops adapt to volatility without re-tuning** a fixed
 #    percentage; this is the cheapest robustness upgrade over fixed stops.
-# 3. **The ML exit signal is marginal on this single-symbol sample.** AUC
-#    sits near coin-flip and the learned exit's lift over a pure time-exit
-#    is small; ML exits are best deployed as an overlay on hard stops, not
-#    as the primary exit. Crucially, exit probabilities must be aligned to
-#    price bars by *timestamp* — `df_ml` drops warm-up and forward-target
-#    rows, so a positional index would silently evaluate exits on the wrong
-#    dates.
+# 3. **ML exits require a stricter timing contract than fixed rules.** The
+#    five-day forward label requires a five-row purge at the train/test
+#    boundary. Each close-based probability is keyed by timestamp and delayed
+#    to the next session's open; a positional or same-close mapping would
+#    silently evaluate exits on the wrong date. Treat the model as an overlay
+#    on explicit stops unless its chronological test results justify more.
 #
 # **Next**: [`03_position_sizing_mae_mfe`](03_position_sizing_mae_mfe.ipynb)
 # connects these exit policies to position sizing and excursion-based

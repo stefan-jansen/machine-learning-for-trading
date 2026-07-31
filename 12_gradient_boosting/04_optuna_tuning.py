@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -387,7 +387,7 @@ comparison
 # rank differences. On the **sealed 2024–2025 holdout** — never seen during the
 # search — both models are positive and the tuned one-tree model (test IC 0.103)
 # edges the default 100-tree model (0.073). That a one-tree model generalizes at
-# all is the cautionary note of Box 12.2 of §12.4: a single noisy validation
+# all is the cautionary note of Box 12.3 of §12.4: a single noisy validation
 # period barely constrains the search, so the "win" is fragile. Section 10 checks
 # whether averaging the objective across walk-forward folds selects sturdier
 # hyperparameters.
@@ -620,7 +620,7 @@ tuning_comparison
 #    near-constant predictions on two folds (undefined IC). Walk-forward averaging
 #    penalizes those degenerate folds (best mean val IC −0.082) and still selects
 #    hyperparameters that generalize marginally better, but it cannot manufacture
-#    signal where the target is this noisy — the textbook Box 12.2 caution.
+#    signal where the target is this noisy — the textbook Box 12.3 caution.
 # 4. **50–100 trials suffice for GBMs** — TPE converges quickly; beyond this
 #    range, marginal gains are outweighed by validation overfitting risk.
 #

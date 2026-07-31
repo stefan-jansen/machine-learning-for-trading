@@ -53,9 +53,9 @@
 # | Element                   | This notebook                                                                                |
 # |---------------------------|----------------------------------------------------------------------------------------------|
 # | Unit                      | ETF-date row from the ETF modeling panel                                                     |
-# | Treatment                 | `skip_recent_6_1` — 6/1 momentum factor (continuous)                                          |
-# | Outcome                   | `fwd_ret_21d` — 21-day forward return                                                         |
-# | Controls (W in EconML)    | `vol_21d`, `vol_126d`, `regime`, `yield_curve_slope` — all backward-looking, pre-treatment    |
+# | Treatment                 | `skip_recent_6_1` - 6/1 momentum factor (continuous)                                          |
+# | Outcome                   | `fwd_ret_21d` - 21-day forward return                                                         |
+# | Controls (W in EconML)    | `vol_21d`, `vol_126d`, `regime`, `yield_curve_slope` - all backward-looking, pre-treatment    |
 # | Effect modifiers (X)      | None in this notebook; constant ATE target. See `04_dml_crypto_regime` for the X-slot example |
 # | Identification assumption | Selection on observables given the four controls; sufficient pre-treatment information       |
 # | Main failure mode         | Unobserved confounding (sentiment / macro shocks), nuisance-model misspecification, panel-time leakage if CV is not date-grouped |
@@ -65,7 +65,7 @@
 # ## Setup
 
 # %%
-"""Double Machine Learning for Momentum Causal Effect — estimate causal effect of momentum on forward returns."""
+"""Double Machine Learning for Momentum Causal Effect - estimate causal effect of momentum on forward returns."""
 
 import warnings
 
@@ -119,12 +119,12 @@ print(f"Seed: {SEED}")
 #
 # We use `load_modeling_dataset()` to load pre-computed features (Ch8),
 # temporal features (Ch9), and labels, joined and ready for analysis.
-# Real-data only — no synthetic fallback. If the modeling dataset is missing,
+# Real-data only - no synthetic fallback. If the modeling dataset is missing,
 # the notebook fails loudly with a clear error rather than silently switching
 # to a synthetic substitute that would publish indistinguishable numbers.
 
 # %%
-# Real-data only — load failure is a fatal error so CI / a fresh reader
+# Real-data only - load failure is a fatal error so CI / a fresh reader
 # environment without ML4T_DATA_PATH cannot silently publish synthetic numbers.
 mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
 
@@ -191,7 +191,7 @@ mse = rss / (n - 2)
 se_iid = np.sqrt(mse / np.sum((X_naive - X_naive.mean()) ** 2))
 
 # HAC (Newey-West) standard error for autocorrelation-robust inference.
-# Bandwidth matches the 21-day forward outcome — shorter bandwidths
+# Bandwidth matches the 21-day forward outcome - shorter bandwidths
 # underestimate the variance of overlapping 21-day returns.
 HAC_LAGS = FORWARD_HORIZON
 X_with_const = sm.add_constant(df[[treatment_col]])
@@ -276,7 +276,7 @@ if not np.isnan(dml_ci_lower):
     print(f"95% CI: [{dml_ci_lower:.6f}, {dml_ci_upper:.6f}]")
 else:
     print(
-        "95% CI: unavailable (EconML inference returned NaN — "
+        "95% CI: unavailable (EconML inference returned NaN - "
         "likely numerically degenerate first-stage residualization)"
     )
 
@@ -300,7 +300,7 @@ else:
 # against the confounders before estimating the final coefficient.
 #
 # The direction of bias reveals the confounding structure. If the naive effect is
-# smaller in magnitude than the DML estimate, confounders *mask* the true effect —
+# smaller in magnitude than the DML estimate, confounders *mask* the true effect -
 # for example, high volatility reduces both momentum and returns simultaneously.
 # If the naive effect is larger, confounders *inflate* the apparent predictive power.
 #
@@ -594,11 +594,11 @@ se_inflation = se_hac / se_iid
 print("Quantitative Findings")
 print("-" * 40)
 print(
-    f"SE Inflation (HAC/IID): {se_inflation:.1%} — HAC standard errors are {se_inflation:.2f}x larger than IID"
+    f"SE Inflation (HAC/IID): {se_inflation:.1%} - HAC standard errors are {se_inflation:.2f}x larger than IID"
 )
 if dml_estimate is not None:
     direction = "overstates" if abs(naive_estimate) > abs(dml_estimate) else "understates"
-    print(f"Confounding Bias: {abs(bias_pct):.1f}% — naive estimate {direction} the DML effect")
+    print(f"Confounding Bias: {abs(bias_pct):.1f}% - naive estimate {direction} the DML effect")
     if not np.isnan(dml_ci_lower):
         print(
             f"DML Effect Size: {dml_estimate:.6f} (95% CI: [{dml_ci_lower:.6f}, {dml_ci_upper:.6f}])"
@@ -606,16 +606,16 @@ if dml_estimate is not None:
         ci_width = dml_ci_upper - dml_ci_lower
         ci_includes_zero = dml_ci_lower <= 0 <= dml_ci_upper
         print(
-            f"CI Width: {ci_width:.6f} — {'includes zero (not significant at 5%)' if ci_includes_zero else 'excludes zero (significant at 5%)'}"
+            f"CI Width: {ci_width:.6f} - {'includes zero (not significant at 5%)' if ci_includes_zero else 'excludes zero (significant at 5%)'}"
         )
     else:
         print(
-            f"DML Effect Size: {dml_estimate:.6f} (CI unavailable — EconML inference failed with custom CV)"
+            f"DML Effect Size: {dml_estimate:.6f} (CI unavailable - EconML inference failed with custom CV)"
         )
 print(f"Manual DML Effect: {manual_ate:.6f} (HAC SE: {manual_se_hac:.6f})")
 if z_score is not None:
     print(
-        f"Placebo Z-Score: {z_score:.2f} — {'distinguishable from noise' if abs(z_score) > 2 else 'not distinguishable from noise'}"
+        f"Placebo Z-Score: {z_score:.2f} - {'distinguishable from noise' if abs(z_score) > 2 else 'not distinguishable from noise'}"
     )
 if fdr is not None:
     print(f"False Discovery Rate: {fdr:.1%}")
@@ -630,10 +630,10 @@ if fdr is not None:
 #
 # 2. **HAC inference is the binding inference**. IID standard errors understate
 #    uncertainty for overlapping 21-day labels; HAC widens the CI by a factor
-#    of roughly 1.5–2.2× on this dataset.
+#    of roughly 1.5-2.2× on this dataset.
 #
 # 3. **Manual DML matches EconML conceptually but differs numerically**.
-#    The point estimate is sensitive to nuisance-model flexibility — the DML
+#    The point estimate is sensitive to nuisance-model flexibility - the DML
 #    guarantee is on Neyman orthogonality, not on numerical stability across
 #    nuisance choices.
 #
@@ -641,7 +641,12 @@ if fdr is not None:
 #    series**. Random permutation would destroy the temporal structure that
 #    makes the inference task hard in the first place.
 #
-# 5. **Naive factor research overstates predictive power**. The widely-cited
-#    momentum slope masks substantial confounding from volatility and the
-#    yield-curve regime; DML moves the estimate toward what the data actually
-#    support after controlling for both.
+# 5. **Naive factor research understates this effect, it does not overstate it**.
+#    Here the naive momentum slope (-0.038) is smaller in magnitude than the
+#    orthogonalized DML estimate (-0.054): volatility and the yield-curve regime
+#    *mask* part of the true effect rather than inflating a spurious one. Once
+#    those confounders are controlled for, the effect becomes roughly 28% more
+#    negative, so naive factor research misses part of the effect rather than
+#    overstating it. The sign of the confounding bias is an empirical result,
+#    not a rule, other treatments (for example the crypto funding premium) show
+#    the reverse pattern, where confounders inflate the apparent effect.

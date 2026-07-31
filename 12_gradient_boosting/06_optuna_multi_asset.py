@@ -23,9 +23,9 @@
 # ## Purpose
 # This notebook demonstrates two advanced HPO concepts:
 #
-# 1. **Multi-objective optimization** with NSGA-II — finding the Pareto frontier
+# 1. **Multi-objective optimization** with NSGA-II - finding the Pareto frontier
 #    of IC vs turnover, where no single "best" solution exists
-# 2. **Cross-asset hyperparameter transfer** — testing whether ETF-tuned
+# 2. **Cross-asset hyperparameter transfer** - testing whether ETF-tuned
 #    parameters generalize to crypto and futures
 #
 # ## Key Insight
@@ -46,7 +46,7 @@
 # ## 1. Setup
 
 # %%
-"""Multi-Objective HPO and Cross-Asset Transfer — demonstrate NSGA-II multi-objective tuning and hyperparameter transfer."""
+"""Multi-Objective HPO and Cross-Asset Transfer - demonstrate NSGA-II multi-objective tuning and hyperparameter transfer."""
 
 import warnings
 
@@ -223,7 +223,7 @@ print(f"Best IC: {single_study.best_value:.4f}, Turnover at best IC: {best_singl
 # %% [markdown]
 # ## 6. Multi-Objective Optimization with NSGA-II
 #
-# NSGA-II finds the Pareto frontier — the set of non-dominated solutions where
+# NSGA-II finds the Pareto frontier - the set of non-dominated solutions where
 # improving one objective necessarily harms the other.
 
 
@@ -312,9 +312,9 @@ ax.scatter(
     zorder=4,
 )
 
-ax.set_xlabel("Turnover (lower is better)")
-ax.set_ylabel("IC (higher is better)")
-ax.set_title("Pareto Frontier: IC vs Turnover Trade-off")
+ax.set_xlabel("Turnover (normalized mean |Δ prediction|, lower is better)")
+ax.set_ylabel("Validation IC (Spearman, higher is better)")
+ax.set_title("Higher IC demands higher turnover along the Pareto frontier")
 ax.legend(loc="lower right")
 plt.tight_layout()
 plt.show()
@@ -520,12 +520,14 @@ transfer_summary = pl.DataFrame(transfer_rows)
 transfer_summary
 
 # %% [markdown]
-# **Interpretation**: Transfer efficiency on this run is −20.0 % for CME
-# futures (transfer IC −0.0042, asset-specific IC 0.0211 — the transferred
-# model loses signal direction entirely). Transfer would be useful if the
-# efficiency were closer to 100 %; below ~80 % asset-specific tuning is
-# clearly worth the compute. The gap reflects the different feature
-# distributions and signal-to-noise ratios across asset classes — and is the
+# **Interpretation**: The table above quantifies the transfer gap. On CME
+# futures the ETF-tuned configuration collapses to an essentially zero
+# (slightly negative) validation IC, so its transfer efficiency - the
+# transferred IC as a percentage of the asset-specific IC - falls far below
+# the 100% break-even and even turns negative. Transfer would be useful only
+# if that efficiency were close to 100%; below roughly 80%, asset-specific
+# tuning is clearly worth the compute. The gap reflects the different feature
+# distributions and signal-to-noise ratios across asset classes, and is the
 # reason production trading systems retune per asset rather than rely on a
 # single ETF-tuned configuration.
 
@@ -552,8 +554,8 @@ if len(transfer_rows) >= 2:
     ax1.bar(x + width / 2, specific_ics, width, label="Asset-Specific", color=COLORS["amber"])
     ax1.set_xticks(x)
     ax1.set_xticklabels(asset_names, rotation=15, ha="right")
-    ax1.set_ylabel("IC")
-    ax1.set_title("IC Comparison")
+    ax1.set_ylabel("Validation IC (Spearman)")
+    ax1.set_title("ETF params transfer well only back to ETFs")
     ax1.legend(fontsize=9)
 
     # Right: transfer efficiency
@@ -562,8 +564,8 @@ if len(transfer_rows) >= 2:
     ax2.axhline(100, linestyle="--", color="gray", linewidth=0.8)
     ax2.set_xticks(x)
     ax2.set_xticklabels(asset_names, rotation=15, ha="right")
-    ax2.set_ylabel("% of Asset-Specific IC")
-    ax2.set_title("Transfer Efficiency")
+    ax2.set_ylabel("Transfer IC as % of asset-specific IC")
+    ax2.set_title("Transfer efficiency collapses off the tuned asset")
 
     plt.tight_layout()
     plt.show()
@@ -577,12 +579,13 @@ if len(transfer_rows) >= 2:
 #    choose solutions matched to their transaction cost tolerance.
 #
 # 2. **Cross-asset transfer is fragile here**: ETF-tuned hyperparameters
-#    flip the sign of the validation IC on CME futures (transfer IC −0.0042
-#    vs asset-specific IC 0.0211). Crypto is excluded outright — only 3
-#    features overlap because the ETF and crypto pipelines run different
-#    feature engineering. The lesson is the converse of "tune once, deploy
-#    everywhere": when feature distributions differ across asset classes,
-#    asset-specific tuning is mandatory, not optional.
+#    collapse to a near-zero (slightly negative) validation IC on CME
+#    futures, versus a clearly positive asset-specific IC (see the transfer
+#    table). Crypto is excluded outright: only 3 features overlap because the
+#    ETF and crypto pipelines run different feature engineering. The lesson is
+#    the converse of "tune once, deploy everywhere": when feature
+#    distributions differ across asset classes, asset-specific tuning is
+#    mandatory, not optional.
 #
 # 3. **Marginal IC has increasing turnover cost**: The Pareto frontier's
 #    curvature shows that the last few basis points of IC improvement

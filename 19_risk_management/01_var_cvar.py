@@ -18,8 +18,8 @@
 # **Docker image**: `ml4t`
 #
 # ## Purpose
-# Demonstrate VaR and CVaR computation methods—historical, parametric, Cornish-Fisher, and
-# Monte Carlo—on real ETF returns, then backtest them against realized losses, decompose
+# Demonstrate VaR and CVaR computation methods - historical, parametric, Cornish-Fisher, and
+# Monte Carlo - on real ETF returns, then backtest them against realized losses, decompose
 # diversification benefit on a multi-asset portfolio, and contrast tail risk across volatility
 # regimes. These tail measures form the foundation for risk budgeting, exposure control, and
 # regulatory reporting.
@@ -32,8 +32,8 @@
 # - Decompose tail risk into volatility regimes and contrast forecast losses
 #
 # ## Book reference
-# - Section 19.3 — Measuring the Tail: VaR and CVaR
-# - Section 19.4 — Drawdowns, Path Risk, and Time-to-Recovery (drawdown context)
+# - Section 19.3 - Measuring the Tail: VaR and CVaR
+# - Section 19.4 - Drawdowns, Path Risk, and Time-to-Recovery (drawdown context)
 #
 # ## Prerequisites
 # - Familiarity with daily return series and rolling volatility estimates
@@ -43,6 +43,7 @@
 """Value at Risk and Conditional Value at Risk on real ETF returns."""
 
 import json
+import logging
 import warnings
 
 import numpy as np
@@ -50,15 +51,18 @@ import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 from arch import arch_model
-from ml4t.diagnostic.evaluation.distribution import analyze_distribution, analyze_tails
+from IPython.display import Markdown, display
+from ml4t.diagnostic.evaluation.distribution import analyze_distribution
 from plotly.subplots import make_subplots
 from scipy import stats
 
 from data import load_etfs
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
+logging.disable(logging.INFO)
 
 # %% tags=["parameters"]
 SYMBOL = "SPY"
@@ -67,6 +71,9 @@ PORTFOLIO_SYMBOLS = ["SPY", "AGG", "GLD", "EFA", "EEM"]
 START_DATE = "2006-01-01"
 END_DATE = "2024-12-31"
 ROLLING_WINDOW = 252
+REGIME_WINDOW = 63
+REGIME_MIN_HISTORY = 252
+FORECAST_EVALUATION_START = "2020-01-02"
 N_MC_SIMULATIONS = 10_000
 
 # %%
@@ -121,7 +128,7 @@ returns = returns_spy["ret"].to_numpy()
 N_DAYS = len(returns)
 
 # %%
-summary_stats = pd.DataFrame(
+summary_stats = pl.DataFrame(
     {
         "metric": ["Mean (%)", "Std (%)", "Skewness", "Excess kurtosis"],
         SYMBOL: [
@@ -131,7 +138,7 @@ summary_stats = pd.DataFrame(
             stats.kurtosis(returns),
         ],
     }
-).round(4)
+).with_columns(pl.col(SYMBOL).round(4))
 summary_stats
 
 # %% [markdown]
@@ -186,9 +193,9 @@ def cornish_fisher_var(returns: np.ndarray, confidence: float = 0.95) -> float:
     k = stats.kurtosis(returns)
 
     alpha = 1 - confidence
-    z = stats.norm.ppf(1 - alpha)
+    z = stats.norm.ppf(alpha)
     z_cf = z + (z**2 - 1) * s / 6 + (z**3 - 3 * z) * k / 24 - (2 * z**3 - 5 * z) * s**2 / 36
-    return -(mu - z_cf * sigma)
+    return -(mu + z_cf * sigma)
 
 
 # %% [markdown]
@@ -218,10 +225,9 @@ def monte_carlo_var(
 # %% [markdown]
 # ### Method comparison
 #
-# Across confidence levels, all four methods agree on the order of magnitude but differ in
-# how aggressively they assign mass to the tail. Cornish-Fisher and Monte Carlo lift the
-# 99% VaR estimate above the Gaussian baseline because they incorporate the empirical
-# heavy tail of the SPY return distribution.
+# The methods diverge where tail-shape assumptions matter most. In particular, a truncated
+# Cornish-Fisher expansion can become unstable when empirical excess kurtosis is large, so
+# the estimate needs a coverage backtest rather than automatic preference over simpler methods.
 
 # %%
 confidence_levels = [0.90, 0.95, 0.99]
@@ -236,17 +242,16 @@ for conf in confidence_levels:
             "monte_carlo": monte_carlo_var(returns, conf) * 100,
         }
     )
-var_df = pd.DataFrame(var_results)
-var_df.round(4)
+var_df = pl.DataFrame(var_results)
 
 # %%
 fig = go.Figure()
-x = [f"{int(c * 100)}%" for c in confidence_levels]
+x = [f"{round(c * 100)}%" for c in confidence_levels]
 for method in ["historical", "parametric", "cornish_fisher", "monte_carlo"]:
     fig.add_trace(go.Bar(x=x, y=var_df[method], name=method.replace("_", " ").title()))
 fig.update_layout(
-    title=f"{SYMBOL} VaR by method and confidence level",
-    xaxis_title="Confidence level",
+    title="Tail assumptions dominate deep-confidence VaR",
+    xaxis=dict(title="Confidence level", type="category"),
     yaxis_title="VaR (% of NAV)",
     barmode="group",
     height=400,
@@ -257,7 +262,7 @@ fig.show()
 # ## 3. Conditional Value at Risk (CVaR / Expected Shortfall)
 #
 # CVaR is the average loss conditional on a VaR breach. Unlike VaR, CVaR is subadditive
-# and provides full-tail information — both properties that make it the preferred
+# and provides full-tail information - both properties that make it the preferred
 # coherent risk measure when tail severity matters more than tail frequency.
 
 # %% [markdown]
@@ -324,8 +329,7 @@ for conf in confidence_levels:
             "cvar_student_t": student_t_cvar(returns, conf) * 100,
         }
     )
-risk_df = pd.DataFrame(risk_measures)
-risk_df.round(4)
+risk_df = pl.DataFrame(risk_measures)
 
 # %%
 fig = make_subplots(rows=1, cols=2, subplot_titles=["VaR comparison", "CVaR comparison"])
@@ -336,8 +340,18 @@ fig.add_trace(go.Bar(x=x, y=risk_df["cvar_parametric"], name="CVaR Parametric"),
 fig.add_trace(go.Bar(x=x, y=risk_df["cvar_student_t"], name="CVaR Student-t"), row=1, col=2)
 fig.update_yaxes(title_text="Risk (%)", row=1, col=1)
 fig.update_yaxes(title_text="Risk (%)", row=1, col=2)
+for col in [1, 2]:
+    fig.update_xaxes(
+        title_text="Confidence level",
+        type="category",
+        tickmode="array",
+        tickvals=x,
+        ticktext=x,
+        row=1,
+        col=col,
+    )
 fig.update_layout(
-    title=f"{SYMBOL}: Value at Risk vs Conditional Value at Risk", barmode="group", height=400
+    title="CVaR reveals loss severity beyond the VaR threshold", barmode="group", height=400
 )
 fig.show()
 
@@ -351,7 +365,7 @@ fig.show()
 # ## 3.1 Cantelli Inequality: Distribution-Free Tail Bound
 #
 # The Cantelli (one-sided Chebyshev) inequality provides a worst-case tail probability
-# requiring only finite mean and variance — no distributional assumptions:
+# requiring only finite mean and variance - no distributional assumptions:
 #
 # $$P(X - \mu \geq k\sigma) \leq \frac{1}{1 + k^2}$$
 #
@@ -360,22 +374,42 @@ fig.show()
 
 # %%
 k_values = [1.0, 1.5, 2.0, 3.0]
-cantelli_df = pd.DataFrame(
+standardized_losses = (np.mean(returns) - returns) / np.std(returns)
+cantelli_df = pl.DataFrame(
     {
         "k": k_values,
-        "Cantelli upper bound": [1.0 / (1.0 + k**2) for k in k_values],
-        "Gaussian tail": [1.0 - stats.norm.cdf(k) for k in k_values],
+        "cantelli_bound": [1.0 / (1.0 + k**2) for k in k_values],
+        "gaussian_tail": [1.0 - stats.norm.cdf(k) for k in k_values],
+        "empirical_spy_tail": [np.mean(standardized_losses >= k) for k in k_values],
     }
-)
-cantelli_df["Cantelli / Gaussian"] = (
-    cantelli_df["Cantelli upper bound"] / cantelli_df["Gaussian tail"]
-)
-cantelli_df.round(4)
+).with_columns(pl.exclude("k").round(4))
 
-# %% [markdown]
-# At $k=2$, Cantelli gives a 20% tail probability vs Gaussian's 2.3%, an order of magnitude
-# more conservative. Empirical equity returns sit between the two: heavier-tailed than
-# Gaussian but never as extreme as the Cantelli worst case.
+fig = go.Figure()
+for column, label in [
+    ("cantelli_bound", "Cantelli bound"),
+    ("gaussian_tail", "Gaussian tail"),
+    ("empirical_spy_tail", "Empirical SPY tail"),
+]:
+    fig.add_trace(go.Scatter(x=k_values, y=cantelli_df[column], mode="lines+markers", name=label))
+fig.update_layout(
+    title="Cantelli remains conservative for observed SPY downside tails",
+    xaxis_title="Downside deviation from mean (standard deviations)",
+    yaxis_title="Tail probability",
+    yaxis_tickformat=".1%",
+    height=400,
+)
+fig.show()
+
+# %%
+cantelli_k2 = cantelli_df.filter(pl.col("k") == 2.0).row(0, named=True)
+display(
+    Markdown(
+        f"At $k=2$, the Cantelli bound is {cantelli_k2['cantelli_bound']:.1%}, "
+        f"compared with {cantelli_k2['gaussian_tail']:.1%} under a Gaussian model and "
+        f"{cantelli_k2['empirical_spy_tail']:.1%} in this SPY sample. The bound is "
+        "distribution-free, but its conservatism limits its use as a day-to-day forecast."
+    )
+)
 
 # %% [markdown]
 # ## 4. Distribution Analysis with ml4t-diagnostic
@@ -386,11 +420,28 @@ cantelli_df.round(4)
 
 # %%
 dist_result = analyze_distribution(returns)
-print(dist_result.summary())
-
-# %%
-tail_result = analyze_tails(returns)
-print(tail_result.summary())
+tail_analysis = dist_result.tail_analysis_result
+distribution_summary = pl.DataFrame(
+    {
+        "metric": [
+            "Jarque-Bera p-value",
+            "Shapiro-Wilk p-value",
+            "Hill tail index",
+            "Normal QQ R-squared",
+            "Student-t QQ R-squared",
+            "Recommended distribution",
+        ],
+        "value": [
+            f"{dist_result.jarque_bera_result.p_value:.4g}",
+            f"{dist_result.shapiro_wilk_result.p_value:.4g}",
+            f"{tail_analysis.hill_result.tail_index:.3f}",
+            f"{tail_analysis.qq_normal.r_squared:.3f}",
+            f"{tail_analysis.qq_t.r_squared:.3f}",
+            dist_result.recommended_distribution,
+        ],
+    }
+)
+distribution_summary
 
 # %% [markdown]
 # ## 5. VaR Backtesting
@@ -411,9 +462,9 @@ def kupiec_test(exceptions: np.ndarray, expected_rate: float) -> tuple[float, fl
     x = int(np.sum(exceptions))
     p = expected_rate
     if x == 0:
-        lr = 2 * (n * np.log(1 - p))
+        lr = -2 * n * np.log(1 - p)
     elif x == n:
-        lr = 2 * (n * np.log(p))
+        lr = -2 * n * np.log(p)
     else:
         lr = 2 * (x * np.log(x / (n * p)) + (n - x) * np.log((n - x) / (n * (1 - p))))
     return lr, 1 - stats.chi2.cdf(lr, 1)
@@ -453,13 +504,11 @@ def backtest_var(
 
     return {
         "method": method,
-        "confidence": confidence,
         "n_observations": len(exceptions),
         "n_exceptions": n_exc,
         "exception_rate": rate,
         "expected_rate": expected,
         "exception_ratio": rate / expected,
-        "kupiec_lr": lr,
         "kupiec_pvalue": p_value,
         "var_estimates": var_estimates,
         "exceptions": exceptions,
@@ -473,37 +522,48 @@ for method in ["historical", "parametric", "cornish_fisher"]:
         backtest_var(returns, window=ROLLING_WINDOW, confidence=0.95, method=method)
     )
 
-backtest_summary = pd.DataFrame(
+backtest_summary = pl.DataFrame(
     [
         {
             "method": r["method"],
-            "n_exceptions": r["n_exceptions"],
-            "n_obs": r["n_observations"],
-            "exception_rate": r["exception_rate"],
-            "expected_rate": r["expected_rate"],
-            "exception_ratio": r["exception_ratio"],
-            "kupiec_pvalue": r["kupiec_pvalue"],
-            "model_valid": r["kupiec_pvalue"] > 0.05,
+            "exceptions": r["n_exceptions"],
+            "rate_pct": r["exception_rate"] * 100,
+            "ratio": r["exception_ratio"],
+            "kupiec_p": r["kupiec_pvalue"],
+            "reject_5pct": bool(r["kupiec_pvalue"] < 0.05),
         }
         for r in backtest_results
     ]
+).with_columns(
+    pl.col("rate_pct").round(4),
+    pl.col("ratio").round(4),
+    pl.col("kupiec_p").round(4),
 )
-backtest_summary.round(4)
+backtest_summary
 
 # %% [markdown]
-# Whichever method produces the exception ratio closest to 1.0 with the
-# highest Kupiec p-value is the best calibrated risk model on this
-# sample. Historical VaR is best calibrated, with exception ratio
-# 1.11 and Kupiec p ≈ 0.10 — the only method whose 95% tail rate is not
-# rejected at conventional levels. Parametric VaR underforecasts tail
-# losses (exception ratio 1.17, Kupiec p ≈ 0.012). Cornish-Fisher is
-# destabilised by the excess kurtosis of equity returns: rather than
-# stabilising the tail, the skew/kurtosis adjustment over-tightens the
-# quantile so the model breaches its budget 45% more often than expected
-# (exception ratio 1.45, Kupiec p ≈ 0).
+# The exception ratio measures distance from the configured coverage target; the Kupiec test
+# asks whether that distance is statistically distinguishable from correct unconditional
+# coverage. Failure to reject is evidence about coverage, not proof that a model is valid.
 
 # %%
-best_result = max(backtest_results, key=lambda r: r["kupiec_pvalue"])
+best_result = min(backtest_results, key=lambda r: abs(r["exception_ratio"] - 1))
+backtest_by_method = {result["method"]: result for result in backtest_results}
+historical_result = backtest_by_method["historical"]
+parametric_result = backtest_by_method["parametric"]
+cornish_fisher_result = backtest_by_method["cornish_fisher"]
+display(
+    Markdown(
+        f"Historical VaR has an exception ratio of {historical_result['exception_ratio']:.2f} "
+        f"with Kupiec $p={historical_result['kupiec_pvalue']:.3f}$. Parametric and "
+        f"Cornish-Fisher VaR produce ratios of {parametric_result['exception_ratio']:.2f} "
+        f"and {cornish_fisher_result['exception_ratio']:.2f}; their Kupiec p-values are "
+        f"{parametric_result['kupiec_pvalue']:.3f} and "
+        f"{cornish_fisher_result['kupiec_pvalue']:.3f}."
+    )
+)
+
+# %%
 test_dates = dates[ROLLING_WINDOW:]
 test_returns = returns[ROLLING_WINDOW:]
 
@@ -514,7 +574,7 @@ fig.add_trace(
         y=test_returns * 100,
         mode="lines",
         name="Returns",
-        line=dict(color="blue", width=1),
+        line=dict(color=COLORS["neutral"], width=1),
     )
 )
 fig.add_trace(
@@ -523,7 +583,7 @@ fig.add_trace(
         y=-best_result["var_estimates"] * 100,
         mode="lines",
         name="VaR (95%)",
-        line=dict(color="red", dash="dash"),
+        line=dict(color=COLORS["blue"], dash="dash"),
     )
 )
 mask = best_result["exceptions"]
@@ -533,11 +593,11 @@ fig.add_trace(
         y=test_returns[mask] * 100,
         mode="markers",
         name="VaR exceptions",
-        marker=dict(color="red", size=6, symbol="x"),
+        marker=dict(color=COLORS["negative"], size=6, symbol="x"),
     )
 )
 fig.update_layout(
-    title=f"{SYMBOL} VaR backtest — best calibrated method: {best_result['method']}",
+    title=f"{best_result['method'].title()} VaR is closest to its exception budget",
     xaxis_title="Date",
     yaxis_title="Return (%)",
     height=500,
@@ -557,7 +617,7 @@ rolling_var = np.array(rolling_var)
 rolling_cvar = np.array(rolling_cvar)
 rolling_dates = dates[ROLLING_WINDOW:]
 
-rolling_summary = pd.DataFrame(
+rolling_summary = pl.DataFrame(
     {
         "metric": ["Mean VaR(95%)", "Mean CVaR(95%)", "Mean CVaR/VaR ratio"],
         "value": [
@@ -575,14 +635,30 @@ fig = make_subplots(
 )
 fig.add_trace(
     go.Scatter(
-        x=rolling_dates, y=rolling_var * 100, mode="lines", name="VaR 95%", line=dict(color="blue")
+        x=rolling_dates,
+        y=rolling_var * 100,
+        mode="lines",
+        name="VaR 95%",
+        line=dict(color=COLORS["blue"]),
     ),
     row=1,
     col=1,
 )
+_ = fig
+
+# %% [markdown]
+# Both series use a trailing 252-trading-day window of daily, unannualized returns. The lower
+# panel normalizes expected shortfall by VaR to show changes in tail severity that are not
+# explained by a larger loss threshold alone.
+
+# %%
 fig.add_trace(
     go.Scatter(
-        x=rolling_dates, y=rolling_cvar * 100, mode="lines", name="CVaR 95%", line=dict(color="red")
+        x=rolling_dates,
+        y=rolling_cvar * 100,
+        mode="lines",
+        name="CVaR 95%",
+        line=dict(color=COLORS["negative"]),
     ),
     row=1,
     col=1,
@@ -593,35 +669,61 @@ fig.add_trace(
         y=rolling_cvar / rolling_var,
         mode="lines",
         name="Ratio",
-        line=dict(color="purple"),
+        line=dict(color=COLORS["copper"]),
     ),
     row=2,
     col=1,
 )
 fig.update_yaxes(title_text="Risk (%)", row=1, col=1)
 fig.update_yaxes(title_text="CVaR / VaR", row=2, col=1)
-fig.update_layout(title=f"{SYMBOL}: rolling tail risk ({ROLLING_WINDOW}-day window)", height=600)
+fig.update_layout(
+    title=(
+        "Tail severity remains above the loss threshold"
+        "<br><sup>252-trading-day trailing window; daily, unannualized returns</sup>"
+    ),
+    height=600,
+)
 fig.show()
 
 # %% [markdown]
 # ## 6.1 Regime-Conditional VaR and CVaR
 #
 # Unconditional VaR averages over regimes and masks the tail amplification that occurs
-# during high-volatility periods. We bucket trading days by trailing 63-day realized
-# volatility (terciles) and recompute VaR/CVaR within each regime.
+# during high-volatility periods. Each day uses prior-close 63-trading-day daily volatility
+# and expanding point-in-time tercile thresholds available at that time. The same-day return
+# never defines its own regime.
 
 # %%
-returns_series = pd.Series(returns, index=pd.DatetimeIndex(dates))
-rolling_vol_series = returns_series.rolling(63).std().dropna()
-rolling_vol = rolling_vol_series.to_numpy()
-vol_dates = rolling_vol_series.index
-vol_returns = returns_series.loc[vol_dates].to_numpy()
-
-vol_33 = np.percentile(rolling_vol, 33)
-vol_67 = np.percentile(rolling_vol, 67)
-regimes = np.where(
-    rolling_vol <= vol_33, "Low Vol", np.where(rolling_vol <= vol_67, "Mid Vol", "High Vol")
+regime_frame = returns_spy.with_columns(
+    rolling_vol=pl.col("ret").rolling_std(window_size=REGIME_WINDOW).shift(1)
 )
+rolling_vol = regime_frame["rolling_vol"].to_numpy()
+low_threshold = np.full(len(rolling_vol), np.nan)
+high_threshold = np.full(len(rolling_vol), np.nan)
+regimes = np.full(len(rolling_vol), None, dtype=object)
+
+# %% [markdown]
+# At each date, the expanding thresholds use only lagged volatility observations already
+# available by that morning. The minimum history avoids unstable early-sample terciles.
+
+# %%
+for i, current_vol in enumerate(rolling_vol):
+    available_history = rolling_vol[: i + 1]
+    available_history = available_history[np.isfinite(available_history)]
+    if np.isfinite(current_vol) and len(available_history) >= REGIME_MIN_HISTORY:
+        low_threshold[i], high_threshold[i] = np.quantile(available_history, [0.33, 0.67])
+        regimes[i] = (
+            "Low Vol"
+            if current_vol <= low_threshold[i]
+            else "Mid Vol"
+            if current_vol <= high_threshold[i]
+            else "High Vol"
+        )
+
+valid_regimes = np.array([regime is not None for regime in regimes])
+vol_dates = dates[valid_regimes]
+vol_returns = returns[valid_regimes]
+regimes = regimes[valid_regimes]
 
 regime_rows = []
 regime_stats = {}
@@ -640,13 +742,12 @@ for regime in ["Low Vol", "Mid Vol", "High Vol"]:
             "cvar_var_ratio": cvar_val / var_val,
         }
     )
-regime_df = pd.DataFrame(regime_rows)
-regime_df.round(3)
+regime_df = pl.DataFrame(regime_rows).with_columns(pl.exclude("regime").round(3))
 
 # %%
 fig = make_subplots(rows=1, cols=2, subplot_titles=["VaR by regime", "CVaR by regime"])
 regime_names = list(regime_stats.keys())
-colors = ["#2ecc71", "#f39c12", "#e74c3c"]
+colors = [COLORS["positive"], COLORS["amber"], COLORS["negative"]]
 for col_i, metric in enumerate(["var", "cvar"], 1):
     vals = [regime_stats[r][metric] for r in regime_names]
     fig.add_trace(
@@ -655,23 +756,32 @@ for col_i, metric in enumerate(["var", "cvar"], 1):
         col=col_i,
     )
     fig.update_yaxes(title_text=f"{metric.upper()} (%)", row=1, col=col_i)
-fig.update_layout(title=f"{SYMBOL}: tail risk amplification across volatility regimes", height=400)
+fig.update_layout(
+    title=(
+        "High-volatility states amplify SPY tail losses"
+        "<br><sup>Prior-close 63-trading-day volatility; expanding point-in-time terciles</sup>"
+    ),
+    height=400,
+)
 fig.show()
 
-# %% [markdown]
-# Both VaR and CVaR rise sharply from the low- to high-volatility regime
-# — CVaR climbs from $1.63\%$ in Low Vol to $4.33\%$ in High Vol, a
-# 2.7× amplification — and the CVaR/VaR ratio also expands from
-# $1.42$ to $1.58$. High-volatility days bring not just larger
-# expected losses but a fatter conditional tail. Position-sizing rules
-# that scale inversely to conditional CVaR react to this regime shift,
-# while controls calibrated to unconditional VaR can underprovision risk
-# capital just when it is most needed.
+# %%
+low_vol_stats = regime_stats["Low Vol"]
+high_vol_stats = regime_stats["High Vol"]
+display(
+    Markdown(
+        f"CVaR rises from {low_vol_stats['cvar']:.2f}% in the low-volatility state to "
+        f"{high_vol_stats['cvar']:.2f}% in the high-volatility state, a "
+        f"{high_vol_stats['cvar'] / low_vol_stats['cvar']:.1f}x increase. Because each "
+        "label is available before the return it classifies, a risk control can use this "
+        "state without same-bar look-ahead."
+    )
+)
 
 # %% [markdown]
 # ## 6.2 Drawdown depth and time-to-recovery
 #
-# VaR and CVaR are point-loss measures; drawdowns capture *path* risk — how deep the
+# VaR and CVaR are point-loss measures; drawdowns capture *path* risk - how deep the
 # losses go and how long the recovery takes. For the same underlying return series,
 # drawdowns and tail measures stress different aspects of the same distribution.
 
@@ -692,7 +802,7 @@ peak_idx = int(np.argmax(wealth[: max_dd_idx + 1]))
 recovery_offset = np.where(wealth[max_dd_idx:] >= peak[max_dd_idx])[0]
 recovery_idx = int(max_dd_idx + recovery_offset[0]) if recovery_offset.size else None
 
-drawdown_summary = pd.DataFrame(
+drawdown_summary = pl.DataFrame(
     {
         "metric": [
             "Max drawdown",
@@ -709,8 +819,8 @@ drawdown_summary = pd.DataFrame(
             str(pd.Timestamp(dates[recovery_idx]).date())
             if recovery_idx is not None
             else "not recovered in sample",
-            max_dd_idx - peak_idx,
-            (recovery_idx - max_dd_idx) if recovery_idx is not None else None,
+            str(max_dd_idx - peak_idx),
+            str(recovery_idx - max_dd_idx) if recovery_idx is not None else "not recovered",
         ],
     }
 )
@@ -718,15 +828,21 @@ drawdown_summary
 
 # %%
 fig = make_subplots(
-    rows=2, cols=1, shared_xaxes=True, subplot_titles=[f"{SYMBOL} cumulative return", "Drawdown"]
+    rows=2, cols=1, shared_xaxes=True, subplot_titles=[f"{SYMBOL} growth of $1", "Drawdown"]
 )
 fig.add_trace(
-    go.Scatter(x=dates, y=wealth, mode="lines", name="Wealth", line=dict(color="blue")),
+    go.Scatter(x=dates, y=wealth, mode="lines", name="Wealth", line=dict(color=COLORS["blue"])),
     row=1,
     col=1,
 )
 fig.add_trace(
-    go.Scatter(x=dates, y=peak, mode="lines", name="Peak", line=dict(color="black", dash="dash")),
+    go.Scatter(
+        x=dates,
+        y=peak,
+        mode="lines",
+        name="Peak",
+        line=dict(color=COLORS["neutral"], dash="dash"),
+    ),
     row=1,
     col=1,
 )
@@ -737,51 +853,73 @@ fig.add_trace(
         mode="lines",
         name="Drawdown",
         fill="tozeroy",
-        line=dict(color="red"),
+        line=dict(color=COLORS["negative"]),
     ),
     row=2,
     col=1,
 )
+_ = fig
+
+# %% [markdown]
+# The message title reports the observed depth and recovery, while the drawdown panel retains
+# the conventional zero-at-top orientation.
+
+# %%
 fig.update_yaxes(title_text="Wealth ($1 → x)", row=1, col=1)
 fig.update_yaxes(title_text="Drawdown (%)", row=2, col=1)
-fig.update_layout(title=f"{SYMBOL} drawdown path", height=600, showlegend=True)
+recovery_days = recovery_idx - max_dd_idx if recovery_idx is not None else None
+recovery_message = (
+    f"and required {recovery_days:,} trading days to recover"
+    if recovery_days is not None
+    else "and remained unrecovered at the sample end"
+)
+fig.update_layout(
+    title=f"{SYMBOL} fell {abs(max_dd):.1%} from peak {recovery_message}",
+    height=600,
+    showlegend=True,
+)
 fig.show()
 
 # %% [markdown]
 # Maximum drawdown is the worst-case path loss in the sample; the trough-to-recovery
 # duration is the operational pain that allocators and risk officers actually live
 # through. Tail metrics (CVaR) and path metrics (max drawdown) tend to move together
-# but the path metric responds to the *sequence* of losses — two distributions with
+# but the path metric responds to the *sequence* of losses - two distributions with
 # identical CVaR can produce very different drawdown experiences.
 
 # %% [markdown]
-# ## 7. Portfolio VaR — Diversification Benefit
+# ## 7. Portfolio VaR - Diversification Benefit
 #
-# A diversified portfolio's VaR is bounded above by the weighted sum of stand-alone
-# component VaRs. The gap is the diversification benefit. Because correlations rise in
-# stress, this benefit is itself state-dependent — the same five-asset basket carries
-# different effective tail risk in calm and stressed regimes.
+# The gap between this portfolio's tail risk and the weighted stand-alone estimates measures
+# its empirical diversification benefit. Unlike CVaR, VaR is not generally subadditive, so a
+# positive VaR benefit in this sample is an observation rather than a mathematical guarantee.
 
 
 # %%
-def portfolio_var(
+def portfolio_tail_risk(
     returns_matrix: np.ndarray,
     weights: np.ndarray,
     confidence: float = 0.95,
 ) -> dict:
-    """Compute diversified and undiversified portfolio VaR side by side."""
+    """Compute empirical portfolio VaR and CVaR against weighted stand-alone estimates."""
     portfolio_returns = returns_matrix @ weights
-    individual = np.array(
+    individual_var = np.array(
         [historical_var(returns_matrix[:, i], confidence) for i in range(returns_matrix.shape[1])]
     )
-    undiversified = float(np.sum(weights * individual))
-    diversified = float(historical_var(portfolio_returns, confidence))
-    benefit = 1 - diversified / undiversified
+    individual_cvar = np.array(
+        [historical_cvar(returns_matrix[:, i], confidence) for i in range(returns_matrix.shape[1])]
+    )
+    undiversified_var = float(np.sum(weights * individual_var))
+    undiversified_cvar = float(np.sum(weights * individual_cvar))
+    diversified_var = float(historical_var(portfolio_returns, confidence))
+    diversified_cvar = float(historical_cvar(portfolio_returns, confidence))
     return {
-        "portfolio_var": diversified,
-        "undiversified_var": undiversified,
-        "diversification_benefit": benefit,
-        "individual_vars": individual,
+        "portfolio_var": diversified_var,
+        "portfolio_cvar": diversified_cvar,
+        "undiversified_var": undiversified_var,
+        "undiversified_cvar": undiversified_cvar,
+        "var_benefit": 1 - diversified_var / undiversified_var,
+        "cvar_benefit": 1 - diversified_cvar / undiversified_cvar,
         "portfolio_returns": portfolio_returns,
     }
 
@@ -789,36 +927,123 @@ def portfolio_var(
 # %%
 asset_returns = returns_wide.select(PORTFOLIO_SYMBOLS).to_numpy()
 weights = np.ones(len(PORTFOLIO_SYMBOLS)) / len(PORTFOLIO_SYMBOLS)
-port_var_result = portfolio_var(asset_returns, weights, confidence=0.95)
+port_var_result = portfolio_tail_risk(asset_returns, weights, confidence=0.95)
 
-portfolio_summary = pd.DataFrame(
+portfolio_summary = pl.DataFrame(
     {
-        "metric": ["Diversified VaR(95%)", "Undiversified VaR(95%)", "Diversification benefit"],
-        "value": [
-            f"{port_var_result['portfolio_var'] * 100:.3f}%",
-            f"{port_var_result['undiversified_var'] * 100:.3f}%",
-            f"{port_var_result['diversification_benefit'] * 100:.1f}%",
+        "metric": ["VaR", "CVaR"],
+        "portfolio_pct": [
+            port_var_result["portfolio_var"] * 100,
+            port_var_result["portfolio_cvar"] * 100,
+        ],
+        "weighted_standalone_pct": [
+            port_var_result["undiversified_var"] * 100,
+            port_var_result["undiversified_cvar"] * 100,
         ],
     }
 )
-portfolio_summary
 
 # %%
-component_df = pd.DataFrame(
-    {
-        "symbol": PORTFOLIO_SYMBOLS,
-        "weight": weights,
-        "var_95_pct": port_var_result["individual_vars"] * 100,
-    }
-).round(4)
-component_df
+fig = go.Figure()
+fig.add_trace(
+    go.Bar(
+        x=portfolio_summary["metric"],
+        y=portfolio_summary["portfolio_pct"],
+        name="Equal-weight portfolio",
+        marker_color=COLORS["blue"],
+    )
+)
+fig.add_trace(
+    go.Bar(
+        x=portfolio_summary["metric"],
+        y=portfolio_summary["weighted_standalone_pct"],
+        name="Weighted stand-alone risk",
+        marker_color=COLORS["neutral"],
+    )
+)
+fig.update_layout(
+    title="Diversification lowers this portfolio's empirical tail risk",
+    xaxis_title="Tail measure (95% confidence)",
+    yaxis_title="Loss (% of NAV)",
+    barmode="group",
+    height=400,
+)
+fig.show()
+
+# %%
+display(
+    Markdown(
+        f"The equal-weight portfolio's VaR is {port_var_result['portfolio_var']:.2%}, "
+        f"compared with {port_var_result['undiversified_var']:.2%} for the weighted "
+        f"stand-alone estimates, an empirical benefit of {port_var_result['var_benefit']:.1%}. "
+        f"CVaR falls by {port_var_result['cvar_benefit']:.1%}; unlike VaR, this benefit is "
+        "consistent with CVaR's general subadditivity property."
+    )
+)
 
 # %% [markdown]
-# On the five-asset basket the diversified portfolio VaR of $1.30\%$ sits
-# 23.9% below the undiversified weighted-component VaR of $1.71\%$ — that
-# gap is the diversification benefit. It is *unconditional*: the same
-# basket shows a much smaller benefit in stressed regimes because
-# correlations rise precisely when diversification would be most useful.
+# ### Diversification across point-in-time volatility states
+#
+# Applying the causal SPY state labels to the aligned ETF panel tests whether the observed
+# VaR benefit survives high-volatility days. The state is known before each portfolio return.
+
+# %%
+regime_labels = pl.DataFrame({"timestamp": vol_dates, "regime": regimes})
+portfolio_by_regime = returns_wide.join(regime_labels, on="timestamp", how="inner")
+regime_portfolio_rows = []
+for regime in ["Low Vol", "Mid Vol", "High Vol"]:
+    regime_matrix = portfolio_by_regime.filter(pl.col("regime") == regime).select(PORTFOLIO_SYMBOLS)
+    result = portfolio_tail_risk(regime_matrix.to_numpy(), weights, confidence=0.95)
+    regime_portfolio_rows.append(
+        {
+            "regime": regime,
+            "n_days": regime_matrix.height,
+            "var_benefit_pct": result["var_benefit"] * 100,
+            "cvar_benefit_pct": result["cvar_benefit"] * 100,
+        }
+    )
+regime_portfolio_df = pl.DataFrame(regime_portfolio_rows)
+
+# %%
+fig = go.Figure()
+fig.add_trace(
+    go.Bar(
+        x=regime_portfolio_df["regime"],
+        y=regime_portfolio_df["var_benefit_pct"],
+        name="VaR benefit",
+        marker_color=COLORS["blue"],
+    )
+)
+fig.add_trace(
+    go.Bar(
+        x=regime_portfolio_df["regime"],
+        y=regime_portfolio_df["cvar_benefit_pct"],
+        name="CVaR benefit",
+        marker_color=COLORS["copper"],
+    )
+)
+fig.update_layout(
+    title="Tail-risk diversification changes with the volatility state",
+    xaxis_title="Point-in-time volatility state",
+    yaxis_title="Empirical diversification benefit (%)",
+    barmode="group",
+    height=400,
+)
+fig.show()
+
+# %%
+regime_portfolio_lookup = {row["regime"]: row for row in regime_portfolio_df.iter_rows(named=True)}
+low_regime_benefit = regime_portfolio_lookup["Low Vol"]["cvar_benefit_pct"]
+high_regime_benefit = regime_portfolio_lookup["High Vol"]["cvar_benefit_pct"]
+benefit_direction = "contracts" if high_regime_benefit < low_regime_benefit else "expands"
+display(
+    Markdown(
+        f"The empirical CVaR benefit {benefit_direction} from {low_regime_benefit:.1f}% "
+        f"in the low-volatility state to {high_regime_benefit:.1f}% in the "
+        "high-volatility state. The result is sample-specific; the point-in-time labels "
+        "make the comparison usable as a diagnostic rather than a look-ahead mechanism."
+    )
+)
 
 # %% [markdown]
 # ## 8. Volatility Forecast Evaluation: QLIKE and MSE
@@ -845,7 +1070,7 @@ component_df
 # %%
 def qlike_loss(forecast_var: np.ndarray, proxy_var: np.ndarray) -> float:
     """QLIKE loss: $\\log(\\hat{\\sigma}^2) + \\sigma^2_{\\text{proxy}} / \\hat{\\sigma}^2$."""
-    mask = (forecast_var > 0) & (proxy_var > 0)
+    mask = (forecast_var > 0) & np.isfinite(forecast_var) & np.isfinite(proxy_var)
     f, p = forecast_var[mask], proxy_var[mask]
     return float(np.mean(np.log(f) + p / f))
 
@@ -866,26 +1091,29 @@ def variance_mse(forecast_var: np.ndarray, proxy_var: np.ndarray) -> float:
 ret_series = pd.Series(returns, index=pd.DatetimeIndex(dates))
 proxy_var = ret_series**2
 
-# Forecast variance for day t comes from information up to day t-1, so we
-# shift every conditional-variance series by one day before scoring it
-# against the squared-return proxy. The GARCH(1,1) fit below is full-sample
-# (compact, for comparison only — see Chapter 9 for deeper / walk-forward
-# GARCH); the one-day shift converts the in-sample conditional volatility
-# into a lagged volatility estimate that is at least available before the
-# realised return.
+# Rolling and EWMA variance for day t use returns only through t-1. GARCH parameters are
+# estimated once on observations before the evaluation boundary; the fixed model then updates
+# conditional variance recursively as evaluation-period returns arrive.
 rolling_var_21 = ret_series.rolling(21).var().shift(1).dropna()
 ewma_var = ret_series.ewm(alpha=0.06).var().shift(1).dropna()
 garch_model = arch_model(ret_series * 100, vol="Garch", p=1, q=1, dist="normal")
-garch_fit = garch_model.fit(disp="off")
-garch_var = ((garch_fit.conditional_volatility / 100) ** 2).shift(1).dropna()
+garch_fit = garch_model.fit(last_obs=FORECAST_EVALUATION_START, disp="off")
+garch_forecast = garch_fit.forecast(
+    horizon=1,
+    start=FORECAST_EVALUATION_START,
+    align="target",
+    reindex=True,
+)
+garch_var = (garch_forecast.variance["h.1"] / 10_000).dropna()
 
 common_idx = rolling_var_21.index.intersection(ewma_var.index).intersection(garch_var.index)
+common_idx = common_idx[common_idx >= pd.Timestamp(FORECAST_EVALUATION_START)]
 proxy_aligned = proxy_var.loc[common_idx].values
 rolling_aligned = rolling_var_21.loc[common_idx].values
 ewma_aligned = ewma_var.loc[common_idx].values
 garch_aligned = garch_var.loc[common_idx].values
 
-forecast_eval_df = pd.DataFrame(
+forecast_eval_df = pl.DataFrame(
     [
         {
             "method": name,
@@ -898,23 +1126,58 @@ forecast_eval_df = pd.DataFrame(
             ("GARCH(1,1)", garch_aligned),
         ]
     ]
-)
-forecast_eval_df.round(4)
+).with_columns(pl.exclude("method").round(4))
 
-# %% [markdown]
-# Lower QLIKE and lower MSE both indicate a better forecast. On this SPY
-# sample the one-day-lagged GARCH(1,1) posts the lowest QLIKE ($-8.35$) and
-# the lowest MSE ($0.28 \times 10^{-6}$), edging out EWMA with the 21-day
-# rolling variance last. Two caveats keep this from being a forecast
-# verdict: the GARCH(1,1) is fit once on the full sample with Gaussian
-# innovations (a compact comparison, not the walk-forward, Student-t refit
-# of *Chapter 9*), and the squared-return proxy $\sigma_t^2$ is noisy enough
-# that the GARCH–EWMA QLIKE gap ($\approx 0.05$) sits within sampling error
-# on a single $\sim$20-year window. Read the table as "all three track
-# realised variance, GARCH and EWMA more closely than rolling," not as a
-# ranking. QLIKE is still the more relevant loss for risk management because
-# methods that under-predict during crises score worse than those that
-# over-predict.
+# %%
+fig = make_subplots(rows=1, cols=2, subplot_titles=["QLIKE", "Variance MSE"])
+fig.add_trace(
+    go.Scatter(
+        x=forecast_eval_df["method"],
+        y=forecast_eval_df["qlike"],
+        mode="markers+text",
+        text=[f"{value:.3f}" for value in forecast_eval_df["qlike"]],
+        textposition="top center",
+        marker=dict(color=COLORS["blue"], size=12),
+        showlegend=False,
+    ),
+    row=1,
+    col=1,
+)
+fig.add_trace(
+    go.Scatter(
+        x=forecast_eval_df["method"],
+        y=forecast_eval_df["mse_x_1e6"],
+        mode="markers+text",
+        text=[f"{value:.3f}" for value in forecast_eval_df["mse_x_1e6"]],
+        textposition="top center",
+        marker=dict(color=COLORS["copper"], size=12),
+        showlegend=False,
+    ),
+    row=1,
+    col=2,
+)
+fig.update_yaxes(title_text="Average QLIKE (lower is better)", row=1, col=1)
+fig.update_yaxes(title_text="MSE (x 1e-6; lower is better)", row=1, col=2)
+fig.update_layout(
+    title="Out-of-sample loss functions compare volatility forecasts",
+    height=400,
+)
+fig.show()
+
+# %%
+qlike_winner = forecast_eval_df.sort("qlike").row(0, named=True)
+mse_winner = forecast_eval_df.sort("mse_x_1e6").row(0, named=True)
+display(
+    Markdown(
+        f"From {common_idx.min().date()} through {common_idx.max().date()}, "
+        f"{qlike_winner['method']} has the lowest QLIKE ({qlike_winner['qlike']:.3f}) and "
+        f"{mse_winner['method']} has the lowest variance MSE "
+        f"({mse_winner['mse_x_1e6']:.3f} x $10^{{-6}}$). GARCH parameters are estimated "
+        "before this interval, while rolling and EWMA forecasts are explicitly lagged. "
+        "Squared returns remain a noisy volatility proxy, so small loss gaps should not be "
+        "treated as economically decisive."
+    )
+)
 
 # %% [markdown]
 # ## 9. Save artefacts for downstream chapters
@@ -922,7 +1185,7 @@ forecast_eval_df.round(4)
 # %%
 var_comparison_df = pl.DataFrame(
     {
-        "confidence": [f"{int(c * 100)}%" for c in confidence_levels] * 4,
+        "confidence": [f"{round(c * 100)}%" for c in confidence_levels] * 4,
         "method": ["historical"] * 3
         + ["parametric"] * 3
         + ["cornish_fisher"] * 3
@@ -933,7 +1196,7 @@ var_comparison_df = pl.DataFrame(
         + list(var_df["monte_carlo"]),
     }
 )
-var_cvar_df = pl.from_pandas(risk_df)
+var_cvar_df = risk_df
 backtest_df = pl.DataFrame(
     {
         "method": [r["method"] for r in backtest_results],
@@ -953,9 +1216,14 @@ rolling_risk_df = pl.DataFrame(
         "cvar_var_ratio": (rolling_cvar / rolling_var).tolist(),
     }
 )
-regime_pl = pl.from_pandas(regime_df)
+regime_pl = regime_df
 
-best_bt = max(backtest_results, key=lambda r: r["kupiec_pvalue"])
+# %% [markdown]
+# The metadata captures the estimation boundaries and causal regime convention alongside the
+# reported values so downstream notebooks can audit how each result was produced.
+
+# %%
+best_bt = best_result
 methodology_metadata = {
     "symbol": SYMBOL,
     "portfolio_symbols": PORTFOLIO_SYMBOLS,
@@ -968,11 +1236,17 @@ methodology_metadata = {
     "avg_var_95": float(np.mean(rolling_var)),
     "avg_cvar_95": float(np.mean(rolling_cvar)),
     "cvar_var_ratio": float(np.mean(rolling_cvar) / np.mean(rolling_var)),
-    "diversification_benefit": float(port_var_result["diversification_benefit"]),
+    "diversification_benefit": float(port_var_result["var_benefit"]),
+    "cvar_diversification_benefit": float(port_var_result["cvar_benefit"]),
     "best_backtest_method": best_bt["method"],
     "kupiec_pvalue_best": float(best_bt["kupiec_pvalue"]),
     "regime_low_vol_cvar_pct": float(regime_stats["Low Vol"]["cvar"]),
     "regime_high_vol_cvar_pct": float(regime_stats["High Vol"]["cvar"]),
+    "regime_method": "prior-close rolling volatility with expanding point-in-time terciles",
+    "regime_window": REGIME_WINDOW,
+    "regime_min_history": REGIME_MIN_HISTORY,
+    "forecast_evaluation_start": str(common_idx.min().date()),
+    "forecast_evaluation_end": str(common_idx.max().date()),
     "max_drawdown_pct": float(max_dd * 100),
     "drawdown_duration_days": int(max_dd_idx - peak_idx),
     "recovery_duration_days": (
@@ -980,11 +1254,18 @@ methodology_metadata = {
     ),
 }
 
+# %% [markdown]
+# The write step uses `get_output_dir`, which redirects every artifact to the isolated validation
+# directory when `ML4T_OUTPUT_DIR` is set.
+
+# %%
 var_comparison_df.write_parquet(OUTPUT_DIR / "var_method_comparison.parquet")
 var_cvar_df.write_parquet(OUTPUT_DIR / "var_cvar_comparison.parquet")
 backtest_df.write_parquet(OUTPUT_DIR / "var_backtest_results.parquet")
 rolling_risk_df.write_parquet(OUTPUT_DIR / "rolling_risk_metrics.parquet")
 regime_pl.write_parquet(OUTPUT_DIR / "regime_conditional_risk.parquet")
+regime_portfolio_df.write_parquet(OUTPUT_DIR / "regime_portfolio_diversification.parquet")
+forecast_eval_df.write_parquet(OUTPUT_DIR / "volatility_forecast_evaluation.parquet")
 
 with open(OUTPUT_DIR / "var_methodology_metadata.json", "w") as f:
     json.dump(methodology_metadata, f, indent=2)
@@ -995,33 +1276,31 @@ print(f"  - var_cvar_comparison.parquet:   {len(var_cvar_df)} rows")
 print(f"  - var_backtest_results.parquet:  {len(backtest_df)} methods")
 print(f"  - rolling_risk_metrics.parquet:  {len(rolling_risk_df)} days")
 print(f"  - regime_conditional_risk.parquet: {len(regime_pl)} regimes")
+print(f"  - regime_portfolio_diversification.parquet: {len(regime_portfolio_df)} regimes")
+print(f"  - volatility_forecast_evaluation.parquet: {len(forecast_eval_df)} methods")
 
-# %% [markdown]
-# ## 10. Key Takeaways
-#
-# 1. **Historical VaR is best calibrated on this SPY sample.** Exception
-#    ratio 1.11 with Kupiec p ≈ 0.10 — the only method whose realised tail
-#    exception rate is not rejected at conventional levels. Parametric VaR
-#    underforecasts; Cornish-Fisher's skew/kurtosis adjustment is
-#    destabilised by the heavy tail and fails most strongly.
-# 2. **CVaR strictly dominates VaR as a coherent risk measure.** It is
-#    subadditive, captures full tail severity, and is convex — preferred
-#    for portfolio optimisation with tail constraints. Diversification
-#    benefit on a five-asset basket is real but shrinks when correlations
-#    rise in stress, precisely when it is needed most.
-# 3. **Distributional adjustments matter at deep confidence.** At 99% the
-#    Cornish-Fisher and Student-t MC estimates diverge meaningfully from
-#    the Gaussian baseline; ignore the heavy tail and the 99% number
-#    under-reserves risk capital.
-# 4. **Regime-conditional tail risk drives position sizing.** High-volatility
-#    VaR/CVaR is meaningfully larger than low-volatility values, and the
-#    CVaR/VaR ratio also expands; ignoring regime structure under-provisions
-#    risk capital in stress.
-# 5. **Backtest the model, not just the metric.** The Kupiec test
-#    discriminates between methods that look similar at average-day
-#    quantiles but differ in their realised exception rates over
-#    multi-year windows.
-#
-# **Next**: [`06_stress_testing`](06_stress_testing.ipynb) challenges
-# these tail-risk estimates with named historical crises and constructed
-# shocks.
+# %%
+high_low_cvar_ratio = high_vol_stats["cvar"] / low_vol_stats["cvar"]
+display(
+    Markdown(
+        f"""## 10. Key Takeaways
+
+1. **Coverage must be backtested.** {best_result["method"].title()} VaR is closest to the
+   configured exception budget in this sample, with an exception ratio of
+   {best_result["exception_ratio"]:.2f} and Kupiec $p={best_result["kupiec_pvalue"]:.3f}$.
+2. **CVaR measures severity beyond VaR.** The equal-weight ETF basket shows an empirical
+   CVaR diversification benefit of {port_var_result["cvar_benefit"]:.1%}; CVaR is generally
+   subadditive, while VaR is not.
+3. **Tail-shape adjustments require diagnostics.** Student-t and Cornish-Fisher estimates
+   move away from Gaussian VaR at deep confidence, but the Cornish-Fisher polynomial becomes
+   unstable under large excess kurtosis.
+4. **Risk controls need causal states.** High-volatility CVaR is {high_low_cvar_ratio:.1f}x
+   the low-volatility estimate when each label uses information available before the return.
+5. **Forecast comparisons need an external window.** The volatility models are scored from
+   {common_idx.min().date()} onward after GARCH estimation ends.
+
+**Next**: [`06_stress_testing`](06_stress_testing.ipynb) challenges these tail-risk estimates
+with named historical crises and constructed shocks.
+"""
+    )
+)

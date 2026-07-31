@@ -79,16 +79,16 @@
 # | Unit                      | Synthetic observation (1 of 1,000 i.i.d. rows generated from a known DGP)              |
 # | Treatment                 | `momentum` (continuous), partially driven by `volatility` and `regime`                 |
 # | Outcome                   | `returns` (continuous), driven by treatment and confounders with known true ATE = 0.02 |
-# | Controls (W in EconML)    | `volatility`, `regime` — both confound the treatment-outcome path                      |
+# | Controls (W in EconML)    | `volatility`, `regime` - both confound the treatment-outcome path                      |
 # | Effect modifiers (X)      | None (this NB targets a constant ATE; later NBs use X for regime heterogeneity)        |
-# | Identification assumption | The synthetic DGP is fully observed — there is no unobserved confounding by design     |
+# | Identification assumption | The synthetic DGP is fully observed - there is no unobserved confounding by design     |
 # | Main failure mode         | None in identification; this is an API smoke test, not an empirical finding            |
 
 # %% [markdown]
 # ## Setup
 
 # %%
-"""Causal Inference Library Decision Guide — choose the right causal library for your problem."""
+"""Causal Inference Library Decision Guide - choose the right causal library for your problem."""
 
 import warnings
 
@@ -107,7 +107,7 @@ if not hasattr(nx.algorithms, "d_separated"):
 
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+# Production defaults - Papermill injects overrides for CI
 SEED = 42
 
 # %%
@@ -146,7 +146,7 @@ status_df
 # ## Generate Common Demonstration Data
 #
 # We use one synthetic dataset across all libraries to illustrate comparable
-# API patterns. This is not a benchmark — the goal is to show how each library
+# API patterns. This is not a benchmark - the goal is to show how each library
 # expresses a causal question, not to rank estimator accuracy on this sample.
 
 # %%
@@ -216,11 +216,11 @@ else:
 # residualization), not `X` (effect modifiers used to model treatment-effect
 # heterogeneity). For a simple adjusted ATE the distinction is invisible,
 # but it matters as soon as the question is whether the effect varies across
-# regimes — `04_dml_crypto_regime` demonstrates the `X` role.
+# regimes - `04_dml_crypto_regime` demonstrates the `X` role.
 #
 # This example uses i.i.d. cross-validation (`cv=3`) on synthetic data. For
 # time-series applications, temporal splitting is required to avoid lookahead
-# bias — see `03_econml_dml` for a walk-forward implementation.
+# bias - see `03_econml_dml` for a walk-forward implementation.
 
 # %% [markdown]
 # ## 2. DoWhy (Microsoft/Amazon)
@@ -418,7 +418,7 @@ estimates_df
 # %% [markdown]
 # Both EconML and DoWhy recover the sign and order of magnitude of the true
 # ATE, but each overestimates the marginal effect on this small synthetic
-# sample — recovering an effect of around 0.030 against a true value of
+# sample - recovering an effect of around 0.030 against a true value of
 # 0.020. The point is that the APIs work as advertised, not that estimator
 # accuracy is comparable across libraries on a single 1,000-row toy sample.
 # CausalML estimates a binary treatment effect and is on a different scale.

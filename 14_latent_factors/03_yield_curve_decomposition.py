@@ -33,21 +33,24 @@
 #
 # Yield-curve PCA is a textbook **Stage 1** decomposition (Figure 14.9):
 # the cross-section of yields is compressed to three orthogonal factors.
-# Stage 1 is essentially where the yield curve story ends in this notebook —
+# Stage 1 is essentially where the yield curve story ends in this notebook:
 # the factors are interpretable risk dimensions used for hedging and risk
 # decomposition, not return forecasts. The two-step framework's Stage 2 +
 # Stage 3 mechanics become relevant when factors are used predictively;
 # see [`04_ipca`](04_ipca.ipynb) for that pipeline on equity panels.
+# This notebook uses the complete sample only for descriptive decomposition and
+# local sensitivity analysis. It contains no target, model selection, backtest,
+# or performance claim, so a train/validation/test split is not applicable.
 #
 # **Key Concepts (Litterman & Scheinkman, 1991):**
 # - PC1 (Level): Parallel shift of the entire curve (~82% of variance in this sample)
-# - PC2 (Slope): Steepening/flattening — opposite moves at short vs long end (~12%)
-# - PC3 (Curvature): Butterfly twist — middle moves opposite to ends (~3%)
+# - PC2 (Slope): Steepening/flattening, with opposite moves at short and long maturities (~12%)
+# - PC3 (Curvature): Butterfly twist, with the middle moving opposite to the ends (~3%)
 #
 # **Prerequisites**: Complete [`01_pca_equity_sectors`](01_pca_equity_sectors.ipynb); requires FRED macro data.
 #
 # **Data Source**: FRED macro parquet (canonical data, no API calls). Uses 8
-# Treasury constant-maturity series (1Y, 2Y, 3Y, 5Y, 7Y, 10Y, 20Y, 30Y) — a
+# Treasury constant-maturity series (1Y, 2Y, 3Y, 5Y, 7Y, 10Y, 20Y, 30Y), a
 # dense enough grid for the classical Level / Slope / Curvature pattern to
 # emerge clearly, with PC1/PC2/PC3 explaining ~82/12/3 % of the variance in
 # this 2000–2024 sample.
@@ -58,25 +61,32 @@
 # ## 1. Setup and Imports
 
 # %%
-"""Yield Curve Decomposition — Level, Slope, and Curvature via PCA."""
+"""Yield Curve Decomposition: Level, Slope, and Curvature via PCA."""
 
 import warnings
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from scipy.optimize import linear_sum_assignment
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings("ignore")
 
 from data import load_macro
-from utils.style import COLORS
+from utils.style import (
+    COLORS,
+    FIGSIZE,
+    add_message_title,
+    label_line_ends,
+    ml4t_palette,
+    zero_line,
+)
 
 # %%
 
-# Maturities in years — used for x-axis positions on all yield-curve plots
+# Maturities in years, used for x-axis positions on all yield-curve plots
 MATURITIES_YEARS = [1, 2, 3, 5, 7, 10, 20, 30]
 MATURITY_LABELS = ["1Y", "2Y", "3Y", "5Y", "7Y", "10Y", "20Y", "30Y"]
 
@@ -122,35 +132,43 @@ yield_names = list(YIELD_SERIES.values())
 timestamps = yields["timestamp"].to_numpy()
 
 # %%
-# Data summary
-pl.DataFrame(
-    {
-        "Maturity": yield_names,
-        "Start": [yields[c][0] for c in yield_names],
-        "End": [yields[c][-1] for c in yield_names],
-        "Mean": [yields[c].mean() for c in yield_names],
-        "Std": [yields[c].std() for c in yield_names],
-    }
+print(
+    f"Loaded {len(yields):,} calendar observations from {timestamps[0]} "
+    f"through {timestamps[-1]} across {len(yield_names)} maturities."
 )
 
 # %% [markdown]
 # ## 3. Yield Curve Visualization
 #
 # Sample yield curves at different dates show how the term structure has
-# evolved over the sample period — from the post-dot-com era to today's
+# evolved over the sample period, from the post-dot-com era to today's
 # higher-rate regime.
 
 # %%
-n_obs = len(yields)
-sample_indices = [0, n_obs // 4, n_obs // 2, 3 * n_obs // 4, n_obs - 1]
+observed_curve_levels = (
+    yields.with_columns(
+        pl.any_horizontal(pl.col(yield_names).diff() != 0).alias("observed_curve_update")
+    )
+    .filter(pl.col("observed_curve_update"))
+    .drop("observed_curve_update")
+)
+n_observed_levels = len(observed_curve_levels)
+sample_indices = [
+    0,
+    n_observed_levels // 4,
+    n_observed_levels // 2,
+    3 * n_observed_levels // 4,
+    n_observed_levels - 1,
+]
 
-fig, ax = plt.subplots(figsize=(12, 6))
+# %%
+fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"], constrained_layout=True)
 
-colors = plt.colormaps["viridis"](np.linspace(0, 1, len(sample_indices)))
-for idx, color in zip(sample_indices, colors, strict=False):
-    row = yields.row(idx, named=True)
+curve_colors = ml4t_palette(4, categorical=True) + [COLORS["neutral"]]
+for idx, color in zip(sample_indices, curve_colors, strict=False):
+    row = observed_curve_levels.row(idx, named=True)
     curve = [row[c] for c in yield_names]
-    label = str(np.datetime_as_string(timestamps[idx], unit="D"))
+    label = str(row["timestamp"])
     ax.plot(
         MATURITIES_YEARS,
         curve,
@@ -163,13 +181,14 @@ for idx, color in zip(sample_indices, colors, strict=False):
 
 ax.set_xlabel("Maturity (years)")
 ax.set_ylabel("Yield (%)")
-ax.set_title("Treasury Yield Curves at Selected Dates")
-ax.set_xticks(MATURITIES_YEARS)
-ax.set_xticklabels(MATURITY_LABELS)
-ax.legend(title="Date", loc="best")
-
-
-fig.tight_layout()
+ax.set_xticks([1, 5, 10, 20, 30])
+ax.set_xticklabels(["1Y", "5Y", "10Y", "20Y", "30Y"])
+label_line_ends(ax, expand_right=0.16)
+add_message_title(
+    ax,
+    "Curve shapes span flat, steep, and inverted regimes",
+    subtitle="Five observed Treasury curves across eight maturities, 2000-2024",
+)
 fig.show()
 
 # %% [markdown]
@@ -179,19 +198,28 @@ fig.show()
 # are more stationary and capture the dynamics we want to model.
 
 # %%
-yield_changes = yields.with_columns(pl.col(c).diff() for c in yield_names).drop_nulls()
+calendar_changes = yields.with_columns(pl.col(c).diff() for c in yield_names).drop_nulls()
+
+# The macro panel is calendar-daily and forward-fills FRED observations. Weekend
+# and holiday rows therefore contain eight exact zeros and are not new yield-curve
+# observations. Keep genuine observations only; an unchanged single maturity is valid.
+stale_calendar_row = pl.all_horizontal(pl.col(yield_names) == 0)
+yield_changes = calendar_changes.filter(~stale_calendar_row)
+n_stale_rows = len(calendar_changes) - len(yield_changes)
 
 change_timestamps = yield_changes["timestamp"].to_numpy()
 
 # %%
-# Yield change statistics (in basis points)
-yield_changes.select(yield_names).describe()
+print(
+    f"Retained {len(yield_changes):,} observed curve changes after removing "
+    f"{n_stale_rows:,} forward-filled zero-change calendar rows."
+)
 
 # %% [markdown]
 # We standardize yield changes before PCA (correlation-matrix PCA). This
 # equalizes the influence of each maturity regardless of its volatility level.
 # Some practitioners apply PCA to the covariance matrix directly when
-# maturity-level variance differences are economically meaningful — for example,
+# maturity-level variance differences are economically meaningful, for example,
 # to let the volatile short end dominate the first component. With standardization,
 # each maturity contributes equally to the factor structure.
 
@@ -205,9 +233,11 @@ changes_scaled = scaler.fit_transform(changes_np)
 #
 # PCA decomposes yield changes into orthogonal factors:
 #
-# $$\Delta y_i = \beta_{i,1} f_1 + \beta_{i,2} f_2 + \beta_{i,3} f_3 + \epsilon_i$$
+# $$z(\Delta y_i) = \beta_{i,1} f_1 + \beta_{i,2} f_2 + \beta_{i,3} f_3 + \epsilon_i$$
 #
-# where $f_k$ are the principal component scores and $\beta_{i,k}$ are the loadings.
+# where $z(\Delta y_i)$ is a standardized yield change, $f_k$ is a principal
+# component score, and $\beta_{i,k}$ is its correlation-PCA loading. Section 10
+# converts the fitted moves back to basis points before applying key-rate DV01s.
 # With eight maturities, we expect the first three components to reproduce the
 # classical Litterman–Scheinkman (1991) Level / Slope / Curvature pattern.
 
@@ -224,7 +254,7 @@ loadings = pca.components_[:n_meaningful].copy()  # numpy array (n_meaningful x 
 loading_names = ["PC1 (Level)", "PC2 (Slope)", "PC3 (Curvature)"]
 scores_np = pca.transform(changes_scaled)
 
-# PCA component signs are arbitrary — flip so each PC's economic interpretation
+# PCA component signs are arbitrary. Flip so each PC's economic interpretation
 # matches its name:
 #   Level: all-positive loadings (parallel shift up)
 #   Slope: long-end positive, short-end negative (positive PC2 = steepening)
@@ -232,10 +262,11 @@ scores_np = pca.transform(changes_scaled)
 signs = np.ones(n_meaningful)
 if loadings[0].mean() < 0:
     signs[0] = -1.0
-if loadings[1, 0] > loadings[1, -1]:
+if loadings[1, -1] - loadings[1, 0] < 0:
     signs[1] = -1.0
-mid_idx = len(yield_names) // 2
-if loadings[2, mid_idx] < 0:
+belly = np.array([1, 2, 3, 4, 5])
+wings = np.array([0, 6, 7])
+if loadings[2, belly].mean() - loadings[2, wings].mean() < 0:
     signs[2] = -1.0
 loadings = loadings * signs[:, None]
 scores_np[:, :n_meaningful] = scores_np[:, :n_meaningful] * signs
@@ -247,29 +278,107 @@ pc3_variance = var_explained[2] * 100
 top3_cumvar = cumvar_explained[2] * 100
 
 # %%
-# Variance decomposition
-pl.DataFrame(
-    {
-        "Component": [f"PC{i + 1}" for i in range(len(var_explained))],
-        "Variance Explained (%)": (var_explained * 100).round(2),
-        "Cumulative (%)": (cumvar_explained * 100).round(2),
-    }
+print(
+    f"Variance shares: Level {pc1_variance:.2f}%, Slope {pc2_variance:.2f}%, "
+    f"Curvature {pc3_variance:.2f}%; cumulative {top3_cumvar:.2f}%."
 )
 
 # %% [markdown]
 # **Interpretation**: PC1 explains the bulk of the variance, PC2 captures a
 # steepening/flattening dimension orthogonal to it, and PC3 captures a
 # middle-vs-ends curvature twist. Together the three components account for
-# essentially all of the daily-change variance — confirming the classical
+# essentially all of the daily-change variance, confirming the classical
 # Litterman–Scheinkman finding that the yield curve is effectively
 # three-dimensional. The loadings below establish the economic interpretation
 # of each factor.
 
+# %% [markdown]
+# ### Moving-block stability check
+#
+# A single full-sample PCA does not show whether the economic labels are stable.
+# We resample contiguous 21-observation blocks, refit the scaler and PCA inside
+# each bootstrap sample, and align all components to the full-sample basis by
+# permutation and sign. The intervals quantify sampling variation in the loading
+# curves while respecting short-run dependence in yield changes.
+
 # %%
-# Factor loadings table
-pl.DataFrame(
-    {"Component": loading_names}
-    | {name: loadings[:, i].round(3) for i, name in enumerate(yield_names)}
+N_BOOTSTRAP = 500
+BLOCK_LENGTH = 21
+RANDOM_SEED = 42
+
+# %% [markdown]
+# The circular index sampler joins randomly selected contiguous blocks until it
+# reaches the original sample length. Circular wrapping avoids giving the sample
+# endpoints special treatment.
+
+
+# %%
+def moving_block_indices(
+    n_observations: int, block_length: int, rng: np.random.Generator
+) -> np.ndarray:
+    """Draw a circular moving-block bootstrap index of the requested length."""
+    n_blocks = int(np.ceil(n_observations / block_length))
+    starts = rng.integers(0, n_observations, size=n_blocks)
+    offsets = np.arange(block_length)
+    return ((starts[:, None] + offsets) % n_observations).ravel()[:n_observations]
+
+
+# %% [markdown]
+# Bootstrap components may change sign or order without changing their economic
+# content. A one-to-one Hungarian assignment aligns the complete orthonormal basis
+# to the reference before intervals are computed.
+
+
+# %%
+def align_to_reference(
+    candidate: np.ndarray,
+    candidate_variance: np.ndarray,
+    reference: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Match component order and signs to a reference orthonormal basis."""
+    similarity = candidate @ reference.T
+    candidate_idx, reference_idx = linear_sum_assignment(-np.abs(similarity))
+    aligned = np.empty_like(candidate)
+    aligned_variance = np.empty_like(candidate_variance)
+    aligned_cosine = np.empty_like(candidate_variance)
+    for source, target in zip(candidate_idx, reference_idx, strict=True):
+        direction = 1.0 if similarity[source, target] >= 0 else -1.0
+        aligned[target] = direction * candidate[source]
+        aligned_variance[target] = candidate_variance[source]
+        aligned_cosine[target] = abs(similarity[source, target])
+    return aligned, aligned_variance, aligned_cosine
+
+
+# %%
+rng = np.random.default_rng(RANDOM_SEED)
+reference_components = pca.components_.copy()
+reference_components[:n_meaningful] = loadings
+bootstrap_loadings = np.empty((N_BOOTSTRAP, n_meaningful, len(yield_names)))
+bootstrap_variance = np.empty((N_BOOTSTRAP, n_meaningful))
+bootstrap_cosine = np.empty((N_BOOTSTRAP, n_meaningful))
+
+for bootstrap_id in range(N_BOOTSTRAP):
+    sample_idx = moving_block_indices(len(changes_np), BLOCK_LENGTH, rng)
+    sample_scaled = StandardScaler().fit_transform(changes_np[sample_idx])
+    sample_pca = PCA(svd_solver="full").fit(sample_scaled)
+    aligned, aligned_variance, aligned_cosine = align_to_reference(
+        sample_pca.components_, sample_pca.explained_variance_ratio_, reference_components
+    )
+    bootstrap_loadings[bootstrap_id] = aligned[:n_meaningful]
+    bootstrap_variance[bootstrap_id] = aligned_variance[:n_meaningful]
+    bootstrap_cosine[bootstrap_id] = aligned_cosine[:n_meaningful]
+
+# %%
+loading_ci_low, loading_ci_high = np.percentile(bootstrap_loadings, [2.5, 97.5], axis=0)
+variance_ci_low, variance_ci_high = np.percentile(bootstrap_variance * 100, [2.5, 97.5], axis=0)
+median_cosine = np.median(bootstrap_cosine, axis=0)
+
+print(
+    "Median aligned loading cosine: "
+    + ", ".join(
+        f"{name.split()[0]} {cosine:.3f}"
+        for name, cosine in zip(loading_names, median_cosine, strict=True)
+    )
 )
 
 # %% [markdown]
@@ -280,47 +389,57 @@ pl.DataFrame(
 # pattern emerges in the first three components.
 
 # %%
-fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-
-titles = [
-    f"PC1: Level ({pc1_variance:.1f}%)",
-    f"PC2: Slope ({pc2_variance:.1f}%)",
-    f"PC3: Curvature ({pc3_variance:.1f}%)",
+loading_messages = [
+    "Level is a parallel shift",
+    "Slope pivots the curve",
+    "Curvature bends the belly",
 ]
-
-for i, (ax, title) in enumerate(zip(axes, titles, strict=False)):
-    loading = loadings[i]
-
-    ax.axhline(y=0, color="gray", linestyle="--", linewidth=1)
-    ax.plot(MATURITIES_YEARS, loading, marker="o", linewidth=2.5, markersize=9)
-
-    ax.set_xlabel("Maturity (years)")
-    ax.set_ylabel("Loading")
-    ax.set_title(title)
-    ax.set_xticks(MATURITIES_YEARS)
-    ax.set_xticklabels(MATURITY_LABELS)
-
-
-fig.tight_layout()
-fig.show()
+component_colors = ml4t_palette(3, categorical=True)
+loading_limit = 1.08 * np.max(np.abs([loading_ci_low, loading_ci_high]))
 
 # %%
-# Persist the loading profiles so they can be re-rendered at print resolution
-# without re-fitting the PCA. Saved as a portable .npz alongside the notebook's
-# other yield-curve artifacts.
-artifact_dir = Path("output/yield_curve_decomposition")
-artifact_dir.mkdir(parents=True, exist_ok=True)
-np.savez(
-    artifact_dir / "factor_loadings.npz",
-    maturities_years=np.asarray(MATURITIES_YEARS),
-    maturity_labels=np.asarray(MATURITY_LABELS),
-    loadings=loadings,
-    variance_explained_pct=np.asarray([pc1_variance, pc2_variance, pc3_variance]),
-    component_names=np.asarray(["Level", "Slope", "Curvature"]),
+fig, axes = plt.subplots(
+    3,
+    1,
+    figsize=FIGSIZE["grid_3x2"],
+    sharex=True,
+    sharey=True,
+    constrained_layout=True,
 )
 
+for i, (ax, message, color) in enumerate(
+    zip(axes, loading_messages, component_colors, strict=False)
+):
+    loading = loadings[i]
+
+    zero_line(ax)
+    ax.fill_between(
+        MATURITIES_YEARS,
+        loading_ci_low[i],
+        loading_ci_high[i],
+        color=color,
+        alpha=0.2,
+        label="95% block-bootstrap interval",
+    )
+    ax.plot(MATURITIES_YEARS, loading, color=color, marker="o", linewidth=2.5, markersize=6)
+
+    ax.set_ylabel("Loading")
+    ax.set_ylim(-loading_limit, loading_limit)
+    ax.set_xticks([1, 5, 10, 20, 30])
+    ax.set_xticklabels(["1Y", "5Y", "10Y", "20Y", "30Y"])
+    add_message_title(
+        ax,
+        message,
+        subtitle=(
+            f"PC{i + 1}: {var_explained[i] * 100:.1f}% "
+            f"[95% CI {variance_ci_low[i]:.1f}-{variance_ci_high[i]:.1f}%]"
+        ),
+    )
+axes[-1].set_xlabel("Maturity (years)")
+fig.show()
+
 # %% [markdown]
-# **PC1 (Level)**: Approximately equal positive loadings across all maturities —
+# **PC1 (Level)**: Approximately equal positive loadings across all maturities,
 # a near-parallel shift of the entire curve. This is the dominant mode of yield
 # variation, driven by changes in inflation expectations and the overall level
 # of interest rates.
@@ -332,7 +451,7 @@ np.savez(
 # during tightening cycles and steepens during easing.
 #
 # **PC3 (Curvature)**: Opposite signs on the middle of the curve versus the
-# ends — a "butterfly" twist where intermediate maturities move differently
+# ends, a "butterfly" twist where intermediate maturities move differently
 # from the short and long ends. This factor reflects nuances in term-premium
 # pricing and convexity effects.
 
@@ -340,80 +459,115 @@ np.savez(
 # ## 7. Scree Plot
 
 # %%
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], constrained_layout=True)
 
 n_components = len(var_explained)
 
 # Individual variance
 ax1 = axes[0]
-ax1.bar(range(1, n_components + 1), var_explained * 100, alpha=0.8)
+ax1.bar(range(1, n_components + 1), var_explained * 100, color=COLORS["blue"])
 ax1.set_xlabel("Principal Component")
 ax1.set_ylabel("Variance Explained (%)")
-ax1.set_title("Variance Explained by Each Component")
 ax1.set_xticks(range(1, n_components + 1))
+add_message_title(
+    ax1,
+    "Level dominates variance",
+    subtitle="Individual correlation-PCA shares",
+)
 
 # Cumulative variance
 ax2 = axes[1]
 ax2.plot(
     range(1, n_components + 1),
     cumvar_explained * 100,
+    color=COLORS["blue"],
     marker="o",
     linewidth=2,
     markersize=8,
 )
-ax2.axhline(y=95, color=COLORS["positive"], linestyle="--", alpha=0.5, label="95% threshold")
-ax2.axhline(y=99, color=COLORS["negative"], linestyle="--", alpha=0.5, label="99% threshold")
+ax2.axhline(y=95, color=COLORS["amber"], linestyle="--", alpha=0.7, label="95% threshold")
+ax2.axhline(y=99, color=COLORS["copper"], linestyle="--", alpha=0.7, label="99% threshold")
 ax2.set_xlabel("Number of Components")
 ax2.set_ylabel("Cumulative Variance Explained (%)")
-ax2.set_title("Cumulative Variance Explained")
 ax2.set_xticks(range(1, n_components + 1))
 ax2.set_ylim(0, 105)
 ax2.legend()
+add_message_title(
+    ax2,
+    "Three PCs reach 97.8%",
+    subtitle="Cumulative share with 95% and 99% references",
+)
 
-fig.tight_layout()
 fig.show()
 
 # %% [markdown]
 # The first component dominates, three components capture essentially all of
 # the variance, and components beyond PC3 add negligible explanatory power.
-# The yield curve's effective dimension is three — exactly the Level / Slope /
+# The yield curve's effective dimension is three, exactly the Level / Slope /
 # Curvature structure documented in Litterman & Scheinkman (1991) for the US
 # Treasury market.
 
 # %% [markdown]
-# ## 8. Factor Time Series
+# ## 8. Factor-Shock Time Series
+#
+# PCA was fitted to yield *changes*, so its scores are daily shocks rather than
+# yield levels. Dividing each score by its fitted standard deviation places the
+# three components on a comparable scale. A 63-observation rolling mean reveals
+# sustained directions in recent curve changes without relabeling those changes
+# as the level or inversion state of the curve.
 
 # %%
 factor_names = ["Level", "Slope", "Curvature"]
 scores_for_plot = scores_np[:, :n_meaningful]
+factor_zscores = scores_for_plot / np.sqrt(pca.explained_variance_[:n_meaningful])
+ROLLING_WINDOW = 63
+rolling_factor_shocks = np.column_stack(
+    [
+        np.convolve(
+            factor_zscores[:, component],
+            np.ones(ROLLING_WINDOW) / ROLLING_WINDOW,
+            mode="valid",
+        )
+        for component in range(n_meaningful)
+    ]
+)
+rolling_timestamps = change_timestamps[ROLLING_WINDOW - 1 :]
 
 # %%
 fig, axes = plt.subplots(
-    n_meaningful, 1, figsize=(14, 4.2 * n_meaningful), sharex=True, constrained_layout=True
+    n_meaningful,
+    1,
+    figsize=FIGSIZE["grid_3x2"],
+    sharex=True,
+    sharey=True,
+    constrained_layout=True,
 )
+shock_messages = [
+    "Level shocks alternate between easing and tightening",
+    "Slope shocks isolate steepening and flattening",
+    "Curvature shocks move the belly against the wings",
+]
+shock_limit = 1.05 * np.max(np.abs(rolling_factor_shocks))
 
-for i, (ax, name) in enumerate(zip(axes, factor_names, strict=False)):
-    ax.plot(change_timestamps, scores_for_plot[:, i], linewidth=0.8, alpha=0.8)
-    ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
+for i, (ax, name, message, color) in enumerate(
+    zip(axes, factor_names, shock_messages, component_colors, strict=False)
+):
+    ax.plot(rolling_timestamps, rolling_factor_shocks[:, i], color=color, linewidth=1.1)
+    zero_line(ax)
     ax.set_ylabel(name, fontsize=12)
-    ax.set_title(f"{name} Factor (standardized scores)", fontsize=13)
+    ax.set_ylim(-shock_limit, shock_limit)
     ax.tick_params(axis="both", labelsize=11)
-
-    # ±2σ bands
-    ax.axhline(y=2, color="gray", linestyle=":", alpha=0.5)
-    ax.axhline(y=-2, color="gray", linestyle=":", alpha=0.5)
+    add_message_title(ax, message, subtitle="63-observation mean standardized shock")
 
 axes[-1].set_xlabel("Date", fontsize=12)
-fig.suptitle("Yield curve PCs map onto distinct macro regimes (2000-2024)", fontsize=14)
 fig.show()
 
 # %% [markdown]
-# The Level factor shows the largest cumulative moves during major rate
-# regimes — the secular post-2008 decline, the 2020 emergency cuts, and the
-# 2022 tightening shock. The Slope factor captures business-cycle dynamics,
-# with sustained negative readings during curve inversions that often precede
-# recessions (2007, 2019, 2022–23). The Curvature factor moves at higher
-# frequency and reflects term-premium adjustments and convexity dynamics.
+# The rolling Level shock turns strongly negative during rapid easing and positive
+# during tightening episodes. The Slope and Curvature series isolate recent
+# steepening/flattening and butterfly directions. These are descriptive changes,
+# not recession signals or estimates of the current curve level; interpreting the
+# economic cause of any episode requires information outside this PCA.
 
 # %% [markdown]
 # ## 9. Reconstruction Quality
@@ -437,54 +591,77 @@ reconstructed_np = scaler.inverse_transform(reconstructed_scaled)
 # Reconstruction RMSE per maturity (in basis points)
 actual_std_bps = changes_np.std(axis=0) * 100
 rmse_bps = np.sqrt(((changes_np - reconstructed_np) ** 2).mean(axis=0)) * 100
-
-pl.DataFrame(
-    {
-        "Maturity": yield_names,
-        "Actual Std (bps)": actual_std_bps.round(2),
-        "Reconstruction RMSE (bps)": rmse_bps.round(2),
-        "RMSE / Std (%)": (rmse_bps / actual_std_bps * 100).round(2),
-    }
-)
+rmse_ratio_pct = rmse_bps / actual_std_bps * 100
 
 # %%
-# Overlay actual vs reconstructed for the 10Y maturity
+# Overlay recent actual vs reconstructed changes and summarize all maturities
 target = "10Y"
 target_idx = yield_names.index(target)
-fig, ax = plt.subplots(figsize=(14, 4))
-ax.plot(
-    change_timestamps, changes_np[:, target_idx] * 100, linewidth=0.6, alpha=0.7, label="Actual"
+recent_observations = 504
+recent_slice = slice(-recent_observations, None)
+recent_tick_indices = np.linspace(
+    len(change_timestamps) - recent_observations, len(change_timestamps) - 1, 3, dtype=int
 )
-ax.plot(
-    change_timestamps,
-    reconstructed_np[:, target_idx] * 100,
-    linewidth=0.6,
-    alpha=0.7,
+recent_tick_dates = change_timestamps[recent_tick_indices]
+recent_tick_labels = [np.datetime_as_string(date, unit="M") for date in recent_tick_dates]
+
+# %%
+fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"], constrained_layout=True)
+axes[0].plot(
+    change_timestamps[recent_slice],
+    changes_np[recent_slice, target_idx] * 100,
+    color=COLORS["blue"],
+    linewidth=0.9,
+    label="Actual",
+)
+axes[0].plot(
+    change_timestamps[recent_slice],
+    reconstructed_np[recent_slice, target_idx] * 100,
+    color=COLORS["amber"],
+    linewidth=0.9,
     label=f"Reconstructed ({n_reconstruct} PCs)",
 )
-ax.set_xlabel("Date")
-ax.set_ylabel("Daily Change (bps)")
-ax.set_title(f"{target} Yield Changes: Actual vs {n_reconstruct}-PC Reconstruction")
-ax.legend()
+axes[0].set_xlabel("Date")
+axes[0].set_ylabel("Observed change (bps)")
+axes[0].set_xticks(recent_tick_dates, recent_tick_labels)
+axes[0].legend()
+add_message_title(
+    axes[0],
+    "Three PCs track 10Y changes",
+    subtitle=f"Latest {recent_observations} observed changes",
+)
 
-fig.tight_layout()
+rmse_positions = np.arange(len(yield_names))
+axes[1].bar(rmse_positions, rmse_ratio_pct, color=COLORS["blue"])
+axes[1].set_xlabel("Maturity")
+axes[1].set_ylabel("RMSE / observed standard deviation (%)")
+axes[1].set_ylim(0, 22)
+axes[1].set_xticks(rmse_positions, yield_names)
+axes[1].tick_params(axis="x", labelsize=8)
+for position, ratio in zip(rmse_positions, rmse_ratio_pct, strict=True):
+    axes[1].text(position, ratio + 0.5, f"{ratio:.1f}", ha="center", fontsize=7)
+add_message_title(
+    axes[1],
+    "Error stays below 20%",
+    subtitle="RMSE / observed-change volatility",
+)
+
 fig.show()
 
 # %% [markdown]
 # **Finding**: Three PCs reconstruct every maturity's daily changes with RMSE
 # between roughly 7% and 20% of the maturity's standard deviation (the 1Y is
-# the tightest at ~7%, most maturities fall in the 13–20% range). The
-# reconstructed series is visually indistinguishable from the actual at the 10Y
-# point. The remaining
-# residual reflects measurement noise and idiosyncratic moves at specific
-# maturities — not a missing systematic factor.
+# the tightest at ~7%, most maturities fall in the 13-20% range). The recent
+# 10Y overlay shows where the approximation misses individual daily moves. The
+# remaining residual is maturity-specific variation that the three-factor basis
+# does not represent; PCA alone cannot identify its economic cause.
 
 # %% [markdown]
 # ## 10. Practical Application: Generalized Duration
 #
 # The low-dimensional structure enables efficient hedging. Rather than managing
 # exposure to dozens of individual bonds, a portfolio manager neutralizes three
-# factor exposures — level, slope, and curvature sensitivity:
+# factor exposures: level, slope, and curvature sensitivity:
 #
 # 1. **Level Duration**: Sensitivity to parallel shifts (traditional DV01)
 # 2. **Slope Duration**: Sensitivity to curve steepening/flattening
@@ -495,54 +672,98 @@ fig.show()
 # specific yield curve movements. See Chapter 14, Section 14.4 for the full
 # hedging discussion.
 
-# %% [markdown]
-# ## 11. Summary Statistics
+# %%
+# Each PCA loading is expressed in standardized-yield space. Convert it back to
+# basis-point moves so a key-rate DV01 profile can be mapped into factor exposure.
+factor_moves_bps = loadings * scaler.scale_[None, :] * 100
+
+# Illustrative portfolio key-rate DV01 profile, in $1,000 per basis point.
+portfolio_krd = np.array([0.10, 0.25, 0.40, 0.80, 1.20, 1.60, 1.20, 0.80])
+unhedged_factor_exposure = factor_moves_bps @ portfolio_krd
+
+# Use 2Y, 10Y, and 30Y key-rate instruments as three independent hedge directions.
+hedge_indices = np.array([1, 5, 7])
+hedge_positions = np.linalg.solve(factor_moves_bps[:, hedge_indices], -unhedged_factor_exposure)
+hedged_krd = portfolio_krd.copy()
+hedged_krd[hedge_indices] += hedge_positions
+hedged_factor_exposure = factor_moves_bps @ hedged_krd
+
+assert np.max(np.abs(hedged_factor_exposure)) < 1e-10
 
 # %%
-pl.DataFrame(
-    {
-        "Factor": ["Level (PC1)", "Slope (PC2)", "Curvature (PC3)", "Total (3 PCs)"],
-        "Variance Explained (%)": [
-            round(pc1_variance, 1),
-            round(pc2_variance, 1),
-            round(pc3_variance, 1),
-            round(top3_cumvar, 1),
-        ],
-        "Pattern": [
-            "Parallel shift across all maturities",
-            "Short vs long end (steepening/flattening)",
-            "Middle vs ends (butterfly twist)",
-            "—",
-        ],
-        "Economic Driver": [
-            "Inflation expectations, overall rate level",
-            "Business cycle, monetary policy stance",
-            "Term premium, convexity",
-            "—",
-        ],
-    }
-)
+positions = np.arange(len(yield_names))
+factor_positions = np.arange(n_meaningful)
+width = 0.36
+panel_specs = [
+    (
+        positions,
+        portfolio_krd,
+        hedged_krd,
+        yield_names,
+        "After hedge",
+        "Key-rate maturity",
+        "Key-rate DV01 ($1,000 per bp)",
+        "Hedge reshapes key-rate DV01",
+    ),
+    (
+        factor_positions,
+        unhedged_factor_exposure,
+        hedged_factor_exposure,
+        factor_names,
+        "After hedge",
+        "Factor",
+        "Factor exposure ($1,000 per score unit)",
+        "Factor exposure closes to zero",
+    ),
+]
+
+# %%
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], constrained_layout=True)
+for ax, spec in zip(axes, panel_specs, strict=True):
+    x, before, after, tick_labels, after_label, xlabel, ylabel, title = spec
+    ax.bar(x - width / 2, before, width, label="Before hedge", color=COLORS["blue"])
+    ax.bar(x + width / 2, after, width, label=after_label, color=COLORS["amber"])
+    zero_line(ax)
+    if len(x) > 3:
+        shown = np.array([0, 1, 3, 5, 7])
+        ax.set_xticks(x[shown], np.asarray(tick_labels)[shown])
+    else:
+        ax.set_xticks(x, tick_labels)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.tick_params(axis="x", labelsize=8)
+    ax.legend()
+    add_message_title(ax, title)
+fig.show()
+
+# %% [markdown]
+# **Finding**: In this local linear example, positions in three independent
+# key-rate instruments reduce all three fitted factor exposures to numerical
+# zero. This is an algebraic exposure match, not a backtest. A production hedge
+# must map the target weights to actual futures or swaps and account for
+# convexity, carry, basis risk, liquidity, and transaction costs.
 
 # %% [markdown]
 # ## Key Takeaways
 #
 # 1. **Three-dimensional yield curve**: PC1 (Level), PC2 (Slope), and PC3
-#    (Curvature) together explain effectively all of the variance in daily
-#    yield-change cross-sections — a ~82/12/3 % split in this sample, the same
+#    (Curvature) together explain 97.8% of the variance in observed daily
+#    yield-change cross-sections, an 82/12/3% split in this correlation-PCA sample. A
+#    moving-block bootstrap preserves the loading shapes while quantifying their
+#    sampling variation. This is the same
 #    Level/Slope/Curvature structure documented in Litterman & Scheinkman
 #    (1991). The yield curve's effective dimension is three, not eight.
 #
 # 2. **Low-dimensional macro drivers**: The yield curve's compressibility
 #    reflects that its underlying drivers (inflation expectations, business
-#    cycle, term premium) are themselves low-dimensional — in sharp contrast
+#    cycle, term premium) are themselves low-dimensional, in sharp contrast
 #    to equities, where thousands of idiosyncratic factors operate alongside
 #    a smaller systematic core.
 #
-# 3. **Practical hedging**: Factor-based duration management neutralizes
-#    exposure to Level, Slope, and Curvature using a small set of liquid
-#    instruments (Treasury futures, swaps), rather than tracking dozens of
-#    individual bonds. The same three-factor structure underpins risk
-#    decomposition for fixed-income portfolios and structured-product books.
+# 3. **Practical hedging**: The illustrative key-rate example shows how three
+#    independent hedge directions can neutralize fitted Level, Slope, and
+#    Curvature exposure. It is a local sensitivity calculation, not evidence of
+#    realized hedge performance.
 #
 # **Next**: See [`04_ipca`](04_ipca.ipynb) for time-varying factor models that extend PCA
 # by conditioning on observable characteristics.

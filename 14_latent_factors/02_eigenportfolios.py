@@ -22,10 +22,10 @@
 # **Section Reference**: Section 14.3 (Eigenportfolios for Equity Strategies)
 #
 # ## Purpose
-# This notebook applies PCA to the US Equities dataset (3,199 stocks) to extract latent
-# equity risk factors and construct eigenportfolios. We demonstrate standard PCA, sector
-# loading analysis, hierarchical PCA (HPCA), and applications to statistical arbitrage
-# and risk decomposition.
+# This notebook applies PCA to a liquid subset of the US Equities dataset to extract latent
+# risk factors and construct gross-normalized eigenportfolios. It demonstrates standard PCA,
+# sector loading analysis, hierarchical PCA (HPCA), residual diagnostics, risk decomposition,
+# loading stability, and an as-of-end-date two-speed covariance estimate.
 #
 # ## Where this fits in the framework
 #
@@ -34,14 +34,15 @@
 # (eigenportfolios) and loadings $B$ (factor exposures); these are the
 # Stage 1 outputs that downstream notebooks combine with Stage 2 forecasters
 # to produce return forecasts. Eigenportfolios are also natural risk-model
-# inputs in their own right — see the statistical arbitrage and risk
+# inputs in their own right; see the statistical arbitrage and risk
 # decomposition sections.
 #
 # ## Learning Objectives
 # - LO1: Apply PCA to large cross-sectional equity data and interpret variance decomposition
 # - LO2: Interpret eigenportfolios economically via sector loading analysis
 # - LO3: Implement Hierarchical PCA (HPCA) for improved factor interpretability
-# - LO4: Apply eigenportfolios to statistical arbitrage and risk decomposition
+# - LO4: Diagnose residual persistence and decompose portfolio risk without making a trading claim
+# - LO5: Separate sign ambiguity from subspace drift in rolling PCA
 #
 # **Prerequisites**: Complete [`01_pca_equity_sectors`](01_pca_equity_sectors.ipynb); requires US equities data.
 #
@@ -51,22 +52,20 @@
 # - **Related**: Section 9.4 (HMM regimes for factor timing)
 #
 # ## Data Source
-# US Equities (NASDAQ Data Link) — 3,199 stocks, 1962–2018
+# US Equities (NASDAQ Data Link), with sector ETF returns used only for descriptive labels
 
 # %% [markdown]
 # ## 1. Setup and Imports
 
 # %%
-"""Eigenportfolios — Large-scale PCA factor extraction from US equities."""
+"""Eigenportfolios: large-scale PCA factor extraction from US equities."""
 
 import warnings
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
-import seaborn as sns
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
@@ -75,6 +74,7 @@ warnings.filterwarnings("ignore")
 
 from data import load_etfs, load_us_equities
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
 
 # %% tags=["parameters"]
 # Production defaults (Papermill overrides for CI testing)
@@ -83,6 +83,13 @@ MIN_OBSERVATIONS = 252
 TOP_N_STOCKS = 500
 START_DATE = "2006-01-01"
 END_DATE = "2018-03-27"
+ROLL_WINDOW = 252
+ROLL_STEP = 21
+N_ROLL_PCS = 5
+FAST_HALFLIFE = 20
+SLOW_HALFLIFE = 120
+N_PROD_FACTORS = 5
+DIAGONAL_SHRINKAGE = 0.10
 SEED = 42
 
 # %%
@@ -105,8 +112,9 @@ print(f"Date range: {equities['timestamp'].min()} to {equities['timestamp'].max(
 # %% [markdown]
 # ## 3. Universe Selection: Top N by Dollar Volume
 #
-# We select the most liquid stocks by trailing dollar volume. This liquidity filter ensures
-# that the eigenportfolios are investable in practice.
+# We select the most liquid stocks by average dollar volume over the declared sample. This is a
+# descriptive, full-sample universe definition. It must not be reused as a point-in-time trading
+# universe because later observations affect which stocks qualify.
 
 # %%
 dollar_volume = (
@@ -159,17 +167,22 @@ dates = returns_wide["timestamp"].to_pandas()
 symbol_cols = [c for c in returns_wide.columns if c != "timestamp"]
 returns_matrix = returns_wide.select(symbol_cols).to_pandas()
 
-# Fill remaining NaNs with 0 (neutral return for missing days)
+# Record the remaining missingness, then use zero as an explicit covariance-estimation convention.
+# Zero filling can attenuate covariance for stocks with gaps; the effect is not assumed negligible.
+missing_share = returns_matrix.isna().to_numpy().mean()
 returns_matrix = returns_matrix.fillna(0)
 final_symbols = returns_matrix.columns.tolist()
 
-print(f"Return matrix: {returns_matrix.shape[0]:,} days x {returns_matrix.shape[1]} stocks")
+print(
+    f"Return matrix: {returns_matrix.shape[0]:,} days x {returns_matrix.shape[1]} stocks; "
+    f"zero-filled cells: {missing_share:.2%}"
+)
 
 # %% [markdown]
-# **NaN handling**: Missing returns are filled with zero, which biases covariance estimates
-# toward zero for stocks with gaps. For this liquid top-500 universe with 90% coverage
-# requirement, the effect is negligible. For sparser panels, consider dropping stocks with
-# gaps or using EM-based covariance estimation.
+# **NaN handling**: Missing returns are filled with zero after a 90% coverage filter. This
+# attenuates covariance for stocks with gaps, so the printed missing-cell share is part of the
+# result. A production estimate should compare this convention with a complete-case or
+# missing-data covariance estimator.
 
 # %% [markdown]
 # ## 5. PCA: Extract Eigenportfolios
@@ -179,7 +192,18 @@ scaler = StandardScaler()
 returns_scaled = scaler.fit_transform(returns_matrix)
 
 pca = PCA(n_components=N_COMPONENTS, random_state=SEED)
-factor_scores = pca.fit_transform(returns_scaled)
+pca.fit(returns_scaled)
+factor_scores = pca.transform(returns_scaled)
+
+# A standardized-space eigenvector v maps to raw-return weights v / sigma. Normalize by gross
+# exposure, not by the signed sum, and orient PC1 toward the equal-weight market.
+raw_weights = pca.components_ / scaler.scale_[None, :]
+if raw_weights[0].sum() < 0:
+    pca.components_[0] *= -1
+    factor_scores[:, 0] *= -1
+    raw_weights[0] *= -1
+eigenweights = raw_weights / np.abs(raw_weights).sum(axis=1, keepdims=True)
+factor_returns = returns_matrix.to_numpy() @ eigenweights.T
 
 # %% [markdown]
 # ### Variance Decomposition
@@ -188,18 +212,13 @@ factor_scores = pca.fit_transform(returns_scaled)
 explained_var = pca.explained_variance_ratio_
 cumulative_var = np.cumsum(explained_var)
 
-variance_df = pd.DataFrame(
-    {
-        "Component": [f"PC{i + 1}" for i in range(N_COMPONENTS)],
-        "Var Explained": explained_var,
-        "Cumulative": cumulative_var,
-    }
-).set_index("Component")
-
-variance_df.style.format({"Var Explained": "{:.2%}", "Cumulative": "{:.2%}"})
+print(
+    f"Variance explained: PC1={explained_var[0]:.2%}; "
+    f"first 5={cumulative_var[4]:.2%}; first 10={cumulative_var[-1]:.2%}"
+)
 
 # %% [markdown]
-# **Finding**: PC1 alone captures a substantial share of total variance — the dominant market
+# **Finding**: PC1 alone captures a substantial share of total variance as the dominant market
 # factor. The first 5 components together explain roughly half the cross-sectional variation,
 # with diminishing returns beyond PC5.
 
@@ -207,21 +226,26 @@ variance_df.style.format({"Var Explained": "{:.2%}", "Cumulative": "{:.2%}"})
 # ## 6. Scree Plot
 
 # %%
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-
-ax1.bar(range(1, N_COMPONENTS + 1), explained_var * 100, alpha=0.7)
-ax1.plot(range(1, N_COMPONENTS + 1), cumulative_var * 100, "o-", color="C1", linewidth=2)
-ax1.set_xlabel("Principal Component")
-ax1.set_ylabel("Variance Explained (%)")
-ax1.set_title("Scree Plot: Variance Explained")
-ax1.legend(["Cumulative", "Individual"], loc="right")
-
-eigenvalues = pca.explained_variance_
-ax2.bar(range(1, N_COMPONENTS + 1), eigenvalues, alpha=0.7)
-ax2.set_xlabel("Principal Component")
-ax2.set_ylabel("Eigenvalue")
-ax2.set_title("Eigenvalue Spectrum")
-ax2.axhline(y=1, color="gray", linestyle="--", alpha=0.5, label="Kaiser criterion")
+fig, ax = plt.subplots(figsize=FIGSIZE["single"], constrained_layout=True)
+bars = ax.bar(range(1, N_COMPONENTS + 1), explained_var * 100, color=COLORS["blue"], alpha=0.8)
+ax_cumulative = ax.twinx()
+(cumulative_line,) = ax_cumulative.plot(
+    range(1, N_COMPONENTS + 1),
+    cumulative_var * 100,
+    "o-",
+    color=COLORS["amber"],
+    linewidth=2,
+)
+ax.set_xlabel("Principal component")
+ax.set_ylabel("Individual variance explained (%)")
+ax_cumulative.set_ylabel("Cumulative variance explained (%)")
+ax_cumulative.set_ylim(0, 100)
+ax.legend([bars, cumulative_line], ["Individual", "Cumulative"], loc="center right")
+add_message_title(
+    ax,
+    f"PC1 explains {explained_var[0]:.1%} of standardized-return variance",
+    subtitle=f"The first five components explain {cumulative_var[4]:.1%}",
+)
 
 fig.show()
 
@@ -232,7 +256,7 @@ fig.show()
 # long-short factor portfolios.
 
 # %%
-loadings = pca.components_  # (n_components, n_features)
+loadings = pca.components_  # standardized-space eigenvectors, (components, stocks)
 loadings_df = pd.DataFrame(
     loadings[:5].T, index=final_symbols, columns=[f"PC{i + 1}" for i in range(5)]
 )
@@ -242,21 +266,31 @@ loadings_df = pd.DataFrame(
 #
 # $$w_k = \frac{v_k}{\|v_k\|_1}$$
 #
-# where $v_k$ is the $k$-th eigenvector and $\|v_k\|_1$ ensures weights sum to one.
+# where $v_k$ is converted from standardized to raw-return space and $\|w_k\|_1=1$ fixes
+# gross exposure. L1 normalization does not make signed weights sum to one.
 
 # %% [markdown]
-# ### PC1 (Market Factor) — Top and Bottom Loadings
+# ### PC1 (Market Factor): Top and Bottom Weights
 
 # %%
-pc1_sorted = loadings_df["PC1"].sort_values(ascending=False)
-pd.DataFrame(
-    {"Top 10 (Highest Beta)": pc1_sorted.head(10), "Bottom 10 (Lowest Beta)": pc1_sorted.tail(10)}
+pc1_weights = pd.Series(eigenweights[0], index=final_symbols).sort_values()
+weight_extremes = pd.concat([pc1_weights.head(10), pc1_weights.tail(10)]) * 100
+fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"], constrained_layout=True)
+bar_colors = [COLORS["negative"] if value < 0 else COLORS["blue"] for value in weight_extremes]
+ax.barh(weight_extremes.index, weight_extremes.values, color=bar_colors, alpha=0.85)
+zero_line(ax, axis="x")
+ax.set_xlabel("Gross-normalized portfolio weight (%)")
+add_message_title(
+    ax,
+    "PC1 is a broad long market portfolio, not a beta estimate",
+    subtitle="Ten smallest and ten largest raw-return-space weights",
 )
+fig.show()
 
 # %% [markdown]
-# **Interpretation**: PC1 loadings are predominantly positive, confirming its role as the
-# market factor. High-loading stocks tend to be large-cap, high-beta names; low-loading
-# stocks are more defensive or idiosyncratic.
+# **Interpretation**: PC1 weights are predominantly positive, confirming its role as a broad
+# market mode. Their magnitude is a PCA portfolio weight, not CAPM beta; economic labels require
+# separate characteristics or a prespecified market regression.
 
 # %% [markdown]
 # ## 8. Sector Loading Heatmap (Figure 14.3)
@@ -318,8 +352,10 @@ sector_corr = pd.DataFrame(
 sector_assignment = sector_corr.idxmax(axis=1).map(sector_etfs)
 sector_assignment.name = "Sector"
 
-print(f"Sector assignments ({len(overlap_dates)} overlapping dates):")
-sector_assignment.value_counts().sort_index()
+print(
+    f"Sector proxy labels: {sector_assignment.notna().sum()} stocks across "
+    f"{sector_assignment.nunique()} sectors and {len(overlap_dates)} overlapping dates"
+)
 
 # %% [markdown]
 # ### Compute Mean Loadings by Sector
@@ -327,49 +363,46 @@ sector_assignment.value_counts().sort_index()
 # %%
 # Add sector to loadings and compute mean per sector
 loadings_with_sector = loadings_df.copy()
-loadings_with_sector["Sector"] = sector_assignment.values
+loadings_with_sector["Sector"] = sector_assignment.reindex(loadings_with_sector.index)
 
 sector_loadings = loadings_with_sector.groupby("Sector")[["PC1", "PC2", "PC3", "PC4", "PC5"]].mean()
 
 # Sort sectors by PC1 loading for visual clarity
 sector_loadings = sector_loadings.sort_values("PC1", ascending=False)
 
-sector_loadings.style.format("{:.3f}").background_gradient(cmap="RdBu_r", axis=None)
-
-# %%
-# Persist the sector-averaged loadings so Figure 14.3 can be re-rendered at
-# print resolution without re-running the eigenportfolio pipeline. Saved as a
-# portable .npz alongside the notebook's other eigenportfolio outputs.
-artifact_dir = Path("output/eigenportfolios")
-artifact_dir.mkdir(parents=True, exist_ok=True)
-np.savez(
-    artifact_dir / "sector_loadings.npz",
-    values=sector_loadings.to_numpy(),
-    sectors=np.asarray(sector_loadings.index.to_list()),
-    components=np.asarray(sector_loadings.columns.to_list()),
-)
-
 # %%
 # Figure 14.3: Sector loading heatmap
-fig, ax = plt.subplots(figsize=(14, 5))
-sns.heatmap(
-    sector_loadings,
-    annot=True,
-    fmt=".3f",
-    cmap="RdBu_r",
-    center=0,
-    ax=ax,
-    linewidths=0.5,
+fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"], constrained_layout=True)
+limit = float(np.abs(sector_loadings.to_numpy()).max())
+image = ax.imshow(sector_loadings.to_numpy(), cmap="RdBu_r", vmin=-limit, vmax=limit, aspect="auto")
+ax.set_xticks(range(sector_loadings.shape[1]), sector_loadings.columns)
+ax.set_yticks(range(sector_loadings.shape[0]), sector_loadings.index)
+for row in range(sector_loadings.shape[0]):
+    for col in range(sector_loadings.shape[1]):
+        value = sector_loadings.iloc[row, col]
+        text_color = COLORS["silver"] if abs(value) > 0.55 * limit else COLORS["neutral"]
+        ax.text(
+            col,
+            row,
+            f"{value:+.3f}",
+            ha="center",
+            va="center",
+            fontsize=8,
+            color=text_color,
+        )
+fig.colorbar(image, ax=ax, label="Mean standardized-space loading")
+add_message_title(
+    ax,
+    "PC2 is a resource axis; PC3 is defensive-cyclical",
+    subtitle="Full-sample ETF-correlation sector proxies",
 )
-ax.set_title("Average Eigenportfolio Loadings by Sector")
-ax.set_ylabel("")
 fig.show()
 
 # %% [markdown]
 # **Finding**: PC1 loads positively across all sectors with tightly clustered values
 # (0.041–0.056), reflecting the broad market factor. PC2 is dominated by Energy
 # (+0.107) and Materials (+0.046) versus Financials (-0.045), Discretionary (-0.026), and
-# Staples (-0.026) — a commodity / cyclical-resource axis rather than the growth-vs-defensive
+# Staples (-0.026), a commodity / cyclical-resource axis rather than the growth-vs-defensive
 # rotation that one might expect. The conventional defensive-vs-cyclical pattern instead
 # appears in PC3, with Utilities (+0.134), Staples (+0.084), and Healthcare (+0.051) on the
 # defensive side and Financials (-0.056), Energy (-0.017), and Materials (-0.013) on the
@@ -381,47 +414,51 @@ fig.show()
 # %% [markdown]
 # ## 9. Eigenportfolio Score Trajectories
 #
-# Principal component scores are mean-zero projections of standardized returns onto each
-# eigenvector. They are not portfolio returns and cannot be compounded — to put them on
-# a portfolio-return scale we rescale all PC series by a single constant so PC1's daily
-# standard deviation matches the equal-weight market portfolio. This preserves the
-# eigenvalue hierarchy ($\sigma_{\text{PC}_k}/\sigma_{\text{PC}_1} = \sqrt{\lambda_k/\lambda_1}$)
-# and makes the cumulative trajectories directly comparable to a market index.
+# Standardized PCA scores cannot be compounded as returns. Instead, we apply the
+# gross-normalized raw-return-space weights derived in Section 7 to each day's stock returns.
+# These are actual in-sample portfolio returns. Their signs remain conventional for PC2 onward,
+# and their paths are descriptive rather than out-of-sample performance estimates.
 
 # %%
-ew_market_daily_std = returns_matrix.mean(axis=1).std()
-score_scale = ew_market_daily_std / factor_scores[:, 0].std()
-factor_returns_scaled = factor_scores * score_scale  # (T, N_COMPONENTS)
-
-factor_returns = pd.DataFrame(
-    {f"PC{i + 1}": factor_returns_scaled[:, i] for i in range(N_COMPONENTS)},
+factor_returns_df = pd.DataFrame(
+    {f"PC{i + 1}": factor_returns[:, i] for i in range(N_COMPONENTS)},
     index=dates.values[: len(factor_scores)],
 )
 
-cum_factors = (1 + factor_returns[["PC1", "PC2", "PC3", "PC4", "PC5"]]).cumprod()
+cum_factors = (1 + factor_returns_df[["PC1", "PC2", "PC3", "PC4", "PC5"]]).cumprod()
 
-fig, ax = plt.subplots(figsize=(12, 6))
+fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"], constrained_layout=True)
 for i, col in enumerate(cum_factors.columns):
     ax.plot(
         cum_factors.index,
         cum_factors[col],
         label=f"{col} ({explained_var[i]:.1%})",
         linewidth=1.5 if i < 2 else 1,
+        color=[
+            COLORS["blue"],
+            COLORS["amber"],
+            COLORS["copper"],
+            COLORS["slate"],
+            COLORS["positive"],
+        ][i],
     )
 
 ax.set_xlabel("Date")
-ax.set_ylabel("Cumulative Return (vol-matched)")
-ax.set_title("Eigenportfolio Factor Trajectories")
+ax.set_ylabel("Growth of $1")
 ax.legend(loc="upper left")
-ax.axhline(y=1, color="gray", linestyle="--", alpha=0.3)
+ax.axhline(y=1, color=COLORS["neutral"], linestyle="--", alpha=0.5)
+add_message_title(
+    ax,
+    "PC1 captures the broad market path; higher components rotate around zero drift",
+    subtitle="In-sample gross-normalized eigenportfolio returns, 2006-2018",
+)
 fig.show()
 
 # %% [markdown]
-# **Finding**: PC1 trails the broad equity market because PCA centers the input — daily PC1
-# correlates above 0.98 with the equal-weight portfolio, but the cumulative path picks up
-# variance drag without the long-run cross-sectional drift. PC2 through PC5 oscillate around
-# 1.0 with progressively smaller amplitude, consistent with the eigenvalue decline. For
-# regime-switching models applied to factor scores, see Section 9.4 (HMM).
+# **Finding**: PC1 tracks the broad equity market because its raw-return-space weights are
+# predominantly positive. PC2 through PC5 are long-short portfolios whose paths depend on the
+# arbitrary component sign, so direction is not an economic forecast. For regime-switching models
+# applied to factor histories, see Section 9.4 (HMM).
 
 # %% [markdown]
 # ## 10. Factor Characteristics
@@ -429,40 +466,37 @@ fig.show()
 # %%
 factor_stats = pd.DataFrame(
     {
-        "Daily Std": factor_returns.iloc[:, :5].std(),
-        "Ann Std": factor_returns.iloc[:, :5].std() * np.sqrt(252),
-        "Skew": factor_returns.iloc[:, :5].skew(),
-        "Kurtosis": factor_returns.iloc[:, :5].kurtosis(),
+        "Annualized volatility": factor_returns_df.iloc[:, :5].std() * np.sqrt(252),
+        "Skew": factor_returns_df.iloc[:, :5].skew(),
+        "Excess kurtosis": factor_returns_df.iloc[:, :5].kurtosis(),
     }
 )
-
-factor_stats.style.format(
-    {"Daily Std": "{:.4f}", "Ann Std": "{:.2%}", "Skew": "{:.2f}", "Kurtosis": "{:.2f}"}
+print(
+    "Eigenportfolio annualized volatility: "
+    + ", ".join(f"{idx}={value:.1%}" for idx, value in factor_stats.iloc[:, 0].items())
 )
 
 # %% [markdown]
-# **Interpretation**: Annualized standard deviations follow the eigenvalue ranking, with PC1
-# matching the equal-weight market portfolio by construction and PC2–PC5 falling at ratios
-# $\sqrt{\lambda_k/\lambda_1}$. PCA scores are mean-zero by construction, so reporting Sharpe
-# would be a degenerate zero across the board — the components capture variance structure,
-# not expected returns. Risk premia are recovered downstream by combining loadings with a
-# Stage 2 factor-premium forecaster.
+# **Interpretation**: The gross-normalized portfolios are valid return series, but their gross
+# normalization differs by component, so their volatility ranking need not equal the standardized
+# score eigenvalue ranking. In-sample mean return or Sharpe is not a forecast. Risk premia require a
+# separately specified Stage 2 factor-premium forecast and a point-in-time evaluation.
 
 # %% [markdown]
 # ## 11. Market Factor Validation
 
 # %%
 market_return = returns_matrix.mean(axis=1).values
-pc1_return = factor_scores[:, 0]
+pc1_return = factor_returns[:, 0]
 market_corr = np.corrcoef(pc1_return, market_return)[0, 1]
 
 print(f"Correlation(PC1, Equal-Weight Market): {market_corr:.4f}")
 print(f"PC1 variance explained: {explained_var[0]:.1%}")
 
 # %% [markdown]
-# A correlation above 0.90 confirms that PC1 effectively captures the broad market factor,
-# validating the standard interpretation of the first eigenportfolio as a data-driven
-# market proxy analogous to CAPM beta.
+# A correlation above 0.90 confirms that PC1 captures the dominant broad-market mode in this
+# sample. Its PCA loading resembles a common-factor exposure but is not a CAPM beta or a pricing
+# statement.
 
 # %% [markdown]
 # ## 12. Hierarchical PCA (HPCA)
@@ -471,10 +505,10 @@ print(f"PC1 variance explained: {explained_var[0]:.1%}")
 # can be difficult to interpret economically. Avellaneda's (2019) Hierarchical PCA addresses
 # this by injecting known economic structure.
 #
-# **Step 1**: PCA within each sector — identify the dominant factor for Technology stocks,
+# **Step 1**: PCA within each sector to identify the dominant factor for Technology stocks,
 # another for Financials, etc.
 #
-# **Step 2**: PCA across sector-level factors — capture cross-sector dynamics.
+# **Step 2**: PCA across sector-level factors to capture cross-sector dynamics.
 #
 # > **HPCA ≠ HRP.** Hierarchical PCA (factor discovery) and Hierarchical Risk Parity
 # > (portfolio construction, Chapter 19) share a name but not a purpose.
@@ -501,9 +535,12 @@ for sector in sorted(valid_sectors):
     sector_factors[sector] = sector_factor.flatten()
 
 print(f"HPCA Step 1: Extracted intra-sector factors for {len(sector_factors)} sectors")
-for sector, factor in sector_factors.items():
-    n_stocks = (sector_assignment == sector).sum()
-    print(f"  {sector:<15}: {n_stocks:>3} stocks")
+print(
+    "Sector counts: "
+    + ", ".join(
+        f"{sector}={(sector_assignment == sector).sum()}" for sector in sorted(valid_sectors)
+    )
+)
 
 # %%
 # Step 2: Cross-sector PCA
@@ -525,8 +562,25 @@ hpca_loadings = pd.DataFrame(
     columns=[f"HPCA{i + 1}" for i in range(n_cross)],
 )
 
-print(f"\nHPCA Step 2: Cross-sector factor loadings ({n_cross} components)")
-hpca_loadings.round(3)
+fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"], constrained_layout=True)
+hpca_limit = float(np.abs(hpca_loadings.to_numpy()).max())
+image = ax.imshow(
+    hpca_loadings.to_numpy(), cmap="RdBu_r", vmin=-hpca_limit, vmax=hpca_limit, aspect="auto"
+)
+ax.set_xticks(range(n_cross), hpca_loadings.columns)
+ax.set_yticks(range(len(hpca_loadings)), hpca_loadings.index)
+for row in range(hpca_loadings.shape[0]):
+    for col in range(hpca_loadings.shape[1]):
+        value = hpca_loadings.iloc[row, col]
+        text_color = COLORS["silver"] if abs(value) > 0.55 * hpca_limit else COLORS["neutral"]
+        ax.text(col, row, f"{value:+.2f}", ha="center", va="center", color=text_color)
+fig.colorbar(image, ax=ax, label="Cross-sector loading")
+add_message_title(
+    ax,
+    "HPCA1 is broad; later components express named sector contrasts",
+    subtitle=f"First-stage factors from {len(valid_sectors)} ETF-proxy sectors",
+)
+fig.show()
 
 # %% [markdown]
 # **Finding**: HPCA produces cross-sector factors with clear economic interpretation.
@@ -543,7 +597,8 @@ hpca_loadings.round(3)
 #
 # $$t_{1/2} = -\frac{\ln 2}{\ln |\phi|}$$
 #
-# where $\phi$ is the AR(1) coefficient of the residual series.
+# where $\phi$ is the AR(1) slope. A positive $0 < \phi < 1$ maps to an OU-style half-life;
+# negative slopes imply alternating signs and are reported without an OU half-life.
 #
 # **Caveat**: mean-reversion parameters are unstable
 # out-of-sample and transaction costs typically dominate any theoretical edge.
@@ -568,21 +623,33 @@ residuals_df = pd.DataFrame(residuals_dict, index=dates.values[: len(factor_scor
 halflife_results = []
 for stock in sample_stocks:
     resid = residuals_df[stock].values
-    # AR(1) coefficient via OLS
+    # AR(1) slope via OLS with an intercept
     resid_lag = resid[:-1]
     resid_cur = resid[1:]
-    phi = np.corrcoef(resid_lag, resid_cur)[0, 1]
-    halflife = -np.log(2) / np.log(abs(phi)) if 0 < abs(phi) < 1 else np.inf
+    phi = float(LinearRegression().fit(resid_lag[:, None], resid_cur).coef_[0])
+    halflife = -np.log(2) / np.log(phi) if 0 < phi < 1 else np.nan
     halflife_results.append({"Stock": stock, "AR(1) Coeff": phi, "Half-Life (days)": halflife})
 
-pd.DataFrame(halflife_results).set_index("Stock").round(2)
+halflife_df = pd.DataFrame(halflife_results).set_index("Stock")
+fig, ax = plt.subplots(figsize=FIGSIZE["single"], constrained_layout=True)
+colors = [
+    COLORS["blue"] if value > 0 else COLORS["negative"] for value in halflife_df["AR(1) Coeff"]
+]
+ax.barh(halflife_df.index, halflife_df["AR(1) Coeff"], color=colors, alpha=0.85)
+zero_line(ax, axis="x")
+ax.set_xlabel("AR(1) slope")
+add_message_title(
+    ax,
+    "Sample residuals show negligible one-day persistence",
+    subtitle="Five seeded stocks; full-sample diagnostic, not a tradable mean-reversion estimate",
+)
+fig.show()
 
 # %% [markdown]
-# **Interpretation**: Sub-daily half-lives and AR(1) coefficients near zero indicate that
-# residuals are essentially serially uncorrelated once factor exposure is removed — the
-# mean-reversion is too fast to exploit at daily frequency. These estimates are highly
-# sensitive to the estimation window, sample of stocks, and number of factors. In practice,
-# half-lives drift out of sample and transaction costs dominate any theoretical edge.
+# **Interpretation**: Slopes near zero indicate little one-day residual persistence in this
+# seeded sample. Negative slopes do not admit the positive-$\phi$ OU half-life formula. The
+# full-sample fit, random stock choice, and absence of cost-aware out-of-sample evaluation rule
+# out a trading conclusion.
 
 # %% [markdown]
 # ## 14. Risk Decomposition
@@ -597,11 +664,11 @@ portfolio_stocks = rng.choice(
 ).tolist()
 portfolio_returns = returns_matrix[portfolio_stocks].mean(axis=1).values
 
-# Use vol-rescaled factor returns so betas are on the same scale as portfolio returns.
-X_factors = factor_returns_scaled[:, :5]
+# Regress on the five actual gross-normalized eigenportfolio return series.
+X_factors = factor_returns[:, :5]
 reg_portfolio = LinearRegression().fit(X_factors, portfolio_returns)
 
-factor_var = np.var(X_factors @ np.diag(reg_portfolio.coef_), axis=0)
+factor_var = np.var(X_factors * reg_portfolio.coef_[None, :], axis=0)
 residual_var = np.var(portfolio_returns - reg_portfolio.predict(X_factors))
 total_var = np.var(portfolio_returns)
 
@@ -615,34 +682,40 @@ decomp = pd.DataFrame(
 )
 decomp.loc["Residual"] = [np.nan, residual_var * 1e5, residual_var / total_var * 100]
 
-decomp.style.format(
-    {"Beta": "{:+.3f}", "Factor Variance Contrib (1e-5)": "{:.3f}", "% of Total Var": "{:.2f}"}
+fig, ax = plt.subplots(figsize=FIGSIZE["single"], constrained_layout=True)
+ax.bar(
+    decomp.index,
+    decomp["% of Total Var"],
+    color=[COLORS["blue"]] * 5 + [COLORS["neutral"]],
+    alpha=0.85,
 )
+ax.set_ylabel("Share of total variance (%)")
+ax.set_xlabel("Risk component")
+add_message_title(
+    ax,
+    f"PC1 explains {decomp.loc['PC1', '% of Total Var']:.1f}% of seeded-portfolio variance",
+    subtitle="In-sample decomposition of an equal-weight 20-stock portfolio",
+)
+fig.show()
 
 # %% [markdown]
-# **Finding**: The market factor (PC1) dominates portfolio risk — typically explaining
-# 80–90% of total variance for a diversified portfolio. This demonstrates why hedging
-# market exposure is the single most impactful risk management action. The residual
-# represents idiosyncratic risk that diversification can reduce.
+# **Finding**: The market factor (PC1) dominates portfolio risk, explaining
+# the largest share of total variance for this seeded portfolio. This is an in-sample
+# attribution, not a universal 80-90% range or a hedge recommendation. The residual is variation
+# not spanned by the first five fitted components.
 
 # %% [markdown]
 # ## 15. Eigenvector Stability: Cosine Similarity and Procrustes Rotation
 #
 # Rolling PCA loadings can "flip" between adjacent windows when eigenvalues are
-# close in magnitude — a mathematical pathology, not a structural change. This
+# close in magnitude, a mathematical pathology rather than a structural change. This
 # creates phantom turnover in downstream allocation. We diagnose this with cosine
 # similarity, then fix it with Procrustes rotation (Section 14.3).
 
 # %%
-# Rolling PCA with monthly re-estimation (full panel; ROLL_STEP keeps wall-time bounded)
-ROLL_WINDOW = 252
-ROLL_STEP = 21  # monthly re-estimation
-N_ROLL_PCS = 5
-
-# Use the standardized returns from earlier (returns_matrix is pandas)
-roll_dates = returns_matrix.index[ROLL_WINDOW::ROLL_STEP]
-
+# Rolling PCA with monthly re-estimation; each window ends before its displayed month.
 loading_history = []
+loading_dates = []
 for end_idx in range(ROLL_WINDOW, len(returns_matrix), ROLL_STEP):
     window = returns_matrix.iloc[end_idx - ROLL_WINDOW : end_idx].values
     valid_cols = ~np.isnan(window).any(axis=0)
@@ -651,94 +724,107 @@ for end_idx in range(ROLL_WINDOW, len(returns_matrix), ROLL_STEP):
     window_clean = window[:, valid_cols]
     roll_scaler = StandardScaler()
     window_scaled = roll_scaler.fit_transform(window_clean)
-    roll_pca = PCA(n_components=N_ROLL_PCS)
+    roll_pca = PCA(n_components=N_ROLL_PCS, random_state=SEED)
     roll_pca.fit(window_scaled)
     loading_history.append(roll_pca.components_)
+    loading_dates.append(dates.iloc[end_idx])
 
 print(f"Rolling PCA: {len(loading_history)} windows, {N_ROLL_PCS} components each")
 
 # %%
-# Cosine similarity between consecutive loading matrices
-cosine_sim = np.zeros((len(loading_history) - 1, N_ROLL_PCS))
+# Signed and absolute cosine similarity between like-numbered consecutive eigenvectors.
+signed_cosine = np.zeros((len(loading_history) - 1, N_ROLL_PCS))
 for t in range(len(loading_history) - 1):
     for k in range(N_ROLL_PCS):
         v1 = loading_history[t][k]
         v2 = loading_history[t + 1][k]
-        cosine_sim[t, k] = abs(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+        signed_cosine[t, k] = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
 
-fig, ax = plt.subplots(figsize=(14, 4))
-for k in range(N_ROLL_PCS):
-    ax.plot(cosine_sim[:, k], label=f"PC{k + 1}", alpha=0.8, linewidth=0.8 if k > 0 else 1.5)
-ax.axhline(0.8, color="gray", linestyle="--", alpha=0.5, label="Stability threshold")
-ax.set_xlabel("Rolling Window Index")
-ax.set_ylabel("|Cosine Similarity|")
-ax.set_title("Eigenvector Stability: Cosine Similarity Between Consecutive Windows")
-ax.legend(loc="lower left", fontsize=8)
-ax.set_ylim(0, 1.05)
-fig.show()
+absolute_cosine = np.abs(signed_cosine)
+sign_flip_counts = (signed_cosine < 0).sum(axis=0)
+low_stability_counts = (absolute_cosine < 0.8).sum(axis=0)
+print(
+    "Raw rolling diagnostics: "
+    + ", ".join(
+        f"PC{k + 1} flips={sign_flip_counts[k]}, |cos|<0.8={low_stability_counts[k]}"
+        for k in range(N_ROLL_PCS)
+    )
+)
 
 # %% [markdown]
-# **Finding**: PC1 (market) maintains near-perfect stability ($\cos \approx 1$).
-# Components 3+ show periodic drops — these are the eigenvalue-proximity flips
-# discussed in the text. Without correction, these flips translate directly into
-# spurious rebalancing in portfolio allocation.
+# **Finding**: The signed diagnostic separates arbitrary sign reversals from genuine loading
+# instability. The absolute diagnostic treats $v$ and $-v$ as equivalent; values below 0.8 then
+# flag rotations or component swaps that a sign correction alone cannot repair.
 
 # %%
-# Procrustes rotation: align each window's factor basis to a FIXED reference (window 0).
+# Procrustes rotation: align each window's factor basis to the preceding aligned basis.
 #
-# Each `loading_history[t]` has shape (K, N) — components × assets. The factor basis
+# Each `loading_history[t]` has shape (K, N), components by assets. The factor basis
 # is the transpose: B_t = loading_history[t].T with shape (N, K). Procrustes alignment
 # in factor space solves
-#     min_{R: R^T R = I_K}  || B_t R - B_0 ||_F
-# whose closed-form solution is R = U V^T from SVD of (B_t^T B_0). The resulting R
-# is K × K — a rotation in the K-dimensional factor space — not N × N.
+#     min_{R: R^T R = I_K}  || B_t R - B_{t-1} ||_F
+# whose closed-form solution is R = U V^T from SVD of (B_t^T B_{t-1}). The resulting R
+# is K by K: a rotation in the K-dimensional factor space, not N by N.
 #
-# We use a fixed-reference anchor (loading_history[0]) so the resulting cosine
-# similarities measure drift relative to a single baseline rather than accumulating
-# rotation error from a chained pairwise alignment.
+# The coordinate rotation must also be applied to factor scores and factor covariance before
+# downstream use; here it is only a loading-stability diagnostic.
 
-prev_basis = loading_history[0].T  # (N, K) — fixed anchor
+aligned_bases = [loading_history[0].T]
 procrustes_sim = np.zeros((len(loading_history) - 1, N_ROLL_PCS))
 
 for t in range(1, len(loading_history)):
+    prev_basis = aligned_bases[-1]
     curr_basis = loading_history[t].T  # (N, K)
-    # K × K rotation that maps current factor basis into the anchor's frame
+    # K x K rotation that maps the current factor basis into the prior aligned frame
     U, _, Vt = np.linalg.svd(curr_basis.T @ prev_basis)
     rotation = U @ Vt  # (K, K), orthogonal
     aligned_basis = curr_basis @ rotation  # (N, K)
-    # Per-factor cosine similarity against the anchor
+    aligned_bases.append(aligned_basis)
     for k in range(N_ROLL_PCS):
         v1 = prev_basis[:, k]
         v2 = aligned_basis[:, k]
-        procrustes_sim[t - 1, k] = abs(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+        procrustes_sim[t - 1, k] = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
 
+# %%
 # Compare before/after
-fig, axes = plt.subplots(1, 2, figsize=(14, 4), sharey=True)
-for k in range(min(3, N_ROLL_PCS)):
-    axes[0].plot(cosine_sim[:, k], label=f"PC{k + 1}", alpha=0.8)
-    axes[1].plot(procrustes_sim[:, k], label=f"PC{k + 1}", alpha=0.8)
-for ax, title in zip(axes, ["Before Procrustes", "After Procrustes"], strict=False):
-    ax.axhline(0.8, color="gray", linestyle="--", alpha=0.5)
-    ax.set_xlabel("Window Index")
-    ax.set_title(title)
-    ax.legend(fontsize=8)
-    ax.set_ylim(0, 1.05)
-axes[0].set_ylabel("|Cosine Similarity|")
+fig, axes = plt.subplots(
+    2, 1, figsize=FIGSIZE["dual_v"], sharex=True, sharey=True, constrained_layout=True
+)
+palette = [
+    COLORS["blue"],
+    COLORS["amber"],
+    COLORS["negative"],
+    COLORS["positive"],
+    COLORS["copper"],
+]
+for k in range(N_ROLL_PCS):
+    axes[0].plot(loading_dates[1:], signed_cosine[:, k], label=f"PC{k + 1}", color=palette[k])
+    axes[1].plot(loading_dates[1:], procrustes_sim[:, k], label=f"PC{k + 1}", color=palette[k])
+for ax in axes:
+    ax.axhline(0.8, color=COLORS["neutral"], linestyle="--", alpha=0.6)
+    zero_line(ax)
+    ax.legend(fontsize=8, loc="lower left", ncol=5)
+    ax.set_ylim(-1.05, 1.05)
+    ax.set_ylabel("Signed cosine")
+axes[1].set_xlabel("Window end date")
+add_message_title(
+    axes[0],
+    "Raw eigenvectors combine sign flips with structural rotation",
+    subtitle="Trailing 252-day windows, re-estimated every 21 observations",
+)
+add_message_title(
+    axes[1],
+    "Adjacent-window Procrustes removes coordinate ambiguity",
+    subtitle="Remaining departures from 1 reflect changes in the top-five factor subspace",
+)
 fig.show()
 
 # %% [markdown]
 # **Reading the figure**: The Procrustes rotation is a $K \times K$ orthogonal transform in
-# factor space (here $K = 5$), not an $N \times N$ rotation on the asset basis — a common
-# implementation pitfall. After alignment to the fixed reference window, the |cosine
-# similarity| panel removes the sign-flip oscillations visible in the raw (pre-alignment)
-# panel, where PC2–PC5 each cross zero in 13–29 of the 134 consecutive-window
-# comparisons. What remains is genuine structural drift: PC1 stays close to 1.0 (mean
-# 0.97, terminal 0.93) because the market factor is stable; PC2 drifts to roughly 0.80;
-# PC3 falls below 0.5 by the end of the rolling history; PC4–PC5 collapse further. The
-# practical implication for Chapter 17 portfolio construction is that Procrustes resolves
-# the eigenvector-flip artifact but does not manufacture stability — slow drift in
-# higher-order components is a real signal that downstream risk models must accommodate
-# (e.g. by periodically re-anchoring the reference basis).
+# factor space, not an $N \times N$ asset-space rotation. Adjacent alignment removes arbitrary
+# signs and rotations inside the retained subspace. It does not prove that named PCs are stable,
+# nor does it by itself define production portfolio weights. A downstream covariance model must
+# rotate scores and factor covariance consistently and still monitor subspace drift.
 
 # %% [markdown]
 # ## 16. Two-Stage Production PCA
@@ -749,130 +835,168 @@ fig.show()
 # volatility; Stage 2 estimates the stable correlation factor structure.
 
 # %%
-# Stage 1: Exponentially-weighted volatility estimation (half-life ~20 days)
-FAST_HALFLIFE = 20
-SLOW_HALFLIFE = 120
-N_PROD_FACTORS = 5
-
-# Use the full returns matrix (already cleaned)
+# This is an as-of-END_DATE estimator, not a historical backtest.
 ret_np = returns_matrix.values
 T_full, N_full = ret_np.shape
 
-# EWMA variance per asset (fast dynamics)
-alpha = 1 - np.exp(-np.log(2) / FAST_HALFLIFE)
-ewma_var = np.zeros(N_full)
-ewma_var[:] = np.var(ret_np[:20], axis=0)  # initialize from first 20 days
-for t in range(20, T_full):
-    ewma_var = (1 - alpha) * ewma_var + alpha * ret_np[t] ** 2
 
-idio_vol = np.sqrt(ewma_var)
-idio_vol[idio_vol < 1e-8] = np.median(idio_vol)
+def exp_weights(length, half_life):
+    ages = np.arange(length)[::-1]
+    weights = np.exp(-np.log(2) * ages / half_life)
+    return weights / weights.sum()
 
-print(f"Stage 1: EWMA vol (halflife={FAST_HALFLIFE}d), median idio vol = {np.median(idio_vol):.6f}")
 
-# %%
-# Stage 2: Slow weighting on vol-normalized returns for correlation structure
-slow_decay = np.exp(-np.log(2) / SLOW_HALFLIFE * np.arange(T_full)[::-1])
-slow_weights = slow_decay * T_full / slow_decay.sum()
+def weighted_covariance(values, weights):
+    mean = np.average(values, axis=0, weights=weights)
+    centered = values - mean
+    covariance = (centered * np.sqrt(weights[:, None])).T @ (centered * np.sqrt(weights[:, None]))
+    return covariance, mean
 
-# Normalize returns by idiosyncratic volatility → unit variance per asset
-ret_normalized = ret_np / idio_vol[None, :]
-ret_slow = ret_normalized * np.sqrt(slow_weights[:, None])
 
-# Production PCA on normalized, slowly-weighted returns (used for the covariance reconstruction below)
-prod_pca = PCA(n_components=N_PROD_FACTORS)
-prod_pca.fit(ret_slow)
-
-# Marchenko-Pastur noise floor is only well-defined on unit-variance i.i.d. data. We
-# evaluate it on the StandardScaler eigenvalues from Section 5 (correlation-PCA, unit-
-# variance per column) — the slow-weighted PCA above tracks the current correlation
-# structure but inflates eigenvalues outside the MP regime, so its raw spectrum is
-# unsuitable as a noise-floor comparison.
-ratio = N_full / T_full
-mp_upper = (1 + np.sqrt(ratio)) ** 2
-mp_eigenvalues = pca.explained_variance_[:N_PROD_FACTORS]
-n_signal = max(1, int((mp_eigenvalues > mp_upper).sum()))
-eigenvalues = prod_pca.explained_variance_
-
-mp_summary = pd.DataFrame(
-    {
-        "MP eigenvalue (correlation-scale)": mp_eigenvalues,
-        "Above lambda_plus": ["yes" if v > mp_upper else "no (noise)" for v in mp_eigenvalues],
-        "Slow-weighted eigenvalue": eigenvalues,
-    },
-    index=[f"PC{i + 1}" for i in range(N_PROD_FACTORS)],
+# Stage 1: fast covariance, then residual volatility after removing five common components.
+fast_weights = exp_weights(T_full, FAST_HALFLIFE)
+fast_cov, _ = weighted_covariance(ret_np, fast_weights)
+fast_eigenvalues, fast_eigenvectors = np.linalg.eigh(fast_cov)
+fast_order = np.argsort(fast_eigenvalues)[::-1]
+fast_eigenvalues = fast_eigenvalues[fast_order]
+fast_eigenvectors = fast_eigenvectors[:, fast_order]
+fast_common = (
+    fast_eigenvectors[:, :N_PROD_FACTORS]
+    @ np.diag(fast_eigenvalues[:N_PROD_FACTORS])
+    @ fast_eigenvectors[:, :N_PROD_FACTORS].T
 )
+fast_residual_raw = np.clip(np.diag(fast_cov - fast_common), 1e-10, None)
+fast_residual_var = (1 - DIAGONAL_SHRINKAGE) * fast_residual_raw + DIAGONAL_SHRINKAGE * np.median(
+    fast_residual_raw
+)
+idio_vol = np.sqrt(fast_residual_var)
 
 print(
-    f"Stage 2: {n_signal}/{N_PROD_FACTORS} components above MP noise floor "
-    f"(lambda_plus = {mp_upper:.2f}; T={T_full}, N={N_full})"
+    f"Stage 1: {FAST_HALFLIFE}-day half-life; median residual volatility={np.median(idio_vol):.4%}"
 )
-mp_summary.style.format(
-    {"MP eigenvalue (correlation-scale)": "{:.2f}", "Slow-weighted eigenvalue": "{:.2f}"}
+
+# %%
+# Stage 2: slow covariance on returns normalized by fast residual volatility.
+slow_weights = exp_weights(T_full, SLOW_HALFLIFE)
+ret_normalized = ret_np / idio_vol[None, :]
+slow_cov, _ = weighted_covariance(ret_normalized, slow_weights)
+slow_eigenvalues, slow_eigenvectors = np.linalg.eigh(slow_cov)
+slow_order = np.argsort(slow_eigenvalues)[::-1]
+slow_eigenvalues = slow_eigenvalues[slow_order]
+slow_eigenvectors = slow_eigenvectors[:, slow_order]
+
+# An exponentially weighted sample has fewer effective observations. Use that effective size
+# in a BBP-informed threshold, then retain only excess eigenvalue above the estimated noise scale.
+effective_t = 1 / np.square(slow_weights).sum()
+noise_scale = float(np.median(np.diag(slow_cov)))
+mp_upper = noise_scale * (1 + np.sqrt(N_full / effective_t)) ** 2
+n_above_edge = int((slow_eigenvalues > mp_upper).sum())
+n_signal = max(1, min(N_PROD_FACTORS, n_above_edge))
+signal_eigenvalues = np.clip(slow_eigenvalues[:n_signal] - noise_scale, 0, None)
+
+print(
+    f"Stage 2: {n_above_edge} components clear the edge; {n_signal} retained; "
+    f"BBP-informed upper edge={mp_upper:.2f}, effective T={effective_t:.1f}, N={N_full}"
 )
 
 # %%
 # Reconstruct covariance: Ω = D_σ (B Ω_f B^T + Ω_ε) D_σ
-B = prod_pca.components_[:n_signal].T  # (N, n_signal)
-Omega_f = np.diag(eigenvalues[:n_signal])
-# Residual variance from normalized returns (should be ~1 per asset)
-resid_norm = ret_normalized - prod_pca.transform(ret_normalized) @ prod_pca.components_
-omega_eps = np.var(resid_norm, axis=0)
+B = slow_eigenvectors[:, :n_signal]
+Omega_f = np.diag(signal_eigenvalues)
+common_cov = B @ Omega_f @ B.T
+omega_eps_raw = np.clip(np.diag(slow_cov - common_cov), 1e-10, None)
+omega_eps = (1 - DIAGONAL_SHRINKAGE) * omega_eps_raw + DIAGONAL_SHRINKAGE * np.median(omega_eps_raw)
 
-# Factor covariance in original scale
 cov_prod = np.diag(idio_vol) @ (B @ Omega_f @ B.T + np.diag(omega_eps)) @ np.diag(idio_vol)
 std_cov = np.cov(ret_np.T)
+standard_condition = np.linalg.cond(std_cov)
+two_stage_condition = np.linalg.cond(cov_prod)
 
 print(
-    f"Condition number — standard: {np.linalg.cond(std_cov):.0f}, two-stage: {np.linalg.cond(cov_prod):.0f}"
+    f"Condition number: standard={standard_condition:.0f}, two-stage={two_stage_condition:.0f}; "
+    f"ratio={standard_condition / two_stage_condition:.1f}x"
 )
-print(f"Ratio: {np.linalg.cond(std_cov) / np.linalg.cond(cov_prod):.1f}x improvement")
+
+shown = min(20, len(slow_eigenvalues))
+spectrum_colors = [
+    COLORS["blue"]
+    if i < n_signal
+    else COLORS["amber"]
+    if slow_eigenvalues[i] > mp_upper
+    else COLORS["silver_muted"]
+    for i in range(shown)
+]
+
+# %%
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], constrained_layout=True)
+axes[0].bar(
+    np.arange(1, shown + 1),
+    slow_eigenvalues[:shown],
+    color=spectrum_colors,
+)
+axes[0].axhline(mp_upper, color=COLORS["amber"], linestyle="--", label="BBP-informed edge")
+axes[0].set_xlabel("Slow-covariance component")
+axes[0].set_xlim(0.5, shown + 0.5)
+axes[0].set_xticks([1, 5, 10, 15, 20])
+axes[0].set_yscale("log")
+axes[0].set_ylabel("Eigenvalue (log scale)")
+axes[0].legend()
+add_message_title(
+    axes[0],
+    f"{n_above_edge} components clear the edge; the model retains {n_signal}",
+    subtitle="Top 20 eigenvalues; blue retained, amber above edge but beyond the five-factor cap",
+)
+axes[1].bar(
+    ["Sample", "Two-stage"],
+    [standard_condition, two_stage_condition],
+    color=[COLORS["neutral"], COLORS["blue"]],
+)
+axes[1].set_yscale("log")
+axes[1].set_ylabel("Covariance condition number (log scale)")
+add_message_title(
+    axes[1],
+    f"Diagonal residual shrinkage changes conditioning by {standard_condition / two_stage_condition:.1f}x",
+    subtitle="Numerical conditioning is a diagnostic, not out-of-sample validation",
+)
+fig.show()
 
 # %% [markdown]
-# **Finding**: The two-stage procedure produces a better-conditioned covariance matrix
-# by separating fast volatility dynamics from the stable factor structure. The lower
-# condition number means more stable portfolio weights in Chapter 17's optimization,
-# and the BBP eigenvalue shrinkage prevents noise eigenvalues from inflating the
-# covariance estimate. This two-stage covariance is the form used in production risk
-# models that feed mean-variance optimization, risk parity, and risk budgeting.
+# **Finding**: The as-of-end-date estimate separates fast residual volatility from a slowly
+# weighted factor structure, retains eigenvalue excess above a BBP-informed noise edge, and places
+# the remaining variance on the diagonal. Its condition number differs from the uniform sample
+# covariance. That numerical diagnostic does not establish better realized portfolio risk; a
+# point-in-time walk-forward comparison belongs in Chapter 17.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Market dominance**: PC1 captures the broad equity market factor with 0.99 correlation
-#    to the equal-weight portfolio, confirming PCA's ability to recover the dominant risk
-#    source from return covariance alone
+# 1. **Market dominance**: the gross-normalized PC1 portfolio correlates 0.99 with the equal-weight
+#    return in this sample. This is a descriptive market mode, not CAPM beta or a risk-premium claim
 # 2. **Sector interpretability is universe-specific**: On this 2006–2018 top-500 panel,
 #    PC2 is a commodity / cyclical-resource factor (Energy +0.107, Materials +0.046 vs
 #    Financials, Discretionary, Staples negative); the conventional defensive-vs-cyclical
 #    rotation appears in PC3 (Utilities, Staples, Healthcare positive vs Financials, Energy,
 #    Materials negative). The labeling depends on which common drivers dominate after the
 #    market is removed
-# 3. **HPCA improves labeling**: Two-step hierarchical PCA produces factors that are easier
-#    to interpret because cross-sector loadings correspond to named industry groups
-# 4. **Eigenvector stability**: Rolling-window PCA produces frequent sign flips on PC2 and
-#    beyond (13–29 of 134 consecutive-window pairs change sign in the raw cosine series).
-#    Procrustes alignment in $K$-dimensional factor space (a $K \times K$ rotation, not
-#    $N \times N$) against a fixed reference window removes the flip artifact. After
-#    alignment, PC1 holds at $\approx 0.93$–$1.0$, PC2 drifts to $\approx 0.80$, and PC3
-#    falls below $0.5$ by the end of the sample — genuine structural drift that downstream
-#    risk models must accommodate.
-# 5. **Two-stage production PCA**: Separating volatility (fast) from correlation (slow)
-#    estimation produces a better-conditioned covariance matrix; the BBP noise floor must
-#    be evaluated on unit-variance i.i.d. data, not on slow-weighted returns
-# 6. **Risk decomposition**: PC1 dominates portfolio variance — over 90% of total variance
-#    for the diversified 20-stock example — making market beta the primary risk dimension
-#    for any broad equity portfolio
+# 3. **HPCA improves labeling**: two-step hierarchical PCA exposes named sector contrasts, while
+#    the full-sample ETF-correlation labels remain proxies rather than point-in-time GICS data
+# 4. **Eigenvector stability**: signed cosine reveals arbitrary reversals; absolute cosine reveals
+#    rotations and swaps. Adjacent-window $K \times K$ Procrustes alignment removes coordinate
+#    ambiguity, but downstream use must rotate scores and factor covariance consistently
+# 5. **Two-speed covariance estimation**: fast residual volatility and slow normalized covariance
+#    can be combined with a BBP-informed noise threshold. Better conditioning alone is not evidence
+#    of better out-of-sample portfolio risk
+# 6. **Risk decomposition**: PC1 is the largest variance component for the seeded 20-stock example,
+#    but its fitted share is sample- and portfolio-specific
 #
 # ### Stage 1 Outputs Feed Stage 2
 #
-# Everything in this notebook is Stage 1: factors and loadings extracted
-# from the equity covariance structure. The two-step framework (Figure 14.9)
-# treats these as inputs to a Stage 2 forecaster that predicts factor
-# premia, then a Stage 3 mapper that turns the forecast back into
-# per-asset signals. PCA + the simplest Stage 2 (sample mean) collapses
-# to per-asset historical mean — useful as a baseline but not a forecaster
-# in any meaningful sense. The next-tier Stage 2 forecasters (AR(1),
+# The full-sample PCA, HPCA, residual, and risk sections are descriptive Stage 1 analyses. The
+# final as-of-end-date covariance example is a risk-estimation adapter, still not a return forecast.
+# The two-step framework (Figure 14.9) treats fitted factors and loadings as inputs to a Stage 2
+# forecaster that predicts factor premia, then a Stage 3 mapper that turns the forecast back into
+# per-asset signals. PCA plus the simplest Stage 2 (sample mean) collapses to per-asset historical
+# mean, useful as a baseline but not a meaningful forecaster. The next-tier Stage 2 forecasters (AR(1),
 # EWMA, ML) are demonstrated in [`04_ipca`](04_ipca.ipynb).
 #
 # **Next Steps**:

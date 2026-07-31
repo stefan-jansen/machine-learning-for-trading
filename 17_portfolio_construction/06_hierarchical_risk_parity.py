@@ -19,11 +19,11 @@
 # **Docker image**: `ml4t`
 #
 # This notebook demonstrates Hierarchical Risk Parity, a modern portfolio construction
-# method developed by Marcos López de Prado that addresses the fundamental flaws of
-# Mean-Variance Optimization through clustering, quasi-diagonalization, and recursive bisection.
+# method developed by Marcos López de Prado that reduces sensitivity to noisy covariance
+# estimates through clustering, quasi-diagonalization, and recursive bisection.
 #
 # **Learning Objectives**:
-# - Understand why classical MVO fails in practice (the "Markowitz Curse")
+# - Understand why classical MVO can be fragile in practice (the "Markowitz Curse")
 # - Implement the three steps of HRP: clustering, quasi-diagonalization, recursive bisection
 # - Visualize the asset hierarchy with dendrograms
 # - Run walk-forward backtests comparing HRP to MVO and heuristic allocators
@@ -36,13 +36,11 @@
 # ## 1. Setup and Imports
 
 # %%
-"""Hierarchical Risk Parity (HRP) — cluster assets by correlation structure and allocate using inverse variance."""
+"""Hierarchical Risk Parity: cluster assets and allocate using inverse variance."""
 
+import hashlib
 import warnings
 
-warnings.filterwarnings("ignore")
-
-# %%
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -66,14 +64,15 @@ from scipy.cluster.hierarchy import dendrogram, leaves_list, linkage
 from scipy.spatial.distance import squareform
 from sklearn.covariance import LedoitWolf
 
-from case_studies.utils.analytics import resolve_best_prediction
 from case_studies.utils.backtest_loaders import compute_allocator_metrics
+from case_studies.utils.registry.queries import load_prediction_index
 from data import load_etfs
 from utils.paths import get_case_study_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS, add_message_title
 
 # %% tags=["parameters"]
-# Production defaults — Papermill overrides for CI testing
+# Production defaults; Papermill overrides these values for CI testing
 START_DATE = "2010-01-01"
 SEED = 42
 
@@ -91,6 +90,10 @@ fallback_count: dict[str, int] = {}
 
 # %% [markdown]
 # ## 3. Data Acquisition
+#
+# The 15 named ETFs form a fixed teaching universe. It is not a point-in-time
+# membership reconstruction, so the static examples and walk-forward comparison are
+# conditional on this ex-post universe and must not be read as an unbiased universe-selection test.
 
 # %%
 # Diversified ETF universe
@@ -151,6 +154,8 @@ print(f"Loaded {len(returns):,} days for {close_prices.shape[1]} ETFs")
 # Build a hierarchy of assets based on their correlation structure using
 # agglomerative clustering.
 #
+# $$d_{ij} = \sqrt{\frac{1-\rho_{ij}}{2}}$$
+#
 # ### Step 2: Quasi-Diagonalization
 # Reorder the covariance matrix according to the clustering hierarchy
 # to group similar assets together.
@@ -162,17 +167,8 @@ print(f"Loaded {len(returns):,} days for {close_prices.shape[1]} ETFs")
 
 # %%
 def correlation_distance(corr_matrix: np.ndarray) -> np.ndarray:
-    """
-    Convert correlation matrix to distance matrix.
-
-    Distance = sqrt(0.5 * (1 - correlation))
-
-    This ensures:
-    - Perfectly correlated assets have distance 0
-    - Uncorrelated assets have distance ~0.707
-    - Perfectly anti-correlated assets have distance 1
-    """
-    return np.sqrt(0.5 * (1 - corr_matrix))
+    """Convert a correlation matrix to a bounded distance matrix."""
+    return np.sqrt(np.clip(0.5 * (1 - corr_matrix), 0.0, 1.0))
 
 
 # %% [markdown]
@@ -203,7 +199,7 @@ def cluster_assets(returns: pd.DataFrame, method: str = "ward") -> np.ndarray:
 
 
 # %%
-def get_quasi_diagonal_order(link: np.ndarray, n_assets: int) -> list[int]:
+def get_quasi_diagonal_order(link: np.ndarray) -> list[int]:
     """
     Get the quasi-diagonal ordering from linkage matrix.
 
@@ -239,7 +235,7 @@ def recursive_bisection(
     """Allocate weights by recursively splitting ordered clusters."""
     n = len(sorted_idx)
     weights = np.ones(n)
-
+    sorted_position = {original: position for position, original in enumerate(sorted_idx)}
     clusters = [sorted_idx]
 
     while clusters:
@@ -256,10 +252,8 @@ def recursive_bisection(
             right_var = cluster_variance(cov, right)
 
             alpha = 1 - left_var / (left_var + right_var)
-            for i in left:
-                weights[sorted_idx.index(i)] *= alpha
-            for i in right:
-                weights[sorted_idx.index(i)] *= 1 - alpha
+            weights[[sorted_position[i] for i in left]] *= alpha
+            weights[[sorted_position[i] for i in right]] *= 1 - alpha
 
             if len(left) > 1:
                 new_clusters.append(left)
@@ -269,8 +263,7 @@ def recursive_bisection(
         clusters = new_clusters
 
     final_weights = np.zeros(n)
-    for i, orig_idx in enumerate(sorted_idx):
-        final_weights[orig_idx] = weights[i]
+    final_weights[np.asarray(sorted_idx)] = weights
 
     return final_weights / final_weights.sum()
 
@@ -294,7 +287,7 @@ def hrp_portfolio(returns: pd.DataFrame) -> np.ndarray:
     link = cluster_assets(returns)
 
     # Step 2: Quasi-diagonalize
-    sorted_idx = get_quasi_diagonal_order(link, len(returns.columns))
+    sorted_idx = get_quasi_diagonal_order(link)
 
     # Step 3: Recursive bisection
     cov = returns.cov().values
@@ -309,6 +302,7 @@ def hrp_portfolio(returns: pd.DataFrame) -> np.ndarray:
 # %%
 # Compute linkage for visualization
 link = cluster_assets(returns)
+branch_colors = [COLORS["blue"], COLORS["copper"], COLORS["positive"], COLORS["neutral"]]
 
 # Create dendrogram
 fig, ax = plt.subplots(figsize=(14, 8))
@@ -317,10 +311,16 @@ dn = dendrogram(
     labels=[ETF_UNIVERSE.get(s, s) for s in returns.columns],
     leaf_rotation=45,
     leaf_font_size=10,
+    link_color_func=lambda node_id: branch_colors[(node_id - len(returns.columns)) % 4],
     ax=ax,
 )
-ax.set_title("Asset Hierarchy (Dendrogram)", fontsize=14)
 ax.set_ylabel("Distance (based on correlation)")
+ax.set_xlabel("ETF")
+add_message_title(
+    ax,
+    "ETF correlations separate defensive assets from the equity cluster",
+    subtitle="Ward linkage on correlation distance, fixed 15-ETF teaching universe",
+)
 plt.tight_layout()
 plt.show()
 
@@ -342,7 +342,7 @@ def plotly_dendrogram(link, labels, title="Asset Hierarchy"):
                 x=dn["icoord"][i],
                 y=dn["dcoord"][i],
                 mode="lines",
-                line=dict(color="steelblue", width=1.5),
+                line=dict(color=COLORS["blue"], width=1.5),
                 hoverinfo="skip",
             )
         )
@@ -358,6 +358,7 @@ def plotly_dendrogram(link, labels, title="Asset Hierarchy"):
             tickvals=list(range(5, 10 * len(labels), 10)),
             ticktext=[labels[i] for i in dn["leaves"]],
             tickangle=45,
+            title="ETF",
         ),
         yaxis_title="Correlation Distance",
         height=500,
@@ -372,7 +373,9 @@ def plotly_dendrogram(link, labels, title="Asset Hierarchy"):
 
 # %%
 labels = [ETF_UNIVERSE.get(s, s) for s in returns.columns]
-fig = plotly_dendrogram(link, labels, "Asset Hierarchy (Correlation-Based Clustering)")
+fig = plotly_dendrogram(
+    link, labels, "ETF correlations form distinct defensive and equity branches"
+)
 fig.show()
 
 # %% [markdown]
@@ -382,53 +385,58 @@ fig.show()
 
 # %%
 # Get quasi-diagonal ordering
-sorted_idx = get_quasi_diagonal_order(link, len(returns.columns))
+sorted_idx = get_quasi_diagonal_order(link)
 sorted_symbols = [returns.columns[i] for i in sorted_idx]
 sorted_labels = [ETF_UNIVERSE.get(s, s) for s in sorted_symbols]
 
 # Reorder covariance matrix
 cov_original = returns.cov()
 cov_reordered = cov_original.iloc[sorted_idx, sorted_idx]
+cov_colorscale = [
+    [0.0, COLORS["negative"]],
+    [0.5, COLORS["silver"]],
+    [1.0, COLORS["blue"]],
+]
 
 # %%
-# Visualization
 fig = make_subplots(
     rows=1, cols=2, subplot_titles=["Original Covariance Matrix", "Quasi-Diagonal (Reordered)"]
 )
-
-# Original
 fig.add_trace(
     go.Heatmap(
         z=cov_original.values,
-        x=[ETF_UNIVERSE.get(s, s) for s in cov_original.columns],
-        y=[ETF_UNIVERSE.get(s, s) for s in cov_original.index],
-        colorscale="RdBu_r",
+        x=cov_original.columns,
+        y=cov_original.index,
+        colorscale=cov_colorscale,
         zmid=0,
         showscale=False,
     ),
     row=1,
     col=1,
 )
-
-# Reordered
 fig.add_trace(
     go.Heatmap(
         z=cov_reordered.values,
-        x=sorted_labels,
-        y=sorted_labels,
-        colorscale="RdBu_r",
+        x=sorted_symbols,
+        y=sorted_symbols,
+        colorscale=cov_colorscale,
         zmid=0,
         showscale=True,
     ),
     row=1,
     col=2,
 )
-
 fig.update_layout(
-    title="Covariance Matrix: Before and After Quasi-Diagonalization",
-    height=500,
+    title="Quasi-diagonal ordering exposes clustered covariance blocks",
+    height=560,
+    width=1100,
+    margin=dict(l=90, r=90, b=110, t=100),
 )
-fig.update_xaxes(tickangle=45)
+fig.update_xaxes(tickangle=45, tickfont_size=10, automargin=True)
+fig.update_yaxes(tickfont_size=10, automargin=True)
+fig.update_xaxes(title_text="ETF ticker", row=1, col=1)
+fig.update_xaxes(title_text="ETF ticker", row=1, col=2)
+fig.update_yaxes(title_text="ETF ticker", row=1, col=1)
 fig.show()
 
 # %% [markdown]
@@ -447,7 +455,6 @@ weights_df = pd.DataFrame(
     }
 )
 weights_df = weights_df.sort_values("HRP Weight", ascending=False)
-weights_df
 
 # %%
 # Visualization
@@ -455,13 +462,19 @@ fig = px.bar(
     weights_df,
     x="Name",
     y="HRP Weight",
-    title="Hierarchical Risk Parity Portfolio Weights",
+    title=(
+        f"{weights_df.iloc[0]['Name']} receives {weights_df.iloc[0]['HRP Weight']:.0%} "
+        "of the static HRP portfolio"
+    ),
     color="HRP Weight",
-    color_continuous_scale="Blues",
+    color_continuous_scale=[COLORS["silver_muted"], COLORS["blue"]],
 )
 fig.update_layout(
     height=400,
     xaxis_tickangle=45,
+    xaxis_title="ETF",
+    yaxis_title="Portfolio weight",
+    yaxis_tickformat=".0%",
 )
 fig.show()
 
@@ -489,6 +502,10 @@ def equal_weights(n: int) -> np.ndarray:
 
 # %% [markdown]
 # #### Minimum-Variance Baseline
+#
+# The long-only projection starts from
+# $w = \Sigma^{-1}\mathbf{1}/(\mathbf{1}^{\top}\Sigma^{-1}\mathbf{1})$,
+# clips negative weights, and renormalizes the remaining capital.
 
 
 # %%
@@ -497,8 +514,6 @@ def minimum_variance_weights(returns: pd.DataFrame) -> np.ndarray:
     cov = returns.cov().values
     n = len(returns.columns)
 
-    # Solve: min w'Σw s.t. sum(w) = 1
-    # Closed-form: w = Σ^{-1} 1 / (1' Σ^{-1} 1)
     try:
         cov_inv = np.linalg.inv(cov)
         ones = np.ones(n)
@@ -553,14 +568,12 @@ all_weights = pd.DataFrame(
     }
 )
 
-all_weights.round(4)
-
 # %%
 # Visualization: Weight comparison
 fig = go.Figure()
 
 methods = ["Equal", "Inv Vol", "Min Var (LW)", "HRP"]
-colors = ["lightgray", "steelblue", "darkorange", "forestgreen"]
+colors = [COLORS["silver_muted"], COLORS["blue"], COLORS["copper"], COLORS["positive"]]
 
 for method, color in zip(methods, colors, strict=False):
     fig.add_trace(
@@ -573,9 +586,12 @@ for method, color in zip(methods, colors, strict=False):
     )
 
 fig.update_layout(
-    title="Portfolio Weights: HRP vs Other Methods",
+    title="Risk-based methods diverge most in their largest allocations",
     barmode="group",
     xaxis_tickangle=45,
+    xaxis_title="ETF",
+    yaxis_title="Portfolio weight",
+    yaxis_tickformat=".0%",
     height=500,
     legend=dict(orientation="h", yanchor="bottom", y=1.02),
 )
@@ -593,25 +609,46 @@ fig.show()
 # 3. Apply HRP (and the other methods) to the selected subset using only
 #    historical returns for covariance estimation.
 #
-# Asset selection is therefore driven by an out-of-sample ML signal, while the
-# allocator only sees information available at the rebalance date.
+# Asset selection is driven by a walk-forward validation signal, while the
+# allocator only sees information available at the rebalance date. The target
+# becomes effective on the following bar.
 
 # %%
-# We use the ETF case study's best-IC GBM walk-forward predictions for asset
+# We use the ETF case study's best-IC GBM walk-forward validation predictions for asset
 # selection. HRP itself only needs a covariance matrix; using real upstream
-# predictions keeps the asset-selection step honest and aligned with the
-# case-study story. The highest-validation-IC GBM checkpoint is resolved at runtime from
-# `case_studies/etfs/run_log/registry.db` — there is no baked-in `prediction_hash`,
+# predictions keeps the asset-selection step aligned with the case-study story.
+# The highest-validation-IC GBM checkpoint is resolved at runtime from
+# `case_studies/etfs/run_log/registry.db`. There is no baked-in `prediction_hash`,
 # so re-running the GBM sweep automatically updates which predictions feed HRP.
-best_gbm = resolve_best_prediction("etfs", "fwd_ret_21d", family="gbm")
-ETF_GBM_PRED_HASH = best_gbm["prediction_hash"]
-PRED_PATH = (
-    get_case_study_dir("etfs")
-    / "run_log"
-    / "predictions"
-    / ETF_GBM_PRED_HASH
-    / "predictions.parquet"
+# Because the registry ranks and evaluates this comparison on validation, the result
+# demonstrates allocation behavior and is not a sealed holdout estimate.
+etf_case_dir = get_case_study_dir("etfs")
+etf_registry_path = etf_case_dir / "run_log" / "registry.db"
+etf_registry_sha256 = hashlib.sha256(etf_registry_path.read_bytes()).hexdigest()
+prediction_index = load_prediction_index(
+    "etfs",
+    label="fwd_ret_21d",
+    split="validation",
+    family="gbm",
+    case_dir=etf_case_dir,
 )
+if prediction_index.is_empty():
+    raise RuntimeError("No registered ETF GBM validation predictions are available")
+best_ic = prediction_index["ic_mean"][0]
+if best_ic is None or not np.isfinite(best_ic):
+    raise RuntimeError("The leading ETF GBM validation prediction has no finite IC")
+leaders = prediction_index.filter((pl.col("ic_mean") - best_ic).abs() <= 1e-12)
+if leaders.height != 1:
+    hashes = leaders["prediction_hash"].to_list()
+    raise RuntimeError(f"Ambiguous best-IC ETF GBM predictions: {hashes}")
+best_gbm = leaders.row(0, named=True)
+ETF_GBM_PRED_HASH = best_gbm["prediction_hash"]
+
+# %% [markdown]
+# Validate the selected prediction parquet and record immutable input hashes.
+
+# %%
+PRED_PATH = etf_case_dir / "run_log" / "predictions" / ETF_GBM_PRED_HASH / "predictions.parquet"
 if not PRED_PATH.exists():
     raise FileNotFoundError(
         f"Resolved best-IC GBM hash {ETF_GBM_PRED_HASH} (config={best_gbm['config_name']}) "
@@ -621,12 +658,14 @@ print(
     f"Resolved best-IC GBM: hash={ETF_GBM_PRED_HASH}, config={best_gbm['config_name']}, "
     f"IC={best_gbm['ic_mean']:.4f}"
 )
+print(f"ETF registry SHA-256: {etf_registry_sha256}")
+print(f"Prediction parquet SHA-256: {hashlib.sha256(PRED_PATH.read_bytes()).hexdigest()}")
 
 upstream_preds = pl.read_parquet(PRED_PATH).select("timestamp", "symbol", "prediction")
 print(
     f"Loaded ETF GBM predictions: {upstream_preds.height:,} rows, "
     f"{upstream_preds['symbol'].n_unique()} symbols, "
-    f"{upstream_preds['timestamp'].min()} → {upstream_preds['timestamp'].max()}"
+    f"{upstream_preds['timestamp'].min()} to {upstream_preds['timestamp'].max()}"
 )
 
 
@@ -634,15 +673,14 @@ print(
 # ### Asset Selection Rule
 #
 # At each rebalance date we take the most recent prediction available for each
-# symbol (as-of join), rank by predicted return, and select the top $N$ that
-# are present in the historical return panel. If no prediction is available
+# symbol (as-of join), restrict the ranking to the fixed teaching universe, and
+# select the top $N$. If no prediction is available
 # yet for the date (e.g., before the first walk-forward fold), the rebalance
 # is skipped by returning an empty list.
 
 
 # %%
 def select_top_assets(
-    hist_returns: pd.DataFrame,
     date: pd.Timestamp,
     full_returns: pd.DataFrame,
     predictions: pl.DataFrame,
@@ -661,14 +699,19 @@ def select_top_assets(
         as_of.sort("timestamp")
         .group_by("symbol")
         .agg(pl.col("prediction").last())
+        .filter(pl.col("symbol").is_in(full_returns.columns.to_list()))
+        .filter(pl.col("prediction").is_finite())
         .sort(["prediction", "symbol"], descending=[True, False])
     )
-    ranked = latest.head(top_n)["symbol"].to_list()
-    return [asset for asset in ranked if asset in full_returns.columns][:top_n]
+    return latest.head(top_n)["symbol"].to_list()
 
 
 # %% [markdown]
 # ### Allocation Mapping Helper
+#
+# Validate each allocator's long-only weights before mapping them to the full universe. A singular
+# covariance or invalid weight vector triggers a visible equal-weight fallback and increments the
+# method's fallback counter.
 
 
 # %%
@@ -680,15 +723,20 @@ def allocate_selected_assets(
     method: str = "allocator",
     date: pd.Timestamp | None = None,
 ) -> pd.Series:
-    """Apply allocation function and map selected weights back to full universe.
-
-    On a singular/invalid covariance the allocator falls back to equal weights,
-    warns at the call site, and increments the module-level ``fallback_count``
-    so the notebook reports how often each method needed the fallback.
-    """
+    """Map valid selected weights to the full universe, with a reported equal-weight fallback."""
     weights = pd.Series(0.0, index=full_columns)
     try:
-        alloc_weights = allocation_fn(selected_returns)
+        alloc_weights = np.asarray(allocation_fn(selected_returns), dtype=float)
+        if alloc_weights.shape != (len(top_assets),):
+            raise ValueError(
+                f"allocator returned shape {alloc_weights.shape}, expected {(len(top_assets),)}"
+            )
+        if not np.isfinite(alloc_weights).all() or (alloc_weights < 0).any():
+            raise ValueError("allocator returned non-finite or negative weights")
+        total = alloc_weights.sum()
+        if total <= 0:
+            raise ValueError("allocator returned non-positive total weight")
+        alloc_weights = alloc_weights / total
         for asset, weight in zip(top_assets, alloc_weights, strict=False):
             weights[asset] = weight
     except (np.linalg.LinAlgError, ValueError) as exc:
@@ -704,6 +752,41 @@ def allocate_selected_assets(
 
 
 # %% [markdown]
+# ### Rebalance Decision
+#
+# Build a target from trailing returns and the latest registered prediction. Returning
+# `None` leaves the prior target unchanged and prevents a pre-signal baseline from entering results.
+
+
+# %%
+def rebalance_target(
+    returns: pd.DataFrame,
+    predictions: pl.DataFrame,
+    date: pd.Timestamp,
+    allocation_fn,
+    top_n: int,
+    lookback: int,
+    method: str,
+) -> pd.Series | None:
+    """Return the target decided at `date`, or None when history/signal is unavailable."""
+    loc = returns.index.get_loc(date)
+    hist_returns = returns.iloc[max(0, loc - lookback) : loc]
+    if len(hist_returns) < 60:
+        return None
+    top_assets = select_top_assets(date, returns, predictions, top_n)
+    if len(top_assets) < 2:
+        return None
+    return allocate_selected_assets(
+        returns.columns,
+        top_assets,
+        hist_returns[top_assets],
+        allocation_fn,
+        method=method,
+        date=date,
+    )
+
+
+# %% [markdown]
 # ### Walk-Forward Backtest Engine
 
 
@@ -711,48 +794,40 @@ def allocate_selected_assets(
 def walk_forward_backtest(
     returns: pd.DataFrame,
     allocation_fn,
-    predictions: pl.DataFrame | None = None,
+    predictions: pl.DataFrame,
     lookback: int = 252,
-    rebalance_freq: str = "ME",
+    rebalance_freq: str = "M",
     top_n: int = 5,
     method: str = "allocator",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Walk-forward backtest with historical-only allocation inputs."""
-    rebalance_dates = returns.resample(rebalance_freq).last().index
-    portfolio_returns = []
-    weights_history = []
-    current_weights = pd.Series(1.0 / len(returns.columns), index=returns.columns)
-
+    """Hold positions between month-end decisions and let weights drift with returns."""
+    rebalance_dates = set(returns.groupby(returns.index.to_period(rebalance_freq)).tail(1).index)
+    portfolio_returns, target_history = [], []
+    current_weights = pending_target = None
     for date in returns.index:
+        # A target decided at the prior close becomes the next session's opening allocation.
+        if pending_target is not None:
+            current_weights = pending_target
+            pending_target = None
+        if current_weights is not None:
+            asset_returns = returns.loc[date]
+            daily_ret = float((asset_returns * current_weights).sum())
+            portfolio_returns.append({"date": date, "return": daily_ret})
+            end_values = current_weights * (1.0 + asset_returns)
+            current_weights = end_values / end_values.sum()
         if date in rebalance_dates:
-            loc = returns.index.get_loc(date)
-            lookback_start = max(0, loc - lookback)
-            hist_returns = returns.iloc[lookback_start:loc]
-            if len(hist_returns) < 60:
-                continue
-            top_assets = select_top_assets(hist_returns, date, returns, predictions, top_n)
-            if len(top_assets) < 2:
-                continue
-
-            selected_returns = hist_returns[top_assets]
-            current_weights = allocate_selected_assets(
-                returns.columns,
-                top_assets,
-                selected_returns,
-                allocation_fn,
-                method=method,
-                date=date,
+            target = rebalance_target(
+                returns, predictions, date, allocation_fn, top_n, lookback, method
             )
-
-        daily_ret = (returns.loc[date] * current_weights).sum()
-        portfolio_returns.append({"date": date, "return": daily_ret})
-        weights_history.append(
-            {"date": date, **{f"w_{s}": current_weights[s] for s in returns.columns}}
-        )
+            if target is not None:
+                pending_target = target
+                target_history.append(
+                    {"date": date, **{f"w_{s}": target[s] for s in returns.columns}}
+                )
 
     return (
         pd.DataFrame(portfolio_returns).set_index("date"),
-        pd.DataFrame(weights_history).set_index("date"),
+        pd.DataFrame(target_history).set_index("date"),
     )
 
 
@@ -776,7 +851,7 @@ for name, alloc_fn in allocation_methods.items():
         allocation_fn=alloc_fn,
         predictions=upstream_preds,
         lookback=252,
-        rebalance_freq="ME",
+        rebalance_freq="M",
         top_n=5,
         method=name,
     )
@@ -790,30 +865,35 @@ portfolio_returns = pd.DataFrame(results)
 
 
 # %% [markdown]
-# ### Backtest Metrics
+# ### Gross Backtest Metrics
+#
+# The vectorized comparison isolates allocation effects and is gross of implementation costs.
+# Turnover is reported beside performance. The execution-aware bridge below applies its declared
+# commission and slippage assumptions and uses next-bar fills.
 
 
 # %%
 def _weights_wide_to_long(weights_df: pd.DataFrame) -> pl.DataFrame:
-    """Convert wide [w_SYMBOL] matrix to [timestamp, asset, weight] format."""
+    """Convert dense target weights to canonical timestamp/symbol/weight format."""
     wide = weights_df.reset_index()
     ts_col = wide.columns[0]
     wide = wide.rename(columns={ts_col: "timestamp"})
     long = wide.melt(id_vars=["timestamp"], var_name="symbol", value_name="weight")
     long["symbol"] = long["symbol"].str.replace("w_", "", regex=False)
-    long = long[long["weight"] != 0.0]
-    return pl.from_pandas(long[["timestamp", "symbol", "weight"]])
+    return pl.from_pandas(long[["timestamp", "symbol", "weight"]]).sort(["timestamp", "symbol"])
 
 
 # %% [markdown]
-# Compute allocator metrics (Sharpe, drawdown, turnover) for each method.
+# Compute allocator metrics for each method. The dense month-end target state preserves both new
+# positions and explicit zero-weight liquidations before the per-symbol turnover difference.
 
 # %%
 allocator_metrics: dict[str, dict] = {}
 metrics_list = []
 for name in portfolio_returns.columns:
     returns_arr = portfolio_returns[name].to_numpy()
-    weights_long = _weights_wide_to_long(weights_all[name])
+    monthly_targets = weights_all[name]
+    weights_long = _weights_wide_to_long(monthly_targets)
     m = compute_allocator_metrics(
         pl.Series("returns", returns_arr),
         weights_df=weights_long,
@@ -865,9 +945,7 @@ class ScheduledWeightStrategy(Strategy):
         for row in weights_long.iter_rows(named=True):
             ts = pd.Timestamp(row["timestamp"]).tz_localize(None)
             self._targets_by_ts.setdefault(ts, {})
-            weight = float(row["weight"])
-            if weight != 0.0:
-                self._targets_by_ts[ts][str(row["symbol"])] = weight
+            self._targets_by_ts[ts][str(row["symbol"])] = float(row["weight"])
 
     def on_data(self, timestamp, data, context, broker):
         ts = pd.Timestamp(timestamp).tz_localize(None)
@@ -882,8 +960,8 @@ class ScheduledWeightStrategy(Strategy):
 # %% [markdown]
 # ### Build Engine Inputs
 #
-# Convert the wide notebook outputs into the long-form price and target tables
-# required by the execution engine.
+# Convert the wide monthly target schedule into the long-form price and target tables required by
+# the execution engine. Zero targets remain present so liquidations are explicit.
 
 # %%
 bridge_method = "HRP" if "HRP" in weights_all else next(iter(weights_all))
@@ -915,7 +993,9 @@ prices_long = (
 # %% [markdown]
 # ### Run the Execution-Aware Backtest
 #
-# Replay the same target weights with commissions, slippage, and next-bar fills.
+# Replay the same target weights with commissions, slippage, and next-bar fills. Synthetic
+# OHLC fields equal the daily close, so this is an accounting and timing bridge rather than an
+# intraday fill-quality model.
 
 # %%
 engine = Engine(
@@ -978,7 +1058,9 @@ cumulative = (1 + portfolio_returns).cumprod()
 fig = go.Figure()
 
 for col, color in zip(
-    cumulative.columns, ["lightgray", "steelblue", "darkorange", "forestgreen"], strict=False
+    cumulative.columns,
+    [COLORS["silver_muted"], COLORS["blue"], COLORS["copper"], COLORS["positive"]],
+    strict=False,
 ):
     fig.add_trace(
         go.Scatter(
@@ -990,26 +1072,28 @@ for col, color in zip(
         )
     )
 
-fig.add_hline(y=1.0, line_dash="dot", line_color="gray")
+fig.add_hline(y=1.0, line_dash="dot", line_color=COLORS["neutral"])
+
+best_method = metrics_df.loc[metrics_df["Sharpe Ratio"].idxmax(), "Method"]
 
 fig.update_layout(
-    title="Equity Curves: Portfolio Method Comparison",
+    title=f"{best_method} leads gross Sharpe in the allocation comparison",
     xaxis_title="Date",
-    yaxis_title="Cumulative Return",
+    yaxis_title="Growth of $1",
     height=500,
 )
 fig.show()
 
 # %% [markdown]
-# ## 10. Tear Sheet — `ml4t-diagnostic`
+# ## 10. Tear Sheet: `ml4t-diagnostic`
 #
 # `ml4t-diagnostic` exposes two delivery modes for the same analysis surface:
 #
-# - **Inline** — `create_portfolio_dashboard(analysis).show()` renders the
+# - **Inline**: `create_portfolio_dashboard(analysis).show()` renders the
 #   metrics block plus each Plotly figure (cumulative returns, drawdown
 #   underwater, rolling Sharpe, monthly heatmap, returns distribution, etc.) as
 #   normal notebook cell outputs.
-# - **HTML** — `tear_sheet.save_html(path)` writes a self-contained file that
+# - **HTML**: `tear_sheet.save_html(path)` writes a self-contained file that
 #   embeds the same content for sharing or archival.
 #
 # We build the analysis on the HRP walk-forward returns versus SPY (the same
@@ -1031,6 +1115,17 @@ hrp_analysis = PortfolioAnalysis(
 
 hrp_tear_sheet = create_portfolio_dashboard(hrp_analysis)
 
+for dashboard_figure in hrp_tear_sheet.figures.values():
+    dashboard_figure.update_layout(
+        paper_bgcolor=COLORS["bg_light"],
+        plot_bgcolor=COLORS["bg_light"],
+        font_color=COLORS["neutral"],
+    )
+
+rolling_beta_figure = hrp_tear_sheet.figures["Rolling Beta"]
+rolling_beta_figure.update_layout(margin=dict(l=60, r=90, t=40, b=40))
+rolling_beta_figure.update_annotations(x=0.995, xanchor="right")
+
 # Inline display: metrics summary + each constituent figure as a separate cell.
 hrp_tear_sheet.show()
 
@@ -1040,14 +1135,14 @@ output_dir = get_output_dir(17, "hrp")
 output_dir.mkdir(parents=True, exist_ok=True)
 hrp_tear_sheet_path = output_dir / "hrp_tear_sheet.html"
 hrp_tear_sheet.save_html(hrp_tear_sheet_path, include_plotlyjs="cdn")
-print(f"HRP tear sheet saved: {hrp_tear_sheet_path}")
+print(f"HRP tear sheet saved: {output_dir.name}/{hrp_tear_sheet_path.name}")
 print(f"  Figures embedded: {list(hrp_tear_sheet.figures.keys())}")
 
 # %% [markdown]
 # ## 11. Weight Evolution in Strategy Context
 #
-# Analyze how HRP weights change over time in the walk-forward backtest.
-# This shows the ACTUAL weights used in the strategy, not hypothetical static weights.
+# Analyze how the submitted HRP targets change over the walk-forward backtest. The portfolio holds
+# each allocation until the next month-end decision, so realized weights drift between targets.
 
 # %%
 # Plot HRP weight evolution from actual backtest
@@ -1071,11 +1166,12 @@ if not hrp_weights_hist.empty:
                 y=hrp_weights_hist[col],
                 mode="lines",
                 name=ETF_UNIVERSE.get(symbol, symbol),
+                line_shape="hv",
             )
         )
 
     fig.update_layout(
-        title="HRP Weight Evolution (Walk-Forward Backtest)",
+        title="Monthly HRP targets change as the selected ETF set changes",
         xaxis_title="Date",
         yaxis_title="Weight",
         height=450,
@@ -1085,9 +1181,9 @@ else:
     print("No HRP weights available")
 
 # %% [markdown]
-# Weights step rather than drift between rebalance dates because HRP only
-# re-allocates when the GBM signal triggers a monthly rebalance; the sparse
-# visible changes reflect that cadence, not within-month covariance updates.
+# The step lines show submitted targets only. Actual portfolio weights drift with asset returns
+# between month-end decisions; neither the vectorized path nor the execution engine resets them
+# during the month.
 
 # %% [markdown]
 # ## 12. Why HRP Works in Strategy Context
@@ -1100,19 +1196,21 @@ else:
 # 2. **Respects hierarchical structure**: Markets have a natural hierarchical structure
 #    (sectors, asset classes, geographies). HRP exploits this structure.
 #
-# 3. **Regime robustness**: When correlations become unstable (e.g., during crises),
-#    HRP's clustering-based approach is more resilient than MVO.
+# 3. **Potential regime robustness**: Hierarchical diversification can be less sensitive
+#    than unconstrained MVO to unstable correlations, but the result depends on whether
+#    the estimated clusters persist out of sample.
 #
 # 4. **No expected returns**: HRP is a "risk-based" allocation method that doesn't
 #    require expected return forecasts, which are notoriously difficult to estimate.
 #
-# 5. **Stable weights**: HRP weights tend to be more stable over time, reducing turnover.
+# 5. **Turnover must be measured**: Clustering can stabilize allocations, but changing
+#    signals or cluster membership can still produce substantial turnover.
 #
 # ### In Strategy Context:
 #
 # - HRP is applied to **ML-selected assets**, not the full universe
 # - Covariance is estimated on **rolling historical windows only**
-# - Combined with prediction-based selection, HRP provides robust allocation
+# - Prediction-based selection and risk-based sizing play distinct roles
 
 
 # %% [markdown]
@@ -1121,31 +1219,10 @@ else:
 
 # %%
 # Turnover comparison from actual backtests
-print("Average Monthly Turnover (Walk-Forward Backtest):")
+print("Average Monthly L1 Target Turnover (Walk-Forward Backtest):")
 for name in weights_all:
     turnover = allocator_metrics[name]["avg_turnover"]
     print(f"  {name}: {turnover:.2%}")
-
-# %% [markdown]
-# ## Key Takeaways
-#
-# 1. **Clustering avoids matrix inversion**: HRP replaces the covariance matrix inversion
-#    required by MVO with a clustering-based recursive bisection, eliminating the primary
-#    source of numerical instability in portfolio optimization.
-#
-# 2. **Empirical comparison on this universe**: On this GBM-selected ETF universe,
-#    HRP modestly improves on naive diversification: equal-weight Sharpe 0.7763,
-#    HRP Sharpe 0.8293 (a 0.053 improvement), with HRP also ahead of inverse-volatility
-#    (0.8074) and trailing only the Ledoit-Wolf minimum-variance allocator (0.8437).
-#    All four allocators share a ~-28% maximum drawdown, so the differences are in
-#    risk-adjusted return, not tail risk, and the spreads are small.
-#
-# 3. **Best suited for unstable correlation regimes**: HRP's advantages are most pronounced
-#    when correlations shift across market regimes. For assets with stable, well-estimated
-#    covariance structures, simpler methods like inverse volatility may suffice.
-#
-# **Next**: Continue with [`09_allocator_comparison`](09_allocator_comparison.ipynb) for a controlled, side-by-side comparison
-# of allocation methods under the same signal and execution assumptions.
 
 # %% [markdown]
 # ### Allocator Fallback Summary
@@ -1155,7 +1232,10 @@ for name in weights_all:
 
 # %%
 print(f"Assets in universe: {n_assets}")
-print(f"Backtest period: {returns.index[0].date()} to {returns.index[-1].date()}")
+print(
+    f"Invested backtest period: {portfolio_returns.index[0].date()} "
+    f"to {portfolio_returns.index[-1].date()}"
+)
 print(f"Asset selection: ETF GBM walk-forward predictions (hash {ETF_GBM_PRED_HASH})")
 if fallback_count:
     print("Allocator fallbacks (singular/invalid covariance):")
@@ -1164,5 +1244,22 @@ if fallback_count:
 else:
     print("Allocator fallbacks: none triggered")
 
-# %%
-metrics_df.round(4)
+# %% [markdown]
+# ## Key Takeaways
+#
+# 1. **Clustering avoids global covariance inversion.** HRP replaces the inverse used by
+#    minimum-variance optimization with hierarchical ordering and recursive risk splits. It still
+#    depends on estimated correlations and variances, so it reduces rather than eliminates
+#    estimation risk.
+# 2. **The allocation comparison is conditional.** The table compares gross returns on a fixed
+#    15-ETF teaching universe using the best-IC GBM validation predictions. The ranking is useful
+#    for understanding allocation behavior, not as a sealed holdout estimate.
+# 3. **Timing and costs need separate evidence.** Targets use historical returns through each
+#    decision date and become effective on the next bar. The execution bridge then shows how
+#    commissions and slippage alter the vectorized result.
+# 4. **HRP is not universally dominant.** The displayed table determines the winner for this
+#    sample; simpler inverse-volatility or shrinkage methods can lead when the hierarchy adds
+#    little stable structure.
+#
+# **Next**: Continue with [`09_allocator_comparison`](09_allocator_comparison.ipynb) for a
+# controlled comparison under common signal and execution assumptions.

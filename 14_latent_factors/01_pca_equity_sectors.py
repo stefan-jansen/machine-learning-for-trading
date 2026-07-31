@@ -31,7 +31,7 @@
 # PCA is the simplest realisation of **Stage 1** in the two-step latent-factor
 # framework (Figure 14.9): it compresses an $(T \times N)$ returns panel to
 # a $(T \times K)$ factor history via SVD. This notebook focuses on the
-# Stage 1 outputs — variance decomposition, loadings, bootstrap stability —
+# Stage 1 outputs - variance decomposition, loadings, bootstrap stability -
 # and the structural interpretation of the principal components. The full
 # Stage 1 + 2 + 3 pipeline (with a Stage 2 forecaster turning factor history
 # into asset signals) is exercised in [`04_ipca`](04_ipca.ipynb) and
@@ -57,18 +57,19 @@
 # ## 1. Setup and Imports
 
 # %%
-"""PCA on Sector ETFs — Variance decomposition and bootstrap loading stability."""
+"""PCA on Sector ETFs - Variance decomposition and bootstrap loading stability."""
 
 import warnings
 from datetime import date
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
+from matplotlib.ticker import PercentFormatter
 from plotly.subplots import make_subplots
+from scipy.optimize import linear_sum_assignment
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
@@ -76,23 +77,20 @@ warnings.filterwarnings("ignore")
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
 
 # %% tags=["parameters"]
 # Production defaults (Papermill overrides for CI testing)
 START_DATE = "2010-01-01"
 END_DATE = "2024-12-01"
 N_BOOTSTRAP = 100
+BLOCK_LENGTH = 20
 SEED = 42
 
 # %%
-# Configuration
 set_global_seeds(SEED)
 rng = np.random.default_rng(SEED)
 
-# Sector ETFs available in ETF Universe parquet (9 of 11 GICS sectors)
-# Note: XLC (Communication Services) and XLRE (Real Estate) are newer ETFs
-# not included in the canonical dataset
 SECTOR_ETFS = {
     "XLB": "Materials",
     "XLE": "Energy",
@@ -150,18 +148,37 @@ print(
 )
 
 # %% [markdown]
-# Quick summary of the return distributions before PCA — important because PCA is sensitive
-# to outliers and non-normality.
+# Daily return distributions reveal whether a few volatile sectors could dominate covariance-PCA.
+# The interquartile ranges and whiskers make the scale differences visible without a printed
+# `describe()` table.
 
 # %%
-returns.describe().round(4)
+fig, ax = plt.subplots(figsize=FIGSIZE["single_wide"], constrained_layout=True)
+ax.boxplot(
+    (returns * 100).to_numpy(),
+    tick_labels=returns.columns,
+    showfliers=False,
+    boxprops={"color": COLORS["blue"]},
+    medianprops={"color": COLORS["amber"], "linewidth": 1.5},
+    whiskerprops={"color": COLORS["neutral"]},
+    capprops={"color": COLORS["neutral"]},
+)
+zero_line(ax)
+ax.set_xlabel("Sector ETF")
+ax.set_ylabel("Daily return (%)")
+add_message_title(
+    ax,
+    "Energy has the widest central daily-return distribution",
+    subtitle="Sector ETF returns, 2010-2024; outliers hidden to compare central ranges",
+)
+fig.show()
 
 # %% [markdown]
 # ## 3. PCA on Sector Returns
 #
 # We use **correlation-PCA** (standardized returns) rather than covariance-PCA. Standardizing
 # to unit variance prevents high-volatility sectors (e.g., Energy) from dominating the first
-# component. For cross-sectional equity analysis this is the standard choice — see the Scale
+# component. For cross-sectional equity analysis this is the standard choice - see the Scale
 # Sensitivity discussion in Section 14.2.
 #
 # PCA decomposes the covariance matrix as:
@@ -176,10 +193,10 @@ returns.describe().round(4)
 scaler = StandardScaler()
 returns_scaled = scaler.fit_transform(returns)
 
-# Fit PCA — default solver is appropriate for small N (9 sectors);
+# Fit PCA - default solver is appropriate for small N (9 sectors);
 # use svd_solver='randomized' for N > 500
 n_components = min(len(SECTOR_ETFS), 5)
-pca = PCA(n_components=n_components)
+pca = PCA(n_components=n_components, svd_solver="full")
 factors = pca.fit_transform(returns_scaled)
 
 # Create factor DataFrame
@@ -195,15 +212,6 @@ factors_df = pd.DataFrame(factors, index=returns.index, columns=factor_cols)
 
 # %%
 cum_var = np.cumsum(pca.explained_variance_ratio_)
-variance_df = pd.DataFrame(
-    {
-        "Component": factor_cols,
-        "Var Explained": pca.explained_variance_ratio_,
-        "Cumulative": cum_var,
-    }
-).set_index("Component")
-
-variance_df.style.format({"Var Explained": "{:.2%}", "Cumulative": "{:.2%}"})
 
 # %% [markdown]
 # ### Scree Plot
@@ -212,13 +220,14 @@ variance_df.style.format({"Var Explained": "{:.2%}", "Cumulative": "{:.2%}"})
 # "elbow" where explained variance levels off suggests how many components to retain.
 
 # %%
-fig, ax = plt.subplots(figsize=(14, 5))
+fig, ax = plt.subplots(figsize=FIGSIZE["single"], constrained_layout=True)
 
 # Bar chart of individual variance shares
 ax.bar(
     range(1, n_components + 1),
     pca.explained_variance_ratio_,
     alpha=0.7,
+    color=COLORS["blue"],
     label="Individual",
 )
 
@@ -227,30 +236,21 @@ ax.plot(
     range(1, n_components + 1),
     cum_var,
     "o-",
-    color="C1",
+    color=COLORS["amber"],
     label="Cumulative",
 )
 
 ax.set_xlabel("Principal Component")
 ax.set_ylabel("Variance Explained")
-ax.set_title("Scree Plot: Sector ETF PCA")
+ax.yaxis.set_major_formatter(PercentFormatter(1.0))
 ax.set_xticks(range(1, n_components + 1))
 ax.legend()
-fig.tight_layout()
-fig.show()
-
-# %%
-# Persist the scree decomposition so Figure 14.2 can be re-rendered at print
-# resolution without re-fitting the PCA. Saved as a portable .npz alongside the
-# notebook's other PCA outputs.
-artifact_dir = Path("output/pca_equity_sectors")
-artifact_dir.mkdir(parents=True, exist_ok=True)
-np.savez(
-    artifact_dir / "scree.npz",
-    explained_variance_ratio=pca.explained_variance_ratio_,
-    cumulative_variance=cum_var,
-    n_components=np.asarray(n_components),
+add_message_title(
+    ax,
+    f"PC1 captures {pca.explained_variance_ratio_[0]:.0%}; the first two capture {cum_var[1]:.0%}",
+    subtitle="Correlation-PCA on nine sector ETFs, 2010-2024",
 )
+fig.show()
 
 # %% [markdown]
 # **Finding**: The first two components capture about 80% of total variance. PC1 (the
@@ -270,10 +270,9 @@ loadings = pd.DataFrame(
     columns=factor_cols,
 )
 loadings["Sector"] = loadings.index.map(SECTOR_ETFS)
-loadings.set_index("Sector")[["PC1", "PC2", "PC3"]]
 
 # %% [markdown]
-# **Interpretation**: PC1 loadings are uniformly positive — the classic "market factor" where
+# **Interpretation**: PC1 loadings are uniformly positive - the classic "market factor" where
 # all sectors move together. PC2 separates defensive sectors (positive loadings: Utilities,
 # Staples) from cyclical sectors (negative loadings: Energy, Financials, Discretionary),
 # capturing the sector rotation dimension.
@@ -281,43 +280,54 @@ loadings.set_index("Sector")[["PC1", "PC2", "PC3"]]
 # %% [markdown]
 # ## 5. Bootstrap Loading Stability
 #
-# Are the loadings statistically reliable, or could they be estimation noise? We use bootstrap
-# resampling to construct 95% confidence intervals. The default `N_BOOTSTRAP=100` provides
-# a reasonable speed-vs-precision tradeoff; increase to 1,000+ for publication-quality intervals.
+# Are the loadings statistically reliable, or could they be estimation noise? We use a moving-block
+# bootstrap to construct 95% confidence intervals while preserving short-run return dependence.
+# The default `N_BOOTSTRAP=100` is a teaching budget; increase it for final inference.
 
 
 # %% [markdown]
-# ### Sign Alignment for PCA Components
+# ### Component Matching
 #
-# PCA signs are arbitrary — successive fits may flip component directions. We align
-# to a reference set so loadings are comparable across bootstrap samples.
+# PCA signs are arbitrary, and nearby eigenvalues can swap component order across resamples. We use
+# maximum absolute loading similarity to match each bootstrap component to the full-sample basis,
+# then align its sign.
 
 
 # %%
-def align_signs(loadings_new: np.ndarray, reference: np.ndarray) -> np.ndarray:
-    """Align PCA loading signs with a reference to handle sign indeterminacy.
-
-    PCA eigenvectors are defined only up to sign — this helper flips components
-    to maintain consistent orientation across bootstrap samples or rolling windows.
-    """
-    aligned = loadings_new.copy()
-    n_components = aligned.shape[1] if aligned.ndim == 2 else aligned.shape[0]
-    for j in range(n_components):
-        vec = aligned[:, j] if aligned.ndim == 2 else aligned[j]
-        ref = reference[:, j] if reference.ndim == 2 else reference[j]
-        if np.corrcoef(vec, ref)[0, 1] < 0:
-            if aligned.ndim == 2:
-                aligned[:, j] *= -1
-            else:
-                aligned[j] *= -1
+def align_components(loadings_new: np.ndarray, reference: np.ndarray) -> np.ndarray:
+    """Match component order and signs to a reference loading basis."""
+    if loadings_new.shape != reference.shape:
+        raise ValueError("Candidate and reference loading bases must have the same shape")
+    similarity = np.abs(reference.T @ loadings_new)
+    reference_idx, new_idx = linear_sum_assignment(-similarity)
+    aligned = np.zeros_like(loadings_new)
+    for ref_col, candidate_col in zip(reference_idx, new_idx, strict=True):
+        candidate = loadings_new[:, candidate_col]
+        sign = np.sign(reference[:, ref_col] @ candidate) or 1.0
+        aligned[:, ref_col] = sign * candidate
     return aligned
+
+
+# %% [markdown]
+# ### Moving-Block Resamples
+#
+# Twenty-day blocks retain local dependence while resampling the historical sequence. Each draw
+# concatenates random contiguous blocks until it reaches the original sample length.
+
+
+# %%
+def moving_block_indices(n_obs: int, block_length: int, rng: np.random.Generator) -> np.ndarray:
+    """Draw one moving-block bootstrap index of length `n_obs`."""
+    n_blocks = int(np.ceil(n_obs / block_length))
+    starts = rng.integers(0, n_obs - block_length + 1, size=n_blocks)
+    return np.concatenate([np.arange(start, start + block_length) for start in starts])[:n_obs]
 
 
 # %% [markdown]
 # ### Bootstrap Confidence Intervals
 #
-# Resample returns with replacement and re-estimate PCA to build confidence bands
-# around eigenvalue magnitudes and loading patterns.
+# Each resample receives its own scaler and PCA fit. The component-matching step prevents a PC2/PC3
+# swap from being misread as loading uncertainty.
 
 
 # %%
@@ -326,9 +336,10 @@ def bootstrap_pca(
     reference_components: np.ndarray,
     n_bootstrap: int = 100,
     n_components: int = 2,
+    block_length: int = 20,
     rng: np.random.Generator | None = None,
 ) -> np.ndarray:
-    """Run bootstrap PCA to estimate loading confidence intervals."""
+    """Estimate loading uncertainty with a moving-block bootstrap."""
     if rng is None:
         rng = np.random.default_rng()
     n_obs = len(returns_df)
@@ -336,125 +347,117 @@ def bootstrap_pca(
     bootstrap_loadings = np.zeros((n_bootstrap, n_features, n_components))
 
     for b in range(n_bootstrap):
-        idx = rng.choice(n_obs, size=n_obs, replace=True)
+        idx = moving_block_indices(n_obs, block_length, rng)
         sample = returns_df.iloc[idx]
 
         sample_scaled = StandardScaler().fit_transform(sample)
-        pca_boot = PCA(n_components=n_components)
+        pca_boot = PCA(n_components=n_components, svd_solver="full")
         pca_boot.fit(sample_scaled)
 
-        # Align signs with full-sample reference
         loadings_boot = pca_boot.components_.T
-        bootstrap_loadings[b] = align_signs(loadings_boot, reference_components.T)
+        reference_loadings = reference_components[:n_components].T
+        bootstrap_loadings[b] = align_components(loadings_boot, reference_loadings)
 
     return bootstrap_loadings
 
 
 # %%
 bootstrap_results = bootstrap_pca(
-    returns, reference_components=pca.components_, n_bootstrap=N_BOOTSTRAP, n_components=2, rng=rng
+    returns,
+    reference_components=pca.components_,
+    n_bootstrap=N_BOOTSTRAP,
+    n_components=2,
+    block_length=BLOCK_LENGTH,
+    rng=rng,
 )
 
 # Confidence intervals
 loading_mean = bootstrap_results.mean(axis=0)
-loading_std = bootstrap_results.std(axis=0)
 loading_lower = np.percentile(bootstrap_results, 2.5, axis=0)
 loading_upper = np.percentile(bootstrap_results, 97.5, axis=0)
-
-stability_df = pd.DataFrame(
-    {
-        "Sector": [SECTOR_ETFS.get(t, t) for t in returns.columns],
-        "PC1 Mean": loading_mean[:, 0],
-        "PC1 CI Width": loading_upper[:, 0] - loading_lower[:, 0],
-        "PC2 Mean": loading_mean[:, 1],
-        "PC2 CI Width": loading_upper[:, 1] - loading_lower[:, 1],
-    }
-).set_index("Sector")
-
-stability_df.style.format("{:.3f}")
-
-# %% [markdown]
-# Sectors with narrow CI widths have statistically stable loadings; wide intervals suggest
-# the loading is sensitive to the particular sample and should be interpreted cautiously.
 
 # %% [markdown]
 # ## 6. Visualization: Loading Confidence Intervals
 
 # %%
-# Plot PC1 loadings with bootstrap CIs
-fig = go.Figure()
-
-order = loading_mean[:, 0].argsort()
-sectors_sorted = [returns.columns[i] for i in order]
-sector_names = [SECTOR_ETFS.get(s, s) for s in sectors_sorted]
-
-fig.add_trace(
-    go.Scatter(
-        x=[loading_mean[i, 0] for i in order],
-        y=sector_names,
-        mode="markers",
-        marker=dict(size=12, color=COLORS["blue"]),
-        error_x=dict(
-            type="data",
-            symmetric=False,
-            array=[(loading_upper[i, 0] - loading_mean[i, 0]) for i in order],
-            arrayminus=[(loading_mean[i, 0] - loading_lower[i, 0]) for i in order],
-            color="gray",
-            thickness=2,
+fig = make_subplots(rows=1, cols=2, subplot_titles=("PC1: market", "PC2: sector rotation"))
+for component_idx, color in enumerate((COLORS["blue"], COLORS["copper"])):
+    order = loading_mean[:, component_idx].argsort()
+    sector_names = [SECTOR_ETFS.get(returns.columns[i], returns.columns[i]) for i in order]
+    fig.add_trace(
+        go.Scatter(
+            x=loading_mean[order, component_idx],
+            y=sector_names,
+            mode="markers",
+            marker={"size": 10, "color": color},
+            error_x={
+                "type": "data",
+                "symmetric": False,
+                "array": loading_upper[order, component_idx] - loading_mean[order, component_idx],
+                "arrayminus": loading_mean[order, component_idx]
+                - loading_lower[order, component_idx],
+                "color": COLORS["neutral"],
+                "thickness": 1.5,
+            },
+            showlegend=False,
         ),
-        name="PC1 Loading",
+        row=1,
+        col=component_idx + 1,
     )
-)
+    fig.add_vline(
+        x=0,
+        line_dash="dash",
+        line_color=COLORS["neutral"],
+        row=1,
+        col=component_idx + 1,
+    )
 
-fig.add_vline(x=0, line_dash="dash", line_color="gray")
+# %% [markdown]
+# Apply shared loading units and a message-first title before rendering both components.
+
+# %%
 fig.update_layout(
-    title="PC1 Loadings with 95% Bootstrap CI",
-    xaxis_title="Loading",
-    yaxis_title="Sector",
+    title="Market loadings are stable; rotation exposures carry more uncertainty",
+    width=950,
     height=500,
 )
+loading_limit = 1.1 * max(abs(loading_lower.min()), abs(loading_upper.max()))
+fig.update_xaxes(title_text="Loading", range=[-loading_limit, loading_limit])
+fig.update_yaxes(title_text="Sector")
 fig.show()
 
 # %% [markdown]
-# **Finding**: All sectors load positively on PC1, confirming its role as the market factor.
-# Most sectors have tight CIs (width < 0.01), indicating very stable market exposures.
-# Utilities (0.024) and Energy (0.016) show the widest intervals, suggesting their market
-# beta estimates are less precise and warrant caution in portfolio construction.
+# **Finding**: All sectors load positively on PC1, confirming its role as the market factor. PC1
+# intervals cluster tightly, while several PC2 intervals are visibly wider. Rotation exposures
+# therefore deserve more caution than the dominant market direction.
 
 # %% [markdown]
 # ## 7. Temporal Stability: Rolling PCA
 #
-# Factor structure is not constant — correlations spike during crises (increasing PC1
-# variance) and relax in calm markets. Rolling-window PCA tracks this evolution.
-#
-# **Methodological note**: We align each window's loadings with the *previous* window to
-# maintain visual continuity. For long time series, this sequential alignment can accumulate
-# drift; an alternative is aligning all windows to the full-sample loadings.
+# Factor structure is not constant. Correlations often rise during stress, increasing PC1's share,
+# and relax in calm markets. Each point below fits a fresh correlation-PCA on the trailing 252
+# observations ending strictly before the plotted date.
 
 # %%
-window = 252  # 1-year rolling window
+window = 252
 
-rolling_loadings = []
 rolling_var_explained = []
 
 for i in range(window, len(returns)):
     window_returns = returns.iloc[i - window : i]
 
     scaled = StandardScaler().fit_transform(window_returns)
-    pca_roll = PCA(n_components=2)
+    pca_roll = PCA(n_components=2, svd_solver="full")
     pca_roll.fit(scaled)
-
-    loadings_roll = pca_roll.components_.copy()
-    if len(rolling_loadings) > 0:
-        loadings_roll = align_signs(loadings_roll, rolling_loadings[-1])
-
-    rolling_loadings.append(loadings_roll)
     rolling_var_explained.append(pca_roll.explained_variance_ratio_)
 
-rolling_loadings = np.array(rolling_loadings)
 rolling_var_explained = np.array(rolling_var_explained)
 
 roll_dates = returns.index[window:]
+
+# %% [markdown]
+# Plot the two leading variance shares on the same scale so their relative importance remains
+# visually honest throughout the sample.
 
 # %%
 fig = go.Figure()
@@ -469,7 +472,10 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title="Rolling PCA: Variance Explained Over Time",
+    title=(
+        f"PC1 variance ranges from {rolling_var_explained[:, 0].min():.0%} to "
+        f"{rolling_var_explained[:, 0].max():.0%} as market co-movement changes"
+    ),
     xaxis_title="Date",
     yaxis_title="Variance Explained",
     yaxis_tickformat=".0%",
@@ -478,24 +484,14 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# **Finding**: PC1 variance share spikes during market stress (COVID-19 in 2020, rate
-# shocks in 2022) when cross-sector correlations increase — the classic "correlations go
-# to 1 in a crisis" effect. During calm periods, PC1 explains less and PC2 (sector rotation)
-# gains relative importance.
-
-# %%
-print(f"Rolling window: {window} days")
-print(
-    f"PC1 variance range: {rolling_var_explained[:, 0].min():.1%} – {rolling_var_explained[:, 0].max():.1%}"
-)
-print(
-    f"PC2 variance range: {rolling_var_explained[:, 1].min():.1%} – {rolling_var_explained[:, 1].max():.1%}"
-)
+# **Finding**: PC1 jumps above 80% during the systemwide COVID-19 shock, but stress does not have one
+# signature. Around the 2022 rate shock, PC1 falls toward 50% while PC2 rises as sector responses
+# diverge. These are trailing-window descriptions, not forecasts.
 
 # %% [markdown]
 # ## 8. Factor Score Analysis
 #
-# PC scores from correlation-PCA are mean-zero standardized projections — they cannot be
+# PC scores from correlation-PCA are mean-zero standardized projections - they cannot be
 # compounded as portfolio returns because PCA centers the input. What they *can* do is
 # expose the cross-sectional structure each component captures. We rescale all PC scores by
 # a single constant so PC1's daily standard deviation matches the equal-weight sector
@@ -507,23 +503,10 @@ ew_daily_std = returns.mean(axis=1).std()
 score_scale = ew_daily_std / factors_df["PC1"].std()
 factor_returns = factors_df * score_scale
 
-factor_stats = pd.DataFrame(
-    {
-        "Daily Std": factor_returns.std(),
-        "Ann Std": factor_returns.std() * np.sqrt(252),
-        "Skew": factor_returns.skew(),
-        "Kurt": factor_returns.kurtosis(),
-    }
-)
-
-factor_stats.style.format(
-    {"Daily Std": "{:.4f}", "Ann Std": "{:.2%}", "Skew": "{:.2f}", "Kurt": "{:.2f}"}
-)
-
 # %% [markdown]
-# Daily volatility falls off rapidly past PC1 — PC2 carries roughly $\sqrt{\lambda_2/\lambda_1}
-# \approx 36\%$ of PC1's variance, and tail components are below 25%. This matches the
-# eigenvalue decline reported in the variance table above.
+# Daily volatility falls off rapidly past PC1. PC2 carries roughly
+# $\sqrt{\lambda_2/\lambda_1} \approx 36\%$ of PC1's volatility; PC3 is about 31%, and later
+# components fall below 25%. This matches the eigenvalue decline in the scree plot.
 
 # %% [markdown]
 # Prepare two diagnostic series: PC1 vs the equal-weight market (both standardized to unit
@@ -535,6 +518,9 @@ ew_returns = returns.mean(axis=1)
 pc1_z = (factor_returns["PC1"] - factor_returns["PC1"].mean()) / factor_returns["PC1"].std()
 ew_z = (ew_returns - ew_returns.mean()) / ew_returns.std()
 roll_corr = factor_returns["PC1"].rolling(63).corr(factor_returns["PC2"])
+pc1_market_corr = factor_returns["PC1"].corr(ew_returns)
+scatter_min = min(ew_z.min(), pc1_z.min())
+scatter_max = max(ew_z.max(), pc1_z.max())
 
 # %% [markdown]
 # Build the two-panel subplot grid: scatter on the left, time series on the right.
@@ -569,116 +555,75 @@ fig.add_trace(
 )
 fig.add_trace(
     go.Scatter(
-        x=[ew_z.min(), ew_z.max()],
-        y=[ew_z.min(), ew_z.max()],
+        x=[scatter_min, scatter_max],
+        y=[scatter_min, scatter_max],
         mode="lines",
-        line=dict(color="gray", dash="dash"),
+        line=dict(color=COLORS["neutral"], dash="dash"),
         name="45°",
         showlegend=False,
     ),
     row=1,
     col=1,
 )
-fig.add_trace(
-    go.Scatter(x=roll_corr.index, y=roll_corr, line=dict(color=COLORS["slate"]), name="PC1-PC2"),
+_ = fig.add_trace(
+    go.Scatter(
+        x=roll_corr.index,
+        y=roll_corr,
+        line=dict(color=COLORS["slate"]),
+        name="PC1-PC2",
+        showlegend=False,
+    ),
     row=1,
     col=2,
 )
 
 # %% [markdown]
-# Apply axis labels and layout, render, and report the headline correlation statistics.
+# Apply axis labels and honest correlation limits before rendering.
 
 # %%
-fig.add_hline(y=0, line_dash="dash", row=1, col=2)
-fig.update_xaxes(title_text="Equal-weight (z)", row=1, col=1)
-fig.update_yaxes(title_text="PC1 (z)", row=1, col=1)
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=1, col=2)
+fig.update_xaxes(
+    title_text="Equal-weight return (z)", range=[scatter_min, scatter_max], row=1, col=1
+)
+fig.update_yaxes(title_text="PC1 score (z)", range=[scatter_min, scatter_max], row=1, col=1)
 fig.update_xaxes(title_text="Date", row=1, col=2)
-fig.update_yaxes(title_text="Correlation", row=1, col=2)
+fig.update_yaxes(title_text="63-day correlation", range=[-1, 1], row=1, col=2)
 fig.update_layout(
     height=420,
     width=1000,
-    title_text="PC1 Tracks the Market; PC2 Stays Orthogonal On Average",
+    title_text=(
+        f"PC1 tracks equal weight at {pc1_market_corr:.3f}; rolling PC1-PC2 correlation "
+        f"averages {roll_corr.mean():+.2f}"
+    ),
 )
 fig.show()
 
-pc1_market_corr = factor_returns["PC1"].corr(ew_returns)
-print(f"PC1 vs equal-weight daily correlation: {pc1_market_corr:.4f}")
-print(f"Rolling 63d PC1-PC2 correlation: mean={roll_corr.mean():+.3f}, std={roll_corr.std():.3f}")
-
 # %% [markdown]
-# **Finding**: PC1's daily score correlates above 0.99 with the equal-weight sector portfolio —
-# PC1 *is* the broad market in this universe, up to centering. The rolling PC1–PC2 correlation
+# **Finding**: PC1's daily score correlates above 0.99 with the equal-weight sector portfolio.
+# PC1 is the broad market mode in this universe, up to centering. The rolling PC1-PC2 correlation
 # fluctuates around zero with non-trivial variance: the in-sample orthogonality constraint
 # holds globally but short-window deviations are substantial, particularly during regime
 # transitions. This is why orthogonality must be re-imposed in production by refitting on
 # expanding or rolling windows rather than relying on a single in-sample decomposition.
 
 # %% [markdown]
-# ## 9. Sector Rotation Signal
-#
-# As a preview of eigenportfolio applications (developed fully in Section 14.3 and
-# [`02_eigenportfolios`](02_eigenportfolios.ipynb)), we construct a simple long-short rotation signal from PC2
-# loadings. PC2 typically captures cyclical-vs-defensive rotation.
-
-# %%
-# Construct rotation positions from PC2 loadings
-pc2_loadings = loadings["PC2"]
-pc2_signal = factors_df["PC2"]
-
-rotation_positions = pd.DataFrame(index=returns.index, columns=returns.columns)
-for sector in returns.columns:
-    rotation_positions[sector] = np.sign(pc2_loadings[sector]) * pc2_signal
-
-# Normalize to zero-mean cross-section (long-short)
-rotation_positions = rotation_positions.sub(rotation_positions.mean(axis=1), axis=0)
-
-# %%
-# Evaluate rotation strategy vs equal-weight benchmark
-rotation_returns = (rotation_positions.shift(1) * returns).sum(axis=1)
-equal_weight_returns = returns.mean(axis=1)
-
-strategy_comparison = pd.DataFrame(
-    {
-        "Ann Return": [r.mean() * 252 for r in [equal_weight_returns, rotation_returns]],
-        "Ann Vol": [r.std() * np.sqrt(252) for r in [equal_weight_returns, rotation_returns]],
-        "Sharpe": [
-            r.mean() / r.std() * np.sqrt(252) for r in [equal_weight_returns, rotation_returns]
-        ],
-    },
-    index=["Equal Weight", "PC2 Rotation"],
-)
-
-strategy_comparison.style.format({"Ann Return": "{:.2%}", "Ann Vol": "{:.2%}", "Sharpe": "{:.2f}"})
-
-# %% [markdown]
-# **Interpretation**: The PC2 rotation signal produces a positive but lower Sharpe than the
-# equal-weight benchmark, at roughly five times the volatility — the unbounded position scale
-# (driven by the daily PC2 score magnitude) inflates both ends of the table without improving
-# risk-adjusted return. On a narrow universe of nine sectors, this kind of single-factor
-# long-short demo is informative about the rotation dimension PC2 captures, not a
-# competitive alpha source. Section 14.3 develops eigenportfolio construction more rigorously
-# on broader universes with proper position sizing.
-
-# %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Dominant market factor**: PC1 captures ~71% of sector ETF variance — all sectors
+# 1. **Dominant market factor**: PC1 captures ~71% of sector ETF variance; all sectors
 #    load positively, reflecting broad market risk
 # 2. **Bootstrap stability matters**: Not all loadings are equally reliable. Sectors with
-#    wide confidence intervals (e.g., Utilities, Energy) warrant caution in portfolio construction
-# 3. **Time-varying structure**: Rolling PCA reveals that PC1 variance spikes during crises
-#    (correlations increase) and declines in calm markets — relevant for regime-conditional
-#    strategies
-# 4. **Rotation signal is modest**: PC2-based sector rotation produces a low Sharpe on 9
-#    ETFs; the insight is structural (identifying the rotation dimension) rather than
-#    directly profitable
+#    wide confidence intervals warrant caution in portfolio construction
+# 3. **Time-varying structure**: PC1 spikes during systemwide shocks, while PC2 can rise when
+#    sectors diverge; stress regimes do not share one covariance pattern
+# 4. **Descriptive scope**: Full-sample PCA explains covariance structure but does not by itself
+#    produce an out-of-sample return forecast
 #
 # ### PCA in the Two-Step Framework
 #
 # Everything above is **Stage 1**. To turn it into a return forecast, a
 # Stage 2 factor-premium forecaster is required (see Figure 14.10 for the
 # full catalog). PCA + sample-mean Stage 2 collapses to a per-asset
-# historical-mean predictor — a useful sanity-check baseline but not a
+# historical-mean predictor - a useful sanity-check baseline but not a
 # forecaster in any meaningful sense. Non-trivial cross-sectional ranking
 # emerges only when Stage 2 conditions on the factor path (AR(1), EWMA, or
 # richer ML forecasters). The IPCA notebook demonstrates the full pipeline

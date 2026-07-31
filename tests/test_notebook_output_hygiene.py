@@ -106,7 +106,6 @@ def test_known_desynced_list_has_no_stale_entries() -> None:
 # but are tracked here for consistency with the sibling debt list above.
 KNOWN_UNRENDERABLE = frozenset(
     {
-        "15_causal_estimation/08_neural_causal_discovery.ipynb",
         "case_studies/crypto_perps_funding/_archive/11_autoencoder.ipynb",
         "case_studies/us_equities_panel/20_strategy_analysis.ipynb",
     }

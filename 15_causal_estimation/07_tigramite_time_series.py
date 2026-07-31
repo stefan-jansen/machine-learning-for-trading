@@ -16,9 +16,9 @@
 # %% [markdown]
 # # Time Series Causal Discovery with PCMCI
 #
-# **Chapter 15: Causal Estimation with ML**
+# **Chapter 15: Causal Machine Learning**
 # **Docker image**: `ml4t`
-# **Section Reference**: See Section 15.4 for PCMCI theory and ADIA Lab insights
+# **Section Reference**: See Section 15.6 for PCMCI theory and ADIA Lab insights
 #
 # ## Purpose
 # This notebook demonstrates **causal discovery** - learning the causal structure
@@ -51,36 +51,34 @@
 #
 # ### Multiple Testing Correction
 #
-# **CRITICAL**: PCMCI's pc_alpha parameter already controls for multiple testing
-# via the conditioning step. Applying FDR correction afterward is DOUBLE correction.
-#
-# Choose ONE approach:
-# - **Option A (Recommended)**: Use pc_alpha only for threshold. No additional FDR.
-# - **Option B**: Set pc_alpha=None, get raw p-values, apply FDR yourself.
-#
-# This notebook uses Option A per Tigramite documentation.
+# PCMCI separates two statistical decisions. `pc_alpha` regularizes parent
+# selection in PC1; it is not a multiple-testing correction for the final MCI
+# tests. This notebook lets Tigramite select `pc_alpha` and applies its explicit
+# Benjamini-Hochberg false-discovery-rate correction to the MCI p-values.
 #
 # ### Lag Selection
 #
-# MAX_LAG must be justified by:
-# 1. Domain knowledge (how fast do financial relationships propagate?)
-# 2. ACF analysis (at what lag does autocorrelation decay?)
-# 3. Computational constraints (more lags = more tests = less power)
+# `MAX_LAG` defines which delayed causal effects can be discovered. We predeclare
+# a five-trading-day horizon based on the weekly financial response window. The
+# ACF is descriptive evidence about serial dependence, not a rule for excluding
+# cross-variable causal delays.
 
 # %% [markdown]
 # ## Setup
 
 # %%
-"""Time Series Causal Discovery with PCMCI — discover lead-lag causal relationships in financial time series."""
+"""Time Series Causal Discovery with PCMCI - discover lead-lag causal relationships in financial time series."""
 
 import warnings
 from collections import defaultdict
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from data import load_etfs, load_macro
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS, apply_ml4t_style
 
 warnings.filterwarnings("ignore")
 
@@ -92,9 +90,11 @@ N_BOOTSTRAP = 100
 N_SAMPLES = 500
 SEED = 42
 BLOCK_SIZE = 20  # Block size for bootstrap (preserves autocorrelation)
-STABILITY_THRESHOLD = 0.5  # Edge must appear in >50% of bootstraps
+STABILITY_THRESHOLD = 0.5  # Edge must appear in at least 50% of bootstraps
 
 set_global_seeds(SEED)
+apply_ml4t_style()
+plt.rcParams["axes.titleweight"] = "bold"
 
 # %%
 # Tigramite imports
@@ -109,13 +109,13 @@ print(f"Tigramite version: {version}")
 print(f"Bootstrap replications: {N_BOOTSTRAP}")
 
 # %% [markdown]
-# ## 1. Load Multi-Asset Time Series and Determine MAX_LAG
+# ## 1. Load Multi-Asset Time Series
 
 # %%
 import polars as pl
 
 # %%
-# Real-data only — load failure is a fatal error so CI / a fresh reader
+# Real-data only - load failure is a fatal error so CI / a fresh reader
 # environment without ML4T_DATA_PATH cannot silently publish synthetic numbers.
 etf_tickers = ["SPY", "IEF", "GLD"]
 
@@ -141,12 +141,11 @@ var_names = list(returns.columns)
 print(f"Loaded returns: {returns.shape}, {var_names}")
 
 # %% [markdown]
-# ## 2. Justify MAX_LAG via ACF Analysis
+# ## 2. Inspect Serial Dependence Within the Causal Horizon
 #
-# Per Runge et al. (2019), MAX_LAG should be chosen based on:
-# 1. Domain knowledge about typical response times
-# 2. Autocorrelation decay in the data
-# 3. Computational feasibility
+# The search horizon remains the predeclared five trading days. A rapid decline
+# in each series' own autocorrelation does not rule out a delayed effect from a
+# different series, so the ACF does not overwrite `MAX_LAG`.
 
 # %%
 
@@ -164,7 +163,7 @@ def compute_acf(series, max_lag=20):
     return acf_values
 
 
-print("\n=== LAG SELECTION JUSTIFICATION ===\n")
+print("\n=== SERIAL-DEPENDENCE DIAGNOSTIC ===\n")
 
 # Compute ACF for each variable
 acf_results = {}
@@ -176,16 +175,32 @@ for var in var_names:
     decay_lag = next((i for i, a in enumerate(acf) if abs(a) < 0.1), 10)
     print(f"{var}: ACF decays to <0.1 at lag {decay_lag}")
 
-# Determine MAX_LAG based on ACF decay
-# Use the maximum decay lag across variables, capped at reasonable value
-max_decay_lag = max(
-    next((i for i, a in enumerate(acf_results[v]) if abs(a) < 0.1), 10) for v in var_names
-)
-MAX_LAG = min(max_decay_lag, 5)  # Cap at 5 for computational reasons
+print(f"\nPredeclared causal horizon: MAX_LAG = {MAX_LAG} trading days")
+print("The ACF describes own-series persistence; it does not select the causal horizon.")
 
-print(f"\nChosen MAX_LAG = {MAX_LAG}")
-print("Justification: ACF decays to <0.1 by this lag for most variables")
-print("Note: Longer lags would reduce statistical power due to more tests")
+# %% [markdown]
+# The chart shows that daily returns have limited own-series persistence. PCMCI
+# still tests the full weekly horizon because cross-series effects can arrive
+# after a series' own ACF has decayed.
+
+# %%
+_lags = np.arange(len(next(iter(acf_results.values()))))
+_series_colors = [COLORS["blue"], COLORS["amber"], COLORS["copper"], COLORS["neutral"]]
+
+fig, ax = plt.subplots(figsize=(9, 5))
+for (var, acf), color in zip(acf_results.items(), _series_colors):
+    ax.plot(_lags, acf, marker="o", markersize=4, linewidth=1.5, color=color, label=var)
+ax.axhspan(-0.1, 0.1, color=COLORS["slate"], alpha=0.12, label="|ACF| < 0.1 band")
+ax.axhline(0, color=COLORS["neutral"], linestyle="-", linewidth=0.8)
+ax.axvline(
+    MAX_LAG, color=COLORS["negative"], linestyle="--", linewidth=1.2, label=f"MAX_LAG = {MAX_LAG}"
+)
+ax.set_xlabel("Lag (trading days)")
+ax.set_ylabel("Autocorrelation")
+ax.set_title("Return autocorrelation fades quickly; causal search still spans five trading days")
+ax.legend(loc="upper right", frameon=False, ncol=2)
+fig.tight_layout()
+plt.show()
 
 # %% [markdown]
 # ## 3. Prepare Data for Tigramite
@@ -203,13 +218,11 @@ print(f"Tigramite dataframe shape: {shape}")
 print(f"Variable names: {dataframe.var_names}")
 
 # %% [markdown]
-# ## 4. PCMCI Algorithm (Without Double Correction)
+# ## 4. PCMCI with Explicit False-Discovery-Rate Control
 #
-# **CRITICAL**: We use pc_alpha for the PCMCI threshold.
-# We do NOT apply additional FDR correction afterward.
-#
-# Per Runge et al. (2019), the MCI step already controls for multiple testing
-# through the conditioning approach.
+# `pc_alpha=None` asks Tigramite to select the PC1 regularization parameter.
+# `fdr_method="fdr_bh"` then adjusts the final MCI p-values across the tested
+# links. The returned `p_matrix` therefore contains BH-adjusted p-values.
 
 # %%
 # Initialize PCMCI with partial correlation test
@@ -219,12 +232,13 @@ pcmci = PCMCI(dataframe=dataframe, cond_ind_test=parcorr, verbosity=1)
 print("\nRunning PCMCI algorithm...")
 print(f"Max lag: {MAX_LAG}")
 print(f"Alpha level: {ALPHA_LEVEL}")
-print("\nNote: Using pc_alpha for threshold (NO additional FDR correction)")
+print("Multiple-testing policy: Benjamini-Hochberg FDR correction")
 
-# Run PCMCI - pc_alpha handles the threshold
 results = pcmci.run_pcmci(
     tau_max=MAX_LAG,
-    pc_alpha=ALPHA_LEVEL,
+    pc_alpha=None,
+    alpha_level=ALPHA_LEVEL,
+    fdr_method="fdr_bh",
 )
 
 print("\nPCMCI completed!")
@@ -232,16 +246,13 @@ print("\nPCMCI completed!")
 # %% [markdown]
 # ## 5. Interpret Discovered Causal Graph
 #
-# **Important**: We use the p-values directly from PCMCI results.
-# The pc_alpha parameter already applied appropriate thresholding.
+# We threshold Tigramite's BH-adjusted MCI p-values at `ALPHA_LEVEL`.
 
 # %%
-# Use p_matrix directly (NOT corrected again)
-# pc_alpha already handled multiple testing via the MCI conditioning
 p_matrix = results["p_matrix"]
 
 print("\n" + "=" * 60)
-print("DISCOVERED CAUSAL LINKS (PCMCI, pc_alpha threshold)")
+print("DISCOVERED CAUSAL LINKS (PCMCI, BH-FDR adjusted)")
 print("=" * 60)
 
 significant_links = []
@@ -299,15 +310,17 @@ for b in range(N_BOOTSTRAP):
         dataframe=boot_df, cond_ind_test=ParCorr(significance="analytic"), verbosity=0
     )
 
-    try:
-        boot_results = boot_pcmci.run_pcmci(tau_max=MAX_LAG, pc_alpha=ALPHA_LEVEL)
-        for i in range(n_vars):
-            for j in range(n_vars):
-                for tau in range(1, MAX_LAG + 1):
-                    if boot_results["p_matrix"][i, j, tau] < ALPHA_LEVEL:
-                        edge_counts[(var_names[i], var_names[j], tau)] += 1
-    except Exception:
-        pass
+    boot_results = boot_pcmci.run_pcmci(
+        tau_max=MAX_LAG,
+        pc_alpha=None,
+        alpha_level=ALPHA_LEVEL,
+        fdr_method="fdr_bh",
+    )
+    for i in range(n_vars):
+        for j in range(n_vars):
+            for tau in range(1, MAX_LAG + 1):
+                if boot_results["p_matrix"][i, j, tau] < ALPHA_LEVEL:
+                    edge_counts[(var_names[i], var_names[j], tau)] += 1
 
     if (b + 1) % 20 == 0:
         print(f"  Completed {b + 1}/{N_BOOTSTRAP} bootstraps...")
@@ -326,6 +339,43 @@ for edge, stability in sorted(edge_stability.items(), key=lambda x: -x[1]):
         stable_edges.append(edge)
 
 print(f"\nTotal edges: {len(edge_stability)}, Stable: {len(stable_edges)}")
+
+# %% [markdown]
+# The stability chart is the decisive view of the null: across 100 block-bootstrap
+# resamples, no lagged edge clears the 50% robustness threshold. Even the most
+# frequently recovered BH-adjusted edge appears in a small minority of resamples,
+# so PCMCI's zero-link point estimate is not an artifact of a single sample.
+
+# %%
+if edge_stability:
+    _ranked = sorted(edge_stability.items(), key=lambda kv: kv[1], reverse=True)[:10]
+    _labels = [f"{s}[t-{lag}] -> {t}" for (s, t, lag), _ in _ranked]
+    _freqs = [v * 100 for _, v in _ranked]
+    _bar_colors = [
+        COLORS["amber"] if f >= STABILITY_THRESHOLD * 100 else COLORS["blue"] for f in _freqs
+    ]
+
+    fig, ax = plt.subplots(figsize=(9, max(3, 0.5 * len(_ranked) + 1.5)))
+    ypos = np.arange(len(_ranked))
+    ax.barh(ypos, _freqs, color=_bar_colors)
+    ax.axvline(
+        STABILITY_THRESHOLD * 100,
+        color=COLORS["negative"],
+        linestyle="--",
+        linewidth=1.2,
+        label=f"{STABILITY_THRESHOLD:.0%} robustness threshold",
+    )
+    ax.set_yticks(ypos)
+    ax.set_yticklabels(_labels)
+    ax.invert_yaxis()
+    ax.set_xlabel("Share of block-bootstrap resamples recovering the edge (%)")
+    ax.set_xlim(0, 100)
+    ax.set_title("No lagged edge clears the 50% robustness threshold under block bootstrap")
+    ax.legend(loc="lower right", frameon=False)
+    fig.tight_layout()
+    plt.show()
+else:
+    print("No edges recovered in any bootstrap resample - the null is unanimous.")
 
 # %% [markdown]
 # ## 7. Balanced Interpretation of Null Results
@@ -367,9 +417,12 @@ else:
 #
 # **PCMCI advantages**:
 # 1. Multivariate - conditions on all other variables
-# 2. Controls for confounders automatically
+# 2. Conditions on selected observed parents under causal-sufficiency assumptions
 # 3. Tests at multiple lags simultaneously
-# 4. Built-in multiple testing control via MCI
+# 4. Explicit FDR control for the multivariate MCI tests
+#
+# PCMCI can reduce bias from observed common drivers included in the panel. It
+# cannot eliminate hidden confounding, so discovered links remain hypotheses.
 
 # %%
 from sklearn.linear_model import LinearRegression
@@ -397,7 +450,7 @@ def simple_granger_test(X, Y, max_lag=5):
         mse_u = mean_squared_error(Y_target, model_u.predict(XY_lags))
 
         # F-test approximation
-        f_stat = (mse_r - mse_u) / mse_u * (n - 2 * lag - 1) / lag
+        f_stat = (mse_r - mse_u) / mse_u * (n - 3 * lag - 1) / lag
         results.append({"lag": lag, "f_stat": f_stat, "mse_reduction": (mse_r - mse_u) / mse_r})
 
     return results
@@ -454,21 +507,22 @@ for key, value in results_summary.items():
 # %% [markdown]
 # ## Key Takeaways
 #
-# ### Methodological Improvements Applied:
+# ### What the Evidence Supports
 #
-# 1. **No Double Correction**: Use pc_alpha threshold only, NOT additional FDR.
-#    PCMCI's MCI step already controls for multiple testing.
+# 1. **Explicit Multiplicity Control**: Let Tigramite tune `pc_alpha` for parent
+#    selection, then use BH-FDR-adjusted MCI p-values for discovery.
 #
-# 2. **Justified MAX_LAG**: Selected based on ACF decay analysis, not arbitrary.
+# 2. **Predeclared Causal Horizon**: Test five trading days based on the weekly
+#    response window; use the ACF only to describe serial dependence.
 #
-# 3. **Bootstrap Stability**: Edges found in >50% of bootstraps are more reliable.
+# 3. **Bootstrap Stability**: Edges found in at least 50% of bootstraps are more reliable.
 #
 # 4. **Balanced Interpretation**: Null results have multiple possible explanations,
 #    not just "market efficiency".
 #
-# ### For Chapter Prose:
+# ### Practical Interpretation
 #
-# - Contrast Granger (pairwise) with PCMCI (multivariate)
-# - Emphasize stability analysis for robust edge detection
-# - Caveat: discovered structure is statistical, not guaranteed causal
-# - Multiple explanations for null findings - don't overclaim efficiency
+# - Granger tests pairs, while PCMCI conditions on selected variables from the panel.
+# - Bootstrap stability separates recurring edges from sample-specific discoveries.
+# - Discovered structure is statistical evidence, not proof of causality.
+# - A null result is compatible with low power, aggregation, nonlinearity, or regime change.

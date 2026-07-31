@@ -19,27 +19,25 @@
 # **Docker image**: `ml4t`
 #
 # This notebook introduces the **ml4t-backtest** event-driven backtesting engine.
-# We implement the same RSI mean-reversion strategy as notebook 03 (VectorBT),
-# demonstrating how event-driven backtesting more closely mirrors live trading.
+# We implement the RSI mean-reversion rule from notebook 03 (VectorBT) as a
+# sequence of decisions, pending orders, fills, and portfolio-state updates.
 #
 # ## When to Use ml4t-backtest vs VectorBT
 #
-# | Aspect | ml4t-backtest | VectorBT |
-# |--------|---------------|----------|
-# | **Best for** | Production strategies, complex logic | Rapid prototyping, parameter sweeps |
-# | **Execution model** | Event-driven (bar-by-bar) | Vectorized (all-at-once) |
-# | **Code reuse** | Strategy code → live trading | Backtest-only code |
-# | **Speed** | Slower (realistic) | Fast (vectorized) |
-# | **Position management** | Full order lifecycle | Simplified fills |
-# | **Use case** | Final validation, deployment | Early exploration, optimization |
+# | Question | ml4t-backtest | VectorBT |
+# |----------|---------------|----------|
+# | **Natural representation** | Sequential decisions and state transitions | Timestamped arrays and portfolio signals |
+# | **State exposure** | Orders, fills, cash, and positions are explicit | State is expressed through vectorized portfolio rules |
+# | **Research strength** | Path-dependent strategy logic | Fast parameter and signal analysis |
+# | **Credibility condition** | Engine settings match the trading protocol | Array semantics match the trading protocol |
 #
-# **Rule of Thumb**: Use VectorBT for exploration and optimization, then validate
-# with ml4t-backtest before deployment.
+# Neither representation is realistic by default. Credibility comes from explicit,
+# tested assumptions about information timing, fills, sizing, costs, and accounting.
 #
 # **Learning Objectives:**
 # 1. Implement a production-style `Strategy` class with `on_data` callbacks.
-# 2. Run an event-driven backtest with realistic execution timing and costs.
-# 3. Interpret differences between vectorized and event-driven backtest outputs.
+# 2. Run an event-driven backtest with next-open execution and explicit costs.
+# 3. Reconcile fills, closed-trade P&L, and a protocol-matched benchmark.
 #
 # **Book Reference:** Chapter 16, Sections 16.3-16.5 (simulation workflow and reporting).
 #
@@ -64,58 +62,64 @@
 # ## Setup
 
 # %%
-"""Single Asset Backtest with ml4t-backtest — event-driven RSI strategy matching the VectorBT implementation."""
+"""Single-asset event-driven backtest with explicit timing, sizing, and cost accounting."""
 
-import warnings
 from datetime import datetime
-
-warnings.filterwarnings("ignore")
 
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
+from IPython.display import Markdown, display
 from ml4t.backtest import (
     BacktestConfig,
     DataFeed,
     Engine,
     ExecutionMode,
-    OrderSide,
-    OrderType,
     Strategy,
 )
 from ml4t.backtest.analytics import MAEMFEAnalyzer, TradeAnalyzer
+from ml4t.backtest.config import ShareType
 from ml4t.backtest.sessions import SessionConfig, compute_session_pnl
 from plotly.subplots import make_subplots
 
 from data import load_crypto_perps
 from utils.paths import get_output_dir
+from utils.style import COLORS
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+# Production defaults - Papermill injects overrides for CI
 START_DATE = "2020-01-01"
 END_DATE = "2024-01-01"
 INITIAL_CASH = 100_000
-
-# %% [markdown]
-# ## 1. Data Acquisition
-#
-# We load BTC/USDT data from the crypto perpetuals dataset and resample
-# 8-hourly bars to daily frequency.
-
-# %%
-# Backtest cost parameters
 FEES = 0.001  # 10 bps per trade
 SLIPPAGE = 0.0005  # 5 bps slippage
-
-# RSI parameters
 RSI_PERIOD = 14
 RSI_LOWER = 30  # Oversold threshold
 RSI_UPPER = 70  # Overbought threshold
 POSITION_SIZE = 0.95  # 95% of capital per trade
 
 # %%
-# Load BTC data from local crypto dataset and resample to daily bars
-_crypto = load_crypto_perps()
+display(
+    Markdown(
+        f"The rule uses a **{RSI_PERIOD}-day RSI**, enters below **{RSI_LOWER}**, "
+        f"exits above **{RSI_UPPER}**, and targets **{POSITION_SIZE:.0%}** exposure. "
+        f"Each fill pays a **{FEES:.2%} fee** plus **{SLIPPAGE:.2%} slippage**."
+    )
+)
+
+# %% [markdown]
+# ## 1. Data Acquisition
+#
+# Load BTC/USDT perpetual bars, aggregate the three 8-hour observations in each UTC day, and
+# retain the canonical `symbol` and `timestamp` keys. UTC-day aggregation is a calendar convention
+# for a continuously traded market, not an exchange session close.
+
+# %%
+_crypto = load_crypto_perps(
+    symbols=["BTCUSDT"],
+    start_date=START_DATE,
+    end_date=END_DATE,
+)
 btc_df = (
     _crypto.filter(
         (pl.col("symbol") == "BTCUSDT")
@@ -124,7 +128,7 @@ btc_df = (
     )
     .sort("timestamp")
     .with_columns(pl.col("timestamp").dt.replace_time_zone(None))
-    .group_by_dynamic("timestamp", every="1d")
+    .group_by_dynamic("timestamp", every="1d", group_by="symbol")
     .agg(
         pl.col("open").first(),
         pl.col("high").max(),
@@ -132,34 +136,45 @@ btc_df = (
         pl.col("close").last(),
         pl.col("volume").sum(),
     )
-    .with_columns(pl.lit("BTCUSDT").alias("symbol"))
+    .sort(["symbol", "timestamp"])
 )
 
 prices_df = btc_df
+
+# %% [markdown]
+# Canonical keys must remain unique after aggregation. Positive, internally consistent OHLC bars
+# protect both the indicator and the broker from malformed inputs.
+
+# %%
+assert prices_df.n_unique(["symbol", "timestamp"]) == len(prices_df)
+assert prices_df["symbol"].unique().to_list() == ["BTCUSDT"]
+price_columns = ["open", "high", "low", "close"]
+assert prices_df.select(pl.col(price_columns).is_not_null().all()).row(0) == (True,) * 4
+assert prices_df.select((pl.col(price_columns) > 0).all()).row(0) == (True,) * 4
+assert prices_df.select((pl.col("high") >= pl.max_horizontal("open", "close", "low")).all()).item()
+assert prices_df.select((pl.col("low") <= pl.min_horizontal("open", "close", "high")).all()).item()
+assert len(prices_df) > RSI_PERIOD
+
 print(f"Loaded {len(prices_df):,} daily bars from local crypto dataset")
 print(f"Date range: {prices_df['timestamp'].min()} to {prices_df['timestamp'].max()}")
 
 # %% [markdown]
 # ## 2. RSI Indicator Calculation
 #
-# Compute RSI using the Wilder smoothing method (same as VectorBT).
+# Compute the same simple rolling gain/loss RSI used by VectorBT's default indicator.
 
 
 # %%
 def compute_rsi(close: pl.Series, period: int = 14) -> pl.Series:
-    """Compute RSI using Wilder's smoothing method."""
+    """Compute RSI from simple rolling mean gains and losses."""
     delta = close.diff()
-    # Note: Use float literals (0.0) to ensure consistent Polars types
-    gain = delta.clip(lower_bound=0.0).fill_null(0.0)
-    loss = (-delta).clip(lower_bound=0.0).fill_null(0.0)
-
-    # Wilder's smoothed moving average (exponential with alpha = 1/period)
-    avg_gain = gain.ewm_mean(span=period * 2 - 1, adjust=False)
-    avg_loss = loss.ewm_mean(span=period * 2 - 1, adjust=False)
+    gain = delta.clip(lower_bound=0.0)
+    loss = (-delta).clip(lower_bound=0.0)
+    avg_gain = gain.rolling_mean(window_size=period, min_samples=period)
+    avg_loss = loss.rolling_mean(window_size=period, min_samples=period)
 
     rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return 100 - (100 / (1 + rs))
 
 
 # Compute RSI and add to context
@@ -168,7 +183,9 @@ rsi_values = compute_rsi(prices_df["close"], RSI_PERIOD)
 # Create context DataFrame with RSI
 context_df = prices_df.select(["timestamp"]).with_columns(rsi_values.alias("rsi"))
 
-rsi_valid = context_df["rsi"].drop_nans()
+rsi_valid = context_df["rsi"].drop_nulls().drop_nans()
+assert len(rsi_valid) <= len(context_df) - RSI_PERIOD
+assert rsi_valid.is_between(0, 100, closed="both").all()
 print(f"RSI Statistics ({len(rsi_valid)}/{len(context_df)} valid):")
 print(f"  Mean: {rsi_valid.mean():.1f}")
 print(f"  Std:  {rsi_valid.std():.1f}")
@@ -191,7 +208,7 @@ fig.add_trace(
         x=prices_df["timestamp"].to_list(),
         y=prices_df["close"].to_list(),
         name="BTC",
-        line=dict(color="blue"),
+        line=dict(color=COLORS["blue"]),
     ),
     row=1,
     col=1,
@@ -202,21 +219,24 @@ fig.add_trace(
         x=context_df["timestamp"].to_list(),
         y=context_df["rsi"].to_list(),
         name="RSI",
-        line=dict(color="purple"),
+        line=dict(color=COLORS["amber"]),
     ),
     row=2,
     col=1,
 )
 
 # Add RSI threshold lines
-fig.add_hline(y=RSI_LOWER, line_dash="dash", line_color="green", row=2, col=1)
-fig.add_hline(y=RSI_UPPER, line_dash="dash", line_color="red", row=2, col=1)
+fig.add_hline(y=RSI_LOWER, line_dash="dash", line_color=COLORS["positive"], row=2, col=1)
+_ = fig.add_hline(y=RSI_UPPER, line_dash="dash", line_color=COLORS["negative"], row=2, col=1)
 
 # %%
 # Layout and display
 fig.update_layout(
     height=600,
-    title="BTC Price and RSI Indicator",
+    title=(
+        "RSI thresholds isolate BTC price extremes"
+        "<br><sup>14-day simple rolling gain/loss means; UTC daily bars</sup>"
+    ),
     showlegend=True,
     xaxis2_title="Date",
     yaxis_title="Price (USDT)",
@@ -241,8 +261,8 @@ fig.show()
 # 3. **Access context data via `context.get()`**: Indicators precomputed and passed
 #    via `context_df` are available here. Always check for `None`/`NaN`.
 #
-# 4. **Submit orders via `broker.submit_order()`**: Pass `asset`, `quantity`,
-#    `side`, and `order_type` directly. The broker creates the Order internally.
+# 4. **Express sizing explicitly**: `broker.order_target_percent()` converts the target
+#    portfolio weight into an order using information available on the signal bar.
 #
 # 5. **Handle data availability gracefully**: Early bars may lack history for
 #    indicators. Check before trading.
@@ -255,21 +275,7 @@ fig.show()
 
 # %%
 class RSIMeanReversionStrategy(Strategy):
-    """RSI Mean Reversion Strategy - Canonical ml4t-backtest Pattern.
-
-    This strategy demonstrates the standard ml4t-backtest Strategy class structure:
-    - __init__: Initialize parameters and any state variables
-    - on_data: Trading logic called for each bar
-
-    Strategy Logic:
-    - Long Entry: RSI < lower threshold (oversold)
-    - Exit: RSI > upper threshold (overbought)
-
-    Attributes:
-        rsi_lower: RSI threshold for long entry (default: 30)
-        rsi_upper: RSI threshold for exit (default: 70)
-        position_size: Fraction of capital to deploy (default: 0.95)
-    """
+    """Long-only RSI threshold strategy."""
 
     def __init__(
         self,
@@ -277,92 +283,28 @@ class RSIMeanReversionStrategy(Strategy):
         rsi_upper: float = 70,
         position_size: float = 0.95,
     ):
-        """Initialize strategy parameters.
-
-        Args:
-            rsi_lower: RSI level below which to enter long (oversold).
-            rsi_upper: RSI level above which to exit (overbought).
-            position_size: Fraction of available cash to use per trade.
-        """
-        # Store strategy parameters as instance attributes
+        """Store entry, exit, and target-weight parameters."""
         self.rsi_lower = rsi_lower
         self.rsi_upper = rsi_upper
         self.position_size = position_size
 
     def on_data(self, timestamp, data, context, broker):
-        """Called for each bar during backtest.
-
-        This is the main trading logic method. It receives:
-        - timestamp: Current bar's datetime
-        - data: Dict of {asset: {open, high, low, close, volume}}
-        - context: Dict of precomputed indicators (from context_df)
-        - broker: Interface to submit orders and query positions
-
-        The broker provides:
-        - broker.cash: Available cash balance
-        - broker.equity: Total portfolio value (cash + positions)
-        - broker.get_position(asset): Returns Position or None
-        - broker.submit_order(order): Submit an Order for execution
-        """
-        # ============================================================
-        # Step 1: Get indicator value from context
-        # ============================================================
-        # Context contains columns from context_df, keyed by column name.
-        # Always check for None/NaN - early bars may lack indicator values.
+        """Submit target-weight orders from the close-based RSI state."""
         rsi = context.get("rsi")
         if rsi is None or np.isnan(rsi):
-            return  # Skip bar - RSI not yet available
+            return
 
-        # ============================================================
-        # Step 2: Check current position state
-        # ============================================================
-        # broker.get_position() returns None if no position, or a Position object
-        # with attributes: quantity, entry_price, market_value, unrealized_pnl
         asset = "BTCUSDT"
+        if data.get(asset) is None:
+            return
+
         position = broker.get_position(asset)
         is_in_position = position is not None and position.quantity > 0
 
-        # ============================================================
-        # Step 3: Get current price from data
-        # ============================================================
-        # data is a dict of {asset: bar_dict} where bar_dict has OHLCV keys
-        asset_data = data.get(asset)
-        if asset_data is None:
-            return  # Skip - no data for this asset on this bar
-        current_price = asset_data["close"]
-
-        # ============================================================
-        # Step 4: Apply trading logic
-        # ============================================================
         if not is_in_position and rsi < self.rsi_lower:
-            # ENTRY SIGNAL: RSI oversold → expect mean reversion bounce
-            # Crypto trades fractional; we keep eight-decimal precision so the
-            # exposure matches VectorBT's ``size=0.95, size_type='percent'``
-            # convention in NB03 — avoids the integer-rounding wedge that would
-            # show up as a third (avoidable) source of NB03 <-> NB04 divergence
-            # on top of timing and RSI seeding.
-            available_cash = broker.cash * self.position_size
-            quantity = round(available_cash / current_price, 8)
-
-            if quantity > 0:
-                # Submit market buy order
-                # API: broker.submit_order(asset, quantity, side, order_type)
-                broker.submit_order(
-                    asset,
-                    quantity,
-                    side=OrderSide.BUY,
-                    order_type=OrderType.MARKET,
-                )
-
+            broker.order_target_percent(asset, self.position_size)
         elif is_in_position and rsi > self.rsi_upper:
-            # EXIT SIGNAL: RSI overbought → take profit
-            # Sell entire position
-            broker.submit_order(
-                asset,
-                position.quantity,
-                side=OrderSide.SELL,
-                order_type=OrderType.MARKET,
-            )
+            broker.order_target_percent(asset, 0.0)
 
 
 # %% [markdown]
@@ -378,17 +320,16 @@ class RSIMeanReversionStrategy(Strategy):
 #
 # The `execution_mode` parameter controls order fill timing:
 #
-# - `SAME_BAR`: Orders fill at the close of the signal bar (unrealistic but fast)
-# - `NEXT_BAR`: Orders fill at the open of the next bar (realistic)
+# - `SAME_BAR`: Orders are eligible on the signal bar and need a valid intrabar timing argument.
+# - `NEXT_BAR`: Orders submitted after the decision fill at the next bar's open.
 #
-# For production validation, always use `NEXT_BAR` to avoid look-ahead bias.
+# For this close-derived daily signal, `NEXT_BAR` establishes a valid event order: observe RSI after
+# the UTC close, submit the order, and fill at the next UTC day's open. Other strategies require
+# their own latency argument rather than a universal mode choice.
 
 # %%
-# -----------------------------------------------------------------------------
-# Step 1: Create DataFeed
-# -----------------------------------------------------------------------------
 # DataFeed combines OHLCV prices with context data (indicators).
-# - prices_df: Required columns: timestamp, asset, open, high, low, close, volume
+# - prices_df: Required columns: timestamp, symbol, open, high, low, close, volume
 # - context_df: Optional. Columns are passed to strategy via context dict.
 #   Must have 'timestamp' column aligned with prices_df.
 feed = DataFeed(
@@ -396,35 +337,34 @@ feed = DataFeed(
     context_df=context_df,
 )
 
-# -----------------------------------------------------------------------------
-# Step 2: Instantiate Strategy
-# -----------------------------------------------------------------------------
-# Pass strategy parameters to __init__. These can be optimized later.
 strategy = RSIMeanReversionStrategy(
     rsi_lower=RSI_LOWER,
     rsi_upper=RSI_UPPER,
     position_size=POSITION_SIZE,
 )
 
-# -----------------------------------------------------------------------------
-# Step 3: Configure and Create Engine
-# -----------------------------------------------------------------------------
-# BacktestConfig centralizes all behavioral settings — execution timing,
-# transaction costs, position sizing rules, and more. The Engine reads
-# these settings and wires them into the Broker automatically.
 config = BacktestConfig(
     initial_cash=INITIAL_CASH,
-    execution_mode=ExecutionMode.NEXT_BAR,  # Realistic: fill at next bar open
-    commission_rate=FEES,  # 10 bps per trade (percentage of trade value)
-    slippage_rate=SLIPPAGE,  # 5 bps market impact
+    execution_mode=ExecutionMode.NEXT_BAR,
+    commission_rate=FEES,
+    slippage_rate=SLIPPAGE,
+    share_type=ShareType.FRACTIONAL,
+    calendar="crypto",
 )
 
 engine = Engine(feed=feed, strategy=strategy, config=config)
 
 # %%
-# Run backtest
 print("Running backtest...")
 results = engine.run()
+assert results.equity is not None
+assert results.equity.periods_per_year == 365
+assert all(fill.asset == "BTCUSDT" for fill in results.fills)
+
+closed_trades = [trade for trade in results.trades if trade.status == "closed"]
+open_trades = [trade for trade in results.trades if trade.status == "open"]
+assert len(closed_trades) == int(results["num_trades"])
+assert len(open_trades) <= 1
 
 # %% [markdown]
 # **Portfolio performance summary** (RSI mean reversion via ml4t-backtest):
@@ -437,7 +377,7 @@ pl.DataFrame(
             "Total return (%)",
             "Sharpe ratio",
             "Max drawdown (%)",
-            "Total trades",
+            "Closed round trips",
             "Win rate (%)",
         ],
         "value": [
@@ -452,11 +392,28 @@ pl.DataFrame(
 )
 
 # %% [markdown]
+# The full sample is descriptive rather than a sealed holdout. The next cell injects the current
+# result so the interpretation cannot drift when data or engine semantics change.
+
+# %%
+display(
+    Markdown(
+        f"The event-driven RSI rule finishes at **${results['final_value']:,.0f}** "
+        f"(**{results['total_return_pct']:.2f}%**) with a **{results['sharpe']:.2f} Sharpe ratio** "
+        f"and **-{results['max_drawdown_pct']:.2f}% maximum drawdown**. It completes "
+        f"**{len(closed_trades)} closed round trips**"
+        + (f" and has **{len(open_trades)} open trade** at the sample end." if open_trades else ".")
+        + " These in-sample results describe the configured simulation; they do not establish a "
+        "persistent mean-reversion premium."
+    )
+)
+
+# %% [markdown]
 # ## 5. Daily Returns Artifact (Calendar vs Session Alignment)
 
 # %%
 # Build daily return artifact from equity curve (calendar-day aggregation)
-ec = results["equity"]
+ec = results.equity
 equity_df = pl.DataFrame(
     {
         "timestamp": pl.Series("timestamp", ec.timestamps, dtype=pl.Datetime, strict=False),
@@ -465,7 +422,7 @@ equity_df = pl.DataFrame(
 ).sort("timestamp")
 
 calendar_daily = (
-    equity_df.with_columns(pl.col("timestamp").dt.date().alias("timestamp"))
+    equity_df.with_columns(pl.col("timestamp").dt.truncate("1d").alias("timestamp"))
     .group_by("timestamp")
     .agg(
         open_equity=pl.col("equity").first(),
@@ -474,17 +431,24 @@ calendar_daily = (
     .sort("timestamp")
 )
 calendar_daily = calendar_daily.with_columns(
+    pl.lit("BTCUSDT").alias("symbol"),
     ((pl.col("close_equity") - pl.col("close_equity").shift(1)) / pl.col("close_equity").shift(1))
     .fill_null(0.0)
-    .alias("daily_return")
+    .alias("daily_return"),
 )
+assert calendar_daily.n_unique(["symbol", "timestamp"]) == len(calendar_daily)
+assert calendar_daily.schema["timestamp"].base_type() == pl.Datetime
 
 OUTPUT_DIR = get_output_dir(16, "single_asset_ml4t_backtest")
 daily_returns_path = OUTPUT_DIR / "daily_returns_calendar.parquet"
-calendar_daily.select(["timestamp", "daily_return"]).write_parquet(daily_returns_path)
-print(f"Saved daily returns artifact: {daily_returns_path}")
+calendar_daily.select(["symbol", "timestamp", "daily_return"]).write_parquet(daily_returns_path)
+print(f"Saved daily returns artifact: {daily_returns_path.name}")
 
-# CME session-aligned demo (overnight session starts at 17:00 CT)
+# %% [markdown]
+# A three-observation CME example shows why an overnight session boundary differs from a calendar
+# boundary. The observation after 17:00 CT belongs to the following session label.
+
+# %%
 cme_equity_demo = [
     (datetime(2024, 1, 8, 16, 30), 100_000.0),  # Monday session (before 17:00)
     (datetime(2024, 1, 8, 17, 30), 100_400.0),  # Tuesday session (after 17:00)
@@ -501,288 +465,364 @@ session_demo = compute_session_pnl(
 session_demo.select(["session_date", "return_pct"])
 
 # %% [markdown]
-# Session-aligned aggregation is required for futures because trading sessions
-# cross calendar boundaries (e.g., CME evening open). For equities/crypto daily
-# bars, calendar-day aggregation is usually equivalent.
+# Session-aligned aggregation is required for futures because trading sessions cross calendar
+# boundaries, such as the CME evening open. This notebook's BTC artifact instead uses an explicit
+# UTC-day convention for a continuously traded market.
 
 # %% [markdown]
 # ## 6. Analyze Trade Statistics
+#
+# Portfolio metrics describe the path; closed-trade metrics describe the realized round trips.
+# Open positions are marked to market in portfolio equity but are excluded from win-rate and
+# payoff statistics.
 
 # %%
-# Extract and analyze trades
-trades = results.get("trades", [])
+analyzer = TradeAnalyzer(closed_trades)
+assert analyzer.num_trades > 0
+net_trade_returns = np.array([trade.net_return for trade in closed_trades])
+net_wins = net_trade_returns[net_trade_returns > 0]
+net_losses = net_trade_returns[net_trade_returns < 0]
+assert len(net_wins) > 0 and len(net_losses) > 0
+net_payoff_ratio = float(net_wins.mean() / abs(net_losses.mean()))
 
-if trades:
-    analyzer = TradeAnalyzer(trades)
-
-    print(f"\nTotal Trades: {analyzer.num_trades}")
-    print("\nTrade Statistics:")
-    print(f"  Win Rate:       {analyzer.win_rate:.1%}")
-    print(f"  Profit Factor:  {analyzer.profit_factor:.2f}")
-    print(f"  Payoff Ratio:   {analyzer.payoff_ratio:.2f}")
-    print(f"  Avg Trade:      {analyzer.avg_trade:.2%}")
-    print(f"  Avg Win:        {analyzer.avg_win:.2%}")
-    print(f"  Avg Loss:       {analyzer.avg_loss:.2%}")
-    print(f"  Largest Win:    {analyzer.largest_win:.2%}")
-    print(f"  Largest Loss:   {analyzer.largest_loss:.2%}")
-    print(f"  Expectancy:     {analyzer.expectancy:.2%}")
-    print(f"  Avg Bars Held:  {analyzer.avg_bars_held:.1f}")
-
-    # Show first few trades
-    print("\nFirst 5 Trades:")
-    for i, trade in enumerate(trades[:5]):
-        print(
-            f"  {i + 1}. {trade.entry_time.date()} -> {trade.exit_time.date()} | "
-            f"P&L: ${trade.pnl:,.2f} ({trade.pnl_percent * 100:.1f}%)"
-        )
-else:
-    print("No trades executed")
+pl.DataFrame(
+    {
+        "metric": [
+            "Closed round trips",
+            "Win rate (%)",
+            "Profit factor",
+            "Net payoff ratio",
+            "Average net trade (%)",
+            "Average bars held",
+        ],
+        "value": [
+            float(analyzer.num_trades),
+            analyzer.win_rate * 100,
+            analyzer.profit_factor,
+            net_payoff_ratio,
+            float(net_trade_returns.mean() * 100),
+            analyzer.avg_bars_held,
+        ],
+    }
+)
 
 # %% [markdown]
-# ## 6b. Trade Log and Cost Decomposition
+# ## 6.1 Reconcile the Trade Log and Execution Costs
 #
-# The `BacktestResult` provides structured export methods for downstream analysis:
+# The engine records slipped entry and exit prices. To recover P&L before modeled execution costs,
+# remove entry and exit slippage from those fill prices, then subtract slippage dollars and
+# commissions explicitly. The per-trade identity is
 #
-# - `to_trades_dataframe()` → Polars DataFrame with 22 columns per trade
-# - `result.metrics` → Dictionary of portfolio- and trade-level statistics
+# $$\text{net P\&L}=\text{reference-price P\&L}-\text{slippage cost}-\text{commission}. $$
 #
-# The trade DataFrame includes cost decomposition columns that separate
-# price-move P&L from transaction costs — essential for understanding
-# whether a strategy's edge survives implementation costs.
+# The assertion below independently reconciles that identity for every closed round trip.
 
 # %%
-# Export trades as a structured DataFrame (Polars — Parquet-ready)
-trades_df = results.to_trades_dataframe()
-print(f"Trade DataFrame: {trades_df.shape[0]} trades, {trades_df.shape[1]} columns")
-print(f"Columns: {trades_df.columns}\n")
+trades_df = results.to_trades_dataframe().filter(pl.col("status") == "closed")
+assert trades_df["direction"].unique().to_list() == ["long"]
 
-# Show key columns including cost decomposition
-print(
-    trades_df.select(
-        [
-            "symbol",
-            "direction",
-            "entry_price",
-            "exit_price",
-            "pnl",
-            "pnl_percent",
-            "gross_pnl",
-            "cost_drag",
-            "exit_reason",
-        ]
-    ).head(5)
+trades_df = (
+    trades_df.with_columns(
+        entry_reference_price=pl.col("entry_price") - pl.col("entry_slippage"),
+        exit_reference_price=pl.col("exit_price") + pl.col("exit_slippage"),
+    )
+    .with_columns(
+        reference_gross_pnl=(pl.col("exit_reference_price") - pl.col("entry_reference_price"))
+        * pl.col("quantity")
+        * pl.col("multiplier"),
+        execution_costs=pl.col("fees")
+        + (pl.col("entry_slippage") + pl.col("exit_slippage"))
+        * pl.col("quantity").abs()
+        * pl.col("multiplier"),
+    )
+    .with_columns(reconciled_net_pnl=pl.col("reference_gross_pnl") - pl.col("execution_costs"))
+)
+assert np.allclose(trades_df["reconciled_net_pnl"], trades_df["pnl"], rtol=0, atol=1e-8)
+
+trades_df.select(
+    "symbol",
+    "entry_time",
+    "exit_time",
+    "quantity",
+    "reference_gross_pnl",
+    "execution_costs",
+    "pnl",
+    "pnl_percent",
+).head(10)
+
+# %% [markdown]
+# The aggregate below covers closed trades only, so it reconciles realized trade P&L without mixing
+# in an end-of-sample open position or its unrealized return.
+
+# %%
+closed_gross_pnl = float(trades_df["reference_gross_pnl"].sum())
+closed_execution_costs = float(trades_df["execution_costs"].sum())
+closed_net_pnl = float(trades_df["pnl"].sum())
+assert np.isclose(closed_gross_pnl - closed_execution_costs, closed_net_pnl, atol=1e-8)
+
+pl.DataFrame(
+    {
+        "component": ["Reference-price P&L", "Execution costs", "Net closed-trade P&L"],
+        "value_usdt": [closed_gross_pnl, -closed_execution_costs, closed_net_pnl],
+    }
 )
 
 # %%
-# Cost decomposition from result.metrics
-m = results.metrics
-print("\nCost Decomposition (from result.metrics):")
-print(f"  Gross P&L:            ${m['total_gross_pnl']:>12,.2f}")
-print(f"  Total Costs:          ${m['total_costs']:>12,.2f}")
-print(f"  Net P&L:              ${m['total_return'] * INITIAL_CASH:>12,.2f}")
-print(f"  Avg Cost Drag:        {m['avg_cost_drag']:.4%}")
-print(f"  Gross Profit Factor:  {m['gross_profit_factor']:.2f}")
-print(f"  Net Profit Factor:    {m['profit_factor']:.2f}")
-
-# %% [markdown]
-# The `cost_drag` column shows what fraction of each trade's notional value
-# was consumed by fees and slippage. For BTC with 15 bps total costs,
-# typical cost drag is ~0.15% per round trip. The `gross_pnl` column strips
-# out all costs, showing the pure price-move P&L.
-#
-# This DataFrame persists well as Parquet for downstream analysis with
-# `ml4t-diagnostic` (trade analytics, MAE/MFE, regime slicing).
+round_trip_cost_bps = 2 * (FEES + SLIPPAGE) * 10_000
+display(
+    Markdown(
+        f"At the configured rates, a completed entry and exit costs approximately "
+        f"**{round_trip_cost_bps:.0f} bps of fixed notional** before gap and sizing effects. "
+        f"Across the closed trades here, the independently reconciled execution cost is "
+        f"**${closed_execution_costs:,.0f}**."
+    )
+)
 
 # %% [markdown]
 # ## 7. Performance Visualization
+#
+# Portfolio value shows when the strategy is exposed or in cash. Drawdown measures the percentage
+# loss from the running equity peak, with zero fixed at the top of the underwater chart.
 
 # %%
-# Plot portfolio value over time
-ec = results["equity"]
-
-fig = go.Figure()
-fig.add_trace(
+ec = results.equity
+fig = go.Figure(
     go.Scatter(
         x=ec.timestamps,
         y=ec.values,
         name="Portfolio Value",
-        line=dict(color="blue", width=2),
+        line=dict(color=COLORS["blue"], width=2),
     )
 )
-
 fig.update_layout(
-    title="RSI Mean Reversion Strategy - Portfolio Value",
+    title=(
+        "The RSI rule alternates between BTC exposure and cash"
+        "<br><sup>Portfolio value net of configured fees and slippage; full sample</sup>"
+    ),
     xaxis_title="Date",
-    yaxis_title="Portfolio Value ($)",
-    height=500,
+    yaxis_title="Portfolio Value (USDT)",
+    height=450,
+    hovermode="x unified",
 )
 fig.show()
 
 # %%
-# Plot drawdown
-fig_dd = go.Figure()
-fig_dd.add_trace(
+drawdown_pct = ec.drawdown_series() * 100
+drawdown_floor = min(float(drawdown_pct.min()) * 1.05, -1.0)
+fig_dd = go.Figure(
     go.Scatter(
         x=ec.timestamps,
-        y=ec.drawdown_series() * 100,  # Call drawdown_series() method
+        y=drawdown_pct,
         name="Drawdown",
         fill="tozeroy",
-        line=dict(color="red"),
+        fillcolor=COLORS["silver_muted"],
+        line=dict(color=COLORS["negative"]),
     )
 )
-
 fig_dd.update_layout(
-    title="Underwater Curve (Drawdowns)",
+    title=(
+        "Drawdowns reveal the path hidden by terminal return"
+        "<br><sup>Close-to-close peak-to-trough loss; net, full sample</sup>"
+    ),
     xaxis_title="Date",
     yaxis_title="Drawdown (%)",
+    yaxis_range=[drawdown_floor, 0],
     height=400,
+    hovermode="x unified",
 )
 fig_dd.show()
 
 # %% [markdown]
 # ## 8. Compare to Buy-and-Hold Benchmark
 #
-# A strategy should beat buy-and-hold to be worthwhile. Let's compare.
+# A benchmark is useful only under a comparable protocol. The buy-and-hold strategy below uses the
+# same engine, 95% signal-time target, next-open execution, fractional units, fee and slippage rates,
+# crypto annualization, and sample. Its single entry remains open at the sample end.
+
 
 # %%
-# Create buy-and-hold benchmark
-bh_returns = prices_df.with_columns((pl.col("close") / prices_df["close"][0]).alias("cumulative"))
-bh_equity = bh_returns["cumulative"].to_numpy() * INITIAL_CASH
-bh_total_return = (bh_equity[-1] / INITIAL_CASH - 1) * 100
+class BuyAndHoldStrategy(Strategy):
+    """Submit one target-weight entry and retain it through the sample."""
 
-# Strategy returns
-strategy_return = results["total_return_pct"]
+    def __init__(self, position_size: float = 0.95):
+        self.position_size = position_size
+        self.submitted = False
+
+    def on_data(self, timestamp, data, context, broker):
+        """Submit the benchmark entry on the first available bar."""
+        asset = "BTCUSDT"
+        if not self.submitted and data.get(asset) is not None:
+            broker.order_target_percent(asset, self.position_size)
+            self.submitted = True
+
+
+# %%
+benchmark_feed = DataFeed(prices_df=prices_df)
+benchmark_engine = Engine(
+    feed=benchmark_feed,
+    strategy=BuyAndHoldStrategy(position_size=POSITION_SIZE),
+    config=config,
+)
+benchmark_results = benchmark_engine.run()
+assert benchmark_results.equity is not None
+assert benchmark_results.equity.periods_per_year == 365
+assert len(benchmark_results.fills) == 1
+assert len(benchmark_results.trades) == 1
+assert benchmark_results.trades[0].status == "open"
 
 # %% [markdown]
-# **Strategy vs buy-and-hold comparison** (Sharpe and max drawdown for B&H are
-# computed in NB 03 with full ml4t-diagnostic; here we focus on total return,
-# trade count, and the strategy's own risk metrics):
+# **Protocol-matched strategy comparison** (daily returns annualized with 365 crypto periods):
 
 # %%
-pl.DataFrame(
+comparison = pl.DataFrame(
     {
-        "metric": ["Total return (%)", "Sharpe ratio", "Max drawdown (%)", "Total trades"],
+        "metric": ["Total return (%)", "Sharpe ratio", "Max drawdown (%)", "Fill count"],
         "rsi_strategy": [
-            float(strategy_return),
+            float(results["total_return_pct"]),
             float(results["sharpe"]),
             float(results["max_drawdown_pct"]),
-            float(results["num_trades"]),
+            float(len(results.fills)),
         ],
         "buy_and_hold": [
-            float(bh_total_return),
-            float("nan"),
-            float("nan"),
-            0.0,
+            float(benchmark_results["total_return_pct"]),
+            float(benchmark_results["sharpe"]),
+            float(benchmark_results["max_drawdown_pct"]),
+            float(len(benchmark_results.fills)),
         ],
     }
 )
+comparison.with_columns(pl.col(["rsi_strategy", "buy_and_hold"]).round(3))
 
 # %%
-# Plot cumulative returns comparison — separate panels so the order-of-magnitude
-# gap (B&H ~800% vs RSI ~80%) does not collapse the strategy line at this scale.
-fig = make_subplots(
-    rows=2,
-    cols=1,
-    shared_xaxes=True,
-    vertical_spacing=0.06,
-    subplot_titles=("RSI Mean-Reversion Strategy", "Buy & Hold Benchmark"),
+strategy_return = float(results["total_return_pct"])
+benchmark_return = float(benchmark_results["total_return_pct"])
+return_leader = "Buy-and-hold" if benchmark_return > strategy_return else "The RSI strategy"
+display(
+    Markdown(
+        f"**{return_leader}** leads total return in this sample: **{benchmark_return:.2f}%** "
+        f"for buy-and-hold versus **{strategy_return:.2f}%** for RSI. Their Sharpe ratios are "
+        f"**{benchmark_results['sharpe']:.2f}** and **{results['sharpe']:.2f}**; maximum "
+        f"drawdowns are **-{benchmark_results['max_drawdown_pct']:.2f}%** and "
+        f"**-{results['max_drawdown_pct']:.2f}%**, respectively. This is an in-sample exposure "
+        "comparison, not evidence that either rule will dominate out of sample."
+    )
 )
 
-strategy_cum = (np.array(ec.values) / INITIAL_CASH - 1) * 100
-bh_cum = (bh_equity / INITIAL_CASH - 1) * 100
-
+# %%
+benchmark_ec = benchmark_results.equity
+fig = go.Figure()
 fig.add_trace(
     go.Scatter(
-        x=ec.timestamps, y=strategy_cum.tolist(), name="RSI Strategy", line=dict(color="blue")
-    ),
-    row=1,
-    col=1,
+        x=ec.timestamps,
+        y=ec.values,
+        name="RSI Strategy",
+        line=dict(color=COLORS["blue"]),
+    )
 )
 fig.add_trace(
     go.Scatter(
-        x=prices_df["timestamp"].to_list(),
-        y=bh_cum.tolist(),
+        x=benchmark_ec.timestamps,
+        y=benchmark_ec.values,
         name="Buy & Hold",
-        line=dict(color="gray", dash="dash"),
-    ),
-    row=2,
-    col=1,
+        line=dict(color=COLORS["neutral"], dash="dash"),
+    )
 )
-fig.update_yaxes(title_text="Cum. Return (%)", row=1, col=1)
-fig.update_yaxes(title_text="Cum. Return (%)", row=2, col=1)
-fig.update_xaxes(title_text="Date", row=2, col=1)
 fig.update_layout(
-    title="Cumulative Returns: Strategy vs Buy-and-Hold (separate scales)",
-    height=600,
-    showlegend=False,
+    title=(
+        f"{return_leader} leads the protocol-matched exposure comparison"
+        "<br><sup>Portfolio value; same engine, allocation, next-open fills, and costs</sup>"
+    ),
+    xaxis_title="Date",
+    yaxis_title="Portfolio Value (USDT, log scale)",
+    yaxis_type="log",
+    yaxis_tickformat="~s",
+    height=500,
+    legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+    hovermode="x unified",
 )
 fig.show()
 
 # %% [markdown]
-# ## 8. MFE/MAE Analysis
+# ## 9. MFE/MAE Analysis
 #
-# Analyze trade efficiency using Maximum Favorable/Adverse Excursion.
+# Maximum favorable excursion (MFE) and maximum adverse excursion (MAE) expose each closed trade's
+# path between entry and exit. The full-sample levels below are retrospective diagnostics. Without
+# a sealed validation sample, they are not optimized stop-loss or take-profit recommendations.
 
 # %%
-mfe_analyzer = MAEMFEAnalyzer(trades)
+mfe_analyzer = MAEMFEAnalyzer(closed_trades)
 levels = mfe_analyzer.optimal_exit_levels()
-
-mfe_mae_summary = pl.DataFrame(
-    {
-        "metric": [
-            "Edge ratio (MFE / |MAE|)",
-            "Trade efficiency",
-            "MAE mean",
-            "MAE median",
-            "MFE mean",
-            "MFE median",
-            "Suggested stop loss",
-            "Suggested take profit",
-            "Suggested risk/reward",
-        ],
-        "value": [
-            f"{mfe_analyzer.edge_ratio:.2f}",
-            f"{mfe_analyzer.efficiency:.2%}",
-            f"{mfe_analyzer.mae_mean:.2%}",
-            f"{mfe_analyzer.mae_median:.2%}",
-            f"{mfe_analyzer.mfe_mean:.2%}",
-            f"{mfe_analyzer.mfe_median:.2%}",
-            f"{levels['stop_loss']:.2%}",
-            f"{levels['take_profit']:.2%}",
-            f"{levels['risk_reward']:.2f}",
-        ],
-    }
-)
-mfe_mae_summary
+excursion_df = trades_df.with_row_index("trade_id", offset=1)
 
 # %% [markdown]
-# ## 9. Comparison with VectorBT Results
+# Bars show the best and worst marked return reached during each trade; diamonds show the terminal
+# realized return. The chart keeps adverse excursions below zero.
+
+# %%
+fig = go.Figure()
+fig.add_trace(
+    go.Bar(
+        x=excursion_df["trade_id"],
+        y=excursion_df["mfe"] * 100,
+        name="Maximum favorable excursion",
+        marker_color=COLORS["positive"],
+    )
+)
+fig.add_trace(
+    go.Bar(
+        x=excursion_df["trade_id"],
+        y=excursion_df["mae"] * 100,
+        name="Maximum adverse excursion",
+        marker_color=COLORS["negative"],
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=excursion_df["trade_id"],
+        y=excursion_df["pnl_percent"] * 100,
+        name="Realized return",
+        mode="markers",
+        marker=dict(color=COLORS["blue"], size=8, symbol="diamond"),
+    )
+)
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], line_width=1)
+fig.update_layout(
+    title=(
+        "Trade excursions expose the paths hidden by realized returns"
+        "<br><sup>Closed RSI round trips; full-sample retrospective diagnostic</sup>"
+    ),
+    xaxis_title="Closed Trade Number",
+    yaxis_title="Return from Entry (%)",
+    barmode="relative",
+    height=450,
+)
+fig.show()
+
+# %%
+display(
+    Markdown(
+        f"The closed trades have an **{mfe_analyzer.edge_ratio:.2f} MFE-to-|MAE| edge ratio**. "
+        f"The analyzer's full-sample percentile references are **{levels['stop_loss']:.2%}** for "
+        f"adverse excursion and **{levels['take_profit']:.2%}** for favorable excursion, with a "
+        f"**{levels['risk_reward']:.2f}** ratio. These levels require separate validation before "
+        "they can enter a trading rule."
+    )
+)
+
+# %% [markdown]
+# ## 10. Relating the Event-Driven and Vectorized Implementations
 #
-# Both NB 03 (VectorBT) and this notebook load the same BTC/USDT perpetuals
-# resampled to daily bars, yet the headline numbers diverge. The comparison
-# table above prints the current trade count and Sharpe for this notebook;
-# NB 03 reports its own trade count and Sharpe under VectorBT semantics. The
-# gap traces to execution mechanics rather than data:
+# Notebook 03 and this notebook now share the same BTC input, UTC-day aggregation, simple rolling
+# RSI, prior-close decision timing, next-open fill convention, fractional units, and percentage
+# costs. One deliberate sizing detail remains visible:
 #
-# - **RSI computation.** VectorBT's `vbt.RSI.run` and our `compute_rsi` both
-#   use Wilder smoothing but seed the recursion slightly differently, which
-#   shifts the threshold-crossing timestamps.
-# - **Order-fill model.** ml4t-backtest fills at the *next bar's* open
-#   (`ExecutionMode.NEXT_BAR`), while VectorBT fills at the same-bar close.
-#   On a trending instrument with daily 5%+ moves, that one-bar delay
-#   changes which crossings turn into round-trip trades.
-# - **Position sizing.** NB 03 sizes via `size=0.95, size_type='percent'`
-#   (fractional BTC up to VectorBT's internal precision). This notebook
-#   now also sizes fractionally (eight-decimal precision; see `quantity =
-#   round(available_cash / current_price, 8)` in `on_data`). That removes
-#   the integer-truncation wedge that would otherwise act as a third source
-#   of divergence on top of timing and RSI seeding.
-# - **Cost model.** Both apply 10 bps commission + 5 bps slippage, but the
-#   per-fill accounting differs in a small way that compounds across trades.
+# - **VectorBT** resolves the 95% percentage size at the execution row's open.
+# - **ml4t-backtest** converts the 95% signal-time target into units at the decision close, queues
+#   those units, and fills them at the next open. An overnight gap therefore moves the realized
+#   fill-time weight away from exactly 95%.
 #
-# NB 06 (framework parity) re-runs the same strategy under aligned execution
-# rules and shows the parity gap shrink dramatically once these conventions
-# match.
+# Headline differences alone cannot identify a cause. Notebook 06 isolates engine conventions under
+# a dedicated parity contract rather than attributing any residual gap after the fact.
 
 # %% [markdown]
 # **Execution approach: VectorBT vs ml4t-backtest.**
@@ -790,89 +830,52 @@ mfe_mae_summary
 # | Aspect              | VectorBT (NB 03)     | ml4t-backtest (NB 04)    |
 # |---------------------|----------------------|--------------------------|
 # | Execution model     | Vectorized           | Event-driven             |
-# | Order processing    | Immediate fill       | Bar-by-bar simulation    |
-# | Position updates    | End of period        | After each fill          |
-# | Partial fills       | Not supported        | Supported                |
-# | Live-trading ready  | No                   | Yes                      |
-# | MFE/MAE tracking    | Via stats            | Per-trade tracking       |
+# | Order representation | Timestamped signals | Pending order objects    |
+# | Position state      | Portfolio simulation | Explicit broker state    |
+# | Parameter analysis  | Natural array workflow | Repeated sequential runs |
+# | Trade path records  | Portfolio records    | Per-trade state and excursions |
 
 # %% [markdown]
 # ## See Also
 #
-# **VectorBT Implementation**: See [`03_single_asset_vectorbt`](03_single_asset_vectorbt.ipynb) for vectorized
-# backtesting of the same RSI mean-reversion strategy, which provides:
-# - Fast parameter optimization via vectorized operations
-# - Built-in performance metrics and visualization
-# - Quick prototyping and exploration
+# - **`03_single_asset_vectorbt`** implements the common RSI rule with an array-oriented portfolio.
+# - **`06_framework_parity`** aligns engine conventions under a dedicated parity contract.
+# - **`09_performance_reporting`** extends the result into a diagnostic report.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# ### 1. Strategy Class Pattern
-#
-# The canonical ml4t-backtest strategy structure:
-#
-# ```python
-# class MyStrategy(Strategy):
-#     def __init__(self, param1, param2):
-#         self.param1 = param1  # Store parameters
-#
-#     def on_data(self, timestamp, data, context, broker):
-#         # 1. Get indicators from context
-#         # 2. Check current position via broker.get_position()
-#         # 3. Get current price from data
-#         # 4. Apply trading logic
-#         # 5. Submit orders via broker.submit_order()
-# ```
-#
-# ### 2. Component Responsibilities
-#
-# | Component | Role |
-# |-----------|------|
-# | **DataFeed** | Provides OHLCV + context data bar-by-bar |
-# | **Strategy** | Trading logic in `on_data()` callback |
-# | **Engine** | Orchestrates backtest, applies costs |
-# | **Broker** | Manages orders, positions, portfolio state |
-#
-# ### 3. ExecutionMode Matters
-#
-# - **SAME_BAR**: Fast but unrealistic (fills at signal bar close)
-# - **NEXT_BAR**: Realistic (fills at next bar open, avoids look-ahead)
-#
-# **Always use NEXT_BAR for production validation.**
-#
-# ### 4. Transaction Costs
-#
-# - **Commission**: `commission_rate=0.001` = 10 bps per trade
-# - **Slippage**: `slippage_rate=0.0005` = 5 bps market impact
-#
-# Both are set on `BacktestConfig`. For futures, use `CommissionType.PER_CONTRACT`
-# with `commission_per_share` for flat per-contract fees (see NB 02).
-#
-# **Never backtest without costs** - it creates unrealistic expectations.
-#
-# ### 5. MFE/MAE Analysis
-#
-# `MAEMFEAnalyzer` provides trade efficiency metrics:
-# - **MAE** (Maximum Adverse Excursion): Worst drawdown during trade
-# - **MFE** (Maximum Favorable Excursion): Best profit during trade
-# - **Edge Ratio**: MFE/|MAE| - higher is better
-# - **Optimal exits**: Data-driven stop-loss and take-profit levels
-#
-# ### 6. When to Use ml4t-backtest
-#
-# **Use ml4t-backtest for:**
-# - Final strategy validation before deployment
-# - Complex order logic (stops, limits, brackets)
-# - Strategies that need position tracking
-# - Code you'll reuse in live trading
-#
-# **Use VectorBT instead for:**
-# - Rapid parameter optimization
-# - Early-stage exploration
-# - Simple signal backtests
-#
-# ## Next Steps
-#
-# - **06_framework_parity**: Multi-asset framework comparison with aligned assumptions
-# - **09_performance_reporting**: Core metric reporting and diagnostics bridge
+# The synthesis below is generated from the current run so its result statements remain aligned
+# with the executed notebook.
+
+# %%
+display(
+    Markdown(
+        f"""
+### 1. Sequential state is the reason to use the event loop
+
+`DataFeed`, `Strategy`, `Engine`, and `Broker` make decisions, pending orders, fills, cash, and
+positions explicit. That visibility supports path-dependent logic, but does not make unspecified
+assumptions realistic.
+
+### 2. Event ordering is part of the strategy definition
+
+The {RSI_PERIOD}-day close-derived RSI is observed after the UTC day closes. `NEXT_BAR` then fills
+the queued fractional order at the next open. The 95% target is converted to units at signal time,
+so an overnight gap can move the realized fill-time weight.
+
+### 3. Accounting should reconcile independently
+
+The run completes **{len(closed_trades)} closed round trips**. Reference-price P&L less modeled
+slippage and commission reconciles to closed-trade net P&L within the asserted tolerance.
+
+### 4. Benchmarks and diagnostics need the same protocol boundary
+
+**{return_leader}** leads this matched in-sample comparison. MFE/MAE levels describe the observed
+trade paths; they are not validated exit rules.
+
+**Next:** `06_framework_parity` isolates engine semantics, and `09_performance_reporting` builds the
+reporting layer described in Chapter 16, Sections 16.3-16.5.
+"""
+    )
+)

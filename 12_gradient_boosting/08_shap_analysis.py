@@ -64,6 +64,7 @@ from ml4t.diagnostic.metrics import cross_sectional_ic_series
 
 from case_studies.utils.analytics import PRIMARY_LABELS, SHORT_NAMES
 from utils.modeling import load_modeling_dataset
+from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
 
@@ -92,7 +93,11 @@ def cross_sectional_ic_mean(
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0  # 0 = all symbols
 SEED = 42
-OUTPUT_DIR = Path("12_gradient_boosting/output/shap_analysis")
+# Repo-root-anchored (matches sibling chapter notebooks) so the artifact lands in
+# 12_gradient_boosting/output/shap_analysis regardless of the kernel's working
+# directory — a raw relative Path resolves against the notebook dir under nbconvert
+# and produces a stray nested 12_gradient_boosting/12_gradient_boosting/ tree.
+OUTPUT_DIR = get_output_dir(12, "shap_analysis")
 
 
 # %%
@@ -438,18 +443,23 @@ for fold_idx, split in enumerate(mds.splits):
 fold_imp_df = pl.DataFrame(fold_importances)
 
 # %%
-# Compute drift: compare each fold's importance to the first fold baseline
+# Compute drift: compare each fold's importance to the first fold baseline.
+# Percent change is only meaningful for features that carry real importance: a
+# feature whose baseline mean|SHAP| is ~0 turns a negligible absolute shift into
+# an astronomical percentage (a near-zero-denominator artifact, not drift). We
+# therefore rank drift only among features whose baseline importance clears a
+# small fraction of the most important feature's importance.
 if len(fold_importances) >= 2:
     baseline = {k: v for k, v in fold_importances[0].items() if k != "fold"}
+    importance_floor = 0.05 * max(baseline.values())
 
     drift_records = []
     for feat in FEATURE_COLS:
-        values = fold_imp_df[feat].to_list()
         base_val = baseline[feat]
-        if base_val > 0:
-            max_change = max(abs(v - base_val) / base_val * 100 for v in values[1:])
-        else:
-            max_change = 0.0
+        if base_val < importance_floor:
+            continue
+        values = fold_imp_df[feat].to_list()
+        max_change = max(abs(v - base_val) / base_val * 100 for v in values[1:])
         drift_records.append(
             {
                 "feature": feat,
@@ -494,10 +504,13 @@ if len(fold_importances) >= 2:
             label=feat,
             linewidth=1.5,
         )
+    lead_feat = drift_df["feature"][0]
+    lead_change = drift_df["max_change_pct"][0]
     ax.set_xlabel("Walk-Forward Fold")
     ax.set_ylabel("Mean |SHAP|")
     ax.set_title(
-        "SHAP feature importance is stable through fold 4, then ffd_spy/ffd_lqd jump in folds 5–6"
+        f"Mean |SHAP| drifts across walk-forward folds: {lead_feat} moves most "
+        f"(+{lead_change:.0f}% vs fold 0)"
     )
     ax.legend(fontsize=8, ncol=2)
     plt.show()
@@ -512,8 +525,8 @@ if len(fold_importances) >= 2:
 # ## 12. SHAP-Based Feature Selection
 #
 # Rank features by mean |SHAP|, retrain on the top-$k$, and evaluate
-# out-of-sample IC. Removing noise features often improves performance
-# by reducing overfitting.
+# cross-sectional IC on the fold's **validation** window (not a sealed holdout).
+# Removing noise features often improves performance by reducing overfitting.
 
 
 # %%
@@ -544,25 +557,35 @@ ax.plot(
     linewidth=2,
     markersize=8,
 )
+# NaN is a float value, not a null, so filter it explicitly (a top-k of purely
+# market-level features gives an undefined cross-sectional IC — see below).
+defined_ic = selection_df.filter(pl.col("ic").is_not_null() & pl.col("ic").is_not_nan())
+best_row = defined_ic.sort("ic", descending=True).row(0, named=True)
 ax.set_xlabel("Number of Features (Top-k by SHAP)")
-ax.set_ylabel("Test IC")
+ax.set_ylabel("Validation IC")
 ax.set_title(
-    "SHAP-ranked pruning gives no reliable Test IC on this fold (subsets scatter around zero)"
+    f"Every SHAP-ranked subset gives near-zero, non-monotonic validation IC on this "
+    f"fold (best is top-{best_row['top_k']} at {best_row['ic']:+.3f})"
 )
 plt.show()
 
 # %% [markdown]
-# **Reading the result**: Test IC stays small and noisy across every subset on
-# this fold — top-5 −0.097, top-10 −0.045, top-15 +0.016, all 71 −0.040. The
-# values scatter around zero with no clear ordering: the smallest subset is the
-# most negative, the top-15 subset edges marginally positive, and the full
-# feature set sits slightly below zero. None of these is distinguishable from
-# zero, so SHAP-ranked subset selection has no anchor to improve upon here: in a
-# regime where the full-feature validation IC is itself indistinguishable from
-# zero, pruning neither recovers nor destroys signal. Whether SHAP-based pruning
-# helps is a question about folds where the full-feature IC is positive; see
-# `04_optuna_tuning` for the walk-forward HPO that answers it with
-# cross-validated evidence rather than a single fold.
+# **Reading the result**: the `selection_df` table above lists the exact values;
+# every SHAP-ranked subset yields a validation IC that sits near zero on this
+# fold, and the ordering across $k$ is not monotonic. The five-feature subset is a
+# special case: its top-5 features by mean |SHAP| are all market-level series
+# (yield-curve slope and z-score, regime duration, and the fractionally
+# differenced QQQ/VNQ prices), which take the **same value for every symbol on a
+# given date**. A model built on those alone predicts identically across the
+# cross-section each day, so the cross-sectional IC is undefined (reported as
+# `NaN`) — a useful reminder that cross-sectional signal must come from features
+# that vary *across* assets, not from macro state alone. Among the subsets that do
+# admit an IC, none is distinguishable from zero: in a regime where the
+# full-feature validation IC is itself indistinguishable from zero, SHAP-ranked
+# pruning has no signal to recover, so it neither rescues nor destroys
+# performance. Whether SHAP-based pruning helps is a question about folds where
+# the full-feature IC is positive; see `04_optuna_tuning` for the walk-forward HPO
+# that answers it with cross-validated evidence rather than a single fold.
 
 # %% [markdown]
 # ### Publication Figure Artifact
@@ -656,17 +679,22 @@ print(f"Wrote publication figure artifact: {figure_12_7_artifact}")
 # a conclusion from it requires comparing to the same matrix on adjacent
 # folds, not to an a priori expectation.
 #
-# **Drift detection**: cosine similarity between adjacent-fold SHAP
-# ranking vectors is the observable. Whether the observed similarity
-# constitutes "drift" is a threshold question whose answer depends on
-# the universe and feature library; the notebook displays the series
-# rather than committing to a threshold.
+# **Drift detection**: the observable is each feature's per-fold mean
+# |SHAP|, tracked across walk-forward folds, and summarized as the
+# maximum percent change from the fold-0 baseline. That percentage is
+# only reported for features that carry real baseline importance —
+# near-zero-importance features are excluded because a tiny absolute
+# shift over a near-zero denominator inflates into a spurious "drift."
+# Whether an observed shift constitutes actionable drift is a threshold
+# question (here, 50%) whose answer depends on the universe and feature
+# library.
 #
-# **Feature selection**: on this fold the full-feature IC is already
-# negative, so the top-$k$ → all-features sweep does not contain a
-# subset that improves on the full-feature baseline. The pattern "IC
-# peaks at $k < N$" therefore cannot be demonstrated here; it appears
-# in `04_optuna_tuning` on folds where the full-feature IC is positive.
+# **Feature selection**: on this fold every SHAP-ranked subset yields a
+# validation IC near zero, and the sweep is not monotonic in $k$, so no
+# subset is meaningfully distinguishable from the full-feature baseline
+# or from zero. The pattern "IC peaks at $k < N$" therefore cannot be
+# demonstrated here; it appears in `04_optuna_tuning` on folds where the
+# full-feature IC is positive.
 #
 # **Next**: See `09_xai_limitations` for explanation instability analysis,
 # or `11_conformal_gbm` for uncertainty quantification with prediction intervals.
