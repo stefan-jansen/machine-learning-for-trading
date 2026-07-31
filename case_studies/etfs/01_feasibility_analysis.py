@@ -14,923 +14,387 @@
 # ---
 
 # %% [markdown]
-# # ETF Case Study: Feasibility Analysis
+# # ETFs: Feasibility Analysis
 #
-# This notebook tests whether the ETF dataset can deliver on the strategy declared
-# in `config/setup.yaml`. `setup.yaml` is the canonical, hand-curated source of
-# truth: universe, costs, decision schedule, mapping class, labels, sweep grid,
-# and evaluation protocol. This notebook does not write it. Instead, it produces
-# the evidence that justifies its values: universe breadth over time, point-in-
-# time eligibility, return distributions at multiple horizons relative to
-# transaction costs, a walk-forward fold demonstration, and an edge-to-cost
-# ratio. Findings persist to `config/exploration/feasibility_report.json`.
+# `config/setup.yaml` declares a long-only cross-sectional ETF rotation: which funds are in scope,
+# how often the book turns over, what crossing costs, how the sample is split. This notebook asks
+# whether the data supports it, and fits nothing.
 #
-# ## Learning Objectives
+# ## Learning objectives
 #
-# - Verify the data delivers what `setup.yaml` assumes (breadth, costs, holdout)
-# - Implement point-in-time eligibility (no survivorship bias within the universe)
-# - Test whether typical price moves exceed transaction costs at candidate horizons
-# - Demonstrate the walk-forward structure has adequate breadth per fold
-# - Persist findings as a stable artifact downstream notebooks can cite
+# - Build point-in-time universe membership, and count it on the dates the strategy acts on
+# - Price the round trip per fund, and read clearance off an exceedance curve scaled by it
+# - Measure how long the return a rotation ranks on persists, and fit the declared folds cleanly
 #
-# ## Book Reference
+# ## Book reference
 #
-# Chapter 6, Sections 6.2-6.6
-#
-# ## Prerequisites
-#
-# - ETF data available via `load_etfs()`
-# - `config/setup.yaml` exists (canonical strategy spec)
-# - Understanding of walk-forward cross-validation (Section 6.5)
+# Chapter 6, Sections 6.2-6.6. Reads the ETF price panel and `config/setup.yaml`.
 
 # %%
-"""ETF Case Study: Feasibility Analysis."""
+"""ETF Case Study - Feasibility Analysis."""
 
-import json
+import re
 import warnings
-from datetime import UTC, datetime
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-import seaborn as sns
 import yaml
 
+from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
 from data import load_etfs
+from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
-from utils.style import COLORS
+from utils.style import COLORS, FIGSIZE, add_message_title
 
 warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "etfs"
 START_DATE = "2006-01-01"
+END_DATE = "2025-12-31"
 ADV_THRESHOLD = 10e6
-MAX_SYMBOLS = 0
 
 # %% [markdown]
 # ## Configuration
+#
+# Every knob comes from `setup.yaml`, and Section B computes on the development window alone, so
+# nothing the holdout contains can shape a choice made here. `universe.eligibility_rule` declares
+# the rule without its number, so the dollar-volume floor is declared in the parameters cell.
 
 # %%
-CASE_DIR = get_case_study_dir("etfs")
-CASE_DIR.mkdir(parents=True, exist_ok=True)
-EXPLORATION_DIR = CASE_DIR / "config" / "exploration"
-EXPLORATION_DIR.mkdir(parents=True, exist_ok=True)
+CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
+SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 
-with open(CASE_DIR / "config" / "setup.yaml") as f:
-    SETUP = yaml.safe_load(f)
-
-STRATEGY_ID = SETUP["strategy_id"]
-START_DATE = "2006-01-01"
-END_DATE = "2025-12-31"
 HOLDOUT_START = str(SETUP["evaluation"]["holdout_start"])
+HOLDOUT_END = str(SETUP["evaluation"]["holdout_end"])
+PRIMARY_LABEL = SETUP["labels"]["primary"]
+LABEL_BUFFER = SETUP["labels"]["buffer"]
+DECLARED_ASSETS = set(SETUP["universe"]["assets"])
+BREADTH_FLOOR = max(SETUP["backtest"]["sweep"]["top_k_grid"][PRIMARY_LABEL])
+PER_SHARE = SETUP["costs"]["per_share"]
+HALF_SPREADS = SETUP["costs"]["asset_spreads"]
+DEFAULT_HALF_SPREAD = SETUP["costs"]["default_half_spread_usd"]
+LABELS = [PRIMARY_LABEL, *SETUP["labels"]["variants"]]
+HORIZONS = sorted(int(re.search(r"(\d+)d$", n).group(1)) for n in LABELS)
+PRIMARY_HORIZON = int(re.search(r"(\d+)d$", PRIMARY_LABEL).group(1))
 
-
-def as_float(value: object) -> float:
-    """Convert Polars scalar outputs to plain float."""
-    return float(str(value))
-
-
-# %% [markdown]
-# ---
-#
-# ## Section A: Orientation (Section 6.2)
-#
-# ETFs provide diversified exposure across asset classes with high liquidity and
-# low costs. This case study explores price-based signals at monthly cadences,
-# where turnover economics are manageable.
-#
-# `setup.yaml` declares the trading setup. This notebook asks whether the data
-# delivers on those declarations:
-#
-# - **Universe**: Is point-in-time breadth adequate across the sample period?
-# - **Costs**: Do typical moves exceed the cost grid at candidate horizons?
-# - **Evaluation**: Do walk-forward folds carry enough cross-sectional breadth?
-# - **Holdout**: Is the holdout cleanly separated from training data?
+print(f"Development {START_DATE} to {HOLDOUT_START} | sealed holdout to {HOLDOUT_END}")
+print(f"{len(DECLARED_ASSETS)} declared, floor {BREADTH_FLOOR} | horizons {HORIZONS} sessions")
 
 # %% [markdown]
-# ---
+# ## A. Orientation
 #
-# ## Section B: Universe and Cost Feasibility (Sections 6.3-6.4)
+# Exchange-traded funds package equity, credit, sovereign, currency and commodity exposure into
+# instruments that settle like shares, so one account rebalances an allocation across asset classes
+# with ordinary orders. Ranking those funds and holding the leaders trades the difference between
+# their recent paths rather than a view on any one market, so it needs many quoting at once more than
+# a few quoting well. Three questions decide whether that is worth building here: does the universe
+# exist on every decision date, is a typical move large next to what it costs to capture, and are
+# there enough decision dates for a clean walk-forward.
 
 # %% [markdown]
-# ### B.1 Load and Explore the Data
+# ## B. Universe and cost feasibility
+#
+# ### B.1 Load and verify the declared universe
+#
+# The loader returns one row per fund and session, with `close` adjusted for splits and distributions,
+# so its differences are returns rather than corporate actions. Two properties hold before anything is
+# computed from it: nothing outside `universe.assets`, and no close at or below zero.
 
 # %%
-etf_data = load_etfs()
-
-start_dt = pl.Series([START_DATE]).str.to_date("%Y-%m-%d").item()
-end_dt = pl.Series([END_DATE]).str.to_date("%Y-%m-%d").item()
-
 prices = (
-    etf_data.filter(pl.col("timestamp").is_between(start_dt, end_dt))
+    load_etfs(start_date=START_DATE, end_date=END_DATE)
     .select(["symbol", "timestamp", "close", "volume"])
     .sort(["symbol", "timestamp"])
 )
+research = prices.filter(pl.col("timestamp") < pl.lit(HOLDOUT_START).str.to_date())
 
-n_symbols = prices["symbol"].n_unique()
-print(f"Loaded {n_symbols} ETFs, {len(prices):,} rows")
-print(f"Period: {prices['timestamp'].min()} to {prices['timestamp'].max()}")
-
-# %% [markdown]
-# **Note**: The `close` column from `load_etfs()` is adjusted for splits and
-# dividends. We verify this by checking SPY's 2006 price level.
-
-# %%
-spy_2006 = prices.filter((pl.col("symbol") == "SPY") & (pl.col("timestamp").dt.year() == 2006))
-spy_first_close = as_float(spy_2006["close"].first())
-assert spy_first_close < 130, (
-    f"SPY 2006 close={spy_first_close:.2f} looks unadjusted (expected ~$90-100 adjusted)"
+undeclared = sorted(set(research["symbol"].unique().to_list()) - DECLARED_ASSETS)
+assert not undeclared, f"loaded but absent from setup.yaml::universe.assets: {undeclared}"
+assert research["close"].min() > 0, "a non-positive close is not a denominator"
+print(
+    f"{research['symbol'].n_unique()} funds, {len(research):,} rows to {research['timestamp'].max()}"
 )
-print(f"SPY 2006 first close: ${spy_first_close:.2f} (adjusted -- verified)")
 
 # %% [markdown]
-# ### B.2 Universe Selection: Rolling Point-in-Time Methodology
+# ### B.2 Breadth at every decision date
 #
-# A critical mistake in backtesting is using **end-of-sample information** to select
-# the universe. For example, filtering to "ETFs with ADV > $50M" using today's volume
-# excludes ETFs that had sufficient volume historically but have since declined.
-#
-# The correct approach is **rolling selection**: at each decision point, use only
-# information available at that time.
-#
-# For this case study, we will:
-# 1. First explore the historical distribution of dollar volume
-# 2. Set a threshold that is realistic but lenient (this is a demo, not production)
-# 3. Implement point-in-time universe membership
-
-# %% [markdown]
-# #### Exploratory Analysis: Dollar Volume Distribution Over Time
-#
-# Before setting thresholds, we need to understand how dollar volume has evolved.
-# A threshold that seems reasonable today may have excluded most ETFs in 2007.
+# `universe.eligibility_rule` admits a fund to a year when its average daily dollar volume over the
+# *previous* year cleared the floor, so membership is decided by what the strategy already knew.
+# Selecting on whole-sample volume would instead keep exactly the funds that stayed liquid.
 
 # %%
-# Compute daily dollar volume
-prices_with_dv = prices.with_columns((pl.col("close") * pl.col("volume")).alias("dollar_volume"))
-
-# Annual statistics: median dollar volume across all ETF-days in each year
-annual_dv_stats = (
-    prices_with_dv.with_columns(pl.col("timestamp").dt.year().alias("year"))
-    .group_by("year")
-    .agg(
-        pl.col("dollar_volume").median().alias("median_dv"),
-        pl.col("dollar_volume").quantile(0.25).alias("p25_dv"),
-        pl.col("dollar_volume").quantile(0.75).alias("p75_dv"),
-        pl.col("dollar_volume").quantile(0.90).alias("p90_dv"),
-        pl.col("symbol").n_unique().alias("n_etfs"),
+eligibility = (
+    prices.with_columns(
+        dollar_volume=pl.col("close") * pl.col("volume"), year=pl.col("timestamp").dt.year()
     )
-    .sort("year")
-)
-
-# Display as DataFrame (values in millions)
-annual_dv_stats.select(
-    [
-        "year",
-        (pl.col("median_dv") / 1e6).round(1).alias("median_$M"),
-        (pl.col("p75_dv") / 1e6).round(1).alias("p75_$M"),
-        (pl.col("p90_dv") / 1e6).round(1).alias("p90_$M"),
-        "n_etfs",
-    ]
-)
-
-# %% [markdown]
-# #### Visualize the Dollar Volume Evolution
-
-# %%
-fig, ax = plt.subplots(figsize=(9, 4))
-
-years = annual_dv_stats["year"].to_numpy()
-median_dv = annual_dv_stats["median_dv"].to_numpy() / 1e6
-p75_dv = annual_dv_stats["p75_dv"].to_numpy() / 1e6
-p90_dv = annual_dv_stats["p90_dv"].to_numpy() / 1e6
-
-# Log y-axis: dollar volume spans two orders of magnitude, and the $10M/$50M
-# eligibility floors are only legible against the distribution on a log scale.
-ax.fill_between(years, median_dv, p90_dv, alpha=0.18, color=COLORS["blue"], label="p50-p90 range")
-ax.plot(years, p90_dv, "s--", color=COLORS["neutral"], linewidth=1, label="90th percentile")
-ax.plot(years, median_dv, "o-", color=COLORS["blue"], linewidth=2, label="Median ETF")
-
-# Eligibility thresholds (the strategy uses $10M; $50M shown for reference)
-ax.axhline(10, color=COLORS["amber"], linestyle=":", linewidth=1.5, label="$10M floor (used)")
-ax.axhline(50, color=COLORS["copper"], linestyle=":", linewidth=1.5, label="$50M (reference)")
-
-ax.set_yscale("log")
-ax.set_xlabel("Year")
-ax.set_ylabel("Dollar volume ($M/day, log scale)")
-ax.set_title(
-    "The median ETF cleared the $10M eligibility floor every year, liquidity up ~20x",
-    loc="left",
-    color=COLORS["blue"],
-    fontweight="semibold",
-)
-ax.legend(loc="upper left", ncol=2, fontsize=8)
-sns.despine()
-
-fig.tight_layout()
-plt.show()
-
-# %% [markdown]
-# #### Interpretation
-#
-# The figure shows that:
-# - Dollar volume has grown substantially over time (market growth + ETF adoption)
-# - A \$50M/day threshold would have excluded many ETFs in early years
-# - A \$10M/day threshold is more inclusive historically
-#
-# **For this demo case study**, we use a lenient threshold ($10M) to maintain a
-# broad universe (the sample of 100 ETFs has already been selected based on liquidity). A production system might use higher thresholds but would need
-# to account for the changing market structure.
-
-# %% [markdown]
-# #### Implement Rolling Universe Selection
-#
-# The proper point-in-time approach: at the end of each year, compute trailing ADV
-# and select ETFs for the following year.
-
-# %%
-# For each ETF, compute trailing 252-day ADV at each month-end
-# Then apply threshold to create point-in-time universe membership
-
-# Simplification for demo: compute annual ADV and apply to next year.
-# Note: annual granularity is coarser than the monthly decision cadence.
-# An ETF that becomes illiquid in March remains "eligible" through December.
-# Production systems would recompute eligibility at each decision date using
-# a trailing window (e.g., 63-day or 126-day rolling ADV).
-annual_adv = (
-    prices_with_dv.with_columns(pl.col("timestamp").dt.year().alias("year"))
     .group_by(["symbol", "year"])
-    .agg(
-        pl.col("dollar_volume").mean().alias("avg_dv"),
-        pl.col("timestamp").count().alias("n_days"),
-    )
-    .filter(pl.col("n_days") >= 200)  # Require most of the year
-    .sort(["symbol", "year"])
+    .agg(pl.col("dollar_volume").mean().alias("adv"), pl.len().alias("n_days"))
+    # a fund quoting for part of a year has no annual average to be admitted on
+    .filter((pl.col("n_days") >= 200) & (pl.col("adv") >= ADV_THRESHOLD))
+    .select("symbol", (pl.col("year") + 1).alias("eligible_year"))
+    .unique()
+    .sort(["symbol", "eligible_year"])
 )
-
-# Threshold: $10M/day average (lenient for demo)
-ADV_THRESHOLD = 10e6
-
-eligible_by_year = (
-    annual_adv.filter(pl.col("avg_dv") >= ADV_THRESHOLD)
-    .with_columns((pl.col("year") + 1).alias("eligible_year"))
-    .select(["symbol", "eligible_year", "avg_dv"])
-)
-
-# Count eligible ETFs per year
-eligibility_counts = (
-    eligible_by_year.group_by("eligible_year")
-    .agg(pl.col("symbol").n_unique().alias("n_eligible"))
-    .sort("eligible_year")
-)
-
-print(f"Eligible ETFs per year (ADV threshold: ${ADV_THRESHOLD / 1e6:.0f}M):")
-eligibility_counts
 
 # %% [markdown]
-# #### Point-in-Time Universe: Eligibility Mask
-#
-# **Critical**: We do NOT filter to a fixed asset list based on full-sample eligibility.
-# That would use future information (survivorship bias). Instead, we create a
-# point-in-time eligibility table that downstream code uses at each decision date.
-#
-# The rule: an ETF is tradable in year Y if it met the ADV threshold in year Y-1.
-#
-# **Two-Layer Bias Assessment**:
-#
-# Understanding survivorship bias in this case study requires distinguishing two layers:
-#
-# - **Layer 1 (universe composition)**: The 100 ETFs were selected *after the fact*
-#   based on their relevance and liquidity at sample end (2025). ETFs that were liquid
-#   in 2007 but have since been delisted or merged are excluded. This bias **cannot be
-#   fully resolved** without historical constituent data, which is not readily available
-#   for ETFs. It inflates apparent signal quality by removing negative outcomes.
-#
-# - **Layer 2 (eligibility within the universe)**: Given the 100-ETF sample, the
-#   point-in-time ADV filter correctly prevents using future liquidity information.
-#   An ETF is only tradable in year Y if it met the threshold in year Y-1. This layer
-#   **is** point-in-time correct.
-#
-# The two layers partially work at cross purposes: the rolling filter creates rigor at
-# Layer 2 while Layer 1 already embeds the bias it's trying to avoid. Readers should
-# understand which bias is mitigated (within-universe eligibility) and which is not
-# (universe composition).
-#
-# Additionally, the $10M ADV threshold is not inflation-adjusted. Ten million
-# dollars in 2006 had different purchasing power than in 2025. A more rigorous
-# approach would step down the threshold for earlier years (e.g., scale by CPI
-# or market cap growth). We proceed with the fixed threshold for simplicity---the
-# 100-ETF universe was already curated for liquidity.
+# One count of the universe hides what a cross-sectional rotation has to answer: whether enough funds
+# are eligible *on the session it acts on*, against the largest position count the sweep asks for.
 
 # %%
-# All assets in the dataset are candidates
-ASSETS = prices["symbol"].unique().sort().to_list()
-
-# Eligibility table: which assets are tradable in which years
-# eligibility_by_year already has (asset, eligible_year) pairs
-eligibility_table = eligible_by_year.select(["symbol", "eligible_year"]).unique()
-
-# Summary: how many ETFs eligible per year
-eligibility_summary = (
-    eligibility_table.group_by("eligible_year")
-    .agg(pl.col("symbol").count().alias("n_eligible"))
-    .sort("eligible_year")
+month_end = research.filter(
+    pl.col("timestamp") == pl.col("timestamp").max().over(pl.col("timestamp").dt.truncate("1mo"))
+)
+eligible = eligibility.rename({"eligible_year": "year"}).with_columns(eligible=pl.lit(True))
+breadth = (
+    month_end.with_columns(year=pl.col("timestamp").dt.year())
+    # a left join keeps the dates on which nothing is eligible, which an inner join drops
+    .join(eligible, ["symbol", "year"], how="left")
+    .group_by("timestamp")
+    .agg(pl.col("eligible").fill_null(False).sum().alias("n_eligible"))
+    .sort("timestamp")
 )
 
-print(f"\nCandidate universe: {len(ASSETS)} ETFs (all assets in dataset)")
-print("Point-in-time eligibility determined annually based on prior-year ADV")
-print("\nEligible ETFs by year:")
-eligibility_summary
-
-# %% [markdown]
-# ---
-#
-# ### B.3 Trading Cost Analysis: Horizon Feasibility
-#
-# A fundamental question for any trading strategy is: **at which holding periods
-# do typical price moves exceed transaction costs?**
-#
-# This analysis informs which horizons are worth exploring, without prescribing
-# a specific signal type.
-
-# %% [markdown]
-# #### Return Distributions at Multiple Horizons
-#
-# We compute returns at daily, weekly, and monthly frequencies and examine their
-# distributions relative to transaction costs.
-
-# %%
-# Filter to universe assets
-universe_prices = prices.filter(pl.col("symbol").is_in(ASSETS)).sort(["symbol", "timestamp"])
-
-# Daily returns
-daily_returns = (
-    universe_prices.with_columns(
-        (pl.col("close") / pl.col("close").shift(1) - 1).over("symbol").alias("return")
-    )
-    .filter(pl.col("return").is_not_null())
-    .select(["symbol", "timestamp", "return"])
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.plot(breadth["timestamp"], breadth["n_eligible"], color=COLORS["blue"], linewidth=1.2)
+ax.axhline(BREADTH_FLOOR, color=COLORS["copper"], ls="--", lw=1.5, label="largest position count")
+ax.set_ylim(0, len(DECLARED_ASSETS) + 5)
+ax.set_ylabel("Funds eligible at the decision")
+ax.legend(frameon=False, fontsize=8, loc="lower right")
+add_message_title(
+    ax,
+    "Breadth clears the largest position count from the second year on",
+    subtitle="Funds clearing the prior year's dollar-volume floor, counted at each month-end",
 )
-
-# Weekly returns (resample to week-end)
-weekly_prices = (
-    universe_prices.with_columns(pl.col("timestamp").dt.strftime("%G-W%V").alias("week"))
-    .group_by(["symbol", "week"])
-    .agg(pl.col("close").last().alias("close"), pl.col("timestamp").max().alias("timestamp"))
-    .sort(["symbol", "timestamp"])
-)
-weekly_returns = weekly_prices.with_columns(
-    (pl.col("close") / pl.col("close").shift(1) - 1).over("symbol").alias("return")
-).filter(pl.col("return").is_not_null())
-
-# Monthly returns
-monthly_prices = (
-    universe_prices.with_columns(pl.col("timestamp").dt.strftime("%Y-%m").alias("month"))
-    .group_by(["symbol", "month"])
-    .agg(pl.col("close").last().alias("close"), pl.col("timestamp").max().alias("timestamp"))
-    .sort(["symbol", "timestamp"])
-)
-monthly_returns = monthly_prices.with_columns(
-    (pl.col("close") / pl.col("close").shift(1) - 1).over("symbol").alias("return")
-).filter(pl.col("return").is_not_null())
-
-print(f"Daily returns: {len(daily_returns):,} observations")
-print(f"Weekly returns: {len(weekly_returns):,} observations")
-print(f"Monthly returns: {len(monthly_returns):,} observations")
-
-# %% [markdown]
-# #### Summary Statistics by Horizon
-#
-# The key question: what fraction of absolute price moves exceed the round-trip cost?
-
-# %%
-# Extract absolute returns
-daily_abs = daily_returns["return"].abs().to_numpy()
-weekly_abs = weekly_returns["return"].abs().to_numpy()
-monthly_abs = monthly_returns["return"].abs().to_numpy()
-
-# Cost assumptions: per-leg cost 10 bps → round-trip 20 bps
-PER_LEG_COST_BPS = 10
-ROUND_TRIP_COST_BPS = 2 * PER_LEG_COST_BPS
-ROUND_TRIP_COST = ROUND_TRIP_COST_BPS / 10_000  # 0.0020
-
-
-# Build summary DataFrame
-def compute_return_stats(data: np.ndarray, horizon: str) -> dict:
-    """Compute return distribution statistics for a given horizon."""
-    return {
-        "horizon": horizon,
-        "median_pct": np.median(data) * 100,
-        "mean_pct": np.mean(data) * 100,
-        "std_pct": np.std(data) * 100,
-        "p75_pct": np.percentile(data, 75) * 100,
-        "p95_pct": np.percentile(data, 95) * 100,
-        "pct_above_20bps": (data > ROUND_TRIP_COST).mean() * 100,
-    }
-
-
-return_stats = pl.DataFrame(
-    [
-        compute_return_stats(daily_abs, "Daily"),
-        compute_return_stats(weekly_abs, "Weekly"),
-        compute_return_stats(monthly_abs, "Monthly"),
-    ]
-)
-
-# %% [markdown]
-# **Return Distribution Summary** (absolute returns):
-
-# %%
-return_stats.select(
-    [
-        "horizon",
-        pl.col("median_pct").round(2).alias("median %"),
-        pl.col("mean_pct").round(2).alias("mean %"),
-        pl.col("std_pct").round(2).alias("std %"),
-        pl.col("p75_pct").round(2).alias("p75 %"),
-        pl.col("p95_pct").round(2).alias("p95 %"),
-    ]
-)
-
-# %% [markdown]
-# **Fraction of moves exceeding cost threshold** (round-trip = 20 bps):
-
-# %%
-# Cost threshold analysis
-COST_THRESHOLDS_BPS = [10, 20, 30, 50]
-
-cost_exceedance = []
-for horizon, data in [("Daily", daily_abs), ("Weekly", weekly_abs), ("Monthly", monthly_abs)]:
-    row = {"horizon": horizon}
-    for cost_bps in COST_THRESHOLDS_BPS:
-        row[f"{cost_bps}_bps"] = (data > cost_bps / 10_000).mean() * 100
-    cost_exceedance.append(row)
-
-cost_df = pl.DataFrame(cost_exceedance)
-cost_df.select(
-    [
-        "horizon",
-        pl.col("10_bps").round(1).alias("10 bps %"),
-        pl.col("20_bps").round(1).alias("20 bps %"),
-        pl.col("30_bps").round(1).alias("30 bps %"),
-        pl.col("50_bps").round(1).alias("50 bps %"),
-    ]
-)
-
-# %% [markdown]
-# #### Visualize Cost Exceedance
-#
-# The empirical CDF of absolute returns reads off the exact fraction of moves that
-# exceed any cost threshold: everything to the right of the 20 bps cost line clears the
-# round trip. The curves shift right as the horizon lengthens---larger typical moves,
-# so more of the distribution sits above cost.
-
-# %%
-# Empirical CDF of absolute returns per horizon on a shared log x-axis: it reads off
-# the exact fraction exceeding any cost threshold (1 - ECDF at the cost) and keeps the
-# comparison honest (identical support), which mismatched histogram x-limits cannot.
-fig, ax = plt.subplots(figsize=(9, 4))
-
-horizons = [
-    ("Daily", daily_abs, COLORS["neutral"]),
-    ("Weekly", weekly_abs, COLORS["amber"]),
-    ("Monthly", monthly_abs, COLORS["blue"]),
-]
-
-for label, data, color in horizons:
-    x = np.sort(data[data > 0])
-    y = np.arange(1, len(x) + 1) / len(x)
-    frac_above = float((data > ROUND_TRIP_COST).mean())
-    ax.plot(x, y, color=color, linewidth=1.8, label=f"{label} — {frac_above:.0%} > cost")
-
-# Cost reference line: everything to the RIGHT of it clears the 20 bps round trip.
-ax.axvline(
-    ROUND_TRIP_COST,
-    color=COLORS["copper"],
-    linestyle="--",
-    linewidth=1.5,
-    label="20 bps round-trip cost",
-)
-
-ax.set_xscale("log")
-ax.set_xlim(1e-4, 5e-1)
-ax.set_xlabel("Absolute return (log scale)")
-ax.set_ylabel("Cumulative fraction of moves")
-ax.set_title(
-    "Absolute moves clear the 20 bps cost at every horizon; headroom grows with horizon",
-    loc="left",
-    color=COLORS["blue"],
-    fontweight="semibold",
-)
-ax.legend(loc="upper left", fontsize=8)
-sns.despine()
-fig.tight_layout()
 plt.show()
 
 # %% [markdown]
-# #### Interpretation
+# ### B.3 What the round trip costs, and what a move is worth
 #
-# The return distributions clearly differ by horizon. Looking at the tables above:
-#
-# - **Daily**: Median moves are small relative to costs. A majority of moves exceed
-#   the 20 bps threshold, but high-turnover strategies operate with thin margins.
-# - **Weekly**: Moves are larger, providing reasonable headroom over costs.
-# - **Monthly**: Moves comfortably exceed costs in the vast majority of cases.
-#
-# **Connecting costs to the cost model**: The cost exceedance table above spans
-# 10 to 50 bps round-trip. Our stated cost model (5--15 bps per leg, i.e., 10--30
-# bps round-trip) maps directly to the 10, 20, and 30 bps columns. For large liquid
-# ETFs (SPY, QQQ) at the low end (10 bps RT), even daily moves exceed costs ~75%
-# of the time. For smaller thematic ETFs at the high end (30 bps RT), only monthly
-# moves are comfortably above cost in most observations. The choice of horizon
-# therefore depends on the *cost tier* of the ETFs you're trading, not just the
-# horizon in isolation.
-#
-# **This analysis guides but does not dictate**: We establish that all three horizons
-# are feasible. Chapter 7 will test features at each horizon.
-
-# %% [markdown]
-# #### Cost-Regime Choice: per-Share + Tiered Spread
-#
-# `setup.yaml::costs.model = per_share_plus_spread` — costs are declared as
-# a per-share commission plus a per-asset half-spread in dollars per share,
-# not as a flat bps rate.
-#
-# **Commission.** The `per_share = 0.0035` value is IBKR Pro Tiered's top
-# tier (the rate readers see at the broker when they execute monthly ETF
-# rotations at retail scale). This is the library default in
-# `ml4t-backtest` set because we downloaded IBKR Pro pricing for exactly
-# this purpose — the cost dispatcher has nothing to invent.
-#
-# **Spread.** The per-asset half-spread map in
-# `setup.yaml::costs.asset_spreads` ties each ticker to an industry-
-# knowledge tier: mega-ETFs (SPY/QQQ/IWM/EFA/EEM/DIA/VTI/VOO) at 0.5¢,
-# sector XL* funds at 1¢, default 2¢ for thematic/regional/factor ETFs.
-# This is a *reasoned simplification* — ETF nominal prices do not drift
-# much over the validation window, so a static map is defensible — but it
-# is **not** an empirical measurement. We do not have AlgoSeek-grade NBBO
-# quotes spanning the broad ETF universe; the analogous case study with
-# measured per-asset spreads is `nasdaq100_microstructure`, which has
-# AlgoSeek minute-bar NBBO close quotes for its 100-ticker NASDAQ-100
-# universe. The nasdaq100 measurements are NOT a proxy for liquid-ETF
-# spreads: they cover different securities under different microstructure.
-# The tiered ETF map should be read as "what an institutional trader
-# knowledgeable about US ETFs would assert as the going rate" rather than
-# as a quote-grounded estimate. The cost sensitivity sweep in `16_costs.py`
-# probes how robust this assumption is across both bps and per-share
-# grids.
-
-# %% [markdown]
-# ### B.4 Feasibility Ratio
-#
-# A simple edge-to-cost ratio confirms that typical signal magnitude
-# comfortably exceeds transaction costs before proceeding further.
+# `setup.yaml::costs` prices a trade as a per-share commission plus a half-spread assigned by
+# liquidity tier: daily bars carry no bid and ask, so the spread is asserted rather than measured,
+# and `18_cost_sensitivity` stresses that assumption. Both are dollars per share, so what they cost
+# as a fraction of the position falls as a fund's price rises; the chart takes each at its median.
 
 # %%
-median_monthly_abs_return = float(np.median(monthly_abs))
-feasibility_ratio = median_monthly_abs_return / ROUND_TRIP_COST
+half_spread = pl.col("symbol").replace_strict(
+    HALF_SPREADS, default=DEFAULT_HALF_SPREAD, return_dtype=pl.Float64
+)
+cost = (
+    research.group_by("symbol")
+    .agg(pl.col("close").median().alias("price"))
+    .with_columns((2 * (half_spread + PER_SHARE) / pl.col("price") * 1e4).alias("cost_bps"))
+    .sort("cost_bps")
+)
+COST_BPS = float(cost["cost_bps"].median())
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.bar(cost["symbol"], cost["cost_bps"], color=COLORS["blue"], width=0.7)
+ax.axhline(COST_BPS, color=COLORS["copper"], ls="--", lw=1.5, label="universe median")
+ax.set_ylabel("Round-trip cost (bps)")
+ax.set_xticks([])  # a hundred tickers are unreadable, and the spread of the curve is the point
+ax.legend(frameon=False, fontsize=8)
+add_message_title(
+    ax,
+    "Round-trip cost spans an order of magnitude across the same universe",
+    subtitle="Each fund's two half-spreads and two commissions over its median close, sorted",
+)
+plt.show()
+
+# %% [markdown]
+# One cost line on raw returns answers the question for no fund in particular. Each move is divided
+# instead by what its own fund charged at the price the position opened at, which puts break-even at
+# one on a scale they all share. The curve runs over every session in the development window, not
+# only the dates the strategy acts on: it is the scale of a move against cost, not an opportunity set.
+
+# %%
+returns = research.with_columns(
+    cost_bps=2 * (half_spread + PER_SHARE) / pl.col("close") * 1e4
+).with_columns(
+    (pl.col("close").pct_change(h).abs() * 1e4 / pl.col("cost_bps").shift(h))
+    .over("symbol")
+    .alias(f"h{h}")
+    for h in HORIZONS
+)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for h, color in zip(HORIZONS, (COLORS["amber"], COLORS["blue"]), strict=True):
+    multiple, fraction = exceedance_curve(returns[f"h{h}"].drop_nulls().to_numpy())
+    ax.plot(multiple, fraction, color=color, lw=1.6, label=f"{h}-session move")
+ax.axvline(1, color=COLORS["copper"], ls="--", lw=1.5, label="break-even on the round trip")
+ax.set_xscale("log")
+ax.set_xlim(0.02, 2_000)
+ax.set_xlabel("Absolute move as a multiple of the fund's own round trip (log scale)")
+ax.set_ylabel("Fraction of moves at least this large")
+ax.legend(frameon=False, fontsize=8, loc="lower left")
+add_message_title(ax, "Almost every move at either horizon exceeds the cost of taking it")
+plt.show()
+
+# %% [markdown]
+# ### B.4 Serial correlation of the carrier
+#
+# The carrier is what the ranking is built from: the return between consecutive decision dates. Its
+# serial correlation inside each fund says how much of one month's return the next repeats - a
+# property of that series, not of the cross-sectional ranking, which `05_evaluation` measures.
+# Stacking a hundred funds and correlating the result would measure their joins instead.
+
+# %%
+monthly = month_end.with_columns(monthly_return=pl.col("close").pct_change().over("symbol"))
+# lag zero is a series against itself, and its bar would flatten every other one
+acf = panel_acf(monthly, entity_col="symbol", value_col="monthly_return", max_lags=12).filter(
+    pl.col("lag") > 0
+)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.axhspan(-acf["band"][0], acf["band"][0], color=COLORS["copper"], alpha=0.18, zorder=0)
+ax.fill_between(acf["lag"], acf["acf_p10"], acf["acf_p90"], color=COLORS["blue"], alpha=0.15)
+ax.bar(acf["lag"], acf["acf"], color=COLORS["blue"], width=0.6)
+ax.set_xlabel("Lag (decision dates)")
+ax.set_ylabel("Autocorrelation of the month-to-month return")
+add_message_title(
+    ax,
+    "A single month's return says almost nothing about the next month's",
+    subtitle="Mean within-fund autocorrelation, 10th-90th percentile shaded, band in copper",
+)
+plt.show()
+
+# %% [markdown]
+# ### B.5 Move scale against cost
+#
+# The ratio divides the median absolute move at the primary horizon by the median round trip; the
+# clearance share counts moves above what their own fund charged. Both are unsigned magnitudes, so
+# neither says a strategy earns anything - only that cost is not what would stop one.
+
+# %%
+moves = returns.select(
+    move_bps=1e4 * pl.col("close").pct_change(PRIMARY_HORIZON).abs().over("symbol"),
+    clears=pl.col(f"h{PRIMARY_HORIZON}") > 1,
+)
 print(
-    f"Median monthly |return|: {median_monthly_abs_return:.4f} ({median_monthly_abs_return * 10000:.1f} bps)"
-)
-print(f"Round-trip cost: {ROUND_TRIP_COST:.4f} ({ROUND_TRIP_COST * 10000:.0f} bps)")
-print(f"Edge-to-cost ratio: {feasibility_ratio:.1f}x")
-print(f"Assessment: {'PROCEED' if feasibility_ratio > 1.0 else 'KILL -- edge too thin'}")
-
-# %% [markdown]
-# ---
-#
-# ## Section C: Design Decisions
-#
-# Design decisions are the strategy choices encoded in `setup.yaml` that the
-# feasibility evidence above supports. They are justified here, not in the YAML.
-
-# %% [markdown]
-# ### C.1 Decision Cadence
-#
-# Monthly month-end is the conventional cadence for cross-asset momentum studies
-# (Moskowitz, Ooi, and Pedersen 2012; Asness, Moskowitz, and Pedersen 2013), which
-# makes our results directly comparable to published benchmarks. However, the choice
-# deserves scrutiny rather than deference.
-#
-# A **weekly (5-day) cadence** would multiply effective sample size roughly 4x
-# (~1,040 weekly vs ~240 monthly decision dates), improving IC estimate stability
-# per fold. Purging becomes cheaper: a 1-week purge burns 5 trading days vs 21 for
-# monthly. The cost analysis above confirms that weekly absolute returns comfortably
-# exceed the 20 bps round-trip threshold for most of the universe.
-#
-# The complications are real: turnover increases mechanically (even if signals are
-# slow-moving, weekly rebalancing amplifies noise-driven rank changes), and coupling
-# signal horizon with decision cadence requires care---you can evaluate a signal weekly
-# but still use 4-week forward labels, at the cost of overlapping labels that demand
-# proper purge/embargo handling.
-#
-# We treat cadence as a **first-class parameter**. `setup.yaml` declares the
-# default monthly cadence (`decision.cadence: monthly_month_end`) and exposes
-# `fwd_ret_5d` as a weekly-horizon label variant for comparison.
-
-# %% [markdown]
-# ### C.2 Kill Conditions
-#
-# Kill conditions are falsifiable checkpoints --- if any triggers, the strategy
-# is abandoned or substantially reworked. Defining them upfront prevents
-# post-hoc rationalization. The thresholds below are anchored to the feasibility
-# evidence above (cost-exceedance and edge-to-cost analysis):
-#
-# - **KC1 (IC floor)**: IC < 0.01 with t-stat < 2.0 across all lookback horizons
-#   (3M-12M). Gate: Chapter 8 feature evaluation.
-# - **KC2 (edge-cost)**: Edge-to-cost ratio < 1.0x after realistic transaction
-#   costs. Gate: Chapter 7 label evaluation / Chapter 16 backtest. B.4 above
-#   tests this gate on raw return magnitudes before the model is even trained.
-# - **KC3 (EW underperformance)**: Equal-weight benchmark posts a higher Sharpe
-#   and lower max drawdown than the strategy across all test folds. Gate:
-#   Chapter 16 backtest.
-
-# %% [markdown]
-# ### C.3 Mapping Class
-#
-# `setup.yaml` declares the simplest credible mapping: **long-only, equal-weight,
-# top-N** (`mapping.class: long_only_rank_and_rebalance`, `sizing: equal_weight`).
-# Long-only is appropriate because (a) most ETFs are difficult or expensive to
-# short, (b) the target audience for this case study is long-only portfolio
-# construction, and (c) it isolates the ranking signal from short-side
-# complexity. Equal-weight is the minimal-assumption sizing rule---it avoids
-# introducing a secondary optimization (risk-parity, inverse-vol) that would
-# confound evaluation of the ranking signal itself. Chapter 17 explores
-# alternative weighting schemes via the `backtest.sweep.allocators` grid in
-# `setup.yaml`.
-
-# %% [markdown]
-# ---
-#
-# ## Section D: Walk-Forward Structure (Section 6.5)
-#
-# We verify that the data supports the walk-forward design declared in
-# `setup.yaml::evaluation` (`n_splits`, `train_size`, `val_size`, `holdout_start`).
-
-# %% [markdown]
-# ### D.1 Effective Sample Size and Data Coverage
-
-# %%
-n_decision_dates = monthly_prices["month"].n_unique()
-first_month = monthly_prices["month"].min()
-last_month = monthly_prices["month"].max()
-n_years = n_decision_dates / 12
-
-print("Data Coverage:")
-print(f"  Period: {first_month} to {last_month}")
-print(f"  Decision points (months): {n_decision_dates}")
-print(f"  Approx years: {n_years:.1f}")
-
-# %% [markdown]
-# ### D.2 Walk-Forward Fold Demonstration
-#
-# `case_studies/utils/cv_window.py` owns the operational splits; this cell
-# reproduces the fold boundaries from canonical `setup.yaml` parameters to verify
-# the data supports the declared design. Each fold has:
-#
-# - **Train period**: `setup.yaml::evaluation.train_size`
-# - **Test period**: `setup.yaml::evaluation.val_size`
-# - **Purge gap**: 1 month between train end and test start (matches the 21D
-#   buffer for the 1-month primary label)
-
-# %%
-n_splits_declared = int(SETUP["evaluation"]["n_splits"])
-purge_months = 1  # matches setup.yaml::labels.buffer (21D) at monthly cadence
-train_months = 10 * 12  # setup.yaml::evaluation.train_size = 10Y
-test_months = 1 * 12  # setup.yaml::evaluation.val_size = 1Y
-step_months = 1 * 12  # consecutive, non-overlapping
-
-# Get sorted list of decision dates (month-ends)
-decision_dates = (
-    monthly_prices.select("timestamp").unique().sort("timestamp")["timestamp"].to_list()
+    f"Round-trip cost {cost['cost_bps'].min():.2f} to {cost['cost_bps'].max():.2f} bps, median "
+    f"{COST_BPS:.2f} bps | median {PRIMARY_HORIZON}-session move "
+    f"{moves['move_bps'].median():.1f} bps, ratio {moves['move_bps'].median() / COST_BPS:.0f}x, "
+    f"over its own fund's cost {moves['clears'].mean():.3f}"
 )
 
-# Holdout boundary
-holdout_start_dt = pl.Series([HOLDOUT_START]).str.to_date("%Y-%m-%d").item()
-cv_dates = [d for d in decision_dates if d < holdout_start_dt]
-
-# Generate splits
-splits = []
-test_start_idx = train_months
-
-while test_start_idx + test_months <= len(cv_dates):
-    train_start_idx = test_start_idx - train_months
-    train_end_idx = test_start_idx - purge_months  # purge gap
-    test_end_idx = test_start_idx + test_months
-
-    split = {
-        "fold": len(splits) + 1,
-        "train_start": cv_dates[train_start_idx].strftime("%Y-%m-%d"),
-        "train_end": cv_dates[train_end_idx - 1].strftime("%Y-%m-%d"),
-        "test_start": cv_dates[test_start_idx].strftime("%Y-%m-%d"),
-        "test_end": cv_dates[test_end_idx - 1].strftime("%Y-%m-%d"),
-        "purge_months": purge_months,
-    }
-    splits.append(split)
-    test_start_idx += step_months
-
-print(f"Generated {len(splits)} walk-forward folds")
-
-# Sanity check: verify all folds fit within pre-holdout data
-assert len(splits) == n_splits_declared, (
-    f"Expected {n_splits_declared} folds (setup.yaml), got {len(splits)}"
-)
-last_test_end = splits[-1]["test_end"]
-print(f"Last fold test end: {last_test_end}  |  Holdout start: {HOLDOUT_START}")
-assert last_test_end < HOLDOUT_START, (
-    f"Last fold ({last_test_end}) overlaps holdout ({HOLDOUT_START})"
-)
+# %% [markdown] tags=["results"]
+# The round trip costs 0.90 to 38.91 bps at each fund's median close, a universe median of 9.45. The
+# median absolute 21-session move is 287.2 bps, 30x that, and 0.967 of moves clear their entry cost.
 
 # %% [markdown]
-# **Walk-forward fold summary:**
+# ## C. Design decisions
+#
+# ### C.1 Cadence. `setup.yaml::decision.cadence` ranks funds at the month-end close and executes at
+# the next open. B.3 supports rebalancing at least that often, since moves at both declared horizons
+# clear the round trip their own fund charges, so cost is not what sets the cadence. A monthly
+# schedule also buys a purge gap the width of the primary label; the weekly horizon stays in
+# `labels.variants` so the shorter holding period is measured rather than assumed away.
+#
+# ### C.2 Kill conditions. Three thresholds send the strategy back to the drawing board, each tested
+# where its evidence exists rather than here: a cross-sectional information coefficient
+# indistinguishable from zero at every lookback, measured in Chapter 8; a move-to-cost ratio under
+# one once realistic costs are charged, and an equal-weight book earning a higher Sharpe ratio at a
+# smaller drawdown across folds, both measured in Chapter 16.
+#
+# ### C.3 Mapping class. `setup.yaml::mapping.class` holds the leaders long only, because many of
+# these funds are expensive or impossible to borrow and a short leg would price that constraint
+# rather than the signal. Sizing is equal weight, the rule that adds no second estimate: an
+# optimized weighting folds a covariance estimate in and leaves the ranking's own contribution
+# unidentifiable. Chapter 17 sweeps those alternatives.
+
+# %% [markdown]
+# ## D. Walk-forward structure
+#
+# ### D.1 Effective sample size. Folds are cut on the session timeline, the same one
+# `04_model_based_features` hands the splitter, while the strategy acts only at the month-ends - so
+# the decision count, not the row count, is what a cross-sectional evaluation has to spend.
 
 # %%
-splits_df = pl.DataFrame(splits)
-splits_df
-
-# %% [markdown]
-# #### Universe Breadth per Fold
-#
-# We verify that each fold has adequate cross-sectional breadth by counting
-# eligible ETFs in each test period. Thin early folds would weaken cross-sectional
-# signals (quintile sorting requires reasonable N).
-
-# %%
-fold_breadth = []
-for split in splits:
-    test_year = int(split["test_start"][:4])
-    n_eligible = eligibility_table.filter(pl.col("eligible_year") == test_year).height
-    fold_breadth.append(
-        {
-            "fold": split["fold"],
-            "test_year": test_year,
-            "n_eligible": n_eligible,
-        }
-    )
-
-fold_breadth_df = pl.DataFrame(fold_breadth)
-print("Eligible ETFs per fold test period:")
-fold_breadth_df
-
-# %% [markdown]
-# All folds have 70+ eligible ETFs, which is sufficient for cross-sectional ranking
-# and quintile construction. The early folds have fewer ETFs because some symbols
-# (e.g., ARKK, XLC) had not yet launched---this is the correct point-in-time behavior,
-# not a data problem.
-
-# %% [markdown]
-# ---
-#
-# ## Section E: Eligibility Artifact
-#
-# Point-in-time (asset, year) eligibility is the one decision-relevant artifact
-# this notebook generates (everything else lives in `setup.yaml`). It is keyed by
-# year because the ADV filter runs annually; downstream labels and features
-# consume it to enforce point-in-time membership.
-
-# %%
-eligibility_path = CASE_DIR / "eligibility.csv"
-eligibility_table.select(["symbol", "eligible_year"]).sort(["symbol", "eligible_year"]).write_csv(
-    eligibility_path
-)
-print(f"Written: {eligibility_path} ({len(eligibility_table):,} asset-year pairs)")
-
-# %% [markdown]
-# ---
-#
-# ## Section F: Findings vs `setup.yaml`
-#
-# The canonical strategy declarations live in `config/setup.yaml`. This section
-# enumerates each declared knob alongside the feasibility evidence above that
-# motivates it. Setup.yaml is not regenerated here --- it is the hand-curated
-# source of truth, and this notebook reads it.
-
-# %%
-# Numbers used in the side-by-side report
-median_d_abs_pct = float(np.median(daily_abs) * 100)
-median_w_abs_pct = float(np.median(weekly_abs) * 100)
-median_m_abs_pct = float(np.median(monthly_abs) * 100)
-frac_d_above_20 = float((daily_abs > 0.0020).mean())
-frac_w_above_20 = float((weekly_abs > 0.0020).mean())
-frac_m_above_20 = float((monthly_abs > 0.0020).mean())
-n_eligible_min = int(min(fb["n_eligible"] for fb in fold_breadth))
-n_eligible_max = int(max(fb["n_eligible"] for fb in fold_breadth))
-n_folds_generated = int(len(splits))
-
-print("=" * 78)
-print("Setup.yaml knobs vs feasibility evidence")
-print("=" * 78)
-
-print()
-print(f"universe.n_assets = {SETUP['universe']['n_assets']}")
-print(f"  -> point-in-time eligible per fold: min={n_eligible_min}, max={n_eligible_max}")
-print("  -> sufficient for cross-sectional ranking (>=70 per fold)")
-
-print()
-print(f"decision.cadence = {SETUP['decision']['cadence']}")
 print(
-    f"  -> median |monthly return| = {median_m_abs_pct:.2f}%; "
-    f"{frac_m_above_20 * 100:.0f}% exceed 20bps RT"
-)
-
-print()
-print(f"costs.model = {SETUP['costs']['model']}")
-print(f"  -> at 20bps RT: edge-to-cost = {feasibility_ratio:.0f}x at monthly horizon")
-print(f"  -> daily moves > 20bps: {frac_d_above_20 * 100:.0f}%")
-print(f"  -> weekly moves > 20bps: {frac_w_above_20 * 100:.0f}%")
-
-print()
-print(f"labels.primary = {SETUP['labels']['primary']}")
-print(
-    f"  -> median |21d return| = {median_m_abs_pct:.2f}% = "
-    f"{(median_m_abs_pct / 100) / 0.002:.0f}x a 20bps cost"
-)
-
-print()
-print(f"labels.variants = {SETUP['labels']['variants']}")
-print(
-    f"  -> median |weekly return| = {median_w_abs_pct:.2f}% ({frac_w_above_20 * 100:.0f}% > 20bps)"
-)
-
-print()
-print(f"evaluation.n_splits = {SETUP['evaluation']['n_splits']}")
-print(f"  -> generated {n_folds_generated} folds; declared count matches")
-print(
-    f"  -> holdout {SETUP['evaluation']['holdout_start']} "
-    f"to {SETUP['evaluation']['holdout_end']}; "
-    f"last test ends {splits[-1]['test_end']}"
+    f"Sessions {research['timestamp'].n_unique():,} | decision dates {len(breadth):,} "
+    f"| eligible funds per decision {breadth['n_eligible'].mean():.0f}"
 )
 
 # %% [markdown]
-# ### Persist Feasibility Findings
+# ### D.2 Fold demonstration
+#
+# `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone. Between each training
+# and validation block sits a purge gap the width of the label horizon, which stops a label computed
+# inside training from resolving inside validation. The figure draws the boundaries the splitter
+# returned rather than recomputing them, so the two cannot disagree.
 
 # %%
-feasibility_report = {
-    "case_study_id": "etfs",
-    "computed_at_utc": datetime.now(UTC).isoformat(),
-    "data_period": {"start": START_DATE, "end": END_DATE},
-    "universe": {
-        "n_assets_declared": int(SETUP["universe"]["n_assets"]),
-        "n_eligible_per_fold_min": n_eligible_min,
-        "n_eligible_per_fold_max": n_eligible_max,
-    },
-    "return_distribution_abs_pct": {
-        "daily_median": median_d_abs_pct,
-        "weekly_median": median_w_abs_pct,
-        "monthly_median": median_m_abs_pct,
-    },
-    "cost_exceedance_at_20bps_pct": {
-        "daily": frac_d_above_20 * 100,
-        "weekly": frac_w_above_20 * 100,
-        "monthly": frac_m_above_20 * 100,
-    },
-    "feasibility_ratio_monthly_at_20bps": float(feasibility_ratio),
-    "walk_forward": {
-        "n_folds_generated": n_folds_generated,
-        "n_splits_declared": int(SETUP["evaluation"]["n_splits"]),
-        "holdout_start": HOLDOUT_START,
-        "last_test_end": splits[-1]["test_end"],
-    },
-}
+splits = generate_cv_splits(
+    research.select("timestamp"),
+    case_study_id=CASE_STUDY_ID,
+    label_buffer=LABEL_BUFFER,
+    date_col="timestamp",
+)
+last_val = max(s["val_end"] for s in splits)
+assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
+assert last_val < np.datetime64(HOLDOUT_START), "a fold reaches into the holdout"
 
-report_path = EXPLORATION_DIR / "feasibility_report.json"
-with open(report_path, "w") as f:
-    json.dump(feasibility_report, f, indent=2)
-print(f"Written: {report_path}")
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+fold_timeline(ax, splits, holdout=(HOLDOUT_START, HOLDOUT_END))
+add_message_title(ax, "Folds roll back from the holdout, drawn from the splitter's own output")
+plt.show()
 
 # %% [markdown]
-# ---
+# ## E. Derived artifacts
 #
-# ## Key Takeaways
+# The eligibility table is the one thing this notebook hands downstream: `02_labels` and
+# `03_financial_features` semi-join on it, so a fund contributes rows only in years it cleared, and
+# it covers the sealed years too, since prior-year volume is all the rule ever reads.
+
+# %%
+eligibility.write_csv(CASE_DIR / "eligibility.csv")
+print(f"Written: eligibility.csv, {len(eligibility):,} fund-year pairs")
+
+# %% [markdown]
+# ## F. Findings vs `setup.yaml`
 #
-# 1. **Universe**: Two-layer bias assessment---universe composition has survivorship
-#    bias (Layer 1, not fully resolvable, the 100 ETFs were chosen backward-looking);
-#    within-universe eligibility is point-in-time correct (Layer 2, via $10M ADV
-#    threshold applied annually with one-year lag). 70+ eligible ETFs per fold.
-# 2. **Cost feasibility**: All three horizons clear the 20bps round-trip threshold,
-#    but the margin depends on the cost tier---large liquid ETFs (10 bps RT) support
-#    daily strategies, while smaller thematic ETFs (30 bps RT) require monthly
-#    holding periods. `setup.yaml` accommodates both via tiered `costs.asset_spreads`.
-# 3. **Cadence**: Monthly month-end as default for literature comparability;
-#    weekly tested as a variant via `labels.variants: [fwd_ret_5d]`.
-# 4. **Mapping**: Long-only equal-weight top-N as simplest credible baseline;
-#    alternative allocators sweep in `setup.yaml::backtest.sweep.allocators`
-#    (explored in Chapter 17).
-# 5. **Evaluation**: 8 walk-forward folds with verified holdout separation
-#    (`evaluation.holdout_start` enforced).
-# 6. **Kill conditions**: KC2 (edge-to-cost > 1.0x) already cleared---feasibility
-#    ratio at monthly horizon is comfortably above 1.0 on raw return magnitudes.
-#    KC1 (IC floor) and KC3 (EW underperformance) are tested in later chapters.
+# One row per knob: the evidence that motivates it, and what would change it.
 #
-# **Known limitations**:
-# - Layer 1 survivorship bias is documented but not resolved.
-# - Annual eligibility granularity is coarser than monthly decision cadence.
-# - The $10M ADV threshold is not inflation-adjusted.
+# | Knob | Evidence | Revise it when |
+# |---|---|---|
+# | `universe.eligibility_rule` | B.2 breadth at each decision date | breadth falls under the position count the sweep asks for |
+# | `decision.cadence` | B.3 exceedance | moves stop clearing the round trip, or the label horizon no longer fits inside one rebalancing interval |
+# | `costs.asset_spreads` | B.3 cost per fund from the declared commission and half-spread | quoted spreads become available and disagree with the assigned tier |
+# | `evaluation.n_splits` | D.2 fold boundaries | the folds no longer fit the development window |
+
+# %%
+print(
+    f"universe.n_assets {SETUP['universe']['n_assets']}, eligible per decision date "
+    f"{breadth['n_eligible'].min()} to {breadth['n_eligible'].max()}, under the floor on "
+    f"{breadth.filter(pl.col('n_eligible') < BREADTH_FLOOR).height} of {len(breadth)} dates\n"
+    f"decision.cadence {SETUP['decision']['cadence']} | labels.primary {PRIMARY_LABEL}\n"
+    f"evaluation.n_splits {SETUP['evaluation']['n_splits']}, generated {len(splits)}, "
+    f"last validation ends {last_val.date()}, holdout untouched"
+)
+
+# %% [markdown] tags=["results"]
+# Eligible breadth runs from 0 in the first year, before any fund has a prior year to be admitted on,
+# to 96 of the declared 100, and sits under the position floor on 12 of 216 decision dates, every one
+# of them in that first year. Eight folds are generated, the last validation ending 2023-11-29.
+
+# %% [markdown]
+# ## Key takeaways
 #
-# **Artifacts written**:
-# - `eligibility.csv`: point-in-time (asset, year) membership.
-# - `config/exploration/feasibility_report.json`: summary numbers downstream
-#   notebooks and the chapter README can cite without re-running this notebook.
+# 1. **Decide membership on prior-year information, and count it on the decision date.** A liquidity
+#    filter fitted to the whole sample keeps the funds that stayed liquid.
+# 2. **Convert a per-share cost into bps before comparing it to a return**, and scale each move by
+#    its own fund's round trip: a cent of spread is a different cost on a low-priced fund.
+# 3. **Compute a panel autocorrelation inside each entity**, never across the stacked panel.
 #
-# **Next**: Chapter 7 creates labels at the monthly and weekly horizons declared
-# in `setup.yaml::labels`.
+# ### Known limitations
+#
+# - The funds in `universe.assets` were chosen knowing which of them still trade, so the
+#   point-in-time filter removes a bias inside the list and not the bias in the list itself.
+# - `close` is adjusted for splits and distributions, so early prices sit below what a fund traded
+#   at: dollar volume is understated there, and the round trip, being dollars per share over a
+#   price, is overstated. The half-spread is by tier, and the floor is not inflation-adjusted.
+# - Eligibility is annual while decisions are monthly, so a fund turning illiquid in March keeps its
+#   place until January.
+#
+# **Next**: labels at the declared horizons, built on this development window.
