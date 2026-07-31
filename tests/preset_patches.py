@@ -55,3 +55,38 @@ def _patch_presets_for_testing(config_dir: Path) -> None:
             preset.update(overrides)
             with open(preset_path, "w") as f:
                 yaml.dump(preset, f, default_flow_style=False)
+
+
+# Max configs per family in training menu YAMLs (keep tests fast but comprehensive).
+# Only applied to families with homogeneous sweep configs (linear, gbm).
+# DL/TabDL/latent/causal families are NOT trimmed because each config often
+# maps to a dedicated notebook (e.g., 09_dl_lstm, 10_dl_tsmixer).
+_MAX_CONFIGS_PER_FAMILY = 2
+_TRIM_FAMILIES = {"linear", "gbm"}
+
+
+def _trim_label_configs(cs_config_dir: Path) -> None:
+    """Trim training menu YAMLs to at most _MAX_CONFIGS_PER_FAMILY for sweep families.
+
+    The menus live at ``config/training/fwd_*.yaml``. An earlier copy of this
+    function globbed ``config/fwd_*.yaml``, matched nothing, and silently left
+    every sweep family at full width.
+    """
+    training_dir = cs_config_dir / "training"
+    label_root = training_dir if training_dir.exists() else cs_config_dir
+    for label_yaml in label_root.glob("fwd_*.yaml"):
+        data = yaml.safe_load(label_yaml.read_text())
+        if data is None or not isinstance(data, dict):
+            continue
+        trimmed = False
+        for family, configs in data.items():
+            if (
+                family in _TRIM_FAMILIES
+                and isinstance(configs, list)
+                and len(configs) > _MAX_CONFIGS_PER_FAMILY
+            ):
+                data[family] = configs[:_MAX_CONFIGS_PER_FAMILY]
+                trimmed = True
+        if trimmed:
+            with open(label_yaml, "w") as f:
+                yaml.dump(data, f, default_flow_style=False)

@@ -35,14 +35,12 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-import yaml
-
 try:
     from tests.pm_helpers import get_overrides, run_notebook
-    from tests.preset_patches import _patch_presets_for_testing
+    from tests.preset_patches import _patch_presets_for_testing, _trim_label_configs
 except ModuleNotFoundError:
     from pm_helpers import get_overrides, run_notebook
-    from preset_patches import _patch_presets_for_testing
+    from preset_patches import _patch_presets_for_testing, _trim_label_configs
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -76,29 +74,6 @@ DL_STAGE_PATTERNS = re.compile(
 # copies of the same workload-reduction table drift the moment one gets a
 # fix the other doesn't (e.g. IPCA's factor_ridge/gamma_ridge
 # regularization), silently regenerating fixtures against the stale values.
-
-_MAX_CONFIGS_PER_FAMILY = 2
-_TRIM_FAMILIES = {"linear", "gbm"}
-
-
-def _trim_label_configs(cs_config_dir: Path) -> None:
-    """Trim label config YAMLs to at most _MAX_CONFIGS_PER_FAMILY for sweep families."""
-    for label_yaml in cs_config_dir.glob("fwd_*.yaml"):
-        data = yaml.safe_load(label_yaml.read_text())
-        if data is None or not isinstance(data, dict):
-            continue
-        trimmed = False
-        for family, configs in data.items():
-            if (
-                family in _TRIM_FAMILIES
-                and isinstance(configs, list)
-                and len(configs) > _MAX_CONFIGS_PER_FAMILY
-            ):
-                data[family] = configs[:_MAX_CONFIGS_PER_FAMILY]
-                trimmed = True
-        if trimmed:
-            with open(label_yaml, "w") as f:
-                yaml.dump(data, f, default_flow_style=False)
 
 
 def seed_configs(output_dir: Path) -> None:
