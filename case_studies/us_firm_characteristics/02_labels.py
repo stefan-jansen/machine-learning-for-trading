@@ -203,8 +203,11 @@ print(f"market_data digest: {MARKET_DATA_DIGEST}")
 # A label resolves on the month-end that dates the row carrying it, because the return the
 # row reports was earned over the month ending there. That endpoint is carried alongside the
 # labels, and every diagnostic below is sealed on it rather than on the date a decision was
-# taken. The `month` column numbers the panel's own month-end grid, which Sections D and F
-# count on so that a firm skipping a month-end does not read as two adjacent observations.
+# taken. Every diagnostic from Section D on reads that development frame; the assertions and
+# the boundary figure below are the exception, because they read the null structure of the
+# files being written rather than any value in them. The `month` column numbers the panel's
+# own month-end grid, which Sections D and F count on so that a firm skipping a month-end
+# does not read as two adjacent observations.
 
 # %%
 month_ends = firm_chars.select("timestamp").unique().sort("timestamp").with_row_index("month")
@@ -226,7 +229,12 @@ labels_df = (
         .alias(CLASS_LABEL),
     )
 )
-print(f"Constructed {', '.join(LABEL_NAMES)} on {labels_df.height:,} firm-months")
+dev = labels_df.filter(pl.col("_label_end") < HOLDOUT_START)
+print(
+    f"Constructed {', '.join(LABEL_NAMES)} on {labels_df.height:,} firm-months, "
+    f"{dev.height:,} of them development rows through {dev['timestamp'].max()}: "
+    f"{dev['timestamp'].n_unique()} month-ends, {dev['symbol'].n_unique():,} firms"
+)
 
 # %% [markdown]
 # ## D. Window validity
@@ -273,7 +281,7 @@ print(
 
 # %%
 step = pl.col("month").diff().over("symbol")
-alignment = labels_df.with_columns(
+alignment = dev.with_columns(
     pl.when(step == 1).then(pl.col(PRIMARY_LABEL).shift(1).over("symbol")).alias("_previous"),
     pl.when(step.shift(-1).over("symbol") == 1)
     .then(pl.col(PRIMARY_LABEL).shift(-1).over("symbol"))
@@ -330,19 +338,10 @@ show_with_alt(fig, "Non-null label rate by month-ends back from each firm's last
 # %% [markdown]
 # ## E. Distribution and base rate
 #
-# What scale is the label, and does it mean the same thing across regimes? Everything from
-# here through Section G runs on the development window alone, sealed on the label's own
-# endpoint. The label files keep every row, because the seal governs what this notebook looks
-# at rather than what it writes.
-
-# %%
-dev = labels_df.filter(pl.col("_label_end") < HOLDOUT_START)
-print(
-    f"{dev.height:,} development firm-months through {dev['timestamp'].max()}: "
-    f"{dev['timestamp'].n_unique()} month-ends, {dev['symbol'].n_unique():,} firms"
-)
-
-# %% [markdown]
+# What scale is the label, and does it mean the same thing across regimes? The label files
+# keep every row, because the seal governs what this notebook looks at rather than what it
+# writes.
+#
 # Both continuous labels go on one axis with identical bins and a logarithmic count axis.
 # The claim the figure has to support is about shape rather than width - two dispersion
 # scalars would carry the width - and the shape here is that the two series are
