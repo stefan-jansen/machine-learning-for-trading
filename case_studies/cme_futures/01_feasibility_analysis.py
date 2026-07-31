@@ -16,21 +16,20 @@
 # %% [markdown]
 # # CME Futures: Feasibility Analysis
 #
-# `config/setup.yaml` declares a cross-sectional futures strategy: which products trade,
-# how often positions change, what crossing costs, and how the sample is split. This
-# notebook asks whether the data supports it, and fits nothing.
+# `config/setup.yaml` declares a cross-sectional futures strategy: which products trade, how
+# often positions change, what crossing costs, how the sample is split. This notebook asks
+# whether the data supports it, and fits nothing.
 #
 # ## Learning objectives
 #
 # - Count the universe on the session the strategy acts on, price the spread from the
 #   contract's own tick, and read clearance off an exceedance curve scaled by that spread
-# - Measure how long the term-structure slope a carry strategy reads stays put, and
-#   confirm the declared folds fit the sample without touching the holdout
+# - Measure how long the carry a strategy reads stays put, and confirm the declared folds
+#   fit the sample without touching the holdout
 #
 # ## Book reference
 #
-# Chapter 6, Sections 6.2-6.6. Reads CME settlements via `load_cme_futures()` and
-# `config/setup.yaml`, which it never writes.
+# Chapter 6, Sections 6.2-6.6. Reads CME settlements and `config/setup.yaml`, never writes.
 
 # %%
 """CME Futures Case Study - Feasibility Analysis."""
@@ -60,8 +59,8 @@ END_DATE = "2025-12-31"
 # %% [markdown]
 # ## Configuration
 #
-# Every knob is read from `setup.yaml`. Section B computes on the development window alone,
-# so nothing the holdout contains can shape a choice made here.
+# Every knob is read from `setup.yaml`, and Section B computes on the development window
+# alone, so nothing the holdout contains can shape a choice made here.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -89,18 +88,17 @@ print(f"{len(DECLARED_PRODUCTS)} products, floor {BREADTH_FLOOR} | horizons {HOR
 # front-month position earns the spot move plus the roll yield the term structure implies,
 # so ranking products against each other trades a difference in carry as much as one in
 # direction. Three questions decide whether that is worth building here: does the universe
-# exist on every decision date, is a typical move large next to what it costs to capture,
-# and are there enough decision dates for a walk-forward evaluation that never reads the
-# holdout? Section C records which `setup.yaml` value each answer motivates.
+# exist on every decision date, is a typical move large next to the cost of capturing it,
+# and are there enough decision dates for a walk-forward that never reads the holdout?
 
 # %% [markdown]
 # ## B. Universe and cost feasibility
 #
 # ### B.1 Load and verify the declared universe
 #
-# The loader returns one row per product, tenor and session; `tenor == 0` is the front
-# month. Two price columns matter and are not interchangeable: `raw_close` is the printed
-# settlement, while `adj_close` is back-adjusted, so its differences are moves not rolls.
+# The loader returns one row per product, tenor and session; `tenor == 0` is the front month.
+# `raw_close` is the printed settlement and `adj_close` is back-adjusted, so its differences
+# are moves not rolls. Neither is a safe denominator unguarded.
 
 # %%
 futures = load_cme_futures(start_date=START_DATE, end_date=END_DATE)
@@ -121,10 +119,9 @@ print(
 # %% [markdown]
 # ### B.2 Breadth at every decision date
 #
-# One count of the universe hides the question a cross-sectional strategy has to answer,
-# which is whether the products are there *on the session it acts on*. Counting anywhere in
-# the week hides the dates that matter, because the week's final session is sometimes a
-# holiday on which most of the universe does not settle.
+# One count of the universe hides what a cross-sectional strategy has to answer: whether the
+# products are there *on the session it acts on*. Counting anywhere in the week hides the
+# dates that matter, because the week's final session is sometimes a holiday.
 
 # %%
 decisions = research.group_by(pl.col("session_date").dt.truncate("1w")).agg(
@@ -154,9 +151,9 @@ plt.show()
 # ### B.3 What the spread costs, and what a move is worth
 #
 # `setup.yaml::costs` prices a trade as a commission plus a spread in ticks: one for most of
-# the universe, two for the products it lists as illiquid. The tick is a contract spec and
-# `futures_specs.yaml` carries it - do not infer it, since the smallest settlement increment
-# is a half-tick on several contracts, halving the cost you charge yourself.
+# the universe, two for the products it lists as illiquid. The tick is a contract spec that
+# `futures_specs.yaml` carries - do not infer it, since the smallest settlement increment is
+# a half-tick on several contracts, halving the cost you charge yourself.
 
 # %%
 products = yaml.safe_load((REPO_ROOT / "data/futures/market/futures_specs.yaml").read_text())
@@ -198,7 +195,10 @@ plt.show()
 # %%
 returns = (
     research.with_columns(
-        pl.col("adj_close").pct_change(h).abs().over("product").alias(f"h{h}") for h in HORIZONS
+        pl.when(pl.col("adj_close").shift(h).over("product") > 0)
+        .then(pl.col("adj_close").pct_change(h).abs().over("product"))
+        .alias(f"h{h}")
+        for h in HORIZONS
     )
     .join(cost.select("product", "spread_bps"), "product")
     .with_columns(pl.col(f"h{h}") * 1e4 / pl.col("spread_bps") for h in HORIZONS)
@@ -228,8 +228,8 @@ plt.show()
 # still says something at the next. This strategy reads carry, visible in the raw prices as
 # the slope between the front contract and the one behind it: a positive slope means a long
 # position rolls into a more expensive contract and gives back part of the spot move. How
-# long that lasts is an autocorrelation, computed inside each product; stacking thirty and
-# correlating the result measures their joins instead.
+# long that lasts is an autocorrelation, computed inside each product, since stacking thirty
+# and correlating the result measures their joins instead.
 
 # %%
 sealed = pl.col("session_date") < pl.lit(HOLDOUT_START).str.to_date()
@@ -238,6 +238,7 @@ term = (
     .pivot(on="tenor", index=["product", "session_date"], values="raw_close")
     .rename({"0": "near", "1": "deferred"})
     .drop_nulls()
+    .filter(pl.col("near") > 0)
     .sort(["product", "session_date"])
     .with_columns(((pl.col("deferred") - pl.col("near")) / pl.col("near")).alias("slope"))
 )
@@ -260,8 +261,8 @@ plt.show()
 # ### B.5 Move scale against cost
 #
 # The ratio divides the median absolute move at the primary horizon by the median spread,
-# and the clearance share counts moves above their own product's spread. Both are
-# spread-only, so neither says total cost clears; the cost stage tests that.
+# and the clearance share counts moves above their own product's spread. Neither says total
+# cost clears.
 
 # %%
 multiple = pl.col(f"h{HORIZONS[0]}")
@@ -300,21 +301,19 @@ print(
 # exists rather than here: a combined carry-and-momentum information coefficient below its
 # floor across folds; long-backwardation carry turning profitable over the full sample,
 # which would make an inverted-carry reading a regime artifact; and cost above the median
-# move for most of the universe.
+# move for most of the products.
 #
-# ### C.3 Mapping class
-#
-# `setup.yaml::mapping.class` ranks products by carry or momentum and holds both legs, and
+# ### C.3 Mapping class. `setup.yaml::mapping.class` ranks products by carry or momentum and holds both legs, and
 # shorting a future carries no borrow, so the short leg costs what the long leg costs.
 # Sizing is equal-risk because volatilities differ by an order of magnitude and notional
-# weighting would hand the book to energy and grains. A quintile of thirty holds six.
+# weighting would hand the book to energy and grains.
 
 # %% [markdown]
 # ## D. Walk-forward structure
 #
 # ### D.1 Effective sample size
 #
-# What evaluation spends is decision dates, not rows: one a week.
+# What evaluation spends is decision dates, not rows.
 
 # %%
 print(
@@ -326,8 +325,8 @@ print(
 # ### D.2 Fold demonstration
 #
 # `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone. Between each
-# training and validation block sits a purge gap the width of the label horizon, which stops
-# a label computed inside training from resolving inside validation. The figure draws those
+# training and validation block sits a purge gap the width of the label horizon, stopping a
+# label computed inside training from resolving inside validation. The figure draws those
 # boundaries rather than recomputing them, so it and the folds cannot disagree.
 
 # %%
@@ -351,8 +350,8 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# ## E. Derived artifacts. Nothing: exchange listings fix the universe, so no later stage
-# reads an eligibility file from here.
+# ## E. Derived artifacts. Nothing: listings fix the universe, so nothing downstream reads
+# an eligibility file from here.
 
 # %% [markdown]
 # ## F. Findings vs `setup.yaml`
@@ -361,9 +360,9 @@ plt.show()
 #
 # | Knob | Evidence | Revise it when |
 # |---|---|---|
-# | `universe.n_products` | B.2 breadth per decision date | breadth falls below the position count the sweep asks for on either leg |
+# | `universe.n_products` | B.2 breadth per decision date | breadth falls under the position count the sweep asks for on either leg |
 # | `decision.cadence` | B.3 exceedance, B.4 persistence | moves stop clearing the spread, or the slope decays inside one rebalancing interval |
-# | `costs.spread_ticks` | B.3 tick per product from `futures_specs.yaml` | the exchange changes a tick, or a product moves between the liquid and illiquid class |
+# | `costs.spread_ticks` | B.3 tick per product from `futures_specs.yaml` | the exchange changes a tick, or a product changes liquidity class |
 # | `evaluation.n_splits` | D.1 decision dates, D.2 boundaries | the folds no longer fit the development window |
 
 # %%
@@ -384,17 +383,18 @@ print(
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **Count the universe on the session the strategy acts on**, since anywhere-in-the-week
-#    hides the holiday dates where a two-sided book cannot be filled.
+# 1. **Count the universe on the session the strategy acts on.** Anywhere-in-the-week hides
+#    the holiday dates where a two-sided book cannot be filled.
 # 2. **Take the tick from the contract specification, not from the prices.** Several
 #    contracts settle on half-ticks, so the observed grid understates what you pay.
 # 3. **Scale moves by each product's own spread before comparing them to cost**, and
 #    compute a panel autocorrelation inside each entity, never across the stack.
+# 4. **Guard every denominator**: crude settled below zero in 2020, and a percentage change
+#    off a negative price is not a return.
 #
 # ### Known limitations
 #
-# - Cost here is the spread alone; the commission and roll slippage `setup.yaml::costs`
-#   declares need a notional and enter at the cost stage, which is also where a persistent
-#   carry reading is tested for being a profitable one.
+# - Cost here is the spread alone; commission and roll slippage need a notional and enter at
+#   the cost stage, which also tests whether a persistent carry reading is profitable.
 #
 # **Next**: labels at the declared horizons, built on this development window.
