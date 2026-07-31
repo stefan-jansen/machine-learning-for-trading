@@ -101,9 +101,9 @@ does not work on Intel Macs or in native Windows Python.
 > above, which is the one that is tested.
 
 > **macOS: which path depends on the chip.** On **Apple Silicon**, use the local `uv`
-> environment: it builds natively against the Xcode command-line tools, and the only reason to
-> add Docker is the twelve `ml4t-py312` notebooks, which have no arm64 build and run emulated.
-> On
+> environment: it builds natively against the Xcode command-line tools. Docker is worth adding
+> there only for the twelve `ml4t-py312` notebooks, which have no arm64 build, and for Chapter
+> 2's containerized database benchmarks. On
 > an **Intel Mac**, Docker is the only option, because PyTorch stopped publishing macOS x86_64
 > wheels and `uv sync` stops immediately with `Distribution torch==2.10.0 ... doesn't have a
 > source distribution or wheel for the current platform`. There is nothing to configure around
@@ -301,14 +301,15 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
 has an arm64 wheel or builds from source against the Xcode command-line tools, the same way it
 does on Linux, so Docker would add a 13 GB image and change nothing. Go to
 [Local Setup with uv](#local-setup-with-uv-alternative-to-docker); this is the path walked on
-real hardware before every release. The one exception is the twelve `ml4t-py312` notebooks, which
-have no arm64 build at all: they ship pre-executed, and
-[Py312 Image](#py312-image-specific-notebooks) covers running them under Rosetta if you want to,
-which is the only reason to install Docker Desktop on an Apple Silicon Mac.
+real hardware before every release. Two things still want Docker on that machine: the twelve
+`ml4t-py312` notebooks, which have no arm64 build at all and are covered under
+[Py312 Image](#py312-image-specific-notebooks), and Chapter 2's storage benchmarks, which compare
+databases that run as containers. Everything else is `uv`.
 
 ```bash
 xcode-select --install                        # compiler, if you do not have it already
 curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env                   # puts uv on PATH in this shell
 git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
 cd machine-learning-for-trading
 cp .env.example .env
@@ -453,8 +454,8 @@ Silicon setup above does not install:
    `py312-gpu` one: it reserves an NVIDIA device, which no Mac has, so all twelve notebooks go
    through the CPU-only service here.
 
-It runs at emulation speed. This is the only thing on an Apple Silicon Mac that Docker is needed
-for.
+It runs at emulation speed. Apart from Chapter 2's database benchmarks, this is the only thing
+on an Apple Silicon Mac that Docker is needed for.
 
 ---
 
@@ -573,6 +574,9 @@ Docker is recommended because it guarantees a consistent environment. But if you
 # Install uv — use this installer, not `pip install uv`. Most current systems either
 # ship no `pip` at all or refuse the install with `externally-managed-environment`.
 curl -LsSf https://astral.sh/uv/install.sh | sh
+# The installer puts uv in ~/.local/bin, which your current shell does not know about
+# yet. Load it now rather than opening a new terminal:
+source $HOME/.local/bin/env        # sh, bash, zsh;  env.fish for fish
 # Windows PowerShell: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # Clone and enter the repository (about 0.9 GB of history)
