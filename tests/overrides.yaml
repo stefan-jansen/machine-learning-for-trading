@@ -45,8 +45,6 @@
   timeout: 300
 02_financial_data_universe/18_data_management:
   timeout: 300
-02_financial_data_universe/18_storage_benchmark_file:
-  timeout: 300
 02_financial_data_universe/19_incremental_updates:
   timeout: 300
 02_financial_data_universe/20_storage_benchmark_file:
@@ -143,13 +141,6 @@
 05_synthetic_data/01_timegan:
   docker_env: py312
   gpu: true
-  parameters:
-    BATCH_SIZE: 32
-    EPOCHS: 1
-    HIDDEN_DIM: 8
-    NUM_LAYERS: 1
-    N_SAMPLES: 100
-    SEQ_LEN: 5
   timeout: 600
 05_synthetic_data/02_tailgan_tail_risk:
   gpu: true
@@ -212,7 +203,6 @@
   docker_env: py312
   gpu: true
   parameters:
-    BATCH_SIZE: 32
     EPOCHS: 5
     MAX_SYMBOLS: 5
   timeout: 300
@@ -227,16 +217,10 @@
 06_strategy_definition/03_case_study_overview:
   timeout: 180
 07_defining_the_learning_task/01_data_quality_diagnostics:
-  parameters:
-    START_DATE: '2023-01-01'
   timeout: 300
 07_defining_the_learning_task/02_preprocessing_pipeline:
-  parameters:
-    START_DATE: '2023-01-01'
   timeout: 300
 07_defining_the_learning_task/03_label_methods:
-  timeout: 300
-07_defining_the_learning_task/04_minimum_favorable_adverse_excursion:
   timeout: 300
 07_defining_the_learning_task/05_signal_evaluation:
   parameters:
@@ -247,24 +231,13 @@
 07_defining_the_learning_task/06_ic_inference:
   parameters:
     START_DATE: '2022-01-01'
-    n_boot: 500
   timeout: 300
 07_defining_the_learning_task/07_multiple_testing:
+  # N_RAD_ETF, not n_rad_etf: the lowercase name is assigned from this one
+  # inside `if min_len > 1:` and read only there, so papermill's value could
+  # never be the one used and the Rademacher run stayed at its 5000 default.
   parameters:
-    etf_start: '2020-01-01'
-    n_assets: 20
-    n_assets_zoo: 30
-    n_combos: 10
-    n_days: 252
-    n_factors: 30
-    n_factors_zoo: 50
-    n_periods: 120
-    n_periods_zoo: 252
-    n_rad_etf: 500
-    n_rad_sims: 500
-    n_strat_pbo: 8
-    n_strategies: 10
-    n_true: 3
+    N_RAD_ETF: 500
   timeout: 300
 07_defining_the_learning_task/08_causal_sanity_checks:
   parameters:
@@ -282,31 +255,17 @@
     START_DATE: '2023-01-01'
   timeout: 300
 08_financial_features/02_microstructure_features:
-  parameters:
-    N_TRADES: 50000
   timeout: 300
 08_financial_features/03_structural_cross_instrument_features:
-  parameters:
-    START_DATE: '2022-01-01'
   timeout: 300
 08_financial_features/04_fundamentals_macro_calendar:
-  parameters:
-    START_DATE: '2023-01-01'
   timeout: 300
-08_financial_features/05_factor_orthogonality:
-  parameters:
-    START_DATE: '2023-01-01'
-  timeout: 900
 08_financial_features/06_robustness_sensitivity:
   timeout: 300
 08_financial_features/07_event_studies:
   parameters:
     START_DATE: '2022-01-01'
   timeout: 300
-08_financial_features/08_feature_selection:
-  parameters:
-    START_DATE: '2023-01-01'
-  timeout: 900
 08_financial_features/case_study_feature_summary:
   timeout: 300
 09_model_based_features/01_visual_diagnostics:
@@ -352,10 +311,6 @@
   timeout: 300
 10_text_feature_engineering/01_word2vec_training:
   docker_env: py312
-  parameters:
-    EPOCHS: 2
-    MIN_COUNT: 3
-    WINDOW: 5
   requires_import: gensim
   reruns: 2
   timeout: 300
@@ -368,8 +323,6 @@
 10_text_feature_engineering/03_sentiment_evolution:
   docker_env: py312
   gpu: true
-  parameters:
-    MAX_SYMBOLS: 10
   requires_import: gensim
   timeout: 300
 10_text_feature_engineering/04_bert_finetuning:
@@ -399,7 +352,6 @@
   gpu: true
   parameters:
     MAX_SYMBOLS: 5
-    START_DATE: '2000-01-01'
   timeout: 600
 11_ml_pipeline/01_ols_inference:
   parameters:
@@ -474,29 +426,19 @@
 12_gradient_boosting/07_hpo_comparison:
   gpu: true
   long_running: true
-  parameters:
-    N_GRID_POINTS: 3
-    N_OPTUNA_TRIALS: 2
   timeout: 2400
 12_gradient_boosting/08_shap_analysis:
   env:
     MAX_SYMBOLS: 10
   timeout: 300
 12_gradient_boosting/09_xai_limitations:
-  parameters:
-    MAX_SYMBOLS: 10
   timeout: 300
 12_gradient_boosting/10_shap_nlp_sentiment:
   docker_env: py312
   gpu: true
-  parameters:
-    MAX_SYMBOLS: 5
-    SAMPLE_SIZE: 100
   timeout: 300
 12_gradient_boosting/11_conformal_gbm:
   gpu: true
-  parameters:
-    MAX_SYMBOLS: 3
   timeout: 900
 12_gradient_boosting/12_case_study_insights:
   timeout: 300
@@ -632,9 +574,6 @@
     N_PERIODS: 200
   timeout: 240
 14_latent_factors/05_rp_pca:
-  parameters:
-    N_ASSETS: 50
-    N_PERIODS: 200
   timeout: 180
 14_latent_factors/06_conditional_autoencoder:
   docker_env: py312
@@ -723,7 +662,6 @@
   parameters:
     N_DATASETS: 50
     N_ESTIMATORS: 50
-    N_RF_ESTIMATORS: 25
   timeout: 900
 15_causal_estimation/10_case_study_insights:
   skip: true
@@ -744,66 +682,24 @@
   timeout: 300
 16_strategy_simulation/05_stateful_strategies:
   parameters:
-    N_ASSETS: 10
-    N_DAYS: 252
     SEED: 42
   timeout: 300
 16_strategy_simulation/06_framework_parity:
-  parameters:
-    N_ASSETS: 5
-    N_DAYS: 252
-    SEED: 42
   timeout: 300
 16_strategy_simulation/07_engine_divergence_anatomy:
   timeout: 300
-16_strategy_simulation/08_backtest_statistical_inference:
-  parameters:
-    N_ASSETS: 10
-    N_PERIODS: 252
-    N_SIMULATIONS: 200
-  timeout: 300
 16_strategy_simulation/08_signal_method_comparison:
-  timeout: 300
-16_strategy_simulation/09_backtesting_pitfalls:
-  parameters:
-    N_BARS: 252
-    N_SIMULATIONS: 200
   timeout: 300
 16_strategy_simulation/09_performance_reporting:
   timeout: 300
 16_strategy_simulation/10_regime_backtest_analysis:
   timeout: 300
-16_strategy_simulation/10_transaction_costs:
-  parameters:
-    N_ASSETS: 10
-    N_DAYS: 252
-  timeout: 300
-16_strategy_simulation/11_look_ahead_bias:
-  parameters:
-    N_ASSETS: 10
-    N_PERIODS: 252
-    N_SIMULATIONS: 200
-  timeout: 300
 16_strategy_simulation/11_sharpe_ratio_inference:
   timeout: 180
 16_strategy_simulation/12_dsr_validation:
   timeout: 300
-16_strategy_simulation/12_walk_forward_optimization:
-  parameters:
-    N_ASSETS: 10
-    N_LOOKBACK_PERIODS: 3
-    N_PERIODS: 500
-  timeout: 300
-16_strategy_simulation/13_backtesting_protocols:
-  parameters:
-    N_BARS: 252
-    N_LOOKBACK: 126
-    N_SIMULATIONS: 200
-  timeout: 300
 16_strategy_simulation/13_ras_protocol:
   timeout: 180
-16_strategy_simulation/14_case_study_insights:
-  timeout: 300
 16_strategy_simulation/15_lean_engine_parity:
   timeout: 300
 16_strategy_simulation/16_case_study_lean_parity:
@@ -813,38 +709,16 @@
 16_strategy_simulation/18_vectorbt_engine_parity:
   timeout: 300
 17_portfolio_construction/01_portfolio_metrics:
-  parameters:
-    MAX_SYMBOLS: 10
-  timeout: 300
-17_portfolio_construction/02_markowitz_mvo:
-  parameters:
-    MAX_SYMBOLS: 10
   timeout: 300
 17_portfolio_construction/02_mean_variance_optimization:
   timeout: 300
 17_portfolio_construction/03_robust_optimization:
-  parameters:
-    MAX_SYMBOLS: 10
-    N_PORTFOLIOS: 500
-    N_SIMULATIONS: 200
-  timeout: 300
-17_portfolio_construction/04_black_litterman:
-  parameters:
-    MAX_SYMBOLS: 10
   timeout: 300
 17_portfolio_construction/04_kelly_criterion:
   timeout: 180
 17_portfolio_construction/05_factor_allocation_evidence:
   timeout: 600
-17_portfolio_construction/05_risk_parity:
-  parameters:
-    MAX_SYMBOLS: 10
-  timeout: 300
 17_portfolio_construction/06_hierarchical_risk_parity:
-  timeout: 300
-17_portfolio_construction/06_regime_based_allocation:
-  parameters:
-    MAX_SYMBOLS: 10
   timeout: 300
 17_portfolio_construction/07_conformal_position_sizing:
   parameters:
@@ -853,32 +727,10 @@
     TOP_K_CME: 5
     TOP_K_ETF: 5
   timeout: 300
-17_portfolio_construction/07_shrinkage_estimators:
-  parameters:
-    MAX_SYMBOLS: 10
-  timeout: 300
 17_portfolio_construction/08_library_comparison:
   timeout: 600
-17_portfolio_construction/08_signal_combination:
-  parameters:
-    MAX_SYMBOLS: 10
-  timeout: 300
 17_portfolio_construction/09_allocator_comparison:
   timeout: 600
-17_portfolio_construction/09_portfolio_rebalancing:
-  parameters:
-    MAX_SYMBOLS: 10
-    N_SIMULATIONS: 200
-  timeout: 300
-17_portfolio_construction/10_constraints_real_world:
-  parameters:
-    MAX_SYMBOLS: 10
-  timeout: 300
-17_portfolio_construction/11_deepm_basics:
-  parameters:
-    MAX_SYMBOLS: 10
-    N_EPOCHS: 10
-  timeout: 300
 17_portfolio_construction/11_dl_portfolio_allocation:
   gpu: true
   parameters:
@@ -904,86 +756,36 @@
   parameters:
     MAX_SYMBOLS: 10
   timeout: 300
-18_transaction_costs/03_impact_models:
-  parameters:
-    MAX_SYMBOLS: 10
-  timeout: 300
 18_transaction_costs/03_market_impact_calibration:
   parameters:
     MAX_SYMBOLS: 10
     NQ100_SYMBOLS: 5
   timeout: 300
-18_transaction_costs/04_execution_algorithms:
-  parameters:
-    N_DAYS: 20
-    N_SIMULATIONS: 200
-  timeout: 300
 18_transaction_costs/04_vwap_twap_execution:
   timeout: 300
 18_transaction_costs/05_almgren_chriss_optimal_execution:
   timeout: 300
-18_transaction_costs/05_nasdaq100_microstructure_validation:
-  parameters:
-    MAX_SYMBOLS: 5
-  timeout: 300
-18_transaction_costs/06_cost_adjusted_backtesting:
-  parameters:
-    MAX_SYMBOLS: 10
-  timeout: 300
 18_transaction_costs/06_ml4t_execution_demo:
-  timeout: 300
-18_transaction_costs/07_cost_aware_portfolio:
-  parameters:
-    MAX_SYMBOLS: 10
   timeout: 300
 18_transaction_costs/07_ml4t_volume_participation:
   timeout: 300
 18_transaction_costs/08_ml_dynamic_execution:
   timeout: 300
-18_transaction_costs/08_turnover_analysis:
-  parameters:
-    MAX_SYMBOLS: 10
-  timeout: 300
-18_transaction_costs/09_cost_sweep:
-  parameters:
-    MAX_SYMBOLS: 10
-  timeout: 600
 18_transaction_costs/09_frequency_tradeoff:
   timeout: 180
 18_transaction_costs/10_gross_vs_net_performance:
   timeout: 180
-18_transaction_costs/10_optimal_execution:
-  parameters:
-    N_SIMULATIONS: 200
-  timeout: 300
 18_transaction_costs/11_cost_cliff:
   timeout: 180
-18_transaction_costs/11_market_regime_costs:
-  parameters:
-    MAX_SYMBOLS: 10
-  timeout: 300
 18_transaction_costs/12_commission_slippage_comparison:
   timeout: 180
-18_transaction_costs/12_cost_benchmarking:
-  parameters:
-    MAX_SYMBOLS: 10
-  timeout: 300
 19_risk_management/01_var_cvar:
   timeout: 300
 19_risk_management/02_exit_strategies:
   timeout: 300
 19_risk_management/03_position_sizing_mae_mfe:
   timeout: 300
-19_risk_management/04_drawdown_analysis:
-  parameters:
-    MAX_SYMBOLS: 10
-  timeout: 300
 19_risk_management/04_factor_exposure:
-  timeout: 300
-19_risk_management/05_stress_correlation:
-  parameters:
-    MAX_SYMBOLS: 10
-    N_SIMULATIONS: 200
   timeout: 300
 19_risk_management/05_trade_shap_diagnostics:
   timeout: 300
@@ -1003,24 +805,12 @@
   timeout: 600
 19_risk_management/10_ml4t_backtest_risk_demo:
   timeout: 300
-19_risk_management/10_risk_sweep:
-  parameters:
-    MAX_SYMBOLS: 10
-    N_SIMULATIONS: 200
-  timeout: 600
-19_risk_management/11_case_study_diagnostics:
-  parameters:
-    MAX_SYMBOLS: 10
-  timeout: 300
 19_risk_management/11_systematic_risk_sweep:
-  parameters:
-    MAX_RISK_VARIANTS: 3
   timeout: 900
 20_strategy_synthesis/00_holdout_predictions:
   skip_reason: Requires trained model registry (not available in CI test data)
 20_strategy_synthesis/01_aggregate_synthesis:
   parameters:
-    MAX_SYMBOLS: 10
     # Isolated test registry has no nasdaq out-of-band cost-feasible carrier,
     # so its spine can't resolve; report cost/risk N/A instead of raising.
     ALLOW_MISSING_SPINE: true
@@ -1028,12 +818,8 @@
 20_strategy_synthesis/02_feature_evaluation:
   timeout: 300
 20_strategy_synthesis/03_signal_quality:
-  parameters:
-    MAX_SYMBOLS: 10
   timeout: 600
 20_strategy_synthesis/04_signal_to_strategy:
-  parameters:
-    MAX_SYMBOLS: 10
   timeout: 600
 20_strategy_synthesis/05_portfolio_allocation:
   parameters:
@@ -1149,37 +935,24 @@
   docker_env: ml4t+neo4j+gpu
   gpu: true
   parameters:
-    MAX_ENTITIES: 20
     MAX_FILINGS: 5
   timeout: 600
 23_knowledge_graphs/07_dynamic_kg_temporal:
   docker_env: ml4t+neo4j
-  parameters:
-    MAX_INSTITUTIONS: 10
-    MAX_QUARTERS: 2
   skip: true
   skip_reason: Requires 08_8k_event_extraction with GPU to generate temporal edges
   tier: on_demand
   timeout: 600
 23_knowledge_graphs/06_gnn_feature_engineering:
   gpu: true
-  parameters:
-    N_EPOCHS: 2
   timeout: 600
 23_knowledge_graphs/03_graph_rag_qa:
-  parameters:
-    MAX_QUERIES: 5
   timeout: 300
 23_knowledge_graphs/05_institutional_holdings_kg:
   docker_env: ml4t+neo4j
-  parameters:
-    MAX_INSTITUTIONS: 10
-    NUM_QUARTERS: 2
   timeout: 600
 23_knowledge_graphs/09_knowledge_graph_features:
   docker_env: ml4t+neo4j
-  parameters:
-    MAX_SYMBOLS: 10
   skip: true
   skip_reason: Requires 02_supply_chain_kg_construction with GPU to populate Neo4j
   tier: on_demand
@@ -1207,12 +980,9 @@
   timeout: 300
 24_autonomous_agents/02_tool_contracts:
   parameters:
-    LLM_PROVIDER: mock
     MAX_RESULTS: 3
   timeout: 300
 24_autonomous_agents/03_state_and_memory:
-  parameters:
-    MAX_EVIDENCE_ITEMS: 5
   timeout: 300
 24_autonomous_agents/04_research_agent:
   parameters:
@@ -1221,8 +991,6 @@
     MAX_STEPS: 3
   timeout: 300
 24_autonomous_agents/05_aggregation_math:
-  parameters:
-    N_FORECASTERS: 5
   timeout: 300
 24_autonomous_agents/06_multi_agent_research:
   parameters:
@@ -1242,17 +1010,10 @@
   parameters:
     DEBATE_ROUNDS: 2
     LLM_PROVIDER: mock
-    MAX_QUESTIONS: 2
-    MAX_SEARCH_RESULTS: 3
     MAX_STEPS: 3
     N_AGENTS: 3
   timeout: 300
 24_autonomous_agents/09_evaluation_and_governance:
-  parameters:
-    DEBATE_ROUNDS: 2
-    LLM_PROVIDER: mock
-    MAX_STEPS: 3
-    N_AGENTS: 3
   timeout: 300
 24_autonomous_agents/10_framework_comparison:
   parameters:
@@ -1305,9 +1066,6 @@
 25_live_trading/08_pipeline_verification:
   timeout: 360
 25_live_trading/09_crypto_funding_deployment_loop:
-  parameters:
-    EVALUATION_INTERVAL_SECONDS: 1
-    MAX_ITERATIONS: 1
   skip: true
   skip_reason: Requires OKX SDK + live exchange credentials (not in CI image)
   tier: weekly
@@ -1315,9 +1073,6 @@
 25_live_trading/10_safety_risk_demo:
   timeout: 180
 25_live_trading/11_fx_deployment_loop:
-  parameters:
-    EVALUATION_INTERVAL_SECONDS: 1
-    MAX_ITERATIONS: 1
   skip: true
   skip_reason: Requires running IB Gateway (not available in CI)
   tier: weekly
@@ -1363,34 +1118,13 @@
 case_studies/cme_futures/01_feasibility_analysis:
   timeout: 180
 case_studies/cme_futures/02_labels:
-  parameters:
-    # MAX_PRODUCTS stays unset: the CI fixture is already a reduced universe, and
-    # thinning the cross-section starves the rank correlation in section G.
-    START_DATE: '2000-01-01'
   timeout: 120
 case_studies/cme_futures/03_financial_features:
-  parameters:
-    GARCH_MIN_OBS: 50
-    HMM_N_RESTARTS: 1
-    MAX_SAMPLE_ASSETS: 3
-    MAX_SYMBOLS: 5
-    MIN_OBS: 10
-    MIN_TRAIN_BARS: 10
-    N_RESTARTS: 1
-    START_DATE: '2000-01-01'
   timeout: 120
 case_studies/cme_futures/04_model_based_features:
   parameters:
     FFT_WINDOW: 126
-    GARCH_MIN_OBS: 50
-    HMM_N_RESTARTS: 1
     MAX_PRODUCTS: 3
-    MAX_SAMPLE_ASSETS: 3
-    MAX_SYMBOLS: 5
-    MIN_OBS: 10
-    MIN_TRAIN_BARS: 10
-    N_RESTARTS: 1
-    START_DATE: '2000-01-01'
   skip: true
   skip_reason: ARIMA/HMM/FFT cells across multiple products and folds exceed 900s on the slower pymc 5.28 / pytensor 2.38
     / numpy 2.3 stack. All downstream notebooks consume the pre-seeded test-data/intermediates/cme_futures/features and pass;
@@ -1409,7 +1143,6 @@ case_studies/cme_futures/07_gbm:
   parameters:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-    NUM_BOOST_ROUND: 5
   timeout: 180
 case_studies/cme_futures/08_tabular_dl:
   parameters:
@@ -1427,12 +1160,6 @@ case_studies/cme_futures/09_dl_lstm:
     N_EPOCHS: 1
   timeout: 180
 case_studies/cme_futures/10_latent_factors:
-  parameters:
-    FORCE_RETRAIN: true
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-    N_FACTORS: 2
   timeout: 180
 case_studies/cme_futures/10b_stochastic_discount_factor:
   skip: true
@@ -1452,17 +1179,17 @@ case_studies/cme_futures/13_backtest:
     TOP_K: 2
     TOP_N_PREDICTIONS: 2
   timeout: 120
-case_studies/cme_futures/14_portfolio_management: &id001
+case_studies/cme_futures/14_portfolio_management:
   parameters:
     MAX_SYMBOLS: 5
     TOP_N_PREDICTIONS: 2
   timeout: 300
-case_studies/cme_futures/15_costs: &id002
+case_studies/cme_futures/15_costs:
   parameters:
     MAX_SYMBOLS: 5
     TOP_N_COMBOS: 1
   timeout: 600
-case_studies/cme_futures/16_risk_management: &id003
+case_studies/cme_futures/16_risk_management:
   parameters:
     MAX_RISK_VARIANTS: 3
     MAX_SYMBOLS: 5
@@ -1483,26 +1210,12 @@ case_studies/crypto_perps_funding/02_labels:
     START_DATE: '2000-01-01'
   timeout: 120
 case_studies/crypto_perps_funding/03_financial_features:
-  parameters:
-    GARCH_MIN_OBS: 50
-    HMM_N_RESTARTS: 1
-    MAX_SAMPLE_ASSETS: 3
-    MAX_SYMBOLS: 5
-    MIN_OBS: 10
-    MIN_TRAIN_BARS: 10
-    N_RESTARTS: 1
-    START_DATE: '2000-01-01'
   timeout: 120
 case_studies/crypto_perps_funding/04_model_based_features:
   parameters:
-    GARCH_MIN_OBS: 50
     HMM_N_RESTARTS: 1
-    MAX_SAMPLE_ASSETS: 3
     MAX_SYMBOLS: 5
-    MIN_OBS: 10
     MIN_TRAIN_BARS: 10
-    N_RESTARTS: 1
-    START_DATE: '2000-01-01'
   timeout: 300
 case_studies/crypto_perps_funding/05_evaluation:
   parameters:
@@ -1517,7 +1230,6 @@ case_studies/crypto_perps_funding/07_gbm:
   parameters:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-    NUM_BOOST_ROUND: 5
   timeout: 180
 case_studies/crypto_perps_funding/08_tabular_dl:
   parameters:
@@ -1553,21 +1265,19 @@ case_studies/crypto_perps_funding/11_causal_dml:
 case_studies/crypto_perps_funding/12_model_analysis:
   timeout: 300
 case_studies/crypto_perps_funding/13_backtest:
+  timeout: 600
+case_studies/crypto_perps_funding/14_portfolio_management:
   parameters:
     MAX_SYMBOLS: 5
-    TOP_K: 2
-  timeout: 600
-case_studies/crypto_perps_funding/14_portfolio_management: *id001
+  timeout: 300
 case_studies/crypto_perps_funding/15_costs:
   parameters:
     MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
   timeout: 600
 case_studies/crypto_perps_funding/16_risk_management:
   parameters:
     MAX_RISK_VARIANTS: 3
     MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
   timeout: 600
 case_studies/crypto_perps_funding/17_strategy_analysis:
 case_studies/etfs/01_feasibility_analysis:
@@ -1587,26 +1297,12 @@ case_studies/etfs/02_labels:
     START_DATE: '2000-01-01'
   timeout: 120
 case_studies/etfs/03_financial_features:
-  parameters:
-    GARCH_MIN_OBS: 50
-    HMM_N_RESTARTS: 1
-    MAX_SAMPLE_ASSETS: 3
-    MAX_SYMBOLS: 5
-    MIN_OBS: 10
-    MIN_TRAIN_BARS: 10
-    N_RESTARTS: 1
-    START_DATE: '2000-01-01'
   timeout: 300
 case_studies/etfs/04_model_based_features:
   parameters:
     GARCH_MIN_OBS: 50
-    HMM_N_RESTARTS: 1
-    MAX_SAMPLE_ASSETS: 3
     MAX_SYMBOLS: 5
-    MIN_OBS: 10
-    MIN_TRAIN_BARS: 10
     N_RESTARTS: 1
-    START_DATE: '2000-01-01'
   timeout: 300
 case_studies/etfs/05_evaluation:
   parameters:
@@ -1621,7 +1317,6 @@ case_studies/etfs/07_gbm:
   parameters:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-    NUM_BOOST_ROUND: 5
   timeout: 180
 case_studies/etfs/08_tabular_dl:
   parameters:
@@ -1669,12 +1364,6 @@ case_studies/etfs/11b_ipca:
   timeout: 300
 case_studies/etfs/11_latent_factors:
   gpu: true
-  parameters:
-    FORCE_RETRAIN: true
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 2
-    N_FACTORS: 2
   timeout: 900
 case_studies/etfs/11c_conditional_autoencoder:
   skip: true
@@ -1718,33 +1407,17 @@ case_studies/etfs/18_strategy_analysis:
 case_studies/fx_pairs/01_feasibility_analysis:
   timeout: 120
 case_studies/fx_pairs/02_labels:
-  parameters:
-    MAX_SYMBOLS: 5
-    START_DATE: '2000-01-01'
   timeout: 120
 case_studies/fx_pairs/03_financial_features:
   parameters:
-    GARCH_MIN_OBS: 50
-    HMM_N_RESTARTS: 1
-    MAX_SAMPLE_ASSETS: 3
-    MAX_SYMBOLS: 5
-    MIN_OBS: 10
-    MIN_TRAIN_BARS: 10
-    N_RESTARTS: 1
     START_DATE: '2000-01-01'
   timeout: 300
 case_studies/fx_pairs/04_model_based_features:
   parameters:
-    GARCH_MIN_OBS: 50
-    HMM_N_RESTARTS: 1
     KALMAN_MAXITER: 50
     MAX_FOLDS: 2
-    MAX_SAMPLE_ASSETS: 3
     MAX_SYMBOLS: 5
-    MIN_OBS: 10
-    MIN_TRAIN_BARS: 10
     N_HMM_RESTARTS: 3
-    N_RESTARTS: 1
     START_DATE: '2000-01-01'
   timeout: 300
 case_studies/fx_pairs/05_evaluation:
@@ -1760,7 +1433,6 @@ case_studies/fx_pairs/07_gbm:
   parameters:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-    NUM_BOOST_ROUND: 5
   timeout: 180
 case_studies/fx_pairs/08_tabular_dl:
   parameters:
@@ -1799,9 +1471,22 @@ case_studies/fx_pairs/13_backtest:
     MAX_SYMBOLS: 5
     TOP_K: 2
   timeout: 600
-case_studies/fx_pairs/14_portfolio_management: *id001
-case_studies/fx_pairs/15_costs: *id002
-case_studies/fx_pairs/16_risk_management: *id003
+case_studies/fx_pairs/14_portfolio_management:
+  parameters:
+    MAX_SYMBOLS: 5
+    TOP_N_PREDICTIONS: 2
+  timeout: 300
+case_studies/fx_pairs/15_costs:
+  parameters:
+    MAX_SYMBOLS: 5
+    TOP_N_COMBOS: 1
+  timeout: 600
+case_studies/fx_pairs/16_risk_management:
+  parameters:
+    MAX_RISK_VARIANTS: 3
+    MAX_SYMBOLS: 5
+    TOP_N_COMBOS: 1
+  timeout: 600
 case_studies/fx_pairs/17_strategy_analysis:
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
   parameters:
@@ -1814,13 +1499,6 @@ case_studies/nasdaq100_microstructure/02_labels:
   timeout: 120
 case_studies/nasdaq100_microstructure/03_financial_features:
   parameters:
-    GARCH_MIN_OBS: 50
-    HMM_N_RESTARTS: 1
-    MAX_SAMPLE_ASSETS: 3
-    MAX_SYMBOLS: 5
-    MIN_OBS: 10
-    MIN_TRAIN_BARS: 10
-    N_RESTARTS: 1
     START_DATE: '2000-01-01'
   timeout: 120
 case_studies/nasdaq100_microstructure/04_model_based_features:
@@ -1847,7 +1525,6 @@ case_studies/nasdaq100_microstructure/07_gbm:
   parameters:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-    NUM_BOOST_ROUND: 5
   timeout: 600
 case_studies/nasdaq100_microstructure/08_dl_nlinear:
   parameters:
@@ -1903,44 +1580,33 @@ case_studies/nasdaq100_microstructure/14_backtest:
     TOP_K: 2
     TOP_N_PREDICTIONS: 2
   timeout: 180
-case_studies/nasdaq100_microstructure/15_portfolio_management: *id001
+case_studies/nasdaq100_microstructure/15_portfolio_management:
+  parameters:
+    MAX_SYMBOLS: 5
+    TOP_N_PREDICTIONS: 2
+  timeout: 300
 case_studies/nasdaq100_microstructure/16_costs:
   timeout: 600
-case_studies/nasdaq100_microstructure/17_risk_management: *id003
+case_studies/nasdaq100_microstructure/17_risk_management:
+  parameters:
+    MAX_RISK_VARIANTS: 3
+    MAX_SYMBOLS: 5
+    TOP_N_COMBOS: 1
+  timeout: 600
 case_studies/nasdaq100_microstructure/18_strategy_analysis:
   skip: true
   skip_reason: "Analyzes the cost-feasible ensemble carrier, which is registered out-of-band (session_6/7 drivers) and is not reproduced by the in-notebook test sweep, so an isolated test registry has no carrier rows. Runs clean in production."
-  parameters:
-    MAX_SYMBOLS: 5
   timeout: 180
 case_studies/sp500_equity_option_analytics/01_feasibility_analysis:
   timeout: 120
 case_studies/sp500_equity_option_analytics/02_labels:
-  parameters:
-    MAX_SYMBOLS: 5
-    START_DATE: '2000-01-01'
   timeout: 120
 case_studies/sp500_equity_option_analytics/03_financial_features:
-  parameters:
-    GARCH_MIN_OBS: 50
-    HMM_N_RESTARTS: 1
-    MAX_SAMPLE_ASSETS: 3
-    MAX_SYMBOLS: 5
-    MIN_OBS: 10
-    MIN_TRAIN_BARS: 10
-    N_RESTARTS: 1
-    START_DATE: '2000-01-01'
   timeout: 120
 case_studies/sp500_equity_option_analytics/04_model_based_features:
-  parameters:
-    GARCH_MIN_OBS: 50
-    HMM_N_RESTARTS: 1
-    MAX_SAMPLE_ASSETS: 3
-    MAX_SYMBOLS: 5
-    MIN_OBS: 10
-    MIN_TRAIN_BARS: 10
-    N_RESTARTS: 1
-    START_DATE: '2000-01-01'
+  # MIN_OBS: 10 removed - the notebook repeats `MIN_OBS = 252` below the
+  # parameters cell, so the injected value was gone before any function
+  # that reads it could run.
   timeout: 300
 case_studies/sp500_equity_option_analytics/05_evaluation:
   parameters:
@@ -1962,7 +1628,6 @@ case_studies/sp500_equity_option_analytics/07_gbm:
   parameters:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-    NUM_BOOST_ROUND: 5
   timeout: 180
 case_studies/sp500_equity_option_analytics/08_tabular_dl:
   parameters:
@@ -1988,12 +1653,6 @@ case_studies/sp500_equity_option_analytics/10_dl_patchtst:
     N_EPOCHS: 1
   timeout: 180
 case_studies/sp500_equity_option_analytics/11_latent_factors:
-  parameters:
-    FORCE_RETRAIN: true
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-    N_FACTORS: 2
   timeout: 600
 case_studies/sp500_equity_option_analytics/11a_pca: {}
 case_studies/sp500_equity_option_analytics/11b_ipca:
@@ -2061,23 +1720,28 @@ case_studies/sp500_equity_option_analytics/14_backtest:
     MAX_SYMBOLS: 3
     TOP_K: 1
   timeout: 600
-case_studies/sp500_equity_option_analytics/15_portfolio_management: *id001
-case_studies/sp500_equity_option_analytics/16_costs: *id002
-case_studies/sp500_equity_option_analytics/17_risk_management: *id003
+case_studies/sp500_equity_option_analytics/15_portfolio_management:
+  parameters:
+    MAX_SYMBOLS: 5
+    TOP_N_PREDICTIONS: 2
+  timeout: 300
+case_studies/sp500_equity_option_analytics/16_costs:
+  parameters:
+    MAX_SYMBOLS: 5
+    TOP_N_COMBOS: 1
+  timeout: 600
+case_studies/sp500_equity_option_analytics/17_risk_management:
+  parameters:
+    MAX_RISK_VARIANTS: 3
+    MAX_SYMBOLS: 5
+    TOP_N_COMBOS: 1
+  timeout: 600
 case_studies/sp500_equity_option_analytics/18_strategy_analysis:
 case_studies/sp500_options/01_feasibility_analysis:
   timeout: 120
 case_studies/sp500_options/02_labels:
   timeout: 300
 case_studies/sp500_options/03_financial_features:
-  parameters:
-    GARCH_MIN_OBS: 50
-    HMM_N_RESTARTS: 1
-    MAX_SAMPLE_ASSETS: 3
-    MAX_SYMBOLS: 5
-    MIN_OBS: 10
-    MIN_TRAIN_BARS: 10
-    N_RESTARTS: 1
   timeout: 120
 case_studies/sp500_options/04_model_based_features:
   # Skipped in CI (gpu: true), so this timeout bounds only fixture generation via
@@ -2110,15 +1774,11 @@ case_studies/sp500_options/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/sp500_options/06_linear:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 120
 case_studies/sp500_options/07_gbm:
   parameters:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-    NUM_BOOST_ROUND: 5
   timeout: 180
 case_studies/sp500_options/08_tabular_dl:
   parameters:
@@ -2177,30 +1837,16 @@ case_studies/us_equities_panel/01_feasibility_analysis:
   timeout: 120
 case_studies/us_equities_panel/02_labels:
   parameters:
-    MAX_SYMBOLS: 5
     START_DATE: '2000-01-01'
   timeout: 120
 case_studies/us_equities_panel/03_financial_features:
   parameters:
-    GARCH_MIN_OBS: 50
-    HMM_N_RESTARTS: 1
-    MAX_SAMPLE_ASSETS: 3
-    MAX_SYMBOLS: 5
-    MIN_OBS: 10
-    MIN_TRAIN_BARS: 10
-    N_RESTARTS: 1
     START_DATE: '2000-01-01'
   timeout: 600
 case_studies/us_equities_panel/04_model_based_features:
-  parameters:
-    GARCH_MIN_OBS: 50
-    HMM_N_RESTARTS: 1
-    MAX_SAMPLE_ASSETS: 3
-    MAX_SYMBOLS: 5
-    MIN_OBS: 10
-    MIN_TRAIN_BARS: 10
-    N_RESTARTS: 1
-    START_DATE: '2000-01-01'
+  # GARCH_MIN_OBS: 50 removed - the notebook has no parameters cell, so the
+  # injected cell goes to the top and `GARCH_MIN_OBS = 504` on line 100
+  # overwrites it before any function that reads it can run.
   timeout: 300
 case_studies/us_equities_panel/05_evaluation:
   parameters:
@@ -2215,7 +1861,6 @@ case_studies/us_equities_panel/07_gbm:
   parameters:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-    NUM_BOOST_ROUND: 5
   timeout: 180
 case_studies/us_equities_panel/08_tabular_dl:
   parameters:
@@ -2270,12 +1915,6 @@ case_studies/us_equities_panel/12_dl_weekly:
     N_EPOCHS: 1
   timeout: 600
 case_studies/us_equities_panel/13_latent_factors:
-  parameters:
-    FORCE_RETRAIN: true
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-    N_FACTORS: 2
   timeout: 600
 case_studies/us_equities_panel/13a_pca:
   skip: true
@@ -2297,30 +1936,29 @@ case_studies/us_equities_panel/16_backtest:
     MAX_SYMBOLS: 5
     TOP_K: 2
   timeout: 600
-case_studies/us_equities_panel/17_portfolio_management: *id001
-case_studies/us_equities_panel/18_costs: *id002
-case_studies/us_equities_panel/19_risk_management: *id003
-case_studies/us_equities_panel/20_strategy_analysis:
+case_studies/us_equities_panel/17_portfolio_management:
   parameters:
     MAX_SYMBOLS: 5
+    TOP_N_PREDICTIONS: 2
+  timeout: 300
+case_studies/us_equities_panel/18_costs:
+  parameters:
+    MAX_SYMBOLS: 5
+    TOP_N_COMBOS: 1
+  timeout: 600
+case_studies/us_equities_panel/19_risk_management:
+  parameters:
+    MAX_RISK_VARIANTS: 3
+    MAX_SYMBOLS: 5
+    TOP_N_COMBOS: 1
+  timeout: 600
+case_studies/us_equities_panel/20_strategy_analysis:
   timeout: 600
 case_studies/us_firm_characteristics/01_feasibility_analysis:
   timeout: 120
 case_studies/us_firm_characteristics/02_labels:
-  parameters:
-    MAX_SYMBOLS: 5
-    START_DATE: '2000-01-01'
   timeout: 120
 case_studies/us_firm_characteristics/03_financial_features:
-  parameters:
-    GARCH_MIN_OBS: 50
-    HMM_N_RESTARTS: 1
-    MAX_SAMPLE_ASSETS: 3
-    MAX_SYMBOLS: 5
-    MIN_OBS: 10
-    MIN_TRAIN_BARS: 10
-    N_RESTARTS: 1
-    START_DATE: '2000-01-01'
   timeout: 120
 case_studies/us_firm_characteristics/04_evaluation:
   parameters:
@@ -2335,7 +1973,6 @@ case_studies/us_firm_characteristics/06_gbm:
   parameters:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-    NUM_BOOST_ROUND: 5
   timeout: 180
 case_studies/us_firm_characteristics/07_tabular_dl:
   # setup.yaml pins modeling.tabular_dl.device: cuda, and resolve_torch_device
@@ -2352,12 +1989,6 @@ case_studies/us_firm_characteristics/07_tabular_dl:
   timeout: 180
 case_studies/us_firm_characteristics/08_latent_factors:
   gpu: true
-  parameters:
-    FORCE_RETRAIN: true
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 2
-    N_FACTORS: 2
   timeout: 300
 # 08a and 08b are the split successors of 08_latent_factors above, and the entry
 # never followed the split: neither had one, so both ran unreduced and unmarked and
@@ -2411,16 +2042,25 @@ case_studies/us_firm_characteristics/11_backtest:
     MAX_SYMBOLS: 5
     TOP_K: 2
   timeout: 120
-case_studies/us_firm_characteristics/12_portfolio_management: *id001
-case_studies/us_firm_characteristics/13_costs: *id002
-case_studies/us_firm_characteristics/14_risk_management: *id003
+case_studies/us_firm_characteristics/12_portfolio_management:
+  parameters:
+    MAX_SYMBOLS: 5
+    TOP_N_PREDICTIONS: 2
+  timeout: 300
+case_studies/us_firm_characteristics/13_costs:
+  parameters:
+    MAX_SYMBOLS: 5
+    TOP_N_COMBOS: 1
+  timeout: 600
+case_studies/us_firm_characteristics/14_risk_management:
+  parameters:
+    MAX_RISK_VARIANTS: 3
+    MAX_SYMBOLS: 5
+    TOP_N_COMBOS: 1
+  timeout: 600
 case_studies/us_firm_characteristics/15_strategy_analysis:
   skip: true
   skip_reason: "Test-data load_firm_characteristics() returns 80 firms/day; the NB's liquidity-profile section requires >=100 firms/day. Needs expanded test-data fixture (>=100 firms) before this NB can run under MAX_SYMBOLS=5."
-data/crypto/dataset_card:
-  skip: true
-  skip_reason: Data download notebook (requires API access)
-  tier: weekly
 data/equities/market/microstructure/dataset_card:
   timeout: 120
 data/equities/market/us_equities/dataset_card:
@@ -2429,7 +2069,14 @@ data/equities/market/us_equities/dataset_card:
   tier: weekly
 data/factors/dataset_card:
   timeout: 120
-data/fx/dataset_card:
-  skip: true
-  skip_reason: Data download notebook (requires API access)
+data/fx/market/dataset_card:
+  # The unconditional dry run at the bottom calls download_fx_data, which raises
+  # before it reaches the dry_run branch when OANDA_API_KEY is unset. The entry
+  # that was meant to hold this back named data/fx/dataset_card, one directory
+  # above the notebook, so it matched nothing and the notebook ran every commit.
+  # It stays skipped in CI on purpose: OANDA is a billed API, and the weekly
+  # workflow's no-spend policy leaves those keys unset so their tests skip
+  # rather than charge. The gate is what makes the skip explicit and local.
+  requires_env: OANDA_API_KEY
   tier: weekly
+  timeout: 120

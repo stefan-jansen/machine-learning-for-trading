@@ -170,18 +170,17 @@ The test runner (`scripts/run_all_tests.sh`) iterates over environments, running
 Per-notebook configuration lives in `tests/overrides.yaml`:
 
 ```yaml
-05_synthetic_data/01_timegan:
-  docker_env: gpu          # Runs only in GPU environment
-  timeout: 600             # Max seconds before test is killed
+11_ml_pipeline/01_ols_inference:
+  timeout: 300             # Max seconds before test is killed
   parameters:              # Papermill parameter overrides
-    TRAIN_STEPS: 100
-    BATCH_SIZE: 32
+    MAX_SYMBOLS: 10
+    MAX_TRAIN_ROWS: 5000
 
 case_studies/etfs/07_gbm:
-  timeout: 300
+  timeout: 180
   parameters:
-    MAX_SYMBOLS: 15
-    START_DATE: "2020-01-01"
+    MAX_FOLDS: 2
+    MAX_SYMBOLS: 5
 
 26_mlops_governance/05b_feast_live:
   skip: true               # Never runs
@@ -197,6 +196,32 @@ case_studies/etfs/07_gbm:
 | `skip` | false | Skip this notebook entirely |
 | `skip_reason` | — | Reason displayed in test output |
 | `parameters` | {} | Papermill parameter overrides |
+
+### A parameter has to be one the notebook can actually receive
+
+Papermill injects the `parameters` block as a cell placed directly after the
+notebook's own `# %% tags=["parameters"]` cell — or above the imports when there
+is no tagged cell. Anything the notebook assigns before that point is overridden
+and does not matter. Two things after it do:
+
+- **nothing reads the name**, so the value lands in a variable the notebook has
+  no use for;
+- **something rebinds it before anything reads it**, so the notebook goes on
+  using its own number.
+
+Papermill reports neither. The notebook runs at its production defaults while
+this file records a reduction. Reading the value and then rebinding the same
+name is fine — that is how `case_studies/*/1*_causal_dml` applies `CV_FOLDS`,
+and how `if MAX_SYMBOLS == 0: MAX_SYMBOLS = len(universe)` works. Only a
+rebinding that runs on every path, in a notebook where no function reads the
+name, counts as an overwrite; anything the check cannot establish it leaves
+alone, since a missed stale line is cheaper than a rejected real reduction.
+
+`test_pm_helpers.py` fails the build on any name that cannot reach its notebook,
+on any key that names a notebook which does not exist, and on any YAML anchor
+(one shared block would let a fix for one notebook land on six others). The
+sweeps ship with no allowlist. If one rejects an entry, make the notebook read
+the parameter or delete the entry — do not add an exception.
 
 ---
 

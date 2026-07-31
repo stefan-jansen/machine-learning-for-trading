@@ -6,13 +6,23 @@ Provides:
 - collect_chapter_notebooks(): Discover notebooks in chapter directories
 - get_tier() / current_test_tier(): Test-tier routing (per-commit / weekly / on-demand)
 - get_record_mode(): VCR cassette mode (consumed by Step 5)
+- unusable_parameters(): parameter names an override declares that the notebook
+  cannot receive (checked by tests/test_pm_helpers.py)
 
 NOTE: Notebooks live directly in chapter directories
 (e.g., 05_synthetic_data/01_timegan.py), NOT in code/ subdirs.
 
 overrides.yaml schema (per-notebook, all optional):
     timeout: int (seconds, default 300)
-    parameters: dict (papermill -p overrides)
+    parameters: dict (papermill -p overrides). Papermill injects these values in a
+        cell right after the notebook's ``# %% tags=["parameters"]`` cell, so
+        every name must be one the notebook reads below that point without first
+        overwriting it. Where the notebook assigns the name is not the test: an
+        assignment above the injection point is overridden. A name nothing reads
+        is an unused variable, and one that is overwritten first is gone; either
+        way the test runs at production scale while this file states a reduction.
+        ``unusable_parameters`` is the detector and tests/test_pm_helpers.py
+        fails the build on what it finds, with no allowlist.
     skip: bool — hard skip in uv-native run (Docker tests ignore)
     skip_reason: str
     requires_import: str | list[str]
@@ -38,12 +48,14 @@ overrides.yaml schema (per-notebook, all optional):
         Default "replay".
 """
 
+import ast
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -131,6 +143,523 @@ def get_record_mode(overrides: dict) -> str:
             f"Invalid record_mode {mode!r} — must be one of {sorted(VALID_RECORD_MODES)}"
         )
     return mode
+
+
+# ---------------------------------------------------------------------------
+# Papermill parameter validation.
+#
+# Papermill injects the `parameters` block as a cell placed directly after the
+# notebook's own `parameters`-tagged cell, so an injected value only reaches the
+# code that uses it when something below that point reads the name and nothing
+# overwrites it first. Neither condition is enforced at run time: papermill
+# accepts any name, and an override that misses either one leaves the notebook
+# running at its production defaults while overrides.yaml records a reduction.
+# `unusable_parameters` is the detector; test_pm_helpers.py runs it over the
+# whole file, with no allowlist.
+# ---------------------------------------------------------------------------
+
+PARAMETERS_CELL_MARKER = 'tags=["parameters"]'
+INJECTED_CELL_MARKER = 'tags=["injected-parameters"]'
+
+
+def _percent_cell_bounds(source: str) -> list[tuple[str, int, int]]:
+    """Split jupytext percent source into (header, first_line, last_line) cells.
+
+    Lines are 1-based and inclusive, matching `ast` line numbers.
+    """
+    lines = source.splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith("# %%")]
+    bounds = []
+    for pos, start in enumerate(starts):
+        end = starts[pos + 1] - 1 if pos + 1 < len(starts) else len(lines) - 1
+        bounds.append((lines[start], start + 1, end + 1))
+    return bounds
+
+
+def _module_level_events(node: ast.AST, events: list[tuple[str, str, int]]) -> None:
+    """Append ("read"|"bind", name, line) in source order for module-level code.
+
+    `if`, `for`, `try` and `with` bodies are entered: a rebinding under one of
+    them still overwrites the injected value when it runs, and the read that
+    precedes it is what tells the two apart.
+
+    Function, lambda and class bodies are not entered. Their code runs when
+    called, which is after the rest of the module, so a name they mention is not
+    a read that protects an earlier value from a later module-level rebinding.
+    The parts of a definition that *do* evaluate where they are written -
+    decorators, default arguments, base classes - are collected.
+    """
+    if isinstance(node, ast.Lambda):
+        for default in [*node.args.defaults, *node.args.kw_defaults]:
+            if default is not None:
+                _module_level_events(default, events)
+        return
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        evaluated: list[ast.AST] = list(node.decorator_list)
+        evaluated += [d for d in node.args.defaults if d is not None]
+        evaluated += [d for d in node.args.kw_defaults if d is not None]
+        for sub in evaluated:
+            _module_level_events(sub, evaluated_events := [])
+            events.extend(evaluated_events)
+        events.append(("bind", node.name, node.lineno))
+        return
+    if isinstance(node, ast.ClassDef):
+        # A class body runs where it is written, not when something calls it, so
+        # what it reads is a module-level read. What it assigns is a class
+        # attribute, so those bindings do not reach the module - but they do
+        # shadow the module name for the rest of the body, and a read after one
+        # of them resolves to the attribute rather than to the parameter.
+        for sub in [*node.decorator_list, *node.bases, *(kw.value for kw in node.keywords)]:
+            _module_level_events(sub, events)
+        body: list[tuple[str, str, int]] = []
+        for statement in node.body:
+            _module_level_events(statement, body)
+        shadowed: set[str] = set()
+        for kind, bound, line in body:
+            if kind == "read" and bound not in shadowed:
+                events.append((kind, bound, line))
+            elif kind == "bind":
+                shadowed.add(bound)
+        events.append(("bind", node.name, node.lineno))
+        return
+    if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+        # A comprehension has its own scope: its loop targets bind nothing in the
+        # module, and inside it they shadow the module name rather than read it.
+        targets: set[str] = set()
+        for gen in node.generators:
+            for sub in ast.walk(gen.target):
+                if isinstance(sub, ast.Name):
+                    targets.add(sub.id)
+        for gen in node.generators:
+            _module_level_events(gen.iter, events)
+        inner: list[tuple[str, str, int]] = []
+        for gen in node.generators:
+            for condition in gen.ifs:
+                _module_level_events(condition, inner)
+        for part in ("elt", "key", "value"):
+            if (sub := getattr(node, part, None)) is not None:
+                _module_level_events(sub, inner)
+        events.extend(event for event in inner if event[1] not in targets)
+        return
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        # `from x import MAX_SYMBOLS` below the cell overwrites what was injected
+        # exactly as an assignment would.
+        for alias in node.names:
+            events.append(("bind", (alias.asname or alias.name).split(".")[0], node.lineno))
+        return
+    if isinstance(node, ast.Name):
+        kind = "read" if isinstance(node.ctx, ast.Load) else "bind"
+        events.append((kind, node.id, node.lineno))
+        return
+    if isinstance(node, ast.Call):
+        # The callee and the arguments are evaluated before the call happens, so
+        # the event goes after theirs. A call is where a function body runs, which
+        # is the only way a deferred read can happen; sequencing it with the reads
+        # and bindings is what lets the three be compared.
+        for sub in ast.iter_child_nodes(node):
+            _module_level_events(sub, events)
+        if isinstance(node.func, ast.Name):
+            events.append(("call", node.func.id, node.lineno))
+        return
+    if isinstance(node, ast.AugAssign):
+        # `X += 1` reads X before writing it.
+        _module_level_events(node.value, events)
+        if isinstance(node.target, ast.Name):
+            events.append(("read", node.target.id, node.target.lineno))
+        _module_level_events(node.target, events)
+        return
+    if isinstance(node, ast.AnnAssign) and node.value is None:
+        # `X: int` annotates without assigning, so it binds nothing and leaves
+        # the injected value in place. Only the annotation itself is evaluated.
+        _module_level_events(node.annotation, events)
+        return
+    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+        # The right-hand side is evaluated before the target is bound, and the
+        # ordering matters: `X = X + 1` reads X, `X = 1` discards it. Child order
+        # puts the target first for `Assign` and `NamedExpr` alike, so neither can
+        # be left to the generic walk below.
+        _module_level_events(node.value, events)
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            _module_level_events(target, events)
+        return
+    for child in ast.iter_child_nodes(node):
+        _module_level_events(child, events)
+
+
+#: Statement fields whose contents may be skipped on a given run. A binding under
+#: one of these reaches only the code in the same branch; a binding outside them
+#: all runs on every path.
+_CONDITIONAL_BODIES = {
+    ast.If: ("body", "orelse"),
+    ast.For: ("body", "orelse"),
+    ast.AsyncFor: ("body", "orelse"),
+    ast.While: ("body", "orelse"),
+    # `body` too: a statement in it may never be reached, so a binding there
+    # does not reach a handler that runs because something above it raised.
+    ast.Try: ("body", "handlers", "orelse"),
+    ast.ExceptHandler: ("body",),
+}
+
+
+def _branch_paths(tree: ast.Module) -> dict[int, tuple]:
+    """line -> the chain of conditional branches enclosing it.
+
+    An empty path means the line runs on every path through the module. One path
+    being a prefix of another means the first branch encloses the second, which
+    is what says a binding can reach a read: same branch or an outer one.
+    """
+    paths: dict[int, tuple] = {}
+
+    def walk(node: ast.AST, path: tuple) -> None:
+        for field, value in ast.iter_fields(node):
+            branching = field in _CONDITIONAL_BODIES.get(type(node), ())
+            for item in value if isinstance(value, list) else [value]:
+                if not isinstance(item, ast.AST):
+                    continue
+                inner = path + ((id(node), field),) if branching else path
+                line = getattr(item, "lineno", None)
+                if line is not None and len(inner) >= len(paths.get(line, ())):
+                    paths[line] = inner
+                walk(item, inner)
+
+    walk(tree, ())
+    return paths
+
+
+def _top_level_bindings(tree: ast.Module) -> list[tuple[str, int]]:
+    """(name, line) for bindings made by an unconditional statement of the module.
+
+    Nested statements are excluded, so this is the set of bindings that run on
+    every path through the notebook. A binding under `if`/`for`/`try` may or may
+    not run, and deciding which needs the branch analysis a config linter has no
+    business carrying, so those are left alone.
+    """
+    bound = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.append((node.name, node.lineno))
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound.append(((alias.asname or alias.name).split(".")[0], node.lineno))
+            continue
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        for target in targets:
+            for sub in ast.walk(target):
+                if isinstance(sub, ast.Name):
+                    bound.append((sub.id, sub.lineno))
+    return bound
+
+
+_NESTED_SCOPE = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.Lambda,
+    ast.ClassDef,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
+
+
+def _own_scope_nodes(body: list[ast.AST]) -> list[ast.AST]:
+    """Nodes belonging to one scope, stopping at every nested scope.
+
+    A nested scope's own statements are somebody else's locals, so descending
+    into one would let a store in an inner function hide a read in its parent.
+    Each is visited on its own turn by the caller's `ast.walk`.
+    """
+    found: list[ast.AST] = []
+    stack = list(body)
+    while stack:
+        node = stack.pop()
+        found.append(node)
+        if not isinstance(node, _NESTED_SCOPE):
+            stack.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _comprehension_free_reads(node: ast.AST) -> set[str]:
+    """Names a comprehension reads from the scope around it.
+
+    Its own loop targets are its locals, so they are subtracted; everything else
+    it evaluates resolves outward.
+    """
+    targets = {
+        sub.id
+        for gen in node.generators
+        for sub in ast.walk(gen.target)
+        if isinstance(sub, ast.Name)
+    }
+    parts: list[ast.AST] = [gen.iter for gen in node.generators]
+    parts += [condition for gen in node.generators for condition in gen.ifs]
+    for attr in ("elt", "key", "value"):
+        if (sub := getattr(node, attr, None)) is not None:
+            parts.append(sub)
+    reads = set()
+    for part in parts:
+        for sub in ast.walk(part):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                reads.add(sub.id)
+    return reads - targets
+
+
+def _class_body_free_reads(node: ast.ClassDef) -> set[str]:
+    """Names a class body reads from the scope around it.
+
+    Its own assignments become class attributes and shadow an outer name for the
+    rest of the body, so they are subtracted. Methods are not walked here - they
+    are functions, and `_deferred_global_reads` reaches every function in the
+    tree on its own.
+    """
+    seen: set[str] = set()
+    bound: set[str] = set()
+    for sub in _own_scope_nodes(node.body):
+        if isinstance(sub, ast.Name):
+            (seen if isinstance(sub.ctx, ast.Load) else bound).add(sub.id)
+        elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+            bound |= {(a.asname or a.name).split(".")[0] for a in sub.names}
+        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(sub.name)
+        elif isinstance(sub, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            seen |= _comprehension_free_reads(sub)
+    for outer in [*node.bases, *node.decorator_list]:
+        seen |= {
+            sub.id
+            for sub in ast.walk(outer)
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load)
+        }
+    return seen - bound
+
+
+def _scope_reads_and_calls(node: ast.AST) -> tuple[set[str], set[str]]:
+    """(free names this function reads, names of things it calls).
+
+    A class body at module level is not the caller's concern: Python runs one
+    where it is written, so what it reads is a module-level read and
+    `_module_level_events` records it as one. A class body *inside* a function is
+    the other case - it runs when the function is called - so its reads are
+    collected here.
+
+    A name the body also binds is local to it throughout, by Python's own scoping
+    rule, so reading it there says nothing about the module-level variable. Those
+    are excluded; a `global` declaration puts one back.
+    """
+    args = node.args
+    local = {
+        a.arg
+        for a in [*args.posonlyargs, *args.args, *args.kwonlyargs]
+        + [x for x in (args.vararg, args.kwarg) if x is not None]
+    }
+    declared_global: set[str] = set()
+    seen: set[str] = set()
+    called: set[str] = set()
+    for sub in _own_scope_nodes(node.body if isinstance(node.body, list) else [node.body]):
+        if isinstance(sub, ast.Global):
+            declared_global |= set(sub.names)
+        elif isinstance(sub, ast.Call):
+            if isinstance(sub.func, ast.Name):
+                called.add(sub.func.id)
+        elif isinstance(sub, ast.Name):
+            (seen if isinstance(sub.ctx, ast.Load) else local).add(sub.id)
+        elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+            local |= {(a.asname or a.name).split(".")[0] for a in sub.names}
+        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            local.add(sub.name)
+            if isinstance(sub, ast.ClassDef):
+                # Runs when this function is called, so what it reads from
+                # outside is deferred too. `_own_scope_nodes` stops at the
+                # class, so collect them directly.
+                seen |= _class_body_free_reads(sub)
+        elif isinstance(sub, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            # Its own scope, but its free variables resolve out through this
+            # one. `_own_scope_nodes` stops here, so collect them directly.
+            seen |= _comprehension_free_reads(sub)
+    return (seen - local) | (seen & declared_global), called
+
+
+def _deferred_readers(tree: ast.Module) -> tuple[dict[str, set[str]], set[str]]:
+    """(name -> the module-level functions that read it, names read opaquely).
+
+    Knowing *which* function reads a parameter is what makes a module-level call
+    evidence about that parameter rather than about calls in general. Reads reach
+    a caller through the functions it calls, so the map is closed transitively
+    over local calls.
+
+    The second set is the escape hatch: a lambda, or a function defined inside
+    another, is not something a module-level call can name, so a parameter read
+    from one keeps the blanket exemption instead of being attributed.
+    """
+    top = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    direct: dict[str, set[str]] = {}
+    calls: dict[str, set[str]] = {}
+    opaque: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        reads, called = _scope_reads_and_calls(node)
+        if top.get(getattr(node, "name", None)) is node:
+            direct[node.name] = reads
+            calls[node.name] = called
+        else:
+            opaque |= reads
+    changed = True
+    while changed:
+        changed = False
+        for caller, callees in calls.items():
+            for callee in callees & direct.keys():
+                if not direct[callee] <= direct[caller]:
+                    direct[caller] |= direct[callee]
+                    changed = True
+    readers: dict[str, set[str]] = {}
+    for func, names in direct.items():
+        for name in names:
+            readers.setdefault(name, set()).add(func)
+    return readers, opaque
+
+
+def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
+    """Map each declared parameter name that cannot reach the notebook to why.
+
+    An empty dict means every name is injectable. Everything turns on where
+    papermill puts the value: in a cell immediately after the notebook's
+    `parameters`-tagged cell, or — when there is no tagged cell — above the
+    imports, ahead of the whole notebook. Anything the notebook assigns before
+    that point is overridden and does not matter. Two things after it do:
+
+    - some binding overwrites the injected value before anything reads it, so
+      the notebook goes on using its own number;
+    - nothing reads the name at all, so the value is injected into a variable
+      the notebook has no use for.
+
+    The overwrite test turns on the read rather than on the indentation.
+    Reading the injected value and then rebinding the same name is how the
+    `12_causal_dml` notebooks apply an override: they push `CV_FOLDS` into the
+    config dict, then read it back out. The value survives, so the entry is
+    valid, and `if MAX_SYMBOLS == 0: MAX_SYMBOLS = len(universe)` is the same
+    shape with the guard as the read. Every binding is checked, not just the
+    first, so a legitimate read-and-restore does not license an overwrite
+    further down.
+
+    Only bindings that run on every path are counted, and only when no function
+    body reads the name. A conditional binding may not run, and a function that
+    reads the name may be called before one that does; proving either way needs
+    branch and call analysis that would buy this file nothing. Where the analysis
+    cannot be sure, it says nothing — a missed dead entry costs a stale line,
+    a wrong rejection costs a real reduction.
+
+    Args:
+        py_path: the notebook's `.py` source
+        names: the parameter names `overrides.yaml` declares for it
+
+    Returns:
+        {name: reason} for the names that cannot take effect.
+    """
+    names = list(names)
+    if not names:
+        return {}
+    if not py_path.exists():
+        return dict.fromkeys(names, f"no notebook at {py_path}")
+
+    source = py_path.read_text()
+    tree = ast.parse(source, filename=str(py_path))
+    cells = _percent_cell_bounds(source)
+    tagged = [c for c in cells if PARAMETERS_CELL_MARKER in c[0]]
+    # A committed `injected-parameters` cell is a leftover from a papermill run,
+    # replaced on the next one. Reading it as notebook code would report the
+    # notebook overwriting exactly what papermill is about to inject.
+    stale = [(lo, hi) for header, lo, hi in cells if INJECTED_CELL_MARKER in header]
+
+    # Papermill's cell lands right after the tagged one, or at the very top of
+    # the notebook when there is none.
+    injected_at = tagged[-1][2] if tagged else 0
+    where = (
+        "the parameters cell"
+        if tagged
+        else 'the top of the notebook (it has no `# %% tags=["parameters"]` cell)'
+    )
+
+    def live(line: int) -> bool:
+        return line > injected_at and not any(lo <= line <= hi for lo, hi in stale)
+
+    events: list[tuple[str, str, int]] = []
+    _module_level_events(tree, events)
+    branch = _branch_paths(tree)
+    readers, opaque = _deferred_readers(tree)
+
+    def reaches(bind: tuple[int, int], read: tuple[int, int]) -> bool:
+        """Does this binding run before that read, and on the read's path?
+
+        Order comes from the event sequence, not the line: `_module_level_events`
+        emits an assignment's right-hand side before its target, so in a multiline
+        `X = (\\n    X + 1\\n)` the read is sequenced first even though the target
+        sits on the earlier line. The line is only how a branch path is looked up.
+        """
+        (bind_seq, bind_line), (read_seq, read_line) = bind, read
+        if bind_seq >= read_seq:
+            return False
+        here, there = branch.get(bind_line, ()), branch.get(read_line, ())
+        return here == there[: len(here)]
+
+    problems = {}
+    for name in names:
+        reads = [
+            (seq, line)
+            for seq, (kind, bound, line) in enumerate(events)
+            if kind == "read" and bound == name and live(line)
+        ]
+        binds = [
+            (seq, line)
+            for seq, (kind, bound, line) in enumerate(events)
+            if kind == "bind" and bound == name and live(line)
+        ]
+        if name in opaque or name in readers:
+            # A function that reads the name is normally enough to leave the
+            # entry alone: it may be called before any binding below, and the
+            # tree does not say which happens first. The exception is a binding
+            # that nothing can run ahead of - unconditional, with no module-level
+            # read and no call to a function that reads this name above it. Then
+            # every such call happens after it and none can see the injected
+            # value. A read from a lambda or a nested function is not attributable
+            # to a name a call site can use, so it keeps the blanket exemption.
+            blocking = [(seq, line) for seq, line in binds if branch.get(line, ()) == ()]
+            reaching = [
+                seq
+                for seq, (kind, bound, line) in enumerate(events)
+                if kind == "call" and bound in readers.get(name, set()) and live(line)
+            ]
+            first = min((seq for seq, _ in blocking), default=None)
+            reachable = (
+                name in opaque
+                or first is None
+                or any(seq < first for seq in [*(r for r, _ in reads), *reaching])
+            )
+            if reachable:
+                continue
+            problems[name] = (
+                f"the binding on line {min(line for _, line in blocking)} overwrites the "
+                f"injected value before anything below {where} can call a function that "
+                "reads it"
+            )
+        elif not reads:
+            problems[name] = f"the notebook never reads it below {where}"
+        elif all(any(reaches(b, r) for b in binds) for r in reads):
+            problems[name] = (
+                f"the binding on line {min(line for _, line in binds)} overwrites the "
+                f"injected value: every read below {where} is on a path that rebinds "
+                "the name first"
+            )
+    return problems
 
 
 def get_overrides(notebook_key: str) -> dict:
