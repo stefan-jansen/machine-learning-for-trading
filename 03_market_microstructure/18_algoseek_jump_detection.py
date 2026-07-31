@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -190,7 +190,7 @@ for sym, color in zip(SYMBOLS, sym_colors):
 ax.axhline(0.5, color=COLORS["neutral"], ls="--", lw=0.8)
 ax.set_xlabel("Jump share of realized variance (%)")
 ax.set_ylabel("Cumulative fraction of symbol-days")
-ax.set_title("On most days jumps explain little realized variance; a heavy tail carries the rest")
+ax.set_title("Jumps explain little realized variance on most symbol-days")
 ax.legend(title="Symbol")
 fig.tight_layout()
 fig.show()

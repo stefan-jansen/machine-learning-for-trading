@@ -548,10 +548,7 @@ if data_available and all_trades is not None:
 
         ax.set_xlabel("Lag (seconds)")
         ax.set_ylabel("Autocorrelation")
-        ax.set_title(
-            f"Bid-Ask Bounce: Return Autocorrelation for {high_sym}\n"
-            f"(Negative lag-1 = bounce between bid and ask)"
-        )
+        ax.set_title(f"Negative lag-1 autocorrelation is the bid-ask bounce — {high_sym}")
         ax.set_xticks(lags)
 
         # Add annotation

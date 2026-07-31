@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -808,12 +808,12 @@ if ofi_arr is not None and ret_arr is not None:
     axes[1].axvline(0, color="black", lw=0.5)
     axes[1].set_xlabel("OFI (signed log scale)")
     axes[1].set_ylabel("Next-minute return (bps)")
-    axes[1].set_title(f"OFI vs Returns: ρ = {corr_log:.3f}")
+    axes[1].set_title("Next-minute return against order-flow imbalance")
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
 
     plt.suptitle(
-        f"Order Flow Imbalance Analysis - {OFI_SYMBOL} ({len(ofi_arr)} observations)",
+        f"Order-flow imbalance analysis — {OFI_SYMBOL}",
         fontsize=12,
         fontweight="bold",
     )

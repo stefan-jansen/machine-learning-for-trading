@@ -982,12 +982,9 @@ if HAS_MESSAGE_DATA and orders_with_exec is not None:
         ax.set_xticks(range(len(top_25_pd)))
         ax.set_xticklabels(top_25_pd["ticker"], rotation=45, ha="right")
         if symbol_filtered:
-            ax.set_title(
-                f"Traded Value (filtered to SYMBOL={SYMBOL} — "
-                f"single-symbol drilldown, see notebook header)"
-            )
+            ax.set_title(f"Traded value, filtered to SYMBOL={SYMBOL}")
         else:
-            ax.set_title(f"Top {n_symbols} Symbols by Traded Value ({total_share:.1%} of total)")
+            ax.set_title("Traded value concentrates in a few symbols")
         ax.set_xlabel("Symbol")
         ax.set_ylabel("Share of Dollar Volume")
         ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.1%}"))

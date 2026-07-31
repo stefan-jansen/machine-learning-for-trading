@@ -1272,10 +1272,7 @@ if "bar_data" in dir() and bar_data:
         ax.set_yticklabels([k.title() for k in y_positions.keys()])
         ax.set_xlabel("Time")
         ax.set_ylabel("Bar Type")
-        ax.set_title(
-            f"Bar Formation Times ({first_date}, First 100 Bars)\n"
-            "Information-driven bars cluster during active periods"
-        )
+        ax.set_title("Information-driven bars cluster during active periods")
         ax.legend(loc="upper right")
         plt.xticks(rotation=45)
         plt.show()

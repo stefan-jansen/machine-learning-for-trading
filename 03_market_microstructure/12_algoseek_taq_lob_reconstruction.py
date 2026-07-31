@@ -490,7 +490,7 @@ if mask.sum() > 2:
     )
 
 fig.update_layout(
-    title=f"Imbalance-Return Relationship (r={corr[0, 0]:.2f})",
+    title="Imbalance-return relationship, colored by prevailing spread",
     xaxis_title="Order Imbalance",
     yaxis_title="Minute Return",
     yaxis=dict(tickformat=".1%"),

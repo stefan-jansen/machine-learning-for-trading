@@ -719,7 +719,7 @@ if multi_day is not None and len(multi_day) > 0:
         ha="center",
     )
 
-    plt.suptitle(f"OFI Predictive Power - {SYMBOL} ({len(pdf):,} observations)", fontsize=12)
+    plt.suptitle(f"OFI predictive power — {SYMBOL}", fontsize=12)
     plt.tight_layout()
     plt.show()
 
