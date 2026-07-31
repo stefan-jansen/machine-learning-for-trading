@@ -364,12 +364,33 @@ cd machine-learning-for-trading
 cp .env.example .env
 
 docker compose pull ml4t # Option A — Docker (recommended)
-pip install uv && uv sync # Option B — local with uv
 ```
 
-See the **[installation guide](docs/installation.md)** for platform-specific setup (Linux, Windows WSL2, macOS) and GPU
-instructions. Windows readers: WSL2 must be working *before* Docker Desktop is installed, and the
-reboot is not optional.
+Option B is a local `uv` environment, on **macOS, Linux, or inside WSL2**. Install `uv` with its
+own installer rather than with `pip`, which is missing or refuses to install on most current
+systems:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync
+```
+
+Option B compiles several dependencies from source, `scikit-learn` among them, so it needs a
+**C/C++ compiler**: on Ubuntu, Debian and WSL2 `sudo apt install build-essential`, on macOS
+`xcode-select --install`. Docker carries its own and needs none of this.
+
+**Windows readers:** both options run inside WSL2, not in PowerShell. Install it once with
+`wsl --install -d Ubuntu` from an Administrator PowerShell, restart, and then follow the Linux
+instructions in the Ubuntu terminal. Installing into Windows Python is not supported and does
+not work — `scikit-learn` has no Windows wheel for this Python version and its source build
+fails. The [installation guide](docs/installation.md) has the full WSL2 walkthrough.
+
+Budget about **16 GB** for Option B (11 GB environment, 4 GB free datasets, 0.9 GB of git
+history) and about 12 minutes for the data.
+
+See the **[installation guide](docs/installation.md)** for platform-specific setup and GPU
+instructions. Intel Macs are Docker-only: PyTorch no longer publishes macOS x86_64 wheels, so the
+local `uv` path cannot resolve there.
 
 **Download data.** Most notebooks need datasets; start with the free ones (no API keys):
 
@@ -380,8 +401,16 @@ uv run python data/download_all.py --free-only
 Docker readers run this in the Jupyter Lab terminal (**File → New → Terminal**) as
 `python data/download_all.py --free-only` — there is no host Python on the Docker path.
 
-The **[data guide](data/README.md)** documents every dataset, API-key setup, the loaders, and storage tiers (≈70 MB
-free tier up to ≈7 GB full).
+That command fetches seven datasets and takes about **4 GB** and twelve minutes, almost all of it
+the firm-characteristics panel, first needed in Ch04. To start in about 75 MB, leave it out and
+fetch it when a chapter asks for it:
+
+```bash
+uv run python data/download_all.py --free-only --skip-firm-characteristics
+```
+
+The **[data guide](data/README.md)** documents every dataset, API-key setup, the loaders, and
+storage tiers.
 
 **(Optional) pre-computed results.** To explore the nine released Ch11-20 case studies without
 retraining, download their verified registries, predictions, model files, and backtest artifacts:

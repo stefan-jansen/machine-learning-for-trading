@@ -12,7 +12,7 @@ and run it.
 
 | Platform | How to open a terminal |
 |----------|------------------------|
-| **Windows** | Start menu → type `PowerShell` → open *Windows PowerShell*. Some steps below need *Run as administrator* (right-click → Run as administrator). |
+| **Windows** | Start menu → type `PowerShell` → open *Windows PowerShell*. Some steps below need *Run as administrator* (right-click → Run as administrator). You use PowerShell only to **set up WSL2**; once WSL2 is running, every other command in this guide is typed into the **Ubuntu** terminal it gives you, not into PowerShell. |
 | **macOS** | Applications → Utilities → *Terminal* |
 | **Linux** | `Ctrl+Alt+T`, or search for *Terminal* |
 
@@ -30,6 +30,36 @@ If a command is not found, the tool it belongs to is not installed yet. `git` sh
 [Git for Windows](https://git-scm.com/download/win) and with the Xcode command-line tools on
 macOS (`xcode-select --install`).
 
+### What you need before either path
+
+| | Docker path | Local `uv` path |
+|---|---|---|
+| `git` | yes | yes |
+| Docker Desktop or Docker Engine | yes | no |
+| **C/C++ compiler** | no, the image carries one | **yes** |
+| Disk | ~13 GB image + ~4 GB data | ~11 GB environment + ~4 GB data + ~1 GB git history |
+
+The compiler is not optional on the local path and it is the most common way a first install
+fails. Twelve locked packages publish no wheel for Python 3.14, so `uv` builds them from
+source; six of those are C or C++ (`scikit-learn`, `shap`, `hmmlearn`, `ruptures`, `econml`,
+`causalml`). Without a compiler `uv sync` stops with:
+
+```
+error: command 'c++' failed: No such file or directory
+```
+
+Install one first:
+
+```bash
+sudo apt install build-essential      # Ubuntu, Debian, and inside WSL2
+xcode-select --install                # macOS
+```
+
+**Docker is the one path that avoids this**, because the image ships its own toolchain. WSL2
+does not avoid it: a local `uv` environment inside WSL2 is the Linux path, so it needs
+`build-essential` exactly as native Linux does. What WSL2 avoids is the *Windows* build, which
+does not work at all — see the note under [Platform Support](#platform-support).
+
 ---
 
 ## Platform Support
@@ -42,6 +72,23 @@ macOS (`xcode-select --install`).
 | **macOS Apple Silicon** |  ✅  |   -    |    ✅     |  -  |
 
 \* Requires NVIDIA GPU + nvidia-container-toolkit
+
+The table is about the **Docker images**, which work on all four rows. The local `uv` path is
+narrower: it works on Linux, on Apple Silicon, and inside WSL2 (which is the Linux path), and it
+does not work on Intel Macs or in native Windows Python.
+
+> **Windows: use WSL2, not PowerShell.** Everything on Windows runs inside WSL2, whether you
+> pick Docker or the local `uv` environment. Installing directly into Windows Python is not
+> supported and does not work: the dependency set resolves `scikit-learn 1.6.1`, which has no
+> Python 3.14 wheel for Windows, and building it from source fails partway through even on a
+> machine that already has the Visual Studio Build Tools. Inside WSL2 you are on the Linux path
+> above, which is the one that is tested.
+
+> **Intel Macs: use Docker, not the local `uv` path.** PyTorch stopped publishing macOS x86_64
+> wheels, so `uv sync` on an Intel Mac stops immediately with `Distribution torch==2.10.0 ...
+> doesn't have a source distribution or wheel for the current platform`. There is nothing to
+> configure around it. The `ml4t` image is amd64 and runs fine, so Docker is the Intel Mac path.
+> Apple Silicon has native wheels and the local `uv` path works there.
 
 ### Which image do I need?
 
@@ -438,14 +485,18 @@ Docker is recommended because it guarantees a consistent environment. But if you
 ### Setup
 
 ```bash
-# Install uv
+# Install uv — use this installer, not `pip install uv`. Most current systems either
+# ship no `pip` at all or refuse the install with `externally-managed-environment`.
 curl -LsSf https://astral.sh/uv/install.sh | sh
+# Windows PowerShell: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-# Clone and enter the repository
+# Clone and enter the repository (about 0.9 GB of history)
 git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
 cd machine-learning-for-trading
 
-# Install all dependencies (creates .venv/, installs ~300 packages)
+# Install all dependencies (creates .venv/, installs ~300 packages, about 11 GB).
+# Twelve of them compile from source, so a C/C++ compiler must already be installed —
+# see "What you need before either path" above.
 uv sync
 
 # Copy environment template (defaults work as-is; no editing needed to start)

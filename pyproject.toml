@@ -238,8 +238,10 @@ dev = [
 ]
 
 [tool.uv]
-# ml4t-engineer only has pre-release versions on PyPI
-prerelease = "if-necessary-or-explicit"
+# ml4t-engineer only has pre-release versions on PyPI. Spelled "if-necessary" rather
+# than the deprecated "if-necessary-or-explicit", which makes uv print a deprecation
+# warning on every single `uv run` a reader types.
+prerelease = "if-necessary"
 
 # Force protobuf >= 5.0 for Python 3.14 compatibility.
 # protobuf 4.x has a C extension metaclass bug on Python 3.14.
