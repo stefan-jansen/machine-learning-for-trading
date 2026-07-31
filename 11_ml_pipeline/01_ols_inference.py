@@ -440,14 +440,24 @@ time_codes = np.unique(date_groups, return_inverse=True)[1]
 ols_cluster_date = sm.OLS(y_train_s, X_train_c).fit(
     cov_type="cluster", cov_kwds={"groups": date_groups}
 )
-ols_cluster_2way = sm.OLS(y_train_s, X_train_c).fit(
-    cov_type="cluster", cov_kwds={"groups": np.column_stack([date_groups, symbol_groups])}
-)
+# A second cluster dimension needs at least two of it, which a reduced run
+# (MAX_SYMBOLS=1, or a small MAX_TRAIN_ROWS) may not leave.
+n_symbols_train = int(len(np.unique(symbol_groups)))
+if n_symbols_train >= 2:
+    ols_cluster_2way = sm.OLS(y_train_s, X_train_c).fit(
+        cov_type="cluster", cov_kwds={"groups": np.column_stack([date_groups, symbol_groups])}
+    )
+    se_2way = ols_cluster_2way.bse[1:]
+    n_sig_2way = int((np.abs(ols_cluster_2way.tvalues[1:]) > 1.96).sum())
+else:
+    se_2way = np.full(len(FEATURE_COLS), np.nan)
+    n_sig_2way = None
+
 ols_cluster = sm.OLS(y_train_s, X_train_c).fit(
     cov_type="nw-groupsum", cov_kwds={"time": time_codes, "maxlags": LABEL_HORIZON_DAYS}
 )
 print(f"Dates:  {len(np.unique(date_groups)):,}")
-print(f"Symbols: {len(np.unique(symbol_groups)):,}")
+print(f"Symbols: {n_symbols_train:,}")
 print(f"Driscoll-Kraay lags: {LABEL_HORIZON_DAYS} (the label horizon)")
 
 # Compare SEs and t-stats for features (skip constant at index 0)
@@ -458,7 +468,7 @@ se_comparison = pl.DataFrame(
         "se_ols": ols_model.bse[1:],
         "se_hc3": ols_hc3.bse[1:],
         "se_date": ols_cluster_date.bse[1:],
-        "se_2way": ols_cluster_2way.bse[1:],
+        "se_2way": se_2way,
         "se_cluster": ols_cluster.bse[1:],
         "t_ols": ols_model.tvalues[1:],
         "t_cluster": ols_cluster.tvalues[1:],
@@ -494,13 +504,13 @@ cluster_ranked
 # Count how many features change significance at 5% level
 n_sig_ols = int((np.abs(ols_model.tvalues[1:]) > 1.96).sum())
 n_sig_date = int((np.abs(ols_cluster_date.tvalues[1:]) > 1.96).sum())
-n_sig_2way = int((np.abs(ols_cluster_2way.tvalues[1:]) > 1.96).sum())
 n_sig_cluster = int((np.abs(ols_cluster.tvalues[1:]) > 1.96).sum())
 
 print("\nFeatures significant at 5% level:")
 print(f"  OLS standard errors:         {n_sig_ols} / {len(FEATURE_COLS)}")
 print(f"  Clustered by date:           {n_sig_date} / {len(FEATURE_COLS)}")
-print(f"  Clustered by date + symbol:  {n_sig_2way} / {len(FEATURE_COLS)}")
+if n_sig_2way is not None:
+    print(f"  Clustered by date + symbol:  {n_sig_2way} / {len(FEATURE_COLS)}")
 print(f"  Driscoll-Kraay:              {n_sig_cluster} / {len(FEATURE_COLS)}")
 print(f"  Difference: {n_sig_ols - n_sig_cluster} features lose significance")
 
