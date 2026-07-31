@@ -320,18 +320,12 @@ def test_no_hand_rolled_random_time_split() -> None:
 FUTURE_FILL_ALLOWLIST: dict[tuple[str, str], str] = {}
 
 # Backlog: known, UN-AUDITED occurrences awaiting that chapter's Gate-0 pass. NOT approvals.
-FUTURE_FILL_PENDING: dict[tuple[str, str], str] = {
-    (
-        "17_portfolio_construction/11_dl_portfolio_allocation.py",
-        "bfill",
-    ): "Ch17, UN-AUDITED: bfill in DL portfolio allocation. Resolve at the Ch17 (Program 2) "
-    "pass — confirm it fills a static/reference series, not a feature/return path. NOT approved.",
-    (
-        "17_portfolio_construction/12_vlstm_portfolio.py",
-        "bfill",
-    ): "Ch17, UN-AUDITED: bfill in VLSTM portfolio. Resolve at the Ch17 (Program 2) pass. "
-    "NOT approved.",
-}
+# Empty since 2026-07-31. Both entries were `bfill` in Ch17, parked UN-AUDITED
+# pending the Ch17 pass; #428's reviewed generation replaced both notebooks and
+# both now fill forward, so the occurrences are gone and the ratchet's own
+# dead-entry check requires the rows to go with them. The list had been stale -
+# and this test red on `main` - since that PR landed.
+FUTURE_FILL_PENDING: dict[tuple[str, str], str] = {}
 
 
 def _future_fill_occurrences(tree: ast.AST) -> set[tuple[str, str]]:

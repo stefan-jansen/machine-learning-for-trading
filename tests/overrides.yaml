@@ -572,6 +572,10 @@
     MAX_ITER: 30
     N_ASSETS: 50
     N_PERIODS: 200
+    # Production splits 350/500 of the panel. TRAIN_BOUNDARY is a literal, so a
+    # shorter panel needs the boundary moved with it or the evaluation window
+    # starts past the end of the data.
+    TRAIN_BOUNDARY: 140
   timeout: 240
 14_latent_factors/05_rp_pca:
   timeout: 180
@@ -587,13 +591,15 @@
 14_latent_factors/07_stochastic_discount_factor:
   gpu: true
   parameters:
-    BETA_NET_EPOCHS: 8
-    NUM_ADVERSARIAL_ROUNDS: 1
-    NUM_EPOCHS_CONDITIONAL: 12
-    NUM_EPOCHS_INSTRUMENTS: 4
-    NUM_EPOCHS_UNCONDITIONAL: 8
-    N_MACRO_COLS: 10
+    ADVERSARIAL_ROUNDS: 1
+    BETA_EPOCHS: 8
+    CONDITIONAL_EPOCHS: 12
+    # Production evaluates every 16 epochs. At these epoch counts that is never,
+    # so the checkpoint-selection path CI is here to exercise would not run.
+    EVAL_EVERY: 4
+    INSTRUMENT_EPOCHS: 4
     N_STOCKS: 50
+    UNCONDITIONAL_EPOCHS: 8
   timeout: 360
 14_latent_factors/08_supervised_autoencoder:
   gpu: true

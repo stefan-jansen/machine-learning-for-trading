@@ -49,7 +49,7 @@ from case_studies.utils.benchmark import load_benchmark_returns
 from case_studies.utils.strategy_analysis import compute_cost_bps
 from utils.paths import get_case_study_dir, get_chapter_dir
 
-# %%
+# %% tags=["parameters"]
 MAX_SYMBOLS = 0
 # When non-empty, restricts the cross-CS iteration to the given subset.
 # Used by the per-CS pipeline driver to populate `backtest_paired_metrics`
