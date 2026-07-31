@@ -26,7 +26,8 @@
 #
 # - Express a forward return as an execution convention, then assert - rather than describe -
 #   that every labelled window is complete and gap-free inside one symbol
-# - Keep an eligibility screen away from the forward shift, and say where it belongs instead
+# - Keep an eligibility screen away from the forward shift, and apply it where it cannot change
+#   the window of a row it keeps
 # - Seal a diagnostic on the label's endpoint rather than on its observation date
 # - Price the overlap in a multi-session label, both as decay and as an effective row count
 # - Establish the floor a feature has to clear, under a standard error that prices in that
@@ -70,10 +71,10 @@ CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 LABELS_DIR = CASE_DIR / "labels"
 
 # %% [markdown]
-# `START_DATE` trims the history to a later start, which is what shortens a run in CI. It is
-# read once below, and the panel it produces is thinner at both ends: Section E's
-# cross-sectional dispersion and Section G's rank correlation both need a wide cross-section
-# on each session to mean anything.
+# `START_DATE` trims the history to a later start, which is what shortens a run in CI. It is read
+# once below, and a later start costs the earliest folds their training window; the cross-section
+# on each session, which Section E's dispersion and Section G's rank correlation both need to be
+# wide, is unaffected.
 
 # %% tags=["parameters"]
 START_DATE = "1990-01-01"
@@ -135,11 +136,11 @@ print(f"Holdout opens {HOLDOUT_START} and seals the label endpoint; panel ends {
 # not register the split as a price move; sorting by `symbol` then `timestamp` is what makes a
 # shift mean "the next session for this stock".
 #
-# This case study screens its universe point in time: a stock is tradable on a date only if it
-# closed above five dollars and turned over more than a million dollars a day over the previous
-# month. Both quantities are backward-looking, so the screen is a decision-time one, and
-# [`03_financial_features`](03_financial_features.ipynb) rebuilds it from the same two constants
-# on the same price series.
+# This case study screens its universe point in time: a stock is tradable on a date only if its
+# adjusted close is above five dollars and it turned over more than a million dollars a day over
+# the previous month. Both quantities are backward-looking, so the screen is a decision-time one,
+# and [`03_financial_features`](03_financial_features.ipynb) rebuilds it from the same three
+# constants on the same price series.
 #
 # **The screen runs after the forward shift, not before, and that ordering is not a detail.**
 # Once ineligible rows are dropped a shift counts survivors instead of sessions: a stock that
@@ -271,13 +272,12 @@ for label_name, horizon in HORIZONS.items():
 
 # %% [markdown]
 # Position zero below is each stock's last session. The non-null rate has to fall to zero over
-# exactly the last `horizon` positions and sit flat beyond them. A scalar count of valid rows
-# shows neither failure this catches: a tail fabricated instead of nulled, or a short label
-# masked by a longer one's null set. The figure reads only the null structure and never a
-# value, so it is not sealed, and it is drawn before the eligibility screen because the screen
-# removes whole rows rather than nulling them. It does not reach one: a stock whose series ends
-# in a suspension carries nulls further in than its horizon, which is the gap between each
-# series and the flat line above it.
+# exactly the last `horizon` positions and be flat beyond them. A scalar count of valid rows shows
+# neither failure this catches: a tail fabricated instead of nulled, or a short label masked by a
+# longer one's null set. The flat stretch sits just under one rather than at it, because a stock
+# whose series ends in a suspension carries nulls further in than its horizon. The figure reads
+# only the null structure and never a value, so it is not sealed, and it is drawn before the
+# eligibility screen because the screen removes whole rows rather than nulling them.
 
 # %%
 profile = (
@@ -395,11 +395,10 @@ for name in LABEL_NAMES:
 # %% [markdown]
 # Chapter 7.2 asks for the base rate to be tracked through time. For a continuous label ranked
 # across a cross-section, the quantity that has to be stable is the spread the model ranks
-# within: where it is not, the same rank correlation buys a different amount of return. The
-# spread is taken across stocks on each session first and only then averaged over the year.
-# Pooling every stock-session in a year into one standard deviation instead measures something
-# else: it adds the movement of the panel's own mean from session to session to the spread
-# across stocks on a session, and a ranking model is scored on the second alone.
+# within: where it is not, the same rank correlation buys a different amount of return. The spread
+# is taken across stocks on each session first and only then averaged over the year, because
+# pooling a whole year of stock-sessions into one standard deviation would add the movement of the
+# panel's own mean from session to session to the spread a ranking model is actually scored on.
 
 # %%
 annual = (
