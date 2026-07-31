@@ -224,6 +224,31 @@ def test_a_configured_value_is_not_marked_as_a_default(monkeypatch, tmp_path) ->
     assert "ML4T_DATA_PATH_IS_DEFAULT" not in os.environ
 
 
+def test_a_generated_env_omits_the_anchored_default() -> None:
+    """Otherwise the marker is defeated one step later.
+
+    conftest writes a .env when a clean clone has none. Writing the marked
+    default into it promotes the default to an explicit setting, which the .env
+    branch of _resolve_data_path() then returns — the same silent skip the marker
+    exists to prevent, one indirection further along.
+    """
+    from tests.conftest import generated_env_contents
+
+    written = generated_env_contents(
+        REPO_ROOT,
+        {"ML4T_DATA_PATH": str(REPO_ROOT / "data"), "ML4T_DATA_PATH_IS_DEFAULT": "1"},
+    )
+    assert "ML4T_DATA_PATH=" not in written
+    assert f"ML4T_PATH={REPO_ROOT}" in written
+
+
+def test_a_generated_env_keeps_a_chosen_data_path() -> None:
+    from tests.conftest import generated_env_contents
+
+    written = generated_env_contents(REPO_ROOT, {"ML4T_DATA_PATH": "/mnt/big/data"})
+    assert "ML4T_DATA_PATH=/mnt/big/data" in written
+
+
 def test_conftest_ignores_the_anchored_default(monkeypatch) -> None:
     """The regression the marker exists to prevent, at the site that consumes it."""
     import tests.conftest as conftest

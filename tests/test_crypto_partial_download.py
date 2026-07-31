@@ -10,10 +10,14 @@ These pin the status, not the summary text: a requested symbol absent from what
 is now on disk must exit 1, and ``--allow-partial`` must be the only way to keep
 what arrived and still exit 0.
 
-The status comes from the *merged* dataset rather than from the symbols that
-failed in the last request. ``combine_existing()`` folds a retry into what an
-earlier run wrote, so a symbol that fails on the retry is still on disk — basing
-the status on the request would fail a download that is in fact complete.
+On a plain run the status comes from the *merged* dataset rather than from the
+symbols that failed in the last request. ``combine_existing()`` folds a retry
+into what an earlier run wrote, so a symbol that fails on the retry is still on
+disk — basing the status on the request would fail a download that is complete.
+
+``--update`` inverts that, and both directions are pinned below. Every symbol is
+already on disk by construction, so presence proves nothing about whether the
+window was extended; there the request's failures are what did not arrive.
 """
 
 from __future__ import annotations
@@ -155,6 +159,34 @@ def test_a_retry_that_is_still_short_exits_nonzero(
     with pytest.raises(SystemExit) as exc:
         _run(downloader, monkeypatch, tmp_path, arrived=second)
     assert exc.value.code == 1
+
+
+def test_update_reports_a_failed_extension(downloader, monkeypatch, tmp_path, configured_symbols):
+    """--update inverts what presence proves.
+
+    Every symbol is already on disk by construction, so an update whose every
+    incremental request failed would look complete to a presence check even
+    though no new rows arrived. There the request's failures are the answer.
+    """
+    _run(downloader, monkeypatch, tmp_path, arrived=configured_symbols)
+
+    with pytest.raises(SystemExit) as exc:
+        _run(
+            downloader,
+            monkeypatch,
+            tmp_path,
+            arrived=configured_symbols,
+            failed=configured_symbols,
+            cli=("--update",),
+        )
+    assert exc.value.code == 1
+
+
+def test_update_that_extends_everything_exits_zero(
+    downloader, monkeypatch, tmp_path, configured_symbols
+):
+    _run(downloader, monkeypatch, tmp_path, arrived=configured_symbols)
+    _run(downloader, monkeypatch, tmp_path, arrived=configured_symbols, cli=("--update",))
 
 
 def test_a_single_requested_symbol_that_arrives_is_complete(downloader, monkeypatch, tmp_path):

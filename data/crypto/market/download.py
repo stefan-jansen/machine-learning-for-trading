@@ -58,19 +58,26 @@ def combine_existing(output_path: Path, new_df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def missing_symbols(df: pl.DataFrame, symbols: list[str]) -> list[str]:
-    """Which requested symbols are absent from what is now on disk.
+def missing_symbols(
+    df: pl.DataFrame, symbols: list[str], failed: list[str], *, updating: bool
+) -> list[str]:
+    """Which requested symbols this run did not deliver.
 
-    The status has to come from the merged dataset, not from the symbols that
-    failed in this request. combine_existing() folds a retry into what a previous
-    run already wrote, so a symbol that fails on the retry is still present, and
-    reporting the request's failures would fail a download that is in fact
-    complete.
+    On a plain run the answer comes from the merged dataset, not from the symbols
+    that failed in this request: combine_existing() folds a retry into what a
+    previous run already wrote, so a symbol that fails on the retry is still
+    present, and reporting the request's failures would fail a download that is in
+    fact complete.
+
+    --update inverts that. Every symbol is already on disk by construction, so
+    presence proves nothing about whether the window was extended - there the
+    request's failures are exactly what did not arrive.
     """
-    if df.is_empty():
-        return list(symbols)
-    present = set(df["symbol"].unique().to_list())
-    return [s for s in symbols if s not in present]
+    present = set() if df.is_empty() else set(df["symbol"].unique().to_list())
+    absent = {s for s in symbols if s not in present}
+    if updating:
+        absent |= {s for s in failed if s in symbols}
+    return sorted(absent)
 
 
 def get_update_start(output_path: Path, end_date: str, interval_hours: int) -> str | None:
@@ -181,7 +188,7 @@ def main() -> None:
     parser.add_argument(
         "--allow-partial",
         action="store_true",
-        help="Exit 0 even if some symbols failed (keeps what arrived; re-run to resume)",
+        help="Exit 0 even if symbols are missing (keeps what arrived; re-run to retry them)",
     )
     args = parser.parse_args()
 
@@ -281,7 +288,7 @@ def main() -> None:
             perps_df = clamp_date_range(perps_df, perps_start, perps_end)
             if not args.symbol:
                 perps_df = perps_df.filter(pl.col("symbol").is_in(symbols))
-            perps_missing = missing_symbols(perps_df, symbols)
+            perps_missing = missing_symbols(perps_df, symbols, perps_failed, updating=args.update)
             atomic_write_parquet(perps_df, perps_output)
             save_partitioned(perps_df, storage_path / "ohlcv_1h")
             profile_path = save_dataset_profile(
@@ -336,7 +343,9 @@ def main() -> None:
             premium_df = clamp_date_range(premium_df, premium_start, premium_end)
             if not args.symbol:
                 premium_df = premium_df.filter(pl.col("symbol").is_in(symbols))
-            premium_missing = missing_symbols(premium_df, symbols)
+            premium_missing = missing_symbols(
+                premium_df, symbols, premium_failed, updating=args.update
+            )
             atomic_write_parquet(premium_df, premium_output)
             save_partitioned(premium_df, storage_path / "premium_index")
             profile_path = save_dataset_profile(
