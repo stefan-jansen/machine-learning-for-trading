@@ -245,6 +245,7 @@ class ExecutionEnv(gym.Env):
     ) -> int:
         current_market = self.market_path[self.step_idx] if market is None else market
         if self.step_idx >= self.horizon - 1:
+            # The horizon step clears the book at any price: the order must complete.
             return int(self.remaining_shares)
         action_frac = self._coerce_action_fraction(action)
         multiplier = self.pace_min_multiplier + action_frac * (
@@ -336,28 +337,10 @@ class ExecutionEnv(gym.Env):
 
         reward = -(shortfall + risk_penalty + schedule_penalty) / max(self.total_shares, 1)
 
-        if terminated and self.remaining_shares > 0:
-            forced_shares = self.remaining_shares
-            forced_execution_price, remaining_shortfall, _ = self._trade_metrics(
-                market, forced_shares
-            )
-            self.total_cost += remaining_shortfall
-            reward -= remaining_shortfall / max(self.total_shares, 1)
-            self.execution_history.append(
-                {
-                    "step": self.step_idx,
-                    "shares_sold": forced_shares,
-                    "execution_price": forced_execution_price,
-                    "shortfall": remaining_shortfall,
-                    "remaining": 0,
-                    "regime": market.regime,
-                    "depth": market.depth,
-                    "risk_penalty": 0.0,
-                    "schedule_penalty": 0.0,
-                    "forced_liquidation": True,
-                }
-            )
-            self.remaining_shares = 0
+        assert not (terminated and self.remaining_shares > 0), (
+            "the horizon step sells the whole remainder, so a terminated episode "
+            "holds no inventory - a nonzero remainder means the pacing logic changed"
+        )
 
         # Return terminal observation if episode is done
         if terminated:
