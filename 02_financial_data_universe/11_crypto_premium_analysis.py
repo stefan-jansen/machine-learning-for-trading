@@ -202,11 +202,13 @@ for idx, (symbol, color) in enumerate(zip(major_symbols, colors, strict=False)):
     # SOL carries a handful of thousand-bps dislocations. Restricting the axis is not
     # enough — the bin width is set by the full range, so the visible window would hold
     # two bins. Drop the outer 1% before binning so all four panels resolve their body.
-    lo, hi = np.percentile(data, [0.5, 99.5])
-    core = data[(data >= lo) & (data <= hi)]
+    # A reduced test panel may not carry every symbol, and a percentile of nothing raises.
+    if data.size:
+        lo, hi = np.percentile(data, [0.5, 99.5])
+        data = data[(data >= lo) & (data <= hi)]
 
     fig.add_trace(
-        go.Histogram(x=core, nbinsx=50, marker_color=color, name=symbol), row=row, col=col
+        go.Histogram(x=data, nbinsx=50, marker_color=color, name=symbol), row=row, col=col
     )
 
 fig.update_layout(
