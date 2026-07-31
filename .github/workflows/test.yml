@@ -410,9 +410,14 @@ jobs:
         # validates the 13F artifacts by rebuilding them with the producer's own
         # build_features_and_matrix, and 13f_download.py imports requests at
         # module scope. Nothing in this job makes a network call.
+        #
+        # scipy/statsmodels/scikit-learn are the import surface of
+        # case_studies/utils/causal.py, so the p-value tail test can actually
+        # run its numeric case rather than skipping past the behavior it pins.
         run: |
           uv venv --python 3.14
-          uv pip install pytest numpy polars pyyaml python-dotenv plotly gymnasium requests
+          uv pip install pytest numpy polars pyyaml python-dotenv plotly gymnasium requests \
+            scipy statsmodels scikit-learn
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -470,6 +475,20 @@ jobs:
             tests/test_create_test_data.py \
             tests/test_sample_registry_for_tests.py \
             -v --tb=short
+      # A two-tailed p-value written as `2 * (1 - dist.cdf(abs(t)))` returns
+      # exactly 0.0 above |t| ~8.35, so a notebook teaching inference printed
+      # `p=0` for a number no computation produced. `dist.sf` is the correct
+      # call. Two halves, both needed: the numeric case pins the behavior of
+      # the DML HAC p-value that reaches the registry, and the static scan
+      # catches the expression coming back — it is reintroduced by copying it
+      # from one chapter into another, so the scan is unfiltered by path.
+      - name: No tail probability computed as 1 - cdf
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          ML4T_PATH: ${{ github.workspace }}
+          ML4T_DATA_PATH: ${{ github.workspace }}/data
+        run: |
+          .venv/bin/python -m pytest tests/test_pvalue_tail_precision.py -v --tb=short
 
   # ---------------------------------------------------------------------------
   # Chapter notebook tests — inside Docker (ml4t/ml4t:latest)

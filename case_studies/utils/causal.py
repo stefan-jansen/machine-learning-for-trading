@@ -352,7 +352,7 @@ def manual_dml_timeseries(
 
     t_stat_hac = theta / se_hac if se_hac > 0 else np.nan
     p_value_hac = (
-        2 * (1 - stats.t.cdf(abs(t_stat_hac), df=max(n_periods - 2, 1)))
+        2 * stats.t.sf(abs(t_stat_hac), df=max(n_periods - 2, 1))
         if not np.isnan(t_stat_hac)
         else np.nan
     )
