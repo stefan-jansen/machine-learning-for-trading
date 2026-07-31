@@ -402,16 +402,25 @@ features:
       frame: cross-section
       representation: percentile within the decision date
       failure_mode: discards the level the state families carry instead
-    - name: macro and cross-asset regime
-      pattern: corr_spy_tlt_*|regime|yield_curve_*
+    - name: cross-asset regime
+      pattern: corr_spy_tlt_*
       role: state
-      hypothesis: Rotation depends on the macro regime and on assets still diversifying
-      inputs: SPY and TLT log returns, 10y and 2y constant-maturity yields
+      hypothesis: Rotation stops working when equities and bonds stop diversifying
+      inputs: SPY and TLT log returns
+      lookback: 63
+      lag: 0
+      frame: cross-asset
+      representation: rolling correlation
+      failure_mode: one equity-bond pair stands in for the whole universe
+    - name: yield curve
+      pattern: regime|yield_curve_*
+      role: state
+      hypothesis: The slope of the curve separates the macro regimes rotation depends on
+      inputs: 10y and 2y constant-maturity yields
       lookback: 252
       lag: 1
-      frame: cross-asset
-      representation: rolling correlation, level, z-score, indicator
+      frame: macro
+      representation: level, z-score, regime indicator
       failure_mode: >-
-        one equity-bond pair stands in for the whole universe, and the Treasury series is
-        the revised history rather than the initial release, so the lag is right for
+        the revised Treasury history, not the initial release, so the lag is right for
         publication timing but not for revisions

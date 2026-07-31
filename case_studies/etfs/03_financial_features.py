@@ -137,9 +137,10 @@ print(f"Holdout starts {HOLDOUT_START}; Section D rebuilds the panel without it"
 # The register is declared in `config/setup.yaml`, one row per family: what it reads, how far
 # back, and with what delay. A `lag` of zero means the input is on the tape at the decision
 # itself, which every price-derived family here is: the decision is taken at the close and
-# executes at the next open. The macro family is the one exception, at one session - the
-# Treasury series for a given day is treated as available from the following close, which is
-# what `config/setup.yaml` declares as the case study's macro policy.
+# executes at the next open. The yield curve is the one exception, at one session: a Treasury
+# series dated t is treated as available from the close of t+1, which is what
+# `config/setup.yaml` declares as the case study's macro policy. That lag is why it is a family
+# of its own rather than sharing one with the cross-asset correlation, which reads prices.
 
 # %%
 register_frame(FAMILIES).select(
@@ -318,12 +319,14 @@ def regime_and_state(df: pl.DataFrame) -> pl.DataFrame:
             ),
         )
     )
-    # Shifted one session before the join. `config/setup.yaml` declares the macro
-    # policy as `alfred_initial_release_close_lagged`: an observation dated t is
-    # available for a decision at the close of t+1, not t. Joining it at t reads a
-    # number the decision could not have had.
+    # Stamped with its availability date, not its observation date. `config/setup.yaml`
+    # declares the macro policy as `alfred_initial_release_close_lagged`: a value dated t
+    # is available for a decision at the close of t+1. The offset is a calendar day rather
+    # than a shift down the Treasury series, because the two calendars differ - a shift
+    # would mean "the next day the Treasury published", so on Columbus Day, when NYSE
+    # trades and FRED does not, it would add a second session of delay.
     curve = yield_curve.select(
-        pl.col("timestamp").shift(-1),
+        pl.col("timestamp").dt.offset_by("1d"),
         pl.when(pl.col("slope") > REGIME_THRESHOLD).then(1).otherwise(0).alias("regime"),
         pl.col("slope").alias("yield_curve_slope"),
         (
@@ -501,12 +504,13 @@ plot_coverage_through_time(
 plot_timing_contract(
     FAMILIES,
     bar_unit="trading sessions",
-    title="Every family reads a trailing window and none claims a delay",
-    subtitle="Register lookback per family; a gap at the right edge would be an information lag",
+    title="Only the yield curve waits for its input to publish",
+    subtitle="Register lookback per family; a gap at the right edge is an information lag",
     alt=(
         "Horizontal bars, one per feature family, each extending leftward from the decision "
-        "line by that family's lookback, from 63 sessions for volume to 252 for momentum and "
-        "the macro state. No bar stops short of the decision line."
+        "line by that family's lookback, from 63 sessions for volume and the cross-asset "
+        "correlation to 252 for momentum and the yield curve. Every bar reaches the decision "
+        "line except the yield curve, which stops one session short of it."
     ),
 )
 
