@@ -41,6 +41,7 @@ HOLDOUT_SCOPED_NOTEBOOKS = [
     ),
     ("case_studies/sp500_options/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/us_equities_panel/02_labels.py", "cross_sectional_ic_series("),
+    ("case_studies/nasdaq100_microstructure/02_labels.py", "cross_sectional_ic_series("),
 ]
 
 
@@ -151,6 +152,7 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
     "case_studies/sp500_equity_option_analytics/02_labels.py",
     "case_studies/sp500_options/02_labels.py",
     "case_studies/us_equities_panel/02_labels.py",
+    "case_studies/nasdaq100_microstructure/02_labels.py",
 ]
 
 # Of the four above, only etfs/05 uses a market-wide calendar; the other three
@@ -175,6 +177,13 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
 # after a merger or a spin-off, and ``adj_factor`` restarts with the new security, so
 # shifting within ``symbol`` would be the under-purge this list exists to prevent rather
 # than the fix for it. It is in both lists above, where the mechanism is what is checked.
+# ``nasdaq100_microstructure/02_labels`` is deliberately absent from this third list while
+# being present in the two above. Its labels are intraday and may not cross an overnight
+# gap, so the entity a label may not cross is the compound ``["symbol", "session_date"]``
+# and its endpoint is derived with ``.over(GROUP_COLS)``. The regex below binds a single
+# quoted column name, so it cannot express a compound key -- listing the notebook here
+# would produce a false red against a seal that is strictly stronger than the per-symbol
+# one this test checks.
 # ``etfs/03_financial_features`` is deliberately absent. It was listed here while it
 # purged on a shifted label endpoint; public #447 replaced that mechanism with a seal
 # that rebuilds the whole panel with the holdout withheld and compares all 57 columns,
