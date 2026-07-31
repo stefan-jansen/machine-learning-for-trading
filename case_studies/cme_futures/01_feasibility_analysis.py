@@ -14,695 +14,387 @@
 # ---
 
 # %% [markdown]
-# # CME Futures Case Study: Feasibility Analysis
+# # CME Futures: Feasibility Analysis
 #
-# This notebook tests whether the CME futures dataset can deliver on the strategy
-# declared in `config/setup.yaml`. `setup.yaml` is the canonical, hand-curated
-# source of truth: universe (30 products across seven sectors), decision cadence,
-# cost model, labels, sweep grid, and evaluation protocol. This notebook does
-# not write it. Instead, it produces the evidence that justifies its values:
-# data coverage across products and time, return distributions at the candidate
-# horizons relative to transaction costs, the futures return decomposition that
-# makes carry a payoff component, and a walk-forward fold demonstration. Findings
-# persist to `config/exploration/feasibility_report.json`.
+# `config/setup.yaml` declares a cross-sectional futures strategy: which products trade, how
+# often positions change, what crossing costs, how the sample is split. This notebook asks
+# whether the data supports it, and fits nothing.
 #
-# ## Learning Objectives
+# ## Learning objectives
 #
-# - Verify the data delivers what `setup.yaml` assumes (30 products, coverage, holdout)
-# - Decompose futures returns into spot + roll components and document the sign convention
-# - Test whether typical price moves exceed transaction costs at candidate horizons
-# - Demonstrate the walk-forward structure declared in `setup.yaml::evaluation`
-# - Persist findings as a stable artifact downstream notebooks can cite
+# - Count the universe on the session the strategy acts on, price the spread from the
+#   contract's own tick, and read clearance off an exceedance curve scaled by that spread
+# - Measure how long the carry a strategy reads stays put, and confirm the declared folds
+#   fit the sample without touching the holdout
 #
-# ## Book Reference
+# ## Book reference
 #
-# Chapter 6, Sections 6.2-6.6
-#
-# ## Prerequisites
-#
-# - CME futures data available via `load_cme_futures()` (Databento daily settlements)
-# - `config/setup.yaml` exists (canonical strategy spec)
-# - Understanding of futures roll mechanics and walk-forward CV (Section 6.5)
+# Chapter 6, Sections 6.2-6.6. Reads CME settlements and `config/setup.yaml`, never writes.
 
 # %%
-"""CME Futures Case Study: Feasibility Analysis."""
+"""CME Futures Case Study - Feasibility Analysis."""
 
-import json
+import re
 import warnings
-from datetime import UTC, datetime
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-import seaborn as sns
 import yaml
-from scipy import stats
 
+from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
 from data import load_cme_futures
+from utils.config import REPO_ROOT
+from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
-from utils.style import COLORS
+from utils.style import COLORS, FIGSIZE, add_message_title
 
 warnings.filterwarnings("ignore")
-sns.set_style("whitegrid")
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "cme_futures"
-START_DATE = "2011-01-01"  # Futures data starts 2011
-MAX_SYMBOLS = 0
+START_DATE = "2011-01-01"
+END_DATE = "2025-12-31"
 
 # %% [markdown]
 # ## Configuration
+#
+# Every knob is read from `setup.yaml`, and Section B computes on the development window
+# alone, so nothing the holdout contains can shape a choice made here.
 
 # %%
-CASE_DIR = get_case_study_dir("cme_futures")
-CASE_DIR.mkdir(parents=True, exist_ok=True)
-EXPLORATION_DIR = CASE_DIR / "config" / "exploration"
-EXPLORATION_DIR.mkdir(parents=True, exist_ok=True)
+CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
+SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 
-with open(CASE_DIR / "config" / "setup.yaml") as f:
-    SETUP = yaml.safe_load(f)
-
-STRATEGY_ID = SETUP["strategy_id"]
-START_DATE = "2011-01-01"
-END_DATE = "2025-12-31"
 HOLDOUT_START = str(SETUP["evaluation"]["holdout_start"])
 HOLDOUT_END = str(SETUP["evaluation"]["holdout_end"])
+PRIMARY_LABEL = SETUP["labels"]["primary"]
+LABEL_BUFFER = SETUP["labels"]["buffer"]
+DECLARED_PRODUCTS = sorted(p for g in SETUP["universe"]["product_groups"].values() for p in g)
+BREADTH_FLOOR = 2 * max(SETUP["backtest"]["sweep"]["top_k_grid"][PRIMARY_LABEL])
+SPREAD_TICKS = SETUP["costs"]["spread_ticks"]
+ILLIQUID = set(SETUP["costs"]["illiquid_products"])
+LABELS = [PRIMARY_LABEL, *SETUP["labels"]["variants"]]
+HORIZONS = sorted(int(re.search(r"(\d+)d$", name).group(1)) for name in LABELS)
+
+print(f"Development {START_DATE} to {HOLDOUT_START} | sealed holdout to {HOLDOUT_END}")
+print(f"{len(DECLARED_PRODUCTS)} products, floor {BREADTH_FLOOR} | horizons {HORIZONS} sessions")
 
 # %% [markdown]
-# ---
+# ## A. Orientation
 #
-# ## Section A: Orientation (Section 6.2)
-#
-# CME futures provide leveraged exposure across asset classes (equity indices,
-# rates, energy, metals, currencies, agriculture, livestock) with a return
-# structure that splits into spot movement and roll yield. The strategy operates
-# at a weekly cadence on 30 front-month continuous contracts.
-#
-# `setup.yaml` declares the trading setup. This notebook asks whether the data
-# delivers on those declarations:
-#
-# - **Universe**: Are all 30 declared products present across the sample period?
-# - **Returns**: How do futures returns decompose into spot and roll components?
-# - **Costs**: Do typical moves exceed the 5 bps round-trip floor at daily and weekly horizons?
-# - **Evaluation**: Does the data support 5 walk-forward folds with the declared train/val/holdout split?
+# CME futures give leveraged exposure across equity indices, rates, energy, metals,
+# currencies, agriculture and livestock through one order type and one clearing house. A
+# front-month position earns the spot move plus the roll yield the term structure implies,
+# so ranking products against each other trades a difference in carry as much as one in
+# direction. Three questions decide whether that is worth building here: does the universe
+# exist on every decision date, is a typical move large next to the cost of capturing it,
+# and are there enough decision dates for a walk-forward that never reads the holdout?
 
 # %% [markdown]
-# ---
+# ## B. Universe and cost feasibility
 #
-# ## Section B: Universe and Cost Feasibility (Sections 6.3-6.4)
-
-# %% [markdown]
-# ### B.1 Load and Verify the Data
+# ### B.1 Load and verify the declared universe
 #
-# The loader returns daily settlement data per product and tenor. `tenor == 0`
-# is the front-month contract; deferred contracts (`tenor == 1, 2, ...`) carry
-# the term structure used in Chapter 7 carry features. For feasibility analysis
-# we use the front-month `adj_close`, which is the roll-continuous
-# (back-adjusted) settlement series --- `adj_close == raw_close * cum_ratio`, so
-# roll gaps are removed and return magnitudes reflect genuine price moves rather
-# than roll discontinuities. The contemporaneous traded level (`raw_close`) is
-# what carries roll jumps; Chapter 7 uses `raw_close` and the deferred tenors to
-# construct explicit carry and roll-yield features.
+# The loader returns one row per product, tenor and session; `tenor == 0` is the front month.
+# `raw_close` is the printed settlement and `adj_close` is back-adjusted, so its differences
+# are moves not rolls. Neither is a safe denominator unguarded.
 
 # %%
-futures_data = load_cme_futures(start_date=START_DATE, end_date=END_DATE)
-
+futures = load_cme_futures(start_date=START_DATE, end_date=END_DATE)
 front = (
-    futures_data.filter(pl.col("tenor") == 0)
-    .select(["product", "session_date", "adj_close", "volume"])
+    futures.filter(pl.col("tenor") == 0)
+    .select(["product", "session_date", "raw_close", "adj_close"])
     .sort(["product", "session_date"])
 )
+research = front.filter(pl.col("session_date") < pl.lit(HOLDOUT_START).str.to_date())
 
-n_products_in_data = front["product"].n_unique()
-n_dates = front["session_date"].n_unique()
-print(f"Loaded {n_products_in_data} products, {len(front):,} rows")
-print(f"Period: {front['session_date'].min()} to {front['session_date'].max()}")
-print(f"Distinct session dates: {n_dates}")
+missing = sorted(set(DECLARED_PRODUCTS) - set(research["product"].unique().to_list()))
+assert not missing, f"declared in setup.yaml but absent from the data: {missing}"
+print(
+    f"{research['product'].n_unique()} products, {len(research):,} settlements, "
+    f"{research['session_date'].min()} to {research['session_date'].max()}"
+)
 
 # %% [markdown]
-# ### B.2 Universe Verification
+# ### B.2 Breadth at every decision date
 #
-# `setup.yaml::universe.product_groups` declares 30 CME root symbols across
-# seven sectors. We verify every declared product is present in the data and
-# report coverage per product (no point-in-time eligibility filter applies to
-# futures --- the universe is fixed by exchange contract availability).
+# One count of the universe hides what a cross-sectional strategy has to answer: whether the
+# products are there *on the session it acts on*. Counting anywhere in the week hides the
+# dates that matter, because the week's final session is sometimes a holiday.
 
 # %%
-declared_groups = SETUP["universe"]["product_groups"]
-declared_products = sorted(p for products in declared_groups.values() for p in products)
-n_products_declared = SETUP["universe"]["n_products"]
-
-actual_products = sorted(front["product"].unique().to_list())
-missing = sorted(set(declared_products) - set(actual_products))
-extra = sorted(set(actual_products) - set(declared_products))
-
-assert not missing, f"Declared but missing from data: {missing}"
-print(f"Declared products: {n_products_declared}")
-print(f"Found in data: {len(actual_products)}")
-if extra:
-    print(f"Extra in data (not in setup.yaml): {extra}")
-
-# %%
-# Coverage per product: number of session dates and earliest/latest dates
-coverage = (
-    front.group_by("product")
-    .agg(
-        pl.col("session_date").n_unique().alias("n_days"),
-        pl.col("session_date").min().alias("first_date"),
-        pl.col("session_date").max().alias("last_date"),
-    )
-    .sort("n_days")
+decisions = research.group_by(pl.col("session_date").dt.truncate("1w")).agg(
+    pl.col("session_date").max().alias("decision_date")
+)
+breadth = (
+    research.join(decisions, left_on="session_date", right_on="decision_date")
+    .group_by("session_date")
+    .agg(pl.col("product").n_unique().alias("n_products"))
+    .sort("session_date")
 )
 
-print("\nCoverage by product (sorted ascending):")
-coverage
-
-# %% [markdown]
-# All declared products have meaningful coverage across the 2011-2025 sample.
-# Some products start later than 2011-01-01 (driven by Databento contract-listing
-# dates); the walk-forward folds operate on whatever coverage exists per product.
-
-# %% [markdown]
-# ### B.3 Trading Cost Analysis: Horizon Feasibility
-#
-# A fundamental question for any trading strategy is: **at which holding periods
-# do typical price moves exceed transaction costs?**
-#
-# Futures have low per-trade costs (~3-5 bps round-trip for liquid contracts ---
-# commission + half-tick spread). We test both daily and weekly horizons against
-# a 5 bps round-trip cost floor.
-
-# %%
-# Daily front-month returns on the roll-adjusted series (adj_close): roll gaps are
-# removed so feasibility-scale statistics reflect genuine price moves, not roll
-# discontinuities. Ch7 features compute their own returns from adj_close explicitly.
-daily_returns = (
-    front.with_columns(
-        (pl.col("adj_close") / pl.col("adj_close").shift(1) - 1).over("product").alias("return")
-    )
-    .filter(pl.col("return").is_not_null())
-    .select(["product", "session_date", "return"])
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.plot(breadth["session_date"], breadth["n_products"], color=COLORS["blue"], linewidth=1.2)
+ax.axhline(BREADTH_FLOOR, color=COLORS["copper"], ls="--", lw=1.5, label="both-leg position floor")
+ax.set_ylim(0, len(DECLARED_PRODUCTS) + 2)
+ax.set_ylabel("Products quoting at the weekly decision")
+ax.legend(frameon=False, fontsize=8, loc="lower right")
+add_message_title(
+    ax,
+    "Holiday sessions are the only decision dates a two-sided book cannot fill",
+    subtitle="Products settling on the week's final session, the date the strategy acts on",
 )
-
-# Weekly returns: Friday-close to Friday-close (the declared decision cadence)
-weekly = (
-    front.with_columns(pl.col("session_date").dt.strftime("%G-W%V").alias("week"))
-    .group_by(["product", "week"])
-    .agg(
-        pl.col("adj_close").last().alias("adj_close"),
-        pl.col("session_date").max().alias("session_date"),
-    )
-    .sort(["product", "session_date"])
-)
-weekly_returns = weekly.with_columns(
-    (pl.col("adj_close") / pl.col("adj_close").shift(1) - 1).over("product").alias("return")
-).filter(pl.col("return").is_not_null())
-
-print(f"Daily returns: {len(daily_returns):,} observations")
-print(f"Weekly returns: {len(weekly_returns):,} observations")
-
-# %% [markdown]
-# #### Summary Statistics by Horizon
-
-# %%
-daily_abs = daily_returns["return"].abs().to_numpy()
-weekly_abs = weekly_returns["return"].abs().to_numpy()
-
-# Cost reference: 5 bps round-trip for liquid CME futures (commission + half-tick spread)
-ROUND_TRIP_COST_BPS = 5
-ROUND_TRIP_COST = ROUND_TRIP_COST_BPS / 10_000  # 0.0005
-
-
-def compute_return_stats(data: np.ndarray, horizon: str) -> dict:
-    """Compute return distribution statistics for a given horizon."""
-    return {
-        "horizon": horizon,
-        "median_pct": float(np.median(data)) * 100,
-        "mean_pct": float(np.mean(data)) * 100,
-        "std_pct": float(np.std(data)) * 100,
-        "p75_pct": float(np.percentile(data, 75)) * 100,
-        "p95_pct": float(np.percentile(data, 95)) * 100,
-        "pct_above_5bps": float((data > ROUND_TRIP_COST).mean()) * 100,
-    }
-
-
-return_stats = pl.DataFrame(
-    [
-        compute_return_stats(daily_abs, "Daily"),
-        compute_return_stats(weekly_abs, "Weekly"),
-    ]
-)
-
-return_stats.select(
-    [
-        "horizon",
-        pl.col("median_pct").round(2).alias("median %"),
-        pl.col("mean_pct").round(2).alias("mean %"),
-        pl.col("std_pct").round(2).alias("std %"),
-        pl.col("p75_pct").round(2).alias("p75 %"),
-        pl.col("p95_pct").round(2).alias("p95 %"),
-        pl.col("pct_above_5bps").round(1).alias("> 5bps %"),
-    ]
-)
-
-# %% [markdown]
-# **Fraction of moves exceeding cost thresholds**
-
-# %%
-COST_THRESHOLDS_BPS = [1, 5, 10, 20, 50]
-cost_exceedance = []
-for horizon, data in [("Daily", daily_abs), ("Weekly", weekly_abs)]:
-    row = {"horizon": horizon}
-    for cost_bps in COST_THRESHOLDS_BPS:
-        row[f"{cost_bps}_bps"] = float((data > cost_bps / 10_000).mean()) * 100
-    cost_exceedance.append(row)
-
-cost_df = pl.DataFrame(cost_exceedance)
-cost_df.select(
-    [
-        "horizon",
-        pl.col("1_bps").round(1).alias("1 bps %"),
-        pl.col("5_bps").round(1).alias("5 bps %"),
-        pl.col("10_bps").round(1).alias("10 bps %"),
-        pl.col("20_bps").round(1).alias("20 bps %"),
-        pl.col("50_bps").round(1).alias("50 bps %"),
-    ]
-)
-
-# %% [markdown]
-# #### Visualize Return Distributions
-
-# %%
-fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
-
-horizons = [
-    ("Daily", daily_abs, COLORS["blue"]),
-    ("Weekly", weekly_abs, COLORS["amber"]),
-]
-
-for ax, (label, data, color) in zip(axes, horizons, strict=False):
-    xlim = 0.06 if label == "Daily" else 0.10
-    data_clipped = data[data < xlim]
-    bins = np.linspace(0, xlim, 50)
-    ax.hist(data_clipped, bins=bins, density=True, alpha=0.5, color=color, edgecolor="white")
-
-    if len(data_clipped) > 100:
-        kde = stats.gaussian_kde(data_clipped, bw_method=0.1)
-        x_grid = np.linspace(0, xlim, 200)
-        ax.plot(x_grid, kde(x_grid), color=color, linewidth=2)
-
-    ax.axvline(
-        ROUND_TRIP_COST,
-        color=COLORS["neutral"],
-        linestyle="--",
-        linewidth=2,
-        label=f"Cost: {ROUND_TRIP_COST_BPS} bps",
-    )
-
-    median_val = float(np.median(data))
-    frac_above = float((data > ROUND_TRIP_COST).mean())
-    ax.axvline(
-        median_val,
-        color=COLORS["neutral"],
-        linestyle="-",
-        linewidth=1.5,
-        alpha=0.7,
-        label=f"Median |return|: {median_val * 100:.2f}%",
-    )
-
-    # Annotation placed in the empty right tail so it never overlaps the legend.
-    ax.text(
-        0.97,
-        0.55,
-        f"{frac_above:.0%} of moves\n> cost floor",
-        transform=ax.transAxes,
-        ha="right",
-        va="top",
-        fontsize=10,
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
-    )
-
-    ax.set_title(f"{label} Horizon")
-    ax.set_xlabel("Absolute Return (fraction)")
-    ax.set_xlim(0, xlim)
-    ax.legend(loc="upper right", fontsize=9)
-
-axes[0].set_ylabel("Density")
-fig.suptitle("Typical CME futures moves clear the 5 bps round-trip cost floor at both horizons")
-sns.despine()
-fig.tight_layout()
 plt.show()
 
 # %% [markdown]
-# #### Return Decomposition: Spot + Roll
+# ### B.3 What the spread costs, and what a move is worth
 #
-# Futures returns decompose as:
-#
-# $$R_{\text{total}} = R_{\text{spot}} + R_{\text{roll}}$$
-#
-# Let $F_1$ be the front-month price and $F_2$ the first deferred contract. The
-# term structure slope is:
-#
-# $$s_t = \frac{F_2 - F_1}{F_1}$$
-#
-# For a long position that rolls from $F_1$ into $F_2$, the roll component is
-# approximately:
-#
-# $$R_{\text{roll}} \approx -s_t$$
-#
-# - **Contango** ($F_2 > F_1$): $s_t > 0$ so $R_{\text{roll}} < 0$ (longs lose on roll)
-# - **Backwardation** ($F_2 < F_1$): $s_t < 0$ so $R_{\text{roll}} > 0$ (longs gain on roll)
-#
-# This is why carry signals are a payoff component, not just a cost: the term
-# structure slope predicts the roll contribution at the next rebalance. Chapter 7
-# constructs explicit carry features using $F_1$ and $F_2$ from the same loader.
-
-# %% [markdown]
-# ### B.4 Feasibility Ratio
-#
-# A simple edge-to-cost ratio confirms that typical weekly signal magnitude
-# comfortably exceeds transaction costs before proceeding further. We use the
-# weekly horizon because `setup.yaml::decision.cadence = weekly_friday_close`.
+# `setup.yaml::costs` prices a trade as a commission plus a spread in ticks: one for most of
+# the universe, two for the products it lists as illiquid. The tick is a contract spec that
+# `futures_specs.yaml` carries - do not infer it, since the smallest settlement increment is
+# a half-tick on several contracts, halving the cost you charge yourself.
 
 # %%
-median_weekly_abs_return = float(np.median(weekly_abs))
-feasibility_ratio = median_weekly_abs_return / ROUND_TRIP_COST
-print(
-    f"Median weekly |return|: {median_weekly_abs_return:.4f} "
-    f"({median_weekly_abs_return * 10000:.1f} bps)"
+products = yaml.safe_load((REPO_ROOT / "data/futures/market/futures_specs.yaml").read_text())
+ticks = pl.DataFrame(
+    {
+        "product": list(products["products"]),
+        "tick": [p["tick_size"] for p in products["products"].values()],
+    }
 )
-print(f"Round-trip cost: {ROUND_TRIP_COST:.4f} ({ROUND_TRIP_COST_BPS} bps)")
-print(f"Edge-to-cost ratio: {feasibility_ratio:.1f}x")
-print(f"Assessment: {'PROCEED' if feasibility_ratio > 1.0 else 'KILL -- edge too thin'}")
+illiquid, liquid = SPREAD_TICKS["illiquid"], SPREAD_TICKS["liquid"]
+spread = pl.when(pl.col("product").is_in(ILLIQUID)).then(illiquid).otherwise(liquid)
+cost = (
+    research.group_by("product")
+    .agg(pl.col("raw_close").median().alias("price"))
+    .join(ticks, "product")
+    .with_columns((spread * pl.col("tick") / pl.col("price") * 1e4).alias("spread_bps"))
+    .sort("spread_bps")
+)
+COST_BPS = float(cost["spread_bps"].median())
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.bar(cost["product"], cost["spread_bps"], color=COLORS["blue"], width=0.7)
+ax.axhline(COST_BPS, color=COLORS["copper"], ls="--", lw=1.5, label="universe median")
+ax.set_ylabel("Round-trip spread (bps)")
+ax.tick_params(axis="x", labelsize=6, rotation=90)
+ax.legend(frameon=False, fontsize=8)
+add_message_title(
+    ax,
+    "The same universe spans an order of magnitude in what the spread costs",
+    subtitle="The configured spread over the median settlement price: one tick, two if illiquid",
+)
+plt.show()
 
 # %% [markdown]
-# ---
-#
-# ## Section C: Design Decisions
-#
-# Design decisions are the strategy choices encoded in `setup.yaml` that the
-# feasibility evidence above supports. They are justified here, not in the YAML.
-
-# %% [markdown]
-# ### C.1 Decision Cadence
-#
-# `setup.yaml::decision.cadence = weekly_friday_close` with Monday-open execution
-# delay. Weekly cadence is the natural choice for futures carry: the dominant
-# payoff component (roll yield) accrues continuously regardless of rebalancing
-# frequency, so more frequent trading adds turnover without capturing more carry.
-# The cost analysis above confirms that weekly absolute returns comfortably
-# exceed the 5 bps round-trip floor on nearly all observations.
-#
-# Daily rebalancing is feasible from a cost perspective (the majority of daily
-# moves also exceed 5 bps) but offers no structural advantage for carry-driven
-# signals. Monthly cadence would lengthen the carry capture window but shrink
-# the effective sample size to ~180 monthly decision dates over ~15 years ---
-# weekly gives ~780, which is meaningful for cross-sectional rank statistics
-# on a narrow 30-product cross-section.
-
-# %% [markdown]
-# ### C.2 Kill Conditions
-#
-# Kill conditions are falsifiable checkpoints --- if any triggers, the strategy
-# is abandoned or substantially reworked. The thresholds below are anchored to
-# the feasibility evidence above (cost-exceedance and edge-to-cost analysis):
-#
-# - **KC1 (IC floor)**: Combined IC (carry + momentum) < 0.03 with t-stat < 5.0
-#   across folds. Gate: Chapter 8 feature evaluation and Chapter 11-12 modeling.
-# - **KC2 (carry sign)**: Traditional long-backwardation carry becomes
-#   profitable across the full sample --- would suggest any "inverted carry"
-#   finding is a regime-specific artifact rather than a stable edge. Gate:
-#   Chapter 11-12 fold stability.
-# - **KC3 (cost dominance)**: Round-trip cost exceeds the median weekly absolute
-#   return for >50% of the universe. B.4 above tests this gate on the front-month
-#   aggregate; per-product cost dominance is tested in Chapter 18.
-
-# %% [markdown]
-# ### C.3 Mapping Class
-#
-# `setup.yaml::mapping.class = long_short_carry_rank` with
-# `position_state_space: long_short` and `sizing: equal_risk_or_notional`.
-# Long-short is appropriate for futures because (a) shorting is structurally
-# symmetric --- futures contracts have no borrow cost or hard-to-borrow
-# restrictions, so the short side is as cheap as the long side; (b) the carry
-# signal is naturally cross-sectional (rank-based: long high-carry, short
-# low-carry), which only works in a long-short construction; (c) long-only
-# would forfeit the contango leg of the carry trade. Equal-risk (vol-scaled)
-# sizing is the minimal-assumption rule for a cross-asset universe spanning
-# rates, equities, energy, and ags, where notional-equal weighting would
-# concentrate risk in the high-vol contracts (energy, ags). Chapter 17
-# explores alternative allocators via the `backtest.sweep.allocators` grid
-# in `setup.yaml`.
-#
-# **Narrow cross-section caveat**: With 30 products in 7 sectors, quintile
-# buckets contain only 6 instruments each. Cross-sectional rank signals have
-# limited statistical power; time-series signals (per-product carry, momentum)
-# carry independent information and are evaluated alongside the cross-section
-# in Chapter 11-12.
-
-# %% [markdown]
-# ---
-#
-# ## Section D: Walk-Forward Structure (Section 6.5)
-#
-# We verify that the data supports the walk-forward design declared in
-# `setup.yaml::evaluation` (`n_splits`, `train_size`, `val_size`, `holdout_start`).
-
-# %% [markdown]
-# ### D.1 Effective Sample Size and Data Coverage
+# Spreads differ by an order of magnitude across the universe, so one cost line on raw
+# returns answers the question for no product in particular. Each move is divided by its own
+# product's spread instead, putting break-even at one on a shared scale.
 
 # %%
-n_weeks = weekly["week"].n_unique()
-first_week = weekly["week"].min()
-last_week = weekly["week"].max()
-n_years = n_weeks / 52
-
-print("Data Coverage:")
-print(f"  Period: {first_week} to {last_week}")
-print(f"  Weekly decision dates: {n_weeks}")
-print(f"  Approx years: {n_years:.1f}")
-
-# %% [markdown]
-# ### D.2 Walk-Forward Fold Demonstration
-#
-# `case_studies/utils/cv_window.py` owns the operational splits; this cell
-# reproduces the fold boundaries from canonical `setup.yaml` parameters to verify
-# the data supports the declared design. Each fold has:
-#
-# - **Train period**: `setup.yaml::evaluation.train_size` (8Y rolling)
-# - **Val period**: `setup.yaml::evaluation.val_size` (1Y)
-# - **Purge gap**: 1 week between train end and val start (matches the 5D
-#   `labels.buffer` for the fwd_ret_5d primary label at weekly cadence)
-
-# %%
-n_splits_declared = int(SETUP["evaluation"]["n_splits"])
-train_years = 8
-data_start_year = 2011
-holdout_start_year = int(HOLDOUT_START[:4])
-
-splits = []
-for fold_idx in range(n_splits_declared):
-    test_year = data_start_year + train_years + fold_idx
-    train_start = test_year - train_years
-    train_end = test_year - 1
-    splits.append(
-        {
-            "fold": fold_idx + 1,
-            "train_start": f"{train_start}-01-01",
-            "train_end": f"{train_end}-12-31",
-            "test_start": f"{test_year}-01-01",
-            "test_end": f"{test_year}-12-31",
-            "purge_weeks": 1,
-        }
+returns = (
+    research.with_columns(
+        pl.when(pl.col("adj_close").shift(h).over("product") > 0)
+        .then(pl.col("adj_close").pct_change(h).abs().over("product"))
+        .alias(f"h{h}")
+        for h in HORIZONS
     )
-
-print(f"Generated {len(splits)} walk-forward folds")
-
-assert len(splits) == n_splits_declared, (
-    f"Expected {n_splits_declared} folds (setup.yaml), got {len(splits)}"
+    .join(cost.select("product", "spread_bps"), "product")
+    .with_columns(pl.col(f"h{h}") * 1e4 / pl.col("spread_bps") for h in HORIZONS)
 )
-last_test_end = splits[-1]["test_end"]
-print(f"Last fold test end: {last_test_end}  |  Holdout start: {HOLDOUT_START}")
-assert last_test_end < HOLDOUT_START, (
-    f"Last fold ({last_test_end}) overlaps holdout ({HOLDOUT_START})"
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for h, color in zip(HORIZONS, (COLORS["blue"], COLORS["amber"]), strict=True):
+    multiple, fraction = exceedance_curve(returns[f"h{h}"].drop_nulls().to_numpy())
+    ax.plot(multiple, fraction, color=color, lw=1.6, label=f"{h}-session move")
+ax.axvline(1, color=COLORS["copper"], ls="--", lw=1.5, label="break-even on the spread")
+ax.set_xscale("log")
+ax.set_xlim(0.02, 2_000)
+ax.set_xlabel("Absolute move as a multiple of the product's spread (log scale)")
+ax.set_ylabel("Fraction of moves at least this large")
+ax.legend(frameon=False, fontsize=8, loc="lower left")
+add_message_title(
+    ax,
+    "Almost every move at either horizon is larger than the spread it crosses",
+    subtitle="Exceedance of absolute returns scaled by each product's own spread",
 )
+plt.show()
 
 # %% [markdown]
-# **Walk-forward fold summary:**
+# ### B.4 How long the carrier stays put
+#
+# Rebalancing weekly is only worth the turnover if what the data says at one decision date
+# still says something at the next. This strategy reads carry, visible in the raw prices as
+# the slope between the front contract and the one behind it: a positive slope means a long
+# position rolls into a more expensive contract and gives back part of the spot move. How
+# long that lasts is an autocorrelation, computed inside each product, since stacking thirty
+# and correlating the result measures their joins instead.
 
 # %%
-splits_df = pl.DataFrame(splits)
-splits_df
+sealed = pl.col("session_date") < pl.lit(HOLDOUT_START).str.to_date()
+term = (
+    futures.filter((pl.col("tenor") <= 1) & sealed)
+    .pivot(on="tenor", index=["product", "session_date"], values="raw_close")
+    .rename({"0": "near", "1": "deferred"})
+    .drop_nulls()
+    .filter(pl.col("near") > 0)
+    .sort(["product", "session_date"])
+    .with_columns(((pl.col("deferred") - pl.col("near")) / pl.col("near")).alias("slope"))
+)
+acf = panel_acf(term, entity_col="product", value_col="slope", max_lags=max(HORIZONS))
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.fill_between(acf["lag"], acf["acf_p10"], acf["acf_p90"], color=COLORS["blue"], alpha=0.15)
+ax.bar(acf["lag"], acf["acf"], color=COLORS["blue"], width=0.6)
+ax.axhspan(-acf["band"][0], acf["band"][0], color=COLORS["copper"], alpha=0.3)
+ax.set_xlabel("Lag (sessions)")
+ax.set_ylabel("Autocorrelation of the term-structure slope")
+add_message_title(
+    ax,
+    "Carry moves slowly enough that a weekly rebalance still acts on it",
+    subtitle="Mean within-product autocorrelation, shaded 10th-90th percentile across products",
+)
+plt.show()
 
 # %% [markdown]
-# #### Universe Breadth per Fold
+# ### B.5 Move scale against cost
 #
-# We verify that each fold has adequate cross-sectional breadth by counting
-# products with data in each test year. Cross-sectional rank signals benefit
-# from coverage on the full 30-product universe.
+# The ratio divides the median absolute move at the primary horizon by the median spread,
+# and the clearance share counts moves above their own product's spread. Neither says total
+# cost clears.
 
 # %%
-fold_breadth = []
-for split in splits:
-    test_year = int(split["test_start"][:4])
-    n_present = front.filter(pl.col("session_date").dt.year() == test_year)["product"].n_unique()
-    fold_breadth.append({"fold": split["fold"], "test_year": test_year, "n_present": n_present})
+multiple = pl.col(f"h{HORIZONS[0]}")
+median_move_bps, clears_cost = (
+    returns.drop_nulls(f"h{HORIZONS[0]}")
+    .select(
+        (multiple * pl.col("spread_bps")).median().alias("mid"),
+        (multiple > 1).mean().alias("share"),
+    )
+    .row(0)
+)
+print(
+    f"Round-trip spread {cost['spread_bps'].min():.2f} to "
+    f"{cost['spread_bps'].max():.2f} bps, median {COST_BPS:.2f} bps | median "
+    f"{HORIZONS[0]}-session move {median_move_bps:.1f} bps, ratio "
+    f"{median_move_bps / COST_BPS:.0f}x, over its own product's spread {clears_cost:.3f}"
+)
 
-fold_breadth_df = pl.DataFrame(fold_breadth)
-print("Products present per fold test year:")
-fold_breadth_df
-
-# %% [markdown]
-# All five folds carry the full 30-product universe (or close to it), which is
-# sufficient for cross-sectional ranking on this narrow universe. Quintile
-# buckets remain at ~6 instruments each across folds.
-
-# %% [markdown]
-# ---
-#
-# ## Section E: Derived Artifacts
-#
-# The CME futures universe is fixed by exchange contract availability --- there
-# is no point-in-time eligibility filter to materialize (the closest analog is
-# the per-product coverage table in B.2, which is informational). The one
-# decision-relevant artifact this notebook produces is the feasibility report
-# in Section F. All other strategy parameters live in `config/setup.yaml`.
+# %% [markdown] tags=["results"]
+# The median round-trip spread across the thirty products is 1.13 bps, from 0.43 bps on
+# the two-year note to 5.80 bps on corn. The median absolute five-session move is 121.2
+# bps, and 0.991 of moves exceed the spread their own product would charge to cross.
 
 # %% [markdown]
-# ---
+# ## C. Design decisions
 #
-# ## Section F: Findings vs `setup.yaml`
+# ### C.1 Cadence
 #
-# The canonical strategy declarations live in `config/setup.yaml`. This section
-# enumerates each declared knob alongside the feasibility evidence above that
-# motivates it. Setup.yaml is not regenerated here --- it is the hand-curated
-# source of truth, and this notebook reads it.
+# `setup.yaml::decision.cadence` rebalances at the Friday settlement and executes at the
+# Monday open. B.3 supports that: moves at both horizons clear their own spread, so the
+# signal sets the cadence rather than cost.
+#
+# ### C.2 Kill conditions
+#
+# Three thresholds send the strategy back to the drawing board, tested where the evidence
+# exists rather than here: a combined carry-and-momentum information coefficient below its
+# floor across folds; long-backwardation carry turning profitable over the full sample,
+# which would make an inverted-carry reading a regime artifact; and cost above the median
+# move for most of the products.
+#
+# ### C.3 Mapping class. `setup.yaml::mapping.class` ranks products by carry or momentum and holds both legs, and
+# shorting a future carries no borrow, so the short leg costs what the long leg costs.
+# Sizing is equal-risk because volatilities differ by an order of magnitude and notional
+# weighting would hand the book to energy and grains.
+
+# %% [markdown]
+# ## D. Walk-forward structure
+#
+# ### D.1 Effective sample size
+#
+# What evaluation spends is decision dates, not rows.
 
 # %%
-median_d_abs_pct = float(np.median(daily_abs) * 100)
-median_w_abs_pct = float(np.median(weekly_abs) * 100)
-frac_d_above_5 = float((daily_abs > ROUND_TRIP_COST).mean())
-frac_w_above_5 = float((weekly_abs > ROUND_TRIP_COST).mean())
-n_products_present_min = int(min(fb["n_present"] for fb in fold_breadth))
-n_products_present_max = int(max(fb["n_present"] for fb in fold_breadth))
-n_folds_generated = int(len(splits))
-
-print("=" * 78)
-print("Setup.yaml knobs vs feasibility evidence")
-print("=" * 78)
-
-print()
-print(f"universe.n_products = {SETUP['universe']['n_products']}")
 print(
-    f"  -> products in data: {n_products_in_data}; "
-    f"per-fold min={n_products_present_min}, max={n_products_present_max}"
-)
-
-print()
-print(f"decision.cadence = {SETUP['decision']['cadence']}")
-print(
-    f"  -> median |weekly return| = {median_w_abs_pct:.2f}%; "
-    f"{frac_w_above_5 * 100:.0f}% exceed 5bps RT"
-)
-
-print()
-print(f"costs.class = {SETUP['costs']['class']}")
-print(f"  -> at 5bps RT: edge-to-cost = {feasibility_ratio:.1f}x at weekly horizon")
-print(f"  -> daily moves > 5bps: {frac_d_above_5 * 100:.0f}%")
-print(f"  -> weekly moves > 5bps: {frac_w_above_5 * 100:.0f}%")
-
-print()
-print(f"mapping.class = {SETUP['mapping']['class']}")
-print(f"  -> position_state_space = {SETUP['mapping']['position_state_space']}")
-print(f"  -> sizing = {SETUP['mapping']['sizing']}")
-
-print()
-print(f"labels.primary = {SETUP['labels']['primary']}")
-print(
-    f"  -> median |weekly return| = {median_w_abs_pct:.2f}% = "
-    f"{(median_w_abs_pct / 100) / ROUND_TRIP_COST:.0f}x a 5bps cost"
-)
-
-print()
-print(f"labels.variants = {SETUP['labels']['variants']}")
-print("  -> 21d horizon supports longer-carry capture; same cost floor applies")
-
-print()
-print(f"evaluation.n_splits = {SETUP['evaluation']['n_splits']}")
-print(f"  -> generated {n_folds_generated} folds; declared count matches")
-print(
-    f"  -> holdout {SETUP['evaluation']['holdout_start']} "
-    f"to {SETUP['evaluation']['holdout_end']}; "
-    f"last test ends {splits[-1]['test_end']}"
+    f"Sessions {research['session_date'].n_unique():,} | decision dates {len(decisions):,} "
+    f"| products per decision {breadth['n_products'].mean():.0f}"
 )
 
 # %% [markdown]
-# ### Persist Feasibility Findings
+# ### D.2 Fold demonstration
+#
+# `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone. Between each
+# training and validation block sits a purge gap the width of the label horizon, stopping a
+# label computed inside training from resolving inside validation. The figure draws those
+# boundaries rather than recomputing them, so it and the folds cannot disagree.
 
 # %%
-feasibility_report = {
-    "case_study_id": "cme_futures",
-    "computed_at_utc": datetime.now(UTC).isoformat(),
-    "data_period": {"start": START_DATE, "end": END_DATE},
-    "universe": {
-        "n_products_declared": int(SETUP["universe"]["n_products"]),
-        "n_products_in_data": int(n_products_in_data),
-        "n_products_per_fold_min": n_products_present_min,
-        "n_products_per_fold_max": n_products_present_max,
-    },
-    "return_distribution_abs_pct": {
-        "daily_median": median_d_abs_pct,
-        "weekly_median": median_w_abs_pct,
-    },
-    "cost_reference_bps_round_trip": ROUND_TRIP_COST_BPS,
-    "cost_exceedance_at_5bps_pct": {
-        "daily": frac_d_above_5 * 100,
-        "weekly": frac_w_above_5 * 100,
-    },
-    "feasibility_ratio_weekly_at_5bps": float(feasibility_ratio),
-    "walk_forward": {
-        "n_folds_generated": n_folds_generated,
-        "n_splits_declared": int(SETUP["evaluation"]["n_splits"]),
-        "holdout_start": HOLDOUT_START,
-        "holdout_end": HOLDOUT_END,
-        "last_test_end": splits[-1]["test_end"],
-    },
-}
+splits = generate_cv_splits(
+    research.select("session_date").rename({"session_date": "timestamp"}),
+    case_study_id=CASE_STUDY_ID,
+    label_buffer=LABEL_BUFFER,
+    date_col="timestamp",
+)
+last_val = max(s["val_end"] for s in splits)
+assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
+assert last_val < np.datetime64(HOLDOUT_START), "a fold reaches into the holdout"
 
-report_path = EXPLORATION_DIR / "feasibility_report.json"
-with open(report_path, "w") as f:
-    json.dump(feasibility_report, f, indent=2)
-print(f"Written: {report_path}")
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+fold_timeline(ax, splits, holdout=(HOLDOUT_START, HOLDOUT_END))
+add_message_title(
+    ax,
+    "Folds roll back from the sealed holdout and stop short of it",
+    subtitle="Training, purge and validation blocks exactly as generate_cv_splits returns them",
+)
+plt.show()
 
 # %% [markdown]
-# ---
+# ## E. Derived artifacts. Nothing: listings fix the universe, so nothing downstream reads
+# an eligibility file from here.
+
+# %% [markdown]
+# ## F. Findings vs `setup.yaml`
 #
-# ## Key Takeaways
+# One row per knob: the evidence that motivates it, and what would change it.
 #
-# 1. **Universe**: All 30 declared CME products are present; per-fold breadth
-#    holds at the full universe across the 5 walk-forward folds. The narrow
-#    cross-section (~6 per quintile) is the binding statistical constraint, not
-#    coverage.
-# 2. **Return decomposition**: Futures returns split into spot + roll. Roll
-#    yield ($R_{\text{roll}} \approx -s_t$) is a payoff component driven by the
-#    term structure slope --- contango hurts longs, backwardation helps them.
-#    Chapter 7 constructs explicit carry features from $F_1, F_2$.
-# 3. **Cost feasibility**: Both daily and weekly horizons clear the 5 bps
-#    round-trip threshold by wide margins. Edge-to-cost ratio at the weekly
-#    horizon is comfortably above 1.0 on raw return magnitudes, so KC3 (cost
-#    dominance) is cleared before training begins.
-# 4. **Cadence**: Weekly Friday-close with Monday-open execution is the natural
-#    choice for carry --- roll yield accrues continuously, so faster
-#    rebalancing adds turnover without capturing more carry.
-# 5. **Mapping**: Long-short equal-risk on cross-sectional carry ranks is the
-#    minimal-assumption baseline; allocator variants sweep in
-#    `setup.yaml::backtest.sweep.allocators` (explored in Chapter 17--18).
-# 6. **Evaluation**: 5 walk-forward folds with verified holdout separation
-#    (`evaluation.holdout_start = 2024-01-01` enforced).
+# | Knob | Evidence | Revise it when |
+# |---|---|---|
+# | `universe.n_products` | B.2 breadth per decision date | breadth falls under the position count the sweep asks for on either leg |
+# | `decision.cadence` | B.3 exceedance, B.4 persistence | moves stop clearing the spread, or the slope decays inside one rebalancing interval |
+# | `costs.spread_ticks` | B.3 tick per product from `futures_specs.yaml` | the exchange changes a tick, or a product changes liquidity class |
+# | `evaluation.n_splits` | D.1 decision dates, D.2 boundaries | the folds no longer fit the development window |
+
+# %%
+print(
+    f"universe.n_products {SETUP['universe']['n_products']}, breadth per decision date "
+    f"{breadth['n_products'].min()} to {breadth['n_products'].max()}, under the floor on "
+    f"{breadth.filter(pl.col('n_products') < BREADTH_FLOOR).height} of {len(breadth)} dates\n"
+    f"decision.cadence {SETUP['decision']['cadence']} | labels.primary {PRIMARY_LABEL}\n"
+    f"evaluation.n_splits {SETUP['evaluation']['n_splits']}, generated {len(splits)}, "
+    f"last validation ends {last_val.date()}, holdout untouched"
+)
+
+# %% [markdown] tags=["results"]
+# Breadth is 29 products until the small-cap index contract lists in 2017 and 30 after, with
+# 8 at its worst on a Good Friday; the floor of 20 binds on 7 of 678 decision dates, every
+# one a holiday session. Five folds are generated, the last validation ending 2023-12-21.
+
+# %% [markdown]
+# ## Key takeaways
 #
-# **Artifacts written**:
-# - `config/exploration/feasibility_report.json`: summary numbers downstream
-#   notebooks and the chapter README can cite without re-running this notebook.
+# 1. **Count the universe on the session the strategy acts on.** Anywhere-in-the-week hides
+#    the holiday dates where a two-sided book cannot be filled.
+# 2. **Take the tick from the contract specification, not from the prices.** Several
+#    contracts settle on half-ticks, so the observed grid understates what you pay.
+# 3. **Scale moves by each product's own spread before comparing them to cost**, and
+#    compute a panel autocorrelation inside each entity, never across the stack.
+# 4. **Guard every denominator**: crude settled below zero in 2020, and a percentage change
+#    off a negative price is not a return.
 #
-# **Next**: Chapter 7 creates labels at the 5-day primary and 21-day variant
-# horizons declared in `setup.yaml::labels`.
+# ### Known limitations
+#
+# - Cost here is the spread alone; commission and roll slippage need a notional and enter at
+#   the cost stage, which also tests whether a persistent carry reading is profitable.
+#
+# **Next**: labels at the declared horizons, built on this development window.
