@@ -59,10 +59,9 @@ END_DATE = "2025-12-31"
 # %% [markdown]
 # ## Configuration
 #
-# Every knob is read from `setup.yaml`, and Section B computes on the development window alone,
-# so nothing the holdout contains can shape a choice made here. `setup.yaml` names its calendar
-# `FX`, and the splitter's mapping from that name to the exchange the calendar library knows is
-# reused rather than repeated.
+# Every knob is read from `setup.yaml`, and Section B computes on the development window alone, so
+# nothing the holdout contains can shape a choice made here. `setup.yaml` names its calendar `FX`,
+# and the splitter's mapping to the exchange the calendar library knows is reused, not repeated.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -85,10 +84,10 @@ print(f"{len(DECLARED_PAIRS)} pairs, floor {BREADTH_FLOOR} | horizons {HORIZONS}
 #
 # A currency pair is a relative price, so a long position is always a short in the quote currency
 # and the cross-section is a set of differences rather than a set of assets. The market trades
-# around the clock on weekdays and has no exchange close, which leaves the trading day a
-# convention that `setup.yaml::decision.snapshot` picks. Three questions decide whether a ranking
-# strategy is worth building here: does the declared universe quote at the snapshot the strategy
-# acts on, is a typical move large next to a round trip, and are there enough decision dates?
+# around the clock on weekdays and has no exchange close, which leaves the trading day a convention
+# that `setup.yaml::decision.snapshot` picks. Three questions decide whether a ranking strategy is
+# worth building here: does the universe quote at the snapshot, is a move large next to a round
+# trip, and are there enough decision dates?
 
 # %% [markdown]
 # ## B. Universe and cost feasibility
@@ -97,7 +96,9 @@ print(f"{len(DECLARED_PAIRS)} pairs, floor {BREADTH_FLOOR} | horizons {HORIZONS}
 #
 # The loader returns four-hour bars and positions change once a day, so the calendar assigns each
 # bar to its session first, which puts the bars after the New York rollover into the next session
-# rather than the one whose date they carry. The last close in a session is its decision price.
+# rather than the one whose date they carry. The session's last bar across the universe is the one
+# the decision reads, and a pair enters the panel only where it has that bar: its own last bar
+# would fill a missing close with a stale earlier one.
 
 # %%
 bars = load_fx_pairs(start_date=START_DATE, end_date=END_DATE)
@@ -106,8 +107,8 @@ sessions = calendar.get_sessions(pd.DatetimeIndex(bars["timestamp"].to_pandas())
 bars = bars.with_columns(pl.Series("session", sessions.values).cast(pl.Date)).drop_nulls("session")
 
 research = bars.filter(pl.col("session") < pl.lit(HOLDOUT_START).str.to_date())
-grouped = research.group_by(["symbol", "session"])
-daily = grouped.agg(pl.col("close").sort_by("timestamp").last()).sort(["symbol", "session"])
+decision_bar = research.group_by("session").agg(pl.col("timestamp").max().alias("timestamp"))
+daily = research.join(decision_bar, on=["session", "timestamp"]).sort(["symbol", "session"])
 
 missing = sorted(set(DECLARED_PAIRS) - set(daily["symbol"].unique().to_list()))
 assert not missing, f"declared in setup.yaml but absent from the data: {missing}"
@@ -119,9 +120,8 @@ print(
 # %% [markdown]
 # ### B.2 Breadth at every decision date
 #
-# A both-leg book holding the declared number of pairs on each side needs the whole universe
-# present on the date it rebalances, and that is a property of the snapshot rather than of the
-# sample: a pair can quote in the day and still be missing from the bar the decision reads.
+# A both-leg book holding the declared number of pairs on each side needs the whole universe present
+# on the date it rebalances, which the four-hour grid an alternative cadence trades does not.
 
 # %%
 snap = daily.group_by("session").agg(pl.col("symbol").n_unique().alias("n")).sort("session")
@@ -168,11 +168,10 @@ plt.show()
 # %% [markdown]
 # ### B.3 What a round trip costs, and what a move is worth
 #
-# `setup.yaml::costs` prices a trade as a spread band per leg: one band for the pairs quoted
-# against the dollar and a wider one for the crosses, which are quoted
-# through it. A round trip pays a leg in and a leg out, and the top of each band is the
-# conservative end to charge yourself. This data carries no quotes, so nothing here is
-# measured - the declared assumption is what gets drawn.
+# `setup.yaml::costs` prices a trade as a spread band per leg: one band for the pairs quoted against
+# the dollar and a wider one for the crosses, which are quoted through it. A round trip pays a leg
+# in and a leg out, and the top of each band is the conservative end to charge yourself. This data
+# carries no quotes, so nothing here is measured - the declared assumption is what gets drawn.
 
 # %%
 cost = (
@@ -209,9 +208,11 @@ moves = (
     .join(cost, "symbol")
     .with_columns(pl.col(f"h{h}") * 1e4 / pl.col("cost_bps") for h in HORIZONS)
 )
+spacing = pl.col("timestamp").diff().over("symbol") == pl.duration(hours=4)
 intraday = (
     research.sort(["symbol", "timestamp"])
     .with_columns(pl.col("close").pct_change().abs().over("symbol").alias("bar"))
+    .filter(spacing)
     .join(cost, "symbol")
     .with_columns(pl.col("bar") * 1e4 / pl.col("cost_bps"))
 )
@@ -239,10 +240,10 @@ plt.show()
 # ### B.4 How long the carrier stays put
 #
 # `setup.yaml::mapping.entry_logic` ranks pairs on momentum or carry, both read off the return
-# series. Rebalancing daily is only worth the turnover if what that series says at one decision
-# date still says something at the next, which is an autocorrelation. It is computed inside each
-# pair and averaged, since stacking twenty and correlating measures their joins instead. The
-# shading spans the per-pair curves, the band is white noise.
+# series. How much one session of it carries on its own is an autocorrelation, computed inside each
+# pair and averaged, since stacking twenty and correlating measures their joins instead. It bounds
+# the raw series, not a feature built over many sessions - Chapter 8 builds those, Chapter 7 tests
+# them; the shading spans the per-pair curves and the band is white noise.
 
 # %%
 acf = panel_acf(returns, entity_col="symbol", value_col="ret", max_lags=max(HORIZONS))
@@ -281,7 +282,7 @@ print(
 # The assumed round trip is 6 bps on the seven pairs quoted against the dollar and 16 bps on
 # the thirteen crosses, a median of 16 bps. The median absolute one-session move is 31.3 bps,
 # 2.0 times that median, and 0.776 of one-session moves exceed the cost their own pair would
-# charge. At the four-hour bar that share falls to 0.460.
+# charge. At the four-hour bar that share falls to 0.461.
 
 # %% [markdown]
 # ## C. Design decisions
@@ -358,7 +359,7 @@ plt.show()
 # | Knob | Evidence | Revise it when |
 # |---|---|---|
 # | `universe.symbols` | B.2 breadth and participation ratio | a pair stops quoting at the close, or the independent bets fall further |
-# | `decision.cadence` | B.3 exceedance, B.4 persistence | a shorter horizon starts clearing its round trip, or the return acquires persistence inside one rebalancing interval |
+# | `decision.cadence` | B.2 breadth by snapshot, B.3 exceedance | a shorter horizon starts clearing its round trip on a grid that carries the whole universe |
 # | `costs.spread_bps` | B.3 the declared band, drawn per pair | spreads estimated from quotes sit outside the band |
 # | `evaluation.n_splits` | D.1 session count, D.2 boundaries | the folds no longer fit the development window |
 
@@ -381,8 +382,8 @@ print(
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **Count the universe at the snapshot the strategy acts on.** A pair that quotes
-#    somewhere in the day can still be missing from the bar the decision reads.
+# 1. **Count the universe at the snapshot the strategy acts on**, and take the close from that bar:
+#    a pair's own last bar fills a missing close with a stale earlier one.
 # 2. **Count the independent bets, not the entities.** Where members share a risk factor, the
 #    participation ratio of the correlation spectrum is the breadth a portfolio actually gets.
 # 3. **Scale each move by its own entity's cost before comparing horizons**, so one axis answers
@@ -392,9 +393,8 @@ print(
 #
 # ### Known limitations
 #
-# - Cost here is the declared spread alone. Swap points accrue on every position held overnight,
-#   and both enter at the cost stage, which is where the band is tested against estimated spreads.
-# - The band is an assumption: this data carries no quotes, so a pair whose realized spread sits
-#   outside it would not show up here, at any horizon.
+# - Cost here is the declared spread alone. Swap points accrue on every position held overnight, and
+#   both enter at the cost stage, which is where the band is tested against estimated spreads.
+# - The band is an assumption: a pair whose realized spread sits outside it does not show up here.
 #
 # **Next**: labels at the declared horizons, built on this development window.
