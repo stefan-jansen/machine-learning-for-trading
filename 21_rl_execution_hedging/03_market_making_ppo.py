@@ -364,20 +364,42 @@ for name, runs in results.items():
         }
     )
 
-summary = []
-for row in summary_records:
-    summary.append(
+# %% [markdown]
+# Terminal inventory and trade count describe how each strategy got to its
+# wealth, so they stay as a table; the wealth comparison itself is a figure two
+# cells below.
+
+# %%
+summary_df = pl.DataFrame(
+    [
         {
             "Strategy": row["strategy"],
-            "Mean Final Wealth": f"{row['mean_final_wealth']:.2f}",
-            "Std Final Wealth": f"{row['std_final_wealth']:.2f}",
             "Avg |Terminal Inv|": f"{row['avg_abs_terminal_inventory']:.1f}",
             "Avg Trades": f"{row['avg_trades']:.0f}",
         }
-    )
-
-summary_df = pl.DataFrame(summary)
+        for row in summary_records
+    ]
+)
 summary_df
+
+# %% [markdown]
+# ### Sizing the comparison
+#
+# Mean wealth per episode is noisy, so we quote the standard error alongside it
+# and size the gap between strategies in standard errors. Without that the
+# comparison reads as a ranking when it may be a coin flip.
+#
+# Every strategy trades the same price path in episode $i$ - all four reset to
+# seed `1000 + i` - so the samples are paired and the gap is measured per episode
+# before averaging. Treating the two means as independent samples would use the
+# wrong standard error, because the shared path is common to both arms and
+# cancels in the difference.
+#
+# The reference baseline is fixed in advance. Picking whichever baseline happens
+# to look best in this run and then testing against it would make the interval a
+# selection artifact, so we also report the paired gap to all three baselines and
+# let the reader see the spread rather than one hand-picked number.
+
 
 # %%
 ppo_summary = next(row for row in summary_records if row["strategy"] == RL_LABEL)
@@ -387,18 +409,6 @@ baseline_mean_max = max(row["mean_final_wealth"] for row in baseline_summary)
 baseline_std_min = min(row["std_final_wealth"] for row in baseline_summary)
 baseline_std_max = max(row["std_final_wealth"] for row in baseline_summary)
 
-# Mean wealth per episode is noisy, so quote the standard error alongside it and
-# size the gap in standard errors. Without this the comparison reads as a ranking
-# when it may be a coin flip.
-#
-# Every strategy trades the same price path in episode i (all four reset to seed
-# 1000 + i), so the samples are paired and the gap is measured per episode before
-# averaging. Treating the two means as independent samples would use the wrong
-# standard error: the shared path is common to both arms and cancels in the
-# difference. The reference baseline is fixed in advance -- picking whichever
-# baseline happens to look best in this run and then testing against it would
-# make the interval a selection artifact -- and the paired gap to all three is
-# reported so the reader sees the spread rather than one hand-picked number.
 REFERENCE_BASELINE = "Reservation + Base Spread"
 n_eval = config["eval_episodes"]
 
@@ -434,6 +444,90 @@ same_sign = sum(1 for value, _, _ in all_gaps.values() if (value > 0) == (gap > 
 agreement = (
     f"all {len(all_gaps)}" if same_sign == len(all_gaps) else f"{same_sign} of the {len(all_gaps)}"
 )
+
+# %% [markdown]
+# ### The comparison as a figure
+#
+# The left panel gives the whole distribution of episode wealth per strategy, so
+# the spread is visible next to the mean rather than hidden behind it. The right
+# panel gives the paired gap to each baseline with one standard error either
+# side; an interval that clears the zero line is a difference this episode count
+# resolves.
+
+
+# %%
+def plot_wealth_comparison(results: dict, all_gaps: dict) -> go.Figure:
+    """Episode-wealth distributions beside the paired gap to each baseline."""
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=("Episode wealth by strategy", "Paired gap to each baseline"),
+        horizontal_spacing=0.12,
+    )
+    for name, runs in results.items():
+        focal = name == RL_LABEL
+        fig.add_trace(
+            go.Box(
+                y=[run["final_wealth"] for run in runs],
+                name=name.replace("Reservation + ", "").replace(" Spread", ""),
+                boxmean=True,
+                fillcolor=COLORS["blue"] if focal else COLORS["silver_muted"],
+                line=dict(color=COLORS["blue"] if focal else COLORS["neutral"], width=1),
+                marker=dict(color=COLORS["neutral"], size=3),
+                showlegend=False,
+            ),
+            row=1,
+            col=1,
+        )
+    names = list(all_gaps)
+    fig.add_trace(
+        go.Scatter(
+            x=[name.replace("Reservation + ", "").replace(" Spread", "") for name in names],
+            y=[all_gaps[name][0] for name in names],
+            error_y=dict(
+                type="data",
+                array=[all_gaps[name][1] for name in names],
+                color=COLORS["copper"],
+                thickness=2,
+                width=8,
+            ),
+            mode="markers",
+            marker=dict(color=COLORS["copper"], size=10),
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
+    )
+    fig.add_hline(y=0, line=dict(color=COLORS["neutral"], width=1, dash="dash"), row=1, col=2)
+    # Keep the zero line inside the panel whichever way the gaps point.
+    low = min([0.0] + [all_gaps[name][0] - all_gaps[name][1] for name in names])
+    high = max([0.0] + [all_gaps[name][0] + all_gaps[name][1] for name in names])
+    pad = 0.15 * (high - low)
+    fig.update_yaxes(title_text="Liquidated wealth (USD)", row=1, col=1)
+    fig.update_yaxes(
+        title_text="Learned minus baseline (USD)",
+        range=[low - pad, high + pad],
+        row=1,
+        col=2,
+    )
+    fig.update_xaxes(title_text="Strategy", row=1, col=1)
+    fig.update_xaxes(title_text="Baseline rule", row=1, col=2)
+    fig.update_layout(
+        title=(
+            "Episode wealth spreads far wider for the learned policy"
+            "<br><sup>Box: median and quartiles over evaluation episodes, dashed line at the mean. "
+            "Right: paired gap with one standard error</sup>"
+        ),
+        height=440,
+    )
+    return fig
+
+
+# %%
+fig = plot_wealth_comparison(results, all_gaps)
+fig.show()
+
+# %%
 display(
     Markdown(
         f"""
@@ -516,7 +610,7 @@ _ = fig.add_trace(
 
 # %%
 fig.update_layout(
-    title="PPO offsets quotes against inventory but carries volatile liquidated wealth",
+    title="The learned policy skews its quote center against its inventory",
     height=700,
     showlegend=True,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -531,12 +625,14 @@ fig.show()
 
 # %% [markdown]
 # ## 5. Spread vs Inventory Relationship
+#
+# Pooling the evaluation histories shows how far the learned policy shifts its
+# quote center as inventory varies. The shift has to be read against the
+# inventory held when the quote was posted (`quote_inventory`), not the
+# post-fill position on the same row, which is that inventory plus whatever the
+# quote went on to trade.
 
 # %%
-# Pool PPO evaluation histories and measure the learned quote-center shift
-# as inventory varies. The quote responds to the inventory held when it was
-# posted (`quote_inventory`), not the post-fill position on the same row, which
-# is that inventory plus whatever the quote went on to trade.
 policy_samples = [
     {"inventory": h["quote_inventory"], "quote_offset_bps": h["quote_offset_bps"]}
     for run in results[RL_LABEL]
@@ -552,10 +648,8 @@ else:
     bin_edges = np.linspace(inv_min, inv_max, 9)
 
 bin_ids = np.digitize(policy_df["inventory"].to_numpy(), bin_edges[1:-1], right=False)
-# Inventory is whole contracts and each bin is [edge, next_edge), so label the
-# integers a bin actually holds. Rounding the two edges outward instead printed
-# overlapping ranges ("-3 to 2" next to "1 to 6"), leaving no way to read off
-# which bucket a position of 1 or 2 belongs to.
+# Inventory is whole contracts and each bin is [edge, next_edge), so the label
+# names the integers that bin actually holds.
 n_bins = len(bin_edges) - 1
 bin_labels = [
     f"{max(int(np.ceil(bin_edges[i])), inv_min)} to "
@@ -586,8 +680,9 @@ fig.add_trace(
 
 fig.update_layout(
     title=(
-        "Learned Policy: Quote Center vs Inventory"
-        "<br><sup>Long inventory shifts quotes down; short inventory shifts them up</sup>"
+        "Long inventory shifts the learned quote center down"
+        "<br><sup>Average quote-center offset within each inventory bucket, "
+        "pooled across evaluation episodes</sup>"
     ),
     xaxis_title="Inventory Bucket",
     yaxis_title="Average Quote Center Offset (bps)",
