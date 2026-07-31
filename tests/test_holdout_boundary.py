@@ -33,6 +33,7 @@ HOLDOUT_SCOPED_NOTEBOOKS = [
     ("case_studies/etfs/05_evaluation.py", "ic_series_data = {feat"),
     ("case_studies/crypto_perps_funding/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/cme_futures/02_labels.py", "cross_sectional_ic_series("),
+    ("case_studies/fx_pairs/02_labels.py", "cross_sectional_ic_series("),
 ]
 
 
@@ -129,6 +130,7 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
     "case_studies/etfs/05_evaluation.py",
     "case_studies/crypto_perps_funding/02_labels.py",
     "case_studies/cme_futures/02_labels.py",
+    "case_studies/fx_pairs/02_labels.py",
 ]
 
 # Of the four above, only etfs/05 uses a market-wide calendar; the other three
@@ -153,6 +155,7 @@ PER_SYMBOL_ENDPOINT_NOTEBOOKS = [
     ("case_studies/etfs/03_financial_features.py", "symbol"),
     ("case_studies/crypto_perps_funding/02_labels.py", "symbol"),
     ("case_studies/cme_futures/02_labels.py", "product"),
+    ("case_studies/fx_pairs/02_labels.py", "symbol"),
 ]
 
 
