@@ -111,17 +111,19 @@ jobs:
           du -sh .venv data 2>/dev/null || true
           df -h . | tail -1
 
-  # Native Windows is documented as unsupported, and this job is what establishes that.
-  # It is expected to fail at `uv sync`: scikit-learn 1.6.1 has no Windows wheel for
-  # Python 3.14 and its source build dies on a generated path past the 260-character
-  # limit, even here where the Visual Studio Build Tools are already installed. It runs
-  # non-blocking so the claim keeps being re-tested — if it ever goes green, native
-  # Windows has become supportable and the docs should say so — without leaving a
-  # permanently red check that teaches everyone to ignore this workflow.
+  # docs/installation.md states that installing into Windows Python does not work. This
+  # job is what keeps that statement true, by asserting the failure rather than tolerating
+  # it: `uv sync` is expected to fail, so the job is green while the docs are accurate and
+  # goes red the day native Windows starts installing, which is the day the docs need to
+  # change. `continue-on-error` on the job would have accepted a broken installer or a
+  # regression anywhere else just as happily.
+  #
+  # The observed failure: scikit-learn 1.6.1 has no Windows wheel for Python 3.14 and its
+  # meson build dies on a generated path past the 260-character limit, even on this runner,
+  # which already has the Visual Studio Build Tools.
   windows:
-    name: Windows native (expected to fail, non-blocking)
+    name: Windows native (asserted unsupported)
     runs-on: windows-latest
-    continue-on-error: true
     timeout-minutes: 90
     defaults:
       run:
@@ -129,31 +131,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The docs give no Windows uv command; this is uv's own documented installer.
-      # That gap is itself a finding — see the install validation notes.
+      # The docs give no Windows uv command, because there is no supported Windows path.
       - name: Install uv
         run: |
           irm https://astral.sh/uv/install.ps1 | iex
           "$env:USERPROFILE\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
-      - name: uv sync
-        run: uv sync
+      - name: uv sync is expected to fail here
+        run: |
+          uv sync 2>&1 | Tee-Object -Variable out
+          if ($LASTEXITCODE -eq 0) {
+            Write-Error @"
+          uv sync SUCCEEDED on native Windows.
 
-      - name: Copy the environment template
-        run: Copy-Item .env.example .env
-
-      - name: Verify the installation
-        run: uv run python scripts/verify_installation.py
-
-      - name: Download the free datasets
-        run: uv run python data/download_all.py --free-only
-
-      - name: Run the first notebook
-        env:
-          MPLBACKEND: Agg
-          PLOTLY_RENDERER: json
-        run: uv run python 01_process_is_edge/factor_regimes.py
-
-      - name: Report the footprint a reader pays
-        if: always()
-        run: Get-PSDrive C | Select-Object Used,Free
+          docs/installation.md tells readers that installing into Windows Python is not
+          supported and does not work. That is no longer true, so the documentation is now
+          wrong and should be updated to describe the native Windows path.
+          "@
+            exit 1
+          }
+          Write-Host "uv sync failed as documented (exit $LASTEXITCODE); native Windows remains unsupported."

@@ -485,7 +485,7 @@ git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
 cd machine-learning-for-trading
 
 # Install all dependencies (creates .venv/, installs ~300 packages, about 11 GB).
-# Three of them compile from source, so a C/C++ compiler must already be installed —
+# Twelve of them compile from source, so a C/C++ compiler must already be installed —
 # see "What you need before either path" above.
 uv sync
 

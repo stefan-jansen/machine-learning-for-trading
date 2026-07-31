@@ -326,9 +326,12 @@ on a clean install; the additions below them are the individual dataset sizes to
 
 | Profile | Contents | Size | How you get it |
 |---|---|---|---|
-| Minimum | ETFs, Crypto, Factors | ~70 MB | the individual download scripts above |
-| Free, without firm characteristics | Minimum + Macro, FX, CFTC CoT, prediction markets | ~75 MB | `--free-only --skip-firm-characteristics` |
+| Minimum | ETFs, Crypto, Factors (Fama-French + AQR) | ~70 MB | the individual download scripts above |
+| Free, without firm characteristics | Minimum + CFTC CoT, prediction markets | ~75 MB | `--free-only --skip-firm-characteristics` |
 | **Free** | **the row above + firm characteristics** | **~4.1 GB** | **`--free-only`** |
+
+`--free-only` covers seven datasets and does **not** include Macro or FX; fetch those with
+their own scripts when a chapter needs them.
 
 | Add on top of any profile | Size |
 |---|---|
