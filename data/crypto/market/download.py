@@ -80,10 +80,12 @@ def missing_symbols(
     return sorted(absent)
 
 
-def _empty_response_note(force: bool) -> str:
-    """What happens next when nothing arrived, which --force changes."""
+def _empty_response_note(output_path: Path, force: bool) -> str:
+    """What happens next when nothing arrived."""
     if force:
         return "--force replaces rather than merges, so there is nothing to fall back to."
+    if not output_path.exists():
+        return "Nothing has been downloaded before either."
     return "Falling back to what is already on disk."
 
 
@@ -319,7 +321,9 @@ def main() -> None:
                 # --force means replace, not merge, so there is nothing to fall
                 # back to: a forced refresh that returned nothing has failed, and
                 # keeping the old rows would report stale data as the result.
-                print(f"No perpetual OHLCV rows returned. {_empty_response_note(args.force)}")
+                print(
+                    f"No perpetual OHLCV rows returned. {_empty_response_note(perps_output, args.force)}"
+                )
                 perps_df = (
                     pl.read_parquet(perps_output)
                     if perps_output.exists() and not args.force
@@ -381,7 +385,9 @@ def main() -> None:
                 provider, symbols, start_date, premium_end, premium_interval
             )
             if new_df.is_empty():
-                print(f"No premium index rows returned. {_empty_response_note(args.force)}")
+                print(
+                    f"No premium index rows returned. {_empty_response_note(premium_output, args.force)}"
+                )
                 premium_df = (
                     pl.read_parquet(premium_output)
                     if premium_output.exists() and not args.force
