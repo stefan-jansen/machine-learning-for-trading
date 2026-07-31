@@ -20,7 +20,7 @@ The configuration is the most cost-favorable in the book — long-only rank-and-
 
 | Stage | Notebook | Chapter | Description | Writes |
 |-------|----------|---------|-------------|--------|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe breadth, point-in-time eligibility, horizon-cost feasibility, walk-forward demonstration | `config/exploration/feasibility_report.json`, `eligibility.csv` |
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe breadth, point-in-time eligibility, move scale against cost, carrier persistence, walk-forward demonstration | `eligibility.csv` |
 | Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 21-day and 5-day forward returns, sealed on the label endpoint; folds are derived from `setup.yaml` and the label timeline, not written here | `labels/fwd_ret_21d.parquet`, `labels/fwd_ret_5d.parquet` (each with a `.digest.json` sidecar) |
 | Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | Momentum, volatility, and cross-asset ranking features | `features/financial.parquet` |
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | ARIMA, HMM, and spectral features from walk-forward fits | `features/model_based.parquet` |

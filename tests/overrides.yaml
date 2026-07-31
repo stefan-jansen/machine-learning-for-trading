@@ -1570,14 +1570,13 @@ case_studies/crypto_perps_funding/16_risk_management:
   timeout: 600
 case_studies/crypto_perps_funding/17_strategy_analysis:
 case_studies/etfs/01_feasibility_analysis:
+  # ADV_THRESHOLD is the only name this notebook declares that an override can reach.
+  # MAX_SYMBOLS, N_SPLITS, TRAIN_YEARS and TEST_YEARS named nothing in it; START_DATE
+  # and HOLDOUT_START were injected and then overwritten. The CI fixture is the
+  # reduction here - a 24-fund panel over the full history, which the declared eight
+  # folds still fit.
   parameters:
     ADV_THRESHOLD: 0
-    HOLDOUT_START: '2024-01-01'
-    MAX_SYMBOLS: 5
-    N_SPLITS: 3
-    START_DATE: '2000-01-01'
-    TEST_YEARS: 1
-    TRAIN_YEARS: 3
   timeout: 120
 case_studies/etfs/02_labels:
   parameters:
