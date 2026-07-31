@@ -74,7 +74,8 @@ does not work at all — see the note under [Platform Support](#platform-support
 \* Requires NVIDIA GPU + nvidia-container-toolkit
 
 The table is about the **Docker images**, which work on all four rows. The local `uv` path is
-narrower, and on two of these platforms it does not work at all:
+narrower: it works on Linux, on Apple Silicon, and inside WSL2 (which is the Linux path), and it
+does not work on Intel Macs or in native Windows Python.
 
 > **Windows: use WSL2, not PowerShell.** Everything on Windows runs inside WSL2, whether you
 > pick Docker or the local `uv` environment. Installing directly into Windows Python is not

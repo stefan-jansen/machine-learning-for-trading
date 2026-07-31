@@ -200,8 +200,14 @@ jobs:
             exit 1
           fi
 
-          if ! printf '%s' "$out" | grep -q "torch"; then
-            echo "::error::uv sync failed on Intel macOS, but not for the documented torch-wheel reason. Read the output above."
+          # Matching "torch" alone would accept any torch-related failure as proof. The
+          # documented cause is specifically that no distribution exists for this platform.
+          if ! printf '%s' "$out" | grep -q "doesn't have a source distribution or wheel for the current platform"; then
+            echo "::error::uv sync failed on Intel macOS, but not with uv's missing-distribution diagnostic. The documented cause may have changed; read the output above."
+            exit 1
+          fi
+          if ! printf '%s' "$out" | grep -q "torch=="; then
+            echo "::error::uv sync failed on a missing distribution, but not for torch. Read the output above."
             exit 1
           fi
 
