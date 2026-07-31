@@ -364,8 +364,27 @@ cd machine-learning-for-trading
 cp .env.example .env
 
 docker compose pull ml4t # Option A — Docker (recommended)
-pip install uv && uv sync # Option B — local with uv
 ```
+
+Option B is a local `uv` environment. Install `uv` with its own installer rather than with
+`pip`, which is missing or refuses to install on most current systems:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh    # macOS and Linux
+uv sync
+```
+
+```powershell
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"   # Windows
+uv sync
+```
+
+Option B compiles three dependencies from source, so it needs a **C/C++ compiler**: on Ubuntu
+or Debian `sudo apt install build-essential`, on macOS `xcode-select --install`, on Windows the
+Visual Studio Build Tools. Docker carries its own and needs none of this.
+
+Budget about **16 GB** for Option B (11 GB environment, 4 GB free datasets, 0.9 GB of git
+history) and about 12 minutes for the data.
 
 See the **[installation guide](docs/installation.md)** for platform-specific setup (Linux, Windows WSL2, macOS) and GPU
 instructions. Windows readers: WSL2 must be working *before* Docker Desktop is installed, and the
@@ -380,8 +399,16 @@ uv run python data/download_all.py --free-only
 Docker readers run this in the Jupyter Lab terminal (**File → New → Terminal**) as
 `python data/download_all.py --free-only` — there is no host Python on the Docker path.
 
-The **[data guide](data/README.md)** documents every dataset, API-key setup, the loaders, and storage tiers (≈70 MB
-free tier up to ≈7 GB full).
+That command fetches seven datasets and takes about **4 GB** and twelve minutes, almost all of it
+the firm-characteristics panel, first needed in Ch04. To start in about 75 MB, leave it out and
+fetch it when a chapter asks for it:
+
+```bash
+uv run python data/download_all.py --free-only --skip-firm-characteristics
+```
+
+The **[data guide](data/README.md)** documents every dataset, API-key setup, the loaders, and
+storage tiers.
 
 **(Optional) pre-computed results.** To explore the nine released Ch11-20 case studies without
 retraining, download their verified registries, predictions, model files, and backtest artifacts:

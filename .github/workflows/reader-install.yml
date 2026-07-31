@@ -65,7 +65,9 @@ jobs:
             label: Linux x86_64
           - os: macos-15
             label: macOS Apple Silicon
-          - os: macos-13
+          # macos-15-intel is the last Intel image GitHub offers; macos-13 no longer
+          # schedules in reasonable time.
+          - os: macos-15-intel
             label: macOS Intel
     steps:
       - uses: actions/checkout@v4
