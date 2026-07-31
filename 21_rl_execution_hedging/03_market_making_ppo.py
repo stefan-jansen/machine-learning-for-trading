@@ -451,8 +451,10 @@ agreement = (
 # The left panel gives the whole distribution of episode wealth per strategy, so
 # the spread is visible next to the mean rather than hidden behind it. The right
 # panel gives the paired gap to each baseline with one standard error either
-# side; an interval that clears the zero line is a difference this episode count
-# resolves.
+# side, which sets the scale of the evaluation noise. Read the bars against that
+# scale rather than against the zero line: the rule fixed above resolves an
+# ordering only at three standard errors, so a gap of one or two is a gap this
+# episode count cannot call.
 
 
 # %%

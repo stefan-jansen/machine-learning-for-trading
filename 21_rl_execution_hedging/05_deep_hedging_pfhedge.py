@@ -16,16 +16,20 @@
 # %% [markdown]
 # # Deep Hedging with pfhedge
 #
-# **Docker image**: `ml4t-py312`
+# **Docker image**: `ml4t`
 #
-# > **`ml4t-py312` image required.** `pfhedge` is an unmaintained package pinned
-# > to `numpy<2`, so it only ships in the Python-3.12 image rather than the
-# > main `ml4t` image:
+# > `pfhedge` is a main dependency of the project (`pfhedge>=0.22.0` in
+# > `pyproject.toml`), so this notebook runs in the default environment, which
+# > is what the committed outputs were produced in:
 # >
 # > ```bash
-# > docker compose --profile py312 run --rm py312 \
+# > docker compose run --rm ml4t \
 # >     python 21_rl_execution_hedging/05_deep_hedging_pfhedge.py
 # > ```
+# >
+# > The package is unmaintained, so the version the lock resolves may lag the
+# > newest release; the environment recorded at the end of this notebook is the
+# > one the committed numbers come from.
 #
 #
 # This notebook demonstrates the Deep Hedging framework for derivative risk
@@ -58,7 +62,7 @@ import plotly.graph_objects as go
 import torch
 import torch.nn as nn
 
-# pfhedge for deep hedging - ships only in the py312 image.
+# pfhedge for deep hedging - a main dependency, present in the default image.
 try:
     import pfhedge
     from pfhedge.instruments import BrownianStock, EuropeanOption, HestonStock
@@ -71,9 +75,9 @@ try:
     )
 except ImportError as exc:
     raise ImportError(
-        "`pfhedge` is not available in the current image.\n"
-        "This notebook runs in the `ml4t-py312` image:\n"
-        "  docker compose --profile py312 run --rm py312 \\\n"
+        "`pfhedge` is not available in the current environment, though it is a\n"
+        "main dependency. Re-sync it, or run in the default image:\n"
+        "  docker compose run --rm ml4t \\\n"
         "      python 21_rl_execution_hedging/05_deep_hedging_pfhedge.py"
     ) from exc
 
