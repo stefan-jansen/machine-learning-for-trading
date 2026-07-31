@@ -18,7 +18,7 @@
 #
 # `config/setup.yaml` declares a daily long-short strategy over the broad US cross-section: which
 # stocks are eligible, how often the book turns, what a round trip costs, how the sample is split.
-# This notebook asks whether the data supports it, and fits nothing.
+# This notebook asks whether the data supports it.
 #
 # ## Learning objectives
 #
@@ -55,10 +55,8 @@ START_DATE = "1990-01-01"
 END_DATE = "2018-03-31"  # the archive's last session
 
 # %% [markdown]
-# ## Configuration
-#
-# Every knob is read from `setup.yaml`, and everything below computes on the development window
-# alone, so nothing the holdout contains can shape a choice made here.
+# ## Configuration. Every knob is read from `setup.yaml`, and everything below computes on the
+# development window alone, so the holdout shapes nothing chosen here.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -92,8 +90,7 @@ print(f"Horizons {HORIZONS} | breadth floor {BREADTH_FLOOR} | round trip {COST_B
 # breadth matters more than any single name. Three questions decide whether that is worth building
 # here: is the eligible universe wide enough on every decision date, is a typical move large next
 # to the spread it crosses, and are there enough decision dates to walk forward.
-
-# %% [markdown]
+#
 # ## B. Universe and cost feasibility
 #
 # ### B.1 Load and verify the declared universe. One row per stock and session; `adj_close`
@@ -120,13 +117,13 @@ print(
 # screen on each of them, not how many the archive holds in total. A stock qualifies when the price
 # it printed that day clears the penny-stock floor and its recent dollar volume clears the
 # liquidity threshold - screening over the full sample, or on a price carrying adjustments made
-# later, admits stocks on dates nobody could have known they would qualify on. The liquidity
-# average needs a rolling window, so the screen begins that many sessions into the archive.
+# later, admits stocks on dates nobody could have known they would qualify on. The screen needs a
+# window of history, so it begins that many sessions into the archive.
 
 # %%
 # A decision date is a session the declared calendar holds, and the archive carries stray prints on
 # dates it does not. `get_sessions` maps a timestamp to the session settling it, so a date mapping
-# to itself is one the exchange held. Numbering them counts a move in sessions, not rows.
+# to itself is one the exchange held, and numbering them counts moves in sessions.
 dates = research.select("timestamp").unique().sort("timestamp")
 mapped = pl.Series(
     TradingCalendar(SETUP["evaluation"]["calendar"])
@@ -136,14 +133,20 @@ mapped = pl.Series(
 calendar = dates.filter(mapped == pl.col("timestamp")).with_row_index("session")
 
 dollar_volume = (pl.col("close") * pl.col("volume")).rolling_mean(ADV_WINDOW)
+# The average is over rows, so it is only the average over a window when the window's rows are
+# consecutive sessions; a stock returning from a halt would otherwise qualify on stale volume.
+covered = pl.col("session") - pl.col("session").shift(ADV_WINDOW - 1) == ADV_WINDOW - 1
+qualifies = pl.col("covered") & (pl.col("close") > MIN_PRICE) & (pl.col("adv") > MIN_ADV_USD)
 screened = (
     research.join(calendar, on="timestamp")
     .sort(["symbol", "timestamp"])
-    .with_columns(dollar_volume.over("symbol").alias("adv"))
-    .with_columns(((pl.col("close") > MIN_PRICE) & (pl.col("adv") > MIN_ADV_USD)).alias("eligible"))
+    .with_columns(
+        dollar_volume.over("symbol").alias("adv"), covered.over("symbol").alias("covered")
+    )
+    .with_columns(qualifies.alias("eligible"))
 )
 breadth = (
-    screened.drop_nulls("adv")
+    screened.filter("covered")
     .group_by("timestamp")
     .agg(pl.col("eligible").sum().alias("n_eligible"))
     .sort("timestamp")
@@ -167,10 +170,9 @@ plt.show()
 # %% [markdown]
 # ### B.3 What a round trip costs
 #
-# `setup.yaml::costs` prices a trade as a fraction of what it moves, and carries a per-share
-# half-spread plus commission as a companion regime, both charged per leg. The two disagree across
-# this cross-section, since a fixed number of cents is a different fraction of a single-digit stock
-# than of one in the hundreds.
+# `setup.yaml::costs` prices a trade as a fraction of the move, and carries a per-share
+# half-spread plus commission as a companion regime, both per leg. They disagree here: a fixed
+# number of cents is a different fraction of a single-digit stock than of one in the hundreds.
 
 # %%
 per_share_leg = HALF_SPREAD_USD + SETUP["costs"]["per_share"]  # half-spread plus commission
@@ -199,22 +201,25 @@ plt.show()
 # %% [markdown]
 # That range is why `setup.yaml::costs.model` prices in basis points: one proportional number is
 # wrong for every stock by a bounded amount, where one per-share number is wrong for the cheap end
-# by orders of magnitude. Moves are compared against it at each label horizon.
+# by orders of magnitude. Moves are compared against it at each horizon.
 
 # %%
-# A stock's rows are the sessions it traded, so h rows apart need not be h sessions apart. The
-# session numbers say which pairs are, and any other span is dropped.
+# The labels are forward returns from a decision date, so these are too, and the eligibility that
+# matters is the one at the date the position would open. A stock's rows are the sessions it
+# traded, so h rows ahead need not be h sessions ahead; the session numbers say which pairs are.
+ahead = {h: pl.col("session").shift(-h) - pl.col("session") == h for h in HORIZONS}
 returns = screened.with_columns(
-    pl.when(pl.col("session").diff(h).over("symbol") == h)
-    .then(pl.col("adj_close").pct_change(h).over("symbol"))
+    pl.when(ahead[h].over("symbol"))
+    .then((pl.col("adj_close").shift(-h) / pl.col("adj_close") - 1).over("symbol"))
     .alias(f"h{h}")
     for h in HORIZONS
-).filter("eligible")
+)
+moves = returns.filter("eligible")
 
 styles = ((COLORS["blue"], "-"), (COLORS["amber"], "-"), (COLORS["neutral"], "-."))
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 for h, (color, ls) in zip(HORIZONS, styles, strict=True):
-    magnitude, fraction = exceedance_curve(returns[f"h{h}"].abs().drop_nulls().to_numpy() * 1e4)
+    magnitude, fraction = exceedance_curve(moves[f"h{h}"].abs().drop_nulls().to_numpy() * 1e4)
     ax.plot(magnitude, fraction, color=color, ls=ls, lw=1.6, label=f"{h}-session move")
 ax.axvline(COST_BPS, color=COLORS["copper"], ls="--", lw=1.5, label="round-trip cost")
 ax.set_xscale("log")
@@ -234,7 +239,8 @@ plt.show()
 #
 # Rebalancing daily is only worth the turnover if a stock's recent behaviour says something about
 # the session ahead. The cheapest version is whether its own return predicts its next, computed
-# inside each stock and pooled, since stacking thousands and correlating measures their joins.
+# inside each stock over every session it traded, then pooled - stacking thousands and correlating
+# would measure their joins instead.
 
 # %%
 acf = panel_acf(
@@ -265,11 +271,10 @@ plt.show()
 # ### B.5 Move scale against cost
 #
 # The ratio divides the median absolute move at the primary horizon by the declared round trip, and
-# the clearance share counts the moves above it. Neither says total cost clears: both legs pay and
-# a move has no direction.
+# the clearance share counts the moves above it. Neither says cost clears: both legs pay.
 
 # %%
-move_bps = returns[f"h{HORIZONS[0]}"].abs().drop_nulls() * 1e4
+move_bps = moves[f"h{HORIZONS[0]}"].abs().drop_nulls() * 1e4
 per_share = cost["per_share_bps"]
 print(
     f"Per-share round trip {per_share.min():.2f} to {per_share.max():.0f} bps, median "
@@ -294,17 +299,15 @@ print(
 # ### C.2 Kill conditions
 #
 # Four thresholds in `setup.yaml::kill_conditions` send the strategy back, each tested where the
-# evidence is rather than here: a cross-sectional information coefficient, a net-Sharpe-to-cost
-# ratio, alpha in the least liquid quintile, and net Sharpe after borrow, each against its own
-# floor.
+# evidence is, not here: a cross-sectional information coefficient, a net-Sharpe-to-cost ratio,
+# alpha in the least liquid quintile, and net Sharpe after borrow, each against its own floor.
 #
 # ### C.3 Mapping class
 #
 # `setup.yaml::mapping.class` sorts stocks into deciles and holds the top against the bottom,
 # equally weighted inside each, because the bottom of a ranking carries as much information as the
 # top, and equal weighting keeps the comparison about the ranking itself.
-
-# %% [markdown]
+#
 # ## D. Walk-forward structure
 #
 # ### D.1 Effective sample size. What evaluation spends is decision dates, not rows: a wider
@@ -324,8 +327,8 @@ print(
 #
 # `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone, rolling back from the
 # holdout so the most recent fold is the first generated. Between each training and validation
-# block sits a purge gap the width of the label horizon, so a label computed inside training cannot
-# resolve inside validation. The figure draws those boundaries.
+# block sits a purge gap the width of the label horizon, so a label computed in training cannot
+# resolve in validation.
 
 # %%
 splits = generate_cv_splits(
@@ -350,8 +353,7 @@ plt.show()
 # %% [markdown]
 # ## E. Derived artifacts. Nothing: the eligibility screen is a rule rather than a table, which
 # `02_labels` re-applies at each decision date from the same thresholds.
-
-# %% [markdown]
+#
 # ## F. Findings vs `setup.yaml`
 #
 # | Knob | Evidence | Revise it when |
@@ -382,8 +384,7 @@ print(
 # 1. **Count the universe under the screen the pipeline applies, on every decision date**, since a
 #    total drawn from the archive counts stocks that were not tradable when the strategy acted.
 # 2. **Take returns from the adjusted series and the screen from the printed one.** A split enters
-#    an unadjusted return as a move of tens of percent, and an adjusted price carries corporate
-#    actions the decision date had not seen.
+#    an unadjusted return as a move of tens of percent, and an adjusted price carries later news.
 # 3. **Check a per-share cost assumption against the price distribution**, since a fixed number of
 #    cents is a different fraction of every stock.
 # 4. **Compute a panel autocorrelation inside each entity, never across the stack**, or it just
