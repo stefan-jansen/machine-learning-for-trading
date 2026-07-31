@@ -83,9 +83,11 @@ does not work at all — see the note under [Platform Support](#platform-support
 | **Linux x86_64**        |  ✅  |   ✅   |    ✅     | ✅* |
 | **Windows 11 (WSL2)**   |  ✅  |   ✅   |    ✅     | ✅* |
 | **macOS Intel**         |  ✅  |   ✅   |    ✅     |  -  |
-| **macOS Apple Silicon** |  ✅  |   -    |    ✅     |  -  |
+| **macOS Apple Silicon** |  ✅  |   †    |    ✅     |  -  |
 
 \* Requires NVIDIA GPU + nvidia-container-toolkit
+† `ml4t-py312` is amd64 only. It has no native build on Apple Silicon and runs under Rosetta
+emulation, which [Py312 Image](#py312-image-specific-notebooks) covers.
 
 The table is about the **Docker images**, which work on all four rows. The local `uv` path is
 narrower: it works on Linux, on Apple Silicon, and inside WSL2 (which is the Linux path), and it
@@ -417,17 +419,24 @@ A small number of notebooks require Python 3.12 libraries not available on Pytho
 # On x86 (Linux, Windows WSL2, Intel Mac) run these as they stand. On Apple Silicon
 # prefix each with DOCKER_DEFAULT_PLATFORM=linux/amd64, see below.
 docker compose --profile py312 pull py312
-docker compose --profile py312 run --rm py312 python 05_synthetic_data/03_sigcwgan_signatures.py
+docker compose --profile py312 run --rm py312 python 09_model_based_features/06_path_signatures.py
 docker compose --profile py312 run --rm py312 \
   /opt/bsts/bin/python 15_causal_estimation/06_fed_announcement_bsts.py
+
+# The seven that train a model, on a machine with an NVIDIA GPU:
+docker compose --profile py312-gpu run --rm py312-gpu \
+  python 05_synthetic_data/03_sigcwgan_signatures.py
 ```
 
 Chapter 15 notebook 06 uses the isolated `/opt/bsts` interpreter so its NumPy 1 and
 pandas 2.2 constraints do not replace dependencies required by the other py312 notebooks.
 
-The `py312` service reserves no GPU, so it runs anywhere the amd64 image does. On a machine with
-an NVIDIA GPU, `--profile py312-gpu run --rm py312-gpu` is the same image with the GPU attached,
-which Ch21 `05_deep_hedging_pfhedge` benefits from.
+The `py312` service reserves no GPU, so it runs anywhere the amd64 image does. Seven of the
+twelve notebooks train a model and are faster with one: Ch05 `01_timegan`,
+`03_sigcwgan_signatures` and `07_dp_gan`, Ch10 `03_sentiment_evolution`, Ch12
+`10_shap_nlp_sentiment`, Ch14 `06_conditional_autoencoder` and Ch21
+`05_deep_hedging_pfhedge`. The `py312-gpu` service is the same image with an NVIDIA GPU
+attached, for those.
 
 **Apple Silicon**: these notebooks have no arm64 build and all of them ship pre-executed, so
 reading the `.ipynb` in Jupyter or on GitHub is the intended route, and the local `uv` path
