@@ -14,18 +14,21 @@
 # If a step here fails, the corresponding paragraph of docs/installation.md is
 # wrong. Fix the docs or fix the dependency; do not relax the job.
 #
-# Platform coverage and what it deliberately does not cover:
-#   ubuntu-latest  the Linux uv path
-#   macos-15       Apple Silicon
-#   macos-13       Intel
-#   windows-latest native Windows, PowerShell, no WSL
+# Two kinds of job, because two platforms are documented as unsupported:
 #
-# GitHub-hosted Windows runners have no WSL2 and no Docker Desktop, so the
-# recommended Windows path (WSL2) and the Docker path cannot be tested here.
-# Those are covered by the manual VM walk recorded in the install validation notes.
-# Runners also ship git, a C toolchain and Xcode, so this workflow cannot see the
-# "reader has no compiler" class of failure; that is why the docs must still state
-# the toolchain requirement explicitly.
+#   ubuntu-latest, macos-15   walk the whole path and expect it to work
+#   windows-latest            assert `uv sync` fails, and fails on scikit-learn
+#   macos-15-intel            assert `uv sync` fails, and fails on torch
+#
+# The asserting jobs are green while the docs are accurate and red the day either
+# platform becomes installable, which is the day the docs need rewriting. They also
+# fail when the cause changes, so an unrelated break cannot quietly certify the claim.
+#
+# What this workflow cannot see. GitHub-hosted Windows runners have no WSL2 and no
+# Docker Desktop, so the recommended Windows path and the Docker path are covered by
+# the manual VM walk in the install validation notes instead. Runners also ship git,
+# Xcode and a C toolchain, so the "reader has no compiler" failure never appears here;
+# that is why the docs must state the toolchain requirement rather than rely on CI.
 
 name: Reader install
 
@@ -64,10 +67,6 @@ jobs:
             label: Linux x86_64
           - os: macos-15
             label: macOS Apple Silicon
-          # macos-15-intel is the last Intel image GitHub offers; macos-13 no longer
-          # schedules in reasonable time.
-          - os: macos-15-intel
-            label: macOS Intel
     steps:
       - uses: actions/checkout@v4
 
@@ -170,3 +169,40 @@ jobs:
           # GitHub's pwsh shell appends `exit $LASTEXITCODE`, so the non-zero status from
           # the expected failure would fail this step. Clear it deliberately.
           exit 0
+
+  # docs/installation.md tells Intel Mac readers to use Docker because the local uv path
+  # cannot work there: PyTorch publishes no macOS x86_64 wheel and torch has no sdist, so
+  # resolution fails before anything is built. Asserted rather than tolerated, for the same
+  # reason as the Windows job: green while the docs are accurate, red if the cause changes
+  # or if Intel Macs become installable again.
+  macos-intel:
+    name: macOS Intel (asserted Docker-only)
+    runs-on: macos-15-intel   # the last Intel image GitHub offers; macos-13 no longer schedules
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv as the docs instruct
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+
+      - name: uv sync is expected to fail here, for the documented reason
+        run: |
+          set +e
+          out=$(uv sync 2>&1)
+          code=$?
+          set -e
+          echo "$out"
+
+          if [ $code -eq 0 ]; then
+            echo "::error::uv sync SUCCEEDED on an Intel Mac. docs/installation.md says the local uv path cannot work there; update it."
+            exit 1
+          fi
+
+          if ! printf '%s' "$out" | grep -q "torch"; then
+            echo "::error::uv sync failed on Intel macOS, but not for the documented torch-wheel reason. Read the output above."
+            exit 1
+          fi
+
+          echo "uv sync failed on torch, as documented (exit $code); Intel Macs remain Docker-only."

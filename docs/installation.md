@@ -73,12 +73,21 @@ does not work at all — see the note under [Platform Support](#platform-support
 
 \* Requires NVIDIA GPU + nvidia-container-toolkit
 
+The table is about the **Docker images**, which work on all four rows. The local `uv` path is
+narrower, and on two of these platforms it does not work at all:
+
 > **Windows: use WSL2, not PowerShell.** Everything on Windows runs inside WSL2, whether you
 > pick Docker or the local `uv` environment. Installing directly into Windows Python is not
 > supported and does not work: the dependency set resolves `scikit-learn 1.6.1`, which has no
 > Python 3.14 wheel for Windows, and building it from source fails partway through even on a
 > machine that already has the Visual Studio Build Tools. Inside WSL2 you are on the Linux path
 > above, which is the one that is tested.
+
+> **Intel Macs: use Docker, not the local `uv` path.** PyTorch stopped publishing macOS x86_64
+> wheels, so `uv sync` on an Intel Mac stops immediately with `Distribution torch==2.10.0 ...
+> doesn't have a source distribution or wheel for the current platform`. There is nothing to
+> configure around it. The `ml4t` image is amd64 and runs fine, so Docker is the Intel Mac path.
+> Apple Silicon has native wheels and the local `uv` path works there.
 
 ### Which image do I need?
 
