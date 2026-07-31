@@ -73,6 +73,19 @@ PENDING = {
     "case_studies/sp500_equity_option_analytics/03_financial_features.py": 1,
 }
 
+# The ceiling on the whole backlog, and the thing that makes "only shrinks" a
+# rule a test can enforce rather than a sentence in a comment.
+#
+# Without it, a genuinely new occurrence in a file that already has a row can be
+# absorbed by raising that row's count: `test_no_new_...` reads the count, so the
+# edit that admits the defect is the edit that hides it. Only the ceiling makes
+# the admission visible, because raising any row without lowering another fails
+# here. It is why a re-count like the 2026-07-31 one above can be checked rather
+# than argued about - the two rows moved and the total did not.
+#
+# Lower it whenever a fix lands. Never raise it.
+PENDING_CEILING = 14
+
 
 def _is_cdf_call(node: ast.AST) -> bool:
     return (
@@ -196,6 +209,25 @@ def test_no_new_tail_probability_is_written_as_one_minus_cdf():
     ]
 
     assert not violations, "use dist.sf(x), not 1 - dist.cdf(x):\n" + "\n".join(violations)
+
+
+def test_the_backlog_never_grows():
+    """A raised row must be paid for by a lowered one, or the ceiling comes down.
+
+    `test_no_new_...` reads PENDING per file, so raising a row is enough to make a
+    new occurrence pass it. This is the assertion that notices.
+    """
+    total = sum(PENDING.values())
+
+    assert total <= PENDING_CEILING, (
+        f"the `1 - cdf` backlog grew to {total} against a ceiling of {PENDING_CEILING}. "
+        "A row goes up only when another goes down; a genuinely new occurrence is fixed, "
+        "never admitted."
+    )
+    assert total == PENDING_CEILING, (
+        f"the backlog is down to {total}: lower PENDING_CEILING to match, so the ground "
+        "regained cannot be given back"
+    )
 
 
 def test_pending_baseline_has_no_stale_rows():
