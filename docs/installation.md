@@ -36,7 +36,7 @@ macOS (`xcode-select --install`).
 |---|---|---|
 | `git` | yes | yes |
 | Docker Desktop or Docker Engine | yes | no |
-| **C/C++ compiler** | no, the image carries one | **yes** |
+| **C/C++ compiler and Python headers** | no, the image carries both | **yes** |
 | Disk | ~13 GB image + ~4 GB data | ~11 GB environment + ~4 GB data + ~1 GB git history |
 
 The compiler is not optional on the local path and it is the most common way a first install
