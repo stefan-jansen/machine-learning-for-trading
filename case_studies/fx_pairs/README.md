@@ -20,7 +20,7 @@ The pipeline is a study in hypothesis revision, from short-horizon momentum to m
 
 | Stage | Notebook | Chapter | Description | Writes |
 |-------|----------|---------|-------------|--------|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Daily NY 5pm close cadence, horizon-cost feasibility, walk-forward fold demonstration | `config/exploration/feasibility_report.json` |
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe breadth at the daily decision, effective independent bets, assumed round-trip cost per pair, move-to-cost scale by horizon, return persistence, and the declared walk-forward folds | none |
 | Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 1-day, 5-day, and 21-day forward returns | `labels/fwd_ret_1d.parquet`, `labels/fwd_ret_5d.parquet`, `labels/fwd_ret_21d.parquet` |
 | Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | Momentum, carry, volatility, and mean-reversion features | `features/financial.parquet` |
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward ARIMA, HMM, and spectral features | `features/model_based.parquet` |
