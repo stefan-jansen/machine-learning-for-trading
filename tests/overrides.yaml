@@ -2073,9 +2073,6 @@ case_studies/sp500_equity_option_analytics/16_costs: *id002
 case_studies/sp500_equity_option_analytics/17_risk_management: *id003
 case_studies/sp500_equity_option_analytics/18_strategy_analysis:
 case_studies/sp500_options/01_feasibility_analysis:
-  parameters:
-    ADV_THRESHOLD: 0
-    MAX_SYMBOLS: 5
   timeout: 120
 case_studies/sp500_options/02_labels:
   timeout: 300

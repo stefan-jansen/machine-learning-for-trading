@@ -13,871 +13,388 @@
 #     name: python3
 # ---
 
-# %% [markdown] tags=[]
-# # S&P 500 Options Case Study: Feasibility Analysis
+# %% [markdown]
+# # S&P 500 Options: Feasibility Analysis
 #
-# This notebook tests whether the S&P 500 single-stock options dataset can deliver
-# on the strategy declared in `config/setup.yaml`. `setup.yaml` is the canonical,
-# hand-curated source of truth: universe, costs, decision schedule, mapping class,
-# labels, sweep grid (including the HTM cost-mitigation cascade), and
-# evaluation protocol. This notebook does not write it. Instead, it produces the
-# evidence that justifies its values: ATM option spread distributions, VRP
-# magnitude, the edge-to-cost feasibility ratio, and a walk-forward fold
-# demonstration. Findings persist to `config/exploration/feasibility_report.json`.
+# `config/setup.yaml` declares a cross-sectional short-volatility strategy: sell the at-the-money
+# straddle on S&P 500 constituents, delta-hedge the underlying, hold to maturity. This notebook
+# asks whether the data supports it, and fits nothing.
 #
-# ## Learning Objectives
+# ## Learning objectives
 #
-# - Verify the data delivers what `setup.yaml` assumes (universe, holdout, cadence)
-# - Quantify empirical ATM option half-spreads on S&P 500 single-stock straddles
-# - Measure the volatility risk premium (IV - RV) magnitude vs round-trip cost
-# - Compute a feasibility ratio that motivates the HTM cost cascade design
-# - Demonstrate the 2-fold walk-forward structure fits within the 5-year window
-# - Persist findings as a stable artifact downstream notebooks can cite
+# - Price the round trip in the units the position earns on, then read clearance off an
+#   exceedance curve scaled by it, and count the universe on the session the strategy acts on
+# - Measure how long the volatility premium stays put, and confirm the declared folds fit the
+#   development window without reaching the holdout
 #
-# ## Book Reference
-#
-# Chapter 6, Sections 6.2-6.6
-#
-# ## Prerequisites
-#
-# - S&P 500 options data via `load_sp500_options_straddles_raw()` (2017-2021)
-# - S&P 500 daily bars via `load_sp500_daily_bars()`
-# - `config/setup.yaml` exists (canonical strategy spec)
-# - Understanding of options Greeks and the volatility risk premium
+# ## Book reference. Chapter 6, Sections 6.2-6.6. Reads the straddle panel, the raw chains,
+# the underlying bars and `config/setup.yaml`, and writes nothing.
 
-# %% tags=[]
-"""S&P 500 Options Case Study: Feasibility Analysis."""
+# %%
+"""S&P 500 Options Case Study - Feasibility Analysis."""
 
-import json
 import warnings
-from datetime import UTC, datetime
 
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 import numpy as np
-import plotly.graph_objects as go
 import polars as pl
 import yaml
-from plotly.subplots import make_subplots
+from ml4t.diagnostic.splitters.calendar import TradingCalendar
 
+from case_studies.sp500_options._straddle_moves import straddle_premium_moves
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
-from data import load_sp500_daily_bars, load_sp500_options_straddles_raw
+from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
+from data import (
+    load_sp500_daily_bars,
+    load_sp500_options_straddles,
+    load_sp500_options_straddles_raw,
+)
+from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, ml4t_palette  # registers the ml4t Plotly template on import
+from utils.style import COLORS, FIGSIZE, add_message_title
 
 warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_options"
 START_DATE = "2017-01-01"
-# Feasibility sample spans the cross-validation window only; 2021 is the holdout
-# (setup.yaml::evaluation.holdout_start) and is deliberately excluded so the
-# motivating VRP statistic never touches held-out data.
-FEASIBILITY_CV_START = "2017-01-01"
-FEASIBILITY_CV_END = "2020-12-31"
-FEASIBILITY_SYMBOLS = ["AAPL", "MSFT", "GOOGL", "AMZN"]
-
-# %% [markdown] tags=[]
-# ## Configuration
-
-# %% tags=[]
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-CASE_DIR.mkdir(parents=True, exist_ok=True)
-EXPLORATION_DIR = CASE_DIR / "config" / "exploration"
-EXPLORATION_DIR.mkdir(parents=True, exist_ok=True)
-
-with open(CASE_DIR / "config" / "setup.yaml") as f:
-    SETUP = yaml.safe_load(f)
-
-STRATEGY_ID = SETUP["strategy_id"]
 END_DATE = "2021-12-31"
+
+# %% [markdown]
+# ## Configuration
+#
+# Every knob is read from `setup.yaml`, and Sections B and D compute on the development window
+# alone. Two derived quantities carry the strategy's shape into the diagnostics: a `top_k` book
+# drawn from the cheapest `liquid_quantile` of a date needs that many times more straddles quoted,
+# and holding to maturity pays the cheapest `cost_fractions` rung of the entry leg, not a round trip.
+
+# %%
+CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
+SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 HOLDOUT_START = str(SETUP["evaluation"]["holdout_start"])
 HOLDOUT_END = str(SETUP["evaluation"]["holdout_end"])
-COST_FRACTIONS = SETUP["backtest"]["sweep"]["htm_cost_cascade"]["cost_fractions"]
-
-# %% [markdown] tags=[]
-# ---
-#
-# ## Section A: Orientation (Section 6.2)
-#
-# **Strategy family**: Market mechanics / payoff-driven (options).
-#
-# **Position on the strategy map**: cross-sectional short-vol harvesting. The
-# economic claim is that the **volatility risk premium** (VRP = IV - RV)
-# compensates option sellers for bearing variance risk. We sell ATM single-stock
-# straddles and hedge delta with the underlying.
-#
-# **Dominant friction**: costs. Single-stock options have wide quoted spreads
-# (often 2-5% of option mid per leg). Daily delta hedging adds equity-side costs.
-# Margin requirements tie up 15-20% of notional. The empirical question this
-# notebook answers: **does the VRP edge survive the cost stack at any subset
-# of the universe?**
-#
-# `setup.yaml` declares the trading setup. This notebook asks whether the data
-# delivers on those declarations:
-#
-# - **Universe**: Does S&P 500 options data cover the period and offer breadth?
-# - **Costs**: How wide are realized ATM spreads vs the expected VRP edge?
-# - **Evaluation**: Do 2 walk-forward folds fit within the 2017-2020 CV window?
-# - **Holdout**: Is the 2021 holdout cleanly separated from training data?
-
-# %% [markdown] tags=[]
-# ---
-#
-# ## Section B: Universe and Cost Feasibility (Sections 6.3-6.4)
-
-# %% [markdown] tags=[]
-# ### B.1 Load and Verify the Data
-#
-# We sample the full cross-validation window (2017-2020) for four large, liquid
-# tech names to characterise ATM behaviour *across regimes* rather than in any
-# single year. The 2021 holdout is excluded. The full universe (S&P 500
-# constituents with options coverage) is processed by the downstream pipeline;
-# here we only need a spread/VRP sample that spans calm and stressed markets.
-
-# %% tags=[]
-opts_sample = load_sp500_options_straddles_raw(
-    symbols=FEASIBILITY_SYMBOLS,
-    start_date=FEASIBILITY_CV_START,
-    end_date=FEASIBILITY_CV_END,
+PRIMARY_LABEL = SETUP["labels"]["primary"]
+LABEL_BUFFER = SETUP["labels"]["buffer"]
+CASCADE = SETUP["backtest"]["sweep"]["htm_cost_cascade"]
+TOP_K = max(SETUP["backtest"]["sweep"]["top_k_grid"][PRIMARY_LABEL])
+BREADTH_FLOOR = int(np.ceil(TOP_K / CASCADE["liquid_quantile"]))
+ENTRY_COST_SHARE = min(CASCADE["cost_fractions"]) / 2
+HORIZONS = sorted(
+    {SETUP["labels"]["rebalance_step"][PRIMARY_LABEL], SETUP["decision"]["holding_period_days"]}
+)
+SESSIONS = TradingCalendar(SETUP["evaluation"]["calendar"]).trading_days_between(
+    START_DATE, HOLDOUT_START
 )
 print(
-    f"Options sample: {len(opts_sample):,} rows "
-    f"({FEASIBILITY_CV_START[:4]}-{FEASIBILITY_CV_END[:4]} CV window, "
-    f"{len(FEASIBILITY_SYMBOLS)} symbols; 2021 holdout excluded)"
+    f"Development {START_DATE} to {HOLDOUT_START} | sealed holdout to {HOLDOUT_END} | "
+    f"breadth floor {BREADTH_FLOOR} straddles | horizons {HORIZONS} sessions"
 )
 
-bars_sample = load_sp500_daily_bars(symbols=FEASIBILITY_SYMBOLS)
-print(f"Daily bars: {len(bars_sample):,} rows")
-
-# %% [markdown] tags=[]
-# The raw S&P 500 option chains (~347M rows across all constituents) are reduced
-# upstream by `data/equities/market/sp500/materialize_options.py` to daily 30D
-# ATM straddles using delta-based selection (|delta| closest to 0.50, DTE 25-35,
-# convergence required, min bid $0.01, max spread 30%). The resulting ~372K
-# straddle rows are what downstream notebooks consume. Here we work with a
-# four-symbol subset of the broader chain to inspect spread and IV behaviour
-# before filtering.
-
-# %% [markdown] tags=[]
-# ### B.2 Universe and Contract Characterisation
+# %% [markdown]
+# ## A. Orientation
 #
-# The universe is **S&P 500 constituents with listed options coverage** -
-# approximately 500 single-stock American option chains. Contract selection
-# rules (target 25-35 DTE, ATM by delta ~0.50) are encoded in the
-# materialisation script, not in `setup.yaml`, because they are properties of
-# the dataset rather than tunable strategy knobs.
+# A short at-the-money straddle collects the option premium and pays out whatever the underlying
+# does, so hedging the delta at each close leaves a position that earns when the implied
+# volatility set at entry exceeds the volatility the stock goes on to realize. That gap is the
+# volatility risk premium, and selling it across several hundred single-stock names trades how
+# richly each name's options are priced. What separates this from an equity strategy is the
+# denominator: the return base is the premium, a few percent of the share price, and the spread
+# is quoted on that same premium. So, are enough straddles quoted on the session the strategy
+# acts on, is a typical move in the premium large next to the cost of crossing it, and is there
+# room for a walk-forward that never reads the holdout.
 
-# %% tags=[]
-n_symbols = opts_sample["symbol"].n_unique()
-date_range = (opts_sample["timestamp"].min(), opts_sample["timestamp"].max())
-print(f"Sample symbols: {n_symbols}")
-print(f"Sample date range: {date_range[0]} to {date_range[1]}")
-print("Universe (full): S&P 500 constituents with options coverage")
-
-# %% [markdown] tags=[]
-# ### B.3 ATM Option Quote-Cost Analysis
+# %% [markdown]
+# ## B. Universe and cost feasibility
 #
-# Single-stock ATM options have spreads that are large relative to their
-# premium. We first measure the single-leg half-spread relative to mid for
-# options near the strategy's target window (|delta| 0.35-0.65, DTE 25-35,
-# bid > $0.05). We then pair complete call and put quotes by contract coordinates
-# and compute the entry-plus-exit two-leg cost relative to straddle mid.
+# ### B.1 Load and verify the declared universe. The straddle panel holds one row per symbol and
+# session: the call and put nearest the money at the target maturity, paired at a common strike
+# and expiration, with the two-leg mid and quoted spread. A row exists only where a listed expiry
+# falls in that window.
 
-# %% tags=[]
-atm_opts = opts_sample.filter(
-    pl.col("delta").abs().is_between(0.35, 0.65)
-    & (pl.col("bid") > 0.05)
-    & (pl.col("ask") > pl.col("bid"))
-    & (pl.col("days_to_maturity").is_between(25, 35))
-    & pl.col("call_put").is_in(["C", "P"])
+# %%
+straddles = load_sp500_options_straddles(start_date=START_DATE, end_date=END_DATE)
+research = straddles.filter(pl.col("timestamp") < pl.lit(HOLDOUT_START).str.to_date())
+assert research["instr_mid"].min() > 0, "a straddle mid is not a usable denominator"
+print(
+    f"{research['symbol'].n_unique()} symbols, {len(research):,} straddle-days over "
+    f"{research['timestamp'].n_unique():,} sessions, {research['timestamp'].min()} to "
+    f"{research['timestamp'].max()} | entry maturity {research['instr_dte'].min()}-"
+    f"{research['instr_dte'].max()} days"
 )
 
-atm_opts = atm_opts.with_columns(
-    ((pl.col("ask") + pl.col("bid")) / 2).alias("mid"),
-    (pl.col("ask") - pl.col("bid")).alias("full_spread"),
-).with_columns(
-    (pl.col("full_spread") / (2 * pl.col("mid")) * 100).alias("half_spread_pct_of_mid"),
+# %% [markdown]
+# ### B.2 Breadth at every decision date. `setup.yaml::decision.entry_cadence` acts on the last
+# session of each week, so that is where the universe has to exist. One count over the whole
+# sample would hide the question, because a chain carries a target maturity only on the weeks a
+# listed expiry falls there.
+
+# %%
+decisions = research.group_by(pl.col("timestamp").dt.truncate("1w")).agg(
+    pl.col("timestamp").max().alias("decision_date")
+)
+breadth = (
+    research.join(decisions, left_on="timestamp", right_on="decision_date")
+    .group_by("timestamp")
+    .agg(pl.col("symbol").n_unique().alias("n_symbols"))
+    .sort("timestamp")
 )
 
-pair_keys = ["timestamp", "symbol", "strike", "expiration"]
-paired_straddles = (
-    atm_opts.group_by(pair_keys)
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.plot(breadth["timestamp"], breadth["n_symbols"], color=COLORS["blue"], lw=1.0)
+ax.axhline(BREADTH_FLOOR, color=COLORS["copper"], ls="--", lw=1.5, label="liquid-quintile floor")
+ax.set_ylim(0, None)
+ax.set_ylabel("Symbols quoting a straddle")
+ax.xaxis.set_major_locator(mdates.YearLocator())
+ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+ax.legend(frameon=False, fontsize=8, loc="lower right")
+add_message_title(
+    ax,
+    "Breadth swings by a factor of two from one decision week to the next",
+    subtitle="Symbols with a target-maturity straddle on the week's final session",
+)
+plt.show()
+
+# %% [markdown]
+# ### B.3 What the round trip costs, and what a move is worth. Selling the straddle crosses half
+# the quoted spread on each leg and buying it back crosses the other half, so a round trip costs
+# one full two-leg spread. Over the straddle mid, that is the share of the position's own return
+# base the trade gives up before anything happens - `setup.yaml::costs.components.option_spread`
+# assumed, and measured here. Against that cost sits the move, measured inside one contract and
+# indexed by session - `straddle_premium_moves` documents both constructions - then divided by its
+# own symbol's round trip, which puts break-even at one on a shared scale.
+
+# %%
+cost = (
+    research.group_by("symbol")
     .agg(
-        pl.len().alias("n_legs"),
-        pl.col("call_put").n_unique().alias("n_leg_types"),
-        pl.col("full_spread").sum().alias("round_trip_dollars"),
-        pl.col("mid").sum().alias("straddle_mid"),
+        pl.col("instr_rel_spread").median().alias("round_trip"),
+        (pl.col("instr_spread") / pl.col("underlying_price") * 1e4).median().alias("spread_bps"),
     )
-    .filter((pl.col("n_legs") == 2) & (pl.col("n_leg_types") == 2))
-    .with_columns(
-        (pl.col("round_trip_dollars") / pl.col("straddle_mid") * 100).alias("round_trip_pct_of_mid")
-    )
+    .sort("round_trip")
+)
+COST_SHARE = float(cost["round_trip"].median())
+LIQUID_CUT = float(cost["round_trip"].quantile(CASCADE["liquid_quantile"]))
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.plot(range(len(cost)), cost["round_trip"] * 100, color=COLORS["blue"], lw=1.6)
+ax.axhline(COST_SHARE * 100, color=COLORS["copper"], ls="--", lw=1.5, label="universe median")
+ax.axhline(LIQUID_CUT * 100, color=COLORS["amber"], ls=":", lw=1.5, label="liquid-quintile cutoff")
+ax.set_xlabel("Symbols, ordered by their own round-trip cost")
+ax.set_ylabel("Round trip (% of straddle premium)")
+ax.legend(frameon=False, fontsize=8, loc="upper left")
+add_message_title(
+    ax,
+    "Crossing the spread costs a double-digit share of premium for most names",
+    subtitle="Median two-leg quoted spread per symbol over its straddle mid, development window",
+)
+plt.show()
+
+# %%
+moves = straddle_premium_moves(
+    load_sp500_options_straddles_raw(start_date=START_DATE, end_date=HOLDOUT_START, lazy=True),
+    horizons=HORIZONS,
+    entry_window=(research["instr_dte"].min(), research["instr_dte"].max()),
+).join(cost.select("symbol", "round_trip"), on="symbol", how="inner")
+moves = moves.with_columns(
+    (pl.col(f"h{h}") / pl.col("round_trip")).alias(f"h{h}") for h in HORIZONS
 )
 
-# %% [markdown] tags=[]
-# The single-leg statistic describes quote width. The paired-straddle statistic
-# is the economically consistent raw cost: each leg crosses half the spread at
-# entry and half at exit, for one full dollar spread per leg over the round trip.
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for h, color in zip(HORIZONS, (COLORS["blue"], COLORS["amber"]), strict=True):
+    multiple, fraction = exceedance_curve(moves[f"h{h}"].drop_nulls().to_numpy())
+    ax.plot(multiple, fraction, color=color, lw=1.6, label=f"{h}-session move")
+ax.axvline(1, color=COLORS["copper"], ls="--", lw=1.5, label="round trip crossed")
+ax.axvline(ENTRY_COST_SHARE, color=COLORS["neutral"], ls=":", lw=1.5, label="entry leg only")
+ax.set_xscale("log")
+ax.set_xlim(0.03, 100)
+ax.set_xlabel("Absolute premium move as a multiple of the symbol's round trip (log scale)")
+ax.set_ylabel("Fraction of moves at least this large")
+ax.legend(frameon=False, fontsize=8, loc="lower left")
+add_message_title(
+    ax,
+    "Which cost line the position pays decides whether its move clears it",
+    subtitle="Exceedance of absolute straddle-premium moves, scaled by each symbol's round trip",
+)
+plt.show()
 
-# %% tags=[]
-half_spread_stats = atm_opts.select(
-    pl.col("half_spread_pct_of_mid").mean().alias("mean"),
-    pl.col("half_spread_pct_of_mid").median().alias("median"),
-    pl.col("half_spread_pct_of_mid").quantile(0.25).alias("q25"),
-    pl.col("half_spread_pct_of_mid").quantile(0.75).alias("q75"),
-    pl.col("half_spread_pct_of_mid").quantile(0.95).alias("q95"),
-).row(0, named=True)
-straddle_cost_stats = paired_straddles.select(
-    pl.len().alias("n_pairs"),
-    pl.col("round_trip_pct_of_mid").mean().alias("mean"),
-    pl.col("round_trip_pct_of_mid").median().alias("median"),
-    pl.col("round_trip_pct_of_mid").quantile(0.25).alias("q25"),
-    pl.col("round_trip_pct_of_mid").quantile(0.75).alias("q75"),
-    pl.col("round_trip_pct_of_mid").quantile(0.95).alias("q95"),
-).row(0, named=True)
+# %% [markdown]
+# ### B.4 How long the premium stays put. Re-ranking weekly is worth the turnover only if what the
+# data says at one decision date still says something at the next. The strategy reads the
+# at-the-money implied volatility the straddle is priced at, less the volatility the underlying has
+# just realized, computed inside each stable security identity so a ticker succession does not
+# become a return. How long that gap lasts is an autocorrelation taken inside each symbol, since
+# the panel stacked and correlated as one series measures its joins instead; lag counts sessions,
+# so only the symbols quoted on nearly every session are kept.
 
-print("ATM single-leg half-spread (% of option mid):")
-print(f"  Mean:   {half_spread_stats['mean']:.2f}%")
-print(f"  Median: {half_spread_stats['median']:.2f}%")
-print(f"  IQR:    [{half_spread_stats['q25']:.2f}%, {half_spread_stats['q75']:.2f}%]")
-print(f"  95th:   {half_spread_stats['q95']:.2f}%")
-print()
-print(f"Complete call-put straddles: {straddle_cost_stats['n_pairs']:,}")
-print("Two-leg entry-plus-exit cost (% of straddle mid):")
-print(f"  Mean:   {straddle_cost_stats['mean']:.3f}%")
-print(f"  Median: {straddle_cost_stats['median']:.3f}%")
-print(f"  95th:   {straddle_cost_stats['q95']:.3f}%")
-
-# %% [markdown] tags=[]
-# These single-leg half-spreads are orders of magnitude wider than typical
-# equity costs. The complete-pair calculation avoids multiplying an average
-# leg percentage: it sums call and put dollar spreads and normalizes by their
-# combined straddle mid before averaging across contracts.
-
-# %% [markdown] tags=[]
-# ### B.4 Volatility Risk Premium and Feasibility Ratio
-#
-# We measure VRP as $IV_{30d} - RV_{21d}$ per symbol-day, then compare it to the
-# round-trip spread cost. Realized volatility uses split-adjusted close returns
-# within each stable `(symbol, sec_id)` security segment. Resetting the rolling
-# window when the security identity changes prevents a ticker succession from
-# becoming a manufactured return. The feasibility ratio is gross VRP edge
-# divided by raw round-trip spread cost.
-#
-# The premium is **regime-dependent**, so we report it per calendar year across
-# the CV window rather than collapsing it into a single number. The pooled
-# premium is thin and positive, while the 2020 volatility spike drives the
-# annual mean below zero. The motivating feasibility ratio is computed on the
-# **pooled** window so a single benign year cannot flatter the assessment.
-
-# %% tags=[]
-reconciled_bars = reconcile_underlying_log_returns(bars_sample)
-rv_21 = (
-    reconciled_bars.with_columns(
-        (
-            pl.col("clean_log_return").rolling_std(21, min_samples=21).over(["symbol", "sec_id"])
-            * np.sqrt(252)
-        ).alias("rv_21d"),
-    )
-    .select(["timestamp", "symbol", "sec_id", "rv_21d"])
+# %%
+bars = load_sp500_daily_bars(start_date=START_DATE, end_date=HOLDOUT_START)
+rolling = pl.col("clean_log_return").rolling_std(21, min_samples=21).over(["symbol", "sec_id"])
+realized = (
+    reconcile_underlying_log_returns(bars)
+    .select("timestamp", "symbol", (rolling * np.sqrt(252)).alias("rv"))
     .drop_nulls()
 )
-
-# %% [markdown] tags=[]
-# Same-day ATM implied volatility joins the trailing realized-volatility estimate
-# on the canonical symbol-date key. The security identifier remains attached as
-# an audit field but does not change the option-side key.
-
-# %% tags=[]
-iv_daily = (
-    atm_opts.group_by(["timestamp", "symbol"])
-    .agg(pl.col("implied_vol").mean().alias("iv_30d"))
+premium = (
+    research.filter(pl.len().over("symbol") >= 0.9 * research["timestamp"].n_unique())
+    .select("timestamp", "symbol", "iv_atm")
+    .join(realized, on=["timestamp", "symbol"], how="inner")
+    .with_columns((pl.col("iv_atm") - pl.col("rv")).alias("vrp"))
     .sort(["symbol", "timestamp"])
 )
+acf = panel_acf(premium, entity_col="symbol", value_col="vrp", max_lags=max(HORIZONS) * 2)
 
-vrp_sample = iv_daily.join(rv_21, on=["timestamp", "symbol"], how="inner")
-vrp_sample = vrp_sample.with_columns(
-    (pl.col("iv_30d") - pl.col("rv_21d")).alias("vrp"),
-    pl.col("timestamp").dt.year().alias("year"),
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.fill_between(acf["lag"], acf["acf_p10"], acf["acf_p90"], color=COLORS["blue"], alpha=0.15)
+ax.bar(acf["lag"], acf["acf"], color=COLORS["blue"], width=0.6)
+ax.axhspan(-acf["band"][0], acf["band"][0], color=COLORS["copper"], alpha=0.3)
+ax.set_xlabel("Lag (sessions)")
+ax.set_ylabel("Autocorrelation of the volatility premium")
+add_message_title(
+    ax,
+    "A week of decay leaves most of the volatility premium in place",
+    subtitle="Mean within-symbol autocorrelation, shaded 10th-90th percentile across symbols",
 )
+plt.show()
 
-# %% [markdown] tags=[]
-# Per-year estimates expose regime dependence; pooled estimates then support the
-# cost comparison without selecting a favorable calendar year.
+# %% [markdown]
+# ### B.5 Move scale against cost. The ratio divides the median absolute move at the shorter
+# horizon by the median round trip, and the clearance shares count moves above each cost line.
+# Neither says the position is profitable: the move is unsigned, and a seller keeps the premium
+# only when it is small.
 
-# %% tags=[]
-vrp_by_year = (
-    vrp_sample.group_by("year")
-    .agg(
-        pl.len().alias("n_obs"),
-        pl.col("vrp").mean().alias("vrp_mean"),
-        pl.col("vrp").std().alias("vrp_std"),
-        (pl.col("vrp") > 0).mean().alias("pos_frac"),
-    )
-    .sort("year")
-)
-
-# Pooled statistics drive the motivating feasibility ratio so a single benign
-# year cannot flatter the assessment.
-vrp_mean = float(vrp_sample["vrp"].mean())
-vrp_std = float(vrp_sample["vrp"].std())
-vrp_positive_frac = float(vrp_sample.filter(pl.col("vrp") > 0).height / max(1, vrp_sample.height))
-
-# Complete paired call-put quotes give the raw two-leg entry-plus-exit cost.
-straddle_round_trip_cost_pct = straddle_cost_stats["mean"]
-# Signed ratio: a negative pooled premium must stay negative. abs() here would
-# hide a regime where selling volatility loses money before any costs.
-feasibility_ratio = (vrp_mean * 100) / max(straddle_round_trip_cost_pct, 0.01)
-
-# %% [markdown] tags=[]
-# The report keeps both the annual distribution and the pooled feasibility ratio
-# visible. A positive average is insufficient when it clears only a tiny fraction
-# of the quoted round-trip cost.
-
-# %% tags=[]
-print("VRP by year (IV_30d - RV_21d):")
-print(f"  {'year':>6} {'n':>6} {'mean%':>8} {'std%':>8} {'pos%':>6}")
-for r in vrp_by_year.iter_rows(named=True):
-    print(
-        f"  {r['year']:>6} {r['n_obs']:>6} {r['vrp_mean'] * 100:>8.2f} "
-        f"{r['vrp_std'] * 100:>8.2f} {r['pos_frac'] * 100:>5.0f}%"
-    )
-print()
-print("Pooled VRP (2017-2020 CV window):")
-print(f"  Mean VRP:           {vrp_mean:.4f} ({vrp_mean * 100:.2f}%)")
-print(f"  Std VRP:            {vrp_std:.4f}")
-print(f"  VRP > 0 fraction:   {vrp_positive_frac:.1%}")
-print("  -> thin pooled premium, with a negative annual mean in the 2020 stress regime")
-print()
-print("Feasibility (raw, no cost mitigation):")
-print(f"  Round-trip straddle cost: ~{straddle_round_trip_cost_pct:.1f}% of straddle mid")
-print(f"  Feasibility ratio:        {feasibility_ratio:.3f}x")
-if feasibility_ratio < 1.0:
-    print("  ASSESSMENT: NOT VIABLE -- pooled premium does not clear the raw cost stack")
-elif feasibility_ratio < 2.0:
-    print("  ASSESSMENT: MARGINAL -- cost mitigation required for viability")
-else:
-    print("  ASSESSMENT: VIABLE -- gross edge supports unconditional execution")
-
-# %% [markdown] tags=[]
-# **Interpretation**: Two facts motivate the entire downstream strategy design.
-# First, the premium itself is regime-dependent: the pooled CV mean is thin and
-# positive, but the annual mean turns negative in the 2020 volatility spike.
-# Second, the raw round-trip cost dwarfs even the positive pooled premium, so the
-# feasibility ratio sits well below 1.0. Unconditional ATM straddle selling on
-# the full S&P 500 universe is therefore not viable: costs overwhelm the average
-# premium, which can also invert during stress. The strategy survives only via
-# the **hold-to-maturity (HTM) cost cascade** declared in
-# `setup.yaml::backtest.sweep.htm_cost_cascade`: entry-only execution across the
-# configured cost fractions `[0.203, 0.5, 0.75, 1.0]`, combined with a
-# bottom-quintile half-spread "liquid" universe filter. C.3 below documents the
-# design choice.
-
-# %% [markdown] tags=[]
-# #### VRP by Regime
-#
-# The premium is a thin positive number in calm years and inverts sharply in
-# 2020. A single-year sample would tell either half of this story in isolation;
-# the pooled window keeps both in view.
-
-# %% tags=[]
-_years = vrp_by_year["year"].to_list()
-_means = [v * 100 for v in vrp_by_year["vrp_mean"].to_list()]
-fig_year = go.Figure()
-fig_year.add_trace(
-    go.Bar(
-        x=_years,
-        y=_means,
-        marker_color=[COLORS["positive"] if m >= 0 else COLORS["negative"] for m in _means],
-        text=[f"{m:.1f}%" for m in _means],
-        textposition="outside",
-        name="Mean VRP",
-    )
-)
-fig_year.add_hline(
-    y=vrp_mean * 100,
-    line_dash="dot",
-    line_color=COLORS["neutral"],
-    annotation_text=f"pooled {vrp_mean * 100:.1f}%",
-    annotation_position="bottom right",
-)
-fig_year.add_hline(y=0, line_color=COLORS["blue"], line_width=1)
-fig_year.update_layout(
-    title="The Volatility Premium Flipped Sharply Negative in 2020",
-    template="ml4t",
-    height=400,
-    yaxis_title="Mean VRP (% vol points)",
-    xaxis_title="Year",
-    showlegend=False,
-)
-fig_year.update_xaxes(tickmode="array", tickvals=_years)
-fig_year.show()
-
-# %% [markdown] tags=[]
-# #### Paired Straddle Cost and VRP Visualisation
-
-# %% tags=[]
-fig = make_subplots(
-    rows=1,
-    cols=2,
-    subplot_titles=["Paired Straddle Round-Trip Cost", "VRP Over Time"],
-)
-
-# Costs are heavily right-skewed (a thin tail runs past 100% of mid); clip the
-# display window to 0-40% so the bulk of the distribution is legible rather than
-# crushed against the axis by a handful of wide-cost outliers.
-_cost_xmax = 40.0
-_sym_colors = ml4t_palette(len(FEASIBILITY_SYMBOLS), categorical=True)
-for sym, color in zip(FEASIBILITY_SYMBOLS, _sym_colors, strict=True):
-    symbol_costs = paired_straddles.filter(pl.col("symbol") == sym)[
-        "round_trip_pct_of_mid"
-    ].to_list()
-    if symbol_costs:
-        fig.add_trace(
-            go.Histogram(
-                x=symbol_costs,
-                name=sym,
-                opacity=0.6,
-                marker_color=color,
-                xbins=dict(start=0, end=_cost_xmax, size=1.5),
-            ),
-            row=1,
-            col=1,
-        )
-
-# %% [markdown] tags=[]
-# The companion panel places complete-pair cost beside the daily premium. Its
-# 40% display limit is disclosed because the extreme cost tail extends
-# further and would otherwise obscure the bulk of the observations.
-
-# %% tags=[]
-vrp_ts = (
-    vrp_sample.group_by("timestamp").agg(pl.col("vrp").mean().alias("vrp_mean")).sort("timestamp")
-)
-fig.add_trace(
-    go.Scatter(
-        x=vrp_ts["timestamp"].to_list(),
-        y=(vrp_ts["vrp_mean"] * 100).to_list(),
-        mode="lines",
-        name="VRP (%)",
-        line=dict(color=COLORS["positive"]),
-    ),
-    row=1,
-    col=2,
-)
-_ = fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=1, col=2)
-
-# %% [markdown] tags=[]
-# Explicit units, zero references, and the strategy sample labels make each panel
-# interpretable without relying on the surrounding code.
-
-# %% tags=[]
-fig.update_layout(
-    title="Complete-Pair Costs Overwhelm a Regime-Dependent Volatility Premium",
-    template="ml4t",
-    height=400,
-    showlegend=True,
-)
-fig.update_xaxes(
-    title_text="Two-leg round-trip cost (% of straddle mid)",
-    range=[0, _cost_xmax],
-    row=1,
-    col=1,
-)
-fig.update_xaxes(title_text="Date", row=1, col=2)
-fig.update_yaxes(title_text="Count", row=1, col=1)
-fig.update_yaxes(title_text="VRP (%)", row=1, col=2)
-
-fig.show()
-
-# %% [markdown] tags=[]
-# ---
-#
-# ## Section C: Design Decisions
-#
-# Design decisions are the strategy choices encoded in `setup.yaml` that the
-# feasibility evidence above supports. They are justified here, not in the YAML.
-
-# %% [markdown] tags=[]
-# ### C.1 Decision Cadence
-#
-# `setup.yaml::decision.entry_cadence: weekly_friday` with `execution_delay:
-# monday_open` and `hedge_cadence: daily_close`. Weekly entry at the
-# ~30-day-to-expiry sweet spot is standard for variance-risk-premium
-# harvesting: monthly expiries provide the deepest liquidity, weekly entries
-# maintain five overlapping cohorts (1/5 capital each) so the strategy is
-# always exposed, and daily delta hedging keeps the per-position direction
-# bet bounded. The 10-day variant labels (`fwd_ret_dh_10d`, `fwd_ret_10d`)
-# explore a shorter holding window where IV mean-reversion may be sharper.
-#
-# The primary label `ret_to_expiry` follows the full ~30-day cohort with
-# daily-MTM P&L accounting (per `setup.yaml::labels.rebalance_step.ret_to_expiry:
-# 5`, which is `ceil(30/7)` for the weekly schedule). Five concurrent cohorts
-# at 1/5 capital each are aggregated into a daily portfolio return series.
-
-# %% [markdown] tags=[]
-# ### C.2 Kill Conditions
-#
-# Kill conditions are falsifiable checkpoints anchored to the feasibility
-# evidence above. They are documented here rather than serialised into
-# `setup.yaml` because the S&P 500 options pipeline does not consume
-# `kill_conditions` programmatically.
-#
-# - **KC1 (VRP compression)**: Sample-mean VRP < 2% annualised for > 6
-#   months. Gate: Chapter 7 label evaluation. B.4 above measures the
-#   baseline VRP magnitude that motivates this threshold.
-# - **KC2 (cost erosion)**: Round-trip cost consumes > 50% of gross VRP edge
-#   even at the cascade's most aggressive rung. Gate: Chapter 18 cost
-#   sensitivity. B.4 measures the raw feasibility ratio that gates this
-#   check; the rung-3 (HTM + liquid filter) result is computed downstream.
-# - **KC3 (gamma loss dominance)**: Cumulative gamma losses exceed cumulative
-#   VRP collection over any rolling 2-year window. Gate: Chapter 19 risk
-#   overlay (stop-loss / max-drawdown sweep on `backtest.sweep.risk_controls`).
-
-# %% [markdown] tags=[]
-# ### C.3 Mapping Class
-#
-# `setup.yaml::mapping.class: systematic_straddle_sell` with
-# `position_state_space: short_straddle_hedged`, `entry_logic:
-# sell_atm_straddle_weekly`, and `sizing: fixed_vega_notional`. The short
-# straddle is delta-hedged with the underlying stock at `daily_close` with a
-# `delta_threshold: 0.1` rehedge trigger (declared in
-# `setup.yaml::hedging_protocol`, consumed by `case_studies.utils.backtest_runner`).
-#
-# The mapping is constrained by feasibility evidence in two ways:
-#
-# - **Long-only short-vol exposure**: The straddle sign convention is encoded
-#   in the label construction (returns are computed for the short side), not
-#   via a `long_short=True` allocator setting. Top-k selection picks the
-#   names with the highest expected short-straddle return, executed
-#   long-only on the chosen straddles. This sidesteps the need for option-
-#   borrowing infrastructure that single-stock short-vol would otherwise
-#   require.
-#
-# - **HTM cost cascade**: B.4 shows the raw round-trip feasibility
-#   ratio is well below 1.0. The strategy survives only by (a) avoiding the
-#   exit-leg spread entirely via hold-to-maturity (HTM), (b) sweeping all four
-#   entry-cost fractions `[0.203, 0.5, 0.75, 1.0]`, where 0.203 is the
-#   sophisticated-execution anchor, and (c) restricting to the bottom-quintile
-#   half-spread "liquid" subset of each rebalance date. These choices are declared
-#   in `setup.yaml::backtest.sweep.htm_cost_cascade` and dispatched inline
-#   by Chapter 18 cost notebooks; they do not flow through the standard
-#   `run_backtest` cost sweep.
-
-# %% [markdown] tags=[]
-# ---
-#
-# ## Section D: Walk-Forward Structure (Section 6.5)
-#
-# We verify that the data supports the walk-forward design declared in
-# `setup.yaml::evaluation` (`n_splits`, `train_size`, `val_size`, `holdout_start`).
-
-# %% [markdown] tags=[]
-# ### D.1 Effective Sample Size
-#
-# Five calendar years (2017-2021) of weekly-cadence data is a thin sample for
-# walk-forward CV. With 2-year training windows and 1-year validation windows,
-# only two non-overlapping folds fit before the 2021 holdout. Results will
-# have high variance per fold; we report this constraint rather than papering
-# over it.
-
-# %% tags=[]
-sample_years = (
-    pl.Series([END_DATE]).str.to_date("%Y-%m-%d").item().year
-    - pl.Series([START_DATE]).str.to_date("%Y-%m-%d").item().year
-    + 1
-)
-weekly_decisions_per_year = 52
-n_decision_dates = sample_years * weekly_decisions_per_year
-
-print("Data Coverage:")
-print(f"  Period: {START_DATE} to {END_DATE}")
-print(f"  Years:  {sample_years}")
-print(f"  Approx weekly decision dates: {n_decision_dates}")
-print(f"  Holdout: {HOLDOUT_START} to {HOLDOUT_END}")
-
-# %% [markdown] tags=[]
-# ### D.2 Walk-Forward Fold Demonstration
-#
-# `case_studies/utils/cv_window.py` owns the operational splits; this cell
-# reproduces the fold boundaries from canonical `setup.yaml` parameters
-# (`train_size: 2Y`, `val_size: 1Y`, `n_splits: 2`) to verify the data window
-# supports the declared design.
-
-
-# %% tags=[]
-def _generate_fold_boundaries(
-    start_date: str,
-    holdout_start: str,
-    train_years: int,
-    test_years: int,
-    n_splits: int,
-) -> list[dict]:
-    """Generate walk-forward fold boundaries from canonical setup.yaml values."""
-    folds = []
-    validation_start_year = int(start_date[:4]) + train_years
-
-    for i in range(n_splits):
-        test_start_year = validation_start_year + i * test_years
-        train_start_year = test_start_year - train_years
-        test_end_year = test_start_year + test_years
-
-        if f"{test_start_year}-01-01" >= holdout_start:
-            break
-
-        folds.append(
-            {
-                "fold": i + 1,
-                "train_start": f"{train_start_year}-01-01",
-                "train_end": f"{test_start_year - 1}-12-31",
-                "test_start": f"{test_start_year}-01-01",
-                "test_end": f"{min(test_end_year - 1, int(holdout_start[:4]) - 1)}-12-31",
-            }
-        )
-
-    return folds
-
-
-# %% tags=[]
-n_splits_declared = int(SETUP["evaluation"]["n_splits"])
-train_years = int(str(SETUP["evaluation"]["train_size"]).rstrip("Y"))
-test_years = int(str(SETUP["evaluation"]["val_size"]).rstrip("Y"))
-
-splits = _generate_fold_boundaries(
-    start_date=START_DATE,
-    holdout_start=HOLDOUT_START,
-    train_years=train_years,
-    test_years=test_years,
-    n_splits=n_splits_declared,
-)
-
-splits_df = pl.DataFrame(splits)
-print(f"Generated {len(splits)} walk-forward folds")
-print(splits_df)
-
-assert len(splits) == n_splits_declared, (
-    f"Expected {n_splits_declared} folds (setup.yaml), got {len(splits)}"
-)
-last_test_end = splits[-1]["test_end"]
-assert last_test_end < HOLDOUT_START, (
-    f"Last fold ({last_test_end}) overlaps holdout ({HOLDOUT_START})"
-)
-print(f"\nLast fold test end: {last_test_end}  |  Holdout start: {HOLDOUT_START}")
-
-# %% [markdown] tags=[]
-# Two folds with annual step is the most CV depth the 4-year pre-holdout
-# window supports without overlapping. Downstream notebooks rely on
-# `case_studies.utils.cv_window.get_cv_config_v2("sp500_options")` to produce
-# the authoritative fold boundaries with proper purging.
-
-# %% [markdown] tags=[]
-# ---
-#
-# ## Section E: Derived Artifacts
-#
-# The S&P 500 options strategy has no point-in-time eligibility filter at the
-# notebook level - universe selection (S&P 500 constituents with options
-# coverage) happens in `materialize_options.py`, and the cascade's liquid-rung
-# filter (bottom-quintile half-spread per rebalance date) is computed inline
-# by Chapter 18 cost notebooks. The only artifact this notebook persists is
-# the feasibility summary written in Section F.
-
-# %% [markdown] tags=[]
-# ---
-#
-# ## Section F: Findings vs `setup.yaml`
-#
-# The canonical strategy declarations live in `config/setup.yaml`. This section
-# enumerates each declared knob alongside the feasibility evidence above that
-# motivates it. `setup.yaml` is not regenerated here - it is the hand-curated
-# source of truth, and this notebook reads it.
-
-# %% tags=[]
-print("=" * 78)
-print("Setup.yaml knobs vs feasibility evidence")
-print("=" * 78)
-
-print()
-print(f"universe.underlying = {SETUP['universe']['underlying']}")
-print(f"universe.strategy   = {SETUP['universe']['strategy']}")
-print("  -> S&P 500 constituents with options coverage")
-print(f"  -> sample symbols for spread/VRP: {FEASIBILITY_SYMBOLS}")
-
-print()
-print(f"decision.entry_cadence = {SETUP['decision']['entry_cadence']}")
-print(f"decision.hedge_cadence = {SETUP['decision']['hedge_cadence']}")
-print("  -> 5 weekly cohorts at 1/5 capital, ~30 DTE entry")
-
-print()
-print(f"hedging_protocol.delta_threshold = {SETUP['hedging_protocol']['delta_threshold']}")
-print("  -> consumed by case_studies.utils.backtest_runner HTM cohort engine")
-
-print()
-print(f"costs.class = {SETUP['costs']['class']}")
-print(f"  -> empirical mean single-leg half-spread: {half_spread_stats['mean']:.2f}%")
+# %%
+short = moves[f"h{HORIZONS[0]}"].drop_nulls()
 print(
-    f"  -> complete-pair raw round-trip cost: {straddle_round_trip_cost_pct:.3f}% of straddle mid"
+    f"Round trip {cost['round_trip'].min():.3f} to {cost['round_trip'].max():.3f} of premium, median"
+    f" {COST_SHARE:.4f}; on notional {cost['spread_bps'].median():.1f} bps\n"
+    f"Median {HORIZONS[0]}-session move {short.median():.2f}x the round trip; over it "
+    f"{(short > 1).mean():.3f}, over the entry leg {(short > ENTRY_COST_SHARE).mean():.3f}\n"
+    f"Premium mean {premium['vrp'].mean():.4f} over {premium['symbol'].n_unique()} symbols, "
+    f"positive {(premium['vrp'] > 0).mean():.3f}, autocorrelation {acf['acf'][HORIZONS[0]]:.3f}"
+    f" a week out"
 )
-print(f"  -> pooled mean VRP (IV30 - RV21): {vrp_mean * 100:.2f}% (regime-dependent, see B.4)")
-print(f"  -> raw feasibility ratio: {feasibility_ratio:.3f}x")
-print("  -> raw ratio < 1.0 motivates the HTM cascade")
 
-# %% [markdown] tags=[]
-# The remaining declarations connect the cost-mitigation cascade, label horizon,
-# and walk-forward window to their canonical configuration entries.
+# %% [markdown] tags=["results"]
+# The median symbol gives up 0.1153 of the straddle premium to cross the two-leg spread twice, the
+# same 67.3 bps of underlying notional an equity trader would call ordinary. The median five-session
+# move in the premium is 1.47x that round trip and 0.650 of moves clear it; against the entry leg
+# alone, which is what a held position pays, 0.965 clear. The premium averages 0.0027 in volatility
+# points, is positive on 0.595 of symbol-days, and carries 0.667 of its autocorrelation a week out.
 
-# %% tags=[]
-print()
-print(
-    f"backtest.sweep.htm_cost_cascade.cost_fractions = "
-    f"{SETUP['backtest']['sweep']['htm_cost_cascade']['cost_fractions']}"
+# %% [markdown]
+# ## C. Design decisions
+#
+# ### C.1 Cadence. `setup.yaml::decision.entry_cadence` enters at the Friday close and executes at
+# the Monday open; `hedge_cadence` re-hedges the delta at each close. B.4 supports weekly entry,
+# because the premium decays slowly enough that a week-old reading still ranks the cross-section,
+# and B.2 constrains it, since the universe available to rank doubles and halves week to week.
+#
+# ### C.2 Kill conditions. Three thresholds send the strategy back to the drawing board: the
+# premium compressing below its floor for longer than a rebalance cycle, tested at label
+# evaluation in Chapter 7; cost consuming more of the premium than the cascade's cheapest rung
+# leaves, at the cost stage in Chapter 18; and gamma losses over a rolling window exceeding the
+# premium collected, under the risk overlay in Chapter 19. B.3 and B.5 set the first two baselines.
+#
+# ### C.3 Mapping class. `setup.yaml::mapping.class` ranks symbols by expected short-straddle
+# return and holds the top `top_k`, sized on vega rather than notional so a high-priced name does
+# not dominate a book of volatility exposures. Three choices follow from B.3, all declared under
+# `setup.yaml::backtest.sweep.htm_cost_cascade`: hold to maturity and never cross the exit leg,
+# rank only inside the cheapest `liquid_quantile` of a date, and sweep `cost_fractions` of the
+# quoted entry half-spread. The Chapter 18 notebooks dispatch them.
+
+# %% [markdown]
+# ## D. Walk-forward structure
+#
+# ### D.1 Effective sample size. What evaluation spends is decision dates, not rows. A
+# straddle entered on the last of them resolves `setup.yaml::labels.buffer` later, so a date
+# whose outcome would land inside the holdout cannot be used to fit anything either.
+
+# %%
+outcome_seal = (
+    pl.Series([HOLDOUT_START]).str.to_date().dt.offset_by(f"-{LABEL_BUFFER.lower()}").item()
 )
 print(
-    f"backtest.sweep.htm_cost_cascade.universes = "
-    f"{SETUP['backtest']['sweep']['htm_cost_cascade']['universes']}"
+    f"Trading days {SESSIONS} | decision dates "
+    f"{len(decisions):,} | symbols per decision {breadth['n_symbols'].min()} to "
+    f"{breadth['n_symbols'].max()}, median {breadth['n_symbols'].median():.0f} | under the book "
+    f"floor on {breadth.filter(pl.col('n_symbols') < BREADTH_FLOOR).height} of {len(breadth)} "
+    f"dates | outcomes resolve inside the holdout after {outcome_seal}"
 )
+
+# %% [markdown]
+# ### D.2 Fold demonstration. `generate_cv_splits` derives the folds from `setup.yaml::evaluation`
+# alone, numbering them backwards from the holdout. Between each training and validation block
+# sits a purge gap the width of the label buffer, stopping a straddle sold inside training from
+# expiring inside validation. The figure draws the boundaries the splitter returns rather than
+# recomputing them, so they cannot disagree.
+
+# %%
+splits = generate_cv_splits(
+    research.select("timestamp").unique(),
+    case_study_id=CASE_STUDY_ID,
+    label_buffer=LABEL_BUFFER,
+    date_col="timestamp",
+)
+last_val = max(s["val_end"] for s in splits)
+assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
+assert last_val < np.datetime64(HOLDOUT_START), "a fold reaches into the holdout"
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+fold_timeline(ax, splits, holdout=(HOLDOUT_START, HOLDOUT_END))
+add_message_title(
+    ax,
+    "Two folds roll back from the sealed holdout and stop short of it",
+    subtitle="Training, purge and validation blocks exactly as generate_cv_splits returns them",
+)
+plt.show()
+
+# %% [markdown]
+# ## E. Derived artifacts. Nothing: the universe is whatever carries a quoted straddle on the day
+# and the liquid filter is recomputed per rebalance date at the cost stage, so nothing downstream
+# reads an eligibility file from here.
+
+# %% [markdown]
+# ## F. Findings vs `setup.yaml`. One row per knob: the evidence that motivates it, and what
+# would change it.
+#
+# | Knob | Evidence | Revise it when |
+# |---|---|---|
+# | `universe.underlying` | B.2 breadth per decision date | breadth falls under the count the liquid quintile needs to fill a book of `top_k` |
+# | `decision.entry_cadence` | B.2 breadth, B.4 persistence | the premium decays inside one rebalancing interval, or coverage stops cycling with the expiry calendar |
+# | `backtest.sweep.htm_cost_cascade` | B.3 cost per symbol and exceedance | the quoted spread narrows enough that the exit leg stops deciding whether a move clears its cost |
+# | `evaluation.n_splits` | D.1 decision dates, D.2 boundaries | the folds no longer fit the development window ahead of the outcome seal |
+
+# %%
 print(
-    f"backtest.sweep.htm_cost_cascade.liquid_quantile = "
-    f"{SETUP['backtest']['sweep']['htm_cost_cascade']['liquid_quantile']}"
+    f"universe.underlying {SETUP['universe']['underlying']}, {research['symbol'].n_unique()} symbols"
+    f" quoted, liquid-quintile cutoff {LIQUID_CUT:.4f} of premium\n"
+    f"decision.entry_cadence {SETUP['decision']['entry_cadence']} | labels.primary {PRIMARY_LABEL}"
+    f" | labels.buffer {LABEL_BUFFER} | top_k {CASCADE['top_k']} of the cheapest "
+    f"{CASCADE['liquid_quantile']}, cost_fractions {CASCADE['cost_fractions']}\n"
+    f"evaluation.n_splits {SETUP['evaluation']['n_splits']}, generated {len(splits)}, last "
+    f"validation ends {last_val.date()}, holdout untouched"
 )
-print(f"  -> all configured entry-cost fractions: {COST_FRACTIONS}")
-print("  -> 0.203 is the execution anchor; 1.0 pays the full quoted half-spread")
-print("  -> liquid universe = bottom-quintile half-spread")
 
-print()
-print(f"labels.primary = {SETUP['labels']['primary']}")
-print(f"labels.variants = {SETUP['labels']['variants']}")
-print("  -> primary uses 5-cohort daily-MTM accrual at ~30 DTE")
-print(f"  -> rebalance_step: {SETUP['labels']['rebalance_step']}")
+# %% [markdown] tags=["results"]
+# The development window quotes 605 symbols, of which the cheapest fifth crosses at or under 0.0841
+# of premium. Breadth runs from 77 to 469 straddles per decision date and falls under the floor a
+# top-20 book needs on 4 of 209 of them. Two folds are generated, the last validation ending
+# 2020-11-10; an entry after 2020-11-27 would resolve inside the holdout.
 
-print()
-print(f"evaluation.n_splits = {SETUP['evaluation']['n_splits']}")
-print(f"evaluation.train_size = {SETUP['evaluation']['train_size']}")
-print(f"evaluation.val_size   = {SETUP['evaluation']['val_size']}")
-print(f"  -> generated {len(splits)} folds; declared count matches")
-print(f"  -> holdout {HOLDOUT_START} to {HOLDOUT_END}; last test ends {splits[-1]['test_end']}")
-
-# %% [markdown] tags=[]
-# ### Persist Feasibility Findings
-
-# %% tags=[]
-feasibility_report = {
-    "case_study_id": CASE_STUDY_ID,
-    "computed_at_utc": datetime.now(UTC).isoformat(),
-    "data_period": {"start": START_DATE, "end": END_DATE},
-    "sample": {
-        "symbols": FEASIBILITY_SYMBOLS,
-        "cv_window": {"start": FEASIBILITY_CV_START, "end": FEASIBILITY_CV_END},
-        "holdout_excluded": HOLDOUT_START[:4],
-        "n_atm_observations": int(atm_opts.height),
-    },
-    "single_leg_half_spread_pct_of_mid": {
-        "mean": float(half_spread_stats["mean"]),
-        "median": float(half_spread_stats["median"]),
-        "q25": float(half_spread_stats["q25"]),
-        "q75": float(half_spread_stats["q75"]),
-        "q95": float(half_spread_stats["q95"]),
-    },
-    "straddle_round_trip_cost_pct_of_mid": {
-        "n_pairs": int(straddle_cost_stats["n_pairs"]),
-        "mean": float(straddle_cost_stats["mean"]),
-        "median": float(straddle_cost_stats["median"]),
-        "q25": float(straddle_cost_stats["q25"]),
-        "q75": float(straddle_cost_stats["q75"]),
-        "q95": float(straddle_cost_stats["q95"]),
-    },
-}
-
-# %% [markdown] tags=[]
-# The VRP block preserves both the pooled estimate and each annual regime for
-# downstream consumers of the report.
-
-# %% tags=[]
-feasibility_report["vrp_iv30_minus_rv21"] = {
-    "mean": vrp_mean,
-    "std": vrp_std,
-    "positive_fraction": vrp_positive_frac,
-    "note": "pooled over CV window; regime-dependent (see by_year)",
-    "by_year": [
-        {
-            "year": int(r["year"]),
-            "n_obs": int(r["n_obs"]),
-            "mean": float(r["vrp_mean"]),
-            "std": float(r["vrp_std"]),
-            "positive_fraction": float(r["pos_frac"]),
-        }
-        for r in vrp_by_year.iter_rows(named=True)
-    ],
-}
-
-# %% [markdown] tags=[]
-# The final blocks record the economic assessment and the demonstrated
-# walk-forward capacity before the report is written to the isolated output path.
-
-# %% tags=[]
-feasibility_report["feasibility"] = {
-    "round_trip_cost_pct_of_straddle_mid": float(straddle_round_trip_cost_pct),
-    "ratio_vrp_over_round_trip_cost": float(feasibility_ratio),
-    "assessment": (
-        "not_viable"
-        if feasibility_ratio < 1.0
-        else "marginal"
-        if feasibility_ratio < 2.0
-        else "viable"
-    ),
-    "motivates": "htm_cost_cascade (setup.yaml::backtest.sweep.htm_cost_cascade)",
-}
-feasibility_report["walk_forward"] = {
-    "n_folds_generated": int(len(splits)),
-    "n_splits_declared": n_splits_declared,
-    "train_years": train_years,
-    "test_years": test_years,
-    "holdout_start": HOLDOUT_START,
-    "holdout_end": HOLDOUT_END,
-    "last_test_end": splits[-1]["test_end"],
-}
-
-# %% [markdown] tags=[]
-# Writing the compact JSON report lets downstream notebooks cite the feasibility
-# evidence without loading the raw option chain.
-
-# %% tags=[]
-report_path = EXPLORATION_DIR / "feasibility_report.json"
-with open(report_path, "w") as f:
-    json.dump(feasibility_report, f, indent=2)
-print(f"Written: {report_path}")
-
-# %% [markdown] tags=[]
-# ---
+# %% [markdown]
+# ## Key takeaways
 #
-# ## Key Takeaways
+# 1. **Read cost against the base the position earns on.** One quoted spread is an ordinary equity
+#    cost against notional and a large share of the premium; only the second says what is given up.
+# 2. **Count the universe on the session the strategy acts on**, because a chain carries a target
+#    maturity only on the weeks a listed expiry falls in the window.
+# 3. **Follow a contract by its own strike and expiration**, index its horizon by sessions not
+#    rows, and take a panel autocorrelation inside each entity, never across the stack.
 #
-# 1. **Costs dominate at quoted spreads**: The mean single-leg half-spread is
-#    multiple percent of option mid. Across complete call-put pairs, the raw
-#    entry-plus-exit cost is larger than the premium in every year of the window,
-#    and the feasibility ratio is below 1.0.
-# 2. **The premium is regime-dependent, not a fixed edge**: Mean IV30 - RV21 is
-#    thin but positive over the pooled CV window and turns negative in the 2020
-#    volatility spike. Selling volatility is not a standing edge merely taxed
-#    by costs; the raw premium itself can go negative before any cost is paid.
-# 3. **Strategy survives only via the HTM cascade**: `setup.yaml::backtest.sweep.htm_cost_cascade`
-#    combines HTM with four configured entry-cost fractions and two universes
-#    (HTM avoids the exit leg; `[0.203, 0.5, 0.75, 1.0]` spans the cost grid;
-#    the liquid filter restricts to the bottom-quintile half-spread universe).
-#    Chapter 18 cost notebooks
-#    dispatch these inline.
-# 4. **Limited walk-forward depth**: 5 calendar years supports only 2 folds
-#    with 2Y train + 1Y validation before the 2021 holdout. Variance per
-#    fold will be high; the holdout is the credible single-point estimate.
-# 5. **No point-in-time eligibility artifact**: Universe selection happens
-#    upstream (`materialize_options.py`); the liquid-rung filter is computed
-#    inline at backtest time.
+# ### Known limitations. Cost here is the quoted spread alone: commission, the equity leg of the
+# daily hedge and the margin the position ties up need a notional and enter at the cost stage. The
+# premium moves in B.3 are unhedged marks, and the strategy re-hedges its delta at each close,
+# which removes part of the move a seller would otherwise take.
 #
-# **Artifacts written**:
-#
-# - `config/exploration/feasibility_report.json`: spread distribution,
-#   VRP magnitude, feasibility ratio, and walk-forward summary that downstream
-#   notebooks and the chapter README can cite without re-running this notebook.
-#
-# **Next**: [`02_labels`](02_labels.ipynb) computes forward short-straddle
-# returns (primary `ret_to_expiry`, variants `fwd_ret_dh_*` and `fwd_ret_*`)
-# with the declared rebalance steps.
+# **Next**: labels at the declared horizon, built on this development window.
