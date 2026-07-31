@@ -17,14 +17,13 @@
 # # S&P 500 Equity + Option Analytics: Feasibility Analysis
 #
 # `config/setup.yaml` declares a strategy that ranks S&P 500 shares by signals read off their
-# listed options and holds the shares themselves. This notebook asks whether the data supports
-# that, and fits nothing.
+# listed options and holds the shares. This notebook asks whether the data supports that.
 #
 # ## Learning objectives
 #
 # - Count the universe by what the strategy can rank, not by what the files contain
-# - Read clearance off an exceedance curve, and see why a per-share and a percentage cost
-#   model are different assumptions rather than two units for one
+# - Read clearance off an exceedance curve, and see why a per-share and a percentage cost model
+#   are different assumptions rather than two units for one
 # - Measure how long the volatility level stays put, and confirm the declared folds fit
 #
 # ## Book reference
@@ -76,6 +75,7 @@ COST_BPS = SETUP["costs"]["round_trip_cost_bps"]
 PER_SHARE = SETUP["costs"]["per_share"]
 HALF_SPREADS = SETUP["backtest"]["sweep"]["cost_grid_half_spread_usd"]
 CARRIER = "iv_30_atm"
+IV_LAG, IV_STALE = 1, 5  # declared feature lag; sessions 03_financial_features forward-fills
 
 print(f"Development {START_DATE} to {HOLDOUT_START} | sealed holdout to {HOLDOUT_END}")
 print(f"Universe {SETUP['universe']['n_assets']} names, floor {BREADTH_FLOOR}, horizons {HORIZONS}")
@@ -86,9 +86,8 @@ print(f"Universe {SETUP['universe']['n_assets']} names, floor {BREADTH_FLOOR}, h
 # The options market prices the distribution of a share's future returns and the equity market
 # prices its level. This case study reads the first and trades the second, so signal and cost
 # arrive from two venues that need not cover the same names on the same days. Does the universe
-# exist on the dates the strategy acts on, once an ATM volatility is required as well as a price?
-# Is a typical move large next to what crossing the spread costs? Are there enough decision
-# dates for a walk-forward that never reads the holdout?
+# exist on the dates the strategy acts on? Is a typical move large next to the spread? Are there
+# enough decision dates for a walk-forward clear of the holdout?
 
 # %% [markdown]
 # ## B. Universe and cost feasibility
@@ -97,8 +96,8 @@ print(f"Universe {SETUP['universe']['n_assets']} names, floor {BREADTH_FLOOR}, h
 #
 # The surface carries implied volatility interpolated to fixed tenors, one row per name and
 # session, with `qc_converged_share` scoring how cleanly the points behind it solved; the bars
-# carry `close` as printed plus `adj_factor`. A name is in the universe on a date where the
-# interpolation produced a value and a bar exists, the condition `03_financial_features` reads.
+# carry `close` as printed plus `adj_factor`. A name is present where the interpolation produced a
+# value and a bar exists, the condition `03_financial_features` reads it under.
 
 # %%
 surface = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
@@ -122,15 +121,24 @@ print(
 # ### B.2 Breadth at every decision date
 #
 # `setup.yaml::universe.n_assets` counts the names appearing anywhere in the sample; what a
-# cross-sectional strategy spends is the names available *on the session it acts on*, against
-# the sweep's largest position count as the floor it clears to fill a book.
+# cross-sectional strategy spends is the names it can rank *on the session it acts on*, against
+# the sweep's largest position count as the floor it clears to fill a book. Ranking reads the
+# volatility a session late and `03_financial_features` carries it forward over a short gap, so a
+# name counts here under that lag and that tolerance.
 
 # %%
-decisions = panel.group_by(pl.col("timestamp").dt.truncate("1w")).agg(
+rankable = (
+    quotes.select("timestamp", "symbol")
+    .join(panel.select("timestamp", "symbol", CARRIER), ["timestamp", "symbol"], how="left")
+    .sort(["symbol", "timestamp"])
+    .with_columns(pl.col(CARRIER).shift(IV_LAG).forward_fill(limit=IV_STALE).over("symbol"))
+    .drop_nulls(CARRIER)
+)
+decisions = rankable.group_by(pl.col("timestamp").dt.truncate("1w")).agg(
     pl.col("timestamp").max().alias("decision_date")
 )
 breadth = (
-    panel.join(decisions, left_on="timestamp", right_on="decision_date")
+    rankable.join(decisions, left_on="timestamp", right_on="decision_date")
     .group_by("timestamp")
     .agg(pl.col("symbol").n_unique().alias("n_names"))
     .sort("timestamp")
@@ -140,30 +148,29 @@ fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 ax.plot(breadth["timestamp"], breadth["n_names"], color=COLORS["blue"], linewidth=1.0)
 ax.axhline(BREADTH_FLOOR, color=COLORS["copper"], ls="--", lw=1.5, label="largest position count")
 ax.set_ylim(0, SETUP["universe"]["n_assets"])
-ax.set_ylabel("Names with an interpolated ATM volatility")
+ax.set_ylabel("Names the strategy can rank")
 ax.xaxis.set_major_locator(mdates.YearLocator())
 ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
 ax.legend(frameon=False, fontsize=8, loc="upper right")
 add_message_title(
     ax,
     "Option coverage halves and recovers on a monthly cycle",
-    subtitle="Names carrying an interpolated ATM volatility and a share price, at the weekly decision",
+    subtitle="Names with a lagged ATM volatility and a share price, at the weekly decision",
 )
 plt.show()
 
 # %% [markdown]
 # Breadth never approaches the floor, so it is not what limits this strategy. What the swing
-# changes is *which* names can be ranked: on the narrow weeks the cross-section is about half
-# the panel, so a statistic averaged over decision dates spans two universes.
+# changes is *which* names can be ranked: on the narrow weeks the cross-section is about half the
+# panel, so a statistic averaged over decision dates spans two universes.
 #
 # ### B.3 What the trade costs, and what a move is worth
 #
 # `setup.yaml::costs.model` declares a percentage regime: a flat round trip in basis points for
 # every name. The companion the sweep keeps is a per-share regime, where the charge is a number
 # of cents and the basis points follow from the price, so a cent buys a different fraction of a
-# cheap share than of an expensive one. Cost and move scale are both properties of the share, so
-# both come off the bars, not the joined panel, where a horizon counted in rows stretches; and
-# what follows is the size of a move, not the payoff of the declared entry and exit.
+# cheap share than of an expensive one. Both come off the bars, not the joined panel, where a
+# horizon counted in rows stretches; and what follows is a move's size, not a payoff.
 
 # %%
 prices = (
@@ -199,11 +206,10 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# The flat line is the declared assumption, the band is what the same trade would cost quoted per
-# share, and they cross: no single cent figure reproduces the flat line across a universe this
-# wide in price, which is why the percentage regime is the headline. Returns run close to close on
-# the adjusted series and within one security: on a split date the printed close falls by the
-# split ratio, and a ticker can change hands between two `sec_id` values.
+# The two cross, so no single cent figure reproduces the flat line across a universe this wide in
+# price, which is why the percentage regime is the headline. Returns run close to close on the
+# adjusted series and within one security: a split cuts the printed close by its ratio, and a
+# ticker can change hands between two `sec_id` values.
 
 # %%
 returns = prices.with_columns(
@@ -233,8 +239,8 @@ plt.show()
 #
 # Rebalancing weekly is worth the turnover only if what the data says at one decision date still
 # says something at the next, so the question is how fast the volatility level decays. The
-# autocorrelation is computed inside each name, since stacking six hundred measures the joins
-# between them, and over the names quoting every session, since a lag over a gap is not one.
+# autocorrelation runs inside each name, since stacking six hundred measures the joins between
+# them, and over the names quoting every session, since a lag over a gap is not one.
 
 # %%
 whole = panel.group_by("symbol").len().filter(pl.col("len") == panel["timestamp"].n_unique())
@@ -263,8 +269,7 @@ plt.show()
 # ### B.5 Move scale against cost
 #
 # The ratio divides the median absolute move at the primary horizon by the declared round trip
-# and the clearance share counts moves above it. Neither says total cost clears: a move is a
-# magnitude, not a forecast, and nothing here has ranked a name.
+# and the clearance share counts moves above it. Neither says total cost clears.
 
 # %%
 primary = f"h{HORIZONS[0]}"
@@ -290,23 +295,22 @@ print(
 # ### C.1 Cadence
 #
 # `setup.yaml::decision.cadence` snapshots at the Friday close and executes at the Monday open,
-# with a one-day lag on the volatility features so a surface published after the close cannot be
-# read before it exists. B.4 supports the weekly interval: the carrier holds most of its level a
-# week out, so a daily rebalance would pay the spread again for information that has not moved.
+# with a one-day lag so a surface published after the close cannot be read before it exists. B.4
+# supports the weekly interval: the carrier holds most of its level a week out, so a daily
+# rebalance pays the spread again for information that has not moved.
 #
 # ### C.2 Kill conditions
 #
 # Three thresholds send the setup back to be revised, each tested where its evidence exists, not
 # here: the information coefficient of the volatility families falling below its floor across
-# folds, the move-to-cost ratio at the weekly horizon falling under one after realistic costs,
-# and the volatility features adding nothing over realized volatility. B.5 speaks to the second.
+# folds, the move-to-cost ratio falling under one after realistic costs, and the volatility
+# features adding nothing over realized volatility.
 #
 # ### C.3 Mapping class
 #
-# `setup.yaml::mapping.class` ranks names by the volatility signal and holds the top of the
-# ranking long and equally weighted. Long-only keeps borrow and locate frictions out of an
-# example whose subject is the signal, and equal weight avoids stacking a second optimization on
-# the ranking being evaluated. Chapter 17 sweeps the allocators.
+# `setup.yaml::mapping.class` holds the top of the ranking long and equally weighted. Long-only
+# keeps borrow and locate frictions out of an example whose subject is the signal, and equal
+# weight avoids stacking a second optimization on the ranking. Chapter 17 sweeps the allocators.
 
 # %% [markdown]
 # ## D. Walk-forward structure
@@ -328,7 +332,7 @@ print(
 # `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone. Between each
 # training and validation block sits a purge gap the width of the label buffer, so a label
 # computed inside training cannot resolve inside validation. The figure draws the boundaries the
-# splitter returned rather than recomputing them, so the two cannot come apart.
+# splitter returned, so the two cannot come apart.
 
 # %%
 splits = generate_cv_splits(
@@ -357,7 +361,6 @@ plt.show()
 # None. `03_financial_features` derives the same universe from the same loader.
 #
 # ## F. Findings vs `setup.yaml`
-#
 # | Knob | Evidence | Revise it when |
 # |---|---|---|
 # | `universe.n_assets` | B.2 breadth at each decision date | names available on a decision date fall towards the largest position count the sweep asks for |
@@ -385,16 +388,13 @@ print(
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **Count the universe by what the strategy can rank**, not by what the files contain. Here
-#    that means an interpolated ATM volatility, absent for half the names on half the weeks.
-# 2. **A percentage and a per-share cost model are different assumptions about the cross-section**:
-#    choosing between them claims that friction does or does not scale with price.
+# 1. **Count the universe by what the strategy can rank**, not by what the files contain.
+# 2. **A percentage and a per-share cost model are different assumptions about friction.**
 # 3. **Adjust prices, keep to one security, and take a panel autocorrelation inside each entity.**
 #
 # ### Known limitations
 #
 # - The development window is four years, and a slow carrier shortens it further in effect.
-# - Cost is the declared spread and commission; impact needs a notional and enters at Ch18.
-# - The universe is the names the vendor's surface covers, so an earlier member is absent.
+# - Cost is the declared spread and commission; impact enters at the cost stage.
 #
-# **Next**: labels at the declared horizons, built on this development window.
+# **Next**: labels at the declared horizons, on this development window.
