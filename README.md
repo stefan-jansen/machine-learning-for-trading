@@ -388,9 +388,9 @@ fails. The [installation guide](docs/installation.md) has the full WSL2 walkthro
 Budget about **16 GB** for Option B (11 GB environment, 4 GB free datasets, 0.9 GB of git
 history) and about 12 minutes for the data.
 
-See the **[installation guide](docs/installation.md)** for platform-specific setup (Linux, Windows WSL2, macOS) and GPU
-instructions. Windows readers: WSL2 must be working *before* Docker Desktop is installed, and the
-reboot is not optional.
+See the **[installation guide](docs/installation.md)** for platform-specific setup and GPU
+instructions. Intel Macs are Docker-only: PyTorch no longer publishes macOS x86_64 wheels, so the
+local `uv` path cannot resolve there.
 
 **Download data.** Most notebooks need datasets; start with the free ones (no API keys):
 
