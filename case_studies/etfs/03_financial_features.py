@@ -59,6 +59,7 @@ from case_studies.utils.feature_engineering import (
     EPS,
     assert_values_agree,
     assign_families,
+    clip_within_date,
     cross_sectional_percentile,
     drawdown_block,
     families_from_config,
@@ -71,7 +72,7 @@ from case_studies.utils.feature_engineering import (
     plot_redundancy_clusters,
     plot_timing_contract,
     register_frame,
-    relative_volume_block,
+    trailing_volume_ratio,
     warmup_audit,
 )
 from data import load_etfs, load_macro
@@ -260,11 +261,6 @@ def oscillator_features(df: pl.DataFrame) -> pl.DataFrame:
 
 
 # %%
-def relative_volume(df: pl.DataFrame) -> pl.DataFrame:
-    """Volume against its own trailing mean, clipped within the decision date."""
-    return relative_volume_block(df, entity="symbol", windows=WINDOWS["volume"])
-
-
 def drawdown_and_extremes(df: pl.DataFrame) -> pl.DataFrame:
     """Drawdown, on-balance volume and position in the 52-week range."""
     df = drawdown_block(df, entity="symbol", windows=WINDOWS["drawdown"])
@@ -349,20 +345,30 @@ def gate_to_eligible(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def cross_sectional_position(df: pl.DataFrame) -> pl.DataFrame:
-    """Percentile of each carrier feature within its own decision date."""
-    return df.with_columns(
-        cross_sectional_percentile(col, "timestamp").alias(f"{col}_rank") for col in RANKED
-    )
-
-
 def per_entity_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Everything computed from one ETF's own history, gate not yet applied."""
+    """Everything computed from one ETF's own history, gate not yet applied.
+
+    The relative-volume ratio is here rather than after the gate: its trailing mean
+    has to read every bar the ETF traded, or an ETF admitted to the universe this
+    year divides by a mean of its first few eligible days, and one that re-enters
+    after a gap averages across the gap. Only the clip is a cross-sectional step.
+    """
     return (
         df.pipe(momentum_features)
         .pipe(oscillator_features)
         .pipe(drawdown_and_extremes)
         .pipe(regime_and_state)
+        .pipe(trailing_volume_ratio, entity="symbol", windows=WINDOWS["volume"])
+    )
+
+
+def clip_and_rank(df: pl.DataFrame) -> pl.DataFrame:
+    """The two within-date steps, over the eligible cross-section only."""
+    clipped = clip_within_date(
+        df, columns=[f"vol_ratio_{w}d" for w in WINDOWS["volume"]], time="timestamp"
+    )
+    return clipped.with_columns(
+        cross_sectional_percentile(col, "timestamp").alias(f"{col}_rank") for col in RANKED
     )
 
 
@@ -374,17 +380,12 @@ def build_features(df: pl.DataFrame) -> pl.DataFrame:
     cross-section they are taken over, so an ETF the strategy cannot trade must not be in
     that cross-section: ranking against it moves the number written for every ETF that is.
     """
-    return (
-        df.pipe(per_entity_features)
-        .pipe(gate_to_eligible)
-        .pipe(relative_volume)
-        .pipe(cross_sectional_position)
-    )
+    return df.pipe(per_entity_features).pipe(gate_to_eligible).pipe(clip_and_rank)
 
 
 EXCLUDED = {"symbol", "timestamp", "open", "high", "low", "close", "volume", "log_return"}
 per_entity = per_entity_features(prices)
-built = per_entity.pipe(gate_to_eligible).pipe(relative_volume).pipe(cross_sectional_position)
+built = per_entity.pipe(gate_to_eligible).pipe(clip_and_rank)
 feature_cols = [c for c in built.columns if c not in EXCLUDED]
 print(f"{len(built):,} eligible bars carrying {len(feature_cols)} features")
 
@@ -589,10 +590,12 @@ plot_persistence(
     title="The long-window carriers still hold their ordering a month out",
     subtitle=f"Feature autocorrelation to {2 * DECISION_CYCLE} sessions, with a 95% interval",
     alt=(
-        "Two panels. On the left, autocorrelation against lag: the six-month return and its "
-        "risk-adjusted twin stay above 0.6 out to 42 sessions, while the one-month return "
-        "reaches zero at exactly 21 and the 14-day oscillator is near zero soon after. On the "
-        "right, one-session rank correlation, above 0.85 for all five features."
+        "Two panels. On the left, autocorrelation against lag: the six-month return, the "
+        "three-month volatility and the six-month risk-adjusted return are still between "
+        "roughly 0.5 and 0.75 at 42 sessions, while the one-month return reaches zero at "
+        "exactly 21 sessions - the length of its own window - and the 14-day oscillator "
+        "levels off near 0.2. On the right, the cross-sectional rank correlation between "
+        "consecutive decision dates, above 0.9 for all five features."
     ),
 )
 
@@ -623,7 +626,7 @@ print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}")
 
 # %% [markdown] tags=["results"]
 # The matrix carries **57 features** on **396,186 rows** across **99 ETFs**, from **2007-01-03**
-# to **2025-12-31**, under content digest **efa6363a247bb219**. Cutting the redundancy tree
+# to **2025-12-31**, under content digest **a03feca8d6fe7bbd**. Cutting the redundancy tree
 # leaves **28 clusters**, so half the columns repeat an ordering another column already
 # carries.
 

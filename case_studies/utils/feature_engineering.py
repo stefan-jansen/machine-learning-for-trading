@@ -252,22 +252,58 @@ def relative_volume_block(
     scale a model sees while reading no other date's volume - which a clip fitted
     over the whole column would.
     """
+    return clip_within_date(
+        trailing_volume_ratio(df, entity=entity, volume=volume, windows=windows),
+        columns=[f"vol_ratio_{w}d" for w in windows],
+        quantiles=clip_quantiles,
+        time=time,
+    )
+
+
+def trailing_volume_ratio(
+    df: pl.DataFrame,
+    *,
+    entity: str | Sequence[str],
+    volume: str = "volume",
+    windows: Sequence[int],
+) -> pl.DataFrame:
+    """Volume over its own trailing mean, per entity, unclipped.
+
+    Separate from the clip because the two need different row sets. The trailing
+    mean is a property of the entity's whole history and has to read every bar it
+    traded, including bars a downstream eligibility gate will drop; taking it after
+    the gate makes a newly eligible entity's first year read a mean of a few days,
+    and lets an entity that re-enters after a gap average across the gap.
+    """
     keys = [entity] if isinstance(entity, str) else list(entity)
-    lo, hi = clip_quantiles
-    raw = {
-        w: pl.col(volume) / pl.col(volume).rolling_mean(w).over(keys).clip(lower_bound=EPS)
-        for w in windows
-    }
-    df = df.with_columns(expr.alias(f"_relvol_{w}") for w, expr in raw.items())
     return df.with_columns(
-        pl.col(f"_relvol_{w}")
-        .clip(
-            pl.col(f"_relvol_{w}").quantile(lo).over(time),
-            pl.col(f"_relvol_{w}").quantile(hi).over(time),
+        (pl.col(volume) / pl.col(volume).rolling_mean(w).over(keys).clip(lower_bound=EPS)).alias(
+            f"vol_ratio_{w}d"
         )
-        .alias(f"vol_ratio_{w}d")
         for w in windows
-    ).drop([f"_relvol_{w}" for w in windows])
+    )
+
+
+def clip_within_date(
+    df: pl.DataFrame,
+    *,
+    columns: Sequence[str],
+    quantiles: tuple[float, float] = (0.01, 0.99),
+    time: str = "timestamp",
+) -> pl.DataFrame:
+    """Winsorize *columns* at quantiles taken within each decision date.
+
+    The bounds are a property of one cross-section, so they read no other date -
+    and, like any within-date statistic, they must be taken over the rows that are
+    actually tradable on that date.
+    """
+    lo, hi = quantiles
+    return df.with_columns(
+        pl.col(c)
+        .clip(pl.col(c).quantile(lo).over(time), pl.col(c).quantile(hi).over(time))
+        .alias(c)
+        for c in columns
+    )
 
 
 def cross_sectional_percentile(column: str, over: str | Sequence[str]) -> pl.Expr:
@@ -775,30 +811,42 @@ def plot_persistence(
         frame = frame.join(entities, on=keys, how="semi")
 
     lags = np.unique(np.linspace(1, max_lag, min(max_lag, 24)).astype(int))
-    groups = frame.partition_by(keys, maintain_order=True)
+    # Lags are counted along the panel's decision dates, not along each entity's own
+    # rows. Slicing an entity's rows positionally makes "21 bars ago" mean "21 rows
+    # ago", which is a different date for every entity and crosses any stretch the
+    # entity was absent for - after an eligibility gate, by months or years.
+    dates = frame[time].unique().sort()
     acf: dict[str, list[float]] = {c: [] for c in columns}
-    for column in columns:
-        series = [group[column].to_numpy().astype(float) for group in groups]
-        counts = []
-        for lag in lags:
-            values, weights = [], []
-            for arr in series:
-                if arr.size <= lag + 10:
-                    continue
-                a, b = arr[lag:], arr[:-lag]
-                good = np.isfinite(a) & np.isfinite(b)
-                if good.sum() <= 10 or np.std(a[good]) == 0 or np.std(b[good]) == 0:
-                    continue
-                values.append(float(np.corrcoef(a[good], b[good])[0, 1]))
-                weights.append(int(good.sum()))
-            acf[column].append(float(np.average(values, weights=weights)) if values else np.nan)
-            counts.append(sum(weights) if weights else 0)
-        acf[f"_n_{column}"] = counts
+    counts: list[int] = []
+    for lag in lags:
+        back = dict(zip(dates[lag:].to_list(), dates[: -int(lag)].to_list(), strict=True))
+        pairs = frame.with_columns(
+            pl.col(time).replace_strict(back, default=None).alias("_then")
+        ).join(
+            frame.select(
+                *keys,
+                pl.col(time).alias("_then"),
+                *[pl.col(c).alias(f"_{c}_then") for c in columns],
+            ),
+            on=[*keys, "_then"],
+            how="inner",
+        )
+        counts.append(pairs.height)
+        for column in columns:
+            both = pairs.select(column, f"_{column}_then").drop_nulls().drop_nans()
+            acf[column].append(
+                float(
+                    np.corrcoef(both[column].to_numpy(), both[f"_{column}_then"].to_numpy())[0, 1]
+                )
+                if both.height > 10
+                else np.nan
+            )
+    acf["_n"] = counts
 
     fig, (left, right) = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
     for (color, style), column in zip(_cycle(len(columns)), columns, strict=False):
         left.plot(lags, acf[column], label=column, color=color, ls=style, linewidth=1.2, ms=2.5)
-    n_eff = max(1, int(np.median([n for n in acf[f"_n_{columns[0]}"] if n] or [1])))
+    n_eff = max(1, int(np.median([n for n in acf["_n"] if n] or [1])))
     band = 1.96 / np.sqrt(n_eff)
     left.axhspan(
         -band, band, color=COLORS["neutral"], alpha=0.18, linewidth=0, label="95% interval"
