@@ -16,427 +16,594 @@
 # %% [markdown]
 # # FX Pairs: Label Engineering
 #
-# **Chapter 7: Defining the Learning Task**
+# Every model in this case study is trained to predict the label defined here, so an error
+# in it is silent where it is made and reaches every metric and every backtest after it.
+# This notebook fixes the execution convention, proves each labelled row has a complete
+# forward window inside one pair, measures how much independent information those rows
+# carry, establishes the floor a feature has to clear, and writes the files stage 03 reads.
 #
-# This notebook implements label engineering for the FX Pairs case study.
-# Labels encode the economic hypothesis: can cross-sectional reversal
-# predict forward returns across a 20-pair FX universe?
+# ## Learning objectives
 #
-# **Learning Objectives**:
-# - Aggregate 4-hour bars to daily using NY 5PM rollover convention
-# - Compute forward return labels at multiple horizons (1d, 5d, 21d)
-# - Build walk-forward CV configuration respecting FX calendar
-# - Evaluate baseline IC of raw 126-day reversal signal against labels
+# - Put a bar series on the session clock the decision cadence is defined in, before any
+#   forward window is measured
+# - Assert, rather than describe, that every labelled window is complete and gap-free inside
+#   one pair
+# - Seal a diagnostic on the label's endpoint rather than on its observation date
+# - Price the overlap in a multi-session label, both as decay and as an effective row count
+# - Establish the floor a feature has to clear, under a standard error that prices in that
+#   overlap
 #
-# **Book Reference**: Chapter 7, Section 7.2 (Label Engineering)
+# ## Book reference, prerequisites and artifacts
 #
-# **Prerequisites**: [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) completed; FX data via `load_fx_pairs()`
-#
-# **Output Contract**:
-# - `labels/fwd_ret_1d.parquet` -- Primary: 1-day forward returns
-# - `labels/fwd_ret_5d.parquet` -- Variant: 1-week forward returns
-# - `labels/fwd_ret_21d.parquet` -- Variant: 1-month forward returns
-#
-# The walk-forward CV configuration is defined in `config/setup.yaml` (mirrored in
-# `config/cv_config.json`, consumed by `04_model_based_features`); this notebook
-# validates that config and materializes the splits via `generate_cv_splits`.
+# Chapter 7, Section 7.2. Reads four-hour spot bars through `load_fx_pairs()`, whose
+# coverage [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) establishes, and
+# `config/setup.yaml`, which declares the universe, the label set, the horizons and the
+# holdout boundary. Writes `labels/fwd_ret_1d.parquet`, `labels/fwd_ret_5d.parquet` and
+# `labels/fwd_ret_21d.parquet`, each with a `.digest.json` sidecar beside it.
+# `03_financial_features.py` reads `fwd_ret_1d.parquet`, which it names directly rather
+# than resolving `labels.primary`, so changing that key here does not move stage 03.
 
 # %%
 """FX Pairs: Label Engineering."""
 
-import subprocess
+import math
 import warnings
-from datetime import UTC, datetime
+from datetime import date
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
+import yaml
+from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 from ml4t.diagnostic.splitters.calendar import TradingCalendar
-from scipy.stats import spearmanr
 
+from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
 from data import load_fx_pairs
-from utils.cv_splits import generate_cv_splits, load_evaluation_config
+from utils.artifact_specs import resolve_label_horizon
 from utils.paths import get_case_study_dir
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
-# %% tags=["parameters"]
 CASE_STUDY_ID = "fx_pairs"
-START_DATE = "2011-01-01"
-MAX_SYMBOLS = 0
-
-# %%
-CASE_DIR = get_case_study_dir("fx_pairs")
+CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 LABELS_DIR = CASE_DIR / "labels"
 
-START_DATE = "2011-01-01"
-END_DATE = "2025-12-31"
-HOLDOUT_START = "2024-01-01"
+# %% [markdown]
+# Both parameters are unset by default, and both are read below. `START_DATE` trims the
+# history to a later start; `MAX_SYMBOLS` keeps only the first pairs in alphabetical order.
+# Either one shortens a run at the cost of a thinner panel: the rank correlation in Section G
+# and the cross-sectional dispersion in Section E both need a wide cross-section on each
+# session to mean anything.
+
+# %% tags=["parameters"]
+MAX_SYMBOLS = None
+START_DATE = None
 
 # %% [markdown]
-# ## 1. Load and Aggregate to Daily
+# ## Configuration
 #
-# FX data arrives as 4-hour bars. The setup (Ch6) specifies daily NY 5PM close
-# as the decision cadence. We aggregate 4H bars to daily using the CME_FX
-# trading calendar, which implements the standard NY 5PM session rollover.
+# Everything that defines a label is declared in `config/setup.yaml` and bound here. A
+# horizon or a boundary typed into a cell is a second copy of a value the rest of the
+# pipeline reads from the file, and the two drift apart the first time either is edited.
+#
+# `resolve_label_horizon` prefers an explicit `labels.horizons` entry and falls back to the
+# cross-validation buffer. The two fields are separate, because the gap that keeps folds
+# independent need not equal the horizon an outcome resolves over; here they coincide, and
+# all three are declared in trading sessions.
+
+# %%
+setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+
+PRIMARY_LABEL = setup["labels"]["primary"]
+LABEL_NAMES = [PRIMARY_LABEL, *setup["labels"].get("variants", [])]
+HORIZONS = {
+    name: int(resolve_label_horizon(CASE_STUDY_ID, name, setup).rstrip("Dd"))
+    for name in LABEL_NAMES
+}
+PRIMARY_HORIZON = HORIZONS[PRIMARY_LABEL]
+LONGEST_LABEL = max(HORIZONS, key=HORIZONS.get)
+HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
+HOLDOUT_END = date.fromisoformat(setup["evaluation"]["holdout_end"])
+CALENDAR = "CME_FX"  # the venue calendar that implements the NY 5pm rollover
+
+print(f"Labels: {LABEL_NAMES}, primary {PRIMARY_LABEL}, horizons {HORIZONS} sessions")
+print(f"Holdout opens {HOLDOUT_START}, and seals the label endpoint")
+
+# %% [markdown]
+# ## A. The learning task
+#
+# The hypothesis is cross-sectional reversal. Among a fixed universe of twenty liquid crosses,
+# the claim is that the pairs that have appreciated most over the past two quarters
+# subsequently underperform the pairs that have not - a macro-driven mean reversion in
+# relative value, ranked across the universe rather than judged pair by pair. The label is
+# therefore a forward spot return on the pair itself, and the strategy that consumes it is
+# long-short across the twenty.
+#
+# The decision cadence comes from `setup.yaml`: the New York 5pm close is observed and the
+# resulting position is entered at the next bar's open, which fixes the primary horizon at
+# one session. The two variants ask whether the same relationship pays over a week and over
+# a month. Those are questions about how fast the reversal unwinds and about how often the
+# book has to turn over, rather than second hypotheses, so Section G measures the floor
+# against the primary label, and `05_evaluation` measures decay across the three.
+
+# %% [markdown]
+# ## B. Preparation before the label
+#
+# Spot FX has no exchange close, so a daily bar is a convention rather than an observation.
+# The provider delivers four-hour bars stamped in UTC; the decision cadence is defined at the
+# New York 5pm rollover, and for eight hours out of every twenty-four the two clocks put a
+# bar on different calendar days. `TradingCalendar("CME_FX")` assigns each
+# four-hour bar to the session it actually traded in, and the daily close is the last bar of
+# that session rather than the last bar before midnight UTC. Aggregating on the UTC date
+# instead puts a Sunday-evening bar and the Monday session in the same row.
+#
+# The aggregation sorts within each session group before taking its last bar, because a
+# Polars `group_by` does not contractually preserve input order, and a daily close taken
+# from an arbitrary bar of the session is wrong without ever raising.
+#
+# No eligibility filter runs before the shift, and that ordering matters: once rows are
+# dropped from inside a series, a shift counts survivors, the horizon stops being measured in
+# sessions, and the window silently spans whatever was removed. The universe is the fixed
+# twenty-pair list `setup.yaml` declares, which carries the selection bias
+# `01_feasibility_analysis` documents.
 
 
 # %%
-def aggregate_4h_to_daily(df: pl.DataFrame) -> pl.DataFrame:
-    """Aggregate 4-hour FX bars to daily OHLCV using CME_FX trading calendar.
-
-    Uses ml4t-diagnostic's TradingCalendar to assign each 4H bar to its
-    correct FX trading session (Mon-Fri, NY 5PM rollover).
-    """
-    cal = TradingCalendar("CME_FX")
-    sessions = cal.get_sessions(pd.DatetimeIndex(df["timestamp"].to_pandas()))
-
-    # Keep the original 4H timestamp as `bar_ts` so first()/last() can sort
-    # within the session group — polars group_by does not contractually
-    # preserve input row order.
-    daily = (
-        df.rename({"timestamp": "bar_ts"})
+def to_daily_sessions(bars: pl.DataFrame) -> pl.DataFrame:
+    """Aggregate four-hour bars to one row per pair and venue session."""
+    sessions = TradingCalendar(CALENDAR).get_sessions(pd.DatetimeIndex(bars["timestamp"]))
+    return (
+        bars.rename({"timestamp": "bar_ts"})
         .with_columns(pl.Series("timestamp", sessions.values).cast(pl.Date))
         .drop_nulls("timestamp")
         .group_by(["symbol", "timestamp"])
-        .agg(
-            pl.col("open").sort_by("bar_ts").first().alias("open"),
-            pl.col("high").max().alias("high"),
-            pl.col("low").min().alias("low"),
-            pl.col("close").sort_by("bar_ts").last().alias("close"),
-            pl.col("volume").sum().alias("volume"),
-        )
+        .agg(pl.col("close").sort_by("bar_ts").last())
         .sort(["symbol", "timestamp"])
     )
 
-    assert daily.filter(pl.col("timestamp").dt.weekday() > 5).height == 0, (
-        "Weekend dates found in prices"
-    )
-    return daily
 
+bars = load_fx_pairs(frequency="4h", start_date=START_DATE, end_date=str(HOLDOUT_END))
+prices = to_daily_sessions(bars.select(["symbol", "timestamp", "close"]))
+if MAX_SYMBOLS is not None:
+    keep = sorted(prices["symbol"].unique().to_list())[:MAX_SYMBOLS]
+    prices = prices.filter(pl.col("symbol").is_in(keep))
 
-# %%
-# Load 4H data and aggregate to daily
-fx_4h = load_fx_pairs(
-    frequency="4h",
-    start_date=START_DATE,
-    end_date=END_DATE,
-).select(["symbol", "timestamp", "open", "high", "low", "close", "volume"])
+assert prices.filter(pl.col("timestamp").dt.weekday() > 5).height == 0, "weekend session"
 
-prices = aggregate_4h_to_daily(fx_4h)
+# Digest of the data the labels are built from, recorded as every label's `inputs`: a
+# re-run against a refreshed download is otherwise indistinguishable from this one.
+MARKET_DATA_DIGEST = value_digest(prices, ["symbol", "timestamp", "close"])
 
-n_assets = prices["symbol"].n_unique()
-n_dates = prices["timestamp"].n_unique()
-print(f"Daily FX data: {n_assets} pairs, {n_dates} dates, {len(prices):,} rows")
-print(f"Period: {prices['timestamp'].min()} to {prices['timestamp'].max()}")
-print(f"Pairs: {sorted(prices['symbol'].unique().to_list())}")
+print(f"{prices['symbol'].n_unique()} pairs, {prices.height:,} pair-sessions")
+print(f"Sessions {prices['timestamp'].min()} to {prices['timestamp'].max()}")
+print(f"market_data digest: {MARKET_DATA_DIGEST}")
 
 # %% [markdown]
-# ## 2. Forward Return Labels
+# ## C. Label construction
 #
-# We compute forward returns at three horizons:
-# - **1-day** (primary): Matches daily decision cadence; tight 1-day purge
-# - **5-day** (variant): Tests slower signal decay; academic FX literature uses weekly
-# - **21-day** (variant): Matches concept note's reversal hypothesis horizon
+# One execution convention, written once and applied at all three horizons:
 #
-# $r_{t \to t+h} = \frac{P_{t+h}}{P_t} - 1$
+# $$r^{(h)}_{i,t} = \frac{P_{i,t+h}}{P_{i,t}} - 1$$
 #
-# where $P_t$ is the NY 5PM close.
+# where $P$ is pair $i$'s New York 5pm close and $t+h$ counts $h$ **venue sessions** for that
+# pair: Chapter 7.2's close-to-close convention. It is not the convention the backtest fills
+# at - `setup.yaml` places execution at the next bar's open - and that difference is a real
+# gap, left to `15_costs`, which sweeps commission and spread rather than the return
+# definition.
+#
+# Two bookkeeping columns are numbered here, on the complete session series, because both
+# mean something only before a row is dropped: `from_end` counts back from each pair's last
+# session for Section D's boundary profile, and `session` numbers its sessions forward so
+# Section F's overlap statistics keep counting sessions once the null tail and the holdout
+# are filtered out. Neither reaches a label parquet, which selects three columns.
 
 
 # %%
-def create_forward_returns(df: pl.DataFrame, horizon: int, label_name: str) -> pl.DataFrame:
-    """Create forward return labels.
-
-    Args:
-        df: Daily DataFrame with asset, date, close
-        horizon: Forward horizon in trading days
-        label_name: Output column name
-    """
+def forward_return(df: pl.DataFrame, horizon: int, name: str) -> pl.DataFrame:
+    """Close-to-close return over `horizon` venue sessions, per pair."""
     return df.with_columns(
-        (pl.col("close").shift(-horizon).over("symbol") / pl.col("close") - 1).alias(label_name)
+        (pl.col("close").shift(-horizon).over("symbol") / pl.col("close") - 1).alias(name)
     )
 
 
-# %%
-labels_df = prices.sort(["symbol", "timestamp"])
-
-# Primary: 1-day forward return
-labels_df = create_forward_returns(labels_df, horizon=1, label_name="fwd_ret_1d")
-print("Created: fwd_ret_1d (primary, 1-day)")
-
-# Variant: 5-day forward return
-labels_df = create_forward_returns(labels_df, horizon=5, label_name="fwd_ret_5d")
-print("Created: fwd_ret_5d (variant, 1-week)")
-
-# Variant: 21-day forward return
-labels_df = create_forward_returns(labels_df, horizon=21, label_name="fwd_ret_21d")
-print("Created: fwd_ret_21d (variant, 1-month)")
-
-# %% [markdown]
-# ## 3. Label Distribution Summary
-
-# %%
-print("\n" + "=" * 60)
-print("LABEL DISTRIBUTION SUMMARY")
-print("=" * 60)
-
-label_stats = {}
-
-for label_col, horizon_name in [
-    ("fwd_ret_1d", "1-day"),
-    ("fwd_ret_5d", "5-day"),
-    ("fwd_ret_21d", "21-day"),
-]:
-    valid = labels_df.select(label_col).drop_nulls()
-    n_valid = len(valid)
-    mean_val = valid[label_col].mean()
-    std_val = valid[label_col].std()
-    pct_pos = (valid[label_col] > 0).mean()
-
-    label_stats[label_col] = {
-        "n_valid": n_valid,
-        "mean": float(mean_val),
-        "std": float(std_val),
-        "pct_positive": float(pct_pos),
-    }
-
-    print(f"\n{horizon_name} ({label_col}):")
-    print(f"  Valid samples: {n_valid:,}")
-    print(f"  Mean: {mean_val:.6f}")
-    print(f"  Std:  {std_val:.6f}")
-    print(f"  % Positive: {pct_pos:.1%}")
-
-# %% [markdown]
-# **Class balance**: ~50% positive for all horizons is expected for FX forward
-# returns (no systematic drift in exchange rates). This is not a class-imbalance
-# problem -- the challenge is predicting the sign of small deviations from zero.
-
-# %% [markdown]
-# ### Label Autocorrelation
-#
-# Overlapping labels (5d, 21d) induce mechanical autocorrelation.
-# We verify this and note it for downstream purge/embargo design.
-
-# %%
-from statsmodels.tsa.stattools import acf as acf_func
-
-# Compute pooled label ACF for each horizon
-print("\nLabel autocorrelation (pooled across pairs):")
-for label_col, horizon_name, overlap in [
-    ("fwd_ret_1d", "1-day", 0),
-    ("fwd_ret_5d", "5-day", 4),
-    ("fwd_ret_21d", "21-day", 20),
-]:
-    pooled = labels_df[label_col].drop_nulls().to_numpy()
-    acf_vals = acf_func(pooled, nlags=5, alpha=None)
-    lags_str = ", ".join(f"lag{i}={acf_vals[i]:.3f}" for i in range(1, 6))
-    print(f"  {horizon_name}: {lags_str}  (expected overlap={overlap}d)")
-
-# %%
-# Effective sample size: N_eff = N / (1 + 2 * sum(ACF[1:h]))
-n_eff_stats = {}
-print("\nEffective sample size (overlapping label adjustment):")
-for label_col_name, horizon_name, h in [
-    ("fwd_ret_1d", "1-day", 1),
-    ("fwd_ret_5d", "5-day", 5),
-    ("fwd_ret_21d", "21-day", 21),
-]:
-    pooled = labels_df[label_col_name].drop_nulls().to_numpy()
-    N = len(pooled)
-    acf_vals = acf_func(pooled, nlags=h, alpha=None)
-    denom = 1 + 2 * sum(acf_vals[1 : h + 1])
-    n_eff = int(N / max(denom, 1.0))
-    ratio = n_eff / N
-    n_eff_stats[label_col_name] = {"N": N, "N_eff": n_eff, "ratio": round(ratio, 3)}
-    print(f"  {horizon_name}: N={N:,}, N_eff={n_eff:,} ({ratio:.1%} effective)")
-
-# %% [markdown]
-# **Interpretation**: The 1-day label shows near-zero autocorrelation (no overlap),
-# so $N_\text{eff} \approx N$. The 5-day and 21-day labels show significant
-# autocorrelation from overlapping return windows, reducing effective sample sizes
-# to ~21% and ~5% of raw counts respectively. The CV purge (1-day) is sufficient
-# for the primary 1-day label; downstream models using 5d/21d labels should
-# account for this overlap when interpreting statistical significance.
-
-# %% [markdown]
-# ## 4. Baseline Reversal IC
-#
-# Before any feature engineering we measure the cross-sectional rank IC of the
-# raw 126-day reversal signal (past 126-day return) against each forward-return
-# label. This sets the floor that engineered features must beat and tests the
-# reversal hypothesis: a *negative* IC means past losers outperform.
-#
-# **Holdout seal.** This IC is a development-time signal-validation readout, so it
-# is measured only on signal dates whose entire label window closes before
-# `HOLDOUT_START` (2024-01-01). We seal on the **label endpoint**
-# (`timestamp.shift(-h) < HOLDOUT_START`), not the signal date -- otherwise the
-# last few pre-holdout signal dates of the 21-day label would read holdout prices.
-# The 2024-2025 holdout stays sealed against every quantity used to motivate
-# feature work.
-
-# %%
-# Compute 126-day lookback return as the reversal signal
-reversal_df = labels_df.with_columns(
-    (pl.col("close") / pl.col("close").shift(126).over("symbol") - 1).alias("ret_126d")
+labels_df = prices.with_columns(
+    (pl.len().over("symbol") - 1 - pl.int_range(pl.len()).over("symbol")).alias("from_end"),
+    pl.int_range(pl.len()).over("symbol").alias("session"),
+)
+for label_name, horizon in HORIZONS.items():
+    labels_df = forward_return(labels_df, horizon, label_name)
+labels_df = labels_df.with_columns(
+    pl.col("timestamp").shift(-PRIMARY_HORIZON).over("symbol").alias("_label_end")
 )
 
-holdout_start = datetime.strptime(HOLDOUT_START, "%Y-%m-%d").date()
+print(f"Constructed {', '.join(LABEL_NAMES)}")
 
-# Compute IC per date (cross-sectional rank correlation), sealed to the
-# development window on the label endpoint so no forward label reads the holdout.
-ic_results = {}
+# %% [markdown]
+# ## D. Window validity
+#
+# A shift always returns something; the question is whether what it returns is the quantity
+# the label claims. Each property below fails silently and leaves plausible numbers behind,
+# so each is asserted rather than described.
+#
+# The third assertion is what proves no window spans a hole. A session-to-session step wider
+# than a long weekend plus a holiday would mean the pair stopped quoting, and the shift would
+# then count surviving sessions rather than elapsed ones: $h$ sessions span about $7h/5$
+# calendar days on a five-session week, plus a week for holidays. The panel turns out to be
+# dense - every pair quotes on every session in the sample - so the bound holds with room to
+# spare, and that is a property of the data rather than of the code, which is why it is
+# executed here instead of stated.
 
-for label_col, horizon_name, horizon in [
-    ("fwd_ret_1d", "1d", 1),
-    ("fwd_ret_5d", "5d", 5),
-    ("fwd_ret_21d", "21d", 21),
-]:
-    # Seal: keep only signal dates whose label window closes before the holdout.
-    sealed = reversal_df.with_columns(
-        pl.col("timestamp").shift(-horizon).over("symbol").alias("_label_end")
-    ).filter(pl.col("_label_end") < holdout_start)
+# %%
+for label_name, horizon in HORIZONS.items():
+    checked = labels_df.with_columns(
+        (pl.col("timestamp").shift(-horizon).over("symbol") - pl.col("timestamp"))
+        .dt.total_days()
+        .alias("_span")
+    )
+    tail = checked.filter(pl.col("from_end") < horizon)
+    labelled = checked.drop_nulls(label_name)
 
-    # Group by date, compute Spearman rank correlation
-    date_ics = []
-    valid = sealed.drop_nulls(subset=["ret_126d", label_col])
+    # 1. An incomplete forward window is null, never a value.
+    assert tail[label_name].null_count() == tail.height, label_name
 
-    for date_val in valid["timestamp"].unique().sort().to_list():
-        day_data = valid.filter(pl.col("timestamp") == date_val)
-        if len(day_data) >= 10:  # Require at least 10 pairs for meaningful IC
-            signal = day_data["ret_126d"].to_numpy()
-            label = day_data[label_col].to_numpy()
-            ic, _ = spearmanr(signal, label)
-            if not np.isnan(ic):
-                date_ics.append(ic)
+    # 2. No label crosses a pair boundary: the labelled count equals the session count less
+    #    `horizon` rows per pair, which holds only if every window closed in its own pair.
+    expected = prices.height - horizon * prices["symbol"].n_unique()
+    assert labelled.height == expected, label_name
 
-    if date_ics:
-        mean_ic = np.mean(date_ics)
-        ic_std = np.std(date_ics)
-        ic_tstat = mean_ic / (ic_std / np.sqrt(len(date_ics)))
-        ic_results[horizon_name] = {
-            "mean_ic": float(mean_ic),
-            "ic_std": float(ic_std),
-            "ic_tstat": float(ic_tstat),
-            "n_dates": len(date_ics),
-        }
+    # 3. No labelled window spans more calendar days than holidays alone can explain.
+    tolerance = math.ceil(horizon * 7 / 5) + 7
+    assert labelled.filter(pl.col("_span") > tolerance).height == 0, label_name
 
-print("\n" + "=" * 60)
-print("BASELINE IC: 126-Day Reversal Signal")
-print("=" * 60)
-print(f"\n{'Horizon':<10} {'Mean IC':>10} {'IC Std':>10} {'t-stat':>10} {'N dates':>10}")
-print("-" * 52)
-for horizon_name, stats in ic_results.items():
+    # 4. No discrete label is derived from a null return - vacuous by dtype here, since
+    #    this notebook writes continuous labels only.
+    assert labels_df.schema[label_name] == pl.Float64, label_name
+
     print(
-        f"{horizon_name:<10} {stats['mean_ic']:>10.4f} {stats['ic_std']:>10.4f} "
-        f"{stats['ic_tstat']:>10.2f} {stats['n_dates']:>10,}"
+        f"{label_name}: {labelled.height:,} labelled, {tail.height:,} tail rows null, "
+        f"windows span up to {labelled['_span'].max()}d against a {tolerance}d tolerance"
     )
 
 # %% [markdown]
-# **Interpretation**: The reversal IC is essentially zero at the 1-day horizon and
-# turns increasingly negative as the horizon lengthens -- the 21-day label carries
-# the largest-magnitude, most significant IC, so the reversal mechanism operates at
-# monthly rather than daily frequency, consistent with the macro-driven hypothesis.
-# All three horizons still sit **below the 0.05 absolute-IC floor** set by the
-# feasibility kill condition KC1, so the raw signal alone is weak: feature
-# engineering in `03_financial_features.py` must lift it. Note the naive per-date
-# t-statistic assumes independent daily ICs; for the overlapping 5-day and 21-day
-# labels it overstates significance (see the effective-sample-size analysis above),
-# so treat those t-values as upper bounds.
-
-# %% [markdown]
-# ## 5. Save Labels and Materialize CV Splits
+# Position zero below is each pair's last session. The non-null rate has to fall to zero over
+# exactly the last `horizon` positions and sit flat beyond them. A scalar count of valid rows
+# shows neither failure this catches: a tail fabricated instead of nulled, or a short label
+# masked by a longer one's null set. The figure reads only the null structure and never a
+# value, so it is not sealed - it describes the shape of the artifact.
 
 # %%
-label_key_cols = ["timestamp", "symbol"]
-
-LABELS_DIR.mkdir(parents=True, exist_ok=True)
-
-# Save individual label files
-labels_df.select(label_key_cols + ["fwd_ret_1d"]).drop_nulls().write_parquet(
-    LABELS_DIR / "fwd_ret_1d.parquet"
+profile = (
+    labels_df.filter(pl.col("from_end") <= max(HORIZONS.values()) + 3)
+    .group_by("from_end")
+    .agg([pl.col(name).is_not_null().mean().alias(name) for name in LABEL_NAMES])
+    .sort("from_end")
 )
-print("Saved labels/fwd_ret_1d.parquet")
+palette = (COLORS["blue"], COLORS["amber"], COLORS["copper"])
+markers = ("o-", "s--", "^:")
 
-labels_df.select(label_key_cols + ["fwd_ret_5d"]).drop_nulls().write_parquet(
-    LABELS_DIR / "fwd_ret_5d.parquet"
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for name, colour, fmt in zip(LABEL_NAMES, palette, markers, strict=True):
+    tag = f"{name}, h={HORIZONS[name]}"
+    ax.plot(profile["from_end"], profile[name], fmt, ds="steps-mid", ms=3, c=colour, label=tag)
+    ax.axvline(HORIZONS[name] - 0.5, color=colour, linestyle=":", lw=1)
+ax.set_xlabel("Sessions from the end of each pair's series")
+ax.set_ylabel("Share of pairs with a non-null label")
+ax.set_ylim(-0.05, 1.08)
+add_message_title(
+    ax,
+    "Each label nulls exactly its own horizon of trailing sessions",
+    subtitle="Dotted lines mark each horizon; a fabricated tail would sit flat across it",
 )
-print("Saved labels/fwd_ret_5d.parquet")
+ax.legend(loc="center left", frameon=False)
+show_with_alt(fig, "Non-null label rate by position from the end of each pair's series.")
 
-labels_df.select(label_key_cols + ["fwd_ret_21d"]).drop_nulls().write_parquet(
-    LABELS_DIR / "fwd_ret_21d.parquet"
-)
-print("Saved labels/fwd_ret_21d.parquet")
-
-# CV config from setup.yaml
-eval_config = load_evaluation_config("fx_pairs")
-assert eval_config["n_splits"] == 8
-assert eval_config["train_size"] in ("P5Y", "5Y")
-assert eval_config["val_size"] in ("P1Y", "1Y")
-
-cv_splits = generate_cv_splits(prices, case_study_id="fx_pairs", label_buffer="1D")
-print(f"Generated {len(cv_splits)} walk-forward splits")
 # %% [markdown]
-# ## 6. Results Collection
-
+# ## E. Distribution and base rate
+#
+# What scale is the label, and does it mean the same thing in every regime? Everything from
+# here through Section G is computed on the development window only, sealed on the label's
+# **endpoint** rather than its observation date: a row observed shortly before the holdout
+# still resolves inside it, so a filter on the observation date looks sealed and is not. The
+# label files keep every row, because the seal governs what this notebook looks at rather
+# than what it writes.
 
 # %%
-def _git_hash():
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], text=True, timeout=5
-        ).strip()
-    except Exception:
-        return "unknown"
-
-
-results = {
-    "case_study_id": "fx_pairs",
-    "chapter": 7,
-    "stage": "labels",
-    "timestamp": datetime.now(UTC).isoformat(),
-    "git_commit": _git_hash(),
-    "notebook": "case_studies/fx_pairs/02_labels.py",
-    "summary": {
-        "n_pairs": int(n_assets),
-        "n_dates": int(n_dates),
-        "date_range": [str(prices["timestamp"].min()), str(prices["timestamp"].max())],
-        "frequency": "daily_ny_5pm",
-        "primary_label": "fwd_ret_1d",
-        "variant_labels": ["fwd_ret_5d", "fwd_ret_21d"],
-    },
-    "techniques": {
-        "aggregation": "4h_to_daily_ny_5pm_rollover",
-        "label_type": "forward_returns",
-        "horizons_days": [1, 5, 21],
-        "cv_method": "walk_forward_rolling_5Y_train_1Y_test",
-    },
-    "diagnostics": {
-        "label_stats": label_stats,
-        "baseline_ic": ic_results,
-        "n_eff": n_eff_stats,
-    },
-    "key_findings": [
-        f"Aggregated 4H bars to daily using NY 5PM rollover convention ({n_dates} dates)",
-        f"126-day reversal IC against 1d label: {ic_results.get('1d', {}).get('mean_ic', 0):.4f}",
-        f"126-day reversal IC against 21d label: {ic_results.get('21d', {}).get('mean_ic', 0):.4f}",
-        "CV config: 8 folds, 5Y rolling train, 1Y test (2016-2023), holdout 2024-2025",
-    ],
+dev = {
+    name: labels_df.with_columns(
+        pl.col("timestamp").shift(-horizon).over("symbol").alias("_label_end")
+    )
+    .filter(pl.col("_label_end") < HOLDOUT_START)
+    .drop_nulls(name)
+    for name, horizon in HORIZONS.items()
 }
-
+for label_name, frame in dev.items():
+    print(f"{label_name}: {frame.height:,} development rows through {frame['timestamp'].max()}")
 
 # %% [markdown]
-# ## Key Takeaways
+# All three labels go on one axis with identical bins and a logarithmic count axis. The claim
+# the figure has to support is about shape rather than width, which three dispersion scalars
+# would carry: each longer horizon spreads the same centred body wider. The axis is narrower
+# than every label's range, so rows outside it are counted below rather than drawn, and the
+# figure is therefore evidence about the body and not about the tails. The skew printed
+# beneath it is the quantity that does read the tails, and for the one-session label the two
+# disagree: a handful of sessions of sharp depreciation sit outside the drawn range and pull
+# it well negative. That asymmetry is a property of a daily FX label, and a plot of its
+# central mass cannot show it.
+
+# %%
+bins = np.linspace(-0.06, 0.06, 81)
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for name, colour in zip(LABEL_NAMES, palette, strict=True):
+    series = dev[name][name]
+    tag = f"{name}, std {series.std():.4f}"
+    ax.hist(series.to_numpy(), bins=bins, histtype="step", lw=1.8, color=colour, label=tag)
+ax.axvline(0, color=COLORS["neutral"], linestyle="--", lw=0.8)
+ax.set_yscale("log")
+ax.set_xlabel("Forward spot return")
+ax.set_ylabel("Rows per bin, log scale")
+ax.set_ylim(0.7, ax.get_ylim()[1] * 6)  # headroom so the legend clears the tallest bin
+add_message_title(
+    ax,
+    "Every horizon centres on zero; the longer ones simply spread wider",
+    subtitle="Identical bins, development window; rows beyond the axis are counted below",
+)
+ax.legend(loc="upper left", frameon=False)
+show_with_alt(fig, "Histograms of the three labels on identical bins and a log count axis.")
+
+std = {name: dev[name][name].std() for name in LABEL_NAMES}
+for name in LABEL_NAMES:
+    frame, column = dev[name], pl.col(name)
+    out = frame.filter(column < bins[0]).height, frame.filter(column > bins[-1]).height
+    print(
+        f"{name}: std {std[name]:.5f}, skew {frame[name].skew():+.3f}, share positive "
+        f"{(frame[name] > 0).mean():.3f}, {out[0]:,} left and {out[1]:,} right of the axis"
+    )
+ratio = std[LONGEST_LABEL] / std[PRIMARY_LABEL]
+root_h = math.sqrt(HORIZONS[LONGEST_LABEL] / PRIMARY_HORIZON)
+print(f"width ratio {ratio:.2f} against {root_h:.2f} under square-root-of-horizon scaling")
+
+# %% [markdown]
+# Chapter 7.2 asks for the base rate to be tracked through time. For a continuous label
+# ranked across a cross-section, the quantity that has to be stable is the spread the model
+# ranks within: where it is not, the same rank correlation buys a different amount of return.
+# The spread is taken across pairs on each session first and only then averaged over the
+# year. Pooling every pair-session in a year into one standard deviation instead measures
+# something else: it adds the movement of the panel's own mean from session to session to the
+# spread across pairs on a session, and a ranking model is scored on the second alone.
+
+# %%
+annual = (
+    dev[PRIMARY_LABEL]
+    .group_by("timestamp")
+    .agg(pl.col(PRIMARY_LABEL).std().alias("dispersion"))
+    .with_columns(pl.col("timestamp").dt.year().alias("year"))
+    .group_by("year")
+    .agg(pl.col("dispersion").mean())
+    .sort("year")
+)
+peak, low = (annual.sort("dispersion", descending=d).row(0, named=True) for d in (True, False))
+median_dispersion = annual["dispersion"].median()
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single_wide"])
+ax.bar(annual["year"], annual["dispersion"], color=COLORS["blue"], width=0.7)
+ax.axhline(median_dispersion, color=COLORS["copper"], linestyle="--", lw=1.2, label="median year")
+ax.set_xticks(annual["year"].to_list()[::2])
+ax.set_xlabel("Year")
+ax.set_ylabel("Cross-pair std, mean over sessions")
+add_message_title(
+    ax,
+    "Cross-pair dispersion drifts by nearly a factor of two across years",
+    subtitle=f"Daily spread across pairs in {PRIMARY_LABEL}, averaged over each year",
+)
+ax.legend(loc="upper left", frameon=False)
+show_with_alt(fig, "Annual mean of the daily cross-pair dispersion of the primary label.")
+
+print(
+    f"dispersion peaks at {peak['dispersion']:.2%} in {peak['year']:.0f} against "
+    f"{low['dispersion']:.2%} in {low['year']:.0f}, a ratio of "
+    f"{peak['dispersion'] / low['dispersion']:.2f}; median year {median_dispersion:.2%}"
+)
+
+# %% [markdown] tags=["results"]
+# On the development window the one-session label has a standard deviation of 0.00610 and
+# the monthly label 0.02664, a ratio of 4.37 against the 4.58 that square-root-of-horizon
+# scaling implies. All three are close to balanced around zero - the share of positive rows
+# runs 0.503 to 0.504 - so the task is not one of predicting a drift but of ranking small
+# deviations from it. The tails are not balanced at the daily horizon: skew runs -0.762 at
+# one session against -0.173 at five and +0.021 at twenty-one, so the one-session label
+# carries a left tail the longer two average away. The spread the ranking happens inside is
+# not constant either: cross-pair dispersion peaks at 0.65% in 2011 against 0.36% in 2019, a
+# ratio of 1.79.
+
+# %% [markdown]
+# ## F. Overlap and effective sample size
 #
-# 1. **Daily aggregation**: 4H bars aggregated to daily using NY 5PM rollover --
-#    this resolves the frequency mismatch between Ch6 setup and Ch8 features
-# 2. **Three label horizons** capture different signal decay speeds: 1-day
-#    (high frequency, noisy), 5-day (weekly, standard academic), 21-day
-#    (monthly, matches reversal hypothesis)
-# 3. **Baseline IC** confirms whether reversal effect (negative IC) is present
-#    before any feature engineering
-# 4. **CV configuration**: 8-fold walk-forward with 5Y rolling train
-#    captures regime diversity (post-GFC, COVID, Fed hiking)
+# Sampling a multi-session label at every session makes consecutive rows share most of their
+# forward window, so the row count overstates the evidence. Two measurements answer that in
+# different units: how fast the overlap decays, and what the rows are worth once it is priced
+# in. `effective_sample_size` applies Chapter 7.2's average-uniqueness weighting per pair,
+# because concurrency is a property of one pair's own overlapping windows.
 #
-# **Next**: `03_financial_features.py` uses these daily prices and labels for feature
-# engineering.
+# The one-session label is the case that checks the measurement rather than the data.
+# Consecutive one-session forward returns are built from disjoint return intervals, so no row
+# shares any part of its window with a neighbour, every uniqueness weight must be one, and
+# the effective count has to come back equal to the row count. A weighting that counted the
+# anchor session as consumed would halve it instead, and would read as a refinement.
+#
+# Disjoint is not independent, and the figure is what says so: the one-session label shares
+# no part of its window with any other row, and its autocorrelation is small but not zero at
+# every lag drawn. Average uniqueness prices shared windows, not serial dependence.
+
+# %%
+max_lag = HORIZONS[LONGEST_LABEL] + 4
+acf = {n: panel_autocorrelation(dev[n], n, max_lag=max_lag, bar_col="session") for n in LABEL_NAMES}
+lags = np.arange(1, max_lag + 1)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for name, colour in zip(LABEL_NAMES, palette, strict=True):
+    ax.plot(lags, acf[name], "o-", ms=3, c=colour, lw=1.8, label=name)
+    ax.axvline(HORIZONS[name], color=colour, linestyle=":", lw=1.5)
+ax.axhline(0, color=COLORS["neutral"], lw=0.8)
+ax.set_xlabel("Lag in venue sessions")
+ax.set_ylabel("Panel autocorrelation")
+add_message_title(
+    ax,
+    "The overlap in each label decays to zero at its own horizon",
+    subtitle="Dotted lines mark each horizon; what remains past one is not overlap",
+)
+ax.legend(loc="upper right", frameon=False)
+show_with_alt(fig, "Panel autocorrelation of the three labels against lag in sessions.")
+
+# A horizon-h label consumes the h returns realised over its window, and its neighbour one
+# session later shares h-1 of them, so average uniqueness converges to 1/h.
+for label_name, horizon in HORIZONS.items():
+    n_rows, n_eff = effective_sample_size(dev[label_name], horizon=horizon, bar_col="session")
+    print(
+        f"{label_name}: N={n_rows:,}, N_eff={n_eff:,.0f}, ratio {n_eff / n_rows:.4f} against "
+        f"{1 / horizon:.4f} for windows overlapping this fully; autocorrelation "
+        f"{acf[label_name][0]:+.3f} at lag one, {acf[label_name][horizon - 1]:+.3f} at its horizon"
+    )
+
+# %% [markdown] tags=["results"]
+# The one-session label's 67,080 development rows carry 67,080 effective observations, the
+# answer that confirms the weighting rather than the data: consecutive windows are disjoint,
+# so every uniqueness weight is one. The weekly label's 67,000 rows carry 13,416, a ratio of
+# 0.2002 against 0.2000, and the monthly label's 66,680 rows carry 3,194, a ratio of 0.0479
+# against 0.0476. Autocorrelation is -0.003 at lag one for the one-session label, +0.792 for
+# the weekly and +0.947 for the monthly, and each falls to zero at its own horizon. The purge
+# gap a fold needs is set by the forward window itself, not by these counts.
+
+# %% [markdown]
+# ## G. Baseline floor
+#
+# One signal against the primary label on the sealed development window, with no feature
+# engineering: the raw two-quarter return the reversal hypothesis names, which
+# `03_financial_features` recomputes as a momentum family. A reversal hypothesis predicts a
+# **negative** information coefficient, so the sign is part of the claim and not a detail.
+#
+# The coefficient is the cross-sectional rank correlation on each session, averaged over
+# sessions, which is the quantity a ranking model is scored on; pooling every pair-session
+# instead mixes a cross-sectional claim with a time-series one. The library call returns its
+# series ordered by time, which the standard error depends on. The minimum cross-section is
+# half the median rather than a bare count, so it means the same thing on a universe of
+# another size. The primary label does not overlap, but its IC series is still serially
+# dependent, because the two-quarter return that produces it moves slowly, so the standard
+# error is HAC-adjusted and the Newey-West rule sets the bandwidth.
+
+# %%
+LOOKBACK = 126  # two quarters, the reversal window the hypothesis names
+
+baseline = (
+    labels_df.with_columns(
+        (pl.col("close") / pl.col("close").shift(LOOKBACK).over("symbol") - 1).alias("ret_126d")
+    )
+    .filter(pl.col("_label_end") < HOLDOUT_START)
+    .drop_nulls([PRIMARY_LABEL, "ret_126d"])
+)
+min_obs = int(baseline.group_by("timestamp").len()["len"].median() // 2)
+
+ic = cross_sectional_ic_series(
+    baseline,
+    baseline,
+    pred_col="ret_126d",
+    ret_col=PRIMARY_LABEL,
+    date_col="timestamp",
+    entity_col="symbol",
+    min_obs=min_obs,
+).sort("timestamp")  # HAC autocovariances are meaningless over a permutation of time
+stats = compute_ic_hac_stats(ic, ic_col="ic", label_horizon=PRIMARY_HORIZON)
+
+print(
+    f"Baseline: {LOOKBACK}-session return against {PRIMARY_LABEL}, {baseline.height:,} rows, "
+    f"minimum cross-section {min_obs} pairs"
+)
+print(f"  sessions scored {ic.height:,}, mean IC {stats['mean_ic']:+.4f}")
+print(
+    f"  HAC t {stats['t_stat']:+.2f} on {stats['effective_lags']} Bartlett lags, "
+    f"naive t {stats['naive_t_stat']:+.2f}, p {stats['p_value']:.3g}"
+)
+
+# %% [markdown] tags=["results"]
+# The two-quarter return earns a mean information coefficient of +0.0035 against the
+# one-session label over 3,228 scored sessions on a cross-section of at least 10 pairs. The
+# reversal hypothesis predicts a negative coefficient; this one is positive, and neither the
+# naive t-statistic of +0.43 nor the HAC statistic of +0.46 on 8 Bartlett lags separates it
+# from zero, at a p-value of 0.649. The floor a feature has to clear at the daily horizon is
+# therefore zero, and the reversal premise is not visible in the raw signal at this cadence.
+
+# %% [markdown]
+# ## H. Artifacts and the audit record
+#
+# Each label is written with a digest sidecar beside it, recording the content digest of the
+# values written, the row count, the key columns, the notebook that wrote it and the digest
+# of the price data it was built from. That last field is what ties a label to its data
+# vintage.
+#
+# The folds that train models are fixed boundaries in `config/cv_config.json`, which
+# `06_linear`, `07_gbm` and `09_dl_tcn` each read directly, and which follow the walk-forward
+# shape `config/setup.yaml` declares. They are not derived from the timeline of the label
+# parquet written here, so a label whose coverage changes does not move a fold with it, and
+# the two have to be checked against each other rather than assumed consistent.
+
+# %%
+for label_name in LABEL_NAMES:
+    record = write_artifact(
+        labels_df.select(["timestamp", "symbol", label_name]).drop_nulls(),
+        LABELS_DIR / f"{label_name}.parquet",
+        keys=["timestamp", "symbol"],
+        written_by="02_labels",
+        inputs={"market_data": MARKET_DATA_DIGEST},
+    )
+    print(f"{label_name}.parquet: {record['n_rows']:,} rows, digest {record['digest']}")
+
+# %% [markdown]
+# The record Chapter 7.2 requires to close a label definition, one row per label, built from
+# the values computed above rather than written by hand.
+
+# %%
+readers = dict.fromkeys(LABEL_NAMES, "the model stages, as a variant declared in `setup.yaml`")
+readers[PRIMARY_LABEL] = "03_financial_features.py, as the label it names directly"
+print("\nLabel audit record")
+for label_name, horizon in HORIZONS.items():
+    frame = dev[label_name]
+    print(
+        f"\n{label_name}\n  anchor       New York 5pm close of the venue session at t"
+        f"\n  horizon      {horizon} venue sessions"
+        f"\n  resolution   fixed at t+h; the session close is the tie-break the calendar sets"
+        f"\n  overlap      {horizon - 1} sessions shared by consecutive rows"
+        f"\n  base rate    mean {frame[label_name].mean():+.6f}, std {frame[label_name].std():.5f}"
+        f"\n  consumed by  {readers[label_name]}"
+    )
+
+# %% [markdown]
+# ## Key takeaways
+#
+# 1. **Put the bars on the session clock the cadence is defined in before measuring
+#    anything.** Spot FX has no exchange close, so the daily bar is a convention; aggregating
+#    on the UTC date instead of the venue session moves a third of every day into the wrong
+#    row, and every shift after that inherits the error.
+# 2. **Assert the window, do not describe it.** An incomplete window, a window spanning a
+#    hole in a pair's quoting history and a label crossing a pair boundary all fail without
+#    raising and leave plausible numbers behind.
+# 3. **Seal a diagnostic on the label's endpoint.** A row observed before the holdout whose
+#    outcome resolves inside it is a holdout row, so the usable boundary is the boundary
+#    minus the horizon, counted on each pair's own sessions.
+# 4. **Check an effective-sample measurement at a horizon whose answer is known by
+#    inspection.** Consecutive one-session returns are disjoint, so the effective count has
+#    to come back equal to the row count; a weighting that counts the anchor session halves
+#    it instead, which reads as a refinement rather than a bug.
+# 5. **State the sign the hypothesis predicts before measuring the floor.** Reversal predicts
+#    a negative information coefficient, so a positive one of the same magnitude is evidence
+#    against the premise rather than a weak version of it.
+#
+# **Known limitations.** Close-to-close is not the next-bar-open execution the backtest fills
+# at, and nothing here measures that gap. The universe is a fixed twenty-pair list rather
+# than a liquidity screen applied point in time. The baseline is one signal at one lookback
+# against one horizon, and `05_evaluation` is where the same signal is scored against all
+# three.
+#
+# **Next**: `03_financial_features.py` builds the momentum, carry and volatility features and
+# evaluates them against these labels.
