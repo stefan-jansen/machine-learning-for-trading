@@ -34,6 +34,10 @@ HOLDOUT_SCOPED_NOTEBOOKS = [
     ("case_studies/crypto_perps_funding/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/cme_futures/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/fx_pairs/02_labels.py", "cross_sectional_ic_series("),
+    (
+        "case_studies/sp500_equity_option_analytics/02_labels.py",
+        "cross_sectional_ic_series(",
+    ),
 ]
 
 
@@ -131,6 +135,7 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
     "case_studies/crypto_perps_funding/02_labels.py",
     "case_studies/cme_futures/02_labels.py",
     "case_studies/fx_pairs/02_labels.py",
+    "case_studies/sp500_equity_option_analytics/02_labels.py",
 ]
 
 # Of the four above, only etfs/05 uses a market-wide calendar; the other three
@@ -150,6 +155,11 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
 # ``entity_col`` names the column the endpoint must be shifted within, which is the
 # entity a label may not cross. It is ``symbol`` for seven of the nine case studies and
 # ``product`` for cme_futures.
+# ``sp500_equity_option_analytics/02_labels`` is deliberately absent: its entity is the
+# security (``sec_id``), not the ticker. A ticker there is reassigned to another company
+# after a merger or a spin-off, and ``adj_factor`` restarts with the new security, so
+# shifting within ``symbol`` would be the under-purge this list exists to prevent rather
+# than the fix for it. It is in both lists above, where the mechanism is what is checked.
 # ``etfs/03_financial_features`` is deliberately absent. It was listed here while it
 # purged on a shifted label endpoint; public #447 replaced that mechanism with a seal
 # that rebuilds the whole panel with the holdout withheld and compares all 57 columns,
