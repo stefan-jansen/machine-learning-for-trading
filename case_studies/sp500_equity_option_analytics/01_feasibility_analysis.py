@@ -23,8 +23,8 @@
 # ## Learning objectives
 #
 # - Count the universe by what the strategy can rank, not by what the files contain
-# - Read clearance off an exceedance curve, and see why a per-share and a percentage cost model
-#   are different assumptions rather than two units for one
+# - Read clearance off an exceedance curve, and see why a per-share and a percentage cost
+#   model are different assumptions rather than two units for one
 # - Measure how long the volatility level stays put, and confirm the declared folds fit
 #
 # ## Book reference
@@ -58,9 +58,9 @@ END_DATE = "2021-12-31"
 # %% [markdown]
 # ## Configuration
 #
-# Every knob comes from `setup.yaml`, and Sections B through D compute on the development
-# window alone, so nothing the holdout contains shapes a choice made here. The signal ranked on
-# is the thirty-day at-the-money implied volatility, the carrier whose persistence B.4 measures.
+# Every knob comes from `setup.yaml`, and Sections B through D compute on the development window
+# alone, so nothing the holdout contains shapes a choice made here. The signal ranked on is the
+# thirty-day at-the-money implied volatility, whose persistence B.4 measures.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -74,7 +74,7 @@ HORIZONS = sorted({int(h.rstrip("D")) for h in SETUP["labels"]["horizons"].value
 BREADTH_FLOOR = max(SETUP["backtest"]["sweep"]["top_k_grid"][PRIMARY_LABEL])
 COST_BPS = SETUP["costs"]["round_trip_cost_bps"]
 PER_SHARE = SETUP["costs"]["per_share"]
-HALF_SPREADS = [h for h in SETUP["backtest"]["sweep"]["cost_grid_half_spread_usd"] if h > 0]
+HALF_SPREADS = SETUP["backtest"]["sweep"]["cost_grid_half_spread_usd"]
 CARRIER = "iv_30_atm"
 
 print(f"Development {START_DATE} to {HOLDOUT_START} | sealed holdout to {HOLDOUT_END}")
@@ -103,13 +103,13 @@ print(f"Universe {SETUP['universe']['n_assets']} names, floor {BREADTH_FLOOR}, h
 surface = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
 bars = load_sp500_daily_bars(start_date=START_DATE, end_date=END_DATE)
 sealed = pl.col("timestamp") < pl.lit(HOLDOUT_START).str.to_date()
-quotes = bars.filter(sealed).select("timestamp", "symbol", "close", "adj_factor")
+quotes = bars.filter(sealed).select("timestamp", "symbol", "sec_id", "close", "adj_factor")
 
 panel = (
     surface.filter(sealed)
     .select("timestamp", "symbol", CARRIER)
     .drop_nulls(CARRIER)
-    .join(quotes, ["timestamp", "symbol"])
+    .join(quotes.drop("sec_id"), ["timestamp", "symbol"])
     .sort(["symbol", "timestamp"])
 )
 print(
@@ -161,13 +161,14 @@ plt.show()
 # every name. The companion the sweep keeps is a per-share regime, where the charge is a number
 # of cents and the basis points follow from the price, so a cent buys a different fraction of a
 # cheap share than of an expensive one. Cost and move scale are both properties of the share, so
-# both are measured on the bars, not the joined panel, where a horizon counted in rows stretches.
+# both come off the bars, not the joined panel, where a horizon counted in rows stretches; and
+# what follows is the size of a move, not the payoff of the declared entry and exit.
 
 # %%
 prices = (
     quotes.filter(pl.col("symbol").is_in(panel["symbol"].unique()))
-    .select("timestamp", "symbol", "close", (pl.col("close") * pl.col("adj_factor")).alias("adj"))
-    .sort(["symbol", "timestamp"])
+    .with_columns((pl.col("close") * pl.col("adj_factor")).alias("adj"))
+    .sort(["symbol", "sec_id", "timestamp"])
 )
 cost = (
     prices.group_by("symbol")
@@ -182,7 +183,7 @@ cost = (
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 rank = np.arange(len(cost))
 ax.fill_between(rank, cost["cheapest"], cost["dearest"], color=COLORS["blue"], alpha=0.25)
-ax.plot(rank, cost["cheapest"], color=COLORS["blue"], lw=1.2, label="narrowest declared spread")
+ax.plot(rank, cost["cheapest"], color=COLORS["blue"], lw=1.2, label="commission, no spread")
 ax.plot(rank, cost["dearest"], color=COLORS["amber"], lw=1.2, label="widest declared spread")
 ax.axhline(COST_BPS, color=COLORS["copper"], ls="--", lw=1.5, label="declared percentage cost")
 ax.set_yscale("log")
@@ -199,13 +200,14 @@ plt.show()
 # %% [markdown]
 # The flat line is the declared assumption, the band is what the same trade would cost quoted per
 # share, and they cross: no single cent figure reproduces the flat line across a universe this
-# wide in price, which is why the percentage regime is the headline. Returns then use the
-# adjusted series - on a split date the printed close falls by the split ratio, and a change
-# taken across it is not a move.
+# wide in price, which is why the percentage regime is the headline. Returns run close to close on
+# the adjusted series and within one security: on a split date the printed close falls by the
+# split ratio, and a ticker can change hands between two `sec_id` values.
 
 # %%
 returns = prices.with_columns(
-    (pl.col("adj").pct_change(h).abs().over("symbol") * 1e4).alias(f"h{h}") for h in HORIZONS
+    (pl.col("adj").pct_change(h).abs().over(["symbol", "sec_id"]) * 1e4).alias(f"h{h}")
+    for h in HORIZONS
 )
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
@@ -220,7 +222,7 @@ ax.set_ylabel("Fraction of moves at least this large")
 ax.legend(frameon=False, fontsize=8, loc="lower left")
 add_message_title(
     ax,
-    "Moves at both label horizons clear the declared round trip",
+    "Close-to-close moves at both horizons clear the declared round trip",
     subtitle="Exceedance of absolute adjusted returns at the horizons setup.yaml labels",
 )
 plt.show()
@@ -259,9 +261,9 @@ plt.show()
 # %% [markdown]
 # ### B.5 Move scale against cost
 #
-# The ratio divides the median absolute move at the primary horizon by the declared round trip,
-# and the clearance share counts moves above it. Neither says total cost clears: the move is a
-# magnitude, not a forecast, and nothing here has ranked a single name.
+# The ratio divides the median absolute move at the primary horizon by the declared round trip
+# and the clearance share counts moves above it. Neither says total cost clears: a move is a
+# magnitude, not a forecast, and nothing here has ranked a name.
 
 # %%
 primary = f"h{HORIZONS[0]}"
@@ -279,7 +281,7 @@ print(
 # %% [markdown] tags=["results"]
 # The median absolute five-session move is 209 bps, sixteen times the declared 13 bps round
 # trip, and 0.964 of moves exceed it. Priced per share instead, the same round trip runs
-# from 0.09 bps on the most expensive name to 619 bps on the cheapest.
+# from 0.04 bps on the most expensive name to 619 bps on the cheapest.
 
 # %% [markdown]
 # ## C. Design decisions
@@ -316,7 +318,7 @@ print(
 # %%
 print(
     f"Sessions {panel['timestamp'].n_unique():,} | decision dates {len(decisions):,} | "
-    f"names per decision {breadth['n_names'].mean():.0f}, fewest {breadth['n_names'].min()}"
+    f"names per decision {breadth['n_names'].mean():.0f}"
 )
 
 # %% [markdown]
@@ -332,6 +334,7 @@ splits = generate_cv_splits(
     panel.select("timestamp"),
     case_study_id=CASE_STUDY_ID,
     label_buffer=LABEL_BUFFER,
+    outcome_horizon=SETUP["labels"]["horizons"][PRIMARY_LABEL],
     date_col="timestamp",
 )
 last_val = max(s["val_end"] for s in splits)
@@ -350,8 +353,7 @@ plt.show()
 # %% [markdown]
 # ## E. Derived artifacts
 #
-# None. A name enters on the dates its surface converges, which `03_financial_features` derives
-# from the same loader, leaving nothing here for a later notebook to read.
+# None. `03_financial_features` derives the same universe from the same loader.
 #
 # ## F. Findings vs `setup.yaml`
 #
@@ -377,7 +379,7 @@ print(
 # %% [markdown] tags=["results"]
 # Names available at a decision date run from 213 to 503 against a declared universe of 633
 # and a floor of 20, which no date approaches. The ATM volatility level retains 0.83 of
-# itself five sessions on. Two folds are generated, the last validation ending 2020-12-16.
+# itself five sessions on. Two folds are generated, the last validation ending 2020-12-23.
 
 # %% [markdown]
 # ## Key takeaways
@@ -387,8 +389,7 @@ print(
 # 2. **A percentage and a per-share cost model are different assumptions about the
 #    cross-section**, and choosing between them claims that friction does or does not scale
 #    with price.
-# 3. **Adjust prices before taking a return, and take a panel autocorrelation inside each entity**
-#    rather than across the stack. Both errors are silent.
+# 3. **Adjust prices, keep to one security, and take a panel autocorrelation inside each entity.**
 #
 # ### Known limitations
 #
