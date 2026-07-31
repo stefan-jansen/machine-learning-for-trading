@@ -781,17 +781,16 @@ def plot_redundancy_clusters(
     return dict(zip(columns, (int(v) for v in labels), strict=True))
 
 
-def _bootstrap_median_halfwidth(
+def _bootstrap_median_interval(
     values: np.ndarray, *, seed: int, draws: int = 500, level: float = 0.95
-) -> float:
-    """Half-width of a percentile bootstrap interval for the median of *values*."""
+) -> tuple[float, float]:
+    """Percentile bootstrap interval for the median of *values*, resampling entities."""
     if values.size < 3:
-        return float("nan")
+        return float("nan"), float("nan")
     rng = np.random.default_rng(seed)
-    resampled = rng.choice(values, size=(draws, values.size), replace=True)
-    medians = np.median(resampled, axis=1)
+    medians = np.median(rng.choice(values, size=(draws, values.size), replace=True), axis=1)
     lo, hi = np.quantile(medians, [(1 - level) / 2, (1 + level) / 2])
-    return float((hi - lo) / 2)
+    return float(lo), float(hi)
 
 
 def plot_persistence(
@@ -801,22 +800,26 @@ def plot_persistence(
     entity: str | Sequence[str],
     time: str = "timestamp",
     max_lag: int,
-    stability_lag: int,
+    decision_dates: Sequence,
     title: str,
     alt: str,
     subtitle: str | None = None,
     max_entities: int = 40,
     seed: int = 42,
 ) -> Figure | None:
-    """F6. Feature autocorrelation with confidence bands, plus rank stability.
+    """F6. Feature autocorrelation with bootstrap intervals, plus rank stability.
 
-    The autocorrelation is of the feature itself, estimated per entity on pairs of
-    decision dates exactly *k* apart and summarized by the median over entities, out
-    to at least one decision cycle: a feature whose value has decayed before the next
-    rebalance cannot support that cadence. The right-hand panel asks the same question
-    of the ordering - one cross-sectional rank correlation per pair of dates
-    ``stability_lag`` apart, which is the cadence the strategy actually re-forms its
-    ordering at, again summarized by the median.
+    The left panel is the autocorrelation of the feature itself, estimated per entity
+    on pairs of decision dates exactly *k* apart, summarized by the median over
+    entities and shown with a percentile bootstrap interval over entities. It runs to
+    at least one decision cycle: a feature whose value has decayed before the next
+    rebalance cannot support that cadence, however well it predicts the day it is
+    computed.
+
+    The right panel asks the same question of the ordering rather than the level, and
+    is per date rather than per entity: one cross-sectional rank correlation for each
+    consecutive pair in ``decision_dates`` - the schedule the strategy rebalances on -
+    summarized by the median over those pairs.
     """
     keys = [entity] if isinstance(entity, str) else list(entity)
     columns = list(columns)
@@ -834,7 +837,8 @@ def plot_persistence(
     # entity was absent for - after an eligibility gate, by months or years.
     dates = frame[time].unique().sort()
     acf: dict[str, list[float]] = {c: [] for c in columns}
-    spread: dict[str, list[float]] = {c: [] for c in columns}
+    lower: dict[str, list[float]] = {c: [] for c in columns}
+    upper: dict[str, list[float]] = {c: [] for c in columns}
     counts: list[int] = []
     for lag in lags:
         back = dict(zip(dates[lag:].to_list(), dates[: -int(lag)].to_list(), strict=True))
@@ -866,27 +870,25 @@ def plot_persistence(
         for column in columns:
             rho = per_entity[column].drop_nulls().drop_nans().to_numpy()
             acf[column].append(float(np.median(rho)) if rho.size else np.nan)
-            spread[column].append(_bootstrap_median_halfwidth(rho, seed=seed))
+            lower[column], upper[column] = (
+                bound + [value]
+                for bound, value in zip(
+                    (lower[column], upper[column]),
+                    _bootstrap_median_interval(rho, seed=seed),
+                    strict=True,
+                )
+            )
     acf["_n"] = counts
 
     width, height = FIGSIZE["dual_h_tall"]
     fig, (left, right) = plt.subplots(1, 2, figsize=(width, height + 0.5))
+    # An interval around each curve, at each lag. A single width drawn around zero is
+    # a white-noise significance band, which is a different statement and not one this
+    # estimator supports: the quantity plotted is a median over ETFs, so its
+    # uncertainty is a bootstrap over ETFs and it belongs around the median.
     for (color, style), column in zip(_cycle(len(columns)), columns, strict=False):
+        left.fill_between(lags, lower[column], upper[column], color=color, alpha=0.18, linewidth=0)
         left.plot(lags, acf[column], label=column, color=color, ls=style, linewidth=1.2, ms=2.5)
-    # The band is the widest bootstrap half-width of the plotted statistic, which is a
-    # median: `std / sqrt(n)` is the standard error of a *mean* and does not describe
-    # it. A white-noise band over pooled pairs would be narrower still and wrong for a
-    # different reason - an entity's successive observations are not independent draws.
-    errors = [v for c in columns for v in spread[c] if np.isfinite(v)]
-    band = max(errors) if errors else 0.0
-    left.axhspan(
-        -band,
-        band,
-        color=COLORS["neutral"],
-        alpha=0.18,
-        linewidth=0,
-        label="95% interval across ETFs",
-    )
     left.axhline(0, color=COLORS["neutral"], linewidth=0.8)
     left.set_xlabel("lag (bars)")
     left.set_ylabel("autocorrelation")
@@ -902,15 +904,19 @@ def plot_persistence(
         frameon=False,
     )
 
-    # One cross-sectional rank correlation per consecutive pair of decision dates,
-    # then the median over pairs. Pooling every entity-date row into a single
-    # correlation measures how stable an entity's rank is against the whole panel,
-    # which is high whenever entities differ from each other at all, and a shift
-    # within an entity silently bridges dates that entity was absent for.
-    # At the decision cadence, not at one session. The strategy re-forms its ordering
-    # every `stability_lag` sessions, so a one-session correlation answers a question
-    # nobody rebalancing monthly is asking, and answers it far too favourably.
-    step = dict(zip(dates[stability_lag:].to_list(), dates[:-stability_lag].to_list(), strict=True))
+    # One cross-sectional rank correlation per consecutive pair of decision dates, then
+    # the median over pairs. Pooling every entity-date row into one correlation instead
+    # measures how stable an entity's rank is against the whole panel, which is high
+    # whenever entities differ from each other at all, and a within-entity shift
+    # silently bridges dates that entity was absent for.
+    #
+    # The pairs come from the schedule the strategy rebalances on, not a fixed number of
+    # sessions. `monthly_month_end` leaves a varying number of sessions between
+    # decisions, so a fixed lag correlates dates the strategy never compares - and at a
+    # one-session lag it answers a question nobody rebalancing monthly is asking, far
+    # too favourably, because a daily ordering barely moves.
+    schedule = sorted(decision_dates)
+    step = dict(zip(schedule[1:], schedule[:-1], strict=True))
     stability = []
     for column in columns:
         ranked = frame.select(
@@ -931,9 +937,13 @@ def plot_persistence(
     right.barh(range(len(columns)), stability, color=COLORS["blue"], height=0.6)
     right.set_yticks(range(len(columns)))
     right.set_yticklabels(columns, fontsize=6)
+    # The lower bound follows the data and is never clipped at zero: a negative value is
+    # rank reversal between rebalances, which is the most interesting thing this panel can
+    # show and the one an axis pinned at zero hides.
     lowest = float(np.nanmin(stability))
-    right.set_xlim(max(0.0, lowest - 0.15), 1.0)
-    right.set_xlabel(f"rank correlation, {stability_lag} bars apart", fontsize=8)
+    right.set_xlim(min(lowest, 0.0) - 0.08, 1.0)
+    right.axvline(0, color=COLORS["neutral"], linewidth=0.8)
+    right.set_xlabel("rank correlation, consecutive rebalances", fontsize=8)
     add_message_title(left, title, subtitle=subtitle)
     fig.tight_layout()
     show_with_alt(fig, alt)

@@ -576,35 +576,46 @@ clusters = plot_redundancy_clusters(
 # %% [markdown]
 # ### F6. Persistence and rank stability
 #
-# The autocorrelation is of the feature, not of the return, and it runs past one full decision
-# cycle. A feature whose value has decayed inside a cycle cannot support that rebalance cadence,
-# however well it predicts on the day it is computed. Both panels are estimated per ETF on pairs
-# of decision dates exactly one lag apart and summarized by the median: a correlation pooled over
-# every ETF-date pair would be high whenever ETFs sit at different levels, whether or not any one
-# of them persists. The right-hand panel asks the same question of the ordering, not the level.
+# The right-hand panel compares the ordering across consecutive **rebalances**, which
+# `config/setup.yaml` declares as `monthly_month_end` - a varying number of sessions apart, so
+# a fixed lag would correlate dates the strategy never puts side by side.
+#
+# The autocorrelation on the left is of the feature, not of the return, and it runs past one
+# full decision cycle. A feature whose value has decayed inside a cycle cannot support that
+# rebalance cadence, however well it predicts on the day it is computed. It is estimated per ETF
+# on pairs of dates exactly one lag apart and summarized by the median over ETFs, with a
+# bootstrap interval over ETFs: a correlation pooled over every ETF-date pair would read high
+# whenever ETFs sit at different levels, whether or not any one of them persists.
 
 # %%
+DECISION_DATES = (
+    features.group_by(pl.col("timestamp").dt.truncate("1mo"))
+    .agg(pl.col("timestamp").max().alias("decision"))["decision"]
+    .sort()
+    .to_list()
+)
+
 plot_persistence(
     features,
     ["ret_21d", "ret_126d", "sharpe_126d", "vol_63d", "rsi_14"],
     entity="symbol",
     max_lag=2 * DECISION_CYCLE,
-    stability_lag=DECISION_CYCLE,
+    decision_dates=DECISION_DATES,
     title="The long-window carriers still hold their ordering a month out",
     subtitle=(
-        f"Autocorrelation to {2 * DECISION_CYCLE} sessions; rank correlation across one "
-        f"{DECISION_CYCLE}-session cycle"
+        f"Autocorrelation to {2 * DECISION_CYCLE} sessions, median over ETFs with a bootstrap "
+        "interval; rank correlation across consecutive month-end rebalances"
     ),
     alt=(
         "Two panels. On the left, autocorrelation against lag: the six-month return, the "
         "three-month volatility and the six-month risk-adjusted return are all still above "
         "0.7 at 42 sessions, while the one-month return reaches zero at exactly 21 sessions - "
         "the length of its own window - and the 14-day oscillator levels off near 0.2. The "
-        "shaded interval is narrow, a few hundredths either side of zero. On the right, the "
-        "cross-sectional rank correlation across one full decision cycle separates the "
-        "features sharply: about 0.95 for the three-month volatility and 0.85 for the two "
-        "six-month carriers, but 0.2 for the oscillator and essentially zero for the one-month "
-        "return, whose window is exactly one cycle long."
+        "bootstrap ribbon around each curve is only a few hundredths wide. On the right, the "
+        "cross-sectional rank correlation between consecutive rebalances separates the features "
+        "sharply: about 0.95 for the three-month volatility and 0.85 for the two six-month "
+        "carriers, against 0.2 for the oscillator and almost nothing for the one-month return, "
+        "whose window is about one rebalance long."
     ),
 )
 
