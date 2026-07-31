@@ -235,11 +235,31 @@ def test_an_empty_forced_download_exits_nonzero(
     assert exc.value.code == 1
 
 
-def test_an_empty_first_run_exits_nonzero(downloader, monkeypatch, tmp_path, configured_symbols):
-    """The converse: nothing on disk and nothing arrived is still a failure."""
+def test_an_empty_first_run_exits_nonzero(
+    downloader, monkeypatch, tmp_path, capsys, configured_symbols
+):
+    """The converse: nothing on disk and nothing arrived is still a failure.
+
+    The message matters as much as the status here. A reader on their first run
+    has no earlier download, so telling them the script is falling back to what
+    is on disk describes something that does not exist.
+    """
     with pytest.raises(SystemExit) as exc:
         _run(downloader, monkeypatch, tmp_path, arrived=[], failed=configured_symbols)
     assert exc.value.code == 1
+
+    out = capsys.readouterr().out
+    assert "Nothing has been downloaded before either." in out
+    assert "Falling back to what is already on disk." not in out
+
+
+def test_an_empty_retry_says_it_is_using_what_is_on_disk(
+    downloader, monkeypatch, tmp_path, capsys, configured_symbols
+):
+    _run(downloader, monkeypatch, tmp_path, arrived=configured_symbols)
+    capsys.readouterr()
+    _run(downloader, monkeypatch, tmp_path, arrived=[], failed=configured_symbols)
+    assert "Falling back to what is already on disk." in capsys.readouterr().out
 
 
 def test_update_starts_from_the_earliest_symbol(downloader, tmp_path):
