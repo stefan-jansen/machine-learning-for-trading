@@ -17,9 +17,8 @@
 # # Crypto Perpetuals Funding: Feasibility Analysis
 #
 # `config/setup.yaml` declares a cross-sectional long-short strategy on Binance perpetual futures:
-# which contracts trade, that decisions land on the eight-hour funding schedule, what crossing
-# costs, and how the sample is split. This notebook asks whether the data supports it, and fits
-# nothing.
+# which contracts trade, that decisions land on the eight-hour funding schedule, what crossing costs
+# and how the sample is split. This notebook asks whether the data supports it, and fits nothing.
 #
 # ## Learning objectives
 #
@@ -100,7 +99,7 @@ print(
 # collect it - it ranks contracts on their premium and holds the price move that follows. Three
 # questions decide whether that is worth building: are the declared contracts quoting at the funding
 # timestamp, is a typical move large next to the fee, and does the sample hold enough independent
-# observations for a walk-forward.
+# observations.
 
 # %% [markdown]
 # ## B. Universe and cost feasibility
@@ -156,8 +155,8 @@ plt.show()
 # per-contract spread, so cost here is a level the venue publishes rather than something this data
 # measures. A move counts only when the bar it ends on sits exactly one horizon ahead: four
 # contracts are missing settlements in 2022, and a positional shift would price a three-day move as
-# an eight-hour one. Both round trips are drawn against those moves at every horizon the labels
-# declare, on one log axis, so the fraction clearing a tier is read off it.
+# an eight-hour one. Both round trips are drawn against those moves at each declared horizon, on one
+# log axis, so the fraction clearing a tier is read off the curve.
 
 # %%
 moves = bars
@@ -220,13 +219,16 @@ plt.show()
 
 # %% [markdown]
 # Persistence describes one contract through time. A cross-sectional book also needs contracts to
-# disagree at one timestamp: the band is what the ranking reads, the line the level it nets out.
+# disagree at one timestamp, so quantiles are taken there and only then thinned to a daily median:
+# pooling three settlements first folds the level's own movement into the band a ranking reads.
 
 # %%
 BANDS = (("lo", 0.1), ("mid", 0.5), ("hi", 0.9))
 spread = (
-    research.group_by(pl.col("timestamp").dt.truncate("1d").alias("day"))
+    research.group_by("timestamp")
     .agg(pl.col(PREMIUM).quantile(q).mul(1e4).alias(name) for name, q in BANDS)
+    .group_by(pl.col("timestamp").dt.truncate("1d").alias("day"))
+    .agg(pl.col(name).median() for name, _ in BANDS)
     .sort("day")
     .drop_nulls()
 )
@@ -241,7 +243,7 @@ ax.set_ylabel("Premium index (bps of the tracked index)")
 add_message_title(
     ax,
     "The premium moves as a common level more than contracts disperse",
-    subtitle="Daily cross-sectional median of the premium index, banded 10th to 90th percentile",
+    subtitle="Cross-sectional quantiles at each funding timestamp, shown at their daily median",
 )
 plt.show()
 
@@ -280,8 +282,8 @@ print(
 # Four falsifiable checkpoints send the strategy back to the drawing board, each tested where its
 # evidence exists: a gross return the fee erases, in Chapter 16; a premium that stops predicting
 # before the next funding timestamp, in Chapter 7 through the information coefficient rather than
-# the autocorrelation above; a venue change to the funding formula, cap or interval, which leaves
-# the training distribution describing a product that no longer exists; and an equal-weight
+# the autocorrelation above; a venue change to the funding formula, cap or interval, leaving the
+# training distribution to describe a product that no longer exists; and an equal-weight
 # cross-section reaching a higher Sharpe and shallower drawdown on every fold, in Chapter 17.
 #
 # ### C.3 Mapping class
@@ -289,8 +291,7 @@ print(
 # `setup.yaml::mapping.class` ranks contracts on the premium and holds both legs. A perpetual is
 # symmetrically tradable from either side, so a long-only restriction would discard half the
 # cross-section and leave in the position the common level that B.4 shows is most of what the
-# premium does. Sizing is equal weight or risk parity: Chapter 16 fixes the first as the baseline
-# and Chapter 17 sweeps the rest.
+# premium does. Sizing is equal weight or risk parity: Chapter 16 fixes the first, Chapter 17 sweeps.
 
 # %% [markdown]
 # ## D. Walk-forward structure
@@ -299,8 +300,8 @@ print(
 #
 # What evaluation spends is independent observations, not rows. Summing the initial positive
 # sequence of B.4's mean curve gives the integrated autocorrelation time, the funding periods one
-# independent premium observation is worth. It counts the carrier inside one contract, not the
-# decisions a portfolio takes, and its sequence never turns negative here, so it is a ceiling.
+# independent premium observation is worth - for one contract's carrier, not for the decisions a
+# portfolio takes. The sequence never turns negative here, so the count below is a ceiling.
 
 # %%
 curve = acf["acf"].to_numpy()
@@ -354,8 +355,7 @@ plt.show()
 #
 # | Knob | Evidence | Revise it when |
 # |---|---|---|
-# | `universe.symbols` | B.2 breadth at each funding timestamp | breadth falls below the contracts a sleeve needs on both legs |
-# | `backtest.sweep.top_k_grid` | B.2 breadth against twice the largest top-k | the panel cannot fill both legs at the widest sleeve |
+# | `universe.symbols`, `backtest.sweep.top_k_grid` | B.2 breadth against twice the largest top-k | breadth falls below the contracts a sleeve needs on both legs, as it does here at top-10 |
 # | `decision.cadence` | B.3 exceedance, B.4 persistence | moves stop clearing the round trip, or the premium decays inside one funding period |
 # | `costs.fee_schedule` | B.3 the two declared round trips | the venue changes a tier, or a contract moves between them |
 # | `evaluation.n_splits` | D.1 independent observations, D.2 boundaries | the folds no longer fit the development window |
@@ -380,10 +380,10 @@ print(
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **Count the panel at the timestamp the strategy acts on.** Members that enter at their listing
-#    dates give breadth a history, and the declared sleeve has to fit inside it at every timestamp.
-# 2. **Compute a panel autocorrelation inside each entity.** Stacking the contracts and
-#    correlating the result measures where one contract's series meets the next.
+# 1. **Count the panel at the timestamp the strategy acts on.** Members entering at their listing
+#    dates give breadth a history the declared sleeve has to fit inside at every timestamp.
+# 2. **Compute a panel autocorrelation inside each entity, over unbroken stretches.** Stacking
+#    contracts measures where two of them meet; counting lags by row measures across the gaps.
 # 3. **Turn persistence into an observation count before trusting a sample size.** Where the
 #    initial positive sequence runs past the lags you drew, that count is a ceiling, not a level.
 # 4. **Separate the common level from the cross-sectional spread.** A ranking reads only what is
@@ -391,10 +391,10 @@ print(
 #
 # ### Known limitations
 #
-# - The contract list is fixed and was drawn knowing which perpetuals stayed listed, so it is not a
-#   point-in-time universe and carries selection and delisting bias.
+# - The contract list is fixed and was drawn knowing which perpetuals stayed listed, so it carries
+#   selection and delisting bias.
 # - Cost is the published fee alone; slippage and the entry spread need a notional and enter at the
-#   cost stage. Funding is a cash flow this strategy does not collect, so the labels and the
-#   backtest measure the price move net of fees and the premium enters only as a feature.
+#   cost stage. Funding itself is a cash flow this strategy does not collect - labels and backtest
+#   measure the price move net of fees, and the premium enters only as a feature.
 #
 # **Next**: labels at the declared horizons, built on this development window.
