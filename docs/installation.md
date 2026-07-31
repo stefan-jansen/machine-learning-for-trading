@@ -101,8 +101,9 @@ does not work on Intel Macs or in native Windows Python.
 > above, which is the one that is tested.
 
 > **macOS: which path depends on the chip.** On **Apple Silicon**, use the local `uv`
-> environment: it builds natively against the Xcode command-line tools and Docker buys you
-> nothing there. On
+> environment: it builds natively against the Xcode command-line tools, and the only reason to
+> add Docker is the twelve `ml4t-py312` notebooks, which have no arm64 build and run emulated.
+> On
 > an **Intel Mac**, Docker is the only option, because PyTorch stopped publishing macOS x86_64
 > wheels and `uv sync` stops immediately with `Distribution torch==2.10.0 ... doesn't have a
 > source distribution or wheel for the current platform`. There is nothing to configure around
@@ -432,7 +433,8 @@ Chapter 15 notebook 06 uses the isolated `/opt/bsts` interpreter so its NumPy 1 
 pandas 2.2 constraints do not replace dependencies required by the other py312 notebooks.
 
 The `py312` service reserves no GPU, so it runs anywhere the amd64 image does. Seven of the
-twelve notebooks train a model and are faster with one: Ch05 `01_timegan`,
+twelve are GPU-tagged and run faster with one, whether they train or only do inference: Ch05
+`01_timegan`,
 `03_sigcwgan_signatures` and `07_dp_gan`, Ch10 `03_sentiment_evolution`, Ch12
 `10_shap_nlp_sentiment`, Ch14 `06_conditional_autoencoder` and Ch21
 `05_deep_hedging_pfhedge`. The `py312-gpu` service is the same image with an NVIDIA GPU
@@ -446,11 +448,13 @@ Silicon setup above does not install:
 1. Install Docker Desktop from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/),
    choosing the **Apple chip** download.
 2. Enable Settings → General → **Use Rosetta for x86_64/amd64 emulation**.
-3. Prefix each command above with `DOCKER_DEFAULT_PLATFORM=linux/amd64`, for example
-   `DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose --profile py312 pull py312`.
+3. Prefix the **`py312`** commands above with `DOCKER_DEFAULT_PLATFORM=linux/amd64`, for example
+   `DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose --profile py312 pull py312`. Skip the
+   `py312-gpu` one: it reserves an NVIDIA device, which no Mac has, so all twelve notebooks go
+   through the CPU-only service here.
 
-It runs at emulation speed and without a GPU. This is the only thing on an Apple Silicon Mac
-that Docker is needed for.
+It runs at emulation speed. This is the only thing on an Apple Silicon Mac that Docker is needed
+for.
 
 ---
 
