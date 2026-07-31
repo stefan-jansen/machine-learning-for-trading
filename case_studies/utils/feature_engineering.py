@@ -327,17 +327,21 @@ def trailing_sharpe(
     *,
     periods_per_year: float = 252.0,
 ) -> pl.Expr:
-    """Trailing risk-adjusted return: window log return over its own dispersion.
+    """Annualized trailing Sharpe ratio: mean log return over its own dispersion.
 
-    Annualized by the square root of the number of windows in a year, so the
-    horizons of one family are on a common scale.
+    Both terms are per period and the annualization is the usual root-time factor,
+    so the result is on the scale a Sharpe ratio is read on and horizons of one
+    family are comparable.
+
+    Four case studies previously divided the rolling **sum** by the per-period
+    standard deviation and scaled by ``sqrt(periods_per_year / window)``. That is
+    a mean/std ratio inflated by ``sqrt(window)`` - a factor of about 16 at a
+    one-year window - which is why the shipped one-year values ranged past 50.
     """
     partition = [over] if isinstance(over, str) else list(over)
-    total = pl.col(log_return).rolling_sum(window).over(partition)
+    mean = pl.col(log_return).rolling_mean(window).over(partition)
     std = pl.col(log_return).rolling_std(window).over(partition)
-    return (total / std.clip(lower_bound=EPS) * np.sqrt(periods_per_year / window)).alias(
-        f"sharpe_{window}"
-    )
+    return (mean / std.clip(lower_bound=EPS) * np.sqrt(periods_per_year)).alias(f"sharpe_{window}")
 
 
 # ---------------------------------------------------------------------------
@@ -420,12 +424,24 @@ def assert_values_agree(
     for column in columns:
         a = a_frame[column].cast(pl.Float64).to_numpy()
         b = b_frame[column].cast(pl.Float64).to_numpy()
-        gap = np.abs(np.where(np.isnan(a) & np.isnan(b), 0.0, a - b))
+        missing_a, missing_b = np.isnan(a), np.isnan(b)
+        # A value on one side and a null on the other is the loudest form of this
+        # failure, and it is exactly what a nan-skipping maximum hides.
+        both = missing_a & missing_b
+        gap = np.where(both, 0.0, np.abs(a - b))
+        gap = np.where(missing_a ^ missing_b, np.inf, gap)
         rows.append(
-            {"column": column, "max abs difference": float(np.nanmax(gap)) if gap.size else 0.0}
+            {
+                "column": column,
+                "rows compared": int(a.size),
+                "null only on one side": int((missing_a ^ missing_b).sum()),
+                "max abs difference": float(gap.max()) if gap.size else 0.0,
+            }
         )
     census = pl.DataFrame(rows)
-    moved = census.filter(pl.col("max abs difference") > 1e-12)
+    moved = census.filter(
+        (pl.col("max abs difference") > 1e-12) | (pl.col("null only on one side") > 0)
+    )
     if moved.height:
         raise AssertionError(
             "these features move when later rows are withheld, so their transform was "
@@ -506,7 +522,8 @@ def plot_coverage_through_time(
     # Scaled to the data rather than pinned to zero. A matrix that is 99% dense everywhere
     # draws as one flat line at the top of a 0-1 axis, which hides the only thing the figure
     # is for: where, and by how much, a family is actually thin.
-    lowest = min(float(coverage[f].min() or 1.0) for f in families)
+    minima = [coverage[f].min() for f in families]
+    lowest = min([float(v) for v in minima if v is not None], default=1.0)
     ax.set_ylim(min(lowest - 0.02 * (1 - lowest) - 0.002, 0.999), 1.0005)
     ax.set_ylabel("non-null share")
     ax.legend(fontsize=6, ncol=3, frameon=False, loc="lower right")
@@ -582,11 +599,12 @@ def plot_cross_sectional_dispersion(
     every: str | None = None,
 ) -> None:
     """F3. Per decision date, the 10th-90th percentile band of *column* with its median."""
-    frame = df
-    if every is not None:
-        frame = frame.with_columns(pl.col(time).dt.truncate(every).alias(time))
-    band = (
-        frame.group_by(time)
+    # The quantiles are taken within one decision date and only then averaged over
+    # the period. Truncating the timestamp first and taking a quantile of the pooled
+    # month measures the spread of a month of entity-days, which is a different and
+    # always wider quantity than the cross-section a strategy actually ranks on.
+    daily = (
+        df.group_by(time)
         .agg(
             pl.col(column).quantile(0.10).alias("p10"),
             pl.col(column).median().alias("p50"),
@@ -595,6 +613,14 @@ def plot_cross_sectional_dispersion(
         .sort(time)
         .drop_nulls()
     )
+    band = daily
+    if every is not None:
+        band = (
+            daily.with_columns(pl.col(time).dt.truncate(every).alias(time))
+            .group_by(time)
+            .agg(pl.col("p10").mean(), pl.col("p50").mean(), pl.col("p90").mean())
+            .sort(time)
+        )
     fig, ax = plt.subplots(figsize=FIGSIZE["single"])
     x = band[time].to_list()
     ax.fill_between(
@@ -784,17 +810,30 @@ def plot_persistence(
         fontsize=6, loc="best", frameon=True, facecolor="white", framealpha=0.9, edgecolor="none"
     )
 
+    # One cross-sectional rank correlation per consecutive pair of decision dates,
+    # then the median over pairs. Pooling every entity-date row into a single
+    # correlation measures how stable an entity's rank is against the whole panel,
+    # which is high whenever entities differ from each other at all, and a shift
+    # within an entity silently bridges dates that entity was absent for.
+    dates = frame[time].unique().sort()
+    step = dict(zip(dates[1:].to_list(), dates[:-1].to_list(), strict=True))
     stability = []
     for column in columns:
-        ranked = frame.with_columns(pl.col(column).rank().over(time).alias("_r")).with_columns(
-            pl.col("_r").shift(1).over(keys).alias("_r_prev")
+        ranked = frame.select(
+            time, *keys, pl.col(column).rank().over(time).alias("_r")
+        ).drop_nulls()
+        joined = (
+            ranked.with_columns(pl.col(time).replace_strict(step, default=None).alias("_prev"))
+            .join(
+                ranked.select(*keys, pl.col(time).alias("_prev"), pl.col("_r").alias("_r_prev")),
+                on=[*keys, "_prev"],
+                how="inner",
+            )
+            .group_by(time)
+            .agg(pl.corr(pl.col("_r"), pl.col("_r_prev"), method="spearman").alias("rho"))
         )
-        pair = ranked.select(["_r", "_r_prev"]).drop_nulls().drop_nans()
-        stability.append(
-            float(np.corrcoef(pair["_r_prev"].to_numpy(), pair["_r"].to_numpy())[0, 1])
-            if pair.height > 10
-            else np.nan
-        )
+        rho = joined["rho"].drop_nulls().drop_nans()
+        stability.append(float(rho.median()) if rho.len() else np.nan)
     right.barh(range(len(columns)), stability, color=COLORS["blue"], height=0.6)
     right.set_yticks(range(len(columns)))
     right.set_yticklabels(columns, fontsize=6)

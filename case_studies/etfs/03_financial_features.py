@@ -260,10 +260,14 @@ def oscillator_features(df: pl.DataFrame) -> pl.DataFrame:
 
 
 # %%
-def state_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Drawdown, relative volume, on-balance volume and position in the 52-week range."""
+def relative_volume(df: pl.DataFrame) -> pl.DataFrame:
+    """Volume against its own trailing mean, clipped within the decision date."""
+    return relative_volume_block(df, entity="symbol", windows=WINDOWS["volume"])
+
+
+def drawdown_and_extremes(df: pl.DataFrame) -> pl.DataFrame:
+    """Drawdown, on-balance volume and position in the 52-week range."""
     df = drawdown_block(df, entity="symbol", windows=WINDOWS["drawdown"])
-    df = relative_volume_block(df, entity="symbol", windows=WINDOWS["volume"])
     df = df.with_columns(obv("close", "volume").over("symbol").alias("_obv"))
     return df.with_columns(
         (
@@ -296,8 +300,8 @@ def state_features(df: pl.DataFrame) -> pl.DataFrame:
 
 
 # %%
-def regime_and_position(df: pl.DataFrame) -> pl.DataFrame:
-    """Equity-bond correlation, yield-curve state, and percentile within the date."""
+def regime_and_state(df: pl.DataFrame) -> pl.DataFrame:
+    """Equity-bond correlation and yield-curve state, broadcast to every row."""
     pair = (
         df.filter(pl.col("symbol") == "SPY")
         .select("timestamp", pl.col("log_return").alias("_spy"))
@@ -329,24 +333,60 @@ def regime_and_position(df: pl.DataFrame) -> pl.DataFrame:
         df.join(pair, on="timestamp", how="left")
         .sort("timestamp")
         .join_asof(curve, on="timestamp", strategy="backward")
-        .with_columns(
-            cross_sectional_percentile(col, "timestamp").alias(f"{col}_rank") for col in RANKED
+    )
+
+
+def gate_to_eligible(df: pl.DataFrame) -> pl.DataFrame:
+    """Drop the rows the annual tradability gate excludes, before anything ranks them."""
+    return (
+        df.with_columns(pl.col("timestamp").dt.year().alias("_year"))
+        .join(
+            eligibility.select("symbol", pl.col("eligible_year").alias("_year")),
+            on=["symbol", "_year"],
+            how="semi",
         )
+        .drop("_year")
+    )
+
+
+def cross_sectional_position(df: pl.DataFrame) -> pl.DataFrame:
+    """Percentile of each carrier feature within its own decision date."""
+    return df.with_columns(
+        cross_sectional_percentile(col, "timestamp").alias(f"{col}_rank") for col in RANKED
+    )
+
+
+def per_entity_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Everything computed from one ETF's own history, gate not yet applied."""
+    return (
+        df.pipe(momentum_features)
+        .pipe(oscillator_features)
+        .pipe(drawdown_and_extremes)
+        .pipe(regime_and_state)
     )
 
 
 def build_features(df: pl.DataFrame) -> pl.DataFrame:
-    """The whole construction, as one function Section D can re-run on a shorter panel."""
+    """The whole construction, as one function Section D can re-run on a shorter panel.
+
+    The eligibility gate sits after everything computed per entity and before the two
+    statistics computed within a date. A percentile and a clip are properties of the
+    cross-section they are taken over, so an ETF the strategy cannot trade must not be in
+    that cross-section: ranking against it moves the number written for every ETF that is.
+    """
     return (
-        df.pipe(momentum_features)
-        .pipe(oscillator_features)
-        .pipe(state_features)
-        .pipe(regime_and_position)
+        df.pipe(per_entity_features)
+        .pipe(gate_to_eligible)
+        .pipe(relative_volume)
+        .pipe(cross_sectional_position)
     )
 
 
-built = build_features(prices)
-print(f"{len(built):,} bars carrying {built.width - 8} features")
+EXCLUDED = {"symbol", "timestamp", "open", "high", "low", "close", "volume", "log_return"}
+per_entity = per_entity_features(prices)
+built = per_entity.pipe(gate_to_eligible).pipe(relative_volume).pipe(cross_sectional_position)
+feature_cols = [c for c in built.columns if c not in EXCLUDED]
+print(f"{len(built):,} eligible bars carrying {len(feature_cols)} features")
 
 # %% [markdown]
 # ## D. The timing contract
@@ -364,11 +404,12 @@ print(f"{len(built):,} bars carrying {built.width - 8} features")
 # A trailing window cannot produce a value until it has enough bars to fill, so every family has
 # a leading stretch of nulls as long as its lookback. The audit checks that length rather than
 # describing it: a column carrying a value before its window could have filled is reading bars
-# that do not exist, and that is the failure it raises on.
+# that do not exist, and that is the failure it raises on. It runs on the panel before the
+# eligibility gate, because the gate drops the early rows the warmup stretch is made of.
 
 # %%
 warmup_audit(
-    built,
+    per_entity,
     {
         "ret_252d": 252,
         "skip_recent_12_1": 252,
@@ -390,16 +431,19 @@ warmup_audit(
 # panel that stops before the holdout, they reproduce the same values on the rows the two panels
 # share. A parameter fitted over a whole column - a winsorization bound, a scaler, an encoder -
 # does not, because truncating the column moves the parameter and with it every row it was
-# applied to. Building the panel twice and comparing tests the whole construction at once, and
-# does not depend on anyone having flagged the transform that fits.
+# applied to. Building the panel twice and comparing tests the whole construction at once -
+# every emitted column, not a sample - and does not depend on anyone having flagged the
+# transform that fits. A value on one side against a null on the other counts as a difference,
+# because that is the form of the failure a null-skipping comparison hides.
 
 # %%
-assert_values_agree(
+seal = assert_values_agree(
     built.filter(pl.col("timestamp") < HOLDOUT_START),
     build_features(prices.filter(pl.col("timestamp") < HOLDOUT_START)),
-    columns=["ret_126d", "sharpe_126d", "vol_ratio_21d", "ret_126d_rank", "yield_curve_zscore"],
+    columns=feature_cols,
     keys=["timestamp", "symbol"],
 )
+seal.filter(pl.col("column").is_in(["ret_126d", "ret_126d_rank", "yield_curve_zscore"]))
 
 # %% [markdown]
 # ## E. Matrix assembly and coverage
@@ -411,20 +455,11 @@ assert_values_agree(
 # which is the point past which every family is dense.
 
 # %%
-EXCLUDED = {"symbol", "timestamp", "open", "high", "low", "close", "volume", "log_return"}
-feature_cols = [c for c in built.columns if c not in EXCLUDED]
-
-eligible = (
-    built.with_columns(pl.col("timestamp").dt.year().alias("_year"))
-    .join(
-        eligibility.select("symbol", pl.col("eligible_year").alias("_year")),
-        on=["symbol", "_year"],
-        how="semi",
-    )
-    .select(["timestamp", "symbol", *feature_cols])
+features = (
+    built.select(["timestamp", "symbol", *feature_cols])
+    .drop_nulls(subset=["sharpe_126d"])
     .sort(["timestamp", "symbol"])
 )
-features = eligible.drop_nulls(subset=["sharpe_126d"])
 assert features.select(["timestamp", "symbol"]).is_duplicated().sum() == 0, "duplicate panel key"
 assignment = assign_families(feature_cols, FAMILIES)
 register_frame(FAMILIES, feature_cols).select(["family", "columns", "role", "representation"])
@@ -482,12 +517,14 @@ plot_timing_contract(
 plot_feature_distributions(
     features,
     ["ret_21d", "ret_126d", "ret_252d", "sharpe_21d", "sharpe_126d", "sharpe_252d"],
-    title="Longer windows widen the carrier and move its centre",
+    title="A longer window widens the return and narrows the ratio",
     subtitle="Trailing return and risk-adjusted return, display tails clipped at 0.5%",
     alt=(
-        "Six histograms in two rows. The trailing returns along the top broaden from a narrow "
-        "right-skewed peak at 21 sessions to a wide body at 252. The risk-adjusted returns "
-        "below are close to symmetric at every horizon and an order of magnitude wider in scale."
+        "Six histograms in two rows. Along the top the trailing returns broaden from a narrow "
+        "right-skewed peak spanning about plus or minus 0.2 at 21 sessions to a wide body "
+        "reaching 0.75 at 252. Below, the annualized risk-adjusted returns move the other way, "
+        "from roughly minus five to ten at 21 sessions down to minus two to three at 252, and "
+        "are close to symmetric at every horizon."
     ),
 )
 
@@ -586,7 +623,7 @@ print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}")
 
 # %% [markdown] tags=["results"]
 # The matrix carries **57 features** on **396,186 rows** across **99 ETFs**, from **2007-01-03**
-# to **2025-12-31**, under content digest **8d691ca913ee2a81**. Cutting the redundancy tree
+# to **2025-12-31**, under content digest **efa6363a247bb219**. Cutting the redundancy tree
 # leaves **28 clusters**, so half the columns repeat an ordering another column already
 # carries.
 
@@ -617,5 +654,8 @@ print(f"{len(set(clusters.values()))} redundancy clusters")
 #   universe.
 # - The eligibility gate is annual, so an ETF that lost liquidity in June stays in the
 #   cross-section until December.
+# - The yield-curve features read the revised Treasury history, not the initial release. The
+#   timing is right - the series publishes at the close of the session it describes - but a
+#   value revised later is not the value a decision at that close could have seen.
 # - Every feature here is a rule written in advance. `04_model_based_features` adds the features
 #   that are themselves model outputs, where the rule is estimated from the data.

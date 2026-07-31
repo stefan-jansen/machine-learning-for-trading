@@ -396,8 +396,8 @@ features:
       pattern: '*_rank'
       role: signal
       hypothesis: Only relative standing is tradable in a cross-sectional strategy
-      inputs: carrier features
-      lookback: 252
+      inputs: ret_126d, sharpe_126d, vol_63d
+      lookback: 126
       lag: 0
       frame: cross-section
       representation: percentile within the decision date
@@ -411,4 +411,7 @@ features:
       lag: 0
       frame: cross-asset
       representation: rolling correlation, level, z-score, indicator
-      failure_mode: one equity-bond pair stands in for the whole universe
+      failure_mode: >-
+        one equity-bond pair stands in for the whole universe, and the Treasury series is
+        the revised history rather than the initial release, so the lag is right for
+        publication timing but not for revisions
