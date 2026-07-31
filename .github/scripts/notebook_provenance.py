@@ -85,9 +85,19 @@ PRODUCTION_SAFE_PARAMETERS = {
 
 
 def _coerce_bool(value: object) -> bool | None:
-    """Return a boolean for Papermill's bool-like CLI values."""
+    """Return a boolean for Papermill's bool-like CLI values.
+
+    The same override reaches this module as ``True`` through a YAML parameter file,
+    ``"true"`` through ``papermill -p`` (which stringifies everything), and ``1``
+    through a JSON declaration. All three name the same run, so ``1`` and ``"1"``
+    have to coerce alike — otherwise one form is read as a boolean and the other as
+    the string ``"1"``, and comparing the two reports a contradiction that is not
+    there.
+    """
     if isinstance(value, bool):
         return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized in {"true", "1", "yes", "on"}:

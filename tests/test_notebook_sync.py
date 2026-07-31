@@ -73,6 +73,18 @@ def test_production_parameters_allow_only_full_run_cache_bypasses():
     assert not production_parameters({"USE_CACHE": True})
 
 
+def test_numeric_and_string_bools_are_the_same_override() -> None:
+    """``1`` from a JSON declaration and ``"1"`` from ``papermill -p`` are one run."""
+    assert production_parameters({"FORCE_REBACKTEST": 1})
+    assert production_parameters({"USE_CACHE": 0})
+    assert not production_parameters({"USE_CACHE": 1})
+
+    nb = _notebook([_injected_cell("# Parameters\nFORCE_RETRAIN = 1\n")])
+    assert contradicts_injected_cell(nb, {"FORCE_RETRAIN": "1"}) is None
+    assert contradicts_injected_cell(nb, {"FORCE_RETRAIN": True}) is None
+    assert contradicts_injected_cell(nb, {"FORCE_RETRAIN": 0}) is not None
+
+
 # -----------------------------------------------------------------------------
 # The injected-parameters cell — the record that belongs to the execution
 # -----------------------------------------------------------------------------
