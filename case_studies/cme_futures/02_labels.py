@@ -40,8 +40,9 @@
 # [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) establishes, and
 # `config/setup.yaml`, which declares the universe, the label set, the horizons and the
 # holdout boundary. Writes `labels/fwd_ret_5d.parquet` and `labels/fwd_ret_21d.parquet`,
-# each with a `.digest.json` sidecar beside it. `03_financial_features.py` reads whichever
-# label is `labels.primary`.
+# each with a `.digest.json` sidecar beside it. `03_financial_features.py` reads
+# `fwd_ret_5d.parquet`, which it names directly rather than resolving `labels.primary`, so
+# changing that key here does not move stage 03.
 
 # %%
 """CME Futures: Label Engineering."""
@@ -609,7 +610,7 @@ for label_name in LABEL_NAMES:
 # the values computed above rather than written by hand.
 
 # %%
-readers = {PRIMARY_LABEL: "03_financial_features.py, as `labels.primary`"}
+readers = {PRIMARY_LABEL: "03_financial_features.py, as the label it names directly"}
 print("\nLabel audit record")
 for label_name, horizon in HORIZONS.items():
     frame = dev[label_name]

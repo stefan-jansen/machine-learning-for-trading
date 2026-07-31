@@ -40,7 +40,8 @@
 # `config/setup.yaml`, which declares the universe, the label set, the horizons and the
 # holdout boundary. Writes `labels/fwd_ret_1d.parquet`, `labels/fwd_ret_5d.parquet` and
 # `labels/fwd_ret_21d.parquet`, each with a `.digest.json` sidecar beside it.
-# `03_financial_features.py` reads whichever label is `labels.primary`.
+# `03_financial_features.py` reads `fwd_ret_1d.parquet`, which it names directly rather
+# than resolving `labels.primary`, so changing that key here does not move stage 03.
 
 # %%
 """FX Pairs: Label Engineering."""
@@ -564,7 +565,7 @@ for label_name in LABEL_NAMES:
 
 # %%
 readers = dict.fromkeys(LABEL_NAMES, "the model stages, as a variant declared in `setup.yaml`")
-readers[PRIMARY_LABEL] = "03_financial_features.py, as `labels.primary`"
+readers[PRIMARY_LABEL] = "03_financial_features.py, as the label it names directly"
 print("\nLabel audit record")
 for label_name, horizon in HORIZONS.items():
     frame = dev[label_name]
