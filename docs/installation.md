@@ -299,7 +299,7 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
 
 **Apple Silicon: use the local `uv` path, not Docker.** Everything in the main environment either
 has an arm64 wheel or builds from source against the Xcode command-line tools, the same way it
-does on Linux, so Docker would add a 13 GB image and change nothing. Go to
+does on Linux, so Docker would add an image you have no use for. Go to
 [Local Setup with uv](#local-setup-with-uv-alternative-to-docker); this is the path walked on
 real hardware before every release. Two things still want Docker on that machine: the twelve
 `ml4t-py312` notebooks, which have no arm64 build at all and are covered under
@@ -425,7 +425,7 @@ docker compose --profile py312 run --rm py312 python 09_model_based_features/06_
 docker compose --profile py312 run --rm py312 \
   /opt/bsts/bin/python 15_causal_estimation/06_fed_announcement_bsts.py
 
-# The seven that train a model, on a machine with an NVIDIA GPU:
+# The seven GPU-tagged notebooks, on a machine with an NVIDIA GPU:
 docker compose --profile py312-gpu run --rm py312-gpu \
   python 05_synthetic_data/03_sigcwgan_signatures.py
 ```
