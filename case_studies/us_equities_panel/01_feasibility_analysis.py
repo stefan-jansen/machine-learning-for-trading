@@ -16,9 +16,9 @@
 # %% [markdown]
 # # US Equities Panel: Feasibility Analysis
 #
-# `config/setup.yaml` declares a daily long-short strategy over the broad US cross-section:
-# which stocks are eligible, how often the book turns over, what a round trip costs, how the
-# sample is split. This notebook asks whether the data supports it, and fits nothing.
+# `config/setup.yaml` declares a daily long-short strategy over the broad US cross-section: which
+# stocks are eligible, how often the book turns, what a round trip costs, how the sample is
+# split. This notebook asks whether the data supports it, and fits nothing.
 #
 # ## Learning objectives
 #
@@ -59,8 +59,8 @@ END_DATE = "2018-03-31"  # the archive's last session
 # ## Configuration
 #
 # Every knob is read from `setup.yaml`, and everything below computes on the development window
-# alone, so nothing the holdout contains can shape a choice made here. The eligibility
-# thresholds are the only constants declared locally, since the YAML has no key for them.
+# alone, so nothing the holdout contains can shape a choice made here. The eligibility thresholds
+# are the only constants declared locally, since the YAML has no key for them.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -80,29 +80,26 @@ HALF_SPREAD_USD = HALF_SPREADS[len(HALF_SPREADS) // 2]
 MIN_PRICE = 5.0  # penny-stock floor, as 02_labels applies it
 MIN_ADV_USD = 1_000_000  # dollar volume a position has to be able to hide in
 ADV_WINDOW = 21  # sessions of history the liquidity screen averages over
-print(
-    f"Development {START_DATE} to {HOLDOUT_START} | sealed holdout to {HOLDOUT_END} | "
-    f"horizons {HORIZONS} | breadth floor {BREADTH_FLOOR} | round trip {COST_BPS} bps"
-)
+print(f"Development {START_DATE} to {HOLDOUT_START} | sealed holdout to {HOLDOUT_END}")
+print(f"Horizons {HORIZONS} | breadth floor {BREADTH_FLOOR} | round trip {COST_BPS} bps")
 
 # %% [markdown]
 # ## A. Orientation
 #
 # The archive holds daily bars for every US common stock that traded into the first quarter of
 # 2018, delisted names included up to the session they stopped trading, so a universe formed on
-# any past date is the universe that existed on it. A cross-sectional strategy takes no view on
-# the market - it ranks stocks against each other and holds both ends of the ranking - so
-# breadth matters more than any single name. Three questions decide whether that is worth
-# building here: does the eligible universe stay wide enough on every decision date, is a
-# typical move large next to the spread it crosses, and are there enough decision dates to
-# walk forward without reading the holdout.
+# any past date is the one that existed on it. A cross-sectional strategy ranks stocks against
+# each other and holds both ends of the ranking, so breadth matters more than any single name.
+# Three questions decide whether that is worth building here: does the eligible universe stay
+# wide enough on every decision date, is a typical move large next to the spread it crosses, and
+# are there enough decision dates to walk forward without reading the holdout.
 
 # %% [markdown]
 # ## B. Universe and cost feasibility
 #
 # ### B.1 Load and verify the declared universe. The loader returns one row per stock and
-# session; `adj_close` carries splits and dividends back through the history, so its
-# differences are returns and the printed `close`'s are not.
+# session; `adj_close` carries splits and dividends back, so its differences are returns and the
+# printed `close`'s are not.
 
 # %%
 panel = load_us_equities(start_date=START_DATE, end_date=END_DATE)
@@ -113,8 +110,8 @@ research = panel.filter(pl.col("timestamp") < pl.lit(HOLDOUT_START).str.to_date(
 n_declared = SETUP["universe"]["n_assets"]
 assert panel["symbol"].n_unique() <= n_declared, "the panel holds more stocks than setup.yaml"
 print(
-    f"{panel['symbol'].n_unique():,} stocks against {n_declared:,} declared | development "
-    f"window {research['symbol'].n_unique():,} stocks, {len(research):,} bars, "
+    f"{panel['symbol'].n_unique():,} stocks against {n_declared:,} declared | development window "
+    f"{research['symbol'].n_unique():,} stocks, {len(research):,} bars, "
     f"{research['timestamp'].n_unique():,} dates to {research['timestamp'].max()}"
 )
 
@@ -125,19 +122,19 @@ print(
 # screen on each of them, not how many the archive holds in total. A stock qualifies when it
 # trades above the penny-stock floor and its dollar volume clears the liquidity threshold, both
 # read from the session itself - screening over the full sample would admit stocks on dates
-# nobody could have known they would qualify on.
+# nobody could have known they would qualify on. The liquidity leg averages over a rolling
+# window, so breadth begins that many sessions in, and everything below is computed on the rows
+# that pass.
 
 # %%
 dollar_volume = (pl.col("adj_close") * pl.col("adj_volume")).rolling_mean(ADV_WINDOW)
+screened = research.with_columns(dollar_volume.over("symbol").alias("adv")).with_columns(
+    ((pl.col("adj_close") > MIN_PRICE) & (pl.col("adv") > MIN_ADV_USD)).alias("eligible")
+)
 breadth = (
-    research.with_columns(dollar_volume.over("symbol").alias("adv"))
-    .drop_nulls("adv")
+    screened.drop_nulls("adv")
     .group_by("timestamp")
-    .agg(
-        ((pl.col("adj_close") > MIN_PRICE) & (pl.col("adv") > MIN_ADV_USD))
-        .sum()
-        .alias("n_eligible")
-    )
+    .agg(pl.col("eligible").sum().alias("n_eligible"))
     .sort("timestamp")
 )
 
@@ -151,6 +148,7 @@ sessions = pl.Series(
 ).cast(pl.Date)
 breadth = breadth.with_columns((sessions == pl.col("timestamp")).alias("is_session"))
 decisions = breadth.filter("is_session")
+tradable = screened.filter("eligible")  # the universe every statistic below is computed on
 
 # %%
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
@@ -161,8 +159,8 @@ ax.set_ylim(0, None)
 ax.legend(frameon=False, fontsize=8, loc="upper left")
 add_message_title(
     ax,
-    "Breadth grows across the sample and never nears the position floor",
-    subtitle="Stocks clearing the price and liquidity thresholds on each decision date",
+    "Eligible breadth clears the position floor on every decision date",
+    subtitle="Stocks clearing the price and liquidity thresholds, counted per session",
 )
 plt.show()
 
@@ -170,15 +168,17 @@ plt.show()
 # ### B.3 What a round trip costs
 #
 # `setup.yaml::costs` prices a trade as a fraction of what it moves, and carries a per-share
-# half-spread as a companion regime. The two disagree across this cross-section, since a fixed
-# number of cents is a different fraction of a single-digit stock than of one in the hundreds.
+# half-spread plus commission as a companion regime, both charged per leg. The two disagree
+# across this cross-section, since a fixed number of cents is a different fraction of a
+# single-digit stock than of one in the hundreds.
 
 # %%
+per_share_leg = HALF_SPREAD_USD + SETUP["costs"]["per_share"]  # half-spread plus commission
 cost = (
-    research.group_by("symbol")
+    tradable.group_by("symbol")
     .agg(pl.col("close").median().alias("price"))
     .drop_nulls("price")
-    .with_columns((2 * HALF_SPREAD_USD / pl.col("price") * 1e4).alias("per_share_bps"))
+    .with_columns((2 * per_share_leg / pl.col("price") * 1e4).alias("per_share_bps"))
     .sort("per_share_bps")
 )
 
@@ -191,25 +191,31 @@ ax.set_ylabel("Round-trip cost (bps, log scale)")
 ax.legend(frameon=False, fontsize=8, loc="upper left")
 add_message_title(
     ax,
-    "A per-share spread charges low-priced stocks orders of magnitude more",
-    subtitle="The configured per-share half-spread over each stock's median printed price",
+    "The per-share regime charges low-priced stocks orders of magnitude more",
+    subtitle="The configured per-share half-spread and commission over each median price",
 )
 plt.show()
 
 # %% [markdown]
-# That spread is why `setup.yaml::costs.model` prices in basis points: one proportional number
-# is wrong for every stock by a bounded amount, where one per-share number is wrong for the
-# cheap end by orders of magnitude. Moves are compared against it at each label horizon.
+# That range is why `setup.yaml::costs.model` prices in basis points: one proportional number is
+# wrong for every stock by a bounded amount, where one per-share number is wrong for the cheap
+# end by orders of magnitude. Moves are compared against it at each label horizon.
 
 # %%
-returns = research.with_columns(
-    pl.col("adj_close").pct_change(h).abs().over("symbol").alias(f"h{h}") for h in HORIZONS
+# A stock's rows are the sessions it traded and passed the screen, so h rows apart need not be
+# h sessions apart; spans wider than the horizon's calendar width are dropped, not counted.
+spans = {h: pl.col("timestamp").diff(h).over("symbol").dt.total_days() for h in HORIZONS}
+returns = tradable.with_columns(
+    pl.when(spans[h] <= 7 * h // 5 + 5)
+    .then(pl.col("adj_close").pct_change(h).over("symbol"))
+    .alias(f"h{h}")
+    for h in HORIZONS
 )
 
 styles = ((COLORS["blue"], "-"), (COLORS["amber"], "-"), (COLORS["neutral"], "-."))
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 for h, (color, ls) in zip(HORIZONS, styles, strict=True):
-    magnitude, fraction = exceedance_curve(returns[f"h{h}"].drop_nulls().to_numpy() * 1e4)
+    magnitude, fraction = exceedance_curve(returns[f"h{h}"].abs().drop_nulls().to_numpy() * 1e4)
     ax.plot(magnitude, fraction, color=color, ls=ls, lw=1.6, label=f"{h}-session move")
 ax.axvline(COST_BPS, color=COLORS["copper"], ls="--", lw=1.5, label="round-trip cost")
 ax.set_xscale("log")
@@ -227,15 +233,15 @@ plt.show()
 # %% [markdown]
 # ### B.4 How long what the strategy reads stays put
 #
-# Rebalancing daily is only worth the turnover if a stock's recent behaviour says something
-# about the session ahead. The cheapest version is whether its own return predicts its next,
-# computed inside each stock and pooled - stacking thousands and correlating measures the joins.
+# Rebalancing daily is only worth the turnover if a stock's recent behaviour says something about
+# the session ahead. The cheapest version is whether its own return predicts its next, computed
+# inside each stock and pooled - stacking thousands and correlating measures their joins.
 
 # %%
 acf = panel_acf(
-    research.with_columns(pl.col("adj_close").pct_change().over("symbol").alias("ret")),
+    returns,
     entity_col="symbol",
-    value_col="ret",
+    value_col=f"h{HORIZONS[0]}",
     max_lags=max(HORIZONS),
     min_obs=252,  # a stock contributes a curve only with a year of sessions behind it
 ).filter(pl.col("lag") > 0)  # lag zero is one by construction and only rescales the axis
@@ -254,31 +260,30 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# The bars sit close to zero against the spread of the per-stock curves behind them, so what
-# the strategy ranks on has to come from the cross-section - one stock against the others on
-# the same date - which `mapping.class` builds and the feature notebooks supply.
+# The bars sit close to zero against the spread of the per-stock curves behind them, so what the
+# strategy ranks on has to come from the cross-section - one stock against the others on the
+# same date - which `mapping.class` builds and the feature notebooks supply.
 #
 # ### B.5 Move scale against cost
 #
 # The ratio divides the median absolute move at the primary horizon by the declared round trip,
-# and the clearance share counts the moves above it. Neither says total cost clears: both legs
-# of the book pay, borrow accrues on the short leg, and a move is a magnitude with no direction.
+# and the clearance share counts the moves above it. Neither says total cost clears: both legs of
+# the book pay, borrow accrues on the short leg, and a move is a magnitude with no direction.
 
 # %%
-move_bps = returns[f"h{HORIZONS[0]}"].drop_nulls() * 1e4
+move_bps = returns[f"h{HORIZONS[0]}"].abs().drop_nulls() * 1e4
 per_share = cost["per_share_bps"]
 print(
     f"Per-share round trip {per_share.min():.2f} to {per_share.max():.0f} bps, median "
     f"{per_share.median():.1f} bps | median {HORIZONS[0]}-session move {move_bps.median():.0f} "
-    f"bps, ratio {move_bps.median() / COST_BPS:.1f}x, share over the round trip "
-    f"{(move_bps > COST_BPS).mean():.3f}"
+    f"bps, ratio {move_bps.median() / COST_BPS:.1f}x, share over it {(move_bps > COST_BPS).mean():.3f}"
 )
 
 # %% [markdown] tags=["results"]
-# The median absolute one-session move is 121 bps against a declared round trip of 25 bps, a
-# ratio of 4.8x, and 0.841 of one-session moves are larger than the round trip. The same
-# per-share half-spread costs 0.01 bps on the highest-priced stock in the panel and 4545 bps on
-# the lowest, with a median of 24.5 bps.
+# The median absolute one-session move is 117 bps against a declared round trip of 25 bps, a
+# ratio of 4.7x, and 0.869 of one-session moves are larger than it. The per-share regime costs
+# 0.01 bps on the highest-priced stock in the eligible universe and 422 bps on the lowest, with a
+# median of 23.8 bps.
 
 # %% [markdown]
 # ## C. Design decisions
@@ -292,15 +297,14 @@ print(
 #
 # Four thresholds in `setup.yaml::kill_conditions` send the strategy back to the drawing board,
 # each tested where the evidence exists rather than here: a cross-sectional information
-# coefficient below its floor across every feature, a net-Sharpe-to-cost ratio under its floor,
-# alpha concentrated in the least liquid quintile, and net Sharpe after borrow under its own.
+# coefficient below its floor, a net-Sharpe-to-cost ratio under its floor, alpha concentrated in
+# the least liquid quintile, and net Sharpe after borrow under its own.
 #
 # ### C.3 Mapping class
 #
 # `setup.yaml::mapping.class` sorts stocks into deciles and holds the top against the bottom,
 # equally weighted inside each, because the bottom of a ranking carries as much information as
-# the top. Equal weighting keeps the comparison about the ranking, and the allocation stage
-# sweeps the alternatives separately.
+# the top, and equal weighting keeps the comparison about the ranking itself.
 
 # %% [markdown]
 # ## D. Walk-forward structure
@@ -311,10 +315,10 @@ print(
 # %%
 eligible_per_date = decisions["n_eligible"]
 print(
-    f"Decision dates {len(decisions):,} of {len(breadth):,} dated in the archive | eligible "
-    f"stocks per decision date {eligible_per_date.mean():.0f} on average, "
-    f"{eligible_per_date.min():,} at the fewest and {eligible_per_date.max():,} at the widest, "
-    f"under the floor on {(eligible_per_date < BREADTH_FLOOR).sum()} of them"
+    f"Decision dates {len(decisions):,} of {len(breadth):,} dated in the archive | eligible per "
+    f"date {eligible_per_date.mean():.0f} on average, {eligible_per_date.min():,} at the fewest "
+    f"and {eligible_per_date.max():,} at the widest, under the floor on "
+    f"{(eligible_per_date < BREADTH_FLOOR).sum()} of them"
 )
 
 # %% [markdown]
@@ -322,9 +326,8 @@ print(
 #
 # `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone, rolling back from
 # the holdout so the most recent fold is the first generated. Between each training and
-# validation block sits a purge gap the width of the label horizon, stopping a label computed
-# inside training from resolving inside validation. The figure draws those boundaries, so it
-# and the folds agree by construction.
+# validation block sits a purge gap the width of the label horizon, so a label computed inside
+# training cannot resolve inside validation. The figure draws those boundaries.
 
 # %%
 splits = generate_cv_splits(
@@ -356,9 +359,8 @@ plt.show()
 # | Knob | Evidence | Revise it when |
 # |---|---|---|
 # | `universe.n_assets` | B.1 count, B.2 breadth | eligible breadth falls under what both legs of the sort need |
-# | `costs.model` | B.3 per-share cost across the cross-section | per-stock quotes replace the assumption, or prices stop spanning orders of magnitude |
-# | `decision.cadence` | B.3 exceedance, B.4 persistence | moves stop clearing the round trip at the primary horizon |
-# | `labels.primary` | B.5 ratio at each horizon | a longer horizon buys more than the turnover it saves |
+# | `costs.model` | B.3 per-share cost across the universe | per-stock quotes replace the assumption, or prices stop spanning orders of magnitude |
+# | `decision.cadence`, `labels.primary` | B.3 exceedance, B.4 persistence, B.5 ratio | moves stop clearing the round trip, or a longer horizon buys more than the turnover it saves |
 # | `evaluation.n_splits` | D.1 decision dates, D.2 boundaries | the folds no longer fit ahead of the holdout |
 
 # %%
@@ -379,22 +381,20 @@ print(
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **Count the universe under the screen the pipeline applies, on every decision date.** A
-#    total drawn from the whole archive counts stocks that were not tradable when the strategy
+# 1. **Count the universe under the screen the pipeline applies, on every decision date**, since
+#    a total drawn from the whole archive counts stocks that were not tradable when the strategy
 #    would have acted, and a date the exchange closed is not a decision date.
 # 2. **Take returns from the adjusted series, never the printed one**, where a split shows up
 #    as a move of tens of percent.
 # 3. **Check a per-share cost assumption against the price distribution before adopting it**,
-#    because a fixed number of cents is a different fraction of every stock.
-# 4. **Compute a panel autocorrelation inside each entity, never across the stack**, or it
-#    measures where one stock's history is glued to the next one's.
+#    since a fixed number of cents is a different fraction of every stock.
+# 4. **Compute a panel autocorrelation inside each entity, never across the stack**, or it just
+#    measures where one stock's history is glued to the next.
 #
 # ### Known limitations
 #
-# - The archive ends in the first quarter of 2018, so there is nothing more recent than the
-#   declared holdout to test on.
-# - Cost is one proportional assumption applied to every stock and date; quotes at panel scale
-#   would let it vary by name and era, and the cost stage sweeps a grid instead.
-# - Borrow on the short leg is a flat annual assumption, neither flat across names nor stable.
+# - The archive ends in the first quarter of 2018, so nothing is more recent than the holdout.
+# - Cost is one proportional assumption for every stock and date, not a quote per name and era.
+# - Borrow on the short leg is a flat annual assumption, neither flat nor stable in practice.
 #
 # **Next**: labels at the declared horizons, built on this development window.
