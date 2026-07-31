@@ -18,7 +18,7 @@
 #
 # `config/setup.yaml` declares a cross-sectional long-short strategy on Binance perpetual futures:
 # which contracts trade, that decisions land on the eight-hour funding schedule, what crossing costs
-# and how the sample is split. This notebook asks whether the data supports it, and fits nothing.
+# and how the sample splits. This notebook asks whether the data supports it, and fits nothing.
 #
 # ## Learning objectives
 #
@@ -82,6 +82,7 @@ HORIZONS = sorted(
 )
 MAKER_RT, TAKER_RT = (2 * SETUP["costs"]["fee_schedule"][k] for k in ("maker_bps", "taker_bps"))
 PREMIUM = "premium_index_close"
+AVAILABLE = pl.col("timestamp") + pl.duration(hours=BAR_HOURS)  # a bar is known when it closes
 ACF_LAGS = 21 * 24 // BAR_HOURS  # three weeks of funding periods
 
 print(
@@ -94,12 +95,11 @@ print(
 #
 # A perpetual future has no expiry, so the venue keeps it near the index it tracks by making one
 # side pay the other every eight hours. The premium index is the running measure that payment is
-# computed from, positive while the perpetual trades above that index and negative below. That
-# payment is a cash flow between longs and shorts rather than a cost, and this strategy does not
-# collect it - it ranks contracts on their premium and holds the price move that follows. Three
-# questions decide whether that is worth building: are the declared contracts quoting at the funding
-# timestamp, is a typical move large next to the fee, and does the sample hold enough independent
-# observations.
+# computed from, and it takes both signs. The payment is a cash flow between longs and shorts rather
+# than a cost, and this strategy does not collect it - it ranks contracts on their premium and holds
+# the price move that follows. Three questions decide whether that is worth building: are the
+# declared contracts quoting at the funding timestamp, is a typical move large next to the fee, and
+# are there enough independent observations in the sample.
 
 # %% [markdown]
 # ## B. Universe and cost feasibility
@@ -107,14 +107,15 @@ print(
 # ### B.1 Load and verify the declared universe
 #
 # The loader aggregates raw hourly bars onto the funding grid, so one row is one contract at one
-# settlement. A bar is labelled at its opening timestamp and not known until it closes a period
-# later, which is the clock every filter here runs on. The panel is unbalanced by listing date.
+# settlement, labelled at the bar's opening timestamp. That timestamp moves onto the availability
+# clock once, here, and the seal, the folds and the horizons all read it. The panel is unbalanced.
 
 # %%
 bars = load_crypto_perps(
     frequency=f"{BAR_HOURS}h", start_date=START_DATE, end_date=END_DATE, max_symbols=MAX_SYMBOLS
-).sort(["symbol", "timestamp"])
-research = bars.filter(pl.col("timestamp") + pl.duration(hours=BAR_HOURS) < HOLDOUT_TS)
+)
+bars = bars.with_columns(AVAILABLE).sort(["symbol", "timestamp"])
+research = bars.filter(pl.col("timestamp") < HOLDOUT_TS)
 
 loaded = set(research["symbol"].unique().to_list())
 assert not loaded - DECLARED, f"in the data, undeclared in setup.yaml: {sorted(loaded - DECLARED)}"
@@ -127,7 +128,7 @@ print(
 # ### B.2 Breadth at every funding timestamp
 #
 # One count of the universe hides what a cross-sectional book has to answer: how many contracts are
-# quoting when it rebalances. A sleeve of k per side needs twice k, set by the widest grid entry.
+# quoting when it rebalances. A sleeve of k per side needs twice k, from the widest grid entry.
 
 # %%
 breadth = research.group_by("timestamp").agg(n=pl.col("symbol").n_unique()).sort("timestamp")
@@ -152,11 +153,10 @@ plt.show()
 # ### B.3 What a move is worth against the fee
 #
 # `setup.yaml::costs.fee_schedule` charges a flat fee per trade in two tiers rather than a
-# per-contract spread, so cost here is a level the venue publishes rather than something this data
-# measures. A move counts only when the bar it ends on sits exactly one horizon ahead: four
-# contracts are missing settlements in 2022, and a positional shift would price a three-day move as
-# an eight-hour one. Both round trips are drawn against those moves at each declared horizon, on one
-# log axis, so the fraction clearing a tier is read off the curve.
+# per-contract spread, so cost here is a level the venue publishes, not something this data measures.
+# A move counts only when the bar it ends on sits exactly one horizon ahead: four contracts are
+# missing settlements in 2022, and a positional shift would price a three-day move as an eight-hour
+# one. Both round trips are drawn against those moves on one log axis.
 
 # %%
 moves = bars
@@ -164,7 +164,7 @@ for h in HORIZONS:
     endpoint = pl.col("timestamp") + pl.duration(hours=h)
     ahead = pl.col("close").shift(-h // BAR_HOURS).over("symbol")
     on_grid = pl.col("timestamp").shift(-h // BAR_HOURS).over("symbol") == endpoint
-    known = endpoint + pl.duration(hours=BAR_HOURS) < HOLDOUT_TS
+    known = endpoint < HOLDOUT_TS
     moves = moves.with_columns(
         pl.when(on_grid & known).then((ahead / pl.col("close") - 1).abs() * 1e4).alias(f"h{h}")
     )
@@ -191,9 +191,9 @@ plt.show()
 # ### B.4 How long the premium describes the contract
 #
 # Ranking contracts every funding period is only worth the turnover if what the premium says at one
-# settlement still describes the same contract at the next. That is an autocorrelation, computed
-# inside each contract: stacking the panel and correlating it measures where two contracts meet.
-# Lags are counted by row, so each contract contributes its longest unbroken run of settlements.
+# settlement still describes the same contract at the next. That is an autocorrelation computed
+# inside each contract - stacking the panel measures where two of them meet - and over each
+# contract's longest unbroken run, because the helper counts lags by row.
 
 # %%
 gap = pl.col("timestamp").diff().over("symbol").ne(pl.duration(hours=BAR_HOURS)).fill_null(True)
@@ -218,9 +218,8 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# Persistence describes one contract through time. A cross-sectional book also needs contracts to
-# disagree at one timestamp, so quantiles are taken there and only then thinned to a daily median:
-# pooling three settlements first folds the level's own movement into the band a ranking reads.
+# A cross-sectional book also needs contracts to disagree at one timestamp, so quantiles are taken
+# there and thinned to a daily median only after: pooling first folds the level into the band.
 
 # %%
 BANDS = (("lo", 0.1), ("mid", 0.5), ("hi", 0.9))
@@ -274,24 +273,22 @@ print(
 #
 # `setup.yaml::decision.cadence` rebalances on the funding grid and executes at the funding
 # timestamp. That is an information schedule rather than a hyperparameter to sweep: a new premium
-# observation exists only when a period settles, so a decision between two settlements reads the
-# same premium twice and pays the fee twice. B.4 supports holding through at least one period.
+# observation exists only when a period settles, so a decision between settlements reads the same
+# premium twice and pays twice for it. B.4 supports holding through at least one period.
 #
 # ### C.2 Kill conditions
 #
 # Four falsifiable checkpoints send the strategy back to the drawing board, each tested where its
-# evidence exists: a gross return the fee erases, in Chapter 16; a premium that stops predicting
-# before the next funding timestamp, in Chapter 7 through the information coefficient rather than
-# the autocorrelation above; a venue change to the funding formula, cap or interval, leaving the
-# training distribution to describe a product that no longer exists; and an equal-weight
-# cross-section reaching a higher Sharpe and shallower drawdown on every fold, in Chapter 17.
+# evidence exists: a gross return the fee erases, in Chapter 16; a premium that stops predicting by
+# the next funding timestamp, in Chapter 7 through the information coefficient; a venue change to
+# the funding formula, cap or interval, leaving the training distribution describing a product that
+# no longer exists; and an equal-weight cross-section with a higher Sharpe, in Chapter 17.
 #
 # ### C.3 Mapping class
 #
-# `setup.yaml::mapping.class` ranks contracts on the premium and holds both legs. A perpetual is
-# symmetrically tradable from either side, so a long-only restriction would discard half the
-# cross-section and leave in the position the common level that B.4 shows is most of what the
-# premium does. Sizing is equal weight or risk parity: Chapter 16 fixes the first, Chapter 17 sweeps.
+# `setup.yaml::mapping.class` ranks contracts on the premium and holds both legs, which a perpetual
+# allows from either side and which cancels the level B.4 shows is most of what the premium does.
+# Sizing is equal weight or risk parity: Chapter 16 fixes the first, Chapter 17 sweeps the rest.
 
 # %% [markdown]
 # ## D. Walk-forward structure
@@ -318,10 +315,10 @@ print(
 # %% [markdown]
 # ### D.2 Fold demonstration
 #
-# `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone. Between each training
-# and validation block sits a purge gap the width of the label horizon, so a label computed at the
-# end of training cannot resolve inside validation. The figure draws those boundaries rather than
-# recomputing them. The util returns folds newest first, so the reordering below stays local here.
+# `generate_cv_splits` anchors the folds on the timeline it is handed and the widths in
+# `setup.yaml::evaluation`, purging between training and validation by the label horizon so a label
+# computed at the end of training cannot resolve inside validation. The figure draws those
+# boundaries rather than recomputing them. Folds come back newest first and are reordered here.
 
 # %%
 splits = sorted(
@@ -334,7 +331,10 @@ for position, split in enumerate(splits):
     split["fold"] = position
 last_val = max(split["val_end"] for split in splits)
 assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
-assert last_val < pd.Timestamp(HOLDOUT_START, tz="UTC"), "a fold reaches into the holdout"
+holdout_opens = pd.Timestamp(HOLDOUT_START, tz="UTC")
+assert last_val + pd.Timedelta(LABEL_BUFFER) < holdout_opens, (
+    "a fold's last label reaches the holdout"
+)
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 fold_timeline(ax, splits, holdout=(HOLDOUT_START, HOLDOUT_END))
@@ -384,15 +384,15 @@ print(
 #    dates give breadth a history the declared sleeve has to fit inside at every timestamp.
 # 2. **Compute a panel autocorrelation inside each entity, over unbroken stretches.** Stacking
 #    contracts measures where two of them meet; counting lags by row measures across the gaps.
-# 3. **Turn persistence into an observation count before trusting a sample size.** Where the
-#    initial positive sequence runs past the lags you drew, that count is a ceiling, not a level.
-# 4. **Separate the common level from the cross-sectional spread.** A ranking reads only what is
-#    left once the level both legs cancel comes out, and here the level is the larger part.
+# 3. **Turn persistence into an observation count before trusting a sample size**, and read it as a
+#    ceiling where the initial positive sequence runs past the lags you drew.
+# 4. **Separate the common level from the cross-sectional spread.** A ranking reads what is left
+#    once the level both legs cancel comes out, and here the level is the larger part.
 #
 # ### Known limitations
 #
 # - The contract list is fixed and was drawn knowing which perpetuals stayed listed, so it carries
-#   selection and delisting bias.
+#   selection and delisting bias, and the earliest folds see a much narrower cross-section.
 # - Cost is the published fee alone; slippage and the entry spread need a notional and enter at the
 #   cost stage. Funding itself is a cash flow this strategy does not collect - labels and backtest
 #   measure the price move net of fees, and the premium enters only as a feature.
