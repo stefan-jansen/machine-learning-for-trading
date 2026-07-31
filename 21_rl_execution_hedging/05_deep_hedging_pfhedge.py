@@ -155,9 +155,10 @@ print(f"Configuration: {config}")
 #
 # We use the `pfhedge` implementation with an expected-shortfall objective and
 # compare it against analytical friction-aware baselines (Black-Scholes delta,
-# Whalley-Wilmott). Section 2 defines a from-scratch PyTorch implementation
-# that is trained and evaluated on GBM paths in Section 3b as a reference
-# check; the pfhedge Heston-stock run here remains the primary measurement.
+# Whalley-Wilmott). Section 2 defines a from-scratch PyTorch implementation for
+# readers who want the mechanics without the library; Section 3b trains it on
+# GBM paths when `RUN_REFERENCE_IMPL` is set. The pfhedge Heston-stock run here
+# is the measurement the rest of the notebook reports.
 
 # %%
 criterion = ExpectedShortfall(config["expected_shortfall_q"]).to(config["device"])
@@ -243,10 +244,10 @@ print(
 # the mechanics outside the `pfhedge` library. The network maps the state vector
 # $(\log(S/K),\; \tau,\; \sigma,\; \delta_{\text{prev}})$ to a hedge position
 # $\delta \in [0, 1]$ via a sigmoid output and trains by minimizing an
-# expected-shortfall surrogate over terminal P&L. The implementation is
-# invoked in Section 3b on GBM paths (its native model) as a sanity check that
-# the from-scratch training loop converges to a coherent hedger; the §6
-# summary table reports its P&L statistics alongside the pfhedge run.
+# expected-shortfall surrogate over terminal P&L. Section 3b runs it on GBM
+# paths, its native model, as a check that the from-scratch training loop
+# converges to a coherent hedger. That run is a reader-enabled option rather
+# than part of the headline comparison, so `RUN_REFERENCE_IMPL` controls it.
 
 # %% [markdown]
 # ### Hedger Network
@@ -583,14 +584,12 @@ deep_seed_summary
 # %% [markdown]
 # ## 3b. From-Scratch Reference Run on GBM Paths (optional)
 #
-# When `RUN_REFERENCE_IMPL` is enabled, train the `CustomDeepHedger` defined in
-# §2 once at the representative seed on GBM paths with the same volatility,
-# maturity, strike, and cost rate. The from-scratch model assumes
-# constant-volatility GBM, so it is trained and evaluated on its native model,
-# a convergence sanity check on the §2 implementation, **not** a head-to-head
-# against the pfhedge Heston run. Because the two use different stochastic
-# models it is excluded from the §6 four-method comparison by default; set
-# `RUN_REFERENCE_IMPL = True` to compute and display it.
+# Setting `RUN_REFERENCE_IMPL = True` trains the `CustomDeepHedger` from §2 once
+# at the representative seed, on GBM paths with the same volatility, maturity,
+# strike, and cost rate, and adds its P&L statistics to the §6 table. The
+# from-scratch model assumes constant-volatility GBM, so it is trained and
+# evaluated on its native process: this is a convergence check on the §2
+# implementation, and its P&L is not comparable with the pfhedge Heston run.
 
 # %% [markdown]
 # Evaluation rolls the fitted custom network over a fresh GBM draw and applies
@@ -1245,11 +1244,12 @@ if config["export_results"]:
 #
 # 3. **Heston for pfhedge, GBM for the from-scratch reference**: The pfhedge
 #    underlier is configured as a Heston stochastic-volatility process
-#    (parameters in the config dict above). The §3b from-scratch reference run
-#    uses GBM with the same volatility. The §6 summary reports both rows
-#    together, but their P&L distributions are not directly comparable because
-#    the underlying simulator differs. A controlled Heston-vs-GBM training
-#    comparison is left to Section 21.6.
+#    (parameters in the config dict above), while the §3b from-scratch reference
+#    run uses GBM with the same volatility. Whenever both are run, their P&L
+#    distributions are not directly comparable because the underlying simulator
+#    differs, which is why the §6 table carries the simulator in every row
+#    label. A controlled Heston-vs-GBM training comparison is left to
+#    Section 21.6.
 #
 # 4. **Seed stability matters**: Reporting multiple training seeds reduces the
 #    risk of overinterpreting a single favorable run. The representative seed
