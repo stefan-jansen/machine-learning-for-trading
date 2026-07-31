@@ -67,7 +67,6 @@ from utils.style import COLORS
 OUTPUT_DIR = get_output_dir(21, "algorithms_comparison")
 
 # %% tags=["parameters"]
-N_EPISODES = 50
 TIMESTEPS_PER_EPISODE = 252
 TOTAL_TIMESTEPS = 50_000
 EVAL_EPISODES = 10
@@ -80,7 +79,6 @@ set_global_seeds(SEED)
 # %%
 # Configuration
 config = {
-    "n_episodes": N_EPISODES,
     "timesteps_per_episode": TIMESTEPS_PER_EPISODE,
     "total_timesteps": TOTAL_TIMESTEPS,
     "eval_episodes": EVAL_EPISODES,
@@ -455,7 +453,7 @@ for name, traj in trajectories.items():
 # %%
 # Configure layout and display
 fig.update_layout(
-    title=f"{most_active} learns the most active policy under an equal training budget",
+    title="Only one of the three algorithms keeps switching position",
     height=800,
     showlegend=True,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -498,7 +496,7 @@ for name, traj in trajectories.items():
     )
 
 fig.update_layout(
-    title=f"{most_active} uses the broadest action mix on the diagnostic path",
+    title="Two of the three algorithms collapse onto a single position",
     xaxis_title="Chosen Position",
     yaxis_title="Count (days)",
     barmode="group",
