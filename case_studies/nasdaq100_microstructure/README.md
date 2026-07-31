@@ -18,7 +18,7 @@ This case study uses AlgoSeek TAQ-derived 15-minute bars for 114 NASDAQ-100 cons
 
 | Stage | Notebook | Chapter | Description | Writes |
 |-------|----------|---------|-------------|--------|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Empirical half-spreads, horizon feasibility vs cost floor, baseline lagged-return IC, walk-forward demo | `config/exploration/feasibility_report.json`, `liquidity_profile.parquet`, `liquidity_tod_profile.parquet` |
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Measured per-symbol round-trip cost, breadth and move clearance by horizon, return persistence, walk-forward demo | `liquidity_profile.parquet` |
 | Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 15-minute, 5-minute, and 60-minute forward returns | One parquet per label in `labels/` (`fwd_ret_15m` plus the `fwd_ret_5m`, `fwd_ret_60m`, `fwd_dir_15m` variants) |
 | Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | Order-flow, spread, volatility, and microstructure features | `features/financial.parquet` |
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward temporal features for intraday patterns | `features/model_based.parquet` |

@@ -1805,9 +1805,7 @@ case_studies/fx_pairs/16_risk_management: *id003
 case_studies/fx_pairs/17_strategy_analysis:
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
   parameters:
-    ADV_THRESHOLD: 0
     MAX_SYMBOLS: 5
-    START_DATE: '2000-01-01'
   timeout: 120
 case_studies/nasdaq100_microstructure/02_labels:
   parameters:
