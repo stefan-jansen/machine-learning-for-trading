@@ -4,6 +4,7 @@ import sqlite3
 from datetime import date
 
 import polars as pl
+import pytest
 
 from tests.fixtures.seed_results import _backfill_all_prediction_parquets
 
@@ -137,3 +138,136 @@ def test_an_underivable_window_still_respects_the_split_boundary(tmp_path):
 
     assert validation["timestamp"].max() < holdout_start
     assert holdout["timestamp"].min() >= holdout_start
+
+
+# --- Cohort-leader handling -------------------------------------------------
+#
+# A label's cohort leader is the frozen carrier a strategy-analysis/portfolio/cost/
+# risk notebook resolves by hash and checks against real historical values, so it is
+# the one prediction the synthetic rewrite must not touch. All three tests use
+# crypto_perps_funding because it is the only case study with rewrite_existing set;
+# everywhere else an existing artifact is already left alone and the exemption is
+# unobservable.
+
+LEADER_PRED = "hash_leader"
+LEADER_BT = "bt_leader_signal"
+
+_COHORT_DDL = (
+    "CREATE TABLE cohort_metrics (cohort_type TEXT, label TEXT, stage TEXT, leader_hash TEXT)"
+)
+_COHORT_DDL_NO_STAGE = (
+    "CREATE TABLE cohort_metrics (cohort_type TEXT, label TEXT, leader_hash TEXT)"
+)
+
+
+def _crypto_registry(run_log, cohort_ddl):
+    """Registry with one leader prediction and one ordinary one."""
+    run_log.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(run_log / "registry.db") as connection:
+        connection.execute(
+            "CREATE TABLE prediction_sets "
+            "(prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE training_runs (training_hash TEXT PRIMARY KEY, label TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE backtest_runs "
+            "(backtest_hash TEXT PRIMARY KEY, prediction_hash TEXT, stage TEXT)"
+        )
+        connection.execute("INSERT INTO training_runs VALUES ('train_a', 'funding_next_8h')")
+        connection.executemany(
+            "INSERT INTO prediction_sets VALUES (?, ?, ?)",
+            [(LEADER_PRED, "train_a", "validation"), ("hash_other", "train_a", "validation")],
+        )
+        connection.execute(
+            "INSERT INTO backtest_runs VALUES (?, ?, 'signal')", (LEADER_BT, LEADER_PRED)
+        )
+        if cohort_ddl:
+            connection.execute(cohort_ddl)
+            if "stage TEXT" in cohort_ddl:
+                connection.execute(
+                    "INSERT INTO cohort_metrics VALUES ('stagelabel', 'funding_next_8h', "
+                    "'signal', ?)",
+                    (LEADER_BT,),
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO cohort_metrics VALUES ('stagelabel', 'funding_next_8h', ?)",
+                    (LEADER_BT,),
+                )
+
+
+def _write_carrier(run_log, prediction_hash, marker):
+    path = run_log / "predictions" / prediction_hash
+    path.mkdir(parents=True, exist_ok=True)
+    frame = pl.DataFrame(
+        {
+            "symbol": [marker, marker],
+            "timestamp": [date(2020, 1, 1), date(2020, 1, 2)],
+            "fold": [0, 0],
+            "prediction": [0.5, 0.25],
+            "actual": [0.4, 0.2],
+        }
+    )
+    frame.write_parquet(path / "predictions.parquet")
+    return frame
+
+
+def test_the_real_carrier_artifact_survives_the_crypto_rewrite(tmp_path):
+    """crypto normalizes every prediction onto one key/target panel. The carrier is
+    exempt: a notebook pins it by hash and correlates its target against real raw
+    prices, which synthetic noise cannot pass."""
+    cs_dir = tmp_path / "crypto_perps_funding"
+    run_log = cs_dir / "run_log"
+    _crypto_registry(run_log, _COHORT_DDL)
+    leader_before = _write_carrier(run_log, LEADER_PRED, "REALCARRIER")
+    other_before = _write_carrier(run_log, "hash_other", "STALE")
+
+    _backfill_all_prediction_parquets(cs_dir, "crypto_perps_funding")
+
+    leader_after = pl.read_parquet(run_log / "predictions" / LEADER_PRED / "predictions.parquet")
+    other_after = pl.read_parquet(run_log / "predictions" / "hash_other" / "predictions.parquet")
+    assert leader_after.equals(leader_before), "the cohort leader's real artifact was overwritten"
+    assert not other_after.equals(other_before), (
+        "hash_other was left alone, so the rewrite this exemption carves out of did not run "
+        "and the assertion above passes for the wrong reason"
+    )
+
+
+def test_a_leader_with_no_artifact_is_named_not_silently_synthesized(tmp_path):
+    """Nothing here can reconstruct the artifact, so the gap is reported by hash at
+    regeneration time rather than left to surface as a correlation failure several
+    notebooks downstream."""
+    cs_dir = tmp_path / "crypto_perps_funding"
+    run_log = cs_dir / "run_log"
+    _crypto_registry(run_log, _COHORT_DDL)
+    _write_carrier(run_log, "hash_other", "STALE")
+
+    with pytest.warns(RuntimeWarning, match=LEADER_PRED):
+        _backfill_all_prediction_parquets(cs_dir, "crypto_perps_funding")
+
+
+def test_a_cohort_metrics_table_missing_stage_is_not_swallowed(tmp_path):
+    """An emptied leader set is the dangerous outcome, not a missing one: every real
+    carrier artifact then goes back through the synthetic rewrite, reported as success.
+    """
+    cs_dir = tmp_path / "crypto_perps_funding"
+    run_log = cs_dir / "run_log"
+    _crypto_registry(run_log, _COHORT_DDL_NO_STAGE)
+    _write_carrier(run_log, LEADER_PRED, "REALCARRIER")
+
+    with pytest.raises(sqlite3.OperationalError, match="stage"):
+        _backfill_all_prediction_parquets(cs_dir, "crypto_perps_funding")
+
+
+def test_a_registry_without_cohort_metrics_still_seeds(tmp_path):
+    """The one condition the existence guard tolerates."""
+    cs_dir = tmp_path / "crypto_perps_funding"
+    run_log = cs_dir / "run_log"
+    _crypto_registry(run_log, None)
+
+    _backfill_all_prediction_parquets(cs_dir, "crypto_perps_funding")
+
+    for prediction_hash in (LEADER_PRED, "hash_other"):
+        assert (run_log / "predictions" / prediction_hash / "predictions.parquet").is_file()

@@ -14,6 +14,7 @@ already present (real upstream runs take priority).
 import hashlib
 import json
 import sqlite3
+import warnings
 from pathlib import Path
 
 import yaml
@@ -768,7 +769,9 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     never claim decisions outside the split it is registered under. Predictions
     are random noise. Crypto artifacts are normalized even when copied
     intermediates exist because its model analysis requires one common key and
-    target panel.
+    target panel - except each label's cohort-leader prediction, which a
+    replay notebook pins by hash and checks against real historical values;
+    those keep whatever real artifact already exists on disk.
     """
     db_path = cs_dir / "run_log" / "registry.db"
     if not db_path.exists():
@@ -807,6 +810,35 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
             (r[0], None, None)
             for r in db.execute("SELECT prediction_hash FROM prediction_sets").fetchall()
         ]
+    # Cohort-leader predictions - the frozen carrier a strategy-analysis/portfolio/
+    # cost/risk notebook resolves via cohort_metrics(cohort_type='stagelabel',
+    # stage='signal') and pins by hash. Those notebooks check the carrier's real
+    # historical target against real raw prices (e.g. a >0.99 correlation gate), which
+    # synthetic noise can never satisfy - so these hashes keep whatever real artifact
+    # is already on disk instead of being swept into the generic rewrite below.
+    # A registry predating the cohort_metrics table has no leaders to exempt, and that
+    # is the only condition worth tolerating here. Catching OperationalError outright
+    # would also absorb schema drift or a typo in the query, empty the exemption set,
+    # and let the rewrite below overwrite every real carrier artifact with noise.
+    has_cohort_metrics = (
+        db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cohort_metrics'"
+        ).fetchone()
+        is not None
+    )
+    cohort_leader_hashes: set = set()
+    if has_cohort_metrics:
+        cohort_leader_hashes = {
+            r[0]
+            for r in db.execute(
+                """
+                SELECT DISTINCT b.prediction_hash
+                FROM cohort_metrics c
+                JOIN backtest_runs b ON b.backtest_hash = c.leader_hash
+                WHERE c.cohort_type = 'stagelabel' AND c.stage = 'signal'
+                """
+            ).fetchall()
+        }
     db.close()
     if not hash_rows:
         return
@@ -925,10 +957,33 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         return templates[window]
 
     rewrite_existing = cs_id == "crypto_perps_funding"
+    missing_leaders = sorted(
+        p_hash
+        for p_hash in cohort_leader_hashes
+        if not (cs_dir / "run_log" / "predictions" / p_hash / "predictions.parquet").is_file()
+    )
+    if missing_leaders:
+        # The exemption above can only preserve an artifact that exists. A leader with
+        # none still falls through to the synthetic write, and the notebook that pins
+        # its hash then fails a >0.99 correlation gate against real prices several
+        # stages downstream, nowhere near this function. Nothing here can reconstruct
+        # the artifact - it has to be copied in from the production run_log - so the
+        # gap is reported by hash at regeneration time rather than left to surface as
+        # an unexplained correlation failure. Not fatal: seven of the nine fixtures
+        # are missing at least one leader artifact today, so raising would stop every
+        # regeneration on a pre-existing gap this function did not introduce.
+        warnings.warn(
+            f"{cs_id}: no predictions.parquet on disk for cohort-leader prediction(s) "
+            f"{', '.join(missing_leaders)}; each gets synthetic scores that a replay "
+            "notebook's historical-target check will reject. Copy the real artifacts "
+            "from the production run_log into the fixture.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     for p_hash, split, label in hash_rows:
         pred_dir = cs_dir / "run_log" / "predictions" / p_hash
         pred_file = pred_dir / "predictions.parquet"
-        if pred_file.exists() and not rewrite_existing:
+        if pred_file.exists() and (p_hash in cohort_leader_hashes or not rewrite_existing):
             continue
         template, n = _template_for(_window_for(split, label))
         pred_dir.mkdir(parents=True, exist_ok=True)

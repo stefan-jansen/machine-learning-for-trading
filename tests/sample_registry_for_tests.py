@@ -266,7 +266,47 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
     for row in src.execute(holdout_sql).fetchall():
         sampled_bt_hashes.add(row[0])
 
-    # 3c. Complete the downstream surface of every prediction sampled so far.
+    # 3c. Seed the FULL backtest grid (every stage) for each label's cohort leader -
+    # the frozen carrier a strategy-analysis notebook resolves via
+    # cohort_metrics(cohort_type='stagelabel', stage='signal'), same query
+    # `_baseline_leaders`-style notebooks use. Top-N-per-(family, stage) does not
+    # guarantee this specific prediction survives sampling: it may not dominate its
+    # family's |Sharpe| bucket in every stage. A notebook that pins an exact row
+    # count for the leader's own allocation/cost/risk grid then fails against an
+    # incomplete sample even though production satisfies it - the fixture would be
+    # testing its own sampling artifact, not the notebook.
+    leader_sql = """
+        SELECT DISTINCT b.prediction_hash
+        FROM cohort_metrics c
+        JOIN backtest_runs b ON b.backtest_hash = c.leader_hash
+        WHERE c.cohort_type = 'stagelabel' AND c.stage = 'signal'
+    """
+    # Registries predating cohort_metrics have no table to read; that is the only
+    # condition this step tolerates. Catching OperationalError outright would also
+    # swallow a schema drift, a locked database or a typo in leader_sql and report a
+    # successful sample built without any cohort leader.
+    src_has_cohort_metrics = (
+        src.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cohort_metrics'"
+        ).fetchone()
+        is not None
+    )
+    leader_prediction_hashes: set = set()
+    if src_has_cohort_metrics:
+        leader_prediction_hashes = {row[0] for row in src.execute(leader_sql).fetchall()}
+    if leader_prediction_hashes:
+        ph_list = list(leader_prediction_hashes)
+        full_grid_sql = """
+            SELECT backtest_hash FROM backtest_runs
+            WHERE prediction_hash IN ({placeholders})
+        """
+        for i in range(0, len(ph_list), 500):
+            batch = ph_list[i : i + 500]
+            sql = full_grid_sql.format(placeholders=",".join(["?"] * len(batch)))
+            for row in src.execute(sql, batch).fetchall():
+                sampled_bt_hashes.add(row[0])
+
+    # 3d. Complete the downstream surface of every prediction sampled so far.
     #
     # Top-N-per-(family, stage) slices across predictions, so it can retain a
     # prediction's signal and allocation rows while keeping only a few of its
@@ -276,9 +316,12 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
     # partial set fails a contract the production registry satisfies - the
     # fixture would be testing its own sampling artifact. Whichever prediction
     # survives sampling must therefore bring its complete downstream surface.
+    # Includes 'allocation' alongside cost_sensitivity/risk_overlay: a portfolio-
+    # management notebook that pins an exact allocation-grid row count for one
+    # prediction needs the same completeness guarantee those two stages already get.
     downstream_sql = """
         SELECT backtest_hash FROM backtest_runs
-        WHERE stage IN ('cost_sensitivity', 'risk_overlay')
+        WHERE stage IN ('allocation', 'cost_sensitivity', 'risk_overlay')
           AND prediction_hash IN (
               SELECT DISTINCT prediction_hash FROM backtest_runs
               WHERE backtest_hash IN ({placeholders})
@@ -310,6 +353,32 @@ def _populate_sample_db(src, dst, dst_db) -> dict:
                 ).fetchall()
                 count += _copy_rows(src, dst, table, rows)
             stats[table] = count
+
+        # 3e. Copy cohort_metrics rows whose leader_hash survived sampling. A
+        # strategy-analysis/portfolio/cost/risk notebook resolves its frozen carrier
+        # via cohort_metrics(cohort_type='stagelabel'|'label', ...) JOIN backtest_runs
+        # ON leader_hash - an empty table here makes that JOIN return nothing and every
+        # such notebook raise "no frozen carrier" regardless of how complete the
+        # backtest_runs sample is. Filtering by leader_hash membership in the sample
+        # is sufficient and correct: a row whose leader was not sampled would fail the
+        # same JOIN downstream anyway, so it is dropped exactly like an FK would.
+        has_cohort_metrics = (
+            src.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cohort_metrics'"
+            ).fetchone()
+            is not None
+        )
+        count = 0
+        if has_cohort_metrics:
+            for i in range(0, len(hash_list), batch_size):
+                batch = hash_list[i : i + batch_size]
+                placeholders = ",".join(["?"] * len(batch))
+                rows = src.execute(
+                    f"SELECT * FROM cohort_metrics WHERE leader_hash IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                count += _copy_rows(src, dst, "cohort_metrics", rows)
+        stats["cohort_metrics"] = count
 
     dst.commit()
 
@@ -773,6 +842,7 @@ def main() -> int:
             "backtest_runs",
             "backtest_metrics",
             "backtest_fold_metrics",
+            "cohort_metrics",
         ]:
             print(f"  {table:30s} {stats.get(table, 0):>6}")
         print(f"  {'backtest artifact dirs':30s} {stats.get('backtest_artifact_dirs', 0):>6}")
