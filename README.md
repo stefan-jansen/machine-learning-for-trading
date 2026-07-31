@@ -379,9 +379,10 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"   # Windows
 uv sync
 ```
 
-Option B compiles three dependencies from source, so it needs a **C/C++ compiler**: on Ubuntu
-or Debian `sudo apt install build-essential`, on macOS `xcode-select --install`, on Windows the
-Visual Studio Build Tools. Docker carries its own and needs none of this.
+Option B compiles several dependencies from source, `scikit-learn` among them, so it needs a
+**C/C++ compiler**: on Ubuntu or Debian `sudo apt install build-essential`, on macOS
+`xcode-select --install`. Docker carries its own and needs none of this. On Windows, use WSL2
+or Docker; installing into Windows Python is not supported and does not work.
 
 Budget about **16 GB** for Option B (11 GB environment, 4 GB free datasets, 0.9 GB of git
 history) and about 12 minutes for the data.

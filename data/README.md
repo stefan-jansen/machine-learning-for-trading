@@ -321,22 +321,27 @@ consulting the top-level doc.
 
 ## Storage Requirements
 
-| Tier          | Datasets                                        | Size    |
-| ------------- | ----------------------------------------------- | ------- |
-| Minimum       | ETFs, Crypto, Factors                           | ~70 MB  |
-| Standard      | + Macro, FX                                     | ~75 MB  |
-| **Free**      | **everything `--free-only` fetches**            | **~4.1 GB** |
-| With Equities | + US Equities                                   | ~740 MB |
-| With Futures  | + CME Futures                                   | ~825 MB |
-| Full          | + AlgoSeek slim package, ITCH, MBO              | ~7 GB   |
+Each row is a complete profile, not an increment on the row above. The first three were measured
+on a clean install; the additions below them are the individual dataset sizes to add on top.
 
-The **Free** row is the one most readers land on, because `--free-only` is what the README
-tells you to run. It is 4.1 GB rather than 75 MB entirely because of firm characteristics
-(4.0 GB, of which 3.5 GB is the `dl_asset_pricing` source archive). `--skip-firm-characteristics`
-puts you back at the Standard row.
+| Profile | Contents | Size | How you get it |
+|---|---|---|---|
+| Minimum | ETFs, Crypto, Factors | ~70 MB | the individual download scripts above |
+| Free, without firm characteristics | Minimum + Macro, FX, CFTC CoT, prediction markets | ~75 MB | `--free-only --skip-firm-characteristics` |
+| **Free** | **the row above + firm characteristics** | **~4.1 GB** | **`--free-only`** |
 
-These numbers are the environment's data only. The `uv` environment itself is a further ~11 GB
-on Linux and ~3 GB on macOS, and the git history is ~0.9 GB.
+| Add on top of any profile | Size |
+|---|---|
+| US Equities | ~670 MB |
+| CME Futures | ~85 MB |
+| AlgoSeek slim package, ITCH, MBO | ~6 GB |
+
+The **Free** row is where most readers land, because `--free-only` is what the README tells you
+to run. It is 4.1 GB rather than 75 MB entirely because of firm characteristics, which is 4.0 GB
+on its own, of which 3.5 GB is the `dl_asset_pricing` source archive.
+
+These are data sizes only. The `uv` environment is a further ~11 GB on Linux and ~3 GB on macOS,
+and the cloned git history is ~0.9 GB.
 
 ---
 

@@ -111,9 +111,17 @@ jobs:
           du -sh .venv data 2>/dev/null || true
           df -h . | tail -1
 
+  # Native Windows is documented as unsupported, and this job is what establishes that.
+  # It is expected to fail at `uv sync`: scikit-learn 1.6.1 has no Windows wheel for
+  # Python 3.14 and its source build dies on a generated path past the 260-character
+  # limit, even here where the Visual Studio Build Tools are already installed. It runs
+  # non-blocking so the claim keeps being re-tested — if it ever goes green, native
+  # Windows has become supportable and the docs should say so — without leaving a
+  # permanently red check that teaches everyone to ignore this workflow.
   windows:
-    name: Windows native (PowerShell)
+    name: Windows native (expected to fail, non-blocking)
     runs-on: windows-latest
+    continue-on-error: true
     timeout-minutes: 90
     defaults:
       run:

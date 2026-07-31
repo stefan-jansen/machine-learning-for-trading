@@ -40,8 +40,9 @@ macOS (`xcode-select --install`).
 | Disk | ~13 GB image + ~4 GB data | ~11 GB environment + ~4 GB data + ~1 GB git history |
 
 The compiler is not optional on the local path and it is the most common way a first install
-fails. Three dependencies (`hmmlearn`, `ruptures`, `shap`) publish no wheel for Python 3.14, so
-`uv` builds them from source, and without a compiler `uv sync` stops with:
+fails. Twelve locked packages publish no wheel for Python 3.14, so `uv` builds them from
+source; six of those are C or C++ (`scikit-learn`, `shap`, `hmmlearn`, `ruptures`, `econml`,
+`causalml`). Without a compiler `uv sync` stops with:
 
 ```
 error: command 'c++' failed: No such file or directory
@@ -54,9 +55,10 @@ sudo apt install build-essential      # Ubuntu, Debian, and inside WSL2
 xcode-select --install                # macOS
 ```
 
-On Windows, install the **Build Tools for Visual Studio** with the "Desktop development with
-C++" workload. If that sounds like more than you want to set up, use Docker or WSL2 instead;
-both avoid it.
+**Docker is the one path that avoids this**, because the image ships its own toolchain. WSL2
+does not avoid it: a local `uv` environment inside WSL2 is the Linux path, so it needs
+`build-essential` exactly as native Linux does. What WSL2 avoids is the *Windows* build, which
+does not work at all — see the note under [Platform Support](#platform-support).
 
 ---
 
