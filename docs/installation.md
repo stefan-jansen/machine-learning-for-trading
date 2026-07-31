@@ -294,11 +294,13 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
 
 ### macOS
 
-**Apple Silicon: use the local `uv` path, not Docker.** Everything the book needs either has an
-arm64 wheel or builds from source against the Xcode command-line tools, the same way it does on
-Linux, and Docker would add a 13 GB image for no benefit. Go to
+**Apple Silicon: use the local `uv` path, not Docker.** Everything in the main environment either
+has an arm64 wheel or builds from source against the Xcode command-line tools, the same way it
+does on Linux, so Docker would add a 13 GB image and change nothing. Go to
 [Local Setup with uv](#local-setup-with-uv-alternative-to-docker); this is the path walked on
-real hardware before every release.
+real hardware before every release. The one exception is the ten or so `ml4t-py312` notebooks,
+which have no arm64 build at all: they ship pre-executed, and
+[Py312 Image](#py312-image-specific-notebooks) covers running them under Rosetta if you want to.
 
 ```bash
 xcode-select --install                        # compiler, if you do not have it already
