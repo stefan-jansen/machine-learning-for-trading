@@ -74,7 +74,7 @@ COST_BPS = sum(SETUP["costs"]["per_leg_cost_bps_range"])  # round trip at the de
 HALF_SPREADS = [c for c in SETUP["backtest"]["sweep"]["cost_grid_half_spread_usd"] if c > 0]
 HALF_SPREAD_USD = HALF_SPREADS[len(HALF_SPREADS) // 2]
 
-MIN_PRICE = 5.0  # penny-stock floor, as 02_labels applies it
+MIN_PRICE = 5.0  # penny-stock floor, read from the price that printed
 MIN_ADV_USD = 1_000_000  # dollar volume a position has to be able to hide in
 ADV_WINDOW = 21  # sessions of history the liquidity screen averages over
 
@@ -351,8 +351,8 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# ## E. Derived artifacts. Nothing: the eligibility screen is a rule rather than a table, which
-# `02_labels` re-applies at each decision date from the same thresholds.
+# ## E. Derived artifacts. Nothing: the eligibility screen is a rule over the panel rather than a
+# table, so there is nothing here for a downstream notebook to read.
 #
 # ## F. Findings vs `setup.yaml`
 #
