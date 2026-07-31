@@ -16,39 +16,31 @@
 # %% [markdown]
 # # US Firm Characteristics: Feasibility Analysis
 #
-# This notebook tests whether the Chen-Pelger-Zhu (2020) anonymized firm-
-# characteristics panel can deliver on the strategy declared in
-# `config/setup.yaml`. `setup.yaml` is the canonical, hand-curated source of
-# truth: universe rules, costs, decision cadence, mapping class, labels, sweep
-# grid, evaluation protocol. This notebook does not write it. Instead, it
-# produces the evidence that justifies its values: cross-sectional breadth over
-# time, monthly return distributions relative to era-dependent transaction
-# costs, a walk-forward fold demonstration, and a return-to-cost scale ratio. Findings
-# persist to `config/exploration/feasibility_report.json`.
+# `config/setup.yaml` declares a monthly cross-sectional long-short strategy over the
+# Chen-Pelger-Zhu (2020) anonymized firm-characteristics panel: which firms are eligible,
+# how often the book turns over, what a round trip is assumed to cost, how the sample is
+# split. This notebook asks whether the data supports those declarations, and fits nothing.
 #
-# ## Learning Objectives
+# ## Learning objectives
 #
-# - Verify the data delivers what `setup.yaml` assumes (breadth, identity, holdout)
-# - Document the provider's point-in-time update conventions
-# - Compare monthly return scale with the declared transaction-cost range
-# - Demonstrate the operational walk-forward structure has adequate breadth per fold
-# - Persist findings as a stable artifact downstream notebooks can cite
+# - Count the cross-section on the date the strategy acts on, and read the share of monthly
+#   moves clearing an assumed round trip off an exceedance curve
+# - Measure how long a firm keeps its place in a characteristic ranking, and confirm the
+#   declared folds fit the sample without touching the holdout
 #
-# ## Book Reference
+# ## Book reference
 #
-# Chapter 6, Sections 6.2--6.6
+# Chapter 6, Sections 6.2-6.6. Reads the released panel through `load_firm_characteristics`
+# and `config/setup.yaml`, and writes nothing.
 #
 # ## Prerequisites
 #
-# - Firm characteristics data available via `load_firm_characteristics()`
-# - `config/setup.yaml` exists (canonical strategy spec)
-# - Understanding of walk-forward cross-validation (Section 6.5)
+# Walk-forward cross-validation, Section 6.5, and the trading setup the case study declares.
 
 # %%
-"""US Firm Characteristics: Feasibility Analysis."""
+"""US Firm Characteristics Case Study - Feasibility Analysis."""
 
-import json
-from datetime import UTC, datetime
+import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -56,721 +48,353 @@ import polars as pl
 import yaml
 from matplotlib.ticker import PercentFormatter
 
+from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
 from data import load_firm_characteristics
 from utils.cv_splits import generate_cv_splits
-from utils.paths import display_path, get_case_study_dir
-from utils.style import COLORS, add_message_title
+from utils.paths import get_case_study_dir
+from utils.style import COLORS, FIGSIZE, add_message_title
+
+warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_firm_characteristics"
 START_DATE = "1990-01-01"
-MAX_SYMBOLS = 0
+END_DATE = "2016-12-31"
 
 # %% [markdown]
 # ## Configuration
+#
+# Every knob is read from `setup.yaml`, and Section B computes on the development window
+# alone, so nothing the holdout contains can shape a choice made here. The three
+# characteristics carried through Section B are one apiece from the families Section C's
+# kill conditions name; the ranking the strategy trades uses all of them.
 
 # %%
-CASE_DIR = get_case_study_dir("us_firm_characteristics")
-CASE_DIR.mkdir(parents=True, exist_ok=True)
-EXPLORATION_DIR = CASE_DIR / "config" / "exploration"
-EXPLORATION_DIR.mkdir(parents=True, exist_ok=True)
+CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
+SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 
-with open(CASE_DIR / "config" / "setup.yaml") as f:
-    SETUP = yaml.safe_load(f)
-
-STRATEGY_ID = SETUP["strategy_id"]
-# Chen-Pelger-Zhu (2020) dataset coverage; restrict to post-1990 for modern
-# market structure. Dataset ends Dec 2016; holdout is the final year.
-END_DATE = "2016-12-31"
 HOLDOUT_START = str(SETUP["evaluation"]["holdout_start"])
-
-# Era boundary: decimalization (NYSE/AMEX 2001-01-29; NASDAQ 2001-04-09).
-DECIMALIZATION_DATE = "2001-01-29"
-
-# %% [markdown]
-# ---
-#
-# ## Section A: Orientation (Section 6.2)
-#
-# Firm characteristics (fundamentals) are the canonical input for cross-sectional
-# asset pricing in the academic literature (Fama-French, Hou-Xue-Zhang,
-# Gu-Kelly-Xiu, Chen-Pelger-Zhu). The CPZ (2020) panel is **fully anonymized**:
-# identifiers are anonymous but persistent within each released tensor block.
-# Returns are monthly. The provider updates annual characteristics at the end
-# of June and monthly characteristics at month-end for use in the next month.
-#
-# `setup.yaml` declares the trading setup. This notebook asks whether the data
-# delivers on those declarations:
-#
-# - **Universe**: Is cross-sectional breadth adequate for the largest top-k grid?
-# - **Costs**: How does monthly return scale compare with transaction costs
-#   (15--30 bps RT pre-decimalization, 5--15 bps RT post)?
-# - **Evaluation**: Do 10 annual walk-forward folds each carry enough cross-
-#   sectional breadth?
-# - **Holdout**: Is the holdout (2016) cleanly separated from training data?
-#
-# **Dominant frictions** for this case study:
-# - **Point-in-time discipline**: Provider update conventions are assumed because
-#   the release does not expose source filing or market-data vintages.
-# - **Short-side capacity**: Long-short requires borrow (the short leg targets
-#   growth stocks, which can be hard to borrow).
-# - **Universe anonymization**: The release includes only complete 46-feature
-#   observations and does not expose the original CRSP identifiers.
-# - **Illiquidity concentration risk**: ML can select from the smallest, widest-
-#   spread stocks (Avramov, Cheng, and Metzker 2020); realistic small-cap costs
-#   are 100--500 bps, not the 5--20 bps assumed for liquid names.
-
-# %% [markdown]
-# ---
-#
-# ## Section B: Universe and Cost Feasibility (Sections 6.3--6.4)
-
-# %% [markdown]
-# ### B.1 Load and Explore the Data
-
-# %%
-firm_chars = load_firm_characteristics(split="all")
-
-start_dt = pl.lit(START_DATE).str.to_date()
-end_dt = pl.lit(END_DATE).str.to_date()
-firm_chars = firm_chars.filter((pl.col("timestamp") >= start_dt) & (pl.col("timestamp") <= end_dt))
-
-n_dates = firm_chars["timestamp"].n_unique()
-n_rows = len(firm_chars)
-avg_stocks_per_month = n_rows // max(n_dates, 1)
+HOLDOUT_END = str(SETUP["evaluation"]["holdout_end"])
+PRIMARY_LABEL = SETUP["labels"]["primary"]
+LABEL_BUFFER = str(SETUP["labels"]["buffer"])
+BREADTH_FLOOR = 2 * max(SETUP["backtest"]["sweep"]["top_k_grid"][PRIMARY_LABEL])
+LEG_BPS = SETUP["costs"]["per_leg_cost_bps_range"]
+ROUND_TRIP_BPS = (2 * LEG_BPS[0], 2 * LEG_BPS[1])
+COST_LO, COST_HI = ROUND_TRIP_BPS[0] / 1e4, ROUND_TRIP_BPS[1] / 1e4
+CARRIERS = {"BEME": "book-to-market", "PROF": "profitability", "r12_2": "momentum"}
+ACF_LAGS = 12
 
 print(
-    f"Loaded firm characteristics: ~{avg_stocks_per_month:,} stocks/month, {n_dates} monthly dates"
+    f"Development {START_DATE} to {HOLDOUT_START} | sealed holdout to {HOLDOUT_END} | "
+    f"breadth floor {BREADTH_FLOOR} firms | assumed round trip {ROUND_TRIP_BPS} bps"
 )
-print(f"  Period: {firm_chars['timestamp'].min()} to {firm_chars['timestamp'].max()}")
-print(f"  Total rows: {n_rows:,}")
-print(f"  Persistent anonymous firms in active split: {firm_chars['symbol'].n_unique():,}")
 
 # %% [markdown]
-# **Note on identifiers**: the authors' NPZ tensors retain a fixed anonymous firm
-# axis within each train, validation, and test block. The canonical converter
-# preserves that axis as `symbol` and namespaces the blocks because the archive
-# does not publish a cross-block mapping. All operational folds and the 2016
-# holdout lie within the 1992-2016 test block, where identity is persistent.
-
-# %% [markdown]
-# ### B.2 Cross-Sectional Breadth Over Time
+# ## A. Orientation
 #
-# Monthly cross-sectional breadth is critical for this case study because
-# top-k sorts require sufficient firms per cross-section. We need at least
-# 100 stocks to fill the largest declared long-short configuration (50 per leg).
-# The CPZ release keeps complete cases across all 46 characteristics, so breadth
-# here is the complete-case count rather than a verified liquidity universe.
-
-# %%
-breadth = firm_chars.group_by("timestamp").agg(pl.len().alias("n_stocks")).sort("timestamp")
-
-print("Cross-sectional breadth (monthly):")
-print(f"  Min stocks/month:  {breadth['n_stocks'].min():,}")
-print(f"  Max stocks/month:  {breadth['n_stocks'].max():,}")
-print(f"  Mean stocks/month: {breadth['n_stocks'].mean():,.0f}")
-print(f"  Months: {len(breadth)}")
+# Firm characteristics are the standard input to cross-sectional asset pricing: accounting
+# ratios, price-based measures and turnover proxies, ranked across firms each month and
+# read as a forecast of the coming month's return. This release is anonymized, its firm
+# axis is persistent only inside each published block, and every retained row carries the
+# complete characteristic set, so the universe is the provider's completeness rule rather
+# than a liquidity screen. Three questions decide whether the declared setup is buildable:
+# is the cross-section wide enough on every decision date to fill both legs, is a typical
+# monthly move large next to what crossing it costs, and are there enough decision dates
+# for a walk-forward that never reads the holdout.
 
 # %% [markdown]
-# #### Visualize Breadth Over Time
+# ## B. Universe and cost feasibility
+#
+# ### B.1 Load and seal the development window
+#
+# The loader returns one row per firm and month, with the realized monthly return in `ret`.
+# The holdout is cut once, here, so everything below runs on data a design choice may see.
 
 # %%
-fig, ax = plt.subplots(figsize=(10, 4))
-years = breadth.with_columns(pl.col("timestamp").dt.year().alias("year"))
-annual = years.group_by("year").agg(pl.col("n_stocks").mean()).sort("year")
-ax.plot(
-    annual["year"].to_numpy(),
-    annual["n_stocks"].to_numpy(),
-    "o-",
-    color=COLORS["blue"],
-    linewidth=2,
+window = pl.col("timestamp").is_between(
+    pl.lit(START_DATE).str.to_date(), pl.lit(END_DATE).str.to_date(), closed="both"
 )
-ax.axhline(
-    100,
-    color=COLORS["amber"],
-    linestyle=":",
-    linewidth=1.5,
-    label="50 long + 50 short",
+research = (
+    load_firm_characteristics(split="all")
+    .filter(window & (pl.col("timestamp") < pl.lit(HOLDOUT_START).str.to_date()))
+    .sort(["symbol", "timestamp"])
 )
-ax.set_xlabel("Year")
-ax.set_ylabel("Average complete-case firms per month")
-add_message_title(
-    ax,
-    "Every year supports the largest declared long-short portfolio",
-    "Annual average complete-case breadth, 1990-2016",
+
+assert not set(CARRIERS) - set(research.columns), "a characteristic is absent from the release"
+assert research["timestamp"].max() < np.datetime64(HOLDOUT_START), "the frame reaches the holdout"
+print(
+    f"{research['symbol'].n_unique():,} firms, {len(research):,} firm-months, "
+    f"{research['timestamp'].min()} to {research['timestamp'].max()}"
 )
-ax.legend(loc="upper left")
+
+# %% [markdown]
+# ### B.2 Breadth at every decision date
+#
+# A cross-sectional book is filled on the date it rebalances, so what decides whether the
+# strategy is buildable is firms per month, not firms in the sample. The reference line is
+# both legs of the largest portfolio the sweep grid asks for.
+
+# %%
+breadth = research.group_by("timestamp").agg(pl.len().alias("n_firms")).sort("timestamp")
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.plot(breadth["timestamp"], breadth["n_firms"], color=COLORS["blue"], linewidth=1.2)
+ax.axhline(BREADTH_FLOOR, color=COLORS["copper"], ls="--", lw=1.5, label="both legs, largest k")
 ax.set_ylim(0, None)
-fig.show()
-
-# %% [markdown]
-# **Characteristic coverage**: the released panel is already a complete-case
-# sample, so each retained row carries all 46 firm characteristics. The check
-# below verifies that parser and filtering behavior preserve that contract.
-
-# %%
-char_cols = [c for c in firm_chars.columns if c not in ("ret", "timestamp", "symbol", "split")]
-coverage = firm_chars.select([pl.col(c).is_not_null().mean().alias(c) for c in char_cols]).row(
-    0, named=True
-)
-mean_coverage = float(np.mean(list(coverage.values())))
-low_coverage = {k: v for k, v in coverage.items() if v < 0.8}
-
-print(f"Characteristic coverage ({len(char_cols)} characteristics):")
-print(f"  Mean coverage: {mean_coverage:.1%}")
-if low_coverage:
-    print(f"  Below 80% coverage ({len(low_coverage)}):")
-    for k, v in sorted(low_coverage.items(), key=lambda x: x[1]):
-        print(f"    {k}: {v:.1%}")
-else:
-    print("  All characteristics above 80% coverage")
-
-# %% [markdown]
-# ### B.3 Trading Cost Analysis: Era-Dependent Horizon Feasibility
-#
-# `setup.yaml::costs` declares an era-dependent cost model:
-#
-# - **Pre-decimalization (before 2001-01-29)**: 15--30 bps per leg (30--60 bps RT).
-#   Tick size of $1/16$ ($0.0625$) widened spreads; commissions were ~3--5 cents/share.
-# - **Post-decimalization (2001-01-29 onward)**: 5--15 bps per leg (10--30 bps RT).
-#   Penny tick regime; electronic trading collapsed spreads.
-#
-# A long-short overlay further requires borrow on the short leg (~50 bps/yr).
-#
-# **Key question**: do typical monthly equity moves exceed costs in each era?
-
-# %%
-# Pre / post decimalization cost midpoints
-PRE_RT_COST = 0.0045  # 45 bps mid (pre-decimal RT range 30-60 bps)
-POST_RT_COST = 0.0020  # 20 bps mid (post-decimal RT range 10-30 bps)
-POOLED_RT_COST = POST_RT_COST  # primary feasibility uses post-decimal (sample-dominant era)
-ROUND_TRIP_COST_BPS = int(POST_RT_COST * 10_000)
-
-decimalization_dt = pl.lit(DECIMALIZATION_DATE).str.to_date()
-holdout_start_dt = pl.lit(HOLDOUT_START).str.to_date()
-
-monthly_returns = firm_chars.filter(
-    pl.col("ret").is_not_null() & (pl.col("timestamp") < holdout_start_dt)
-).select(["timestamp", "ret"])
-monthly_rets_arr = monthly_returns["ret"].to_numpy()
-abs_rets = np.abs(monthly_rets_arr)
-print(f"Monthly returns (pre-holdout, non-null): {len(monthly_rets_arr):,} stock-months")
-
-# %% [markdown]
-# #### Summary Statistics by Era
-#
-# Split absolute monthly returns into pre- and post-decimalization buckets to
-# show how the return-to-cost scale changes by era.
-
-# %%
-pre_mask = monthly_returns["timestamp"].to_numpy() < np.datetime64(DECIMALIZATION_DATE)
-post_mask = ~pre_mask
-
-pre_abs = abs_rets[pre_mask]
-post_abs = abs_rets[post_mask]
-
-
-def era_stats(data: np.ndarray, label: str, rt_cost: float) -> dict:
-    """Cost-exceedance statistics for one era."""
-    return {
-        "era": label,
-        "n_stock_months": int(len(data)),
-        "median_pct": float(np.median(data) * 100),
-        "mean_pct": float(np.mean(data) * 100),
-        "p75_pct": float(np.percentile(data, 75) * 100),
-        "p95_pct": float(np.percentile(data, 95) * 100),
-        "pct_above_rt_cost": float((data > rt_cost).mean() * 100),
-        "rt_cost_bps": float(rt_cost * 10_000),
-    }
-
-
-era_df = pl.DataFrame(
-    [
-        era_stats(pre_abs, "Pre-decimal (1990 -- 2001-01-28)", PRE_RT_COST),
-        era_stats(post_abs, "Post-decimal (2001-01-29 onward)", POST_RT_COST),
-    ]
-)
-era_df.select(
-    [
-        "era",
-        "n_stock_months",
-        pl.col("median_pct").round(2).alias("median %"),
-        pl.col("mean_pct").round(2).alias("mean %"),
-        pl.col("p75_pct").round(2).alias("p75 %"),
-        pl.col("p95_pct").round(2).alias("p95 %"),
-        pl.col("rt_cost_bps").alias("RT cost (bps)"),
-        pl.col("pct_above_rt_cost").round(1).alias("% > cost"),
-    ]
-)
-
-# %% [markdown]
-# **Fraction of monthly moves exceeding cost threshold** (pooled across the sample):
-
-# %%
-COST_THRESHOLDS_BPS = [10, 20, 30, 40, 60]
-pooled_row = {"horizon": "Monthly"}
-for cost_bps in COST_THRESHOLDS_BPS:
-    pooled_row[f"{cost_bps}_bps"] = float((abs_rets > cost_bps / 10_000).mean() * 100)
-cost_df = pl.DataFrame([pooled_row])
-cost_df.select(
-    [
-        "horizon",
-        pl.col("10_bps").round(1).alias("10 bps %"),
-        pl.col("20_bps").round(1).alias("20 bps %"),
-        pl.col("30_bps").round(1).alias("30 bps %"),
-        pl.col("40_bps").round(1).alias("40 bps %"),
-        pl.col("60_bps").round(1).alias("60 bps %"),
-    ]
-)
-
-# %% [markdown]
-# #### Visualize the Monthly Return Distribution
-#
-# Cost reference lines at 20 bps (post-decimal mid) and 60 bps (pre-decimal upper
-# bound, before borrow) show the cost-exceedance margin.
-
-# %%
-fig, ax = plt.subplots(figsize=(8, 4))
-xlim = 0.30  # clip far tail
-clipped = abs_rets[abs_rets < xlim]
-bins = np.linspace(0, xlim, 60)
-ax.hist(
-    clipped,
-    bins=bins,
-    density=True,
-    alpha=0.75,
-    color=COLORS["blue"],
-    edgecolor="white",
-)
-
-for bps, ls, lbl in [
-    (20, "--", "RT cost: 20 bps (post-decimal mid)"),
-    (60, ":", "RT cost: 60 bps (pre-decimal upper)"),
-]:
-    ax.axvline(
-        bps / 10_000,
-        color=COLORS["amber" if bps == 20 else "copper"],
-        linestyle=ls,
-        linewidth=2,
-        label=lbl,
-    )
-
-median_val = float(np.median(abs_rets))
-ax.axvline(
-    median_val,
-    color=COLORS["neutral"],
-    linestyle="-",
-    linewidth=1.5,
-    alpha=0.7,
-    label=f"Median: {median_val * 100:.1f}%",
-)
-
-frac_above_20 = float((abs_rets > 0.0020).mean())
-ax.text(
-    0.97,
-    0.62,
-    f"Median |ret|: {median_val * 100:.1f}%\n{frac_above_20:.0%} > 20 bps",
-    transform=ax.transAxes,
-    ha="right",
-    va="top",
-    fontsize=10,
-    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
-)
-
-ax.set_xlabel("Absolute monthly return")
-ax.set_ylabel("Density")
-ax.xaxis.set_major_formatter(PercentFormatter(1.0))
+ax.set_ylabel("Firms in the month-end cross-section")
+ax.legend(frameon=False, fontsize=8, loc="lower left")
 add_message_title(
     ax,
-    "Typical monthly stock moves exceed the baseline cost scale",
-    "Absolute pre-holdout returns; this is not a forecastable-edge estimate",
+    "The cross-section never comes near the floor both legs need",
+    subtitle="Complete-case firms at each month-end decision date",
 )
-ax.set_xlim(0, xlim)
-ax.legend(loc="upper right", fontsize=9)
-fig.show()
+plt.show()
 
 # %% [markdown]
-# #### Interpretation
+# ### B.3 What a move is worth against what a round trip costs
 #
-# Monthly return dispersion is large relative to the declared cost range, so the
-# data has enough cross-sectional movement for ranking research. This comparison
-# does not show that any predictable edge survives costs. That requires the
-# turnover-aware net backtests in notebooks 11-14.
-
-# %% [markdown]
-# ### B.4 Return-to-Cost Scale Ratio (Primary Label Horizon)
-#
-# The primary label is `fwd_ret_1m` (monthly; `setup.yaml::labels.primary`). The
-# scale diagnostic compares the typical realized move with the post-decimal
-# round-trip cost. It is not a strategy edge-to-cost ratio.
+# The release publishes ranks, not prices: no quote, no volume and no share count reaches
+# this notebook, so a per-firm cost cannot be measured from it and `setup.yaml::costs`
+# declares a per-leg band instead, doubled here into the round trip a rebalance pays. A
+# long-short sorts within the monthly cross-section, so start with how wide that is.
 
 # %%
-median_monthly_abs = float(np.median(abs_rets))
-return_cost_scale_ratio = median_monthly_abs / POOLED_RT_COST
-print(f"Median monthly |return|: {median_monthly_abs:.4f} ({median_monthly_abs * 10_000:.0f} bps)")
-print(f"Post-decimal RT cost: {POOLED_RT_COST:.4f} ({POOLED_RT_COST * 10_000:.0f} bps)")
-print(f"Monthly return-to-cost scale ratio: {return_cost_scale_ratio:.0f}x")
-print("Assessment: dispersion is sufficient; strategy feasibility remains untested")
+returns = research.select("timestamp", "ret").drop_nulls("ret")
+dispersion = (
+    returns.group_by("timestamp")
+    .agg((pl.col("ret").quantile(0.9) - pl.col("ret").quantile(0.1)).alias("interdecile"))
+    .sort("timestamp")
+)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.plot(dispersion["timestamp"], dispersion["interdecile"], color=COLORS["blue"], lw=1.2)
+ax.axhspan(COST_LO, COST_HI, color=COLORS["copper"], alpha=0.35, label="declared round trip")
+ax.set_yscale("log")
+ax.set_ylim(COST_LO / 2, None)
+ax.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=1))
+ax.set_ylabel("Interdecile range of firm returns (log scale)")
+ax.legend(frameon=False, fontsize=8, loc="lower left")
+add_message_title(
+    ax,
+    "The spread a long-short sorts within never approaches the round trip",
+    subtitle="Monthly 90th minus 10th percentile of firm returns, against the assumed round trip",
+)
+plt.show()
 
 # %% [markdown]
-# ---
-#
-# ## Section C: Design Decisions
-#
-# Design decisions are the strategy choices encoded in `setup.yaml`. They are
-# justified here in prose; the YAML is the canonical, hand-curated source of truth.
-
-# %% [markdown]
-# ### C.1 Decision Cadence
-#
-# `setup.yaml::decision.cadence: monthly_month_end` --- snapshot at month-end
-# close, execute at the next bar open (`execution_delay: next_bar_open`). Monthly
-# is the conventional cadence for cross-sectional firm-characteristics studies
-# (Fama and French 1993; Hou, Xue, and Zhang 2015; Gu, Kelly, and Xiu 2020;
-# Chen, Pelger, and Zhu 2022), which makes results directly comparable to
-# published benchmarks.
-#
-# **Why monthly is the natural choice here**:
-#
-# - The CPZ dataset *is* monthly; the `ret` column is the realized return over
-#   month $t$ given characteristics available for the prediction. Decision-cadence
-#   thinning is automatic; there is no sub-monthly grid to thin from.
-# - The provider updates annual characteristics at the end of June; rebalancing
-#   more frequently than monthly adds no new information from those variables.
-# - Long-short turnover at monthly cadence is manageable; weekly rebalancing
-#   would amplify rank-flip noise without a faster underlying signal.
-# - The provider updates annual variables at the end of June and monthly variables
-#   at month-end for the next month. The release does not expose source vintages,
-#   so this notebook documents that convention rather than claiming a uniform lag.
-
-# %% [markdown]
-# ### C.2 Kill Conditions
-#
-# Kill conditions are falsifiable checkpoints --- if any triggers, the strategy
-# is abandoned or substantially reworked. Defining them upfront prevents post-hoc
-# rationalization. The thresholds below are anchored to the feasibility evidence
-# above and to the firm-characteristics literature:
-#
-# - **KC1 (IC floor)**: no single factor (value, profitability, momentum) achieves
-#   cross-sectional IC > 0.01 with HAC t-stat > 2.0. Gate: Chapter 8 feature
-#   evaluation. The 46-characteristic universe gives ample exploratory breadth;
-#   if nothing clears this bar, the cross-sectional anomaly literature is not
-#   replicable on this sample.
-# - **KC2 (edge-cost)**: net performance fails after realistic transaction costs
-#   and borrow. Gate: notebooks 11-14. Section B.4 is only a return-scale check;
-#   it does not pre-clear this kill condition.
-# - **KC3 (incremental IC)**: all factor premia disappear after controlling for
-#   size and momentum (no incremental IC from fundamentals). Gate: Chapter 8
-#   factor decomposition.
-# - **KC4 (illiquidity concentration)**: long or short leg holds >50% in the
-#   least-liquid quintile by the released size, turnover, and spread proxies.
-#   Gate: notebooks 13 and 15.
-
-# %% [markdown]
-# ### C.3 Mapping Class
-#
-# `setup.yaml::mapping.class: long_short_top_k_rebalance`:
-# `position_state_space: long_short`,
-# `entry_logic: rank_top_k_long_bottom_k_short`,
-# `sizing: equal_weight_within_leg`. The reasoning:
-#
-# - **Long-short** is the canonical mapping for cross-sectional firm-
-#   characteristics anomalies because the bottom-ranked tail can carry
-#   negative-expected-return information (small-cap effects with the sign
-#   flipped, distressed firms, etc.). Long-only would discard this signal. Borrow
-#   is generally available for the mid- and large-cap subset most cross-sectional
-#   strategies touch at ~50 bps/yr (encoded in `costs.borrow_cost_note`).
-# - **Top-k sort** follows the declared grid of 5, 10, 20, and 50 names per leg.
-#   The largest portfolio uses about 4% of the average monthly cross-section and
-#   5.2% in the narrowest month.
-# - **Equal-weight within each leg** is the minimal-assumption sizing rule; it
-#   avoids introducing a secondary optimization (value-weighting, risk-parity,
-#   inverse-vol) that would confound evaluation of the ranking signal itself.
-#   Notebook 12 compares equal weighting with score and conformal weighting.
-
-# %% [markdown]
-# ---
-#
-# ## Section D: Walk-Forward Structure (Section 6.5)
-#
-# We verify the data supports the walk-forward design declared in
-# `setup.yaml::evaluation`: 10 splits, a 10-year train window, a 1-year
-# validation window,
-# `holdout_start=2016-01-01`, `holdout_end=2016-12-31`.
-
-# %% [markdown]
-# ### D.1 Effective Sample Size and Data Coverage
+# That spread widens in stress and has drifted down since the dot-com era: the opportunity
+# narrows rather than the cost rising. The exceedance curve asks the cost question
+# directly - pick a magnitude and the curve gives the fraction of firm-months that moved at
+# least that far, so where it crosses the band is the share that covered the round trip.
 
 # %%
-pre_holdout = firm_chars.filter(pl.col("timestamp") < holdout_start_dt)
-n_decision_dates = pre_holdout["timestamp"].n_unique()
-first_month = firm_chars["timestamp"].min()
-last_month = firm_chars["timestamp"].max()
-n_years = n_decision_dates / 12
+magnitude, fraction = exceedance_curve(returns["ret"].abs().to_numpy())
 
-print("Data Coverage:")
-print(f"  Period: {first_month} to {last_month}")
-print(f"  Pre-holdout decision points (months): {n_decision_dates}")
-print(f"  Approx pre-holdout years: {n_years:.1f}")
-print(f"  Holdout: {HOLDOUT_START} to {SETUP['evaluation']['holdout_end']}")
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.plot(magnitude * 1e4, fraction, color=COLORS["blue"], lw=1.6)
+ax.axvspan(*ROUND_TRIP_BPS, color=COLORS["copper"], alpha=0.35, label="declared round trip")
+ax.set_xscale("log")
+ax.set_xlim(1, 3e4)
+ax.set_xlabel("Absolute monthly return (bps, log scale)")
+ax.set_ylabel("Fraction of firm-months at least this large")
+ax.legend(frameon=False, fontsize=8, loc="lower left")
+add_message_title(
+    ax,
+    "Almost every monthly move is larger than the round trip it has to clear",
+    subtitle="Exceedance of absolute firm returns over the development window",
+)
+plt.show()
 
 # %% [markdown]
-# ### D.2 Walk-Forward Fold Demonstration
+# ### B.4 How long a firm keeps its place in the ranking
 #
-# `utils.cv_splits.generate_cv_splits` owns the operational split construction.
-# This cell calls that utility directly rather than maintaining a second manual
-# implementation. Each fold has:
-#
-# - **Train period**: 10 years
-# - **Validation period**: 1 year
-# - **Purge gap**: 1 month between train end and test start (matches the 1M
-#   buffer for the monthly primary label)
-#
-# Folds are generated backward from the sealed 2016 holdout. The one-month label
-# buffer leaves 11 observed monthly validation points per fold, for 110 common
-# validation months in total.
+# Rebalancing monthly is only worth the turnover if what a characteristic says at one
+# month-end still says something at the next. Each characteristic is a cross-sectional
+# rank, so the question is how fast a firm's position in that ranking decays. The
+# autocorrelation is computed inside each firm and then pooled: stacking thousands of firms
+# and correlating the result would measure the joins between them. Firms whose monthly
+# history has a gap are dropped, because a gap reads as a lag it is not, and so are firms
+# too short for the longest lag to be estimated from.
 
 # %%
-n_splits_declared = int(SETUP["evaluation"]["n_splits"])
-splits = generate_cv_splits(
-    firm_chars.select("timestamp"),
-    setup_path=CASE_DIR / "config" / "setup.yaml",
-    label_buffer=str(SETUP["labels"]["buffer"]),
+months = research.select("timestamp").unique().sort("timestamp").with_row_index("month")
+indexed = research.join(months, on="timestamp")
+unbroken = (
+    indexed.group_by("symbol")
+    .agg(pl.len().alias("n"), (pl.col("month").max() - pl.col("month").min() + 1).alias("span"))
+    .filter(pl.col("n") == pl.col("span"))  # months observed == months between first and last
+    .select("symbol")
 )
-
-print(f"Generated {len(splits)} walk-forward folds")
-
-assert len(splits) == n_splits_declared, (
-    f"Expected {n_splits_declared} folds (setup.yaml), got {len(splits)}"
-)
-last_validation_end = max(split["val_end"] for split in splits)
-print(f"Last validation end: {last_validation_end.date()}  |  Holdout start: {HOLDOUT_START}")
-assert last_validation_end.date() < datetime.fromisoformat(HOLDOUT_START).date(), (
-    f"Last fold ({last_validation_end.date()}) overlaps holdout ({HOLDOUT_START})"
-)
-
-# %% [markdown]
-# **Walk-forward fold summary:**
-
-# %%
-splits_df = pl.DataFrame(splits).with_columns(
-    pl.col("train_start", "train_end", "val_start", "val_end").cast(pl.Date)
-)
-splits_df
-
-# %% [markdown]
-# #### Universe Breadth per Fold
-#
-# We verify each validation window has adequate cross-sectional breadth for the
-# largest declared top-k portfolio.
-
-# %%
-fold_breadth = []
-for split in splits:
-    validation = firm_chars.filter(
-        pl.col("timestamp").is_between(split["val_start"], split["val_end"], closed="both")
-    )
-    n_avg = int(validation.height // max(validation["timestamp"].n_unique(), 1))
-    fold_breadth.append(
-        {
-            "fold": split["fold"],
-            "validation_start": split["val_start"].date(),
-            "validation_end": split["val_end"].date(),
-            "avg_n_stocks": n_avg,
-        }
-    )
-
-fold_breadth_df = pl.DataFrame(fold_breadth)
-print("Average complete-case firms per validation month:")
-fold_breadth_df
-
-# %% [markdown]
-# Breadth is comfortable in every fold (well over 1,000 names), supporting the
-# largest declared configuration of 50 firms per leg.
-
-# %% [markdown]
-# ---
-#
-# ## Section E: Derived Artifacts
-#
-# The CPZ panel is a complete-case academic release, not a reader-configurable
-# eligibility universe. There is no separate eligibility table to materialize.
-# The only artifact this notebook persists is the feasibility report (Section F).
-
-# %% [markdown]
-# ---
-#
-# ## Section F: Findings vs `setup.yaml`
-#
-# The canonical strategy declarations live in `config/setup.yaml`. This section
-# enumerates each declared knob alongside the feasibility evidence above that
-# motivates it. Setup.yaml is not regenerated here --- it is the hand-curated
-# source of truth, and this notebook reads it.
-
-# %%
-n_stocks_min = int(min(fb["avg_n_stocks"] for fb in fold_breadth))
-n_stocks_max = int(max(fb["avg_n_stocks"] for fb in fold_breadth))
-n_folds_generated = int(len(splits))
-
-median_pre_pct = float(np.median(pre_abs) * 100)
-median_post_pct = float(np.median(post_abs) * 100)
-median_all_pct = float(np.median(abs_rets) * 100)
-frac_above_20bps = float((abs_rets > 0.0020).mean())
-frac_above_60bps = float((abs_rets > 0.0060).mean())
-
-print("=" * 78)
-print("Setup.yaml knobs vs feasibility evidence")
-print("=" * 78)
-
-print()
-print(f"universe.inclusion_rule = {SETUP['universe']['inclusion_rule']}")
-print(f"  -> avg stocks per month (pre-holdout panel): {avg_stocks_per_month:,}")
-print(f"  -> firms per validation window: min={n_stocks_min:,}, max={n_stocks_max:,}")
-print("  -> all operational folds use persistent IDs from the released test tensor")
-
-print()
-print(f"decision.cadence = {SETUP['decision']['cadence']}")
-print(
-    f"  -> median |monthly return| = {median_all_pct:.2f}%; "
-    f"{frac_above_20bps * 100:.0f}% exceed 20bps RT"
-)
-
-print()
-print(f"decision.characteristic_availability = {SETUP['decision']['characteristic_availability']}")
-print(
-    f"  -> annual updates: {SETUP['decision']['yearly_update']}; "
-    f"monthly updates: {SETUP['decision']['monthly_update']}"
-)
-
-print()
-print(f"costs.class = {SETUP['costs']['class']} (era-dependent)")
-print(
-    f"  -> pre-decimal era: median |ret| = {median_pre_pct:.2f}% "
-    f"vs {PRE_RT_COST * 10_000:.0f} bps RT mid"
-)
-print(
-    f"  -> post-decimal era: median |ret| = {median_post_pct:.2f}% "
-    f"vs {POST_RT_COST * 10_000:.0f} bps RT mid"
-)
-print(f"  -> monthly return-to-cost scale @ 20bps RT: {return_cost_scale_ratio:.0f}x")
-
-print()
-print(f"labels.primary = {SETUP['labels']['primary']}")
-print(
-    f"  -> median |1m return| = {median_all_pct:.2f}% "
-    f"= {return_cost_scale_ratio:.0f}x a 20bps cost scale"
-)
-
-print()
-print(f"labels.variants = {SETUP['labels']['variants']}")
-print("  -> fwd_ret_1m_win: winsorized return tail; fwd_class_1m: directional label")
-
-print()
-print(f"evaluation.n_splits = {SETUP['evaluation']['n_splits']}")
-print(f"  -> generated {n_folds_generated} folds; declared count matches")
-print(
-    f"  -> validation spans {min(split['val_start'] for split in splits).date()} "
-    f"to {last_validation_end.date()}; "
-    f"holdout {SETUP['evaluation']['holdout_start']} "
-    f"to {SETUP['evaluation']['holdout_end']}"
-)
-
-print()
-print(f"mapping.class = {SETUP['mapping']['class']} ({SETUP['mapping']['position_state_space']})")
-print(f"  -> {n_stocks_min:,}+ firms/month supports 50 names per long and short leg")
-
-# %% [markdown]
-# ### Persist Feasibility Findings
-
-# %%
-feasibility_report = {
-    "case_study_id": CASE_STUDY_ID,
-    "computed_at_utc": datetime.now(UTC).isoformat(),
-    "data_period": {"start": START_DATE, "end": END_DATE},
-    "universe": {
-        "avg_stocks_per_month": int(avg_stocks_per_month),
-        "n_months": int(n_dates),
-        "min_stocks_per_month": int(breadth["n_stocks"].min()),
-        "max_stocks_per_month": int(breadth["n_stocks"].max()),
-        "n_stocks_per_fold_min": n_stocks_min,
-        "n_stocks_per_fold_max": n_stocks_max,
-        "characteristic_coverage_mean": mean_coverage,
-        "low_coverage_count": int(len(low_coverage)),
-        "identity_scope": SETUP["universe"]["identifiers"],
-    },
-    "return_distribution_abs_pct": {
-        "median_pre_decimal": median_pre_pct,
-        "median_post_decimal": median_post_pct,
-        "median_pooled": median_all_pct,
-    },
-    "cost_exceedance_pct": {
-        "above_20bps": frac_above_20bps * 100,
-        "above_60bps": frac_above_60bps * 100,
-    },
-    "era_dependent_costs": {
-        "decimalization_date": DECIMALIZATION_DATE,
-        "pre_decimal_rt_bps_mid": PRE_RT_COST * 10_000,
-        "post_decimal_rt_bps_mid": POST_RT_COST * 10_000,
-        "horizon_table": era_df.to_dicts(),
-    },
-    "return_to_cost_scale_ratio_monthly_at_20bps": float(return_cost_scale_ratio),
-    "walk_forward": {
-        "n_folds_generated": n_folds_generated,
-        "n_splits_declared": int(SETUP["evaluation"]["n_splits"]),
-        "validation_start": str(min(split["val_start"] for split in splits).date()),
-        "validation_end": str(last_validation_end.date()),
-        "holdout_start": HOLDOUT_START,
-        "holdout_end": str(SETUP["evaluation"]["holdout_end"]),
-        "label_buffer": str(SETUP["labels"]["buffer"]),
-    },
+carriers = indexed.join(unbroken, on="symbol").sort(["symbol", "timestamp"])
+acfs = {
+    # Four times the longest lag is the shortest history an ACF at that lag is read from.
+    name: panel_acf(carriers, entity_col="symbol", value_col=name, max_lags=ACF_LAGS, min_obs=48)
+    for name in CARRIERS
 }
 
-report_path = EXPLORATION_DIR / "feasibility_report.json"
-with open(report_path, "w") as f:
-    json.dump(feasibility_report, f, indent=2, default=str)
-print(f"Written: {display_path(report_path)}")
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+palette = (COLORS["blue"], COLORS["amber"], COLORS["copper"])
+for (name, label), color in zip(CARRIERS.items(), palette, strict=True):
+    acf = acfs[name]
+    ax.plot(acf["lag"], acf["acf"], color=color, lw=1.6, marker="o", ms=3, label=label)
+band = float(acfs[next(iter(CARRIERS))]["band"][0])
+ax.axhspan(-band, band, color=COLORS["neutral"], alpha=0.2, label="white-noise band")
+ax.set_xlabel("Lag (months)")
+ax.set_ylabel("Mean within-firm autocorrelation of the rank")
+ax.legend(frameon=False, fontsize=8, ncol=2)
+add_message_title(
+    ax,
+    "Momentum ranks decay inside a year; the accounting ranks do not",
+    subtitle="Within-firm autocorrelation pooled across firms with an unbroken monthly history",
+)
+plt.show()
 
 # %% [markdown]
-# ---
+# ### B.5 Move scale against cost
 #
-# ## Key Takeaways
+# The ratio divides the median absolute monthly move by the midpoint of the declared round
+# trip, and the clearance share counts moves above its upper bound. Neither is a forecast:
+# an unsigned move is a magnitude, and nothing here says which side of it a position sat.
+
+# %%
+absolute = returns.select(pl.col("ret").abs().alias("move"))
+median_move_bps = float(absolute["move"].median()) * 1e4
+clears_cost = float((absolute["move"] > ROUND_TRIP_BPS[1] / 1e4).mean())
+print(
+    f"Median absolute monthly move {median_move_bps:.0f} bps against a round trip of "
+    f"{ROUND_TRIP_BPS[0]} to {ROUND_TRIP_BPS[1]} bps, ratio "
+    f"{median_move_bps / np.mean(ROUND_TRIP_BPS):.0f}x | share clearing the upper "
+    f"bound {clears_cost:.3f}"
+)
+
+# %% [markdown] tags=["results"]
+# The median absolute monthly move is 706 bps against an assumed round trip of 10 to 40
+# bps, a ratio of 28x, and 0.961 of firm-months move further than the upper bound of that
+# band.
+
+# %% [markdown]
+# ## C. Design decisions
 #
-# 1. **Universe and identity**: The CPZ release keeps complete cases across all
-#    46 characteristics. The canonical converter recovers persistent anonymous
-#    identifiers within each released tensor block. Every operational fold and
-#    the holdout use the same 1992-2016 identity namespace.
-# 2. **Cost scale**: Typical monthly moves exceed the 20-60 bps cost range, but
-#    realized return magnitude is not predictable edge. Net feasibility remains
-#    a turnover-aware backtest question for notebooks 11-14.
-# 3. **Cadence**: Monthly month-end is the canonical cross-sectional firm-
-#    characteristics cadence (Fama-French, Hou-Xue-Zhang, Gu-Kelly-Xiu,
-#    Chen-Pelger-Zhu). It aligns mechanically with the CPZ data structure and
-#    with the provider's annual-June and monthly-next-month update conventions.
-# 4. **Mapping**: Long-short top-k equal-weight as baseline; alternative
-#    allocators sweep via `setup.yaml::backtest.sweep.allocators` (explored in
-#    Chapter 17).
-# 5. **Evaluation**: 10 backward-generated walk-forward folds contribute 110
-#    validation months from November 2006 through December 2015, followed by the
-#    sealed 2016 holdout. The 1M label buffer separates every train/validation pair.
-# 6. **Kill conditions**: no strategy kill condition is pre-cleared by raw return
-#    dispersion. IC, net cost survival, and liquidity concentration are tested
-#    downstream.
+# ### C.1 Cadence
 #
-# **Known limitations**:
-# - **Dataset ends December 2016**: holdout covers only 2016 (12 months). The
-#   "death of value" post-2018 cannot be tested here.
-# - **Anonymized identifiers**: identities cannot be linked across the three
-#   released tensor blocks or back to CRSP; survivorship handling cannot be
-#   audited from the public release alone.
-# - **Long-short borrow**: 50 bps/yr is a flat assumption; in practice borrow
-#   varies sharply by name and time, especially for hard-to-borrow growth names.
-# - **Small-cap costs**: 20 bps RT is a liquid-name midpoint; ML can select firms
-#   with adverse size, turnover, and spread proxies where realistic costs are much
-#   higher. Notebooks 13 and 15 stress this exposure.
+# `setup.yaml::decision.cadence` snapshots at the month-end close and executes at the next
+# open. The release is monthly, so there is no faster grid to thin from, and B.4 shows the
+# accounting ranks moving slowly enough that a faster book would trade rank flips rather
+# than information. The provider refreshes annual variables at the end of June and monthly
+# ones at month-end for the following month, and publishes no filing dates.
 #
-# **Artifacts written**:
-# - `config/exploration/feasibility_report.json`: summary numbers downstream
-#   notebooks and the chapter README can cite without re-running this notebook.
+# ### C.2 Kill conditions
 #
-# **Next**: [`02_labels`](02_labels.ipynb) creates `fwd_ret_1m`, `fwd_ret_1m_win`,
-# and `fwd_class_1m` per `setup.yaml::labels`.
+# Four declared thresholds send the strategy back to the drawing board, each tested where
+# its evidence exists rather than here: no characteristic family reaching its
+# information-coefficient floor under a corrected t-statistic; net performance failing once
+# costs and borrow are charged; every premium disappearing once size and momentum are
+# controlled for; either leg concentrating in the least liquid released quantile.
+#
+# ### C.3 Mapping class
+#
+# `setup.yaml::mapping.class` ranks firms on the model score and holds both tails, because
+# the bottom of a characteristic sort carries information a long-only book would discard.
+# The short leg needs borrow, charged as a flat annual rate here and varying sharply by
+# name in practice. Sizing is equal weight inside each leg, adding no second optimization
+# on top of the ranking being evaluated.
+
+# %% [markdown]
+# ## D. Walk-forward structure
+#
+# ### D.1 Effective sample size
+#
+# What evaluation spends is decision dates, not rows: a fold trained on ten years of this
+# panel sees as many training periods as there are month-ends in it, however many firms
+# each carries.
+
+# %%
+print(
+    f"Months {research['timestamp'].n_unique():,} | firms {research['symbol'].n_unique():,} "
+    f"| median firms per decision date {breadth['n_firms'].median():,.0f}"
+)
+
+# %% [markdown]
+# ### D.2 Fold demonstration
+#
+# `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone. Between each
+# training and validation block sits a purge gap the width of the label buffer, so a label
+# computed at the end of training cannot resolve inside validation. The figure draws those
+# boundaries rather than recomputing them, so it and the folds cannot disagree.
+
+# %%
+splits = generate_cv_splits(
+    research.select("timestamp"),
+    case_study_id=CASE_STUDY_ID,
+    label_buffer=LABEL_BUFFER,
+    date_col="timestamp",
+)
+last_val = max(split["val_end"] for split in splits)
+assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
+assert last_val < np.datetime64(HOLDOUT_START), "a fold reaches into the holdout"
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+fold_timeline(ax, splits, holdout=(HOLDOUT_START, HOLDOUT_END))
+add_message_title(
+    ax,
+    "Folds roll back from the sealed holdout and stop short of it",
+    subtitle="Training, purge and validation blocks exactly as generate_cv_splits returns them",
+)
+plt.show()
+
+# %% [markdown]
+# ## E. Derived artifacts
+#
+# None: the completeness rule fixes the universe, so nothing downstream reads an
+# eligibility table from here and this notebook writes no file.
+
+# %% [markdown]
+# ## F. Findings vs `setup.yaml`
+#
+# One row per knob: the evidence that motivates it, and what would change it.
+#
+# | Knob | Evidence | Revise it when |
+# |---|---|---|
+# | `universe.inclusion_rule` | B.2 breadth per decision date | breadth falls under the count both legs of the largest portfolio need |
+# | `decision.cadence` | B.3 exceedance, B.4 persistence | moves stop clearing the round trip, or a traded rank decays inside one rebalancing interval |
+# | `costs.per_leg_cost_bps_range` | B.3, and the absence of any quote in the release | a per-firm cost becomes measurable, or the book moves into names the band does not cover |
+# | `mapping.class` | B.2 breadth against both legs | one side cannot be filled, or borrow on the short side stops being available |
+# | `evaluation.n_splits` | D.1 decision dates, D.2 boundaries | the folds no longer fit the development window |
+
+# %%
+print(
+    f"universe.inclusion_rule {SETUP['universe']['inclusion_rule']} | mapping.class "
+    f"{SETUP['mapping']['class']} | decision.cadence {SETUP['decision']['cadence']}\n"
+    f"firms per decision date {breadth['n_firms'].min():,} to {breadth['n_firms'].max():,}, under "
+    f"the floor on {breadth.filter(pl.col('n_firms') < BREADTH_FLOOR).height} of {len(breadth)} "
+    f"dates | costs.per_leg_cost_bps_range {LEG_BPS} | labels.primary {PRIMARY_LABEL}\n"
+    f"evaluation.n_splits {SETUP['evaluation']['n_splits']}, generated {len(splits)}, validation "
+    f"{min(split['val_start'] for split in splits).date()} to {last_val.date()}, holdout untouched"
+)
+
+# %% [markdown] tags=["results"]
+# The month-end cross-section runs from 2032 to 2826 firms and clears the floor on every
+# one of the 312 decision dates. Ten folds are generated, their validation blocks covering
+# 2006-11-30 to 2015-11-30, and the sealed year begins after the last of them.
+
+# %% [markdown]
+# ## Key takeaways
+#
+# 1. **Count the universe on the date the strategy rebalances**, against the positions both
+#    legs of the largest configuration need; a sample-wide average hides the thin months.
+# 2. **Read cost feasibility off an exceedance curve** rather than a summary statistic: it
+#    gives the share of positions clearing any cost level, including the ones charged later.
+# 3. **Compute a panel autocorrelation inside each entity**, never across the stack, after
+#    dropping entities whose history has gaps.
+# 4. **Say when a cost is assumed.** This release carries no quote, so the cost line is a
+#    declaration from `setup.yaml` and every clearance share inherits that assumption.
+#
+# ### Known limitations
+#
+# - The release ends in December of its final year, so the holdout is a single year, and
+#   its identifiers are persistent inside one published block only, so survivorship
+#   handling cannot be audited from it.
+# - A ranking model can select the smallest and widest-spread firms, where a realistic
+#   round trip is far above the declared band. The cost stage stresses that exposure.
+#
+# **Next**: labels at the declared monthly horizon, built on this development window.
