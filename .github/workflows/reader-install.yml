@@ -136,10 +136,13 @@ jobs:
           irm https://astral.sh/uv/install.ps1 | iex
           "$env:USERPROFILE\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
-      - name: uv sync is expected to fail here
+      - name: uv sync is expected to fail here, for the documented reason
         run: |
           uv sync 2>&1 | Tee-Object -Variable out
-          if ($LASTEXITCODE -eq 0) {
+          $code = $LASTEXITCODE
+          $text = $out -join "`n"
+
+          if ($code -eq 0) {
             Write-Error @"
           uv sync SUCCEEDED on native Windows.
 
@@ -149,7 +152,21 @@ jobs:
           "@
             exit 1
           }
-          Write-Host "uv sync failed as documented (exit $LASTEXITCODE); native Windows remains unsupported."
+
+          # Any failure would otherwise read as proof of the documented one. A network
+          # blip, a bad lockfile or a broken installer must not quietly certify the claim.
+          if ($text -notmatch 'Failed to build `?scikit-learn') {
+            Write-Error @"
+          uv sync failed on native Windows, but not for the documented reason.
+
+          Expected a scikit-learn build failure, which is what makes native Windows
+          unsupported. Something else broke instead, and this job cannot tell you the
+          documented claim still holds. Read the output above.
+          "@
+            exit 1
+          }
+
+          Write-Host "uv sync failed building scikit-learn, as documented (exit $code); native Windows remains unsupported."
           # GitHub's pwsh shell appends `exit $LASTEXITCODE`, so the non-zero status from
           # the expected failure would fail this step. Clear it deliberately.
           exit 0
