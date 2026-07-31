@@ -578,8 +578,10 @@ clusters = plot_redundancy_clusters(
 #
 # The autocorrelation is of the feature, not of the return, and it runs past one full decision
 # cycle. A feature whose value has decayed inside a cycle cannot support that rebalance cadence,
-# however well it predicts on the day it is computed. The right-hand panel asks the same question
-# of the ordering rather than the level.
+# however well it predicts on the day it is computed. Both panels are estimated per ETF on pairs
+# of decision dates exactly one lag apart and summarized by the median: a correlation pooled over
+# every ETF-date pair would be high whenever ETFs sit at different levels, whether or not any one
+# of them persists. The right-hand panel asks the same question of the ordering, not the level.
 
 # %%
 plot_persistence(
@@ -591,11 +593,12 @@ plot_persistence(
     subtitle=f"Feature autocorrelation to {2 * DECISION_CYCLE} sessions, with a 95% interval",
     alt=(
         "Two panels. On the left, autocorrelation against lag: the six-month return, the "
-        "three-month volatility and the six-month risk-adjusted return are still between "
-        "roughly 0.5 and 0.75 at 42 sessions, while the one-month return reaches zero at "
-        "exactly 21 sessions - the length of its own window - and the 14-day oscillator "
-        "levels off near 0.2. On the right, the cross-sectional rank correlation between "
-        "consecutive decision dates, above 0.9 for all five features."
+        "three-month volatility and the six-month risk-adjusted return are all still above "
+        "0.7 at 42 sessions, while the one-month return reaches zero at exactly 21 sessions - "
+        "the length of its own window - and the 14-day oscillator levels off near 0.2. The "
+        "shaded interval is narrow, about four hundredths either side of zero. On the right, "
+        "the cross-sectional rank correlation between consecutive decision dates, above 0.9 "
+        "for all five features."
     ),
 )
 

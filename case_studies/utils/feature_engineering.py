@@ -796,10 +796,12 @@ def plot_persistence(
 ) -> Figure | None:
     """F6. Feature autocorrelation with confidence bands, plus rank stability.
 
-    The autocorrelation is of the feature itself, averaged over entities, out to at
-    least one decision cycle: a feature whose ordering has decayed before the next
-    rebalance cannot support that cadence. The right-hand panel is the rank
-    correlation of the cross-section against itself *k* bars earlier.
+    The autocorrelation is of the feature itself, estimated per entity on pairs of
+    decision dates exactly *k* apart and summarized by the median over entities, out
+    to at least one decision cycle: a feature whose value has decayed before the next
+    rebalance cannot support that cadence. The right-hand panel asks the same question
+    of the ordering - one cross-sectional rank correlation per consecutive pair of
+    decision dates, again summarized by the median.
     """
     keys = [entity] if isinstance(entity, str) else list(entity)
     columns = list(columns)
@@ -817,6 +819,7 @@ def plot_persistence(
     # entity was absent for - after an eligibility gate, by months or years.
     dates = frame[time].unique().sort()
     acf: dict[str, list[float]] = {c: [] for c in columns}
+    spread: dict[str, list[float]] = {c: [] for c in columns}
     counts: list[int] = []
     for lag in lags:
         back = dict(zip(dates[lag:].to_list(), dates[: -int(lag)].to_list(), strict=True))
@@ -831,25 +834,43 @@ def plot_persistence(
             on=[*keys, "_then"],
             how="inner",
         )
-        counts.append(pairs.height)
+        # One estimate per entity, then the median over entities. Pooling every
+        # entity-date pair into a single correlation measures something else: two ETFs
+        # that sit at different levels make the pooled pairs line up whether or not
+        # either one's value persists, so the pooled number is high for a feature with
+        # no temporal persistence at all.
+        per_entity = (
+            pairs.group_by(keys)
+            .agg(
+                pl.len().alias("_pairs"),
+                *[pl.corr(pl.col(c), pl.col(f"_{c}_then")).alias(c) for c in columns],
+            )
+            .filter(pl.col("_pairs") > 10)
+        )
+        counts.append(per_entity.height)
         for column in columns:
-            both = pairs.select(column, f"_{column}_then").drop_nulls().drop_nans()
-            acf[column].append(
-                float(
-                    np.corrcoef(both[column].to_numpy(), both[f"_{column}_then"].to_numpy())[0, 1]
-                )
-                if both.height > 10
-                else np.nan
+            rho = per_entity[column].drop_nulls().drop_nans()
+            acf[column].append(float(rho.median()) if rho.len() else np.nan)
+            spread[column].append(
+                float(rho.std() / np.sqrt(rho.len())) if rho.len() > 1 else np.nan
             )
     acf["_n"] = counts
 
     fig, (left, right) = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
     for (color, style), column in zip(_cycle(len(columns)), columns, strict=False):
         left.plot(lags, acf[column], label=column, color=color, ls=style, linewidth=1.2, ms=2.5)
-    n_eff = max(1, int(np.median([n for n in acf["_n"] if n] or [1])))
-    band = 1.96 / np.sqrt(n_eff)
+    # The band is the widest standard error of the plotted median across entities, not
+    # a white-noise band over pooled pairs: an entity's successive observations are not
+    # independent draws, so pooling them makes any band far too narrow.
+    errors = [v for c in columns for v in spread[c] if np.isfinite(v)]
+    band = 1.96 * max(errors) if errors else 0.0
     left.axhspan(
-        -band, band, color=COLORS["neutral"], alpha=0.18, linewidth=0, label="95% interval"
+        -band,
+        band,
+        color=COLORS["neutral"],
+        alpha=0.18,
+        linewidth=0,
+        label="95% interval across ETFs",
     )
     left.axhline(0, color=COLORS["neutral"], linewidth=0.8)
     left.set_xlabel("lag (bars)")
