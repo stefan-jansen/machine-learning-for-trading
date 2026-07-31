@@ -24,8 +24,7 @@
 #
 # - Price the round trip in the units the position earns on, read clearance off an exceedance curve
 #   scaled by it, and count the universe on the session the strategy acts on
-# - Measure how long the volatility premium stays put, and confirm the folds fit the development
-#   window without reaching the holdout
+# - Measure how long the volatility premium stays put, and confirm the folds fit without the holdout
 #
 # ## Book reference. Chapter 6, Sections 6.2-6.6. Reads the straddle panel, the raw chains,
 # the underlying bars and `config/setup.yaml`, and writes nothing.
@@ -66,9 +65,9 @@ END_DATE = "2021-12-31"
 # ## Configuration
 #
 # Every knob is read from `setup.yaml`, and Sections B and D compute on the development window alone.
-# Two derived quantities carry the strategy's shape into the diagnostics: a `top_k` book drawn from
-# the cheapest `liquid_quantile` of a date needs that many times more straddles quoted, and holding
-# to maturity pays the cheapest `cost_fractions` rung of the entry leg, not a round trip.
+# Two derived quantities carry the strategy's shape into the diagnostics: a `top_k` book drawn from the
+# cheapest `liquid_quantile` of a date needs that many times more straddles quoted, and holding to
+# maturity pays the cheapest `cost_fractions` rung of the entry leg, not a round trip.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -94,22 +93,21 @@ print(f"Breadth floor {BREADTH_FLOOR} straddles | horizons {HORIZONS} sessions")
 # %% [markdown]
 # ## A. Orientation
 #
-# A short at-the-money straddle collects the option premium and pays out whatever the underlying
-# does, so hedging the delta at each close leaves a position earning the gap between the implied
-# volatility set at entry and the volatility the stock goes on to realize. That gap is the
-# volatility risk premium, and selling it across several hundred names is a cross-sectional trade in
-# how richly each is priced. What separates this from an equity strategy is the denominator: the
-# return base is the premium, a few percent of the share price, and the spread is quoted on that
-# same premium. So, are enough straddles quoted on the session the strategy acts on, is a typical
-# move in the premium large next to the cost of crossing it, and is there room for a walk-forward
-# that never reads the holdout.
+# A short at-the-money straddle collects the option premium and pays out whatever the underlying does,
+# so hedging the delta at each close leaves a position earning the gap between the implied volatility
+# set at entry and the volatility the stock goes on to realize. That gap is the volatility risk
+# premium, and selling it across several hundred names trades how richly each is priced. What
+# separates this from an equity strategy is the denominator: the return base is the premium, a few
+# percent of the share price, and the spread is quoted on that same premium. So, are
+# enough straddles quoted on the session the strategy acts on, is a typical move in the premium large
+# next to the cost of crossing it, and is there room for a walk-forward that never reads the holdout.
 
 # %% [markdown]
 # ## B. Universe and cost feasibility
 #
 # ### B.1 Load and verify the declared universe. The straddle panel holds one row per symbol and
 # session: the call and put nearest the money at the target maturity, paired at a common strike and
-# expiration, with the two-leg mid and quoted spread, and only where a listed expiry falls there.
+# expiration, with the two-leg mid and quoted spread, where a listed expiry falls in that window.
 
 # %%
 straddles = load_sp500_options_straddles(start_date=START_DATE, end_date=END_DATE)
@@ -132,9 +130,9 @@ print(
 decisions = research.group_by(pl.col("timestamp").dt.truncate("1w")).agg(
     pl.col("timestamp").max().alias("decision_date")
 )
+entries = research.join(decisions, left_on="timestamp", right_on="decision_date")
 breadth = (
-    research.join(decisions, left_on="timestamp", right_on="decision_date")
-    .group_by("timestamp")
+    entries.group_by("timestamp")
     .agg(pl.col("symbol").n_unique().alias("n_symbols"))
     .sort("timestamp")
 )
@@ -159,13 +157,13 @@ plt.show()
 # quoted spread on each leg and buying it back crosses the other half, so a round trip costs one full
 # two-leg spread. Over the straddle mid, that is the share of the position's own return base the trade
 # gives up before anything happens - `setup.yaml::costs.components.option_spread` assumed, and
-# measured here. Against it sits the move in the premium of the straddles the panel selected, followed
-# through their own strike and expiration and indexed by session, then divided by their own symbol's
-# round trip. `straddle_premium_moves` documents all three constructions.
+# measured here. Against it sits the move in the premium of the straddles the panel selected on a
+# decision date, followed through their own strike and expiration, indexed by session, and divided by
+# the round trip that entry itself would cross. `straddle_premium_moves` documents all three.
 
 # %%
 cost = (
-    research.group_by("symbol")
+    entries.group_by("symbol")
     .agg(
         pl.col("instr_rel_spread").median().alias("round_trip"),
         (pl.col("instr_spread") / pl.col("underlying_price") * 1e4).median().alias("spread_bps"),
@@ -178,25 +176,28 @@ LIQUID_CUT = float(cost["round_trip"].quantile(CASCADE["liquid_quantile"]))
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 ax.plot(range(len(cost)), cost["round_trip"] * 100, color=COLORS["blue"], lw=1.6)
 ax.axhline(COST_SHARE * 100, color=COLORS["copper"], ls="--", lw=1.5, label="universe median")
-ax.axhline(LIQUID_CUT * 100, color=COLORS["amber"], ls=":", lw=1.5, label="liquid-quintile cutoff")
+ax.axhline(
+    LIQUID_CUT * 100, color=COLORS["amber"], ls=":", lw=1.5, label="cheapest fifth of symbols"
+)
 ax.set_xlabel("Symbols, ordered by their own round-trip cost")
 ax.set_ylabel("Round trip (% of straddle premium)")
 ax.legend(frameon=False, fontsize=8, loc="upper left")
 add_message_title(
     ax,
     "Crossing the spread costs a double-digit share of premium for most names",
-    subtitle="Median two-leg quoted spread per symbol over its straddle mid, development window",
+    subtitle="Median two-leg quoted spread per symbol over its straddle mid, at decision dates",
 )
 plt.show()
 
 # %%
+KEYS = ["symbol", "strike", "expiration", "timestamp"]
 moves = straddle_premium_moves(
     load_sp500_options_straddles_raw(start_date=START_DATE, end_date=HOLDOUT_START, lazy=True),
-    research,
+    entries,
     horizons=HORIZONS,
-).join(cost.select("symbol", "round_trip"), on="symbol", how="inner")
+).join(entries.select(*KEYS, "instr_rel_spread"), on=KEYS)
 moves = moves.with_columns(
-    (pl.col(f"h{h}") / pl.col("round_trip")).alias(f"h{h}") for h in HORIZONS
+    (pl.col(f"h{h}") / pl.col("instr_rel_spread")).alias(f"h{h}") for h in HORIZONS
 )
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
@@ -204,16 +205,18 @@ for h, color in zip(HORIZONS, (COLORS["blue"], COLORS["amber"]), strict=True):
     multiple, fraction = exceedance_curve(moves[f"h{h}"].drop_nulls().to_numpy())
     ax.plot(multiple, fraction, color=color, lw=1.6, label=f"{h}-session move")
 ax.axvline(1, color=COLORS["copper"], ls="--", lw=1.5, label="round trip crossed")
-ax.axvline(ENTRY_COST_SHARE, color=COLORS["neutral"], ls=":", lw=1.5, label="entry leg only")
+ax.axvline(
+    ENTRY_COST_SHARE, color=COLORS["neutral"], ls=":", lw=1.5, label="entry leg, cheapest rung"
+)
 ax.set_xscale("log")
 ax.set_xlim(0.03, 100)
-ax.set_xlabel("Absolute premium move as a multiple of the symbol's round trip (log scale)")
+ax.set_xlabel("Absolute premium move as a multiple of the entry's own round trip (log scale)")
 ax.set_ylabel("Fraction of moves at least this large")
 ax.legend(frameon=False, fontsize=8, loc="lower left")
 add_message_title(
     ax,
     "Which cost line the position pays decides whether its move clears it",
-    subtitle="Exceedance of absolute straddle-premium moves, scaled by each symbol's round trip",
+    subtitle="Exceedance of absolute premium moves at entry, over the spread that entry crosses",
 )
 plt.show()
 
@@ -221,11 +224,12 @@ plt.show()
 # ### B.4 How long the premium stays put. Re-ranking weekly is worth the turnover only if what the
 # data says at one decision date still says something at the next. The carrier is at-the-money
 # implied volatility less the volatility the underlying has just realized, computed inside each
-# stable security identity so a ticker succession does not become a return, and read off the
-# constant-tenor surface rather than the panel above, which quotes only when a listed expiry sits in
-# the entry window. How long the gap lasts is an autocorrelation inside each symbol, since the panel
-# correlated as one series measures its joins instead. A lag is a row offset, so the filter keeps
-# only symbols observed on every session over half the window or more.
+# stable security identity so a ticker succession does not become a return. It reads implied
+# volatility from the daily surface summary, which records the contract nearest the money in the
+# target maturity bucket every session, where the paired panel above needs both legs quotable and so
+# has holes. How long the gap lasts is an autocorrelation inside each symbol, since the panel
+# correlated as one series measures its joins; a lag is a row offset, so the filter keeps only the
+# symbols observed on every session over half the window or more.
 
 # %%
 bars = load_sp500_daily_bars(start_date=START_DATE, end_date=HOLDOUT_START)
@@ -265,9 +269,8 @@ plt.show()
 
 # %% [markdown]
 # ### B.5 Move scale against cost. The ratio divides the median absolute move at the shorter horizon
-# by the median round trip, and the clearance shares count moves above each cost line. Neither says
-# the position is profitable: the move is unsigned, and a seller keeps the premium only when it is
-# small.
+# by the median round trip, and the clearance shares count entries above each cost line. Neither says
+# the position is profitable: the move is unsigned, and a seller keeps the premium only if it is small.
 
 # %%
 short = moves[f"h{HORIZONS[0]}"].drop_nulls()
@@ -281,40 +284,37 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# The median symbol gives up 0.1153 of the straddle premium to cross the two-leg spread twice, the
-# same 67.3 bps of underlying notional an equity trader would call ordinary. The median five-session
-# move in the premium is 1.09x that round trip and 0.537 of moves clear it; against the entry leg
-# alone, which is what a held position pays, 0.954 clear. The premium averages -0.0003 volatility
-# points over 194 symbols, positive on 0.598 of symbol-days, and carries 0.703 of it a week out.
+# The median symbol gives up 0.1184 of the straddle premium to cross the two-leg spread twice, which
+# is 70.1 bps of underlying notional. The median five-session move matches that round trip at 1.00x
+# and 0.497 of entries clear it; at the entry leg's cheapest rung, 0.948 clear. The premium averages
+# -0.0003 volatility points over 194 symbols, positive on 0.598 of days, 0.703 of it left a week on.
 
 # %% [markdown]
 # ## C. Design decisions
 #
 # ### C.1 Cadence. `setup.yaml::decision.entry_cadence` enters at the Friday close and executes at the
-# Monday open; `hedge_cadence` re-hedges the delta at each close. B.4 supports weekly entry, because
-# the premium decays slowly enough that a week-old reading still ranks the cross-section, and B.2
-# constrains it, since the universe available to rank doubles and halves week to week.
+# Monday open; `hedge_cadence` re-hedges the delta at each close. B.4 supports weekly entry, because the
+# premium decays slowly enough that a week-old reading still ranks the cross-section; B.2 constrains
+# it, since the universe available to rank doubles and halves week to week.
 #
 # ### C.2 Kill conditions. Three thresholds send the strategy back to the drawing board: the premium
-# compressing below its floor for longer than a rebalance cycle, tested at label evaluation in
-# Chapter 7; cost consuming more of the premium than the cascade's cheapest rung leaves, at the cost
-# stage in Chapter 18; and gamma losses over a rolling window exceeding the premium collected, under
-# the risk overlay in Chapter 19. B.3 and B.5 set the first two baselines.
+# compressing below its floor for longer than a rebalance cycle, tested at label evaluation in Chapter
+# 7; cost consuming more of the premium than the cascade's cheapest rung leaves, at the cost stage in
+# Chapter 18; and gamma losses over a rolling window exceeding the premium collected, under the risk
+# overlay in Chapter 19. B.3 and B.5 set the first two baselines.
 #
 # ### C.3 Mapping class. `setup.yaml::mapping.class` ranks symbols by expected short-straddle return
 # and holds the top `top_k`, sized on vega so a high-priced name does not dominate a book of
 # volatility exposures. Three choices follow from B.3, declared under
 # `setup.yaml::backtest.sweep.htm_cost_cascade` and dispatched by the Chapter 18 notebooks: hold to
-# maturity and never cross the exit leg, rank only inside the cheapest `liquid_quantile` of a date,
-# and sweep `cost_fractions` of the quoted entry half-spread.
+# maturity, rank only inside the cheapest `liquid_quantile` of a date, and sweep `cost_fractions`.
 
 # %% [markdown]
 # ## D. Walk-forward structure
 #
 # ### D.1 Effective sample size. What evaluation spends is decision dates, not rows. A straddle
 # entered on the last of them resolves `setup.yaml::labels.buffer` later, and `generate_cv_splits`
-# reads that buffer as trading sessions rather than calendar days, so the seal counts back over the
-# timeline and lands where the last validation block ends.
+# reads that buffer in trading sessions, so the seal counts over the timeline, not the calendar.
 
 # %%
 outcome_seal = timeline["timestamp"][-(BUFFER_SESSIONS + 1)]
@@ -353,8 +353,7 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# ## E. Derived artifacts. Nothing: the universe is whatever carries a quoted straddle that day, and
-# the liquid filter is recomputed per rebalance date at the cost stage, so nothing is written here.
+# ## E. Derived artifacts. Nothing: the universe is whatever carries a quoted straddle that day and the liquid filter is recomputed per rebalance date at the cost stage, so nothing is written here.
 
 # %% [markdown]
 # ## F. Findings vs `setup.yaml`. One row per knob: its evidence, and what would change it.
@@ -378,23 +377,24 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# The development window quotes 605 symbols, of which the cheapest fifth crosses at or under 0.0841
-# of premium. Breadth runs from 77 to 469 straddles per decision date and falls under the floor a
-# top-20 book needs on 4 of 209 of them. Two folds are generated, the last validation ending
-# 2020-11-10, the same date after which an entry's outcome would land inside the holdout.
+# The development window quotes 605 symbols, of which the cheapest fifth crosses at or under 0.0887 of
+# premium. Breadth runs from 77 to 469 straddles per decision date and falls under the floor a top-20
+# book needs on 4 of 209. Two folds are generated, the last validation ending 2020-11-10, the same
+# date after which an entry's outcome would land inside the holdout.
 
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **Read cost against the base the position earns on**: one quoted spread is an ordinary equity
-#    cost against notional and a large share of the premium.
+# 1. **Read cost against the base the position earns on**, not against the notional it is quoted on.
 # 2. **Count the universe on the session the strategy acts on**, because a chain carries a target
 #    maturity only on the weeks a listed expiry falls in the window.
 # 3. **Follow a contract by its own strike and expiration**, index its horizon by sessions not rows,
-#    and take a panel autocorrelation inside each entity, never across the stack.
+#    and correlate inside each entity, never across the stack.
 #
 # ### Known limitations. Cost here is the quoted spread alone: commission, the equity leg of the daily
 # hedge and the margin the position ties up need a notional and enter at the cost stage. The B.3 moves
 # are unhedged marks, and re-hedging the delta each close removes part of what a seller would take.
+# B.4's implied volatility is the nearest-the-money contract in a maturity bucket, not a fixed tenor,
+# so a change of expiry moves the carrier alongside the premium.
 #
 # **Next**: labels at the declared horizon, built on this development window.
