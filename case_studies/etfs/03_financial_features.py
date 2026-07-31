@@ -24,8 +24,8 @@
 #
 # - State a feature's timing contract - its lookback and its information lag - before writing
 #   the code that computes it
-# - Compute trailing and cross-sectional statistics that read no observation dated at or after
-#   the decision timestamp
+# - Compute trailing and cross-sectional statistics that read no observation dated after the
+#   decision timestamp, and declare a lag where an input is not yet available at it
 # - Show that withholding later dates leaves every feature value unchanged, which is what
 #   separates a trailing statistic from one fitted over the whole sample
 # - Read a feature set for scale, dispersion, redundancy and decay before any model sees it
