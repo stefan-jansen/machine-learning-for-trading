@@ -366,23 +366,24 @@ cp .env.example .env
 docker compose pull ml4t # Option A — Docker (recommended)
 ```
 
-Option B is a local `uv` environment. Install `uv` with its own installer rather than with
-`pip`, which is missing or refuses to install on most current systems:
+Option B is a local `uv` environment, on **macOS, Linux, or inside WSL2**. Install `uv` with its
+own installer rather than with `pip`, which is missing or refuses to install on most current
+systems:
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh    # macOS and Linux
-uv sync
-```
-
-```powershell
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"   # Windows
+curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 ```
 
 Option B compiles several dependencies from source, `scikit-learn` among them, so it needs a
-**C/C++ compiler**: on Ubuntu or Debian `sudo apt install build-essential`, on macOS
-`xcode-select --install`. Docker carries its own and needs none of this. On Windows, use WSL2
-or Docker; installing into Windows Python is not supported and does not work.
+**C/C++ compiler**: on Ubuntu, Debian and WSL2 `sudo apt install build-essential`, on macOS
+`xcode-select --install`. Docker carries its own and needs none of this.
+
+**Windows readers:** both options run inside WSL2, not in PowerShell. Install it once with
+`wsl --install -d Ubuntu` from an Administrator PowerShell, restart, and then follow the Linux
+instructions in the Ubuntu terminal. Installing into Windows Python is not supported and does
+not work — `scikit-learn` has no Windows wheel for this Python version and its source build
+fails. The [installation guide](docs/installation.md) has the full WSL2 walkthrough.
 
 Budget about **16 GB** for Option B (11 GB environment, 4 GB free datasets, 0.9 GB of git
 history) and about 12 minutes for the data.
