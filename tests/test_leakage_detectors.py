@@ -269,10 +269,6 @@ RANDOM_SPLIT_ALLOWLIST: dict[str, str] = {
 
 # Backlog: known, UN-AUDITED occurrences awaiting that chapter's Gate-0 pass. NOT approvals.
 RANDOM_SPLIT_PENDING: dict[str, str] = {
-    "21_rl_execution_hedging/06_inverse_reinforcement_learning.py": "Ch21, UN-AUDITED: "
-    "behavior-cloning split of (state, action) expert pairs. ⚠ trajectory (state,action) "
-    "pairs are NOT automatically i.i.d. — adjacent states from one episode can straddle the "
-    "split; resolve at the Ch21 pass with a trajectory/episode-grouped split. NOT approved.",
     "23_knowledge_graphs/06_gnn_feature_engineering.py": "Ch23, UN-AUDITED: KFold(shuffle="
     "True) in GNN feature engineering. Resolve at the Ch23 Gate-0 pass. NOT approved.",
 }
