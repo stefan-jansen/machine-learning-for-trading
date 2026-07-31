@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.preset_patches import _patch_presets_for_testing
+from tests.preset_patches import _patch_presets_for_testing, _trim_label_configs
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -271,10 +271,12 @@ def seeded_output_dir(tmp_path_factory):
     return output_dir
 
 
-# _patch_presets_for_testing (imported above) and the _TEST_PRESET_PATCHES
-# table it reads live in tests/preset_patches.py, which
-# tests/generate_intermediates.py also imports - that script runs standalone
-# without pytest installed, so the table can't live in this module.
+# _patch_presets_for_testing and _trim_label_configs (imported above), and the
+# _TEST_PRESET_PATCHES table the first reads, live in tests/preset_patches.py,
+# which tests/generate_intermediates.py also imports - that script runs
+# standalone without pytest installed, so they can't live in this module.
+# _trim_label_configs was duplicated here until 2026-07-30; the copy in
+# generate_intermediates.py globbed the wrong directory and trimmed nothing.
 
 _PREDICTION_COL_RENAMES = {
     "y_score": "prediction",
@@ -301,36 +303,6 @@ def _migrate_predictions_schema(preds_root: Path) -> None:
             continue
         df = pl.read_parquet(parquet).rename(renames)
         df.write_parquet(parquet)
-
-
-# Max configs per family in label config files (keep tests fast but comprehensive).
-# Only applied to families with homogeneous sweep configs (linear, gbm).
-# DL/TabDL/latent/causal families are NOT trimmed because each config often
-# maps to a dedicated notebook (e.g., 09_dl_lstm, 10_dl_tsmixer).
-_MAX_CONFIGS_PER_FAMILY = 2
-_TRIM_FAMILIES = {"linear", "gbm"}
-
-
-def _trim_label_configs(cs_config_dir: Path) -> None:
-    """Trim training menu YAMLs to at most _MAX_CONFIGS_PER_FAMILY for sweep families."""
-    training_dir = cs_config_dir / "training"
-    label_root = training_dir if training_dir.exists() else cs_config_dir
-    for label_yaml in label_root.glob("fwd_*.yaml"):
-        data = yaml.safe_load(label_yaml.read_text())
-        if data is None or not isinstance(data, dict):
-            continue
-        trimmed = False
-        for family, configs in data.items():
-            if (
-                family in _TRIM_FAMILIES
-                and isinstance(configs, list)
-                and len(configs) > _MAX_CONFIGS_PER_FAMILY
-            ):
-                data[family] = configs[:_MAX_CONFIGS_PER_FAMILY]
-                trimmed = True
-        if trimmed:
-            with open(label_yaml, "w") as f:
-                yaml.dump(data, f, default_flow_style=False)
 
 
 # ---------------------------------------------------------------------------
