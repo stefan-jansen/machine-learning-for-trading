@@ -32,7 +32,7 @@ the two result versions are not mixed.
 
 | Stage | Notebook | Chapter | What it teaches | Writes |
 |---|---|---:|---|--------|
-| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | 6 | Tests options coverage, weekly cadence, and whether equity trading costs leave room for research. | `config/exploration/feasibility_report.json`, `config/exploration/coverage.csv` |
+| Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | 6 | Tests options coverage, weekly cadence, and whether equity trading costs leave room for research. | Nothing - the evidence stays in the notebook |
 | Labels | [`02_labels`](02_labels.ipynb) | 7 | Builds five- and ten-day return, risk-adjusted, and direction labels with walk-forward boundaries. | `labels/fwd_ret_5d.parquet`, `labels/fwd_ret_10d.parquet`, `labels/fwd_ret_risk_adj_5d.parquet`, `labels/fwd_dir_5d.parquet`, `labels/fwd_dir_10d.parquet`, `config/cv_config.json` |
 | Financial features | [`03_financial_features`](03_financial_features.ipynb) | 8 | Joins lagged IV surfaces to realized volatility, momentum, and liquidity features. | `features/financial.parquet` |
 | Temporal features | [`04_model_based_features`](04_model_based_features.ipynb) | 9 | Produces forward-only GJR-GARCH volatility features and documents the pinned single-start feature vintage. | `features/model_based.parquet` |
