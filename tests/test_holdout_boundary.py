@@ -34,6 +34,7 @@ HOLDOUT_SCOPED_NOTEBOOKS = [
     ("case_studies/crypto_perps_funding/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/cme_futures/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/fx_pairs/02_labels.py", "cross_sectional_ic_series("),
+    ("case_studies/us_firm_characteristics/02_labels.py", "cross_sectional_ic_series("),
 ]
 
 
@@ -125,6 +126,16 @@ def test_holdout_filter_precedes_first_ic_computation(rel_path: str, first_ic_ma
 # screen from stage 03, so that notebook reads no label and has no endpoint to
 # purge. Its own seal is a different check -- it rebuilds the panel with the
 # holdout withheld and requires every emitted feature value to agree.
+# ``case_studies/us_firm_characteristics/02_labels.py`` is deliberately absent, and it is the
+# one case study where that is a property of the data rather than a gap. The Chen-Pelger-Zhu
+# release pairs the characteristics observed at the close of month t-1 with the return earned
+# over month t and dates the row by month t, so a row's label resolves on its own timestamp
+# and the label endpoint IS the signal date -- the notebook derives it as such and filters on
+# it. Shifting the timestamp forward by the horizon to satisfy the pattern below would purge a
+# month that is already sealed and would drop every firm's final observation, whenever it
+# fell. The alignment is measured rather than assumed: 02_labels correlates ``ST_REV``, the
+# short-term-reversal characteristic, against the label at three candidate lags and only the
+# previous row's return carries it.
 LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
     "case_studies/etfs/02_labels.py",
     "case_studies/etfs/05_evaluation.py",
