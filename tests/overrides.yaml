@@ -1470,8 +1470,9 @@ case_studies/cme_futures/16_risk_management: &id003
 case_studies/cme_futures/17_strategy_analysis:
 case_studies/crypto_perps_funding/01_feasibility_analysis:
   parameters:
+    # No START_DATE: the notebook already declares 2020-01-01, which is the data start, so an
+    # override there narrows nothing. MAX_SYMBOLS is read by the loader and stays live.
     MAX_SYMBOLS: 5
-    START_DATE: '2020-01-01'
   timeout: 120
 case_studies/crypto_perps_funding/02_labels:
   parameters:
