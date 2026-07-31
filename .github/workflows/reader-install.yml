@@ -77,6 +77,16 @@ jobs:
                       /usr/local/lib/android "$AGENT_TOOLSDIRECTORY" || true
           df -h /
 
+      # docs/installation.md, "Before you start: you need a compiler". The runner already
+      # carries a toolchain, so this step is not what makes the sync work today - it is what
+      # keeps the documented command exercised. It starts mattering the day ubuntu-latest
+      # ships a system Python that satisfies the project floor: `uv` then builds against the
+      # system interpreter instead of downloading its own, and the sync fails on a missing
+      # Python.h unless python3-dev is installed.
+      - name: Install the prerequisites the docs name
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y build-essential python3-dev
+
       # docs/installation.md, "Local Setup with uv"
       - name: Install uv as the docs instruct
         run: |
