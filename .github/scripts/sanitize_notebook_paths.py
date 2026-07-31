@@ -166,7 +166,9 @@ def main() -> int:
                 nb.write_text(new, encoding="utf-8")
 
     if blocked:
-        print("NOT rewritten - the same string appears in the notebook's source:")
+        print("NOT rewritten - the same string appears in the notebook's source.")
+        print("Remove it by hand or re-execute the notebook; this tool cannot tell the")
+        print("two occurrences apart:")
         for rel, s in blocked:
             print(f"  {rel}\n    {s}")
 
@@ -176,7 +178,8 @@ def main() -> int:
         print(f"{verb} {total} occurrence(s) across {len(dirty)} notebook(s):")
         for rel, n in dirty:
             print(f"  {n:4d}  {rel}")
-    else:
+
+    if not dirty and not blocked:
         print("clean: no machine-specific paths in any notebook's outputs or metadata")
 
     return 1 if blocked or (args.check and dirty) else 0

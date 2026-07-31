@@ -335,10 +335,12 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "latest"
+      # Same version as pyproject.toml's dev extra and .pre-commit-config.yaml;
+      # tests/test_toolchain_pins.py fails when any of the three drift.
       - name: Ruff check
-        run: uvx ruff@0.15.8 check utils/ data/ tests/
+        run: uvx ruff@0.15.14 check utils/ data/ tests/
       - name: Ruff format
-        run: uvx ruff@0.15.8 format --check utils/ data/ tests/
+        run: uvx ruff@0.15.14 format --check utils/ data/ tests/
 
   # ---------------------------------------------------------------------------
   # Reader-facing guards. Always-on, never path-filtered, no Docker, ~1 minute.

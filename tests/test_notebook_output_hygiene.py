@@ -37,17 +37,26 @@ def test_strip_empty_cell_tags_handles_a_metadata_only_tag():
 
 
 def test_no_machine_specific_paths_in_committed_notebooks() -> None:
-    """Outputs and metadata only. A path in `source` may be load bearing."""
+    """Outputs and metadata only. A path in `source` may be load bearing.
+
+    A leak the notebook's source also contains counts too. The sanitizer skips
+    those rather than rewriting them, so leaving them out of this count would
+    let a leak the reader can plainly see sit in a committed output while the
+    gate reported the repository clean - the tool declining to fix something is
+    not the same as there being nothing to fix.
+    """
     offenders: list[str] = []
     for nb in _iter_notebooks():
         raw = nb.read_text(encoding="utf-8")
-        _, n, _ = sanitize_notebook(raw)
-        if n:
-            offenders.append(f"{nb.relative_to(REPO_ROOT)} ({n})")
+        _, n, skipped = sanitize_notebook(raw)
+        if n or skipped:
+            note = f"{n}" + (f", {len(skipped)} the sanitizer cannot rewrite" if skipped else "")
+            offenders.append(f"{nb.relative_to(REPO_ROOT)} ({note})")
     assert not offenders, (
         "Notebooks leak machine-specific absolute paths in their committed "
         "outputs/metadata. Run `uv run python .github/scripts/sanitize_notebook_paths.py` "
-        "to fix:\n  " + "\n  ".join(offenders)
+        "to fix; a leak it reports as unrewritable has to be removed by hand or by "
+        "re-executing the notebook:\n  " + "\n  ".join(offenders)
     )
 
 

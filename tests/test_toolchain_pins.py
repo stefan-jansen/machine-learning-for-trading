@@ -1,16 +1,19 @@
-"""The formatter the project installs and the formatter pre-commit runs are one version.
+"""Every ruff in the project is one version.
 
-`uv run ruff format` and the pre-commit hook are two separate installs of ruff, and
-nothing but this test makes them the same version. When they differ they format the
-same code differently: 0.15.14 rewrote a committed multi-line `assert ... , (...)`
-in `21_rl_execution_hedging/07_backtest_with_impact.py` and the 0.15.8 hook rewrote
-it back.
+There are three separate installs: `uv run ruff` from the dev extra, the pre-commit
+hook, and `uvx ruff@<version>` in the `lint` CI job. Nothing but this test makes them
+agree, and when they differ they format the same code differently - 0.15.14 rewrote a
+committed multi-line `assert ..., (...)` in
+`21_rl_execution_hedging/07_backtest_with_impact.py` and the 0.15.8 hook rewrote it
+back.
 
 That is not cosmetic. `notebooks/TEACHING_WORKER.md` has a worker format the `.py`,
 `jupytext --sync`, execute, then commit; jupytext embeds the `.py` source in the
 `.ipynb`, so the hook's counter-reformat at commit time makes the freshly executed
 notebook a stale render of its own source and the notebook-sync gate rejects it. The
 worker then re-syncs, re-executes and re-stamps a notebook nothing was wrong with.
+Against the CI pin the same disagreement is a red `lint` job on formatting the
+contributor's own ruff called clean.
 """
 
 from __future__ import annotations
@@ -48,11 +51,29 @@ def _pre_commit_ruff_rev() -> str:
     return revs[0].lstrip("v")
 
 
+def _workflow_ruff_pins() -> set[str]:
+    """Every version the `lint` job pins through `uvx ruff@<version>`."""
+    workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text()
+    pins = set(re.findall(r"uvx\s+ruff@([0-9][^\s]*)", workflow))
+
+    assert pins, "the lint job must pin ruff explicitly (`uvx ruff@X.Y.Z`)"
+    return pins
+
+
 def test_pre_commit_ruff_matches_the_project_pin() -> None:
     assert _pre_commit_ruff_rev() == _pyproject_ruff_pin(), (
         "the ruff pre-commit hook and the project's ruff pin are different versions, "
         "so `uv run ruff format` and `pre-commit run ruff-format` disagree; "
         "bump both together"
+    )
+
+
+def test_ci_ruff_matches_the_project_pin() -> None:
+    """A third install, and the one whose disagreement shows up as a red PR."""
+    assert _workflow_ruff_pins() == {_pyproject_ruff_pin()}, (
+        "the `uvx ruff@...` pins in .github/workflows/test.yml and the project's ruff "
+        "pin are different versions, so the lint job rejects formatting a contributor's "
+        "own ruff calls clean; bump them together"
     )
 
 
