@@ -33,7 +33,12 @@ REPO_ROOT = Path(__file__).parent.parent
 # baseline assertion below deliberately writes the broken form.
 SCANNED_GLOBS = ("[0-9][0-9]_*/*.py", "case_studies/**/*.py", "utils/**/*.py")
 
-ONE_MINUS_CDF = re.compile(r"1(\.0)?\s*-\s*[A-Za-z_][\w.]*\.cdf\(")
+# `1 - norm.cdf(x)` written out in one expression.
+DIRECT = re.compile(r"1(\.0)?\s*-\s*[A-Za-z_][\w.]*\.cdf\(")
+# `probability = norm.cdf(x)` - a name bound to a CDF value. The two-line
+# spelling that follows it, `p_value = 1 - probability`, cancels exactly as hard
+# and reads as arithmetic rather than as a tail, which is how it hides.
+CDF_BINDING = re.compile(r"^\s*([A-Za-z_]\w*)\s*=.*[A-Za-z_][\w.]*\.cdf\(")
 
 # PENDING, not approved. Each of these is the same defect, and the one-token fix
 # is known. It is not applied here because every one of them sits in a paired
@@ -54,10 +59,31 @@ PENDING = {
     "15_causal_estimation/09_adia_causal_benchmark.py": 1,
     "15_causal_estimation/11_factor_zoo_validation.py": 1,
     "16_strategy_simulation/11_sharpe_ratio_inference.py": 1,
+    "16_strategy_simulation/12_dsr_validation.py": 1,
+    "16_strategy_simulation/13_ras_protocol.py": 1,
     "17_portfolio_construction/05_factor_allocation_evidence.py": 1,
     "19_risk_management/01_var_cvar.py": 2,
     "case_studies/sp500_equity_option_analytics/03_financial_features.py": 1,
 }
+
+
+def _hits(path: Path, rel: str) -> list[str]:
+    """Both spellings of the cancellation, in one file.
+
+    Names bound to a CDF value are collected first, then every ``1 - <that
+    name>`` is flagged wherever it appears in the same file. Comments are
+    stripped: prose that names the pattern - including a comment explaining why
+    a nearby line uses ``sf`` - is not the pattern.
+    """
+    code = [line.split("#", 1)[0] for line in path.read_text().splitlines()]
+    bound = {m.group(1) for line in code if (m := CDF_BINDING.match(line))}
+    indirect = [re.compile(rf"1(\.0)?\s*-\s*{re.escape(n)}\b") for n in sorted(bound)]
+
+    return [
+        f"{rel}:{lineno}: {line.strip()}"
+        for lineno, line in enumerate(code, start=1)
+        if DIRECT.search(line) or any(p.search(line) for p in indirect)
+    ]
 
 
 def _occurrences() -> dict[str, list[str]]:
@@ -65,12 +91,7 @@ def _occurrences() -> dict[str, list[str]]:
     for glob in SCANNED_GLOBS:
         for path in sorted(REPO_ROOT.glob(glob)):
             rel = path.relative_to(REPO_ROOT).as_posix()
-            hits = [
-                f"{rel}:{lineno}: {line.strip()}"
-                for lineno, line in enumerate(path.read_text().splitlines(), start=1)
-                if ONE_MINUS_CDF.search(line)
-            ]
-            if hits:
+            if hits := _hits(path, rel):
                 found[rel] = hits
     return found
 
