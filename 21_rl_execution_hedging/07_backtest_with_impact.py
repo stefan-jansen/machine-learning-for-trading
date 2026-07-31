@@ -21,11 +21,12 @@
 # Market impact is not a fixed cost; it depends on how large an order is
 # relative to the liquidity available to absorb it. This notebook makes that
 # concrete on **real US equity data**: it runs the *same* momentum strategy
-# with the *same* dollar order across stocks spanning five orders of magnitude
-# in daily volume, from a mega-cap to a micro-cap. The square-root impact model
-# can have modest effects on a liquid name and outsized effects on a thin one.
-# This explains why small-cap strategies that look good on paper may not scale
-# and motivates the liquidity-aware execution policies of Section 21.4.
+# with the *same* dollar order across a spectrum of stocks from a mega-cap to a
+# micro-cap, so that one order goes from a small fraction of a day's volume to
+# more than a whole day's volume. The square-root impact model can have modest
+# effects on a liquid name and outsized effects on a thin one. This explains
+# why small-cap strategies that look good on paper may not scale, and motivates
+# the liquidity-aware execution policies of Section 21.4.
 #
 # **Learning Objectives**:
 # - Express market impact as a function of order size relative to daily volume
@@ -155,10 +156,15 @@ def formation_statistics(prices: pl.DataFrame) -> pl.DataFrame:
 # %%
 formation_stats = formation_statistics(formation_prices)
 liquidity = formation_stats
+traded = liquidity.filter(pl.col("adv_usd") > 0)
 print(f"Symbols with a full formation window: {liquidity.height:,}")
 print(
-    f"Daily dollar volume spans ${liquidity['adv_usd'].min():,.0f} to "
-    f"${liquidity['adv_usd'].max():,.0f} - five orders of magnitude"
+    f"Median daily dollar volume runs from ${traded['adv_usd'].min():,.0f} to "
+    f"${traded['adv_usd'].max():,.0f}"
+)
+print(
+    f"{liquidity.height - traded.height} of them trade on fewer than half their formation "
+    "days, so their median dollar volume is zero"
 )
 
 # %% [markdown]
@@ -567,13 +573,13 @@ def add_erosion_trace(fig: go.Figure, summary: pl.DataFrame) -> None:
 
 
 # %% [markdown]
-# The final assembly uses logarithmic participation axes so five liquidity
-# orders of magnitude remain legible without implying a linear relationship.
+# The final assembly uses logarithmic participation axes so participation rates
+# that differ by orders of magnitude remain legible without implying a linear
+# relationship.
 
 
 # %%
 def plot_impact_spectrum(spectrum_results: pl.DataFrame, summary: pl.DataFrame) -> go.Figure:
-    thinnest = summary.sort("order_participation").row(-1, named=True)
     fig = make_subplots(
         rows=1,
         cols=2,
@@ -596,10 +602,7 @@ def plot_impact_spectrum(spectrum_results: pl.DataFrame, summary: pl.DataFrame) 
         col=1,
     )
     fig.update_layout(
-        title=(
-            f"High impact erodes the thinnest selected name by "
-            f"{thinnest['erosion_high'] * 100:.0f} percentage points"
-        ),
+        title="The same order erodes a thin name far more than a liquid one",
         height=420,
         width=1000,
     )

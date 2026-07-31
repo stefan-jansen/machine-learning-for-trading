@@ -153,6 +153,12 @@ calibration_summary
 #
 # The result is an Almgren-Chriss-style liquidation problem in a stylized,
 # path-dependent simulator. The calibration is heuristic rather than exact.
+#
+# The horizon step sells whatever inventory is left and ignores the
+# participation cap while doing so, so every policy finishes the order on time
+# and pays for whatever it postponed. The cost of delay therefore shows up in
+# the shortfall and in how concentrated the schedule is at the end, which is
+# what the diagnostics in Section 6 measure.
 
 # %% [markdown]
 # ## 2. Benchmark Strategies
@@ -193,17 +199,15 @@ def twap_execution(env: ExecutionEnv, reset_seed: int | None = None) -> dict:
 # %% [markdown]
 # ### Execution Summary
 #
-# Extracts shortfall (total and bps) and forced-liquidation flag from a
+# Extracts shortfall, in dollars and in basis points of arrival notional, from a
 # completed environment for comparison across strategies.
 
 
 # %%
 def summarize_execution(env: ExecutionEnv) -> dict:
-    forced_liquidation = any(h.get("forced_liquidation", False) for h in env.execution_history)
     return {
         "total_shortfall": env.total_cost,
         "shortfall_bps": env.total_cost / (env.arrival_price * env.total_shares) * 10_000,
-        "forced_liquidation": forced_liquidation,
         "history": env.execution_history,
     }
 
@@ -337,7 +341,7 @@ model = PPO(
     verbose=0,
 )
 
-model.learn(total_timesteps=config["total_timesteps"])
+_ = model.learn(total_timesteps=config["total_timesteps"])
 
 # %% [markdown]
 # ## 4. Evaluate Strategies
@@ -349,7 +353,7 @@ model.learn(total_timesteps=config["total_timesteps"])
 
 # %%
 def _collect_execution_diagnostics(env: "ExecutionEnv", result: dict) -> dict:
-    """Extract end-of-execution shape and forced-liquidation diagnostics."""
+    """Extract how much of the order each policy leaves for the end of the horizon."""
     history = result["history"]
     last_step_share = float(history[-1]["shares_sold"]) / env.total_shares
     final_quarter_cutoff = max(env.horizon - env.horizon // 4, 0)
@@ -358,7 +362,6 @@ def _collect_execution_diagnostics(env: "ExecutionEnv", result: dict) -> dict:
     )
     return {
         "shortfall_bps": result["shortfall_bps"],
-        "forced_liquidation": result["forced_liquidation"],
         "last_step_share": last_step_share,
         "final_quarter_share": final_quarter_volume / env.total_shares,
         "history": history,
@@ -397,7 +400,6 @@ def evaluate_strategy(strategy_name: str, strategy_fn, n_episodes: int = 20, see
         "std_bps": shortfalls.std(),
         "min_bps": shortfalls.min(),
         "max_bps": shortfalls.max(),
-        "forced_liq_rate": float(np.mean([d["forced_liquidation"] for d in diagnostics])),
         "avg_last_step_share_pct": 100
         * float(np.mean([d["last_step_share"] for d in diagnostics])),
         "avg_final_quarter_share_pct": 100
@@ -445,7 +447,6 @@ for name, fn in [
     evaluation_paths.extend(strategy_paths)
     print(
         f"{name:16s}: {results[name]['mean_bps']:6.2f} ± {results[name]['std_bps']:5.2f} bps"
-        f" | forced liquidation: {results[name]['forced_liq_rate'] * 100:5.1f}%"
         f" | last step share: {results[name]['avg_last_step_share_pct']:5.1f}%"
     )
 
@@ -581,12 +582,9 @@ for name in colors:
 
 # %%
 # Configure layout and display
-ppo_last_step = results["PPO"]["avg_last_step_share_pct"]
-oracle_last_step = results["Almgren-Chriss"]["avg_last_step_share_pct"]
 fig.update_layout(
     title=(
-        f"PPO softens terminal back-loading ({ppo_last_step:.1f}% vs "
-        f"{oracle_last_step:.1f}% at the final step)"
+        "PPO clears inventory earlier than the Almgren-Chriss schedule"
         "<br><sup>Lines are episode means; shaded bands show the 10th to 90th percentile execution rate</sup>"
     ),
     height=700,
@@ -602,18 +600,23 @@ fig.show()
 
 # %% [markdown]
 # ## 6. Failure-Mode Diagnostic
+#
+# The failure mode this environment can express is postponement: a policy that
+# leaves inventory for the last few steps must trade it there whatever the depth
+# is. Two shares measure it - the volume traded in the final quarter of the
+# horizon, and the volume traded on the horizon step alone.
 
 # %%
 print("\n" + "=" * 60)
-print("EXECUTION FAILURE DIAGNOSTIC")
+print("EXECUTION SCHEDULE CONCENTRATION")
 print("=" * 60)
 for name in ["TWAP", "Almgren-Chriss", "PPO"]:
     print(
-        f"{name:16s}: forced liquidation in {results[name]['forced_liq_rate'] * 100:5.1f}% of episodes"
-        f" | average final-quarter volume: {results[name]['avg_final_quarter_share_pct']:5.1f}%"
+        f"{name:16s}: final-quarter volume {results[name]['avg_final_quarter_share_pct']:5.1f}%"
+        f" | last-step volume {results[name]['avg_last_step_share_pct']:5.1f}%"
     )
-print("\nA high forced-liquidation rate indicates that a policy is delaying too much")
-print("execution until the horizon, even if mean shortfall looks acceptable.")
+print("\nA schedule concentrated at the end pays whatever the book charges at that")
+print("moment, so a low mean shortfall built that way is a bet on terminal liquidity.")
 
 # %% [markdown]
 # ## 7. Summary
@@ -628,7 +631,7 @@ for name, r in results.items():
             "Std (bps)": f"{r['std_bps']:.2f}",
             "Best (bps)": f"{r['min_bps']:.2f}",
             "Worst (bps)": f"{r['max_bps']:.2f}",
-            "Forced Liq %": f"{100 * r['forced_liq_rate']:.0f}",
+            "Final Quarter %": f"{r['avg_final_quarter_share_pct']:.1f}",
             "Last Step %": f"{r['avg_last_step_share_pct']:.1f}",
         }
     )
@@ -656,7 +659,6 @@ if config["export_results"]:
                 "std_bps": r["std_bps"],
                 "min_bps": r["min_bps"],
                 "max_bps": r["max_bps"],
-                "forced_liq_rate": r["forced_liq_rate"],
                 "avg_last_step_share_pct": r["avg_last_step_share_pct"],
                 "avg_final_quarter_share_pct": r["avg_final_quarter_share_pct"],
             }
@@ -668,9 +670,6 @@ if config["export_results"]:
 
 # %%
 best_mean = min(results, key=lambda name: results[name]["mean_bps"])
-forced_text = ", ".join(
-    f"{name} {results[name]['forced_liq_rate']:.0%}" for name in ["TWAP", "Almgren-Chriss", "PPO"]
-)
 profile_text = "\n".join(
     f"- **{name}**: mean shortfall {results[name]['mean_bps']:.1f} bps, standard deviation "
     f"{results[name]['std_bps']:.1f} bps, final-quarter share "
@@ -686,8 +685,9 @@ display(
 {profile_text}
 
 **{best_mean}** has the lowest mean implementation shortfall in this run, but the between-strategy
-mean differences are small relative to episode dispersion. Forced-liquidation rates are
-{forced_text}. The profile diagnostics therefore matter more than a locked ranking.
+mean differences are small relative to episode dispersion, and the three schedules leave very
+different amounts of the order for the end of the horizon. The profile diagnostics therefore matter
+more than a locked ranking.
 
 Almgren-Chriss is an oracle comparator here because it uses full-path volatility and depth. PPO and
 TWAP do not receive that future information. This notebook demonstrates a state-responsive learned
