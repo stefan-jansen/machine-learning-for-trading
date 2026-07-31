@@ -51,7 +51,7 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from data import load_crypto_premium
-from utils.style import COLORS
+from utils.style import COLORS, ml4t_palette
 
 # %% tags=["parameters"]
 # Production defaults — Papermill injects overrides for CI
@@ -191,7 +191,7 @@ major_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
 
 fig = make_subplots(rows=2, cols=2, subplot_titles=major_symbols)
 
-colors = ["#F7931A", "#627EEA", "#00FFA3", "#F3BA2F"]
+colors = ml4t_palette(len(major_symbols), categorical=True)
 
 for idx, (symbol, color) in enumerate(zip(major_symbols, colors, strict=False)):
     row = idx // 2 + 1
@@ -199,12 +199,18 @@ for idx, (symbol, color) in enumerate(zip(major_symbols, colors, strict=False)):
 
     data = premium_df.filter(pl.col("symbol") == symbol)["premium_index_close"].to_numpy() * 10000
 
+    # SOL carries a handful of thousand-bps dislocations. Restricting the axis is not
+    # enough — the bin width is set by the full range, so the visible window would hold
+    # two bins. Drop the outer 1% before binning so all four panels resolve their body.
+    lo, hi = np.percentile(data, [0.5, 99.5])
+    core = data[(data >= lo) & (data <= hi)]
+
     fig.add_trace(
-        go.Histogram(x=data, nbinsx=50, marker_color=color, name=symbol), row=row, col=col
+        go.Histogram(x=core, nbinsx=50, marker_color=color, name=symbol), row=row, col=col
     )
 
 fig.update_layout(
-    title="Premium Index Distributions (bps) - Major Cryptos",
+    title="Premium-index distributions, axes clipped to each central 99%",
     height=500,
     showlegend=False,
 )

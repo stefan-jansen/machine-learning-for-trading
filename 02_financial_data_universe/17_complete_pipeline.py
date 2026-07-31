@@ -64,6 +64,7 @@ from ml4t.data.providers import WikiPricesProvider, YahooFinanceProvider
 from data import load_crypto_perps
 from utils import DATA_DIR
 from utils.paths import get_output_dir
+from utils.style import COLORS
 
 # Reproducibility: a fixed AS_OF_DATE keeps outputs stable between book editions.
 AS_OF_DATE = "2025-01-15"
@@ -425,7 +426,7 @@ etf_results = etf_pipeline.run()
 fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 for ax, (symbol, result) in zip(axes, etf_results.items(), strict=True):
     df = result["data"]
-    for source, color in [("wiki", "#1f77b4"), ("yahoo", "#ff7f0e")]:
+    for source, color in [("wiki", COLORS["blue"]), ("yahoo", COLORS["amber"])]:
         src = df.filter(pl.col("source") == source)
         label = "Wiki Prices" if source == "wiki" else "Yahoo Finance"
         if len(src) > 0:
@@ -663,7 +664,7 @@ axes[0].plot(
     recent_data["close"].to_list(),
     linewidth=0.8,
     alpha=0.8,
-    color="#2E86AB",
+    color=COLORS["blue"],
 )
 axes[0].set_ylabel("Close ($)")
 axes[0].set_title("BTCUSDT: last 30 days")
@@ -676,7 +677,7 @@ hourly_volume = (
 axes[1].bar(
     hourly_volume["hour_utc"].to_list(),
     hourly_volume["avg_volume"].to_list(),
-    color="#2E86AB",
+    color=COLORS["blue"],
     alpha=0.7,
 )
 for funding_hour in [0, 8, 16]:
@@ -692,7 +693,7 @@ daily_volume = (
     .sort("day_of_week")
 )
 days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-colors = ["#2E86AB"] * 5 + ["#E94F37"] * 2
+colors = [COLORS["blue"]] * 5 + [COLORS["copper"]] * 2
 axes[2].bar(range(7), daily_volume["avg_volume"].to_list(), color=colors, alpha=0.7)
 axes[2].set_xticks(range(7))
 axes[2].set_xticklabels(days)

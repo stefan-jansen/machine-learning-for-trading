@@ -671,7 +671,7 @@ fig = go.Figure(
         orientation="h",
         text=[f"{v:.2f}%" for v in convergence_pd["pct"]],
         textposition="outside",
-        marker_color="#4C72B0",
+        marker_color=COLORS["blue"],
     )
 )
 fig.update_layout(
