@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -41,6 +41,7 @@
 """CME Futures: Temporal Feature Engineering."""
 
 import multiprocessing
+import re
 import warnings
 from datetime import date
 
@@ -59,27 +60,25 @@ from sklearn.cluster import KMeans
 from statsforecast import StatsForecast
 from statsforecast.models import AutoARIMA
 
-import utils.style as style
 from data import load_cme_futures
-from utils.cv_splits import generate_cv_splits
+from utils.artifact_specs import load_setup_config, resolve_label_buffer
+from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.paths import get_case_study_dir
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
 
-# Registering the ml4t Plotly template as the default so every figure sources its
-# colors from utils.style rather than Plotly's defaults.
-style.apply_ml4t_style()
-COLORS = style.COLORS
-
 # %% tags=["parameters"]
+CASE_STUDY_ID = "cme_futures"
+PRIMARY_LABEL = "fwd_ret_5d"
 MAX_PRODUCTS = 0  # 0 = all products; >0 limits ARIMA/HMM/FFT to N products
 FFT_WINDOW = 252  # FFT window (trading days)
 
 # %%
-CASE_DIR = get_case_study_dir("cme_futures")
+CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 FEATURES_DIR = CASE_DIR / "features"
 LABELS_DIR = CASE_DIR / "labels"
-STRATEGY_ID = "cme_futures"
+STRATEGY_ID = CASE_STUDY_ID
 
 # Product-to-sector mapping
 PRODUCT_GROUPS = {
@@ -99,10 +98,18 @@ else:
     ARIMA_PRODUCTS = ALL_PRODUCTS
 
 # %% [markdown]
-# ## 1. Load Data and CV Configuration
+# ## 1. Load Data and Resolve the Fold Contract
 #
-# Load prices from Ch7 output and the CV configuration that defines
-# train/test boundaries for walk-forward fitting.
+# Load prices from Ch7 output, then resolve the walk-forward boundaries **before
+# any model is fitted**. Every fit below is sealed against these boundaries, so
+# they have to exist first.
+#
+# The folds are derived from the label frame, not the price frame. The consumer
+# side (`load_modeling_dataset`) derives them from the label frame too, and the
+# two indexes are not the same: the label parquet starts later than the prices
+# because the forward return needs a window to resolve. Deriving both sides from
+# the same frame is what makes the `fold` ids in this artifact mean the same
+# thing downstream as they do here.
 
 # %%
 # Load raw data and compute carry
@@ -114,16 +121,40 @@ if MAX_PRODUCTS > 0:
 print(f"Loaded {len(df):,} rows, {df['product'].n_unique()} products")
 print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 
-# Generate per-fold CV splits from setup.yaml (5D label buffer for fwd_ret_5d)
-unique_dates = df.select("timestamp").unique().sort("timestamp")
-splits = generate_cv_splits(unique_dates, case_study_id="cme_futures", label_buffer="5D")
+# %%
+SETUP = load_setup_config(CASE_STUDY_ID)
+LABEL_BUFFER = resolve_label_buffer(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
+assert LABEL_BUFFER, f"No label buffer configured for {PRIMARY_LABEL}"
+LABEL_HORIZON_SESSIONS = int(re.match(r"^(\d+)", LABEL_BUFFER).group(1))
 
-print(f"CV splits: {len(splits)} folds")
+label_frame = pl.read_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")
+splits = generate_cv_splits(
+    label_frame.select("timestamp").unique().sort("timestamp"),
+    case_study_id=CASE_STUDY_ID,
+    label_buffer=LABEL_BUFFER,
+)
+
+
+def _as_date(value) -> date:
+    return pd.Timestamp(value).date()
+
+
+# The holdout seal for the supervised screen in section 8 binds on the outcome
+# endpoint, not the decision date: a decision carrying a 5-session forward return
+# is realized 5 sessions later. Sessions come from the traded calendar in the
+# data, never from a literal.
+HOLDOUT_START = _as_date(load_evaluation_config(CASE_STUDY_ID)["holdout_start"])
+_sessions = df.select("timestamp").unique().sort("timestamp")["timestamp"].to_list()
+_pre_holdout = [d for d in _sessions if d < HOLDOUT_START]
+LAST_SEALED_DECISION_DATE = _pre_holdout[-(LABEL_HORIZON_SESSIONS + 1)]
+
+print(f"CV splits: {len(splits)} folds  (label buffer {LABEL_BUFFER})")
 for s in splits:
     print(
         f"  Fold {s['fold']}: train {s['train_start']} → {s['train_end']}, "
         f"val {s['val_start']} → {s['val_end']}"
     )
+print(f"Holdout opens {HOLDOUT_START}; last sealed decision date {LAST_SEALED_DECISION_DATE}")
 
 # %% [markdown]
 # ## 2. Compute Carry for Temporal Modeling
@@ -716,11 +747,11 @@ else:
 # dominant), the carry trade is traditionally profitable; in low-carry periods
 # (contango dominant), carry signals are weaker or inverted. Per-fold fitting
 # means each fold's HMM is trained only on that fold's training data, ensuring
-# no look-ahead bias. The test-period state mix varies substantially across
-# folds (low-carry ranges from roughly 10% to 70% of a fold's validation year),
-# which is expected: each fold validates on a different calendar year and carry
-# regimes are genuinely time-varying. The `hmm_regime_duration` feature captures
-# state persistence, which matters for position sizing and turnover.
+# no look-ahead bias. The state mix printed above for each fold's validation
+# window varies substantially, which is expected: each fold validates on a
+# different calendar year and carry regimes are genuinely time-varying. The
+# `hmm_regime_duration` feature captures state persistence, which matters for
+# position sizing and turnover.
 
 # %% [markdown]
 # ---
@@ -801,9 +832,9 @@ for col in temporal_cols:
 # **Coverage note**: With per-fold fitting, ARIMA and HMM features cover both the
 # later training dates and the test window within each fold. Every ARIMA value is
 # an out-of-sample 1-step-ahead walk-forward forecast (the value at date t uses
-# only data before t); the burn-in head of each series is NaN, which is why ARIMA
-# coverage is ~20%. FFT features are deterministic (rolling backward-looking
-# window) and identical across folds.
+# only data before t); the burn-in head of each series is NaN, which is what
+# holds ARIMA coverage below the other families in the table above. FFT features
+# are deterministic (rolling backward-looking window) and identical across folds.
 
 # %% [markdown]
 # ### Downstream Merge Note
@@ -828,9 +859,17 @@ print(f"Saved temporal features to case_studies/{STRATEGY_ID}/features/model_bas
 # %% [markdown]
 # ## 8. Incremental Evaluation
 #
-# Do temporal features add predictive value beyond base features?
-# We compute per-feature IC against `fwd_ret_5d` using HAC-adjusted
-# standard errors.
+# Do temporal features add predictive value beyond the stage-03 features?
+# Per-feature rank IC is computed against `fwd_ret_5d` with HAC-adjusted
+# standard errors. This screen selects nothing; `05_evaluation` does that.
+#
+# Two scoping rules make the number mean what its name says. **Validation rows
+# only**: a fold's rows cover its training window as well as its validation
+# window, so filtering on the fold alone would mix in-sample dates into a
+# quantity described as out-of-sample. **The outcome endpoint, not the decision
+# date, bounds the seal**: a decision on date `t` carrying a 5-day forward return
+# is realized at `t + 5` sessions, so the last usable decision date is the one
+# whose label resolves before the holdout opens.
 
 # %%
 temporal_ic = {}
@@ -841,29 +880,47 @@ temporal_ic = {}
 
 # %%
 def _build_temporal_eval_frame(features_df: pl.DataFrame):
-    label_path = CASE_DIR / "labels" / "fwd_ret_5d.parquet"
+    label_path = CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet"
     if not label_path.exists():
         return None, None
     label_df = pl.read_parquet(label_path)
-    label_col = [
-        c for c in label_df.columns if c not in ("timestamp", "product", "position", "timestamp")
-    ][0]
-    # Use last fold for IC evaluation to avoid duplicate timestamp-product pairs
-    last_fold = features_df["fold"].max()
+    label_col = [c for c in label_df.columns if c not in ("timestamp", "product", "position")][0]
+
+    # Validation rows only, taken per fold from that fold's own validation window.
+    validation = pl.concat(
+        [
+            features_df.filter(
+                (pl.col("fold") == split["fold"])
+                & (pl.col("timestamp") >= _as_date(split["val_start"]))
+                & (pl.col("timestamp") <= _as_date(split["val_end"]))
+            )
+            for split in splits
+        ]
+    )
+
     eval_df = (
-        features_df.filter((pl.col("position") == 0) & (pl.col("fold") == last_fold))
+        validation.filter(pl.col("position") == 0)
         .join(
             label_df.filter(pl.col("position") == 0).select(["timestamp", "product", label_col]),
             on=["timestamp", "product"],
             how="inner",
         )
-        .filter(pl.col("timestamp") < date.fromisoformat("2024-01-01"))
+        .filter(pl.col("timestamp") <= LAST_SEALED_DECISION_DATE)
+        .unique(subset=["timestamp", "product"], keep="first")
+        .sort(["timestamp", "product"])
     )
     return eval_df, label_col
 
 
 # %% [markdown]
 # Helper: compute HAC-adjusted IC statistics for each temporal feature.
+#
+# The frame arrives sorted and `maintain_order=True` keeps the partitions in that
+# order. Both matter: `compute_ic_hac_stats` treats row order as time order and
+# does not sort, and a Polars `partition_by` returns groups in frame order rather
+# than sorted key order, so an unsorted input silently produces a Newey-West
+# correction over a permuted timeline. The lag comes from the 5-day label
+# horizon, because consecutive daily decisions share four days of outcome window.
 
 
 # %%
@@ -872,17 +929,21 @@ def _compute_temporal_ic_stats(eval_df, feature_cols, label_col):
     from scipy.stats import spearmanr as _spearmanr
 
     output = {}
-    partitions = eval_df.partition_by("timestamp", as_dict=True)
+    partitions = eval_df.sort("timestamp").partition_by(
+        "timestamp", as_dict=True, maintain_order=True
+    )
     for feat in feature_cols:
         ic_vals = []
-        for _, group in partitions.items():
+        for group in partitions.values():
             vals = group.select([feat, label_col]).drop_nulls()
             if len(vals) >= 10:
                 ic, _ = _spearmanr(vals[feat].to_numpy(), vals[label_col].to_numpy())
                 if not np.isnan(ic):
                     ic_vals.append(ic)
         if len(ic_vals) >= 20:
-            output[feat] = compute_ic_hac_stats(np.array(ic_vals))
+            output[feat] = compute_ic_hac_stats(
+                np.array(ic_vals), label_horizon=LABEL_HORIZON_SESSIONS
+            )
     return output
 
 
