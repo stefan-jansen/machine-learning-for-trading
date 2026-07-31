@@ -72,9 +72,10 @@ LABELS_DIR = CASE_DIR / "labels"
 
 # %% [markdown]
 # `START_DATE` trims the history to a later start, which is what shortens a run in CI. It is read
-# once below, and a later start costs the earliest folds their training window; the cross-section
-# on each session, which Section E's dispersion and Section G's rank correlation both need to be
-# wide, is unaffected.
+# once below, and it costs more than the sessions it removes: the eligibility screen needs a month
+# of trailing volume, so the first sessions after the new start carry no eligible stock at all, and
+# Section E's dispersion and Section G's rank correlation both need a wide cross-section to mean
+# anything.
 
 # %% tags=["parameters"]
 START_DATE = "1990-01-01"
@@ -104,8 +105,8 @@ PRIMARY_HORIZON = HORIZONS[PRIMARY_LABEL]
 HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
 END_DATE = setup["evaluation"]["holdout_end"]
 
-# The decision-time eligibility screen, Section B. `03_financial_features` carries the same
-# three constants and rebuilds the screen from them.
+# The tradability screen, Section B. `03_financial_features` carries the same three constants
+# and rebuilds the screen from them.
 MIN_PRICE, MIN_ADV_USD, ADV_WINDOW = 5.0, 1_000_000, 21
 
 print(f"Labels: {LABEL_NAMES}, primary {PRIMARY_LABEL}, horizons {HORIZONS} sessions")
@@ -136,11 +137,11 @@ print(f"Holdout opens {HOLDOUT_START} and seals the label endpoint; panel ends {
 # not register the split as a price move; sorting by `symbol` then `timestamp` is what makes a
 # shift mean "the next session for this stock".
 #
-# This case study screens its universe point in time: a stock is tradable on a date only if its
-# adjusted close is above five dollars and it turned over more than a million dollars a day over
-# the previous month. Both quantities are backward-looking, so the screen is a decision-time one,
-# and [`03_financial_features`](03_financial_features.ipynb) rebuilds it from the same three
-# constants on the same price series.
+# This case study screens its universe for tradability: a stock enters on a date only if its
+# adjusted close is above five dollars and its dollar volume averaged more than a million a day
+# over the previous month. Both are rolling backward windows, and
+# [`03_financial_features`](03_financial_features.ipynb) rebuilds the screen from the same three
+# constants on the same price series, so the trainable panel and these files agree on the universe.
 #
 # **The screen runs after the forward shift, not before, and that ordering is not a detail.**
 # Once ineligible rows are dropped a shift counts survivors instead of sessions: a stock that
@@ -155,9 +156,10 @@ if prices.schema["timestamp"] == pl.Datetime:
     prices = prices.with_columns(pl.col("timestamp").dt.date().alias("timestamp"))
 prices = prices.sort(["symbol", "timestamp"])
 
-# Recorded as every label's `inputs`: a re-run against a refreshed download is
-# otherwise indistinguishable from this one.
-MARKET_DATA_DIGEST = value_digest(prices, ["symbol", "timestamp", "adj_close"])
+# Recorded as every label's `inputs`: a re-run against a refreshed download is otherwise
+# indistinguishable from this one. Volume is in the digest because it decides which rows are
+# written, so a corrected volume moves the artifact without the price having changed.
+MARKET_DATA_DIGEST = value_digest(prices, ["symbol", "timestamp", "adj_close", "adj_volume"])
 
 print(f"{prices['symbol'].n_unique():,} symbols, {prices.height:,} symbol-sessions")
 print(f"Sessions {prices['timestamp'].min()} to {prices['timestamp'].max()}")
@@ -320,13 +322,6 @@ print(
     f"Eligible: {eligible.height:,} of {labels_df.height:,} symbol-sessions "
     f"({eligible.height / labels_df.height:.1%}), {eligible['symbol'].n_unique():,} stocks"
 )
-print(
-    "Rows the screen removes, by label: "
-    + ", ".join(
-        f"{n} {labels_df.drop_nulls(n).height - eligible.drop_nulls(n).height:,}"
-        for n in LABEL_NAMES
-    )
-)
 
 # %% [markdown]
 # ## E. Distribution and base rate
@@ -339,15 +334,22 @@ print(
 # notebook looks at rather than what it writes.
 
 # %%
-dev = {
-    name: eligible.with_columns(
-        pl.col("timestamp").shift(-horizon).over("symbol").alias("_label_end")
+dev = {}
+for label_name, horizon in HORIZONS.items():
+    # The endpoint is a property of the label, so it is derived on the complete series the label
+    # was built on. Shifting the screened frame instead would return the horizon-th next eligible
+    # row, which is a later date and depends on eligibility after the decision.
+    ends = labels_df.select(
+        "symbol",
+        "timestamp",
+        pl.col("timestamp").shift(-horizon).over("symbol").alias("_label_end"),
     )
-    .filter(pl.col("_label_end") < HOLDOUT_START)
-    .drop_nulls(name)
-    for name, horizon in HORIZONS.items()
-}
-for label_name, frame in dev.items():
+    dev[label_name] = (
+        eligible.join(ends, on=["symbol", "timestamp"], how="left")
+        .filter(pl.col("_label_end") < HOLDOUT_START)
+        .drop_nulls(label_name)
+    )
+    frame = dev[label_name]
     print(f"{label_name}: {frame.height:,} development rows through {frame['timestamp'].max()}")
 
 # %% [markdown]
@@ -435,14 +437,14 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# On the development window the daily label has a standard deviation of 0.02902, the weekly
-# 0.06306 and the monthly 0.12558 - 2.17x and 4.33x the daily one, against the 2.24x and 4.58x
+# On the development window the daily label has a standard deviation of 0.02904, the weekly
+# 0.06312 and the monthly 0.12579 - 2.17x and 4.33x the daily one, against the 2.24x and 4.58x
 # square-root-of-horizon scaling implies, so the longer horizons come out slightly narrower than
 # a run of independent daily moves would make them. Their tails are the other way round: excess
-# kurtosis falls from 101.5 on the daily label to 25.3 on the monthly one, because a month of
+# kurtosis falls from 101.8 on the daily label to 25.2 on the monthly one, because a month of
 # returns averages away the single-session jumps that dominate the daily tail. The spread a
 # ranking model works inside is not stable through time: cross-sectional dispersion peaks at
-# 4.46% in 2000 against 1.81% in 1990, a ratio of 2.46, with a median year of 2.16%.
+# 4.46% in 2000 against 1.81% in 1990, a ratio of 2.46, with a median year of 2.17%.
 
 # %% [markdown]
 # ## F. Overlap and effective sample size
@@ -495,16 +497,16 @@ for label_name, horizon in HORIZONS.items():
     )
 
 # %% [markdown] tags=["results"]
-# The daily label's 8,057,485 development rows carry 8,057,485 effective observations, a ratio of
-# exactly 1.0000, as disjoint one-session windows require. The weekly label's 8,044,905 rows
-# carry 1,634,759, a ratio of 0.2032 against the 0.2000 a fully overlapped five-session window
-# implies, and the monthly label's 7,990,295 rows carry 401,365, a ratio of 0.0502 against
-# 0.0476. Both variants sit above their reference value because a stock dropping out of the
-# eligible universe ends an overlap early. Autocorrelation at lag one is -0.014 for the daily
-# label, 0.785 for the weekly and 0.944 for the monthly, and the two variants fall to -0.042 and
-# -0.020 at their own horizons. So the monthly label buys twenty times the rows of a monthly
-# sample and roughly one twentieth of the evidence per row. The purge gap a fold needs is set by
-# the forward window itself, not by these counts.
+# The daily label's 8,058,076 development rows carry 8,058,076 effective observations, a ratio of
+# exactly 1.0000, as disjoint one-session windows require. The weekly label's 8,047,838 rows carry
+# 1,635,506, a ratio of 0.2032 against the 0.2000 a fully overlapped five-session window implies,
+# and the monthly label's 8,002,727 rows carry 402,359, a ratio of 0.0503 against 0.0476. Both
+# variants sit above their reference value because a stock dropping out of the eligible universe
+# ends an overlap early. Autocorrelation at lag one is -0.014 for the daily label, 0.785 for the
+# weekly and 0.944 for the monthly, and the two variants fall to -0.042 and -0.019 at their own
+# horizons. So the monthly label buys twenty times the rows of a monthly sample and roughly one
+# twentieth of the evidence per row. The purge gap a fold needs is set by the forward window
+# itself, not by these counts.
 
 # %% [markdown]
 # ## G. Baseline floor
@@ -528,15 +530,20 @@ for label_name, horizon in HORIZONS.items():
 # %%
 MOMENTUM_LOOKBACK, MOMENTUM_SKIP = 252, 21  # 12-1 momentum, in trading sessions
 
+# On the complete price series, for the reason the label is: a lookback shifted on the screened
+# frame counts eligible rows, so an intermittently eligible stock gets a window years long.
+momentum = labels_df.select(
+    "symbol",
+    "timestamp",
+    (
+        pl.col("adj_close").shift(MOMENTUM_SKIP).over("symbol")
+        / pl.col("adj_close").shift(MOMENTUM_LOOKBACK).over("symbol")
+        - 1
+    ).alias("ret_12m_skip"),
+)
 baseline = (
     dev[PRIMARY_LABEL]
-    .with_columns(
-        (
-            pl.col("adj_close").shift(MOMENTUM_SKIP).over("symbol")
-            / pl.col("adj_close").shift(MOMENTUM_LOOKBACK).over("symbol")
-            - 1
-        ).alias("ret_12m_skip")
-    )
+    .join(momentum, on=["symbol", "timestamp"], how="left")
     .drop_nulls("ret_12m_skip")
 )
 min_obs = int(baseline.group_by("timestamp").len()["len"].median() // 2)
@@ -563,14 +570,14 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# Skip-month momentum earns a mean information coefficient of 0.0133 against the daily label over
-# 6,287 scored sessions on a cross-section of at least 543 stocks, positive as the momentum
-# hypothesis implies. Under the naive standard error that is a t-statistic of 6.44; the
-# Newey-West rule picks 9 lags here, well above the zero a one-session horizon needs on its own,
-# and the HAC statistic is 5.71 with a p-value of 1.22e-08. So the floor a feature has to clear
-# is a mean IC of 0.0133 the correction still separates from zero, and that correction costs
-# about a tenth of the statistic even where the label itself does not overlap - the IC series
-# carries persistence of its own, which is what the lag rule is reading.
+# Skip-month momentum earns a mean information coefficient of 0.0119 against the daily label over
+# 6,314 scored sessions on a cross-section of at least 576 stocks, positive as the momentum
+# hypothesis implies. Under the naive standard error that is a t-statistic of 5.60; the Newey-West
+# rule picks 9 lags here, well above the zero a one-session horizon needs on its own, and the HAC
+# statistic is 4.95 with a p-value of 7.59e-07. So the floor a feature has to clear is a mean IC of
+# 0.0119 the correction still separates from zero, and that correction costs about a tenth of the
+# statistic even where the label itself does not overlap - the IC series carries persistence of its
+# own, which is what the lag rule is reading.
 
 # %% [markdown]
 # ## H. Artifacts and the audit record
