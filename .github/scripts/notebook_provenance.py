@@ -205,9 +205,31 @@ def injected_parameters(nb: dict) -> dict[str, object] | None:
             continue
         try:
             params[target.id] = ast.literal_eval(node.value)
-        except ValueError:
-            params[target.id] = ast.unparse(node.value)
+        except (ValueError, TypeError):
+            params[target.id] = _non_literal_value(node.value)
     return params
+
+
+def _non_literal_value(node: ast.expr) -> object:
+    """Value for an injected assignment that ``literal_eval`` will not take.
+
+    Papermill spells a non-finite float as a call, ``float('nan')``, so that form
+    has to come back as the number to compare against a declared ``float("nan")``.
+    Anything else compares as its own source text.
+    """
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"float", "int"}
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        constructor = float if node.func.id == "float" else int
+        try:
+            return constructor(ast.literal_eval(node.args[0]))
+        except (ValueError, TypeError):
+            pass
+    return ast.unparse(node)
 
 
 def iter_notebooks() -> list[Path]:

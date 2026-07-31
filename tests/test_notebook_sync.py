@@ -110,14 +110,21 @@ def test_float_matches_its_decimal_string() -> None:
 def test_non_finite_values_reach_one_normal_form() -> None:
     """A Decimal NaN does not equal itself, so these have to compare as text.
 
-    Papermill spells a non-finite override ``float('nan')``, which is not a literal
-    and so reaches the comparison as that source text on the injected side. Every
-    form that *is* a number normalizes together; the call form compares as itself.
+    The cell source is what papermill 2.7's ``PythonTranslator`` actually emits for
+    a non-finite float: a ``float(...)`` call rather than a literal.
     """
-    nb = _notebook([_injected_cell("# Parameters\nCAP = inf\n")])
-    assert contradicts_injected_cell(nb, {"CAP": float("inf")}) is None
-    assert contradicts_injected_cell(nb, {"CAP": "Infinity"}) is None
-    assert contradicts_injected_cell(nb, {"CAP": 5}) is not None
+    nb = _notebook([_injected_cell("# Parameters\nCLIP = float('nan')\nCAP = float('inf')\n")])
+    assert contradicts_injected_cell(nb, {"CLIP": float("nan"), "CAP": float("inf")}) is None
+    assert contradicts_injected_cell(nb, {"CLIP": "NaN", "CAP": "Infinity"}) is None
+    assert contradicts_injected_cell(nb, {"CLIP": float("nan"), "CAP": 5}) is not None
+
+
+def test_papermill_translator_still_spells_non_finite_floats_as_a_call() -> None:
+    """Pins the assumption the test above encodes, so it fails if papermill changes."""
+    papermill_translators = pytest.importorskip("papermill.translators")
+
+    assert papermill_translators.PythonTranslator.translate(float("nan")) == "float('nan')"
+    assert papermill_translators.PythonTranslator.translate(float("inf")) == "float('inf')"
 
 
 def test_string_parameters_compare_by_value() -> None:
