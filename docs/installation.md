@@ -98,11 +98,12 @@ does not work on Intel Macs or in native Windows Python.
 > machine that already has the Visual Studio Build Tools. Inside WSL2 you are on the Linux path
 > above, which is the one that is tested.
 
-> **Intel Macs: use Docker, not the local `uv` path.** PyTorch stopped publishing macOS x86_64
-> wheels, so `uv sync` on an Intel Mac stops immediately with `Distribution torch==2.10.0 ...
-> doesn't have a source distribution or wheel for the current platform`. There is nothing to
-> configure around it. The `ml4t` image is amd64 and runs fine, so Docker is the Intel Mac path.
-> Apple Silicon has native wheels and the local `uv` path works there.
+> **macOS: which path depends on the chip.** On **Apple Silicon**, use the local `uv`
+> environment: every dependency has a native arm64 wheel and Docker buys you nothing there. On
+> an **Intel Mac**, Docker is the only option, because PyTorch stopped publishing macOS x86_64
+> wheels and `uv sync` stops immediately with `Distribution torch==2.10.0 ... doesn't have a
+> source distribution or wheel for the current platform`. There is nothing to configure around
+> it. See [macOS](#macos).
 
 ### Which image do I need?
 
@@ -115,7 +116,11 @@ does not work on Intel Macs or in native Windows Python.
 
 **Most readers need only `ml4t`.** The other images are for specific notebooks.
 
-**Apple Silicon users**: The notebooks requiring `ml4t-py312` are not runnable on ARM64 because the underlying libraries (signatory, esig) have no ARM64 builds. View the pre-executed `.ipynb` files on GitHub or in Jupyter instead.
+**Apple Silicon users**: `signatory` and `esig` have no ARM64 builds, so the `ml4t-py312`
+notebooks do not run natively. Every one of them ships pre-executed, so reading the `.ipynb` on
+GitHub or in Jupyter is the intended route. To execute them anyway, enable Docker Desktop →
+Settings → General → **Use Rosetta for x86_64/amd64 emulation** and pull the amd64 image; it
+works, at emulation speed. Nothing else in the book needs this.
 
 ---
 
@@ -287,21 +292,38 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
 
 **Tip**: Keep the repo at `~/machine-learning-for-trading` in WSL, not under `/mnt/c/...`. Windows drives reach WSL through the 9P protocol bridge, which costs roughly 8x on a 512 MB sequential write, 240x on creating two thousand small files, and 470x on reading their metadata. `git clone` and `uv sync` are almost entirely small-file and metadata work, so those last two ratios are the ones a reader pays. Access WSL files from Windows Explorer via `\\wsl$\Ubuntu\home\<username>\machine-learning-for-trading`.
 
-### macOS (Intel and Apple Silicon)
+### macOS
 
-1. **Install Docker Desktop** from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/)
-   - Choose the correct chip: **Intel** or **Apple chip**
-   - Recommended resources: 4+ CPUs, 8+ GB memory, 64+ GB disk
+**Apple Silicon: use the local `uv` path, not Docker.** Every dependency has a native arm64
+wheel, `uv sync` needs nothing beyond the Xcode command-line tools, and it costs you no 13 GB
+image. Go to [Local Setup with uv](#local-setup-with-uv-alternative-to-docker); this is the path
+that is walked on real hardware before every release.
 
-2. **Apple Silicon only**: In Docker Desktop Settings → General, enable **Use Rosetta for x86_64/amd64 emulation** (needed only for the `ml4t-py312` image, which most readers won't use).
+```bash
+xcode-select --install                        # compiler, if you do not have it already
+curl -LsSf https://astral.sh/uv/install.sh | sh
+git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
+cd machine-learning-for-trading
+cp .env.example .env
+uv sync
+```
 
-3. **Clone and pull**:
+**Intel Macs: Docker is the only local option.** PyTorch publishes no macOS x86_64 wheel, so the
+`uv` path cannot be made to work on that hardware. The `ml4t` image is amd64 and runs, so:
+
+1. Install Docker Desktop from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/),
+   choosing the **Intel chip** download. Give it 4+ CPUs, 8+ GB memory and 64+ GB disk in
+   Settings → Resources, and note that the image plus data wants about 17 GB of that disk.
+2. Clone and pull:
    ```bash
    git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
    cd machine-learning-for-trading
    cp .env.example .env
    docker compose pull ml4t
    ```
+
+If that machine is tight on memory or disk, a Linux box or a cloud instance is the more
+comfortable route, and it is the same Linux path documented above.
 
 ---
 
