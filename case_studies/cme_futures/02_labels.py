@@ -521,10 +521,15 @@ for label_name, horizon in HORIZONS.items():
 # ## G. Baseline floor
 #
 # One signal against the primary label on the sealed development window, with no feature
-# engineering: the raw carry the hypothesis names, annualised as
+# engineering: the raw carry the hypothesis names, computed as
 # $12 \times (F_1 - F_2) / F_1$ from the two nearest **raw** settlements, which is what
-# `03_financial_features` recomputes under the name `carry_pct`. Measuring the floor before
-# building features is what makes a later improvement meaningful.
+# `03_financial_features` recomputes under the name `carry_pct`. The factor of twelve is not
+# an annualisation - these thirty products run monthly, quarterly and irregular contract
+# cycles, so the next listed contract is not a fixed distance away, and the gap differs by
+# product. It is a constant applied to every product alike, which leaves the cross-sectional
+# rank correlation below unchanged; it is carried here only so the quantity matches the one
+# stage 03 builds. Measuring the floor before building features is what makes a later
+# improvement meaningful.
 #
 # The information coefficient is the cross-sectional rank correlation on each session,
 # averaged over sessions, which is the quantity a ranking model is scored on; pooling every
@@ -563,7 +568,7 @@ ic = cross_sectional_ic_series(
 stats = compute_ic_hac_stats(ic, ic_col="ic", label_horizon=PRIMARY_HORIZON)
 
 print(
-    f"Baseline: annualised front-to-next carry against {PRIMARY_LABEL}, "
+    f"Baseline: front-to-next carry against {PRIMARY_LABEL}, "
     f"{baseline.height:,} rows, minimum cross-section {min_obs} products"
 )
 print(f"  sessions scored {ic.height:,}, mean IC {stats['mean_ic']:.4f}")
