@@ -380,11 +380,12 @@ Headline metrics aggregated across walk-forward folds, one row per prediction se
 |----------------------|------|------------------------------------------------------------|
 | `prediction_hash`    | TEXT | Primary key, foreign to `prediction_sets`                  |
 | `computed_at`        | TEXT | ISO 8601 UTC timestamp                                     |
-| `ic_mean`            | REAL | Mean cross-sectional Spearman IC across folds              |
-| `ic_std`             | REAL | Std-dev of fold-level IC                                   |
-| `ic_t`               | REAL | `ic_mean / (ic_std / √n_folds)`                            |
-| `n_folds`            | REAL | Number of folds aggregated                                 |
-| `pct_positive`       | REAL | Fraction of folds with IC > 0                              |
+| `ic_mean`            | REAL | Mean cross-sectional Spearman IC over the folds with a defined IC |
+| `ic_std`             | REAL | Std-dev of fold-level IC (0.0 when fewer than two folds define one) |
+| `ic_t`               | REAL | Diagnostic fold-level t, `ic_mean / (ic_std / √n_folds_ic)`. **NULL when undefined** — fewer than two folds with an IC, or no dispersion across them. Read `ic_t_hac` for inference: it is the HAC t on the daily IC series and comes with `ic_ci_lo` / `ic_ci_hi` |
+| `n_folds`            | REAL | Number of folds present in the prediction set              |
+| `n_folds_ic`         | REAL | Number of those folds that produced a defined IC. Below `n_folds` means partial coverage: some fold scored constant and contributes to no IC statistic |
+| `pct_positive`       | REAL | Fraction of the folds with a defined IC whose IC > 0       |
 | `task_type`          | TEXT | `'regression'` or `'classification'`                       |
 | `accuracy`           | REAL | Classification: accuracy at threshold (NULL for regression) |
 | `balanced_accuracy`  | REAL | Classification: balanced accuracy                          |

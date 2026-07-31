@@ -35,6 +35,14 @@ def compute_prediction_fold_metrics(
     - headline_metrics: aggregated across all folds
     - fold_metrics: per-fold breakdown keyed by fold_id
 
+    Folds whose scores are constant produce no cross-sectional IC. Headline
+    ``ic_mean`` / ``ic_std`` / ``ic_t`` / ``pct_positive`` are computed over the
+    folds that did produce one, and ``n_folds_ic`` reports how many that was
+    against ``n_folds``. ``ic_t`` is None when fewer than two folds have a defined
+    IC or the folds show no dispersion. The fold-based ``ic_t`` is a diagnostic:
+    the inferential statistic is ``ic_t_hac``, computed below on the daily IC
+    series with its confidence interval.
+
     Regression metrics: ic, ic_std, rmse, mae, n_entities
     Classification metrics: ic, ic_std, auc_roc, log_loss, brier_score,
         accuracy, balanced_accuracy, auc_pr, n_entities
@@ -137,16 +145,34 @@ def compute_prediction_fold_metrics(
 
         fold_results[fold_id] = fold_m
 
-    # Headline aggregates — IC always computed
+    # Headline aggregates over the folds that produced a *defined* IC.
+    #
+    # A fold whose scores are constant has no cross-sectional rank correlation, so
+    # `cross_sectional_ic` returns NaN for it — an L1 config that zeroes every
+    # coefficient on one fold is the case that surfaced this. Aggregating with plain
+    # `np.mean`/`np.std` propagates that NaN into every headline value, and because
+    # `np.nan > 0` is False the `ic_t` guard fell through to a sentinel `0.0`. A
+    # stored `ic_t = 0.0` reads as "this IC is indistinguishable from zero", which is
+    # a claim; "not computable" is not. Aggregate over the defined folds, count them
+    # in `n_folds_ic` so partial coverage is visible next to `n_folds`, and return
+    # None (SQL NULL) for a t statistic that does not exist.
+    #
+    # `ic_std` keeps its 0.0-when-undefined convention: `_verify_cached_config` in
+    # `case_studies/utils/gbm.py` reads the stored value through `float()`, which a
+    # NULL would raise on.
     fold_ics = [fm["ic"] for fm in fold_results.values()]
-    headline: dict[str, float | str] = {
-        "ic_mean": float(np.mean(fold_ics)) if fold_ics else 0.0,
-        "ic_std": float(np.std(fold_ics)) if len(fold_ics) > 1 else 0.0,
-        "ic_t": float(np.mean(fold_ics) / (np.std(fold_ics) / np.sqrt(len(fold_ics))))
-        if len(fold_ics) > 1 and np.std(fold_ics) > 0
-        else 0.0,
+    defined_ics = [float(ic) for ic in fold_ics if ic is not None and np.isfinite(ic)]
+    n_ic = len(defined_ics)
+    ic_dispersion = float(np.std(defined_ics)) if n_ic > 1 else 0.0
+    headline: dict[str, float | str | None] = {
+        "ic_mean": float(np.mean(defined_ics)) if n_ic else None,
+        "ic_std": ic_dispersion,
+        "ic_t": float(np.mean(defined_ics) / (ic_dispersion / np.sqrt(n_ic)))
+        if n_ic > 1 and ic_dispersion > 0
+        else None,
         "n_folds": len(folds),
-        "pct_positive": float(np.mean([ic > 0 for ic in fold_ics])) if fold_ics else 0.0,
+        "n_folds_ic": n_ic,
+        "pct_positive": float(np.mean([ic > 0 for ic in defined_ics])) if n_ic else None,
         "task_type": "classification" if task_type == "classification" else "regression",
     }
 
