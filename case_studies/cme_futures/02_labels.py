@@ -161,8 +161,8 @@ if MAX_PRODUCTS is not None:
 bars = bars.sort(["product", "position", "timestamp"])
 front = bars.filter(pl.col("position") == 0)
 
-# Digest of the data the labels are built from, recorded as every label's `inputs`: a
-# re-run against a refreshed download is otherwise indistinguishable from this one.
+# Recorded as every label's `inputs`: a re-run against a refreshed download is
+# otherwise indistinguishable from this one.
 MARKET_DATA_DIGEST = value_digest(front, ["product", "position", "timestamp", "adj_close"])
 
 print(f"{front['product'].n_unique()} products, {front.height:,} front-contract sessions")
@@ -226,7 +226,8 @@ labels_df = labels_df.with_columns(
 )
 
 print(f"Constructed {', '.join(LABEL_NAMES)}")
-print(f"Session spacings above {MAX_SESSION_GAP_DAYS} days: {labels_df['_holes'].max()} in total")
+gaps = labels_df.group_by("product").agg(pl.col("_holes").max()).filter(pl.col("_holes") > 0)
+print(f"{gaps['_holes'].sum()} holes above {MAX_SESSION_GAP_DAYS} days, in {gaps.height} products")
 
 # %% [markdown]
 # ## D. Window validity
@@ -608,8 +609,7 @@ for label_name in LABEL_NAMES:
 # the values computed above rather than written by hand.
 
 # %%
-readers = dict.fromkeys(LABEL_NAMES, "the model stages, as a variant declared in `setup.yaml`")
-readers[PRIMARY_LABEL] = "03_financial_features.py, as `labels.primary`"
+readers = {PRIMARY_LABEL: "03_financial_features.py, as `labels.primary`"}
 print("\nLabel audit record")
 for label_name, horizon in HORIZONS.items():
     frame = dev[label_name]
@@ -619,7 +619,7 @@ for label_name, horizon in HORIZONS.items():
         f"\n  resolution   fixed at t+h; daily settlements need no intraday tie-break"
         f"\n  overlap      {horizon - 1} sessions shared by consecutive rows"
         f"\n  base rate    mean {frame[label_name].mean():+.5f}, std {frame[label_name].std():.5f}"
-        f"\n  consumed by  {readers[label_name]}"
+        f"\n  consumed by  {readers.get(label_name, 'the model stages, as a variant')}"
     )
 
 # %% [markdown]
