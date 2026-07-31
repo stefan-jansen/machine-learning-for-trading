@@ -16,62 +16,58 @@ import polars as pl
 __all__ = ["exceedance_curve", "fold_timeline", "panel_acf"]
 
 
-def fold_timeline(
-    cv,
-    timeline: pl.DataFrame,
-    *,
-    timestamp_col: str = "timestamp",
-    title: str,
-    holdout: tuple[str, str] | None = None,
-):
-    """Walk-forward folds as a timeline, exportable to a static image.
+def fold_timeline(ax, splits: list[dict], *, holdout: tuple[str, str]) -> None:
+    """Draw walk-forward folds on ``ax`` from the boundaries a caller already has.
 
-    :func:`ml4t.diagnostic.visualization.cv_plots.plot_cv_folds` draws each block as
-    a horizontal bar whose ``base`` is a pandas ``Timestamp`` and whose width is a
-    duration in milliseconds. The static-image path serializes with ``orjson``,
-    which rejects the ``Timestamp``; round-tripping through Plotly's own JSON
-    encoder fixes that but leaves the x axis looking numeric, so it is declared a
-    date axis explicitly. Without both steps the committed notebook carries either
-    no PNG or one whose axis reads in epoch milliseconds.
+    :func:`ml4t.diagnostic.visualization.cv_plots.plot_cv_folds` takes a splitter and
+    re-splits whatever timeline it is handed, so the picture it draws is a second
+    computation that can disagree with the one the notebook reports - it did, by
+    eleven days, on a timeline truncated at the last validation date. This draws the
+    boundaries themselves, so the figure and the folds cannot come apart.
 
     Parameters
     ----------
-    cv
-        A configured splitter. ``plot_cv_folds`` calls ``.split()`` itself, so this
-        takes the splitter object and not the list of boundaries.
-    timeline
-        One column of timestamps covering exactly the range the folds may use.
-        ``plot_cv_folds`` re-splits this itself, so passing anything wider than the
-        boundaries a caller reports draws folds that disagree with them.
+    splits
+        As returned by ``utils.cv_splits.generate_cv_splits``: ``train_start``,
+        ``train_end``, ``val_start``, ``val_end`` per fold. The span between
+        ``train_end`` and ``val_start`` is the purge gap and is drawn as such.
     holdout
-        Start and end of the sealed block, shaded on the same axis. Pass it rather
-        than widening ``timeline``, which would move the fold boundaries.
+        Start and end of the sealed block, shaded behind the folds.
     """
-    import plotly.io as pio
-    from ml4t.diagnostic.visualization.cv_plots import plot_cv_folds
+    from matplotlib.patches import Patch
 
-    figure = plot_cv_folds(
-        cv,
-        timeline,
-        timestamp_col=timestamp_col,
-        show_purge_gaps=True,
-        show_test_period=True,
-        title=title,
-    )
-    normalized = pio.from_json(figure.to_json())
-    normalized.update_xaxes(type="date")
-    normalized.update_layout(margin={"l": 110})
-    if holdout is not None:
-        normalized.add_vrect(
-            x0=holdout[0],
-            x1=holdout[1],
-            fillcolor="#C1662F",
-            opacity=0.25,
-            line_width=0,
-            annotation_text="sealed holdout",
-            annotation_position="top left",
+    from utils.style import COLORS
+
+    bands = [
+        ("train_start", "train_end", COLORS["blue"]),
+        ("val_start", "val_end", COLORS["amber"]),
+    ]
+    for row, split in enumerate(splits):
+        for lo, hi, color in bands:
+            ax.barh(row, split[hi] - split[lo], left=split[lo], height=0.62, color=color)
+        ax.barh(
+            row,
+            split["val_start"] - split["train_end"],
+            left=split["train_end"],
+            height=0.62,
+            color=COLORS["silver_muted"],
         )
-    return normalized
+    ax.axvspan(*(np.datetime64(d) for d in holdout), color=COLORS["copper"], alpha=0.25)
+    ax.set_yticks(range(len(splits)), [f"Fold {s['fold'] + 1}" for s in splits])
+    ax.invert_yaxis()
+    ax.legend(
+        handles=[
+            Patch(color=COLORS["blue"], label="train"),
+            Patch(color=COLORS["silver_muted"], label="purge"),
+            Patch(color=COLORS["amber"], label="validation"),
+            Patch(color=COLORS["copper"], alpha=0.25, label="sealed holdout"),
+        ],
+        frameon=False,
+        fontsize=8,
+        ncol=4,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.12),
+    )
 
 
 def panel_acf(
