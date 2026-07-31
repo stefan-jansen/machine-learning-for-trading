@@ -58,6 +58,21 @@ def combine_existing(output_path: Path, new_df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def missing_symbols(df: pl.DataFrame, symbols: list[str]) -> list[str]:
+    """Which requested symbols are absent from what is now on disk.
+
+    The status has to come from the merged dataset, not from the symbols that
+    failed in this request. combine_existing() folds a retry into what a previous
+    run already wrote, so a symbol that fails on the retry is still present, and
+    reporting the request's failures would fail a download that is in fact
+    complete.
+    """
+    if df.is_empty():
+        return list(symbols)
+    present = set(df["symbol"].unique().to_list())
+    return [s for s in symbols if s not in present]
+
+
 def get_update_start(output_path: Path, end_date: str, interval_hours: int) -> str | None:
     if not output_path.exists():
         return None
@@ -222,6 +237,10 @@ def main() -> None:
     storage_path.mkdir(parents=True, exist_ok=True)
     dictionary_path = write_dictionary(storage_path, symbol_groups)
     summary: dict[str, object] = {"dictionary_file": str(dictionary_path)}
+    # What is absent from the merged dataset, which is what the exit status is
+    # about. Not the same as the failed lists below, which are per-request.
+    perps_missing: list[str] = []
+    premium_missing: list[str] = []
     perps_failed: list[str] = []
     premium_failed: list[str] = []
 
@@ -262,6 +281,7 @@ def main() -> None:
             perps_df = clamp_date_range(perps_df, perps_start, perps_end)
             if not args.symbol:
                 perps_df = perps_df.filter(pl.col("symbol").is_in(symbols))
+            perps_missing = missing_symbols(perps_df, symbols)
             atomic_write_parquet(perps_df, perps_output)
             save_partitioned(perps_df, storage_path / "ohlcv_1h")
             profile_path = save_dataset_profile(
@@ -269,9 +289,11 @@ def main() -> None:
             )
             summary["perps_rows"] = len(perps_df)
             summary["perps_symbols"] = perps_df["symbol"].n_unique()
-            summary["perps_failed"] = len(perps_failed)
+            summary["perps_missing"] = len(perps_missing)
             summary["perps_output"] = str(perps_output)
             summary["perps_profile"] = str(profile_path)
+        else:
+            perps_missing = list(symbols)
 
     if download_premium_flag:
         premium_output = storage_path / premium_file
@@ -314,6 +336,7 @@ def main() -> None:
             premium_df = clamp_date_range(premium_df, premium_start, premium_end)
             if not args.symbol:
                 premium_df = premium_df.filter(pl.col("symbol").is_in(symbols))
+            premium_missing = missing_symbols(premium_df, symbols)
             atomic_write_parquet(premium_df, premium_output)
             save_partitioned(premium_df, storage_path / "premium_index")
             profile_path = save_dataset_profile(
@@ -321,25 +344,34 @@ def main() -> None:
             )
             summary["premium_rows"] = len(premium_df)
             summary["premium_symbols"] = premium_df["symbol"].n_unique()
-            summary["premium_failed"] = len(premium_failed)
+            summary["premium_missing"] = len(premium_missing)
             summary["premium_output"] = str(premium_output)
             summary["premium_profile"] = str(profile_path)
+        else:
+            premium_missing = list(symbols)
 
     print_download_summary(summary)
 
-    # Exit non-zero when any symbol is missing. Binance rate-limits this download —
-    # roughly 700 calls over 10-15 minutes — so coming back short is the expected
-    # failure, and exiting 0 makes it indistinguishable from a complete download to
-    # download_all.py, to CI, and to a reader who checks the status rather than
-    # reading the summary. --allow-partial keeps what arrived; re-running resumes.
-    if perps_failed or premium_failed:
-        for label, failed in (("perpetual OHLCV", perps_failed), ("premium index", premium_failed)):
-            if failed:
-                print(f"\n{len(failed)} {label} symbol(s) failed: {', '.join(sorted(failed))}")
+    # Exit non-zero when a requested symbol is absent from what is now on disk.
+    # Binance rate-limits this download — roughly 700 calls over 10-15 minutes —
+    # so coming back short is the expected failure, and exiting 0 makes it
+    # indistinguishable from a complete download to download_all.py, to CI, and to
+    # a reader who checks the status rather than reading the summary.
+    if perps_missing or premium_missing:
+        for label, missing in (
+            ("perpetual OHLCV", perps_missing),
+            ("premium index", premium_missing),
+        ):
+            if missing:
+                print(f"\n{len(missing)} {label} symbol(s) missing: {', '.join(sorted(missing))}")
+        # Re-running fetches every configured symbol again and merges the result
+        # into what is already on disk, so a symbol that failed once can arrive on
+        # the second run. It is a retry, not a resume; --update is the incremental
+        # path, and it extends the window rather than filling gaps in it.
         if args.allow_partial:
-            print("\nPartial download accepted (--allow-partial). Re-run to fetch the rest.")
+            print("\nPartial download accepted (--allow-partial). Re-run to try the rest.")
         else:
-            print("\nPartial download. Re-run to fetch the missing symbols,")
+            print("\nPartial download. Re-run to try the missing symbols again,")
             print("or pass --allow-partial to accept what arrived.")
             sys.exit(1)
 

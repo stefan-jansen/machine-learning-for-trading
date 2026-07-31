@@ -312,6 +312,18 @@ class DaySource:
     # -- extracted directory ------------------------------------------------
 
     def _days_from_directory(self) -> Iterator[tuple[str, object]]:
+        # Extracting the NASDAQ-100 archive gives per-day zips, not CSVs — its outer
+        # archive is a zip of zips. A reader who unpacks one level and points at the
+        # result has done nothing wrong, so read both shapes.
+        day_zips = sorted(
+            (p for p in self.path.rglob("*.zip") if "__MACOSX" not in p.parts and _day_of(p)),
+            key=lambda p: _day_of(p),
+        )
+        if day_zips:
+            for path in day_zips:
+                yield _day_of(path), lambda path=path: _read_day_zip(path)
+            return
+
         suffix = "*.csv.gz" if self.dataset == "sp500-options" else "*.csv"
         by_day: dict[str, list[Path]] = defaultdict(list)
         for file in self.path.rglob(suffix):
@@ -368,13 +380,22 @@ def _read_member(archive: zipfile.ZipFile, name: str) -> bytes:
     return gzip.decompress(payload) if name.endswith(".gz") else payload
 
 
+def _members_of_day_zip(inner: zipfile.ZipFile) -> list[bytes]:
+    return [
+        inner.read(m)
+        for m in sorted(inner.namelist())
+        if _NASDAQ_MEMBER.search(m) and "__MACOSX" not in m
+    ]
+
+
 def _read_inner_zip(archive: zipfile.ZipFile, name: str) -> list[bytes]:
     with zipfile.ZipFile(io.BytesIO(archive.read(name))) as inner:
-        return [
-            inner.read(m)
-            for m in sorted(inner.namelist())
-            if _NASDAQ_MEMBER.search(m) and "__MACOSX" not in m
-        ]
+        return _members_of_day_zip(inner)
+
+
+def _read_day_zip(path: Path) -> list[bytes]:
+    with zipfile.ZipFile(path) as inner:
+        return _members_of_day_zip(inner)
 
 
 # --------------------------------------------------------------------------------

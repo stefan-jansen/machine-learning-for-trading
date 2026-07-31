@@ -34,11 +34,16 @@ made every data-loading notebook fail on the local ``uv`` path. Setting the
 variable here gives every entry point the same answer: an explicit value in the
 environment wins, then ``.env``, then ``<repo>/data``. Reading ``.env`` here is
 what makes the two groups of notebooks agree — those that import
-``utils.config`` (which calls ``load_dotenv``) and those that do not.
+``utils.config`` (which calls ``load_dotenv``) and those that do not. When the
+value is the ``<repo>/data`` default rather than anyone's choice,
+``ML4T_DATA_PATH_IS_DEFAULT`` says so, which is what lets ``tests/conftest.py``
+still prefer a populated test-data checkout over the tracked source tree.
 
 Nothing here may raise: this module runs at the startup of every interpreter in
 the environment, so a failure would break the whole install rather than one
-notebook.
+notebook. Failing means leaving the variable unset, never setting a guess —
+``utils.config`` calls ``load_dotenv(override=False)``, so a wrong value set
+here is one nothing downstream can correct.
 """
 
 import os
@@ -55,26 +60,26 @@ for _chapter_dir in sorted(_REPO_ROOT.glob("[0-9][0-9]_*")):
 
 
 def _data_root_from_dotenv(repo_root: Path) -> str | None:
-    """Read ``ML4T_DATA_PATH`` out of ``<repo>/.env`` without importing dotenv.
+    """Read ``ML4T_DATA_PATH`` out of ``<repo>/.env``, or report that it cannot.
 
-    ``python-dotenv`` is not guaranteed to be importable at interpreter startup,
-    and importing it there would cost every process in the environment. Only the
-    one variable is parsed; ``load_dotenv`` still handles the rest of the file
-    later, and leaves this value alone because it does not override.
+    Returns the configured value, or ``None`` when the file does not exist or
+    does not set the variable. Raises when there is a ``.env`` whose value cannot
+    be read the way ``load_dotenv`` would read it — the caller must then leave the
+    environment alone, because ``utils.config`` calls ``load_dotenv(override=False)``
+    and so cannot correct a wrong value set here.
+
+    ``python-dotenv`` is imported lazily and only when there is a file to parse.
+    Importing it unconditionally costs ~15 ms on every interpreter start in the
+    environment, which roughly doubles bare startup; hand-rolling the parse
+    instead gets ``export KEY=``, inline comments and ``${VAR}`` interpolation
+    wrong, and each of those is a value a reader may legitimately write.
     """
     env_file = repo_root / ".env"
     if not env_file.is_file():
         return None
-    for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line.startswith("ML4T_DATA_PATH"):
-            continue
-        key, _, value = line.partition("=")
-        if key.strip() != "ML4T_DATA_PATH":
-            continue
-        value = value.strip().strip("'\"")
-        return value or None
-    return None
+    from dotenv import dotenv_values
+
+    return dotenv_values(env_file).get("ML4T_DATA_PATH") or None
 
 
 def _anchor_data_root(repo_root: Path) -> None:
@@ -87,9 +92,17 @@ def _anchor_data_root(repo_root: Path) -> None:
     if not data_root.is_absolute():
         data_root = repo_root / data_root
     os.environ["ML4T_DATA_PATH"] = str(data_root)
+    if configured is None:
+        # This value is the repo-anchored default, not something anyone asked for.
+        # tests/conftest.py needs the difference: the tracked data/ tree is never
+        # empty, so an unmarked default would hide the populated test-data
+        # checkout and silently skip every data-dependent notebook test.
+        os.environ["ML4T_DATA_PATH_IS_DEFAULT"] = "1"
 
 
 try:
     _anchor_data_root(_REPO_ROOT)
 except Exception:  # noqa: BLE001 - startup hook: never break the interpreter
+    # Leaving ML4T_DATA_PATH unset is the safe failure: load_dotenv still applies
+    # the reader's .env later, which a wrong value set here would have blocked.
     pass

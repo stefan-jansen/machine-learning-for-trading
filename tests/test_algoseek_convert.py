@@ -351,11 +351,83 @@ def test_day_source_reads_an_extracted_options_tree(convert, tmp_path):
     assert convert.parse_sp500_options_csv(payloads[0]).height == 1
 
 
+def test_day_source_reads_an_extracted_nasdaq_tree(convert, tmp_path):
+    """Extracting the NASDAQ-100 archive one level gives day *zips*, not CSVs.
+
+    Its outer archive is a zip of zips, so a reader who unpacks it and points
+    --source at the result has an ``2020/20200313.zip`` tree. Globbing for CSVs
+    finds nothing there and the run used to report an empty source.
+    """
+    year_dir = tmp_path / "2020"
+    year_dir.mkdir()
+    for day in ("20200313", "20200316"):
+        with zipfile.ZipFile(year_dir / f"{day}.zip", "w") as z:
+            z.writestr(f"{day}/A/AAPL.csv", _nasdaq100_csv(convert, day=day))
+            z.writestr(f"{day}/M/MSFT.csv", _nasdaq100_csv(convert, symbol="MSFT", day=day))
+
+    days = list(convert.DaySource(tmp_path, "nasdaq100-minute-bars").days())
+    assert [d for d, _ in days] == ["20200313", "20200316"]
+    payloads = days[0][1]()
+    assert len(payloads) == 2
+    assert convert.parse_nasdaq100_csv(payloads[0]).height == 2
+
+
+def test_extracted_nasdaq_tree_converts_end_to_end(convert, tmp_path):
+    year_dir = tmp_path / "archive" / "2020"
+    year_dir.mkdir(parents=True)
+    with zipfile.ZipFile(year_dir / "20200313.zip", "w") as z:
+        z.writestr("20200313/A/AAPL.csv", _nasdaq100_csv(convert))
+
+    out = tmp_path / "data"
+    assert convert.convert_nasdaq100(tmp_path / "archive", out, workers=1, force=False) == 0
+    written = out / "equities" / "market" / "nasdaq100" / "minute_bars" / "year=2020"
+    assert (written / "month=03.parquet").is_file()
+
+
 def test_day_source_rejects_a_source_that_is_neither(convert, tmp_path):
     junk = tmp_path / "notes.txt"
     junk.write_text("not an archive")
     with pytest.raises(SystemExit):
         list(convert.DaySource(junk, "sp500-options").days())
+
+
+def test_the_documented_workflow_works_with_an_external_data_root(convert, tmp_path, monkeypatch):
+    """Convert, then build, with ML4T_DATA_PATH outside the repository.
+
+    The converter always honored the data root; the three build scripts resolved
+    their input and output from their own directory, so with an external root
+    they looked where nothing had been written and left their output where no
+    loader reads. This walks conversion followed by a build and asserts both
+    landed under the configured root.
+    """
+    import importlib.util
+
+    source = tmp_path / "chains" / "2020" / "20200313"
+    source.mkdir(parents=True)
+    for symbol in ("AAPL", "MSFT"):
+        (source / f"{symbol}.csv.gz").write_bytes(
+            gzip.compress(_options_csv(convert, symbol=symbol))
+        )
+
+    data_root = tmp_path / "elsewhere"
+    assert convert.convert_sp500_options(tmp_path / "chains", data_root, 1, False) == 0
+    raw = data_root / "equities" / "market" / "sp500" / "options" / "year=2020" / "20200313.parquet"
+    assert raw.is_file(), "the converter must write under the configured data root"
+
+    build_py = Path(da.__file__).parent / "equities" / "market" / "sp500" / "build_options_eda.py"
+    spec = importlib.util.spec_from_file_location("build_options_eda_under_test", build_py)
+    build = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = build
+    spec.loader.exec_module(build)
+
+    monkeypatch.setenv("ML4T_DATA_PATH", str(data_root))
+    monkeypatch.setattr(sys, "argv", ["build_options_eda.py", "--data-path", str(data_root)])
+    build.main()
+
+    built = data_root / "equities" / "market" / "sp500" / "options_eda" / "year=2020.parquet"
+    assert built.is_file(), "the build script must read and write under the same root"
+    # Both fixture symbols are in EDA_SYMBOLS, so both rows survive the filter.
+    assert sorted(pl.read_parquet(built)["symbol"].to_list()) == ["AAPL", "MSFT"]
 
 
 # --------------------------------------------------------------------------------

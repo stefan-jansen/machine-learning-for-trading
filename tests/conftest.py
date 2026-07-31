@@ -65,9 +65,14 @@ def _resolve_data_path() -> Path | None:
     pytest-xdist workers may not inherit env vars set by the parent process,
     so we also check the .env file and well-known test-data locations.
     """
-    # 1. Explicit env var (works in single-process pytest and CI)
+    # 1. Explicit env var (works in single-process pytest and CI).
+    #    sitecustomize.py sets ML4T_DATA_PATH to <repo>/data when nothing else
+    #    did, and marks it. That default must not win here: the tracked data/
+    #    tree is never empty, so taking it would shadow the populated test-data
+    #    checkout below and silently skip every data-dependent notebook test.
+    #    Step 4 applies the real test — does it hold parquet — to that path.
     env_path = os.environ.get("ML4T_DATA_PATH")
-    if env_path:
+    if env_path and not os.environ.get("ML4T_DATA_PATH_IS_DEFAULT"):
         p = Path(env_path).expanduser().resolve()
         if p.exists() and any(p.iterdir()):
             return p

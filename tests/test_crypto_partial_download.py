@@ -6,9 +6,14 @@ mode. It used to exit non-zero only when the downloaded frame was *entirely*
 empty: 18 of 19 symbols could fail and the script still exited 0, which
 ``data/download_all.py`` reads as ``[OK] Crypto``.
 
-These pin the status, not the summary text: a non-empty failed-symbol list on
-either dataset must exit 1, and ``--allow-partial`` must be the only way to keep
+These pin the status, not the summary text: a requested symbol absent from what
+is now on disk must exit 1, and ``--allow-partial`` must be the only way to keep
 what arrived and still exit 0.
+
+The status comes from the *merged* dataset rather than from the symbols that
+failed in the last request. ``combine_existing()`` folds a retry into what an
+earlier run wrote, so a symbol that fails on the retry is still on disk — basing
+the status on the request would fail a download that is in fact complete.
 """
 
 from __future__ import annotations
@@ -35,13 +40,14 @@ def _load_download_module():
     return mod
 
 
-def _frame(symbol: str) -> pl.DataFrame:
-    """One in-window row, the minimum the write path needs."""
+def _frame(symbols) -> pl.DataFrame:
+    """One in-window row per symbol, the minimum the write path needs."""
+    symbols = list(symbols)
     return pl.DataFrame(
         {
-            "symbol": [symbol],
-            "timestamp": [datetime(2021, 6, 1)],
-            "close": [30000.0],
+            "symbol": symbols,
+            "timestamp": [datetime(2021, 6, 1)] * len(symbols),
+            "close": [30000.0] * len(symbols),
         }
     )
 
@@ -61,61 +67,103 @@ def downloader(monkeypatch, tmp_path):
     return mod
 
 
-def _run(mod, monkeypatch, tmp_path, *, perps_failed, premium_failed, cli=()):
-    monkeypatch.setattr(
-        mod,
-        "download_perps",
-        lambda *a, **k: (_frame("BTCUSDT"), list(perps_failed)),
-    )
-    monkeypatch.setattr(
-        mod,
-        "download_premium",
-        lambda *a, **k: (_frame("BTCUSDT"), list(premium_failed)),
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["download.py", "--data-path", str(tmp_path), "--symbol", "BTCUSDT", *cli],
-    )
+@pytest.fixture
+def configured_symbols():
+    """The symbols a plain run requests, read from the shipped config."""
+    from utils.downloading import flatten_group_values, load_section
+
+    config = load_section(DOWNLOAD_PY.parent / "config.yaml", "crypto")
+    symbols = flatten_group_values(config.get("symbols", {}), "symbols")
+    assert len(symbols) > 3, "these tests need a multi-symbol universe"
+    return symbols
+
+
+def _run(mod, monkeypatch, tmp_path, *, arrived, failed=(), cli=()):
+    """Run ``main()`` with both download functions replaced.
+
+    *arrived* is what the provider returns this time. *failed* is what the
+    request reports, which on a retry is deliberately allowed to disagree with
+    what an earlier run already put on disk.
+    """
+    monkeypatch.setattr(mod, "download_perps", lambda *a, **k: (_frame(arrived), list(failed)))
+    monkeypatch.setattr(mod, "download_premium", lambda *a, **k: (_frame(arrived), list(failed)))
+    monkeypatch.setattr(sys, "argv", ["download.py", "--data-path", str(tmp_path), *cli])
     mod.main()
 
 
-def test_complete_download_exits_zero(downloader, monkeypatch, tmp_path):
-    _run(downloader, monkeypatch, tmp_path, perps_failed=[], premium_failed=[])
+def test_complete_download_exits_zero(downloader, monkeypatch, tmp_path, configured_symbols):
+    _run(downloader, monkeypatch, tmp_path, arrived=configured_symbols)
 
 
-def test_partial_perps_exits_nonzero(downloader, monkeypatch, tmp_path):
+def test_missing_symbol_exits_nonzero(downloader, monkeypatch, tmp_path, configured_symbols):
     with pytest.raises(SystemExit) as exc:
-        _run(downloader, monkeypatch, tmp_path, perps_failed=["ETHUSDT"], premium_failed=[])
-    assert exc.value.code == 1
-
-
-def test_partial_premium_exits_nonzero(downloader, monkeypatch, tmp_path):
-    with pytest.raises(SystemExit) as exc:
-        _run(downloader, monkeypatch, tmp_path, perps_failed=[], premium_failed=["ETHUSDT"])
-    assert exc.value.code == 1
-
-
-def test_allow_partial_keeps_what_arrived(downloader, monkeypatch, tmp_path, capsys):
-    _run(
-        downloader,
-        monkeypatch,
-        tmp_path,
-        perps_failed=["ETHUSDT"],
-        premium_failed=["ETHUSDT"],
-        cli=("--allow-partial",),
-    )
-    assert "ETHUSDT" in capsys.readouterr().out
-
-
-def test_failed_symbols_are_named(downloader, monkeypatch, tmp_path, capsys):
-    with pytest.raises(SystemExit):
         _run(
             downloader,
             monkeypatch,
             tmp_path,
-            perps_failed=["ETHUSDT", "SOLUSDT"],
-            premium_failed=[],
+            arrived=configured_symbols[:1],
+            failed=configured_symbols[1:],
         )
+    assert exc.value.code == 1
+
+
+def test_missing_symbols_are_named(downloader, monkeypatch, tmp_path, capsys, configured_symbols):
+    with pytest.raises(SystemExit):
+        _run(downloader, monkeypatch, tmp_path, arrived=configured_symbols[:-2])
     out = capsys.readouterr().out
-    assert "ETHUSDT" in out and "SOLUSDT" in out
+    for symbol in configured_symbols[-2:]:
+        assert symbol in out
+
+
+def test_allow_partial_keeps_what_arrived(
+    downloader, monkeypatch, tmp_path, capsys, configured_symbols
+):
+    _run(
+        downloader,
+        monkeypatch,
+        tmp_path,
+        arrived=configured_symbols[:-1],
+        cli=("--allow-partial",),
+    )
+    assert configured_symbols[-1] in capsys.readouterr().out
+
+
+def test_a_retry_that_completes_the_dataset_exits_zero(
+    downloader, monkeypatch, tmp_path, configured_symbols
+):
+    """The case a request-based status gets wrong.
+
+    The first run comes back short. The second fetches the rest and reports the
+    already-downloaded symbols as failures, which is what a rate-limited retry
+    looks like. The merged dataset is complete, so the run has succeeded.
+    """
+    first, rest = configured_symbols[:2], configured_symbols[2:]
+    with pytest.raises(SystemExit):
+        _run(downloader, monkeypatch, tmp_path, arrived=first, failed=rest)
+
+    # Nothing may raise: across the two runs every symbol is now on disk.
+    _run(downloader, monkeypatch, tmp_path, arrived=rest, failed=first)
+
+
+def test_a_retry_that_is_still_short_exits_nonzero(
+    downloader, monkeypatch, tmp_path, configured_symbols
+):
+    """The converse, so the fix cannot degrade into always exiting 0."""
+    first, second = configured_symbols[:2], configured_symbols[2:-1]
+    with pytest.raises(SystemExit):
+        _run(downloader, monkeypatch, tmp_path, arrived=first)
+    with pytest.raises(SystemExit) as exc:
+        _run(downloader, monkeypatch, tmp_path, arrived=second)
+    assert exc.value.code == 1
+
+
+def test_a_single_requested_symbol_that_arrives_is_complete(downloader, monkeypatch, tmp_path):
+    """--symbol narrows what was asked for, so nothing else can be missing."""
+    _run(
+        downloader,
+        monkeypatch,
+        tmp_path,
+        arrived=["BTCUSDT"],
+        failed=["ETHUSDT"],
+        cli=("--symbol", "BTCUSDT"),
+    )

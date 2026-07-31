@@ -85,13 +85,34 @@ def anchor_ran() -> None:
         pytest.skip("sitecustomize.py did not run in this environment")
 
 
-def test_repo_root_resolves_to_repo_data(anchor_ran) -> None:
-    assert Path(_probe(REPO_ROOT)) == REPO_ROOT / "data"
+def _expected_root() -> Path:
+    """What the hook should resolve to on *this* machine.
+
+    Not unconditionally ``<repo>/data``: a reader who keeps data on another drive
+    sets ML4T_DATA_PATH in ``.env``, and honoring that is the whole point of
+    reading the file. Asserting the repo path regardless would fail on every
+    correctly-configured machine, including this one.
+    """
+    configured = _load_sitecustomize()._data_root_from_dotenv(REPO_ROOT)
+    if not configured:
+        return REPO_ROOT / "data"
+    path = Path(configured).expanduser()
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
+def test_repo_root_resolves_to_the_configured_root(anchor_ran) -> None:
+    assert Path(_probe(REPO_ROOT)) == _expected_root()
 
 
 def test_chapter_directory_resolves_to_the_same_place(anchor_ran) -> None:
     """The defect itself: this used to be <repo>/01_process_is_edge/data."""
-    assert Path(_probe(CHAPTER_DIR)) == REPO_ROOT / "data"
+    assert Path(_probe(CHAPTER_DIR)) == _expected_root()
+
+
+def test_every_directory_agrees(anchor_ran) -> None:
+    """Whatever the answer is, it must not depend on where the process started."""
+    seen = {_probe(d) for d in (REPO_ROOT, CHAPTER_DIR, REPO_ROOT / "tests", Path.home())}
+    assert len(seen) == 1, seen
 
 
 def test_explicit_environment_value_wins(anchor_ran, tmp_path) -> None:
@@ -143,3 +164,74 @@ def test_dotenv_parser_tolerates_a_missing_file(tmp_path) -> None:
     sitecustomize = _load_sitecustomize()
 
     assert sitecustomize._data_root_from_dotenv(tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("ML4T_DATA_PATH=/mnt/big/data", "/mnt/big/data"),
+        ('ML4T_DATA_PATH="/mnt/big/data"', "/mnt/big/data"),
+        ("ML4T_DATA_PATH=/mnt/big/data # external disk", "/mnt/big/data"),
+        ("export ML4T_DATA_PATH=/mnt/big/data", "/mnt/big/data"),
+        ("ML4T_DATA_PATH=", None),
+    ],
+    ids=["plain", "quoted", "inline-comment", "export", "empty"],
+)
+def test_dotenv_parser_matches_load_dotenv(tmp_path, line, expected) -> None:
+    """Every one of these is valid .env syntax a reader may write.
+
+    A hand-rolled parser gets the last three wrong, and a wrong value here is one
+    nothing downstream can fix: ``utils.config`` calls ``load_dotenv`` with
+    ``override=False``, so whatever the hook sets is what the run uses.
+    """
+    sitecustomize = _load_sitecustomize()
+
+    (tmp_path / ".env").write_text(line + "\n")
+    assert sitecustomize._data_root_from_dotenv(tmp_path) == expected
+
+
+def test_dotenv_parser_interpolates(tmp_path) -> None:
+    sitecustomize = _load_sitecustomize()
+
+    (tmp_path / ".env").write_text("ROOT=/mnt/big\nML4T_DATA_PATH=${ROOT}/data\n")
+    assert sitecustomize._data_root_from_dotenv(tmp_path) == "/mnt/big/data"
+
+
+def test_the_default_is_marked_as_a_default(monkeypatch) -> None:
+    """tests/conftest.py distinguishes on this.
+
+    The tracked ``data/`` tree is never empty, so an unmarked default would look
+    like a configured data root and hide the populated test-data checkout,
+    silently skipping every data-dependent notebook test.
+    """
+    sitecustomize = _load_sitecustomize()
+
+    monkeypatch.setattr(sitecustomize, "_data_root_from_dotenv", lambda _root: None)
+    monkeypatch.delenv("ML4T_DATA_PATH", raising=False)
+    monkeypatch.delenv("ML4T_DATA_PATH_IS_DEFAULT", raising=False)
+    sitecustomize._anchor_data_root(REPO_ROOT)
+    assert Path(os.environ["ML4T_DATA_PATH"]) == REPO_ROOT / "data"
+    assert os.environ["ML4T_DATA_PATH_IS_DEFAULT"] == "1"
+
+
+def test_a_configured_value_is_not_marked_as_a_default(monkeypatch, tmp_path) -> None:
+    sitecustomize = _load_sitecustomize()
+
+    monkeypatch.setattr(sitecustomize, "_data_root_from_dotenv", lambda _root: str(tmp_path))
+    monkeypatch.delenv("ML4T_DATA_PATH", raising=False)
+    monkeypatch.delenv("ML4T_DATA_PATH_IS_DEFAULT", raising=False)
+    sitecustomize._anchor_data_root(REPO_ROOT)
+    assert "ML4T_DATA_PATH_IS_DEFAULT" not in os.environ
+
+
+def test_conftest_ignores_the_anchored_default(monkeypatch) -> None:
+    """The regression the marker exists to prevent, at the site that consumes it."""
+    import tests.conftest as conftest
+
+    monkeypatch.setenv("ML4T_DATA_PATH", str(REPO_ROOT / "data"))
+    monkeypatch.setenv("ML4T_DATA_PATH_IS_DEFAULT", "1")
+    resolved = conftest._resolve_data_path()
+    # Whatever it picks, it must not be the source tree taken on the strength of
+    # being non-empty. Step 4 may still return it, but only if it holds parquet.
+    if resolved == REPO_ROOT / "data":
+        assert list((REPO_ROOT / "data").glob("*/*.parquet"))
