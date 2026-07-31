@@ -29,7 +29,6 @@ SETUP_YAML = REPO_ROOT / "case_studies" / "etfs" / "config" / "setup.yaml"
 HOLDOUT_SCOPED_NOTEBOOKS = [
     ("08_financial_features/05_feature_selection.py", "ic_by_date"),
     ("08_financial_features/06_robustness_sensitivity.py", "def compute_momentum_ic_series"),
-    ("case_studies/etfs/03_financial_features.py", "ic_matrix = np.full"),
     ("case_studies/etfs/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/etfs/05_evaluation.py", "ic_series_data = {feat"),
     ("case_studies/crypto_perps_funding/02_labels.py", "cross_sectional_ic_series("),
@@ -119,9 +118,13 @@ def test_holdout_filter_precedes_first_ic_computation(rel_path: str, first_ic_ma
 # different, equally sound mechanism, and asserting this one against them would
 # be wrong. Seven case studies have not been audited for this class of leak; add
 # their notebooks here as each is checked.
+# ``case_studies/etfs/03_financial_features.py`` was in these lists and is in
+# none of them now: ``rules/stages/03-financial-features.md`` removes the IC
+# screen from stage 03, so that notebook reads no label and has no endpoint to
+# purge. Its own seal is a different check -- it rebuilds the panel with the
+# holdout withheld and requires every emitted feature value to agree.
 LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
     "case_studies/etfs/02_labels.py",
-    "case_studies/etfs/03_financial_features.py",
     "case_studies/etfs/05_evaluation.py",
     "case_studies/crypto_perps_funding/02_labels.py",
 ]
@@ -142,7 +145,6 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
 # re-executed on a newer feature vintage.
 PER_SYMBOL_ENDPOINT_NOTEBOOKS = [
     "case_studies/etfs/02_labels.py",
-    "case_studies/etfs/03_financial_features.py",
     "case_studies/crypto_perps_funding/02_labels.py",
 ]
 
@@ -533,10 +535,10 @@ def test_the_two_purges_agree_on_the_shipped_label_panel() -> None:
 
 
 def test_the_label_and_horizon_are_resolved_from_the_configured_primary_label() -> None:
-    """One config read must drive both the endpoint purge and the HAC lag.
+    """The label and its horizon come from one config read, never from a literal.
 
-    A hardcoded 21 works until ``labels.primary`` changes, and then the purge and
-    the Newey-West lag are silently wrong for the label actually being evaluated.
+    A hardcoded 21 works until ``labels.primary`` changes, and then every window
+    that depends on the decision cycle is silently wrong for the label in force.
     """
     source = (REPO_ROOT / "case_studies" / "etfs" / "03_financial_features.py").read_text()
 
@@ -553,12 +555,13 @@ def test_the_label_and_horizon_are_resolved_from_the_configured_primary_label() 
         "03_financial_features names a label file literally; read the configured "
         "primary label's parquet instead"
     )
-    # The one resolved value has to reach both places that depend on it.
-    assert 'shift(-LABEL_HORIZON).over("symbol")' in source, (
-        "the holdout purge must shift by the resolved horizon"
-    )
-    assert "label_horizon=LABEL_HORIZON" in source, (
-        "the Newey-West lag must be set from the resolved horizon, not a literal"
+    # Two further assertions used to live here, requiring the resolved horizon to
+    # reach the endpoint purge and the Newey-West lag. Both belonged to the stage-03
+    # IC screen, which ``rules/stages/03-financial-features.md`` removes: the horizon
+    # is still resolved from the configured label, but now the only thing that reads
+    # it is the persistence figure, which has to look at least one decision cycle out.
+    assert "resolve_label_horizon(" in source, (
+        "the decision cycle must be resolved from the configured primary label"
     )
 
 
