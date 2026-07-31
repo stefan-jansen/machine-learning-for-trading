@@ -179,12 +179,18 @@ labels:
   # backtests, cohort_metrics, or rank-1 selection. See
   # .agents/issues/2026-05-17-sp500-options-legacy-10d-5d-labels-cleanup.md
   variants: []
-  # Diagnostic-only label buffers: variants below are NOT in the sweep
-  # but their parquets are still computed by 02_labels.py for EDA NBs
-  # (e.g. 90_ic_diagnostic uses fwd_ret_dh_10d for IV-decay analysis).
-  # Listing the buffer here keeps `resolve_label_buffer` from raising
-  # without re-introducing the variant into the sweep / cohort_metrics.
+  # Diagnostic-only labels: the four fixed-horizon variants below are NOT in
+  # the sweep, and their parquets are written by 02_labels.py for the notebooks
+  # that read them (03_financial_features and 05_evaluation contrast the primary
+  # against fwd_ret_dh_10d; 90_ic_diagnostic reads fwd_ret_10d and
+  # fwd_ret_dh_10d for the IV-decay analysis). Declaring each here is what makes
+  # the written label set equal the declared one, and gives
+  # `resolve_label_buffer` / `resolve_label_horizon` a value for each without
+  # re-introducing the variant into the sweep / cohort_metrics.
   variant_buffers:
+    fwd_ret_5d: 5D
+    fwd_ret_10d: 10D
+    fwd_ret_dh_5d: 5D
     fwd_ret_dh_10d: 10D
   # Vectorized-backtest thinning step per label: number of schedule slots
   # to advance per trade so holding periods don't overlap.

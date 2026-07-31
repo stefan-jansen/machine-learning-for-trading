@@ -1,8 +1,0 @@
-{
-  "n_splits": 2,
-  "train_size": "2Y",
-  "test_size": "1Y",
-  "holdout_start": "2021-01-01",
-  "holdout_end": "2021-12-31",
-  "calendar": "NYSE"
-}

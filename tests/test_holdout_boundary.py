@@ -39,6 +39,7 @@ HOLDOUT_SCOPED_NOTEBOOKS = [
         "case_studies/sp500_equity_option_analytics/02_labels.py",
         "cross_sectional_ic_series(",
     ),
+    ("case_studies/sp500_options/02_labels.py", "cross_sectional_ic_series("),
 ]
 
 
@@ -147,6 +148,7 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
     "case_studies/cme_futures/02_labels.py",
     "case_studies/fx_pairs/02_labels.py",
     "case_studies/sp500_equity_option_analytics/02_labels.py",
+    "case_studies/sp500_options/02_labels.py",
 ]
 
 # Of the four above, only etfs/05 uses a market-wide calendar; the other three
@@ -177,6 +179,14 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
 # which is checked by executing the notebook rather than by reading its source. A
 # source pattern cannot see the stronger check, so listing it here only produces a
 # false red. See agent-workspace #141.
+# ``sp500_options/02_labels`` is deliberately absent, and for the opposite reason to
+# ``etfs/05``: its endpoint is not an approximation that needs the per-symbol form. The
+# hold-to-expiry label settles on the expiration written into the contract and the
+# fixed-horizon variants on the exit session recorded in the round-trip artifact, so
+# ``_label_end`` is the exact resolution date of each individual trade rather than a
+# calendar shift of the signal date. The notebook checks the recorded exit dates against a
+# shift of the panel calendar by the declared horizon, which is what
+# ``test_holdout_purge_is_on_the_label_endpoint`` above matches on.
 PER_SYMBOL_ENDPOINT_NOTEBOOKS = [
     ("case_studies/etfs/02_labels.py", "symbol"),
     ("case_studies/crypto_perps_funding/02_labels.py", "symbol"),
