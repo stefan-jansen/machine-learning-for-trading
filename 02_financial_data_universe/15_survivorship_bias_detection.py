@@ -166,7 +166,7 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title="Every exit falls in the last four years of the panel",
+    title="Recorded exits appear only at the very end of the panel",
     xaxis_title="Year of last observation",
     yaxis_title="Symbols",
     xaxis=dict(range=[lifespans["first_date"].min().year - 1, dataset_end.year + 1]),
@@ -178,7 +178,8 @@ fig.show()
 # %% [markdown] tags=[]
 # ### Reading the chart
 #
-# The bars occupy the last four years of a fifty-six-year panel. The rest of the axis is empty.
+# The bars occupy the last five calendar years of a fifty-six-year panel — 2014 through the
+# March 2018 cutoff. The rest of the axis is empty.
 #
 # That is not a claim about the equity market. Firms were acquired, went private and went
 # bankrupt throughout the panel's history — Enron was delisted from the NYSE in January 2002,

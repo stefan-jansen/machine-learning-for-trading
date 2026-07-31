@@ -519,7 +519,7 @@ if time_1m is not None:
     axes[5].axis("off")
 
     plt.suptitle(
-        f"{SYMBOL} activity-sampled bars sit closer to normal than time bars",
+        f"{SYMBOL} activity-sampled bars sit closer to normal (tails clipped to ±2%)",
         fontsize=14,
     )
     plt.tight_layout()
