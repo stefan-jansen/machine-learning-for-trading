@@ -186,7 +186,7 @@ ax.legend(frameon=False, fontsize=8)
 add_message_title(
     ax,
     "The same universe spans an order of magnitude in what a round trip costs",
-    subtitle="One tick as a fraction of the median settlement price, per product",
+    subtitle="The configured spread over the median settlement price: one tick, two if illiquid",
 )
 plt.show()
 
