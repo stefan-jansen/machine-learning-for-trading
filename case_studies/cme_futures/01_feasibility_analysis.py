@@ -25,7 +25,7 @@
 #
 # - Count the universe at every decision date against the breadth a two-sided book needs
 # - Recover a contract's tick from settlement prices and price a round trip with it
-# - Read the fraction of moves that clears cost off an exceedance curve, per horizon
+# - Read off an exceedance curve what fraction of moves clears its own product's cost
 # - Measure how long the term-structure slope a carry strategy reads stays put
 #
 # ## Book reference
@@ -61,9 +61,8 @@ END_DATE = "2025-12-31"
 # %% [markdown]
 # ## Configuration
 #
-# Every knob below is read from `setup.yaml`. The holdout boundary matters most: Section
-# B computes on the development window alone, so nothing the holdout contains can shape a
-# design choice made here. Candidate horizons come from the declared labels.
+# Every knob below is read from `setup.yaml`. The holdout boundary matters most: Section B
+# computes on the development window alone, so nothing it contains can shape a choice here.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -86,14 +85,14 @@ print(f"{len(DECLARED_PRODUCTS)} products, floor {BREADTH_FLOOR} | horizons {HOR
 # ## A. Orientation
 #
 # CME futures give leveraged exposure across equity indices, rates, energy, metals,
-# currencies, agriculture and livestock through one order type and one clearing house.
-# A front-month position earns the spot move plus the roll yield the term structure
-# implies, so ranking products against each other trades a difference in carry as much
-# as a difference in direction. Three questions decide whether that is worth building
-# here: does the declared universe exist at every decision date and not just on
-# average, is a typical move large next to what it costs to capture, and does the
-# sample carry enough decision dates for a walk-forward evaluation that never reads
-# the holdout? Section C records which `setup.yaml` value each answer motivates.
+# currencies, agriculture and livestock through one order type and one clearing house. A
+# front-month position earns the spot move plus the roll yield the term structure
+# implies, so ranking products against each other trades a difference in carry as much as
+# a difference in direction. Three questions decide whether that is worth building here:
+# does the declared universe exist at every decision date and not just on average, is a
+# typical move large next to what it costs to capture, and does the sample carry enough
+# decision dates for a walk-forward evaluation that never reads the holdout? Section C
+# records which `setup.yaml` value each answer motivates.
 
 # %% [markdown]
 # ## B. Universe and cost feasibility
@@ -127,7 +126,7 @@ print(
 # One count of the universe hides the question a cross-sectional strategy has to answer,
 # which is whether the products are there *when a decision is made*. Products list at
 # different dates, so early decision dates can carry a fraction of the universe while the
-# average looks healthy. The line is the position count the widest sweep holds, both legs.
+# average looks healthy; the line is what the widest sweep holds across both legs.
 
 # %%
 breadth = (
@@ -154,10 +153,9 @@ plt.show()
 # ### B.3 What a round trip costs, and what a move is worth
 #
 # `setup.yaml::costs` prices a trade as a commission plus a spread quoted in ticks. The
-# tick is a contract specification and it is recoverable: the smallest non-zero change in
-# a settlement price is the grid the contract trades on. Crossing a one-tick spread costs
-# half a tick per leg, so a round trip costs one tick, and dividing by the typical price
-# puts every product on a basis-point scale. The commission needs a notional to convert.
+# tick is recoverable: the smallest non-zero change in a settlement price is the grid the
+# contract trades on. Crossing a one-tick spread costs half a tick per leg, so a round
+# trip costs one tick, and the typical price puts every product on a basis-point scale.
 
 # %%
 cost = (
@@ -169,7 +167,6 @@ cost = (
     .sort("round_trip_bps")
 )
 COST_BPS = float(cost["round_trip_bps"].median())
-COST_FRACTION = COST_BPS / 10_000
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 ax.bar(cost["product"], cost["round_trip_bps"], color=COLORS["blue"], width=0.7)
@@ -187,8 +184,7 @@ plt.show()
 # %% [markdown]
 # Against that cost sits the move a position is trying to capture. The curves below give
 # the fraction of absolute returns at or above each magnitude, per candidate horizon on
-# one logarithmic axis. Reading up from the cost line gives the share of moves large
-# enough to pay for the trade that captured them.
+# one logarithmic axis, against the universe-median spread.
 
 # %%
 returns = research.with_columns(
@@ -219,9 +215,8 @@ plt.show()
 # date still says something at the next. This strategy reads carry, visible in the raw
 # prices as the slope between the front contract and the one behind it: a positive slope
 # means a long position rolls into a more expensive contract and gives back part of the
-# spot move. How long that reading lasts is an autocorrelation, and on a panel it is
-# computed inside each product. Stacking thirty products into one series and correlating
-# it with its own lag measures the joins between products, not persistence.
+# spot move. How long that reading lasts is an autocorrelation, computed inside each
+# product; stacking thirty products and correlating the result measures their joins.
 
 # %%
 sealed = pl.col("session_date") < pl.lit(HOLDOUT_START).str.to_date()
@@ -251,27 +246,32 @@ plt.show()
 # %% [markdown]
 # ### B.5 Move scale against cost
 #
-# The ratio below divides the median absolute move at the primary label horizon by the
-# round-trip spread. It is a scale comparison: the numerator is a realised move rather
-# than a forecast, so a large ratio says cost is not the binding constraint and nothing
-# about whether the sign is predictable.
+# The ratio below divides the median absolute move at the primary horizon by the median
+# round-trip spread; the clearance share compares each move with *its own* product's
+# spread, because the two ends of the universe differ by an order of magnitude. Both run
+# on realised moves rather than forecasts, so neither says the sign is predictable.
 
 # %%
-median_move_bps = float(returns[f"h{HORIZONS[0]}"].drop_nulls().median() * 10_000)
-clears_cost = float((returns[f"h{HORIZONS[0]}"].drop_nulls() > COST_FRACTION).mean())
+move_bps = pl.col(f"h{HORIZONS[0]}") * 1e4
+priced = returns.drop_nulls(f"h{HORIZONS[0]}").join(
+    cost.select("product", "round_trip_bps"), "product"
+)
+median_move_bps, clears_cost = priced.select(
+    move_bps.median().alias("mid"), (move_bps > pl.col("round_trip_bps")).mean().alias("share")
+).row(0)
 print(
     f"Round-trip spread {cost['round_trip_bps'].min():.2f} to "
     f"{cost['round_trip_bps'].max():.2f} bps, median {COST_BPS:.2f} bps"
 )
 print(
-    f"Median {HORIZONS[0]}-session move {median_move_bps:.1f} bps, "
-    f"ratio {median_move_bps / COST_BPS:.0f}x, share above spread {clears_cost:.3f}"
+    f"Median {HORIZONS[0]}-session move {median_move_bps:.1f} bps, ratio "
+    f"{median_move_bps / COST_BPS:.0f}x, clears its own product's spread {clears_cost:.3f}"
 )
 
 # %% [markdown] tags=["results"]
 # The median round-trip spread across the thirty products is 1.01 bps, from 0.36 bps on
 # the two-year note to 5.78 bps on corn. The median absolute five-session move is 121.2
-# bps, and 0.991 of five-session moves exceed the spread they would have to cross.
+# bps, and 0.993 of moves exceed the spread their own product would charge to cross.
 
 # %% [markdown]
 # ## C. Design decisions
@@ -280,33 +280,30 @@ print(
 #
 # `setup.yaml::decision.cadence` rebalances at the Friday settlement and executes at the
 # Monday open. B.3 supports that from the cost side: moves at both horizons sit far above
-# the spread, so the signal sets the cadence rather than cost. Roll yield accrues whether
-# or not the book turns over, so a faster cadence pays more spread for the same carry.
+# the spread, so the signal sets the cadence rather than cost.
 #
 # ### C.2 Kill conditions
 #
-# Three thresholds would send the strategy back to the drawing board, declared here and
-# tested where the evidence exists rather than in this notebook: a combined
-# carry-and-momentum information coefficient below its floor across folds; long-
-# backwardation carry turning profitable over the full sample, which would make an
-# inverted-carry reading a regime artifact; and round-trip cost above the median
-# absolute move for most of the universe, which the cost stage re-tests in full.
+# Three thresholds send the strategy back to the drawing board, tested where the
+# evidence exists rather than here: a combined carry-and-momentum information coefficient
+# below its floor across folds; long-backwardation carry turning profitable over the full
+# sample, which would make an inverted-carry reading a regime artifact; and round-trip
+# cost above the median absolute move for most of the universe.
 #
 # ### C.3 Mapping class
 #
 # `setup.yaml::mapping.class` ranks products by carry or momentum and holds both legs.
 # Shorting a future carries no borrow, so the short leg costs what the long leg costs.
-# Sizing is equal-risk rather than equal-notional because volatilities across the
-# universe differ by an order of magnitude, and notional weighting would hand the book
-# to energy and grains. A quintile of thirty products holds six, which is the real limit
-# on a rank signal's power here.
+# Sizing is equal-risk rather than equal-notional because volatilities across the universe
+# differ by an order of magnitude, and notional weighting would hand the book to energy
+# and grains. A quintile of thirty holds six, which is the real limit here.
 
 # %% [markdown]
 # ## D. Walk-forward structure
 #
 # ### D.1 Effective sample size
 #
-# What evaluation spends is decision dates, not rows: one per week per product here.
+# What evaluation spends is decision dates, not rows: one a week per product here.
 
 # %%
 n_weeks = research.select(pl.col("session_date").dt.truncate("1w").n_unique()).item()
@@ -319,9 +316,10 @@ print(
 # ### D.2 Fold demonstration
 #
 # `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone, so the
-# boundaries are the declared design rather than a copy of it. Between each training
-# block and its validation block sits a purge gap the width of the label horizon, which
-# stops a label computed inside training from resolving inside validation.
+# boundaries are the declared design rather than a copy of it. Between each training and
+# validation block sits a purge gap the width of the label horizon, which stops a label
+# computed inside training from resolving inside validation. The figure is drawn over
+# exactly those boundaries, so it and the splits cannot disagree.
 
 # %%
 splits = generate_cv_splits(
@@ -330,34 +328,38 @@ splits = generate_cv_splits(
     label_buffer=LABEL_BUFFER,
     date_col="timestamp",
 )
+last_val = max(s["val_end"] for s in splits)
 assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
-assert max(s["val_end"] for s in splits) < np.datetime64(HOLDOUT_START), "fold hits holdout"
+assert last_val < np.datetime64(HOLDOUT_START), "a fold reaches into the holdout"
 
 cv = WalkForwardCV(config=make_walk_forward_config(CASE_STUDY_ID, label_horizon=LABEL_BUFFER))
 cv.expanding = False
-timeline = front.select(
+timeline = research.filter(pl.col("session_date") <= last_val).select(
     pl.col("session_date").cast(pl.Datetime("us", "UTC")).unique().sort().alias("timestamp")
 )
-fold_timeline(cv, timeline, title="Folds roll back from the holdout and stop short of it").show()
+fold_timeline(
+    cv,
+    timeline,
+    title="Folds roll back from the sealed holdout and stop short of it",
+    holdout=(HOLDOUT_START, HOLDOUT_END),
+).show()
 
 # %% [markdown]
 # ## E. Derived artifacts
 #
-# This notebook writes nothing: the exchange's listings fix the universe, so there is no
+# This notebook writes nothing: exchange listings fix the universe, so there is no
 # point-in-time eligibility file for a later stage to read.
 
 # %% [markdown]
 # ## F. Findings vs `setup.yaml`
 #
-# One row per knob: the evidence that motivates it, and what a reader would have to see
-# on their own data to set it differently.
+# One row per knob: the evidence that motivates it, and what would change it.
 #
 # | Knob | Evidence | Revise it when |
 # |---|---|---|
 # | `universe.n_products` | B.2 breadth per decision date | breadth falls below the position count the sweep asks for on either leg |
 # | `decision.cadence` | B.3 exceedance, B.4 persistence | moves stop clearing the spread, or the slope decays inside one rebalancing interval |
-# | `labels.primary` | B.3 exceedance at each horizon | a longer horizon separates moves from cost by a wider margin than the shorter one |
-# | `evaluation.n_splits` | D.1 decision dates, D.2 boundaries | the folds no longer fit the development window, or validation reaches the holdout |
+# | `evaluation.n_splits` | D.1 decision dates, D.2 boundaries | the folds no longer fit the development window |
 
 # %%
 print(
@@ -366,8 +368,8 @@ print(
 )
 print(f"decision.cadence {SETUP['decision']['cadence']} | labels.primary {PRIMARY_LABEL}")
 print(
-    f"evaluation.n_splits {SETUP['evaluation']['n_splits']}, generated {len(splits)}, last "
-    f"validation ends {max(s['val_end'] for s in splits).date()}, holdout untouched"
+    f"evaluation.n_splits {SETUP['evaluation']['n_splits']}, generated {len(splits)}, "
+    f"last validation ends {last_val.date()}, holdout untouched"
 )
 
 # %% [markdown] tags=["results"]
@@ -381,20 +383,18 @@ print(
 # 1. **Count the universe at every decision date.** A mean breadth hides the dates where
 #    a two-sided book cannot be filled, and those cluster early in the sample.
 # 2. **Recover cost from the price grid where the vendor quotes none.** The smallest
-#    non-zero settlement increment is the tick, and one tick is what a round trip across
-#    a one-tick spread costs, per product rather than as a single assumption.
-# 3. **Compare moves to cost with an exceedance curve rather than a histogram.** One
-#    shared logarithmic axis puts every candidate horizon in the same picture.
-# 4. **Autocorrelation on a panel is computed inside each entity.** Stacking entities and
-#    correlating the result measures the joins between them.
-# 5. **Seal the holdout before the first statistic, not the first model.** A cadence or a
-#    cost threshold read off the holdout leaks like a fitted parameter.
+#    non-zero settlement increment is the tick, and one tick is a round trip.
+# 3. **Compare moves to cost with an exceedance curve, not a histogram.** One shared
+#    logarithmic axis puts every candidate horizon in the same picture.
+# 4. **Autocorrelation on a panel is computed inside each entity**, and a fold figure is
+#    drawn over the boundaries it reports, or it can contradict them.
+# 5. **Seal the holdout before the first statistic, not the first model.**
 #
 # ### Known limitations
 #
 # - The recovered tick understates cost where the exchange settles on half-ticks, and
-#   excludes the commission and roll slippage `setup.yaml::costs` also declares.
-# - A persistent carry reading is not a profitable one. Whether the slope predicts the
-#   sign of the next move is what the modelling stages test.
+#   excludes the commission and roll slippage `setup.yaml::costs` declares.
+# - A persistent carry reading is not a profitable one; whether the slope predicts the
+#   next move's sign is what the modelling stages test.
 #
 # **Next**: labels at the declared horizons, built on this development window.

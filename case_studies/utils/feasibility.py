@@ -16,7 +16,14 @@ import polars as pl
 __all__ = ["exceedance_curve", "fold_timeline", "panel_acf"]
 
 
-def fold_timeline(cv, timeline: pl.DataFrame, *, timestamp_col: str = "timestamp", title: str):
+def fold_timeline(
+    cv,
+    timeline: pl.DataFrame,
+    *,
+    timestamp_col: str = "timestamp",
+    title: str,
+    holdout: tuple[str, str] | None = None,
+):
     """Walk-forward folds as a timeline, exportable to a static image.
 
     :func:`ml4t.diagnostic.visualization.cv_plots.plot_cv_folds` draws each block as
@@ -33,8 +40,12 @@ def fold_timeline(cv, timeline: pl.DataFrame, *, timestamp_col: str = "timestamp
         A configured splitter. ``plot_cv_folds`` calls ``.split()`` itself, so this
         takes the splitter object and not the list of boundaries.
     timeline
-        One column of timestamps covering the whole sample, holdout included, so
-        the sealed block is drawn rather than inferred.
+        One column of timestamps covering exactly the range the folds may use.
+        ``plot_cv_folds`` re-splits this itself, so passing anything wider than the
+        boundaries a caller reports draws folds that disagree with them.
+    holdout
+        Start and end of the sealed block, shaded on the same axis. Pass it rather
+        than widening ``timeline``, which would move the fold boundaries.
     """
     import plotly.io as pio
     from ml4t.diagnostic.visualization.cv_plots import plot_cv_folds
@@ -50,6 +61,16 @@ def fold_timeline(cv, timeline: pl.DataFrame, *, timestamp_col: str = "timestamp
     normalized = pio.from_json(figure.to_json())
     normalized.update_xaxes(type="date")
     normalized.update_layout(margin={"l": 110})
+    if holdout is not None:
+        normalized.add_vrect(
+            x0=holdout[0],
+            x1=holdout[1],
+            fillcolor="#C1662F",
+            opacity=0.25,
+            line_width=0,
+            annotation_text="sealed holdout",
+            annotation_position="top left",
+        )
     return normalized
 
 
