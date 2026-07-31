@@ -545,6 +545,20 @@ try:
         es = es.rename({"ts_event": "timestamp"})
     elif "date" in es.columns:
         es = es.rename({"date": "timestamp"})
+    # Keep the front contract only, BEFORE sorting.
+    #
+    # load_cme_futures returns one row per (session, tenor): 11,458 rows over 3,866
+    # sessions, tenors 0, 1 and 2. compute_mfe_mae walks a forward window with
+    # shift(-k) over whatever row order it is handed, so on the un-filtered frame the
+    # 21-bar excursion window steps across three different contracts rather than
+    # forward in time on one. That inflates every excursion statistic, and these
+    # statistics are exported to mfe_mae_summary.json as the source for the chapter's
+    # barrier-width references.
+    if "tenor" in es.columns:
+        n_before = len(es)
+        es = es.filter(pl.col("tenor") == 0)
+        print(f"Front contract only: {len(es):,} of {n_before:,} rows (tenors 1 and 2 dropped)")
+
     es = es.sort("timestamp")
 
     # Filter date range (cast literal to match column dtype)
@@ -707,12 +721,21 @@ if spy_mfe_mae is not None and spy_atr is not None:
 
 # %%
 if spy is not None:
-    # Test different barrier widths based on percentile analysis
+    # Barriers taken from the measured excursion percentiles, not from round numbers.
+    #
+    # This is the notebook's stated purpose - "rather than picking arbitrary barrier
+    # widths, we analyze actual price excursions" - and mfe_pctls / mae_pctls were
+    # already computed above and then not used here. Take-profit comes from the MFE
+    # distribution and stop-loss from the MAE distribution, at the same percentile, so
+    # each label genuinely names the quantity it is derived from.
     configs = [
-        ("Tight (p50)", 0.02, 0.01),
-        ("Medium (p75)", 0.04, 0.02),
-        ("Wide (p90)", 0.06, 0.03),
+        (f"{label} (p{p})", mfe_pctls[p] / 100, mae_pctls[p] / 100)
+        for label, p in (("Tight", 50), ("Medium", 75), ("Wide", 90))
     ]
+
+    print("Barrier widths derived from SPY's own excursion distribution:")
+    for name, tp, sl in configs:
+        print(f"  {name}: TP={tp:.2%} (MFE), SL={sl:.2%} (MAE)")
 
     print("\n=== Barrier Hit Validation (SPY 21d) ===")
 
