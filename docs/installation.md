@@ -99,7 +99,8 @@ does not work on Intel Macs or in native Windows Python.
 > above, which is the one that is tested.
 
 > **macOS: which path depends on the chip.** On **Apple Silicon**, use the local `uv`
-> environment: every dependency has a native arm64 wheel and Docker buys you nothing there. On
+> environment: it builds natively against the Xcode command-line tools and Docker buys you
+> nothing there. On
 > an **Intel Mac**, Docker is the only option, because PyTorch stopped publishing macOS x86_64
 > wheels and `uv sync` stops immediately with `Distribution torch==2.10.0 ... doesn't have a
 > source distribution or wheel for the current platform`. There is nothing to configure around
@@ -294,10 +295,11 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
 
 ### macOS
 
-**Apple Silicon: use the local `uv` path, not Docker.** Every dependency has a native arm64
-wheel, `uv sync` needs nothing beyond the Xcode command-line tools, and it costs you no 13 GB
-image. Go to [Local Setup with uv](#local-setup-with-uv-alternative-to-docker); this is the path
-that is walked on real hardware before every release.
+**Apple Silicon: use the local `uv` path, not Docker.** Everything the book needs either has an
+arm64 wheel or builds from source against the Xcode command-line tools, the same way it does on
+Linux, and Docker would add a 13 GB image for no benefit. Go to
+[Local Setup with uv](#local-setup-with-uv-alternative-to-docker); this is the path walked on
+real hardware before every release.
 
 ```bash
 xcode-select --install                        # compiler, if you do not have it already

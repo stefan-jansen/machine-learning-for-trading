@@ -393,8 +393,9 @@ Option B compiles several dependencies from source, `scikit-learn` among them, s
 `sudo apt install build-essential python3-dev`, on macOS `xcode-select --install`. Docker
 carries its own and needs none of this.
 
-**macOS readers:** on **Apple Silicon** take Option B. Every dependency has a native arm64
-wheel, so Docker costs you a 13 GB image and buys nothing. On an **Intel Mac** take Option A:
+**macOS readers:** on **Apple Silicon** take Option B. It is the path walked on real hardware
+before each release, it needs only the Xcode command-line tools for the packages that build from
+source, and Docker would add a 13 GB image for no benefit. On an **Intel Mac** take Option A:
 PyTorch publishes no macOS x86_64 wheel, so Option B cannot work there.
 
 **Windows readers:** both options run inside WSL2, not in PowerShell. Run
