@@ -32,6 +32,7 @@ HOLDOUT_SCOPED_NOTEBOOKS = [
     ("case_studies/etfs/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/etfs/05_evaluation.py", "ic_series_data = {feat"),
     ("case_studies/crypto_perps_funding/02_labels.py", "cross_sectional_ic_series("),
+    ("case_studies/cme_futures/02_labels.py", "cross_sectional_ic_series("),
 ]
 
 
@@ -127,6 +128,7 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
     "case_studies/etfs/02_labels.py",
     "case_studies/etfs/05_evaluation.py",
     "case_studies/crypto_perps_funding/02_labels.py",
+    "case_studies/cme_futures/02_labels.py",
 ]
 
 # Of the four above, only etfs/05 uses a market-wide calendar; the other three
@@ -143,9 +145,14 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
 # form regardless would remove the dependence on that data property; it is
 # deferred because editing 05 forces the case study's evaluation to be
 # re-executed on a newer feature vintage.
+# ``entity_col`` names the column the endpoint must be shifted within, which is the
+# entity a label may not cross. It is ``symbol`` for seven of the nine case studies and
+# ``product`` for cme_futures.
 PER_SYMBOL_ENDPOINT_NOTEBOOKS = [
-    "case_studies/etfs/02_labels.py",
-    "case_studies/crypto_perps_funding/02_labels.py",
+    ("case_studies/etfs/02_labels.py", "symbol"),
+    ("case_studies/etfs/03_financial_features.py", "symbol"),
+    ("case_studies/crypto_perps_funding/02_labels.py", "symbol"),
+    ("case_studies/cme_futures/02_labels.py", "product"),
 ]
 
 
@@ -302,8 +309,12 @@ def test_crypto_tcn_requires_cuda_and_hashes_current_inputs() -> None:
     assert "current CPU" not in source
 
 
-@pytest.mark.parametrize("rel_path", PER_SYMBOL_ENDPOINT_NOTEBOOKS, ids=lambda p: p)
-def test_label_endpoint_is_derived_per_symbol(rel_path: str) -> None:
+@pytest.mark.parametrize(
+    ("rel_path", "entity_col"),
+    PER_SYMBOL_ENDPOINT_NOTEBOOKS,
+    ids=[rel_path for rel_path, _ in PER_SYMBOL_ENDPOINT_NOTEBOOKS],
+)
+def test_label_endpoint_is_derived_per_symbol(rel_path: str, entity_col: str) -> None:
     """The endpoint must be shifted within symbol, as the label generator does.
 
     A market-wide cutoff is only equivalent while every symbol trades every
@@ -317,14 +328,14 @@ def test_label_endpoint_is_derived_per_symbol(rel_path: str) -> None:
     # this test would still pass -- the same vacuous-gate failure that let the
     # 2026-07-21 revert stay green.
     assert re.search(
-        r"\.shift\(-\s*[A-Za-z_]*horizon\s*\)\s*\.over\(\s*\"symbol\"\s*\)"
+        r"\.shift\(-\s*[A-Za-z_]*horizon\s*\)\s*\.over\(\s*\"" + entity_col + r"\"\s*\)"
         r"\s*\.alias\(\s*\"_label_end\"\s*\)",
         source,
         re.IGNORECASE,
     ), (
         f"{rel_path}: the label endpoint must be derived as shift(-horizon)"
-        '.over("symbol").alias("_label_end"), matching 02_labels; a market-wide '
-        "cutoff under-purges a symbol with a gapped calendar"
+        f'.over("{entity_col}").alias("_label_end"), matching 02_labels; a market-wide '
+        "cutoff under-purges an entity with a gapped calendar"
     )
 
 

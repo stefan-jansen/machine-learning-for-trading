@@ -1364,7 +1364,8 @@ case_studies/cme_futures/01_feasibility_analysis:
   timeout: 180
 case_studies/cme_futures/02_labels:
   parameters:
-    MAX_SYMBOLS: 5
+    # MAX_PRODUCTS stays unset: the CI fixture is already a reduced universe, and
+    # thinning the cross-section starves the rank correlation in section G.
     START_DATE: '2000-01-01'
   timeout: 120
 case_studies/cme_futures/03_financial_features:
