@@ -80,8 +80,14 @@ def missing_symbols(
     return sorted(absent)
 
 
-def get_update_start(output_path: Path, end_date: str, interval_hours: int) -> str | None:
-    """Where an incremental update has to start so no symbol is skipped.
+def get_update_start(
+    output_path: Path,
+    end_date: str,
+    interval_hours: int,
+    symbols: list[str] | None = None,
+    configured_start: str | None = None,
+) -> str | None:
+    """Where an incremental update has to start so no symbol is left short.
 
     The *earliest* per-symbol last timestamp, not the dataset-wide maximum. Those
     differ exactly when an earlier update was partial: the symbols that succeeded
@@ -89,6 +95,10 @@ def get_update_start(output_path: Path, end_date: str, interval_hours: int) -> s
     the ones that failed and never fill it, while the run reported success. The
     cost of starting earlier is refetching rows for symbols that are already
     current, which combine_existing() dedups on (symbol, timestamp).
+
+    A symbol missing from the file entirely has no history at all, not a recent
+    gap, so the window has to reopen at *configured_start* — otherwise the symbol
+    arrives with only the tail, and its presence then reads as success.
     """
     if not output_path.exists():
         return None
@@ -96,6 +106,12 @@ def get_update_start(output_path: Path, end_date: str, interval_hours: int) -> s
     per_symbol = pl.read_parquet(output_path).group_by("symbol").agg(pl.col("timestamp").max())
     if per_symbol.is_empty():
         return None
+
+    if symbols and configured_start:
+        present = set(per_symbol["symbol"].to_list())
+        if any(s not in present for s in symbols):
+            return None if configured_start > end_date else configured_start
+
     last_ts = per_symbol["timestamp"].min()
     if last_ts is None:
         return None
@@ -268,7 +284,7 @@ def main() -> None:
         provider = BinancePublicProvider(market=str(perps_cfg.get("market", "futures")))
         start_date = perps_start
         if args.update and not args.force:
-            incremental_start = get_update_start(perps_output, perps_end, interval_hours=1)
+            incremental_start = get_update_start(perps_output, perps_end, 1, symbols, perps_start)
             if incremental_start is None:
                 print("\nPerpetual OHLCV already up to date.")
                 perps_df = (
@@ -283,7 +299,7 @@ def main() -> None:
                     combine_existing(perps_output, new_df)
                     if not new_df.is_empty()
                     else pl.read_parquet(perps_output)
-                )
+                )  # the update branch only runs with an existing file
         else:
             print("\nDownloading perpetual OHLCV...")
             new_df, perps_failed = download_perps(provider, symbols, start_date, perps_end)
@@ -291,13 +307,16 @@ def main() -> None:
                 # Not necessarily a failure: a fully rate-limited retry against a
                 # complete dataset arrives here. Fall through to the merged-dataset
                 # check rather than exiting, so the status reflects what is on disk
-                # and --allow-partial still applies.
+                # and --allow-partial still applies. The provider returns a frame
+                # with no columns at all, so it can be neither combined nor sorted.
                 print("No perpetual OHLCV rows returned; falling back to what is on disk.")
-            perps_df = (
-                combine_existing(perps_output, new_df)
-                if perps_output.exists() and not args.force
-                else new_df.sort(["symbol", "timestamp"])
-            )
+                perps_df = pl.read_parquet(perps_output) if perps_output.exists() else new_df
+            else:
+                perps_df = (
+                    combine_existing(perps_output, new_df)
+                    if perps_output.exists() and not args.force
+                    else new_df.sort(["symbol", "timestamp"])
+                )
 
         if not perps_df.is_empty():
             perps_df = clamp_date_range(perps_df, perps_start, perps_end)
@@ -322,7 +341,9 @@ def main() -> None:
         provider = BinancePublicProvider(market=str(config.get("market", "futures")))
         start_date = premium_start
         if args.update and not args.force:
-            incremental_start = get_update_start(premium_output, premium_end, interval_hours=8)
+            incremental_start = get_update_start(
+                premium_output, premium_end, 8, symbols, premium_start
+            )
             if incremental_start is None:
                 print("\nPremium index already up to date.")
                 premium_df = (
@@ -347,11 +368,13 @@ def main() -> None:
             )
             if new_df.is_empty():
                 print("No premium index rows returned; falling back to what is on disk.")
-            premium_df = (
-                combine_existing(premium_output, new_df)
-                if premium_output.exists() and not args.force
-                else new_df.sort(["symbol", "timestamp"])
-            )
+                premium_df = pl.read_parquet(premium_output) if premium_output.exists() else new_df
+            else:
+                premium_df = (
+                    combine_existing(premium_output, new_df)
+                    if premium_output.exists() and not args.force
+                    else new_df.sort(["symbol", "timestamp"])
+                )
 
         if not premium_df.is_empty():
             premium_df = clamp_date_range(premium_df, premium_start, premium_end)

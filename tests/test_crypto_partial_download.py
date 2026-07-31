@@ -45,8 +45,16 @@ def _load_download_module():
 
 
 def _frame(symbols) -> pl.DataFrame:
-    """One in-window row per symbol, the minimum the write path needs."""
+    """One in-window row per symbol, the minimum the write path needs.
+
+    An empty response is a frame with *no columns*, which is what the provider
+    actually returns and what an earlier version of these tests got wrong: a
+    zero-row frame that still carries named columns hides every crash on the
+    empty path, because combine_existing() and sort() both need `timestamp`.
+    """
     symbols = list(symbols)
+    if not symbols:
+        return pl.DataFrame()
     return pl.DataFrame(
         {
             "symbol": symbols,
@@ -226,6 +234,27 @@ def test_update_starts_from_the_earliest_symbol(downloader, tmp_path):
 
     start = downloader.get_update_start(output, "2021-12-31", interval_hours=1)
     assert start == "2021-06-01", "must resume from the symbol that is furthest behind"
+
+
+def test_update_reopens_the_window_for_a_symbol_with_no_history(downloader, tmp_path):
+    """An absent symbol needs the configured start, not the recent gap.
+
+    Resuming from the earliest *stored* symbol would give it only the tail, and
+    its presence afterwards would then read as a complete download.
+    """
+    output = tmp_path / "perps_1h.parquet"
+    pl.DataFrame(
+        {
+            "symbol": ["BTCUSDT", "ETHUSDT"],
+            "timestamp": [datetime(2021, 6, 10), datetime(2021, 6, 1)],
+            "close": [30000.0, 2000.0],
+        }
+    ).write_parquet(output)
+
+    start = downloader.get_update_start(
+        output, "2021-12-31", 1, ["BTCUSDT", "ETHUSDT", "SOLUSDT"], "2020-01-01"
+    )
+    assert start == "2020-01-01", "a symbol with no history reopens the configured window"
 
 
 def test_a_single_requested_symbol_that_arrives_is_complete(downloader, monkeypatch, tmp_path):
