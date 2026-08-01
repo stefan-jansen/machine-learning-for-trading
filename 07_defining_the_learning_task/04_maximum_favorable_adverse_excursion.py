@@ -113,10 +113,12 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 # ## 1. Vectorized MFE/MAE Computation
 #
 # We use Polars' `max_horizontal` and `min_horizontal` functions to compute
-# forward-looking extremes without Python loops. This approach builds $H+1$ shifted
-# columns, resulting in $O(n \times H)$ work and memory. While vectorized (no Python
-# loops), memory scales with horizon. For very large horizons, consider the
-# reverse-rolling approach: `high.reverse().rolling_max(H+1).reverse()`.
+# forward-looking extremes without Python loops. This approach builds $H$ shifted
+# columns - shifts $-1$ through $-H$, so the entry bar is excluded - resulting in
+# $O(n \times H)$ work and memory. While vectorized (no Python loops), memory scales
+# with horizon. For very large horizons the equivalent reverse-rolling form is
+# `high.shift(-1).reverse().rolling_max(H).reverse()`; note the `shift(-1)`, without
+# which the window reopens at bar $t$ and reintroduces the pre-entry extremes.
 
 
 # %%
@@ -374,7 +376,14 @@ if spy is not None:
     spy_atr = compute_atr(spy, "timestamp", period=14, unit="pct")
     avg_atr = float(spy_atr["atr_pct"].mean())
     print(f"SPY 14-day ATR: {avg_atr:.2f}% (average)")
-    print(f"Suggested starting point: TP=2xATR ({avg_atr * 2:.2f}%), SL=1xATR ({avg_atr:.2f}%)")
+    # Deliberately not a barrier recommendation. The conventional "TP=2xATR,
+    # SL=1xATR" is printed here only so the reader can compare it against what
+    # section 9 derives from the measured excursions, where the stop this panel
+    # supports is over three times ATR rather than one.
+    print(
+        f"Conventional rule of thumb, for comparison only: "
+        f"TP=2xATR ({avg_atr * 2:.2f}%), SL=1xATR ({avg_atr:.2f}%)"
+    )
 
     # Library ATR comparison
     lib_atr_values = library_atr(

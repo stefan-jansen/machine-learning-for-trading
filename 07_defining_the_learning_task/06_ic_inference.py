@@ -232,19 +232,24 @@ print(f"Suggested ARIMA order: {acf_analysis.suggested_arima_order}")
 #
 # **$L$ should not be left to the sample size here.** The usual automatic rule
 # $L = \lfloor 4(T/100)^{2/9} \rfloor$ reads only $T$, and on this series it
-# returns 9. But the labels are $h$-day *overlapping* forward returns: date $t$
-# and date $t+j$ share part of their outcome window for every $j < h$, so their
-# ICs are mechanically dependent out to lag $h-1$. Truncating at 9 discards
-# autocovariances from lag 10 to lag 20 that the overlap alone is enough to
-# generate, and the standard error comes out too small. Passing `label_horizon`
-# makes the library take $L = \max(h-1, \text{auto rule})$.
+# returns 9. The labels are $h$-day *overlapping* forward returns, so date $t$ and
+# date $t+j$ share part of their outcome window for every $j < h$ - and the signal
+# is 21-day momentum, whose cross-sectional ranks change slowly. Overlapping
+# outcomes measured against persistent ranks give ICs that move together over
+# roughly the label horizon.
 #
-# $h-1$ is a **lower bound on a defensible bandwidth, not the true dependence
-# order.** The overlap is one source of serial correlation and the ACF below is
-# the sum of all of them: ranks persist, volatility clusters, and regimes last
-# longer than a month, none of which stop at lag $h-1$. What the overlap
-# supports is the claim that any bandwidth *below* $h-1$ is wrong by
-# construction - which is the defect this notebook had.
+# **Both halves of that sentence are doing work, and the overlap alone is not
+# enough.** The IC is a rank correlation, not a return: if the signal ranks were
+# redrawn independently every day, the ICs could be serially uncorrelated no matter
+# how much the return windows overlap. So $h-1$ is not a theorem about overlapping
+# labels - it is a **conservative horizon-aware bandwidth for a persistent signal**,
+# and the evidence that it is the right order of magnitude is the measured ACF in
+# the next figure, which stays outside the white-noise band until about lag 16.
+#
+# What is not defensible is $L = 9$, chosen by a rule that never looked at the
+# labels or the signal. Passing `label_horizon` makes the library take
+# $L = \max(h-1, \text{auto rule})$; the ACF is what justifies that choice, and the
+# next section measures what it is worth.
 
 # %% [markdown]
 # ### 2.1 What the Bandwidth Is Worth
@@ -283,7 +288,8 @@ naive_t = np.mean(ic_series) / naive_se
 print("=== Naive vs HAC Inference ===\n")
 print(
     f"HAC lag truncation: {hac_result['effective_lags']} "
-    f"(label horizon {LABEL_HORIZON}, so the MA(h-1) overlap needs L >= {LABEL_HORIZON - 1})"
+    f"(horizon-aware choice: label horizon {LABEL_HORIZON} -> L = {LABEL_HORIZON - 1}, "
+    f"consistent with the measured ACF above)"
 )
 print(f"Mean IC: {hac_result['mean_ic']:.4f}")
 print("\nStandard Errors:")

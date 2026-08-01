@@ -543,23 +543,29 @@ fig.show()
 # reversal exists. The feature and the label share an endpoint.
 #
 # This is not a hypothetical. The check is to move the label one day forward, so it
-# spans $p_{t+6} - p_{t+1}$: the same five-day holding period, no shared endpoint,
-# and the more realistic execution assumption anyway, since a signal computed from
-# the day-$t$ close is traded at $t+1$.
+# spans $p_{t+6} - p_{t+1}$: the same five-day holding period and no shared endpoint.
 #
 # **What this check can and cannot settle.** Moving the label forward removes the
-# shared $p_t$, but it also removes the $t \to t+1$ return from the holding period,
-# and a genuine one-day reversal would concentrate its predictability in exactly
-# that first day. The two explanations - shared-endpoint noise, and a real effect
-# that lives in the first day and is not tradeable at $t+1$ - both predict the drop
-# we are about to see, and this test does not separate them. Distinguishing them
-# needs an independent price for day $t$: a quote midpoint rather than a last
-# trade, so that feature and label do not share the same print.
+# shared $p_t$, but it also removes the entire $t \to t+1$ session, and a genuine
+# one-day reversal would concentrate its predictability in exactly that session. The
+# two explanations - shared-endpoint noise, and a real effect living in the first
+# day - both predict the drop we are about to see, and **this test does not separate
+# them.**
 #
-# What the check does establish is enough for the decision at hand. Either the cell
-# is arithmetic, or it is a real effect that vanishes the moment execution is
-# delayed by one day. Both make it unusable as a signal, and both mean the scan's
-# $t = 3.0$ overstates what a tradeable strategy would see.
+# Nor does the drop establish that a real effect would be untradeable. A signal
+# computed from the day-$t$ close executes at the $t+1$ *open*, which is this
+# repository's label convention, so a close-to-close label starting at $t+1$
+# discards a session that a real strategy would partly capture. Settling either
+# question needs a different measurement: an independent price for day $t$ - a quote
+# midpoint rather than a last trade - to isolate endpoint noise, and an
+# open-to-open label to measure what is actually tradeable. Both are out of scope
+# for a bivariate sanity check and belong with the execution assumptions in
+# Chapter 16.
+#
+# What the check does establish is enough for the decision at hand: **the cell's
+# significance depends entirely on the feature and the label sharing the day-$t$
+# close.** That is a reason to withhold belief from it until it is re-measured
+# properly - not a demonstration that no reversal effect exists.
 
 # %%
 shared_endpoint = analysis.with_columns(
@@ -594,9 +600,11 @@ display(pl.DataFrame(endpoint_rows))
 # to $t \approx 1.6$ - from "significant" to not - on the same panel and the same
 # five-day holding period, moved forward by one day.
 #
-# So the scan's short-horizon reversal cell is not usable evidence of a reversal
-# effect, on either reading of the drop. That is why the deep-dive below treats
-# 1-day reversal as a near-null baseline rather than as a signal to explain.
+# So the scan's short-horizon reversal cell does not survive its own robustness
+# check, and the deep-dive below therefore treats 1-day reversal as a near-null
+# baseline rather than as a signal to explain. Note what that is *not*: it is not a
+# finding that one-day reversal is absent from this panel, and it is not a
+# tradeability result. Both would need the measurements named above.
 # **The general rule: a feature ending at $t$ and a label beginning at $t$ share a
 # price, and that alone will manufacture a t-statistic - so a cell that only exists
 # while they share one has to be re-measured before it is believed.**

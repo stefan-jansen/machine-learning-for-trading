@@ -954,14 +954,23 @@ if us_equities is not None:
 # survivorship-free means, and it is the reason a universe must be rebuilt as of each
 # decision date rather than taken from today's index membership.
 #
-# What is *not* here is equally informative. There are no full-height white columns
-# and no full-width white rows - no asset is missing throughout, and no month is
-# missing for every asset - so there is no vendor outage or exchange closure written
-# into this panel. Interior gaps, where an asset goes quiet and comes back, do exist
-# but are rare; the cell counts below make that precise rather than leaving it to the
-# eye. Missingness here is overwhelmingly a question of when each asset entered and
-# left, which makes the Section 7.1 strategy a universe-construction problem rather
-# than an imputation one.
+# What is *not* here is equally informative, but only one of the two absences is
+# something this figure can report. There are **no full-width white rows**: the month
+# axis is a continuous range built from the panel's own bounds, so a month in which
+# nothing traded would be drawn as a blank row, and none is - no vendor outage or
+# exchange closure is written into this panel.
+#
+# The columns cannot answer the matching question. The symbol axis is assembled from
+# the assets that *appear in the data*, so an asset missing throughout would not be a
+# white column - it would not be a column at all. "No asset is entirely absent" is
+# therefore not a finding this figure can produce, and checking it needs an
+# independently defined expected universe to compare against, which this notebook
+# does not have. The cell below counts only what is countable here.
+#
+# Interior gaps, where an asset goes quiet and comes back, do exist but are rare.
+# Missingness is overwhelmingly a question of when each asset entered and left, which
+# makes the Section 7.1 strategy a universe-construction problem rather than an
+# imputation one.
 
 # %%
 # Quantify what the heatmap shows, so the reading above is checkable
