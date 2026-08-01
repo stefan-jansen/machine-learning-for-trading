@@ -504,7 +504,7 @@ fig.show()
 #
 # 1. **The three survivors all sit at the 5-day horizon**: 12-1 momentum ($t = 3.7$),
 #    252d momentum ($t = 3.4$), and 1-day reversal ($t = 3.0$). Section 4.1 shows the
-#    third does not survive a check on how the feature and the label are built, which
+#    third does not survive a five-day label measured one session later, which
 #    leaves two to carry forward.
 # 2. **The 21-day cells do not survive the correction.** 12-1 momentum reaches
 #    $t = 2.6$ and 252d momentum $t = 2.3$ - the largest ICs anywhere in the grid
@@ -530,7 +530,7 @@ fig.show()
 # horizons.
 
 # %% [markdown]
-# ### 4.1 A Significant Cell That Does Not Survive a Construction Check
+# ### 4.1 A Significant Cell That Does Not Survive a Shift of Its Label
 #
 # One cell in the scan deserves a second look before we trust it: 1-day reversal at
 # the 5-day horizon. Write the two quantities out in logs, with $p_t = \log P_t$:
@@ -545,30 +545,35 @@ fig.show()
 # This is not a hypothetical. The check is to move the label one day forward, so it
 # spans $p_{t+6} - p_{t+1}$: the same five-day holding period and no shared endpoint.
 #
-# **What this check can and cannot settle.** Moving the label forward removes the
-# shared $p_t$, but it also removes the entire $t \to t+1$ session, and a genuine
-# one-day reversal would concentrate its predictability in exactly that session. The
-# two explanations - shared-endpoint noise, and a real effect living in the first
-# day - both predict the drop we are about to see, and **this test does not separate
-# them.**
+# **What this check can and cannot settle.** It is a *shift* of the return window,
+# not a removal of the shared price alone. Going from $p_{t+5} - p_t$ to
+# $p_{t+6} - p_{t+1}$ drops the $t \to t+1$ session **and adds a $t+5 \to t+6$
+# session**, on top of dropping the shared $p_t$. At least four things could
+# produce the decline we are about to see:
 #
-# Nor does the drop establish that a real effect would be untradeable. A signal
-# computed from the day-$t$ close executes at the $t+1$ *open*, which is this
-# repository's label convention, so a close-to-close label starting at $t+1$
-# discards a session that a real strategy would partly capture. Settling either
-# question needs a different measurement: an independent price for day $t$ - a quote
-# midpoint rather than a last trade - to isolate endpoint noise, and an
-# open-to-open label to measure what is actually tradeable. Both are out of scope
-# for a bivariate sanity check and belong with the execution assumptions in
-# Chapter 16.
+# 1. shared-endpoint noise inflated the original statistic;
+# 2. a real effect concentrated in the $t \to t+1$ session, now excluded;
+# 3. the added $t+5 \to t+6$ session contributes returns that offset the rest;
+# 4. sampling variation, on a $t$ that was not large to begin with.
+#
+# **This test distinguishes none of them.** One comparison with several
+# simultaneous changes cannot attribute its own result, and the only honest reading
+# is that the statistic moved when the window did.
+#
+# Nor does the drop say anything about tradeability. A signal computed from the
+# day-$t$ close executes at the $t+1$ *open*, which is this repository's label
+# convention, so neither of these close-to-close labels is what a strategy would
+# earn. Separating the four needs measurements this notebook does not make: an
+# independent price for day $t$ - a quote midpoint rather than a last trade - to
+# isolate endpoint noise, one-session-at-a-time attribution across the window, and
+# an open-to-open label for the tradeable quantity. All belong with the execution
+# assumptions in Chapter 16.
 #
 # What the check does establish is enough for the decision at hand: **the cell does
-# not survive the shifted-label check.** Which of the two causes is responsible -
-# the shared endpoint, or a genuine effect confined to the first session - this test
-# cannot say, and saying it needs an independent day-$t$ price or an open-to-open
-# label. Either way the result is not one to build on until it is re-measured, and
-# that is a reason to withhold belief rather than a demonstration that no reversal
-# effect exists.
+# not survive a five-day label measured one session later.** A result that depends
+# on which five sessions are used is not one to build on, whichever of the four
+# explanations holds. That is a reason to withhold belief until it is re-measured -
+# not a demonstration that no reversal effect exists.
 
 # %%
 shared_endpoint = analysis.with_columns(
