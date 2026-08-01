@@ -659,9 +659,11 @@ def conformal_coverage_diagnostic(
     OOF predictions and uses the earliest validation fold as a calibration
     set to derive a symmetric absolute-residual quantile, then measures
     empirical coverage on later folds at each nominal level. Numeric fold ids
-    are not chronological under backward walk-forward splitting. Interval
-    width is reported as a fraction of the actuals' standard deviation, so
-    families with different return scales are comparable.
+    are not chronological under backward walk-forward splitting, so the
+    calibration fold is the one with the earliest timestamp, not ``fold_id``
+    zero. Interval width is reported as a fraction of the calibration window's
+    return standard deviation, so families with different return scales are
+    comparable and no evaluation-fold outcome enters the reported width.
 
     Returns columns:
         family, config_name, nominal_level,
@@ -736,9 +738,6 @@ def conformal_coverage_diagnostic(
             continue
 
         df = df.with_columns((pl.col("y_true") - pl.col("y_score")).abs().alias("abs_resid"))
-        scale = float(df["y_true"].std() or 0.0)
-        if not np.isfinite(scale) or scale == 0:
-            continue
 
         fold_windows = (
             df.group_by("fold_id")
@@ -755,13 +754,33 @@ def conformal_coverage_diagnostic(
         if cal.height < 30 or tst.height < 30:
             continue
 
-        cal_res = cal["abs_resid"].to_numpy()
+        # The width is normalized by the calibration window's own return scale,
+        # not the whole panel's: everything the procedure reports has to be a
+        # property of the data it was allowed to see when it calibrated. Using
+        # every fold's std here let the evaluation windows set the divisor.
+        scale = float(cal["y_true"].std() or 0.0)
+        if not np.isfinite(scale) or scale == 0:
+            continue
+
+        cal_res = np.sort(cal["abs_resid"].to_numpy())
         tst_res = tst["abs_resid"].to_numpy()
         n_cal = len(cal_res)
         for level in levels:
-            alpha = 1.0 - level
-            q_level = min(np.ceil((n_cal + 1) * (1.0 - alpha)) / n_cal, 1.0)
-            q_hat = float(np.quantile(cal_res, q_level))
+            # Split conformal calls for the ceil((n+1)*level)-th smallest
+            # calibration residual. Index that rank directly rather than asking
+            # for a quantile at k/n: every np.quantile method maps a probability
+            # onto p*(n-1), so k/n lands a rank high, and the default linear
+            # method additionally interpolates to a value no residual attains.
+            rank = int(np.ceil((n_cal + 1) * level))
+            if rank > n_cal:
+                # The calibration set is too small to certify this level at all:
+                # the conformal interval is genuinely unbounded, so coverage is
+                # trivially 1 and the width infinite. Reported rather than
+                # clamped to the largest residual, which would under-cover while
+                # still claiming the nominal level.
+                q_hat = float(np.inf)
+            else:
+                q_hat = float(cal_res[rank - 1])
             cov = float((tst_res <= q_hat).mean())
             width_std = (2.0 * q_hat) / scale
             out_rows.append(
