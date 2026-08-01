@@ -61,11 +61,31 @@ uv sync
 
 # Run a notebook
 uv run python 11_ml_pipeline/01_ols_inference.py
+
+# Or start Jupyter Lab, from the repo root, and open the URL it prints
+ML4T_DATA_PATH="${ML4T_DATA_PATH:-$PWD/data}" uv run jupyter lab
 ```
+
+A local Jupyter Lab generates an access token on each start and prints the address with the token
+attached:
+
+```
+http://localhost:8888/lab?token=ef2600091d6010aa5e7f044172907ebf893f16f5d1aaa851
+```
+
+Open that whole line, not a bare `http://localhost:8888`, which only shows a token prompt. On
+Windows the server runs inside WSL2 and no browser opens by itself, so copy the URL into your normal
+Windows browser; WSL2 forwards `localhost` for you.
+
+`uv sync` installs Jupyter Lab, so no separate install is needed. The `ML4T_DATA_PATH` prefix gives
+the data loaders an absolute path: Jupyter runs each notebook with its own chapter folder as the
+working directory, and without it they look for `01_process_is_edge/data/…` and report the data as
+missing. The form above keeps a value you already exported and falls back to the repository's own
+`data/` only when you have not set one. If you keep the datasets elsewhere, export that path in your
+shell profile - setting it in `.env` alone is not enough, because `uv run` does not read `.env`.
 
 **Platform notes for local setup:**
 - **Python 3.14+** required
-- **TA-Lib** must be installed separately ([instructions](https://ta-lib.github.io/ta-lib-python/install.html))
 - **GPU**: PyTorch auto-detects CUDA if NVIDIA drivers are installed
 - **Apple Silicon**: Most packages have native ARM64 wheels; the py312 notebooks above cannot run on ARM64 — view their pre-executed `.ipynb` files instead
 
@@ -73,9 +93,12 @@ uv run python 11_ml_pipeline/01_ols_inference.py
 
 ## Your First Notebook
 
-If you started Jupyter Lab with `docker compose up ml4t`, open
-**http://localhost:8888** in your web browser. The repository's file tree appears
-on the left.
+Once Jupyter Lab is running - `docker compose up ml4t` on the Docker path, or
+`ML4T_DATA_PATH="${ML4T_DATA_PATH:-$PWD/data}" uv run jupyter lab` from the repo
+root on the local path - open it in your web browser: **http://localhost:8888**
+for Docker, and for the local path the tokenized URL the server printed. The
+repository's file tree appears on the left. On Windows, start it inside your WSL2
+Ubuntu terminal and open the address in your normal Windows browser.
 
 1. In the file browser (left panel), open a chapter folder — e.g.
    `01_process_is_edge` — and **double-click** a `.ipynb` file to open it.
@@ -113,7 +136,10 @@ uv run python 11_ml_pipeline/01_ols_inference.py
 docker compose run --rm ml4t python 11_ml_pipeline/01_ols_inference.py
 ```
 
-**Important**: Always run from the repository root. Running from a subdirectory will fail with `ImportError: No module named 'utils'`.
+**Important**: Run `.py` notebooks from the repository root. The data loaders resolve `data/` relative
+to the working directory, so running from a chapter folder reports the datasets as missing even when
+they are downloaded. Setting `ML4T_DATA_PATH` to an absolute path removes the constraint, which is
+why the Jupyter Lab command above sets it.
 
 ---
 

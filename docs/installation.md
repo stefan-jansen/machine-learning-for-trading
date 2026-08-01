@@ -595,7 +595,21 @@ cp .env.example .env
 
 # Verify
 uv run python -c "import polars, torch, lightgbm; print('Ready')"
+
+# Start Jupyter Lab, from the repo root, and open the URL it prints
+ML4T_DATA_PATH="${ML4T_DATA_PATH:-$PWD/data}" uv run jupyter lab
 ```
+
+`uv sync` installs Jupyter Lab along with everything else. The `ML4T_DATA_PATH` prefix gives the data
+loaders an absolute path: Jupyter runs each notebook with its own chapter folder as the working
+directory, so they would otherwise search inside that folder and report the datasets as missing. The
+form above keeps a value you have already exported and falls back to this repository's `data/`.
+
+Jupyter prints its address with a freshly generated access token attached
+(`http://localhost:8888/lab?token=…`). Open that whole line; a bare `http://localhost:8888` only
+shows a token prompt. On Windows, run the command in your WSL2 Ubuntu terminal and paste the URL into
+your normal Windows browser - no browser opens by itself there, and WSL2 forwards `localhost` for
+you.
 
 ### How pyproject.toml Works
 

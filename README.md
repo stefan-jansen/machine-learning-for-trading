@@ -445,9 +445,15 @@ uv run python scripts/download_artifacts.py
 `.ipynb`). Run a quick smoke test, or open Jupyter Lab:
 
 ```bash
-uv run python 01_process_is_edge/factor_regimes.py
-docker compose up -d ml4t # then open http://localhost:8888
+uv run python 01_process_is_edge/factor_regimes.py                # smoke test
+ML4T_DATA_PATH="${ML4T_DATA_PATH:-$PWD/data}" uv run jupyter lab  # local: open the URL it prints
+docker compose up -d ml4t                                         # Docker: same address
 ```
+
+`uv sync` already installed Jupyter Lab. Start it from the repo root: the `ML4T_DATA_PATH` prefix
+gives the loaders an absolute path, because Jupyter runs each notebook with its chapter folder as the
+working directory, and they would otherwise search inside that folder and report the datasets as
+missing. It keeps a value you have already exported and defaults to this repository's `data/`.
 
 See the guide to **[running notebooks](docs/running-notebooks.md)** for case-study pipelines, Papermill parameters, and
 the experiment workflow.
