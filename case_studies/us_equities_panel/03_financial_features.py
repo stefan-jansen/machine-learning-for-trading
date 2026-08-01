@@ -101,9 +101,17 @@ MAX_SYMBOLS = 0
 # %% [markdown]
 # ## 1. Load Data
 #
-# Load from the canonical data loader with the same PIT filters as [`02_labels`](02_labels.ipynb).
-# Both notebooks apply identical filters (MIN_PRICE=\$5, ADV>\$1M) via the
-# same constants.
+# Load from the canonical data loader and apply the same eligibility screen as
+# [`02_labels`](02_labels.ipynb): a printed close above \$5, and dollar volume
+# `close * volume` averaging above \$1M over the previous 21 sessions. Both legs
+# read figures the tape carried on the day, so neither depends on a corporate
+# action that had not happened yet. Section B of [`02_labels`](02_labels.ipynb)
+# derives why the adjusted close cannot serve here. Both notebooks rebuild the
+# screen from the same three constants on the same columns, so the trainable
+# panel and the label files agree on the universe.
+#
+# Returns and every price-derived feature below still read `adj_close`: a return
+# has to divide out splits and dividends to mean anything.
 #
 # **Alignment check**: After loading and filtering, we verify the feature
 # index is a subset of the label index. Any mismatch indicates divergent
@@ -121,14 +129,14 @@ raw_df = raw_df.sort(["symbol", "timestamp"])
 # Compute base columns
 raw_df = raw_df.with_columns(
     (pl.col("adj_close") / pl.col("adj_close").shift(1).over("symbol") - 1).alias("returns"),
-    (pl.col("adj_close") * pl.col("adj_volume")).alias("dollar_volume"),
+    (pl.col("close") * pl.col("volume")).alias("dollar_volume"),
 )
 
 # Apply PIT eligibility filters
 raw_df = raw_df.with_columns(
     pl.col("dollar_volume").rolling_mean(ADV_WINDOW).over("symbol").alias("adv_21d")
 )
-df = raw_df.filter((pl.col("adj_close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD))
+df = raw_df.filter((pl.col("close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD))
 
 print(f"Loaded {len(df):,} rows, {df['symbol'].n_unique()} symbols")
 print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
@@ -624,7 +632,7 @@ print(f"Saved {n_features} features to {output_path}")
 #   in the IC time series
 # - **BH-FDR**: Benjamini-Hochberg false discovery rate correction for multiple
 #   testing across all features
-# - **Fundamental Law of Active Management**: With ~3,149 stocks, even tiny ICs
+# - **Fundamental Law of Active Management**: With ~3,164 stocks, even tiny ICs
 #   compound into significant portfolio-level IR
 # - **Pairwise correlation**: Identify redundant feature pairs (|corr| > 0.7)
 
@@ -847,7 +855,7 @@ if ic_results:
 
 # %% [markdown]
 # **Interpretation**:
-# - With ~3,149 stocks the Fundamental Law is the key insight: even ICs of
+# - With ~3,164 stocks the Fundamental Law is the key insight: even ICs of
 #   0.01-0.02 generate portfolio-level $IR \approx 0.5\text{--}1.0$ because
 #   $IR = IC \cdot \sqrt{BR}$ and breadth is enormous.
 # - HAC adjustment should be minimal (inflation factor ~1.0x) because 1-day
@@ -860,8 +868,8 @@ if ic_results:
 #   clustering recommended before modeling.
 #
 # **Fundamental Law teaching moment**: This is the book's highest-breadth
-# case study. A mean IC of just 0.01 across 3,149 stocks implies
-# $IR = 0.01 \times \sqrt{3149} \approx 0.56$ -- competitive with many
+# case study. A mean IC of just 0.01 across 3,164 stocks implies
+# $IR = 0.01 \times \sqrt{3164} \approx 0.56$ -- competitive with many
 # hedge fund strategies. The lesson: in large cross-sections, signal
 # quality matters less than signal consistency and cost control.
 

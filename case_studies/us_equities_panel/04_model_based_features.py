@@ -120,7 +120,11 @@ MAX_FOLDS = 0  # 0 = all folds; test mode: 2
 # %% [markdown]
 # ## 1. Load Data
 #
-# Same PIT filters as [`02_labels`](02_labels.ipynb) for consistent universe construction.
+# Same eligibility screen as [`02_labels`](02_labels.ipynb) for consistent universe
+# construction: a printed close above $5, and dollar volume `close * volume`
+# averaging above $1M over the previous 21 sessions. Both legs read figures the tape
+# carried on the day; Section B of [`02_labels`](02_labels.ipynb) derives why the
+# adjusted close cannot serve here.
 # Note: this notebook applies filters independently rather than reusing
 # a materialized price extract. Both use identical constants (MIN_PRICE=$5,
 # ADV>$1M). A production pipeline would centralize universe construction.
@@ -137,14 +141,14 @@ raw_df = raw_df.sort(["symbol", "timestamp"])
 # Compute base columns
 raw_df = raw_df.with_columns(
     (pl.col("adj_close") / pl.col("adj_close").shift(1).over("symbol") - 1).alias("returns"),
-    (pl.col("adj_close") * pl.col("adj_volume")).alias("dollar_volume"),
+    (pl.col("close") * pl.col("volume")).alias("dollar_volume"),
 )
 
 # Apply PIT eligibility filters
 raw_df = raw_df.with_columns(
     pl.col("dollar_volume").rolling_mean(ADV_WINDOW).over("symbol").alias("adv_21d")
 )
-df = raw_df.filter((pl.col("adj_close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD))
+df = raw_df.filter((pl.col("close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD))
 
 print(f"Loaded {len(df):,} rows, {df['symbol'].n_unique()} symbols")
 print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
