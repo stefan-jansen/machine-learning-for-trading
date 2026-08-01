@@ -86,7 +86,7 @@ import seaborn as sns
 from matplotlib.ticker import FuncFormatter
 
 from data import load_nasdaq_itch
-from utils.paths import get_output_dir
+from utils.paths import display_path, get_output_dir
 
 sns.set_style("whitegrid")
 
@@ -113,13 +113,13 @@ SYMBOL = "AAPL"
 # MAX_ORDERS: Optional row limit for testing (None = no limit after symbol filter)
 MAX_ORDERS = None
 
-print(f"Input directory (messages): {MESSAGE_DIR}")
-print(f"Output directory (analysis): {OUTPUT_DIR}")
+print(f"Input directory (messages): {display_path(MESSAGE_DIR)}")
+print(f"Output directory (analysis): {display_path(OUTPUT_DIR)}")
 print(f"Analyzing symbol: {SYMBOL}")
 
 # %%
 if not MESSAGE_DIR.exists():
-    print(f"\nWARNING: Message directory not found: {MESSAGE_DIR}")
+    print(f"\nWARNING: Message directory not found: {display_path(MESSAGE_DIR)}")
     print("   Run 01_itch_parser first to parse ITCH data.")
     available = []
 else:
@@ -982,12 +982,9 @@ if HAS_MESSAGE_DATA and orders_with_exec is not None:
         ax.set_xticks(range(len(top_25_pd)))
         ax.set_xticklabels(top_25_pd["ticker"], rotation=45, ha="right")
         if symbol_filtered:
-            ax.set_title(
-                f"Traded Value (filtered to SYMBOL={SYMBOL} — "
-                f"single-symbol drilldown, see notebook header)"
-            )
+            ax.set_title(f"Traded value, filtered to SYMBOL={SYMBOL}")
         else:
-            ax.set_title(f"Top {n_symbols} Symbols by Traded Value ({total_share:.1%} of total)")
+            ax.set_title("Traded value concentrates in a few symbols")
         ax.set_xlabel("Symbol")
         ax.set_ylabel("Share of Dollar Volume")
         ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.1%}"))
@@ -1040,7 +1037,7 @@ if ENRICHED_DIR.exists():
         enriched_c = lf.collect()
         print(f"Loaded {len(enriched_c):,} enriched C messages for {SYMBOL}")
 else:
-    print(f"Enriched data not found at {ENRICHED_DIR}")
+    print(f"Enriched data not found at {display_path(ENRICHED_DIR)}")
     print("Run 05_itch_trading_activity first to generate the enriched E/C/X parquets.")
     enriched_e = None
     enriched_c = None

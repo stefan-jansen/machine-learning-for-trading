@@ -523,7 +523,7 @@ fig.add_trace(
 )
 fig.add_hline(y=10, line_dash="dash", line_color=COLORS["amber"], line_width=1)
 fig.update_layout(
-    title=f"AAPL return-decile membership, baseline vs current (PSI = {psi_value:.3f})",
+    title="AAPL return-decile membership, baseline vs current",
     xaxis_title="Baseline decile bin",
     yaxis_title="Share of observations (%)",
     barmode="group",
@@ -658,7 +658,7 @@ fig = go.Figure(
 fig.add_hline(y=25, line_dash="dash", line_color=COLORS["amber"], line_width=1)
 fig.add_hline(y=-25, line_dash="dash", line_color=COLORS["amber"], line_width=1)
 fig.update_layout(
-    title="Flagged corporate actions are large discrete jumps, not data noise (±25% threshold)",
+    title="Flagged corporate actions are large discrete jumps, not data noise",
     xaxis_title="Date",
     yaxis_title="Overnight return (%)",
     height=420,

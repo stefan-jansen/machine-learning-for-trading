@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -56,6 +56,7 @@
 """Information-Driven Bars — constructing tick, volume, dollar, and imbalance bars from raw trades."""
 
 import warnings
+from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
@@ -98,9 +99,23 @@ MESSAGE_DIR = load_nasdaq_itch(get_base_path=True)
 OUTPUT_DIR = get_output_dir(3, "nasdaq_itch") / "bars"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Print repo-relative paths so outputs stay portable across machines
-print(f"Input directory (messages): {MESSAGE_DIR.relative_to(ML4T_PATH)}")
-print(f"Output directory (bars): {OUTPUT_DIR.relative_to(ML4T_PATH)}")
+
+def _repo_relative(path: Path) -> Path:
+    """Path relative to the repo root, or absolute when it lives outside it.
+
+    ``ML4T_DATA_PATH`` may point anywhere - a shared data volume, or a sibling
+    checkout when several worktrees share one copy - so the data directory is not
+    always under the repo.
+    """
+    try:
+        return path.relative_to(ML4T_PATH)
+    except ValueError:
+        return path
+
+
+# Print repo-relative paths where possible so outputs stay portable across machines
+print(f"Input directory (messages): {_repo_relative(MESSAGE_DIR)}")
+print(f"Output directory (bars): {_repo_relative(OUTPUT_DIR)}")
 
 # Validate parsed ITCH data — produced by 01_itch_parser or Rust parser
 assert MESSAGE_DIR.exists(), (
@@ -495,7 +510,7 @@ if time_1m is not None:
                     label="Fitted normal",
                 )
 
-            ax.set_title(f"{name}\n(n={len(bars):,})")
+            ax.set_title(name)
             ax.set_xlabel("Bar return (%)")
             ax.set_ylabel("Density")
             ax.legend()
@@ -504,8 +519,7 @@ if time_1m is not None:
     axes[5].axis("off")
 
     plt.suptitle(
-        f"{SYMBOL} activity-sampled bars sit closer to normal than time bars "
-        f"({TRADING_DATE}, tails clipped to ±2%)",
+        f"{SYMBOL} activity-sampled bars sit closer to normal (tails clipped to ±2%)",
         fontsize=14,
     )
     plt.tight_layout()

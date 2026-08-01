@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -95,7 +95,7 @@ COLORS = {
 # %%
 # Configuration - Unified output directory structure
 from data.equities.loader import load_nasdaq_itch
-from utils.paths import get_output_dir
+from utils.paths import display_path, get_output_dir
 
 # All ITCH-related outputs under a single chapter directory
 NASDAQ_ITCH_OUTPUT = get_output_dir(3, "nasdaq_itch")
@@ -133,7 +133,7 @@ def discover_available_symbols(base_dir: Path) -> list[str]:
 
 AVAILABLE_SYMBOLS = discover_available_symbols(ORDER_BOOK_DIR)
 
-print(f"Data directory: {ORDER_BOOK_DIR}")
+print(f"Data directory: {display_path(ORDER_BOOK_DIR)}")
 print(
     f"Available symbols: {AVAILABLE_SYMBOLS if AVAILABLE_SYMBOLS else 'None (run notebook 02 first)'}"
 )
@@ -808,12 +808,12 @@ if ofi_arr is not None and ret_arr is not None:
     axes[1].axvline(0, color="black", lw=0.5)
     axes[1].set_xlabel("OFI (signed log scale)")
     axes[1].set_ylabel("Next-minute return (bps)")
-    axes[1].set_title(f"OFI vs Returns: ρ = {corr_log:.3f}")
+    axes[1].set_title("Next-minute return against order-flow imbalance")
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
 
     plt.suptitle(
-        f"Order Flow Imbalance Analysis - {OFI_SYMBOL} ({len(ofi_arr)} observations)",
+        f"Order-flow imbalance analysis — {OFI_SYMBOL}",
         fontsize=12,
         fontweight="bold",
     )
@@ -1177,7 +1177,9 @@ if len(multi_stock_results) >= 3:
     results_path = OUTPUT_DIR / "figure_3_3_ofi_correlation_50_stocks.parquet"
     results_path.parent.mkdir(parents=True, exist_ok=True)
     results_df.write_parquet(results_path)
-    print(f"Persisted Fig 3.3 cross-section: {results_path} ({len(results_df)} symbols)")
+    print(
+        f"Persisted Fig 3.3 cross-section: {display_path(results_path)} ({len(results_df)} symbols)"
+    )
 
     # Generate Figure 3.3 from actual data
     plot_ofi_vs_returns(multi_stock_results)

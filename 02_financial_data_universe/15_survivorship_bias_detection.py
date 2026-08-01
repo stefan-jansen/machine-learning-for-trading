@@ -166,10 +166,7 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title=(
-        f"All {n_left:,} exits fall in {exits_by_year['year'].min()}–{exits_by_year['year'].max()} "
-        f"— the panel spans {lifespans['first_date'].min().year}–{dataset_end.year}"
-    ),
+    title="Recorded exits appear only at the very end of the panel",
     xaxis_title="Year of last observation",
     yaxis_title="Symbols",
     xaxis=dict(range=[lifespans["first_date"].min().year - 1, dataset_end.year + 1]),
@@ -181,7 +178,8 @@ fig.show()
 # %% [markdown] tags=[]
 # ### Reading the chart
 #
-# The bars occupy the last four years of a fifty-six-year panel. The rest of the axis is empty.
+# The bars occupy the last five calendar years of a fifty-six-year panel — 2014 through the
+# March 2018 cutoff. The rest of the axis is empty.
 #
 # That is not a claim about the equity market. Firms were acquired, went private and went
 # bankrupt throughout the panel's history — Enron was delisted from the NYSE in January 2002,
@@ -827,15 +825,14 @@ def plot_bias(ax: plt.Axes) -> None:
     ax.set_xticklabels(names, fontsize=9)
     ax.set_xlabel("Delisting outcome scenario")
     ax.set_ylabel("Survivorship bias (percentage points)")
-    ax.set_title(f"Bias by scenario ({N_SIMS:,} Monte Carlo draws)")
+    ax.set_title("Every scenario puts the bias above zero")
 
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 5), constrained_layout=True)
 plot_paths(axes[0])
 plot_bias(axes[1])
 fig.suptitle(
-    f"Survivors overstate the full universe ({window_start.year}–{window_end.year}, "
-    f"{n_leavers} exits of {len(universe):,} symbols)",
+    "Survivors overstate the full universe over 2014–2018",
     fontsize=13,
     fontweight="bold",
 )

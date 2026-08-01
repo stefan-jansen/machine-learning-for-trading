@@ -47,6 +47,7 @@ import polars as pl
 from ml4t.data.adjustments import apply_corporate_actions
 
 from data import load_us_equities
+from utils.style import COLORS
 
 # %% tags=["parameters"]
 # Production defaults — Papermill injects overrides for CI
@@ -142,8 +143,12 @@ adj_cumret = np.cumprod(1 + adj_returns)
 
 # %%
 fig, ax = plt.subplots(figsize=(12, 6), layout="tight")
-ax.plot(dates_arr[1:], adj_cumret, label="Adjusted prices (correct)", color="#1E3A5F", linewidth=2)
-ax.plot(dates_arr[1:], raw_cumret, label="Raw prices (wrong)", color="#8B0000", linewidth=2)
+ax.plot(
+    dates_arr[1:], adj_cumret, label="Adjusted prices (correct)", color=COLORS["blue"], linewidth=2
+)
+ax.plot(
+    dates_arr[1:], raw_cumret, label="Raw prices (wrong)", color=COLORS["negative"], linewidth=2
+)
 
 for d, ratio in zip(split_dates, split_ratios, strict=False):
     ax.axvline(d, color="gray", linestyle="--", alpha=0.4, linewidth=1)
@@ -338,7 +343,7 @@ ax1.set_yscale("log")
 ax1.legend()
 
 ax2 = axes[1]
-ax2.plot(dates, relative_diff, color="#2E86AB", linewidth=1.2, alpha=0.9)
+ax2.plot(dates, relative_diff, color=COLORS["blue"], linewidth=1.2, alpha=0.9)
 ax2.axhline(
     tolerance_pct,
     color="red",

@@ -56,6 +56,8 @@ import polars as pl
 from ml4t.data.providers import WikiPricesProvider, YahooFinanceProvider
 from ml4t.data.providers.fred import FREDProvider
 
+from utils.style import COLORS
+
 HAS_FRED = bool(os.getenv("FRED_API_KEY"))
 if not HAS_FRED:
     raise RuntimeError(
@@ -678,18 +680,28 @@ for symbol, df in etf_data.items():
             mode="lines",
         )
     )
+    # Seven series exceed the categorical palette, so identity comes from a direct
+    # end-label rather than from a legend lookup against a repeated color.
+    fig.add_annotation(
+        x=df["timestamp"][-1],
+        y=normalized[-1],
+        text=f" {symbol}",
+        showarrow=False,
+        xanchor="left",
+        font=dict(size=10),
+    )
 
 fig.update_layout(
-    title=f"Core ETF Universe Performance ({len(etf_data)} ETFs, Normalized to 100)",
+    title="Core ETFs rebased to 100 at each series' first observation",
     xaxis_title="Date",
     yaxis_title="Normalized Price",
     height=500,
-    template="plotly_white",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    showlegend=False,
+    margin=dict(r=70),
 )
 
 # Add horizontal line at 100
-fig.add_hline(y=100, line_dash="dash", line_color="gray", opacity=0.5)
+fig.add_hline(y=100, line_dash="dash", line_color=COLORS["neutral"], opacity=0.5)
 
 fig.show()
 

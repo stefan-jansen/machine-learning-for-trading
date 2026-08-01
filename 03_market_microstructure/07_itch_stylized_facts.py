@@ -73,7 +73,7 @@ import pyarrow.dataset as ds
 import seaborn as sns
 from IPython.display import display  # noqa: F401
 
-from utils.paths import get_output_dir
+from utils.paths import display_path, get_output_dir
 
 sns.set_style("whitegrid")
 
@@ -95,11 +95,11 @@ MESSAGE_DIR = load_nasdaq_itch(get_base_path=True)
 # Input: Trade summary from notebook 05 (trading_activity_overview)
 TRADING_ACTIVITY_DIR = NASDAQ_ITCH_OUTPUT / "trading_activity"
 
-print(f"Input directory (messages): {MESSAGE_DIR}")
-print(f"Input directory (trade summary): {TRADING_ACTIVITY_DIR}")
+print(f"Input directory (messages): {display_path(MESSAGE_DIR)}")
+print(f"Input directory (trade summary): {display_path(TRADING_ACTIVITY_DIR)}")
 
 if not MESSAGE_DIR.exists():
-    print(f"\nWARNING: Message directory not found: {MESSAGE_DIR}")
+    print(f"\nWARNING: Message directory not found: {display_path(MESSAGE_DIR)}")
     print("   Run 01_itch_parser first.")
 
 # %% [markdown]
@@ -548,10 +548,7 @@ if data_available and all_trades is not None:
 
         ax.set_xlabel("Lag (seconds)")
         ax.set_ylabel("Autocorrelation")
-        ax.set_title(
-            f"Bid-Ask Bounce: Return Autocorrelation for {high_sym}\n"
-            f"(Negative lag-1 = bounce between bid and ask)"
-        )
+        ax.set_title(f"Negative lag-1 autocorrelation is the bid-ask bounce — {high_sym}")
         ax.set_xticks(lags)
 
         # Add annotation
