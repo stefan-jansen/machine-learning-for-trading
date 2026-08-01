@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -12,7 +13,7 @@
 #     name: python3
 # ---
 
-# %% [markdown] papermill={"duration": 0.001638, "end_time": "2026-05-25T01:24:21.965925+00:00", "exception": false, "start_time": "2026-05-25T01:24:21.964287+00:00", "status": "completed"}
+# %% [markdown]
 # # CNN with Time Series Image Encoding (GAF + MTF)
 #
 # **Docker image**: `ml4t-gpu`
@@ -24,8 +25,8 @@
 # encoded representations.
 #
 # **Learning Objectives**:
-# - Implement Gramian Angular Summation Fields (GASF) that encode temporal
-#   correlations as angular differences
+# - Implement Gramian Angular Summation Fields (GASF) that encode pairwise
+#   angular sums
 # - Implement Markov Transition Fields (MTF) that encode transition probabilities
 #   between discretized states
 # - Stack GAF + MTF as multi-channel images and train a CNN regressor on
@@ -37,28 +38,34 @@
 #
 # **Prerequisites**: ETF features (`case_studies/etfs/`)
 
-# %% papermill={"duration": 7.012912, "end_time": "2026-05-25T01:24:28.980445+00:00", "exception": false, "start_time": "2026-05-25T01:24:21.967533+00:00", "status": "completed"}
-"""CNN with Time Series Image Encoding — convert time series to GAF/MTF images for forward-return regression."""
+# %%
+"""CNN with Time Series Image Encoding - convert time series to GAF/MTF images for forward-return regression."""
 
+import os
 import warnings
+
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import matplotlib.pyplot as plt
 import numpy as np
+import plotly.graph_objects as go
 import polars as pl
 import torch
 import torch.nn as nn
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
+from plotly.subplots import make_subplots
 from sklearn.decomposition import PCA
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS, add_message_title
 
 warnings.filterwarnings("ignore")
 
 from dl_sequences import create_sequences_multi_asset, load_dl_dataset, train_model
 
-# %% papermill={"duration": 0.005775, "end_time": "2026-05-25T01:24:28.988178+00:00", "exception": false, "start_time": "2026-05-25T01:24:28.982403+00:00", "status": "completed"} tags=["parameters"]
+# %% tags=["parameters"]
 SEED = 42
 LOOKBACK = 20
 IMAGE_SIZE = 32
@@ -70,38 +77,41 @@ MAX_TRAIN_SAMPLES = 40_000
 MAX_VAL_SAMPLES = 10_000
 MAX_TEST_SAMPLES = 10_000
 INFER_BATCH_SIZE = 1_024
+LABEL_HORIZON = 21
 
-# %% papermill={"duration": 0.066581, "end_time": "2026-05-25T01:24:29.056244+00:00", "exception": false, "start_time": "2026-05-25T01:24:28.989663+00:00", "status": "completed"}
+# %%
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {DEVICE}")
 
 set_global_seeds(SEED)
+torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
 
-# %% [markdown] papermill={"duration": 0.00132, "end_time": "2026-05-25T01:24:29.059105+00:00", "exception": false, "start_time": "2026-05-25T01:24:29.057785+00:00", "status": "completed"}
+# %% [markdown]
 # ## Data Loading
 #
-# We use ETF data from the case study pipeline, providing diverse cross-asset
-# time series for testing image encoding approaches.
+# We use the five-day ETF return from the case-study pipeline. Both models see
+# exactly the same one-feature windows.
 
-# %% papermill={"duration": 0.564624, "end_time": "2026-05-25T01:24:29.624988+00:00", "exception": false, "start_time": "2026-05-25T01:24:29.060364+00:00", "status": "completed"}
+# %%
 mds = load_dl_dataset("etfs")
 
-# We load six features for completeness but only the first feature column is
-# encoded as a GAF + MTF image (see `create_image_dataset`). The other five
-# features are retained in the panel only so it stays compatible with shared
-# sequence builders; production usage would encode all features into a
-# (2 × F)-channel image.
-FEATURE_COLS = mds.feature_names[:6]
+FEATURE_COLS = ["ret_5d"]
 TARGET_COL = mds.label_col
+
+missing_features = sorted(set(FEATURE_COLS) - set(mds.feature_names))
+if missing_features:
+    raise ValueError(f"Missing required ETF return features: {missing_features}")
 
 print(f"Features ({len(FEATURE_COLS)}): {FEATURE_COLS}")
 print(f"Target: {TARGET_COL}")
 
-# %% [markdown] papermill={"duration": 0.001679, "end_time": "2026-05-25T01:24:29.628160+00:00", "exception": false, "start_time": "2026-05-25T01:24:29.626481+00:00", "status": "completed"}
+# %% [markdown]
 # ## Sequence Creation and Temporal Split
 
-# %% papermill={"duration": 3.434698, "end_time": "2026-05-25T01:24:33.064153+00:00", "exception": false, "start_time": "2026-05-25T01:24:29.629455+00:00", "status": "completed"}
+# %%
 df = mds.dataset.drop_nulls(subset=FEATURE_COLS + [TARGET_COL])
 print(f"Rows after dropping nulls: {len(df):,}")
 
@@ -115,17 +125,25 @@ X, y, timestamps, symbols = create_sequences_multi_asset(
 )
 print(f"Sequences: {X.shape[0]:,}, shape: {X.shape}")
 
-X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-y = np.nan_to_num(y, nan=0.0).astype(np.float32)
+sequence_order = np.lexsort((symbols.astype(str), timestamps))
+X = np.nan_to_num(X[sequence_order], nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+y = np.nan_to_num(y[sequence_order], nan=0.0).astype(np.float32)
+timestamps = timestamps[sequence_order]
+symbols = symbols[sequence_order]
 
-# %% papermill={"duration": 0.064152, "end_time": "2026-05-25T01:24:33.131125+00:00", "exception": false, "start_time": "2026-05-25T01:24:33.066973+00:00", "status": "completed"}
-# Date-based 60/20/20 temporal split
+# %%
+# Date-based 60/20/20 temporal split. The target is a 21-day forward return,
+# so labels whose outcome windows cross the next boundary are purged.
 unique_dates = np.sort(np.unique(timestamps))
-train_end_date = unique_dates[int(len(unique_dates) * 0.6)]
-val_end_date = unique_dates[int(len(unique_dates) * 0.8)]
+train_boundary_idx = int(len(unique_dates) * 0.6)
+val_boundary_idx = int(len(unique_dates) * 0.8)
+train_end_date = unique_dates[train_boundary_idx]
+val_end_date = unique_dates[val_boundary_idx]
+train_label_cutoff = unique_dates[train_boundary_idx - LABEL_HORIZON]
+val_label_cutoff = unique_dates[val_boundary_idx - LABEL_HORIZON]
 
-train_mask = timestamps < train_end_date
-val_mask = (timestamps >= train_end_date) & (timestamps < val_end_date)
+train_mask = timestamps < train_label_cutoff
+val_mask = (timestamps >= train_end_date) & (timestamps < val_label_cutoff)
 test_mask = timestamps >= val_end_date
 
 X_train, y_train = X[train_mask], y[train_mask]
@@ -134,45 +152,64 @@ X_test, y_test = X[test_mask], y[test_mask]
 test_dates, test_symbols = timestamps[test_mask], symbols[test_mask]
 
 print(f"Train: {len(X_train):,}, Val: {len(X_val):,}, Test: {len(X_test):,}")
+print(
+    f"Purged {LABEL_HORIZON} target dates before each boundary before complete-date subsampling: "
+    f"validation starts {train_end_date}, test starts {val_end_date}"
+)
 
 
-# %% [markdown] papermill={"duration": 0.002412, "end_time": "2026-05-25T01:24:33.136275+00:00", "exception": false, "start_time": "2026-05-25T01:24:33.133863+00:00", "status": "completed"}
+# %% [markdown]
 # ### Pedagogical subsampling
 #
-# The GAF/MTF encoding loop produces one (image_size × image_size × 2) tensor
+# The GAF/MTF encoding loop produces one (image_size x image_size x 2) tensor
 # per sample, so the full ETF panel takes considerable wall-clock to encode.
 # We cap each split at a few tens of thousands of sequences for tractable
-# runtime — the cap is row-based here, which means the last batch can start
-# mid-date and leave a partial cross-section; the per-date Spearman IC
-# downstream handles partial cross-sections via `min_obs` rather than
-# refusing to compute.
+# runtime. Critically we subsample by **complete dates**, not row count: the
+# sequence array can begin or end partway through a date, so a raw row slice
+# would leave a partial cross-section. Keeping the most recent complete dates
+# instead gives a stable, full cross-section that reproduces across runs.
 
 
-# %% papermill={"duration": 0.005966, "end_time": "2026-05-25T01:24:33.144744+00:00", "exception": false, "start_time": "2026-05-25T01:24:33.138778+00:00", "status": "completed"}
-if len(X_train) > MAX_TRAIN_SAMPLES:
-    X_train = X_train[-MAX_TRAIN_SAMPLES:]
-    y_train = y_train[-MAX_TRAIN_SAMPLES:]
-if len(X_val) > MAX_VAL_SAMPLES:
-    X_val = X_val[-MAX_VAL_SAMPLES:]
-    y_val = y_val[-MAX_VAL_SAMPLES:]
-if len(X_test) > MAX_TEST_SAMPLES:
-    X_test = X_test[-MAX_TEST_SAMPLES:]
-    y_test = y_test[-MAX_TEST_SAMPLES:]
-    test_dates = test_dates[-MAX_TEST_SAMPLES:]
-    test_symbols = test_symbols[-MAX_TEST_SAMPLES:]
+# %%
+def _trim_by_complete_dates(X_arr, y_arr, ts_arr, sym_arr, max_samples):
+    """Keep the most recent whole dates whose total rows fit under `max_samples`."""
+    if len(X_arr) <= max_samples:
+        return X_arr, y_arr, ts_arr, sym_arr
+    unique_ts = np.sort(np.unique(ts_arr))[::-1]
+    cumulative = 0
+    keep_dates: list = []
+    for ts in unique_ts:
+        n = int((ts_arr == ts).sum())
+        if cumulative + n > max_samples and keep_dates:
+            break
+        cumulative += n
+        keep_dates.append(ts)
+    keep_mask = np.isin(ts_arr, np.array(keep_dates))
+    return X_arr[keep_mask], y_arr[keep_mask], ts_arr[keep_mask], sym_arr[keep_mask]
+
+
+X_train, y_train, _train_ts, _train_sym = _trim_by_complete_dates(
+    X_train, y_train, timestamps[train_mask], symbols[train_mask], MAX_TRAIN_SAMPLES
+)
+X_val, y_val, _val_ts, _val_sym = _trim_by_complete_dates(
+    X_val, y_val, timestamps[val_mask], symbols[val_mask], MAX_VAL_SAMPLES
+)
+X_test, y_test, test_dates, test_symbols = _trim_by_complete_dates(
+    X_test, y_test, test_dates, test_symbols, MAX_TEST_SAMPLES
+)
 
 print(f"Capped split: Train={len(X_train):,}, Val={len(X_val):,}, Test={len(X_test):,}")
 
 
-# %% [markdown] papermill={"duration": 0.001346, "end_time": "2026-05-25T01:24:33.147928+00:00", "exception": false, "start_time": "2026-05-25T01:24:33.146582+00:00", "status": "completed"}
+# %% [markdown]
 # ### Cross-sectional IC helper
 #
-# Mean cross-sectional Spearman IC by date — same metric used in the rest of
+# Mean cross-sectional Spearman IC by date - same metric used in the rest of
 # Chapter 13 so the Image-CNN result is comparable with the other
 # architectures.
 
 
-# %% papermill={"duration": 0.004392, "end_time": "2026-05-25T01:24:33.153689+00:00", "exception": false, "start_time": "2026-05-25T01:24:33.149297+00:00", "status": "completed"}
+# %%
 def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
     """Mean cross-sectional Spearman IC across dates."""
     pred_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "prediction": y_pred})
@@ -189,7 +226,7 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
     return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
 
 
-# %% [markdown] papermill={"duration": 0.001546, "end_time": "2026-05-25T01:24:33.156648+00:00", "exception": false, "start_time": "2026-05-25T01:24:33.155102+00:00", "status": "completed"}
+# %% [markdown]
 # ## Gramian Angular Summation Field (GASF)
 #
 # The GASF encodes a time series as a matrix of trigonometric sums. Given a
@@ -199,12 +236,12 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 # $$\text{GASF}_{i,j} = \cos(\phi_i + \phi_j)$$
 #
 # This preserves temporal ordering. The diagonal evaluates to
-# $\cos(2\phi_i) = 2\tilde{x}_i^2 - 1$ — a deterministic function of the
-# normalized value, not the value itself — while off-diagonal entries capture
-# pairwise temporal correlations between time steps $i$ and $j$.
+# $\cos(2\phi_i) = 2\tilde{x}_i^2 - 1$ - a deterministic function of the
+# normalized value, not the value itself - while off-diagonal entries capture
+# pairwise angular relationships between time steps $i$ and $j$.
 
 
-# %% papermill={"duration": 0.004659, "end_time": "2026-05-25T01:24:33.162691+00:00", "exception": false, "start_time": "2026-05-25T01:24:33.158032+00:00", "status": "completed"}
+# %%
 def gramian_angular_field(series: np.ndarray, image_size: int) -> np.ndarray:
     """Compute the Gramian Angular Summation Field (GASF).
 
@@ -235,7 +272,7 @@ def gramian_angular_field(series: np.ndarray, image_size: int) -> np.ndarray:
     return gasf.astype(np.float32)
 
 
-# %% [markdown] papermill={"duration": 0.001389, "end_time": "2026-05-25T01:24:33.165497+00:00", "exception": false, "start_time": "2026-05-25T01:24:33.164108+00:00", "status": "completed"}
+# %% [markdown]
 # ## Markov Transition Field (MTF)
 #
 # The MTF discretizes a time series into $Q$ quantile bins and builds a
@@ -248,7 +285,7 @@ def gramian_angular_field(series: np.ndarray, image_size: int) -> np.ndarray:
 # dynamic transition structure of the series.
 
 
-# %% papermill={"duration": 0.004854, "end_time": "2026-05-25T01:24:33.171761+00:00", "exception": false, "start_time": "2026-05-25T01:24:33.166907+00:00", "status": "completed"}
+# %%
 def markov_transition_field(series: np.ndarray, image_size: int, n_bins: int = 8) -> np.ndarray:
     """Compute the Markov Transition Field (MTF).
 
@@ -287,24 +324,24 @@ def markov_transition_field(series: np.ndarray, image_size: int, n_bins: int = 8
     return mtf.astype(np.float32)
 
 
-# %% [markdown] papermill={"duration": 0.001404, "end_time": "2026-05-25T01:24:33.174717+00:00", "exception": false, "start_time": "2026-05-25T01:24:33.173313+00:00", "status": "completed"}
+# %% [markdown]
 # ## Create Multi-Channel Image Dataset
 #
-# For each sequence, we encode the first feature as a GASF and an MTF,
+# For each one-feature sequence, we encode the return history as a GASF and an MTF,
 # then stack them as a 2-channel image. This gives the CNN both angular
-# correlation (GASF) and transition dynamics (MTF) as complementary views.
+# structure (GASF) and transition dynamics (MTF) as complementary views.
 #
-# > **Simplification**: This demo encodes only the first feature column. A production
+# > **Simplification**: This demo encodes only the five-day return history. A production
 # > system would encode all features, stacking GASF+MTF per feature to produce a
-# > $(2 \times F)$-channel image (e.g., 12 channels for 6 features). We use one
+# > $(2 \times F)$-channel image. We use one
 # > feature here to keep encoding time manageable and focus on the method itself.
 
 
-# %% papermill={"duration": 0.004637, "end_time": "2026-05-25T01:24:33.180781+00:00", "exception": false, "start_time": "2026-05-25T01:24:33.176144+00:00", "status": "completed"}
+# %%
 def create_image_dataset(X_sequences: np.ndarray, image_size: int) -> np.ndarray:
     """Convert feature sequences into stacked GAF + MTF image tensors.
 
-    For each sample, takes the first feature column and computes both GASF
+    For each sample, takes the return feature and computes both GASF
     and MTF encodings, returning a (N, 2, H, W) tensor.
 
     Args:
@@ -318,7 +355,7 @@ def create_image_dataset(X_sequences: np.ndarray, image_size: int) -> np.ndarray
     images = np.zeros((n_samples, 2, image_size, image_size), dtype=np.float32)
 
     for i in range(n_samples):
-        series = X_sequences[i, :, 0]  # first feature
+        series = X_sequences[i, :, 0]
         images[i, 0] = gramian_angular_field(series, image_size)
         images[i, 1] = markov_transition_field(series, image_size)
 
@@ -328,10 +365,10 @@ def create_image_dataset(X_sequences: np.ndarray, image_size: int) -> np.ndarray
     return images
 
 
-# %% [markdown] papermill={"duration": 0.001384, "end_time": "2026-05-25T01:24:33.183619+00:00", "exception": false, "start_time": "2026-05-25T01:24:33.182235+00:00", "status": "completed"}
+# %% [markdown]
 # ## Encode Training, Validation, and Test Sets
 
-# %% papermill={"duration": 6.424907, "end_time": "2026-05-25T01:24:39.609924+00:00", "exception": false, "start_time": "2026-05-25T01:24:33.185017+00:00", "status": "completed"}
+# %%
 print("Encoding training images...")
 X_train_img = create_image_dataset(X_train, IMAGE_SIZE)
 print(f"Train images: {X_train_img.shape}")
@@ -344,13 +381,13 @@ print("Encoding test images...")
 X_test_img = create_image_dataset(X_test, IMAGE_SIZE)
 print(f"Test images: {X_test_img.shape}")
 
-# %% [markdown] papermill={"duration": 0.001544, "end_time": "2026-05-25T01:24:39.613199+00:00", "exception": false, "start_time": "2026-05-25T01:24:39.611655+00:00", "status": "completed"}
+# %% [markdown]
 # ## Visualize Sample Encodings
 #
 # Inspecting the GASF and MTF channels for a few training samples to verify
 # the encoding produces visually distinct patterns.
 
-# %% papermill={"duration": 0.51172, "end_time": "2026-05-25T01:24:40.126405+00:00", "exception": false, "start_time": "2026-05-25T01:24:39.614685+00:00", "status": "completed"}
+# %%
 fig, axes = plt.subplots(3, 3, figsize=(10, 9), constrained_layout=True)
 
 for row in range(3):
@@ -373,10 +410,10 @@ for row in range(3):
     axes[row, 2].set_title("MTF" if row == 0 else "")
     plt.colorbar(im2, ax=axes[row, 2], fraction=0.046)
 
-fig.suptitle("Time Series Image Encodings: GASF and MTF Channels")
+fig.suptitle("GASF encodes angular relationships; MTF encodes transitions from the same window")
 fig.show()
 
-# %% [markdown] papermill={"duration": 0.001929, "end_time": "2026-05-25T01:24:40.130368+00:00", "exception": false, "start_time": "2026-05-25T01:24:40.128439+00:00", "status": "completed"}
+# %% [markdown]
 # ## CNN Architecture
 #
 # Three convolutional blocks (Conv2d $\to$ BatchNorm $\to$ ReLU $\to$ MaxPool)
@@ -385,7 +422,7 @@ fig.show()
 # the image encoding from the model complexity.
 
 
-# %% papermill={"duration": 0.00512, "end_time": "2026-05-25T01:24:40.137310+00:00", "exception": false, "start_time": "2026-05-25T01:24:40.132190+00:00", "status": "completed"}
+# %%
 class CNNBlock(nn.Module):
     """Single CNN building block: Conv2d -> BatchNorm -> ReLU -> MaxPool."""
 
@@ -406,7 +443,7 @@ class CNNBlock(nn.Module):
         return x
 
 
-# %% [markdown] papermill={"duration": 0.001805, "end_time": "2026-05-25T01:24:40.140951+00:00", "exception": false, "start_time": "2026-05-25T01:24:40.139146+00:00", "status": "completed"}
+# %% [markdown]
 # ### Full Image CNN
 #
 # Three CNN blocks downsample the spatial dimensions by $2\times$ each,
@@ -415,7 +452,7 @@ class CNNBlock(nn.Module):
 # regularization.
 
 
-# %% papermill={"duration": 0.00506, "end_time": "2026-05-25T01:24:40.147770+00:00", "exception": false, "start_time": "2026-05-25T01:24:40.142710+00:00", "status": "completed"}
+# %%
 class ImageCNN(nn.Module):
     """CNN for regression on GAF+MTF encoded time series images.
 
@@ -447,10 +484,11 @@ class ImageCNN(nn.Module):
         return self.fc(x).squeeze(-1)  # (N,)
 
 
-# %% [markdown] papermill={"duration": 0.001816, "end_time": "2026-05-25T01:24:40.151421+00:00", "exception": false, "start_time": "2026-05-25T01:24:40.149605+00:00", "status": "completed"}
+# %% [markdown]
 # ## Train the Image CNN
 
-# %% papermill={"duration": 11.158235, "end_time": "2026-05-25T01:24:51.311457+00:00", "exception": false, "start_time": "2026-05-25T01:24:40.153222+00:00", "status": "completed"}
+# %%
+set_global_seeds(SEED)
 model = ImageCNN(n_channels=2, dropout=DROPOUT).to(DEVICE)
 
 n_params = sum(p.numel() for p in model.parameters())
@@ -459,10 +497,34 @@ print(f"Image size: {IMAGE_SIZE}x{IMAGE_SIZE}, channels: 2 (GASF + MTF)")
 
 history = train_model(model, X_train_img, y_train, X_val_img, y_val, EPOCHS, LR, BATCH_SIZE, DEVICE)
 
-# %% [markdown] papermill={"duration": 0.001951, "end_time": "2026-05-25T01:24:51.315532+00:00", "exception": false, "start_time": "2026-05-25T01:24:51.313581+00:00", "status": "completed"}
+# %% [markdown]
+# ### Training convergence
+#
+# The loss curves show whether the CNN is learning from the encoded images over
+# the configured training budget. A validation curve that stays flat while the
+# training curve falls signals the model is fitting noise the images do not
+# generalize.
+
+# %%
+fig, ax = plt.subplots(figsize=(7, 4), constrained_layout=True)
+epochs_axis = range(1, len(history["train_loss"]) + 1)
+ax.plot(epochs_axis, history["train_loss"], marker="o", color=COLORS["blue"], label="Train")
+ax.plot(epochs_axis, history["val_loss"], marker="o", color=COLORS["amber"], label="Validation")
+ax.set_xlabel("Epoch")
+ax.set_ylabel("MSE loss")
+ax.legend()
+add_message_title(
+    ax,
+    f"Image CNN reaches its validation minimum at epoch {np.argmin(history['val_loss']) + 1} "
+    f"of {len(history['val_loss'])}",
+    subtitle="GAF+MTF images, forward 21-day return target",
+)
+fig.show()
+
+# %% [markdown]
 # ## Evaluate on Test Set
 
-# %% papermill={"duration": 0.061413, "end_time": "2026-05-25T01:24:51.378866+00:00", "exception": false, "start_time": "2026-05-25T01:24:51.317453+00:00", "status": "completed"}
+# %%
 model.eval()
 with torch.no_grad():
     preds = []
@@ -478,7 +540,7 @@ print("\nImage CNN Test Results:")
 print(f"  MSE: {test_mse:.6f}")
 print(f"  Spearman IC: {test_ic:.4f}")
 
-# %% [markdown] papermill={"duration": 0.002011, "end_time": "2026-05-25T01:24:51.383036+00:00", "exception": false, "start_time": "2026-05-25T01:24:51.381025+00:00", "status": "completed"}
+# %% [markdown]
 # ## Ridge + PCA Baseline
 #
 # Flatten the 2-channel images into vectors, reduce dimensionality with PCA
@@ -486,7 +548,7 @@ print(f"  Spearman IC: {test_ic:.4f}")
 # learns spatial structure beyond what a linear model can extract from the
 # same pixel representation.
 
-# %% papermill={"duration": 4.207208, "end_time": "2026-05-25T01:24:55.592181+00:00", "exception": false, "start_time": "2026-05-25T01:24:51.384973+00:00", "status": "completed"}
+# %%
 X_train_flat = X_train_img.reshape(len(X_train_img), -1)
 X_test_flat = X_test_img.reshape(len(X_test_img), -1)
 
@@ -495,7 +557,7 @@ X_train_scaled = scaler.fit_transform(X_train_flat)
 X_test_scaled = scaler.transform(X_test_flat)
 
 n_components = min(100, X_train_scaled.shape[1], X_train_scaled.shape[0])
-pca = PCA(n_components=n_components)
+pca = PCA(n_components=n_components, random_state=SEED)
 X_train_pca = pca.fit_transform(X_train_scaled)
 X_test_pca = pca.transform(X_test_scaled)
 
@@ -505,46 +567,86 @@ y_ridge_pred = ridge.predict(X_test_pca)
 
 ridge_mse = np.mean((y_ridge_pred - y_test) ** 2)
 ridge_ic = cross_sectional_ic_mean(y_test, y_ridge_pred, test_dates, test_symbols)
+zero_mse = float(np.mean(y_test**2))
 
 print(f"\nRidge + PCA ({n_components} components) Baseline:")
 print(f"  MSE: {ridge_mse:.6f}")
 print(f"  Spearman IC: {ridge_ic:.4f}")
 
-# %% [markdown] papermill={"duration": 0.009176, "end_time": "2026-05-25T01:24:55.604622+00:00", "exception": false, "start_time": "2026-05-25T01:24:55.595446+00:00", "status": "completed"}
+# %% [markdown]
 # ## Summary
 
-# %% papermill={"duration": 0.010541, "end_time": "2026-05-25T01:24:55.618329+00:00", "exception": false, "start_time": "2026-05-25T01:24:55.607788+00:00", "status": "completed"}
-results_df = pl.DataFrame(
-    {
-        "Model": ["Image CNN (GASF+MTF)", f"Ridge + PCA ({n_components})"],
-        "Spearman IC": [test_ic, ridge_ic],
-        "MSE": [test_mse, ridge_mse],
-    }
+# %%
+model_names = ["Image CNN", "Ridge + PCA"]
+ic_values = [test_ic, ridge_ic]
+mse_ratios = [test_mse / zero_mse, ridge_mse / zero_mse]
+bar_palette = {"Image CNN": COLORS["blue"], "Ridge + PCA": COLORS["slate"]}
+
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=("Mean cross-sectional Spearman IC", "MSE relative to zero-return forecast"),
 )
-results_df
+for model_name, ic_value, mse_ratio in zip(model_names, ic_values, mse_ratios, strict=True):
+    fig.add_trace(
+        go.Bar(
+            x=[model_name],
+            y=[ic_value],
+            name=model_name,
+            marker_color=bar_palette[model_name],
+            text=[f"{ic_value:.3f}"],
+            textposition="outside",
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=[model_name],
+            y=[mse_ratio],
+            name=model_name,
+            marker_color=bar_palette[model_name],
+            text=[f"{mse_ratio:.2f}x"],
+            textposition="outside",
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
+    )
 
-# %% [markdown] papermill={"duration": 0.005255, "end_time": "2026-05-25T01:24:55.629681+00:00", "exception": false, "start_time": "2026-05-25T01:24:55.624426+00:00", "status": "completed"}
-# **Interpretation**: treat this as a method illustration, not an
-# architectural claim. In this run the Image CNN's cross-sectional Spearman
-# IC (0.008) falls well short of the Ridge+PCA baseline on the same flattened
-# pixels (0.043 — roughly 5× higher; see `results_df`), so the CNN's spatial
-# inductive bias does **not** extract patterns from the GASF + MTF image
-# encoding that a linear projection of the same pixels cannot. That gap is
-# itself the instructive result: adding convolutional capacity on top of a
-# single-channel-derived image buys nothing over a linear model on the same
-# pixels here, and the image representation as a class does not beat
-# sequence-native models in this chapter.
-# The encoding maps a single feature channel into a 2-channel image, so
-# the representation is necessarily impoverished compared to the
-# multi-feature sequence inputs used by other architectures here.
-# Section 13.6 reviews published comparisons that encode all features and
-# evaluate against sequence-native models — those are the right
-# benchmarks for the GAF/MTF representation as a class.
+ic_leader = model_names[int(np.argmax(ic_values))]
+mse_winners = sum(ratio < 1 for ratio in mse_ratios)
+fig.add_hline(y=0, line_color=COLORS["neutral"], row=1, col=1)
+fig.add_hline(y=1, line_dash="dot", line_color=COLORS["neutral"], row=1, col=2)
+fig.update_layout(
+    title=f"{ic_leader} leads on rank IC; {mse_winners} of 2 models beat zero-return MSE",
+    width=950,
+    height=480,
+)
+fig.update_yaxes(title_text="Spearman IC", row=1, col=1)
+fig.update_yaxes(title_text="MSE / zero-return MSE", row=1, col=2)
+fig.show()
 
-# %% [markdown] papermill={"duration": 0.002, "end_time": "2026-05-25T01:24:55.633744+00:00", "exception": false, "start_time": "2026-05-25T01:24:55.631744+00:00", "status": "completed"}
+# %% [markdown]
+# ## Interpretation
+#
+# Treat this as a method illustration, not an architectural claim. On this
+# single-feature, single-split setup, the paired figure reports both
+# cross-sectional ranking and squared error relative to zero. Encoding a
+# single feature channel into a 2-channel GAF+MTF image does not by itself
+# establish a cross-sectional edge. The
+# representation is deliberately impoverished - one feature versus the
+# multi-feature sequence inputs the other architectures use - so the point here
+# is the encoding mechanics, visible in the GASF/MTF panels above, not a
+# performance verdict. Section 13.6 reviews published comparisons that encode
+# all features and benchmark against sequence-native models; those are the right
+# tests for the GAF/MTF representation as a class.
+
+# %% [markdown]
 # ## Key Takeaways
 #
-# 1. **GAF encodes temporal correlation**: The Gramian Angular Field maps
+# 1. **GAF encodes angular relationships**: The Gramian Angular Field maps
 #    pairwise temporal relationships into a symmetric matrix, preserving the
 #    original time ordering along the diagonal
 # 2. **MTF captures transition dynamics**: The Markov Transition Field
@@ -558,11 +660,16 @@ results_df
 #    directly to an LSTM or Transformer
 # 5. **Representation differs from sequence-native models**: this notebook
 #    does not evaluate the CNN against LSTM/Transformer baselines or test
-#    ensembling — Section 13.6 reviews the published comparisons
+#    ensembling - Section 13.6 reviews the published comparisons
 # 6. **Single-feature encoding is a teaching simplification**: encoded
 #    representations come from one feature channel only, so single-split
 #    IC results are method illustrations rather than empirical claims
 #    about GAF/MTF + CNN versus Ridge as architectures in general
+#
+# Deterministic PyTorch algorithms, a fixed cuBLAS workspace, and an explicit
+# PCA random state make repeated executions reproducible on the same software
+# and GPU stack; another environment may still produce small floating-point
+# differences.
 #
 # **Next**: See `09_foundation_models` for pre-trained time series foundation
 # models that skip manual feature engineering entirely.

@@ -35,7 +35,7 @@
 # **Prerequisites**: ETF price data via the canonical `load_etfs()` loader
 
 # %%
-"""Library Landscape — compare raw PyTorch vs sktime-wrapped forecasting implementations."""
+"""Library Landscape - compare raw PyTorch vs sktime-wrapped forecasting implementations."""
 
 import tempfile
 import time
@@ -44,6 +44,7 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import polars as pl
 import torch
 import torch.nn as nn
@@ -54,6 +55,7 @@ from sktime.forecasting.chronos import ChronosForecaster
 from sktime.forecasting.patch_tst import PatchTSTForecaster
 
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS  # activates the ml4t Plotly template on import
 
 warnings.filterwarnings("ignore")
 
@@ -93,7 +95,17 @@ spy = (
 )
 
 prices = spy["close"].to_numpy().astype(np.float32)
-price_mean, price_std = prices.mean(), prices.std()
+
+# Fix the train/test boundary in sequence space first, then normalize with
+# TRAIN-ONLY price statistics. Using the full series' mean/std here would fold
+# test-period price levels into the normalization of the training inputs - a
+# full-sample-statistic leak. `train_price_end` is the last price index any
+# training sequence can see (input window + forecast horizon).
+n_seq = len(prices) - LOOKBACK - HORIZON + 1
+split_idx = int(n_seq * 0.8)
+train_price_end = split_idx + LOOKBACK + HORIZON
+price_mean = prices[:train_price_end].mean()
+price_std = prices[:train_price_end].std()
 prices_norm = (prices - price_mean) / price_std
 
 print(f"SPY: {len(prices):,} daily observations")
@@ -113,7 +125,7 @@ def create_sequences(data, lookback, horizon):
 
 
 X, y = create_sequences(prices_norm, LOOKBACK, HORIZON)
-split_idx = int(len(X) * 0.8)
+# split_idx was fixed above (in price space) so the normalization stays train-only
 X_train, X_test = X[:split_idx], X[split_idx:]
 y_train, y_test = y[:split_idx], y[split_idx:]
 
@@ -147,8 +159,8 @@ fh_sk = list(range(1, HORIZON + 1))
 # ### Evaluation Helper
 #
 # **Note on Spearman IC**: In this univariate setting, IC reduces to rank
-# correlation between predicted and actual values at consecutive time points —
-# not the cross-sectional rank correlation used in multi-asset notebooks (04–10).
+# correlation between predicted and actual values at consecutive time points -
+# not the cross-sectional rank correlation used in multi-asset notebooks (04-10).
 # We include it for metric consistency across notebooks, but MSE is the primary
 # metric here.
 
@@ -227,7 +239,7 @@ print(f"Raw PyTorch LSTM: {pytorch_time:.1f}s, MSE={m['mse']}, IC={m['ic']}")
 
 # %% [markdown]
 # The raw PyTorch LSTM requires defining the model class, training loop, and
-# evaluation — approximately 50 lines. Full control over architecture and
+# evaluation - approximately 50 lines. Full control over architecture and
 # training dynamics, at the cost of significant boilerplate.
 
 # %% [markdown]
@@ -237,7 +249,7 @@ print(f"Raw PyTorch LSTM: {pytorch_time:.1f}s, MSE={m['mse']}, IC={m['ic']}")
 # loop. The underlying recurrent architecture is equivalent.
 #
 # **Dependency note**: sktime's neural forecasters require `neuralforecast`, which
-# depends on `ray` — and Python 3.14 wheels are still pending in
+# depends on `ray` - and Python 3.14 wheels are still pending in
 # ([ray-project/ray#56434](https://github.com/ray-project/ray/issues/56434)).
 # Once those wheels land, install via `uv pip install neuralforecast`
 # and uncomment the demo below. Recent sktime releases also renamed
@@ -315,7 +327,7 @@ print(f"Raw PyTorch LSTM: {pytorch_time:.1f}s, MSE={m['mse']}, IC={m['ic']}")
 
 # %% [markdown]
 # Same three-line API, different architecture. Swapping LSTM for N-BEATS requires
-# changing only the import and constructor — no data pipeline changes.
+# changing only the import and constructor - no data pipeline changes.
 
 # %% [markdown]
 # ## Part 4: sktime PatchTST
@@ -458,7 +470,7 @@ print(f"Darts LSTM: {t:.1f}s, MSE={m['mse']}, IC={m['ic']}")
 
 # %% [markdown]
 # Darts provides a self-contained ecosystem with its own `TimeSeries` container.
-# The `random_state` parameter ensures reproducibility — a feature not all
+# The `random_state` parameter ensures reproducibility - a feature not all
 # wrapper APIs expose.
 
 # %% [markdown]
@@ -476,7 +488,7 @@ print(f"Darts LSTM: {t:.1f}s, MSE={m['mse']}, IC={m['ic']}")
 # explicit: raw PyTorch fits on a *normalized* target and evaluates on a long
 # rolling-window test set, while sktime PatchTST/Chronos and Darts operate on
 # raw price levels and evaluate on a single `HORIZON`-step forecast. Both
-# axes — scale and `n_eval` — break apples-to-apples comparison. Read the
+# axes - scale and `n_eval` - break apples-to-apples comparison. Read the
 # table as "implementation experience", not as an accuracy benchmark.
 
 # %%
@@ -489,6 +501,29 @@ else:
 comparison
 
 # %% [markdown]
+# ### Boilerplate: lines of code per approach
+#
+# The clearest scale-independent signal in the table is implementation effort.
+# The raw-PyTorch path needs a model class plus a training loop; every wrapped
+# approach is a handful of `fit`/`predict` lines. This is the notebook's thesis
+# in one view (unlike the MSE column, line count is directly comparable).
+
+# %%
+if results:
+    _labels = [f"{r['Model']}<br>({r['Library']})" for r in results]
+    _lines = [int(str(r["Lines"]).lstrip("~")) for r in results]
+    _colors = [COLORS["amber"] if "PyTorch" in r["Library"] else COLORS["blue"] for r in results]
+    fig = go.Figure(
+        go.Bar(x=_labels, y=_lines, marker_color=_colors, text=_lines, textposition="outside")
+    )
+    fig.update_layout(
+        title="sktime and Darts wrappers replace ~50 lines of raw PyTorch with a handful",
+        yaxis_title="Approximate lines of code",
+        showlegend=False,
+    )
+    fig.show()
+
+# %% [markdown]
 # ## When to Use Each Approach
 #
 # The section text (Section 13.7) compares library *capabilities* (panel support,
@@ -497,7 +532,7 @@ comparison
 # | Approach | Implementation Effort | Flexibility | Best For |
 # |----------|----------------------|-------------|----------|
 # | **Raw PyTorch** | ~50 lines, full boilerplate | Full control over everything | Custom architectures, cross-sectional ranking, research |
-# | **sktime** | ~3–8 lines | Constrained to `fit`/`predict` API | Rapid prototyping, backend swapping, standardized benchmarks |
+# | **sktime** | ~3-8 lines | Constrained to `fit`/`predict` API | Rapid prototyping, backend swapping, standardized benchmarks |
 # | **Darts** | ~10 lines | Moderate (own `TimeSeries` container) | Probabilistic forecasting, self-contained ecosystem |
 # | **Chronos / TSFMs** | ~3 lines, zero training | None (zero-shot only) | Instant baselines, cold-start scenarios |
 #

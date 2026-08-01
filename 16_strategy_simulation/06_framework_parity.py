@@ -24,12 +24,12 @@
 # `ml4t-backtest`.
 #
 # The point is not to declare one framework "right" and the other "wrong". The
-# point is to show how small protocol mismatches in timing, cash handling, and
+# point is to show how specific protocol mismatches in timing, cash handling, and
 # cost treatment create measurable performance differences.
 #
 # **Learning Objectives**:
 # - Compare an array-based implementation with a sequential implementation
-# - Quantify protocol divergence and identify its sources
+# - Quantify implementation divergence and catalog the protocol differences
 # - Separate library choice from modeling choice
 # - Use `PortfolioAnalysis` for consistent metric computation
 #
@@ -40,7 +40,7 @@
 # %% [markdown]
 # ## Two Simulation Styles
 #
-# This notebook contrasts two common ways to encode the same trading protocol:
+# This notebook contrasts two common ways to apply the same target schedule:
 #
 # | Implementation | Style | Strength | Watch Carefully |
 # |----------------|-------|----------|-----------------|
@@ -57,17 +57,14 @@
 # ## Setup
 
 # %%
-"""ETF Momentum Protocol Parity — compare array-based and event-driven backtesting implementations."""
-
-import warnings
-
-warnings.filterwarnings("ignore")
+"""ETF Momentum Protocol Parity - compare array and sequential implementations."""
 
 # %%
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
+from IPython.display import Markdown, display
 from ml4t.backtest import (
     BacktestConfig,
     DataFeed,
@@ -78,19 +75,28 @@ from ml4t.backtest import (
 from ml4t.diagnostic.evaluation import PortfolioAnalysis
 
 from data import load_etfs, load_macro
+from utils.style import COLORS
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides after this cell
+# Production defaults - Papermill injects overrides after this cell
 START_DATE = "2010-01-01"
 END_DATE = "2024-01-01"
 LOOKBACK_PERIOD = 126
 TOP_N = 3
 REGIME_THRESHOLD = 0.005
 INITIAL_CASH = 100_000
-FEES = 0.0005
+ARRAY_TURNOVER_COST = 0.0005
+ENGINE_COMMISSION = 0.0005
+ENGINE_SLIPPAGE = 0.0005
 
 # %% [markdown]
-# ## 1. Parameters (Identical for Both)
+# ## 1. Common Strategy and Explicit Frictions
+
+# %% [markdown]
+# The symbols and strategy parameters are common to both paths. Friction parameters
+# are separate because this is a divergence demonstration, not a cost-parity test.
+# The fixed ETF basket and current-vintage macro history make the result a
+# full-sample teaching comparison rather than an unbiased live estimate.
 
 # %%
 ETF_SYMBOLS = ["SPY", "QQQ", "IWM", "EFA", "EEM", "AGG", "TLT", "GLD", "VNQ", "DBC"]
@@ -99,59 +105,80 @@ ETF_SYMBOLS = ["SPY", "QQQ", "IWM", "EFA", "EEM", "AGG", "TLT", "GLD", "VNQ", "D
 # ## 2. Load Common Data
 
 # %%
-# Load ETF price data via canonical loader
 etf_pl = load_etfs()
-
-# Convert timestamp to date and filter
 etf_pl = etf_pl.with_columns(pl.col("timestamp").dt.date().alias("timestamp"))
 etf_pl = etf_pl.filter(
     (pl.col("symbol").is_in(ETF_SYMBOLS))
     & (pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
     & (pl.col("timestamp") <= pl.lit(END_DATE).str.to_date())
 )
+assert etf_pl.n_unique(["symbol", "timestamp"]) == len(etf_pl)
+required_columns = ["timestamp", "symbol", "open", "high", "low", "close", "volume"]
+assert set(required_columns) <= set(etf_pl.columns)
+assert etf_pl.select(pl.all_horizontal(pl.col(required_columns).is_not_null()).all()).item()
+assert etf_pl.select((pl.col("close") > 0).all()).item()
+assert etf_pl.select((pl.col("volume") >= 0).all()).item()
 
-# Pivot to wide format
+# %% [markdown]
+# Pivot the canonical long panel at the pandas boundary used by the array
+# implementation. Forward filling carries only observations already available.
+
+# %%
 close_prices_pl = etf_pl.pivot(on="symbol", index="timestamp", values="close").sort("timestamp")
-
-# Convert to pandas (both simulations need pandas)
 close_prices = close_prices_pl.to_pandas()
 close_prices.set_index("timestamp", inplace=True)
 
-# Update ETF_SYMBOLS to available symbols
 available_symbols = [s for s in ETF_SYMBOLS if s in close_prices.columns]
 close_prices = close_prices[available_symbols].ffill()
 ETF_SYMBOLS = available_symbols
+assert len(ETF_SYMBOLS) == 10
+assert not close_prices.isna().any().any()
 
-print(f"Loaded {len(close_prices):,} daily bars for {len(ETF_SYMBOLS)} symbols")
+display(
+    Markdown(
+        f"The fixed teaching basket contains **{len(ETF_SYMBOLS)} ETFs** over "
+        f"**{len(close_prices):,} daily observations** from "
+        f"**{close_prices.index.min()} through {close_prices.index.max()}**."
+    )
+)
 
 # %%
-# Load yield curve from macro data
 macro_df = load_macro()
+assert macro_df.n_unique("timestamp") == len(macro_df)
 
 if "YIELD_CURVE_SLOPE" in macro_df.columns:
     yield_curve_pl = macro_df.select(
         [pl.col("timestamp"), (pl.col("YIELD_CURVE_SLOPE") / 100).alias("slope")]
     ).drop_nulls()
+    yield_curve_source = "YIELD_CURVE_SLOPE"
 elif "DGS10" in macro_df.columns and "DGS2" in macro_df.columns:
     yield_curve_pl = macro_df.select(
         [pl.col("timestamp"), ((pl.col("DGS10") - pl.col("DGS2")) / 100).alias("slope")]
     ).drop_nulls()
+    yield_curve_source = "DGS10 - DGS2"
 else:
     yield_curve_pl = macro_df.select(
         [pl.col("timestamp"), ((pl.col("dgs10") - pl.col("dgs2")) / 100).alias("slope")]
     ).drop_nulls()
+    yield_curve_source = "dgs10 - dgs2"
 
 yield_curve = yield_curve_pl.to_pandas().set_index("timestamp")
-print(f"Yield curve data: {len(yield_curve):,} days")
-
 yield_curve_aligned = yield_curve.reindex(close_prices.index, method="ffill")
+assert not yield_curve_aligned["slope"].isna().any()
 regime = (yield_curve_aligned["slope"] > REGIME_THRESHOLD).astype(int)
+
+display(
+    Markdown(
+        f"The regime uses the current-vintage **{yield_curve_source}** series and carries past "
+        f"observations forward to ETF dates. The source contains **{len(yield_curve):,} dated "
+        "observations**. This is a teaching comparison, not an ALFRED-vintage live simulation."
+    )
+)
 
 # %% [markdown]
 # ## 3. Compute Momentum and Weights
 
 # %%
-# Calculate momentum
 daily_returns = close_prices.pct_change()
 cumulative_return = close_prices.pct_change(LOOKBACK_PERIOD)
 realized_vol = daily_returns.rolling(LOOKBACK_PERIOD).std() * np.sqrt(252)
@@ -159,7 +186,6 @@ momentum_score = cumulative_return / realized_vol
 momentum_rank = momentum_score.rank(axis=1, ascending=False)
 
 # %%
-# Generate weights
 weights = pd.DataFrame(np.nan, index=close_prices.index, columns=ETF_SYMBOLS)
 rebalance_dates = close_prices.loc[
     close_prices.index.isin(
@@ -191,31 +217,39 @@ for date in rebalance_dates:
         weights.loc[date, "TLT"] = 0.40
 
 weights = weights.ffill()
+assert not weights.isna().any().any()
+np.testing.assert_allclose(weights.sum(axis=1).to_numpy(), 1.0, rtol=0, atol=1e-12)
 
 # %% [markdown]
 # ## 4. Array-Based Simulation
 #
 # The calculation below is a compact parity reference built from lagged target
-# weights and close-to-close returns — a plain array-based backtest using
+# weights and close-to-close returns - a plain array-based backtest using
 # pandas arithmetic, not VectorBT's portfolio engine. It is intentionally
 # simple. The resulting gap versus the sequential engine reflects this
 # notebook's implementation choices, not a blanket limit of any one library.
 
 # %%
-# Vectorized backtest using the same ETF momentum specification as this notebook
 shifted_weights_vbt = weights.shift(1).fillna(0)
 returns_vbt = close_prices.pct_change().fillna(0)
 portfolio_returns_vbt = (shifted_weights_vbt * returns_vbt).sum(axis=1)
 
-# Transaction costs from turnover
-weight_changes = weights.diff().fillna(weights)
-turnover = weight_changes.abs().sum(axis=1)
-cost_drag = turnover * FEES
+# A target chosen at t is executed for the t+1 return interval.
+target_turnover = weights.diff().fillna(weights).abs().sum(axis=1)
+executed_turnover = target_turnover.shift(1).fillna(0)
+cost_drag = executed_turnover * ARRAY_TURNOVER_COST
 
 portfolio_returns_vbt_net = portfolio_returns_vbt - cost_drag
 equity_vbt = INITIAL_CASH * (1 + portfolio_returns_vbt_net).cumprod()
 
-print(f"Array-Based Final Value: ${equity_vbt.iloc[-1]:,.2f}")
+display(
+    Markdown(
+        f"The array approximation ends at **${equity_vbt.iloc[-1]:,.0f}** after charging "
+        f"**{ARRAY_TURNOVER_COST * 10_000:.0f} bps** on scheduled target turnover. "
+        "Carried targets enter the "
+        "daily return arithmetic without modeling shares or cash."
+    )
+)
 
 # %% [markdown]
 # ## 5. Sequential Engine Simulation
@@ -229,7 +263,7 @@ print(f"Array-Based Final Value: ${equity_vbt.iloc[-1]:,.2f}")
 class WeightRebalanceStrategy(Strategy):
     """Rebalance to precomputed target weights from context.
 
-    Uses broker.rebalance_to_weights() — the Engine handles position
+    Uses broker.rebalance_to_weights() - the Engine handles position
     sizing, order generation, and fill simulation internally.
     """
 
@@ -280,8 +314,9 @@ strategy = WeightRebalanceStrategy(assets=ETF_SYMBOLS)
 config = BacktestConfig(
     initial_cash=INITIAL_CASH,
     execution_mode=ExecutionMode.NEXT_BAR,
-    commission_rate=FEES,
-    slippage_rate=FEES,
+    commission_rate=ENGINE_COMMISSION,
+    slippage_rate=ENGINE_SLIPPAGE,
+    calendar="NYSE",
 )
 engine = Engine(feed=feed, strategy=strategy, config=config)
 
@@ -293,29 +328,57 @@ equity_ml4t = pd.Series(
 )
 portfolio_returns_ml4t = equity_ml4t.pct_change().dropna()
 
-print(f"ml4t-backtest Final Value: ${equity_ml4t.iloc[-1]:,.2f}")
+display(
+    Markdown(
+        f"The sequential account ends at **${equity_ml4t.iloc[-1]:,.0f}** with "
+        f"**{ENGINE_COMMISSION * 10_000:.0f} bps commission** and "
+        f"**{ENGINE_SLIPPAGE * 10_000:.0f} bps slippage** applied to submitted trades. It "
+        "restores carried targets through actual shares and cash."
+    )
+)
+
+# %% [markdown]
+# Align both return streams before computing any comparison statistic. This
+# removes date-set differences from the framework comparison.
+
+# %%
+array_returns = portfolio_returns_vbt_net.copy()
+engine_returns = portfolio_returns_ml4t.copy()
+array_returns.index = pd.to_datetime(array_returns.index)
+engine_returns.index = pd.to_datetime(engine_returns.index)
+comparison_returns = pd.concat(
+    {"array_based": array_returns, "ml4t_backtest": engine_returns}, axis=1, join="inner"
+).dropna()
+assert comparison_returns.index.is_unique
+assert not comparison_returns.isna().any().any()
 
 # %% [markdown]
 # ## 6. Parity Comparison via PortfolioAnalysis
 #
 # Using `PortfolioAnalysis` ensures consistent metric computation across
-# frameworks — the same functions compute Sharpe, drawdown, etc. regardless
+# frameworks - the same functions compute Sharpe, drawdown, etc. regardless
 # of the backtest engine that produced the returns.
 
 # %%
-# Create PortfolioAnalysis for both return streams
 vbt_analysis = PortfolioAnalysis(
-    returns=portfolio_returns_vbt_net.dropna().values, periods_per_year=252
+    returns=comparison_returns["array_based"].to_numpy(), periods_per_year=252
 )
 ml4t_analysis = PortfolioAnalysis(
-    returns=portfolio_returns_ml4t.dropna().values, periods_per_year=252
+    returns=comparison_returns["ml4t_backtest"].to_numpy(), periods_per_year=252
 )
 
 vbt_stats = vbt_analysis.compute_summary_stats()
 ml4t_stats = ml4t_analysis.compute_summary_stats()
 
-# Build comparison table
-metrics_labels = ["Total Return", "CAGR", "Volatility", "Sharpe", "Sortino", "Max Drawdown"]
+metrics_labels = [
+    "Total Return (%)",
+    "CAGR (%)",
+    "Volatility (%)",
+    "Sharpe",
+    "Sortino",
+    "Max Drawdown (%)",
+]
+metric_scales = [100, 100, 100, 1, 1, 100]
 vbt_vals = [
     vbt_stats.total_return,
     vbt_stats.annual_return,
@@ -334,34 +397,46 @@ ml4t_vals = [
 ]
 
 # %% [markdown]
-# **Framework parity comparison** — same signal, same costs, two implementations:
+# The table uses the same common-date returns and the same metric implementation.
+# Execution and friction assumptions remain intentionally different.
 
 # %%
 parity_df = pl.DataFrame(
     {
         "metric": metrics_labels,
-        "array_based": [float(v) for v in vbt_vals],
-        "ml4t_backtest": [float(m) for m in ml4t_vals],
-        "diff": [float(v) - float(m) for v, m in zip(vbt_vals, ml4t_vals, strict=False)],
+        "array_based": [float(v) * scale for v, scale in zip(vbt_vals, metric_scales, strict=True)],
+        "ml4t_backtest": [
+            float(value) * scale for value, scale in zip(ml4t_vals, metric_scales, strict=True)
+        ],
+        "array_minus_engine": [
+            (float(vbt) - float(engine)) * scale
+            for vbt, engine, scale in zip(vbt_vals, ml4t_vals, metric_scales, strict=True)
+        ],
     }
 )
 parity_df
 
 # %%
-# Relative difference on total return
 vbt_total = vbt_stats.total_return
 ml4t_total = ml4t_stats.total_return
 rel_diff = abs(vbt_total - ml4t_total) / max(abs(vbt_total), 0.0001)
-print(f"Relative total-return difference: {rel_diff:.1%}")
-print(f"Parity status: {'GOOD (<5%)' if rel_diff < 0.05 else 'REVIEW (>5%)'}")
+ending_gap = float(equity_vbt.iloc[-1] - equity_ml4t.iloc[-1])
+correlation = comparison_returns.corr().iloc[0, 1]
+display(
+    Markdown(
+        f"Across **{len(comparison_returns):,} common daily returns**, correlation is "
+        f"**{correlation:.4f}**. The total-return estimates differ by **{rel_diff:.1%}** "
+        f"relative to the array estimate, and ending equity differs by **${ending_gap:,.0f}**. "
+        "The comparison measures the joint effect of the declared protocol differences; it does "
+        "not identify a causal share for any one mechanism."
+    )
+)
 
 # %% [markdown]
-# **Interpretation**: The array-based path reports higher total return because it
-# uses close-to-close returns (same-bar fill) whereas the sequential Engine fills
-# at the next bar's open, introducing a one-bar delay. The cost models also
-# differ: turnover-based fee drag versus per-trade commission plus slippage. Both
-# paths produce similar volatility and drawdown, confirming that the signal is
-# identical and only execution mechanics diverge.
+# The high daily correlation shows that the paths respond similarly to the common
+# target schedule. It does not prove protocol parity: execution price, friction
+# accounting, share quantization, and cash treatment remain different by design.
+# Notebook 07 isolates such mechanisms one at a time.
 
 # %% [markdown]
 # ## 7. Visualize Equity Curves
@@ -374,7 +449,7 @@ fig.add_trace(
         x=equity_vbt.index,
         y=equity_vbt,
         name="Array-Based",
-        line=dict(color="blue", width=2),
+        line=dict(color=COLORS["blue"], width=2),
     )
 )
 
@@ -383,14 +458,18 @@ fig.add_trace(
         x=equity_ml4t.index,
         y=equity_ml4t,
         name="ml4t-backtest",
-        line=dict(color="green", width=2, dash="dash"),
+        line=dict(color=COLORS["neutral"], width=2, dash="dash"),
     )
 )
 
 fig.update_layout(
-    title="Equity Curve Comparison: Array-Based vs ml4t-backtest",
+    title=(
+        "Similar daily paths compound to different ending wealth"
+        f"<br><sup>10-ETF teaching basket, 2010-2023; return correlation {correlation:.3f}; "
+        "implementation-specific net costs</sup>"
+    ),
     xaxis_title="Date",
-    yaxis_title="Portfolio Value ($)",
+    yaxis_title="Portfolio Equity (USD)",
     height=500,
     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
 )
@@ -412,17 +491,19 @@ fig.add_trace(
         x=diff_series.index,
         y=diff_series,
         name="Array - ml4t",
-        fill="tozeroy",
-        line=dict(color="purple"),
+        line=dict(color=COLORS["copper"], width=2),
     )
 )
 
-fig.add_hline(y=0, line_dash="dash", line_color="gray")
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
 
 fig.update_layout(
-    title="Value Difference: Array-Based minus ml4t-backtest",
+    title=(
+        f"The array approximation ends ${ending_gap:,.0f} above the sequential account"
+        "<br><sup>Equity difference only; this is not a causal decomposition</sup>"
+    ),
     xaxis_title="Date",
-    yaxis_title="Difference ($)",
+    yaxis_title="Array - Sequential Equity (USD)",
     height=400,
 )
 fig.show()
@@ -432,48 +513,33 @@ fig.show()
 #
 # | Aspect | Array-Based Path | Sequential Path |
 # |---|---|---|
-# | Execution Timing | Lagged close-to-close | Next-bar execution |
-# | Cost Model | Turnover $\times$ fee | Per-trade commission |
-# | Position Tracking | Weight approximation | Shares + cash |
+# | Execution Timing | Prior target applied to close-to-close return | Order fills at next-bar open |
+# | Cost Model | 5 bps on scheduled target turnover | 5 bps commission + 5 bps slippage on submitted trades |
+# | Position Tracking | Daily target-weight return approximation | Integer shares + explicit cash |
 # | Cash Management | Implicit | Explicit cash tracking |
-# | Rebalance Trigger | Any weight change | Strategy callback |
+# | Target Maintenance | Carried target enters daily arithmetic | Daily callback restores carried target through orders |
 #
 # These differences arise from the specific protocol choices used in this
 # notebook, not from "vectorized versus event-driven" as abstract categories.
-# The divergence mainly reflects close-to-close returns versus next-bar
-# execution, turnover-based costs versus per-trade costs, and implicit weights
-# versus explicit shares and cash. Aligning these assumptions more closely
-# would shrink the parity gap.
+# The observed divergence is compatible with these differences, but this
+# notebook does not estimate their separate contributions. Notebook 07 performs
+# the controlled decomposition needed for causal attribution.
 
 # %% [markdown]
 # ## 9. Correlation of Returns
 
 # %%
-# Align returns (normalize index types — array path uses date, Engine uses datetime)
-vbt_ret = portfolio_returns_vbt_net.copy()
-ml4t_ret = portfolio_returns_ml4t.copy()
-vbt_ret.index = pd.to_datetime(vbt_ret.index)
-ml4t_ret.index = pd.to_datetime(ml4t_ret.index)
-common_idx = vbt_ret.index.intersection(ml4t_ret.index)
-vbt_aligned = vbt_ret.loc[common_idx].dropna()
-ml4t_aligned = ml4t_ret.loc[common_idx].dropna()
-
-# Align again after dropna
-shared = vbt_aligned.index.intersection(ml4t_aligned.index)
-correlation = np.corrcoef(vbt_aligned.loc[shared], ml4t_aligned.loc[shared])[0, 1]
-
-print("\n" + "=" * 80)
-print("RETURN CORRELATION")
-print("=" * 80)
-print(f"  Correlation: {correlation:.6f}")
-print(
-    f"  Status: {'EXCELLENT (>0.99)' if correlation > 0.99 else 'GOOD (>0.95)' if correlation > 0.95 else 'REVIEW'}"
+display(
+    Markdown(
+        f"The common-date daily returns have **{correlation:.4f} correlation**. This supports "
+        "the narrow claim that both paths respond similarly to the target schedule. It does not "
+        "show that their fills, costs, holdings, or ending wealth are interchangeable."
+    )
 )
 
 # %% [markdown]
-# **Interpretation**: A daily-return correlation above 0.99 confirms that both
-# implementations track the same signal. The remaining gap is almost entirely
-# explained by timing and cost mechanics, not by divergent trading logic.
+# Correlation is a path-similarity diagnostic, not a parity verdict. A high value
+# can coexist with a material compounded wealth gap, as the two figures show.
 
 # %% [markdown]
 # ## 10. Framework Selection Guide
@@ -511,5 +577,5 @@ print(
 # 5. **Do not treat the sequential result as automatically correct**. Trust the
 #    implementation that best matches the execution protocol you intend to test.
 #
-# **Next**: `09_performance_reporting` for the full core metric set and tearsheet.
+# **Next**: `07_engine_divergence_anatomy` decomposes execution differences under controlled changes.
 # **Book**: Section 16.3 covers the speed-fidelity spectrum in depth.

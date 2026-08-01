@@ -34,12 +34,14 @@
 # **Prerequisites**: ETF features (`case_studies/etfs/`)
 
 # %%
-"""Transformer Architectures for Time Series — compare PatchTST and iTransformer on ETF returns."""
+"""Compare PatchTST and iTransformer on ETF returns."""
 
+import os
 import warnings
 
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import numpy as np
-import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
 import torch
@@ -49,7 +51,10 @@ from dl_sequences import (
     load_dl_dataset,
 )
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
+from plotly.subplots import make_subplots
 from sklearn.linear_model import Ridge
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 from case_studies.config.patchtst.patchtst import PatchTST
 from utils.reproducibility import set_global_seeds
@@ -68,12 +73,16 @@ DROPOUT = 0.1
 EPOCHS = 30
 BATCH_SIZE = 128
 LR = 0.0005
+LABEL_HORIZON = 21
 
 # %%
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
 set_global_seeds(SEED)
+torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
 
 # %% [markdown]
 # ## Data Loading
@@ -83,8 +92,21 @@ set_global_seeds(SEED)
 # %%
 mds = load_dl_dataset("etfs")
 
-FEATURE_COLS = mds.feature_names[:8]
+FEATURE_COLS = [
+    "ret_5d",
+    "ret_10d",
+    "ret_21d",
+    "ret_42d",
+    "ret_63d",
+    "ret_126d",
+    "ret_189d",
+    "ret_252d",
+]
 TARGET_COL = mds.label_col
+
+missing_features = sorted(set(FEATURE_COLS) - set(mds.feature_names))
+if missing_features:
+    raise ValueError(f"Missing required ETF momentum features: {missing_features}")
 
 df = mds.dataset.drop_nulls(subset=FEATURE_COLS + [TARGET_COL])
 print(f"Features: {FEATURE_COLS}")
@@ -95,8 +117,8 @@ print(f"Rows after dropna: {len(df):,}")
 # ## Sequence Creation
 #
 # Both models consume standard `(batch, lookback, n_features)` tensors. PatchTST does
-# its patching internally — overlapping stride, channel-independent embedding, and
-# RevIN — rather than requiring pre-patched inputs. iTransformer transposes the same
+# its patching internally - overlapping stride, channel-independent embedding, and
+# RevIN - rather than requiring pre-patched inputs. iTransformer transposes the same
 # tensor to treat each feature as a token.
 
 # %%
@@ -108,20 +130,28 @@ X_reg, y_reg, timestamps, symbols = create_sequences_multi_asset(
     timestamp_col=mds.date_col,
     symbol_col=mds.entity_cols[0],
 )
-X_reg = np.nan_to_num(X_reg, nan=0.0, posinf=0.0, neginf=0.0)
-y_reg = np.nan_to_num(y_reg, nan=0.0)
+sequence_order = np.lexsort((symbols.astype(str), timestamps))
+X_reg = np.nan_to_num(X_reg[sequence_order], nan=0.0, posinf=0.0, neginf=0.0)
+y_reg = np.nan_to_num(y_reg[sequence_order], nan=0.0)
+timestamps = timestamps[sequence_order]
+symbols = symbols[sequence_order]
 print(f"Sequences: {X_reg.shape}")
 
 # %%
-# Date-based 60/20/20 temporal split: all asset-rows for dates < train_end_date
-# go to train, etc. This keeps the cross-section intact within each split,
-# unlike sample-order slicing which would split cross-asset.
+# Date-based 60/20/20 temporal split. The target is a 21-day forward return,
+# so training and validation labels whose outcome windows cross the next
+# boundary are purged. Input windows may use earlier observations, as they
+# would at inference time.
 unique_dates = np.sort(np.unique(timestamps))
-train_end_date = unique_dates[int(len(unique_dates) * 0.6)]
-val_end_date = unique_dates[int(len(unique_dates) * 0.8)]
+train_boundary_idx = int(len(unique_dates) * 0.6)
+val_boundary_idx = int(len(unique_dates) * 0.8)
+train_end_date = unique_dates[train_boundary_idx]
+val_end_date = unique_dates[val_boundary_idx]
+train_label_cutoff = unique_dates[train_boundary_idx - LABEL_HORIZON]
+val_label_cutoff = unique_dates[val_boundary_idx - LABEL_HORIZON]
 
-train_mask = timestamps < train_end_date
-val_mask = (timestamps >= train_end_date) & (timestamps < val_end_date)
+train_mask = timestamps < train_label_cutoff
+val_mask = (timestamps >= train_end_date) & (timestamps < val_label_cutoff)
 test_mask = timestamps >= val_end_date
 
 X_train, y_train = X_reg[train_mask], y_reg[train_mask]
@@ -130,6 +160,10 @@ X_test, y_test = X_reg[test_mask], y_reg[test_mask]
 test_dates, test_symbols = timestamps[test_mask], symbols[test_mask]
 
 print(f"Train: {len(y_train):,}, Val: {len(y_val):,}, Test: {len(y_test):,}")
+print(
+    f"Purged {LABEL_HORIZON} target dates before each boundary: "
+    f"validation starts {train_end_date}, test starts {val_end_date}"
+)
 
 
 # %% [markdown]
@@ -159,9 +193,9 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 
 
 # %% [markdown]
-# > **Note**: This fixed 60/20/20 split is a pedagogical simplification. Production
-# > deployment requires the walk-forward validation protocol from Chapter 6, where
-# > the model is retrained on expanding windows to avoid temporal data leakage.
+# > **Note**: This fixed 60/20/20 split is a pedagogical simplification. Its
+# > 21-day purge keeps forward-label windows disjoint, but production deployment
+# > still requires the expanding walk-forward protocol from Chapter 6.
 
 # %% [markdown]
 # ## PatchTST
@@ -188,7 +222,7 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 
 # %%
 # PatchTST imported at the top; instantiate with teaching-scale dimensions.
-# The backbone does patching internally — input is raw `(batch, lookback, n_features)`.
+# The backbone does patching internally - input is raw `(batch, lookback, n_features)`.
 
 
 # %% [markdown]
@@ -201,13 +235,15 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 
 # %%
 class iTransformer(nn.Module):
-    """iTransformer: attention over features (inverted dimension)."""
+    """Teaching-scale iTransformer with a scalar regression adapter."""
 
     def __init__(self, lookback, n_features, d_model, n_heads, n_layers, dropout):
         super().__init__()
-        # Each feature's time series is a token
+        self.n_features = n_features
+        # Each feature's complete history is one variate token. The paper
+        # intentionally omits positional embeddings: temporal order lives in
+        # the neurons of this projection, not in the token order.
         self.input_proj = nn.Linear(lookback, d_model)
-        self.pos_enc = nn.Parameter(torch.randn(1, n_features, d_model) * 0.02)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -217,15 +253,19 @@ class iTransformer(nn.Module):
             batch_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-        self.head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, 1))
+        self.token_head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, 1))
+        self.feature_head = nn.Linear(n_features, 1)
 
     def forward(self, x):
         # x: (batch, lookback, n_features)
+        means = x.mean(dim=1, keepdim=True).detach()
+        variances = x.var(dim=1, keepdim=True, unbiased=False)
+        x = (x - means) / torch.sqrt(variances + 1e-5)
         x = x.permute(0, 2, 1)  # (batch, n_features, lookback)
-        x = self.input_proj(x) + self.pos_enc  # (batch, n_features, d_model)
+        x = self.input_proj(x)  # (batch, n_features, d_model)
         x = self.encoder(x)
-        x = x.mean(dim=1)  # Pool over features
-        return self.head(x).squeeze(-1)
+        per_feature = self.token_head(x).squeeze(-1)
+        return self.feature_head(per_feature).squeeze(-1)
 
 
 # %% [markdown]
@@ -268,7 +308,7 @@ def train_model(model, X_tr, y_tr, X_v, y_v, epochs, batch_size, lr):
     for epoch in range(epochs):
         model.train()
         indices = torch.randperm(len(X_tr_t))
-        epoch_loss, n_b = 0.0, 0
+        epoch_loss, n_seen = 0.0, 0
         for i in range(0, len(indices), batch_size):
             idx = indices[i : i + batch_size]
             loss = criterion(model(X_tr_t[idx]), y_tr_t[idx])
@@ -276,13 +316,13 @@ def train_model(model, X_tr, y_tr, X_v, y_v, epochs, batch_size, lr):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            epoch_loss += loss.item()
-            n_b += 1
+            epoch_loss += loss.item() * len(idx)
+            n_seen += len(idx)
         scheduler.step()
         model.eval()
         with torch.no_grad():
             val_loss = criterion(_chunked_forward(model, X_v_t, batch_size), y_v_t).item()
-        avg_train = epoch_loss / n_b
+        avg_train = epoch_loss / n_seen
         history["train_loss"].append(avg_train)
         history["val_loss"].append(val_loss)
         if val_loss < best_val:
@@ -306,6 +346,7 @@ def train_model(model, X_tr, y_tr, X_v, y_v, epochs, batch_size, lr):
 # ## Train PatchTST
 
 # %%
+set_global_seeds(SEED)
 patchtst = PatchTST(
     n_features=len(FEATURE_COLS),
     lookback=LOOKBACK,
@@ -328,6 +369,7 @@ patchtst, hist_patch = train_model(patchtst, X_train, y_train, X_val, y_val, EPO
 # %%
 print(f"\niTransformer: {len(FEATURE_COLS)} feature tokens, lookback={LOOKBACK}")
 
+set_global_seeds(SEED)
 itrans = iTransformer(LOOKBACK, len(FEATURE_COLS), D_MODEL, N_HEADS, N_LAYERS, DROPOUT).to(DEVICE)
 n_params_i = sum(p.numel() for p in itrans.parameters())
 print(f"Parameters: {n_params_i:,}")
@@ -351,13 +393,9 @@ for name, hist in [("PatchTST", hist_patch), ("iTransformer", hist_itrans)]:
     )
 
 fig.update_layout(
-    title=(
-        f"Validation loss: PatchTST trains to {len(hist_patch['val_loss'])} epochs; "
-        f"iTransformer early-stops at {len(hist_itrans['val_loss'])} (patience=5)"
-    ),
+    title=f"Both architectures stop within {max(len(hist_patch['val_loss']), len(hist_itrans['val_loss']))} epochs",
     xaxis_title="Epoch",
     yaxis_title="MSE (validation)",
-    template="plotly_white",
 )
 fig.show()
 
@@ -389,14 +427,11 @@ pred_patch = _predict_chunked(patchtst, X_test)
 pred_itrans = _predict_chunked(itrans, X_test)
 
 # %%
-# Ridge baseline on flattened sequences. The 8 input features come from
-# `load_dl_dataset('etfs')`, which the case-study pipeline already produces in
-# z-score units (see `case_studies/etfs/code/08_features.py`). No extra
-# StandardScaler step is therefore needed before Ridge — the columns are
-# already on a comparable scale across the flattened lookback × feature axis.
+# Ridge baseline on flattened sequences. Its penalty is scale-sensitive, so the
+# scaler is fit on training inputs only and applied unchanged to the test set.
 X_flat_train = X_train.reshape(len(X_train), -1)
 X_flat_test = X_test.reshape(len(X_test), -1)
-ridge = Ridge(alpha=1.0)
+ridge = make_pipeline(StandardScaler(), Ridge(alpha=1.0))
 ridge.fit(X_flat_train, y_train)
 pred_ridge = ridge.predict(X_flat_test)
 
@@ -408,26 +443,37 @@ for name, pred in [("PatchTST", pred_patch), ("iTransformer", pred_itrans), ("Ri
     ic = cross_sectional_ic_mean(y_test, pred, test_dates, test_symbols)
     results[name] = {"mse": mse, "ic": ic}
 
-results_df = pl.DataFrame(
-    [{"Model": k, "MSE": v["mse"], "Spearman IC": v["ic"]} for k, v in results.items()]
+zero_mse = float(np.mean(y_test**2))
+for result in results.values():
+    result["mse_ratio"] = result["mse"] / zero_mse
+
+best_ic_name = max(results, key=lambda name: results[name]["ic"])
+both_transformers_beat_ridge = all(
+    results[name]["ic"] > results["Ridge"]["ic"] for name in ("PatchTST", "iTransformer")
 )
-results_df
+comparison_title = (
+    "Transformers edge Ridge on IC; only iTransformer beats zero-return MSE"
+    if both_transformers_beat_ridge
+    else f"{best_ic_name} leads rank IC; the single split does not favor both Transformers"
+)
+print(
+    f"Best cross-sectional rank IC: {best_ic_name} ({results[best_ic_name]['ic']:.3f}). "
+    f"Zero-return test MSE: {zero_mse:.6f}."
+)
 
 # %% [markdown]
-# **Interpretation**: both Transformer variants achieve cross-sectional
-# Spearman IC well above the Ridge baseline on this 60/20/20 split
-# (PatchTST 0.046, iTransformer 0.050 vs Ridge 0.010 — roughly a 5× gap).
-# The two attention designs land close to each other, with iTransformer
-# marginally ahead here, so the gap *between* them is narrow relative to
-# their gap over Ridge and the ordering can shift on a different temporal
-# split. The MSE spread is tighter still (around 0.0034–0.0035 for all
-# three) because predictions cluster near zero and squared error is
-# dominated by the irreducible noise floor of forward returns. The
-# authoritative cross-study ranking comes from the walk-forward evaluation
-# in Section 13.9, not from this single-split comparison.
+# **Interpretation**: Cross-sectional IC asks whether a model ranks ETFs well
+# within each decision date; MSE asks whether its return levels are calibrated.
+# The two panels can therefore disagree. Treat this purged single split as an
+# architectural demonstration, not an architecture ranking. The authoritative
+# comparison is the walk-forward evaluation in Section 13.9.
 
 # %%
-fig = go.Figure()
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=("Cross-sectional rank skill", "Squared error versus zero return"),
+)
 bar_palette = {
     "PatchTST": COLORS["blue"],
     "iTransformer": COLORS["amber"],
@@ -442,141 +488,124 @@ for name, r in results.items():
             marker_color=bar_palette.get(name, COLORS["blue"]),
             text=[f"{r['ic']:.3f}"],
             textposition="outside",
-        )
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=[name],
+            y=[r["mse_ratio"]],
+            marker_color=bar_palette.get(name, COLORS["blue"]),
+            text=[f"{r['mse_ratio']:.2f}x"],
+            textposition="outside",
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
     )
 
 fig.update_layout(
-    title="Information Coefficient: PatchTST vs iTransformer vs Ridge",
-    yaxis_title="Spearman IC",
-    template="plotly_white",
-    showlegend=False,
+    title=comparison_title,
 )
+fig.update_yaxes(title_text="Mean daily Spearman IC", row=1, col=1)
+fig.update_yaxes(title_text="Test MSE relative to zero forecast", row=1, col=2)
+fig.add_hline(y=0, line_color=COLORS["neutral"], row=1, col=1)
+fig.add_hline(y=1, line_dash="dot", line_color=COLORS["neutral"], row=1, col=2)
 fig.show()
 
 # %% [markdown]
 # Both Transformer variants share the same raw lookback tensor; they differ in
-# which axis attention is applied over — features (iTransformer) or time-patch
-# tokens (PatchTST). The Ridge baseline on the flattened sequence is the null
-# model: a linear map with no attention structure at all.
+# which axis attention is applied over - features (iTransformer) or time-patch
+# tokens (PatchTST). The scaled Ridge baseline on the flattened sequence is the
+# null model: a linear map with no attention structure at all.
 
 # %% [markdown]
 # ### iTransformer Attention Weights
 #
 # Because iTransformer applies attention over features (not time steps), the
 # attention matrix reveals which feature pairs the model considers related.
-# We extract weights from the first encoder layer to visualize learned
-# cross-variate dependencies.
+# We extract weights from the first encoder layer and compare them with the
+# uniform 1/N reference. Attention weights are a model diagnostic, not a causal
+# feature-importance measure.
 
 # %%
 # Extract first-layer attention from iTransformer's self_attn module. Calling
 # self_attn with need_weights=True is the supported way to read attention from
 # the standard PyTorch TransformerEncoderLayer; we feed the input the encoder
-# itself sees (input_proj + pos_enc) so the weights correspond to the same
-# computation the model is performing during evaluation.
+# itself sees after instance normalization and input projection, so the weights correspond to the same
+# computation the model is performing during evaluation. Evenly spaced holdout
+# rows cover the panel rather than taking one contiguous asset block.
 itrans.eval()
-X_sample = torch.FloatTensor(X_test[:256]).to(DEVICE)
+sample_idx = np.linspace(0, len(X_test) - 1, num=min(512, len(X_test)), dtype=int)
+X_sample = torch.FloatTensor(X_test[sample_idx]).to(DEVICE)
 with torch.no_grad():
-    x_inv = X_sample.permute(0, 2, 1)  # (batch, n_features, lookback)
-    x_proj = itrans.input_proj(x_inv) + itrans.pos_enc
+    means = X_sample.mean(dim=1, keepdim=True)
+    variances = X_sample.var(dim=1, keepdim=True, unbiased=False)
+    x_normalized = (X_sample - means) / torch.sqrt(variances + 1e-5)
+    x_inv = x_normalized.permute(0, 2, 1)  # (batch, n_features, lookback)
+    x_proj = itrans.input_proj(x_inv)
     first_layer = itrans.encoder.layers[0]
     _, attn = first_layer.self_attn(x_proj, x_proj, x_proj, need_weights=True)
 avg_attn = attn.mean(dim=0).cpu().numpy()  # (n_features, n_features)
+uniform_attention = 1 / len(FEATURE_COLS)
+attention_deviation_pp = 100 * (avg_attn - uniform_attention)
 
-fig = px.imshow(
-    avg_attn,
-    x=FEATURE_COLS,
-    y=FEATURE_COLS,
-    color_continuous_scale="Blues",
-    title="iTransformer: Average Cross-Variate Attention",
+fig = go.Figure(
+    go.Heatmap(
+        z=attention_deviation_pp,
+        x=FEATURE_COLS,
+        y=FEATURE_COLS,
+        zmid=0,
+        colorscale=[
+            [0, COLORS["negative"]],
+            [0.5, COLORS["silver"]],
+            [1, COLORS["positive"]],
+        ],
+        colorbar_title="Deviation<br>from uniform<br>(percentage points)",
+        hovertemplate=(
+            "Query: %{y}<br>Key: %{x}<br>Deviation from uniform: %{z:.2f} pp<extra></extra>"
+        ),
+    )
 )
-fig.update_layout(width=500, height=450)
+max_attention_deviation = float(np.max(np.abs(attention_deviation_pp)))
+fig.update_layout(
+    title=f"Attention stays within {max_attention_deviation:.2f} pp of uniform across momentum horizons",
+    xaxis_title="Key feature",
+    yaxis_title="Query feature",
+    width=700,
+    height=520,
+)
 fig.show()
 
 # %% [markdown]
-# The attention heatmap shows which features the iTransformer relates to each
-# other. Stronger attention between features suggests the model has learned
-# meaningful cross-variate dependencies — for instance, momentum and volatility
-# features may attend strongly to each other if they interact to predict returns.
-
-# %% [markdown]
-# ## sktime Alternative
-#
-# The custom implementations above provide full control over architecture and
-# training — useful for understanding the mechanics and for research experiments.
-# For rapid prototyping, **sktime** wraps PatchTST (and many other architectures)
-# behind a unified `fit()`/`predict()` interface, handling patching, positional
-# encoding, and training automatically.
-#
-# **Dependency note**: sktime's neural forecasters require `neuralforecast`, which
-# depends on `ray` — and ray does not yet support Python 3.14
-# ([ray-project/ray#56434](https://github.com/ray-project/ray/issues/56434)).
-# Once ray adds 3.14 wheels, install via `uv pip install neuralforecast`
-# and uncomment the demo below.
-
-# %%
-# import pandas as pd
-# from sktime.forecasting.patch_tst import PatchTSTForecaster
-#
-# from data import load_etfs
-#
-# spy = load_etfs(symbols=["SPY"]).sort("timestamp")
-# spy_pd = spy.select(["timestamp", "close"]).to_pandas().set_index("timestamp")["close"]
-#
-# split = int(len(spy_pd) * 0.8)
-# y_train_sk = spy_pd.iloc[:split]
-# fh_sk = list(range(1, 11))
-#
-# forecaster = PatchTSTForecaster(
-#     fit_strategy="full",
-#     config={
-#         "context_length": LOOKBACK,
-#         "prediction_length": len(fh_sk),
-#         "patch_length": PATCH_SIZE,
-#         "patch_stride": PATCH_SIZE // 2,  # match the custom PatchTST stride
-#         "d_model": D_MODEL,
-#         "num_attention_heads": N_HEADS,
-#         "num_hidden_layers": N_LAYERS,
-#         "ffn_dim": 4 * D_MODEL,
-#         "head_dropout": DROPOUT,
-#     },
-#     training_args={
-#         "num_train_epochs": min(EPOCHS, 10),
-#         "per_device_train_batch_size": BATCH_SIZE,
-#         "logging_strategy": "no",
-#         "save_strategy": "no",
-#         "report_to": "none",
-#     },
-# )
-# forecaster.fit(y_train_sk, fh=fh_sk)
-# y_pred_sk = forecaster.predict()
-# print(f"sktime PatchTST: predicted {len(y_pred_sk)} steps")
-
-# %% [markdown]
-# The sktime wrapper trades flexibility for convenience: it handles data
-# preprocessing, training loops, and prediction formatting. For production
-# pipelines where rapid iteration matters more than architectural
-# experimentation, this is the recommended starting point.
+# Near-uniform attention means this first layer does not sharply favor a few
+# momentum horizons on the sampled holdout panel. That is a useful negative
+# result. It does not prove that the features are unrelated, and the weights
+# should not be read as causal importance.
 
 # %% [markdown]
 # ## Key Takeaways
 #
 # 1. **PatchTST** patches along the time axis, reducing attention complexity from
-#    $O(L^2)$ to $O((L/P)^2)$ — a dramatic speedup enabling longer lookback windows
+#    $O(L^2)$ to $O((L/P)^2)$ - a dramatic speedup enabling longer lookback windows
 # 2. **iTransformer** inverts the attention dimension: features become tokens, enabling
-#    direct cross-variate dependency modeling visible in the attention heatmap
-# 3. **Both Transformer variants clearly exceed Ridge but land close to each
-#    other**: cross-sectional Spearman IC is 0.046 (PatchTST) and 0.050
-#    (iTransformer) versus 0.010 for the Ridge baseline — roughly a 5× gap
-#    over the linear model. The two attention designs are within a narrow
-#    margin of each other on this single 60/20/20 split, so which one leads
-#    can shift on a different temporal split. The authoritative cross-study
-#    ranking is the walk-forward evaluation in Section 13.9, not this
-#    single-split comparison
-# 4. Both represent improvements over vanilla Transformer designs by incorporating
+#    direct cross-variate dependency modeling without positional embeddings
+# 3. **Rank IC and MSE answer different questions**: compare the architecture panel
+#    with both Ridge and the zero-return squared-error reference
+# 4. **One split cannot rank architectures**: the purged holdout illustrates the
+#    mechanics; Section 13.9 supplies the walk-forward comparison
+# 5. Both represent improvements over vanilla Transformer designs by incorporating
 #    temporal inductive biases (patching) or sidestepping the temporal order problem
 #    entirely (inverted attention)
-# 5. **sktime provides native PatchTST** for rapid prototyping via a unified API
-# 6. This notebook evaluates a single ETF universe; cross-dataset comparison in
+# 6. **Attention is descriptive, not causal**: near-uniform weights here do not
+#    establish feature importance or the absence of dependence
+# 7. This notebook evaluates a single ETF universe; cross-dataset comparison in
 #    `12_case_study_insights` tests whether these patterns generalize
+#
+# PyTorch deterministic algorithms and a fixed cuBLAS workspace make repeated
+# executions reproducible on the same software and GPU stack; another environment
+# may still produce small floating-point differences.
 #
 # **Next**: See `05_tcn` for temporal convolutional networks.

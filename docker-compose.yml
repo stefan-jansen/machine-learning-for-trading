@@ -11,7 +11,8 @@
 #   - Linux x86_64:     All services work, GPU optional
 #   - Windows x86_64:   All services via Docker Desktop (WSL2), GPU via WSL2+nvidia-toolkit
 #   - macOS Intel:      All services except GPU
-#   - Apple Silicon:    ml4t + benchmark (native arm64); ml4t-py312 not available (see below)
+#   - Apple Silicon:    ml4t + benchmark native arm64; ml4t-py312 amd64 only, runs under
+#                       Rosetta emulation (see below)
 #
 # IMAGES ON DOCKER HUB (docker.io/ml4t/):
 #   ml4t:latest           — All chapters, Python 3.14, PyTorch CUDA 12.8 (amd64+arm64)
@@ -21,7 +22,8 @@
 # WHICH IMAGE DO I NEED?
 #   Most readers: ml4t only (covers Ch01-Ch27 + case studies)
 #   Ch05 NB01/03/07, Ch09 NB06/12, Ch10 NB01-03, Ch12 NB10, Ch14 NB06, Ch15 NB06, Ch21 deep_hedging:
-#       ml4t-py312 (x86 only, Apple Silicon: see .ipynb outputs)
+#       ml4t-py312 (amd64; on Apple Silicon read the committed .ipynb outputs, or run it
+#       under Rosetta with DOCKER_DEFAULT_PLATFORM=linux/amd64)
 #   Ch02 storage benchmarks: benchmark + database services
 #   Ch12 GBM GPU benchmark: rapids (requires NVIDIA GPU)
 #
@@ -223,6 +225,8 @@ services:
   # Covers: Ch05 NB01/03/07, Ch09 NB06/12, Ch10 NB01-03, Ch12 NB10, Ch14 NB06,
   # Ch15 NB06, Ch21 deep_hedging.
   # Start with: docker compose --profile py312 run --rm py312 python ...
+  # This service reserves no GPU, so it starts on macOS and on any machine
+  # without NVIDIA. Use the py312-gpu service below where a GPU is available.
   # Apple Silicon: there is no native arm64 image (signatory/esig/gensim have no
   # arm64 wheels). Either read the committed .ipynb outputs for the notebooks
   # above, or run the amd64 image under Rosetta emulation (slow, no GPU):
@@ -238,6 +242,21 @@ services:
         - linux/amd64
     container_name: ml4t-py312
     profiles: ["py312"]
+
+  # Same image with an NVIDIA GPU attached, for the seven GPU-tagged py312 notebooks
+  # (Ch05 NB01/03/07, Ch10 NB03, Ch12 NB10, Ch14 NB06, Ch21 deep_hedging), whether they
+  # train or run inference. Linux and Windows WSL2 only, exactly like ml4t-gpu.
+  # Start with: docker compose --profile py312-gpu run --rm py312-gpu python ...
+  py312-gpu:
+    <<: *common
+    image: ml4t/ml4t-py312:latest
+    build:
+      context: .
+      dockerfile: envs/py312/Dockerfile
+      platforms:
+        - linux/amd64
+    container_name: ml4t-py312-gpu
+    profiles: ["py312-gpu"]
     deploy:
       resources:
         reservations:

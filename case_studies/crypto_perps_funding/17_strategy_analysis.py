@@ -73,7 +73,7 @@ EXPECTED_PRODUCER_BLOBS = {
     "06_linear.py": "c1343570c423283334c633a9f220b98c4e65d294",
     "06_linear.ipynb": "5744f22ca3718576f19d7611575b8c06db70d166",
     "07_gbm.py": "4cc22e580706f794c915b31a7593ddc63d980059",
-    "07_gbm.ipynb": "1f02b1744585ea098bf7d1bb88789df3a9371d8c",
+    "07_gbm.ipynb": "7891203023e3ee413258b3e2c528da8e94f71f98",
 }
 EXPECTED_LEADERS = {
     "gbm": ("leaves_7_mae", "491ea02ecf58", None),
@@ -118,8 +118,14 @@ def _md5(path) -> str:
 def _git_blob(name: str) -> str:
     """Return the committed Git blob for one current producer file."""
     path = f"case_studies/{CASE_STUDY}/{name}"
+    # -c safe.directory trusts this checkout for this one invocation: CI containers mount the
+    # workspace with a different owner than the container user, which makes bare `git` refuse to
+    # run ("detected dubious ownership") even though the checkout itself is exactly what the test
+    # is running from.
     return subprocess.check_output(
-        ["git", "rev-parse", f"HEAD:{path}"], cwd=REPO_ROOT, text=True
+        ["git", "-c", f"safe.directory={REPO_ROOT}", "rev-parse", f"HEAD:{path}"],
+        cwd=REPO_ROOT,
+        text=True,
     ).strip()
 
 

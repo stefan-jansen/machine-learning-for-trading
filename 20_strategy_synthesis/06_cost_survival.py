@@ -60,21 +60,25 @@ MAX_CASE_STUDIES = 0  # 0 = all
 
 # %%
 CS_LIST = CASE_STUDY_IDS[:MAX_CASE_STUDIES] if MAX_CASE_STUDIES else CASE_STUDY_IDS
+DEFERRED_V31_CASE_STUDIES = {"nasdaq100_microstructure"}
+ACTIVE_CS_LIST = [cs for cs in CS_LIST if cs not in DEFERRED_V31_CASE_STUDIES]
 
 # %% [markdown]
 # ## Load Cost Sweep Results from Registry
 #
 # Ch18 backtests vary commission + slippage across a grid of cost levels
 # while holding the signal and allocation constant. We read the sweep for
-# each case study's **deployed carrier** — the highest-validation-Sharpe
-# configuration across the signal, allocation, and risk-overlay stages —
+# each case study's **release carrier** -- the declared configuration across
+# the signal, allocation, and risk-overlay stages --
 # so the breakeven measured here is the cost survival of the strategy the
 # chapter actually deploys, not of whichever allocator happened to be best
-# at zero cost. (NASDAQ-100's carrier is the cost-feasible ensemble built
-# in *§20.4*, pinned inside the loader.)
+# at zero cost. NASDAQ-100 is excluded from the v3.0 cross-case cost surface:
+# its bounded active scope has no corrected carrier cost grid, so that broad
+# regeneration is deferred to v3.1 rather than mixed with historical timing.
 
 # %%
-costs_df = load_carrier_cost_curves(CS_LIST)
+costs_df = load_carrier_cost_curves(ACTIVE_CS_LIST)
+print("Deferred to v3.1: NASDAQ-100 timing-corrected broad carrier cost grid")
 
 if costs_df.is_empty():
     msg = "No Ch18 cost-sensitivity backtests found for any deployed carrier"

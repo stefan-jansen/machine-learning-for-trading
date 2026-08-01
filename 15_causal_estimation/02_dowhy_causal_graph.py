@@ -42,8 +42,8 @@
 # - **Related**: [`04_dml_crypto_regime`](04_dml_crypto_regime.ipynb) (DML on same data)
 #
 # ## Data Requirements
-# - Crypto premium index at 8h frequency — loaded via `load_crypto_premium(frequency="8h")`
-# - Crypto perpetual futures OHLCV at 1h frequency — loaded via `load_crypto_perps(frequency="1h")`
+# - Crypto premium index at 8h frequency - loaded via `load_crypto_premium(frequency="8h")`
+# - Crypto perpetual futures OHLCV at 1h frequency - loaded via `load_crypto_perps(frequency="1h")`
 # Both are produced by the Chapter 2 data pipeline (``data/crypto/download.py``).
 #
 # ## Causal Design
@@ -55,7 +55,7 @@
 #
 # The computed comparison table appears at the end of the notebook. The
 # difference between a credible and questionable causal claim often is not
-# the method — it is the outcome you choose to study.
+# the method - it is the outcome you choose to study.
 #
 # ## Causal Design Contract
 #
@@ -68,7 +68,7 @@
 # | Effect modifiers          | None in this notebook                                                                 |
 # | Identification assumption | Selection on observables given the specified DAG; no contemporaneous unobserved cause |
 # | Main failure modes        | Unobserved confounding (sentiment shocks), bad controls, mistimed treatment           |
-# | Estimand                  | ATE of entering the extreme-high-premium state — not the marginal effect of a one-unit change in premium z-score |
+# | Estimand                  | ATE of entering the extreme-high-premium state - not the marginal effect of a one-unit change in premium z-score |
 #
 # **Prerequisites**: [`01_library_overview`](01_library_overview.ipynb) for library context;
 # crypto premium index data from Ch8 features pipeline
@@ -109,7 +109,7 @@
 # ```
 
 # %%
-"""Causal Inference on Crypto Premiums — demonstrate why outcome choice matters for causal credibility."""
+"""Causal Inference on Crypto Premiums - demonstrate why outcome choice matters for causal credibility."""
 
 import warnings
 from datetime import datetime
@@ -231,8 +231,8 @@ btc = btc.with_columns(
     # Forward return: t to t+24h = 3 bars (OUTCOME 1: returns)
     pl.col("close").pct_change(n=3).shift(-3).alias("fwd_return_24h"),
     # Negative-control outcomes: 24h windows ending 48h BEFORE treatment, so the
-    # treatment at time t cannot causally affect them. Two scales — one for the
-    # returns outcome, one for the reversion outcome — so each headline ATE has
+    # treatment at time t cannot causally affect them. Two scales - one for the
+    # returns outcome, one for the reversion outcome - so each headline ATE has
     # a same-scale negative control.
     pl.col("close").pct_change(n=3).shift(6).alias("past_return_48h"),
     (pl.col("premium").shift(6) - pl.col("premium").shift(9)).alias("past_premium_change_48h"),
@@ -286,9 +286,6 @@ train_data = train_data.tail(train_sample_size)
 # Convert to pandas for DoWhy
 df_train = train_data.to_pandas()
 df_test = test_data.to_pandas()
-
-# Combined for some analyses (with temporal ordering preserved)
-df_full = pd.concat([df_train, df_test], ignore_index=True)
 
 print(
     f"Train: {len(df_train):,} obs (up to {TRAIN_END_DATE}), "
@@ -377,33 +374,14 @@ digraph {
 }
 """
 
-# DAGs for the two negative-control outcomes (both pre-treatment, both
-# strictly unreachable from `extreme_high_premium` by temporal ordering).
-# Neither graph contains a `extreme_high_premium -> past_*` edge: the
-# negative-control test fails identification by construction, so estimating
-# it requires a graph that does NOT encode the impossible causal path. The
-# DoWhy estimate measures the residual *association* between current premium
-# state and a past quantity after backdoor adjustment — a placebo
+# The two negative-control outcomes (`past_return_48h`, `past_premium_change_48h`)
+# are both pre-treatment and strictly unreachable from `extreme_high_premium`
+# by temporal ordering. A DAG for them would (correctly) omit any
+# `extreme_high_premium -> past_*` edge, so DoWhy's backdoor identification
+# returns zero by construction and gives no numeric diagnostic of residual
+# association. Section 9 therefore measures that residual association directly
+# with an OLS+HAC regression on the same adjustment set - a placebo
 # diagnostic, not an identifiable causal effect.
-graph_negative_control_return = """
-digraph {
-    return_24h -> extreme_high_premium;
-    return_24h -> past_return_48h;
-
-    volatility_24h -> extreme_high_premium;
-    volatility_24h -> past_return_48h;
-}
-"""
-
-graph_negative_control_reversion = """
-digraph {
-    return_24h -> extreme_high_premium;
-    return_24h -> past_premium_change_48h;
-
-    volatility_24h -> extreme_high_premium;
-    volatility_24h -> past_premium_change_48h;
-}
-"""
 
 # %% [markdown]
 # ### Identifying the Adjustment Set
@@ -469,10 +447,10 @@ def fit_and_estimate(df, outcome_col, graph):
 # ### HAC Standard Errors
 #
 # DoWhy's `linear_regression` estimator reports iid standard errors. For
-# 8-hour crypto series the residuals are autocorrelated by construction —
+# 8-hour crypto series the residuals are autocorrelated by construction -
 # rolling-window confounders and overlapping forward outcomes both carry
 # persistence. We complement each DoWhy estimate with an OLS regression
-# that uses the same adjustment set and Newey–West HAC standard errors,
+# that uses the same adjustment set and Newey-West HAC standard errors,
 # keeping the pedagogy of DoWhy while giving readers inference that matches
 # the data structure.
 
@@ -485,7 +463,7 @@ def estimate_backdoor_ols_hac(
     controls=("return_24h", "volatility_24h"),
     maxlags=3,
 ):
-    """Adjusted treatment effect with HAC (Newey–West) standard errors.
+    """Adjusted treatment effect with HAC (Newey-West) standard errors.
 
     `maxlags=3` matches the 24-hour outcome horizon at 8h frequency. The
     point estimate matches `backdoor.linear_regression` up to numerical
@@ -649,12 +627,12 @@ print(f"Sensitivity-test result: {sensitivity_ret}")
 # %% [markdown]
 # DoWhy's `effect_strength_on_treatment` / `effect_strength_on_outcome`
 # settings are diagnostic perturbations, not calibrated economic effect
-# sizes — they say nothing about percent-of-variance or any market-level
+# sizes - they say nothing about percent-of-variance or any market-level
 # interpretation. We report them as raw settings ("flips at 0.5") rather
 # than percentages ("flips at 50% confounder strength") to avoid
 # overinterpretation.
 #
-# The sensitivity analysis cannot flip the returns effect — but this does
+# The sensitivity analysis cannot flip the returns effect - but this does
 # not mean the claim is credible. The OOS drift and same-scale negative
 # control reported below are the binding diagnostics; sensitivity alone
 # gives a false sense of security.
@@ -714,7 +692,7 @@ print(f"Sensitivity-test result: {sensitivity_rev}")
 # placebo-date, same-scale negative-control, and OOS tests below tell
 # the full story. The direct arbitrage mechanism gives the reversion
 # outcome a more credible causal interpretation than the indirect
-# sentiment channel — but only after every diagnostic supports the
+# sentiment channel - but only after every diagnostic supports the
 # claim. Liquidity, funding congestion, exchange risk, and market-wide
 # leverage can in principle affect both extreme-premium states and
 # reversion speed, so the reversion claim is *less likely* to be
@@ -769,16 +747,21 @@ if sens_ret or sens_rev:
     rev_strengths = [0.0] + [r["strength"] for r in sens_rev]
     rev_effects = [est_rev_train.value] + [r["effect"] for r in sens_rev]
 
+    # Explicit ML4T palette: the inline backend does not always honor the
+    # repo matplotlibrc color cycle, so set the series colors directly.
     ax.plot(
         ret_strengths,
         ret_effects,
         marker="o",
+        color=COLORS["blue"],
         label="Forward Returns (indirect)",
     )
     ax.plot(
         rev_strengths,
         rev_effects,
         marker="s",
+        color=COLORS["copper"],
+        linestyle="--",
         label="Premium Reversion (direct)",
     )
 
@@ -855,7 +838,7 @@ display(placebo_df)
 #
 # Because the negative-control DAGs (correctly) omit any
 # `extreme_high_premium → past_*` edge, DoWhy's backdoor identification
-# refuses to attribute a causal effect — the *graph structure itself*
+# refuses to attribute a causal effect - the *graph structure itself*
 # rules the path out, and `fit_and_estimate` returns zero by construction.
 # That is the right behavior for an identifiability check, but it gives
 # us no numeric diagnostic of *residual association* in the data.
@@ -863,7 +846,7 @@ display(placebo_df)
 # To recover the diagnostic, we run an OLS regression of each past
 # outcome on the treatment and confounders, with HAC standard errors. If
 # the coefficient on treatment is non-trivial, the backdoor adjustment is
-# not blocking all confounding paths — even though no real causal effect
+# not blocking all confounding paths - even though no real causal effect
 # can exist on a pre-treatment outcome.
 
 # %%
@@ -893,7 +876,7 @@ print(f"  Relative to reversion OLS+HAC effect: {neg_ratio_rev:.1%}")
 # corresponding headline effect. A large ratio on one outcome but not the
 # other signals that the headline claim on the affected outcome inherits
 # residual confounding the backdoor adjustment did not block. Treat this
-# as a placebo diagnostic — not an identifiable causal effect — because
+# as a placebo diagnostic - not an identifiable causal effect - because
 # the DAG structurally forbids the path.
 
 # %% [markdown]
@@ -927,8 +910,9 @@ print(f"  Relative to reversion OLS+HAC effect: {neg_ratio_rev:.1%}")
 # ## 11. Practical Implications
 #
 # - **Outcome design matters more than method sophistication**: A well-chosen
-#   outcome with a tight mechanism (reversion) yields a robust claim; a
-#   confounded outcome (returns) degrades under scrutiny.
+#   outcome with a tight mechanism (reversion) yields a more credible claim
+#   that passes the negative-control and placebo-date checks; a confounded
+#   outcome (returns) fails them under scrutiny.
 # - **Use multiple validation tests**: Sensitivity analysis alone can miss
 #   problems that the negative control, placebo-date test, or out-of-sample
 #   stability reveal. No single test is sufficient.
@@ -954,16 +938,21 @@ print(
 
 # %% [markdown]
 # The same treatment yields different causal credibility depending on the
-# outcome variable. The reversion outcome passes the placebo-date shift,
-# same-scale negative control, and out-of-sample stability checks at
-# tighter thresholds than the returns outcome, and its estimate does not
-# flip sign under the sensitivity-analysis setting range tested above.
-# The returns outcome also survives sensitivity analysis on confounder
-# strength alone, but fails on the orthogonal checks — its OOS drift is
-# substantial and the same-scale negative control flags residual
-# confounding the backdoor adjustment did not block. Sensitivity alone is
-# not the binding test; outcome choice, not estimator sophistication,
-# dominates the credibility of the claim.
+# outcome variable. The decisive discriminator is the same-scale negative
+# control: for the reversion outcome the pre-treatment placebo association is
+# a few percent of the headline effect and statistically insignificant, while
+# for the returns outcome it is several times the headline effect and highly
+# significant - proof that the returns backdoor adjustment leaves large
+# residual confounding. The reversion outcome also passes the placebo-date
+# shift at a tighter ratio than returns, and neither estimate flips sign under
+# the sensitivity-analysis setting range tested. Out-of-sample stability
+# separates the two only by degree: both train/test drifts exceed the 50%
+# guideline, so neither outcome is OOS-stable in absolute terms, but the
+# returns drift is far larger than the reversion drift. The returns claim
+# therefore fails the two binding checks (negative control and OOS drift)
+# while surviving sensitivity analysis on confounder strength alone - a
+# reminder that sensitivity alone is not the binding test. Outcome choice,
+# not estimator sophistication, dominates the credibility of the claim.
 
 # %% [markdown]
 # ## Key Takeaways

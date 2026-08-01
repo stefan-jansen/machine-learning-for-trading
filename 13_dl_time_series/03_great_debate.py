@@ -18,15 +18,15 @@
 #
 # **Docker image**: `ml4t-gpu`
 #
-# This notebook replicates the core finding from Zeng et al. (2023) that simple
+# This notebook tests the core finding from Zeng et al. (2023) that simple
 # linear models can outperform Transformers on long-term time series forecasting.
-# We implement all three LTSF-Linear variants (Linear, D-Linear, N-Linear)
-# and a vanilla Transformer to test this claim.
+# We implement all three LTSF-Linear variants (Linear, D-Linear, N-Linear), a
+# vanilla Transformer, and two naive forecasts on daily SPY returns.
 #
 # **Learning Objectives**:
 # - Implement the Linear, D-Linear, and N-Linear baselines from the LTSF-Linear paper
 # - Build a simple Transformer encoder for time series
-# - Reproduce the surprising finding that linear models compete with Transformers
+# - Test whether linear models compete with a Transformer and naive forecasts
 # - Understand why this result sparked the "great debate" in the field
 #
 # **Book Reference**: Chapter 13, Section 13.4 (The Great Debate)
@@ -34,21 +34,24 @@
 # **Prerequisites**: ETF price data via the canonical `load_etfs()` loader
 
 # %%
-"""The Great Debate — test whether simple linear models can outperform Transformers on time series."""
+"""Test whether simple linear models can outperform Transformers on time series."""
 
+import os
 import time
 import warnings
 from datetime import datetime
+
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
 import torch
 import torch.nn as nn
-from ml4t.diagnostic.metrics import pooled_ic
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
 
@@ -69,6 +72,9 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
 set_global_seeds(SEED)
+torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
 
 # %% [markdown]
 # ## Data Preparation
@@ -106,7 +112,8 @@ series = returns["SPY"].to_numpy().astype(np.float32)
 # ### Sequence builder
 #
 # Standard sliding-window construction: each input is `lookback` daily returns
-# and each target is the next `horizon` returns.
+# and each target is the next `horizon` returns. We assign complete forecast
+# horizons to one partition and purge the 23 overlapping targets at each boundary.
 
 
 # %%
@@ -123,20 +130,26 @@ def create_sequences(data, lookback, horizon):
 X, y = create_sequences(series, LOOKBACK, HORIZON)
 
 n = len(X)
-train_end = int(n * 0.7)
-val_end = int(n * 0.85)
+train_target_cutoff = LOOKBACK + int(n * 0.70)
+val_target_cutoff = LOOKBACK + int(n * 0.85)
+target_start = np.arange(LOOKBACK, len(series) - HORIZON + 1)
+target_end = target_start + HORIZON - 1
 
-X_train, y_train = X[:train_end], y[:train_end]
-X_val, y_val = X[train_end:val_end], y[train_end:val_end]
-X_test, y_test = X[val_end:], y[val_end:]
+train_mask = target_end < train_target_cutoff
+val_mask = (target_start >= train_target_cutoff) & (target_end < val_target_cutoff)
+test_mask = target_start >= val_target_cutoff
+
+X_train, y_train = X[train_mask], y[train_mask]
+X_val, y_val = X[val_mask], y[val_mask]
+X_test, y_test = X[test_mask], y[test_mask]
 
 print(f"Sequences: {X.shape}, Target: {y.shape}")
 print(f"Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
 
 # %% [markdown]
-# **Note**: We use a fixed 70/15/15 chronological split for clarity. In practice,
-# walk-forward validation (Section 13.7) is preferred to avoid optimistic estimates
-# from a single split.
+# **Note**: The 70/15/15 cutoffs refer to forecast target dates. No target date
+# appears in two partitions. Walk-forward validation (Section 13.7) remains
+# preferable when the goal is a production estimate rather than this comparison.
 
 # %% [markdown]
 # ## Model Definitions
@@ -148,7 +161,7 @@ print(f"Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
 
 # %%
 class Linear(nn.Module):
-    """Plain linear mapping from lookback to horizon — the simplest baseline."""
+    """Plain linear mapping from lookback to horizon - the simplest baseline."""
 
     def __init__(self, lookback, horizon):
         super().__init__()
@@ -173,7 +186,7 @@ class DLinear(nn.Module):
         self.lookback = lookback
         self.horizon = horizon
         self.kernel_size = kernel_size
-        # No internal padding — we explicitly edge-pad inputs in `forward`
+        # No internal padding - we explicitly edge-pad inputs in `forward`
         # so the moving average mirrors the boundary values instead of
         # injecting zeros, which would bias the trend toward zero near the
         # window edges.
@@ -294,16 +307,34 @@ def train_model(model, X_train, y_train, X_val, y_val, epochs, batch_size, lr=1e
 # ## Run Experiments
 
 # %%
-models = {
-    "Linear": Linear(LOOKBACK, HORIZON).to(DEVICE),
-    "D-Linear": DLinear(LOOKBACK, HORIZON).to(DEVICE),
-    "N-Linear": NLinear(LOOKBACK, HORIZON).to(DEVICE),
-    "Transformer": SimpleTransformer(LOOKBACK, HORIZON, D_MODEL, N_HEADS, N_LAYERS).to(DEVICE),
+model_factories = {
+    "Linear": lambda: Linear(LOOKBACK, HORIZON),
+    "D-Linear": lambda: DLinear(LOOKBACK, HORIZON),
+    "N-Linear": lambda: NLinear(LOOKBACK, HORIZON),
+    "Transformer": lambda: SimpleTransformer(LOOKBACK, HORIZON, D_MODEL, N_HEADS, N_LAYERS),
+}
+models = {}
+
+zero_pred = np.zeros_like(y_test)
+repeat_pred = np.repeat(X_test[:, -1:], HORIZON, axis=1)
+results = {
+    "Zero": {
+        "mse": float(np.mean((zero_pred - y_test) ** 2)),
+        "mae": float(np.mean(np.abs(zero_pred - y_test))),
+        "time": 0.0,
+        "params": 0,
+    },
+    "Closest Repeat": {
+        "mse": float(np.mean((repeat_pred - y_test) ** 2)),
+        "mae": float(np.mean(np.abs(repeat_pred - y_test))),
+        "time": 0.0,
+        "params": 0,
+    },
 }
 
-results = {}
-
-for name, model in models.items():
+for name, factory in model_factories.items():
+    set_global_seeds(SEED)
+    model = factory().to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"\nTraining {name} ({n_params:,} params)...")
 
@@ -317,73 +348,76 @@ for name, model in models.items():
 
     mse = np.mean((pred - y_test) ** 2)
     mae = np.mean(np.abs(pred - y_test))
-    ic = pooled_ic(pred.mean(axis=1), y_test.mean(axis=1))
 
-    results[name] = {"mse": mse, "mae": mae, "ic": ic, "time": train_time, "params": n_params}
-    print(f"  MSE={mse:.6f}, MAE={mae:.6f}, IC={ic:.4f}, Time={train_time:.1f}s")
+    models[name] = model
+    results[name] = {"mse": mse, "mae": mae, "time": train_time, "params": n_params}
+    print(f"  MSE={mse:.6f}, MAE={mae:.6f}, Time={train_time:.1f}s")
 
 # %% [markdown]
 # ## Results Comparison
 
 # %%
-comparison_data = []
-for name, r in results.items():
-    comparison_data.append(
-        {
-            "Model": name,
-            "Params": f"{r['params']:,}",
-            "MSE": round(r["mse"], 6),
-            "MAE": round(r["mae"], 6),
-            "IC": round(r["ic"], 4),
-            "Time (s)": round(r["time"], 1),
-        }
-    )
+zero_mse = results["Zero"]["mse"]
+for result in results.values():
+    result["mse_ratio"] = result["mse"] / zero_mse
 
-comparison_df = pl.DataFrame(comparison_data)
-comparison_df
+best_learned_name = min(model_factories, key=lambda name: results[name]["mse"])
+transformer_ratio = results["Transformer"]["mse"] / results[best_learned_name]["mse"]
+parameter_ratio = results["Transformer"]["params"] / results["Linear"]["params"]
+
+print(
+    f"Best learned model: {best_learned_name}; Transformer error is "
+    f"{transformer_ratio:.2f}x as large. Zero forecast remains best; "
+    f"the Transformer has {parameter_ratio:.1f}x as many parameters as Linear."
+)
 
 # %% [markdown]
-# **Interpretation**: Consistent with Zeng et al., the linear baselines achieve
-# roughly half the MSE of the Transformer (see the `comparison_df` cell above)
-# with roughly 44× fewer parameters and a fraction of the training time. The
-# Transformer's additional capacity does not translate to improved accuracy
-# on this univariate task — supporting the critique that self-attention may
-# underutilize temporal structure here.
-#
-# Note that N-Linear's IC is negative, meaning its rank ordering inversely
-# correlates with actuals despite low MSE. This can happen when a model
-# produces predictions with small variance concentrated near the mean — MSE
-# stays low, but cross-sectional ranking fails. D-Linear's decomposition
-# yields the highest IC among the linear variants.
+# **Interpretation**: The linear family beats the Transformer on this SPY task,
+# the narrow comparison at the center of Zeng et al. But every learned model
+# loses to a zero-return forecast. Daily returns offer little predictable signal,
+# so the stronger conclusion is not that a linear network forecasts well. It is
+# that additional capacity fails to earn its keep here. The Closest Repeat
+# baseline from the original paper is also weak because yesterday's return is a
+# poor forecast for every point in the next 24-day horizon.
 
 # %%
-fig = go.Figure()
-for name, r in results.items():
-    fig.add_trace(
-        go.Bar(
-            x=[name],
-            y=[r["mse"]],
-            name=name,
-            text=[f"IC={r['ic']:.3f}"],
-            textposition="outside",
-        )
+ordered_models = ["Zero", "Closest Repeat", "Linear", "D-Linear", "N-Linear", "Transformer"]
+bar_colors = [
+    COLORS["positive"],
+    COLORS["neutral"],
+    COLORS["blue"],
+    COLORS["slate"],
+    COLORS["amber"],
+    COLORS["copper"],
+]
+fig = go.Figure(
+    go.Bar(
+        x=ordered_models,
+        y=[results[name]["mse_ratio"] for name in ordered_models],
+        marker_color=bar_colors,
+        text=[f"{results[name]['mse_ratio']:.2f}x" for name in ordered_models],
+        textposition="outside",
+        hovertemplate="%{x}<br>MSE relative to zero: %{y:.2f}x<extra></extra>",
     )
+)
 
 fig.update_layout(
-    title="MSE Comparison: Linear Models vs. Transformer",
-    yaxis_title="Mean Squared Error",
-    template="plotly_white",
+    title="Linear models beat the Transformer, but not a zero-return forecast",
+    xaxis_title="Forecast",
+    yaxis_title="Test MSE relative to zero forecast",
     showlegend=False,
+    yaxis_range=[0, max(results[name]["mse_ratio"] for name in ordered_models) * 1.15],
 )
+fig.add_hline(y=1, line_dash="dot", line_color=COLORS["neutral"])
 fig.show()
 
 # %% [markdown]
 # ## Shuffle Experiment
 #
-# The most striking diagnostic from Zeng et al.: when input sequences are randomly
-# shuffled (destroying temporal order), Transformers are largely unaffected while
-# linear models collapse. This reveals that Transformers rely on pointwise
-# correlations rather than sequential structure.
+# Zeng et al. shuffled each input sequence to destroy temporal order. On the
+# Exchange and ETTh1 benchmarks, this hurt the linear models much more than the
+# Transformers. We repeat the diagnostic on SPY returns without assuming that a
+# result from those multivariate benchmarks must transfer.
 
 # %%
 # Evaluate all models on original and shuffled test inputs
@@ -415,13 +449,31 @@ for name, model in models.items():
     )
 
 shuffle_df = pl.DataFrame(shuffle_results)
-shuffle_df
+
+fig = go.Figure(
+    go.Bar(
+        x=shuffle_df["Model"],
+        y=shuffle_df["Delta (%)"],
+        marker_color=[COLORS["blue"], COLORS["slate"], COLORS["amber"], COLORS["copper"]],
+        text=[f"{value:+.1f}%" for value in shuffle_df["Delta (%)"]],
+        textposition="outside",
+        hovertemplate="%{x}<br>MSE change: %{y:+.1f}%<extra></extra>",
+    )
+)
+fig.add_hline(y=0, line_color=COLORS["neutral"])
+fig.update_layout(
+    title="Shuffling barely changes error on low-signal SPY returns",
+    xaxis_title="Model",
+    yaxis_title="Change in test MSE after shuffling (%)",
+    showlegend=False,
+)
+fig.show()
 
 # %% [markdown]
 # **Finding**: On this SPY split, shuffling has minimal impact on any model.
 # The Transformer's MSE is essentially unchanged and the linear models also
 # show negligible change. This is a diagnostic on one univariate financial
-# series — not a proof that daily equity returns are i.i.d., and not a claim
+# series - not a proof that daily equity returns are i.i.d., and not a claim
 # that self-attention generally ignores temporal order; the original Zeng et
 # al. shuffle gap was demonstrated on weather and electricity data with
 # strong periodic patterns, structure that our SPY return series mostly
@@ -429,10 +481,12 @@ shuffle_df
 # preserving sequential order does not help.
 
 # %% [markdown]
-# ## Lookback Sensitivity
+# ## Validation-Only Lookback Sensitivity
 #
-# Zeng et al. found that Transformer forecasting error *increased* with longer
-# lookback windows. We test this on our ETF data with three lookback lengths.
+# Zeng et al. found that longer inputs often helped linear models while leaving
+# Transformers stable or worse. We test three lookbacks without consulting the
+# test set. Every candidate uses the same forecast-date cutoffs, so changing the
+# lookback changes available context rather than silently shifting the calendar.
 
 # %%
 lookback_values = [48, 96, 192]
@@ -440,104 +494,104 @@ lookback_results = []
 
 for lb in lookback_values:
     X_lb, y_lb = create_sequences(series, lb, HORIZON)
-    n_lb = len(X_lb)
-    tr_end = int(n_lb * 0.7)
-    val_end = int(n_lb * 0.85)
+    target_start_lb = np.arange(lb, len(series) - HORIZON + 1)
+    target_end_lb = target_start_lb + HORIZON - 1
+    train_mask_lb = target_end_lb < train_target_cutoff
+    val_mask_lb = (target_start_lb >= train_target_cutoff) & (target_end_lb < val_target_cutoff)
 
-    lb_models = {
-        "Linear": Linear(lb, HORIZON).to(DEVICE),
-        "D-Linear": DLinear(lb, HORIZON).to(DEVICE),
-        "Transformer": SimpleTransformer(lb, HORIZON, D_MODEL, N_HEADS, N_LAYERS).to(DEVICE),
+    X_train_lb, y_train_lb = X_lb[train_mask_lb], y_lb[train_mask_lb]
+    X_val_lb, y_val_lb = X_lb[val_mask_lb], y_lb[val_mask_lb]
+    zero_val_mse = float(np.mean(y_val_lb**2))
+
+    lb_factories = {
+        "Linear": lambda lb=lb: Linear(lb, HORIZON),
+        "D-Linear": lambda lb=lb: DLinear(lb, HORIZON),
+        "Transformer": lambda lb=lb: SimpleTransformer(lb, HORIZON, D_MODEL, N_HEADS, N_LAYERS),
     }
 
-    for name, model in lb_models.items():
+    for name, factory in lb_factories.items():
+        set_global_seeds(SEED)
+        model = factory().to(DEVICE)
         model, _ = train_model(
             model,
-            X_lb[:tr_end],
-            y_lb[:tr_end],
-            X_lb[tr_end:val_end],
-            y_lb[tr_end:val_end],
+            X_train_lb,
+            y_train_lb,
+            X_val_lb,
+            y_val_lb,
             EPOCHS,
             BATCH_SIZE,
         )
         model.eval()
         with torch.no_grad():
-            pred_lb = model(torch.FloatTensor(X_lb[val_end:]).to(DEVICE)).cpu().numpy()
-        mse_lb = float(np.mean((pred_lb - y_lb[val_end:]) ** 2))
-        lookback_results.append({"Lookback": lb, "Model": name, "MSE": round(mse_lb, 6)})
+            pred_lb = model(torch.FloatTensor(X_val_lb).to(DEVICE)).cpu().numpy()
+        mse_lb = float(np.mean((pred_lb - y_val_lb) ** 2))
+        lookback_results.append(
+            {
+                "Lookback": lb,
+                "Model": name,
+                "MSE ratio": mse_lb / zero_val_mse,
+            }
+        )
     print(f"  Lookback={lb}: done")
 
 lookback_df = pl.DataFrame(lookback_results)
-lookback_df
+
+fig = go.Figure()
+for name, color, dash in [
+    ("Linear", COLORS["blue"], "solid"),
+    ("D-Linear", COLORS["amber"], "dash"),
+    ("Transformer", COLORS["copper"], "solid"),
+]:
+    subset = lookback_df.filter(pl.col("Model") == name)
+    show_text = name == "Transformer"
+    fig.add_trace(
+        go.Scatter(
+            x=subset["Lookback"],
+            y=subset["MSE ratio"],
+            mode="lines+markers+text" if show_text else "lines+markers",
+            name=name,
+            line=dict(color=color, dash=dash),
+            text=[f"{value:.2f}x" for value in subset["MSE ratio"]] if show_text else None,
+            textposition="top center",
+            hovertemplate=f"{name}<br>Lookback: %{{x}}<br>Relative MSE: %{{y:.2f}}x<extra></extra>",
+        )
+    )
+fig.add_hline(y=1, line_dash="dot", line_color=COLORS["neutral"])
+fig.update_layout(
+    title="Longer context does not overcome the zero-return baseline",
+    xaxis_title="Lookback (trading days)",
+    yaxis_title="Validation MSE relative to zero forecast",
+    xaxis=dict(tickmode="array", tickvals=lookback_values),
+)
+fig.show()
 
 # %% [markdown]
-# **Finding**: Linear models show slightly increasing MSE with longer lookbacks,
-# consistent with extra context adding noise on near-i.i.d. daily returns. The
-# Transformer shows non-monotonic behavior — MSE rises from lookback 48 to 96 but
-# drops at 192, likely reflecting training stochasticity on a single split rather
-# than a systematic pattern. Zeng et al. observed a starker asymmetry on datasets
-# with strong periodic patterns (weather, electricity), where linear models
-# benefited from longer lookbacks while Transformers degraded. The muted effect
-# here reflects the low autocorrelation of daily equity returns.
-
-# %% [markdown]
-# ## sktime Alternative
-#
-# sktime provides native implementations of both N-Linear and D-Linear from the
-# LTSF-Linear paper, so you can reproduce this debate in 5 lines.
-#
-# **Dependency note**: sktime's neural forecasters require `neuralforecast`, which
-# depends on `ray` — and ray does not yet support Python 3.14
-# ([ray-project/ray#56434](https://github.com/ray-project/ray/issues/56434)).
-# Once ray adds 3.14 wheels, install via `uv pip install neuralforecast`
-# and uncomment the demo below.
-
-# %%
-# import pandas as pd
-# from sktime.forecasting.ltsf import LTSFDLinearForecaster, LTSFNLinearForecaster
-#
-# spy_close = close_wide.select(["timestamp", "SPY"]).to_pandas()
-# spy_close = spy_close.set_index("timestamp")["SPY"].dropna()
-# split = int(len(spy_close) * 0.8)
-# y_train_sk = spy_close.iloc[:split]
-# y_test_sk = spy_close.iloc[split : split + HORIZON]
-#
-# for name, ForecasterCls in [
-#     ("N-Linear", LTSFNLinearForecaster),
-#     ("D-Linear", LTSFDLinearForecaster),
-# ]:
-#     fh_sk = list(range(1, HORIZON + 1))
-#     forecaster = ForecasterCls(
-#         seq_len=LOOKBACK,
-#         pred_len=HORIZON,
-#         num_epochs=min(EPOCHS, 10),
-#     )
-#     forecaster.fit(y_train_sk, fh=fh_sk)
-#     y_pred_sk = forecaster.predict()
-#     mae_sk = float(np.mean(np.abs(y_test_sk.values - y_pred_sk.values)))
-#     print(f"sktime {name}: MAE = {mae_sk:.4f}")
-
-# %% [markdown]
-# When ray supports Python 3.14, the sktime wrappers reproduce the same
-# LTSF-Linear architectures with a few lines of code.
+# **Finding**: Use this chart as a model-selection diagnostic, not another test
+# result. It compares candidates only on validation targets. None beats the
+# horizontal zero-forecast reference, and the short three-point curves do not
+# support a general claim about how either architecture scales with context.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Linear baselines match or exceed the Transformer on this univariate task**:
-#    roughly half the MSE with ~44× fewer parameters, consistent with Zeng et al. (2023)
-# 2. **Three variants**: Linear (plain), D-Linear (trend/remainder decomposition),
-#    N-Linear (last-value normalization) — all with minimal parameters
-# 3. **Shuffle test**: On i.i.d.-like returns, neither architecture relies on temporal
-#    order — the original paper's shuffle effect requires strong periodic structure
-# 4. **Lookback sensitivity**: Linear models degrade slightly with longer context on
-#    low-autocorrelation data; the Zeng et al. asymmetry is most pronounced on periodic series
-# 5. This result motivated better Transformer designs (PatchTST, iTransformer)
+# 1. **Linear baselines beat the Transformer on this univariate task**, the narrow
+#    comparison highlighted by Zeng et al. (2023), with about 44x fewer parameters
+# 2. **No learned model beats zero**: low MSE relative to a complex model is not
+#    evidence of useful return predictability; naive forecasts belong in every comparison
+# 3. **Three variants**: Linear (plain), D-Linear (trend/remainder decomposition),
+#    N-Linear (last-value normalization) - all with minimal parameters
+# 4. **Shuffle test does not transfer**: neither architecture reacts much to shuffled
+#    SPY returns, unlike the paper's Exchange and ETTh1 benchmark results
+# 5. **Lookback sensitivity is validation-only**: fixed target dates prevent leakage
+#    and make the comparison independent of the final test set
+# 6. The debate motivated better Transformer designs (PatchTST, iTransformer)
 #    that directly address these failure modes
-# 6. **sktime provides N-Linear/D-Linear natively** — the debate is easy to reproduce
 #
 # **Caveat**: These results are on univariate SPY data. Transformers may perform
 # better in multivariate settings with rich covariates where cross-series attention
 # extracts meaningful relationships (Section 13.5 explores TFT for this case).
+# PyTorch deterministic algorithms and a fixed cuBLAS workspace make repeated
+# executions reproducible on the same software and GPU stack; another environment
+# may still produce small floating-point differences.
 #
 # **Next**: See `04_transformers` for modern PatchTST and iTransformer architectures.

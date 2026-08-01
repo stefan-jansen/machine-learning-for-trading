@@ -1,0 +1,224 @@
+# Reader install — walk the documented setup on a clean machine, on every platform
+#
+# The install instructions are the one part of the repo that no other job exercises:
+# `test.yml` runs notebooks inside the pre-built ml4t image, which already has the
+# environment baked in, so it can stay green while `uv sync` is broken for every
+# reader. That gap is what this workflow closes.
+#
+# Each job runs the commands a reader is told to run, in the order the docs give
+# them, on a runner that starts with nothing installed:
+#
+#   install uv  ->  uv sync  ->  cp .env.example .env  ->  verify_installation.py
+#   ->  download the free data  ->  run the first notebook
+#
+# If a step here fails, the corresponding paragraph of docs/installation.md is
+# wrong. Fix the docs or fix the dependency; do not relax the job.
+#
+# Two kinds of job, because two platforms are documented as unsupported:
+#
+#   ubuntu-latest, macos-15   walk the whole path and expect it to work
+#   windows-latest            assert `uv sync` fails, and fails on scikit-learn
+#   macos-15-intel            assert `uv sync` fails, and fails on torch
+#
+# The asserting jobs are green while the docs are accurate and red the day either
+# platform becomes installable, which is the day the docs need rewriting. They also
+# fail when the cause changes, so an unrelated break cannot quietly certify the claim.
+#
+# What this workflow cannot see. GitHub-hosted Windows runners have no WSL2 and no
+# Docker Desktop, so the recommended Windows path and the Docker path are covered by
+# the manual VM walk in the install validation notes instead. Runners also ship git,
+# Xcode and a C toolchain, so the "reader has no compiler" failure never appears here;
+# that is why the docs must state the toolchain requirement rather than rely on CI.
+
+name: Reader install
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 5 * * 1'   # Weekly Monday 5 AM UTC, ahead of the Tests cron
+  pull_request:
+    # Everything the walk actually touches, so a change to any of it is re-walked.
+    paths:
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.env.example'
+      - 'docs/installation.md'
+      - 'README.md'
+      - 'data/**'
+      - 'utils/**.py'
+      - 'scripts/verify_installation.py'
+      - '01_process_is_edge/factor_regimes.py'
+      - '.github/workflows/reader-install.yml'
+
+concurrency:
+  group: reader-install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unix:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Linux x86_64
+          - os: macos-15
+            label: macOS Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reclaim runner disk
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost \
+                      /usr/local/lib/android "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      # docs/installation.md, "Before you start: you need a compiler". The runner already
+      # carries a toolchain, so this step is not what makes the sync work today - it is what
+      # keeps the documented command exercised. It starts mattering the day ubuntu-latest
+      # ships a system Python that satisfies the project floor: `uv` then builds against the
+      # system interpreter instead of downloading its own, and the sync fails on a missing
+      # Python.h unless python3-dev is installed.
+      - name: Install the prerequisites the docs name
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y build-essential python3-dev
+
+      # docs/installation.md, "Local Setup with uv"
+      - name: Install uv as the docs instruct
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+
+      - name: uv sync
+        run: |
+          set -o pipefail
+          time uv sync 2>&1 | tail -30
+
+      - name: Copy the environment template
+        run: cp .env.example .env
+
+      - name: Verify the installation
+        run: uv run python scripts/verify_installation.py
+
+      - name: Download the free datasets
+        run: uv run python data/download_all.py --free-only
+
+      - name: Run the first notebook
+        env:
+          MPLBACKEND: Agg
+          PLOTLY_RENDERER: json
+        run: uv run python 01_process_is_edge/factor_regimes.py
+
+      - name: Report the footprint a reader pays
+        if: always()
+        run: |
+          du -sh .venv data 2>/dev/null || true
+          df -h . | tail -1
+
+  # docs/installation.md states that installing into Windows Python does not work. This
+  # job is what keeps that statement true, by asserting the failure rather than tolerating
+  # it: `uv sync` is expected to fail, so the job is green while the docs are accurate and
+  # goes red the day native Windows starts installing, which is the day the docs need to
+  # change. `continue-on-error` on the job would have accepted a broken installer or a
+  # regression anywhere else just as happily.
+  #
+  # The observed failure: scikit-learn 1.6.1 has no Windows wheel for Python 3.14 and its
+  # meson build dies on a generated path past the 260-character limit, even on this runner,
+  # which already has the Visual Studio Build Tools.
+  windows:
+    name: Windows native (asserted unsupported)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      # The docs give no Windows uv command, because there is no supported Windows path.
+      - name: Install uv
+        run: |
+          irm https://astral.sh/uv/install.ps1 | iex
+          "$env:USERPROFILE\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: uv sync is expected to fail here, for the documented reason
+        run: |
+          uv sync 2>&1 | Tee-Object -Variable out
+          $code = $LASTEXITCODE
+          $text = $out -join "`n"
+
+          if ($code -eq 0) {
+            Write-Error @"
+          uv sync SUCCEEDED on native Windows.
+
+          docs/installation.md tells readers that installing into Windows Python is not
+          supported and does not work. That is no longer true, so the documentation is now
+          wrong and should be updated to describe the native Windows path.
+          "@
+            exit 1
+          }
+
+          # Any failure would otherwise read as proof of the documented one. A network
+          # blip, a bad lockfile or a broken installer must not quietly certify the claim.
+          if ($text -notmatch 'Failed to build `?scikit-learn') {
+            Write-Error @"
+          uv sync failed on native Windows, but not for the documented reason.
+
+          Expected a scikit-learn build failure, which is what makes native Windows
+          unsupported. Something else broke instead, and this job cannot tell you the
+          documented claim still holds. Read the output above.
+          "@
+            exit 1
+          }
+
+          Write-Host "uv sync failed building scikit-learn, as documented (exit $code); native Windows remains unsupported."
+          # GitHub's pwsh shell appends `exit $LASTEXITCODE`, so the non-zero status from
+          # the expected failure would fail this step. Clear it deliberately.
+          exit 0
+
+  # docs/installation.md tells Intel Mac readers to use Docker because the local uv path
+  # cannot work there: PyTorch publishes no macOS x86_64 wheel and torch has no sdist, so
+  # resolution fails before anything is built. Asserted rather than tolerated, for the same
+  # reason as the Windows job: green while the docs are accurate, red if the cause changes
+  # or if Intel Macs become installable again.
+  macos-intel:
+    name: macOS Intel (asserted Docker-only)
+    runs-on: macos-15-intel   # the last Intel image GitHub offers; macos-13 no longer schedules
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv as the docs instruct
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+
+      - name: uv sync is expected to fail here, for the documented reason
+        run: |
+          set +e
+          out=$(uv sync 2>&1)
+          code=$?
+          set -e
+          echo "$out"
+
+          if [ $code -eq 0 ]; then
+            echo "::error::uv sync SUCCEEDED on an Intel Mac. docs/installation.md says the local uv path cannot work there; update it."
+            exit 1
+          fi
+
+          # Matching "torch" alone would accept any torch-related failure as proof. The
+          # documented cause is specifically that no distribution exists for this platform.
+          if ! printf '%s' "$out" | grep -q "doesn't have a source distribution or wheel for the current platform"; then
+            echo "::error::uv sync failed on Intel macOS, but not with uv's missing-distribution diagnostic. The documented cause may have changed; read the output above."
+            exit 1
+          fi
+          if ! printf '%s' "$out" | grep -q "torch=="; then
+            echo "::error::uv sync failed on a missing distribution, but not for torch. Read the output above."
+            exit 1
+          fi
+
+          echo "uv sync failed on torch, as documented (exit $code); Intel Macs remain Docker-only."

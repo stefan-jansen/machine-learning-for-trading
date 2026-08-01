@@ -24,7 +24,7 @@
 # > docker compose run --rm ml4t-gpu python 17_portfolio_construction/12_vlstm_portfolio.py
 # > ```
 #
-# Saly-Kaufmann et al. (2026) identify **VLSTM** — a TFT-style variable-selection block in front of an LSTM encoder — as a strong end-to-end portfolio architecture under a shared volatility-targeted long-short pipeline.
+# This notebook implements a TFT-style variable-selection block in front of an LSTM encoder.
 #
 # **Learning objectives**:
 # - Build a TFT-style Gated Residual Network (GRN) and Variable Selection Network (VSN)
@@ -41,13 +41,12 @@
 # ## 1. Setup
 
 # %%
-"""VLSTM portfolio allocator — TFT-style variable selection + LSTM under a volatility-targeted portfolio layer."""
+"""VLSTM allocator with TFT-style variable selection and volatility targeting."""
 
+import hashlib
 import os
-import warnings
+from datetime import UTC, datetime
 from pathlib import Path
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -61,6 +60,7 @@ from torch.utils.data import DataLoader, Dataset
 from data import load_etfs
 from utils.paths import get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0  # 0 = full ETF universe.
@@ -69,7 +69,7 @@ SEQ_LEN = 63  # ~3 months lookback, matches notebook 11.
 D_MODEL = 32  # GRN / VSN hidden dimension.
 SEED = 42
 LSTM_HIDDEN = 64
-DROPOUT = 0.1
+DROPOUT = 0.0  # Exact pooled two-pass gradients require deterministic chunk recomputation.
 LR = 1e-3
 WEIGHT_DECAY = 1e-5
 BATCH_SIZE = 32
@@ -77,16 +77,17 @@ VOL_TARGET_ANN = 0.15  # Target annualized portfolio volatility.
 VOL_LOOKBACK = 63  # Rolling window for per-asset volatility estimate.
 TURNOVER_COST_BPS = 5.0  # One-way cost in the loss (basis points).
 COST_WEIGHT = 1.0  # Scales the turnover penalty in the loss.
-USE_CACHED_MODEL_IF_AVAILABLE = True
-SAVE_TRAINED_MODEL_TO_CACHE = True
+ALLOW_MODEL_CACHE = os.environ.get("ML4T_ALLOW_MODEL_CACHE", "0") == "1"
+USE_CACHED_MODEL_IF_AVAILABLE = ALLOW_MODEL_CACHE
+SAVE_TRAINED_MODEL_TO_CACHE = os.environ.get("ML4T_SAVE_MODEL_CACHE", "0") == "1"
 
 # %%
 OUTPUT_DIR = get_output_dir(17, "vlstm_portfolio")
 OUTPUT_DIR.mkdir(exist_ok=True)
 MODEL_CACHE_PATH = OUTPUT_DIR / "vlstm_portfolio_cache.pt"
 CANONICAL_OUTPUT_DIR = get_chapter_dir(17) / "output" / "vlstm_portfolio"
-CANONICAL_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CANONICAL_MODEL_CACHE_PATH = CANONICAL_OUTPUT_DIR / "vlstm_portfolio_cache.pt"
+CACHE_SCHEMA = "vlstm-v2-causal-exact-pooled"
 
 
 # %% [markdown]
@@ -123,12 +124,33 @@ def state_dict_is_compatible(model: nn.Module, state_dict: dict) -> tuple[bool, 
     return True, ""
 
 
+# %% [markdown]
+# Bind cache reuse to ordered data, source, split, configuration, and tensor layout.
+
+
 # %%
-IN_TEST_OUTPUT_MODE = os.environ.get("ML4T_OUTPUT_DIR") is not None
+def stable_data_hash(frame: pd.DataFrame) -> str:
+    """Hash the ordered price panel, including its index and columns."""
+    digest = hashlib.sha256()
+    digest.update("|".join(frame.index.astype(str)).encode())
+    digest.update(b"\0")
+    digest.update("|".join(map(str, frame.columns)).encode())
+    digest.update(np.ascontiguousarray(frame.to_numpy()).tobytes())
+    return digest.hexdigest()
+
+
+# %%
+def cache_provenance_is_compatible(payload: dict) -> bool:
+    """Require exact learned-state provenance, not shape compatibility alone."""
+    return payload.get("provenance") == expected_cache_provenance
+
+
+# %%
+IN_TEST_OUTPUT_MODE = os.environ.get("ML4T_TEST_MODE") == "1"
 if IN_TEST_OUTPUT_MODE:
     cache_exists = any(
         path.exists()
-        for path in iter_cache_candidates(MODEL_CACHE_PATH, CANONICAL_MODEL_CACHE_PATH)
+        for path in (iter_cache_candidates(MODEL_CACHE_PATH) if ALLOW_MODEL_CACHE else ())
     )
     if not cache_exists:
         N_EPOCHS = min(N_EPOCHS, 20)
@@ -172,7 +194,9 @@ prices = (
 )
 prices = prices[[c for c in UNIVERSE if c in prices.columns]]
 coverage_threshold = max(1, int(prices.shape[1] * 0.8))
-prices = prices.dropna(thresh=coverage_threshold).ffill().bfill()
+prices = prices.dropna(thresh=coverage_threshold)
+prices = prices.ffill()
+prices = prices.dropna()
 UNIVERSE = list(prices.columns)
 N_ASSETS = len(UNIVERSE)
 
@@ -187,7 +211,7 @@ print(f"Date range:  {prices.index[0]:%Y-%m-%d} → {prices.index[-1]:%Y-%m-%d}"
 # estimate that feeds into the position sizing rather than into the model input.
 
 # %%
-returns = prices.pct_change().fillna(0.0)
+returns = prices.pct_change(fill_method=None).fillna(0.0)
 
 HORIZONS = [1, 5, 21, 63]
 features_list = [(prices / prices.shift(h) - 1.0).fillna(0.0).values for h in HORIZONS]
@@ -196,10 +220,10 @@ features = np.stack(features_list, axis=-1).astype(np.float32)
 N_FEATURES = features.shape[-1]
 
 # Volatility estimate for the position layer (used for vol targeting).
-vol_estimate = returns.rolling(VOL_LOOKBACK, min_periods=21).std().ffill().fillna(returns.std())
-vol_estimate = vol_estimate.clip(lower=1e-4).values.astype(np.float32)
+vol_estimate_frame = returns.rolling(VOL_LOOKBACK, min_periods=21).std().ffill()
+assert not vol_estimate_frame.iloc[SEQ_LEN - 1 : -1].isna().any().any()
+vol_estimate = vol_estimate_frame.fillna(0.0).clip(lower=1e-4).values.astype(np.float32)
 
-realized_returns = returns.values.astype(np.float32)
 fwd_returns = returns.shift(-1).fillna(0.0).values.astype(np.float32)
 
 print(f"Feature tensor: {features.shape} (T, N, F)")
@@ -220,18 +244,23 @@ print(f"Train: {dates[0]:%Y-%m-%d} → {dates[train_end - 1]:%Y-%m-%d} ({train_e
 print(
     f"Val:   {dates[train_end]:%Y-%m-%d} → {dates[val_end - 1]:%Y-%m-%d} ({val_end - train_end} days)"
 )
-print(f"Test:  {dates[val_end]:%Y-%m-%d} → {dates[-1]:%Y-%m-%d} ({n_dates - val_end} days)")
+print(
+    f"Test decisions: {dates[val_end]:%Y-%m-%d} → {dates[-2]:%Y-%m-%d} "
+    f"({n_dates - val_end - 1} days)"
+)
+print(f"Last realized-return date: {dates[-1]:%Y-%m-%d} (not a decision origin)")
 
 # %% [markdown]
 # ## 5. Dataset
 #
-# Each training example is a sliding window of features, the realized-return path, and
-# the per-asset volatility estimate over the same window.
+# Each example provides a feature-history window and exactly one forward-return endpoint.
+# Validation and test windows may use prior feature history, but their scored labels remain
+# strictly inside their own partition.
 
 
 # %%
 class VLSTMDataset(Dataset):
-    """Sliding windows with features, forward returns, and vol estimates."""
+    """Feature-history windows with one decision endpoint each."""
 
     def __init__(self, features, fwd_ret, vol_est, start_idx, end_idx, seq_len):
         self.features = features
@@ -240,7 +269,7 @@ class VLSTMDataset(Dataset):
         self.seq_len = seq_len
         self.indices = np.arange(
             max(start_idx, seq_len - 1),
-            min(end_idx, len(features) - 1) - seq_len + 1,
+            min(end_idx, len(features) - 1),
         )
 
     def __len__(self):
@@ -251,18 +280,29 @@ class VLSTMDataset(Dataset):
         sl = slice(t - self.seq_len + 1, t + 1)
         return (
             torch.from_numpy(self.features[sl]),
-            torch.from_numpy(self.fwd_ret[sl]),
-            torch.from_numpy(self.vol_est[sl]),
+            torch.from_numpy(self.fwd_ret[t]),
+            torch.from_numpy(self.vol_est[t]),
         )
 
 
+# %% [markdown]
+# Instantiate disjoint endpoint datasets and chronological loaders.
+
+
+# %%
 train_ds = VLSTMDataset(features, fwd_returns, vol_estimate, 0, train_end, SEQ_LEN)
 val_ds = VLSTMDataset(features, fwd_returns, vol_estimate, train_end, val_end, SEQ_LEN)
 test_ds = VLSTMDataset(features, fwd_returns, vol_estimate, val_end, n_dates, SEQ_LEN)
 
 print(f"Train windows: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
+assert dates[train_end - 1] < dates[train_end] <= dates[val_end - 1] < dates[val_end]
+assert train_ds.indices[-1] == train_end - 1
+assert val_ds.indices[0] == train_end and val_ds.indices[-1] == val_end - 1
+assert test_ds.indices[0] == val_end and test_ds.indices[-1] == n_dates - 2
+assert len(set(train_ds.indices) & set(val_ds.indices)) == 0
+assert len(set(val_ds.indices) & set(test_ds.indices)) == 0
 
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False, drop_last=False)
 val_loader = DataLoader(val_ds, batch_size=64, shuffle=False)
 test_loader = DataLoader(test_ds, batch_size=64, shuffle=False)
 
@@ -418,7 +458,7 @@ print(f"Model parameters: {n_params:,}")
 
 # %%
 def vol_scaled_positions(signal: torch.Tensor, vol_est: torch.Tensor) -> torch.Tensor:
-    """Map (B, T, N) signal in (-1, 1) to a volatility-targeted position size.
+    """Map endpoint signals in (-1, 1) to volatility-targeted positions.
 
     Per-asset exposure is scaled by 1/N so that the book-level sum of per-asset
     contributions has the target volatility level (rather than sqrt(N) times it).
@@ -429,17 +469,35 @@ def vol_scaled_positions(signal: torch.Tensor, vol_est: torch.Tensor) -> torch.T
     return (VOL_TARGET_ANN / (ann_vol * n_assets)) * signal
 
 
+# %% [markdown]
+# Convert signals to net portfolio returns and explicit turnover costs.
+
+
 # %%
 def portfolio_returns_and_cost(
-    signal: torch.Tensor, fwd_ret: torch.Tensor, vol_est: torch.Tensor
+    signal: torch.Tensor,
+    fwd_ret: torch.Tensor,
+    vol_est: torch.Tensor,
+    *,
+    has_predecessor: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute net portfolio return and turnover cost series with shape (B, T)."""
+    """Compute one continuous net-return endpoint per decision window."""
     w = vol_scaled_positions(signal, vol_est)
-    w_prev = torch.cat([torch.zeros_like(w[:, :1]), w[:, :-1]], dim=1)
-    gross = (w * fwd_ret).sum(dim=-1)
-    turnover = torch.abs(w - w_prev).sum(dim=-1)
+    if has_predecessor:
+        current, previous = w[1:], w[:-1]
+        current_returns = fwd_ret[1:]
+    else:
+        current = w
+        previous = torch.cat([torch.zeros_like(w[:1]), w[:-1]], dim=0)
+        current_returns = fwd_ret
+    gross = (current * current_returns).sum(dim=-1)
+    turnover = torch.abs(current - previous).sum(dim=-1)
     cost = turnover * (TURNOVER_COST_BPS / 10_000.0)
     return gross - cost * COST_WEIGHT, turnover
+
+
+# %% [markdown]
+# Pool all return observations into the differentiable training Sharpe.
 
 
 # %%
@@ -460,32 +518,111 @@ def pooled_sharpe(
 optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=N_EPOCHS)
 
+# %%
+expected_cache_provenance = {
+    "schema": CACHE_SCHEMA,
+    "source_py_blob": os.environ.get("ML4T_SOURCE_BLOB", ""),
+    "data_hash": stable_data_hash(prices),
+    "universe": list(UNIVERSE),
+    "split": [int(train_end), int(val_end)],
+    "seed": int(SEED),
+    "config": {
+        "epochs": int(N_EPOCHS),
+        "seq_len": int(SEQ_LEN),
+        "d_model": int(D_MODEL),
+        "lstm_hidden": int(LSTM_HIDDEN),
+        "dropout": float(DROPOUT),
+        "learning_rate": float(LR),
+        "weight_decay": float(WEIGHT_DECAY),
+        "batch_size": int(BATCH_SIZE),
+        "vol_target": float(VOL_TARGET_ANN),
+        "vol_lookback": int(VOL_LOOKBACK),
+        "cost_bps": float(TURNOVER_COST_BPS),
+        "cost_weight": float(COST_WEIGHT),
+    },
+    "state_shapes": {key: tuple(value.shape) for key, value in model.state_dict().items()},
+}
+
 
 # %% [markdown]
-# One training epoch over the train loader, returning the pooled Sharpe over all batches.
+# Recompute one predecessor endpoint at each chunk boundary so costs and their gradients
+# remain continuous without retaining the full training graph in GPU memory.
+
+
+# %%
+def prepend_predecessor(dataset, start, x_batch, r_batch, v_batch):
+    """Prepend the prior endpoint to every noninitial chronological chunk."""
+    if start == 0:
+        return x_batch, r_batch, v_batch, False
+    x_prev, r_prev, v_prev = dataset[start - 1]
+    return (
+        torch.cat([x_prev.unsqueeze(0), x_batch]),
+        torch.cat([r_prev.unsqueeze(0), r_batch]),
+        torch.cat([v_prev.unsqueeze(0), v_batch]),
+        True,
+    )
+
+
+# %% [markdown]
+# Collect a single continuous endpoint series while preserving chronological chunk boundaries.
+
+
+# %%
+@torch.no_grad()
+def collect_endpoint_returns(loader, dataset) -> torch.Tensor:
+    """Return each decision once with one initial entry cost."""
+    chunks = []
+    start = 0
+    for x_batch, r_batch, v_batch in loader:
+        x_batch, r_batch, v_batch, has_previous = prepend_predecessor(
+            dataset, start, x_batch, r_batch, v_batch
+        )
+        x_batch = x_batch.to(DEVICE)
+        r_batch = r_batch.to(DEVICE)
+        v_batch = v_batch.to(DEVICE)
+        signal, _ = model(x_batch)
+        net_r, _ = portfolio_returns_and_cost(
+            signal[:, -1, :], r_batch, v_batch, has_predecessor=has_previous
+        )
+        chunks.append(net_r)
+        start += len(net_r)
+    return torch.cat(chunks)
+
+
+# %% [markdown]
+# One exact pooled-Sharpe training epoch. The first no-grad pass derives the global
+# return gradient; the second chunked pass applies that exact gradient to model parameters.
 
 
 # %%
 def train_one_epoch() -> float:
     model.train()
-    epoch_returns = []
+    reference_returns = collect_endpoint_returns(train_loader, train_ds)
+    reference_variable = reference_returns.detach().requires_grad_(True)
+    reference_loss = -pooled_sharpe(reference_variable)
+    return_gradient = torch.autograd.grad(reference_loss, reference_variable)[0].detach()
+
+    optimizer.zero_grad(set_to_none=True)
+    start = 0
     for x_batch, r_batch, v_batch in train_loader:
+        x_batch, r_batch, v_batch, has_previous = prepend_predecessor(
+            train_ds, start, x_batch, r_batch, v_batch
+        )
         x_batch = x_batch.to(DEVICE)
         r_batch = r_batch.to(DEVICE)
         v_batch = v_batch.to(DEVICE)
-
-        optimizer.zero_grad()
         signal, _ = model(x_batch)
-        net_r, _ = portfolio_returns_and_cost(signal, r_batch, v_batch)
-        loss = -pooled_sharpe(net_r)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        net_r, _ = portfolio_returns_and_cost(
+            signal[:, -1, :], r_batch, v_batch, has_predecessor=has_previous
+        )
+        stop = start + len(net_r)
+        torch.sum(net_r * return_gradient[start:stop]).backward()
+        start = stop
 
-        with torch.no_grad():
-            epoch_returns.append(net_r.detach().cpu().reshape(-1))
-
-    return float(pooled_sharpe(torch.cat(epoch_returns)))
+    assert start == len(reference_returns)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    optimizer.step()
+    return float(pooled_sharpe(reference_returns))
 
 
 # %% [markdown]
@@ -496,15 +633,8 @@ def train_one_epoch() -> float:
 @torch.no_grad()
 def evaluate_pooled_sharpe(loader) -> float:
     model.eval()
-    out = []
-    for x_batch, r_batch, v_batch in loader:
-        x_batch = x_batch.to(DEVICE)
-        r_batch = r_batch.to(DEVICE)
-        v_batch = v_batch.to(DEVICE)
-        signal, _ = model(x_batch)
-        net_r, _ = portfolio_returns_and_cost(signal, r_batch, v_batch)
-        out.append(net_r.cpu().reshape(-1))
-    return float(pooled_sharpe(torch.cat(out)))
+    dataset = loader.dataset
+    return float(pooled_sharpe(collect_endpoint_returns(loader, dataset)))
 
 
 # %%
@@ -520,6 +650,9 @@ if USE_CACHED_MODEL_IF_AVAILABLE:
             continue
         payload = torch.load(cache_path, map_location="cpu")
         if isinstance(payload, dict) and "best_state" in payload:
+            if not cache_provenance_is_compatible(payload):
+                print(f"Skipping wrong-provenance cache at {cache_path}")
+                continue
             ok, reason = state_dict_is_compatible(model, payload["best_state"])
             if not ok:
                 print(f"Skipping incompatible cache at {cache_path}: {reason}")
@@ -548,6 +681,13 @@ if not loaded_from_cache:
 
         if epoch % 25 == 0 or epoch == 1:
             print(f"Epoch {epoch:3d} | Train SR: {tr:+.3f} | Val SR: {va:+.3f}")
+        progress_log = os.environ.get("ML4T_PROGRESS_LOG")
+        if progress_log and (epoch == 1 or epoch % 10 == 0):
+            with open(progress_log, "a", encoding="utf-8") as handle:
+                handle.write(
+                    f"{datetime.now(UTC).isoformat()} epoch={epoch} "
+                    f"train_sr={tr:+.6f} val_sr={va:+.6f}\n"
+                )
 
 # %%
 if SAVE_TRAINED_MODEL_TO_CACHE and not loaded_from_cache and best_state is not None:
@@ -556,10 +696,9 @@ if SAVE_TRAINED_MODEL_TO_CACHE and not loaded_from_cache and best_state is not N
         "train_sharpes": train_sharpes,
         "val_sharpes": val_sharpes,
         "best_val_sharpe": best_val,
+        "provenance": expected_cache_provenance,
     }
     torch.save(payload, MODEL_CACHE_PATH)
-    if MODEL_CACHE_PATH.resolve() != CANONICAL_MODEL_CACHE_PATH.resolve():
-        torch.save(payload, CANONICAL_MODEL_CACHE_PATH)
     print(f"Saved trained model cache to {MODEL_CACHE_PATH}")
 
 if best_state is None:
@@ -577,8 +716,8 @@ print(f"\nBest validation Sharpe: {best_val:.3f}")
 # %%
 fig, ax = plt.subplots(figsize=(10, 5))
 if train_sharpes and val_sharpes:
-    ax.plot(train_sharpes, label="Train", alpha=0.8)
-    ax.plot(val_sharpes, label="Validation", alpha=0.8)
+    ax.plot(train_sharpes, label="Train", color=COLORS["blue"], alpha=0.8)
+    ax.plot(val_sharpes, label="Validation", color=COLORS["amber"], alpha=0.8)
     ax.legend()
 else:
     ax.text(
@@ -589,10 +728,12 @@ else:
         va="center",
         transform=ax.transAxes,
     )
-ax.axhline(0, color="gray", linestyle="--", linewidth=0.5)
+ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
 ax.set_xlabel("Epoch")
 ax.set_ylabel("Pooled Sharpe")
-ax.set_title("VLSTM Training: Pooled Sharpe Over Epochs")
+ax.set_title(
+    f"Validation Sharpe peaks at {best_val:.2f} before training reaches {train_sharpes[-1]:.1f}"
+)
 fig.tight_layout()
 fig.show()
 
@@ -607,6 +748,10 @@ model.load_state_dict(best_state)
 model.eval()
 
 
+# %% [markdown]
+# Collect held-out signals, returns, and volatility estimates without gradients.
+
+
 # %%
 @torch.no_grad()
 def collect_test_arrays():
@@ -617,8 +762,8 @@ def collect_test_arrays():
         v_batch = v_batch.to(DEVICE)
         signal, _ = model(x_batch)
         sig_last.append(signal[:, -1, :].cpu().numpy())
-        ret_last.append(r_batch[:, -1, :].cpu().numpy())
-        vol_last.append(v_batch[:, -1, :].cpu().numpy())
+        ret_last.append(r_batch.cpu().numpy())
+        vol_last.append(v_batch.cpu().numpy())
     return (
         np.concatenate(sig_last, axis=0),
         np.concatenate(ret_last, axis=0),
@@ -695,8 +840,11 @@ results = pd.DataFrame(
         metrics(iv_ret, "Inverse Volatility"),
     ]
 )
-print(results.to_string(index=False))
 results
+
+
+# %% [markdown]
+# Compare the net held-out Sharpe ratios on a common annualized scale.
 
 
 # %%
@@ -723,15 +871,21 @@ print(
 
 # %%
 fig, ax = plt.subplots(figsize=(10, 5))
-for arr, label in [
-    (vlstm_ret, "VLSTM"),
-    (eq_ret, "Equal Weight"),
-    (iv_ret, "Inverse Volatility"),
+for arr, label, color in [
+    (vlstm_ret, "VLSTM", COLORS["blue"]),
+    (eq_ret, "Equal Weight", COLORS["amber"]),
+    (iv_ret, "Inverse Volatility", COLORS["positive"]),
 ]:
-    ax.plot(np.cumprod(1 + arr), label=label)
+    ax.plot(np.cumprod(1 + arr), label=label, color=color)
+sharpe_lookup = {
+    "VLSTM": vlstm_sharpe,
+    "Equal Weight": ew_sharpe,
+    "Inverse Volatility": iv_sharpe,
+}
+winner = max(sharpe_lookup, key=sharpe_lookup.get)
 ax.set_xlabel("Test Window Index")
 ax.set_ylabel("Cumulative Return")
-ax.set_title("Out-of-Sample Equity Curves: VLSTM vs Heuristic Baselines")
+ax.set_title(f"{winner} leads held-out Sharpe at {sharpe_lookup[winner]:.2f} net of cost")
 ax.legend()
 fig.tight_layout()
 fig.show()
@@ -753,19 +907,25 @@ fig.show()
 # %%
 fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
-axes[0].hist(test_signal.reshape(-1), bins=50, alpha=0.8)
+signal_at_bounds = float(np.mean(np.abs(test_signal) > 0.9))
+axes[0].hist(test_signal.reshape(-1), bins=50, color=COLORS["blue"], alpha=0.8)
 axes[0].set_xlabel("VLSTM scalar signal $p_{i,t}$")
 axes[0].set_ylabel("Frequency")
-axes[0].set_title("Signal Distribution (test period)")
+axes[0].set_title(f"{signal_at_bounds:.0%} of test signals sit near the tanh bounds")
 
+mean_position_change = np.abs(np.diff(vlstm_weights, axis=0)).mean(axis=1)
 axes[1].plot(
-    np.abs(np.diff(vlstm_weights, axis=0)).mean(axis=1),
-    color="steelblue",
+    mean_position_change,
+    color=COLORS["amber"],
     alpha=0.8,
 )
 axes[1].set_xlabel("Test Window Index")
 axes[1].set_ylabel("Mean Abs Position Change")
-axes[1].set_title("Daily Turnover")
+axes[1].set_title(
+    f"95% of daily mean position changes stay below {np.quantile(mean_position_change, 0.95):.3f}"
+)
+axes[0].legend(["Signal"], loc="upper right")
+axes[1].legend(["Mean abs change"], loc="upper right")
 
 fig.tight_layout()
 fig.show()
@@ -795,9 +955,13 @@ vsn_mean = np.concatenate(vsn_weights, axis=0).mean(axis=(0, 1))
 
 feature_names = [f"ret_{h}d" for h in HORIZONS] + ["vol_21d"]
 fig, ax = plt.subplots(figsize=(8, 4))
-ax.bar(feature_names, vsn_mean)
+ax.bar(feature_names, vsn_mean, color=COLORS["blue"])
+ax.legend(["Average VSN weight"], loc="upper right")
 ax.set_ylabel("Average VSN weight")
-ax.set_title("Variable Selection: Average Feature Importance")
+top_feature = int(np.argmax(vsn_mean))
+ax.set_title(
+    f"{feature_names[top_feature]} receives {vsn_mean[top_feature]:.0%} of average VSN weight"
+)
 ax.set_ylim(0, max(vsn_mean.max() * 1.2, 1.0 / len(feature_names) * 2))
 fig.tight_layout()
 fig.show()
@@ -826,23 +990,14 @@ for cost_bps in cost_grid:
         ("Inverse Vol", iv_weights, test_fwd),
     ]:
         r = strategy_returns(w, fwd, cost_bps=cost_bps)
-        mu = r.mean() * 252.0
-        sigma = r.std() * (252.0**0.5)
-        row[name] = mu / (sigma + 1e-8)
+        row[name] = _sharpe(r)
     cost_rows.append(row)
 
 cost_df = pd.DataFrame(cost_rows).set_index("One-way cost (bps)")
-print(cost_df.round(2).to_string())
 cost_df.round(2)
 
 # %% [markdown]
-# **Trading implication**: The point at which the VLSTM Sharpe drops below a heuristic
-# alternative is the breakeven cost for the learned allocator on this universe. The
-# Saly-Kaufmann benchmark documents architecture rank changes as costs rise — the
-# ordering of xLSTM and VLSTM is not stable across the frictionless-to-realistic-cost
-# range — which is a reminder that architecture comparisons depend on the deployment
-# cost regime, not the zero-cost Sharpe alone. See Saly-Kaufmann et al. (2026) for
-# the figure-level details.
+# **Trading implication**: The cost grid reports only the assumptions computed in this notebook.
 
 # %% [markdown]
 # ## 16. Key Takeaways
@@ -851,18 +1006,14 @@ cost_df.round(2)
 #    TFT-style per-feature GRN embeddings; it lets the LSTM ingest a denoised
 #    representation rather than the raw feature stack.
 # 2. **The portfolio layer matters as much as the encoder.** Scalar signal → vol-targeted
-#    long-short weights is the shared template that makes architecture comparisons in
-#    Saly-Kaufmann et al. (2026) fair; the same layer is what DeePM uses, with SoftMin
-#    added on top.
+#    long-short weights is the layer evaluated here.
 # 3. **Turnover cost is in the training loss, not added after the fact.** The model
 #    optimizes net-of-cost return at training time rather than receiving a post-hoc
 #    cost adjustment at evaluation. Whether the in-loss formulation strictly improves
 #    realized net Sharpe versus a post-hoc charge is not tested in this notebook.
-# 4. **VLSTM is a bridge between the plain LSTM and DeePM.** Whatever Sharpe gap it
-#    leaves open against DeePM is the contribution of FiLM metadata conditioning, the
-#    macro graph prior, and the SoftMin objective — not of the encoder.
+# 4. **VLSTM is a variable-selection extension of the plain LSTM.** Comparisons with
+#    other architectures require their own matched implementation and evaluation.
 #
 # **Next**: `13_deepm_regime_robust` adds regime-aware structure on top of this base.
 #
-# **Book**: §17.8 compares the simple LSTM, VLSTM, and DeePM under the same
-# end-to-end pipeline.
+# **Book**: §17.8 places this implementation alongside related portfolio encoders.

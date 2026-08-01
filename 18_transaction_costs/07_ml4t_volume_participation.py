@@ -53,28 +53,30 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-import numpy as np
+import plotly.graph_objects as go
 import polars as pl
+from IPython.display import Markdown, display
 from ml4t.backtest.execution import (
     SquareRootImpact,
     VolumeParticipationLimit,
 )
 from plotly.subplots import make_subplots
 
-import utils  # noqa: F401  — sys.path side-effect; enables `from data import ...`
 from data import load_nasdaq100_bars
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 # %% tags=["parameters"]
 # A parent order is released against a real intraday sequence of (volume, price)
 # intervals built from AlgoSeek NASDAQ-100 minute bars. The participation cap is
 # applied to each interval's *actual* traded volume, so completion time and
-# realized price come entirely from real liquidity — no synthetic volume curves.
+# realized price come entirely from real liquidity - no synthetic volume curves.
 EXEC_SYMBOLS = ["AAPL", "MSFT", "AMZN", "GOOGL", "META"]  # liquid NASDAQ-100 names
 PRIMARY_SYMBOL = "AAPL"  # symbol whose real sessions drive the execution walk
 TAQ_START_DATE = "2021-10-01"
 TAQ_END_DATE = "2021-12-31"
-INTERVAL_MINUTES = 15  # execution grid; 09:30-16:00 → 26 intervals/session
+INTERVAL_MINUTES = 15  # execution grid; 09:30-16:00 -> 26 intervals/session
+CALIBRATION_SESSIONS = 20  # completed sessions used to estimate ADV before execution starts
 ORDER_PCT_ADV = 0.5  # parent order as a fraction of measured ADV
 PARTICIPATION_RATES = [0.05, 0.10, 0.25]
 SEED = 42
@@ -127,10 +129,15 @@ print(f"  Remaining quantity:  {result.remaining_quantity:,.0f} shares")
 print(f"  Participation rate:  {result.participation_rate:.1%}")
 print(f"  Is partial fill:     {result.is_partial}")
 
-# %% [markdown]
-# **Finding**: The first example shows why participation limits matter even for
-# moderate orders. A 50,000-share parent order in a 100,000-share bar still only
-# releases a 10,000-share child order when the desk caps footprint at 10%.
+# %%
+display(
+    Markdown(
+        f"**Finding**: A {order_qty:,.0f}-share parent order facing a "
+        f"{bar_volume:,.0f}-share bar releases only "
+        f"{result.fillable_quantity:,.0f} shares under a "
+        f"{limit.max_participation:.0%} participation cap."
+    )
+)
 
 # %% [markdown]
 # ## Part 2: The ExecutionResult Object
@@ -201,11 +208,7 @@ def load_intraday_panel(
     end_date: str,
     interval_minutes: int,
 ) -> pl.DataFrame:
-    """Aggregate real minute bars onto an intraday execution grid.
-
-    Returns per (symbol, date, bucket) the interval volume and the
-    volume-weighted trade price, restricted to the regular session (09:30-16:00).
-    """
+    """Aggregate regular-session minute bars onto an intraday execution grid."""
     session_start = 9 * 60 + 30  # 09:30 as minute-of-day
     session_end = 16 * 60  # 16:00
     return (
@@ -219,22 +222,20 @@ def load_intraday_panel(
         .select("timestamp", "symbol", "volume", "last_trade_price")
         .filter(pl.col("last_trade_price").is_not_null() & (pl.col("volume") > 0))
         .with_columns(
-            date=pl.col("timestamp").dt.date(),
             minute_of_day=pl.col("timestamp").dt.hour().cast(pl.Int32) * 60
-            + pl.col("timestamp").dt.minute().cast(pl.Int32),
+            + pl.col("timestamp").dt.minute().cast(pl.Int32)
         )
         .filter(
             (pl.col("minute_of_day") >= session_start) & (pl.col("minute_of_day") < session_end)
         )
-        .with_columns(
-            bucket=((pl.col("minute_of_day") - session_start) // interval_minutes).cast(pl.Int32)
-        )
-        .group_by("symbol", "date", "bucket")
+        .with_columns(timestamp=pl.col("timestamp").dt.truncate(f"{interval_minutes}m"))
+        .group_by("symbol", "timestamp")
         .agg(
             volume=pl.col("volume").sum(),
             price=(pl.col("last_trade_price") * pl.col("volume")).sum() / pl.col("volume").sum(),
         )
-        .sort("symbol", "date", "bucket")
+        .with_columns(session=pl.col("timestamp").dt.date())
+        .sort("symbol", "timestamp")
         .collect()
     )
 
@@ -242,74 +243,51 @@ def load_intraday_panel(
 # %%
 panel = load_intraday_panel(EXEC_SYMBOLS, TAQ_START_DATE, TAQ_END_DATE, INTERVAL_MINUTES)
 
-# Consecutive real intervals for the primary symbol, in chronological order.
-seq = panel.filter(pl.col("symbol") == PRIMARY_SYMBOL).sort("date", "bucket")
-interval_volume = seq["volume"].to_numpy()
-interval_price = seq["price"].to_numpy()
-interval_date = seq["date"].to_list()
+# Calibrate on completed sessions, then begin execution strictly afterward.
+seq = panel.filter(pl.col("symbol") == PRIMARY_SYMBOL).sort("timestamp")
+sessions = seq["session"].unique(maintain_order=True).to_list()
+calibration_sessions = sessions[:CALIBRATION_SESSIONS]
+execution_sessions = sessions[CALIBRATION_SESSIONS:]
+calibration = seq.filter(pl.col("session").is_in(calibration_sessions))
+execution = seq.filter(pl.col("session").is_in(execution_sessions))
 
-adv = float(seq.group_by("date").agg(dv=pl.col("volume").sum())["dv"].mean())
+adv = float(calibration.group_by("session").agg(dv=pl.col("volume").sum())["dv"].mean())
 order_shares = int(round(ORDER_PCT_ADV * adv))
 
 print(f"Primary symbol: {PRIMARY_SYMBOL}")
-print(f"Real intervals: {len(interval_volume):,} across {seq['date'].n_unique()} sessions")
-print(f"Measured ADV:   {adv:,.0f} shares")
+print(
+    f"Calibration:    {len(calibration_sessions)} completed sessions through "
+    f"{calibration_sessions[-1]}"
+)
+print(f"Execution:      {execution.height:,} intervals from {execution_sessions[0]}")
+print(f"Calibration ADV:{adv:>14,.0f} shares")
 print(f"Parent order:   {order_shares:,} shares ({ORDER_PCT_ADV:.0%} of ADV)")
 
 # %% [markdown]
 # **Finding**: The parent order is a fixed fraction of the symbol's measured ADV,
 # so it is genuinely large relative to a single session's liquidity. That is the
-# regime where a participation cap actually binds — small orders clear in one
+# regime where a participation cap actually binds - small orders clear in one
 # interval and never exercise the constraint.
 
 # %% [markdown]
 # ### Walk the Parent Order Against Real Intervals
 #
-# At each real interval, the broker releases at most `cap × interval_volume`
-# shares and queues the remainder for the next interval. Volume and price both
-# come from the data; only the cap changes between runs.
+# A participation-of-volume order reacts as trades print: after each market
+# transaction, cumulative child fills may not exceed `cap × cumulative market
+# volume`. Aggregating that feasible continuous process to 15-minute bars makes
+# the end-of-interval fill exactly `cap × realized interval volume`; the fill
+# price is the interval VWAP because the child order participates proportionally
+# throughout the interval. The simulation does not know final bar volume at the
+# interval open. Only the cap changes between runs.
+
+# %% [markdown]
+# A small frame helper adds cumulative shares, cost, and completion. Keeping this
+# accounting separate leaves the event loop readable as a notebook cell.
 
 
 # %%
-def participation_walk(
-    volumes: np.ndarray,
-    prices: np.ndarray,
-    dates: list,
-    order_shares: int,
-    max_participation: float,
-    min_volume: float = 0.0,
-) -> pl.DataFrame:
-    """Release a parent order against a real (volume, price) interval sequence."""
-    limit = VolumeParticipationLimit(max_participation=max_participation, min_volume=min_volume)
-    remaining = order_shares
-    rows = []
-    day_index = {d: i for i, d in enumerate(sorted(set(dates)))}
-    for i, (vol, px, d) in enumerate(zip(volumes, prices, dates)):
-        if remaining <= 0:
-            break
-        result = limit.calculate(remaining, float(vol), float(px))
-        if result.fillable_quantity <= 0:
-            continue
-        rows.append(
-            {
-                "bar": len(rows),
-                "interval": i,
-                "day": day_index[d],
-                "date": d,
-                "bar_volume": float(vol),
-                "price": float(px),
-                "fill_qty": result.fillable_quantity,
-                "remaining": result.remaining_quantity,
-                "participation": result.participation_rate,
-            }
-        )
-        remaining = result.remaining_quantity
-    if remaining > 0:
-        print(
-            f"WARNING: parent order not fully filled — {remaining:,} of "
-            f"{order_shares:,} shares remain after {len(rows)} intervals "
-            f"(data window exhausted before completion)"
-        )
+def execution_frame(rows: list[dict], order_shares: int) -> pl.DataFrame:
+    """Convert fill records to a cumulative execution path."""
     df = pl.DataFrame(rows)
     if df.height == 0:
         return df
@@ -319,12 +297,56 @@ def participation_walk(
     ).with_columns(pct_complete=pl.col("cumulative_shares") / order_shares * 100)
 
 
+# %% [markdown]
+# The walk applies the library limit at every interval, preserves the event
+# timestamp, and queues any unfilled inventory for the next observed interval.
+
+
+# %%
+def participation_walk(
+    intervals: pl.DataFrame,
+    order_shares: int,
+    max_participation: float,
+    min_volume: float = 0.0,
+) -> pl.DataFrame:
+    """Release a parent order against a real (volume, price) interval sequence."""
+    limit = VolumeParticipationLimit(max_participation=max_participation, min_volume=min_volume)
+    remaining = order_shares
+    rows: list[dict] = []
+    sessions = intervals["session"].unique(maintain_order=True).to_list()
+    session_index = {session: i for i, session in enumerate(sessions)}
+    for i, row in enumerate(intervals.iter_rows(named=True)):
+        if remaining <= 0:
+            break
+        result = limit.calculate(remaining, float(row["volume"]), float(row["price"]))
+        if result.fillable_quantity <= 0:
+            continue
+        rows.append(
+            {
+                "bar": len(rows),
+                "interval": i,
+                "session_number": session_index[row["session"]],
+                "timestamp": row["timestamp"],
+                "bar_volume": float(row["volume"]),
+                "price": float(row["price"]),
+                "fill_qty": result.fillable_quantity,
+                "remaining": result.remaining_quantity,
+                "participation": result.participation_rate,
+            }
+        )
+        remaining = result.remaining_quantity
+    if remaining > 0:
+        print(
+            f"WARNING: parent order not fully filled - {remaining:,} of "
+            f"{order_shares:,} shares remain after {len(rows)} intervals "
+            f"(data window exhausted before completion)"
+        )
+    return execution_frame(rows, order_shares)
+
+
 # %%
 # Run the walk for each participation cap against the same real interval sequence.
-results = {
-    rate: participation_walk(interval_volume, interval_price, interval_date, order_shares, rate)
-    for rate in PARTICIPATION_RATES
-}
+results = {rate: participation_walk(execution, order_shares, rate) for rate in PARTICIPATION_RATES}
 
 print("Participation Rate Comparison")
 print(f"Order: {order_shares:,} shares ({PRIMARY_SYMBOL}, {ORDER_PCT_ADV:.0%} of ADV)")
@@ -332,9 +354,22 @@ print("=" * 70)
 for rate, df in results.items():
     print(
         f"{rate:>5.0%} limit: {df.height:>3} intervals to complete, "
-        f"{df['day'].max() + 1:>2} sessions, "
+        f"{df['session_number'].max() + 1:>2} sessions, "
         f"avg participation: {df['participation'].mean():.1%}"
     )
+
+comparison_df = pl.DataFrame(
+    [
+        {
+            "participation_limit": rate,
+            "intervals_to_complete": df.height,
+            "sessions_to_complete": df["session_number"].max() + 1,
+            "avg_participation": df["participation"].mean(),
+            "vwap": df["cumulative_cost"][-1] / df["cumulative_shares"][-1],
+        }
+        for rate, df in results.items()
+    ]
+)
 
 # %% [markdown]
 # **Finding**: Against real liquidity the cap is the only lever that changes, so
@@ -352,7 +387,7 @@ fig = make_subplots(
     subplot_titles=["5% Participation", "10% Participation", "25% Participation"],
 )
 
-colors = ["#2E86AB", "#A23B72", "#F18F01"]
+colors = [COLORS["blue"], COLORS["amber"], COLORS["copper"]]
 
 for i, (rate, df) in enumerate(results.items()):
     if df.height == 0:
@@ -367,24 +402,38 @@ for i, (rate, df) in enumerate(results.items()):
         row=1,
         col=i + 1,
     )
-    fig.add_hline(y=100, line_dash="dash", line_color="gray", row=1, col=i + 1)
+    fig.add_hline(
+        y=100,
+        line_dash="dash",
+        line_color=COLORS["neutral"],
+        row=1,
+        col=i + 1,
+    )
 
-fig.update_xaxes(title_text="Interval (filled)")
-fig.update_yaxes(title_text="% Filled", range=[0, 110])
+fig.update_xaxes(title_text="Executed interval (count)")
+fig.update_yaxes(title_text="Parent order filled (%)", range=[0, 105])
 fig.update_layout(
-    title="Order Fill Progression by Participation Limit",
+    title="Higher participation caps shorten the completion horizon",
     height=400,
     showlegend=False,
 )
 fig.show()
 
-# %% [markdown]
-# **Finding**: Completion time scales roughly inversely with the cap. Against real
-# AAPL liquidity the half-ADV order clears in 307 intervals (12 sessions) at a 5%
-# cap, 135 intervals (6 sessions) at 10%, and 50 intervals (2 sessions) at 25%.
-# Each step up in the cap shortens the horizon about proportionally; the price paid
-# is a proportionally larger participation share each interval, and therefore more
-# market-impact risk per fill.
+# %%
+summary = {row["participation_limit"]: row for row in comparison_df.iter_rows(named=True)}
+display(
+    Markdown(
+        "**Finding**: The calibrated half-ADV order clears in "
+        f"{summary[0.05]['intervals_to_complete']} intervals "
+        f"({summary[0.05]['sessions_to_complete']} sessions) at a 5% cap, "
+        f"{summary[0.10]['intervals_to_complete']} intervals "
+        f"({summary[0.10]['sessions_to_complete']} sessions) at 10%, and "
+        f"{summary[0.25]['intervals_to_complete']} intervals "
+        f"({summary[0.25]['sessions_to_complete']} sessions) at 25%. "
+        "The faster schedule consumes more of each interval's liquidity and "
+        "therefore accepts more market-impact risk per fill."
+    )
+)
 
 # %% [markdown]
 # ## Part 4: Large Order Execution Timeline
@@ -401,17 +450,20 @@ for rate, df in results.items():
     vwap = df["cumulative_cost"][-1] / df["cumulative_shares"][-1]
     print(f"\n{rate:.0%} Participation Limit:")
     print(f"  Intervals to complete:  {df.height}")
-    print(f"  Sessions to complete:   {df['day'].max() + 1}")
+    print(f"  Sessions to complete:   {df['session_number'].max() + 1}")
     print(f"  Realized VWAP:          ${vwap:.4f}")
     print(f"  Avg participation:      {df['participation'].mean():.1%}")
 
-# %% [markdown]
-# **Finding**: Realized VWAP differs across caps ($141.90 at 5%, $140.93 at 10%,
-# $140.21 at 25%) purely because the three executions span different windows of a
-# trending market: AAPL rose through Q4 2021, so the tighter cap — finishing 12
-# sessions later — averaged over higher prices. That is timing/drift risk, the
-# genuine cost of slow execution, and it is distinct from the per-interval
-# participation footprint that the participation-rate panel measures.
+# %%
+display(
+    Markdown(
+        "**Finding**: Realized VWAP differs across caps "
+        f"(${summary[0.05]['vwap']:.2f} at 5%, ${summary[0.10]['vwap']:.2f} at 10%, "
+        f"and ${summary[0.25]['vwap']:.2f} at 25%) because the schedules span "
+        "different market-price windows. This timing or drift risk is distinct "
+        "from the participation footprint measured within each interval."
+    )
+)
 
 # %% [markdown]
 # ### Visualize Execution Timeline
@@ -430,7 +482,7 @@ fig = make_subplots(
     horizontal_spacing=0.1,
 )
 
-colors = {0.05: "#2E86AB", 0.10: "#A23B72", 0.25: "#F18F01"}
+colors = {0.05: COLORS["blue"], 0.10: COLORS["amber"], 0.25: COLORS["copper"]}
 
 # %% [markdown]
 # ### Trace Helper for the Four-Panel Diagnostic
@@ -469,7 +521,7 @@ for rate, df in results.items():
 
 # %%
 # Finalize execution diagnostics panel
-fig.add_hline(y=100, line_dash="dash", line_color="gray", row=1, col=1)
+fig.add_hline(y=100, line_dash="dash", line_color=COLORS["neutral"], row=1, col=1)
 
 fig.update_xaxes(title_text="Interval", row=2, col=1)
 fig.update_xaxes(title_text="Interval", row=2, col=2)
@@ -479,7 +531,7 @@ fig.update_yaxes(title_text="Price ($)", row=2, col=1)
 fig.update_yaxes(title_text="Participation (%)", row=2, col=2)
 
 fig.update_layout(
-    title="Large Order Execution: Participation Rate Comparison",
+    title="Tighter caps extend the horizon and spread fills across liquidity",
     height=600,
     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
 )
@@ -596,7 +648,33 @@ for vol in volume_levels:
     )
 
 gate_df = pl.DataFrame(gate_rows)
-gate_df
+
+# %% [markdown]
+# The grouped bars isolate the gate's discontinuity: below the threshold the
+# permitted fill drops to zero, while both policies agree once volume recovers.
+
+# %%
+fig = go.Figure()
+fig.add_bar(
+    x=[f"{volume:,}" for volume in gate_df["bar_volume"]],
+    y=gate_df["no_gate_fill"].to_list(),
+    name="No minimum-volume gate",
+    marker_color=COLORS["amber"],
+)
+fig.add_bar(
+    x=[f"{volume:,}" for volume in gate_df["bar_volume"]],
+    y=gate_df["gate_5k_fill"].to_list(),
+    name="5,000-share minimum",
+    marker_color=COLORS["blue"],
+)
+fig.update_layout(
+    title="The minimum-volume gate blocks fills below 5,000 shares",
+    barmode="group",
+    xaxis_title="Realized bar volume (shares)",
+    xaxis_type="category",
+    yaxis_title="Permitted fill (shares)",
+)
+fig.show()
 
 # %% [markdown]
 # **Finding**: A minimum-volume gate is a second layer of execution discipline.
@@ -631,21 +709,6 @@ gate_df
 # [`08_ml_dynamic_execution`](08_ml_dynamic_execution.ipynb) for adaptive execution policies.
 
 # %%
-# Save comparison data
-comparison_df = pl.DataFrame(
-    [
-        {
-            "participation_limit": f"{rate:.0%}",
-            "bars_to_complete": len(df),
-            "days_to_complete": df["day"].max() + 1 if len(df) > 0 else 0,
-            "avg_participation": df["participation"].mean() if len(df) > 0 else 0,
-            "vwap": df["cumulative_cost"][-1] / df["cumulative_shares"][-1] if len(df) > 0 else 0,
-        }
-        for rate, df in results.items()
-    ]
-)
-
-print("Volume participation comparison:")
 comparison_df
 
 # %% [markdown]
@@ -657,10 +720,10 @@ comparison_df
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Participation caps mechanize footprint discipline**: a 10% cap on a
-#    100,000-share bar releases at most 10,000 shares regardless of how
-#    aggressive the parent order is. The cap is the operational rule that
-#    turns a target schedule into a sequence of executable child orders.
+# 1. **Participation caps mechanize footprint discipline**: the cap limits each
+#    child fill to a fixed share of cumulative market volume, regardless of how
+#    aggressive the parent order is. This turns a target schedule into a
+#    sequence of executable child orders.
 #
 # 2. **Partial-fill arithmetic is additive across bars**: `ExecutionResult`
 #    returns `fillable_quantity` for the current bar and `remaining_quantity`
@@ -669,16 +732,16 @@ comparison_df
 #    absorb.
 #
 # 3. **Completion time scales inversely with the cap**: against real AAPL
-#    liquidity a half-ADV order clears in 12 sessions at a 5% cap, 6 at 10%,
-#    and 2 at 25%. The speedup is roughly proportional to the cap, but so is
-#    the participation footprint consumed each interval — and impact rises
+#    liquidity, higher caps clear the same calibrated half-ADV order in fewer
+#    intervals and sessions. The speedup is roughly proportional to the cap,
+#    but so is the participation footprint consumed each interval, and impact rises
 #    with that footprint, so the genuine cost of a higher cap is impact risk,
 #    not a worse benchmark fill.
 #
 # 4. **Minimum-volume gates are a second layer of control**: caps without a
 #    gate still execute on thin bars, where even a small participation share
 #    is dangerous. A `min_volume` threshold blocks fills entirely until
-#    liquidity recovers — the right rule for lunch-hour or halted markets.
+#    liquidity recovers - the right rule for lunch-hour or halted markets.
 #
 # 5. **Volume limits and impact models answer different questions**: the
 #    limit decides *how much* trades now; the impact model decides *what

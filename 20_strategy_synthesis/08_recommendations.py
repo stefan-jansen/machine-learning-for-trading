@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -52,7 +52,7 @@ warnings.filterwarnings("ignore")
 
 from utils.paths import get_chapter_dir
 
-# %% tags=["parameters"]
+# %%
 MAX_SYMBOLS = 0
 
 # %%
@@ -69,6 +69,9 @@ DISPLAY_NAMES = {
     "sp500_options": "S&P 500 Options",
     "us_equities_panel": "US Equities",
 }
+NASDAQ_ID = "nasdaq100_microstructure"
+NASDAQ_ACTIVE_HOLDOUT_HASH = "eb3da38446fe"
+NASDAQ_HOLDOUT_CI95 = (-2.07942782097352, 3.71411455717823)
 
 # %% [markdown]
 # ## 1. Load Pipeline Data
@@ -82,6 +85,15 @@ synthesis = json.load((OUTPUT_DIR / "all_synthesis.json").open())
 # Registry-based holdout results (more current than synthesis JSON)
 holdout_df = pl.read_parquet(OUTPUT_DIR / "holdout_results.parquet")
 holdout_map = {row["cs_id"]: row for row in holdout_df.iter_rows(named=True)}
+
+nasdaq_holdout = holdout_map.get(NASDAQ_ID)
+if (
+    nasdaq_holdout is None
+    or nasdaq_holdout.get("holdout_backtest_hash") != NASDAQ_ACTIVE_HOLDOUT_HASH
+):
+    raise RuntimeError(
+        "NASDAQ-100 v3.0 holdout row is absent or superseded; refusing historical fallback."
+    )
 
 print(f"Loaded synthesis for {len(synthesis)} case studies")
 print(f"Holdout results for {holdout_df.height} case studies")
@@ -160,12 +172,18 @@ for cs in cost_surviving:
         holdout_passing.add(cs)
 stages.append(("Holdout SR > 0", holdout_passing))
 
-# Gate 5: Risk overlay doesn't destroy the edge. Case studies whose risk
+# Gate 5: Risk overlay doesn't destroy the edge, and active uncertainty evidence
+# is sufficient for a deployment-facing classification. Case studies whose risk
 # stage is not applicable (sp500_options HTM expiration structure;
 # us_firm_characteristics vectorized path with portfolio overlays purged)
 # pass through rather than being eliminated.
 all_gates_pass = set()
 for cs in holdout_passing:
+    if cs == NASDAQ_ID:
+        # The fixed carrier is positive on point estimate, but both corrected
+        # validation and holdout intervals cross zero. Broad cost and risk grids
+        # are also deferred to v3.1, so it cannot clear the evidence gate.
+        continue
     risk = synthesis[cs]["pipeline_summary"].get("risk", {})
     if risk.get("not_applicable_reason"):
         all_gates_pass.add(cs)
@@ -173,7 +191,7 @@ for cs in holdout_passing:
     managed_sr = risk.get("managed_sharpe")
     if managed_sr is not None and managed_sr > 0:
         all_gates_pass.add(cs)
-stages.append(("Managed SR > 0", all_gates_pass))
+stages.append(("Evidence ready", all_gates_pass))
 
 # Print the funnel
 print("=== Stage Attrition Funnel ===\n")
@@ -319,6 +337,16 @@ def classify_exclusions():
             exclusions["Unacceptable drawdown"].append(
                 {"cs": display, "detail": f"Max DD = {worst_dd:.0f}%"}
             )
+
+        if cs == NASDAQ_ID:
+            exclusions["Statistically unresolved"].append(
+                {
+                    "cs": display,
+                    "detail": (
+                        "Fixed-carrier holdout SR = +0.411, CI95 [-2.079, +3.714]; not deployable"
+                    ),
+                }
+            )
     return exclusions
 
 
@@ -341,6 +369,7 @@ BUCKETS = {
         "Holdout collapse",
         "Holdout not available",
         "Unreproducible model",
+        "Statistically unresolved",
     ],
 }
 
@@ -418,6 +447,7 @@ def build_evidence_profile():
         else:
             holdout_decay = None
         modest_decay = holdout_decay is not None and holdout_decay < 0.50
+        evidence_resolved = cs != NASDAQ_ID
 
         # Gate tally as passed/applicable. Not-applicable stages (cost or
         # risk) are excluded from both numerator and denominator rather than
@@ -429,6 +459,7 @@ def build_evidence_profile():
             (True, positive_holdout),
             (not risk_na, positive_managed),
             (True, modest_decay),
+            (True, evidence_resolved),
         ]
         gates_passed = sum(1 for appl, passed in gate_flags if appl and passed)
         gates_applicable = sum(1 for appl, _ in gate_flags if appl)
@@ -449,6 +480,7 @@ def build_evidence_profile():
                 "positive_holdout": positive_holdout,
                 "positive_managed": positive_managed,
                 "modest_decay": modest_decay,
+                "evidence_resolved": evidence_resolved,
                 "best_ic": round(best_ic, 4),
                 "holdout_sharpe": round(ho_sharpe, 2) if ho_sharpe is not None else None,
                 "net_sharpe": round(net_sr, 2) if net_sr is not None else None,
@@ -521,6 +553,7 @@ for cs, data in synthesis.items():
         and ho_sharpe > 0
         and costs.get("survives_costs", False)
         and cs != "sp500_options"  # Known evidence issue: spread overwhelms signal
+        and cs != NASDAQ_ID  # Fixed-carrier intervals cross zero; broad grids deferred
     )
 
     structural_rows.append(
@@ -576,9 +609,10 @@ if full_pass.height > 0 and gate_miss.height > 0:
 # - **Daily frequency** case studies most often pass every gate — the
 #   cadence balances signal decay against cost pressure.
 # - **Higher-frequency** case studies split on outcome: Crypto (8h) clears
-#   the cost gate on its gross signal but collapses out-of-sample (holdout
-#   Sharpe −0.13), while NASDAQ-100 (15min) clears every gate — its pinned
-#   ensemble carrier carries a +0.53 holdout Sharpe and a 1.06 managed Sharpe.
+#   the cost gate on its gross signal but has holdout Sharpe -0.13.
+#   NASDAQ-100's fixed ensemble carrier has corrected holdout Sharpe +0.411
+#   with CI95 [-2.079, +3.714]. It does not clear the evidence gate and remains
+#   marginal, statistically unresolved, and not deployable.
 # - **Signal strength alone does not drive gate passage** — S&P 500 Options
 #   has positive IC and a positive holdout Sharpe under the bottom-quintile
 #   liquid-universe construction, but the HTM cost cascade pushes the best
@@ -629,6 +663,12 @@ for row in evidence_df.iter_rows(named=True):
 # which we are scoring ensembles against single-model rank-1
 # configurations. It belongs in the "next iteration" list at the
 # end of this section.
+#
+# NASDAQ-100 is the bounded exception in this release: its ensemble was fixed
+# before holdout scoring as diversification under overlapping validation
+# uncertainty. The corrected positive linear holdout is a comparator only and
+# cannot be used to reselect the carrier or describe the ensemble as an ex-post
+# rescue.
 
 # %% [markdown]
 # ## Key Takeaways

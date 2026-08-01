@@ -18,13 +18,13 @@
 #
 # **Docker image**: `ml4t`
 #
-# Side-by-side comparison of all 6 commission models and 5 slippage models in
-# `ml4t.backtest.models`. We compute costs for identical trades across varying
-# sizes, define 4 asset-class cost stacks, and measure the P&L sensitivity and
-# frequency sensitivity of model choice.
+# This notebook compares every commission and slippage model in
+# `ml4t.backtest.models`. It separates equity shares from futures contracts,
+# defines illustrative asset-class cost stacks, and measures how commission
+# choice interacts with the cadence of a fixed momentum rule.
 #
 # **Learning Objectives**
-# - Instantiate and compare all 6 commission models and 5 slippage models
+# - Instantiate and compare the complete commission and slippage model taxonomy
 # - Build asset-class-specific cost configurations (equities, ETFs, futures, crypto)
 # - Quantify how much model choice affects net Sharpe for different trading styles
 # - Understand the frequency-cost interaction (daily vs weekly vs monthly)
@@ -39,15 +39,9 @@
 # %%
 """Commission & Slippage Model Comparison."""
 
-import warnings
-
 import plotly.graph_objects as go
 import polars as pl
-from IPython.display import display
-from plotly.subplots import make_subplots
-
-warnings.filterwarnings("ignore")
-
+from IPython.display import Markdown, display
 from ml4t.backtest import (
     BacktestConfig,
     DataFeed,
@@ -66,19 +60,20 @@ from ml4t.backtest.models import (
     PercentageCommission,
     PercentageSlippage,
     PerShareCommission,
+    SpreadSlippage,
     TieredCommission,
     VolumeShareSlippage,
 )
+from plotly.subplots import make_subplots
 
 # Side-effect import: configures the default Plotly renderer to embed PNG
 # alongside the interactive widget so figures render on GitHub when the
 # rendered .ipynb is browsed without a live Plotly runtime.
 import utils  # noqa: F401
 from data import load_etfs
-from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 # %% tags=["parameters"]
-SEED = 42
 N_BARS = 1260  # 5 years daily
 INITIAL_CASH = 100_000
 ETF_SYMBOLS = ["SPY", "QQQ", "IWM", "XLF", "EEM"]  # liquid, distinct sectors/regions
@@ -86,140 +81,252 @@ START_DATE = "2019-01-02"
 END_DATE = "2023-12-29"
 MOMENTUM_LOOKBACK = 63  # trading days (~quarter) for the rebalance signal
 
-# %%
-set_global_seeds(SEED)
-
 # %% [markdown]
 # ## 1. Commission Model Taxonomy
 #
-# The library provides 6 commission models, from zero-cost to futures-specific.
-# We compute commission for identical trades at varying order sizes and prices
-# to compare their cost profiles.
+# Equity-style commission models accept share quantity and price. The futures
+# model instead accepts contracts, price, and a contract multiplier. Keeping
+# those unit systems separate prevents a contract count from being mislabeled
+# as shares.
 
 # %%
-commission_models = {
+equity_commission_models = {
     "NoCommission": NoCommission(),
     "Percentage (10bp)": PercentageCommission(rate=0.001),
     "PerShare ($0.005)": PerShareCommission(per_share=0.005, minimum=1.0),
     "Combined (5bp + $1)": CombinedCommission(percentage=0.0005, fixed=1.0),
     "Tiered": TieredCommission(tiers=[(10_000, 0.001), (50_000, 0.0008), (float("inf"), 0.0005)]),
-    "Futures ($2.25/ct)": FuturesCommission(per_block=2.25),
 }
+futures_commission_model = FuturesCommission(per_block=2.25)
+commission_models = {**equity_commission_models, "FuturesCommission": futures_commission_model}
 
-# Test scenarios: (quantity, price)
-test_sizes = [10, 50, 100, 500, 1000, 5000, 10000]
-test_prices = [50.0, 100.0, 500.0]
+SHARE_PRICE = 100.0
+SHARE_QUANTITIES = [10, 50, 100, 500, 1000, 5000, 10000]
 
 commission_rows = []
-for price in test_prices:
-    for name, model in commission_models.items():
-        row = {"price": price, "model": name}
-        for qty in test_sizes:
-            if name == "Futures ($2.25/ct)":
-                cost = model.calculate("TEST", qty, price, multiplier=50.0)
-            else:
-                cost = model.calculate("TEST", qty, price)
-            row[f"{qty}sh"] = cost
-        commission_rows.append(row)
-
+for name, model in equity_commission_models.items():
+    for quantity in SHARE_QUANTITIES:
+        notional = quantity * SHARE_PRICE
+        cost = model.calculate("TEST", quantity, SHARE_PRICE)
+        commission_rows.append(
+            {
+                "model": name,
+                "quantity": quantity,
+                "notional": notional,
+                "cost": cost,
+                "cost_bps": cost / notional * 10_000,
+            }
+        )
 commission_df = pl.DataFrame(commission_rows)
 
-for price in test_prices:
-    print(f"\n--- Price: ${price:.0f} ---")
-    display(commission_df.filter(pl.col("price") == price).drop("price"))
+# %% [markdown]
+# ### Compare Equity-Style Cost Profiles
+
+# %%
+profile_colors = [
+    COLORS["neutral"],
+    COLORS["negative"],
+    COLORS["blue"],
+    COLORS["amber"],
+    COLORS["positive"],
+]
+profile_dashes = ["dot", "solid", "dash", "dashdot", "longdash"]
+fig = go.Figure()
+for (name, _model), color, dash in zip(
+    equity_commission_models.items(), profile_colors, profile_dashes, strict=True
+):
+    subset = commission_df.filter(pl.col("model") == name)
+    fig.add_trace(
+        go.Scatter(
+            x=subset["notional"].to_list(),
+            y=subset["cost_bps"].to_list(),
+            name=name,
+            mode="lines+markers",
+            line=dict(color=color, dash=dash),
+            customdata=subset["quantity"].to_list(),
+            hovertemplate="Notional: $%{x:,.0f}<br>Quantity: %{customdata:,.0f} shares"
+            "<br>Commission: %{y:.2f} bps<extra>%{fullData.name}</extra>",
+        )
+    )
+fig.update_layout(
+    title="Minimum Fees Matter Most for Small Equity Tickets",
+    xaxis_title=f"Trade notional at ${SHARE_PRICE:,.0f} per share (log scale)",
+    yaxis_title="One-way commission (bps of notional)",
+    xaxis_type="log",
+    height=430,
+)
+fig.show()
 
 # %% [markdown]
-# **Finding**: The commission table highlights the fixed-versus-proportional
-# trade-off. Small tickets are dominated by minimums and fixed fees, while large
-# tickets quickly become a notional-based cost problem.
+# **Finding**: Percentage fees stay constant in basis-point terms. Minimum and
+# fixed fees consume a larger share of small tickets, while per-share costs and
+# tier thresholds create different profiles as notional grows.
 
 # %% [markdown]
-# **Observations**:
-# - **NoCommission** is always zero (useful as a reference for isolating other costs)
-# - **PercentageCommission** scales linearly with trade value --- $50 at 100 shares of
-#   a $500 stock
-# - **PerShareCommission** is independent of price --- favors high-priced stocks
-#   (lower cost as % of value)
-# - **TieredCommission** drops the per-unit rate as trade value increases (institutional
-#   volume discounts)
-# - **CombinedCommission** has a fixed floor plus a percentage --- the fixed component
-#   dominates for small trades
-# - **FuturesCommission** is per-contract (per-block), independent of price; the
-#   multiplier converts to notional value
-#
-# **Bps-normalized futures example**: a 10-contract ES trade at $4,000 with
-# multiplier $50 has notional $4,000 x 50 x 10 = $2,000,000. At
-# `FuturesCommission(per_block=2.25)` the commission is $22.50, which is
-# $22.50 / $2,000,000 = 0.11 bps of notional. The raw dollar amount looks
-# small compared to a percentage-fee equity ticket, but per-block commissions
-# only make sense once normalized against the multiplier-adjusted notional.
+# ### Normalize a Futures Contract Example
+
+# %%
+FUTURES_QUANTITY = 10
+FUTURES_PRICE = 4_000.0
+FUTURES_MULTIPLIER = 50.0
+futures_notional = FUTURES_QUANTITY * FUTURES_PRICE * FUTURES_MULTIPLIER
+futures_commission = futures_commission_model.calculate(
+    "ES", FUTURES_QUANTITY, FUTURES_PRICE, multiplier=FUTURES_MULTIPLIER
+)
+futures_commission_bps = futures_commission / futures_notional * 10_000
+display(
+    Markdown(
+        f"**Futures example**: {FUTURES_QUANTITY} contracts at "
+        f"${FUTURES_PRICE:,.0f} with a ${FUTURES_MULTIPLIER:,.0f} multiplier "
+        f"represent **${futures_notional:,.0f}** of notional. The per-contract "
+        f"schedule charges **${futures_commission:,.2f}**, or "
+        f"**{futures_commission_bps:.2f} bps one way**."
+    )
+)
 
 # %% [markdown]
 # ## 2. Slippage Model Taxonomy
 #
-# The 5 slippage models return per-unit price adjustment (except FuturesSlippage
-# which returns total cost). We compute slippage for varying order sizes
-# relative to bar volume.
+# Most slippage models return a per-unit price adjustment. `SpreadSlippage`
+# treats its input as a full quoted spread by default and charges the
+# half-spread per side. `FuturesSlippage` returns total dollars, so it remains
+# separate from the participation profile.
 
 # %%
-# Standard slippage models (return per-unit price adjustment)
-slippage_models = {
+per_unit_slippage_models = {
     "NoSlippage": NoSlippage(),
     "Fixed ($0.01)": FixedSlippage(amount=0.01),
+    "Spread ($0.04 full)": SpreadSlippage(spread=0.04),
     "Percentage (10bp)": PercentageSlippage(rate=0.001),
     "VolumeShare (0.1)": VolumeShareSlippage(impact_factor=0.1),
 }
+futures_slippage_model = FuturesSlippage(slippage_points=0.25)
+slippage_models = {**per_unit_slippage_models, "FuturesSlippage": futures_slippage_model}
 
-# Test at different participation rates
-price = 100.0
-volume = 1_000_000
-participation_rates = [0.001, 0.005, 0.01, 0.02, 0.05, 0.10, 0.20]
-
-print(f"\nSlippage Model Comparison (Price: ${price:.0f}, Volume: {volume:,.0f})")
+SLIPPAGE_PRICE = 100.0
+BAR_VOLUME = 1_000_000
+PARTICIPATION_RATES = [0.001, 0.005, 0.01, 0.02, 0.05, 0.10, 0.20]
 
 slippage_rows = []
-for name, model in slippage_models.items():
-    row = {"model": name}
-    for pct in participation_rates:
-        qty = volume * pct
-        slip = model.calculate("TEST", qty, price, volume)
-        row[f"{pct:.1%}"] = slip
-    slippage_rows.append(row)
-
+for name, model in per_unit_slippage_models.items():
+    for participation in PARTICIPATION_RATES:
+        quantity = BAR_VOLUME * participation
+        adjustment = model.calculate("TEST", quantity, SLIPPAGE_PRICE, BAR_VOLUME)
+        slippage_rows.append(
+            {
+                "model": name,
+                "participation": participation,
+                "adjustment": adjustment,
+                "cost_bps": adjustment / SLIPPAGE_PRICE * 10_000,
+            }
+        )
 slippage_df = pl.DataFrame(slippage_rows)
-display(slippage_df)
 
 # %% [markdown]
-# **Finding**: The slippage table separates fixed execution frictions from
-# participation-sensitive impact. That distinction matters because only the
-# latter gets materially worse as order size consumes more of the bar volume.
+# ### Compare Per-Unit Slippage Profiles
 
 # %%
-# FuturesSlippage comparison (returns total cost, not per-unit)
-futures_slip = FuturesSlippage(slippage_points=0.25)
-print("\nFuturesSlippage (0.25 points, multiplier=50):")
-for n_contracts in [1, 2, 5, 10, 25, 50]:
-    cost = futures_slip.calculate("ES", n_contracts, 4000.0, multiplier=50.0)
-    print(f"  {n_contracts:>3d} contracts: ${cost:.2f} total")
+slippage_styles = {
+    name: (color, dash)
+    for (name, _model), color, dash in zip(
+        per_unit_slippage_models.items(), profile_colors, profile_dashes, strict=True
+    )
+}
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=["Participation-invariant assumptions", "Volume-share response"],
+    horizontal_spacing=0.15,
+)
+for name in ["NoSlippage", "Fixed ($0.01)", "Spread ($0.04 full)", "Percentage (10bp)"]:
+    subset = slippage_df.filter(pl.col("model") == name)
+    color, dash = slippage_styles[name]
+    fig.add_trace(
+        go.Scatter(
+            x=subset["participation"].to_list(),
+            y=subset["cost_bps"].to_list(),
+            name=name,
+            mode="lines+markers",
+            line=dict(color=color, dash=dash),
+            hovertemplate="Participation: %{x:.1%}<br>Slippage: %{y:.2f} bps"
+            "<extra>%{fullData.name}</extra>",
+        ),
+        row=1,
+        col=1,
+    )
 
 # %% [markdown]
-# **Finding**: Futures slippage behaves differently because the contract
-# multiplier converts a small tick move into a meaningful dollar cost. That is
-# why futures transaction costs should be reasoned about in ticks and blocks,
-# not only in percentage terms.
+# ### Add the Participation-Sensitive Panel
+#
+# The percentage curve supplies a constant 10 bps reference beside the
+# volume-share response and makes their computed crossover visible.
+
+# %%
+for name in ["Percentage (10bp)", "VolumeShare (0.1)"]:
+    subset = slippage_df.filter(pl.col("model") == name)
+    color, dash = slippage_styles[name]
+    fig.add_trace(
+        go.Scatter(
+            x=subset["participation"].to_list(),
+            y=subset["cost_bps"].to_list(),
+            name=name,
+            mode="lines+markers",
+            line=dict(color=color, dash=dash),
+            showlegend=name == "VolumeShare (0.1)",
+            hovertemplate="Participation: %{x:.1%}<br>Slippage: %{y:.2f} bps"
+            "<extra>%{fullData.name}</extra>",
+        ),
+        row=1,
+        col=2,
+    )
+fig.update_xaxes(title_text="Order participation", tickformat=".0%", row=1, col=1)
+fig.update_xaxes(title_text="Order participation", tickformat=".0%", row=1, col=2)
+fig.update_yaxes(title_text="One-way slippage (bps)", range=[-0.5, 11.5], row=1, col=1)
+fig.update_yaxes(title_text="One-way slippage (bps)", row=1, col=2)
+fig.update_layout(
+    title="Only Volume-Share Slippage Responds to Participation",
+    height=450,
+    legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+    margin=dict(b=95),
+)
+fig.show()
 
 # %% [markdown]
-# **Key Difference**: VolumeShareSlippage is the only model that depends on
-# order size relative to volume --- it captures the market impact of large
-# orders. At 1% participation, VolumeShareSlippage is comparable to
-# PercentageSlippage. At 10%+, it becomes substantially more expensive,
-# reflecting the reality that large orders move prices.
+# **Finding**: Fixed, spread, and percentage assumptions do not respond to bar
+# participation. The volume-share model does, so it is the only curve here that
+# changes when the same price and volume face a larger order.
+
+# %%
+# `FuturesSlippage` returns total dollars rather than a per-unit adjustment.
+futures_slippage = futures_slippage_model.calculate(
+    "ES", FUTURES_QUANTITY, FUTURES_PRICE, multiplier=FUTURES_MULTIPLIER
+)
+futures_slippage_bps = futures_slippage / futures_notional * 10_000
+volume_share_crossover = (
+    per_unit_slippage_models["Percentage (10bp)"].rate
+    / per_unit_slippage_models["VolumeShare (0.1)"].impact_factor
+)
+display(
+    Markdown(
+        f"**Futures example**: {FUTURES_QUANTITY} contracts with "
+        f"{futures_slippage_model.slippage_points:.2f} points of slippage cost "
+        f"**${futures_slippage:,.2f}**, or **{futures_slippage_bps:.2f} bps one way**. "
+        f"In the per-unit profile, volume-share slippage meets the 10 bps "
+        f"percentage assumption at **{volume_share_crossover:.1%} participation**."
+    )
+)
+
+# %% [markdown]
+# **Finding**: Contract multipliers convert a small price-point move into total
+# dollars. Futures costs therefore require explicit contract, point, and
+# multiplier units before they can be compared with basis-point schedules.
 
 # %% [markdown]
 # ## 3. Asset-Class Cost Configurations
 #
-# We define representative cost stacks for 4 asset classes and compare
-# round-trip costs for a standard trade.
+# We define four illustrative, one-way cost stacks. Each row is a different
+# unit-aware scenario, not a claim that the markets share a common ticket size
+# or that the assumptions estimate a particular broker or venue.
 
 # %%
 asset_class_configs = {
@@ -229,7 +336,7 @@ asset_class_configs = {
         "trade_qty": 200,
         "trade_price": 150.0,
         "trade_volume": 2_000_000,
-        "description": "IB-style per-share with tight spreads",
+        "description": "Illustrative per-share fee with percentage slippage",
     },
     "ETFs (institutional)": {
         "commission": PercentageCommission(rate=0.0003),
@@ -246,7 +353,7 @@ asset_class_configs = {
         "trade_qty": 5,
         "trade_price": 5000.0,
         "trade_volume": 50_000,
-        "description": "Per-contract IB rates, 1-tick slippage (point-value $50)",
+        "description": "Illustrative per-contract fee and one-tick slippage",
     },
     "Crypto (spot)": {
         "commission": PercentageCommission(rate=0.001),
@@ -254,32 +361,26 @@ asset_class_configs = {
         "trade_qty": 0.5,
         "trade_price": 40_000.0,
         "trade_volume": 500,
-        "description": "Maker/taker + wide spread",
+        "description": "Illustrative percentage fee and slippage",
     },
 }
 
 # %% [markdown]
-# ### Compute Round-Trip Costs for Each Asset Class
+# ### Compute One-Way Costs for Each Asset Class
 
 
 # %%
 def asset_class_cost_row(asset_class: str, cfg: dict) -> dict:
-    """Evaluate one representative trade under its commission and slippage stack.
-
-    For futures, `multiplier` converts contracts to notional dollars and is
-    threaded into both the commission and slippage models that accept it.
-    `FuturesSlippage.calculate` already returns total dollar cost, so it is
-    not multiplied by quantity again; per-unit slippage models (Fixed,
-    Percentage, VolumeShare) are multiplied by `abs(qty)` to total them.
-    """
+    """Evaluate one representative trade under a unit-aware one-way cost stack."""
     qty = cfg["trade_qty"]
     price = cfg["trade_price"]
     vol = cfg["trade_volume"]
     multiplier = cfg.get("multiplier", 1.0)
     trade_value = abs(qty * price * multiplier)
+    if trade_value <= 0:
+        raise ValueError("trade notional must be positive")
 
     commission_model = cfg["commission"]
-    # FuturesCommission accepts multiplier; non-futures models ignore it.
     if isinstance(commission_model, FuturesCommission):
         commission = commission_model.calculate("TEST", qty, price, multiplier=multiplier)
     else:
@@ -287,114 +388,151 @@ def asset_class_cost_row(asset_class: str, cfg: dict) -> dict:
 
     slippage_model = cfg["slippage"]
     if isinstance(slippage_model, FuturesSlippage):
-        # Returns total dollar cost already; do not multiply by qty.
         slippage = slippage_model.calculate("TEST", qty, price, vol, multiplier=multiplier)
     else:
         slippage = slippage_model.calculate("TEST", qty, price, vol) * abs(qty)
 
     total = commission + slippage
-    total_bps = total / trade_value * 10_000 if trade_value > 0 else 0.0
+    total_bps = total / trade_value * 10_000
     return {
         "asset_class": asset_class,
         "trade_value": trade_value,
         "commission": commission,
         "slippage": slippage,
+        "commission_bps": commission / trade_value * 10_000,
+        "slippage_bps": slippage / trade_value * 10_000,
         "total": total,
         "total_bps": total_bps,
         "description": cfg["description"],
     }
 
 
-# %%
-print("\nAsset-Class Cost Stacks")
+# %% [markdown]
+# ### Evaluate the Four Illustrative Tickets
+#
+# The calculation calls each commission and slippage model once. Its output is
+# therefore a one-way cost for the specified trade, not a round trip.
 
+# %%
 rows = [asset_class_cost_row(asset_class, cfg) for asset_class, cfg in asset_class_configs.items()]
 
 # %% [markdown]
-# **Interpretation**: The asset-class rows translate abstract model definitions into
-# realistic trading stacks. Once the same trade is priced under each market’s native
-# fee logic, the relevant modeling differences become much easier to see.
+# **Interpretation**: The four rows translate abstract model definitions into
+# native-unit scenarios. Comparing component shares avoids letting the largest
+# basis-point total hide the composition of the smaller stacks.
 
 # %%
-for row in rows:
-    trade_value = row["trade_value"]
-    print(f"\n  {row['asset_class']} ({row['description']}):")
-    print(f"    Trade value:  ${trade_value:,.0f}")
-    print(
-        f"    Commission:   ${row['commission']:,.2f} ({row['commission'] / trade_value * 10_000:.1f} bps)"
-    )
-    print(
-        f"    Slippage:     ${row['slippage']:,.2f} ({row['slippage'] / trade_value * 10_000:.1f} bps)"
-    )
-    print(f"    Total:        ${row['total']:,.2f} ({row['total_bps']:.1f} bps)")
-
-# %% [markdown]
-# **Finding**: The asset-class table shows why cost modeling must be specific to
-# the instrument. In some markets commission is negligible and slippage dominates;
-# in others a fixed fee floor matters more than impact.
-
-# %%
-# Visualize cost breakdown by asset class
-cost_df = pl.DataFrame(rows)
-
+slippage_dominant = sum(row["slippage_bps"] > row["commission_bps"] for row in rows)
 fig = go.Figure()
 fig.add_trace(
     go.Bar(
         x=[r["asset_class"] for r in rows],
-        y=[r["commission"] / r["trade_value"] * 10_000 for r in rows],
-        name="Commission (bps)",
-        marker_color="#1f77b4",
+        y=[r["commission_bps"] / r["total_bps"] * 100 for r in rows],
+        name="Commission share",
+        marker_color=COLORS["blue"],
+        marker_pattern_shape="/",
+        customdata=[[r["commission_bps"], r["total_bps"]] for r in rows],
+        hovertemplate="Commission: %{customdata[0]:.2f} bps"
+        "<br>One-way total: %{customdata[1]:.2f} bps<extra></extra>",
     )
 )
-fig.add_trace(
+_ = fig.add_trace(
     go.Bar(
         x=[r["asset_class"] for r in rows],
-        y=[r["slippage"] / r["trade_value"] * 10_000 for r in rows],
-        name="Slippage (bps)",
-        marker_color="#ff7f0e",
+        y=[r["slippage_bps"] / r["total_bps"] * 100 for r in rows],
+        name="Slippage share",
+        marker_color=COLORS["amber"],
+        marker_pattern_shape="x",
+        customdata=[[r["slippage_bps"], r["total_bps"]] for r in rows],
+        hovertemplate="Slippage: %{customdata[0]:.2f} bps"
+        "<br>One-way total: %{customdata[1]:.2f} bps<extra></extra>",
     )
 )
+
+# %% [markdown]
+# ### Label Native-Unit Totals
+#
+# The bar heights compare composition. Direct labels retain each scenario's
+# one-way basis-point magnitude without letting the largest market compress the rest.
+
+# %%
+for row in rows:
+    fig.add_annotation(
+        x=row["asset_class"],
+        y=103,
+        text=f"{row['total_bps']:.2f} bps total",
+        showarrow=False,
+        font=dict(color=COLORS["neutral"], size=10),
+    )
 fig.update_layout(
-    title="Round-Trip Cost Breakdown by Asset Class (bps)",
-    yaxis_title="Cost (basis points)",
+    title=f"Slippage Dominates {slippage_dominant} of {len(rows)} Illustrative Cost Stacks",
+    xaxis_title="Illustrative asset-class stack",
+    yaxis_title="Share of one-way total cost (%)",
+    yaxis_range=[0, 112],
     barmode="stack",
-    height=400,
+    height=430,
 )
 fig.show()
 
 # %% [markdown]
-# **Finding**: The stacked bars isolate what must be optimized. Where slippage is
-# most of the stack, better execution matters more than fee negotiation; where
-# fees dominate, broker or venue choice is the first-order lever.
+# **Finding**: The composition, not the cross-market magnitude, identifies the
+# first lever to investigate. Slippage-heavy scenarios point toward execution;
+# fee-heavy scenarios point toward the broker or venue schedule.
 
 # %% [markdown]
 # ## 4. P&L Sensitivity: Does Model Choice Matter?
 #
 # For a liquid ETF momentum strategy with monthly rebalancing, we run the
-# same strategy using each commission model and compare net Sharpe ratios.
-# We test whether model choice is second-order at monthly cadence — and check
-# whether that ordering changes once turnover increases. The price panel is
-# real daily OHLCV for five liquid ETFs; only the cost model varies between runs.
+# same momentum rule using each equity-compatible commission model. The price
+# panel is real daily OHLCV for a manually selected ETF universe. This fixed universe
+# is not point-in-time membership data and carries survivorship and selection
+# limitations. There is no holdout or model selection, so the results demonstrate
+# cost mechanisms rather than unbiased strategy performance.
 
 # %% [markdown]
 # ### Load the Real ETF Price Panel
 
 # %%
-test_prices_df = (
+loaded_prices_df = (
     load_etfs(symbols=ETF_SYMBOLS, start_date=START_DATE, end_date=END_DATE)
     .select("timestamp", "symbol", "open", "high", "low", "close", "volume")
     .sort("symbol", "timestamp")
 )
+dates = loaded_prices_df["timestamp"].unique().sort()[:N_BARS]
+test_prices_df = loaded_prices_df.filter(pl.col("timestamp").is_in(dates.implode()))
+
+# %% [markdown]
+# ### Validate the Canonical Panel
+
+# %%
 SYMBOLS = sorted(test_prices_df["symbol"].unique().to_list())
 assert set(SYMBOLS) == set(ETF_SYMBOLS), (
     f"loaded universe {SYMBOLS} does not match requested {ETF_SYMBOLS}; "
     "a missing symbol would silently change the experiment"
 )
-dates = test_prices_df["timestamp"].unique().sort()[:N_BARS]
-test_prices_df = test_prices_df.filter(pl.col("timestamp").is_in(dates))
-print(
-    f"Loaded {test_prices_df.height:,} rows for {len(SYMBOLS)} ETFs "
-    f"({dates.min()} .. {dates.max()}, {len(dates)} sessions)"
+assert test_prices_df.height > 0, "the ETF panel is empty"
+assert test_prices_df.unique(subset=["symbol", "timestamp"]).height == test_prices_df.height
+assert test_prices_df.null_count().select(pl.sum_horizontal(pl.all())).item() == 0
+for price_column in ["open", "high", "low", "close"]:
+    assert test_prices_df.select((pl.col(price_column) > 0).all()).item()
+assert test_prices_df.select(
+    (pl.col("high") >= pl.max_horizontal("open", "low", "close")).all()
+).item()
+assert test_prices_df.select(
+    (pl.col("low") <= pl.min_horizontal("open", "high", "close")).all()
+).item()
+assert test_prices_df.select((pl.col("volume") >= 0).all()).item()
+coverage = test_prices_df.group_by("symbol").agg(n_sessions=pl.col("timestamp").n_unique())
+assert coverage["n_sessions"].n_unique() == 1
+assert coverage["n_sessions"][0] == len(dates)
+assert test_prices_df.height == len(SYMBOLS) * len(dates)
+display(
+    Markdown(
+        f"Loaded a balanced panel of **{test_prices_df.height:,} rows**, "
+        f"**{len(SYMBOLS)} fixed ETFs**, and **{len(dates):,} sessions** from "
+        f"**{dates.min()}** through **{dates.max()}**. Canonical keys are unique, "
+        "OHLCV values are complete, prices are positive, and volume is nonnegative."
+    )
 )
 
 # %% [markdown]
@@ -402,8 +540,9 @@ print(
 #
 # The rebalance signal is a real trailing-momentum rule: at each rebalance date
 # hold the equal-weighted top three ETFs by their `MOMENTUM_LOOKBACK`-day return.
-# The signal drives turnover; the cost-model comparison below holds it fixed and
-# varies only the commission model.
+# The value at close $t$ uses closes no later than $t$. `NEXT_BAR` queues the
+# resulting target after that close and fills at open $t+1$. Precomputing the
+# deterministic targets does not change this event order.
 
 
 # %%
@@ -411,7 +550,14 @@ momentum = test_prices_df.with_columns(
     mom=pl.col("close").pct_change(MOMENTUM_LOOKBACK).over("symbol")
 )
 
+# %% [markdown]
+# ### Convert the Trailing Rule into Cadence-Specific Targets
+#
+# Each cadence samples different decision dates and therefore creates different
+# holdings and trade paths. The rule is common; the realized signal path is not.
 
+
+# %%
 def make_weight_dict(step: int) -> dict:
     """Equal-weight top-3-by-trailing-momentum targets at the requested cadence."""
     weights = {}
@@ -464,19 +610,17 @@ class SimpleStrategy(Strategy):
             self.executor.execute(targets, data, broker)
 
 
+# %% [markdown]
+# ### Define the Equity-Compatible Commission Variants
+#
+# The futures model is excluded because these trades are ETF shares, not
+# contracts. Slippage and every strategy input remain fixed across variants.
+
 # %%
-commission_tests = {
-    "NoCommission": NoCommission(),
-    "Percentage (10bp)": PercentageCommission(rate=0.001),
-    "PerShare ($0.005)": PerShareCommission(per_share=0.005, minimum=1.0),
-    "Combined (5bp+$1)": CombinedCommission(percentage=0.0005, fixed=1.0),
-    "Tiered (volume)": TieredCommission(
-        tiers=[(10_000, 0.001), (50_000, 0.0008), (float("inf"), 0.0005)]
-    ),
-}
+commission_tests = dict(equity_commission_models)
 
 # %% [markdown]
-# ### Run the Monthly-Rebalance Cost Comparison
+# ### Configure Next-Open Execution
 
 # %%
 base_config = BacktestConfig(
@@ -485,7 +629,15 @@ base_config = BacktestConfig(
     execution_mode=ExecutionMode.NEXT_BAR,
 )
 
+# %% [markdown]
+# ### Execute One Cost-Model Variant
+#
+# A target decided from close $t$ is submitted in `on_data()` and filled at
+# open $t+1$. The function returns the same four diagnostics for every fee
+# schedule.
 
+
+# %%
 def run_backtest_variant(weight_dict: dict, commission_model, config: BacktestConfig) -> dict:
     """Execute the simple strategy under one commission model."""
     feed = DataFeed(prices_df=test_prices_df)
@@ -501,60 +653,76 @@ def run_backtest_variant(weight_dict: dict, commission_model, config: BacktestCo
     }
 
 
-# %%
-print("\nP&L Sensitivity: Commission Model Impact (Monthly Rebalance)")
+# %% [markdown]
+# ### Run the Monthly-Rebalance Cost Comparison
 
+# %%
 pnl_results = {}
 for name, comm_model in commission_tests.items():
     pnl_results[name] = run_backtest_variant(weight_dict, comm_model, base_config)
 
 # %% [markdown]
-# **Finding**: This block isolates model choice with everything else held constant.
-# The resulting Sharpe spread tells us whether commission specification is a first-order
-# design choice or a minor implementation detail for this strategy.
+# **Finding**: This comparison isolates commission arithmetic within the fixed
+# monthly rule. Hover fields retain returns, fees, and trade counts without
+# duplicating the result as a terminal table.
 
 # %%
-for name, metrics in pnl_results.items():
-    print(
-        f"  {name:<25s}: Sharpe={metrics['sharpe']:.3f}  Return={metrics['total_return']:.2%}  "
-        f"Commission=${metrics['total_commission']:,.0f}  Trades={metrics['n_trades']}"
-    )
-
-# %% [markdown]
-# **Finding**: This monthly-rebalance table is the sanity check for overfitting
-# the cost model. If a slow, liquid strategy changes rank only marginally across
-# reasonable fee schedules, model detail is a second-order concern.
-
-# %%
-# Visualize Sharpe comparison
 sharpe_vals = [v["sharpe"] for v in pnl_results.values()]
 names = list(pnl_results.keys())
+sharpe_range = max(sharpe_vals) - min(sharpe_vals)
+x_padding = max(sharpe_range * 0.4, 0.01)
+monthly_customdata = [
+    [metrics["total_return"], metrics["total_commission"], metrics["n_trades"]]
+    for metrics in pnl_results.values()
+]
 
 fig = go.Figure()
 fig.add_trace(
-    go.Bar(
-        x=names,
-        y=sharpe_vals,
-        marker_color=["#2ca02c" if s == max(sharpe_vals) else "#1f77b4" for s in sharpe_vals],
-        text=[f"{s:.3f}" for s in sharpe_vals],
-        textposition="outside",
+    go.Scatter(
+        y=names,
+        mode="markers+text",
+        x=sharpe_vals,
+        marker=dict(
+            color=profile_colors,
+            size=11,
+            symbol=["circle", "square", "diamond", "x", "triangle-up"],
+        ),
+        text=[f"{value:.4f}" for value in sharpe_vals],
+        textposition="middle right",
+        customdata=monthly_customdata,
+        hovertemplate="Sharpe: %{x:.4f}<br>Return: %{customdata[0]:.2%}"
+        "<br>Commission: $%{customdata[1]:,.0f}<br>Trades: %{customdata[2]:,.0f}<extra></extra>",
     )
 )
 fig.update_layout(
-    title="Net Sharpe by Commission Model (Monthly Rebalance)",
-    yaxis_title="Sharpe Ratio",
-    height=400,
+    title=f"Commission Choice Moves Monthly Sharpe by {sharpe_range:.4f}",
+    xaxis_title="Net Sharpe ratio",
+    yaxis_title="Commission model",
+    xaxis_range=[min(sharpe_vals) - x_padding, max(sharpe_vals) + x_padding],
+    height=420,
+    showlegend=False,
+    margin=dict(l=175),
 )
 fig.show()
 
-sharpe_range = max(sharpe_vals) - min(sharpe_vals)
-print(f"\nSharpe range across commission models on this real ETF panel: {sharpe_range:.4f}")
-print(f"  (n_bars={len(dates)}, n_symbols={len(SYMBOLS)}, monthly rebalance)")
+# %% [markdown]
+# ### Read the Monthly Sensitivity
+
+# %%
+display(
+    Markdown(
+        f"Across the {len(commission_tests)} equity-compatible schedules, "
+        f"monthly net Sharpe spans "
+        f"**{sharpe_range:.4f}** on this **{len(SYMBOLS)}-ETF**, "
+        f"**{len(dates):,}-session** demonstration. This magnitude describes the "
+        "fixed panel and rule; it is not an out-of-sample performance estimate."
+    )
+)
 
 # %% [markdown]
 # **Mechanism**: the Sharpe-range scalar compresses the monthly comparison into
-# one number. Its magnitude is specific to this five-ETF momentum portfolio over
-# the 2019-2023 window, not a general claim about commission-model sensitivity.
+# one number. Its magnitude is specific to this fixed momentum panel, not a
+# general claim about commission-model sensitivity.
 # The point of this section is the arithmetic mechanism: percentage and tiered fee
 # structures accumulate proportionally to traded notional, per-share fees scale
 # with share count, and the gap between them depends on price level and trade size
@@ -563,14 +731,22 @@ print(f"  (n_bars={len(dates)}, n_symbols={len(SYMBOLS)}, monthly rebalance)")
 # of the mechanism rather than a transferable magnitude.
 
 # %% [markdown]
-# ## 6. Frequency Sensitivity
+# ## 6. Cadence Sensitivity
 #
-# The same strategy at daily, weekly, and monthly cadence. Higher frequency
-# means more turnover, amplifying cost model differences.
+# We apply the same trailing-momentum rule at daily, weekly, and 21-session
+# cadence. Each cadence samples different dates, targets, and trades, so the
+# comparison measures rule-and-cadence paths rather than holding a gross return
+# series fixed.
 
 # %%
 cadences = {"daily": 1, "weekly": 5, "monthly": 21}
 cadence_weights = {label: make_weight_dict(days) for label, days in cadences.items()}
+
+# %% [markdown]
+# ### Select the Fee Contrast
+#
+# Zero commission supplies the baseline; a 10 bps percentage schedule isolates
+# how the same fee rule accumulates along each cadence-specific trade path.
 
 # %%
 test_models = {
@@ -582,8 +758,6 @@ test_models = {
 # ### Run the Frequency-Sensitivity Grid
 
 # %%
-print("\nFrequency Sensitivity: Cost Impact by Rebalance Cadence")
-
 freq_results = {}
 freq_config = BacktestConfig(
     initial_cash=INITIAL_CASH,
@@ -604,136 +778,139 @@ for cadence_name in cadences:
         }
 
 # %% [markdown]
-# **Interpretation**: This grid is the important stress test because it changes cadence
-# while keeping the portfolio construction logic fixed. Any widening in Sharpe gaps is
-# therefore coming from turnover-amplified costs rather than from a different signal.
-
-# %%
-for cadence_name in cadences:
-    for model_name in test_models:
-        metrics = freq_results[f"{cadence_name}/{model_name}"]
-        print(
-            f"  {cadence_name:>8s} | {model_name:<25s}: "
-            f"Sharpe={metrics['sharpe']:.3f}  Commission=${metrics['total_commission']:,.0f}  "
-            f"Trades={metrics['n_trades']}"
-        )
+# **Interpretation**: The grid holds the momentum formula and execution contract
+# fixed while the decision dates change. A wider fee-induced Sharpe gap at a
+# faster cadence reflects the additional trades generated on that path.
 
 # %% [markdown]
-# **Finding**: The cadence table shows where costs become a design constraint
-# rather than a reporting adjustment. Daily turnover multiplies commission drag
-# far faster than monthly turnover, even with the same gross signal.
+# **Finding**: In this demonstration, the daily rule is the high-turnover case.
+# Conclusions remain limited to the three tested cadences; the notebook does not
+# extrapolate them to intraday or quarterly strategies.
 
 # %%
-# Visualize frequency sensitivity
+daily_spread = abs(
+    freq_results["daily/Percentage (10bp)"]["sharpe"] - freq_results["daily/NoCommission"]["sharpe"]
+)
+monthly_spread = abs(
+    freq_results["monthly/Percentage (10bp)"]["sharpe"]
+    - freq_results["monthly/NoCommission"]["sharpe"]
+)
+amplification = daily_spread / monthly_spread if monthly_spread > 0 else float("inf")
+cadence_labels = list(cadences)
+frequency_styles = [
+    ("NoCommission", COLORS["blue"], "circle", "solid"),
+    ("Percentage (10bp)", COLORS["amber"], "square", "dash"),
+]
+frequency_series = {
+    model_name: {
+        "sharpe": [freq_results[f"{cadence}/{model_name}"]["sharpe"] for cadence in cadences],
+        "commission": [
+            freq_results[f"{cadence}/{model_name}"]["total_commission"] for cadence in cadences
+        ],
+    }
+    for model_name in test_models
+}
+
 fig = make_subplots(
     rows=1,
     cols=2,
-    subplot_titles=["Net Sharpe by Cadence", "Total Commission by Cadence"],
+    subplot_titles=["Net Sharpe", "Total Commission"],
+    horizontal_spacing=0.18,
 )
 
-for model_name, color in [("NoCommission", "#2ca02c"), ("Percentage (10bp)", "#d62728")]:
-    cadence_labels = []
-    sharpes = []
-    commissions = []
-    for cadence_name in cadences:
-        key = f"{cadence_name}/{model_name}"
-        if key in freq_results:
-            cadence_labels.append(cadence_name)
-            sharpes.append(freq_results[key]["sharpe"])
-            commissions.append(freq_results[key]["total_commission"])
+# %% [markdown]
+# ### Plot the Sharpe Paths
 
+# %%
+for model_name, color, symbol, dash in frequency_styles:
+    sharpes = frequency_series[model_name]["sharpe"]
     fig.add_trace(
-        go.Bar(x=cadence_labels, y=sharpes, name=model_name, marker_color=color),
+        go.Scatter(
+            x=cadence_labels,
+            y=sharpes,
+            name=model_name,
+            mode="lines+markers+text",
+            line=dict(color=color, dash=dash),
+            marker=dict(symbol=symbol, size=8),
+            text=[f"{value:.3f}" for value in sharpes],
+            textposition="top center",
+        ),
         row=1,
         col=1,
     )
+
+# %% [markdown]
+# ### Add Dollar Fees and Complete the Layout
+#
+# The second panel uses its own dollar scale. Shared cadence labels align the
+# paths without implying that Sharpe and fees have comparable magnitudes.
+
+# %%
+for model_name, color, symbol, dash in frequency_styles:
+    commissions = frequency_series[model_name]["commission"]
     fig.add_trace(
-        go.Bar(
+        go.Scatter(
             x=cadence_labels,
             y=commissions,
             name=model_name,
-            marker_color=color,
+            mode="lines+markers+text",
+            line=dict(color=color, dash=dash),
+            marker=dict(symbol=symbol, size=8),
+            text=[f"${value:,.0f}" for value in commissions],
+            textposition="top center",
             showlegend=False,
         ),
         row=1,
         col=2,
     )
-
 fig.update_yaxes(title_text="Sharpe Ratio", row=1, col=1)
-fig.update_yaxes(title_text="Total Commission ($)", row=1, col=2)
-fig.update_layout(height=400, title="Frequency-Cost Interaction", barmode="group")
+fig.update_yaxes(title_text="Total commission ($)", title_standoff=12, row=1, col=2)
+fig.update_xaxes(title_text="Rebalance cadence", row=1, col=1)
+fig.update_xaxes(title_text="Rebalance cadence", row=1, col=2)
+fig.update_layout(
+    height=480,
+    title=f"Daily Fee-Induced Sharpe Gap Is {amplification:.1f}x the Monthly Gap",
+    legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
+    margin=dict(b=100, t=100),
+)
 fig.show()
 
 # %% [markdown]
-# **Finding**: The two-panel chart makes the same point in both units: dollars and
-# Sharpe. Faster cadence raises the commission bill directly, and the same increase
-# then appears as a larger deterioration in risk-adjusted performance.
+# **Finding**: Dollar fees and the Sharpe gap widen together along the daily
+# trade path. The chart does not imply that each saved basis point maps linearly
+# into Sharpe outside this fixed-sample comparison.
 
 # %%
-daily_spread = abs(
-    freq_results.get("daily/Percentage (10bp)", {}).get("sharpe", 0)
-    - freq_results.get("daily/NoCommission", {}).get("sharpe", 0)
+display(
+    Markdown(
+        f"The 10 bps commission schedule changes Sharpe by **{daily_spread:.4f}** "
+        f"at daily cadence and **{monthly_spread:.4f}** at 21-session cadence, "
+        f"a **{amplification:.1f}x** ratio on these cadence-specific paths."
+    )
 )
-monthly_spread = abs(
-    freq_results.get("monthly/Percentage (10bp)", {}).get("sharpe", 0)
-    - freq_results.get("monthly/NoCommission", {}).get("sharpe", 0)
-)
-amplification = daily_spread / monthly_spread if monthly_spread > 0 else float("inf")
-print(f"\nCost drag amplification (daily vs monthly): {amplification:.1f}x")
-
-# %% [markdown]
-# **Finding**: The amplification ratio is the headline number for strategy
-# design. It tells the reader how much more sensitive a fast strategy is to
-# small fee changes than a slow strategy using the same portfolio logic.
-
-# %% [markdown]
-# **Key Insight**: At daily rebalancing, the cost drag is amplified
-# substantially compared to monthly. The Sharpe gap between
-# NoCommission and Percentage(10bp) widens as frequency increases,
-# confirming that for high-frequency strategies, cost model choice
-# and minimization becomes critical.
-#
-# For monthly or quarterly strategies on liquid assets, the model
-# choice is nearly irrelevant --- focus on signal quality. For daily
-# or intraday strategies, every basis point of cost reduction translates
-# directly to improved risk-adjusted returns.
 
 # %% [markdown]
 # ## Key Takeaways
-#
-# This notebook compared all 11 cost models in `ml4t.backtest.models`:
-#
-# | Model | Type | Key Parameter | Best For |
-# |-------|------|---------------|----------|
-# | NoCommission | Commission | - | Baseline reference |
-# | PercentageCommission | Commission | rate (bps) | Equities, crypto |
-# | PerShareCommission | Commission | per_share, minimum | US equities (retail) |
-# | CombinedCommission | Commission | percentage + fixed | Mixed fee structures |
-# | TieredCommission | Commission | tier thresholds | Institutional volume |
-# | FuturesCommission | Commission | per_block | Futures contracts |
-# | NoSlippage | Slippage | - | Baseline reference |
-# | FixedSlippage | Slippage | amount | Liquid instruments |
-# | PercentageSlippage | Slippage | rate (bps) | General purpose |
-# | VolumeShareSlippage | Slippage | impact_factor | Market impact |
-# | FuturesSlippage | Slippage | slippage_points | Futures contracts |
-#
-# **Three mechanism observations** (on a real 5-ETF momentum panel, 2019-2023):
-# 1. The arithmetic of commission and slippage models differs by functional
-#    form (per-share, percentage, tiered, volume-share). The §4 monthly
-#    sensitivity demonstration produces a non-trivial Sharpe spread across
-#    models; the magnitude on other deployments depends on price level,
-#    trade size, and rebalance cadence and should be measured per
-#    case-study.
-# 2. Total cost drag rises with rebalance frequency in this demonstration
-#    because more trades cross more bid-ask spreads and incur more impact;
-#    the §5/§6 cells make the scaling explicit on the real ETF panel.
-# 3. `VolumeShareSlippage` is the only slippage model in the chapter that
-#    captures market-impact's non-linear scaling with order size — the
-#    `FixedSlippage` and `PercentageSlippage` models charge a constant
-#    rate per trade regardless of size.
-#
-# > **Book Reference**: Section 18.2 (cost taxonomy), Section 18.3
-# > (market impact models), Section 18.4 (frequency-cost interaction).
-#
-# **Next**: See [`10_gross_vs_net_performance`](10_gross_vs_net_performance.ipynb) for portfolio-level cost drag
-# and [`06_ml4t_execution_demo`](06_ml4t_execution_demo.ipynb) for the execution-facing API.
+
+# %%
+model_count = len(commission_models) + len(slippage_models)
+display(
+    Markdown(
+        f"- **Complete taxonomy**: the configured dictionaries cover "
+        f"**{len(commission_models)} commission** and "
+        f"**{len(slippage_models)} slippage** models, **{model_count} total**.\n"
+        "- **Units come first**: shares, contracts, full spread, half-spread, "
+        "per-unit adjustments, and total dollars are not interchangeable.\n"
+        f"- **Monthly sensitivity is sample-specific**: commission choice moves "
+        f"Sharpe by **{sharpe_range:.4f}** on the fixed ETF panel.\n"
+        f"- **Cadence changes the trade path**: the daily fee-induced Sharpe gap "
+        f"is **{amplification:.1f}x** the 21-session gap here, without supporting "
+        "an intraday or quarterly extrapolation.\n"
+        "- **Deployment requires measurement**: replace every illustrative fee, "
+        "spread, and impact input with the strategy's executable venue terms.\n\n"
+        "**Book**: Chapter 18, Sections 18.2-18.4 cover cost taxonomy, impact, "
+        "and cadence.\n\n"
+        "**Next**: See [`06_ml4t_execution_demo`](06_ml4t_execution_demo.ipynb) "
+        "for the execution-facing API."
+    )
+)

@@ -34,7 +34,7 @@
 #
 # **Note**: This is a *pedagogical* selective SSM written in pure PyTorch
 # to expose the inner workings of the selective scan. It captures Mamba's
-# defining mechanism — input-dependent $B_t$, $C_t$, and $\Delta_t$ — but
+# defining mechanism - input-dependent $B_t$, $C_t$, and $\Delta_t$ - but
 # omits implementation details of the production library, which uses custom
 # CUDA kernels for hardware-efficient parallel scans, hardware-aware
 # materialization of intermediate states, and additional numerical
@@ -45,20 +45,26 @@
 # **Prerequisites**: ETF features (`case_studies/etfs/`)
 
 # %%
-"""Simplified Selective State Space Model — pedagogical Mamba implementation for return prediction."""
+"""Simplified Selective State Space Model - pedagogical Mamba implementation for return prediction."""
 
+import os
 import warnings
 
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import numpy as np
+import plotly.graph_objects as go
 import polars as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
+from plotly.subplots import make_subplots
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS  # activates the ml4t Plotly template on import
 
 warnings.filterwarnings("ignore")
 
@@ -78,6 +84,7 @@ MAX_TRAIN_SAMPLES = 50_000
 MAX_VAL_SAMPLES = 15_000
 MAX_TEST_SAMPLES = 15_000
 INFER_BATCH_SIZE = 1_024
+LABEL_HORIZON = 21
 
 # %%
 
@@ -85,18 +92,33 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {DEVICE}")
 
 set_global_seeds(SEED)
+torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
 
 # %% [markdown]
 # ## Data Loading
 #
-# We use ETF features from the case study pipeline. The first 8 features
-# provide a diverse mix of momentum, volatility, and cross-sectional signals.
+# We use eight fixed momentum horizons from the ETF case-study pipeline.
 
 # %%
 mds = load_dl_dataset("etfs")
 
-FEATURE_COLS = mds.feature_names[:8]
+FEATURE_COLS = [
+    "ret_5d",
+    "ret_10d",
+    "ret_21d",
+    "ret_42d",
+    "ret_63d",
+    "ret_126d",
+    "ret_189d",
+    "ret_252d",
+]
 TARGET_COL = mds.label_col
+
+missing_features = sorted(set(FEATURE_COLS) - set(mds.feature_names))
+if missing_features:
+    raise ValueError(f"Missing required ETF momentum features: {missing_features}")
 
 print(f"Features ({len(FEATURE_COLS)}): {FEATURE_COLS}")
 print(f"Target: {TARGET_COL}")
@@ -118,17 +140,25 @@ X, y, timestamps, symbols = create_sequences_multi_asset(
 )
 print(f"Sequences: {X.shape[0]:,}, shape: {X.shape}")
 
-X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-y = np.nan_to_num(y, nan=0.0).astype(np.float32)
+sequence_order = np.lexsort((symbols.astype(str), timestamps))
+X = np.nan_to_num(X[sequence_order], nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+y = np.nan_to_num(y[sequence_order], nan=0.0).astype(np.float32)
+timestamps = timestamps[sequence_order]
+symbols = symbols[sequence_order]
 
 # %%
-# Date-based 60/20/20 temporal split
+# Date-based 60/20/20 temporal split. The target is a 21-day forward return,
+# so labels whose outcome windows cross the next boundary are purged.
 unique_dates = np.sort(np.unique(timestamps))
-train_end_date = unique_dates[int(len(unique_dates) * 0.6)]
-val_end_date = unique_dates[int(len(unique_dates) * 0.8)]
+train_boundary_idx = int(len(unique_dates) * 0.6)
+val_boundary_idx = int(len(unique_dates) * 0.8)
+train_end_date = unique_dates[train_boundary_idx]
+val_end_date = unique_dates[val_boundary_idx]
+train_label_cutoff = unique_dates[train_boundary_idx - LABEL_HORIZON]
+val_label_cutoff = unique_dates[val_boundary_idx - LABEL_HORIZON]
 
-train_mask = timestamps < train_end_date
-val_mask = (timestamps >= train_end_date) & (timestamps < val_end_date)
+train_mask = timestamps < train_label_cutoff
+val_mask = (timestamps >= train_end_date) & (timestamps < val_label_cutoff)
 test_mask = timestamps >= val_end_date
 
 X_train, y_train = X[train_mask], y[train_mask]
@@ -197,9 +227,13 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 
 
 print(f"Train: {len(X_train):,}, Val: {len(X_val):,}, Test: {len(X_test):,}")
+print(
+    f"Purged {LABEL_HORIZON} target dates before each boundary before complete-date subsampling: "
+    f"validation starts {train_end_date}, test starts {val_end_date}"
+)
 
 # %% [markdown]
-# ## Selective state space — what the code computes
+# ## Selective state space - what the code computes
 #
 # At each timestep $t$ we discretize a continuous-time SSM via zero-order
 # hold and run an input-dependent recurrence on a hidden state $h_t$. In
@@ -217,8 +251,8 @@ print(f"Train: {len(X_train):,}, Val: {len(X_val):,}, Test: {len(X_test):,}")
 # %% [markdown]
 # ## Selective SSM Block
 #
-# We split the block in three pieces — the recurrence itself, the block's
-# parameter geometry (in `__init__`), and the gated forward pass — so each
+# We split the block in three pieces - the recurrence itself, the block's
+# parameter geometry (in `__init__`), and the gated forward pass - so each
 # can be read on its own.
 #
 # > **Runtime warning**: `selective_scan` uses a Python `for` loop over
@@ -345,6 +379,7 @@ class MambaRegressor(nn.Module):
 
 
 # %%
+set_global_seeds(SEED)
 model = MambaRegressor(
     n_features=len(FEATURE_COLS),
     d_model=D_MODEL,
@@ -375,6 +410,37 @@ history = train_model(
     DEVICE,
     weight_decay=0.01,
 )
+
+# %% [markdown]
+# ### Training convergence
+#
+# The loss curves trace how the selective-scan model learns before early
+# stopping halts it. A validation curve that turns up while the training
+# curve keeps falling is the overfitting signal the patience rule watches
+# for, and it explains why the run stops well short of the epoch cap.
+
+# %%
+fig = go.Figure()
+for label, key, color in [
+    ("Train", "train_loss", COLORS["blue"]),
+    ("Validation", "val_loss", COLORS["amber"]),
+]:
+    fig.add_trace(
+        go.Scatter(
+            x=list(range(1, len(history[key]) + 1)),
+            y=history[key],
+            mode="lines+markers",
+            name=label,
+            line={"color": color},
+        )
+    )
+best_epoch = int(np.argmin(history["val_loss"]) + 1)
+fig.update_layout(
+    title=f"Mamba stops at epoch {len(history['val_loss'])} after validation MSE bottoms at epoch {best_epoch}",
+    xaxis_title="Epoch",
+    yaxis_title="MSE loss",
+)
+fig.show()
 
 # %% [markdown]
 # ## Evaluate on Test Set
@@ -415,6 +481,7 @@ y_ridge_pred = ridge.predict(X_test_scaled)
 
 ridge_mse = np.mean((y_ridge_pred - y_test) ** 2)
 ridge_ic = cross_sectional_ic_mean(y_test, y_ridge_pred, test_dates, test_symbols)
+zero_mse = float(np.mean(y_test**2))
 
 print("\nRidge Baseline Results:")
 print(f"  MSE: {ridge_mse:.6f}")
@@ -422,32 +489,77 @@ print(f"  Spearman IC: {ridge_ic:.4f}")
 
 # %% [markdown]
 # ## Summary
+#
+# The left panel measures cross-sectional ranking. The right panel compares
+# squared error with the zero-return forecast, a natural level benchmark for
+# noisy return labels.
 
 # %%
-results_df = pl.DataFrame(
-    {
-        "Model": ["Mamba SSM", "Ridge"],
-        "Spearman IC": [test_ic, ridge_ic],
-        "MSE": [test_mse, ridge_mse],
-        "Parameters": [n_params, None],
-    }
+model_names = ["Mamba SSM", "Ridge"]
+ic_values = [test_ic, ridge_ic]
+mse_ratios = [test_mse / zero_mse, ridge_mse / zero_mse]
+bar_palette = {"Mamba SSM": COLORS["blue"], "Ridge": COLORS["slate"]}
+
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=("Mean cross-sectional Spearman IC", "MSE relative to zero-return forecast"),
 )
-results_df
+for model_name, ic_value, mse_ratio in zip(model_names, ic_values, mse_ratios, strict=True):
+    fig.add_trace(
+        go.Bar(
+            x=[model_name],
+            y=[ic_value],
+            name=model_name,
+            marker_color=bar_palette[model_name],
+            text=[f"{ic_value:.3f}"],
+            textposition="outside",
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=[model_name],
+            y=[mse_ratio],
+            name=model_name,
+            marker_color=bar_palette[model_name],
+            text=[f"{mse_ratio:.2f}x"],
+            textposition="outside",
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
+    )
+
+ic_leader = model_names[int(np.argmax(ic_values))]
+mse_winners = sum(ratio < 1 for ratio in mse_ratios)
+fig.add_hline(y=0, line_color=COLORS["neutral"], row=1, col=1)
+fig.add_hline(y=1, line_dash="dot", line_color=COLORS["neutral"], row=1, col=2)
+fig.update_layout(
+    title=f"{ic_leader} leads on rank IC; {mse_winners} of 2 models beat zero-return MSE",
+    width=950,
+    height=480,
+)
+fig.update_yaxes(title_text="Spearman IC", row=1, col=1)
+fig.update_yaxes(title_text="MSE / zero-return MSE", row=1, col=2)
+fig.show()
 
 # %% [markdown]
-# **Interpretation**: on this single-split multivariate ETF-feature setup
-# (eight momentum/volatility features per ETF, sub-sampled to the most
-# recent complete dates so each per-date Spearman uses the full
-# cross-section), Mamba's cross-sectional Spearman IC is **negative** while
-# Ridge's is positive — Mamba near -0.062 versus Ridge near +0.036 on this
-# run, so Mamba's magnitude is roughly 1.7× Ridge's. Mamba is actively ranking the
-# cross-section the wrong way, while Ridge is the better cross-sectional
-# predictor on this pedagogical configuration. The loop-based scan
-# captures the selective-state-space mechanism but trains and runs orders
-# of magnitude slower than the production CUDA-kernel implementation,
-# which limits the hyperparameter search performed here. This notebook
-# illustrates the architecture; it is not an apples-to-apples evaluation
-# of Mamba against linear models on cross-sectional return prediction.
+# ## Interpretation
+#
+# On this single-split multivariate ETF-feature setup (eight trailing-return
+# horizons per ETF, sub-sampled to the most recent
+# complete dates so each per-date Spearman uses the full cross-section),
+# the paired figure reports both rank IC and squared error relative to zero.
+# The loop-based selective scan is trained for only a handful of epochs on a
+# capped sample. The point is the mechanism, not the horse race: the
+# pure-Python scan exposes the selective-state-space recurrence but runs
+# orders of magnitude slower than the production CUDA kernel, which caps the
+# training budget and hyperparameter search. This notebook illustrates the
+# architecture; it is not an apples-to-apples evaluation of Mamba against
+# linear models on cross-sectional return prediction.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -469,6 +581,10 @@ results_df
 # 6. **Multi-scale variants**: The ms-Mamba architecture deploys parallel
 #    Mamba blocks at different sampling rates to capture signals across
 #    multiple timescales simultaneously -- see Section 13.6 for details
+#
+# Deterministic PyTorch algorithms and a fixed cuBLAS workspace make repeated
+# executions reproducible on the same software and GPU stack; another environment
+# may still produce small floating-point differences.
 #
 # **Next**: See `08_cnn_image_encoding` for encoding time series as images
 # (Gramian Angular Fields, Markov Transition Fields) and classifying with CNNs.

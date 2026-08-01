@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -62,7 +62,8 @@ MAX_CASE_STUDIES = 0  # 0 = all
 
 # %%
 CS_LIST = CASE_STUDY_IDS[:MAX_CASE_STUDIES] if MAX_CASE_STUDIES else CASE_STUDY_IDS
-
+DEFERRED_V31_CASE_STUDIES = {"nasdaq100_microstructure"}
+ACTIVE_CS_LIST = [cs for cs in CS_LIST if cs not in DEFERRED_V31_CASE_STUDIES]
 
 # %% [markdown]
 # ## Risk Configuration Classifier
@@ -115,7 +116,7 @@ def extract_risk_name(spec_json: str) -> str:
 # %%
 ch19_raw = load_chapter_backtests(
     "ch19",
-    case_studies=CS_LIST,
+    case_studies=ACTIVE_CS_LIST,
     metrics=["sharpe", "max_drawdown", "sortino", "total_return", "cagr"],
 )
 
@@ -131,11 +132,15 @@ risk_df = ch19_raw.with_columns(
 
 # %%
 # Baseline comes from Ch17 (allocation stage); per-CS fallback to Ch16 if absent.
-_ch17_raw = load_chapter_backtests("ch17", case_studies=CS_LIST, metrics=["sharpe", "max_drawdown"])
-_ch16_raw = load_chapter_backtests("ch16", case_studies=CS_LIST, metrics=["sharpe", "max_drawdown"])
+_ch17_raw = load_chapter_backtests(
+    "ch17", case_studies=ACTIVE_CS_LIST, metrics=["sharpe", "max_drawdown"]
+)
+_ch16_raw = load_chapter_backtests(
+    "ch16", case_studies=ACTIVE_CS_LIST, metrics=["sharpe", "max_drawdown"]
+)
 
 _baseline_rows = []
-for cs_id in CS_LIST:
+for cs_id in ACTIVE_CS_LIST:
     ch17_cs = (
         _ch17_raw.filter(pl.col("case_study") == cs_id)
         if not _ch17_raw.is_empty()
@@ -189,6 +194,7 @@ overlay_df = overlay_df.join(best_per_cs_flag, on="case_study", how="left").with
 
 n_cs = overlay_df["case_study"].n_unique()
 print(f"Loaded {len(overlay_df)} overlay results across {n_cs} case studies")
+print("Deferred to v3.1: NASDAQ-100 timing-corrected broad carrier risk grid")
 overlay_df.group_by("case_study").agg(
     n_overlays=pl.len(),
     best_sharpe=pl.col("sharpe").max(),
@@ -266,8 +272,9 @@ fig.show()
 # delta is positive for time exits (+0.50) and stop losses (+0.35) but negative
 # for trailing stops (-0.33). All three carry a negative *median* delta and lift
 # Sharpe in fewer than 30% of configurations — the positive means are driven by
-# a few catastrophic-baseline rescues (notably the NASDAQ-100 stop-loss, which
-# turns a -6.49 baseline into +2.02) rather than broad-based improvement.
+# a few extreme baseline changes rather than broad-based improvement.
+# NASDAQ-100 is excluded because its timing-corrected broad risk grid is
+# deferred to v3.1.
 
 # %% [markdown]
 # ## Rule Category Effectiveness

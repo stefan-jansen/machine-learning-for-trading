@@ -234,12 +234,19 @@ dev = [
     "pytest-rerunfailures>=15.0",
     "jupytext>=1.16",
     "pre-commit>=3.6",
-    "ruff>=0.8",
+    # Pinned exactly, and the same version .pre-commit-config.yaml pins. Two
+    # ruff versions format the same code differently, so a notebook formatted by
+    # one and reformatted by the other is a stale render of its own source and
+    # the notebook-sync gate rejects the commit. tests/test_toolchain_pins.py
+    # holds the two together.
+    "ruff==0.15.14",
 ]
 
 [tool.uv]
-# ml4t-engineer only has pre-release versions on PyPI
-prerelease = "if-necessary-or-explicit"
+# ml4t-engineer only has pre-release versions on PyPI. Spelled "if-necessary" rather
+# than the deprecated "if-necessary-or-explicit", which makes uv print a deprecation
+# warning on every single `uv run` a reader types.
+prerelease = "if-necessary"
 
 # Force protobuf >= 5.0 for Python 3.14 compatibility.
 # protobuf 4.x has a C extension metaclass bug on Python 3.14.

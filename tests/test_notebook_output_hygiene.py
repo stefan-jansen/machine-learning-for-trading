@@ -25,7 +25,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 
-from sanitize_notebook_paths import _iter_notebooks, sanitize_text  # noqa: E402
+from sanitize_notebook_paths import _iter_notebooks, sanitize_notebook  # noqa: E402
 from strip_empty_cell_tags import paired_py_has_fossil, strip_text  # noqa: E402
 
 
@@ -37,17 +37,55 @@ def test_strip_empty_cell_tags_handles_a_metadata_only_tag():
 
 
 def test_no_machine_specific_paths_in_committed_notebooks() -> None:
+    """Outputs and metadata only. A path in `source` may be load bearing.
+
+    A leak the notebook's source also contains counts too. The sanitizer skips
+    those rather than rewriting them, so leaving them out of this count would
+    let a leak the reader can plainly see sit in a committed output while the
+    gate reported the repository clean - the tool declining to fix something is
+    not the same as there being nothing to fix.
+    """
     offenders: list[str] = []
     for nb in _iter_notebooks():
         raw = nb.read_text(encoding="utf-8")
-        _, n = sanitize_text(raw)
-        if n:
-            offenders.append(f"{nb.relative_to(REPO_ROOT)} ({n})")
+        _, n, skipped = sanitize_notebook(raw)
+        if n or skipped:
+            note = f"{n}" + (f", {len(skipped)} the sanitizer cannot rewrite" if skipped else "")
+            offenders.append(f"{nb.relative_to(REPO_ROOT)} ({note})")
     assert not offenders, (
         "Notebooks leak machine-specific absolute paths in their committed "
         "outputs/metadata. Run `uv run python .github/scripts/sanitize_notebook_paths.py` "
-        "to fix:\n  " + "\n  ".join(offenders)
+        "to fix; a leak it reports as unrewritable has to be removed by hand or by "
+        "re-executing the notebook:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_the_sanitizer_reports_a_string_it_cannot_safely_rewrite() -> None:
+    """A leak the source shares is skipped, not rewritten, and it is named.
+
+    The raw-text edit is what keeps the diff to the replaced paths, and it is
+    also what makes a string that appears in both places ambiguous. Skipping is
+    the safe answer; going quiet about it is not.
+    """
+    shared = "/home/someone/ml4t/code/data/prices.parquet"
+    raw = json.dumps(
+        {
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "source": [f'pl.read_parquet("{shared}")'],
+                    "outputs": [{"output_type": "stream", "text": [shared]}],
+                }
+            ],
+            "metadata": {},
+        }
+    )
+
+    new, replaced, skipped = sanitize_notebook(raw)
+
+    assert skipped == [shared]
+    assert replaced == 0
+    assert new == raw
 
 
 # Debt list for notebooks still carrying the empty-tag fossil. Emptied when the
@@ -106,7 +144,6 @@ def test_known_desynced_list_has_no_stale_entries() -> None:
 # but are tracked here for consistency with the sibling debt list above.
 KNOWN_UNRENDERABLE = frozenset(
     {
-        "15_causal_estimation/08_neural_causal_discovery.ipynb",
         "case_studies/crypto_perps_funding/_archive/11_autoencoder.ipynb",
         "case_studies/us_equities_panel/20_strategy_analysis.ipynb",
     }

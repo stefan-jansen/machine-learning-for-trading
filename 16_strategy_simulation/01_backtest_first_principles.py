@@ -19,80 +19,72 @@
 # **Docker image**: `ml4t`
 #
 # ## Purpose
-# Build a complete portfolio simulator from scratch — no frameworks, just NumPy and pandas —
-# to make every protocol decision in an ETF momentum backtest explicit. Working through the
-# fundamental equation, transaction costs, and position accounting builds the intuition needed
-# to interpret (and debug) framework results in later notebooks.
+# Build an auditable portfolio simulator from first principles with Polars and NumPy. The
+# implementation makes signal timing, next-open execution, transaction costs, cash constraints,
+# and benchmark rebalancing explicit before later notebooks introduce backtesting frameworks.
 #
-# ## Learning Objectives
-# - Apply the fundamental backtest equation `portfolio_return = weights @ asset_returns`.
-# - Build a bar-by-bar simulator that tracks shares, cash, and transaction costs.
-# - Compare a regime-aware momentum strategy to a static 60/40 benchmark.
-# - Evaluate the result against pre-specified term-sheet criteria.
+# ## Learning objectives
+#
+# - Apply the fundamental portfolio-return equation without introducing same-bar look-ahead.
+# - Construct a monthly ETF momentum rule from point-in-time trailing information.
+# - Simulate next-open fills while tracking positions, fees, and nonnegative cash.
+# - Compare the strategy with a 60/40 benchmark on the same monthly rebalance schedule.
+# - Evaluate the baseline against a pre-specified term sheet.
 #
 # ## Book reference
-# Chapter 16 §16.2 (protocol specification) and §16.4 (the non-ML baseline as yardstick).
+# Chapter 16, Section 16.2 (protocol specification) and Section 16.4 (the non-ML baseline).
 #
 # ## Prerequisites
-# - Ch6 strategy term sheet conventions (universe, signals, regime, costs).
-# - Familiarity with pandas time-series indexing and `pct_change`.
 #
-# ## Case study: ETF rotational momentum
-# - Universe: 10 liquid asset-class ETFs.
-# - Signal: 6-month risk-adjusted momentum (`cumulative_return / realized_volatility`),
-#   computed at each month-end close.
+# - Chapter 6 strategy term-sheet conventions.
+# - Familiarity with return, volatility, Sharpe ratio, and drawdown calculations.
 #
-# - Execution timing: weights take effect on the *first trading day of the
-#   following month* (a one-bar shift of the signal). See §16.2 — same-bar
-#   close-to-close execution would be a lookahead error.
-# - Regime filter: 10Y-2Y Treasury spread > 0.5% → risk-on.
-# - Risk-on: equal-weight top 3 momentum ETFs. Risk-off: 60% AGG / 40% TLT.
-# - Rebalancing: end of each calendar month, at the close.
-# - Transaction costs: 5 bps per trade.
-#
-# ## Success criteria (term sheet)
-# - Sharpe ratio > 0.5
-# - Max drawdown < 25%
-# - Outperform a static 60/40 (60% SPY / 40% AGG) benchmark
+# This is an in-sample teaching backtest, not a sealed holdout estimate. The configuration is fixed
+# before the run; the notebook does not tune the rule against the reported period.
 
 # %% [markdown]
-# ## 1. Setup and Configuration
+# ## 1. Setup and protocol
+#
+# The signal uses each month-end close and the end-of-day 10Y-2Y Treasury spread. Orders execute at
+# the next trading day's open, so no return that begins before the signal is known enters the
+# strategy. Both the strategy and benchmark rebalance on those same next-open dates.
 
 # %%
-"""Backtesting First Principles — build a portfolio simulator from scratch with NumPy/Pandas."""
+"""Backtesting first principles with point-in-time signals and next-open execution."""
 
-# Standard library
+import hashlib
 import warnings
+from datetime import UTC, datetime
 
 warnings.filterwarnings("ignore")
 
-# Core data libraries
 import numpy as np
-import pandas as pd
-
-# Visualization
 import plotly.graph_objects as go
 import polars as pl
+from IPython.display import Markdown, display
 from ml4t.diagnostic.evaluation import PortfolioAnalysis
+from ml4t.diagnostic.metrics import sharpe_ratio, sortino_ratio
 from plotly.subplots import make_subplots
 
-# Standard imports from utils
 from data import load_etfs, load_macro
+from utils import ML4T_DATA_PATH
+from utils.style import COLORS
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
-MAX_SYMBOLS = 0  # 0 = all
-
-# %% [markdown]
-# ## 1. Define Universe and Parameters
+START_DATE = "2010-01-01"
+END_DATE = "2024-01-01"
+LOOKBACK_PERIOD = 126
+TOP_N = 3
+REGIME_THRESHOLD = 0.005
+INITIAL_CASH = 100_000.0
+FEES = 0.0005
 
 # %%
-# ETF Universe - Asset Class Representatives
 ETF_UNIVERSE = {
     "SPY": "US Large Cap Equity",
     "QQQ": "US Tech Equity",
     "IWM": "US Small Cap Equity",
-    "EFA": "Developed Int'l Equity",
+    "EFA": "Developed International Equity",
     "EEM": "Emerging Markets Equity",
     "AGG": "US Aggregate Bonds",
     "TLT": "US Long Treasury",
@@ -100,643 +92,683 @@ ETF_UNIVERSE = {
     "VNQ": "US Real Estate",
     "DBC": "Commodities",
 }
+ETF_SYMBOLS = list(ETF_UNIVERSE)
 
-ETF_SYMBOLS = list(ETF_UNIVERSE.keys())
-
-# %%
-# Strategy Parameters
-LOOKBACK_PERIOD = 126  # 6 months of trading days
-MOMENTUM_WINDOW = 126  # For volatility calculation
-TOP_N = 3  # Number of ETFs to hold in Risk-On
-REGIME_THRESHOLD = 0.005  # 0.5% yield curve slope for Risk-On
-REBALANCE_FREQ = "ME"  # Monthly rebalancing
-
-# Backtest Parameters
-START_DATE = "2010-01-01"
-END_DATE = "2024-01-01"
-INITIAL_CASH = 100_000
-FEES = 0.0005  # 5 bps per trade
-
-# %% [markdown]
-# ## 2. Data Acquisition
-
-# %%
-# Load ETF price data via canonical loader
-etf_pl = load_etfs()
-
-# Filter to universe and date range
-etf_pl = etf_pl.filter(
-    (pl.col("symbol").is_in(ETF_SYMBOLS))
-    & (pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
-    & (pl.col("timestamp") <= pl.lit(END_DATE).str.to_date())
+display(
+    Markdown(
+        f"""**Protocol.** Rank {len(ETF_SYMBOLS)} ETFs by {LOOKBACK_PERIOD}-day return divided by
+        annualized trailing volatility. In risk-on months, hold the top {TOP_N} equally. Otherwise,
+        hold 60% AGG and 40% TLT. Rebalance monthly at the next open and charge
+        {FEES * 10_000:.0f} bps per traded dollar."""
+    )
 )
 
-# Pivot to wide format (symbols as columns)
-close_prices_pl = etf_pl.pivot(on="symbol", index="timestamp", values="close").sort("timestamp")
-
-# Convert to pandas for simulation (pandas used for portfolio simulation logic)
-close_prices = close_prices_pl.to_pandas()
-close_prices.set_index("timestamp", inplace=True)
-
-# Ensure all symbols are present
-available_symbols = [s for s in ETF_SYMBOLS if s in close_prices.columns]
-close_prices = close_prices[available_symbols]
-
-print(f"Loaded {len(close_prices):,} daily bars for {len(available_symbols)} symbols")
-print(f"Date range: {close_prices.index.min()} to {close_prices.index.max()}")
-
-# %%
-# Check for missing data
-missing = close_prices.isna().sum()
-if missing.sum() > 0:
-    print("\nMissing data per ETF:")
-    print(missing[missing > 0])
-
-# Forward fill missing values (ETFs have different inception dates)
-close_prices = close_prices.ffill()
-
-# Update ETF_SYMBOLS to available symbols
-ETF_SYMBOLS = available_symbols
-
-# %%
-close_prices.tail()
+# %% [markdown]
+# **Universe limitation.** This fixed set is a current, hand-curated teaching universe, not a
+# historical constituent list. All ten ETFs had valid observations at the 2010 start, but selecting
+# familiar funds with data available today creates selection and survivorship limitations. Results
+# therefore describe these ten surviving funds and are not a survivorship-free universe estimate.
 
 # %% [markdown]
-# ## 3. Fetch Yield Curve Data for Regime Filter
+# ## 2. Load and validate the market panel
+#
+# The canonical loader returns long-form Polars data keyed by `symbol` and `timestamp`. Open prices
+# determine fills; close prices determine end-of-day portfolio value. Forward filling only carries
+# the last observed quote forward, and the complete-case filter removes any pre-inception rows.
 
 # %%
-# Load yield curve from macro data
-macro_df = load_macro()
+etf_long = load_etfs(
+    symbols=ETF_SYMBOLS,
+    start_date=START_DATE,
+    end_date=END_DATE,
+)
+
+duplicate_keys = etf_long.group_by(["symbol", "timestamp"]).len().filter(pl.col("len") > 1).height
+assert duplicate_keys == 0, f"Found {duplicate_keys} duplicate ETF keys"
+
+# %%
+open_wide = etf_long.pivot(on="symbol", index="timestamp", values="open").sort("timestamp")
+close_wide = etf_long.pivot(on="symbol", index="timestamp", values="close").sort("timestamp")
+available_symbols = [
+    symbol for symbol in ETF_SYMBOLS if symbol in open_wide.columns and symbol in close_wide.columns
+]
+assert available_symbols == ETF_SYMBOLS, "The configured ETF universe is incomplete"
+
+# %%
+price_panel = (
+    open_wide.select(
+        "timestamp",
+        *(pl.col(symbol).alias(f"{symbol}_open") for symbol in ETF_SYMBOLS),
+    )
+    .join(
+        close_wide.select(
+            "timestamp",
+            *(pl.col(symbol).alias(f"{symbol}_close") for symbol in ETF_SYMBOLS),
+        ),
+        on="timestamp",
+        how="inner",
+    )
+    .with_columns(pl.exclude("timestamp").forward_fill())
+    .drop_nulls()
+    .sort("timestamp")
+)
+
+dates = price_panel["timestamp"].to_list()
+open_prices = price_panel.select(f"{symbol}_open" for symbol in ETF_SYMBOLS).to_numpy()
+close_prices = price_panel.select(f"{symbol}_close" for symbol in ETF_SYMBOLS).to_numpy()
+
+assert np.isfinite(open_prices).all() and np.isfinite(close_prices).all()
+assert (open_prices > 0).all() and (close_prices > 0).all()
+
+print(f"Loaded {len(dates):,} complete daily bars for {len(ETF_SYMBOLS)} symbols")
+print(f"Date range: {dates[0]} to {dates[-1]}")
+
+# %% [markdown]
+# ## 3. Align the yield-curve regime point in time
+#
+# The backward as-of join carries only a dated value observed on or before each ETF date. Because
+# orders execute at the following open, the month-end regime observation is available before the
+# fill. The local FRED file is a current snapshot, however, not an ALFRED release-vintage panel.
+# This calendar alignment prevents future-dated rows but cannot undo later historical corrections.
+
+# %%
+macro_df = load_macro(start_date=START_DATE, end_date=END_DATE)
+fred_snapshot_path = ML4T_DATA_PATH / "macro" / "fred_macro.parquet"
+fred_snapshot_date = datetime.fromtimestamp(fred_snapshot_path.stat().st_mtime, tz=UTC).date()
+fred_snapshot_hash = hashlib.sha256(fred_snapshot_path.read_bytes()).hexdigest()[:12]
+
+display(
+    Markdown(
+        f"**FRED input vintage.** Current local snapshot dated `{fred_snapshot_date}` UTC "
+        f"(`sha256:{fred_snapshot_hash}...`). It has no ALFRED release-vintage fields, so this "
+        "exercise does not claim contemporaneous-vintage macro fidelity."
+    )
+)
 
 if "YIELD_CURVE_SLOPE" in macro_df.columns:
-    yield_curve_pl = macro_df.select(
-        [pl.col("timestamp"), (pl.col("YIELD_CURVE_SLOPE") / 100).alias("slope")]
+    yield_curve = macro_df.select(
+        "timestamp",
+        (pl.col("YIELD_CURVE_SLOPE") / 100).alias("slope"),
     ).drop_nulls()
-    print("Loaded yield curve from local macro data (YIELD_CURVE_SLOPE)")
 else:
-    yield_curve_pl = macro_df.select(
-        [pl.col("timestamp"), ((pl.col("dgs10") - pl.col("dgs2")) / 100).alias("slope")]
+    yield_curve = macro_df.select(
+        "timestamp",
+        ((pl.col("dgs10") - pl.col("dgs2")) / 100).alias("slope"),
     ).drop_nulls()
-    print("Computed yield curve from local macro data (dgs10 - dgs2)")
-
-yield_curve_pd = yield_curve_pl.to_pandas().set_index("timestamp")
 
 # %%
-# Align yield curve to price data
-yield_curve_aligned = yield_curve_pd.reindex(close_prices.index, method="ffill")
+regime_panel = (
+    price_panel.select("timestamp")
+    .join_asof(yield_curve.sort("timestamp"), on="timestamp", strategy="backward")
+    .drop_nulls()
+)
+assert regime_panel.height == price_panel.height, "Yield-curve history does not cover the panel"
 
-# Define regime: Risk-On when slope > 0.5%
-regime = (yield_curve_aligned["slope"] > REGIME_THRESHOLD).astype(int)
+yield_curve_slope = regime_panel["slope"].to_numpy()
+regime = yield_curve_slope > REGIME_THRESHOLD
+risk_on_share = float(regime.mean())
 
-print("\nRegime Distribution:")
-print(f"  Risk-On days:  {regime.sum():,} ({regime.mean() * 100:.1f}%)")
-print(f"  Risk-Off days: {(~regime.astype(bool)).sum():,} ({(1 - regime.mean()) * 100:.1f}%)")
+print(f"Risk-on days: {regime.sum():,} ({risk_on_share:.1%})")
+print(f"Risk-off days: {(~regime).sum():,} ({1 - risk_on_share:.1%})")
 
 # %% [markdown]
-# ## 4. Compute Risk-Adjusted Momentum
-
-# %%
-# Calculate returns
-daily_returns = close_prices.pct_change()
-
-# Calculate 6-month cumulative return
-cumulative_return = close_prices.pct_change(LOOKBACK_PERIOD)
-
-# Calculate 6-month realized volatility (annualized)
-realized_vol = daily_returns.rolling(LOOKBACK_PERIOD).std() * np.sqrt(252)
-
-# Risk-adjusted momentum = cumulative return / realized volatility
-momentum_score = cumulative_return / realized_vol
-
-# %% [markdown]
-# Momentum scores (most recent five trading days):
-
-# %%
-momentum_score.tail().round(3)
-
-# %%
-# Rank ETFs by momentum (1 = highest momentum)
-momentum_rank = momentum_score.rank(axis=1, ascending=False)
-
-# %% [markdown]
-# ## 5. Generate Portfolio Weights
+# ## 4. Compute trailing risk-adjusted momentum
 #
-# Strategy Logic:
-# - **Risk-On Regime**: Equal-weight top 3 momentum ETFs (33.3% each)
-# - **Risk-Off Regime**: 60% AGG + 40% TLT (defensive positioning)
+# For ETF $i$, the month-end score uses only closes through date $t$:
+#
+# $$
+# m_{i,t} = \frac{P_{i,t}/P_{i,t-L}-1}{\operatorname{sd}(r_{i,t-L+1:t})\sqrt{252}},
+# \qquad L=126.
+# $$
+#
+# The cross-sectional rank is formed independently at each date. No full-sample statistic enters
+# the score.
 
 # %%
-# Initialize weights DataFrame with NaN (so ffill works correctly)
-weights = pd.DataFrame(np.nan, index=close_prices.index, columns=ETF_SYMBOLS)
+close_frame = price_panel.select(
+    "timestamp",
+    *(pl.col(f"{symbol}_close").alias(symbol) for symbol in ETF_SYMBOLS),
+)
 
-# Generate rebalancing dates (last trading day of each month)
-# Note: resample().last().index gives calendar month-end which may not be trading days
-# Instead, use the actual last trading day index from each month
-rebalance_dates = close_prices.loc[
-    close_prices.index.isin(
-        close_prices.groupby(close_prices.index.to_period("M")).apply(lambda x: x.index[-1])
-    )
-].index
-print(f"Rebalance dates: {len(rebalance_dates)} monthly rebalances")
+daily_returns_frame = close_frame.select(
+    "timestamp",
+    *((pl.col(symbol) / pl.col(symbol).shift(1) - 1).alias(symbol) for symbol in ETF_SYMBOLS),
+)
 
 # %%
-# Compute weights at each rebalancing date
-# First, find when momentum data becomes available (after lookback warm-up)
-first_valid_momentum = momentum_rank.dropna(how="all").index[0]
-print(f"First valid momentum date: {first_valid_momentum}")
+momentum_frame = close_frame.select(
+    "timestamp",
+    *(
+        (
+            (pl.col(symbol) / pl.col(symbol).shift(LOOKBACK_PERIOD) - 1)
+            / (
+                (pl.col(symbol) / pl.col(symbol).shift(1) - 1).rolling_std(LOOKBACK_PERIOD)
+                * np.sqrt(252)
+            )
+        ).alias(symbol)
+        for symbol in ETF_SYMBOLS
+    ),
+)
+momentum_scores = momentum_frame.select(ETF_SYMBOLS).to_numpy()
 
-# Set initial allocation on day 1 (before first rebalance date)
-# Use 60/40 as default since we don't have momentum data yet
-first_day = close_prices.index[0]
-weights.loc[first_day, :] = 0.0  # Zero out all
-weights.loc[first_day, "AGG"] = 0.60
-weights.loc[first_day, "TLT"] = 0.40
-
-for i, date in enumerate(rebalance_dates):
-    # Set all weights for this row (explicit zeros for non-held assets)
-    weights.loc[date, :] = 0.0
-
-    # Before momentum data is available, use default 60/40 allocation
-    if date < first_valid_momentum:
-        weights.loc[date, "AGG"] = 0.60
-        weights.loc[date, "TLT"] = 0.40
-        continue
-
-    if date not in momentum_rank.index:
-        # Dates where momentum data isn't available - use 60/40
-        weights.loc[date, "AGG"] = 0.60
-        weights.loc[date, "TLT"] = 0.40
-        continue
-
-    # Get regime on this date
-    is_risk_on = regime.loc[date] == 1
-
-    if is_risk_on:
-        # Risk-On: Top 3 momentum ETFs, equal weight
-        ranks = momentum_rank.loc[date]
-        top_n_etfs = ranks[ranks <= TOP_N].index.tolist()
-
-        # Equal weight among top N
-        weight = 1.0 / len(top_n_etfs) if len(top_n_etfs) > 0 else 0
-        for etf in top_n_etfs:
-            weights.loc[date, etf] = weight
-    else:
-        # Risk-Off: 60% AGG, 40% TLT
-        weights.loc[date, "AGG"] = 0.60
-        weights.loc[date, "TLT"] = 0.40
-
-# Forward fill weights to all trading days; this gives target weights as of
-# each month-end close.
-weights = weights.ffill()
-
-# Shift target weights forward by one trading day so the signal computed at
-# the month-end close *executes* on the first trading day of the next month.
-# This matches §16.2's close-to-next-open execution convention (we use close
-# prices throughout, so "next bar" is the next trading day's close). Without
-# this shift the simulator would trade at the same close used to compute the
-# signal — same-bar execution that the chapter explicitly rules out.
-weights = weights.shift(1)
-# Re-seed the first bar with a neutral 60/40 since the shift removed it.
-weights.iloc[0] = 0.0
-weights.iloc[0, weights.columns.get_loc("AGG")] = 0.60
-weights.iloc[0, weights.columns.get_loc("TLT")] = 0.40
-weights = weights.ffill()
-
-# %%
-# Verify weights sum to ~1
-weight_sums = weights.sum(axis=1)
-print("Weight sum statistics:")
-print(f"  Mean: {weight_sums.mean():.4f}")
-print(f"  Min:  {weight_sums.min():.4f}")
-print(f"  Max:  {weight_sums.max():.4f}")
+first_valid_idx = int(np.flatnonzero(np.isfinite(momentum_scores).sum(axis=1) >= TOP_N)[0])
+print(f"First valid momentum date: {dates[first_valid_idx]}")
 
 # %% [markdown]
-# ## 6. Visualize Regime and Positioning
+# The latest cross-section shows the relative score dispersion that drives the final ranking.
 
 # %%
-# Sample positioning over time
+latest_scores = pl.DataFrame({"symbol": ETF_SYMBOLS, "momentum_score": momentum_scores[-1]}).sort(
+    "momentum_score", descending=True
+)
+latest_top = latest_scores.head(TOP_N)["symbol"].to_list()
+
+fig = go.Figure(
+    go.Bar(
+        x=latest_scores["momentum_score"],
+        y=latest_scores["symbol"],
+        orientation="h",
+        marker_color=[
+            COLORS["blue"] if symbol in latest_top else COLORS["neutral"]
+            for symbol in latest_scores["symbol"]
+        ],
+    )
+)
+fig.update_layout(
+    title=f"{', '.join(latest_top)} lead the final risk-adjusted momentum ranking",
+    xaxis_title="126-day return per unit of annualized volatility",
+    yaxis_title="ETF symbol",
+    height=430,
+    yaxis=dict(autorange="reversed"),
+    showlegend=False,
+)
+fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
+fig.show()
+
+# %% [markdown]
+# ## 5. Generate point-in-time target weights
+#
+# Month-end closes determine the signal. Shifting the target by one bar makes it executable at the
+# next open. The first bar starts in the defensive allocation because no trailing score exists.
+
+# %%
+month_end_signal = np.zeros(len(dates), dtype=bool)
+for idx in range(len(dates) - 1):
+    month_end_signal[idx] = (dates[idx].year, dates[idx].month) != (
+        dates[idx + 1].year,
+        dates[idx + 1].month,
+    )
+month_end_signal[-1] = True
+
+defensive_weights = np.zeros(len(ETF_SYMBOLS))
+defensive_weights[ETF_SYMBOLS.index("AGG")] = 0.60
+defensive_weights[ETF_SYMBOLS.index("TLT")] = 0.40
+
+# %%
+signal_weights = np.zeros_like(close_prices)
+current_target = defensive_weights.copy()
+
+for idx in range(len(dates)):
+    if month_end_signal[idx]:
+        current_target = defensive_weights.copy()
+        valid = np.flatnonzero(np.isfinite(momentum_scores[idx]))
+        if idx >= first_valid_idx and regime[idx] and len(valid) >= TOP_N:
+            ordered = valid[np.argsort(momentum_scores[idx, valid])]
+            selected = ordered[-TOP_N:]
+            current_target = np.zeros(len(ETF_SYMBOLS))
+            current_target[selected] = 1 / TOP_N
+    signal_weights[idx] = current_target
+
+# %%
+execution_weights = np.vstack([defensive_weights, signal_weights[:-1]])
+rebalance_at_open = np.r_[True, month_end_signal[:-1]]
+
+assert np.allclose(execution_weights.sum(axis=1), 1.0)
+assert rebalance_at_open.sum() == month_end_signal.sum()
+print(f"Monthly next-open rebalances: {rebalance_at_open.sum()}")
+
+# %% [markdown]
+# ## 6. Inspect regime and allocation history
+#
+# The heatmap keeps ten asset weights legible without assigning ten competing categorical colors.
+# It also makes defensive months and concentrated momentum rotations easy to distinguish.
+
+# %%
 fig = make_subplots(
     rows=3,
     cols=1,
     shared_xaxes=True,
-    vertical_spacing=0.05,
-    row_heights=[0.4, 0.3, 0.3],
-    subplot_titles=["Yield Curve Slope", "Regime (1=Risk-On)", "Portfolio Weights"],
+    vertical_spacing=0.06,
+    row_heights=[0.30, 0.18, 0.52],
+    subplot_titles=["10Y-2Y Treasury spread", "Risk regime", "Next-open target weights"],
 )
-
-# Yield curve slope
 fig.add_trace(
     go.Scatter(
-        x=yield_curve_aligned.index,
-        y=yield_curve_aligned["slope"] * 100,
-        name="10Y-2Y Spread",
-        line=dict(color="blue"),
+        x=dates,
+        y=yield_curve_slope * 100,
+        name="10Y-2Y spread",
+        line=dict(color=COLORS["blue"]),
     ),
     row=1,
     col=1,
 )
-fig.add_hline(y=REGIME_THRESHOLD * 100, line_dash="dash", line_color="red", row=1, col=1)
-
-# Regime
-fig.add_trace(
-    go.Scatter(x=regime.index, y=regime, name="Risk-On", line=dict(color="green")), row=2, col=1
+_ = fig.add_hline(
+    y=REGIME_THRESHOLD * 100,
+    line_dash="dash",
+    line_color=COLORS["neutral"],
+    row=1,
+    col=1,
 )
-
-# Weights (stacked area for top holdings)
-for etf in ETF_SYMBOLS:
-    fig.add_trace(
-        go.Scatter(x=weights.index, y=weights[etf], name=etf, stackgroup="weights", mode="lines"),
-        row=3,
-        col=1,
-    )
 
 # %%
-# Layout and display
-fig.update_layout(
-    height=800,
-    title="ETF Momentum Strategy: Regime and Positioning",
-    showlegend=True,
-    yaxis_title="Spread (%)",
-    yaxis2_title="Regime",
-    yaxis3_title="Weight",
+_ = fig.add_trace(
+    go.Scatter(
+        x=dates,
+        y=regime.astype(int),
+        name="Risk-on indicator",
+        line=dict(color=COLORS["positive"]),
+    ),
+    row=2,
+    col=1,
 )
+_ = fig.add_trace(
+    go.Heatmap(
+        x=dates,
+        y=ETF_SYMBOLS,
+        z=execution_weights.T,
+        zmin=0,
+        zmax=float(execution_weights.max()),
+        colorscale=[[0, COLORS["silver"]], [1, COLORS["blue"]]],
+        colorbar=dict(title="Weight", tickformat=".0%"),
+        name="Target weight",
+    ),
+    row=3,
+    col=1,
+)
+
+# %%
+fig.update_layout(
+    title=f"The yield-curve rule is risk-on on {risk_on_share:.1%} of sample days",
+    height=800,
+    showlegend=False,
+)
+fig.update_yaxes(title_text="Spread (%)", row=1, col=1)
+fig.update_yaxes(title_text="State (1 = risk-on)", row=2, col=1)
+fig.update_yaxes(title_text="ETF symbol", row=3, col=1)
+fig.update_xaxes(title_text="Date", row=3, col=1)
 fig.show()
 
 # %% [markdown]
-# ## 7. The Fundamental Equation
+# ## 7. The fundamental return equation
 #
-# Before building a full simulator, understand the core math:
+# If weights are executable before period $t$ begins, portfolio return is the inner product
 #
-# ```
-# portfolio_return[t] = sum(weights[t-1] * asset_returns[t])
-# ```
+# $$
+# R_{p,t} = \sum_{i=1}^{N} w_{i,t}r_{i,t} = \mathbf{w}_t^\top\mathbf{r}_t.
+# $$
 #
-# Or in matrix form: `portfolio_return = (weights.shift(1) * returns).sum(axis=1)`
-#
-# This is **vectorized backtesting** - fast but ignores:
-# - Transaction costs (turnover-dependent)
-# - Position limits (leverage, concentration)
-# - Execution timing (open vs close fills)
-#
-# For production strategies, you need a bar-by-bar simulator.
+# A close-derived signal cannot use this equation with the same close-to-close return. The
+# simulator below therefore waits until the next open, then values the resulting holdings at each
+# close. This explicit event order is the protection against same-bar look-ahead.
 
 # %%
-# Pure vectorized approach (no costs, no position tracking)
-vectorized_returns = (weights.shift(1) * daily_returns).sum(axis=1).dropna()
-vectorized_equity = (1 + vectorized_returns).cumprod() * INITIAL_CASH
-print(f"Vectorized (no costs) final value: ${vectorized_equity.iloc[-1]:,.2f}")
+toy_weights = np.array([0.60, 0.40])
+toy_asset_returns = np.array([0.01, -0.0025])
+toy_portfolio_return = float(toy_weights @ toy_asset_returns)
+print(f"Toy portfolio return: {toy_portfolio_return:.3%}")
 
 # %% [markdown]
-# ## 8. Bar-by-Bar Simulation
+# ## 8. Simulate next-open fills with a cash constraint
 #
-# For realistic backtesting, we simulate bar-by-bar to capture:
-# - Transaction costs proportional to trade value
-# - Cash management (invest available cash)
-# - Position tracking (shares held)
+# On every scheduled rebalance, the simulator sells first, deducts fees, and then scales purchases
+# to the remaining cash. End-of-day equity is marked at the close. This ordering prevents the fee
+# financing and negative-cash behavior that a simultaneous full-notional rebalance can introduce.
 
 
 # %%
-# Manual simulation for multi-asset rebalancing
-def simulate_portfolio(prices, weights, initial_cash, fees):
-    """
-    Simulate portfolio with target weight rebalancing.
-
-    Parameters
-    ----------
-    prices : pd.DataFrame
-        Daily close prices (rows=dates, cols=assets)
-    weights : pd.DataFrame
-        Target weights (rows=dates, cols=assets)
-    initial_cash : float
-        Starting capital
-    fees : float
-        Transaction cost as fraction
-
-    Returns
-    -------
-    pd.Series
-        Portfolio value over time
-    """
-    n_days = len(prices)
-    portfolio_value = np.zeros(n_days)
-    holdings = pd.Series(0.0, index=prices.columns)  # Number of shares
+def simulate_portfolio(
+    opens: np.ndarray,
+    closes: np.ndarray,
+    target_weights: np.ndarray,
+    rebalance_mask: np.ndarray,
+    initial_cash: float,
+    fee_rate: float,
+) -> dict[str, np.ndarray]:
+    """Simulate long-only next-open rebalancing with proportional fees."""
+    n_bars, n_assets = closes.shape
+    holdings = np.zeros(n_assets)
     cash = initial_cash
+    equity = np.zeros(n_bars)
+    cash_path = np.zeros(n_bars)
+    for idx in range(n_bars):
+        if rebalance_mask[idx]:
+            open_values = holdings * opens[idx]
+            open_equity = cash + open_values.sum()
+            target_values = target_weights[idx] * open_equity
+            sells = np.maximum(open_values - target_values, 0.0)
+            holdings -= sells / opens[idx]
+            cash += sells.sum() * (1 - fee_rate)
+            remaining_values = holdings * opens[idx]
+            requested_buys = np.maximum(target_values - remaining_values, 0.0)
+            required_cash = requested_buys.sum() * (1 + fee_rate)
+            buy_scale = min(1.0, cash / required_cash) if required_cash > 0 else 0.0
+            executed_buys = requested_buys * buy_scale
+            holdings += executed_buys / opens[idx]
+            cash -= executed_buys.sum() * (1 + fee_rate)
+        if cash < -1e-8:
+            raise RuntimeError(f"Cash constraint violated at bar {idx}: {cash}")
+        cash = max(cash, 0.0)
+        cash_path[idx] = cash
+        equity[idx] = cash + float(holdings @ closes[idx])
 
-    # Get rebalancing dates (when weights change)
-    weight_changes = weights.diff().abs().sum(axis=1)
-    rebalance_dates = weight_changes[weight_changes > 0.01].index
+    return {"equity": equity, "cash": cash_path}
 
-    # CRITICAL: Always include first date to establish initial positions
-    # (fixes benchmark showing 0% when weights are static)
-    first_date = prices.index[0]
-    if first_date not in rebalance_dates:
-        rebalance_dates = rebalance_dates.insert(0, first_date)
-
-    for i, date in enumerate(prices.index):
-        # Current prices
-        current_prices = prices.loc[date]
-
-        # Portfolio value before any trades
-        holdings_value = (holdings * current_prices).sum()
-        total_value = cash + holdings_value
-        portfolio_value[i] = total_value
-
-        # Check if rebalancing needed
-        if date in rebalance_dates:
-            target_weights = weights.loc[date]
-
-            # Target holdings in dollars
-            target_values = target_weights * total_value
-
-            # Current holdings in dollars
-            current_values = holdings * current_prices
-
-            # Trade amounts
-            trade_values = target_values - current_values
-
-            # Execute trades with costs
-            for asset in prices.columns:
-                trade_value = trade_values[asset]
-                if abs(trade_value) > 1:  # Minimum trade threshold
-                    # Pay transaction cost
-                    trade_cost = abs(trade_value) * fees
-                    cash -= trade_cost
-
-                    # Update holdings
-                    shares_traded = trade_value / current_prices[asset]
-                    holdings[asset] += shares_traded
-                    cash -= trade_value
-
-    return pd.Series(portfolio_value, index=prices.index)
-
-
-# %%
-# Run simulation
-portfolio_value = simulate_portfolio(close_prices, weights, INITIAL_CASH, FEES)
-
-# Calculate returns
-portfolio_returns = portfolio_value.pct_change().dropna()
-
-# %%
-print(f"Final Portfolio Value: ${portfolio_value.iloc[-1]:,.2f}")
-print(f"Total Return: {(portfolio_value.iloc[-1] / INITIAL_CASH - 1) * 100:.2f}%")
 
 # %% [markdown]
-# ## 9. Create Benchmark: 60/40 Portfolio
+# The momentum strategy and benchmark use the same starting capital, fee rate, data window, and
+# monthly next-open rebalance mask. Only their target-weight rules differ.
 
 # %%
-# 60/40 benchmark weights (static)
-benchmark_weights = pd.DataFrame(0.0, index=close_prices.index, columns=ETF_SYMBOLS)
-benchmark_weights["SPY"] = 0.60  # 60% equity (SPY as proxy)
-benchmark_weights["AGG"] = 0.40  # 40% bonds
+strategy_result = simulate_portfolio(
+    open_prices,
+    close_prices,
+    execution_weights,
+    rebalance_at_open,
+    INITIAL_CASH,
+    FEES,
+)
 
-# Simulate benchmark
-benchmark_value = simulate_portfolio(close_prices, benchmark_weights, INITIAL_CASH, FEES)
-benchmark_returns = benchmark_value.pct_change().dropna()
+benchmark_weights = np.zeros_like(close_prices)
+benchmark_weights[:, ETF_SYMBOLS.index("SPY")] = 0.60
+benchmark_weights[:, ETF_SYMBOLS.index("AGG")] = 0.40
+benchmark_result = simulate_portfolio(
+    open_prices,
+    close_prices,
+    benchmark_weights,
+    rebalance_at_open,
+    INITIAL_CASH,
+    FEES,
+)
+
+# %%
+portfolio_value = strategy_result["equity"]
+benchmark_value = benchmark_result["equity"]
+portfolio_returns = (
+    np.diff(np.r_[INITIAL_CASH, portfolio_value]) / np.r_[INITIAL_CASH, portfolio_value][:-1]
+)
+benchmark_returns = (
+    np.diff(np.r_[INITIAL_CASH, benchmark_value]) / np.r_[INITIAL_CASH, benchmark_value][:-1]
+)
+
+assert strategy_result["cash"].min() >= 0
+assert benchmark_result["cash"].min() >= 0
+print(f"Final momentum value: ${portfolio_value[-1]:,.2f}")
+print(f"Final 60/40 value: ${benchmark_value[-1]:,.2f}")
+print(f"Minimum cash balance: ${strategy_result['cash'].min():,.2f}")
 
 # %% [markdown]
-# ## 10. Performance Comparison
+# ## 9. Compute one internally consistent metric set
+#
+# Sharpe and Sortino use mean periodic excess return with a zero annual risk-free rate, matching
+# `PortfolioAnalysis`. CAGR remains a separate growth metric rather than being substituted into the
+# Sharpe numerator.
 
 
 # %%
-# Calculate metrics manually
-def calculate_metrics(returns, periods_per_year=252):
-    """Calculate key performance metrics."""
-    total_return = (1 + returns).prod() - 1
-    annual_return = (1 + total_return) ** (periods_per_year / len(returns)) - 1
-    annual_vol = returns.std() * np.sqrt(periods_per_year)
-    sharpe = annual_return / annual_vol if annual_vol > 0 else 0
-
-    # Sortino (downside deviation)
-    downside_returns = returns[returns < 0]
-    downside_vol = downside_returns.std() * np.sqrt(periods_per_year)
-    sortino = annual_return / downside_vol if downside_vol > 0 else 0
-
-    # Max drawdown
-    cumulative = (1 + returns).cumprod()
-    rolling_max = cumulative.expanding().max()
-    drawdown = (cumulative - rolling_max) / rolling_max
-    max_dd = drawdown.min()
-
-    # Calmar
-    calmar = annual_return / abs(max_dd) if max_dd != 0 else 0
+def calculate_metrics(returns: np.ndarray, periods_per_year: int = 252) -> dict[str, float]:
+    """Calculate growth, risk, and risk-adjusted performance metrics."""
+    total_return = float(np.prod(1 + returns) - 1)
+    annual_return = float((1 + total_return) ** (periods_per_year / len(returns)) - 1)
+    annual_vol = float(np.std(returns, ddof=1) * np.sqrt(periods_per_year))
+    cumulative = np.cumprod(1 + returns)
+    running_max = np.maximum.accumulate(np.r_[1.0, cumulative])[1:]
+    max_dd = float(np.min(cumulative / running_max - 1))
 
     return {
         "Total Return (%)": total_return * 100,
-        "Annual Return (%)": annual_return * 100,
+        "CAGR (%)": annual_return * 100,
         "Annual Volatility (%)": annual_vol * 100,
-        "Sharpe Ratio": sharpe,
-        "Sortino Ratio": sortino,
+        "Sharpe Ratio": float(sharpe_ratio(returns, periods_per_year=periods_per_year)),
+        "Sortino Ratio": float(sortino_ratio(returns, periods_per_year=periods_per_year)),
         "Max Drawdown (%)": max_dd * 100,
-        "Calmar Ratio": calmar,
+        "Calmar Ratio": annual_return / abs(max_dd) if max_dd else np.nan,
     }
 
 
 # %%
-# Compare strategies
 strategy_metrics = calculate_metrics(portfolio_returns)
 benchmark_metrics = calculate_metrics(benchmark_returns)
-
-comparison = pd.DataFrame(
-    {"ETF Momentum": strategy_metrics, "60/40 Benchmark": benchmark_metrics}
-).T
-
-print("\n" + "=" * 70)
-print("PERFORMANCE COMPARISON")
-print("=" * 70)
-comparison.round(3)
+comparison = pl.DataFrame(
+    [
+        {"portfolio": "ETF Momentum", **strategy_metrics},
+        {"portfolio": "60/40 Benchmark", **benchmark_metrics},
+    ]
+)
+comparison
 
 # %% [markdown]
-# ## 11. Success Criteria Evaluation
+# ## 10. Evaluate the pre-specified term sheet
+#
+# The criteria are decision rules, not tuned cutoffs. A weak baseline remains useful when its
+# implementation is auditable and later strategies must beat it on identical assumptions.
 
 # %%
-# From Term Sheet success criteria
-print("\n" + "=" * 70)
-print("SUCCESS CRITERIA EVALUATION")
-print("=" * 70)
+criteria = pl.DataFrame(
+    {
+        "criterion": ["Sharpe ratio", "Absolute max drawdown", "Total return vs 60/40"],
+        "observed": [
+            strategy_metrics["Sharpe Ratio"],
+            abs(strategy_metrics["Max Drawdown (%)"]) / 100,
+            strategy_metrics["Total Return (%)"] / 100,
+        ],
+        "required": [0.5, 0.25, benchmark_metrics["Total Return (%)"] / 100],
+        "passed": [
+            strategy_metrics["Sharpe Ratio"] > 0.5,
+            abs(strategy_metrics["Max Drawdown (%)"]) < 25,
+            strategy_metrics["Total Return (%)"] > benchmark_metrics["Total Return (%)"],
+        ],
+    }
+)
+criteria
 
-criteria = {
-    "Sharpe Ratio > 0.5": strategy_metrics["Sharpe Ratio"] > 0.5,
-    "Max Drawdown < 25%": abs(strategy_metrics["Max Drawdown (%)"]) < 25,
-    "Outperform 60/40": strategy_metrics["Total Return (%)"]
-    > benchmark_metrics["Total Return (%)"],
-}
-
-for criterion, passed in criteria.items():
-    status = "[OK] PASS" if passed else "[FAIL] FAIL"
-    print(f"  {criterion}: {status}")
-
-all_passed = all(criteria.values())
-print(
-    f"\nOverall: {'GO - Strategy meets all criteria' if all_passed else 'NO-GO - Review strategy'}"
+# %%
+passed_count = int(criteria["passed"].sum())
+failed_count = criteria.height - passed_count
+display(
+    Markdown(
+        f"""**Interpretation.** The baseline passes {passed_count} of {criteria.height} criteria and
+        fails {failed_count}. The result is a reference point, not a tuned winner: later strategies
+        must improve on the same timing, costs, and benchmark protocol."""
+    )
 )
 
 # %% [markdown]
-# **Interpretation**: The strategy fails 2 of 3 criteria. This is not a failure of the
-# backtesting methodology — it is the *expected* outcome at this stage. A simple
-# momentum strategy with a single regime filter and equal weighting is a starting point,
-# not a finished product. The remaining chapters build on this baseline:
+# ## 11. Compare cumulative performance and drawdowns
 #
-# - **Ch17** (Portfolio Construction): Optimize weights beyond equal-weight
-# - **Ch18** (Transaction Costs): Model realistic costs beyond flat 5 bps
-# - **Ch19** (Risk Management): Add drawdown controls and position limits
-# - **Ch20** (Synthesis): Combine multiple signals and strategies
-#
-# The honest NO-GO result here is more instructive than a cherry-picked backtest that
-# passes all criteria. It demonstrates that backtesting infrastructure must be built
-# *before* you know whether the strategy works.
-
-# %% [markdown]
-# ## 12. Visualize Results
+# Growth of the initial capital answers who finishes ahead; the underwater curve shows the path
+# risk hidden by an endpoint comparison.
 
 # %%
-# Cumulative returns comparison
+strategy_cum = portfolio_value / INITIAL_CASH - 1
+benchmark_cum = benchmark_value / INITIAL_CASH - 1
+leader = (
+    "60/40 finishes ahead" if benchmark_cum[-1] > strategy_cum[-1] else "Momentum finishes ahead"
+)
+
 fig = go.Figure()
-
-strategy_cum = (portfolio_value / INITIAL_CASH - 1) * 100
-benchmark_cum = (benchmark_value / INITIAL_CASH - 1) * 100
-
 fig.add_trace(
     go.Scatter(
-        x=portfolio_value.index,
-        y=strategy_cum,
+        x=dates,
+        y=strategy_cum * 100,
         name="ETF Momentum",
-        line=dict(color="blue", width=2),
+        line=dict(color=COLORS["blue"], width=2),
     )
 )
-
 fig.add_trace(
     go.Scatter(
-        x=benchmark_value.index,
-        y=benchmark_cum,
+        x=dates,
+        y=benchmark_cum * 100,
         name="60/40 Benchmark",
-        line=dict(color="gray", dash="dash"),
+        line=dict(color=COLORS["neutral"], dash="dash"),
     )
 )
-
 fig.update_layout(
-    title="Cumulative Returns: ETF Momentum vs 60/40",
+    title=f"{leader} under matched next-open monthly rebalancing",
     xaxis_title="Date",
-    yaxis_title="Cumulative Return (%)",
+    yaxis_title="Cumulative net return (%)",
     height=500,
-    legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
 )
+fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"])
 fig.show()
 
-
 # %% [markdown]
-# ### Drawdown Helper
-#
-# Compute percentage drawdown from the running peak.
+# Drawdown is measured from the running peak, with zero at the top and losses below.
 
 
 # %%
-def compute_drawdown(values):
-    rolling_max = values.expanding().max()
-    return (values - rolling_max) / rolling_max * 100
+def compute_drawdown(equity: np.ndarray, initial_cash: float) -> np.ndarray:
+    """Return percentage drawdown from the running portfolio peak."""
+    running_max = np.maximum.accumulate(np.r_[initial_cash, equity])[1:]
+    return equity / running_max - 1
 
 
 # %%
-# Drawdown comparison
-strategy_dd = compute_drawdown(portfolio_value)
-benchmark_dd = compute_drawdown(benchmark_value)
+strategy_dd = compute_drawdown(portfolio_value, INITIAL_CASH)
+benchmark_dd = compute_drawdown(benchmark_value, INITIAL_CASH)
+deeper = (
+    "Momentum experiences the deeper drawdown"
+    if strategy_dd.min() < benchmark_dd.min()
+    else "60/40 experiences the deeper drawdown"
+)
 
 fig = go.Figure()
-
 fig.add_trace(
     go.Scatter(
-        x=strategy_dd.index,
-        y=strategy_dd,
+        x=dates,
+        y=strategy_dd * 100,
         name="ETF Momentum",
         fill="tozeroy",
-        line=dict(color="blue"),
+        line=dict(color=COLORS["blue"]),
     )
 )
-
 fig.add_trace(
     go.Scatter(
-        x=benchmark_dd.index,
-        y=benchmark_dd,
+        x=dates,
+        y=benchmark_dd * 100,
         name="60/40 Benchmark",
-        line=dict(color="gray", dash="dash"),
+        line=dict(color=COLORS["neutral"], dash="dash"),
     )
 )
-
 fig.update_layout(
-    title="Underwater Curve (Drawdowns)", xaxis_title="Date", yaxis_title="Drawdown (%)", height=400
+    title=deeper,
+    xaxis_title="Date",
+    yaxis_title="Drawdown from running peak (%)",
+    height=420,
 )
+fig.update_yaxes(range=[min(strategy_dd.min(), benchmark_dd.min()) * 110, 0])
 fig.show()
 
 # %% [markdown]
-# ## 13. Regime-Conditional Performance
+# ## 12. Compare performance by contemporaneous regime
+#
+# This descriptive slice attributes realized strategy returns to the yield-curve state observed on
+# that day. It does not claim that the state causes the return difference.
 
 # %%
-# Analyze performance by regime
-regime_aligned = regime.reindex(portfolio_returns.index)
+risk_on_returns = portfolio_returns[regime]
+risk_off_returns = portfolio_returns[~regime]
+regime_metrics = pl.DataFrame(
+    {
+        "regime": ["Risk-on", "Risk-off"],
+        "days": [len(risk_on_returns), len(risk_off_returns)],
+        "mean_daily_return_bps": [
+            risk_on_returns.mean() * 10_000,
+            risk_off_returns.mean() * 10_000,
+        ],
+        "annualized_volatility_pct": [
+            risk_on_returns.std(ddof=1) * np.sqrt(252) * 100,
+            risk_off_returns.std(ddof=1) * np.sqrt(252) * 100,
+        ],
+    }
+)
+regime_metrics
 
-risk_on_returns = portfolio_returns[regime_aligned == 1]
-risk_off_returns = portfolio_returns[regime_aligned == 0]
-
-print("\n" + "=" * 70)
-print("REGIME-CONDITIONAL PERFORMANCE")
-print("=" * 70)
-
-print("\nRisk-On Periods:")
-print(f"  Days: {len(risk_on_returns):,}")
-print(f"  Mean Daily Return: {risk_on_returns.mean() * 100:.4f}%")
-print(f"  Volatility (ann.): {risk_on_returns.std() * np.sqrt(252) * 100:.2f}%")
-
-print("\nRisk-Off Periods:")
-print(f"  Days: {len(risk_off_returns):,}")
-print(f"  Mean Daily Return: {risk_off_returns.mean() * 100:.4f}%")
-print(f"  Volatility (ann.): {risk_off_returns.std() * np.sqrt(252) * 100:.2f}%")
+# %%
+higher_mean = regime_metrics.sort("mean_daily_return_bps", descending=True)["regime"][0]
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    horizontal_spacing=0.18,
+    subplot_titles=["Mean net return", "Annualized volatility"],
+)
+fig.add_trace(
+    go.Bar(
+        x=regime_metrics["regime"],
+        y=regime_metrics["mean_daily_return_bps"],
+        marker_color=[COLORS["blue"], COLORS["neutral"]],
+        showlegend=False,
+    ),
+    row=1,
+    col=1,
+)
+fig.add_trace(
+    go.Bar(
+        x=regime_metrics["regime"],
+        y=regime_metrics["annualized_volatility_pct"],
+        marker_color=[COLORS["blue"], COLORS["neutral"]],
+        showlegend=False,
+    ),
+    row=1,
+    col=2,
+)
+fig.update_layout(
+    title=f"{higher_mean} days have the higher average strategy return",
+    height=420,
+)
+fig.update_yaxes(title_text="Mean daily return (bps)", row=1, col=1)
+fig.update_yaxes(title_text="Annualized volatility (%)", row=1, col=2)
+fig.update_xaxes(title_text="Yield-curve regime", row=1, col=1)
+fig.update_xaxes(title_text="Yield-curve regime", row=1, col=2)
+fig.show()
 
 # %% [markdown]
-# ## 14. Evaluate with ml4t-diagnostic
+# ## 13. Reconcile with `ml4t-diagnostic`
+#
+# The library receives the same daily return arrays and dates. Its headline Sharpe, Sortino, CAGR,
+# volatility, and drawdown should agree with the table above up to display precision.
 
 # %%
-# Align returns with benchmark on common dates
-common_idx = portfolio_returns.index.intersection(benchmark_returns.index)
-aligned_returns = portfolio_returns.loc[common_idx].values
-aligned_benchmark = benchmark_returns.loc[common_idx].values
-
-if len(aligned_returns) == 0 or len(aligned_benchmark) == 0:
-    raise ValueError("Insufficient aligned data for ml4t-diagnostic analysis")
-
 analysis = PortfolioAnalysis(
-    returns=aligned_returns,
-    benchmark=aligned_benchmark,
-    dates=common_idx,
+    returns=portfolio_returns,
+    benchmark=benchmark_returns,
+    dates=dates,
     periods_per_year=252,
 )
-metrics = analysis.compute_summary_stats()
+diagnostic_metrics = analysis.compute_summary_stats()
 
-print("\n" + "=" * 70)
-print("ML4T DIAGNOSTIC - COMPREHENSIVE EVALUATION")
-print("=" * 70)
-print(metrics.summary())
+assert np.isclose(diagnostic_metrics.sharpe_ratio, strategy_metrics["Sharpe Ratio"])
+assert np.isclose(diagnostic_metrics.sortino_ratio, strategy_metrics["Sortino Ratio"])
+assert np.isclose(diagnostic_metrics.max_drawdown * 100, strategy_metrics["Max Drawdown (%)"])
+print(diagnostic_metrics.summary())
 
-# %% [markdown]
-# ## Key Takeaways
-#
-# 1. **The fundamental equation governs everything.** Portfolio return is the
-#    inner product of yesterday's weights and today's asset returns. The bar-by-bar
-#    simulator above is just that equation extended to track shares, cash, and
-#    transaction costs explicitly.
-# 2. **The baseline does not beat the static 60/40 in this sample.** With a
-#    Sharpe of 0.65 against the benchmark's 0.80 and a deeper max drawdown
-#    (−31.9% vs −26.9%), the strategy passes only one of three term-sheet
-#    criteria. That is the intended outcome: a transparent baseline that any
-#    later ML strategy must improve on.
-# 3. **The regime filter does not reduce drawdowns here.** The 10Y-2Y spread
-#    splits the sample roughly 71/29 (risk-on/risk-off) but the strategy's worst
-#    drawdown still occurs in this period — a reminder that simple regime
-#    indicators are not a substitute for risk management.
-# 4. **Transaction costs are visible already at 5 bps.** With monthly
-#    rebalancing the cost drag is small but non-zero; once Ch18 introduces
-#    realistic cost models, this baseline becomes the reference point against
-#    which more sophisticated execution is measured.
-#
-# **Next**: `03_single_asset_vectorbt` and `04_single_asset_ml4t_backtest` re-run
-# the same strategy through two production-grade engines, and `06_framework_parity`
-# reconciles the differences. See chapter §16.4 for the baseline as a yardstick.
+# %%
+display(
+    Markdown(
+        f"""## Key takeaways
+
+1. **Event order is part of the model.** Month-end close information becomes tradable at the next
+   open; the simulator never applies a signal to a return that began before the signal existed.
+2. **The 60/40 benchmark is stronger in this sample.** Momentum's net Sharpe is
+   {strategy_metrics["Sharpe Ratio"]:.2f} versus {benchmark_metrics["Sharpe Ratio"]:.2f}, and its
+   maximum drawdown is {strategy_metrics["Max Drawdown (%)"]:.1f}% versus
+   {benchmark_metrics["Max Drawdown (%)"]:.1f}%.
+3. **Cash and costs are explicit.** The simulator rebalances both portfolios monthly, deducts
+   {FEES * 10_000:.0f} bps per traded dollar, and maintains a nonnegative cash balance.
+4. **The result is descriptive, not a holdout claim.** This fixed-rule teaching backtest provides
+   an auditable baseline that later models must beat under the same protocol.
+
+**Next:** `03_single_asset_vectorbt` and `04_single_asset_ml4t_backtest` implement a common RSI rule
+in two engines. `06_framework_parity` then isolates protocol differences. See Section 16.4 for the
+baseline's role as a yardstick."""
+    )
+)

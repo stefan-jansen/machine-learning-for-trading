@@ -12,7 +12,7 @@ and run it.
 
 | Platform | How to open a terminal |
 |----------|------------------------|
-| **Windows** | Start menu → type `PowerShell` → open *Windows PowerShell*. Some steps below need *Run as administrator* (right-click → Run as administrator). |
+| **Windows** | Start menu → type `PowerShell` → open *Windows PowerShell*. Some steps below need *Run as administrator* (right-click → Run as administrator). You use PowerShell only to **set up WSL2**; once WSL2 is running, every other command in this guide is typed into the **Ubuntu** terminal it gives you, not into PowerShell. |
 | **macOS** | Applications → Utilities → *Terminal* |
 | **Linux** | `Ctrl+Alt+T`, or search for *Terminal* |
 
@@ -30,6 +30,50 @@ If a command is not found, the tool it belongs to is not installed yet. `git` sh
 [Git for Windows](https://git-scm.com/download/win) and with the Xcode command-line tools on
 macOS (`xcode-select --install`).
 
+### What you need before either path
+
+| | Docker path | Local `uv` path |
+|---|---|---|
+| `git` | yes | yes |
+| Docker Desktop or Docker Engine | yes | no |
+| **C/C++ compiler and Python headers** | no, the image carries both | **yes** |
+| Disk | ~13 GB image + ~4 GB data | ~11 GB environment + ~4 GB data + ~1 GB git history |
+
+The compiler is not optional on the local path and it is the most common way a first install
+fails. Twelve locked packages publish no wheel for Python 3.14, so `uv` builds them from
+source; six of those are C or C++ (`scikit-learn`, `shap`, `hmmlearn`, `ruptures`, `econml`,
+`causalml`). Without a compiler `uv sync` stops with:
+
+```
+error: command 'c++' failed: No such file or directory
+```
+
+Install one first:
+
+```bash
+sudo apt install build-essential python3-dev   # Ubuntu, Debian, and inside WSL2
+xcode-select --install                         # macOS
+```
+
+`python3-dev` is the second half of the requirement on any distribution whose own `python3` is
+already 3.14 or newer, Ubuntu 26.04 being the first. `uv` downloads a managed CPython only when
+no installed interpreter satisfies the project's floor; when the system one does, `uv` builds
+against it, and Debian and Ubuntu ship that interpreter without its headers. Every source build
+then stops with:
+
+```
+fatal error: Python.h: No such file or directory
+```
+
+On a distribution whose Python is older, such as Ubuntu 24.04, the package changes nothing:
+`uv` fetches its own CPython, which carries its headers with it. Installing both is correct in
+either case.
+
+**Docker is the one path that avoids this**, because the image ships its own toolchain. WSL2
+does not avoid it: a local `uv` environment inside WSL2 is the Linux path, so it needs the same
+two packages that native Linux does. What WSL2 avoids is the *Windows* build, which
+does not work at all — see the note under [Platform Support](#platform-support).
+
 ---
 
 ## Platform Support
@@ -39,9 +83,31 @@ macOS (`xcode-select --install`).
 | **Linux x86_64**        |  ✅  |   ✅   |    ✅     | ✅* |
 | **Windows 11 (WSL2)**   |  ✅  |   ✅   |    ✅     | ✅* |
 | **macOS Intel**         |  ✅  |   ✅   |    ✅     |  -  |
-| **macOS Apple Silicon** |  ✅  |   -    |    ✅     |  -  |
+| **macOS Apple Silicon** |  ✅  |   †    |    ✅     |  -  |
 
 \* Requires NVIDIA GPU + nvidia-container-toolkit
+† `ml4t-py312` is amd64 only. It has no native build on Apple Silicon and runs under Rosetta
+emulation, which [Py312 Image](#py312-image-specific-notebooks) covers.
+
+The table is about the **Docker images**, which work on all four rows. The local `uv` path is
+narrower: it works on Linux, on Apple Silicon, and inside WSL2 (which is the Linux path), and it
+does not work on Intel Macs or in native Windows Python.
+
+> **Windows: use WSL2, not PowerShell.** Everything on Windows runs inside WSL2, whether you
+> pick Docker or the local `uv` environment. Installing directly into Windows Python is not
+> supported and does not work: the dependency set resolves `scikit-learn 1.6.1`, which has no
+> Python 3.14 wheel for Windows, and building it from source fails partway through even on a
+> machine that already has the Visual Studio Build Tools. Inside WSL2 you are on the Linux path
+> above, which is the one that is tested.
+
+> **macOS: which path depends on the chip.** On **Apple Silicon**, use the local `uv`
+> environment: it builds natively against the Xcode command-line tools. Docker is worth adding
+> there only for the twelve `ml4t-py312` notebooks, which have no arm64 build, and for Chapter
+> 2's containerized database benchmarks. On
+> an **Intel Mac**, Docker is the only option, because PyTorch stopped publishing macOS x86_64
+> wheels and `uv sync` stops immediately with `Distribution torch==2.10.0 ... doesn't have a
+> source distribution or wheel for the current platform`. There is nothing to configure around
+> it. See [macOS](#macos).
 
 ### Which image do I need?
 
@@ -54,7 +120,10 @@ macOS (`xcode-select --install`).
 
 **Most readers need only `ml4t`.** The other images are for specific notebooks.
 
-**Apple Silicon users**: The notebooks requiring `ml4t-py312` are not runnable on ARM64 because the underlying libraries (signatory, esig) have no ARM64 builds. View the pre-executed `.ipynb` files on GitHub or in Jupyter instead.
+**Apple Silicon users**: `signatory` and `esig` have no ARM64 builds, so the `ml4t-py312`
+notebooks do not run natively. They all ship pre-executed, and
+[Py312 Image](#py312-image-specific-notebooks) covers both reading them and running them under
+Rosetta. Nothing else in the book needs this.
 
 ---
 
@@ -145,26 +214,40 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
    wsl --install -d Ubuntu
    ```
 
-   Two dashes, no space: `--install`, not `-- install`. The `-d Ubuntu` is required. Without it,
-   some Windows builds install the WSL runtime but no Linux distribution, and later steps fail
-   with `Windows Subsystem for Linux has no installed distributions`.
+   Two dashes, no space: `--install`, not `-- install`. Keep the `-d Ubuntu`: without it, some
+   Windows builds install the WSL runtime and no Linux distribution at all.
+
+   On a machine that has never had WSL, expect this run to enable the Windows features and
+   install the WSL runtime **without** installing Ubuntu. It prints `Changes will not be
+   effective until the system is rebooted` and says nothing about a distribution. That is the
+   normal path, and step 3 completes it.
 
 2. **Restart your computer.** This is a required step, not a conditional one. `wsl --install`
    enables a Windows feature that does not take effect until you reboot, and Windows does not
    always prompt you. If the command printed `The operation completed successfully`, restart now.
 
-   After the restart, Ubuntu opens and asks you to create a username and password. The password
-   is not echoed as you type, which is expected.
+   Nothing opens by itself after the restart.
 
-3. **Verify WSL2 before installing Docker.** In PowerShell:
+3. **Run the same command again**, in an Administrator PowerShell:
+   ```powershell
+   wsl --install -d Ubuntu
+   ```
+   This is the run that prints `Downloading: Ubuntu`, `Installing: Ubuntu` and `Distribution
+   successfully installed`. If the first run already installed Ubuntu, this one reports that it
+   is already installed and changes nothing.
+
+   Then open **Ubuntu** from the Start menu. Its first launch asks you to create a username and
+   password; the password is not echoed as you type, which is expected.
+
+4. **Verify WSL2 before installing Docker.** In PowerShell:
    ```powershell
    wsl --list --verbose
    ```
-   You should see `Ubuntu` with `STATE  Running` (or `Stopped`) and `VERSION  2`. If the list is
-   empty, repeat step 1 and confirm you restarted. If `VERSION` reads `1`, run
-   `wsl --set-version Ubuntu 2`.
+   You should see `Ubuntu` with `STATE  Running` (or `Stopped`) and `VERSION  2`. If you get
+   `Windows Subsystem for Linux has no installed distributions`, step 3 did not complete, so run
+   it again. If `VERSION` reads `1`, run `wsl --set-version Ubuntu 2`.
 
-4. **Increase WSL2 memory limit** *(optional — skip unless a notebook runs out of memory; most
+5. **Increase WSL2 memory limit** *(optional — skip unless a notebook runs out of memory; most
    chapters are fine on the default)*: WSL2 defaults to 50% of host RAM, which may not be enough for
    data-heavy notebooks. The `%USERPROFILE%\.wslconfig` file lives in your **Windows** home folder, so
    create it from **Windows** PowerShell (a regular window, not admin), not from inside Ubuntu. Paste
@@ -180,7 +263,7 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
    ```
    Then apply it by restarting WSL: `wsl --shutdown` from PowerShell, then reopen your terminal.
 
-5. **Install Docker Desktop.** This is a **Windows program you download in your web browser** — not
+6. **Install Docker Desktop.** This is a **Windows program you download in your web browser** — not
    a command you type into a terminal. Open [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/)
    in Edge or Chrome, click **Download for Windows**, and run the downloaded `Docker Desktop
    Installer.exe`. Do **not** type `docker.com/...` into PowerShell or the Ubuntu terminal — that
@@ -193,13 +276,13 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
    - In Settings → Resources → WSL Integration, enable your Ubuntu distribution
    - In Settings → Resources, allocate at least 8 GB memory and 60 GB disk
 
-6. **Verify Docker Desktop integration**: Open your WSL Ubuntu terminal and run:
+7. **Verify Docker Desktop integration**: Open your WSL Ubuntu terminal and run:
    ```bash
    docker version
    ```
-   If this fails with "Cannot connect to the Docker daemon", Docker Desktop's WSL integration is not enabled for your distribution. Check step 5 above.
+   If this fails with "Cannot connect to the Docker daemon", Docker Desktop's WSL integration is not enabled for your distribution. Check step 6 above.
 
-7. **Clone in WSL** (not on Windows drives — much faster):
+8. **Clone in WSL** (not on Windows drives — much faster):
    ```bash
    cd ~
    git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
@@ -210,23 +293,45 @@ Desktop can start, so complete steps 1-3 in order and do not skip the restart.
 
 **Important**: Always run `docker` commands from inside a WSL terminal (Ubuntu), not from Windows PowerShell or Command Prompt. Docker Desktop exposes the Docker socket to WSL distributions, but the Docker CLI in Windows may behave differently.
 
-**Tip**: Keep the repo at `~/machine-learning-for-trading` in WSL, not `/mnt/c/...`. The Windows filesystem (`/mnt/c/`) is dramatically slower due to the 9P protocol bridge. Access WSL files from Windows Explorer via `\\wsl$\Ubuntu\home\<username>\machine-learning-for-trading`.
+**Tip**: Keep the repo at `~/machine-learning-for-trading` in WSL, not under `/mnt/c/...`. Windows drives reach WSL through the 9P protocol bridge, which costs roughly 8x on a 512 MB sequential write, 240x on creating two thousand small files, and 470x on reading their metadata. `git clone` and `uv sync` are almost entirely small-file and metadata work, so those last two ratios are the ones a reader pays. Access WSL files from Windows Explorer via `\\wsl$\Ubuntu\home\<username>\machine-learning-for-trading`.
 
-### macOS (Intel and Apple Silicon)
+### macOS
 
-1. **Install Docker Desktop** from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/)
-   - Choose the correct chip: **Intel** or **Apple chip**
-   - Recommended resources: 4+ CPUs, 8+ GB memory, 64+ GB disk
+**Apple Silicon: use the local `uv` path, not Docker.** Everything in the main environment either
+has an arm64 wheel or builds from source against the Xcode command-line tools, the same way it
+does on Linux, so Docker would add an image you have no use for. Go to
+[Local Setup with uv](#local-setup-with-uv-alternative-to-docker); this is the path walked on
+real hardware before every release. Two things still want Docker on that machine: the twelve
+`ml4t-py312` notebooks, which have no arm64 build at all and are covered under
+[Py312 Image](#py312-image-specific-notebooks), and Chapter 2's storage benchmarks, which compare
+databases that run as containers. Everything else is `uv`.
 
-2. **Apple Silicon only**: In Docker Desktop Settings → General, enable **Use Rosetta for x86_64/amd64 emulation** (needed only for the `ml4t-py312` image, which most readers won't use).
+```bash
+xcode-select --install                        # compiler, if you do not have it already
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env                   # puts uv on PATH in this shell
+git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
+cd machine-learning-for-trading
+cp .env.example .env
+uv sync
+```
 
-3. **Clone and pull**:
+**Intel Macs: Docker is the only local option.** PyTorch publishes no macOS x86_64 wheel, so the
+`uv` path cannot be made to work on that hardware. The `ml4t` image is amd64 and runs, so:
+
+1. Install Docker Desktop from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/),
+   choosing the **Intel chip** download. Give it 4+ CPUs, 8+ GB memory and 64+ GB disk in
+   Settings → Resources, and note that the image plus data wants about 17 GB of that disk.
+2. Clone and pull:
    ```bash
    git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
    cd machine-learning-for-trading
    cp .env.example .env
    docker compose pull ml4t
    ```
+
+If that machine is tight on memory or disk, a Linux box or a cloud instance is the more
+comfortable route, and it is the same Linux path documented above.
 
 ---
 
@@ -313,17 +418,44 @@ A small number of notebooks require Python 3.12 libraries not available on Pytho
 | `05_deep_hedging_pfhedge` | pfhedge (unmaintained, numpy<2) | Ch21 |
 
 ```bash
-# x86 systems only (Linux, Windows WSL2, macOS Intel)
+# On x86 (Linux, Windows WSL2, Intel Mac) run these as they stand. On Apple Silicon
+# prefix each with DOCKER_DEFAULT_PLATFORM=linux/amd64, see below.
 docker compose --profile py312 pull py312
-docker compose --profile py312 run --rm py312 python 05_synthetic_data/03_sigcwgan_signatures.py
+docker compose --profile py312 run --rm py312 python 09_model_based_features/06_path_signatures.py
 docker compose --profile py312 run --rm py312 \
   /opt/bsts/bin/python 15_causal_estimation/06_fed_announcement_bsts.py
+
+# The seven GPU-tagged notebooks, on a machine with an NVIDIA GPU:
+docker compose --profile py312-gpu run --rm py312-gpu \
+  python 05_synthetic_data/03_sigcwgan_signatures.py
 ```
 
 Chapter 15 notebook 06 uses the isolated `/opt/bsts` interpreter so its NumPy 1 and
 pandas 2.2 constraints do not replace dependencies required by the other py312 notebooks.
 
-**Apple Silicon**: These notebooks cannot run natively. View the pre-executed `.ipynb` files in Jupyter or on GitHub.
+The `py312` service reserves no GPU, so it runs anywhere the amd64 image does. Seven of the
+twelve are GPU-tagged and run faster with one, whether they train or only do inference: Ch05
+`01_timegan`,
+`03_sigcwgan_signatures` and `07_dp_gan`, Ch10 `03_sentiment_evolution`, Ch12
+`10_shap_nlp_sentiment`, Ch14 `06_conditional_autoencoder` and Ch21
+`05_deep_hedging_pfhedge`. The `py312-gpu` service is the same image with an NVIDIA GPU
+attached, for those.
+
+**Apple Silicon**: these notebooks have no arm64 build and all of them ship pre-executed, so
+reading the `.ipynb` in Jupyter or on GitHub is the intended route, and the local `uv` path
+covers everything else in the book. To execute them anyway you need Docker, which the Apple
+Silicon setup above does not install:
+
+1. Install Docker Desktop from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/),
+   choosing the **Apple chip** download.
+2. Enable Settings → General → **Use Rosetta for x86_64/amd64 emulation**.
+3. Prefix the **`py312`** commands above with `DOCKER_DEFAULT_PLATFORM=linux/amd64`, for example
+   `DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose --profile py312 pull py312`. Skip the
+   `py312-gpu` one: it reserves an NVIDIA device, which no Mac has, so all twelve notebooks go
+   through the CPU-only service here.
+
+It runs at emulation speed. Apart from Chapter 2's database benchmarks, this is the only thing
+on an Apple Silicon Mac that Docker is needed for.
 
 ---
 
@@ -340,7 +472,8 @@ backend rather than Docker itself. Work through it in this order:
    [Windows setup](#windows-11-wsl2) above.
 2. **Pending reboot.** If you ran `wsl --install` and did not restart, restart now.
 3. **No Linux distribution.** Run `wsl --list --verbose` in PowerShell. If it prints
-   `has no installed distributions`, run `wsl --install -d Ubuntu` and restart.
+   `has no installed distributions`, run `wsl --install -d Ubuntu` again. On a machine that has
+   already rebooted, this second run is what downloads and installs Ubuntu.
 4. **WSL2 backend not selected.** Docker Desktop → Settings → General → "Use the WSL 2
    based engine".
 
@@ -438,14 +571,21 @@ Docker is recommended because it guarantees a consistent environment. But if you
 ### Setup
 
 ```bash
-# Install uv
+# Install uv — use this installer, not `pip install uv`. Most current systems either
+# ship no `pip` at all or refuse the install with `externally-managed-environment`.
 curl -LsSf https://astral.sh/uv/install.sh | sh
+# The installer puts uv in ~/.local/bin, which your current shell does not know about
+# yet. Load it now rather than opening a new terminal:
+source $HOME/.local/bin/env        # sh, bash, zsh;  env.fish for fish
+# Windows PowerShell: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-# Clone and enter the repository
+# Clone and enter the repository (about 0.9 GB of history)
 git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
 cd machine-learning-for-trading
 
-# Install all dependencies (creates .venv/, installs ~300 packages)
+# Install all dependencies (creates .venv/, installs ~300 packages, about 11 GB).
+# Twelve of them compile from source, so a C/C++ compiler must already be installed —
+# see "What you need before either path" above.
 uv sync
 
 # Copy environment template (defaults work as-is; no editing needed to start)

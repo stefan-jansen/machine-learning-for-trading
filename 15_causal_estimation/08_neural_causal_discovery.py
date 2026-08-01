@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -14,33 +14,35 @@
 # ---
 
 # %% [markdown]
-# # Neural Causal Discovery: Beyond Constraint-Based Methods
+# # Continuous and Time-Series Causal Discovery
 #
-# **Chapter 15: Causal Estimation with ML**
+# **Chapter 15: Causal Machine Learning**
 # **Docker image**: `ml4t`
 #
-# **Book Reference**: Chapter 15, §15.4 (Neural Causal Discovery)
+# **Book Reference**: Chapter 15, §15.6 (Causal Discovery from Observational Data)
 #
-# This notebook implements **neural approaches to causal discovery**, moving beyond
-# traditional constraint-based methods (like PCMCI) to differentiable DAG learning.
+# This notebook compares continuous DAG learning with time-series discovery methods on
+# one seven-ETF panel, emphasizing how strongly the resulting graph depends on assumptions.
 #
-# **Why Neural Causal Discovery?**
+# **Why Compare Discovery Methods?**
 #
-# Traditional methods (PC, FCI, PCMCI) test conditional independence to build DAGs.
+# Constraint-based methods such as PC, FCI, and PCMCI test conditional independence
+# to recover graph structure or an equivalence class, depending on their assumptions.
 # They have limitations:
 # 1. **Combinatorial explosion**: Testing all possible edges is expensive
 # 2. **Discrete decisions**: No gradient-based optimization
 # 3. **Limited scalability**: Struggles with many variables
 #
-# **Neural approaches** reformulate DAG learning as continuous optimization:
-# - **NOTEARS**: Uses trace exponential constraint for acyclicity
-# - **DAG-GNN**: Graph neural networks for structure learning
-# - **VAR-LiNGAM**: Combines VAR with non-Gaussianity for identification
+# The comparison includes:
+# - **NOTEARS** for contemporaneous linear DAG learning
+# - **VAR-LiNGAM** for lagged and instantaneous linear structure
+# - **PCMCI** for multivariate conditional-independence discovery
+# - **Granger tests** as pairwise predictive screens
 #
 # **Learning Outcomes**:
 # - LO1: Understand the NOTEARS formulation for DAG learning
-# - LO2: Apply neural causal discovery to financial time series
-# - LO3: Compare neural vs constraint-based methods with proper multiple testing
+# - LO2: Apply contemporaneous and lagged discovery methods to financial time series
+# - LO3: Compare score-based and constraint-based methods with proper multiple testing
 # - LO4: Assess edge stability via bootstrap analysis
 #
 # **Prerequisites**: [`07_tigramite_time_series`](07_tigramite_time_series.ipynb) for constraint-based
@@ -50,22 +52,32 @@
 # ## 1. Setup and Configuration
 
 # %%
-"""Neural Causal Discovery — differentiable DAG learning with NOTEARS and VAR-LiNGAM."""
+"""Compare continuous DAG learning with time-series causal discovery."""
 
+import io
 import warnings
 from collections import defaultdict
+from contextlib import redirect_stdout
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
+from causallearn.search.FCMBased.lingam import VARLiNGAM
+from IPython.display import display
 from scipy import linalg, optimize
-from sklearn.linear_model import RidgeCV
+from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 from statsmodels.stats.multitest import multipletests
+from statsmodels.tsa.stattools import grangercausalitytests
+from tigramite import data_processing as pp
+from tigramite.independence_tests.parcorr import ParCorr
+from tigramite.pcmci import PCMCI
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
 
@@ -79,13 +91,16 @@ SYNTHETIC_SAMPLE_SIZE = 0
 RETURN_SAMPLE_LIMIT = 0
 NOTEARS_LAMBDA1 = 0.05
 NOTEARS_MAX_ITER = 100
+BOOTSTRAP_MAX_ITER = 30
+GRANGER_MAX_LAG = 5
 START_DATE = "2015-01-01"
+END_DATE = "2024-06-01"
 
 # %%
 
 set_global_seeds(SEED)
 
-print("Neural Causal Discovery for Financial Time Series")
+print("Continuous and Time-Series Causal Discovery")
 print(f"Bootstrap iterations: {N_BOOTSTRAP}")
 
 # %% [markdown]
@@ -130,7 +145,35 @@ def _notears_objectives(X, n, d):
 
 
 # %% [markdown]
-# Use the NOTEARS objectives in an augmented-Lagrangian optimization loop.
+# Each augmented-Lagrangian step solves one smooth, bounded optimization problem over
+# positive and negative parts of the adjacency matrix.
+
+
+# %%
+def _solve_notears_subproblem(w_est, d, loss, h, rho, alpha, lambda1):
+    """Solve one NOTEARS augmented-Lagrangian subproblem."""
+
+    def adjacency(w):
+        return (w[: d * d] - w[d * d :]).reshape(d, d)
+
+    def objective(w):
+        W = adjacency(w)
+        loss_val, g_loss = loss(W)
+        h_cur, g_h = h(W)
+        value = loss_val + 0.5 * rho * h_cur**2 + alpha * h_cur + lambda1 * w.sum()
+        g_smooth = g_loss + (rho * h_cur + alpha) * g_h
+        gradient = np.concatenate((g_smooth + lambda1, -g_smooth + lambda1), axis=None)
+        return value, gradient
+
+    bounds = [(0, 0) if i == j else (0, None) for _ in range(2) for i in range(d) for j in range(d)]
+    solution = optimize.minimize(objective, w_est, method="L-BFGS-B", jac=True, bounds=bounds)
+    W_new = adjacency(solution.x)
+    return solution.x, W_new, h(W_new)[0]
+
+
+# %% [markdown]
+# The outer loop raises the acyclicity penalty until the graph satisfies the smooth DAG
+# constraint, then thresholds small coefficients for a readable sparse graph.
 
 
 # %%
@@ -152,39 +195,21 @@ def notears_linear(
     n, d = X.shape
     loss, h = _notears_objectives(X, n, d)
     rho, alpha, h_val = 1.0, 0.0, np.inf
-
-    def _adj(w):
-        return (w[: d * d] - w[d * d :]).reshape(d, d)
-
-    def _func(w):
-        W = _adj(w)
-        loss_val, g_loss = loss(W)
-        h_cur, g_h = h(W)
-        obj = loss_val + 0.5 * rho * h_cur * h_cur + alpha * h_cur + lambda1 * w.sum()
-        g_smooth = g_loss + (rho * h_cur + alpha) * g_h
-        g_obj = np.concatenate((g_smooth + lambda1, -g_smooth + lambda1), axis=None)
-        return obj, g_obj
-
     w_est = np.zeros(2 * d * d)
-    # Fix the diagonal to zero (no self-loops); off-diagonal parts stay non-negative.
-    bnds = [(0, 0) if i == j else (0, None) for _ in range(2) for i in range(d) for j in range(d)]
+    W_est = np.zeros((d, d))
 
     for _ in range(max_iter):
-        w_new, h_new = w_est, h_val
         while rho < rho_max:
-            sol = optimize.minimize(_func, w_est, method="L-BFGS-B", jac=True, bounds=bnds)
-            w_new = sol.x
-            h_new = h(_adj(w_new))[0]
+            w_new, W_new, h_new = _solve_notears_subproblem(w_est, d, loss, h, rho, alpha, lambda1)
             if h_new > 0.25 * h_val:
                 rho *= 10
             else:
                 break
-        w_est, h_val = w_new, h_new
+        w_est, W_est, h_val = w_new, W_new, h_new
         alpha += rho * h_val
         if h_val <= h_tol or rho >= rho_max:
             break
 
-    W_est = _adj(w_est)
     W_est[np.abs(W_est) < w_threshold] = 0
     return W_est
 
@@ -197,64 +222,45 @@ def notears_linear(
 # 2. Apply ICA to residuals to identify instantaneous causal order
 # 3. Use non-Gaussianity for identification (unlike Gaussian methods)
 #
-# We first build a simplified version from scratch to expose the mechanics,
-# then show the production implementation via `causal-learn`.
+# We first fit an explicit ridge-VAR screen to expose the lagged regression step,
+# then use the full `causal-learn` VAR-LiNGAM implementation for structural discovery.
 
 # %% [markdown]
-# ### From-Scratch Implementation
+# ### Explicit VAR Screen
 #
-# The core idea: fit a VAR model to capture lagged effects, then apply ICA
-# to the residuals — non-Gaussian structure in the residuals identifies the
-# instantaneous causal ordering that Gaussian methods cannot recover.
+# A one-lag ridge VAR provides an intentionally modest reference. It estimates predictive
+# lagged coefficients but does not claim to solve LiNGAM's ICA permutation and scaling problem.
 
 
 # %%
-def var_lingam_scratch(
+def ridge_var_screen(
     X: np.ndarray,
-    max_lag: int = 1,
     threshold: float = 0.1,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Simplified VAR-LiNGAM: VAR for lagged effects + ICA for instantaneous."""
-    n, d = X.shape
-    Y = X[max_lag:]
-    X_lagged = X[max_lag - 1 : -1]
+) -> np.ndarray:
+    """Estimate a one-lag ridge VAR coefficient matrix for comparison."""
+    _, d = X.shape
+    Y = X[1:]
+    X_lagged = X[:-1]
 
-    # Fit VAR via Ridge regression
     B_lag = np.zeros((d, d))
-    residuals = np.zeros_like(Y)
     for j in range(d):
-        model = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0])
+        model = Ridge(alpha=1.0)
         model.fit(X_lagged, Y[:, j])
         B_lag[j, :] = model.coef_
-        residuals[:, j] = Y[:, j] - model.predict(X_lagged)
 
-    # ICA on residuals to identify instantaneous effects (LiNGAM)
-    from sklearn.decomposition import FastICA
-
-    ica = FastICA(n_components=d, random_state=SEED, max_iter=500)
-    ica.fit_transform(residuals)
-    try:
-        B0 = np.eye(d) - np.linalg.inv(ica.mixing_)
-    except np.linalg.LinAlgError:
-        B0 = np.zeros((d, d))
-
-    B0[np.abs(B0) < threshold] = 0
     B_lag[np.abs(B_lag) < threshold] = 0
-    return B0, B_lag
+    return B_lag
 
 
 # %% [markdown]
 # ### Library Implementation: causal-learn
 #
-# The `causal-learn` library provides a production-grade `VARLiNGAM` that uses
-# proper VAR estimation with BIC lag selection, DirectLiNGAM for the instantaneous
-# ordering, and optional pruning — all in three lines.
+# The `causal-learn` library provides a production-grade `VARLiNGAM` that fits the
+# requested one-lag VAR, applies DirectLiNGAM to the innovations for instantaneous
+# ordering, and optionally prunes the result - all in three lines.
 
 
 # %%
-from causallearn.search.FCMBased.lingam import VARLiNGAM
-
-
 def var_lingam_library(
     X: np.ndarray,
     lags: int = 1,
@@ -275,7 +281,7 @@ def var_lingam_library(
 # %% [markdown]
 # ## 4. Block Bootstrap for Stability Analysis
 #
-# Neural methods are sensitive to noise. We assess edge stability via block
+# Continuous DAG estimates are sensitive to noise. We assess edge stability via block
 # bootstrap (preserving autocorrelation) to see how often each edge appears.
 
 
@@ -367,14 +373,11 @@ print("\n=== LOADING DATA ===\n")
 
 # Configuration
 ASSETS = ["SPY", "QQQ", "IWM", "TLT", "GLD", "EEM", "XLF"]
-END_DATE = "2024-06-01"
 
 # Load ETF data
 etf_data = load_etfs()
 
 # Filter to assets and date range
-from datetime import datetime
-
 start_dt = datetime.fromisoformat(START_DATE)
 end_dt = datetime.fromisoformat(END_DATE)
 
@@ -393,27 +396,28 @@ prices = (
     .sort("timestamp")
 )
 
-# Convert to pandas
-prices_pd = prices.to_pandas()
-prices_pd["timestamp"] = pd.to_datetime(prices_pd["timestamp"])
-prices_pd = prices_pd.set_index("timestamp")
-
-# Compute returns
-returns = prices_pd.pct_change().dropna()
+# Keep ordinary table transformations in Polars. NumPy and pandas conversions occur
+# only at estimator and display boundaries below.
+ASSETS = [asset for asset in ASSETS if asset in prices.columns]
+returns = prices.select(
+    "timestamp",
+    *[(pl.col(asset) / pl.col(asset).shift(1) - 1).alias(asset) for asset in ASSETS],
+).drop_nulls()
 
 if RETURN_SAMPLE_LIMIT > 0:
     returns = returns.tail(RETURN_SAMPLE_LIMIT)
 
-# Update ASSETS to only those present in data (test data may have subset)
-ASSETS = [a for a in ASSETS if a in returns.columns]
-returns = returns[ASSETS]
 print(f"Assets: {ASSETS}")
-print(f"Sample period: {returns.index.min()} to {returns.index.max()}")
+sample_start = datetime.fromisoformat(str(returns["timestamp"].min()))
+sample_end = datetime.fromisoformat(str(returns["timestamp"].max()))
+print(f"Sample period: {sample_start} to {sample_end}")
 print(f"Observations: {len(returns)}")
 
-# Standardize for causal discovery
+# Keep raw returns so every bootstrap replicate can refit its own scaler. The full-sample
+# transform below is used only for the descriptive full-period estimates.
+X_raw = returns.select(ASSETS).to_numpy()
 scaler = StandardScaler()
-X = scaler.fit_transform(returns.values)
+X = scaler.fit_transform(X_raw)
 
 print(f"\nData shape: {X.shape}")
 
@@ -431,54 +435,69 @@ W_notears = notears_linear(X, lambda1=lambda1, max_iter=NOTEARS_MAX_ITER)
 adj_df = pd.DataFrame(W_notears, index=ASSETS, columns=ASSETS)
 
 print("Discovered Adjacency Matrix (NOTEARS):")
-print(adj_df.round(3).to_string())
+display(adj_df.round(3))
 
-# Count edges
-n_edges = np.sum(np.abs(W_notears) > 0)
+# Count full-sample edges
+full_sample_edges = extract_edges(W_notears, ASSETS)
+n_edges = len(full_sample_edges)
 print(f"\nTotal edges discovered: {n_edges}")
 
 # Bootstrap stability analysis
 print(f"\nBootstrap stability ({N_BOOTSTRAP} iterations)...")
 edge_counts = defaultdict(int)
+progress_step = max(N_BOOTSTRAP // 10, 1)
 for b in range(N_BOOTSTRAP):
     boot_indices = block_bootstrap_indices(len(X), BLOCK_SIZE)
-    W_boot = notears_linear(X[boot_indices], lambda1=lambda1, max_iter=30)
+    X_boot = StandardScaler().fit_transform(X_raw[boot_indices])
+    W_boot = notears_linear(X_boot, lambda1=lambda1, max_iter=BOOTSTRAP_MAX_ITER)
     for i, source in enumerate(ASSETS):
         for j, target in enumerate(ASSETS):
             if abs(W_boot[i, j]) > 0:
                 edge_counts[(source, target)] += 1
+    if (b + 1) % progress_step == 0 or b + 1 == N_BOOTSTRAP:
+        print(f"  completed {b + 1}/{N_BOOTSTRAP} bootstrap fits")
 
 # %%
 # Report edge stability
-stable_edges = []
+bootstrap_edges = []
 for edge, count in sorted(edge_counts.items(), key=lambda x: -x[1]):
     freq = count / N_BOOTSTRAP
     if freq >= 0.3:
-        print(f"  {edge[0]} → {edge[1]}: {freq:.0%} ({'STABLE' if freq >= 0.5 else 'unstable'})")
-        stable_edges.append(
-            {"Source": edge[0], "Target": edge[1], "Frequency": freq, "Stable": freq >= 0.5}
+        in_full_sample = edge in full_sample_edges
+        print(
+            f"  {edge[0]} → {edge[1]}: {freq:.0%} "
+            f"({'CONSENSUS' if freq >= 0.5 else 'sample-sensitive'}, "
+            f"{'full graph' if in_full_sample else 'bootstrap only'})"
+        )
+        bootstrap_edges.append(
+            {
+                "Source": edge[0],
+                "Target": edge[1],
+                "Frequency": freq,
+                "Consensus": freq >= 0.5,
+                "In_Full_Sample": in_full_sample,
+            }
         )
 
-n_stable = sum(1 for e in stable_edges if e["Stable"])
-print(f"\nStable edges (>=50%): {n_stable} / {n_edges}")
+n_consensus = sum(1 for e in bootstrap_edges if e["Consensus"])
+n_confirmed = sum(1 for e in bootstrap_edges if e["Consensus"] and e["In_Full_Sample"])
+print(f"\nBootstrap-consensus edges (>=50%): {n_consensus}")
+print(f"Full-sample edges confirmed by bootstrap: {n_confirmed} / {n_edges}")
 
 # %% [markdown]
 # ## 8. Apply VAR-LiNGAM for Time Series Structure
 #
-# We run both the from-scratch and `causal-learn` library implementations on the
-# same data and compare their discovered edges. The library version uses
-# DirectLiNGAM (a more principled ordering algorithm than raw ICA) and proper
-# VAR estimation, so differences are expected — and instructive.
+# We compare the explicit ridge-VAR screen with the `causal-learn` structural
+# estimate on the same data. Only the library estimate uses DirectLiNGAM, so overlap
+# is evidence of agreement between a predictive screen and a structural specification.
 
 # %%
-print("\n=== VAR-LiNGAM: FROM-SCRATCH IMPLEMENTATION ===\n")
+print("\n=== RIDGE-VAR LAGGED SCREEN ===\n")
 
-B0_scratch, B_lag_scratch = var_lingam_scratch(X, max_lag=1, threshold=0.1)
+B_lag_screen = ridge_var_screen(X, threshold=0.1)
 
-print("Instantaneous Effects (B0):")
-print(pd.DataFrame(B0_scratch, index=ASSETS, columns=ASSETS).round(3).to_string())
-print("\nLagged Effects (B1, lag-1):")
-print(pd.DataFrame(B_lag_scratch, index=ASSETS, columns=ASSETS).round(3).to_string())
+print("Lagged Predictive Coefficients (B1, lag-1):")
+display(pd.DataFrame(B_lag_screen, index=ASSETS, columns=ASSETS).round(3))
 
 # %%
 print("\n=== VAR-LiNGAM: CAUSAL-LEARN LIBRARY ===\n")
@@ -489,19 +508,19 @@ inst_df = pd.DataFrame(B0, index=ASSETS, columns=ASSETS)
 lag_df = pd.DataFrame(B_lag, index=ASSETS, columns=ASSETS)
 
 print("Instantaneous Effects (B0):")
-print(inst_df.round(3).to_string())
+display(inst_df.round(3))
 print("\nLagged Effects (B1, lag-1):")
-print(lag_df.round(3).to_string())
+display(lag_df.round(3))
 
 # %% [markdown]
 # Compare edge agreement between implementations.
 
 # %%
-scratch_lag_edges = set()
+screen_lag_edges = set()
 for i in range(len(ASSETS)):
     for j in range(len(ASSETS)):
-        if abs(B_lag_scratch[j, i]) > 0:
-            scratch_lag_edges.add((ASSETS[i], ASSETS[j]))
+        if abs(B_lag_screen[j, i]) > 0:
+            screen_lag_edges.add((ASSETS[i], ASSETS[j]))
 
 library_lag_edges = set()
 for i in range(len(ASSETS)):
@@ -509,9 +528,9 @@ for i in range(len(ASSETS)):
         if abs(B_lag[j, i]) > 0:
             library_lag_edges.add((ASSETS[i], ASSETS[j]))
 
-shared = scratch_lag_edges & library_lag_edges
-print(f"Scratch-only edges: {len(scratch_lag_edges - library_lag_edges)}")
-print(f"Library-only edges: {len(library_lag_edges - scratch_lag_edges)}")
+shared = screen_lag_edges & library_lag_edges
+print(f"Ridge-screen-only edges: {len(screen_lag_edges - library_lag_edges)}")
+print(f"VAR-LiNGAM-only edges: {len(library_lag_edges - screen_lag_edges)}")
 print(f"Shared edges: {len(shared)}")
 
 # %%
@@ -531,7 +550,7 @@ for i, source in enumerate(ASSETS):
 if lag_edges:
     lag_edges_df = pd.DataFrame(lag_edges).sort_values("Weight", key=abs, ascending=False)
     print("\nDiscovered Lagged Causal Edges (causal-learn VARLiNGAM):")
-    print(lag_edges_df.head(10).to_string(index=False))
+    display(lag_edges_df.head(10))
 
 # %% [markdown]
 # ## 9. PCMCI on the Same Universe
@@ -543,21 +562,26 @@ if lag_edges:
 # %%
 print("\n=== PCMCI ON 7-ASSET PANEL ===\n")
 
-from tigramite import data_processing as pp
-from tigramite.independence_tests.parcorr import ParCorr
-from tigramite.pcmci import PCMCI
-
 dataframe = pp.DataFrame(X, var_names=ASSETS)
 parcorr = ParCorr(significance="analytic")
 pcmci = PCMCI(dataframe=dataframe, cond_ind_test=parcorr)
 pcmci_results = pcmci.run_pcmci(tau_max=MAX_LAG, pc_alpha=0.05)
 
-# Count significant lagged links at multiple thresholds
+# Correct all source-target-lag hypotheses together. The 7 x 7 x 3 family contains
+# 147 tests, including each series' own lags.
 p_matrix = pcmci_results["p_matrix"]
 val_matrix = pcmci_results["val_matrix"]
 n_vars = len(ASSETS)
 total_possible = n_vars * n_vars * MAX_LAG
+lagged_p = p_matrix[:, :, 1 : MAX_LAG + 1]
+_, pcmci_q_flat, _, _ = multipletests(lagged_p.reshape(-1), alpha=0.05, method="fdr_bh")
+pcmci_q_matrix = pcmci_q_flat.reshape(lagged_p.shape)
 
+# %% [markdown]
+# Retain only FDR-significant lagged links, then summarize their conditional-association
+# magnitudes. These remain candidate links rather than identified causal effects.
+
+# %%
 pcmci_sig_links = 0
 pcmci_link_details = []
 effect_sizes = []
@@ -565,14 +589,23 @@ effect_sizes = []
 for i, source in enumerate(ASSETS):
     for j, target in enumerate(ASSETS):
         for tau in range(1, MAX_LAG + 1):
-            if p_matrix[i, j, tau] < 0.05:
+            q_value = pcmci_q_matrix[i, j, tau - 1]
+            if q_value < 0.05:
                 pcmci_sig_links += 1
                 effect_sizes.append(abs(val_matrix[i, j, tau]))
                 pcmci_link_details.append(
-                    f"  {source}(t-{tau}) → {target}: val={val_matrix[i, j, tau]:.3f}, p={p_matrix[i, j, tau]:.4f}"
+                    f"  {source}(t-{tau}) → {target}: "
+                    f"val={val_matrix[i, j, tau]:.3f}, q={q_value:.4f}"
                 )
 
-print(f"Significant lagged links (p<0.05): {pcmci_sig_links}/{total_possible}")
+# %% [markdown]
+# Compare raw and adjusted discovery counts and report the effect sizes that survive
+# correction.
+
+# %%
+pcmci_raw_links = int((lagged_p < 0.05).sum())
+print(f"Raw significant lagged links at 5%: {pcmci_raw_links}/{total_possible}")
+print(f"FDR-significant lagged links at 5%: {pcmci_sig_links}/{total_possible}")
 for detail in sorted(pcmci_link_details):
     print(detail)
 
@@ -588,42 +621,35 @@ if effect_sizes:
 # ## 10. Compare with Granger Causality (FDR-Corrected)
 #
 # **Multiple Testing Correction**:
-# - 7 assets → 42 directed pairs (i→j where i≠j)
-# - At α=0.05, expected false positives ≈ 2.1 without correction
-# - We apply Benjamini-Hochberg FDR to control false discovery rate
+# - 7 assets imply 42 directed pairs ($i \rightarrow j$, where $i \neq j$)
+# - Each pair receives one joint test of all coefficients through lag 5
+# - Benjamini-Hochberg correction controls FDR across the 42 pair-level tests
 
 # %%
 # Pairwise Granger causality tests
 print("\n=== GRANGER CAUSALITY WITH FDR CORRECTION ===\n")
 
 all_granger_tests = []
-from statsmodels.tsa.stattools import grangercausalitytests
-
-max_lag_granger = 5
+max_lag_granger = GRANGER_MAX_LAG
 n_pairs = len(ASSETS) * (len(ASSETS) - 1)
 
 for i, source in enumerate(ASSETS):
     for j, target in enumerate(ASSETS):
         if i != j:
-            try:
-                data = returns[[target, source]].dropna()
-                result = grangercausalitytests(data, maxlag=max_lag_granger, verbose=False)
-                p_vals = [result[lag + 1][0]["ssr_ftest"][1] for lag in range(max_lag_granger)]
-                min_p = min(p_vals)
-                all_granger_tests.append(
-                    {
-                        "Source": source,
-                        "Target": target,
-                        "P_value_raw": min_p,
-                        "Best_Lag": p_vals.index(min_p) + 1,
-                    }
-                )
-            except Exception:
-                # Rare pair-specific VAR failures (singular, non-stationary) are left out of
-                # the comparison table rather than taking down the whole Granger sweep.
-                pass
+            data = returns.select([target, source]).to_numpy()
+            with redirect_stdout(io.StringIO()):
+                result = grangercausalitytests(data, maxlag=max_lag_granger)
+            joint_p = result[max_lag_granger][0]["ssr_ftest"][1]
+            all_granger_tests.append(
+                {
+                    "Source": source,
+                    "Target": target,
+                    "P_value_raw": joint_p,
+                }
+            )
 
 print(f"Computed {len(all_granger_tests)} pairwise Granger tests")
+assert len(all_granger_tests) == n_pairs
 
 # %%
 # Apply FDR correction (Benjamini-Hochberg)
@@ -639,16 +665,11 @@ if all_granger_tests:
     n_raw = sum(granger_df["P_value_raw"] < 0.05)
     n_fdr = sum(rejected)
     print(f"  Uncorrected significant: {n_raw}, FDR-corrected: {n_fdr}")
-    print(f"  Expected false positives (uncorrected): ~{0.05 * len(all_granger_tests):.1f}")
 
     significant_edges = granger_df[granger_df["Significant_FDR"]].sort_values("P_value_FDR")
     if len(significant_edges) > 0:
         print("\nFDR-Significant Granger Edges:")
-        print(
-            significant_edges[
-                ["Source", "Target", "P_value_raw", "P_value_FDR", "Best_Lag"]
-            ].to_string(index=False)
-        )
+        display(significant_edges[["Source", "Target", "P_value_raw", "P_value_FDR"]])
         granger_edges = significant_edges.to_dict("records")
     else:
         print("\nNo edges survive FDR correction.")
@@ -661,18 +682,18 @@ print("\n=== METHOD SUMMARY ===\n")
 
 methods_summary = {
     "Method": ["NOTEARS", "VAR-LiNGAM", "Granger (FDR)", "PCMCI"],
-    "Type": ["Neural/Continuous", "ICA-based", "Statistical Test", "Constraint-based"],
+    "Type": ["Continuous DAG", "ICA-based", "Predictive test", "Constraint-based"],
     "Edges_Found": [
-        f"{n_edges} ({n_stable} stable)",
-        np.sum(np.abs(B_lag) > 0),
+        n_edges,
+        int(np.sum(np.abs(B_lag) > 0)),
         len(granger_edges) if "granger_edges" in dir() else "N/A",
         pcmci_sig_links,
     ],
     "Key_Assumption": [
-        "Linearity, acyclicity",
-        "Non-Gaussianity",
-        "Stationarity",
-        "Faithfulness",
+        "Linear equal-error SEM, acyclicity",
+        "Linear non-Gaussian SEM, no latent confounding",
+        "Stationarity, correctly specified lag order",
+        "Stationarity, causal sufficiency, faithfulness",
     ],
     "Strengths": [
         "Differentiable, scalable",
@@ -683,7 +704,37 @@ methods_summary = {
 }
 
 summary_df = pd.DataFrame(methods_summary)
-print(summary_df.to_string(index=False))
+display(summary_df)
+
+# %% [markdown]
+# The counts are not directly interchangeable: NOTEARS reports contemporaneous edges,
+# VAR-LiNGAM reports lagged structural edges, Granger reports directed pairs, and PCMCI
+# reports source-target-lag links. Their spread nevertheless shows how conclusions depend
+# on the estimand and identifying assumptions.
+
+# %%
+fig_counts = go.Figure(
+    go.Bar(
+        x=summary_df["Method"],
+        y=summary_df["Edges_Found"],
+        marker_color=[COLORS["blue"], COLORS["amber"], COLORS["copper"], COLORS["slate"]],
+        text=summary_df["Edges_Found"],
+        textposition="outside",
+        hovertemplate="%{x}: %{y}<extra></extra>",
+    )
+)
+fig_counts.update_layout(
+    title=dict(
+        text="Discovery counts vary sharply across method assumptions",
+        x=0.02,
+        xanchor="left",
+    ),
+    xaxis_title="Discovery method",
+    yaxis_title="Selected edges, pairs, or lagged links (count)",
+    showlegend=False,
+)
+fig_counts.update_yaxes(rangemode="tozero")
+fig_counts.show()
 
 # %% [markdown]
 # ## 12. Visualize Discovered Causal Graph
@@ -692,10 +743,17 @@ print(summary_df.to_string(index=False))
 # %%
 def _add_directed_edge(fig, x0, y0, x1, y1, mid_x, mid_y, color, width, hover):
     """Render one directed edge with a curved segment and arrow annotation."""
+    dx, dy = x1 - x0, y1 - y0
+    distance = np.hypot(dx, dy)
+    node_padding = 0.14
+    start_x = x0 + node_padding * dx / distance
+    start_y = y0 + node_padding * dy / distance
+    end_x = x1 - node_padding * dx / distance
+    end_y = y1 - node_padding * dy / distance
     fig.add_trace(
         go.Scatter(
-            x=[x0, mid_x, x1],
-            y=[y0, mid_y, y1],
+            x=[start_x, mid_x, end_x],
+            y=[start_y, mid_y, end_y],
             mode="lines",
             line=dict(color=color, width=width),
             hoverinfo="text",
@@ -704,8 +762,8 @@ def _add_directed_edge(fig, x0, y0, x1, y1, mid_x, mid_y, color, width, hover):
         )
     )
     fig.add_annotation(
-        x=x1,
-        y=y1,
+        x=end_x,
+        y=end_y,
         ax=mid_x,
         ay=mid_y,
         xref="x",
@@ -714,7 +772,7 @@ def _add_directed_edge(fig, x0, y0, x1, y1, mid_x, mid_y, color, width, hover):
         ayref="y",
         showarrow=True,
         arrowhead=2,
-        arrowsize=1.5,
+        arrowsize=1.0,
         arrowwidth=width,
         arrowcolor=color,
     )
@@ -736,11 +794,11 @@ def _add_graph_edges(fig, W, labels, x_nodes, y_nodes, stability=None):
             has_stability = stability and edge_key in stability
             if has_stability:
                 stability_value = stability[edge_key]
-                color = "green" if stability_value >= 0.5 else "orange"
+                color = COLORS["positive"] if stability_value >= 0.5 else COLORS["amber"]
             else:
                 stability_value = None
-                color = "green" if weight > 0 else "red"
-            width = min(abs(weight) * 5, 5)
+                color = COLORS["positive"] if weight > 0 else COLORS["negative"]
+            width = min(max(abs(weight) * 3, 1.5), 4)
             mid_x = (x_nodes[i] + x_nodes[j]) / 2 + 0.1 * (y_nodes[j] - y_nodes[i])
             mid_y = (y_nodes[i] + y_nodes[j]) / 2 - 0.1 * (x_nodes[j] - x_nodes[i])
             hover = f"{labels[i]} → {labels[j]}: {weight:.3f}"
@@ -783,16 +841,16 @@ def create_causal_graph_viz(
             x=x_nodes,
             y=y_nodes,
             mode="markers+text",
-            marker=dict(size=40, color="#1f77b4", line=dict(width=2, color="white")),
+            marker=dict(size=40, color=COLORS["blue"]),
             text=labels,
             textposition="middle center",
-            textfont=dict(size=10, color="white"),
+            textfont=dict(size=10, color=COLORS["silver"]),
             hoverinfo="text",
             hovertext=labels,
         )
     )
     fig.update_layout(
-        title=title,
+        title=dict(text=title, x=0.02, xanchor="left"),
         showlegend=False,
         height=500,
         width=720,
@@ -803,21 +861,29 @@ def create_causal_graph_viz(
     return fig
 
 
+# %% [markdown]
+# The first network shows contemporaneous NOTEARS edges with bootstrap frequency in the
+# hover label. The second shows the lagged edges retained by structural VAR-LiNGAM.
+
 # %%
-# Create stability dictionary for visualization
-edge_stability_dict = {(e["Source"], e["Target"]): e["Frequency"] for e in stable_edges}
+edge_stability_dict = {edge: edge_counts.get(edge, 0) / N_BOOTSTRAP for edge in full_sample_edges}
 
 # Visualize NOTEARS graph with stability coloring
 fig1 = create_causal_graph_viz(
     W_notears,
     ASSETS,
-    "NOTEARS Discovered Causal Graph (green=stable, orange=unstable)",
+    f"NOTEARS retains {n_confirmed} bootstrap-confirmed contemporaneous edges",
     stability=edge_stability_dict,
 )
 fig1.show()
 
 # Visualize VAR-LiNGAM lagged effects (causal-learn library)
-fig2 = create_causal_graph_viz(B_lag.T, ASSETS, "VAR-LiNGAM Lagged Causal Graph (causal-learn)")
+n_var_lagged = int(np.sum(np.abs(B_lag) > 0))
+fig2 = create_causal_graph_viz(
+    B_lag.T,
+    ASSETS,
+    f"VAR-LiNGAM retains {n_var_lagged} lagged edge after pruning",
+)
 fig2.show()
 
 # %% [markdown]
@@ -845,12 +911,12 @@ print("\n=== INTERPRETATION: HYPOTHESES FOR INVESTIGATION ===\n")
 
 # Identify most robust relationships
 print("Most Robust Findings:")
-print("=" * 50)
 
-# Edges that are both stable AND have large weights
+# Report only edges that are present in the full-sample graph and recur in at least
+# half of bootstrap samples.
 robust_edges = []
-for e in stable_edges:
-    if e["Stable"]:
+for e in bootstrap_edges:
+    if e["Consensus"] and e["In_Full_Sample"]:
         source, target = e["Source"], e["Target"]
         i, j = ASSETS.index(source), ASSETS.index(target)
         weight = W_notears[i, j]
@@ -864,77 +930,23 @@ for e in stable_edges:
 
 if robust_edges:
     robust_df = pd.DataFrame(robust_edges).sort_values("Bootstrap_Freq", ascending=False)
-    print(robust_df.to_string(index=False))
+    display(robust_df)
 else:
     print("No edges meet stability threshold (≥50% bootstrap frequency).")
     print("This suggests high sensitivity to sample - proceed with caution.")
 
-print("\nValidation Checklist Before Trading:")
-print("  [ ] Validate on out-of-sample period (e.g., most recent 6 months)")
-print("  [ ] Confirm with DML effect estimation (see 03_econml_dml.py)")
-print("  [ ] Consider transaction costs and capacity constraints")
-print("  [ ] Monitor for regime changes that may invalidate relationships")
 
 # %% [markdown]
 # ## 14. Key Takeaways
 #
-# ### What We Learned
-# - **NOTEARS** reformulates DAG learning as continuous optimization
-# - **VAR-LiNGAM** uses non-Gaussianity for time series identification
-# - **Bootstrap stability** reveals which edges are robust to sampling noise
-# - **FDR correction** controls false discoveries in Granger causality
+# - **Method choice changes the object being selected.** NOTEARS estimates contemporaneous
+#   structure, while the time-series methods select lagged links or predictive pairs.
+# - **Multiplicity control materially thins the graphs.** FDR is applied across all PCMCI
+#   source-target-lag hypotheses and across the fixed-order Granger pair tests.
+# - **Bootstrap frequency is not enough by itself.** A robust NOTEARS claim now requires an
+#   edge to appear in the full-sample graph and in at least half of refitted bootstrap graphs.
+# - **Every discovered edge remains a hypothesis.** Latent confounding, nonstationarity,
+#   threshold sensitivity, and the lack of a sealed holdout prevent a trading interpretation.
 #
-# ### Practical Guidance
-# - Use neural methods for **exploration** and **hypothesis generation**
-# - Validate discoveries with **rigorous statistical tests** (PCMCI, DML)
-# - Never trade on discovered edges without **out-of-sample validation**
-# - Consider **ensemble of methods** - edges confirmed by multiple approaches are more credible
-#
-# ### Limitations
-# - Sensitive to hyperparameters (λ, thresholds)
-# - Assume linearity (real relationships may be nonlinear)
-# - Require stationarity (financial markets are non-stationary)
-# - Bootstrap stability is computationally expensive
-
-# %%
-print("\n" + "=" * 60)
-print("SUMMARY: NEURAL CAUSAL DISCOVERY")
-print("=" * 60)
-
-print(f"""
-DATA:
-  Assets: {", ".join(ASSETS)}
-  Period: {returns.index.min().date()} to {returns.index.max().date()}
-  Observations: {len(returns)}
-
-SYNTHETIC VALIDATION:
-  Precision: {SYNTHETIC_RESULTS["precision"]:.1%}
-  Sensitivity: {SYNTHETIC_RESULTS["sensitivity"]:.1%}
-  F1 Score: {SYNTHETIC_RESULTS["f1"]:.2f}
-
-NOTEARS RESULTS:
-  Edges discovered: {n_edges}
-  Stable edges (≥50% bootstrap): {n_stable}
-  Sparsity: {1 - n_edges / (len(ASSETS) * (len(ASSETS) - 1)):.1%}
-
-VAR-LiNGAM RESULTS (causal-learn):
-  Lagged edges discovered: {np.sum(np.abs(B_lag) > 0)}
-
-PCMCI (7-asset panel):
-  Significant lagged links (p<0.05): {pcmci_sig_links}
-
-GRANGER CAUSALITY (FDR-corrected):
-  Total pairs tested: {n_pairs}
-  Significant after FDR: {len(granger_edges)}
-
-KEY INSIGHT:
-  Discovered edges are HYPOTHESES for further investigation.
-  Only edges with high bootstrap stability AND economic rationale
-  should be considered for trading applications.
-
-NEXT STEPS:
-  1. Validate stable edges on held-out period
-  2. Estimate effect magnitudes with DML (see 03_econml_dml.py)
-  3. Run BSTS event studies for specific relationships
-  4. Apply López de Prado correction if testing multiple strategies
-""")
+# Next, use `09_adia_causal_benchmark` to examine what supervised discovery can learn when
+# many labeled synthetic graphs are available. See Chapter 15, Section 15.6.

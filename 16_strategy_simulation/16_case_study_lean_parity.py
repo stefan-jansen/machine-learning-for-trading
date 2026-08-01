@@ -20,16 +20,18 @@
 #
 # The canonical benchmark in `15_lean_engine_parity` proves that
 # `ml4t-backtest[lean]` reproduces QuantConnect LEAN on the library's 250-asset,
-# 20-year daily validation harness. This notebook answers the transfer
-# question readers actually care about: does that same calibrated profile still
-# match LEAN when we feed it the real case-study weights and price artifacts
-# used throughout the book?
+# 20-year daily validation harness. This notebook inspects a cached case-study
+# parity report and provides an optional live path for testing whether that
+# calibrated profile still matches LEAN on real case-study weights and prices.
+# The cached report does not preserve the original raw fill surfaces, run log,
+# or hash manifest, so its default reader path is descriptive rather than an
+# independent transfer proof.
 #
 # **Learning Objectives**:
-# - Reuse the shared case-study validation artifacts with actual LEAN
-# - Compare `ml4t-backtest[lean]` directly against live LEAN, not against a second `ml4t` profile
-# - Distinguish raw trade-log row order from the economic fill surface we validate
-# - Inspect a cached parity snapshot and optionally rerun the live comparison locally
+# - Interpret the metrics recorded by a cached case-study parity report
+# - Compare `ml4t-backtest[lean]` directly against live LEAN on the optional live path
+# - Distinguish a reported aggregate result from independently preserved execution evidence
+# - Identify the raw fills and identities a reproducible parity attestation must retain
 #
 # **Book Reference**: Chapter 16, Section 16.3 (Vectorized and Event-Driven Backtesting)
 #
@@ -44,10 +46,7 @@
 import json
 import shutil
 import time
-import warnings
 from pathlib import Path
-
-warnings.filterwarnings("ignore")
 
 # %%
 import matplotlib.pyplot as plt
@@ -109,7 +108,7 @@ print(f"ML4T_DATA_PATH: {ML4T_DATA_PATH}")
 # %% [markdown]
 # ### Check live-run readiness
 #
-# The committed cached artifact should always work. The live path requires the
+# The committed cached report should always work. The live path requires the
 # LEAN CLI, Docker, a local LEAN workspace, and the case-study artifact root.
 
 
@@ -150,10 +149,10 @@ prereq_df = check_live_prerequisites()
 prereq_df
 
 # %% [markdown]
-# ## 2. Load the Cached Parity Snapshot
+# ## 2. Load the Cached Parity Report
 #
-# The default path reads a committed artifact summarizing the parity run across
-# three daily case studies, each compared against actual LEAN:
+# The default path reads a committed report summarizing a parity run across
+# three daily case studies that the report identifies as comparisons with LEAN:
 #
 # - `etfs`
 # - `sp500_equity_option_analytics`
@@ -163,10 +162,12 @@ prereq_df
 # runs each case study through actual LEAN and through `ml4t-backtest[lean]` and
 # rebuilds the artifact.
 #
-# The comparison surface is the **sorted daily fill multiset**
+# The report identifies its comparison surface as the **sorted daily fill multiset**
 # `(timestamp, asset, side, quantity, 4-decimal price)`. Raw trade-log row
 # order can differ when two engines emit same-day fills in different asset
-# iteration order, but that does not change the executed fills themselves.
+# iteration order. Because the original fills, run log, and hash manifest were
+# not preserved with this artifact, the cached path cannot independently verify
+# either the reported fill identity or its producer lineage.
 
 
 # %%
@@ -176,7 +177,10 @@ def load_artifact(path: Path) -> dict:
 
 
 payload = load_artifact(CACHED_ARTIFACT_PATH)
-payload["artifact_source"], payload["comparison_surface"]
+{
+    "cached_report_artifact_source": payload["artifact_source"],
+    "cached_report_comparison_surface": payload["comparison_surface"],
+}
 
 # %% [markdown]
 # ## 3. Optional Live Rerun
@@ -251,6 +255,11 @@ def _load_case_study_lean():
         return module
 
 
+# %% [markdown]
+# Execute one LEAN and ml4t-backtest parity pair for a selected case study.
+
+
+# %%
 def run_case_study_pair(case_study: str) -> dict:
     """Run actual LEAN and ml4t[lean] on one case study's committed workspace."""
     csl = _load_case_study_lean()
@@ -266,8 +275,6 @@ def run_case_study_pair(case_study: str) -> dict:
     project_dir = LEAN_WORKSPACE / project
     data_daily = LEAN_WORKSPACE / "data" / "equity" / "usa" / "daily"
 
-    # LEAN side: run the workspace project through actual LEAN (Docker). The
-    # algorithm writes its own fills/equity into the workspace as it runs.
     lean_start = time.perf_counter()
     run_lean_backtest(
         lean_cmd=resolve_lean_command(),
@@ -280,7 +287,6 @@ def run_case_study_pair(case_study: str) -> dict:
     lean_runtime = time.perf_counter() - lean_start
     lean = lean_side(project_dir)
 
-    # ml4t side: replay the identical weights through the lean profile.
     ml4t_start = time.perf_counter()
     ml4t = run_ml4t_lean(project_dir, data_daily)
     ml4t_runtime = time.perf_counter() - ml4t_start
@@ -307,6 +313,15 @@ def run_case_study_pair(case_study: str) -> dict:
 
 
 # %%
+PARITY_SOURCES = [
+    "ml4t-backtest/src/ml4t/backtest/_validation/case_study_lean.py",
+    "ml4t-backtest/src/ml4t/backtest/_validation/lean_runner.py",
+    "ml4t-backtest/validation/lean/workspace/chapter16_<case_study>/",
+    "third_edition/code/16_strategy_simulation/16_case_study_lean_parity.py",
+]
+
+
+# %%
 def build_live_payload(rows: list[dict], skipped: list[tuple[str, str]]) -> dict:
     """Build the notebook payload from live case-study reruns."""
     if not rows:
@@ -329,12 +344,7 @@ def build_live_payload(rows: list[dict], skipped: list[tuple[str, str]]) -> dict
             "max_abs_final_value_gap_usd": max_abs_gap,
         },
         "skipped": [{"case_study": case_study, "reason": reason} for case_study, reason in skipped],
-        "sources": [
-            "ml4t-backtest/src/ml4t/backtest/_validation/case_study_lean.py",
-            "ml4t-backtest/src/ml4t/backtest/_validation/lean_runner.py",
-            "ml4t-backtest/validation/lean/workspace/chapter16_<case_study>/",
-            "third_edition/code/16_strategy_simulation/16_case_study_lean_parity.py",
-        ],
+        "sources": PARITY_SOURCES,
     }
 
 
@@ -394,9 +404,10 @@ results_df.select(
 # %% [markdown]
 # ### Summary
 #
-# The cached result shows exact agreement on the sorted fill multiset for all
-# three case studies, with terminal-value differences at float noise. A live
-# rerun with `RUN_LIVE = True` reproduces the same comparison locally.
+# The cached report records exact agreement on the sorted fill multiset for all
+# three case studies, with terminal-value differences at float noise. These are
+# claims carried by the report, not independently recoverable evidence. A live
+# rerun with `RUN_LIVE = True` performs a new comparison locally.
 
 # %%
 summary_df = pl.DataFrame([payload["summary"]])
@@ -405,16 +416,16 @@ summary_df
 # %% [markdown]
 # ## 5. Visual Comparison
 #
-# The first panel shows that fill counts are identical. The second shows that
-# terminal-value differences are economically zero at the scale of these
-# portfolios.
+# The first panel visualizes the fill counts recorded by the cached report. The
+# second visualizes its recorded terminal-value differences, which are near
+# machine precision relative to the reported portfolio values.
 
 # %%
 plot_df = results_df.sort("display")
 labels = plot_df["display"].to_list()
 y = range(len(labels))
 
-fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+fig, axes = plt.subplots(1, 2, figsize=(13, 4), layout="constrained")
 
 axes[0].barh(
     [i + 0.18 for i in y],
@@ -430,16 +441,12 @@ axes[0].barh(
     color=COLORS["amber"],
     label="ml4t[lean]",
 )
-axes[0].set_yticks(list(y))
-axes[0].set_yticklabels(labels)
-axes[0].set_title("Fill Counts")
-axes[0].set_xlabel("fills")
+axes[0].set(yticks=list(y), yticklabels=labels, title="Fill Counts", xlabel="fills")
 axes[0].legend()
 
 _value_gaps = plot_df["final_value_gap_usd"].to_list()
 axes[1].barh(labels, _value_gaps, color=COLORS["positive"])
-axes[1].set_title("Terminal Value Gap")
-axes[1].set_xlabel("ml4t[lean] - LEAN (USD)")
+axes[1].set(title="Terminal Value Gap", xlabel="ml4t[lean] - LEAN (USD)")
 axes[1].axvline(0, color="black", linewidth=0.8, alpha=0.4)
 if all(abs(v) < 1e-6 for v in _value_gaps):
     axes[1].text(
@@ -454,16 +461,17 @@ if all(abs(v) < 1e-6 for v in _value_gaps):
         alpha=0.85,
     )
 
-fig.suptitle("Case-Study LEAN Parity on Real Book Artifacts", y=1.02)
-fig.tight_layout()
+fig.suptitle("Metrics Recorded by the Cached Case-Study Parity Report", y=1.02)
 fig.show()
 
 # %% [markdown]
 # ## 6. Interpretation
 #
-# This notebook is reader-facing evidence that the LEAN-matching profile is not
-# confined to one synthetic benchmark. It transfers to the same real case-study
-# data and target weights that drive the book's validation workflow.
+# The default reader path visualizes a cached report; it does not establish that
+# the LEAN-matching profile transfers beyond the preserved synthetic benchmark.
+# Establishing that result requires a live rerun that retains both raw fill
+# surfaces, the execution log, environment identity, and hashes of every input
+# and output used by the comparison.
 
 # %%
 matched = int(payload["summary"]["matched_case_studies"])
@@ -471,20 +479,20 @@ total = int(payload["summary"]["n_case_studies"])
 max_gap = float(payload["summary"]["max_abs_final_value_gap_usd"])
 raw_row_matches = int(results_df["raw_row_order_match"].sum())
 
-print(f"Sorted fill multiset matches: {matched}/{total}")
-print(f"Raw row-order matches:        {raw_row_matches}/{total}")
-print(f"Max absolute value gap:       ${max_gap:.10f}")
+print(f"Reported sorted fill multiset matches: {matched}/{total}")
+print(f"Reported raw row-order matches:        {raw_row_matches}/{total}")
+print(f"Reported max absolute value gap:       ${max_gap:.10f}")
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **This is the reader-facing transfer proof.** The case-study parity path compares actual LEAN against `ml4t-backtest[lean]`, not one `ml4t` profile against another.
+# 1. **The cached path is a report, not a transfer proof.** It records a comparison between LEAN and `ml4t-backtest[lean]`, but the original raw fills and producer identities are unavailable for independent verification.
 #
-# 2. **The fill surface matches on all three daily case studies.** After normalizing to the daily fill identity key, the sorted fill multiset is exact for ETFs, S&P 500 equity-option analytics, and the US equities panel.
+# 2. **Three fill-surface matches are reported.** The artifact records exact sorted-fill agreement for ETFs, S&P 500 equity-option analytics, and the US equities panel; it does not carry the underlying fill surfaces needed to rederive that statement.
 #
-# 3. **Terminal portfolio values are equal to float noise.** The largest absolute gap in the cached artifact is about one ten-millionth of a dollar.
+# 3. **Terminal-value gaps in the report are at floating-point scale.** The largest recorded absolute gap is about one ten-millionth of a dollar, subject to the same evidence limitation.
 #
-# 4. **Raw row order is a logging detail, not an economic gap.** Same-day fills can appear in a different asset iteration order while still representing the same executed daily fill set.
+# 4. **A fresh attestation must preserve both representations.** Raw row order may be a logging detail, but a verifier still needs both raw logs and the normalized fill multiset to establish that conclusion rather than assume it.
 
 # %% [markdown]
 # ---

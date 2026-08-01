@@ -52,22 +52,23 @@
 # %%
 """Almgren-Chriss Optimal Execution - Efficient frontier, optimal trajectories, and TCA."""
 
-import warnings
 from dataclasses import dataclass
-
-warnings.filterwarnings("ignore")
+from datetime import datetime, timedelta
 
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
-from plotly.subplots import make_subplots
 
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS, ml4t_palette
 
 # %% tags=["parameters"]
 N_RISK_AVERSIONS = 100  # Points along the efficient frontier (risk-aversion sweep)
 SEED = 42
 N_SIMULATIONS = 1000
+TRAJECTORY_RISK_AVERSIONS = [0.0, 1e-13, 1e-12, 1e-11, 1e-10]
+FRONTIER_LOG10_RANGE = (-14, -6)
+SIMULATION_RISK_AVERSIONS = [0.0, 1e-11, 1e-9]
 
 # %%
 set_global_seeds(SEED)
@@ -77,15 +78,15 @@ set_global_seeds(SEED)
 #
 # ### Price Dynamics
 #
-# The stock price evolves as:
-# $$S_k = S_{k-1} + \sigma \tau^{1/2} \xi_k - g(n_k)$$
+# For a sell program, the unaffected price evolves as:
+# $$S_k = S_{k-1} - \gamma n_k + \sigma_P \tau^{1/2} \xi_k$$
 #
 # where:
 # - $S_k$ = price after period $k$
-# - $\sigma$ = volatility
+# - $\sigma_P = S_0\sigma/\sqrt{252}$ = daily price volatility in USD
 # - $\tau$ = time step
 # - $\xi_k \sim N(0,1)$ = random shock
-# - $g(n_k)$ = permanent impact of trading $n_k$ shares
+# - $\gamma n_k$ = permanent price impact of selling $n_k$ shares
 #
 # ### Impact Functions
 #
@@ -94,6 +95,10 @@ set_global_seeds(SEED)
 #
 # **Temporary Impact** (liquidity):
 # $$h(n) = \epsilon \, \text{sign}(n) + \eta \frac{n}{\tau}$$
+#
+# The simulated sell price subtracts spread and temporary impact. It also charges
+# half of the current child order's permanent impact, a convention that makes the
+# zero-shock simulation reconcile exactly with the expected-cost functional below.
 
 
 # %%
@@ -101,22 +106,28 @@ set_global_seeds(SEED)
 class AlmgrenChrissParams:
     """Parameters for Almgren-Chriss model."""
 
-    # Position
-    X: int = 100_000  # Initial shares to liquidate
-    T: float = 1.0  # Trading horizon (days)
-    N: int = 10  # Number of trading periods
+    X: int = 100_000  # Shares to liquidate
+    T: float = 1.0  # Trading horizon in days
+    N: int = 10  # Trading periods
+    S0: float = 100.0  # Arrival price in USD
+    sigma: float = 0.30  # Annual return volatility
+    gamma: float = 0.05  # Permanent-impact bps at 100% ADV
+    eta: float = 0.10  # Temporary-impact bps at 100% interval participation
+    epsilon: float = 5.0  # Half-spread in bps
+    ADV: float = 1_000_000  # Average daily shares
 
-    # Market parameters
-    S0: float = 100.0  # Initial price
-    sigma: float = 0.30  # Annual volatility
-
-    # Impact parameters
-    gamma: float = 0.05  # Permanent impact (bps per share / ADV)
-    eta: float = 0.10  # Temporary impact (bps per share / ADV)
-    epsilon: float = 5.0  # Fixed cost / half-spread component (bps)
-
-    # Volume
-    ADV: float = 1_000_000  # Average daily volume
+    def __post_init__(self) -> None:
+        """Validate inputs and convert impact coefficients to price units."""
+        positive = {"X": self.X, "T": self.T, "N": self.N, "S0": self.S0, "ADV": self.ADV}
+        if any(value <= 0 for value in positive.values()):
+            raise ValueError("Position, horizon, periods, price, and ADV must be positive")
+        if self.eta <= 0:
+            raise ValueError("Temporary-impact coefficient eta must be positive")
+        if any(value < 0 for value in (self.sigma, self.gamma, self.epsilon)):
+            raise ValueError("Volatility and remaining cost inputs must be nonnegative")
+        self.gamma_price = self.gamma * self.S0 / (self.ADV * 10_000)
+        self.eta_price = self.eta * self.S0 / (self.ADV * 10_000)
+        self.epsilon_price = self.epsilon * self.S0 / 10_000
 
     @property
     def tau(self) -> float:
@@ -125,19 +136,16 @@ class AlmgrenChrissParams:
 
     @property
     def sigma_daily(self) -> float:
-        """Daily volatility."""
+        """Daily return volatility."""
         return self.sigma / np.sqrt(252)
 
-    def __post_init__(self):
-        """Convert impact parameters to price units."""
-        # Convert from bps to price impact per share
-        self.gamma_price = self.gamma * self.S0 / (self.ADV * 10000)
-        self.eta_price = self.eta * self.S0 / (self.ADV * 10000)
-        self.epsilon_price = self.epsilon * self.S0 / 10000
+    @property
+    def sigma_price_daily(self) -> float:
+        """Daily price volatility in USD per share."""
+        return self.S0 * self.sigma_daily
 
 
 # %%
-# Default parameters
 params = AlmgrenChrissParams(
     X=100_000,
     T=5.0,  # 5 days
@@ -146,19 +154,18 @@ params = AlmgrenChrissParams(
     sigma=0.30,
     gamma=0.05,
     eta=0.10,
-    epsilon=5.0,  # 5 bps half-spread
+    epsilon=5.0,
     ADV=1_000_000,
 )
 
 print("Almgren-Chriss Parameters")
-print("=" * 50)
 print(f"Position:          {params.X:,} shares (${params.X * params.S0 / 1e6:.1f}M)")
 print(f"Horizon:           {params.T} days ({params.N} periods)")
 print(f"ADV:               {params.ADV:,} shares")
 print(f"Participation:     {params.X / (params.ADV * params.T):.1%} of volume")
-print(f"Daily Volatility:  {params.sigma_daily:.2%}")
-print(f"Permanent γ:       {params.gamma} bps/share")
-print(f"Temporary η:       {params.eta} bps/share")
+print(f"Daily Volatility:  {params.sigma_daily:.2%} (${params.sigma_price_daily:.2f}/share)")
+print(f"Permanent γ:       {params.gamma} bps at 100% ADV")
+print(f"Temporary η:       {params.eta} bps at 100% interval participation")
 
 # %% [markdown]
 # **Finding**: These parameters define the whole execution problem. Once position
@@ -176,14 +183,19 @@ print(f"Temporary η:       {params.eta} bps/share")
 #
 # ### Execution Risk (Variance)
 #
-# $$V[C] = \sigma^2 \sum_{k=1}^{N} \tau \, x_k^2$$
+# $$V[C] = \sigma_P^2 \sum_{k=1}^{N} \tau \, x_k^2$$
 #
-# where $x_k$ is remaining position at time $k$.
+# where $x_k$ is the post-trade position exposed to the next price shock.
 
 
 # %%
 def compute_trajectory_from_list(trade_list: np.ndarray, X: int) -> np.ndarray:
     """Convert trade list to position trajectory."""
+    trade_list = np.asarray(trade_list, dtype=float)
+    if trade_list.ndim != 1 or not np.isfinite(trade_list).all():
+        raise ValueError("trade_list must be a finite one-dimensional array")
+    if (trade_list < 0).any() or not np.isclose(trade_list.sum(), X):
+        raise ValueError("A liquidation schedule must be nonnegative and sum to X")
     trajectory = np.zeros(len(trade_list) + 1)
     trajectory[0] = X
     for k, n in enumerate(trade_list):
@@ -201,19 +213,16 @@ def expected_cost(
     params: AlmgrenChrissParams,
 ) -> float:
     """Compute expected cost (implementation shortfall)."""
+    trade_list = np.asarray(trade_list, dtype=float)
+    compute_trajectory_from_list(trade_list, params.X)
     X = params.X
     tau = params.tau
     gamma = params.gamma_price
     eta = params.eta_price
     epsilon = params.epsilon_price
 
-    # Permanent impact (half affects our trades)
     perm_cost = 0.5 * gamma * X**2
-
-    # Fixed cost
     fixed_cost = epsilon * abs(X)
-
-    # Temporary impact
     temp_cost = eta * np.sum(trade_list**2) / tau
 
     return perm_cost + fixed_cost + temp_cost
@@ -230,11 +239,11 @@ def execution_variance(
 ) -> float:
     """Compute execution variance (timing risk)."""
     trajectory = compute_trajectory_from_list(trade_list, params.X)
-    sigma = params.sigma_daily
+    sigma = params.sigma_price_daily
     tau = params.tau
 
-    # Position risk at each step (excluding final zero position)
-    return sigma**2 * tau * np.sum(trajectory[:-1] ** 2)
+    # Each shock occurs after that period's trade, so it reaches post-trade inventory.
+    return sigma**2 * tau * np.sum(trajectory[1:] ** 2)
 
 
 # %% [markdown]
@@ -248,7 +257,6 @@ def execution_std(trade_list: np.ndarray, params: AlmgrenChrissParams) -> float:
 
 
 # %%
-# Example: Compare TWAP to aggressive execution
 twap_trades = np.full(params.N, params.X / params.N)
 
 aggressive_trades = np.zeros(params.N)
@@ -269,11 +277,6 @@ strategy_comparison = pl.DataFrame(
             "strategy": name,
             "expected_cost_usd": expected_cost(trades, params),
             "cost_std_usd": execution_std(trades, params),
-            "cost_risk_ratio": (
-                expected_cost(trades, params) / execution_std(trades, params)
-                if execution_std(trades, params) > 0
-                else float("inf")
-            ),
         }
         for name, trades in strategies.items()
     ]
@@ -295,12 +298,22 @@ strategy_comparison
 #
 # where $\lambda$ is the risk aversion parameter.
 #
-# ### Closed-Form Solution
+# ### Exact Finite-Period Solution
 #
-# The optimal trajectory has the form:
-# $$x_k = X \frac{\sinh(\kappa(T - t_k))}{\sinh(\kappa T)}$$
+# For the discrete objective used here, define:
+# $$\theta = \frac{\lambda \sigma_P^2 \tau^2}{\eta}, \qquad
+# \alpha = \operatorname{arccosh}\left(1 + \frac{\theta}{2}\right)
+# = 2\operatorname{asinh}\left(\frac{\sqrt{\theta}}{2}\right).$$
 #
-# where $\kappa = \sqrt{\frac{\lambda \sigma^2}{\eta}}$ captures the trade-off.
+# The exact inventory path over $N$ periods is:
+# $$x_k = X \frac{\sinh\left(\alpha(N-k)\right)}{\sinh(\alpha N)}.$$
+#
+# The familiar continuous-time parameter is the small-step approximation
+# $\kappa = \alpha/\tau \approx \sqrt{\lambda\sigma_P^2/\eta}$. Using that
+# approximation directly can misstate the optimum when $\theta$ is not small.
+# The numerical scale of $\lambda$ still depends on the dollar units of
+# $\sigma_P$ and $\eta$, so the sweep is reported rather than treated as a
+# universal calibration.
 
 
 # %%
@@ -309,7 +322,7 @@ def optimal_trajectory(
     risk_aversion: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Compute optimal Almgren-Chriss trajectory.
+    Compute the exact finite-period Almgren-Chriss trajectory.
 
     Parameters
     ----------
@@ -328,28 +341,24 @@ def optimal_trajectory(
     T = params.T
     N = params.N
     tau = params.tau
-    sigma = params.sigma_daily
+    sigma = params.sigma_price_daily
     eta = params.eta_price
 
-    # Kappa determines trajectory shape
-    if risk_aversion > 0 and eta > 0:
-        kappa = np.sqrt(risk_aversion * sigma**2 / eta)
-    else:
-        kappa = 0.001  # Nearly TWAP
-
-    # Time points
+    if risk_aversion < 0:
+        raise ValueError("risk_aversion must be nonnegative")
     times = np.linspace(0, T, N + 1)
-
-    # Optimal position trajectory
-    if abs(kappa * T) < 0.01:
-        # Small kappa: nearly linear (TWAP-like)
+    theta = risk_aversion * sigma**2 * tau**2 / eta
+    if theta == 0:
         trajectory = X * (1 - times / T)
     else:
-        a = kappa * (T - times)
-        b = kappa * T
-        numerator = np.exp(a - b) * (1 - np.exp(-2 * a))
-        denominator = 1 - np.exp(-2 * b)
+        alpha = 2 * np.arcsinh(np.sqrt(theta) / 2)
+        periods_remaining = np.arange(N, -1, -1, dtype=float)
+        scaled_remaining = alpha * periods_remaining
+        scaled_horizon = alpha * N
+        numerator = np.exp(scaled_remaining - scaled_horizon) * -np.expm1(-2 * scaled_remaining)
+        denominator = -np.expm1(-2 * scaled_horizon)
         trajectory = X * numerator / denominator
+    trajectory[-1] = 0.0
 
     return times, trajectory
 
@@ -365,29 +374,31 @@ def trajectory_to_trades(trajectory: np.ndarray) -> np.ndarray:
 
 
 # %%
-# Compare trajectories for different risk aversions. With the default
-# (γ, η) calibration most λ ≥ 1e-3 collapse to near-instant liquidation, so
-# this sweep extends to smaller λ values to make the TWAP→front-loaded
-# spectrum visible on the plot.
-risk_aversions = [1e-7, 1e-5, 1e-3, 1e-1, 1.0]
-
 fig = go.Figure()
+trajectory_styles = [
+    dict(color=COLORS["neutral"], dash="dash", width=1.5),
+    dict(color=COLORS["silver"], dash="dot", width=1.5),
+    dict(color=COLORS["slate"], dash="dashdot", width=1.5),
+    dict(color=COLORS["amber"], dash="solid", width=2),
+    dict(color=COLORS["blue"], dash="solid", width=3),
+]
 
-for lambda_ in risk_aversions:
+for line_style, lambda_ in zip(trajectory_styles, TRAJECTORY_RISK_AVERSIONS):
     times, traj = optimal_trajectory(params, lambda_)
-    fig.add_scatter(
+    _ = fig.add_scatter(
         x=times,
         y=traj / params.X,
         mode="lines",
-        name=f"λ = {lambda_}",
-        line=dict(width=2),
+        name=f"λ = {lambda_:.0e}" if lambda_ else "λ = 0 (TWAP limit)",
+        line=line_style,
     )
 
 fig.update_layout(
-    title="Optimal Trajectories by Risk Aversion",
-    xaxis_title="Time (days)",
-    yaxis_title="Remaining Position (%)",
+    title="Higher risk aversion accelerates liquidation",
+    xaxis_title="Elapsed execution time (days)",
+    yaxis_title="Remaining position",
     yaxis_tickformat=".0%",
+    yaxis_range=[0, 1],
     height=500,
     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
 )
@@ -411,12 +422,11 @@ def compute_efficient_frontier(
     n_points: int = 50,
 ) -> pl.DataFrame:
     """Compute the efficient frontier of execution strategies."""
-    # Range of risk aversions
-    lambdas = np.logspace(-4, 2, n_points)
+    lambdas = np.logspace(*FRONTIER_LOG10_RANGE, n_points)
 
     results = []
     for lambda_ in lambdas:
-        times, traj = optimal_trajectory(params, lambda_)
+        _, traj = optimal_trajectory(params, lambda_)
         trades = trajectory_to_trades(traj)
 
         cost = expected_cost(trades, params)
@@ -429,7 +439,6 @@ def compute_efficient_frontier(
                 "cost_bps": cost / (params.X * params.S0) * 10000,
                 "risk_std": risk,
                 "risk_bps": risk / (params.X * params.S0) * 10000,
-                "sharpe_like": cost / risk if risk > 0 else np.inf,
             }
         )
 
@@ -439,43 +448,39 @@ def compute_efficient_frontier(
 # %%
 frontier = compute_efficient_frontier(params, n_points=N_RISK_AVERSIONS)
 
-# Three λ points to annotate on the frontier. The IS-distribution simulation
-# below uses a different λ trio (1e-7 / 1e-3 / 1e-1) calibrated for that figure;
-# the frontier sweep here is np.logspace(-4, 2, N_RISK_AVERSIONS), so we mark
-# three points inside that range and print λ explicitly so a reader does not
-# conflate frontier markers with IS-sim regime labels.
 strategies_to_mark = [
-    (0.001, "Risk-Neutral (λ=1e-3, TWAP-like)"),
-    (0.1, "Moderate (λ=1e-1)"),
-    (10.0, "Risk-Averse (λ=1e1, Aggressive)"),
+    (1e-13, "Low risk aversion (λ=1e-13)"),
+    (1e-11, "Moderate risk aversion (λ=1e-11)"),
+    (1e-9, "High risk aversion (λ=1e-9)"),
 ]
 
 # %%
-# Build the full annotated figure in one cell so that no intermediate
-# add_scatter return value auto-displays a half-built chart (split-cell
-# figure bug — see feedback_split_cell_figure_bug).
 fig = go.Figure()
-fig.add_scatter(
-    x=frontier["risk_bps"].to_list(),
-    y=frontier["cost_bps"].to_list(),
+frontier_for_plot = frontier.sort("risk_bps")
+_ = fig.add_scatter(
+    x=frontier_for_plot["risk_bps"].to_list(),
+    y=frontier_for_plot["cost_bps"].to_list(),
     mode="lines",
     name="Efficient Frontier",
-    line=dict(color="black", width=3),
+    line=dict(color=COLORS["blue"], width=3),
 )
-for lambda_, name in strategies_to_mark:
-    row = frontier.filter(pl.col("lambda").is_between(lambda_ * 0.9, lambda_ * 1.1))
-    if len(row) > 0:
-        fig.add_scatter(
-            x=[row["risk_bps"][0]],
-            y=[row["cost_bps"][0]],
-            mode="markers",
-            marker=dict(size=12, symbol="star"),
-            name=name,
-        )
+for color, (lambda_, name) in zip(ml4t_palette(3, categorical=True), strategies_to_mark):
+    row = (
+        frontier.with_columns(distance=(pl.col("lambda").log10() - np.log10(lambda_)).abs())
+        .sort("distance")
+        .row(0, named=True)
+    )
+    _ = fig.add_scatter(
+        x=[row["risk_bps"]],
+        y=[row["cost_bps"]],
+        mode="markers",
+        marker=dict(size=11, symbol="star", color=color),
+        name=name,
+    )
 fig.update_layout(
-    title="Efficient Frontier of Execution",
-    xaxis_title="Risk (Std Dev, bps)",
-    yaxis_title="Expected Cost (bps)",
+    title="Lower timing risk requires accepting higher expected cost",
+    xaxis_title="Implementation-shortfall standard deviation (bps)",
+    yaxis_title="Expected implementation shortfall (bps)",
     height=500,
 )
 fig.show()
@@ -483,10 +488,12 @@ fig.show()
 # %%
 print("Frontier Statistics:")
 print(
-    f"  Min Cost: {frontier['cost_bps'].min():.1f} bps (at {frontier['risk_bps'].max():.1f} bps risk)"
+    f"  Min Cost: {frontier['cost_bps'].min():.3f} bps "
+    f"(at {frontier['risk_bps'].max():.1f} bps risk)"
 )
 print(
-    f"  Min Risk: {frontier['risk_bps'].min():.1f} bps (at {frontier['cost_bps'].max():.1f} bps cost)"
+    f"  Min Risk: {frontier['risk_bps'].min():.1f} bps "
+    f"(at {frontier['cost_bps'].max():.3f} bps cost)"
 )
 
 # %% [markdown]
@@ -497,7 +504,7 @@ print(
 # %% [markdown]
 # ## Part 5: Simulation and TCA
 #
-# Let's simulate actual execution and perform Transaction Cost Analysis.
+# Paired synthetic price paths separate timing-risk dispersion from expected impact.
 
 
 # %%
@@ -510,38 +517,39 @@ def simulate_single_execution(
 
     `shocks` is a pre-generated array of standard-normal draws (one per period)
     so that different strategies can be evaluated against the *same* price path
-    for a given simulation index — a paired Monte Carlo design that removes
+    for a given simulation index - a paired Monte Carlo design that removes
     sampling noise from the strategy comparison.
     """
+    trade_list = np.asarray(trade_list, dtype=float)
+    shocks = np.asarray(shocks, dtype=float)
+    compute_trajectory_from_list(trade_list, params.X)
+    if shocks.shape != trade_list.shape or not np.isfinite(shocks).all():
+        raise ValueError("shocks must be finite with one value per trade")
     tau = params.tau
-    sigma = params.sigma_daily
+    sigma = params.sigma_price_daily
     gamma = params.gamma_price
     eta = params.eta_price
     epsilon = params.epsilon_price
     price = params.S0
-    total_cost = 0.0
-    total_shares = 0
+    total_proceeds = 0.0
     prices = [price]
 
     for k, n_k in enumerate(trade_list):
+        exec_price = price - 0.5 * gamma * n_k - epsilon - eta * n_k / tau
+        total_proceeds += exec_price * n_k
         price = price - gamma * n_k
-        exec_price = price + epsilon + eta * n_k / tau
-        total_cost += exec_price * n_k
-        total_shares += n_k
         price = price + sigma * np.sqrt(tau) * shocks[k]
         prices.append(price)
 
-    vwap = total_cost / total_shares if total_shares > 0 else params.S0
-    is_dollar = total_cost - params.S0 * params.X
+    avg_exec_price = total_proceeds / params.X
+    is_dollar = params.S0 * params.X - total_proceeds
     is_bps = is_dollar / (params.S0 * params.X) * 10000
-    arrival_shortfall = (vwap / prices[0] - 1) * 10000
     return {
-        "vwap": vwap,
+        "avg_exec_price": avg_exec_price,
         "final_price": prices[-1],
         "is_dollar": is_dollar,
         "is_bps": is_bps,
-        "arrival_shortfall_bps": arrival_shortfall,
-        "total_cost": total_cost,
+        "total_proceeds": total_proceeds,
     }
 
 
@@ -559,19 +567,24 @@ def simulate_execution(
     """
     Simulate execution with price dynamics.
 
-    Each simulation index `sim` draws its shock array from
-    ``np.random.default_rng(seed + sim)`` so that calling this function for
-    different strategies reuses the *same* price path per index (paired design).
+    Simulation indices share paths across strategies. Consecutive indices use
+    antithetic shocks from ``np.random.default_rng(seed + sim // 2)`` so an even
+    run count centers each strategy on its analytical expected cost.
 
     Returns
     -------
     DataFrame with simulation results
     """
+    if n_simulations <= 0 or n_simulations % 2:
+        raise ValueError("n_simulations must be a positive even integer")
     results = []
 
     for sim in range(n_simulations):
-        rng = np.random.default_rng(seed + sim)
+        pair_index = sim // 2
+        rng = np.random.default_rng(seed + pair_index)
         shocks = rng.standard_normal(len(trade_list))
+        if sim % 2:
+            shocks = -shocks
         result = simulate_single_execution(params, trade_list, shocks)
         result["simulation"] = sim
         results.append(result)
@@ -580,15 +593,15 @@ def simulate_execution(
 
 
 # %%
-# Compare simulated performance of different strategies
 simulation_results = {}
 
-for name, risk_aversion in [
-    ("Risk-Neutral (λ=1e-7, near-TWAP)", 1e-7),
-    ("Balanced (λ=1e-3)", 1e-3),
-    ("Risk-Averse (λ=1e-1, front-loaded)", 1e-1),
-]:
-    times, traj = optimal_trajectory(params, risk_aversion)
+simulation_labels = [
+    "Risk-neutral (λ=0, TWAP)",
+    "Balanced (λ=1e-11)",
+    "Risk-averse (λ=1e-9)",
+]
+for name, risk_aversion in zip(simulation_labels, SIMULATION_RISK_AVERSIONS):
+    _, traj = optimal_trajectory(params, risk_aversion)
     trades = trajectory_to_trades(traj)
     sim_df = simulate_execution(params, trades, n_simulations=N_SIMULATIONS)
     simulation_results[name] = sim_df
@@ -597,7 +610,6 @@ for name, risk_aversion in [
 # #### TCA Summary Statistics
 
 # %%
-# Summary statistics as a Polars DataFrame
 tca_summary = pl.DataFrame(
     [
         {
@@ -613,39 +625,45 @@ tca_summary = pl.DataFrame(
 tca_summary
 
 # %% [markdown]
-# **Finding**: The TCA summary is where the model meets desk reality. The 5th and
-# 95th percentiles matter because execution desks are judged on bad days as much
-# as on the average path.
+# **Finding**: The TCA summary reports both the center and tails of each paired
+# synthetic shortfall distribution. The 5th and 95th percentiles show how much
+# timing exposure remains after the schedule is fixed.
 
 # %%
-# Visualize distributions
-fig = make_subplots(rows=1, cols=3, subplot_titles=list(simulation_results.keys()))
-
-for i, (name, df) in enumerate(simulation_results.items()):
-    fig.add_histogram(
-        x=df["is_bps"].to_list(),
-        nbinsx=50,
+fig = go.Figure()
+distribution_colors = ml4t_palette(len(simulation_results), categorical=True)
+for color, (name, df) in zip(distribution_colors, simulation_results.items()):
+    shortfall = np.sort(df["is_bps"].to_numpy())
+    cumulative_probability = np.arange(1, len(shortfall) + 1) / len(shortfall)
+    _ = fig.add_scatter(
+        x=shortfall,
+        y=cumulative_probability,
+        mode="lines",
         name=name,
-        row=1,
-        col=i + 1,
+        line=dict(color=color, width=2),
     )
-
-    # Add mean line
-    mean_is = df["is_bps"].mean()
-    fig.add_vline(x=mean_is, line_dash="dash", line_color="red", row=1, col=i + 1)
-
-fig.update_xaxes(title_text="Implementation Shortfall (bps)")
+risk_neutral_row = tca_summary.row(0, named=True)
+risk_averse_row = tca_summary.row(-1, named=True)
+dispersion_reduction = risk_neutral_row["is_std_bps"] - risk_averse_row["is_std_bps"]
+mean_cost_increase = risk_averse_row["is_mean_bps"] - risk_neutral_row["is_mean_bps"]
+fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"], line_width=1)
 fig.update_layout(
-    title="Implementation Shortfall Distributions by Strategy",
-    height=400,
-    showlegend=False,
+    title=(
+        f"Front-loading cuts shortfall dispersion by {dispersion_reduction:.0f} bps "
+        f"for {mean_cost_increase:.2f} bps higher mean cost"
+    ),
+    xaxis_title="Implementation shortfall (bps; positive is worse)",
+    yaxis_title="Cumulative probability",
+    yaxis_tickformat=".0%",
+    yaxis_range=[0, 1],
+    height=500,
 )
 fig.show()
 
 # %% [markdown]
-# **Finding**: The histogram makes the hidden cost of urgency visible. Aggressive
-# schedules reduce exposure time, but they compress more trading into the early
-# buckets and widen the implementation-shortfall distribution.
+# **Finding**: The empirical distribution makes the price of urgency visible.
+# Front-loading narrows timing-driven dispersion because less inventory remains
+# exposed to shocks, while its higher participation raises expected impact cost.
 
 # %% [markdown]
 # ## Part 6: Practical Extensions
@@ -667,7 +685,12 @@ fig.show()
 class ExtendedParams(AlmgrenChrissParams):
     """Extended parameters with non-linear impact."""
 
-    impact_exponent: float = 0.5  # For square-root impact
+    impact_exponent: float = 0.5
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not 0 < self.impact_exponent <= 1:
+            raise ValueError("impact_exponent must lie in (0, 1]")
 
 
 # %% [markdown]
@@ -680,27 +703,26 @@ def expected_cost_nonlinear(
     params: ExtendedParams,
 ) -> float:
     """Expected cost with square-root temporary impact."""
+    trade_list = np.asarray(trade_list, dtype=float)
+    compute_trajectory_from_list(trade_list, params.X)
     X = params.X
     tau = params.tau
     gamma = params.gamma_price
-    eta = params.eta_price
     epsilon = params.epsilon_price
     alpha = params.impact_exponent
 
-    # Permanent impact
     perm_cost = 0.5 * gamma * X**2
-
-    # Fixed cost
     fixed_cost = epsilon * abs(X)
-
-    # Non-linear temporary impact: η * |n|^α * n / τ
-    temp_cost = eta * np.sum(np.abs(trade_list) ** alpha * trade_list) / tau
+    interval_market_volume = params.ADV * tau
+    participation = trade_list / interval_market_volume
+    temp_cost = (
+        params.S0 / 10_000 * params.eta * np.sum(trade_list * np.power(participation, alpha))
+    )
 
     return perm_cost + fixed_cost + temp_cost
 
 
 # %%
-# Compare linear vs non-linear impact
 extended_params = ExtendedParams(
     X=100_000,
     T=5.0,
@@ -709,33 +731,31 @@ extended_params = ExtendedParams(
     sigma=0.30,
     gamma=0.05,
     eta=0.10,
-    epsilon=5.0,  # 5 bps half-spread
+    epsilon=5.0,
     ADV=1_000_000,
     impact_exponent=0.5,
 )
 
-# TWAP trades
 twap_trades = np.full(extended_params.N, extended_params.X / extended_params.N)
 
 linear_cost = expected_cost(twap_trades, params)
 nonlinear_cost = expected_cost_nonlinear(twap_trades, extended_params)
 
 print("Impact Model Comparison (TWAP)")
-print("=" * 50)
 print(f"Linear Impact:     ${linear_cost:,.0f}")
 print(f"Square-Root Impact: ${nonlinear_cost:,.0f}")
 print(f"Difference:        {(nonlinear_cost / linear_cost - 1) * 100:+.1f}%")
 
 # %% [markdown]
-# **Finding**: The non-linear impact comparison is a reminder that execution cost
-# is not proportional to size at the parent-order level. Splitting flow matters
-# precisely because marginal impact grows more slowly than linearly.
+# **Finding**: The square-root specification maps each child order to its share of
+# interval volume before applying the exponent. This normalization keeps the
+# coefficient in bps and shows why model choice matters even for the same schedule.
 
 # %% [markdown]
 # ## Part 7: Transaction Cost Analysis (TCA) Dashboard
 #
 # A comprehensive TCA report includes:
-# 1. **Cost breakdown**: Impact, spread, timing
+# 1. **Cost breakdown**: Spread, impact, and timing when counterfactuals identify them
 # 2. **Benchmark comparison**: vs VWAP, arrival, close
 # 3. **Attribution**: By time, size, urgency
 
@@ -752,7 +772,7 @@ def generate_tca_report(
     Parameters
     ----------
     executed_trades : DataFrame
-        Columns: time, shares, exec_price
+        Columns: timestamp, shares, exec_price
     benchmark_prices : dict
         arrival, vwap, close prices
     params : Model parameters
@@ -761,6 +781,11 @@ def generate_tca_report(
     -------
     dict : TCA metrics
     """
+    required = {"timestamp", "shares", "exec_price"}
+    if not required.issubset(executed_trades.columns):
+        raise ValueError(f"executed_trades must contain {sorted(required)}")
+    if (executed_trades["shares"] <= 0).any() or (executed_trades["exec_price"] <= 0).any():
+        raise ValueError("shares and execution prices must be positive")
     total_shares = executed_trades["shares"].sum()
     total_cost = (executed_trades["shares"] * executed_trades["exec_price"]).sum()
     avg_price = total_cost / total_shares
@@ -768,26 +793,24 @@ def generate_tca_report(
     arrival = benchmark_prices["arrival"]
     vwap = benchmark_prices["vwap"]
     close = benchmark_prices["close"]
+    if min(arrival, vwap, close) <= 0:
+        raise ValueError("benchmark prices must be positive")
 
     return {
         "total_shares": total_shares,
         "total_value": total_cost,
         "avg_exec_price": avg_price,
-        # Vs benchmarks
-        "vs_arrival_bps": (avg_price / arrival - 1) * 10000,
-        "vs_vwap_bps": (avg_price / vwap - 1) * 10000,
-        "vs_close_bps": (avg_price / close - 1) * 10000,
-        # Breakdown — epsilon is already expressed in bps (half-spread)
-        "spread_cost_bps": params.epsilon,
-        "impact_cost_bps": (avg_price / arrival - 1) * 10000 - params.epsilon,
+        "vs_arrival_bps": (arrival - avg_price) / arrival * 10000,
+        "vs_vwap_bps": (vwap - avg_price) / vwap * 10000,
+        "vs_close_bps": (close - avg_price) / close * 10000,
+        "assumed_half_spread_bps": params.epsilon,
     }
 
 
 # %%
-# Example TCA
 example_trades = pl.DataFrame(
     {
-        "time": list(range(10)),
+        "timestamp": [datetime(2024, 1, 15, 9, 30) + timedelta(minutes=15 * i) for i in range(10)],
         "shares": [10000] * 10,
         "exec_price": [
             100.02,
@@ -822,16 +845,19 @@ tca_report = pl.DataFrame(
         {"metric": "vs Arrival (bps)", "value": f"{tca['vs_arrival_bps']:+.1f}"},
         {"metric": "vs VWAP (bps)", "value": f"{tca['vs_vwap_bps']:+.1f}"},
         {"metric": "vs Close (bps)", "value": f"{tca['vs_close_bps']:+.1f}"},
-        {"metric": "Spread cost (bps)", "value": f"{tca['spread_cost_bps']:.1f}"},
-        {"metric": "Impact cost (bps)", "value": f"{tca['impact_cost_bps']:.1f}"},
+        {
+            "metric": "Assumed half-spread (bps)",
+            "value": f"{tca['assumed_half_spread_bps']:.1f}",
+        },
     ]
 )
 tca_report
 
 # %% [markdown]
-# **Interpretation**: TCA closes the loop between model and implementation. Once the
-# desk can separate spread, impact, and benchmark slippage, it can decide whether
-# the next improvement should come from smarter scheduling or better venue access.
+# **Interpretation**: TCA closes the loop between model and implementation. Benchmark
+# slippage is observable here, but impact and timing are not separately identified
+# without a counterfactual price or impact model. The assumed spread is therefore
+# reported as an input rather than presented as an empirical decomposition.
 
 # %% [markdown]
 # ## Summary
@@ -856,7 +882,7 @@ tca_report
 # 1. **Estimate parameters** from historical execution data
 # 2. **Choose λ** based on urgency (alpha decay)
 # 3. **Monitor execution** and adjust for market conditions
-# 4. **Use TCA** to improve future executions
+# 4. **Use TCA** to improve future executions without claiming unidentifiable attribution
 #
 # ### Extensions
 #
@@ -865,36 +891,25 @@ tca_report
 # - Multi-asset execution
 # - Reinforcement learning approaches
 
-# %%
-print("Efficient frontier computed:")
-frontier
-
-# %% [markdown]
-# **Interpretation**: The full frontier table is not there to be memorized. It is
-# there to show that every schedule choice can be mapped back to an explicit cost
-# and risk trade-off, which is what makes the model operationally useful.
-
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Efficient frontier**: For the demo parameters (10% participation, 30%
-#    annual volatility, $0.05/0.10$ bps permanent/temporary impact), expected
-#    cost spans roughly $5.0$–$5.1$ bps with risk between $0.6$ and $0.7$ bps.
-#    Real-world frontiers shift up sharply when impact and volatility match
-#    institutional sizes — the *shape* of the frontier is what matters here,
-#    not the absolute level.
+# 1. **Efficient frontier**: The demo's fixed half-spread dominates expected cost,
+#    while dollar timing risk falls as the schedule front-loads. The frontier's
+#    shape, not this stylized calibration's absolute scale, is the teaching result.
 # 2. **Risk aversion controls position on the frontier**: low $\lambda$ produces
 #    TWAP-like flat schedules; high $\lambda$ front-loads execution and accepts
 #    more impact for less variance.
-# 3. **Impact functional matters most when impact dominates**: at this position
-#    size the fixed/spread term dominates total cost, so the square-root and
-#    linear models give nearly identical totals (Linear \$5,004 vs Square-Root
-#    \$5,003, a $-0.0\%$ difference). The choice of impact functional becomes
-#    first-order only at larger sizes, where temporary impact, not the spread,
-#    drives cost.
-# 4. **Practical implication**: optimal execution is a risk-return trade-off,
-#    not just cost minimization — the desk picks a point on the frontier based
-#    on alpha urgency and benchmark sensitivity.
+# 3. **Paired simulation clarifies urgency**: front-loading reduces dispersion by
+#    leaving less inventory exposed to shocks, at the cost premium reported in
+#    the executed TCA table and distribution title.
+# 4. **Impact units matter**: the square-root extension normalizes each child order
+#    by interval market volume before applying its exponent. A linear coefficient
+#    cannot be reused under a different exponent without preserving those units.
+# 5. **TCA needs counterfactuals**: benchmark slippage is observable, but impact
+#    and timing attribution require an explicit model or unaffected-price estimate.
+#    Optimal execution is therefore an auditable cost-risk trade-off, not a claim
+#    that scheduling removes costs.
 #
 # **Next**: `08_ml_dynamic_execution` extends this with ML-based adaptive execution.
 # **Book**: Section 18.6 discusses the Almgren-Chriss framework in depth.

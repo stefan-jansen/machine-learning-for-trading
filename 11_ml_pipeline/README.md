@@ -85,7 +85,7 @@ raw predictions become risk-aware forecasts.
   for generating prediction intervals with statistical coverage guarantees. Unlike classical confidence intervals that
   assume Gaussian residuals, conformal prediction provides finite-sample valid intervals under minimal assumptions (
   exchangeability).
-
+  
 ### 11.6 Linear Models Across Nine Case Studies
 
 This section broadens the chapter from method exposition to empirical judgment. It shows where linear models work well,

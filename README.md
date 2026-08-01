@@ -16,6 +16,10 @@ strategy you can actually run, and keep running, in a live market.
   and [six production Python libraries](https://ml4trading.io/libraries/)
   that facilitate substantial parts of the workflow.
 
+**Start here: [Installation](docs/installation.md)** walks a blank Linux, Windows or macOS
+machine to a running notebook, prerequisites included. The short version is under
+[Quick Start](#quick-start) below.
+
 > **Free reader's guide:** Join [Navigate ML for Trading, 3rd Edition](https://maven.com/p/c6e0e7/navigate-ml-for-trading-3rd-edition)
 > on **July 30, 2026 at 11:00 AM ET** for a 30-minute map of the book, case studies, code, and companion resources.
 > See all current [courses and workshops](https://maven.com/stefan-jansen); the cohort courses are listed under
@@ -353,6 +357,15 @@ edge. The closing bookend to Chapter 1: the process is the edge.
 
 ## Quick Start
 
+**New here? Read these three, in order:**
+
+1. **[What this repository is, and what it is not](docs/what-this-is.md)** - what you can reproduce
+   with one command, what a configuration change buys you, what needs real compute or licensed data,
+   and what is not promised. Five minutes, and it sets expectations before you install anything.
+2. **[Installation](docs/installation.md)** - Linux, Windows WSL2, macOS, Docker, and GPU.
+3. **[Running notebooks](docs/running-notebooks.md)** - the case-study pipeline, the run log, and how
+   to experiment without disturbing the downloaded results.
+
 These commands are typed into a terminal on your own computer, not into GitHub. New to the command
 line? Start with **[Before You Begin](docs/installation.md#before-you-begin)**.
 
@@ -364,12 +377,42 @@ cd machine-learning-for-trading
 cp .env.example .env
 
 docker compose pull ml4t # Option A — Docker (recommended)
-pip install uv && uv sync # Option B — local with uv
 ```
 
-See the **[installation guide](docs/installation.md)** for platform-specific setup (Linux, Windows WSL2, macOS) and GPU
-instructions. Windows readers: WSL2 must be working *before* Docker Desktop is installed, and the
-reboot is not optional.
+Option B is a local `uv` environment, on **macOS, Linux, or inside WSL2**. Install `uv` with its
+own installer rather than with `pip`, which is missing or refuses to install on most current
+systems:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env   # the installer's own line; puts uv on PATH here and now
+uv sync
+```
+
+Option B compiles several dependencies from source, `scikit-learn` among them, so it needs a
+**C/C++ compiler and the Python headers**: on Ubuntu, Debian and WSL2
+`sudo apt install build-essential python3-dev`, on macOS `xcode-select --install`. Docker
+carries its own and needs none of this.
+
+**macOS readers:** on **Apple Silicon** take Option B. It is the path walked on real hardware
+before each release, and it needs only the Xcode command-line tools for the packages that build
+from source. Docker there is worth its disk only for the twelve `ml4t-py312` notebooks, which have no
+arm64 build and ship pre-executed, and for Chapter 2's containerized database benchmarks. On an **Intel Mac** take Option A: PyTorch publishes
+no macOS x86_64 wheel, so Option B cannot work there.
+
+**Windows readers:** both options run inside WSL2, not in PowerShell. Run
+`wsl --install -d Ubuntu` from an Administrator PowerShell, restart, run it a second time
+(the first run usually installs the WSL runtime without a distribution), and then follow the
+Linux instructions in the Ubuntu terminal. Installing into Windows Python is not supported and does
+not work — `scikit-learn` has no Windows wheel for this Python version and its source build
+fails. The [installation guide](docs/installation.md) has the full WSL2 walkthrough.
+
+Budget about **16 GB** for Option B (11 GB environment, 4 GB free datasets, 0.9 GB of git
+history) and about 12 minutes for the data.
+
+See the **[installation guide](docs/installation.md)** for platform-specific setup and GPU
+instructions. Intel Macs are Docker-only: PyTorch no longer publishes macOS x86_64 wheels, so the
+local `uv` path cannot resolve there.
 
 **Download data.** Most notebooks need datasets; start with the free ones (no API keys):
 
@@ -380,8 +423,16 @@ uv run python data/download_all.py --free-only
 Docker readers run this in the Jupyter Lab terminal (**File → New → Terminal**) as
 `python data/download_all.py --free-only` — there is no host Python on the Docker path.
 
-The **[data guide](data/README.md)** documents every dataset, API-key setup, the loaders, and storage tiers (≈70 MB
-free tier up to ≈7 GB full).
+That command fetches seven datasets and takes about **4 GB** and twelve minutes, almost all of it
+the firm-characteristics panel, first needed in Ch04. To start in about 75 MB, leave it out and
+fetch it when a chapter asks for it:
+
+```bash
+uv run python data/download_all.py --free-only --skip-firm-characteristics
+```
+
+The **[data guide](data/README.md)** documents every dataset, API-key setup, the loaders, and
+storage tiers.
 
 **(Optional) pre-computed results.** To explore the nine released Ch11-20 case studies without
 retraining, download their verified registries, predictions, model files, and backtest artifacts:
@@ -430,7 +481,7 @@ machine-learning-for-trading/
 ├── scripts/          reader utilities (install check, notebook sync, artifacts) → scripts/README.md
 ├── tests/            Papermill notebook execution + unit guards, run in CI → tests/README.md
 ├── envs/             Dockerfiles for every image                          → envs/README.md
-├── docs/             installation and notebook-execution guides
+├── docs/             what-this-is, installation, and notebook-execution guides
 ├── docker-compose.yml    all Docker services
 ├── pyproject.toml · uv.lock    pinned dependencies (uv)
 └── matplotlibrc      figure styling, auto-applied from the repo root

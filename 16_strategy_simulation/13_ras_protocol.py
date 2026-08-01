@@ -18,23 +18,34 @@
 #
 # **Docker image**: `ml4t`
 #
-# **Book Reference**: Chapter 16, §16.7 — strategy-level overfitting control.
+# **Book Reference**: Chapter 16, §16.7 - strategy-level overfitting control.
 #
-# This notebook demonstrates the Rademacher Anti-Serum (RAS) protocol for backtest overfitting detection using `ml4t-diagnostic`.
+# This notebook demonstrates the Rademacher Anti-Serum (RAS) protocol for
+# backtest overfitting detection using `ml4t-diagnostic`.
 #
-# ## Why RAS Over DSR?
+# **Learning objectives**
+#
+# - Estimate empirical Rademacher complexity for a finite strategy class.
+# - Apply RAS bounds in native-frequency units before annualizing the result.
+# - Contrast the assumptions and outputs of RAS and the Deflated Sharpe Ratio (DSR).
+# - Interpret RAS diagnostics for Sharpe ratios, information coefficients, and parameter grids.
+#
+# **Prerequisites**: Familiarity with Sharpe ratios, information coefficients,
+# multiple testing, and NumPy array operations.
+#
+# ## RAS and DSR Provide Complementary Diagnostics
 #
 # | Aspect | DSR | RAS |
 # |--------|-----|-----|
-# | Correlation | Ignores strategy correlation | Accounts for correlation |
-# | Assumption | Strategies independent | Any correlation structure |
-# | Bound | Conservative (asymptotic) | Tight (distribution-free) |
-# | Computation | Closed-form | Monte Carlo simulation |
+# | Correlation | Raw trial count needs a separate effective-trials adjustment | Uses the candidate performance matrix |
+# | Assumption | Asymptotic Sharpe sampling approximation | Finite-sample sub-Gaussian lower bound |
+# | Output | Tail probability above a selection benchmark | Lower performance bound |
+# | Computation | Closed form after trial statistics are known | Monte Carlo complexity estimate |
 #
 # ## Key Concepts
 #
-# - **Rademacher Complexity (R̂)**: Measures overfitting risk from multiple testing
-# - **Massart's Bound**: √(2 log N / T) - upper bound for uncorrelated strategies
+# - **Rademacher Complexity (R̂)**: Measures a candidate class's capacity to fit random signs
+# - **Massart's Bound**: A scale-aware upper bound for a finite candidate class
 # - **RAS Adjustment**: θ ≥ θ̂ - 2R̂ - estimation_error
 # - **Data Snooping Bias**: Selection bias from picking the "best" strategy
 #
@@ -44,11 +55,10 @@
 # - Mohri, Rostamizadeh & Talwalkar (2018). "Foundations of Machine Learning"
 
 # %%
-"""Rademacher Anti-Serum (RAS) Protocol — distribution-free backtest overfitting detection."""
+"""Demonstrate Rademacher complexity adjustments for strategy selection."""
 
 import numpy as np
 
-# Quick test support
 # Visualization
 import plotly.graph_objects as go
 
@@ -61,11 +71,11 @@ from ml4t.diagnostic.evaluation.stats import (
 from plotly.subplots import make_subplots
 from scipy import stats
 
-import utils  # noqa: F401
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides after this cell
+# Production defaults - Papermill injects overrides after this cell
 N_SIMULATIONS = 5000
 SEED = 42
 
@@ -83,6 +93,50 @@ EULER_MASCHERONI = 0.5772156649
 
 
 # %%
+def _expected_max_sharpe(variance_trials: float, n_trials: int) -> float:
+    """Expected maximum trial Sharpe in its native sampling frequency."""
+    if n_trials <= 1 or variance_trials <= 0:
+        return 0.0
+    z1 = stats.norm.ppf(1.0 - (1.0 / n_trials))
+    z2 = stats.norm.ppf(1.0 - (np.exp(-1.0) / n_trials))
+    weight = (1.0 - EULER_MASCHERONI) * z1 + EULER_MASCHERONI * z2
+    return float(np.sqrt(variance_trials) * weight)
+
+
+# %% [markdown]
+# The formatter keeps native-frequency computation separate from annualized
+# presentation. This prevents the DSR benchmark and observed Sharpe from being
+# compared in different units.
+
+
+# %%
+def _format_dsr_result(
+    probability: float,
+    z_score: float,
+    expected_max: float,
+    annualizer: float,
+    observed_sharpe: float,
+    confidence_level: float,
+) -> dict[str, float | bool]:
+    """Expose DSR components on the annualized scale used by the notebook."""
+    expected_max_annual = expected_max * annualizer
+    return {
+        "dsr": probability,
+        "z_score": z_score,
+        "p_value": 1.0 - probability,
+        "expected_max_sharpe": expected_max_annual,
+        "adjusted_sharpe": observed_sharpe - expected_max_annual,
+        "is_significant": probability >= confidence_level,
+    }
+
+
+# %% [markdown]
+# The local DSR helper makes that unit conversion explicit. It is an educational
+# baseline for the fixed-input comparison below, not a replacement for the
+# library implementation.
+
+
+# %%
 def deflated_sharpe_ratio(
     observed_sharpe: float,
     skewness: float = 0.0,
@@ -93,54 +147,40 @@ def deflated_sharpe_ratio(
     confidence_level: float = 0.95,
     return_format: str = "probability",
     return_components: bool = False,
+    periods_per_year: int = 252,
 ) -> float | dict[str, float | bool]:
-    """Backward-compatible DSR helper for legacy chapter notebook examples."""
-    if n_trials <= 1 or variance_trials <= 0:
-        expected_max = 0.0
-    else:
-        z1 = stats.norm.ppf(1.0 - (1.0 / n_trials))
-        z2 = stats.norm.ppf(1.0 - (np.exp(-1.0) / n_trials))
-        expected_max = np.sqrt(max(variance_trials, 0.0)) * (
-            (1.0 - EULER_MASCHERONI) * z1 + EULER_MASCHERONI * z2
-        )
-
-    denom = np.sqrt(
-        max(
-            1.0 - skewness * observed_sharpe + ((kurtosis - 1.0) / 4.0) * observed_sharpe**2,
-            1e-12,
-        )
-    )
-    z_score = ((observed_sharpe - expected_max) * np.sqrt(max(n_samples - 1, 1))) / denom
+    """Compute DSR from annualized Sharpe statistics and native observations."""
+    annualizer = np.sqrt(periods_per_year)
+    observed_native = observed_sharpe / annualizer
+    variance_native = max(variance_trials, 0.0) / periods_per_year
+    expected_max = _expected_max_sharpe(variance_native, n_trials)
+    variance = 1.0 - skewness * observed_native + ((kurtosis - 1.0) / 4.0) * observed_native**2
+    denominator = np.sqrt(max(variance, 1e-12))
+    z_score = (observed_native - expected_max) * np.sqrt(max(n_samples - 1, 1)) / denominator
     probability = float(stats.norm.cdf(z_score))
-    p_value = float(1.0 - probability)
-    adjusted_sharpe = float(observed_sharpe - expected_max)
-
+    components = _format_dsr_result(
+        probability, float(z_score), expected_max, annualizer, observed_sharpe, confidence_level
+    )
     if return_components:
-        return {
-            "dsr": probability,
-            "z_score": float(z_score),
-            "p_value": p_value,
-            "expected_max_sharpe": float(expected_max),
-            "adjusted_sharpe": adjusted_sharpe,
-            "is_significant": probability >= confidence_level,
-        }
-
+        return components
     if return_format == "probability":
         return probability
     if return_format == "zscore":
         return float(z_score)
     if return_format == "adjusted_sharpe":
-        return adjusted_sharpe
+        return float(components["adjusted_sharpe"])
     if return_format == "p_value":
-        return p_value
+        return float(components["p_value"])
     raise ValueError(f"Unknown return_format: {return_format}")
 
 
 # %% [markdown]
-# ### Library Equivalence Check
+# ### Library Convention Check
 #
-# The DSR helper above mirrors the algebra section by section. Production
-# code calls `ml4t-diagnostic` directly. Quick verification:
+# The helper exposes the paper's equation using the observed Sharpe in the
+# non-normal variance term. The library evaluates variance at the adjusted
+# benchmark and supports additional corrections, so the values are a
+# fixed-input comparison rather than an equivalence assertion.
 
 # %%
 from ml4t.diagnostic.evaluation.stats import deflated_sharpe_ratio_from_statistics
@@ -166,6 +206,10 @@ print(f"Local DSR: {_local:.4f} | Library DSR: {_lib.probability:.4f}")
 print("In practice, use: from ml4t.diagnostic.evaluation.stats import deflated_sharpe_ratio")
 
 # %% [markdown]
+# The displayed library probability is independent of the MinTRL field also
+# carried by the result object. This notebook never reads or displays MinTRL.
+
+# %% [markdown]
 # ## 1. Understanding Rademacher Complexity
 #
 # Rademacher complexity measures how well a set of strategies can fit random noise:
@@ -174,30 +218,46 @@ print("In practice, use: from ml4t.diagnostic.evaluation.stats import deflated_s
 #
 # Where $\epsilon$ is a Rademacher vector (random ±1 with probability 0.5).
 
+
 # %%
-# Illustrate Rademacher complexity
-np.random.seed(42)
+def normalize_column_norms(values: np.ndarray) -> np.ndarray:
+    """Normalize each candidate path to Euclidean norm sqrt(T)."""
+    target_norm = np.sqrt(values.shape[0])
+    norms = np.linalg.norm(values, axis=0)
+    return values * (target_norm / np.maximum(norms, 1e-12))
+
+
+# %% [markdown]
+# Massart's finite-class bound depends on the largest candidate-path norm.
+# Retaining that scale is essential when the input matrix is not normalized.
+
+
+# %%
+def massart_upper_bound(performance: np.ndarray) -> float:
+    """Return Massart's finite-class bound in the matrix's native units."""
+    n_periods, n_candidates = performance.shape
+    max_norm = np.linalg.norm(performance, axis=0).max()
+    return float(max_norm * np.sqrt(2 * np.log(n_candidates)) / n_periods)
+
+
+# %%
+# Compare abstract candidate classes on a common column-norm scale.
+rng = np.random.default_rng(SEED)
 
 T = 252  # 1 year daily
 N = 100  # 100 strategies
 
-# Case 1: Uncorrelated strategies
-X_uncorrelated = np.random.randn(T, N)
+X_uncorrelated = normalize_column_norms(rng.standard_normal((T, N)))
+base_strategy = rng.standard_normal(T)
+correlated_noise = rng.standard_normal((T, N)) * 0.1
+X_correlated = normalize_column_norms(base_strategy[:, None] + correlated_noise)
+X_identical = normalize_column_norms(np.repeat(base_strategy[:, None], N, axis=1))
 
-# Case 2: Highly correlated strategies (parameter variants)
-base_strategy = np.random.randn(T)
-X_correlated = np.column_stack([base_strategy + np.random.randn(T) * 0.1 for _ in range(N)])
+R_uncorrelated = rademacher_complexity(X_uncorrelated, N_SIMULATIONS, SEED)
+R_correlated = rademacher_complexity(X_correlated, N_SIMULATIONS, SEED)
+R_identical = rademacher_complexity(X_identical, N_SIMULATIONS, SEED)
 
-# Case 3: Identical strategies
-X_identical = np.column_stack([base_strategy for _ in range(N)])
-
-# Compute Rademacher complexity
-R_uncorrelated = rademacher_complexity(X_uncorrelated, n_simulations=10000, random_state=42)
-R_correlated = rademacher_complexity(X_correlated, n_simulations=10000, random_state=42)
-R_identical = rademacher_complexity(X_identical, n_simulations=10000, random_state=42)
-
-# Massart's bound (theoretical maximum for uncorrelated)
-massart_bound = np.sqrt(2 * np.log(N) / T)
+massart_bound = massart_upper_bound(X_uncorrelated)
 
 print("=== Rademacher Complexity Analysis ===")
 print(f"\nNumber of strategies: {N}")
@@ -209,31 +269,41 @@ print(f"  Correlated:   {R_correlated:.4f} ({R_correlated / massart_bound:.1%} o
 print(f"  Identical:    {R_identical:.4f} ({R_identical / massart_bound:.1%} of bound)")
 
 # %%
-# Visualize correlation impact
+# Compare empirical complexities against the shared normalized bound.
 fig = go.Figure()
 
 strategies = ["Uncorrelated", "Correlated", "Identical"]
 R_values = [R_uncorrelated, R_correlated, R_identical]
 
 fig.add_trace(
-    go.Bar(x=strategies, y=R_values, marker_color=["#1f77b4", "#ff7f0e", "#2ca02c"], name="R̂")
+    go.Bar(
+        x=strategies,
+        y=R_values,
+        marker_color=[COLORS["blue"], COLORS["amber"], COLORS["positive"]],
+        name="R̂",
+    )
 )
 
 fig.add_hline(
-    y=massart_bound, line_dash="dash", line_color="red", annotation_text="Massart's Bound"
+    y=massart_bound,
+    line_dash="dash",
+    line_color=COLORS["negative"],
+    annotation_text="Massart's bound",
 )
 
 fig.update_layout(
-    title="Rademacher Complexity by Strategy Correlation",
+    title="Shared variation lowers candidate-class complexity",
     yaxis_title="Rademacher Complexity (R̂)",
-    template="plotly_white",
     height=400,
 )
 
 fig.show()
 
-print("\nKey Insight: Correlated strategies have LOWER overfitting risk!")
-print("Testing many parameter variants is less risky than testing truly independent strategies.")
+# %% [markdown]
+# With candidate count, sample size, and column norms fixed, greater shared
+# variation lowers the empirical complexity of this constructed class. RAS can
+# therefore distinguish a tightly related parameter family from the same number
+# of nearly independent trials.
 
 # %% [markdown]
 # ## 2. RAS Adjustment for Sharpe Ratios
@@ -241,28 +311,27 @@ print("Testing many parameter variants is less risky than testing truly independ
 # Formula (Procedure 8.2 in Paleologo):
 #
 # $$\theta_n \geq \hat{\theta}_n - 2\hat{R} - 3\sqrt{\frac{2\log(2/\delta)}{T}} - \sqrt{\frac{2\log(2N/\delta)}{T}}$$
+#
+# Every term in this bound uses per-period, volatility-standardized return
+# units. We annualize the observed estimate and its lower bound only for display.
 
 # %%
-# Simulate backtesting many strategies
-np.random.seed(42)
+# Simulate a correlated candidate return matrix.
+rng = np.random.default_rng(SEED)
 
 T = 504  # 2 years
 N = 500  # 500 strategy variants
 
 # Generate returns matrix
 # Strategies are correlated (parameter sweep of similar strategy)
-base_returns = np.random.randn(T) * 0.01 + 0.0002  # Slight alpha
-strategy_returns = np.column_stack([base_returns + np.random.randn(T) * 0.005 for _ in range(N)])
+base_returns = rng.standard_normal(T) * 0.01 + 0.0002
+strategy_returns = base_returns[:, None] + rng.standard_normal((T, N)) * 0.005
 
-# Calculate Sharpe ratios (annualized)
-observed_sharpe = (
-    np.mean(strategy_returns, axis=0) / np.std(strategy_returns, axis=0, ddof=1) * np.sqrt(252)
-)
-
-# Z-score for Rademacher complexity
-X = (strategy_returns - np.mean(strategy_returns, axis=0)) / np.std(
-    strategy_returns, axis=0, ddof=1
-)
+# Express each path in per-period Sharpe units without removing its mean.
+return_volatility = np.std(strategy_returns, axis=0, ddof=1)
+standardized_returns = strategy_returns / return_volatility
+observed_sharpe_native = np.mean(standardized_returns, axis=0)
+observed_sharpe = observed_sharpe_native * np.sqrt(252)
 
 print("=== Strategy Universe ===")
 print(f"\nStrategies: {N}")
@@ -273,34 +342,34 @@ print(f"  Mean: {np.mean(observed_sharpe):.3f}")
 print(f"  Min: {np.min(observed_sharpe):.3f}")
 
 # %%
-# Compute Rademacher complexity
-R_hat = rademacher_complexity(X, n_simulations=10000, random_state=42)
+# Compute complexity in the same per-period Sharpe units as the bound.
+R_hat = rademacher_complexity(standardized_returns, N_SIMULATIONS, SEED)
+massart_returns = massart_upper_bound(standardized_returns)
 
 print("\n=== Rademacher Analysis ===")
 print(f"\nR̂: {R_hat:.4f}")
-print(f"Massart's bound: {np.sqrt(2 * np.log(N) / T):.4f}")
-print(f"Ratio: {R_hat / np.sqrt(2 * np.log(N) / T):.1%}")
+print(f"Scale-aware Massart bound: {massart_returns:.4f}")
+print(f"Ratio: {R_hat / massart_returns:.1%}")
 
 # %%
-# Apply RAS adjustment
-adjusted_sharpe = ras_sharpe_adjustment(
-    observed_sharpe=observed_sharpe,
+# Apply the bound in native units, then annualize its result for display.
+adjusted_sharpe_native = ras_sharpe_adjustment(
+    observed_sharpe=observed_sharpe_native,
     complexity=R_hat,
     n_samples=T,
     n_strategies=N,
     delta=0.05,  # 95% confidence
 )
+adjusted_sharpe = adjusted_sharpe_native * np.sqrt(252)
 
-# Count significant strategies
-n_significant_raw = np.sum(observed_sharpe > 0)
-n_significant_ras = np.sum(adjusted_sharpe > 0)
+# Compare positive point estimates with positive RAS lower bounds.
+n_positive_raw = np.sum(observed_sharpe > 0)
+n_positive_ras = np.sum(adjusted_sharpe > 0)
 
 print("\n=== RAS Adjustment Results ===")
-print("\nSignificance threshold: SR > 0")
-print("\nSignificant strategies:")
-print(f"  Before RAS: {n_significant_raw}/{N} ({n_significant_raw / N:.1%})")
-print(f"  After RAS:  {n_significant_ras}/{N} ({n_significant_ras / N:.1%})")
-print(f"\nRejection rate: {(n_significant_raw - n_significant_ras) / n_significant_raw:.1%}")
+print("\nPositive Sharpe estimates:")
+print(f"  Observed: {n_positive_raw}/{N} ({n_positive_raw / N:.1%})")
+print(f"  RAS lower bound: {n_positive_ras}/{N} ({n_positive_ras / N:.1%})")
 
 print("\nBest strategy:")
 best_idx = np.argmax(observed_sharpe)
@@ -309,66 +378,84 @@ print(f"  Adjusted SR: {adjusted_sharpe[best_idx]:.3f}")
 print(f"  Adjustment: {observed_sharpe[best_idx] - adjusted_sharpe[best_idx]:.3f}")
 
 # %%
-# Visualize RAS adjustment
+# Build the observed-versus-bound panel.
 fig = make_subplots(
-    rows=1, cols=2, subplot_titles=["Observed vs Adjusted SR", "Distribution Shift"]
+    rows=1,
+    cols=2,
+    subplot_titles=["RAS lowers Sharpe", "Bounds shift left"],
 )
 
-# Scatter plot
 fig.add_trace(
     go.Scatter(
         x=observed_sharpe,
         y=adjusted_sharpe,
         mode="markers",
-        marker=dict(size=5, color=np.where(adjusted_sharpe > 0, "#2ca02c", "#d62728"), opacity=0.5),
-        name="Strategies",
+        marker=dict(
+            size=5,
+            color=np.where(adjusted_sharpe > 0, COLORS["positive"], COLORS["negative"]),
+            opacity=0.5,
+        ),
+        name="Candidates",
     ),
     row=1,
     col=1,
 )
 
-# 45-degree line
 sr_range = [np.min(observed_sharpe), np.max(observed_sharpe)]
-fig.add_trace(
+_ = fig.add_trace(
     go.Scatter(
         x=sr_range,
         y=sr_range,
         mode="lines",
-        line=dict(dash="dash", color="gray"),
+        line=dict(dash="dash", color=COLORS["neutral"]),
         name="No adjustment",
     ),
     row=1,
     col=1,
 )
 
-# Zero lines
-fig.add_hline(y=0, line_dash="dot", line_color="red", row=1, col=1)
-fig.add_vline(x=0, line_dash="dot", line_color="red", row=1, col=1)
-
-# Distribution comparison
+# %%
+# Add the distribution panel and reference lines.
 fig.add_trace(
     go.Histogram(
-        x=observed_sharpe, name="Observed", marker_color="#1f77b4", opacity=0.6, nbinsx=30
+        x=observed_sharpe,
+        name="Observed",
+        marker_color=COLORS["blue"],
+        opacity=0.6,
+        nbinsx=30,
     ),
     row=1,
     col=2,
 )
 fig.add_trace(
     go.Histogram(
-        x=adjusted_sharpe, name="Adjusted", marker_color="#ff7f0e", opacity=0.6, nbinsx=30
+        x=adjusted_sharpe,
+        name="RAS lower bound",
+        marker_color=COLORS["amber"],
+        opacity=0.6,
+        nbinsx=30,
     ),
     row=1,
     col=2,
 )
 
-fig.add_vline(x=0, line_dash="dash", line_color="red", row=1, col=2)
+fig.add_hline(y=0, line_dash="dot", line_color=COLORS["negative"], row=1, col=1)
+fig.add_vline(x=0, line_dash="dot", line_color=COLORS["negative"], row=1, col=1)
+fig.add_vline(x=0, line_dash="dash", line_color=COLORS["negative"], row=1, col=2)
 
-fig.update_layout(height=400, template="plotly_white", barmode="overlay")
+fig.update_layout(height=400, barmode="overlay")
 fig.update_xaxes(title_text="Observed SR", row=1, col=1)
-fig.update_yaxes(title_text="Adjusted SR", row=1, col=1)
+fig.update_yaxes(title_text="RAS lower-bound SR", row=1, col=1)
 fig.update_xaxes(title_text="Sharpe Ratio", row=1, col=2)
+fig.update_yaxes(title_text="Candidate count", row=1, col=2)
 
 fig.show()
+
+# %% [markdown]
+# The lower-bound distribution shifts left of the point estimates because RAS
+# charges for both class complexity and finite-sample uncertainty. A promising
+# selected Sharpe is therefore not enough: the lower bound must clear the
+# decision hurdle for the evidence to survive the search adjustment.
 
 # %% [markdown]
 # ## 3. RAS vs DSR Comparison
@@ -403,14 +490,20 @@ print("\nRAS Analysis:")
 print(f"  Rademacher complexity: {R_hat:.4f}")
 print(f"  Adjusted SR: {ras_adjusted_best:.3f}")
 print(f"  Adjustment magnitude: {best_sharpe - ras_adjusted_best:.3f}")
-print(f"  Significant at 95%: {'Yes' if ras_adjusted_best > 0 else 'No'}")
+print(f"  Positive 95% lower bound: {'Yes' if ras_adjusted_best > 0 else 'No'}")
+
+# %% [markdown]
+# DSR and RAS answer different questions. DSR reports a tail probability relative
+# to a selection benchmark, while RAS reports a finite-sample lower bound. Reading
+# both prevents a probability from being mistaken for a guaranteed performance
+# floor.
 
 # %% [markdown]
 # ## 4. RAS for Information Coefficients
 
 # %%
-# Simulate multiple signals with varying IC
-np.random.seed(123)
+# Simulate bounded per-period IC observations.
+ic_rng = np.random.default_rng(123)
 
 T = 252  # 1 year
 N = 50  # 50 signals
@@ -420,8 +513,8 @@ N = 50  # 50 signals
 n_true = 5
 true_ic = 0.03  # True IC for real signals
 
-ic_matrix = np.random.randn(T, N) * 0.1  # Cross-sectional IC noise
-ic_matrix[:, :n_true] += true_ic  # Add true IC to first 5
+ic_matrix = ic_rng.uniform(-0.05, 0.05, size=(T, N))
+ic_matrix[:, :n_true] += true_ic
 
 observed_ic = np.mean(ic_matrix, axis=0)
 
@@ -434,11 +527,8 @@ print(f"  Max: {np.max(observed_ic):.4f}")
 print(f"  Mean: {np.mean(observed_ic):.4f}")
 
 # %%
-# Compute Rademacher complexity for IC
-# Normalize IC matrix
-X_ic = ic_matrix / 0.1  # Normalize by typical IC range
-
-R_hat_ic = rademacher_complexity(X_ic, n_simulations=10000, random_state=42)
+# Compute complexity in the same bounded IC units used by the adjustment.
+R_hat_ic = rademacher_complexity(ic_matrix, N_SIMULATIONS, SEED)
 
 # Apply RAS adjustment for IC
 adjusted_ic = ras_ic_adjustment(
@@ -449,15 +539,15 @@ adjusted_ic = ras_ic_adjustment(
     kappa=0.1,  # Max IC bound
 )
 
-# Count significant signals
-n_sig_raw = np.sum(observed_ic > 0.01)  # IC > 1% threshold
-n_sig_ras = np.sum(adjusted_ic > 0.01)
+# Compare candidates above a 1% practical hurdle.
+n_above_raw = np.sum(observed_ic > 0.01)
+n_above_ras = np.sum(adjusted_ic > 0.01)
 
 print("\n=== RAS Adjustment for IC ===")
 print(f"\nR̂ (IC): {R_hat_ic:.4f}")
-print("\nSignificant signals (IC > 1%):")
-print(f"  Before RAS: {n_sig_raw}/{N}")
-print(f"  After RAS:  {n_sig_ras}/{N}")
+print("\nSignals above the 1% IC hurdle:")
+print(f"  Observed: {n_above_raw}/{N}")
+print(f"  RAS lower bound: {n_above_ras}/{N}")
 
 # Check true signal detection
 true_detected_raw = np.sum(observed_ic[:n_true] > 0.01)
@@ -468,18 +558,26 @@ false_positives_ras = np.sum(adjusted_ic[n_true:] > 0.01)
 print("\nTrue signal detection:")
 print(f"  Raw: {true_detected_raw}/{n_true}")
 print(f"  RAS: {true_detected_ras}/{n_true}")
-print("\nFalse positives:")
+print("\nNull signals above the hurdle:")
 print(f"  Raw: {false_positives_raw}/{N - n_true}")
 print(f"  RAS: {false_positives_ras}/{N - n_true}")
 
 # %% [markdown]
-# ## 5. Case Study: ETF Rotational Strategy
+# The raw hurdle identifies the deliberately shifted signals in this bounded
+# construction, but the RAS lower bounds remain more conservative. This is a
+# diagnostic of finite-sample search uncertainty, not a claim that the synthetic
+# signals would trade profitably.
+
+# %% [markdown]
+# ## 5. Synthetic Daily Parameter Grid
 #
-# Apply RAS to a parameter sweep of momentum strategies.
+# The labels resemble an ETF momentum sweep, but this example does not load ETF
+# prices, compute momentum ranks, or rebalance a portfolio. It isolates how RAS
+# treats a correlated daily candidate matrix; it is not a case-study result.
 
 # %%
-# Simulate parameter sweep for momentum strategy
-np.random.seed(42)
+# Create labels for an illustrative daily parameter grid.
+daily_rng = np.random.default_rng(SEED)
 
 T = 504  # 2 years daily
 
@@ -491,9 +589,8 @@ n_top_assets = [1, 2, 3, 5]
 N = len(lookback_periods) * len(holding_periods) * len(n_top_assets)
 print(f"Parameter combinations: {N}")
 
-# Generate correlated strategy returns
-# Base momentum strategy has slight edge
-base_returns = np.random.randn(T) * 0.01 + 0.0001
+# Generate correlated synthetic returns independent of the parameter labels.
+base_returns = daily_rng.standard_normal(T) * 0.01 + 0.0001
 
 strategy_returns = []
 param_labels = []
@@ -501,54 +598,66 @@ param_labels = []
 for lb in lookback_periods:
     for hp in holding_periods:
         for top_n in n_top_assets:
-            # Parameter affects returns slightly
-            param_noise = np.random.randn(T) * 0.003
+            param_noise = daily_rng.standard_normal(T) * 0.003
             returns = base_returns + param_noise
             strategy_returns.append(returns)
             param_labels.append(f"LB{lb}_HP{hp}_N{top_n}")
 
 strategy_returns = np.column_stack(strategy_returns)
 
-# Calculate Sharpe ratios
-sharpe_ratios = (
-    np.mean(strategy_returns, axis=0) / np.std(strategy_returns, axis=0, ddof=1) * np.sqrt(252)
-)
+# Compute native and annualized Sharpe estimates from the same standardized paths.
+daily_volatility = np.std(strategy_returns, axis=0, ddof=1)
+standardized_daily = strategy_returns / daily_volatility
+daily_sharpe_native = np.mean(standardized_daily, axis=0)
+sharpe_ratios = daily_sharpe_native * np.sqrt(252)
 
 # %%
-# Apply RAS
-X_etf = (strategy_returns - np.mean(strategy_returns, axis=0)) / np.std(
-    strategy_returns, axis=0, ddof=1
-)
-R_hat_etf = rademacher_complexity(X_etf, n_simulations=10000, random_state=42)
+# Apply RAS in per-period Sharpe units.
+R_hat_daily = rademacher_complexity(standardized_daily, N_SIMULATIONS, SEED)
+massart_daily = massart_upper_bound(standardized_daily)
 
-adjusted_sharpe_etf = ras_sharpe_adjustment(
-    observed_sharpe=sharpe_ratios, complexity=R_hat_etf, n_samples=T, n_strategies=N, delta=0.05
+adjusted_daily_native = ras_sharpe_adjustment(
+    observed_sharpe=daily_sharpe_native,
+    complexity=R_hat_daily,
+    n_samples=T,
+    n_strategies=N,
+    delta=0.05,
 )
+adjusted_sharpe_daily = adjusted_daily_native * np.sqrt(252)
 
-print("=== ETF Momentum Parameter Sweep ===")
+print("=== Synthetic Daily Parameter Grid ===")
 print(f"\nStrategies tested: {N}")
-print(f"R̂: {R_hat_etf:.4f}")
-print(f"Massart's bound: {np.sqrt(2 * np.log(N) / T):.4f}")
+print(f"R̂: {R_hat_daily:.4f}")
+print(f"Scale-aware Massart bound: {massart_daily:.4f}")
 
 # Best strategy
 best_idx = np.argmax(sharpe_ratios)
 print(f"\nBest parameters: {param_labels[best_idx]}")
 print(f"  Observed SR: {sharpe_ratios[best_idx]:.3f}")
-print(f"  Adjusted SR: {adjusted_sharpe_etf[best_idx]:.3f}")
+print(f"  RAS lower-bound SR: {adjusted_sharpe_daily[best_idx]:.3f}")
 
-# Significance
-n_sig_raw = np.sum(sharpe_ratios > 0.5)
-n_sig_ras = np.sum(adjusted_sharpe_etf > 0.5)
+# Compare the same practical hurdle before and after adjustment.
+n_above_raw = np.sum(sharpe_ratios > 0.5)
+n_above_ras = np.sum(adjusted_sharpe_daily > 0.5)
 print("\nStrategies with SR > 0.5:")
-print(f"  Before RAS: {n_sig_raw}")
-print(f"  After RAS: {n_sig_ras}")
+print(f"  Observed: {n_above_raw}")
+print(f"  RAS lower bound: {n_above_ras}")
 
 # %% [markdown]
-# ## 6. Case Study: Crypto Funding Strategy
+# The best label is selected from correlated synthetic paths, so its point
+# estimate inherits search optimism. The lower bound asks whether the selected
+# candidate remains attractive after charging for the whole candidate class.
+
+# %% [markdown]
+# ## 6. Synthetic Hourly Parameter Grid
+#
+# The labels resemble funding-strategy controls, but the example does not load
+# funding rates, form positions, or calculate funding cash flows. The hourly
+# paths are synthetic and illustrate the adjustment only.
 
 # %%
-# Simulate crypto parameter sweep
-np.random.seed(789)
+# Create labels for an illustrative hourly parameter grid.
+hourly_rng = np.random.default_rng(789)
 
 T = 24 * 90  # 90 days hourly
 
@@ -558,33 +667,45 @@ threshold_pcts = [0.01, 0.02, 0.05, 0.1]
 position_sizes = [0.25, 0.5, 0.75, 1.0]
 
 N = len(lookback_hours) * len(threshold_pcts) * len(position_sizes)
-print(f"Crypto strategy variants: {N}")
+print(f"Hourly strategy variants: {N}")
 
-# Generate hourly returns
-base_returns = np.random.randn(T) * 0.002 + 0.00005  # Slight alpha
+# Generate correlated synthetic hourly returns.
+base_returns = hourly_rng.standard_normal(T) * 0.002 + 0.00005
 
-crypto_returns = np.column_stack([base_returns + np.random.randn(T) * 0.001 for _ in range(N)])
+hourly_returns = base_returns[:, None] + hourly_rng.standard_normal((T, N)) * 0.001
 
-# Calculate Sharpe (annualized from hourly)
-crypto_sharpe = (
-    np.mean(crypto_returns, axis=0) / np.std(crypto_returns, axis=0, ddof=1) * np.sqrt(24 * 365)
+# Compute native and annualized Sharpe estimates from the standardized paths.
+hourly_annualizer = np.sqrt(24 * 365)
+hourly_volatility = np.std(hourly_returns, axis=0, ddof=1)
+standardized_hourly = hourly_returns / hourly_volatility
+hourly_sharpe_native = np.mean(standardized_hourly, axis=0)
+hourly_sharpe = hourly_sharpe_native * hourly_annualizer
+
+# %%
+# Apply RAS in per-period Sharpe units.
+R_hat_hourly = rademacher_complexity(standardized_hourly, N_SIMULATIONS, SEED)
+massart_hourly = massart_upper_bound(standardized_hourly)
+
+adjusted_hourly_native = ras_sharpe_adjustment(
+    observed_sharpe=hourly_sharpe_native,
+    complexity=R_hat_hourly,
+    n_samples=T,
+    n_strategies=N,
+    delta=0.05,
 )
+adjusted_hourly = adjusted_hourly_native * hourly_annualizer
 
-# RAS adjustment
-X_crypto = (crypto_returns - np.mean(crypto_returns, axis=0)) / np.std(
-    crypto_returns, axis=0, ddof=1
-)
-R_hat_crypto = rademacher_complexity(X_crypto, n_simulations=10000, random_state=42)
+print("\n=== Synthetic Hourly Parameter Grid ===")
+print(f"\nR̂: {R_hat_hourly:.4f}")
+print(f"Scale-aware Massart bound: {massart_hourly:.4f}")
+print(f"\nBest observed SR: {np.max(hourly_sharpe):.2f}")
+print(f"Best RAS lower-bound SR: {np.max(adjusted_hourly):.2f}")
+print(f"\nLower bounds above SR 1.0: {np.sum(adjusted_hourly > 1.0)}/{N}")
 
-adjusted_crypto = ras_sharpe_adjustment(
-    observed_sharpe=crypto_sharpe, complexity=R_hat_crypto, n_samples=T, n_strategies=N, delta=0.05
-)
-
-print("\n=== Crypto Funding Strategy RAS ===")
-print(f"\nR̂: {R_hat_crypto:.4f}")
-print(f"\nBest observed SR: {np.max(crypto_sharpe):.2f}")
-print(f"Best adjusted SR: {np.max(adjusted_crypto):.2f}")
-print(f"\nSignificant (adj SR > 1.0): {np.sum(adjusted_crypto > 1.0)}/{N}")
+# %% [markdown]
+# More observations do not eliminate the multiple-testing charge when the
+# candidate set can still align with noise. The hourly example reinforces that
+# annualization belongs after the native-frequency bound, not inside its inputs.
 
 # %% [markdown]
 # ## References
@@ -594,9 +715,27 @@ print(f"\nSignificant (adj SR > 1.0): {np.sum(adjusted_crypto > 1.0)}/{N}")
 # - GitHub: https://github.com/RSv618/rademacher-anti-serum
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Findings and Next Steps
 #
-# ### RAS API
+# - Rademacher complexity measures the realized capacity of the candidate matrix,
+#   so dependence among trials enters directly rather than through a raw count.
+# - RAS must be computed from per-period volatility-standardized returns without
+#   demeaning; annualization is a presentation step applied afterward.
+# - DSR supplies a selection-adjusted probability, while RAS supplies a lower
+#   performance bound. They are complementary, not interchangeable.
+# - A strong point estimate can fail a lower-bound hurdle once class complexity
+#   and sampling uncertainty are included.
+#
+# **Limitations.** These examples use synthetic IID paths to isolate the formulas.
+# Real trading returns often exhibit serial dependence and regime changes, which
+# require a dependence-aware resampling or concentration design. The examples
+# also omit transaction costs and portfolio construction.
+#
+# This notebook implements the strategy-level overfitting controls discussed in
+# Chapter 16, §16.7. Continue to `14_cost_sensitivity` to test whether a selected
+# strategy remains viable when execution-cost assumptions change.
+#
+# ## RAS API
 #
 # ```python
 # from ml4t.diagnostic.evaluation.stats import (
@@ -605,27 +744,30 @@ print(f"\nSignificant (adj SR > 1.0): {np.sum(adjusted_crypto > 1.0)}/{N}")
 #     ras_ic_adjustment,
 # )
 #
-# # Step 1: Compute Rademacher complexity
-# R_hat = rademacher_complexity(X, n_simulations=10000)
+# # Step 1: Standardize without demeaning, then compute native estimates
+# standardized = candidate_returns / candidate_returns.std(axis=0, ddof=1)
+# observed_native = standardized.mean(axis=0)
+# R_hat = rademacher_complexity(standardized, n_simulations=5000)
 #
 # # Step 2: Apply RAS adjustment
-# adjusted_sharpe = ras_sharpe_adjustment(
-#     observed_sharpe,
+# adjusted_native = ras_sharpe_adjustment(
+#     observed_native,
 #     complexity=R_hat,
 #     n_samples=T,
 #     n_strategies=N,
 #     delta=0.05
 # )
 #
-# # Step 3: Check significance
-# significant = adjusted_sharpe > 0
+# # Step 3: Annualize only after applying the native-unit bound
+# adjusted_sharpe = adjusted_native * np.sqrt(periods_per_year)
+# positive_lower_bound = adjusted_sharpe > 0
 # ```
 #
-# ### When to Use RAS vs DSR
+# ## When to Use RAS vs DSR
 #
 # | Scenario | Use |
 # |----------|-----|
-# | Independent strategies | Either (similar results) |
-# | Correlated strategies (parameter sweeps) | RAS (accounts for correlation) |
-# | Quick check | DSR (closed-form) |
-# | Publication-quality | RAS (tighter bounds) |
+# | Independent, low-correlation trials | Compare both and state each assumption |
+# | Correlated parameter sweep | Use RAS or estimate effective trials before DSR |
+# | Quick diagnostic | Use DSR, with the raw-trial-count caveat |
+# | Reported research result | Report the diagnostic, inputs, and assumptions |

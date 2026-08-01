@@ -393,7 +393,7 @@ def main():
             print("\nNote: Some datasets may require API keys:")
             print("  FRED_API_KEY   - for Macro data")
             print("  OANDA_API_KEY  - for FX data (optional, uses Yahoo fallback)")
-        return
+        return 0 if total_success == total else 1
 
     results = {}
 
@@ -474,6 +474,12 @@ def main():
         "  data/equities/market/microstructure/MBO_DOWNLOAD.md          # MBO tick data (Databento, manual)"
     )
 
+    # Exit non-zero when anything the caller asked for did not arrive. Printing [FAIL]
+    # and exiting 0 makes a partial download indistinguishable from a complete one to
+    # every script, CI job and reader who checks the status rather than reading the
+    # summary — and the crypto download in particular fails on Binance rate limits.
+    return 0 if total_success == total else 1
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

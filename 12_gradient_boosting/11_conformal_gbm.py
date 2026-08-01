@@ -18,19 +18,17 @@
 #
 # **Docker image**: `ml4t`
 #
-# **Chapter 12, Section 12.6**: Uncertainty Quantification with Conformal Prediction
+# **Chapter 12, Section 12.5**: From Explanation to Uncertainty and Robustness
 #
-# > **GPU recommended**: This notebook trains models with PyTorch/CUDA. It will run on CPU
-# > but training may be very slow. For GPU acceleration:
-# > ```bash
-# > docker compose run --rm ml4t-gpu python 12_gradient_boosting/11_conformal_gbm.py
-# > ```
+# > **Execution profile**: `ml4t` on CPU. The LightGBM models use deterministic CPU
+# > settings with a fixed thread count. GPU training can be faster, but parallel histogram
+# > accumulation is not bitwise reproducible even with fixed seeds.
 #
 #
 # ## Purpose
 # This notebook demonstrates **conformal prediction** for uncertainty
-# quantification with GBMs, providing distribution-free prediction intervals
-# with guaranteed coverage.
+# quantification with GBMs. It also tests where the finite-sample coverage
+# guarantee weakens when financial observations are temporally dependent.
 #
 # ## Learning Objectives
 # - Implement split conformal prediction from scratch for GBM regression
@@ -51,10 +49,11 @@
 # ## 1. Setup
 
 # %%
-"""Conformal Prediction for GBMs — construct distribution-free prediction intervals for financial forecasts."""
+"""Conformal Prediction for GBMs - construct prediction intervals for financial forecasts."""
 
 import warnings
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
@@ -66,12 +65,14 @@ import lightgbm as lgb
 
 from utils.modeling import load_modeling_dataset
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, FIGSIZE, add_message_title, format_pct_axis
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0  # 0 = all symbols
 CONFORMAL_ALPHA = 0.10  # 90% prediction intervals
 SEED = 42
+NUM_THREADS = 4
+REFERENCE_INTERVAL_WIDTH = 0.20  # fixed ex-ante uncertainty budget
 
 
 # %%
@@ -88,10 +89,75 @@ CAL_FRACTION = 0.2  # 20% calibration set
 # 1. **Split** into proper training $D_{\text{train}}$ and calibration $D_{\text{cal}}$
 # 2. **Train** model $\hat{f}$ on $D_{\text{train}}$
 # 3. **Compute** residuals $R_i = |Y_i - \hat{f}(X_i)|$ for $(X_i, Y_i) \in D_{\text{cal}}$
-# 4. **Quantile**: $q = \lceil (n_{\text{cal}} + 1)(1 - \alpha) \rceil / n_{\text{cal}}$
+# 4. **Order statistic**: $k = \min\{\lceil (n_{\text{cal}} + 1)(1 - \alpha) \rceil,
+#    n_{\text{cal}}\}$ and $\hat{q} = R_{(k)}$
 # 5. **Interval**: $C(X_{\text{new}}) = [\hat{f}(X_{\text{new}}) - \hat{q}, \hat{f}(X_{\text{new}}) + \hat{q}]$
 #
 # **Guarantee**: For exchangeable data, $P(Y_{\text{new}} \in C(X_{\text{new}})) \geq 1 - \alpha$
+
+
+# %%
+def embargo_steps_from_buffer(label_buffer: str, dates: np.ndarray) -> int:
+    """Convert a label horizon to decision-time steps on the observed calendar."""
+    unit = label_buffer[-1].upper()
+    value = int(label_buffer[:-1])
+    unit_ns = {"D": 86_400_000_000_000, "H": 3_600_000_000_000}
+    if unit not in unit_ns:
+        raise ValueError(f"Unsupported label buffer: {label_buffer}")
+
+    unique_dates = np.unique(dates.astype("datetime64[ns]"))
+    median_step_ns = int(
+        np.median(np.diff(unique_dates).astype("timedelta64[ns]").astype(np.int64))
+    )
+    return max(1, int(np.ceil(value * unit_ns[unit] / median_step_ns)))
+
+
+# %% [markdown]
+# ### Purged Calibration Split
+#
+# Calibration is the final 20% of unique training timestamps. The observations immediately
+# before it are removed for at least one full label horizon, so no forward label can cross
+# from proper training into calibration. Grouping on timestamps also keeps a panel date wholly
+# on one side of every boundary.
+
+
+# %%
+def chronological_calibration_masks(
+    dates: np.ndarray, cal_frac: float, embargo_steps: int
+) -> tuple[np.ndarray, np.ndarray, np.datetime64, np.datetime64]:
+    """Return proper-training and calibration masks separated by an embargo."""
+    normalized_dates = dates.astype("datetime64[ns]")
+    unique_dates = np.unique(normalized_dates)
+    n_cal_dates = max(1, int(np.ceil(len(unique_dates) * cal_frac)))
+    cal_start_idx = len(unique_dates) - n_cal_dates
+    proper_end_idx = cal_start_idx - embargo_steps - 1
+    if proper_end_idx < 0:
+        raise ValueError("Not enough timestamps for calibration after applying the embargo")
+
+    proper_end = unique_dates[proper_end_idx]
+    cal_start = unique_dates[cal_start_idx]
+    return normalized_dates <= proper_end, normalized_dates >= cal_start, proper_end, cal_start
+
+
+# %% [markdown]
+# ### Exact Finite-Sample Order Statistic
+#
+# The conformal correction selects the $k$th sorted score directly. Passing the
+# finite-sample fraction to an interpolating quantile API can select the next rank.
+
+
+# %%
+def conformal_order_statistic(scores: np.ndarray, alpha: float) -> float:
+    """Return the exact finite-sample conformal score at one-based rank k."""
+    values = np.asarray(scores)
+    if values.size == 0:
+        raise ValueError("Conformal calibration requires at least one score")
+    rank = min(int(np.ceil((values.size + 1) * (1 - alpha))), values.size)
+    return float(np.partition(values, rank - 1)[rank - 1])
+
+
+# %% [markdown]
+# ### Split Conformal Estimator
 
 
 # %%
@@ -106,19 +172,20 @@ class ConformalRegressor:
         self.conformal_width = None
         self.calibration_residuals = None
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "ConformalRegressor":
-        n_cal = int(len(X) * self.cal_frac)
-        n_proper = len(X) - n_cal
-        X_proper, X_cal = X[:n_proper], X[n_proper:]
-        y_proper, y_cal = y[:n_proper], y[n_proper:]
+    def fit(self, X, y, dates, label_buffer: str) -> "ConformalRegressor":
+        self.embargo_steps = embargo_steps_from_buffer(label_buffer, dates)
+        proper_mask, cal_mask, proper_end, cal_start = chronological_calibration_masks(
+            dates, self.cal_frac, self.embargo_steps
+        )
+        X_proper, X_cal = X[proper_mask], X[cal_mask]
+        y_proper, y_cal = y[proper_mask], y[cal_mask]
         self.model = self.model_factory()
         self.model.fit(X_proper, y_proper)
         y_cal_pred = self.model.predict(X_cal)
         residuals = np.abs(y_cal - y_cal_pred)
         self.calibration_residuals = residuals
-        n = len(residuals)
-        q = np.ceil((n + 1) * (1 - self.alpha)) / n
-        self.conformal_width = np.quantile(residuals, min(q, 1.0))
+        self.conformal_width = conformal_order_statistic(residuals, self.alpha)
+        self.calibration_bounds = (proper_end, cal_start)
         return self
 
     def predict(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -129,33 +196,49 @@ class ConformalRegressor:
         upper = y_pred + self.conformal_width
         return y_pred, lower, upper
 
-    @property
-    def interval_width(self) -> float:
-        return self.conformal_width
-
 
 # %% [markdown]
-# ### LightGBM Factory
+# ### Deterministic LightGBM Parameters
 
 # %%
 from sklearn.base import BaseEstimator, RegressorMixin
 
 
+def deterministic_lgb_parameters(objective: str, alpha: float | None = None) -> dict:
+    """Build the fixed CPU configuration used by every model in this notebook."""
+    params = {
+        "objective": objective,
+        "boosting_type": "gbdt",
+        "num_leaves": 31,
+        "learning_rate": 0.05,
+        "feature_fraction": 0.8,
+        "verbose": -1,
+        "seed": SEED,
+        "data_random_seed": SEED,
+        "feature_fraction_seed": SEED,
+        "bagging_seed": SEED,
+        "deterministic": True,
+        "force_col_wise": True,
+        "num_threads": NUM_THREADS,
+        "device_type": "cpu",
+    }
+    if alpha is not None:
+        params["alpha"] = alpha
+    return params
+
+
+# %% [markdown]
+# ### LightGBM Estimator Wrapper
+
+
+# %%
 class LGBWrapper(BaseEstimator, RegressorMixin):
     def __init__(self, n_rounds=200):
         self.n_rounds = n_rounds
         self.model_ = None
 
     def fit(self, X, y):
-        params = {
-            "objective": "regression",
-            "boosting_type": "gbdt",
-            "num_leaves": 31,
-            "learning_rate": 0.05,
-            "feature_fraction": 0.8,
-            "verbose": -1,
-            "seed": SEED,
-        }
+        params = deterministic_lgb_parameters("regression")
         train_data = lgb.Dataset(X, label=y)
         self.model_ = lgb.train(params, train_data, num_boost_round=self.n_rounds)
         return self
@@ -186,33 +269,109 @@ ASSET_CONFIGS = [
     ("cme_futures", "fwd_ret_5d", "Futures"),
 ]
 
+
+# %% [markdown]
+# ### Resolve Canonical Modeling Inputs
+#
+# The loader joins each case study's financial, model-based, and label artifacts. The
+# composite entity key preserves all panel dimensions, including CME product and position,
+# when cross-sectional IC is computed later. Because the loader's combined frame carries
+# fold 0 temporal columns only as a schema placeholder, each fold below drops those columns
+# and joins the temporal state fitted specifically for that fold.
+
+
+# %%
+def replace_temporal_state(mds, temporal: pl.DataFrame | None, fold_id: int) -> pl.DataFrame:
+    """Replace the loader's schema placeholder with one fold's temporal state."""
+    frame = mds.dataset
+    if temporal is None:
+        return frame
+    fold_temporal = temporal.filter(pl.col("fold") == fold_id).drop("fold")
+    if fold_temporal.is_empty():
+        raise ValueError(f"Temporal artifact has no rows for fold {fold_id}")
+    fold_temporal = fold_temporal.unique(subset=mds.temporal_keys, keep="last")
+    casts = {
+        key: frame.schema[key]
+        for key in mds.temporal_keys
+        if fold_temporal.schema[key] != frame.schema[key]
+    }
+    if casts:
+        fold_temporal = fold_temporal.cast(casts)
+    return frame.drop(mds.temporal_feature_names).join(
+        fold_temporal, on=mds.temporal_keys, how="left"
+    )
+
+
+# %% [markdown]
+# ### Fold-Specific Arrays
+#
+# The joined frame is sorted before conversion so row order, feature order, and complete
+# timestamp groups remain stable across deterministic CPU fits.
+
+
+# %%
+def build_fold_arrays(mds, split: dict, temporal: pl.DataFrame | None) -> dict:
+    """Build one canonical fold with its own temporal learned state."""
+    frame = replace_temporal_state(mds, temporal, int(split["fold"]))
+
+    entity = pl.concat_str(
+        [pl.col(col).cast(pl.String) for col in mds.entity_cols], separator="|"
+    ).alias("__entity")
+    frame = frame.filter(pl.col(mds.label_col).is_finite()).with_columns(entity)
+    frame = frame.sort([mds.date_col, "__entity"])
+    dates = frame[mds.date_col].to_numpy()
+    train_start, train_end, val_start, val_end = (
+        np.datetime64(split[key].to_datetime64())
+        for key in ("train_start", "train_end", "val_start", "val_end")
+    )
+    train_mask = (dates >= train_start) & (dates <= train_end)
+    val_mask = (dates >= val_start) & (dates <= val_end)
+    X = frame.select(mds.feature_names).to_numpy()
+    return {
+        "fold": int(split["fold"]),
+        "X_train": X[train_mask],
+        "y_train": frame[mds.label_col].to_numpy()[train_mask],
+        "dates_train": dates[train_mask],
+        "X_val": X[val_mask],
+        "y_val": frame[mds.label_col].to_numpy()[val_mask],
+        "dates_val": dates[val_mask],
+        "symbols_val": frame["__entity"].to_numpy()[val_mask],
+    }
+
+
+# %% [markdown]
+# Each temporal artifact must contain every requested canonical fold ID. This explicit
+# mapping is the provenance link between the split record and its learned feature state.
+
+
+# %%
 processed_datasets = {}
 
 for cs_id, label, display_name in ASSET_CONFIGS:
     try:
-        mds = load_modeling_dataset(cs_id, label)
-        df = mds.dataset.to_pandas()
-        date_col = mds.date_col
-        feature_cols = mds.feature_names
+        mds = load_modeling_dataset(cs_id, label, max_symbols=MAX_SYMBOLS)
+        temporal = (
+            pl.from_pandas(mds.temporal_by_fold) if mds.temporal_by_fold is not None else None
+        )
+        requested_splits = mds.splits[:5]
+        if temporal is not None:
+            available_folds = set(temporal["fold"].unique().to_list())
+            required_folds = {int(split["fold"]) for split in requested_splits}
+            if not required_folds.issubset(available_folds):
+                raise ValueError(
+                    f"Missing temporal folds: {sorted(required_folds - available_folds)}"
+                )
 
-        split = mds.splits[0]
-        mask = (df[date_col] >= split["train_start"]) & (df[date_col] <= split["val_end"])
-        subset = df.loc[mask]
-
-        valid = np.isfinite(subset[mds.label_col].values)
-        subset = subset.loc[valid]
-
-        if len(subset) > 500:
-            entity_col = mds.entity_cols[0]
-            processed_datasets[display_name] = {
-                "X": subset[feature_cols].values,
-                "y": subset[mds.label_col].values,
-                "dates": subset[date_col].values,
-                "symbols": subset[entity_col].values,
-                "feature_cols": feature_cols,
-                "n_samples": len(subset),
-            }
-            print(f"  {display_name}: {len(subset):,} samples ({len(feature_cols)} features)")
+        fold_data = [build_fold_arrays(mds, split, temporal) for split in requested_splits]
+        processed_datasets[display_name] = {
+            "fold_data": fold_data,
+            "feature_cols": mds.feature_names,
+            "label_buffer": mds.label_buffer,
+        }
+        print(
+            f"  {display_name}: {len(fold_data)} fold-aware matrices "
+            f"({len(mds.feature_names)} features; embargo={mds.label_buffer})"
+        )
     except Exception as e:
         print(f"  {display_name}: skipped ({e})")
 
@@ -221,53 +380,69 @@ print(f"\nLoaded {len(processed_datasets)} asset classes")
 # %% [markdown]
 # ## 4. Conformal Prediction Evaluation
 #
-# We evaluate conformal prediction on each asset class using
-# walk-forward validation to test coverage under temporal dependence.
+# We use each case study's canonical pre-holdout walk-forward folds. Every outer
+# train-validation boundary carries the label horizon configured in `setup.yaml`, and
+# the calibration split inside each training fold applies the same embargo. The sealed
+# 2024-2025 holdouts play no role in model fitting, calibration, method comparison, or
+# interpretation.
 
 
 # %% [markdown]
-# ### Walk-Forward Fold Runner
+# Each fold fits on the canonical training window, calibrates inside that window after a
+# second purge, and evaluates once on the corresponding validation dates.
 
 
 # %%
 def run_conformal_splits(
-    X: np.ndarray,
-    y: np.ndarray,
-    dates: np.ndarray,
-    symbols: np.ndarray,
+    fold_data: list[dict],
+    label_buffer: str,
     alpha: float,
     n_splits: int,
 ) -> list[dict]:
-    n_samples = len(X)
-    fold_size = n_samples // (n_splits + 1)
     fold_results = []
 
-    for fold_idx in range(n_splits):
-        train_end = fold_size * (fold_idx + 1)
-        test_end = min(train_end + fold_size, n_samples)
-        if train_end < 200 or (test_end - train_end) < 50:
+    for fold in fold_data[:n_splits]:
+        if len(fold["X_train"]) < 200 or len(fold["X_val"]) < 50:
             continue
 
-        X_train, y_train = X[:train_end], y[:train_end]
-        X_test, y_test = X[train_end:test_end], y[train_end:test_end]
-        dates_test = dates[train_end:test_end]
-        symbols_test = symbols[train_end:test_end]
-
         conformal = ConformalRegressor(lgb_model_factory, alpha=alpha)
-        conformal.fit(X_train, y_train)
-        y_pred, lower, upper = conformal.predict(X_test)
+        conformal.fit(fold["X_train"], fold["y_train"], fold["dates_train"], label_buffer)
+        y_pred, lower, upper = conformal.predict(fold["X_val"])
         fold_results.append(
             {
-                "y_true": y_test,
+                "y_true": fold["y_val"],
                 "y_pred": y_pred,
-                "dates": dates_test,
-                "symbols": symbols_test,
+                "dates": fold["dates_val"],
+                "symbols": fold["symbols_val"],
                 "lower": lower,
                 "upper": upper,
-                "width": conformal.interval_width,
+                "half_width": conformal.conformal_width,
+                "fold": fold["fold"],
+                "embargo_steps": conformal.embargo_steps,
             }
         )
     return fold_results
+
+
+# %% [markdown]
+# ### Cross-Sectional Information Coefficient
+
+
+# %%
+def mean_cross_sectional_ic(dates, symbols, predictions, returns) -> float:
+    """Compute mean per-date Spearman IC on unique timestamp-entity keys."""
+    pred_df = pl.DataFrame({"timestamp": dates, "symbol": symbols, "prediction": predictions})
+    ret_df = pl.DataFrame({"timestamp": dates, "symbol": symbols, "forward_return": returns})
+    ic_per_date = cross_sectional_ic_series(
+        pred_df,
+        ret_df,
+        pred_col="prediction",
+        ret_col="forward_return",
+        date_col="timestamp",
+        entity_col="symbol",
+    )
+    ic_clean = ic_per_date.drop_nulls("ic")
+    return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
 
 
 # %% [markdown]
@@ -286,25 +461,8 @@ def summarize_conformal_results(results: list[dict], alpha: float) -> dict | Non
     lower_all = np.concatenate([r["lower"] for r in results])
     upper_all = np.concatenate([r["upper"] for r in results])
 
-    in_interval = (y_true_all >= lower_all) & (y_true_all <= upper_all)
-    coverage = in_interval.mean()
-
-    pred_df = pl.DataFrame(
-        {"timestamp": dates_all, "symbol": symbols_all, "prediction": y_pred_all}
-    )
-    ret_df = pl.DataFrame(
-        {"timestamp": dates_all, "symbol": symbols_all, "forward_return": y_true_all}
-    )
-    ic_per_date = cross_sectional_ic_series(
-        pred_df,
-        ret_df,
-        pred_col="prediction",
-        ret_col="forward_return",
-        date_col="timestamp",
-        entity_col="symbol",
-    )
-    ic_clean = ic_per_date.drop_nulls("ic")
-    ic = float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
+    coverage = ((y_true_all >= lower_all) & (y_true_all <= upper_all)).mean()
+    ic = mean_cross_sectional_ic(dates_all, symbols_all, y_pred_all, y_true_all)
     avg_width = np.mean(upper_all - lower_all)
 
     return {
@@ -324,14 +482,17 @@ def summarize_conformal_results(results: list[dict], alpha: float) -> dict | Non
 
 # %%
 def evaluate_conformal(
-    X: np.ndarray,
-    y: np.ndarray,
-    dates: np.ndarray,
-    symbols: np.ndarray,
+    fold_data: list[dict],
+    label_buffer: str,
     alpha: float = 0.10,
     n_splits: int = 5,
 ) -> dict | None:
-    results = run_conformal_splits(X, y, dates, symbols, alpha=alpha, n_splits=n_splits)
+    results = run_conformal_splits(
+        fold_data,
+        label_buffer,
+        alpha=alpha,
+        n_splits=n_splits,
+    )
     return summarize_conformal_results(results, alpha)
 
 
@@ -340,10 +501,8 @@ all_metrics = {}
 
 for asset_name, data in processed_datasets.items():
     metrics = evaluate_conformal(
-        data["X"],
-        data["y"],
-        data["dates"],
-        data["symbols"],
+        data["fold_data"],
+        data["label_buffer"],
         alpha=CONFORMAL_ALPHA,
         n_splits=5,
     )
@@ -368,28 +527,44 @@ eval_df = pl.DataFrame(
 eval_df
 
 # %% [markdown]
-# **Interpretation**: Split conformal lands close to the 0.90 target across all
-# three asset classes — Crypto at 0.897 and ETF at 0.886 are within ~1.5 pp, and
-# Futures shows the largest shortfall at 0.827 (about 7 pp under). The
-# finite-sample guarantee assumes exchangeability between calibration and test
-# residuals; under walk-forward evaluation that assumption holds only
-# approximately, so coverage drifts modestly below nominal where the residual
-# distribution shifts faster than the calibration set can track — most visibly on
-# Futures here. Section 6 compares CQR and ACI variants, which adapt interval shape
-# to local volatility rather than applying one global residual quantile.
+# **Interpretation**: With complete timestamp groups and horizon-sized embargoes,
+# Crypto reaches 0.922 coverage and Futures reaches 0.880, while ETF coverage falls
+# to 0.851, 4.9 percentage points below the 0.90 target. The finite-sample guarantee
+# assumes exchangeability between calibration and validation residuals; these
+# walk-forward results show why empirical coverage still matters when financial
+# residuals shift over time. Predictive ordering is also modest: mean daily IC is
+# 0.046 for ETFs, 0.003 for Crypto, and -0.012 for Futures.
 
 # %% [markdown]
 # ## 5. Coverage Visualization
 
+
+# %%
+def label_coverage_bars(ax, bars, values) -> None:
+    """Place percentage labels immediately above coverage bars."""
+    for bar, value in zip(bars, values, strict=True):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.005,
+            f"{value:.1%}",
+            ha="center",
+        )
+
+
+assets = list(all_metrics.keys())
+coverages = [all_metrics[a]["coverage"] for a in assets]
+ics = [all_metrics[a]["ic"] for a in assets]
+
+
+# %% [markdown]
+# The paired view separates calibration from predictive ordering: empirical coverage is
+# judged against its nominal target, while IC is judged against a zero-information baseline.
+
+
 # %%
 if all_metrics:
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"])
 
-    assets = list(all_metrics.keys())
-    coverages = [all_metrics[a]["coverage"] for a in assets]
-    ics = [all_metrics[a]["ic"] for a in assets]
-
-    # Coverage bars
     ax1 = axes[0]
     bars = ax1.bar(assets, coverages, color=COLORS["blue"])
     ax1.axhline(
@@ -398,33 +573,25 @@ if all_metrics:
         color=COLORS["amber"],
         linewidth=1.5,
     )
-    ax1.text(
-        -0.45,
-        1 - CONFORMAL_ALPHA,
-        f"Target: {(1 - CONFORMAL_ALPHA):.0%}",
-        color=COLORS["amber"],
-        va="center",
-        ha="left",
-        fontsize=9,
+    ax1.set_ylabel("Empirical coverage (%)")
+    ax1.set_ylim(0, 1)
+    format_pct_axis(ax1)
+    add_message_title(
+        ax1,
+        "Coverage varies under temporal dependence",
+        subtitle="Nominal target = 90%; purged walk-forward validation",
     )
-    ax1.set_ylabel("Coverage")
-    ax1.set_title(
-        "Split conformal coverage is near the 90% target across asset classes (Futures undercovers at 82.7%)"
-    )
-    for bar, cov in zip(bars, coverages, strict=False):
-        ax1.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.005,
-            f"{cov:.1%}",
-            ha="center",
-            fontsize=10,
-        )
+    label_coverage_bars(ax1, bars, coverages)
 
-    # IC bars
     ax2 = axes[1]
     ax2.bar(assets, ics, color=COLORS["slate"])
-    ax2.set_ylabel("Information Coefficient")
-    ax2.set_title("Information coefficient by asset class")
+    ax2.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=1)
+    ax2.set_ylabel("Mean daily Spearman IC")
+    add_message_title(
+        ax2,
+        "Predictive rank correlation differs across markets",
+        subtitle="Cross-sectional IC on the same validation folds",
+    )
 
     plt.tight_layout()
     plt.show()
@@ -434,7 +601,7 @@ if all_metrics:
 #
 # | Method | Core Idea | Strength | Limitation |
 # |--------|-----------|----------|------------|
-# | **Split Conformal** | Calibrate absolute residuals | Finite-sample coverage | Symmetric intervals |
+# | **Split Conformal** | Calibrate absolute residuals | Finite-sample coverage under exchangeability | Symmetric intervals |
 # | **Quantile Regression (QR)** | Learn lower/upper quantiles directly | Asymmetric intervals | No finite-sample guarantee |
 # | **Conformalized QR (CQR)** | Quantile models + conformal calibration | Asymmetric + calibrated | Needs 2 models + calibration split |
 # | **Adaptive Conformal (ACI)** | Update miscoverage target online | Tracks regime shifts | Online update hyperparameter sensitivity |
@@ -443,17 +610,18 @@ if all_metrics:
 if processed_datasets:
     test_asset = list(processed_datasets.keys())[0]
     test_data = processed_datasets[test_asset]
+    comparison_fold = test_data["fold_data"][0]
 
-    n = test_data["n_samples"]
-    train_size = int(n * 0.7)
-
-    X_tr = test_data["X"][:train_size]
-    y_tr = test_data["y"][:train_size]
-    X_te = test_data["X"][train_size:]
-    y_te = test_data["y"][train_size:]
+    X_tr = comparison_fold["X_train"]
+    y_tr = comparison_fold["y_train"]
+    dates_tr = comparison_fold["dates_train"]
+    X_te = comparison_fold["X_val"]
+    y_te = comparison_fold["y_val"]
+    dates_te = comparison_fold["dates_val"]
+    symbols_te = comparison_fold["symbols_val"]
 
     conformal = ConformalRegressor(lgb_model_factory, alpha=CONFORMAL_ALPHA)
-    conformal.fit(X_tr, y_tr)
+    conformal.fit(X_tr, y_tr, dates_tr, test_data["label_buffer"])
     y_pred_conf, lower_conf, upper_conf = conformal.predict(X_te)
 
     coverage_conf = ((y_te >= lower_conf) & (y_te <= upper_conf)).mean()
@@ -462,38 +630,32 @@ if processed_datasets:
 # %% [markdown]
 # ### Train Quantile Regression Models
 
+
+# %%
+def train_quantile_model(X: np.ndarray, y: np.ndarray, alpha: float, n_rounds: int = 200):
+    """Fit a deterministic CPU LightGBM quantile model."""
+    train_data = lgb.Dataset(X, label=y)
+    return lgb.train(
+        deterministic_lgb_parameters("quantile", alpha),
+        train_data,
+        num_boost_round=n_rounds,
+    )
+
+
+# %% [markdown]
+# The uncalibrated baseline fits both quantiles on the complete outer training window. It
+# never sees the validation fold, which remains a method-comparison set rather than a final
+# holdout estimate.
+
+
 # %%
 if processed_datasets:
     lower_q = CONFORMAL_ALPHA / 2
     upper_q = 1 - CONFORMAL_ALPHA / 2
     n_rounds = 200
 
-    train_data = lgb.Dataset(X_tr, label=y_tr)
-
-    model_lower = lgb.train(
-        {
-            "objective": "quantile",
-            "alpha": lower_q,
-            "num_leaves": 31,
-            "learning_rate": 0.05,
-            "verbose": -1,
-            "seed": SEED,
-        },
-        train_data,
-        num_boost_round=n_rounds,
-    )
-    model_upper = lgb.train(
-        {
-            "objective": "quantile",
-            "alpha": upper_q,
-            "num_leaves": 31,
-            "learning_rate": 0.05,
-            "verbose": -1,
-            "seed": SEED,
-        },
-        train_data,
-        num_boost_round=n_rounds,
-    )
+    model_lower = train_quantile_model(X_tr, y_tr, lower_q, n_rounds)
+    model_upper = train_quantile_model(X_tr, y_tr, upper_q, n_rounds)
 
     lower_qr = model_lower.predict(X_te)
     upper_qr = model_upper.predict(X_te)
@@ -511,42 +673,21 @@ if processed_datasets:
 
 # %%
 if processed_datasets:
-    n_cal = max(50, int(len(X_tr) * CAL_FRACTION))
-    X_tr_q, y_tr_q = X_tr[:-n_cal], y_tr[:-n_cal]
-    X_cal_q, y_cal_q = X_tr[-n_cal:], y_tr[-n_cal:]
+    cqr_embargo_steps = embargo_steps_from_buffer(test_data["label_buffer"], dates_tr)
+    proper_mask, cal_mask, cqr_train_end, cqr_cal_start = chronological_calibration_masks(
+        dates_tr, CAL_FRACTION, cqr_embargo_steps
+    )
+    X_tr_q, y_tr_q = X_tr[proper_mask], y_tr[proper_mask]
+    X_cal_q, y_cal_q = X_tr[cal_mask], y_tr[cal_mask]
 
-    cqr_train = lgb.Dataset(X_tr_q, label=y_tr_q)
-    model_lower_cqr = lgb.train(
-        {
-            "objective": "quantile",
-            "alpha": lower_q,
-            "num_leaves": 31,
-            "learning_rate": 0.05,
-            "verbose": -1,
-            "seed": SEED,
-        },
-        cqr_train,
-        num_boost_round=n_rounds,
-    )
-    model_upper_cqr = lgb.train(
-        {
-            "objective": "quantile",
-            "alpha": upper_q,
-            "num_leaves": 31,
-            "learning_rate": 0.05,
-            "verbose": -1,
-            "seed": SEED,
-        },
-        cqr_train,
-        num_boost_round=n_rounds,
-    )
+    model_lower_cqr = train_quantile_model(X_tr_q, y_tr_q, lower_q, n_rounds)
+    model_upper_cqr = train_quantile_model(X_tr_q, y_tr_q, upper_q, n_rounds)
 
     lower_cal = model_lower_cqr.predict(X_cal_q)
     upper_cal = model_upper_cqr.predict(X_cal_q)
     cqr_scores = np.maximum(lower_cal - y_cal_q, y_cal_q - upper_cal)
 
-    cqr_q_level = np.ceil((len(cqr_scores) + 1) * (1 - CONFORMAL_ALPHA)) / len(cqr_scores)
-    cqr_qhat = np.quantile(cqr_scores, min(cqr_q_level, 1.0))
+    cqr_qhat = conformal_order_statistic(cqr_scores, CONFORMAL_ALPHA)
 
 # %%
 if processed_datasets:
@@ -561,38 +702,48 @@ if processed_datasets:
 # ### Adaptive Conformal Inference (ACI)
 #
 # ACI updates the effective miscoverage target online and recomputes interval
-# width from a rolling residual buffer.
+# width from a rolling residual buffer. A forward label enters that buffer only
+# after its full horizon has elapsed.
 
 
 # %%
 def compute_adaptive_intervals(
     y_pred: np.ndarray,
     y_true: np.ndarray,
+    dates: np.ndarray,
     cal_scores: np.ndarray,
     alpha: float = 0.10,
     gamma: float = 0.01,
     window: int = 250,
+    label_horizon_steps: int = 21,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     scores = list(cal_scores[-window:])
     alpha_t = alpha
-    alpha_path = []
+    alpha_path = np.empty_like(y_pred)
     lower = np.empty_like(y_pred)
     upper = np.empty_like(y_pred)
+    normalized_dates = dates.astype("datetime64[ns]")
 
-    for i, (pred_i, y_i) in enumerate(zip(y_pred, y_true, strict=False)):
-        q_t = np.quantile(scores, 1 - alpha_t)
-        lower[i] = pred_i - q_t
-        upper[i] = pred_i + q_t
+    unique_dates = np.unique(normalized_dates)
+    for date_idx, timestamp in enumerate(unique_dates):
+        if date_idx >= label_horizon_steps:
+            matured_timestamp = unique_dates[date_idx - label_horizon_steps]
+            matured_mask = normalized_dates == matured_timestamp
+            misses = (y_true[matured_mask] < lower[matured_mask]) | (
+                y_true[matured_mask] > upper[matured_mask]
+            )
+            alpha_t = float(np.clip(alpha_t + gamma * (alpha - misses.mean()), 0.01, 0.30))
+            scores.extend(np.abs(y_true[matured_mask] - y_pred[matured_mask]))
+            if len(scores) > window:
+                scores = scores[-window:]
 
-        miss_t = float((y_i < lower[i]) or (y_i > upper[i]))
-        alpha_t = float(np.clip(alpha_t + gamma * (alpha - miss_t), 0.01, 0.30))
+        date_mask = normalized_dates == timestamp
+        q_t = conformal_order_statistic(np.asarray(scores), alpha_t)
+        lower[date_mask] = y_pred[date_mask] - q_t
+        upper[date_mask] = y_pred[date_mask] + q_t
+        alpha_path[date_mask] = alpha_t
 
-        scores.append(abs(y_i - pred_i))
-        if len(scores) > window:
-            scores.pop(0)
-        alpha_path.append(alpha_t)
-
-    return lower, upper, np.array(alpha_path)
+    return lower, upper, alpha_path
 
 
 # %%
@@ -600,10 +751,12 @@ if processed_datasets:
     lower_aci, upper_aci, alpha_path = compute_adaptive_intervals(
         y_pred_conf,
         y_te,
+        dates_te,
         conformal.calibration_residuals,
         alpha=CONFORMAL_ALPHA,
         gamma=0.01,
         window=250,
+        label_horizon_steps=conformal.embargo_steps,
     )
     coverage_aci = ((y_te >= lower_aci) & (y_te <= upper_aci)).mean()
     width_aci = np.mean(upper_aci - lower_aci)
@@ -643,87 +796,102 @@ comparison_df
 # %%
 # Visualization indices on a shared subsample
 if processed_datasets:
-    n_show = min(200, len(y_te))
-    idx = np.linspace(0, len(y_te) - 1, n_show, dtype=int)
-    x_range = np.arange(n_show)
+    unique_symbols, symbol_counts = np.unique(symbols_te, return_counts=True)
+    display_symbol = unique_symbols[np.argmax(symbol_counts)]
+    symbol_idx = np.flatnonzero(symbols_te == display_symbol)
+    n_show = min(200, len(symbol_idx))
+    idx = symbol_idx[-n_show:]
+    x_dates = dates_te[idx]
 
 # %%
 if processed_datasets:
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.fill_between(
-        x_range,
-        lower_conf[idx],
-        upper_conf[idx],
-        alpha=0.18,
-        color=COLORS["slate"],
-        label="Split Conformal",
+    methods = [
+        ("Split conformal", lower_conf, upper_conf, COLORS["slate"]),
+        ("Quantile regression", lower_qr, upper_qr, COLORS["amber"]),
+        ("Conformalized quantile", lower_cqr, upper_cqr, COLORS["neutral"]),
+        ("Adaptive conformal", lower_aci, upper_aci, COLORS["blue"]),
+    ]
+    fig, axes = plt.subplots(2, 2, figsize=FIGSIZE["dashboard_2x2"], sharex=True, sharey=True)
+    for ax, (method, lower, upper, color) in zip(axes.flat, methods, strict=True):
+        ax.fill_between(x_dates, 100 * lower[idx], 100 * upper[idx], alpha=0.18, color=color)
+        ax.scatter(x_dates, 100 * y_te[idx], s=5, color=COLORS["blue"], zorder=3)
+        add_message_title(ax, method, subtitle=f"{display_symbol}; final {n_show} validation dates")
+        ax.set_ylabel("Forward return (%)")
+    for ax in axes[-1]:
+        ax.set_xlabel("Validation date")
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=4))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
+    fig.suptitle(
+        "Label-mature adaptation reshapes ETF prediction intervals through time",
+        x=0.01,
+        ha="left",
     )
-    ax.fill_between(
-        x_range,
-        lower_qr[idx],
-        upper_qr[idx],
-        alpha=0.18,
-        color=COLORS["amber"],
-        label="Quantile Regression",
-    )
-    ax.fill_between(
-        x_range, lower_cqr[idx], upper_cqr[idx], alpha=0.18, color=COLORS["neutral"], label="CQR"
-    )
-    ax.fill_between(
-        x_range, lower_aci[idx], upper_aci[idx], alpha=0.16, color=COLORS["blue"], label="ACI"
-    )
-    ax.scatter(x_range, y_te[idx], s=6, color=COLORS["blue"], zorder=3, label="Actual")
-    ax.set_xlabel("Observation")
-    ax.set_ylabel("Return")
-    ax.set_title(f"Interval Comparison: {test_asset}")
-    ax.legend(fontsize=8, ncol=2)
     plt.tight_layout()
     plt.show()
 
 # %%
 if processed_datasets:
-    fig, ax = plt.subplots(figsize=(10, 3.8))
-    ax.plot(alpha_path[idx], color=COLORS["slate"], linewidth=1.8, label=r"$\alpha_t$ (ACI)")
+    fig, ax = plt.subplots(figsize=FIGSIZE["single_wide"])
+    ax.plot(x_dates, alpha_path[idx], color=COLORS["slate"], linewidth=1.8)
     ax.axhline(CONFORMAL_ALPHA, color=COLORS["amber"], linestyle="--", linewidth=1.5)
-    ax.set_xlabel("Observation")
-    ax.set_ylabel(r"Adaptive Miscoverage Target $\alpha_t$")
-    ax.set_title("ACI Online Adaptation")
-    ax.legend(fontsize=9)
+    ax.set_xlabel("Validation date")
+    ax.set_ylabel(r"Miscoverage target $\alpha_t$")
+    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
+    add_message_title(
+        ax,
+        "ACI updates only after forward outcomes mature",
+        subtitle=f"{display_symbol}; nominal miscoverage = {CONFORMAL_ALPHA:.0%}",
+    )
     plt.tight_layout()
     plt.show()
 
 # %% [markdown]
-# **Interpretation** (numbers from this ETF run):
-# - Split conformal: coverage 0.905 at width 0.152 — valid but the most
-#   conservative, applying a single global residual quantile.
-# - Quantile Regression alone: coverage 0.876 at width 0.132 — the
-#   narrowest intervals, but slightly below target and with no formal
-#   guarantee.
-# - CQR: coverage 0.898 at width 0.138 — conformalizes QR to restore
-#   calibration while staying narrower than split conformal.
-# - ACI: coverage 0.897 at width 0.141 — matches target by adapting α_t
-#   online; useful when residual dynamics are non-stationary.
+# **Interpretation** (purged 2023 ETF validation fold):
+# - Split conformal reaches 0.753 coverage at width 0.211, showing that a fixed
+#   calibration quantile can fail when the next residual regime changes sharply.
+# - Quantile regression narrows average width to 0.160 but reaches only 0.850
+#   coverage and carries no conformal coverage guarantee.
+# - CQR reaches 0.927 coverage at width 0.218 by calibrating the asymmetric
+#   quantile models.
+# - ACI reaches 0.843 coverage at width 0.312 after delaying each update until
+#   its forward outcome matures. CQR is closest to the 0.90 target in this fold.
 
 # %% [markdown]
 # ## 7. Position Sizing Application
 #
 # Wider intervals signal higher uncertainty, naturally reducing position
-# size:
+# size. A fixed ex-ante interval-width budget $B=0.20$ sets the scale, so no
+# fold depends on widths observed in another period:
 #
-# $$\text{Position Size} \propto \frac{1}{\text{Interval Width}}$$
+# $$\text{Relative Exposure} = \frac{B}{\text{Interval Width}}$$
+
+
+# %% [markdown]
+# The scaling function depends only on each fold's calibration width and the fixed budget.
+# Changing another fold therefore cannot alter an earlier displayed exposure.
+
+
+# %%
+def fixed_budget_exposure(widths: list[float], budget: float) -> np.ndarray:
+    """Scale interval widths by an ex-ante fixed uncertainty budget."""
+    width_array = np.asarray(widths)
+    if np.any(width_array <= 0):
+        raise ValueError("Interval widths must be positive")
+    return budget / width_array
+
 
 # %%
 if all_metrics:
     example_metrics = list(all_metrics.values())[0]
-    widths = [r["width"] for r in example_metrics["results"]]
-    mean_width = np.mean(widths)
-    position_sizes = [mean_width / w for w in widths]
+    widths = [2 * r["half_width"] for r in example_metrics["results"]]
+    position_sizes = fixed_budget_exposure(widths, REFERENCE_INTERVAL_WIDTH)
 
     sizing_df = pl.DataFrame(
         {
             "fold": list(range(len(widths))),
             "interval_width": [round(w, 5) for w in widths],
-            "relative_position": [round(p, 2) for p in position_sizes],
+            "relative_exposure": [round(p, 2) for p in position_sizes],
         }
     )
 else:
@@ -731,43 +899,37 @@ else:
 sizing_df
 
 # %% [markdown]
-# Narrow intervals (high confidence) scale up positions; wide intervals
-# (high uncertainty) scale down. This creates a natural risk management
-# mechanism without explicit regime detection. Chapter 19 integrates
-# conformal widths into Kelly criterion position sizing.
+# Narrow intervals (high confidence) scale up exposure; wide intervals
+# (high uncertainty) scale it down. The fixed 0.20 budget is illustrative,
+# not an estimated optimum. Chapter 19 integrates uncertainty into a complete
+# position-sizing rule with return forecasts and risk constraints.
 #
-# Combining SHAP drift signals with conformal interval widths creates
-# a feedback loop: when drift monitoring detects a regime change, the
-# model's residuals on calibration data grow, widening conformal
-# intervals and automatically reducing position sizes. See Section 12.5
-# for the conceptual framework.
+# Static split conformal widths remain fixed until recalibration. Adaptive conformal
+# methods can instead update their residual buffer after forward outcomes mature,
+# widening or narrowing later intervals without using unavailable labels.
+# Section 12.5 connects that update cycle to SHAP-based drift monitoring.
 
 # %% [markdown]
 # ## 8. Key Takeaways
 #
-# 1. **Always verify empirical coverage**: Split conformal lands near the
-#    0.90 target across all three asset classes — Crypto 0.897, ETF 0.886,
-#    Futures 0.827 — but the shortfall grows where calibration and test
-#    residuals are less exchangeable (Futures is ~7 pp under). The
-#    finite-sample bound is only approximate on financial panels under
-#    temporal dependence, so check empirical coverage rather than assuming
-#    the guarantee transfers automatically.
+# 1. **Always verify empirical coverage**: Across purged walk-forward folds,
+#    Crypto reaches 0.922 coverage and Futures 0.880, while ETFs reach only
+#    0.851 against the 0.90 target. The exchangeability condition is not exact
+#    for financial panels, so the theoretical guarantee does not replace a
+#    time-ordered empirical check.
 #
-# 2. **The variants trade width for adaptivity, not coverage**: On the ETF
-#    window, split conformal (0.905), CQR (0.898), and ACI (0.897) all land
-#    within ±0.01 of the 0.90 target; quantile regression alone slips to
-#    0.876. The difference is interval width — split conformal is the widest
-#    (0.152) because it applies one global residual quantile, while CQR
-#    (0.138) and ACI (0.141) hold coverage with tighter, locally adapted
-#    intervals.
+# 2. **Adaptivity can matter more than width**: On the 2023 ETF validation
+#    fold, split conformal covers 0.753 and plain quantile regression covers
+#    0.850. CQR reaches 0.927, while label-mature timestamp-batched ACI reaches
+#    0.843. ACI uses the widest intervals here, yet still misses the target as
+#    the residual regime changes.
 #
-# 3. **Distribution-free, model-agnostic**: All four methods work with
-#    any point-prediction model and require no error-distribution
-#    assumptions; the trade-off is interval width vs how aggressively
-#    the method adapts to non-stationary residual dynamics.
+# 3. **Match the wrapper to the estimator**: Split conformal and ACI can wrap
+#    a point-prediction model without an error-distribution assumption. QR and
+#    CQR instead require an estimator that learns conditional quantiles.
 #
 # 4. **Risk management**: Interval width is a natural uncertainty signal
-#    for position sizing — wider intervals automatically scale positions
+#    for position sizing. Wider intervals automatically scale positions
 #    down. Chapter 19 integrates conformal widths into Kelly sizing.
 #
 # **Next**: See `08_shap_analysis` for SHAP-based drift detection that

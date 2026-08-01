@@ -59,7 +59,7 @@ from case_studies.utils.backtest_runner import precompute_weights, run_backtest
 from case_studies.utils.cv_window import canonical_window
 from case_studies.utils.registry import read_predictions
 from case_studies.utils.sweep_config import calibrate_trailing_stops
-from utils.paths import get_case_study_source_dir
+from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
 
@@ -75,7 +75,7 @@ MAX_RISK_VARIANTS = 0
 
 # %%
 set_global_seeds(SEED)
-FROZEN_CASE_DIR = get_case_study_source_dir(CASE_STUDY)
+FROZEN_CASE_DIR = get_case_study_dir(CASE_STUDY, create=False)
 REGISTRY_PATH = FROZEN_CASE_DIR / "run_log" / "registry.db"
 config = get_backtest_config(CASE_STUDY)
 print(f"Registry: {REGISTRY_PATH.name} (read-only analysis)")
@@ -323,7 +323,14 @@ if not using_reduced_grid:
             ]
         )
     )
-if len(risk_cells) != EXPECTED_REPLAY_RISK_CELLS:
+if using_reduced_grid:
+    # EXPECTED_REPLAY_RISK_CELLS is the full production count (14 fixed rules plus one
+    # recalibrated MAE replacement). MAX_RISK_VARIANTS truncates risk_cells before this
+    # point specifically to skip that recalibration, so the reduced count is never 20 by
+    # design - only a sanity check applies here, not the production identity pin.
+    if not risk_cells:
+        raise RuntimeError("Reduced risk grid produced no eligible rules")
+elif len(risk_cells) != EXPECTED_REPLAY_RISK_CELLS:
     raise RuntimeError(
         f"Expected {EXPECTED_REPLAY_RISK_CELLS} eligible risk rules, found {len(risk_cells)}"
     )

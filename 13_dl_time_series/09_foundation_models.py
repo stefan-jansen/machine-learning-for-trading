@@ -45,7 +45,7 @@
 # **Prerequisites**: ETF features (`case_studies/etfs/`)
 
 # %%
-"""Time Series Foundation Models — evaluate zero-shot Chronos and TTM against task-specific baselines."""
+"""Time Series Foundation Models - evaluate zero-shot Chronos and TTM against task-specific baselines."""
 
 import warnings
 
@@ -56,13 +56,14 @@ import torch
 import torch.nn as nn
 from chronos import ChronosPipeline
 from dl_sequences import load_dl_dataset, train_model
+from IPython.display import Markdown, display
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 from tsfm_public.models.tinytimemixer import TinyTimeMixerForPrediction
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, add_message_title
 
 warnings.filterwarnings("ignore")
 
@@ -70,7 +71,7 @@ warnings.filterwarnings("ignore")
 SEED = 42
 CONTEXT_LENGTH = 60
 # PREDICTION_LENGTH = 10 is held fixed across all zero-shot evaluations as a
-# directional-signal probe — see the design note below for why it does not
+# directional-signal probe - see the design note below for why it does not
 # need to match the label horizon for this comparison.
 PREDICTION_LENGTH = 10
 EPOCHS = 30
@@ -84,7 +85,7 @@ CHRONOS_NUM_SAMPLES = 10
 # When True, a Chronos or TTM *runtime* (load/inference) failure raises rather
 # than producing a missing row in the results table. The chronos and
 # tsfm_public libraries are imported at module load, so they must be installed
-# regardless of this flag — it governs runtime failures, not missing installs.
+# regardless of this flag - it governs runtime failures, not missing installs.
 REQUIRE_FOUNDATION_MODELS = True
 
 # %%
@@ -128,7 +129,7 @@ print(f"Rows after dropna: {len(df):,}")
 # and uses the mean of that forecast path as a directional score, which is
 # then compared cross-sectionally to the label `TARGET_COL`. The forecast
 # horizon (`PREDICTION_LENGTH = 10`) is held fixed across models and does
-# not necessarily match the label horizon — for the ETF case study used
+# not necessarily match the label horizon - for the ETF case study used
 # here, the label is a multi-day forward return. The experiment is therefore
 # a *directional-signal probe*, not a calibrated forecast of the label
 # itself: it tests whether a zero-shot foundation model's mean forecast on
@@ -197,7 +198,7 @@ print(f"Total samples: {len(contexts):,}")
 # and the pedagogical focus is on zero-shot vs trained comparison.
 
 # %%
-# Date-based 60/20/20 temporal split — sample-order indexing on asset-pooled
+# Date-based 60/20/20 temporal split - sample-order indexing on asset-pooled
 # sequences would split cross-asset, not temporally.
 unique_dates = np.sort(np.unique(dates_arr))
 train_end_date = unique_dates[int(len(unique_dates) * 0.6)]
@@ -207,6 +208,12 @@ train_idx = np.where(dates_arr < train_end_date)[0].tolist()
 val_idx = np.where((dates_arr >= train_end_date) & (dates_arr < val_end_date))[0].tolist()
 test_idx = np.where(dates_arr >= val_end_date)[0].tolist()
 
+# Optional dev-only caps (default None = use the full split). NOTE: these trailing
+# slices keep the LAST rows of an asset-pooled, symbol-ordered index, so a non-None
+# cap yields an arbitrary SUBSET OF SYMBOLS (and a possibly partial cross-section),
+# which makes the per-date IC depend on symbol ordering. They exist only for quick
+# local iteration; for a faithful subsample keep the most recent complete dates
+# instead (see the date-based trim in 07/08). The shipped run leaves them None.
 if MAX_TRAIN_SAMPLES and len(train_idx) > MAX_TRAIN_SAMPLES:
     train_idx = train_idx[-MAX_TRAIN_SAMPLES:]
 if MAX_VAL_SAMPLES and len(val_idx) > MAX_VAL_SAMPLES:
@@ -490,7 +497,7 @@ results_df
 
 # %% [markdown]
 # **Interpretation** (conditional on at least one zero-shot model running
-# successfully — failed rows above show `null` IC and are excluded from this
+# successfully - failed rows above show `null` IC and are excluded from this
 # claim). In the tested zero-shot setup, the foundation models produce
 # near-zero or negative cross-sectional IC on ETF forward returns, while
 # even a small task-specific LSTM trained on domain data substantially
@@ -499,7 +506,7 @@ results_df
 # corpora and financial returns under the specific design used here:
 # first-generation Chronos and TTM applied to a single feature column with
 # a fixed 10-step forecast averaged into a directional score. It is not a
-# blanket claim that every TSFM underperforms specialized baselines —
+# blanket claim that every TSFM underperforms specialized baselines -
 # multivariate / covariate-aware second-generation models (Chronos-2,
 # Moirai-MoE) and the adaptation modes below are out of scope here.
 #
@@ -518,37 +525,57 @@ results_df
 #   exhibit stronger transferable structure, fine-tuned TSFMs show credible
 #   promise (Section 13.6)
 
+# %%
+_foundation = [("Chronos", chronos_ic, CHRONOS_SUCCESS), ("TTM", ttm_ic, TTM_SUCCESS)]
+_fnd = ", ".join(f"{n} {v:+.4f}" for n, v, ok in _foundation if ok)
+display(
+    Markdown(
+        f"On this run the zero-shot foundation models score {_fnd} - at or below zero - "
+        f"while the task-specific baselines are positive (LSTM {lstm_ic:+.4f}, Ridge "
+        f"{ridge_ic:+.4f}). The Ridge baseline is deterministic; the LSTM is GPU-trained "
+        f"with fixed seeds so its IC drifts slightly across runs, but the ordering - "
+        f"domain-trained baselines above zero-shot foundation models - is the reproducible "
+        f"conclusion here."
+    )
+)
+
 # %% [markdown]
 # ## Visualization
+#
+# The IC comparison is the headline; the LSTM prediction scatter shows *why* even
+# the winning baseline earns only a modest IC.
 
 # %%
-fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-
 available_rows = [r for r in rows if r["Spearman IC"] is not None]
 model_names = [r["Model"] for r in available_rows]
 ics = [r["Spearman IC"] for r in available_rows]
 bar_colors = [
     COLORS["blue"] if r["Type"] == "Foundation" else COLORS["amber"] for r in available_rows
 ]
-axes[0].barh(model_names, ics, color=bar_colors)
-axes[0].set_xlabel("Spearman IC")
-axes[0].set_title("Zero-Shot vs Task-Specific")
-axes[0].axvline(0, color="k", linestyle="--", alpha=0.5)
 
-sample_n = min(500, len(y_test_lstm))
-axes[1].scatter(
-    y_test_lstm[:sample_n],
-    y_pred_lstm[:sample_n],
-    alpha=0.3,
-    s=10,
-    color=COLORS["amber"],
+fig, ax = plt.subplots(figsize=(8, 4), constrained_layout=True)
+ax.barh(model_names, ics, color=bar_colors)
+ax.set_xlabel("Spearman IC (test)")
+ax.axvline(0, color=COLORS["neutral"], linestyle="--", alpha=0.7)
+add_message_title(
+    ax,
+    "Domain-trained baselines rank positively; zero-shot foundation models do not",
+    subtitle="Cross-sectional Spearman IC, ETF forward returns (amber = task-specific, navy = zero-shot)",
 )
-axes[1].set_xlabel("Actual Return")
-axes[1].set_ylabel("Predicted Return")
-axes[1].set_title(f"LSTM Predictions (IC={lstm_ic:.3f})")
-axes[1].axline((0, 0), slope=1, color="k", linestyle="--", alpha=0.3)
+fig.show()
 
-plt.tight_layout()
+# %%
+sample_n = min(500, len(y_test_lstm))
+fig, ax = plt.subplots(figsize=(6, 5), constrained_layout=True)
+ax.scatter(y_test_lstm[:sample_n], y_pred_lstm[:sample_n], alpha=0.3, s=10, color=COLORS["amber"])
+ax.set_xlabel("Actual forward return")
+ax.set_ylabel("Predicted return")
+ax.axline((0, 0), slope=1, color=COLORS["neutral"], linestyle="--", alpha=0.5)
+add_message_title(
+    ax,
+    "The LSTM's predictions compress toward zero",
+    subtitle=f"LSTM test IC = {lstm_ic:.3f}, {sample_n} sampled test points; dashed line = perfect calibration",
+)
 fig.show()
 
 # %% [markdown]
@@ -583,7 +610,7 @@ fig.show()
 # temporal handling.
 #
 # **Dependency note**: sktime's neural forecasters require `neuralforecast`, which
-# depends on `ray` — and ray does not yet support Python 3.14
+# depends on `ray` - and ray does not yet support Python 3.14
 # ([ray-project/ray#56434](https://github.com/ray-project/ray/issues/56434)).
 # Once ray adds 3.14 wheels, install via `uv pip install neuralforecast`
 # and uncomment the demo below.

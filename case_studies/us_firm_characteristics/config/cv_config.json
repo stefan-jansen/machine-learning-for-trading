@@ -1,98 +1,90 @@
 {
   "case_study_id": "us_firm_characteristics",
   "n_splits": 10,
-  "holdout_start": "2016-01-29",
-  "holdout_end": "2016-12-30",
+  "train_size": "10YE",
+  "val_size": "1YE",
+  "holdout_start": "2016-01-01",
+  "holdout_end": "2016-12-31",
   "splits": [
     {
       "fold": 0,
-      "train_start": "1996-01-31",
-      "train_end": "2005-12-30",
-      "test_start": "2006-02-28",
-      "test_end": "2006-12-29",
-      "purge_months": 1,
-      "embargo_months": 0
+      "label_buffer": "1M",
+      "train_start": "2005-03-31",
+      "train_end": "2014-12-31",
+      "val_start": "2015-02-27",
+      "val_end": "2015-11-30"
     },
     {
       "fold": 1,
-      "train_start": "1997-01-31",
-      "train_end": "2006-12-29",
-      "test_start": "2007-02-28",
-      "test_end": "2007-12-31",
-      "purge_months": 1,
-      "embargo_months": 0
+      "label_buffer": "1M",
+      "train_start": "2004-04-30",
+      "train_end": "2014-02-28",
+      "val_start": "2014-03-31",
+      "val_end": "2015-01-30"
     },
     {
       "fold": 2,
-      "train_start": "1998-01-30",
-      "train_end": "2007-12-31",
-      "test_start": "2008-02-29",
-      "test_end": "2008-12-31",
-      "purge_months": 1,
-      "embargo_months": 0
+      "label_buffer": "1M",
+      "train_start": "2003-05-30",
+      "train_end": "2013-03-28",
+      "val_start": "2013-04-30",
+      "val_end": "2014-02-28"
     },
     {
       "fold": 3,
-      "train_start": "1999-01-29",
-      "train_end": "2008-12-31",
-      "test_start": "2009-02-27",
-      "test_end": "2009-12-31",
-      "purge_months": 1,
-      "embargo_months": 0
+      "label_buffer": "1M",
+      "train_start": "2002-06-28",
+      "train_end": "2012-04-30",
+      "val_start": "2012-05-31",
+      "val_end": "2013-03-28"
     },
     {
       "fold": 4,
-      "train_start": "2000-01-31",
-      "train_end": "2009-12-31",
-      "test_start": "2010-02-26",
-      "test_end": "2010-12-31",
-      "purge_months": 1,
-      "embargo_months": 0
+      "label_buffer": "1M",
+      "train_start": "2001-07-31",
+      "train_end": "2011-04-29",
+      "val_start": "2011-06-30",
+      "val_end": "2012-04-30"
     },
     {
       "fold": 5,
-      "train_start": "2001-01-31",
-      "train_end": "2010-12-31",
-      "test_start": "2011-02-28",
-      "test_end": "2011-12-30",
-      "purge_months": 1,
-      "embargo_months": 0
+      "label_buffer": "1M",
+      "train_start": "2000-08-31",
+      "train_end": "2010-05-28",
+      "val_start": "2010-07-30",
+      "val_end": "2011-05-31"
     },
     {
       "fold": 6,
-      "train_start": "2002-01-31",
-      "train_end": "2011-12-30",
-      "test_start": "2012-02-29",
-      "test_end": "2012-12-31",
-      "purge_months": 1,
-      "embargo_months": 0
+      "label_buffer": "1M",
+      "train_start": "1999-09-30",
+      "train_end": "2009-07-31",
+      "val_start": "2009-08-31",
+      "val_end": "2010-06-30"
     },
     {
       "fold": 7,
-      "train_start": "2003-01-31",
-      "train_end": "2012-12-31",
-      "test_start": "2013-02-28",
-      "test_end": "2013-12-31",
-      "purge_months": 1,
-      "embargo_months": 0
+      "label_buffer": "1M",
+      "train_start": "1998-10-30",
+      "train_end": "2008-08-29",
+      "val_start": "2008-09-30",
+      "val_end": "2009-07-31"
     },
     {
       "fold": 8,
-      "train_start": "2004-01-30",
-      "train_end": "2013-12-31",
-      "test_start": "2014-02-28",
-      "test_end": "2014-12-31",
-      "purge_months": 1,
-      "embargo_months": 0
+      "label_buffer": "1M",
+      "train_start": "1997-11-28",
+      "train_end": "2007-09-28",
+      "val_start": "2007-10-31",
+      "val_end": "2008-08-29"
     },
     {
       "fold": 9,
-      "train_start": "2005-01-31",
-      "train_end": "2014-12-31",
-      "test_start": "2015-02-27",
-      "test_end": "2015-12-31",
-      "purge_months": 1,
-      "embargo_months": 0
+      "label_buffer": "1M",
+      "train_start": "1996-12-31",
+      "train_end": "2006-09-29",
+      "val_start": "2006-11-30",
+      "val_end": "2007-09-28"
     }
   ]
 }

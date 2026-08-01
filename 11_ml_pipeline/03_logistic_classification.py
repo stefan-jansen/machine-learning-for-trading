@@ -31,7 +31,7 @@
 # - Assess probability calibration and its importance for position sizing
 # - Compare feature importance from L1 logistic coefficients
 #
-# **Book reference**: Section 11.3 — Predicting Direction with Logistic Regression.
+# **Book reference**: Section 11.3 - Predicting Direction with Logistic Regression.
 #
 # **Prerequisites**
 #
@@ -46,14 +46,21 @@
 # ## Setup
 
 # %% tags=[]
-"""Logistic Regression for Return Direction Prediction — classify return direction with calibration analysis."""
+"""Logistic Regression for Return Direction Prediction - classify direction and calibration."""
 
+import hashlib
+import inspect
+import json
 import warnings
+from importlib.metadata import version
 
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+import sklearn
+from IPython.display import Markdown, display
+from matplotlib.patches import Patch
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -66,10 +73,11 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from utils.cv_splits import generate_cv_splits
-from utils.paths import get_case_study_dir, get_chapter_dir
+from utils.paths import display_path, get_case_study_dir, get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
 
@@ -82,6 +90,12 @@ RETRAIN = False
 
 # %% tags=[]
 RANDOM_SEED = SEED
+LABEL_HORIZON_SESSIONS = 21
+OUTER_LABEL_BUFFER = "21D"
+L2_C_VALUES = [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+L1_C_VALUES = [0.001, 0.01, 0.1, 1.0, 10.0]
+MODEL_MAX_ITER = 1000
+CACHE_SCHEMA_VERSION = 2
 set_global_seeds(SEED)
 
 # %% [markdown] tags=[]
@@ -172,7 +186,15 @@ print(f"Down (0): {down_count:>8,}  ({down_count / df.height:.1%})")
 # `02_regularization_paths`: rolling train/validation windows with purge gap.
 
 # %% tags=[]
-splits = generate_cv_splits(df, case_study_id="etfs", label_buffer="21D", date_col="timestamp")
+splits = sorted(
+    generate_cv_splits(
+        df,
+        case_study_id="etfs",
+        label_buffer=OUTER_LABEL_BUFFER,
+        date_col="timestamp",
+    ),
+    key=lambda split: split["val_start"],
+)
 
 features_array = df.select(FEATURE_COLS).to_numpy()
 target_array = df[TARGET_COL].to_numpy()
@@ -191,12 +213,12 @@ train_sizes = [len(tr) for tr, _ in cv_splits]
 test_sizes = [len(te) for _, te in cv_splits]
 if cv_splits:
     print(
-        f"{len(cv_splits)} walk-forward folds — train size "
-        f"{min(train_sizes):,}–{max(train_sizes):,}, test size "
-        f"{min(test_sizes):,}–{max(test_sizes):,}"
+        f"{len(cv_splits)} walk-forward folds - train size "
+        f"{min(train_sizes):,}-{max(train_sizes):,}, validation size "
+        f"{min(test_sizes):,}-{max(test_sizes):,}"
     )
 else:
-    print("0 walk-forward folds — every candidate split failed the train/test size gate")
+    print("0 walk-forward folds - every candidate split failed the train/validation size gate")
 
 # %% [markdown] tags=[]
 # ## Helper Functions
@@ -208,13 +230,12 @@ else:
 #
 # | Solver | L1 | L2 | ElasticNet | Multinomial | Best for |
 # |------------|----|----|------------|-------------|----------------------------------------------|
-# | `lbfgs` | — | yes | — | yes | Default L2; fast quasi-Newton |
-# | `liblinear` | yes | yes | — | — | Pure L1 binary; coordinate descent |
+# | `lbfgs` | no | yes | no | yes | Default L2; fast quasi-Newton |
+# | `liblinear` | yes | yes | no | no | Pure L1 binary; coordinate descent |
 # | `saga` | yes | yes | yes | yes | ElasticNet, large $n$, `sample_weight` |
 #
 # We use `lbfgs` for L2 (fast, numerically stable), `liblinear` for pure L1
-# binary classification (coordinate descent is ~6x faster than `saga` for this
-# case), and `saga` only when ElasticNet mixing is needed.
+# binary classification, and `saga` only when ElasticNet mixing is needed.
 
 
 # %% tags=[]
@@ -231,21 +252,15 @@ def evaluate_classification(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.n
 
 
 # %% [markdown] tags=[]
-# ### Walk-Forward Logistic CV
-# Run logistic regression on walk-forward folds with per-fold preprocessing.
+# ### Logistic Estimator
+#
+# Penalty-specific solver choices live in one constructor so the cache signature
+# and every fold share the same training contract.
 
 
 # %% tags=[]
-def cross_validate_logistic(
-    l1_ratio: float = 0.0,
-    C: float = 1.0,
-) -> tuple[list[dict], list[np.ndarray], list[dict], list[dict]]:
-    """Run logistic regression on walk-forward folds.
-
-    Returns per-fold metrics, coefficient arrays, prediction dicts,
-    and fitted (model, scaler) pairs for persistence.
-    """
-    # Select penalty and solver based on l1_ratio
+def build_logistic_model(l1_ratio: float, C: float) -> LogisticRegression:
+    """Construct the penalty-specific logistic estimator."""
     if l1_ratio == 0.0:
         penalty, solver = "l2", "lbfgs"
         model_kwargs = {}
@@ -255,44 +270,77 @@ def cross_validate_logistic(
     else:
         penalty, solver = "elasticnet", "saga"
         model_kwargs = {"l1_ratio": l1_ratio}
+    return LogisticRegression(
+        penalty=penalty,
+        C=C,
+        solver=solver,
+        max_iter=MODEL_MAX_ITER,
+        random_state=RANDOM_SEED,
+        **model_kwargs,
+    )
 
+
+# %% [markdown] tags=[]
+# ### One Walk-Forward Fold
+#
+# Every fold learns preprocessing and model state from its training rows only.
+
+
+# %% tags=[]
+def fit_logistic_fold(
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    l1_ratio: float,
+    C: float,
+) -> tuple[dict, np.ndarray, dict, dict]:
+    """Fit and evaluate one chronological fold."""
+    X_tr, X_te = features_array[train_idx], features_array[test_idx]
+    y_tr, y_te = target_array[train_idx], target_array[test_idx]
+
+    scaler = StandardScaler()
+    X_tr_s = scaler.fit_transform(X_tr)
+    X_te_s = scaler.transform(X_te)
+
+    model = build_logistic_model(l1_ratio, C)
+    model.fit(X_tr_s, y_tr)
+    y_pred = model.predict(X_te_s)
+    y_prob = model.predict_proba(X_te_s)[:, 1]
+    metrics = evaluate_classification(y_te, y_pred, y_prob)
+    prediction = {
+        "y_true": y_te,
+        "y_pred": y_pred,
+        "y_prob": y_prob,
+        "returns": return_array[test_idx],
+    }
+    return metrics, model.coef_.ravel().copy(), prediction, {"model": model, "scaler": scaler}
+
+
+# %% [markdown] tags=[]
+# ### Walk-Forward Logistic CV
+#
+# The wrapper collects fold metrics, predictions, coefficients, and fitted state.
+
+
+# %% tags=[]
+def cross_validate_logistic(
+    l1_ratio: float = 0.0,
+    C: float = 1.0,
+) -> tuple[list[dict], list[np.ndarray], list[dict], list[dict]]:
+    """Run logistic regression on every walk-forward fold."""
     results, coefficients, predictions, fold_models = [], [], [], []
 
     for i, (train_idx, test_idx) in enumerate(cv_splits):
-        X_tr, X_te = features_array[train_idx], features_array[test_idx]
-        y_tr, y_te = target_array[train_idx], target_array[test_idx]
-
-        scaler = StandardScaler()
-        X_tr_s = scaler.fit_transform(X_tr)
-        X_te_s = scaler.transform(X_te)
-
-        model = LogisticRegression(
-            penalty=penalty,
-            C=C,
-            solver=solver,
-            max_iter=1000,
-            random_state=RANDOM_SEED,
-            **model_kwargs,
+        metrics, coefficient, prediction, fold_model = fit_logistic_fold(
+            train_idx,
+            test_idx,
+            l1_ratio,
+            C,
         )
-        model.fit(X_tr_s, y_tr)
-
-        y_pred = model.predict(X_te_s)
-        y_prob = model.predict_proba(X_te_s)[:, 1]
-
-        metrics = evaluate_classification(y_te, y_pred, y_prob)
         metrics["fold"] = i + 1
         results.append(metrics)
-        coefficients.append(model.coef_.ravel().copy())
-
-        predictions.append(
-            {
-                "y_true": y_te,
-                "y_pred": y_pred,
-                "y_prob": y_prob,
-                "returns": return_array[test_idx],
-            }
-        )
-        fold_models.append({"model": model, "scaler": scaler})
+        coefficients.append(coefficient)
+        predictions.append(prediction)
+        fold_models.append(fold_model)
 
     return results, coefficients, predictions, fold_models
 
@@ -301,32 +349,180 @@ def cross_validate_logistic(
 # ## Model Cache
 #
 # Training results are cached to disk so subsequent runs skip model fitting.
-# Set `RETRAIN = True` to force retraining.
+# Its signature binds the cleaned arrays, split state, model configuration, source
+# implementation, and relevant library versions. Any semantic change therefore
+# triggers a genuine retrain rather than silently reusing stale predictions.
+# Set `RETRAIN = True` to force retraining even when the hashes match.
+
+
+# %% [markdown] tags=[]
+# A content hash makes the cache dependency explicit and portable across machines.
+
 
 # %% tags=[]
-MODELS_DIR = get_chapter_dir(11) / "models" / "03_logistic_classification"
-RESULTS_PATH = MODELS_DIR / "cv_results.joblib"
+def file_sha256(path) -> str:
+    """Return the SHA-256 digest for an input artifact."""
+    with path.open("rb") as file:
+        return hashlib.file_digest(file, "sha256").hexdigest()
+
+
+# %% [markdown] tags=[]
+# Array hashes cover filtering, symbol limits, row order, feature order, and cleaning
+# semantics after the two source files have been joined.
+
+
+# %% tags=[]
+def array_sha256(array: np.ndarray) -> str:
+    """Hash array shape, dtype, and contiguous values."""
+    contiguous = np.ascontiguousarray(array)
+    digest = hashlib.sha256()
+    digest.update(str(contiguous.dtype).encode())
+    digest.update(repr(contiguous.shape).encode())
+    digest.update(contiguous.tobytes())
+    return digest.hexdigest()
+
+
+# %% tags=[]
+def canonical_sha256(payload: dict) -> str:
+    """Hash a nested contract with stable key ordering and date serialization."""
+    serialized = json.dumps(payload, sort_keys=True, default=str).encode()
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def assess_cache(cached: dict, expected_signature: dict) -> tuple[list[str], bool]:
+    """Return missing result keys and whether the training signature matches."""
+    required = {"l2_all", "l2_summary", "best_l2_C", "l1_all", "l1_summary", "best_l1_C"}
+    return sorted(required - set(cached)), cached.get("input_signature") == expected_signature
+
+
+# %% [markdown] tags=[]
+# The training contract records every choice that can change fitted predictions.
+# A canonical digest keeps the cache comparison compact and deterministic.
+
+
+# %% tags=[]
+RESULTS_DIR = get_output_dir(11, "03_logistic_classification")
+RESULTS_PATH = RESULTS_DIR / "cv_results.joblib"
+SETUP_PATH = CASE_DIR / "config" / "setup.yaml"
+cv_indices = np.concatenate(
+    [np.concatenate([train_idx, [-1], test_idx, [-2]]) for train_idx, test_idx in cv_splits]
+).astype(np.int64)
+
+
+# %% [markdown] tags=[]
+# The data and split contracts include both declared configuration and the resolved
+# rows. This catches changes in cleaning, symbol limits, calendar mapping, or fold order.
+
+
+# %% tags=[]
+DATA_CONTRACT = {
+    "case_study_id": "etfs",
+    "date_column": "timestamp",
+    "symbol_column": ASSET_COL,
+    "return_column": RETURN_COL,
+    "target_column": TARGET_COL,
+    "target_rule": "direction = int(fwd_ret_21d > 0)",
+    "feature_columns": FEATURE_COLS,
+    "cleaning": "inner join; drop all-null features; finite-only; drop nulls; sort date-symbol",
+    "scaling": "fold-local StandardScaler fit on training rows only",
+    "max_symbols": MAX_SYMBOLS,
+    "symbol_subset": "sorted unique symbols, first max_symbols; zero means all",
+}
+SPLIT_CONTRACT = {
+    "source_config_sha256": file_sha256(SETUP_PATH),
+    "label_buffer": OUTER_LABEL_BUFFER,
+    "label_horizon_sessions": LABEL_HORIZON_SESSIONS,
+    "direction": "chronological ascending after sort by val_start",
+    "resolved_windows": splits,
+    "resolved_indices_sha256": array_sha256(cv_indices),
+}
+
+
+# %% [markdown] tags=[]
+# The model contract binds optimization, deterministic selection, implementation
+# source, and relevant dependency versions.
+
+
+# %% tags=[]
+MODEL_CONTRACT = {
+    "l2": {"C": L2_C_VALUES, "l1_ratio": 0.0, "penalty": "l2", "solver": "lbfgs"},
+    "l1": {"C": L1_C_VALUES, "l1_ratio": 1.0, "penalty": "l1", "solver": "liblinear"},
+    "max_iter": MODEL_MAX_ITER,
+    "random_seed": RANDOM_SEED,
+    "selection": {
+        "metric": "mean fold AUC-ROC",
+        "aggregation": "unweighted arithmetic mean across folds",
+        "direction": "maximize",
+        "tie_break": "smallest C",
+    },
+}
+
+
+# %% tags=[]
+TRAINING_CONTRACT = {
+    "schema_version": CACHE_SCHEMA_VERSION,
+    "data": DATA_CONTRACT,
+    "splits": SPLIT_CONTRACT,
+    "models": MODEL_CONTRACT,
+    "implementation": {
+        "notebook_source_sha256": file_sha256(
+            get_chapter_dir(11) / "03_logistic_classification.py"
+        ),
+        "splitter_source_sha256": hashlib.sha256(
+            inspect.getsource(generate_cv_splits).encode()
+        ).hexdigest(),
+    },
+    "versions": {
+        "numpy": np.__version__,
+        "polars": pl.__version__,
+        "scikit_learn": sklearn.__version__,
+        "joblib": joblib.__version__,
+        "ml4t_diagnostic": version("ml4t-diagnostic"),
+        "exchange_calendars": version("exchange-calendars"),
+        "pandas_market_calendars": version("pandas-market-calendars"),
+    },
+}
+
+
+# %% [markdown] tags=[]
+# Input hashes bind the contract to the exact cleaned arrays. The complete contract
+# remains inside the cache so a verifier can inspect what produced each result.
+
+
+# %% tags=[]
+TRAINING_CONTRACT_SHA256 = canonical_sha256(TRAINING_CONTRACT)
+INPUT_SIGNATURE = {
+    "training_contract_sha256": TRAINING_CONTRACT_SHA256,
+    "features_sha256": file_sha256(FEATURES_PATH),
+    "labels_sha256": file_sha256(LABELS_PATH),
+    "features_array_sha256": array_sha256(features_array),
+    "target_array_sha256": array_sha256(target_array),
+    "return_array_sha256": array_sha256(return_array),
+    "dates_sha256": array_sha256(dates_np),
+    "training_contract": TRAINING_CONTRACT,
+}
+
+
+# %% tags=[]
 NEED_TRAINING = RETRAIN or not RESULTS_PATH.exists()
 
 if not NEED_TRAINING:
     _cached = joblib.load(RESULTS_PATH)
-    required_keys = {"l2_all", "l2_summary", "best_l2_C", "l1_all", "l1_summary", "best_l1_C"}
-    missing_keys = sorted(required_keys - set(_cached.keys()))
-    if missing_keys:
-        raise KeyError(
-            "Cache schema mismatch for 03_logistic_classification. "
-            f"Missing keys: {missing_keys}. "
-            "Delete stale cache and rerun with RETRAIN=True once to regenerate."
-        )
-    l2_all = _cached["l2_all"]
-    l2_summary = _cached["l2_summary"]
-    best_l2_C = _cached["best_l2_C"]
-    l1_all = _cached["l1_all"]
-    l1_summary = _cached["l1_summary"]
-    best_l1_C = _cached["best_l1_C"]
+    missing_keys, signature_matches = assess_cache(_cached, INPUT_SIGNATURE)
+    NEED_TRAINING = bool(missing_keys or not signature_matches)
+    if NEED_TRAINING:
+        reason = f"missing keys {missing_keys}" if missing_keys else "training signature changed"
+        print(f"Ignoring stale model cache: {reason}.")
+    else:
+        l2_all = _cached["l2_all"]
+        l2_summary = _cached["l2_summary"]
+        best_l2_C = _cached["best_l2_C"]
+        l1_all = _cached["l1_all"]
+        l1_summary = _cached["l1_summary"]
+        best_l1_C = _cached["best_l1_C"]
+        print(f"  L2: {len(l2_all)} C values | L1: {len(l1_all)} C values")
     del _cached
-    print(f"  L2: {len(l2_all)} C values | L1: {len(l1_all)} C values")
-else:
+if NEED_TRAINING:
     print("Training models (RETRAIN=True or no cache found)...")
 
 # %% [markdown] tags=[]
@@ -338,8 +534,6 @@ else:
 
 # %% tags=[]
 if NEED_TRAINING:
-    L2_C_VALUES = [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
-
     l2_all = {}
     for C in L2_C_VALUES:
         res, coeffs, preds, models = cross_validate_logistic(l1_ratio=0.0, C=C)
@@ -360,7 +554,7 @@ if NEED_TRAINING:
             }
             for C, d in l2_all.items()
         ]
-    ).sort("mean_auc", descending=True)
+    ).sort(["mean_auc", "C"], descending=[True, False])
 
     best_l2_C = l2_summary.row(0, named=True)["C"]
 
@@ -374,13 +568,9 @@ l2_summary
 # ### Effect of Class Weighting
 #
 # `class_weight='balanced'` scales each class's loss contribution inversely
-# by its frequency. Even with only mildly imbalanced 21-day ETF returns (59/41)
-# the effect is large and one-sided: up-weighting the minority "down" class
-# collapses recall on the majority "up" class (0.35 -> 0.11) and roughly halves
-# F1 (0.46 -> 0.19), because the classifier now predicts "down" far more often.
-# The lesson is that `balanced` is a strong intervention even at mild imbalance —
-# it trades majority-class recall for minority-class sensitivity, which is what
-# you want for rare-event prediction but not here.
+# by its frequency. We evaluate the unweighted and balanced objectives on the
+# latest walk-forward fold. This comparison isolates the effect of weighting
+# while keeping the training window, regularization, and decision threshold fixed.
 
 # %% tags=[]
 train_idx_cw, test_idx_cw = cv_splits[-1]
@@ -394,7 +584,7 @@ for cw_label, cw_val in [("None", None), ("Balanced", "balanced")]:
     m = LogisticRegression(
         C=best_l2_C,
         solver="lbfgs",
-        max_iter=1000,
+        max_iter=MODEL_MAX_ITER,
         random_state=RANDOM_SEED,
         class_weight=cw_val,
     )
@@ -407,19 +597,35 @@ for cw_label, cw_val in [("None", None), ("Balanced", "balanced")]:
         }
     )
 
-pl.DataFrame(rows_cw)
+cw_df = pl.DataFrame(rows_cw)
+cw_df
+
+# %% [markdown] tags=[]
+# The result below is generated from the current run so a new data vintage cannot
+# leave a stale class-balance claim behind.
+
+# %% tags=[]
+cw_default, cw_balanced = cw_df.iter_rows(named=True)
+display(
+    Markdown(
+        f"The balanced objective changes majority-class recall from "
+        f"**{cw_default['recall']:.3f}** to **{cw_balanced['recall']:.3f}** and F1 from "
+        f"**{cw_default['f1']:.3f}** to **{cw_balanced['f1']:.3f}**, while AUC moves only "
+        f"from **{cw_default['auc_roc']:.3f}** to **{cw_balanced['auc_roc']:.3f}**. "
+        "Class weighting therefore changes the fitted decision rule materially even when "
+        "rank discrimination changes little."
+    )
+)
 
 # %% [markdown] tags=[]
 # ## L1 Regularized Logistic Regression (LASSO)
 #
 # L1 regularization drives some coefficients to exactly zero, performing
-# automatic feature selection — the same sparsity effect we saw with LASSO
+# automatic feature selection - the same sparsity effect we saw with LASSO
 # regression in NB02.
 
 # %% tags=[]
 if NEED_TRAINING:
-    L1_C_VALUES = [0.001, 0.01, 0.1, 1.0, 10.0]
-
     l1_all = {}
     for C in L1_C_VALUES:
         res, coeffs, preds, models = cross_validate_logistic(l1_ratio=1.0, C=C)
@@ -441,7 +647,7 @@ if NEED_TRAINING:
             }
             for C, d in l1_all.items()
         ]
-    ).sort("mean_auc", descending=True)
+    ).sort(["mean_auc", "C"], descending=[True, False])
 
     best_l1_C = l1_summary.row(0, named=True)["C"]
 
@@ -456,9 +662,10 @@ l1_summary
 
 # %% tags=[]
 if NEED_TRAINING:
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump(
         {
+            "input_signature": INPUT_SIGNATURE,
             "l2_all": l2_all,
             "l2_summary": l2_summary,
             "best_l2_C": best_l2_C,
@@ -468,7 +675,7 @@ if NEED_TRAINING:
         },
         RESULTS_PATH,
     )
-    print(f"Saved results to {RESULTS_PATH}")
+    print(f"Saved results to {display_path(RESULTS_PATH)}")
 
 # %% [markdown] tags=[]
 # ## Model Comparison
@@ -477,8 +684,6 @@ if NEED_TRAINING:
 # that always predicts the majority class.
 
 # %% tags=[]
-naive_acc = max(up_count, down_count) / df.height
-
 rows = []
 for label, res_df in [
     (f"Logistic L2 (C={best_l2_C})", l2_all[best_l2_C]["results"]),
@@ -496,20 +701,47 @@ for label, res_df in [
         }
     )
 
+
+# %% [markdown] tags=[]
+# Each naive fold learns its class and probability from that fold's training rows.
+# This preserves chronology and yields the correct metric-specific references.
+
+
+# %% tags=[]
+baseline_folds = []
+for fold, (train_idx, test_idx) in enumerate(cv_splits, start=1):
+    train_rate = float(target_array[train_idx].mean())
+    majority_class = int(train_rate >= 0.5)
+    baseline_pred = np.full(len(test_idx), majority_class, dtype=np.int32)
+    baseline_prob = np.full(len(test_idx), train_rate)
+    baseline_folds.append(
+        {
+            "fold": fold,
+            **evaluate_classification(target_array[test_idx], baseline_pred, baseline_prob),
+        }
+    )
+
+baseline_summary = pl.DataFrame(baseline_folds).select(pl.exclude("fold")).mean().row(0, named=True)
 rows.append(
     {
         "Model": "Naive (majority class)",
-        "Accuracy": round(naive_acc, 4),
-        "AUC-ROC": 0.5,
-        "Precision": 0.0,
-        "Recall": 0.0,
-        "F1": 0.0,
-        "Log-Loss": round(-np.log(naive_acc), 4),
+        "Accuracy": round(baseline_summary["accuracy"], 4),
+        "AUC-ROC": round(baseline_summary["auc_roc"], 4),
+        "Precision": round(baseline_summary["precision"], 4),
+        "Recall": round(baseline_summary["recall"], 4),
+        "F1": round(baseline_summary["f1"], 4),
+        "Log-Loss": round(baseline_summary["log_loss"], 4),
     }
 )
 
 comparison = pl.DataFrame(rows)
 comparison
+
+
+# %% [markdown] tags=[]
+# The chart uses each naive metric as its own reference. Accuracy and F1 therefore
+# do not inherit AUC's 0.5 constant-score benchmark.
+
 
 # %% tags=[]
 fig, axes = plt.subplots(1, 3, figsize=(14, 4))
@@ -517,7 +749,6 @@ fig, axes = plt.subplots(1, 3, figsize=(14, 4))
 model_names = comparison["Model"].to_list()[:2]
 x = np.arange(len(model_names))
 bar_colors = [COLORS["blue"], COLORS["amber"]]
-
 for ax, metric, title in zip(
     axes,
     ["Accuracy", "AUC-ROC", "F1"],
@@ -538,27 +769,42 @@ for ax, metric, title in zip(
     ax.set_yticklabels(model_names)
     ax.set_xlabel(metric)
     ax.set_title(title)
-    ax.axvline(0.5, ls="--", color="grey", alpha=0.5)
-    ax.set_xlim(0, max(vals) * 1.18)
+    baseline_value = comparison.filter(pl.col("Model") == "Naive (majority class)")[metric].item()
+    ax.axvline(
+        baseline_value,
+        ls="--",
+        color=COLORS["neutral"],
+        alpha=0.7,
+        label="Naive baseline",
+    )
+    ax.set_xlim(0, max(max(vals), baseline_value) * 1.18)
+    ax.legend(loc="lower right", fontsize=8)
 
+fig.suptitle("L1 and L2 deliver nearly identical validation discrimination")
 fig.tight_layout()
 fig.show()
 
 # %% [markdown] tags=[]
-# **Interpretation**: both models reach AUC-ROC $\approx 0.57$, above the 0.50
-# value a constant predictor obtains by definition; the features carry some
-# directional signal at the 0.5 threshold the logistic model uses. Accuracy
-# (0.54–0.56) falls *below* the naive majority-class accuracy (0.59), because
-# the 0.5 probability threshold is suboptimal for the 62/38 class imbalance —
-# the model gives up accuracy in exchange for ranking ability across thresholds,
-# which is what AUC-ROC measures. L2 and L1 produce similar AUC and accuracy
-# here; the ETF feature set has many correlated predictors and the L1 sparsity
-# advantage does not translate into a different operating point.
+# The interpretation is computed from the comparison table. These are
+# cross-validation diagnostics, not a sealed final holdout estimate.
+
+# %% tags=[]
+l2_row, l1_row, naive_row = comparison.iter_rows(named=True)
+display(
+    Markdown(
+        f"L2 and L1 reach validation AUCs of **{l2_row['AUC-ROC']:.3f}** and "
+        f"**{l1_row['AUC-ROC']:.3f}**, respectively, versus **0.500** for a constant "
+        f"score. Their accuracies of **{l2_row['Accuracy']:.3f}** and "
+        f"**{l1_row['Accuracy']:.3f}** remain below the majority-class baseline of "
+        f"**{naive_row['Accuracy']:.3f}**. The features add little directional ranking "
+        "power, and changing the penalty does not create a meaningfully different operating point."
+    )
+)
 
 # %% [markdown] tags=[]
 # ## Detailed Classification Analysis
 #
-# We aggregate out-of-sample predictions across all 8 folds for the best L2 model
+# We aggregate validation predictions across all walk-forward folds for the best L2 model
 # to examine the confusion matrix, ROC curve, and precision-recall tradeoff.
 
 # %% tags=[]
@@ -591,7 +837,7 @@ ax.set_xticklabels(["Down", "Up"])
 ax.set_yticklabels(["Down", "Up"])
 ax.set_xlabel("Predicted")
 ax.set_ylabel("Actual")
-ax.set_title("Confusion Matrix")
+ax.set_title("The 0.5 threshold favors up predictions")
 
 for i in range(2):
     for j in range(2):
@@ -608,11 +854,19 @@ fig.tight_layout()
 fig.show()
 
 # %% [markdown] tags=[]
-# The off-diagonal entries are *not* symmetric: the model predicts Up about
-# 69% of the time despite a 62/38 actual base rate, so false positives
-# (Actual Down → Predicted Up) substantially outnumber false negatives. The
-# 0.5 decision threshold is suboptimal for this base rate — Section 11.5
-# returns to threshold tuning under conformal coverage targets.
+# The cell below quantifies how the fixed threshold changes the predicted base rate.
+
+# %% tags=[]
+actual_up_rate = all_y_true.mean()
+predicted_up_rate = all_y_pred.mean()
+display(
+    Markdown(
+        f"The model predicts Up on **{predicted_up_rate:.1%}** of validation observations "
+        f"versus a realized Up rate of **{actual_up_rate:.1%}**. This imbalance explains why "
+        "false positives outnumber false negatives. Section 11.3 discusses choosing a trading "
+        "threshold separately from estimating probabilities."
+    )
+)
 
 # %% [markdown] tags=[]
 # ### ROC Curve
@@ -636,10 +890,10 @@ tpr = np.concatenate([[0.0], np.cumsum(_yt_sorted) / _n_pos])
 
 fig, ax = plt.subplots(figsize=(6, 5))
 ax.plot(fpr, tpr, linewidth=2, label=f"Logistic L2 (AUC = {auc_val:.3f})")
-ax.plot([0, 1], [0, 1], ls="--", color="grey", label="Random")
+ax.plot([0, 1], [0, 1], ls="--", color=COLORS["neutral"], label="Random")
 ax.set_xlabel("False Positive Rate")
 ax.set_ylabel("True Positive Rate")
-ax.set_title("ROC Curve")
+ax.set_title("Validation discrimination remains close to chance")
 ax.legend(loc="lower right")
 fig.tight_layout()
 fig.show()
@@ -661,10 +915,10 @@ baseline = all_y_true.mean()
 
 fig, ax = plt.subplots(figsize=(6, 5))
 ax.plot(rec, prec, linewidth=2, label="Logistic L2")
-ax.axhline(baseline, ls="--", color="grey", label=f"Baseline ({baseline:.2f})")
+ax.axhline(baseline, ls="--", color=COLORS["neutral"], label=f"Baseline ({baseline:.2f})")
 ax.set_xlabel("Recall")
 ax.set_ylabel("Precision")
-ax.set_title("Precision-Recall Curve")
+ax.set_title("Precision converges to the positive-class base rate")
 ax.legend()
 fig.tight_layout()
 fig.show()
@@ -705,7 +959,14 @@ ax.set_yticks(range(len(top15)))
 ax.set_yticklabels(top15["feature"].to_list())
 ax.invert_yaxis()
 ax.set_xlabel("Mean |Coefficient|")
-ax.set_title(f"L1 Logistic Feature Importance (C={best_l1_C})")
+ax.set_title(f"L1 distributes weight across the leading features (C={best_l1_C})")
+ax.legend(
+    handles=[
+        Patch(color=COLORS["blue"], label="Positive mean coefficient"),
+        Patch(color=COLORS["copper"], label="Negative mean coefficient"),
+    ],
+    loc="lower right",
+)
 fig.tight_layout()
 fig.show()
 
@@ -722,11 +983,11 @@ fig.show()
 cal_fracs, cal_means = calibration_curve(all_y_true, all_y_prob, n_bins=10)
 
 fig, ax = plt.subplots(figsize=(6, 5))
-ax.plot([0, 1], [0, 1], ls="--", color="grey", label="Perfect calibration")
+ax.plot([0, 1], [0, 1], ls="--", color=COLORS["neutral"], label="Perfect calibration")
 ax.plot(cal_means, cal_fracs, "o-", linewidth=2, markersize=6, label="Model")
 ax.set_xlabel("Mean Predicted Probability")
 ax.set_ylabel("Observed Fraction Positive")
-ax.set_title("Probability Calibration Curve")
+ax.set_title("Observed frequencies reveal probability calibration gaps")
 ax.legend()
 fig.tight_layout()
 fig.show()
@@ -734,39 +995,83 @@ fig.show()
 # %% [markdown] tags=[]
 # **Interpretation**: A curve above the diagonal means the model is
 # under-confident (actual positive rate exceeds predicted probability),
-# while a curve below means over-confidence. Logistic regression is
-# generally well-calibrated because its loss function directly optimizes
-# for probability estimation.
+# while a curve below means over-confidence. The curve can still depart from the
+# diagonal even though logistic loss directly
+# optimizes probability estimates. The curve, not the model family, decides
+# whether confidence-based position sizing is defensible.
 
 # %% [markdown] tags=[]
 # ### Platt Scaling Correction
 #
 # `CalibratedClassifierCV(method='sigmoid')` fits a logistic function to the
-# model's raw outputs — Platt scaling. We compare the original and corrected
-# calibration curves on the last fold.
+# model's raw outputs - Platt scaling. Its internal folds must also respect
+# chronology. We therefore use expanding date blocks with a 21-session label purge,
+# then compare the original and corrected curves on the latest outer fold.
+
+
+# %% [markdown] tags=[]
+# The inner calibration splitter keeps complete timestamp groups together. For a
+# 21-session forward label, the last training label must mature strictly before the
+# first calibration timestamp.
+
+
+# %% tags=[]
+def expanding_calibration_splits(
+    dates: np.ndarray,
+    n_splits: int = 3,
+    gap_sessions: int = LABEL_HORIZON_SESSIONS,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Build expanding chronological splits for Platt calibration."""
+    unique_dates = np.unique(dates)
+    block_size = max(1, len(unique_dates) // 10)
+    starts = np.linspace(int(0.55 * len(unique_dates)), int(0.85 * len(unique_dates)), n_splits)
+    splits_out = []
+    for start in starts.astype(int):
+        validation_dates = unique_dates[start : min(start + block_size, len(unique_dates))]
+        train_end = start - gap_sessions
+        if train_end <= 0 or not len(validation_dates):
+            continue
+        train_dates = unique_dates[:train_end]
+        label_end = unique_dates[train_end - 1 + gap_sessions]
+        if label_end >= validation_dates[0]:
+            raise ValueError("Calibration training labels overlap the validation block")
+        train_local = np.flatnonzero(np.isin(dates, train_dates))
+        validation_local = np.flatnonzero(np.isin(dates, validation_dates))
+        splits_out.append((train_local, validation_local))
+    return splits_out
+
 
 # %% tags=[]
 tr_last, te_last = cv_splits[-1]
+y_te_platt = target_array[te_last]
+
+calibration_cv = expanding_calibration_splits(dates_np[tr_last])
+base_model = make_pipeline(
+    StandardScaler(),
+    LogisticRegression(
+        C=best_l2_C,
+        solver="lbfgs",
+        max_iter=MODEL_MAX_ITER,
+        random_state=RANDOM_SEED,
+    ),
+)
+cal_model = CalibratedClassifierCV(base_model, method="sigmoid", cv=calibration_cv)
+cal_model.fit(features_array[tr_last], target_array[tr_last])
+y_prob_platt = cal_model.predict_proba(features_array[te_last])[:, 1]
+
+# %% [markdown] tags=[]
+# The comparison model uses the same outer training and validation rows. Its scaler
+# remains fold-local but receives no additional sigmoid calibration.
+
+
+# %% tags=[]
 scaler_platt = StandardScaler()
 X_tr_platt = scaler_platt.fit_transform(features_array[tr_last])
 X_te_platt = scaler_platt.transform(features_array[te_last])
-y_te_platt = target_array[te_last]
-
-base_model = LogisticRegression(
-    C=best_l2_C,
-    solver="lbfgs",
-    max_iter=1000,
-    random_state=RANDOM_SEED,
-)
-cal_model = CalibratedClassifierCV(base_model, method="sigmoid", cv=3)
-cal_model.fit(X_tr_platt, target_array[tr_last])
-y_prob_platt = cal_model.predict_proba(X_te_platt)[:, 1]
-
-# Original (uncalibrated) model on the same test set for fair comparison
 orig_model = LogisticRegression(
     C=best_l2_C,
     solver="lbfgs",
-    max_iter=1000,
+    max_iter=MODEL_MAX_ITER,
     random_state=RANDOM_SEED,
 )
 orig_model.fit(X_tr_platt, target_array[tr_last])
@@ -775,16 +1080,34 @@ y_prob_orig = orig_model.predict_proba(X_te_platt)[:, 1]
 frac_orig, mean_orig = calibration_curve(y_te_platt, y_prob_orig, n_bins=10)
 frac_platt, mean_platt = calibration_curve(y_te_platt, y_prob_platt, n_bins=10)
 
+# %% [markdown] tags=[]
+# The reliability diagram reveals how sigmoid calibration changes the latest-fold
+# probabilities. It does not assume that the correction must improve them.
+
+
+# %% tags=[]
 fig, ax = plt.subplots(figsize=(6, 5))
-ax.plot([0, 1], [0, 1], ls="--", color="grey", label="Perfect")
+ax.plot([0, 1], [0, 1], ls="--", color=COLORS["neutral"], label="Perfect")
 ax.plot(mean_orig, frac_orig, "o-", label="Original", markersize=5)
 ax.plot(mean_platt, frac_platt, "s-", label="Platt-scaled", markersize=5)
 ax.set_xlabel("Mean Predicted Probability")
 ax.set_ylabel("Observed Fraction Positive")
-ax.set_title("Calibration: Original vs Platt Scaling (Last Fold)")
+ax.set_title("Chronological Platt scaling reshapes latest-fold calibration")
 ax.legend()
 fig.tight_layout()
 fig.show()
+
+# %% tags=[]
+orig_log_loss = log_loss(y_te_platt, y_prob_orig)
+platt_log_loss = log_loss(y_te_platt, y_prob_platt)
+calibration_direction = "improves" if platt_log_loss < orig_log_loss else "worsens"
+display(
+    Markdown(
+        f"On the latest outer fold, sigmoid calibration **{calibration_direction}** "
+        f"log-loss from **{orig_log_loss:.4f}** to **{platt_log_loss:.4f}**. The curve "
+        "still decides whether the revised probabilities support confidence-based sizing."
+    )
+)
 
 # %% [markdown] tags=[]
 # ### Hit Rate by Confidence
@@ -797,7 +1120,7 @@ fig.show()
 confidence = np.abs(all_y_prob - 0.5)
 bin_edges = np.quantile(confidence, np.linspace(0, 1, 6))
 bin_edges[0] = -0.001  # include zero
-bin_labels = np.digitize(confidence, bin_edges) - 1
+bin_labels = np.clip(np.digitize(confidence, bin_edges) - 1, 0, 4)
 
 hit_rows = []
 for b in range(5):
@@ -807,7 +1130,7 @@ for b in range(5):
         hit_rows.append(
             {
                 "quintile": b + 1,
-                "confidence": f"{bin_edges[b]:.3f}–{bin_edges[b + 1]:.3f}",
+                "confidence": f"{bin_edges[b]:.3f}-{bin_edges[b + 1]:.3f}",
                 "n_samples": int(mask.sum()),
                 "accuracy": round(acc, 4),
             }
@@ -817,17 +1140,24 @@ hit_table = pl.DataFrame(hit_rows)
 hit_table
 
 # %% [markdown] tags=[]
-# Accuracy is roughly flat across the lower four quintiles (~0.49–0.55) and
-# jumps sharply in the top quintile (~0.71). The non-monotone dip in Q3 (0.49,
-# about 4.5 pp below Q2 and 6 pp below Q4) is far larger than the ~0.8 pp
-# binomial standard error of a ~3,800-sample bin, so it is a genuine feature of
-# the model's miscalibration inside the central band, not sampling noise. Either
-# way, the lack of a clean monotone climb across Q1–Q4 says the model's
-# *graduated* confidence there carries little usable ranking information. The
-# top-quintile jump is what makes the signal usable: a strategy that trades
-# only in the highest-confidence bucket captures ~71% accuracy at the cost of
-# ~80% turnover reduction. That tradeoff motivates the threshold-based
-# signal in the next section.
+# The generated interpretation compares the highest-confidence bucket with the
+# lower four without assuming that a previous vintage's pattern persists.
+
+# %% tags=[]
+hit_rows_named = list(hit_table.iter_rows(named=True))
+lower_accuracies = [row["accuracy"] for row in hit_rows_named[:4]]
+top_hit = hit_rows_named[-1]
+top_share = top_hit["n_samples"] / hit_table["n_samples"].sum()
+display(
+    Markdown(
+        f"Accuracy spans **{min(lower_accuracies):.1%}-{max(lower_accuracies):.1%}** across "
+        f"the lower four confidence quintiles and reaches **{top_hit['accuracy']:.1%}** in "
+        f"the highest-confidence quintile. Restricting decisions to that bucket retains "
+        f"**{top_share:.1%}** of observations. The threshold therefore trades breadth for a "
+        "higher observed hit rate, but the irregular lower buckets warn against treating raw "
+        "probability distance as a perfectly ordered strength signal."
+    )
+)
 
 # %% [markdown] tags=[]
 # ### From Probabilities to Trading Signals
@@ -865,42 +1195,6 @@ print(
 # turnover targets, liquidity). Chapter 17 develops the full framework.
 
 # %% [markdown] tags=[]
-# ## Classification Summary: ROC and Calibration
-#
-# A composite figure showing the ROC curve and calibration plot side by side.
-
-# %% tags=[]
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-# Panel A: ROC
-ax = axes[0]
-ax.plot(fpr, tpr, linewidth=2.5, label=f"AUC = {auc_val:.3f}")
-ax.plot([0, 1], [0, 1], ls="--", color="grey")
-ax.set_xlabel("False Positive Rate")
-ax.set_ylabel("True Positive Rate")
-ax.set_title("(a) ROC Curve")
-ax.legend(loc="lower right")
-
-# Panel B: Calibration
-ax = axes[1]
-ax.plot([0, 1], [0, 1], ls="--", color="grey")
-ax.plot(cal_means, cal_fracs, "o-", linewidth=2.5, markersize=6)
-ax.set_xlabel("Mean Predicted Probability")
-ax.set_ylabel("Observed Fraction Positive")
-ax.set_title("(b) Probability Calibration")
-
-fig.suptitle("Logistic Regression: ROC and Calibration", fontsize=13)
-fig.tight_layout()
-fig.show()
-
-# %% [markdown] tags=[]
-# **Interpretation**: the ROC curve sits above the 45° random-classifier line
-# across the threshold range, with pooled AUC matching the cross-validated AUC
-# of $\approx 0.57$ reported in the L2 sweep above. The calibration plot shows
-# predicted probabilities tracking observed frequencies closely — a prerequisite
-# for confidence-based position sizing (Section 11.3).
-
-# %% [markdown] tags=[]
 # ## Multinomial Extension: Ternary Direction
 #
 # Binary up/down discards information about return magnitude. A multinomial
@@ -923,57 +1217,66 @@ X_te_mn = scaler_mn.transform(features_array[te_last])
 model_mn = LogisticRegression(
     solver="lbfgs",
     C=best_l2_C,
-    max_iter=1000,
+    max_iter=MODEL_MAX_ITER,
     random_state=RANDOM_SEED,
 )
 model_mn.fit(X_tr_mn, y_tern_train)
 y_pred_mn = model_mn.predict(X_te_mn)
 
-print("Multinomial Logistic (ternary direction, last fold):\n")
-print(classification_report(y_tern_test, y_pred_mn, target_names=["Bottom", "Middle", "Top"]))
+ternary_report = classification_report(
+    y_tern_test,
+    y_pred_mn,
+    target_names=["Bottom", "Middle", "Top"],
+    output_dict=True,
+    zero_division=0,
+)
+pl.DataFrame(
+    [
+        {"class": name, **ternary_report[name]}
+        for name in ["Bottom", "Middle", "Top", "macro avg", "weighted avg"]
+    ]
+)
 
 # %% [markdown] tags=[]
-# **Interpretation**: overall accuracy is ~0.41, modestly above the 1/3 random
-# baseline but driven almost entirely by the Bottom and Middle classes. The Top
-# tercile collapses to f1 ≈ 0.13 with recall near 0.07 — the model almost never
-# predicts a top-tercile return even when one occurs, even though when it does
-# the prediction is correct ~56% of the time. The Bottom class shows the
-# opposite pathology: recall ~0.63 with precision only ~0.29, meaning the model
-# over-predicts Bottom on ambiguous cases. The asymmetry reflects the upward
-# drift in 21-day ETF returns combined with vanilla multinomial loss; recovering
-# extremes requires class reweighting, an explicit ordinal loss, or the
-# rank-based mapping introduced above.
+# The class-level interpretation is generated from the current latest fold.
+
+# %% tags=[]
+top_metrics = ternary_report["Top"]
+bottom_metrics = ternary_report["Bottom"]
+display(
+    Markdown(
+        f"Latest-fold ternary accuracy is **{ternary_report['accuracy']:.1%}** versus a "
+        f"one-third random reference. Top-tercile recall is **{top_metrics['recall']:.1%}** "
+        f"and Bottom-tercile recall is **{bottom_metrics['recall']:.1%}**. The asymmetric "
+        "errors show that a vanilla multinomial loss does not recover return extremes evenly; "
+        "class reweighting, an ordinal objective, or a cross-sectional rank mapping would encode "
+        "that trading objective more directly."
+    )
+)
 
 # %% [markdown] tags=[]
 # ## Key Takeaways
 #
 # 1. **Direction prediction** reframes the return forecasting problem as binary
-#    classification. With 21-day ETF returns, the "up" class dominates (~59/41
-#    over the full sample), so a naive majority-class baseline already achieves
-#    ~59% accuracy — models must beat this to demonstrate skill. (The base rate
-#    drifts to ~62/38 within the later out-of-sample folds, which is why the
-#    pooled confusion matrix leans more heavily toward "up".)
+#    classification. The majority-class baseline remains a demanding accuracy
+#    reference because positive 21-day ETF returns are more common.
 #
 # 2. **L2 logistic regression** keeps all features and is well-suited when many
-#    correlated signals each contribute a small amount. L1 can produce sparsity at
-#    stronger regularization (C=0.001 selects 8 features), but at the AUC-optimal C
-#    all features remain active — the sparsity-performance tradeoff is real.
+#    correlated signals each contribute a small amount. L1 can create sparsity
+#    under stronger regularization, but the AUC-optimal fit retains most features.
 #
 # 3. **AUC-ROC** is more informative than raw accuracy because it evaluates
-#    discrimination across all probability thresholds. An AUC of 0.5 is what a
-#    constant or coin-flip predictor obtains by definition; the cross-validated
-#    AUC here is $\approx 0.57$, above that null reference but well short of
-#    the 0.7–0.8 range typical of strong classifiers on less noisy domains.
+#    discrimination across all probability thresholds. Here it remains close to
+#    the constant-score reference, so the exercise demonstrates workflow rather
+#    than a deployable directional edge.
 #
-# 4. **Probability calibration** matters for position sizing: a calibrated model
-#    lets you scale positions by prediction confidence. The calibration plot
-#    above shows the L2 logistic model's predicted probabilities tracking
-#    observed frequencies closely on this dataset; log-loss optimization
-#    encourages but does not guarantee calibration, so the diagnostic still
-#    matters.
+# 4. **Probability calibration** matters for position sizing. The reliability
+#    diagrams show gaps between predicted probabilities and observed frequencies.
+#    Chronological Platt scaling reshapes those probabilities but does not guarantee
+#    improvement, so evaluate calibration on data that follows every fitted step.
 #
-# 5. **Same walk-forward folds as NB02** ensures fair comparison between regression
-#    and classification approaches to the same prediction task.
+# 5. **Walk-forward validation is not a final holdout.** These folds support model
+#    comparison and diagnostics; a sealed holdout is required for a final strategy claim.
 #
 # **Next**: `04_nested_cv_hpo` adds Optuna-based hyperparameter optimization
 # with proper nested cross-validation to control selection bias.

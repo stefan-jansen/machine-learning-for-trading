@@ -56,7 +56,7 @@ from case_studies.utils.backtest_presets import build_backtest_spec
 from case_studies.utils.backtest_runner import precompute_weights, run_backtest
 from case_studies.utils.cv_window import canonical_window
 from case_studies.utils.registry import read_predictions
-from utils.paths import get_case_study_source_dir
+from utils.paths import get_case_study_dir, get_case_study_source_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
 
@@ -67,9 +67,10 @@ BAR_HOURS = 8
 
 # %%
 set_global_seeds(SEED)
-FROZEN_CASE_DIR = get_case_study_source_dir(CASE_STUDY)
+FROZEN_CASE_DIR = get_case_study_dir(CASE_STUDY, create=False)
 REGISTRY_PATH = FROZEN_CASE_DIR / "run_log" / "registry.db"
-setup = yaml.safe_load((FROZEN_CASE_DIR / "config" / "setup.yaml").read_text())
+SOURCE_CASE_DIR = get_case_study_source_dir(CASE_STUDY)
+setup = yaml.safe_load((SOURCE_CASE_DIR / "config" / "setup.yaml").read_text())
 config = get_backtest_config(CASE_STUDY)
 
 print(f"Registry: {REGISTRY_PATH.name} (read-only analysis)")
