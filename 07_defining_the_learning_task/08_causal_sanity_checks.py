@@ -47,8 +47,8 @@
 #   (strongest at lag 0), does not predict Treasury returns, but concentrates in
 #   low-volatility regimes.
 # - **Short-term reversal** (negated 1-day return): fails triage - no significant
-#   IC at the 21-day horizon, and its one significant cell is an artifact of the
-#   feature and the label sharing a price rather than a microstructure effect.
+#   IC at the 21-day horizon, and its one significant cell does not survive the
+#   shifted-label check in Section 4.1.
 #
 # ## Learning Objectives
 #
@@ -504,8 +504,8 @@ fig.show()
 #
 # 1. **The three survivors all sit at the 5-day horizon**: 12-1 momentum ($t = 3.7$),
 #    252d momentum ($t = 3.4$), and 1-day reversal ($t = 3.0$). Section 4.1 shows the
-#    third of these is an artifact of how the feature and the label are built, which
-#    leaves two.
+#    third does not survive a check on how the feature and the label are built, which
+#    leaves two to carry forward.
 # 2. **The 21-day cells do not survive the correction.** 12-1 momentum reaches
 #    $t = 2.6$ and 252d momentum $t = 2.3$ - the largest ICs anywhere in the grid
 #    (0.053 and 0.045) - but against 30 tests that is not enough. This is the honest
@@ -530,7 +530,7 @@ fig.show()
 # horizons.
 
 # %% [markdown]
-# ### 4.1 A Significant Cell That Is an Artifact of Construction
+# ### 4.1 A Significant Cell That Does Not Survive a Construction Check
 #
 # One cell in the scan deserves a second look before we trust it: 1-day reversal at
 # the 5-day horizon. Write the two quantities out in logs, with $p_t = \log P_t$:
@@ -562,10 +562,13 @@ fig.show()
 # for a bivariate sanity check and belong with the execution assumptions in
 # Chapter 16.
 #
-# What the check does establish is enough for the decision at hand: **the cell's
-# significance depends entirely on the feature and the label sharing the day-$t$
-# close.** That is a reason to withhold belief from it until it is re-measured
-# properly - not a demonstration that no reversal effect exists.
+# What the check does establish is enough for the decision at hand: **the cell does
+# not survive the shifted-label check.** Which of the two causes is responsible -
+# the shared endpoint, or a genuine effect confined to the first session - this test
+# cannot say, and saying it needs an independent day-$t$ price or an open-to-open
+# label. Either way the result is not one to build on until it is re-measured, and
+# that is a reason to withhold belief rather than a demonstration that no reversal
+# effect exists.
 
 # %%
 shared_endpoint = analysis.with_columns(
@@ -621,10 +624,10 @@ display(pl.DataFrame(endpoint_rows))
 #   does it survive mechanism checks, or is the signal driven by a confound?
 # - **1-day Reversal** (IC = 0.001, HAC $t$ = 0.4 at 21d): a near-null baseline that
 #   also flips sign across VIX regimes. Its one significant cell, $t = 3.0$ at the
-#   5-day horizon, is the shared-endpoint artifact of Section 4.1 rather than a signal
-#   that decays. We expect the mechanism checks to return STOP - and the useful part is
-#   *which* check catches it, since a construction artifact is not something a timing
-#   placebo or a shared-driver control was designed to detect.
+#   5-day horizon, is the one Section 4.1 shows collapsing under a shifted label. We
+#   expect the mechanism checks to return STOP - and the useful part is *which* check
+#   catches it, since neither a timing placebo nor a shared-driver control was
+#   designed to detect how a feature and its label are constructed.
 
 # %%
 # Selected features for deep diagnostics
