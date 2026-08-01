@@ -230,27 +230,51 @@ print(f"Suggested ARIMA order: {acf_analysis.suggested_arima_order}")
 #
 # Where $w_j = 1 - j/(L+1)$ (Bartlett kernel) and $L$ is the lag truncation.
 #
-# **$L$ is not a free parameter here.** The usual automatic rule
-# $L = \lfloor 4(T/100)^{2/9} \rfloor$ reads only the sample size, and on this
-# series it returns 9. But the labels are $h$-day *overlapping* forward returns,
-# which impose an MA($h-1$) structure on the IC series by construction: date $t$
-# and date $t+h-1$ share part of their outcome window. Truncating at 9 discards
-# the autocovariances from lag 10 to lag 20 that the overlap guarantees are
-# there, so the standard error comes out too small. Passing `label_horizon`
+# **$L$ should not be left to the sample size here.** The usual automatic rule
+# $L = \lfloor 4(T/100)^{2/9} \rfloor$ reads only $T$, and on this series it
+# returns 9. But the labels are $h$-day *overlapping* forward returns: date $t$
+# and date $t+j$ share part of their outcome window for every $j < h$, so their
+# ICs are mechanically dependent out to lag $h-1$. Truncating at 9 discards
+# autocovariances from lag 10 to lag 20 that the overlap alone is enough to
+# generate, and the standard error comes out too small. Passing `label_horizon`
 # makes the library take $L = \max(h-1, \text{auto rule})$.
+#
+# $h-1$ is a **lower bound on a defensible bandwidth, not the true dependence
+# order.** The overlap is one source of serial correlation and the ACF below is
+# the sum of all of them: ranks persist, volatility clusters, and regimes last
+# longer than a month, none of which stop at lag $h-1$. What the overlap
+# supports is the claim that any bandwidth *below* $h-1$ is wrong by
+# construction - which is the defect this notebook had.
 
 # %% [markdown]
 # ### 2.1 What the Bandwidth Is Worth
 #
-# The two estimators below disagree, and the disagreement is the point. The
-# block bootstrap in Section 3 resamples contiguous blocks of length $h$, so it
-# already respects the overlap. If HAC is given a bandwidth that does *not*, the
-# two will not agree - and the gap is a property of the bandwidth, not of the
-# estimator families. Section 3 shows them agreeing once both are horizon-aware.
+# Worth measuring rather than asserting, so the cell below runs the estimator
+# both ways on the same IC series. The block bootstrap in Section 3 resamples
+# contiguous blocks of length $h$, so it already respects the overlap. If HAC is
+# given a bandwidth that does not, the two will not agree - and the gap is then a
+# property of the bandwidth, not of the estimator families, which is what the
+# side-by-side below is there to establish. Section 3 shows HAC and the bootstrap
+# agreeing once both are horizon-aware.
 
 # %%
 # Compute HAC-adjusted statistics
 hac_result = compute_ic_hac_stats(ic_series, label_horizon=LABEL_HORIZON)
+
+# The same estimator with the bandwidth left to the sample-size rule. This is
+# what the notebook used to report, and printing both is the only way the claim
+# above is checkable from the notebook rather than from its history.
+hac_auto = compute_ic_hac_stats(ic_series)
+print("=== Bandwidth: sample-size rule vs label-horizon aware ===\n")
+print(
+    f"  auto rule            L={hac_auto['effective_lags']:>3}  "
+    f"SE={hac_auto['hac_se']:.6f}  t={hac_auto['t_stat']:.4f}  p={hac_auto['p_value']:.4f}"
+)
+print(
+    f"  label_horizon={LABEL_HORIZON:<8} L={hac_result['effective_lags']:>3}  "
+    f"SE={hac_result['hac_se']:.6f}  t={hac_result['t_stat']:.4f}  p={hac_result['p_value']:.4f}"
+)
+print(f"\n  SE ratio (horizon-aware / auto): {hac_result['hac_se'] / hac_auto['hac_se']:.3f}x")
 
 # Compare naive vs HAC
 naive_se = np.std(ic_series, ddof=1) / np.sqrt(len(ic_series))
@@ -662,7 +686,7 @@ display(track_record_df)
 # %%
 # Build IC inference report
 inference_report = {
-    "signal_name": "momentum_21d",
+    "signal_name": f"momentum_{LABEL_HORIZON}d",
     "n_observations": len(ic_series),
     "mean_ic": round(float(np.mean(ic_series)), 4),
     "ic_std": round(float(np.std(ic_series)), 4),

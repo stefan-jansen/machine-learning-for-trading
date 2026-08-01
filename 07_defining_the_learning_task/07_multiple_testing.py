@@ -456,10 +456,13 @@ print(
 #   $\theta_N \ge \hat{\theta}_N - 2\hat{R} - 2\kappa\sqrt{\log(2/\delta)/T}$
 #   subtracts $2\hat{R}$ from an IC, so here $\hat{R}$ must be in **IC units**.
 #
-# Standardizing inflates $\hat{R}$ by roughly the IC standard deviation, which on
-# this panel is around 0.008. Feeding the standardized $\hat{R}$ into the adjustment
-# would deduct a penalty two orders of magnitude larger than any IC in the set - the
-# bound would reject everything, and would do so no matter what the data said.
+# Standardizing divides each factor's column by its own **per-period** IC standard
+# deviation - the dispersion of that factor's IC across dates, not the dispersion of
+# the averaged ICs across factors. The two differ by more than an order of magnitude
+# here, and the cell below prints both so the conversion is checkable rather than
+# asserted. Feeding the standardized $\hat{R}$ into the adjustment would deduct a
+# penalty many times larger than any IC in the set - the bound would reject
+# everything, and would do so no matter what the data said.
 
 # %%
 # Compute Rademacher complexity on both scales
@@ -483,13 +486,17 @@ print(
                 "Massart bound",
                 "Ratio",
                 "R-hat (IC units, used by RAS)",
-                "IC std across factors",
+                "per-period IC std (mean over factors, the divisor)",
+                "implied scale: R-hat raw / R-hat standardized",
+                "std of the averaged ICs across factors (NOT the divisor)",
             ],
             "value": [
                 f"{R_hat_norm:.4f}",
                 f"{massart_bound:.4f}",
                 f"{R_hat_norm / massart_bound:.1%}",
                 f"{R_hat:.6f}",
+                f"{np.mean(np.std(ic_matrix, axis=0, ddof=1)):.6f}",
+                f"{R_hat / R_hat_norm:.6f}",
                 f"{np.std(observed_ics, ddof=1):.6f}",
             ],
         }
@@ -503,23 +510,66 @@ print(
 
 # %%
 # Apply the RAS adjustment.
-# The observed ICs are all noise: max |IC| = 0.022. We set kappa=0.05 (Paleologo's
-# "high-conviction" band), which bounds the largest observed |IC| while staying far
-# below the overly conservative kappa=1.0. The library returns a conservative lower
-# bound on each true IC and flags significance as adjusted_ic > 0.
+#
+# kappa is the bound the concentration (Hoeffding) term needs, and it bounds the
+# *per-period* IC observations that get averaged - not the averaged IC. This is the
+# same units confusion as the complexity above, one term to the right, and it is
+# easy to make because the averaged ICs are tiny: max |IC| = 0.022 invites
+# kappa=0.05, and a per-period Spearman IC is supported on [-1, 1].
+#
+# kappa=1.0 is the only value that is a bound with no assumption attached, and on a
+# sample this short it makes the estimation term alone larger than any IC in the
+# set, so the bound rejects everything and teaches nothing - the same failure mode
+# the complexity scale mix-up produced. Both values are computed below, and the
+# printed comparison is the point: this is a modelling choice with a visible cost,
+# not a constant to copy.
+#
+# The reported adjustment uses the empirical support of the per-period ICs. That is
+# an assumption, not a theorem - a future period may exceed it - so the resulting
+# lower bound is conditional on the observed range rather than distribution-free.
+kappa_empirical = float(np.max(np.abs(ic_matrix)))
+KAPPA_THEORETICAL = 1.0  # Spearman IC support, assumption-free but vacuous here
+
 ras = ras_ic_adjustment(
     observed_ic=observed_ics,
     complexity=R_hat,
     n_samples=n_periods,
     delta=0.05,
-    kappa=0.05,
+    kappa=kappa_empirical,
     return_result=True,
+)
+ras_theoretical = ras_ic_adjustment(
+    observed_ic=observed_ics,
+    complexity=R_hat,
+    n_samples=n_periods,
+    delta=0.05,
+    kappa=KAPPA_THEORETICAL,
+    return_result=True,
+)
+print(
+    pl.DataFrame(
+        {
+            "kappa": [
+                f"{kappa_empirical:.4f}  (observed per-period |IC| max)",
+                f"{KAPPA_THEORETICAL:.4f}  (Spearman support, assumption-free)",
+            ],
+            "best adjusted IC": [
+                f"{np.max(ras.adjusted_values):+.4f}",
+                f"{np.max(ras_theoretical.adjusted_values):+.4f}",
+            ],
+            "significant": [
+                f"{int(np.sum(ras.adjusted_values > 0))}/{n_factors}",
+                f"{int(np.sum(ras_theoretical.adjusted_values > 0))}/{n_factors}",
+            ],
+        }
+    )
 )
 adjusted_ics = ras.adjusted_values
 
-# The RAS penalty is an absolute deduction (2*R_hat plus a small estimation term),
-# not a proportional shrinkage, so we report the penalty components and the resulting
-# lower bound. Significance uses the library's own convention: adjusted_ic > 0.
+# The RAS penalty is an absolute deduction (2*R_hat plus the estimation term), not a
+# proportional shrinkage, so we report both components and the resulting lower bound.
+# Which of the two is larger depends on kappa, N and T, so it is printed rather than
+# described. Significance uses the library's own convention: adjusted_ic > 0.
 n_positive_raw = int(np.sum(observed_ics > 0))
 
 print(
@@ -554,17 +604,27 @@ print(
 # $2\kappa\sqrt{\log(2/\delta)/T}$ is the price of a finite sample.
 #
 # Both terms are now on the IC scale, so their sizes can be compared and the
-# comparison means something. The search penalty is the larger of the two by roughly
-# a factor of four, which is the right answer for 100 candidates over a single year:
-# the dominant cost is having looked at 100 things, not the finiteness of the sample.
-# Read against the best observed IC, the total deduction is roughly three times that
-# IC - enough to sink every candidate, which is correct, because every candidate here
-# is noise by construction.
+# comparison means something - read them off the table above rather than from here,
+# because which one dominates is not a fixed fact about the method. It moves with
+# $\kappa$, with $N$ and with $T$: the search term scales with the number and
+# correlation of the candidates, the estimation term with $\kappa/\sqrt{T}$. On this
+# panel, with $\kappa$ set from the observed per-period IC range and a single year of
+# data, the finite sample is the more expensive of the two. Lengthen the sample or
+# widen the candidate set and that ordering changes.
 #
-# The point of putting the complexity in IC units is that this ordering is now a
-# statement about the data. On the standardized scale the search penalty alone was
-# 0.31, about sixteen times the largest IC in the set, and it would have rejected
-# everything no matter what the ICs were.
+# This paragraph has now been written wrong twice, in both directions, which is the
+# argument for printing the components instead of narrating them: an ordering
+# asserted in prose survives the re-run that invalidates it.
+#
+# Read against the best observed IC, the total deduction is many times that IC -
+# enough to sink every candidate, which is correct, because every candidate here is
+# noise by construction.
+#
+# The point of putting the complexity in IC units is that the comparison is now a
+# statement about the data at all. On the standardized scale the search penalty alone
+# was 0.31, about sixteen times the largest IC in the set, and it would have rejected
+# everything no matter what the ICs were - a bound that returns the same verdict for
+# every input is not measuring anything.
 
 # %% [markdown]
 # ## 4. Harvey et al. (2016) Thresholds

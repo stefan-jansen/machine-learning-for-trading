@@ -393,6 +393,27 @@ def coverage_heatmap(
         on=symbol_col,
     ).sort("period")
 
+    # Reindex onto a continuous month range before anything reads the matrix.
+    #
+    # The pivot emits one row per month that HAS data, so a month in which the whole
+    # panel is missing - a vendor outage, an ingestion gap - is simply absent from the
+    # matrix rather than present as an all-zero row. Any count of "months missing for
+    # every asset" taken off the un-reindexed matrix is therefore zero by
+    # construction, which is the same unfalsifiable-check defect this notebook exists
+    # to find, committed by the notebook itself.
+    if len(pivot_df):
+        full_months = pl.DataFrame(
+            {
+                "period": pl.datetime_range(
+                    pivot_df["period"].min(),
+                    pivot_df["period"].max(),
+                    interval="1mo",
+                    eager=True,
+                ).cast(pivot_df["period"].dtype)
+            }
+        )
+        pivot_df = full_months.join(pivot_df, on="period", how="left").fill_null(0).sort("period")
+
     # Pivot emits columns in order of first appearance, which is not `symbols`.
     # Select explicitly, or the x labels would name different assets than the
     # columns they sit under.
@@ -952,7 +973,9 @@ if us_equities is not None:
         if len(_idx):
             _interior += int((_m[_idx[0] : _idx[-1] + 1, _j] == 0).sum())
     print(f"Sampled panel: {_m.shape[0]} months x {_m.shape[1]} assets")
-    print(f"  Assets missing in every month:        {int((_m.sum(axis=0) == 0).sum())}")
+    # The month axis is a continuous range, so this count can actually fire; the
+    # symbol axis is the observed universe, so "an asset absent in every month" is
+    # not expressible here and is deliberately not printed as a guaranteed zero.
     print(f"  Months missing for every asset:       {int((_m.sum(axis=1) == 0).sum())}")
     print(
         f"  Assets listing after the first month: {int(sum(1 for j in range(_m.shape[1]) if _m[0, j] == 0))}"
