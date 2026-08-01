@@ -244,7 +244,7 @@ print(f"Suggested ARIMA order: {acf_analysis.suggested_arima_order}")
 # how much the return windows overlap. So $h-1$ is not a theorem about overlapping
 # labels - it is a **conservative horizon-aware bandwidth for a persistent signal**,
 # and the evidence that it is the right order of magnitude is the measured ACF in
-# the next figure, which stays outside the white-noise band until about lag 16.
+# the figure above, which stays outside the white-noise band until about lag 16.
 #
 # What is not defensible is $L = 9$, chosen by a rule that never looked at the
 # labels or the signal. Passing `label_horizon` makes the library take
