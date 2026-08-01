@@ -189,8 +189,11 @@ register_frame(FAMILIES).select(
 # one nobody had.
 
 # %%
+OPEN_HOUR, OPEN_MINUTE, CLOSE_HOUR = 9, 30, 16
 _hour, _minute = pl.col("timestamp").dt.hour(), pl.col("timestamp").dt.minute()
-REGULAR_HOURS = ((_hour > 9) | ((_hour == 9) & (_minute >= 30))) & (_hour < 16)
+REGULAR_HOURS = ((_hour > OPEN_HOUR) | ((_hour == OPEN_HOUR) & (_minute >= OPEN_MINUTE))) & (
+    _hour < CLOSE_HOUR
+)
 READ = [
     "timestamp",
     "symbol",
@@ -334,17 +337,19 @@ def quote_features(df: pl.DataFrame) -> pl.DataFrame:
 # location and tick buckets cover every trade in the bar, including the ones reported to the
 # FINRA/TRF rather than to an exchange, while `volume` counts the exchange prints alone: the
 # six location buckets sum to `volume + finra_volume` on every bar of this panel, and to
-# `volume` on 1.7 percent of them. `total_trades` counts on the same basis - a bar with no
-# exchange volume and a TRF print still reports trades. Dividing by `volume` therefore
-# divides a total by a part, which is why the version this notebook shipped ran outside
-# $[-1, 1]$ on nearly a tenth of its bars and reached a magnitude of 340,000 where a bar's
-# exchange volume was small and its off-exchange volume was not. The assertion below is what
-# makes that a failure rather than a scale.
+# `volume` only on the small minority of bars where nothing printed away from the exchanges.
+# `total_trades` counts on the same basis - a bar with no exchange volume and a TRF print
+# still reports trades. Dividing by `volume` therefore divides a total by a part, which is
+# what the version this notebook shipped did: its shares ran far outside $[-1, 1]$, which is
+# not a scale but a contradiction in terms. The assertion below is what turns that into a
+# failure instead of a number nobody looks at.
 
 
-# %%
+# %% [markdown]
 # The volume every share in this family is a share *of*: the exchange prints plus the ones
 # reported away from the exchanges, which is what the buckets themselves are counted over.
+
+# %%
 TRADED_VOLUME = (pl.col("volume") + pl.col("finra_volume")).clip(lower_bound=1)
 
 
@@ -459,8 +464,11 @@ def kyle_lambda(df: pl.DataFrame) -> pl.DataFrame:
 def regime_and_clock_features(df: pl.DataFrame) -> pl.DataFrame:
     """The slow off-exchange regime, and where in the scheduled session a bar sits."""
     finra = pl.col("finra_volume") / TRADED_VOLUME
-    minutes = pl.col("timestamp").dt.hour() * 60 + pl.col("timestamp").dt.minute()
-    bar = (minutes - 9 * 60 - 30).cast(pl.Int32)
+    # `dt.hour()` and `dt.minute()` are Int8, and Int8 arithmetic wraps rather than raising:
+    # 9 * 60 is 28, not 540. Both are widened before the multiplication.
+    hour = pl.col("timestamp").dt.hour().cast(pl.Int32)
+    minute = pl.col("timestamp").dt.minute().cast(pl.Int32)
+    bar = hour * 60 + minute - (OPEN_HOUR * 60 + OPEN_MINUTE)
     length = pl.col("session_bars")
     edge = W["edge_block"]
     return df.with_columns(
@@ -489,10 +497,12 @@ def regime_and_clock_features(df: pl.DataFrame) -> pl.DataFrame:
 # hypothesis rather than a new one, which is why the register claims a level and its z-score
 # under one family.
 
+# %% [markdown]
+# Each entry below is one source column, the stem its aggregates are named on, and the
+# windows. `SHARES` divides a sum by the volume traded over the same window; `MEANS` averages
+# a quantity that is already a ratio.
+
 # %%
-# Each entry is one source column, the stem its aggregates are named on, and the windows.
-# `SHARES` divides a sum by the volume traded over the same window; `MEANS` averages a
-# quantity that is already a ratio.
 SHARES = {
     "signed_vol": ("signed_vol_share", (W["fast"], W["decision"], W["hour"])),
     "tick_imb_vol": ("tick_imb_share", (W["fast"], W["decision"])),
@@ -530,10 +540,12 @@ def multi_resolution(df: pl.DataFrame) -> pl.DataFrame:
 # whose z-score would therefore be a column of zeros divided by nothing.
 
 
+# %% [markdown]
+# The intermediates below are what the families are assembled from, and no model may read
+# them: a contemporaneous price or an unnormalized volume beside a label derived from the
+# same midpoint series is a model reading its own answer.
+
 # %%
-# Intermediates the families are assembled from, and which no model may read: a
-# contemporaneous price or an unnormalized volume beside a label derived from the same
-# midpoint series is a model reading its own answer.
 INTERMEDIATE = {
     "mid_close",
     "signed_vol",
@@ -589,10 +601,12 @@ feature_cols = sorted(c for c in built.columns if c not in LOADER_COLS and c not
 assignment = assign_families(feature_cols, FAMILIES)
 print(f"{built.height:,} rows carrying {len(feature_cols)} features in {len(FAMILIES)} families")
 
-# %%
+# %% [markdown]
 # A share of a volume cannot exceed that volume, at any of the four windows. This is the
 # assertion the previous denominator failed, and it is cheaper than the figure that
 # eventually showed it.
+
+# %%
 SHARE_COLUMNS = [
     c
     for c in feature_cols
@@ -663,8 +677,9 @@ warmup_audit(
 #
 # The cross-sectional z-score is the column this check exists for. It is taken within a
 # minute, so truncating the panel at a date removes whole minutes and leaves the surviving
-# ones with the same membership; a z-score taken over the whole sample instead would move on
-# every row here.
+# ones with the same membership. A z-score taken over the whole sample is the transform this
+# check is built to catch: truncating the panel moves its mean and standard deviation, and
+# with them every row.
 
 # %%
 _before = pl.col("timestamp").dt.date() < HOLDOUT_START
@@ -688,14 +703,44 @@ seal.filter(pl.col("column").is_in(["kyle_lambda", f"{CARRIER}_xs", "finra_share
 # One null policy is applied once: a row is kept when the three carriers of the volatility
 # and impact family have warmed up, of which Kyle's lambda at an hour is the binding one.
 # Requiring it subsumes every shorter window in that family, and the longer families of
-# Section C.5 fill in at the same bar, which is what F1 shows. The 4 percent of bars that
-# printed no trades keep a null Amihud value rather than a fabricated one, and that is the
-# gap the coverage figure shows in the volatility family after warmup.
+# Section C.5 fill in at the same bar, which is what F1 shows.
+#
+# What the policy keeps is not everywhere dense, and the gaps are all of one kind. A bar on
+# which nothing traded has no VWAP, so it has no dollar volume, no Amihud value and no
+# volume-weighted trade-to-mid distance; and because the Amihud average nulls a whole window
+# for one missing bar, a small share of untraded bars costs an order of magnitude more rows
+# than it occupies. The results cell below reports both. Those rows keep a null rather than a
+# fabricated number, which is what F1 shows as the shortfall in the two trade-derived
+# families.
+#
+# The policy also costs one feature outright, and the arithmetic below states it rather than
+# leaving it to be discovered. Kyle's lambda needs an hour, so the matrix begins 60 bars into
+# every session, while `is_first_30m` marks the first 30 - so every bar the flag could be
+# true of has already been dropped, and the column ships identically zero. The column is kept
+# because the feature count is what Chapter 8 reports, and the assertion is what stops it
+# being mistaken for a live signal.
 
 # %%
 CARRIERS = ["r1m", f"rv_{W['slow']}m", "kyle_lambda"]
 features = built.select([*PANEL_KEY, *feature_cols]).drop_nulls(subset=CARRIERS).sort(PANEL_KEY)
 assert features.select(PANEL_KEY).is_duplicated().sum() == 0, "duplicate panel key"
+
+# %% [markdown]
+# No emitted feature may be constant without the notebook saying why. A column with one value
+# ranks nothing and cannot condition anything, and it is the failure a clipped expression
+# hides best: the session clock shipped as `time_since_open = 0` on every row of this panel,
+# because `dt.hour()` is Int8 and `hour * 60` wrapped to 28, after which `.clip(0, 1)` turned
+# the negative result into a plausible constant. It passed the warmup audit, the holdout seal
+# and the conformance checker; only the redundancy dendrogram showed it.
+
+# %%
+DEAD_BY_WARMUP = ["is_first_30m"]
+assert W["hour"] >= W["edge_block"], "the open block is inside the warmup only if it is shorter"
+assert features["is_first_30m"].max() == 0, "the open block survived a 60-bar warmup"
+_variety = features.select(pl.col(c).n_unique().alias(c) for c in feature_cols)
+_flat = [c for c in feature_cols if _variety[c][0] <= 1 and c not in DEAD_BY_WARMUP]
+assert not _flat, f"features that take a single value across the emitted matrix: {_flat}"
+print(f"{len(feature_cols) - len(DEAD_BY_WARMUP)} features vary; {DEAD_BY_WARMUP} dead by warmup")
 # The decision grid the strategy rebalances on, which F3, F6 and F7 read. A figure drawn on
 # every minute would describe a cadence no decision is taken at.
 DECISION_TIMES = (
@@ -717,21 +762,38 @@ print(f"{features['timestamp'].min()} to {features['timestamp'].max()}, warmup {
 print(f"{dropped:,} rows dropped by the null policy ({dropped / built.height:.1%})")
 print(f"thinnest family-month {min(coverage[c].min() for c in set(assignment.values())):.3f}")
 print(f"{len(DECISION_TIMES):,} decision minutes carrying {decisions.height:,} rows")
+# What an untraded bar costs: it defines no dollar volume itself, and it nulls the whole
+# Amihud window that contains it.
+_untraded = features["dollar_vol"].null_count() / features.height
+print(
+    f"untraded bars {_untraded:.2%} of rows, but illiq null on {features['illiq'].null_count() / features.height:.2%}"
+)
 
 # %% [markdown] tags=["results"]
-# The matrix carries **66 features** on **16,738,673 rows** across **114 symbols** and **505
-# sessions**, from **2020-01-02** to **2021-12-31**. The null policy dropped **3,169,371
-# rows**, which is **15.9%** and is the hour of warmup every session pays before Kyle's
-# lambda exists. Past that boundary the thinnest family-month is **0.960** covered, which is
-# the volatility and impact family: Amihud is null on a bar that printed no trades.
+# The matrix carries **66 features** on **16,794,133 rows** across **114 symbols** and **505
+# sessions**, from **2020-01-02 10:30** to **2021-12-31 15:59**. The null policy dropped
+# **3,113,911 rows**, **15.6%**, which is the hour of warmup every session pays before Kyle's
+# lambda exists - and it is why the panel starts at 10:30 rather than at the open. The
+# thinnest family-month is **0.984** covered, in the volatility and impact family. Of those
+# rows, **1,119,676** fall on the **11,101** minutes of the 15-minute decision grid, which is
+# the subset F3 and F6 read.
+#
+# Bars on which nothing traded are **0.52%** of the matrix, and they leave **8.14%** of it
+# without an Amihud value - a sixteenfold amplification, because the estimator's rolling
+# average nulls every one of the thirty bars whose window contains an untraded one.
 
 # %% [markdown]
 # ### F1. Coverage through time
 #
-# The warmup here is intraday rather than historical - it is paid again every morning and it
-# is already spent by the time any row survives the null policy - so the boundary is drawn at
-# the panel's first month rather than a year into it, and the axis runs the full range so
-# that the one family sitting below one is visible rather than compressed against the top.
+# The warmup here is intraday rather than historical - it is paid again every morning, and it
+# is already spent by the time a row reaches the matrix at all - so the boundary sits at the
+# panel's first month rather than a year into it, and no family ever climbs into place. The
+# axis is drawn on the range the data occupies rather than on nought to one, because the
+# whole of what this figure has to show sits in its top sliver.
+#
+# The split it shows is by input, not by family: the four families built from quotes, from
+# the calendar and from the TRF tape are complete on every row, and the two built from
+# trades are not, because a bar on which nothing traded defines none of them.
 
 # %%
 plot_coverage_through_time(
@@ -740,11 +802,12 @@ plot_coverage_through_time(
     title="Only what a trade defines is ever missing",
     subtitle="Monthly non-null share per feature family, after the null policy",
     alt=(
-        "Line chart of non-null share by feature family by month, on a y-axis running from "
-        "zero to one. Five of the six families sit flat at one across the whole sample. The "
-        "volatility and impact family sits a little below them, between about 0.95 and 0.97, "
-        "with no trend, reflecting the bars on which no trade printed and Amihud is "
-        "undefined."
+        "Line chart of non-null share by feature family by month, on a y-axis spanning "
+        "roughly 0.98 to 1.0. The quote liquidity, microprice, hidden liquidity and session "
+        "clock families lie exactly on one for the whole sample, drawn on top of each other. "
+        "The order flow family runs just below them, between about 0.995 and 0.999, dipping "
+        "at the end of 2021. The volatility and impact family is the lowest and the only "
+        "ragged one, oscillating between about 0.985 and 0.996 month to month with no trend."
     ),
 )
 
@@ -798,13 +861,13 @@ plot_feature_distributions(
     title="Aggregating order flow over more bars concentrates it toward zero",
     subtitle="Order-flow family across all symbol-minutes, display tails clipped",
     alt=(
-        "Six histograms in two rows. The per-bar signed volume share is broad and roughly "
-        "symmetric across minus one to one with visible spikes at the extremes where a bar "
-        "carried a single trade. The five-minute, fifteen-minute and sixty-minute aggregates "
-        "narrow progressively toward zero, the hourly one being a tight bell. The "
-        "cross-sectional z-score of the fifteen-minute share is a smooth symmetric bell "
-        "spanning about minus four to four, and the fifteen-minute tick imbalance resembles "
-        "its signed-volume twin but is slightly wider."
+        "Six histograms in two rows. The per-bar signed volume share fills its full range "
+        "from minus one to one, a broad symmetric peak at zero with tails that reach the "
+        "bounds. The five-minute, fifteen-minute and sixty-minute aggregates are the same "
+        "shape over progressively narrower ranges - about plus or minus 0.75, 0.5 and 0.3 - "
+        "so each is a taller, tighter bell than the one before it. The cross-sectional "
+        "z-score of the fifteen-minute share spans about minus three to three, and the "
+        "fifteen-minute tick imbalance is close to its signed-volume twin."
     ),
 )
 
@@ -826,9 +889,9 @@ plot_cross_sectional_dispersion(
     alt=(
         "Shaded band of the 10th to 90th percentile of the fifteen-minute signed volume "
         "share across the universe, by month, with the median drawn through it. The median "
-        "sits marginally above zero throughout. The band runs from roughly minus 0.3 to plus "
-        "0.3, is widest in the first half of 2020 and narrows gradually through 2021 without "
-        "ever closing."
+        "runs flat along zero for the whole sample. The band is roughly symmetric about it "
+        "at plus or minus 0.18, holds that width from the start of 2020 to the end of 2021 "
+        "with a slight bulge around late 2020, and never narrows toward the median."
     ),
 )
 
@@ -838,7 +901,8 @@ plot_cross_sectional_dispersion(
 # Clustering on the distance $1 - |\rho|$ groups features that carry the same ordering,
 # whatever the sign. Above the cut two features are close enough that a linear model cannot
 # separate their contributions. This states the clusters; choosing one representative from
-# each needs a fold-aware criterion and belongs to `05_evaluation`.
+# each needs a fold-aware criterion, which is why `05_evaluation` makes that choice and this
+# notebook does not.
 
 # %%
 CUT = 0.7
@@ -849,21 +913,27 @@ clusters = plot_redundancy_clusters(
     title="Each level and its z-score are one ordering under two names",
     subtitle=r"Average linkage on $1 - |\rho_s|$, cut drawn at $|\rho_s| = 0.7$",
     alt=(
-        "Dendrogram of all 66 features. The dominant structure is that almost every level "
-        "joins its own cross-sectional z-score at a distance near zero, forming 31 tight "
-        "pairs. Those pairs then group by family: the three nested realized volatilities with "
-        "the EWMA and the two ranges, the four signed-volume horizons with the two tick "
-        "imbalance ones, and the four spread windows with the quote rate. The session clock "
-        "features and Kyle's lambda attach only near the root, sharing an ordering with "
-        "nothing else."
+        "Dendrogram of all 66 features, leaves labelled on the right. The dominant structure "
+        "is that almost every level joins its own cross-sectional z-score at a distance near "
+        "zero, so the tree reads as a column of tight pairs. Those pairs then group by "
+        "family: the four spread windows with the quote rate, the signed-volume and tick "
+        "imbalance horizons together, the three nested realized volatilities with the EWMA "
+        "and the two ranges, and the microprice deviations with the depth imbalance. The "
+        "off-exchange share pairs with its z-score and joins nothing else. At the foot, time "
+        "since open and time to close form one pair at distance zero, because each is one "
+        "minus the other; the last-30-minutes flag joins them around 0.5; and the "
+        "first-30-minutes flag stands alone against the root, sharing an ordering with "
+        "nothing because it is constant in this matrix."
     ),
 )
 
 # %% [markdown] tags=["results"]
-# Cutting the redundancy tree at $|\rho_s| = 0.7$ leaves **19 clusters** across the **66**
-# columns, so more than two thirds of the matrix repeats an ordering another column already
-# carries - almost all of it the level-and-z-score pairing, which is deliberate and which
-# `05_evaluation` resolves fold by fold rather than here.
+# Cutting the redundancy tree at $|\rho_s| = 0.7$ leaves **27 clusters** across the **66**
+# columns, so well over half the matrix repeats an ordering another column already carries.
+# Almost all of that is the level-and-z-score pairing, which is deliberate: the two are one
+# hypothesis on two scales and a model that can use either is meant to choose. Which
+# representative each cluster keeps needs a fold-aware criterion, and `05_evaluation` makes
+# that choice rather than this notebook.
 
 # %%
 print(f"{len(set(clusters.values()))} clusters over {len(feature_cols)} features at cut {CUT}")
@@ -888,17 +958,18 @@ plot_persistence(
     entity=ENTITY,
     max_lag=10,
     decision_dates=DECISION_TIMES.to_list(),
-    title="Order flow decays fastest; only the state variables survive a rebalance",
+    title="Order flow is spent by the first rebalance; the state variables are not",
     subtitle=f"Within symbol-session, to 10 rebalances of the {DECISION_MINUTES}-minute schedule",
     alt=(
-        "Two panels. On the left, autocorrelation against lag in decision bars: the relative "
-        "spread and the thirty-minute realized volatility start near 0.8 and decay slowly, "
-        "staying above 0.3 at ten lags. Kyle's lambda sits between them. Both signed volume "
-        "share series fall to near zero by the second lag and stay there, the per-bar one "
-        "starting lower than the fifteen-minute one. The bootstrap ribbons are narrow "
-        "throughout. On the right, the cross-sectional rank correlation between consecutive "
-        "rebalances puts the relative spread highest near 0.95, the realized volatility and "
-        "Kyle's lambda below it, and both order-flow series near zero."
+        "Two panels. On the left, autocorrelation against lag in decision bars, one to ten. "
+        "Kyle's lambda and the thirty-minute realized volatility start above 0.8 at the first "
+        "lag and fall steeply, reaching zero by about the eighth. The relative spread starts "
+        "near 0.2 and decays gently to zero. Both order-flow series start at or below 0.05 "
+        "and stay flat along zero for every lag. The bootstrap ribbons are too narrow to "
+        "read. On the right, the cross-sectional rank correlation between consecutive "
+        "rebalances: Kyle's lambda, the realized volatility and the relative spread form a "
+        "tight group between about 0.75 and 0.85, the fifteen-minute signed volume share "
+        "reaches about 0.3, and the per-bar one is close to zero."
     ),
 )
 
@@ -952,10 +1023,16 @@ print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}, digest {record
 #   `05_evaluation`'s to price and the downstream models' to weight for; nothing here
 #   subsamples, because thinning the matrix would throw away the fast families it exists to
 #   carry.
-# - The vendor emits a padded 390-bar grid on early closes, so the six half-sessions in this
-#   window carry bars after the exchange had closed. The clock family is measured against the
-#   schedule and so reports them correctly, but they remain in the panel because the bar
-#   universe is `02_labels`'s to set and not this notebook's.
+# - `is_first_30m` is identically zero in the emitted matrix. The hour of warmup Kyle's
+#   lambda needs removes every bar the flag marks, so the opening block of the session - the
+#   busiest part of the U - is not representable here at all. The column is kept for the
+#   feature count Chapter 8 reports and Section E asserts that it is dead, but a model has 65
+#   usable features, not 66, and the open is a gap in what this matrix can condition on.
+# - The vendor emits a padded 390-bar grid on early closes, so the three half-sessions in
+#   this window - 2020-11-27, 2020-12-24 and 2021-11-26 - carry bars stamped after the
+#   exchange had closed. The clock family is measured against the schedule and so reports
+#   them correctly, but they remain in the panel because the bar universe is `02_labels`'s to
+#   set and not this notebook's.
 # - Trade location is assigned against the prevailing quote, so a bar whose quote was stale
 #   attributes its volume to a side rather than to neither. The staleness cap bounds how long
 #   that can persist; it does not undo it on the bars inside the cap.
