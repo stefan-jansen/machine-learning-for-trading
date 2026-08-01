@@ -78,7 +78,7 @@ from utils.style import (
     zero_line,
 )
 
-# %%
+# %% tags=["parameters"]
 N_PERIODS = 500
 N_ASSETS = 100
 N_CHARACTERISTICS = 10
