@@ -255,6 +255,76 @@ def _contiguous_groups(sorted_keys: np.ndarray) -> list[np.ndarray]:
     return np.split(np.arange(len(sorted_keys)), starts[1:])
 
 
+def block_permutation_null(
+    df: pl.DataFrame,
+    feature_col: str,
+    baseline_ic: float,
+    seed: int,
+    n_permutations: int,
+) -> tuple[np.ndarray, float, float]:
+    """Permutation null for a cross-sectional IC, blocked at the label horizon.
+
+    Shuffling assets independently on each date would imply the per-date ICs are
+    independent, so the null mean's spread would shrink like sigma/sqrt(n_dates).
+    The labels are LABEL_HORIZON-day forward returns sampled daily - consecutive
+    dates share all but one day of return - so both the returns and the per-date
+    ICs are strongly autocorrelated and the true spread is far larger. One asset
+    relabeling is therefore drawn per block of LABEL_HORIZON sessions and held
+    fixed across the block, exactly as ``05_signal_evaluation`` does.
+
+    Returns ``(null_ics, perm_p, perm_resolution)``. The p-value is
+    ``(r + 1) / (B + 1)``: a permutation p-value can never be exactly zero, since
+    the observed assignment is itself one of the arrangements under the null, and
+    with B permutations the finest resolvable value is ``1 / (B + 1)``.
+    """
+    perm_df = df.drop_nulls([feature_col, "forward_return"]).sort(["timestamp", "symbol"])
+    dates_arr = perm_df["timestamp"].to_numpy()
+    symbol_codes = perm_df["symbol"].cast(pl.Categorical).to_physical().to_numpy()
+    n_symbols = int(symbol_codes.max()) + 1
+    feat_arr_p = perm_df[feature_col].to_numpy()
+    ret_arr_p = perm_df["forward_return"].to_numpy()
+
+    # Ranks are invariant to relabeling, so pre-compute both sides once per date.
+    # Standardize them here too: a permutation changes neither a vector's mean nor its
+    # standard deviation, so the Spearman IC of a permuted pair is just the dot product
+    # of the two standardized rank vectors divided by n. That is identical to
+    # np.corrcoef to floating-point noise and about 17x faster, which matters because
+    # this loop runs n_permutations x n_dates times.
+    def _z(v: np.ndarray) -> np.ndarray | None:
+        sd = v.std()
+        return (v - v.mean()) / sd if sd > 0 else None
+
+    date_groups = [idx for idx in _contiguous_groups(dates_arr) if len(idx) >= 20]
+    feat_ranks, ret_ranks, syms_by_date = [], [], []
+    for idx in date_groups:
+        fz = _z(stats.rankdata(feat_arr_p[idx]))
+        rz = _z(stats.rankdata(ret_arr_p[idx]))
+        if fz is None or rz is None:
+            continue
+        feat_ranks.append(fz)
+        ret_ranks.append(rz)
+        syms_by_date.append(symbol_codes[idx])
+
+    rng = np.random.default_rng(seed)
+    null_ics = []
+    for _ in range(n_permutations):
+        ic_per_date = []
+        block_keys = None
+        for i, f_ranks in enumerate(feat_ranks):
+            # New relabeling only when a block boundary is crossed
+            if i % LABEL_HORIZON == 0:
+                block_keys = rng.permutation(n_symbols)
+            # Same key vector across the block => same asset->asset map across the block
+            order = np.argsort(block_keys[syms_by_date[i]], kind="stable")
+            ic_per_date.append(float(f_ranks @ ret_ranks[i][order]) / len(f_ranks))
+        if ic_per_date:
+            null_ics.append(np.mean(ic_per_date))
+
+    null_ics = np.array(null_ics)
+    n_at_least = int(np.sum(np.abs(null_ics) >= abs(baseline_ic)))
+    return null_ics, (n_at_least + 1) / (len(null_ics) + 1), 1.0 / (len(null_ics) + 1)
+
+
 def compute_cross_sectional_ic(
     df: pl.DataFrame, feature_col: str, outcome_col: str, min_obs: int = 20
 ) -> tuple[float, float, list[float]]:
@@ -322,12 +392,19 @@ for feat_col, feat_label in SCAN_FEATURES:
         _, _, ic_series = compute_cross_sectional_ic(sub, feat_col, hz_col)
         if len(ic_series) < 50:
             scan_rows.append(
-                {"feature": feat_label, "horizon": hz_label, "ic": np.nan, "t_hac": np.nan}
+                {
+                    "feature_col": feat_col,
+                    "feature": feat_label,
+                    "horizon": hz_label,
+                    "ic": np.nan,
+                    "t_hac": np.nan,
+                }
             )
             continue
         hac = compute_ic_hac_stats(ic_series, label_horizon=int(hz_label[:-1]))
         scan_rows.append(
             {
+                "feature_col": feat_col,
                 "feature": feat_label,
                 "horizon": hz_label,
                 "ic": round(hac["mean_ic"], 4),
@@ -469,6 +546,20 @@ fig.show()
 # spans $p_{t+6} - p_{t+1}$: the same five-day holding period, no shared endpoint,
 # and the more realistic execution assumption anyway, since a signal computed from
 # the day-$t$ close is traded at $t+1$.
+#
+# **What this check can and cannot settle.** Moving the label forward removes the
+# shared $p_t$, but it also removes the $t \to t+1$ return from the holding period,
+# and a genuine one-day reversal would concentrate its predictability in exactly
+# that first day. The two explanations - shared-endpoint noise, and a real effect
+# that lives in the first day and is not tradeable at $t+1$ - both predict the drop
+# we are about to see, and this test does not separate them. Distinguishing them
+# needs an independent price for day $t$: a quote midpoint rather than a last
+# trade, so that feature and label do not share the same print.
+#
+# What the check does establish is enough for the decision at hand. Either the cell
+# is arithmetic, or it is a real effect that vanishes the moment execution is
+# delayed by one day. Both make it unusable as a signal, and both mean the scan's
+# $t = 3.0$ overstates what a tradeable strategy would see.
 
 # %%
 shared_endpoint = analysis.with_columns(
@@ -500,15 +591,15 @@ display(pl.DataFrame(endpoint_rows))
 
 # %% [markdown]
 # Removing the shared endpoint takes the 1-day reversal hit from HAC $t \approx 2.9$
-# to $t \approx 1.6$ - from "significant" to not - on the same panel, the same dates
-# and the same five-day holding period. The only thing that changed is whether the
-# feature and the label are allowed to share the day-$t$ close.
+# to $t \approx 1.6$ - from "significant" to not - on the same panel and the same
+# five-day holding period, moved forward by one day.
 #
-# So the scan's short-horizon reversal cell is not evidence of a reversal effect. It
-# is the arithmetic of overlapping endpoints, and it is the reason the deep-dive
-# below treats 1-day reversal as a near-null baseline rather than as a signal to
-# explain. **The general rule: a feature ending at $t$ and a label beginning at $t$
-# share a price, and that alone will manufacture a t-statistic.**
+# So the scan's short-horizon reversal cell is not usable evidence of a reversal
+# effect, on either reading of the drop. That is why the deep-dive below treats
+# 1-day reversal as a near-null baseline rather than as a signal to explain.
+# **The general rule: a feature ending at $t$ and a label beginning at $t$ share a
+# price, and that alone will manufacture a t-statistic - so a cell that only exists
+# while they share one has to be re-measured before it is believed.**
 
 # %% [markdown]
 # ### Feature selection for diagnostic deep-dive
@@ -599,6 +690,27 @@ for feat_col, feat_label in FEATURES.items():
     )
     baseline[feat_col] = {"ic": ic, "t": t, "series": series, "hac": hac}
 
+
+# The BH decision for these same two cells is carried alongside the raw p-value.
+# Reporting a raw p here without it is what let this section call a cell
+# "significant" that Section 4's own grid-wide correction rejects.
+def _bh_for(feat_col: str) -> tuple[str, str]:
+    # Join on the feature column, not the display label. SCAN_FEATURES and FEATURES
+    # spell the same feature differently ("1d Reversal" vs "1-day Reversal"), so a
+    # label join silently returns "n/a" for one of the two features here - which is
+    # exactly the kind of quiet miss this table exists to prevent.
+    row = scan_df.filter(
+        (pl.col("feature_col") == feat_col) & (pl.col("horizon") == f"{LABEL_HORIZON}d")
+    )
+    if len(row) == 0:
+        raise KeyError(f"{feat_col} at {LABEL_HORIZON}d is not in the scan grid")
+    if row["q_bh"][0] is None:
+        return "n/a", "n/a"
+    return f"{row['q_bh'][0]:.4f}", "yes" if row["sig_bh"][0] else "no"
+
+
+_bh = {f: _bh_for(f) for f in FEATURES}
+
 print(
     pl.DataFrame(
         {
@@ -606,17 +718,32 @@ print(
             "mean_ic": [f"{baseline[f]['ic']:.4f}" for f in FEATURES],
             "t_naive": [f"{baseline[f]['t']:.2f}" for f in FEATURES],
             "t_hac": [f"{baseline[f]['hac']['t_stat']:.2f}" for f in FEATURES],
-            "p_hac": [f"{baseline[f]['hac']['p_value']:.4f}" for f in FEATURES],
+            "p_hac_raw": [f"{baseline[f]['hac']['p_value']:.4f}" for f in FEATURES],
+            "q_bh_grid": [_bh[f][0] for f in FEATURES],
+            "survives_bh": [_bh[f][1] for f in FEATURES],
         }
     )
 )
 
 # %% [markdown]
-# 12-1 momentum shows IC = 0.053 (HAC $t$ = 2.6, $p = 0.009$) - a statistically
-# significant cross-sectional signal. Reversal IC is indistinguishable from zero
-# (HAC $t$ = 0.4). The naive t-stat for momentum is higher because it ignores
-# autocorrelation in the IC series; the HAC correction is more conservative but
-# still significant.
+# 12-1 momentum has the largest IC in the grid and the smallest raw p-value of the
+# two features here, and it **does not survive the grid-wide BH correction** - the
+# `survives_bh` column says so, and Section 4 said so about the same cell. The raw
+# $p$ is a post-selection number: this feature and this horizon were chosen by
+# looking at the scan, so the 30 comparisons that produced the choice have to be
+# paid for, and BH is the bill. Reversal IC is indistinguishable from zero on any
+# reading.
+#
+# The naive t-stat for momentum is higher than the HAC one because it ignores
+# autocorrelation in the IC series. That correction and the multiplicity correction
+# are separate, and both apply: HAC widens the interval for one test, BH sets the
+# threshold that test has to clear given the other 29.
+#
+# The deep-dive continues on 12-1 momentum regardless, because the chapter needs a
+# worked example and this is the strongest candidate the scan produced. What it is
+# an example of is a **large effect at borderline significance** - which is the
+# ordinary situation in cross-sectional equity work, and a more useful thing to
+# demonstrate the diagnostics on than a clean winner would be.
 
 # %% [markdown]
 # ## 7. Reusable Diagnostic Functions
@@ -765,64 +892,9 @@ def run_shared_driver_check(
     tsy_pass = abs(t_tsy) < 2.0 if not np.isnan(t_tsy) else True
 
     # Permutation control: block permutation at the label horizon.
-    #
-    # Shuffling assets independently on each date would imply the per-date ICs are
-    # independent, so the null mean's spread would shrink like sigma/sqrt(n_dates).
-    # The labels are 21-day forward returns sampled daily - consecutive dates share
-    # 20 of 21 days of return - so both the returns and the per-date ICs are
-    # strongly autocorrelated and the true spread is far larger. We therefore draw
-    # one asset relabeling per block of LABEL_HORIZON sessions and hold it fixed
-    # across the block, exactly as 05_signal_evaluation does.
-    perm_df = df.drop_nulls([feature_col, "forward_return"]).sort(["timestamp", "symbol"])
-    dates_arr = perm_df["timestamp"].to_numpy()
-    symbol_codes = perm_df["symbol"].cast(pl.Categorical).to_physical().to_numpy()
-    n_symbols = int(symbol_codes.max()) + 1
-    feat_arr_p = perm_df[feature_col].to_numpy()
-    ret_arr_p = perm_df["forward_return"].to_numpy()
-
-    # Ranks are invariant to relabeling, so pre-compute both sides once per date.
-    # Standardize them here too: a permutation changes neither a vector's mean nor its
-    # standard deviation, so the Spearman IC of a permuted pair is just the dot product
-    # of the two standardized rank vectors divided by n. That is identical to
-    # np.corrcoef to floating-point noise and about 17x faster, which matters because
-    # this loop runs n_permutations x n_dates times.
-    def _z(v: np.ndarray) -> np.ndarray | None:
-        sd = v.std()
-        return (v - v.mean()) / sd if sd > 0 else None
-
-    date_groups = [idx for idx in _contiguous_groups(dates_arr) if len(idx) >= 20]
-    feat_ranks, ret_ranks, syms_by_date = [], [], []
-    for idx in date_groups:
-        fz = _z(stats.rankdata(feat_arr_p[idx]))
-        rz = _z(stats.rankdata(ret_arr_p[idx]))
-        if fz is None or rz is None:
-            continue
-        feat_ranks.append(fz)
-        ret_ranks.append(rz)
-        syms_by_date.append(symbol_codes[idx])
-
-    rng = np.random.default_rng(seed)
-    null_ics = []
-    for _ in range(n_permutations):
-        ic_per_date = []
-        block_keys = None
-        for i, f_ranks in enumerate(feat_ranks):
-            # New relabeling only when a block boundary is crossed
-            if i % LABEL_HORIZON == 0:
-                block_keys = rng.permutation(n_symbols)
-            # Same key vector across the block => same asset->asset map across the block
-            order = np.argsort(block_keys[syms_by_date[i]], kind="stable")
-            ic_per_date.append(float(f_ranks @ ret_ranks[i][order]) / len(f_ranks))
-        if ic_per_date:
-            null_ics.append(np.mean(ic_per_date))
-
-    null_ics = np.array(null_ics)
-    # (r + 1) / (B + 1): a permutation p-value can never be exactly zero - the
-    # observed assignment is itself one of the arrangements under the null. With B
-    # permutations the finest resolvable value is 1 / (B + 1).
-    n_at_least = int(np.sum(np.abs(null_ics) >= abs(baseline_ic)))
-    perm_p = (n_at_least + 1) / (len(null_ics) + 1)
-    perm_resolution = 1.0 / (len(null_ics) + 1)
+    null_ics, perm_p, perm_resolution = block_permutation_null(
+        df, feature_col, baseline_ic, seed=seed, n_permutations=n_permutations
+    )
     perm_signal = perm_p < 0.05
 
     metrics = {
@@ -839,15 +911,18 @@ def run_shared_driver_check(
 
     # The verdict is about the shared driver, and only the Treasury arm speaks to
     # that. The permutation control answers a different question - "is there any
-    # signal at all?" - so it is reported, not gated on. Requiring perm_signal here
-    # would mark a feature CAUTION for a *shared-driver* confound when its real
-    # problem is that it has no signal, which the timing check already reports.
-    if not tsy_pass:
-        result = "STOP"
-    elif not perm_signal:
-        result = "CAUTION"
-    else:
-        result = "PASS"
+    # signal at all?" - so it is reported beside the verdict and does not enter it.
+    #
+    # An earlier version said exactly that and then wrote `elif not perm_signal:
+    # result = "CAUTION"`, which is the gate the paragraph disclaims. It marked a
+    # feature CAUTION for a *shared-driver confound* when its real problem is
+    # having no signal to confound - a different finding, already reported by the
+    # permutation row and by the timing check.
+    #
+    # So PASS here means "not explained by the Treasury driver", which for a
+    # feature with no signal is true and uninformative. Read it with the
+    # permutation p beside it; neither number means anything alone.
+    result = "PASS" if tsy_pass else "STOP"
 
     return metrics, result
 
@@ -1170,20 +1245,18 @@ def _figure_7_10_regime(df: pl.DataFrame, feature_col: str) -> np.ndarray:
 
 def _figure_7_10_permutation(
     df: pl.DataFrame, feature_col: str, baseline_ic: float
-) -> tuple[np.ndarray, float]:
-    rng = np.random.default_rng(SEED)
-    perm_ics = []
-    for _ in range(N_PERMUTATIONS):
-        shuffled = df.with_columns(
-            pl.col(feature_col)
-            .shuffle(seed=rng.integers(0, 2**31))
-            .over("timestamp")
-            .alias("_shuf")
-        )
-        perm_ics.append(compute_cross_sectional_ic(shuffled, "_shuf", "forward_return")[0])
-    perm_ics_arr = np.array(perm_ics)
-    perm_p = float(np.mean(np.abs(perm_ics_arr) >= abs(baseline_ic)))
-    return perm_ics_arr, perm_p
+) -> tuple[np.ndarray, float, float]:
+    # Same null as the shared-driver check above, and for the same two reasons.
+    #
+    # This path used to draw its own: an independent within-date shuffle, scored
+    # with `np.mean(|null| >= |observed|)`. Both are the defects §4 corrects - the
+    # iid null is roughly an order of magnitude too narrow against overlapping
+    # labels, and the plain proportion can return exactly 0, which no permutation
+    # test can resolve. It mattered more here than anywhere else in the notebook,
+    # because this p-value is what the published figure reports.
+    return block_permutation_null(
+        df, feature_col, baseline_ic, seed=SEED, n_permutations=N_PERMUTATIONS
+    )
 
 
 def write_figure_7_10_artifact() -> Path:
@@ -1191,12 +1264,19 @@ def write_figure_7_10_artifact() -> Path:
     for feature_col in FIGURE_7_10_FEATURES:
         sub = analysis.drop_nulls(subset=[feature_col, "forward_return", "vixcls"])
         baseline_ic = compute_cross_sectional_ic(sub, feature_col, "forward_return")[0]
-        perm_ics, perm_p = _figure_7_10_permutation(sub, feature_col, baseline_ic)
+        perm_ics, perm_p, perm_resolution = _figure_7_10_permutation(sub, feature_col, baseline_ic)
         artifact_data[f"baseline__{feature_col}"] = baseline_ic
         artifact_data[f"timing__{feature_col}"] = _figure_7_10_timing(sub, feature_col)
         artifact_data[f"regime__{feature_col}"] = _figure_7_10_regime(sub, feature_col)
         artifact_data[f"perm__{feature_col}"] = perm_ics
         artifact_data[f"perm_p__{feature_col}"] = perm_p
+        # The floor travels with the value: a figure caption quoting p without it
+        # cannot tell a measurement from the smallest number B can express.
+        artifact_data[f"perm_resolution__{feature_col}"] = perm_resolution
+        print(
+            f"  {feature_col}: permutation p={perm_p:.4f} "
+            f"(B={N_PERMUTATIONS}, finest resolvable p={perm_resolution:.4f})"
+        )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     artifact = OUTPUT_DIR / "figure_7_10_inputs.npz"
