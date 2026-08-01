@@ -101,7 +101,7 @@ MAX_SYMBOLS = 0
 # %% [markdown]
 # ## 1. Load Data
 #
-# Load from the canonical data loader and apply the same eligibility screen as
+# Load from the canonical data loader and declare the same eligibility screen as
 # [`02_labels`](02_labels.ipynb): a printed close above \$5, and dollar volume
 # `close * volume` averaging above \$1M over the previous 21 sessions. Both legs
 # read figures the tape carried on the day, so neither depends on a corporate
@@ -109,6 +109,12 @@ MAX_SYMBOLS = 0
 # derives why the adjusted close cannot serve here. Both notebooks rebuild the
 # screen from the same three constants on the same columns, so the trainable
 # panel and the label files agree on the universe.
+#
+# **Declared here, applied in Section 6.** The screen removes whole rows, and a
+# per-symbol shift or rolling window applied afterwards counts the rows that
+# survived rather than trading sessions. Section 6 states what that costs and
+# applies the screen between the per-symbol features and the cross-sectional
+# ones, which is the only ordering that gives both their intended meaning.
 #
 # Returns and every price-derived feature below still read `adj_close`: a return
 # has to divide out splits and dividends to mean anything.
@@ -132,14 +138,17 @@ raw_df = raw_df.with_columns(
     (pl.col("close") * pl.col("volume")).alias("dollar_volume"),
 )
 
-# Apply PIT eligibility filters
 raw_df = raw_df.with_columns(
     pl.col("dollar_volume").rolling_mean(ADV_WINDOW).over("symbol").alias("adv_21d")
 )
-df = raw_df.filter((pl.col("close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD))
 
-print(f"Loaded {len(df):,} rows, {df['symbol'].n_unique()} symbols")
-print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
+# The screen is declared here and applied in Section 6, between the per-symbol
+# features and the cross-sectional ones. It is not applied yet, and that ordering
+# is the point: see Section 6.
+ELIGIBLE = (pl.col("close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD)
+
+print(f"Loaded {len(raw_df):,} rows, {raw_df['symbol'].n_unique()} symbols")
+print(f"Date range: {raw_df['timestamp'].min()} to {raw_df['timestamp'].max()}")
 
 # %% [markdown]
 # ## 2. Momentum and Volatility Features
@@ -368,45 +377,48 @@ def compute_xs_ranks(data: pl.DataFrame) -> pl.DataFrame:
 
 
 # %%
-def compute_liquidity_reversion(data: pl.DataFrame) -> pl.DataFrame:
-    """Liquidity measures, Amihud illiquidity, reversion signals, and size proxy."""
-    # Liquidity features
+def compute_rolling_liquidity(data: pl.DataFrame) -> pl.DataFrame:
+    """Per-symbol liquidity measures. Rolling, so the complete series."""
     data = data.with_columns((pl.col("dollar_volume") / pl.col("adv_21d")).alias("volume_ratio"))
-    data = data.with_columns(
-        (
-            pl.col("adv_21d").rank().over("timestamp") / pl.col("adv_21d").count().over("timestamp")
-        ).alias("liq_rank")
-    )
-    # Amihud illiquidity: |return| / dollar_volume (rolling 21-day mean)
+    # Amihud illiquidity: |return| / dollar_volume (rolling 21-session mean)
     data = data.with_columns(
         (pl.col("returns").abs() / (pl.col("dollar_volume") + 1))
         .rolling_mean(21)
         .over("symbol")
         .alias("amihud_illiq")
     )
-    data = data.with_columns(
+    return data
+
+
+# %% [markdown]
+# The ranks below are the cross-sectional half of the same block, and they run on
+# the eligible frame: a rank is only meaningful against the names the strategy
+# could actually have sorted on that day.
+
+
+# %%
+def compute_xs_liquidity_reversion(data: pl.DataFrame) -> pl.DataFrame:
+    """Cross-sectional ranks of the liquidity, reversion, and size signals."""
+    return data.with_columns(
+        (
+            pl.col("adv_21d").rank().over("timestamp") / pl.col("adv_21d").count().over("timestamp")
+        ).alias("liq_rank"),
         (
             pl.col("amihud_illiq").rank().over("timestamp")
             / pl.col("amihud_illiq").count().over("timestamp")
-        ).alias("illiq_rank")
-    )
-    # Mean reversion signals
-    data = data.with_columns(
+        ).alias("illiq_rank"),
         (
             pl.col("ret_5d").rank().over("timestamp") / pl.col("ret_5d").count().over("timestamp")
         ).alias("reversal_rank"),
         (
             pl.col("rsi_14").rank().over("timestamp") / pl.col("rsi_14").count().over("timestamp")
         ).alias("rsi_rank"),
-    )
-    # Size proxy (log dollar volume rank as mcap proxy)
-    data = data.with_columns(
+        # Size proxy (log dollar volume rank as mcap proxy)
         (
             pl.col("adv_21d").log().rank().over("timestamp")
             / pl.col("adv_21d").log().count().over("timestamp")
-        ).alias("size_rank")
+        ).alias("size_rank"),
     )
-    return data
 
 
 # %% [markdown]
@@ -486,13 +498,28 @@ def winsorize_features(
 
 # %%
 print("Computing features...")
-df = df.pipe(compute_momentum_returns).pipe(compute_volatility_sharpe)
+
+# Every per-symbol feature is a shift or a rolling window `.over("symbol")`, and
+# those count rows. On the screened frame they would count *eligible* rows rather
+# than trading sessions, so a stock that drops below a threshold and recovers
+# would carry windows spanning the whole excursion: `ret_12m_skip` would reach
+# back 252 eligible rows, which can be years. So they run on the complete series.
+# `02_labels` Section B makes this argument for the forward window; this is the
+# backward-looking half of it, and the two have to agree on what a session is.
+raw_df = raw_df.pipe(compute_momentum_returns).pipe(compute_volatility_sharpe)
 print("  Momentum and volatility done")
 
-df = df.pipe(compute_oscillators).pipe(compute_trend_distance)
+raw_df = raw_df.pipe(compute_oscillators).pipe(compute_trend_distance)
 print("  Technical indicators done")
 
-df = df.pipe(compute_xs_ranks).pipe(compute_liquidity_reversion).pipe(compute_composites)
+raw_df = raw_df.pipe(compute_rolling_liquidity)
+print("  Rolling liquidity done")
+
+# The screen is applied here, between the two kinds of feature.
+df = raw_df.filter(ELIGIBLE)
+print(f"  Eligible: {df.height:,} of {raw_df.height:,} rows, {df['symbol'].n_unique()} stocks")
+
+df = df.pipe(compute_xs_ranks).pipe(compute_xs_liquidity_reversion).pipe(compute_composites)
 print("  Cross-sectional ranks and composites done")
 
 # %% [markdown]
@@ -632,7 +659,7 @@ print(f"Saved {n_features} features to {output_path}")
 #   in the IC time series
 # - **BH-FDR**: Benjamini-Hochberg false discovery rate correction for multiple
 #   testing across all features
-# - **Fundamental Law of Active Management**: With ~3,164 stocks, even tiny ICs
+# - **Fundamental Law of Active Management**: With ~3,177 stocks, even tiny ICs
 #   compound into significant portfolio-level IR
 # - **Pairwise correlation**: Identify redundant feature pairs (|corr| > 0.7)
 
@@ -855,7 +882,7 @@ if ic_results:
 
 # %% [markdown]
 # **Interpretation**:
-# - With ~3,164 stocks the Fundamental Law is the key insight: even ICs of
+# - With ~3,177 stocks the Fundamental Law is the key insight: even ICs of
 #   0.01-0.02 generate portfolio-level $IR \approx 0.5\text{--}1.0$ because
 #   $IR = IC \cdot \sqrt{BR}$ and breadth is enormous.
 # - HAC adjustment should be minimal (inflation factor ~1.0x) because 1-day
@@ -868,8 +895,8 @@ if ic_results:
 #   clustering recommended before modeling.
 #
 # **Fundamental Law teaching moment**: This is the book's highest-breadth
-# case study. A mean IC of just 0.01 across 3,164 stocks implies
-# $IR = 0.01 \times \sqrt{3164} \approx 0.56$ -- competitive with many
+# case study. A mean IC of just 0.01 across 3,177 stocks implies
+# $IR = 0.01 \times \sqrt{3177} \approx 0.56$ -- competitive with many
 # hedge fund strategies. The lesson: in large cross-sections, signal
 # quality matters less than signal consistency and cost control.
 
