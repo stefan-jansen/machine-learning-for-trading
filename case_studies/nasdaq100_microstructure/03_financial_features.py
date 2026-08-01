@@ -1,12 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
-#     cell_metadata_filter: -all
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -16,1092 +16,948 @@
 # %% [markdown]
 # # NASDAQ-100 Microstructure: Feature Engineering
 #
-# **Chapter 8: Feature Engineering**
+# A minute bar of AlgoSeek data carries something a daily bar cannot: the state of the
+# order book at the close of the bar, and the side of it that the session's trades
+# crossed. This notebook turns those two into a feature matrix - what liquidity costs,
+# which way flow is leaning, how far that flow moves the price, and where in the session
+# the bar sits - states the window and the delay each family carries, and shows that
+# nothing in it reads a quote dated at or after the decision.
 #
-# This notebook engineers intraday microstructure features from AlgoSeek minute
-# bar data. Four feature families capture complementary aspects of market quality:
-# liquidity state (quotes), order flow direction (trades), volatility/impact
-# (price dynamics), and hidden liquidity regime (FINRA).
+# The frame is what makes this case study different from the daily ones. Every window is
+# bounded by the **symbol-session**, never by the symbol alone, so no statistic spans an
+# overnight gap; and every cross-sectional statistic is taken over the 114 names quoted in
+# **that one minute**, which is the cross-section a decision is actually taken over.
 #
-# **Learning Objectives**:
-# - Build quote-based liquidity features (midprice, spread, depth imbalance)
-# - Construct order flow proxies (signed volume, tick imbalance, microprice deviation)
-# - Compute volatility and impact features (realized vol, Kyle's lambda, Amihud)
-# - Engineer multi-resolution features (1-bar, 5-bar, 15-bar, 60-bar)
-# - Apply cross-sectional normalization to remove market-wide effects
+# ## Learning objectives
 #
-# **Feature Families**:
+# - Build quote, order-flow, impact and regime families from a raw microstructure schema,
+#   and say which of them is a signal and which describes the state it is read in
+# - Bound every trailing window by the session, so a window never reaches across a night
+# - Measure the session against the exchange's **scheduled** close rather than against the
+#   bar count the session turned out to have, which is not knowable until it is over
+# - Lag an input that is published late, rather than assuming a one-minute bar is coarse
+#   enough to absorb the delay
+# - Show that withholding later dates leaves every feature value unchanged, which is what
+#   separates a trailing statistic from one fitted over the whole sample
 #
-# | Family | Description | Count | Signal Decay |
-# |--------|-------------|-------|--------------|
-# | A: Quote Liquidity | Spread, depth imbalance, microprice, staleness | ~10 | Medium |
-# | B: Order Flow | Signed volume, tick imbalance, trade-to-mid | ~12 | Fast |
-# | C: Volatility/Impact | RV, Amihud, Kyle's lambda | ~12 | Medium |
-# | D: FINRA Regime | Dark pool share | ~2 | Slow |
-# | E: Calendar | Time-of-day, session position | ~4 | Deterministic |
+# ## Book reference, prerequisites and artifacts
 #
-# **Output Contract**:
-# - `features/financial.parquet` — ML-ready feature matrix
-#
-# **Cross-References**:
-# - **Upstream**: Ch7 ([`02_labels`](02_labels.ipynb) for prices), Ch3 (AlgoSeek data)
-# - **Downstream**: Ch9 (`04_temporal.py`), Ch11+ (models)
+# Chapter 8, Sections 8.1-8.6. Reads AlgoSeek NASDAQ-100 minute bars with the full NBBO and
+# trade-location schema through `load_nasdaq100_bars()`, whose coverage
+# [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) establishes, and
+# `config/setup.yaml`, which declares the register, every window, the calendar and the
+# holdout boundary. Writes `features/financial.parquet` with a `.digest.json` sidecar,
+# read by [`04_model_based_features`](04_model_based_features.ipynb), which adds HAR,
+# spectral and path-signature features on top of it, and by
+# [`05_evaluation`](05_evaluation.ipynb), which tests fold by fold whether any of it
+# predicts. No screen for predictive content runs here: `05_evaluation` owns it and runs it
+# fold-aware.
 
 # %%
-"""NASDAQ-100 Microstructure: Feature Engineering (Ch8)."""
+"""NASDAQ-100 Microstructure: Feature Engineering."""
 
-import itertools
 import warnings
-from datetime import UTC, datetime
+from datetime import date
 
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
 import polars as pl
-from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
-from ml4t.diagnostic.metrics import compute_ic_hac_stats
+import yaml
+from ml4t.diagnostic.splitters.calendar import TradingCalendar
+from ml4t.engineer.features.microstructure import amihud_illiquidity
 
+from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.feature_engineering import (
+    EPS,
+    assert_values_agree,
+    assign_families,
+    families_from_config,
+    family_coverage,
+    plot_coverage_through_time,
+    plot_cross_sectional_dispersion,
+    plot_feature_distributions,
+    plot_persistence,
+    plot_redundancy_clusters,
+    plot_timing_contract,
+    register_frame,
+    warmup_audit,
+)
 from data import load_nasdaq100_bars
-from utils.paths import get_case_study_dir
+from utils.paths import display_path, get_case_study_dir
 
 warnings.filterwarnings("ignore")
 
-# %% tags=["parameters"]
 CASE_STUDY_ID = "nasdaq100_microstructure"
-START_DATE = "2020-01-01"
-END_DATE = "2021-12-31"
-MAX_SYMBOLS = 0
-
-# %%
-# Configuration
-CASE_DIR = get_case_study_dir("nasdaq100_microstructure")
+CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 FEATURES_DIR = CASE_DIR / "features"
 
-# In TEST mode, limit to top 10 most liquid symbols for speed
-N_SYMBOLS_TEST = 10
+# %% [markdown]
+# All three parameters are read below and all three shorten a run at the cost of a thinner
+# panel. `MAX_SYMBOLS` keeps a seed-deterministic subset of the universe; the two dates trim
+# the history. Every cross-sectional statistic in Section C ranks within one minute across
+# the whole universe, so a capped run computes a different quantity rather than a smaller
+# one - which is why CI reads the matrix for shape and never for a value.
+
+# %% tags=["parameters"]
+MAX_SYMBOLS = 0
+START_DATE = "2020-01-01"
+END_DATE = "2021-12-31"
 
 # %% [markdown]
-# ## 1. Load and Prepare Data
+# ## Configuration
 #
-# Load minute bars with full microstructure fields. Filter to regular trading
-# hours (09:30-16:00 ET) and sort for time-series operations.
+# The register, every window, the calendar and the holdout boundary are declared in
+# `config/setup.yaml` and bound here. A window retyped into a cell is a second source of
+# truth for a decision that the register, the warmup assertion and the timing figure all
+# have to agree on, and the two copies drift apart the first time either is edited.
+#
+# The decision cadence is what the persistence figure is measured against: a feature has to
+# hold its ordering for at least one rebalance to be tradable at that cadence, and this
+# strategy rebalances on the 15-minute grid the configuration declares.
 
 # %%
-df = load_nasdaq100_bars(
-    start_date=START_DATE,
-    end_date=END_DATE,
-    include_microstructure=True,
+setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+FEATURES = setup["features"]
+FAMILIES = families_from_config(setup)
+W = FEATURES["windows"]
+CARRIER = FEATURES["carrier"]
+HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
+DECISION_MINUTES = int(setup["decision"]["bar_frequency"].removesuffix("_minute"))
+CALENDAR = setup["evaluation"]["calendar"]
+
+# The panel key, the entity every trailing window is bounded by, and the partition every
+# cross-sectional statistic is taken over.
+PANEL_KEY = ["symbol", "timestamp"]
+ENTITY = ["symbol", "session_date"]
+WITHIN_MINUTE = "timestamp"
+
+print(f"{len(FAMILIES)} declared families, carrier {CARRIER}, decision grid {DECISION_MINUTES}min")
+print(f"Holdout starts {HOLDOUT_START}; Section D rebuilds the matrix without it")
+
+# %% [markdown]
+# ## A. What the thesis says should carry information
+#
+# The hypothesis is short-horizon and it is about pressure rather than value: over the next
+# fifteen minutes a NASDAQ-100 name drifts in the direction the last few minutes of
+# aggressive volume have been pushing it, and the drift is small enough that what it costs
+# to act on it decides whether anything is left. Three things follow.
+#
+# The **carrier** is order-flow imbalance measured over one decision bar. It is signed
+# volume as a share of volume, so it is scale-free and a mega-cap and a mid-cap can sit in
+# one ordering; it is also this case study's causal treatment, which is why the same
+# quantity is carried at four resolutions rather than one.
+#
+# The **conditioning** is everything about the environment the carrier is read in: what the
+# round trip costs, how deep the book is, how far a given quantity of flow moves the price,
+# how much of the session is printing away from the exchanges, and where in the session the
+# bar sits. None of these is expected to rank names on its own, which is what the register's
+# `role` column records and what no assertion can recover from the values.
+#
+# The **frame** is the symbol-session for every trailing window and the single minute for
+# every cross-sectional one. A spread is not comparable between AAPL and ALGN, so each level
+# is carried beside its z-score within the minute, and the register claims both under one
+# family because they are one hypothesis on two scales.
+#
+# The register is declared in `config/setup.yaml`, one row per family. Every lag in it is
+# zero except the FINRA family's, for the reason Section B gives.
+
+# %%
+register_frame(FAMILIES).select(
+    ["family", "role", "inputs", "lookback (bars)", "lag (bars)", "frame"]
 )
 
-# Filter to regular trading hours
-df = df.filter(
-    (pl.col("timestamp").dt.hour() >= 10)
-    | ((pl.col("timestamp").dt.hour() == 9) & (pl.col("timestamp").dt.minute() >= 30))
+# %% [markdown]
+# ## B. Inputs and their observability
+#
+# Each row is one symbol and one minute of one session. Of the sixty columns the raw
+# AlgoSeek schema carries, sixteen are read; projecting at the scan is what keeps a
+# full-universe run inside a few gigabytes rather than the twenty-eight the whole schema
+# costs. Regular hours only - the pre-market and after-hours books are thin enough that
+# their quotes describe a different market.
+#
+# **Two inputs are not knowable at the bar they are stamped with, and each is handled here
+# rather than downstream.**
+#
+# A quote with `nbbo_quote_count == 0` is a bar in which the NBBO never updated, so the
+# prices on it are carried forward from whenever it last did. One such bar is harmless; a
+# run of them turns a stale spread into a live-looking one and reports a calm book exactly
+# where the book has stopped. Quote-derived columns are nulled beyond the configured run of
+# consecutive stale bars, which is the single data policy the rest of the notebook inherits.
+#
+# FINRA/TRF prints are reported with a delay of up to ten seconds. A print executed in the
+# last seconds of a bar can therefore be attributed to that bar while still being unpublished
+# at its close, so the share is **lagged by one bar** before it is smoothed. On a
+# sixty-minute average the lag costs nothing; without it the family's most recent input is
+# one nobody had.
+
+# %%
+_hour, _minute = pl.col("timestamp").dt.hour(), pl.col("timestamp").dt.minute()
+REGULAR_HOURS = ((_hour > 9) | ((_hour == 9) & (_minute >= 30))) & (_hour < 16)
+READ = [
+    "timestamp",
+    "symbol",
+    "close_bid_price",
+    "close_ask_price",
+    "close_bid_size",
+    "close_ask_size",
+    "nbbo_quote_count",
+    "high_trade_price",
+    "low_trade_price",
+    "high_ask_price",
+    "low_bid_price",
+    "vwap",
+    "volume",
+    "total_trades",
+    "finra_volume",
+    "trade_at_bid",
+    "trade_at_bid_mid",
+    "trade_at_mid_ask",
+    "trade_at_ask",
+    "trade_at_cross",
+    "uptick_volume",
+    "downtick_volume",
+    "repeat_uptick_volume",
+    "repeat_downtick_volume",
+    "trade_to_mid_vol_weight_rel",
+]
+
+bars = (
+    load_nasdaq100_bars(
+        start_date=START_DATE,
+        end_date=END_DATE,
+        include_microstructure=True,
+        max_symbols=MAX_SYMBOLS,
+        lazy=True,
+    )
+    .select(READ)
+    .filter(REGULAR_HOURS)
+    .with_columns(pl.col("timestamp").dt.date().alias("session_date"))
+    .collect()
+    .sort([*ENTITY, "timestamp"])
 )
-df = df.filter(pl.col("timestamp").dt.hour() < 16)
 
-# Optionally restrict universe for TEST mode
-# Sort and add session_date
-df = df.sort(["symbol", "timestamp"])
-df = df.with_columns(pl.col("timestamp").dt.date().alias("session_date"))
-
-print(f"Loaded {len(df):,} minute bars")
-print(f"Symbols: {df['symbol'].n_unique()}, Sessions: {df['session_date'].n_unique()}")
-
-# %% [markdown]
-# ### Feature Resolution vs Label Horizon
-#
-# The feature matrix is at **1-minute resolution** (~13.8M rows) while the
-# primary label `fwd_ret_15m` spans 15 minutes. This creates ~15x overlap: each
-# 15-minute return is predicted by 15 consecutive feature rows. The IC
-# evaluation below samples every 15th timestamp to approximate independent
-# observations. Downstream models should use similar subsampling or account
-# for label overlap (e.g., sample weights or block bootstrap).
-
-# %% [markdown]
-# ### Staleness Handling: 5-Bar Forward-Fill Cap
-#
-# NBBO quotes with `NBBOQuoteCount == 0` are carry-forward bars. The loader
-# may indefinitely forward-fill stale quotes, contaminating midprice, spread,
-# and microprice during extended stale periods. We cap forward-fill at 5 bars:
-# beyond that, quote-derived features are set to null.
-
-# %%
-# Implement 5-bar forward-fill cap for stale quotes
-if "nbbo_quote_count" in df.columns:
-    # Count consecutive stale bars per symbol-session
-    df = df.with_columns(
-        _stale=(pl.col("nbbo_quote_count") == 0).cast(pl.Int32),
-    )
-    df = df.with_columns(
-        _stale_run=pl.col("_stale").rolling_sum(window_size=6).over(["symbol", "session_date"]),
-    )
-
-    # Null out quote-derived columns where staleness exceeds 5 consecutive bars
-    quote_derived = [
-        "close_bid_price",
-        "close_ask_price",
-        "close_bid_size",
-        "close_ask_size",
-    ]
-    quote_cols_present = [c for c in quote_derived if c in df.columns]
-
-    n_capped = int(df.filter(pl.col("_stale_run") > 5).shape[0])
-    df = df.with_columns(
-        [
-            pl.when(pl.col("_stale_run") > 5).then(None).otherwise(pl.col(c)).alias(c)
-            for c in quote_cols_present
-        ]
-    )
-    df = df.drop(["_stale", "_stale_run"])
-    pct_capped = 100 * n_capped / len(df)
-    print(
-        f"Staleness cap: {n_capped:,} bars ({pct_capped:.3f}%) had >5 consecutive stale quotes → nulled"
-    )
-else:
-    print("No nbbo_quote_count column — skipping staleness cap")
-
-# %% [markdown]
-# ## 2. Family A: Quote-Based Liquidity and Microprice
-#
-# Features capturing the state of liquidity from NBBO quotes. Midprice and
-# microprice provide fair value estimates; spread captures transaction costs;
-# depth imbalance measures order book pressure.
+LOADER_COLS = {*READ, "session_date"}
+print(f"{bars.height:,} regular-hours bars, {bars['symbol'].n_unique()} symbols")
+print(
+    f"{bars['session_date'].n_unique():,} sessions, {bars['timestamp'].min()} to {bars['timestamp'].max()}"
+)
 
 
 # %%
-def compute_quote_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Compute quote-based liquidity features (Family A).
+QUOTE_COLS = ["close_bid_price", "close_ask_price", "close_bid_size", "close_ask_size"]
 
-    - mid_close: Fair value (bid+ask)/2
-    - micro_close: Depth-weighted fair value (shifts toward thin side)
-    - microprice_dev: Microprice - midprice deviation (the informative signal)
-    - rel_spread_close: Relative spread (transaction cost proxy)
-    - depth_imb: (BidSize - AskSize) / (BidSize + AskSize)
-    - quote_rate: NBBO quote updates per minute
-    - staleness_flag: 1 if NBBOQuoteCount=0 (carry-forward bar)
-    - avg_spread_tw: Time-weighted average spread
-    - spread_range: Max - Min spread in bar
+
+def cap_stale_quotes(df: pl.DataFrame) -> pl.DataFrame:
+    """Null the quote sides once the NBBO has failed to update for too many bars.
+
+    The run length is a trailing count within the symbol-session, so a bar is judged on
+    the bars before it and never on the bars after it.
     """
-    exprs = []
-
-    # Midprice
-    exprs.append(((pl.col("close_bid_price") + pl.col("close_ask_price")) / 2).alias("mid_close"))
-
-    # Relative spread
-    mid = (pl.col("close_bid_price") + pl.col("close_ask_price")) / 2
-    exprs.append(
-        ((pl.col("close_ask_price") - pl.col("close_bid_price")) / (mid + 1e-8)).alias(
-            "rel_spread_close"
-        )
+    cap = W["stale_cap"]
+    run = (pl.col("nbbo_quote_count") == 0).cast(pl.Int32).rolling_sum(cap + 1).over(ENTITY)
+    return df.with_columns(run.alias("_stale_run")).with_columns(
+        pl.when(pl.col("_stale_run") > cap).then(None).otherwise(pl.col(c)).alias(c)
+        for c in QUOTE_COLS
     )
-
-    # Microprice (depth-weighted)
-    total_depth = pl.col("close_bid_size") + pl.col("close_ask_size")
-    exprs.append(
-        (
-            (
-                pl.col("close_ask_price") * pl.col("close_bid_size")
-                + pl.col("close_bid_price") * pl.col("close_ask_size")
-            )
-            / (total_depth + 1e-8)
-        ).alias("micro_close")
-    )
-
-    # Depth imbalance (scale-free)
-    exprs.append(
-        ((pl.col("close_bid_size") - pl.col("close_ask_size")) / (total_depth + 1e-8)).alias(
-            "depth_imb"
-        )
-    )
-
-    # Quote rate and staleness
-    exprs.append(pl.col("nbbo_quote_count").alias("quote_rate"))
-    exprs.append(
-        pl.when(pl.col("nbbo_quote_count") == 0).then(1).otherwise(0).alias("staleness_flag")
-    )
-
-    # Time-weighted spread
-    if "time_weight_bid" in df.columns and "time_weight_ask" in df.columns:
-        exprs.append((pl.col("time_weight_ask") - pl.col("time_weight_bid")).alias("avg_spread_tw"))
-
-    # Spread range
-    if "min_spread" in df.columns and "max_spread" in df.columns:
-        exprs.append((pl.col("max_spread") - pl.col("min_spread")).alias("spread_range"))
-
-    df = df.with_columns(exprs)
-
-    # Microprice deviation (the informative feature, per Stoikov 2018)
-    df = df.with_columns(
-        microprice_dev=(pl.col("micro_close") - pl.col("mid_close")),
-    )
-
-    return df
 
 
 # %%
-df = compute_quote_features(df)
-
-# Verify staleness rate
-stale_pct = df["staleness_flag"].mean() * 100
-print(f"Family A features computed. Staleness rate: {stale_pct:.2f}%")
+_capped = cap_stale_quotes(bars)["_stale_run"]
+print(
+    f"Staleness cap: {(_capped > W['stale_cap']).sum():,} bars "
+    f"({(_capped > W['stale_cap']).mean():.3%}) ran more than {W['stale_cap']} stale quotes"
+)
 
 # %% [markdown]
-# ## 3. Family B: Order Flow Proxies
+# The session's length is taken from the exchange calendar rather than from the bars. Both
+# answers agree on a full session and they do not agree on an early close: the vendor emits
+# a padded 390-bar grid on every date, so a half-session's realized bar count says 390 where
+# the exchange closed after 210. Counting from the schedule is also the only form of the
+# quantity a trader had at the open, which is the property Section D.1 turns on.
+
+# %%
+_schedule = TradingCalendar(CALENDAR).calendar.schedule(start_date=START_DATE, end_date=END_DATE)
+sessions = pl.DataFrame(
+    {
+        "session_date": [d.date() for d in _schedule.index],
+        "session_bars": (
+            (_schedule["market_close"] - _schedule["market_open"]).dt.total_seconds() // 60
+        ).astype("int32"),
+    }
+)
+SHORT = sessions.filter(pl.col("session_bars") < sessions["session_bars"].max())
+print(f"{sessions.height} scheduled sessions, {SHORT.height} of them early closes")
+print(f"scheduled lengths in bars: {sorted(sessions['session_bars'].unique().to_list())}")
+
+# %% [markdown]
+# ## C. Feature construction
 #
-# Order flow features capture the direction and intensity of liquidity demand.
-# Signed volume uses trade location buckets (at-bid vs at-ask) to infer
-# aggressive buying vs selling.
+# ### C.1 Quote liquidity and the microprice
+#
+# The midpoint of the closing NBBO is the fair value a return is taken between, the spread
+# relative to it is the round trip a signal has to clear, and the depth-weighted price -
+# the microprice - leans toward the thin side of the book. Its **deviation** from the
+# midpoint is the informative quantity rather than its level (Stoikov, 2018): the level is
+# a price and moves with the stock, the deviation is a pressure and does not.
+#
+# Every ratio takes the shared denominator guard rather than a locally invented one. Five
+# different guards shipped across the nine case studies, which made otherwise identical
+# features incomparable.
 
 
 # %%
-def compute_order_flow_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Compute order flow features (Family B).
+def quote_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Cost, depth and pressure, read off the closing NBBO of each bar."""
+    bid, ask = pl.col("close_bid_price"), pl.col("close_ask_price")
+    bid_size, ask_size = pl.col("close_bid_size"), pl.col("close_ask_size")
+    mid = (bid + ask) / 2
+    depth = (bid_size + ask_size).clip(lower_bound=EPS)
+    micro = (ask * bid_size + bid * ask_size) / depth
+    return df.with_columns(
+        mid.alias("mid_close"),
+        ((ask - bid) / mid.clip(lower_bound=EPS)).alias("rel_spread_close"),
+        (micro - mid).alias("microprice_dev"),
+        ((bid_size - ask_size) / depth).alias("depth_imb"),
+        pl.col("nbbo_quote_count").cast(pl.Float64).alias("quote_rate"),
+    )
 
-    - signed_vol: Net aggressive volume (at-ask minus at-bid)
-    - signed_vol_share: signed_vol / volume (normalized)
-    - tick_imb_vol: Uptick - downtick volume
-    - tick_imb_share: tick_imb_vol / volume
-    - trade_to_mid_rel: Volume-weighted trade-to-mid relative (from AlgoSeek)
-    - trades_per_1k_shares: Trade fragmentation proxy
-    - cross_locked_share: Volume during crossed/locked states
-    """
-    vol_clip = pl.col("volume").clip(lower_bound=1)
 
-    # Signed volume (aggressive trades)
-    signed_vol = (pl.col("trade_at_ask") + pl.col("trade_at_mid_ask")) - (
+# %% [markdown]
+# ### C.2 Order flow
+#
+# AlgoSeek reports each bar's volume split by where the trade printed against the prevailing
+# quote, which is what makes a signed volume possible without a tick rule. Volume that
+# crossed at or above the midpoint was buyer-initiated and volume at or below it was
+# seller-initiated; the difference is aggressive net demand, and dividing it by the volume
+# it was measured over makes a share that ranks across the universe. The tick imbalance asks
+# the same question of the direction of successive prints rather than of their location.
+#
+# **Which volume it is divided by is the whole of whether the result is a share.** The
+# location and tick buckets cover every trade in the bar, including the ones reported to the
+# FINRA/TRF rather than to an exchange, while `volume` counts the exchange prints alone: the
+# six location buckets sum to `volume + finra_volume` on every bar of this panel, and to
+# `volume` on 1.7 percent of them. `total_trades` counts on the same basis - a bar with no
+# exchange volume and a TRF print still reports trades. Dividing by `volume` therefore
+# divides a total by a part, which is why the version this notebook shipped ran outside
+# $[-1, 1]$ on nearly a tenth of its bars and reached a magnitude of 340,000 where a bar's
+# exchange volume was small and its off-exchange volume was not. The assertion below is what
+# makes that a failure rather than a scale.
+
+
+# %%
+# The volume every share in this family is a share *of*: the exchange prints plus the ones
+# reported away from the exchanges, which is what the buckets themselves are counted over.
+TRADED_VOLUME = (pl.col("volume") + pl.col("finra_volume")).clip(lower_bound=1)
+
+
+def order_flow_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Which side paid the spread, as a share of everything the bar traded."""
+    signed = (pl.col("trade_at_ask") + pl.col("trade_at_mid_ask")) - (
         pl.col("trade_at_bid") + pl.col("trade_at_bid_mid")
     )
-
-    # Tick imbalance
-    tick_imb = (pl.col("uptick_volume") + pl.col("repeat_uptick_volume")) - (
+    ticked = (pl.col("uptick_volume") + pl.col("repeat_uptick_volume")) - (
         pl.col("downtick_volume") + pl.col("repeat_downtick_volume")
     )
-
-    df = df.with_columns(
-        signed_vol=signed_vol,
-        signed_vol_share=(signed_vol / vol_clip),
-        tick_imb_vol=tick_imb,
-        tick_imb_share=(tick_imb / vol_clip),
-        trade_to_mid_rel=pl.col("trade_to_mid_vol_weight_rel"),
-        trades_per_1k_shares=(pl.col("total_trades") / vol_clip * 1000),
-        cross_locked_share=(pl.col("trade_at_cross") / vol_clip),
+    return df.with_columns(
+        signed.alias("signed_vol"),
+        ticked.alias("tick_imb_vol"),
+        (signed / TRADED_VOLUME).alias("signed_vol_share"),
+        (ticked / TRADED_VOLUME).alias("tick_imb_share"),
+        pl.col("trade_to_mid_vol_weight_rel").alias("trade_to_mid_rel"),
+        (pl.col("total_trades") / TRADED_VOLUME * 1000).alias("trades_per_1k_shares"),
+        (pl.col("trade_at_cross") / TRADED_VOLUME).alias("cross_locked_share"),
     )
 
-    return df
-
-
-# %%
-df = compute_order_flow_features(df)
-print("Family B (Order Flow) features computed")
 
 # %% [markdown]
-# ## 4. Family C: Volatility, Range, and Price Impact
+# ### C.3 Volatility, range and price impact
 #
-# Mid returns avoid bid-ask bounce. Realized volatility at multiple horizons
-# captures uncertainty. Kyle's lambda measures price impact per unit of
-# signed order flow.
+# Returns are taken between quote midpoints rather than between trade prices, because a
+# trade series alternates between the bid and the ask as buyers and sellers arrive and a
+# return taken across that alternation carries a bounce with no information in it
+# (Hasbrouck, 2007). Realized volatility at three horizons and an EWMA of the same series
+# describe how much uncertainty a signal is being read against.
+#
+# Two impact measures answer the same question on different data. **Amihud illiquidity** is
+# the library's estimator, and it is an *average* of the absolute return per dollar traded
+# over a window - not the single-bar ratio that this notebook previously shipped under the
+# name, which is a much noisier quantity with a different scale. It is null on a bar that
+# printed no trades, because price impact per dollar traded is undefined when nothing
+# traded. **Kyle's lambda** regresses the return on the signed share over a rolling hour
+# and is kept local: the identity form below has a warmup of exactly its window where a
+# two-pass covariance would need twice that.
 
 
 # %%
-def compute_volatility_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Compute volatility and impact features (Family C).
+def volatility_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Uncertainty and price impact, over windows bounded by the session."""
+    ret = pl.col("mid_close").log().diff().over(ENTITY)
+    df = df.with_columns(ret.alias("r1m"))
+    return df.with_columns(
+        *[
+            pl.col("r1m").rolling_std(w).over(ENTITY).alias(f"rv_{w}m")
+            for w in (W["fast"], W["decision"], W["slow"])
+        ],
+        pl.col("r1m")
+        .pow(2)
+        .ewm_mean(half_life=W["ewma_half_life"])
+        .over(ENTITY)
+        .sqrt()
+        .alias(f"rv_ewma_{W['ewma_half_life']}m"),
+        (pl.col("high_trade_price").log() - pl.col("low_trade_price").log()).alias("trade_range"),
+        (pl.col("high_ask_price").log() - pl.col("low_bid_price").log()).alias("quote_range"),
+        (pl.col("vwap") * pl.col("volume")).alias("dollar_vol"),
+        amihud_illiquidity(
+            returns=pl.col("r1m"), volume=pl.col("volume"), price=pl.col("vwap"), period=W["slow"]
+        )
+        .over(ENTITY)
+        .alias("illiq"),
+    )
 
-    - r1m: 1-minute log mid return
-    - rv_5m, rv_15m, rv_30m: Rolling realized volatility
-    - rv_ewma_30m: EWMA volatility (halflife 30 minutes)
-    - trade_range: log(high/low) trade range
-    - quote_range: log(high_ask/low_bid) quote range
-    - dollar_vol: VWAP * volume
-    - illiq: Amihud illiquidity |r1m| / dollar_vol
+
+# %%
+def kyle_lambda(df: pl.DataFrame) -> pl.DataFrame:
+    """Price impact per unit of signed order flow, over a rolling hour (Kyle, 1985).
+
+    Built from the single-pass identities cov(r, s) = E[rs] - E[r]E[s] and
+    var(s) = E[s^2] - E[s]^2, so the warmup is exactly the window rather than twice it.
     """
-    group_cols = ["symbol", "session_date"]
-
-    # 1-minute log mid return (session-bounded)
-    df = df.with_columns(
-        r1m=(pl.col("mid_close").log() - pl.col("mid_close").log().shift(1).over(group_cols))
+    window = W["hour"]
+    r, s = pl.col("r1m"), pl.col("signed_vol_share")
+    return (
+        df.with_columns(
+            r.rolling_mean(window).over(ENTITY).alias("_r"),
+            s.rolling_mean(window).over(ENTITY).alias("_s"),
+            (r * s).rolling_mean(window).over(ENTITY).alias("_rs"),
+            s.pow(2).rolling_mean(window).over(ENTITY).alias("_ss"),
+        )
+        .with_columns(
+            (
+                (pl.col("_rs") - pl.col("_r") * pl.col("_s"))
+                / (pl.col("_ss") - pl.col("_s").pow(2)).clip(lower_bound=EPS)
+            ).alias("kyle_lambda")
+        )
+        .drop("_r", "_s", "_rs", "_ss")
     )
 
-    # Realized volatility at multiple horizons
-    df = df.with_columns(
-        rv_5m=pl.col("r1m").rolling_std(window_size=5).over(group_cols),
-        rv_15m=pl.col("r1m").rolling_std(window_size=15).over(group_cols),
-        rv_30m=pl.col("r1m").rolling_std(window_size=30).over(group_cols),
-    )
-
-    # EWMA volatility
-    df = df.with_columns(
-        rv_ewma_30m=(pl.col("r1m").pow(2).ewm_mean(half_life=30).over(group_cols).sqrt())
-    )
-
-    # Range-based volatility
-    df = df.with_columns(
-        trade_range=(pl.col("high_trade_price").log() - pl.col("low_trade_price").log()),
-        quote_range=(pl.col("high_ask_price").log() - pl.col("low_bid_price").log()),
-    )
-
-    # Dollar volume and Amihud illiquidity
-    df = df.with_columns(
-        dollar_vol=(pl.col("vwap") * pl.col("volume")),
-    )
-    df = df.with_columns(
-        illiq=(pl.col("r1m").abs() / pl.col("dollar_vol").clip(lower_bound=1)),
-    )
-
-    return df
-
-
-# %%
-df = compute_volatility_features(df)
-print("Family C (Volatility/Impact) features computed")
 
 # %% [markdown]
-# ### Kyle's Lambda
+# ### C.4 Hidden liquidity and the session clock
 #
-# Kyle's lambda (Kyle, 1985) measures the price impact per unit of signed order
-# flow. Higher lambda = more price impact = less liquid.
+# The FINRA share is the fraction of a bar's volume that printed away from the exchanges,
+# and it is the one family carrying a lag: the shift below is what makes the sixty-minute
+# average read only bars whose prints were public by the time it is computed.
 #
-# $$\lambda = \frac{\text{Cov}(r, \text{SignedVolShare})}{\text{Var}(\text{SignedVolShare})}$$
-#
-# Computed over a rolling 60-minute window, session-bounded.
+# The session clock is where the previous version of this notebook was wrong, and the error
+# is worth naming because it is invisible in the values. It divided the bar's position by
+# the session's **realized** bar count, taken as a maximum over the whole symbol-session -
+# a quantity that does not exist until the session is over. Here the position is counted
+# from the clock, against the length the exchange **scheduled**, and both are knowable at
+# the open. The block flags mark the configured window at each end of the scheduled session,
+# so a bar the vendor emits after an early close falls in neither.
 
 
 # %%
-def compute_kyle_lambda(df: pl.DataFrame, window: int = 60) -> pl.DataFrame:
-    """Compute Kyle's lambda over a rolling window.
-
-    Uses the single-pass identities cov(r,s) = E[r*s] - E[r]E[s] and
-    var(s) = E[s^2] - E[s]^2 so warmup is exactly `window` bars (not 2x).
-    """
-    group_cols = ["symbol", "session_date"]
-
-    df = df.with_columns(
-        _r_mean=pl.col("r1m").rolling_mean(window).over(group_cols),
-        _svs_mean=pl.col("signed_vol_share").rolling_mean(window).over(group_cols),
-        _rs_mean=(pl.col("r1m") * pl.col("signed_vol_share")).rolling_mean(window).over(group_cols),
-        _ss_mean=(pl.col("signed_vol_share").pow(2)).rolling_mean(window).over(group_cols),
+def regime_and_clock_features(df: pl.DataFrame) -> pl.DataFrame:
+    """The slow off-exchange regime, and where in the scheduled session a bar sits."""
+    finra = pl.col("finra_volume") / TRADED_VOLUME
+    minutes = pl.col("timestamp").dt.hour() * 60 + pl.col("timestamp").dt.minute()
+    bar = (minutes - 9 * 60 - 30).cast(pl.Int32)
+    length = pl.col("session_bars")
+    edge = W["edge_block"]
+    return df.with_columns(
+        finra.shift(1).over(ENTITY).rolling_mean(W["hour"]).over(ENTITY).alias("finra_share_60m"),
+        bar.alias("bar_of_day"),
+        (bar / length).clip(0.0, 1.0).alias("time_since_open"),
+        (1.0 - bar / length).clip(0.0, 1.0).alias("time_to_close"),
+        (bar < edge).cast(pl.Float64).alias("is_first_30m"),
+        ((bar >= length - edge) & (bar < length)).cast(pl.Float64).alias("is_last_30m"),
     )
 
-    df = df.with_columns(
-        _cov_r_svs=(pl.col("_rs_mean") - pl.col("_r_mean") * pl.col("_svs_mean")),
-        _var_svs=(pl.col("_ss_mean") - pl.col("_svs_mean").pow(2)),
+
+# %% [markdown]
+# ### C.5 Multi-resolution aggregates and the cross-section
+#
+# Microstructure signals decay at different rates - an order-flow imbalance reverts within
+# minutes while a spread dislocation persists - so the fast families are carried at the
+# fast, decision and hourly windows and the model is left to learn which horizon holds the
+# content. The aggregates are ratios of sums rather than means of ratios: over five bars the
+# question is what share of the *volume traded in those five minutes* was aggressive, which a
+# mean of five per-bar shares answers only when the five bars carried equal volume.
+#
+# The cross-sectional z-score is taken **within the minute**, over the names quoted in it,
+# which is the cross-section a decision is taken over and the only partition that removes a
+# market-wide move without reaching across time. It is a representation of the same
+# hypothesis rather than a new one, which is why the register claims a level and its z-score
+# under one family.
+
+# %%
+# Each entry is one source column, the stem its aggregates are named on, and the windows.
+# `SHARES` divides a sum by the volume traded over the same window; `MEANS` averages a
+# quantity that is already a ratio.
+SHARES = {
+    "signed_vol": ("signed_vol_share", (W["fast"], W["decision"], W["hour"])),
+    "tick_imb_vol": ("tick_imb_share", (W["fast"], W["decision"])),
+}
+MEANS = {
+    "rel_spread_close": ("rel_spread", (W["fast"], W["decision"], W["hour"])),
+    "trade_to_mid_rel": ("trade_to_mid", (W["fast"],)),
+    "microprice_dev": ("microprice_dev", (W["fast"], W["decision"])),
+}
+
+
+def multi_resolution(df: pl.DataFrame) -> pl.DataFrame:
+    """The fast families again, over the fast, decision and hourly windows."""
+    return df.with_columns(
+        [
+            (
+                pl.col(source).rolling_sum(w).over(ENTITY)
+                / TRADED_VOLUME.rolling_sum(w).over(ENTITY)
+            ).alias(f"{stem}_{w}m")
+            for source, (stem, windows) in SHARES.items()
+            for w in windows
+        ]
+        + [
+            pl.col(source).rolling_mean(w).over(ENTITY).alias(f"{stem}_{w}m")
+            for source, (stem, windows) in MEANS.items()
+            for w in windows
+        ]
     )
 
-    df = df.with_columns(
-        kyle_lambda=(pl.col("_cov_r_svs") / pl.col("_var_svs").clip(lower_bound=1e-10))
-    )
-
-    df = df.drop(["_r_mean", "_svs_mean", "_rs_mean", "_ss_mean", "_cov_r_svs", "_var_svs"])
-
-    return df
-
-
-# %%
-df = compute_kyle_lambda(df, window=60)
-kyle_valid = df["kyle_lambda"].drop_nulls()
-_kyle_med = kyle_valid.median()
-print(
-    f"Kyle lambda computed (60-min window): median={_kyle_med:.6f}"
-    if _kyle_med is not None
-    else "Kyle lambda: all null (insufficient data)"
-)
 
 # %% [markdown]
-# ### Microprice Deviation Persistence
-#
-# The microprice deviation (micro - mid) measures order book pressure direction.
-# Its persistence over 5 and 15 minute windows indicates sustained imbalance.
+# The z-score partition is the minute alone. Which columns get one is derived from the
+# register rather than listed again here: every level a family claims is ranked, except the
+# session clock, whose values are identical across the cross-section by construction and
+# whose z-score would therefore be a column of zeros divided by nothing.
+
 
 # %%
-group_cols = ["symbol", "session_date"]
+# Intermediates the families are assembled from, and which no model may read: a
+# contemporaneous price or an unnormalized volume beside a label derived from the same
+# midpoint series is a model reading its own answer.
+INTERMEDIATE = {
+    "mid_close",
+    "signed_vol",
+    "tick_imb_vol",
+    "bar_of_day",
+    "session_bars",
+    "_stale_run",
+}
+RANKED_FAMILIES = [f.name for f in FAMILIES if f.name != "session_clock"]
 
-df = df.with_columns(
-    microprice_dev_5m=pl.col("microprice_dev").rolling_mean(5).over(group_cols),
-    microprice_dev_15m=pl.col("microprice_dev").rolling_mean(15).over(group_cols),
-)
 
-print("Microprice deviation persistence features computed")
-
-# %% [markdown]
-# ## 5. Family D: FINRA Hidden Liquidity
-#
-# FINRA/TRF prints can be delayed up to 10 seconds and may not reflect current
-# NBBO. Use as slower regime signals, not short-term predictors.
-#
-# **Design decision**: Only the 60-minute smoothed FINRA share
-# (`finra_share_60m`) is included in the feature set. The raw 1-minute
-# `finra_share` is computed for intermediate use but excluded from
-# `FEATURE_COLS` because it contradicts the slow-signal guidance from
-# the case study constraints.
-
-# %%
-total_vol = pl.col("volume") + pl.col("finra_volume")
-
-df = df.with_columns(
-    finra_share=(pl.col("finra_volume") / total_vol.clip(lower_bound=1)),
-)
-
-# FINRA share smoothed over 60 minutes as a slow regime indicator
-df = df.with_columns(
-    finra_share_60m=pl.col("finra_share").rolling_mean(60).over(group_cols),
-)
-
-print("Family D (FINRA) features computed")
-
-# %% [markdown]
-# ## 6. Family E: Calendar / Intraday Position
-#
-# Deterministic features capturing time-of-day effects. The U-shaped intraday
-# volume pattern (high at open and close, low midday) is a strong conditioning
-# signal for microstructure features.
-
-# %%
-# Bars since 09:30 within each session (0-indexed)
-df = df.with_columns(
-    bar_of_day=pl.col("timestamp").rank("ordinal").over(["symbol", "session_date"]).cast(pl.Int32)
-    - 1,
-)
-
-# Total bars in session (for time_to_close)
-df = df.with_columns(
-    bars_in_session=pl.col("bar_of_day").max().over(["symbol", "session_date"]) + 1,
-)
-
-df = df.with_columns(
-    time_since_open=(pl.col("bar_of_day") / pl.col("bars_in_session")),
-    time_to_close=(1.0 - pl.col("bar_of_day") / pl.col("bars_in_session")),
-    is_first_30m=(pl.col("bar_of_day") < 30).cast(pl.Int8),
-    is_last_30m=(pl.col("bar_of_day") >= (pl.col("bars_in_session") - 30)).cast(pl.Int8),
-)
-
-print("Family E (Calendar) features computed")
-
-# %% [markdown]
-# ## 7. Multi-Resolution Aggregates
-#
-# Microstructure signals decay at different rates: order flow imbalances revert
-# within minutes, while spread dislocations persist longer. Aggregating key fast
-# signals over 5-bar (5 min), 15-bar (15 min = 1 decision bar), and 60-bar
-# (1 hour) windows lets the model learn which horizon carries the most
-# predictive content for each feature. The windows align with the label horizons
-# defined in [`02_labels`](02_labels.ipynb).
-
-# %%
-vol_clip = pl.col("volume").rolling_sum(5).over(group_cols).clip(lower_bound=1)
-
-df = df.with_columns(
-    # 5-bar aggregates
-    signed_vol_share_5m=(pl.col("signed_vol").rolling_sum(5).over(group_cols) / vol_clip),
-    tick_imb_share_5m=(pl.col("tick_imb_vol").rolling_sum(5).over(group_cols) / vol_clip),
-    rel_spread_5m=pl.col("rel_spread_close").rolling_mean(5).over(group_cols),
-    trade_to_mid_5m=pl.col("trade_to_mid_rel").rolling_mean(5).over(group_cols),
-)
-
-vol_clip_15 = pl.col("volume").rolling_sum(15).over(group_cols).clip(lower_bound=1)
-
-df = df.with_columns(
-    # 15-bar aggregates
-    signed_vol_share_15m=(pl.col("signed_vol").rolling_sum(15).over(group_cols) / vol_clip_15),
-    tick_imb_share_15m=(pl.col("tick_imb_vol").rolling_sum(15).over(group_cols) / vol_clip_15),
-    rel_spread_15m=pl.col("rel_spread_close").rolling_mean(15).over(group_cols),
-)
-
-vol_clip_60 = pl.col("volume").rolling_sum(60).over(group_cols).clip(lower_bound=1)
-
-df = df.with_columns(
-    # 60-bar aggregates
-    signed_vol_share_60m=(pl.col("signed_vol").rolling_sum(60).over(group_cols) / vol_clip_60),
-    rel_spread_60m=pl.col("rel_spread_close").rolling_mean(60).over(group_cols),
-)
-
-print("Multi-resolution aggregates computed (5m, 15m, 60m)")
-
-# %% [markdown]
-# ## 8. Cross-Sectional Normalization
-#
-# Z-score features within each bar across all symbols to remove market-wide
-# effects. This makes features comparable across stocks with different price
-# levels and volatility.
-
-# %%
-# Define features to normalize cross-sectionally
-FEATURE_COLS = [
-    # Family A
-    "rel_spread_close",
-    "depth_imb",
-    "quote_rate",
-    "microprice_dev",
-    "microprice_dev_5m",
-    "microprice_dev_15m",
-    # Family B
-    "signed_vol_share",
-    "tick_imb_share",
-    "trade_to_mid_rel",
-    "trades_per_1k_shares",
-    "cross_locked_share",
-    # Family C
-    "r1m",
-    "rv_5m",
-    "rv_15m",
-    "rv_30m",
-    "rv_ewma_30m",
-    "trade_range",
-    "quote_range",
-    "illiq",
-    "kyle_lambda",
-    "dollar_vol",
-    # Family D (60m smoothed only — raw 1-min FINRA share contradicts slow-signal guidance)
-    "finra_share_60m",
-    # Multi-resolution
-    "signed_vol_share_5m",
-    "signed_vol_share_15m",
-    "signed_vol_share_60m",
-    "tick_imb_share_5m",
-    "tick_imb_share_15m",
-    "rel_spread_5m",
-    "rel_spread_15m",
-    "rel_spread_60m",
-    "trade_to_mid_5m",
-]
-
-# %%
-# Verify all declared features exist (catches stale list after refactors)
-missing = [c for c in FEATURE_COLS if c not in df.columns]
-assert not missing, f"FEATURE_COLS references missing columns: {missing}"
-feature_cols_existing = FEATURE_COLS
-
-# Cross-sectional z-score
-norm_exprs = []
-for col in feature_cols_existing:
-    norm_exprs.append(
+def cross_sectional(df: pl.DataFrame) -> pl.DataFrame:
+    """The z-score of each level within its own minute, across the quoted universe."""
+    levels = [c for c in df.columns if c not in LOADER_COLS and c not in INTERMEDIATE]
+    claimed = assign_families(levels, FAMILIES)
+    columns = sorted(c for c, family in claimed.items() if family in RANKED_FAMILIES)
+    return df.with_columns(
         (
-            (pl.col(col) - pl.col(col).mean().over("timestamp"))
-            # Clip denominator: XS std can be ~0 when all symbols share a value
-            / pl.col(col).std().over("timestamp").clip(lower_bound=1e-8)
-        ).alias(f"{col}_xs")
+            (pl.col(c) - pl.col(c).mean().over(WITHIN_MINUTE))
+            / pl.col(c).std().over(WITHIN_MINUTE).clip(lower_bound=EPS)
+        ).alias(f"{c}_xs")
+        for c in columns
     )
 
-df = df.with_columns(norm_exprs)
-xs_cols = [f"{c}_xs" for c in feature_cols_existing]
-
-print(
-    f"Cross-sectional normalization: {len(feature_cols_existing)} raw + {len(xs_cols)} XS features"
-)
 
 # %% [markdown]
-# ## 9. Feature Summary and Quality
+# The six subsections compose into one function, which is what lets D.3 re-run the whole
+# construction on a shorter panel and compare. The scheduled session length is joined before
+# the clock family is built, because that family is a statement about the exchange's day
+# rather than about the panel's rows.
+
 
 # %%
-# Calendar features (not normalized)
-CALENDAR_COLS = ["time_since_open", "time_to_close", "is_first_30m", "is_last_30m"]
-
-# Complete feature list
-all_feature_cols = feature_cols_existing + xs_cols + CALENDAR_COLS
-all_feature_cols = [c for c in all_feature_cols if c in df.columns]
-
-print(f"\nTotal features: {len(all_feature_cols)}")
-print(f"  Raw features: {len(feature_cols_existing)}")
-print(f"  XS-normalized: {len(xs_cols)}")
-print(f"  Calendar: {len(CALENDAR_COLS)}")
-
-# %%
-# Check for nulls (from rolling window warm-up)
-# Only include columns that have some non-null values — all-null columns
-# (e.g., kyle_lambda with very few symbols) would drop every row.
-warmup_cols = ["r1m", "rv_5m", "rv_15m", "rv_30m", "kyle_lambda"]
-warmup_cols = [c for c in warmup_cols if c in df.columns and df[c].null_count() < len(df)]
-
-null_before = len(df)
-df_clean = df.drop_nulls(subset=warmup_cols) if warmup_cols else df
-null_after = len(df_clean)
-
-print(f"\nRows dropped (rolling warm-up): {null_before - null_after:,}")
-print(f"Clean rows: {null_after:,}")
-
-# Replace remaining infinities with NaN then fill
-for col in all_feature_cols:
-    if col in df_clean.columns:
-        df_clean = df_clean.with_columns(
-            pl.when(pl.col(col).is_infinite()).then(None).otherwise(pl.col(col)).alias(col)
-        )
-
-# %% [markdown]
-# ## 10. Save Features
-
-# %%
-# Output columns
-meta_cols = ["timestamp", "symbol"]
-output_cols = meta_cols + all_feature_cols
-output_cols = [c for c in output_cols if c in df_clean.columns]
-
-df_features = df_clean.select(output_cols)
-
-print(f"\nFeature matrix shape: {df_features.shape}")
-print(f"Columns: {len(df_features.columns)}")
-
-# %%
-FEATURES_DIR.mkdir(parents=True, exist_ok=True)
-
-features_path = FEATURES_DIR / "financial.parquet"
-df_features.write_parquet(features_path)
-print(f"Saved: {features_path} ({features_path.stat().st_size / 1e6:.1f} MB)")
-# %% [markdown]
-# ## 11. Feature Evaluation
-#
-# Evaluate predictive content by computing the Information Coefficient (IC) —
-# cross-sectional Spearman rank correlation between each feature and the 15-minute
-# forward midprice return, measured per timestamp then averaged.
-#
-# **Statistical adjustments**:
-# - **HAC standard errors** (Newey-West): overlapping 15-minute returns create strong
-#   autocorrelation in the IC time series within each session; naive t-stats overstate
-#   significance by 2-5x
-# - **FDR correction** (Benjamini-Hochberg): testing 31 features at 5% expects ~1.5
-#   false positives without correction
-#
-# **Scope**: Only the 31 raw features in `FEATURE_COLS` are tested. Cross-sectional
-# z-scores (`_xs` suffix) produce identical Spearman ranks as their raw counterparts.
-# Calendar features have zero cross-sectional variation by construction.
-#
-# **Note**: IC is computed across the **full sample** including the holdout period.
-# This provides an upper bound on predictive content. For proper out-of-sample
-# evaluation, IC should be computed separately per CV fold (done in Ch11).
-
-# %%
-# Load labels and build evaluation DataFrame
-labels_15m = pl.read_parquet(CASE_DIR / "labels" / "fwd_ret_15m.parquet")
-eval_df = df_features.join(labels_15m, on=["timestamp", "symbol"], how="inner")
-print(f"Evaluation DataFrame: {len(eval_df):,} rows")
-
-# Sample every 15th timestamp for tractability
-all_timestamps = eval_df["timestamp"].unique().sort()
-sample_ts = all_timestamps.gather_every(15)
-eval_sample = eval_df.filter(pl.col("timestamp").is_in(sample_ts))
-print(f"Sampled {len(sample_ts):,} timestamps ({len(eval_sample):,} rows)")
-
-# %% [markdown]
-# ### Cross-Sectional IC per Feature
-#
-# Compute Spearman correlation between each feature and `fwd_ret_15m` across all
-# symbols at each sampled timestamp, then aggregate into a time series of IC values.
-
-# %%
-# Compute IC series for each raw feature
-n_symbols = eval_sample["symbol"].n_unique()
-min_cs_size = min(10, n_symbols)
-
-ic_data = {}
-for feat in feature_cols_existing:
-    ic_by_ts = (
-        eval_sample.filter(pl.col(feat).is_not_null() & pl.col("fwd_ret_15m").is_not_null())
-        .group_by("timestamp")
-        .agg(
-            pl.corr(feat, "fwd_ret_15m", method="spearman").alias("ic"),
-            pl.len().alias("n"),
-        )
-        .filter(pl.col("n") >= min_cs_size)
-    )
-    if len(ic_by_ts) >= 20:
-        ic_data[feat] = ic_by_ts
-
-print(f"IC series computed for {len(ic_data)}/{len(feature_cols_existing)} features")
-
-# %% [markdown]
-# ### HAC-Adjusted Significance and FDR Correction
-#
-# Apply Newey-West HAC standard errors to each IC series, then correct for
-# multiple testing using Benjamini-Hochberg FDR at $\alpha=0.05$.
-
-# %%
-hac_rows = []
-for feat, ic_df in ic_data.items():
-    stats = compute_ic_hac_stats(ic_df, ic_col="ic", maxlags=26)
-    stats["feature"] = feat
-    hac_rows.append(stats)
-
-if hac_rows:
-    hac_df = pl.DataFrame(hac_rows)
-
-    # Apply FDR
-    p_values = hac_df["p_value"].to_list()
-    fdr_result = benjamini_hochberg_fdr(p_values, alpha=0.05, return_details=True)
-    hac_df = hac_df.with_columns(fdr_significant=pl.Series(fdr_result["rejected"].tolist()))
-
-    # Sort by |IC|
-    hac_df = hac_df.sort(pl.col("mean_ic").abs(), descending=True)
-else:
-    hac_df = pl.DataFrame(
-        schema={
-            "feature": pl.Utf8,
-            "mean_ic": pl.Float64,
-            "hac_se": pl.Float64,
-            "t_stat": pl.Float64,
-            "p_value": pl.Float64,
-            "naive_t_stat": pl.Float64,
-            "fdr_significant": pl.Boolean,
-        }
+def build_features(bars: pl.DataFrame) -> pl.DataFrame:
+    """Every family, in dependency order, on a panel sorted by symbol-session and time."""
+    return (
+        bars.join(sessions, on="session_date", how="left")
+        .pipe(cap_stale_quotes)
+        .pipe(quote_features)
+        .pipe(order_flow_features)
+        .pipe(volatility_features)
+        .pipe(kyle_lambda)
+        .pipe(regime_and_clock_features)
+        .pipe(multi_resolution)
+        .pipe(cross_sectional)
+        .drop("_stale_run")
     )
 
-# %%
-# Summary
-n_tested = len(hac_df)
-n_naive_sig = (
-    int(hac_df.filter(pl.col("naive_t_stat").abs() > 1.96).shape[0]) if n_tested > 0 else 0
-)
-n_fdr_sig = int(hac_df.filter(pl.col("fdr_significant")).shape[0]) if n_tested > 0 else 0
-if n_tested > 0:
-    _hac_mean = hac_df["t_stat"].abs().mean()
-    inflation = (
-        round(float(hac_df["naive_t_stat"].abs().mean() / _hac_mean), 2)
-        if _hac_mean and _hac_mean > 0
-        else 1.0
-    )
-else:
-    inflation = 1.0
-
-print(f"Features tested: {n_tested}")
-print(f"Naive significant (|t|>1.96): {n_naive_sig}")
-print(f"FDR significant (alpha=0.05): {n_fdr_sig}")
-print(f"Inflation factor (naive/HAC): {inflation:.1f}x")
 
 # %%
-# Top features by |IC|
-if n_tested > 0:
-    print("\nTop 20 features by |IC|:")
-    for row in hac_df.head(20).iter_rows(named=True):
-        sig = "**" if row["fdr_significant"] else ("*" if abs(row["naive_t_stat"]) > 1.96 else " ")
-        print(
-            f"  {row['feature']:30s}  IC={row['mean_ic']:+.5f}  "
-            f"HAC t={row['t_stat']:+.2f}  naive t={row['naive_t_stat']:+.2f}  {sig}"
-        )
-    print("  ** = FDR-significant  * = naive-significant only")
-else:
-    print("\nInsufficient cross-sectional data for IC testing")
-
-# %% [markdown]
-# ### IC Bar Chart
+built = build_features(bars)
+feature_cols = sorted(c for c in built.columns if c not in LOADER_COLS and c not in INTERMEDIATE)
+assignment = assign_families(feature_cols, FAMILIES)
+print(f"{built.height:,} rows carrying {len(feature_cols)} features in {len(FAMILIES)} families")
 
 # %%
-if n_tested > 0:
-    top20 = hac_df.head(20)
-    colors = ["#2ecc71" if s else "#95a5a6" for s in top20["fdr_significant"].to_list()]
-
-    fig = go.Figure(
-        go.Bar(
-            x=top20["mean_ic"].to_list(),
-            y=top20["feature"].to_list(),
-            orientation="h",
-            marker_color=colors,
-            text=[f"t={t:.1f}" for t in top20["t_stat"].to_list()],
-            textposition="outside",
-        )
-    )
-    fig.update_layout(
-        title="Top 20 Features by |IC| (green = FDR-significant)",
-        xaxis_title="Mean IC (Spearman)",
-        yaxis=dict(autorange="reversed"),
-        template="plotly_white",
-        height=500,
-        margin=dict(l=200),
-    )
-    fig.show()
-else:
-    print("Skipping IC bar chart (no features tested)")
-
-# %% [markdown]
-# ### Feature Correlation Heatmap
-
-# %%
-# Pairwise Spearman on heavily sampled data (every 100th timestamp)
-corr_ts = all_timestamps.gather_every(100)
-corr_sample = eval_df.filter(pl.col("timestamp").is_in(corr_ts)).select(feature_cols_existing)
-corr_matrix = corr_sample.to_pandas().corr(method="spearman")
-
-# Count high-correlation pairs
-high_corr_pairs = []
-for a, b in itertools.combinations(feature_cols_existing, 2):
-    rho = abs(corr_matrix.loc[a, b])
-    if rho > 0.7:
-        high_corr_pairs.append((a, b, round(rho, 3)))
-
-fig = px.imshow(
-    corr_matrix,
-    color_continuous_scale="RdBu_r",
-    zmin=-1,
-    zmax=1,
-    title=f"Feature Pairwise Spearman Correlation ({len(high_corr_pairs)} pairs > 0.7)",
-)
-fig.update_layout(height=700, width=700, template="plotly_white")
-fig.show()
-
-print(f"\nHigh-correlation pairs (|rho| > 0.7): {len(high_corr_pairs)}")
-for a, b, rho in sorted(high_corr_pairs, key=lambda x: -x[2])[:10]:
-    print(f"  {a:30s} x {b:30s}  rho={rho:.3f}")
-
-# %% [markdown]
-# ### Naive vs HAC t-Statistics
-
-# %%
-if n_tested > 0:
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=hac_df["naive_t_stat"].to_list(),
-            y=hac_df["t_stat"].to_list(),
-            mode="markers+text",
-            text=hac_df["feature"].to_list(),
-            textposition="top center",
-            textfont=dict(size=8),
-            marker=dict(
-                color=["#2ecc71" if s else "#95a5a6" for s in hac_df["fdr_significant"].to_list()],
-                size=8,
-            ),
-        )
-    )
-    # 45-degree reference line
-    t_range = max(abs(hac_df["naive_t_stat"].max()), abs(hac_df["naive_t_stat"].min()))
-    fig.add_shape(
-        type="line",
-        x0=-t_range,
-        y0=-t_range,
-        x1=t_range,
-        y1=t_range,
-        line=dict(color="gray", dash="dash"),
-    )
-    fig.update_layout(
-        title="Naive vs HAC t-Statistics (points below line = HAC deflation)",
-        xaxis_title="Naive t-stat",
-        yaxis_title="HAC t-stat",
-        template="plotly_white",
-        height=500,
-    )
-    fig.show()
-else:
-    print("Skipping naive vs HAC scatter (no features tested)")
-
-# %% [markdown]
-# ### Multi-Horizon IC: 15-Minute vs 60-Minute
-
-# %%
-# Load 60-minute labels and compute IC per feature at 60-min horizon
-labels_60m_path = CASE_DIR / "labels" / "fwd_ret_60m.parquet"
-horizon_rows = []
-if n_tested > 0 and labels_60m_path.exists():
-    labels_60m = pl.read_parquet(labels_60m_path)
-    eval_60m = eval_sample.drop("fwd_ret_15m").join(
-        labels_60m, on=["timestamp", "symbol"], how="inner"
-    )
-
-    top_feats = hac_df.head(15)["feature"].to_list()
-    for feat in top_feats:
-        if feat not in ic_data:
-            continue
-        ic_15m = float(hac_df.filter(pl.col("feature") == feat)["mean_ic"][0])
-        ic_60m_ts = (
-            eval_60m.filter(pl.col(feat).is_not_null() & pl.col("fwd_ret_60m").is_not_null())
-            .group_by("timestamp")
-            .agg(pl.corr(feat, "fwd_ret_60m", method="spearman").alias("ic"))
-        )
-        ic_60m = float(ic_60m_ts["ic"].mean()) if len(ic_60m_ts) > 0 else 0.0
-        horizon_rows.append({"feature": feat, "ic_15m": ic_15m, "ic_60m": ic_60m})
-
-# %%
-# Multi-horizon IC bar chart
-if horizon_rows:
-    horizon_df = pl.DataFrame(horizon_rows)
-    fig = go.Figure()
-    fig.add_trace(
-        go.Bar(name="15m", x=horizon_df["feature"].to_list(), y=horizon_df["ic_15m"].to_list())
-    )
-    fig.add_trace(
-        go.Bar(name="60m", x=horizon_df["feature"].to_list(), y=horizon_df["ic_60m"].to_list())
-    )
-    fig.update_layout(
-        title="IC by Horizon: 15-Minute vs 60-Minute Forward Return",
-        barmode="group",
-        xaxis_tickangle=-45,
-        template="plotly_white",
-        height=450,
-    )
-    fig.show()
-else:
-    print("Skipping multi-horizon IC (no features tested or 60m labels missing)")
-
-# %% [markdown]
-# ### Evaluation Reflection
-#
-# The feature evaluation reveals important patterns for intraday microstructure
-# prediction:
-#
-# - **Significance after FDR**: Of the features tested, the number surviving FDR
-#   correction is substantially lower than the naive count, demonstrating the
-#   importance of proper multiple-testing adjustment for high-frequency data
-# - **HAC deflation**: Naive t-statistics are inflated by approximately 2-3x due to
-#   overlapping 15-minute returns creating strong autocorrelation within sessions
-# - **Correlation clusters**: Volatility features (rv_5m, rv_15m, rv_30m) are highly
-#   correlated as expected from nested windows. Multi-resolution order flow features
-#   form a second cluster
-# - **Cost dominance**: Even features with statistically significant IC face the 5+ bps
-#   cost floor. With 15-min return std of ~39 bps, a modest IC implies expected
-#   edge of ~0.4 bps — well below half-spread. This confirms the educational focus
-#   of this case study
-
-# %%
-# Feature family mapping for results
-FEATURE_FAMILIES = {
-    "rel_spread_close": "A_quote_liquidity",
-    "depth_imb": "A_quote_liquidity",
-    "quote_rate": "A_quote_liquidity",
-    "microprice_dev": "A_quote_liquidity",
-    "microprice_dev_5m": "A_quote_liquidity",
-    "microprice_dev_15m": "A_quote_liquidity",
-    "signed_vol_share": "B_order_flow",
-    "tick_imb_share": "B_order_flow",
-    "trade_to_mid_rel": "B_order_flow",
-    "trades_per_1k_shares": "B_order_flow",
-    "cross_locked_share": "B_order_flow",
-    "r1m": "C_volatility_impact",
-    "rv_5m": "C_volatility_impact",
-    "rv_15m": "C_volatility_impact",
-    "rv_30m": "C_volatility_impact",
-    "rv_ewma_30m": "C_volatility_impact",
-    "trade_range": "C_volatility_impact",
-    "quote_range": "C_volatility_impact",
-    "illiq": "C_volatility_impact",
-    "kyle_lambda": "C_volatility_impact",
-    "dollar_vol": "C_volatility_impact",
-    "finra_share_60m": "D_finra",
-    "signed_vol_share_5m": "multi_resolution",
-    "signed_vol_share_15m": "multi_resolution",
-    "signed_vol_share_60m": "multi_resolution",
-    "tick_imb_share_5m": "multi_resolution",
-    "tick_imb_share_15m": "multi_resolution",
-    "rel_spread_5m": "multi_resolution",
-    "rel_spread_15m": "multi_resolution",
-    "rel_spread_60m": "multi_resolution",
-    "trade_to_mid_5m": "multi_resolution",
-}
-
-# %%
-# Compute family-average IC
-family_avg_ic = {}
-for feat, family in FEATURE_FAMILIES.items():
-    row = hac_df.filter(pl.col("feature") == feat)
-    if len(row) > 0:
-        ic = float(row["mean_ic"][0])
-        family_avg_ic.setdefault(family, []).append(ic)
-family_avg_ic = {k: round(np.mean(v), 5) for k, v in family_avg_ic.items()}
-
-# Top features for results JSON
-top_features_list = []
-for row in hac_df.head(10).iter_rows(named=True):
-    top_features_list.append(
-        {
-            "name": row["feature"],
-            "family": FEATURE_FAMILIES.get(row["feature"], "other"),
-            "ic_mean": round(row["mean_ic"], 5),
-            "hac_tstat": round(row["t_stat"], 2),
-            "hac_pval": round(row["p_value"], 4),
-            "fdr_significant": bool(row["fdr_significant"]),
-        }
-    )
-
-# %%
-# Build and save results JSON
-results = {
-    "case_study_id": "nasdaq100_microstructure",
-    "chapter": 8,
-    "stage": "features",
-    "timestamp": datetime.now(UTC).isoformat(),
-    "git_commit": "unknown",
-    "notebook": "case_studies/nasdaq100_microstructure/code/03_financial_features.py",
-    "summary": {
-        "n_rows": len(df_features),
-        "n_features": len(all_feature_cols),
-        "n_symbols": df_features["symbol"].n_unique(),
-        "feature_families": {
-            family: sum(
-                1
-                for f, fam in FEATURE_FAMILIES.items()
-                if fam == family and f in feature_cols_existing
-            )
-            for family in sorted(set(FEATURE_FAMILIES.values()))
-        }
-        | {"E_calendar": len(CALENDAR_COLS)},
-    },
-    "techniques": [
-        "midprice and microprice from NBBO",
-        "signed volume from trade location buckets",
-        "Kyle lambda (rolling 60-min covariance)",
-        "Amihud illiquidity (intraday)",
-        "microprice deviation persistence",
-        "multi-resolution aggregates (5m/15m/60m)",
-        "cross-sectional z-score normalization",
-        "staleness detection (NBBOQuoteCount=0)",
-    ],
-    "diagnostics": {
-        "staleness_rate_pct": round(float(df["staleness_flag"].mean()) * 100, 2),
-        "rows_dropped_warmup": null_before - null_after,
-    },
-}
-
-# %%
-# Add evaluation metrics and key findings
-results["evaluation"] = {
-    "primary_label": "fwd_ret_15m",
-    "n_features_tested": n_tested,
-    "n_significant_naive05": n_naive_sig,
-    "n_significant_fdr05": n_fdr_sig,
-    "inflation_factor": inflation,
-    "top_features": top_features_list,
-    "feature_family_avg_ic": family_avg_ic,
-    "max_pairwise_corr": round(
-        float(max(p[2] for p in high_corr_pairs)) if high_corr_pairs else 0.0, 3
-    ),
-    "corr_pairs_above_07": len(high_corr_pairs),
-}
-results["key_findings"] = [
-    f"Total {len(all_feature_cols)} features across 5 families",
-    f"Staleness rate: {float(df['staleness_flag'].mean()) * 100:.2f}% of bars (low for NQ100)",
-    f"Kyle lambda median: {float(_kyle_med):.6f} (positive = buyer impact)"
-    if _kyle_med is not None
-    else "Kyle lambda: insufficient data",
-    f"Feature matrix: {len(df_features):,} rows x {len(output_cols)} columns",
-    f"IC evaluation: {n_fdr_sig}/{n_tested} features FDR-significant (inflation {inflation:.1f}x)"
-    if n_tested > 0
-    else "IC evaluation: no features tested",
+# A share of a volume cannot exceed that volume, at any of the four windows. This is the
+# assertion the previous denominator failed, and it is cheaper than the figure that
+# eventually showed it.
+SHARE_COLUMNS = [
+    c
+    for c in feature_cols
+    if c.startswith(("signed_vol_share", "tick_imb_share")) and not c.endswith("_xs")
 ]
+_worst = built.select(pl.max_horizontal([pl.col(c).abs().max() for c in SHARE_COLUMNS])).item()
+assert _worst <= 1.0, f"an order-flow share reached {_worst:.1f}, so its denominator is a part"
+print(f"{len(SHARE_COLUMNS)} order-flow shares, largest magnitude {_worst:.4f}")
 
 # %% [markdown]
-# ## Key Takeaways
+# ## D. The timing contract
 #
-# ### Five Feature Families for Intraday Microstructure
+# ### D.1 What each construction reads
 #
-# | Family | Key Features | Signal Decay | Best Horizon |
-# |--------|-------------|--------------|--------------|
-# | A: Liquidity | spread, depth_imb, microprice_dev | Medium | 15-30m |
-# | B: Order Flow | signed_vol_share, tick_imb | Fast | 5-10m |
-# | C: Volatility | rv, kyle_lambda, illiq | Medium | 15m+ |
-# | D: FINRA | finra_share | Slow | 30m+ |
-# | E: Calendar | time_since_open, is_first/last_30m | Deterministic | All |
+# Four kinds of operation appear above. A **rolling** window - every realized volatility, every
+# multi-resolution aggregate, the Amihud average and the four moments Kyle's lambda is built
+# from - ends at its own bar and reads a fixed number of earlier bars **within one
+# symbol-session**, so none of them spans a night. A **shift** reads exactly one earlier bar of
+# the same series, and the FINRA family is the one place it is used to defer an input rather
+# than to difference one. A **contemporaneous** relation - the spread, the depth imbalance,
+# the microprice deviation, the two ranges - reads one bar's own quote and no other bar at
+# all. A **cross-sectional** statistic - the z-scores - is taken with `.over("timestamp")`, so
+# it reads every symbol quoted in that minute and nothing dated before or after it.
 #
-# ### Implementation Highlights
+# The session clock is the fifth thing, and it is the one that was wrong: it reads the
+# exchange's published schedule, which is knowable before the session opens, rather than the
+# session's realized bar count, which is not. None of the five is fitted - no bound, scaler or
+# encoder here has a parameter estimated once and applied to every row. D.2 checks the
+# windows; D.3 checks all five at once.
 #
-# 1. **Microprice deviation** (not microprice level) is the informative signal
-#    per Stoikov (2018) -- how far the depth-weighted price deviates from midprice
-# 2. **Kyle's lambda** over 60-min windows captures time-varying price impact
-# 3. **Staleness detection** (NBBOQuoteCount=0) flags carry-forward bars
-# 4. **Multi-resolution** features (1/5/15/60-bar) capture signal decay explicitly
-# 5. **Cross-sectional normalization** removes market-wide effects
+# ### D.2 Warmup
 #
-# ### Feature Evaluation
+# A trailing window cannot produce a value until it has enough bars to fill, and because the
+# entity is the symbol-session every window warms up again each morning. The audit checks
+# that length rather than describing it: a column carrying a value before its window could
+# have filled is reading bars that do not exist, and that is what it raises on. The counts
+# below are one greater than each window wherever the input is itself a difference, because
+# a session's first bar has no previous bar to difference against.
+
+# %%
+warmup_audit(
+    built,
+    {
+        "kyle_lambda": W["hour"] + 1,
+        "finra_share_60m": W["hour"] + 1,
+        "signed_vol_share_60m": W["hour"],
+        "rel_spread_60m": W["hour"],
+        "illiq": W["slow"] + 1,
+        f"rv_{W['slow']}m": W["slow"] + 1,
+        f"rv_{W['decision']}m": W["decision"] + 1,
+        "microprice_dev_15m": W["decision"],
+        f"rv_{W['fast']}m": W["fast"] + 1,
+        "r1m": 2,
+    },
+    entity=ENTITY,
+)
+
+# %% [markdown]
+# ### D.3 Withholding the holdout changes nothing
 #
-# 6. **HAC adjustment is essential**: Naive t-statistics overstate significance by
-#    2-3x due to overlapping 15-minute returns; HAC standard errors correct this
-# 7. **FDR controls false discoveries**: Testing 31 features simultaneously requires
-#    multiple-testing correction to avoid spurious conclusions
-# 8. **Cost floor is the binding constraint**: Even features with statistically significant IC
-#    produce expected edge below the 5+ bps transaction cost floor
+# Trailing, contemporaneous and within-minute statistics share a property worth checking
+# directly: recomputed on a panel that stops before the holdout, they reproduce the same
+# values on the rows the two panels share. A parameter fitted over a whole column does not,
+# because truncating the column moves the parameter and with it every row it was applied to.
+# Comparing two builds tests every emitted column at once and does not depend on anyone
+# having flagged the transform that fits. A value on one side against a null on the other
+# counts as a difference.
 #
-# **Next**: `04_temporal.py` adds HAR volatility, FFT spectral, and path
-# signature features from Chapter 9.
+# The cross-sectional z-score is the column this check exists for. It is taken within a
+# minute, so truncating the panel at a date removes whole minutes and leaves the surviving
+# ones with the same membership; a z-score taken over the whole sample instead would move on
+# every row here.
+
+# %%
+_before = pl.col("timestamp").dt.date() < HOLDOUT_START
+seal = assert_values_agree(
+    built.filter(_before),
+    build_features(bars.filter(_before)),
+    columns=feature_cols,
+    keys=PANEL_KEY,
+)
+seal.filter(pl.col("column").is_in(["kyle_lambda", f"{CARRIER}_xs", "finra_share_60m"]))
+
+# %% [markdown]
+# ## E. Matrix assembly and coverage
+#
+# The panel key is `symbol` + `timestamp`. Everything the loader supplied is excluded - the
+# quote sides and sizes, the trade-location buckets, volume, the VWAP and the quote count -
+# because a model handed a contemporaneous price beside a label derived from the same
+# midpoint series would be reading its own answer. The five intermediates the families are
+# assembled from go with them.
+#
+# One null policy is applied once: a row is kept when the three carriers of the volatility
+# and impact family have warmed up, of which Kyle's lambda at an hour is the binding one.
+# Requiring it subsumes every shorter window in that family, and the longer families of
+# Section C.5 fill in at the same bar, which is what F1 shows. The 4 percent of bars that
+# printed no trades keep a null Amihud value rather than a fabricated one, and that is the
+# gap the coverage figure shows in the volatility family after warmup.
+
+# %%
+CARRIERS = ["r1m", f"rv_{W['slow']}m", "kyle_lambda"]
+features = built.select([*PANEL_KEY, *feature_cols]).drop_nulls(subset=CARRIERS).sort(PANEL_KEY)
+assert features.select(PANEL_KEY).is_duplicated().sum() == 0, "duplicate panel key"
+# The decision grid the strategy rebalances on, which F3, F6 and F7 read. A figure drawn on
+# every minute would describe a cadence no decision is taken at.
+DECISION_TIMES = (
+    features.filter(pl.col("timestamp").dt.minute() % DECISION_MINUTES == 0)["timestamp"]
+    .unique()
+    .sort()
+)
+decisions = features.filter(pl.col("timestamp").is_in(DECISION_TIMES))
+register_frame(FAMILIES, feature_cols).select(["family", "columns", "role", "representation"])
+
+# %%
+WARMUP_BARS = max(f.lookback for f in FAMILIES)
+coverage = family_coverage(features, assignment, every="1mo")
+dropped = built.height - features.height
+print(
+    f"{len(feature_cols)} features, {features.height:,} rows, {features['symbol'].n_unique()} symbols"
+)
+print(f"{features['timestamp'].min()} to {features['timestamp'].max()}, warmup {WARMUP_BARS} bars")
+print(f"{dropped:,} rows dropped by the null policy ({dropped / built.height:.1%})")
+print(f"thinnest family-month {min(coverage[c].min() for c in set(assignment.values())):.3f}")
+print(f"{len(DECISION_TIMES):,} decision minutes carrying {decisions.height:,} rows")
+
+# %% [markdown] tags=["results"]
+# The matrix carries **66 features** on **16,738,673 rows** across **114 symbols** and **505
+# sessions**, from **2020-01-02** to **2021-12-31**. The null policy dropped **3,169,371
+# rows**, which is **15.9%** and is the hour of warmup every session pays before Kyle's
+# lambda exists. Past that boundary the thinnest family-month is **0.960** covered, which is
+# the volatility and impact family: Amihud is null on a bar that printed no trades.
+
+# %% [markdown]
+# ### F1. Coverage through time
+#
+# The warmup here is intraday rather than historical - it is paid again every morning and it
+# is already spent by the time any row survives the null policy - so the boundary is drawn at
+# the panel's first month rather than a year into it, and the axis runs the full range so
+# that the one family sitting below one is visible rather than compressed against the top.
+
+# %%
+plot_coverage_through_time(
+    coverage,
+    warmup_boundary=features["timestamp"].min(),
+    title="Only what a trade defines is ever missing",
+    subtitle="Monthly non-null share per feature family, after the null policy",
+    alt=(
+        "Line chart of non-null share by feature family by month, on a y-axis running from "
+        "zero to one. Five of the six families sit flat at one across the whole sample. The "
+        "volatility and impact family sits a little below them, between about 0.95 and 0.97, "
+        "with no trend, reflecting the bars on which no trade printed and Amihud is "
+        "undefined."
+    ),
+)
+
+# %% [markdown]
+# ### F4. The timing contract
+
+# %%
+plot_timing_contract(
+    FAMILIES,
+    bar_unit="minute bars",
+    title="Only the off-exchange family waits for its input to be published",
+    subtitle="Register lookback per family; a gap at the right edge is a lag",
+    alt=(
+        "Horizontal bars, one per feature family, each extending leftward from the decision "
+        "line by that family's lookback: 60 minute bars for quote liquidity, order flow, "
+        "volatility and impact, and hidden liquidity, 15 for the microprice family, and none "
+        "for the session clock. Every bar reaches the decision line except the hidden "
+        "liquidity one, which stops one bar short of it - the lag with which FINRA prints "
+        "become public."
+    ),
+)
+
+# %% [markdown]
+# ## F. What the features look like
+#
+# Four properties decide whether this matrix can be used at all: the scale each feature
+# arrives on, whether the cross-section disagrees enough to rank on, how much of the set is
+# one ordering under several names, and how long a value lasts. Whether any of it predicts is
+# `05_evaluation`'s question, and it is asked there fold by fold rather than here on the
+# whole sample.
+#
+# ### F2. Feature distributions
+#
+# The carrier family is shown on the scale a reader would judge it: the per-bar imbalance,
+# the same quantity over the fast, decision and hourly windows, and the decision-window
+# version in its cross-sectional form. Aggregating over more bars pulls the share toward
+# zero, and the z-score puts a bounded, heavily-tied quantity onto an unbounded one - which
+# is the point of carrying both.
+
+# %%
+plot_feature_distributions(
+    features,
+    [
+        "signed_vol_share",
+        "signed_vol_share_5m",
+        CARRIER,
+        "signed_vol_share_60m",
+        f"{CARRIER}_xs",
+        "tick_imb_share_15m",
+    ],
+    title="Aggregating order flow over more bars concentrates it toward zero",
+    subtitle="Order-flow family across all symbol-minutes, display tails clipped",
+    alt=(
+        "Six histograms in two rows. The per-bar signed volume share is broad and roughly "
+        "symmetric across minus one to one with visible spikes at the extremes where a bar "
+        "carried a single trade. The five-minute, fifteen-minute and sixty-minute aggregates "
+        "narrow progressively toward zero, the hourly one being a tight bell. The "
+        "cross-sectional z-score of the fifteen-minute share is a smooth symmetric bell "
+        "spanning about minus four to four, and the fifteen-minute tick imbalance resembles "
+        "its signed-volume twin but is slightly wider."
+    ),
+)
+
+# %% [markdown]
+# ### F3. Cross-sectional dispersion through time
+#
+# A cross-sectional strategy needs the cross-section to disagree. On a minute where the band
+# narrows to nothing there is nothing to rank, whatever the average level of order flow. This
+# reads the decision grid alone: a band drawn over every minute would describe a cadence no
+# decision is taken at.
+
+# %%
+plot_cross_sectional_dispersion(
+    decisions,
+    CARRIER,
+    every="1mo",
+    title="The cross-section of order flow never collapses to one view",
+    subtitle=f"Interdecile band of {CARRIER} on the decision grid, by month",
+    alt=(
+        "Shaded band of the 10th to 90th percentile of the fifteen-minute signed volume "
+        "share across the universe, by month, with the median drawn through it. The median "
+        "sits marginally above zero throughout. The band runs from roughly minus 0.3 to plus "
+        "0.3, is widest in the first half of 2020 and narrows gradually through 2021 without "
+        "ever closing."
+    ),
+)
+
+# %% [markdown]
+# ### F5. Redundancy structure
+#
+# Clustering on the distance $1 - |\rho|$ groups features that carry the same ordering,
+# whatever the sign. Above the cut two features are close enough that a linear model cannot
+# separate their contributions. This states the clusters; choosing one representative from
+# each needs a fold-aware criterion and belongs to `05_evaluation`.
+
+# %%
+CUT = 0.7
+clusters = plot_redundancy_clusters(
+    features,
+    feature_cols,
+    cut=CUT,
+    title="Each level and its z-score are one ordering under two names",
+    subtitle=r"Average linkage on $1 - |\rho_s|$, cut drawn at $|\rho_s| = 0.7$",
+    alt=(
+        "Dendrogram of all 66 features. The dominant structure is that almost every level "
+        "joins its own cross-sectional z-score at a distance near zero, forming 31 tight "
+        "pairs. Those pairs then group by family: the three nested realized volatilities with "
+        "the EWMA and the two ranges, the four signed-volume horizons with the two tick "
+        "imbalance ones, and the four spread windows with the quote rate. The session clock "
+        "features and Kyle's lambda attach only near the root, sharing an ordering with "
+        "nothing else."
+    ),
+)
+
+# %% [markdown] tags=["results"]
+# Cutting the redundancy tree at $|\rho_s| = 0.7$ leaves **19 clusters** across the **66**
+# columns, so more than two thirds of the matrix repeats an ordering another column already
+# carries - almost all of it the level-and-z-score pairing, which is deliberate and which
+# `05_evaluation` resolves fold by fold rather than here.
+
+# %%
+print(f"{len(set(clusters.values()))} clusters over {len(feature_cols)} features at cut {CUT}")
+
+# %% [markdown]
+# ### F6. Persistence and rank stability
+#
+# The left panel is the autocorrelation of the feature itself, run out to ten rebalances of
+# the 15-minute schedule. It is estimated within the symbol-session, because every window in
+# this matrix restarts each morning and a pair of bars either side of a night is not a lag
+# of anything. The right panel asks the same question of the ordering rather than the level,
+# between consecutive decisions.
+#
+# A feature whose value has decayed before the next rebalance cannot support that cadence,
+# however well it predicts on the bar it is computed. That is the whole of what this figure
+# decides, and it is why the carrier is carried at four windows rather than one.
+
+# %%
+plot_persistence(
+    decisions.with_columns(pl.col("timestamp").dt.date().alias("session_date")),
+    ["signed_vol_share", CARRIER, "rel_spread_close", f"rv_{W['slow']}m", "kyle_lambda"],
+    entity=ENTITY,
+    max_lag=10,
+    decision_dates=DECISION_TIMES.to_list(),
+    title="Order flow decays fastest; only the state variables survive a rebalance",
+    subtitle=f"Within symbol-session, to 10 rebalances of the {DECISION_MINUTES}-minute schedule",
+    alt=(
+        "Two panels. On the left, autocorrelation against lag in decision bars: the relative "
+        "spread and the thirty-minute realized volatility start near 0.8 and decay slowly, "
+        "staying above 0.3 at ten lags. Kyle's lambda sits between them. Both signed volume "
+        "share series fall to near zero by the second lag and stay there, the per-bar one "
+        "starting lower than the fifteen-minute one. The bootstrap ribbons are narrow "
+        "throughout. On the right, the cross-sectional rank correlation between consecutive "
+        "rebalances puts the relative spread highest near 0.95, the realized volatility and "
+        "Kyle's lambda below it, and both order-flow series near zero."
+    ),
+)
+
+# %% [markdown]
+# ## G. Emit
+#
+# The parquet is written with a sidecar recording the digest of its values, its row count and
+# key columns, and the digest of what it was built from. This stage reads no upstream
+# case-study artifact - the labels are joined in `05_evaluation`, not here - so the sidecar
+# records the loaded minute panel alone, restricted to the columns and window actually
+# consumed. The digest is computed over content rather than file bytes, so row order and
+# parquet metadata leave it alone and any feature value moves it. That is the property the
+# registry's own hashes lack: a feature-set *name* reaches the registry, a feature-set
+# *value* does not.
+
+# %%
+record = write_artifact(
+    features,
+    FEATURES_DIR / "financial.parquet",
+    keys=PANEL_KEY,
+    written_by="case_studies/nasdaq100_microstructure/03_financial_features.py",
+    inputs={"load_nasdaq100_bars": value_digest(bars.select(READ))},
+)
+print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}, digest {record['digest']}")
+
+# %% [markdown]
+# ## Key takeaways
+#
+# - **Bound every window by the session, not by the symbol.** An intraday statistic that
+#   spans a night measures the overnight gap, and on a minute grid that gap is larger than
+#   anything the feature is meant to see. Making the symbol-session the entity is what makes
+#   the warmup assertion in D.2 mean the same thing on every row.
+# - **Measure the session against the schedule, not against the bars that arrived.** The
+#   realized bar count is a whole-session aggregate, so a feature built on it is a quantity
+#   nobody had until the session ended - and on an early close the vendor's padded grid makes
+#   it wrong as well as unknowable.
+# - **A late-published input needs a lag, however short the delay looks.** Ten seconds is
+#   small against a one-minute bar and it is not zero, and the cost of deferring a
+#   sixty-minute average by one bar is nothing.
+# - **Use the library's estimator or rename the column.** The single-bar ratio this notebook
+#   shipped as Amihud illiquidity was a different statistic under a published name; the
+#   averaged form is what the literature and every other case study here mean by it.
+# - **Test the seal by construction, not by inspection.** Rebuilding the matrix with later
+#   dates withheld and comparing values catches any transform that fits across the sample,
+#   including the ones nobody thought to flag.
+#
+# ### Known limitations
+#
+# - The matrix is at one-minute resolution while the decision grid is fifteen minutes, so a
+#   model trained on every row sees each 15-minute label fifteen times. The overlap is
+#   `05_evaluation`'s to price and the downstream models' to weight for; nothing here
+#   subsamples, because thinning the matrix would throw away the fast families it exists to
+#   carry.
+# - The vendor emits a padded 390-bar grid on early closes, so the six half-sessions in this
+#   window carry bars after the exchange had closed. The clock family is measured against the
+#   schedule and so reports them correctly, but they remain in the panel because the bar
+#   universe is `02_labels`'s to set and not this notebook's.
+# - Trade location is assigned against the prevailing quote, so a bar whose quote was stale
+#   attributes its volume to a side rather than to neither. The staleness cap bounds how long
+#   that can persist; it does not undo it on the bars inside the cap.
+# - Every feature here is a rule written in advance. `04_model_based_features` adds the
+#   features that are themselves model outputs, where the rule is estimated from the data.
