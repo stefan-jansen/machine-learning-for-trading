@@ -137,11 +137,28 @@ print(f"Holdout opens {HOLDOUT_START} and seals the label endpoint; panel ends {
 # not register the split as a price move; sorting by `symbol` then `timestamp` is what makes a
 # shift mean "the next session for this stock".
 #
-# This case study screens its universe for tradability: a stock enters on a date only if its
-# adjusted close is above five dollars and its dollar volume averaged more than a million a day
-# over the previous month. Both are rolling backward windows, and
+# The tradability screen asks a different question and therefore reads a different price. A stock
+# enters on a date only if its **printed close** is above five dollars and the dollar volume it
+# actually traded averaged more than a million a day over the previous month: `close` for the
+# price leg, and `close * volume` averaged over the previous 21 sessions for the liquidity leg.
+# Both are figures the tape carried on the day, so both are knowable when the position is decided.
+#
+# The adjusted series cannot answer that question, because its adjustment is anchored at the end
+# of the vendor file rather than at the row. `adj_close` on an early date is that date's price
+# divided by every split and dividend between it and the file's last session, so `close /
+# adj_close` equals one on each stock's final session and grows going backwards. A five dollar
+# floor on it screens on corporate actions that had not happened yet rather than on the share
+# price, and it drops stock-dates that printed well above five dollars on the day. What it drops
+# is concentrated in the early sample, which is where the earliest folds train.
+#
+# Dollar volume needs no adjustment at all, because a two-for-one split halves the price and
+# doubles the shares and leaves `close * volume` unchanged through it. `adj_close * adj_volume`
+# does not survive the same test: `adj_volume` carries only the split factor while `adj_close`
+# carries splits and dividends, so their product keeps the end-anchored dividend factor and
+# understates what a dividend payer traded, by more the further back the date.
+#
 # [`03_financial_features`](03_financial_features.ipynb) rebuilds the screen from the same three
-# constants on the same price series, so the trainable panel and these files agree on the universe.
+# constants on the same columns, so the trainable panel and these files agree on the universe.
 #
 # **The screen runs after the forward shift, not before, and that ordering is not a detail.**
 # Once ineligible rows are dropped a shift counts survivors instead of sessions: a stock that
@@ -157,9 +174,9 @@ if prices.schema["timestamp"] == pl.Datetime:
 prices = prices.sort(["symbol", "timestamp"])
 
 # Recorded as every label's `inputs`: a re-run against a refreshed download is otherwise
-# indistinguishable from this one. Volume is in the digest because it decides which rows are
-# written, so a corrected volume moves the artifact without the price having changed.
-MARKET_DATA_DIGEST = value_digest(prices, ["symbol", "timestamp", "adj_close", "adj_volume"])
+# indistinguishable from this one. `adj_close` sets the label values while the printed close and
+# volume decide which rows are written, so a corrected volume moves the artifact on its own.
+MARKET_DATA_DIGEST = value_digest(prices, ["symbol", "timestamp", "close", "volume", "adj_close"])
 
 print(f"{prices['symbol'].n_unique():,} symbols, {prices.height:,} symbol-sessions")
 print(f"Sessions {prices['timestamp'].min()} to {prices['timestamp'].max()}")
@@ -312,11 +329,8 @@ show_with_alt(fig, "Non-null label rate by position from the end of each stock's
 
 # %%
 eligible = labels_df.with_columns(
-    (pl.col("adj_close") * pl.col("adj_volume"))
-    .rolling_mean(ADV_WINDOW)
-    .over("symbol")
-    .alias("adv_21d")
-).filter((pl.col("adj_close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD))
+    (pl.col("close") * pl.col("volume")).rolling_mean(ADV_WINDOW).over("symbol").alias("adv_21d")
+).filter((pl.col("close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD))
 
 print(
     f"Eligible: {eligible.height:,} of {labels_df.height:,} symbol-sessions "
@@ -437,14 +451,14 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# On the development window the daily label has a standard deviation of 0.02904, the weekly
-# 0.06312 and the monthly 0.12579 - 2.17x and 4.33x the daily one, against the 2.24x and 4.58x
+# On the development window the daily label has a standard deviation of 0.02850, the weekly
+# 0.06190 and the monthly 0.12339 - 2.17x and 4.33x the daily one, against the 2.24x and 4.58x
 # square-root-of-horizon scaling implies, so the longer horizons come out slightly narrower than
 # a run of independent daily moves would make them. Their tails are the other way round: excess
-# kurtosis falls from 101.8 on the daily label to 25.2 on the monthly one, because a month of
+# kurtosis falls from 101.2 on the daily label to 22.3 on the monthly one, because a month of
 # returns averages away the single-session jumps that dominate the daily tail. The spread a
 # ranking model works inside is not stable through time: cross-sectional dispersion peaks at
-# 4.46% in 2000 against 1.81% in 1990, a ratio of 2.46, with a median year of 2.17%.
+# 4.31% in 2000 against 1.88% in 2013, a ratio of 2.29, with a median year of 2.15%.
 
 # %% [markdown]
 # ## F. Overlap and effective sample size
@@ -497,13 +511,13 @@ for label_name, horizon in HORIZONS.items():
     )
 
 # %% [markdown] tags=["results"]
-# The daily label's 8,058,076 development rows carry 8,058,076 effective observations, a ratio of
-# exactly 1.0000, as disjoint one-session windows require. The weekly label's 8,047,838 rows carry
-# 1,635,506, a ratio of 0.2032 against the 0.2000 a fully overlapped five-session window implies,
-# and the monthly label's 8,002,727 rows carry 402,359, a ratio of 0.0503 against 0.0476. Both
+# The daily label's 8,770,224 development rows carry 8,770,224 effective observations, a ratio of
+# exactly 1.0000, as disjoint one-session windows require. The weekly label's 8,760,023 rows carry
+# 1,777,783, a ratio of 0.2029 against the 0.2000 a fully overlapped five-session window implies,
+# and the monthly label's 8,714,574 rows carry 436,614, a ratio of 0.0501 against 0.0476. Both
 # variants sit above their reference value because a stock dropping out of the eligible universe
-# ends an overlap early. Autocorrelation at lag one is -0.014 for the daily label, 0.785 for the
-# weekly and 0.944 for the monthly, and the two variants fall to -0.042 and -0.019 at their own
+# ends an overlap early. Autocorrelation at lag one is -0.015 for the daily label, 0.784 for the
+# weekly and 0.944 for the monthly, and the two variants fall to -0.044 and -0.019 at their own
 # horizons. So the monthly label buys twenty times the rows of a monthly sample and roughly one
 # twentieth of the evidence per row. The purge gap a fold needs is set by the forward window
 # itself, not by these counts.
@@ -570,12 +584,12 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# Skip-month momentum earns a mean information coefficient of 0.0119 against the daily label over
-# 6,314 scored sessions on a cross-section of at least 576 stocks, positive as the momentum
-# hypothesis implies. Under the naive standard error that is a t-statistic of 5.60; the Newey-West
+# Skip-month momentum earns a mean information coefficient of 0.0104 against the daily label over
+# 6,305 scored sessions on a cross-section of at least 628 stocks, positive as the momentum
+# hypothesis implies. Under the naive standard error that is a t-statistic of 5.33; the Newey-West
 # rule picks 9 lags here, well above the zero a one-session horizon needs on its own, and the HAC
-# statistic is 4.95 with a p-value of 7.59e-07. So the floor a feature has to clear is a mean IC of
-# 0.0119 the correction still separates from zero, and that correction costs about a tenth of the
+# statistic is 4.74 with a p-value of 2.16e-06. So the floor a feature has to clear is a mean IC of
+# 0.0104 the correction still separates from zero, and that correction costs about a tenth of the
 # statistic even where the label itself does not overlap - the IC series carries persistence of its
 # own, which is what the lag rule is reading.
 
