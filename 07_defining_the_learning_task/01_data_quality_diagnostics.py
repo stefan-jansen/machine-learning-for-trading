@@ -915,7 +915,7 @@ if us_equities is not None:
         time_col="timestamp",
         symbol_col="symbol",
         value_col="close",
-        title="US equities is survivorship-free: assets enter and exit as they list and delist",
+        title="US equities is survivorship-free: assets list and delist mid-panel",
         max_symbols=50,
     )
     fig.update_layout(

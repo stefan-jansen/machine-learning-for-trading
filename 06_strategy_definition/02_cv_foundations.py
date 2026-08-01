@@ -911,7 +911,7 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title=f"Every one of the {len(splits_cpcv)} CPCV splits validates a different pair of blocks",
+    title="Every CPCV split validates a different pair of blocks",
     xaxis_title="Sample index",
     height=460,
     width=900,

@@ -193,8 +193,7 @@ fig.add_hline(y=-sig_bound, line_dash="dash", line_color=COLORS["negative"])
 fig.add_hline(y=0, line_color=COLORS["neutral"])
 
 fig.update_layout(
-    title=f"IC is strongly autocorrelated: {n_significant_lags} of {n_acf_lags} lags breach "
-    "the white-noise band",
+    title="Overlapping labels leave most IC lags outside the white-noise band",
     xaxis_title="Lag (days)",
     yaxis_title="Autocorrelation",
     template="ml4t",
