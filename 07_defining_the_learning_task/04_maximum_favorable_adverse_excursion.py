@@ -40,13 +40,19 @@
 # introduced by John Sweeney in *Campaign Trading* (1996) to analyze trade
 # management. For a **long** entry at time $t$ with holding period $H$:
 #
-# $$\text{MFE}(t) = \max_{u \in [t, t+H]} \left( \frac{\text{high}(u)}{\text{entry}(t)} - 1 \right)$$
+# $$\text{MFE}(t) = \max_{u \in [t+1, t+H]} \left( \frac{\text{high}(u)}{\text{entry}(t)} - 1 \right)$$
 #
-# $$\text{MAE}(t) = \max_{u \in [t, t+H]} \left( 1 - \frac{\text{low}(u)}{\text{entry}(t)} \right)$$
+# $$\text{MAE}(t) = \max_{u \in [t+1, t+H]} \left( 1 - \frac{\text{low}(u)}{\text{entry}(t)} \right)$$
 #
 # **Note**: Both MFE and MAE are non-negative by definition. For **short** positions,
 # the definitions reverse: MFE uses lows (favorable moves down) and MAE uses highs
 # (adverse moves up).
+#
+# The window opens at $t+1$. The entry fills at bar $t$'s close, so bar $t$'s own
+# high and low have already happened: counting them measures movement the position
+# was never exposed to, and stretches an $H$-bar holding period over $H+1$ bars.
+# Both excursions are inflated, and unevenly, since where the close sits inside bar
+# $t$'s range decides which side gains more.
 #
 # ## Data Coverage
 #
@@ -127,9 +133,15 @@ def compute_mfe_mae(
     """
     Compute maximum favorable excursion (MFE) and maximum adverse excursion (MAE).
 
-    Definitions are for a long position when side=1:
-    - MFE(t) = max_{u in [t, t+h]} (high(u)/entry(t) - 1)
-    - MAE(t) = max_{u in [t, t+h]} (1 - low(u)/entry(t))
+    Definitions are for a long position when side=1, entering at close(t):
+    - MFE(t) = max_{u in [t+1, t+h]} (high(u)/entry(t) - 1)
+    - MAE(t) = max_{u in [t+1, t+h]} (1 - low(u)/entry(t))
+
+    The window opens at ``t+1``, not ``t``. Bar ``t``'s own high and low are
+    already in the past when the entry fills at bar ``t``'s close, so including
+    them measures movement the position never had the chance to experience and
+    inflates both excursions. It also makes the window ``h+1`` bars long while the
+    caller asked for ``h``.
 
     For short positions (side=-1), favorable and adverse are swapped.
 
@@ -170,13 +182,16 @@ def compute_mfe_mae(
     effective_high_col = high_col if high_col in df.columns else close_col
     effective_low_col = low_col if low_col in df.columns else close_col
 
-    # Compute forward-looking max high and min low using horizontal operations
-    # This is vectorized and efficient for reasonable horizon sizes
+    # Compute forward-looking max high and min low using horizontal operations.
+    # This is vectorized and efficient for reasonable horizon sizes.
+    #
+    # k runs from 1, not 0: the entry price is bar t's close, so bar t's own high
+    # and low are pre-entry. See the docstring.
     forward_high = pl.max_horizontal(
-        [pl.col(effective_high_col).shift(-k) for k in range(horizon_bars + 1)]
+        [pl.col(effective_high_col).shift(-k) for k in range(1, horizon_bars + 1)]
     )
     forward_low = pl.min_horizontal(
-        [pl.col(effective_low_col).shift(-k) for k in range(horizon_bars + 1)]
+        [pl.col(effective_low_col).shift(-k) for k in range(1, horizon_bars + 1)]
     )
 
     entry = pl.col(close_col)
@@ -823,37 +838,63 @@ if spy is not None:
 # whole point of the exercise: a barrier width is a claim about how far price
 # travels, and this notebook measured how far it travels.
 #
-# For the two daily instruments the table also reports what ATR multiple each width
-# corresponds to. That is the translation an ATR-scaled implementation needs, and it
-# is a *consequence* of the measured distribution rather than an input to it - which
-# is why the multiple differs by instrument instead of being a round number chosen in
-# advance.
+# For the two daily instruments the table also reports the ATR multiple a
+# volatility-scaled stop would use. That multiple is the 75th percentile of the
+# per-entry ratio `MAE(t) / ATR(t)`, **not** the p75 excursion divided by the mean
+# ATR. The two are different numbers and only the first answers the question an
+# ATR-scaled stop asks. A stop placed at `k x ATR(t)` is re-sized every day, so
+# what has to hold at the 75th percentile is the *ratio*; dividing one aggregate by
+# another gives the ratio of typical values, which ignores that ATR and the
+# excursion it scales move together. It is a *consequence* of the measured
+# distribution rather than an input to it, which is why the multiple differs by
+# instrument instead of being a round number chosen in advance.
+
 
 # %%
+def atr_scaled_stop_multiple(
+    mfe_mae: pl.DataFrame, atr: pl.DataFrame, quantile: float = 0.75
+) -> float | None:
+    """p75 of MAE(t) / ATR(t), the multiple a volatility-scaled stop needs."""
+    joined = mfe_mae.join(atr.select(["timestamp", "atr_pct"]), on="timestamp", how="inner")
+    ratio = (
+        joined.filter(pl.col("atr_pct") > 0)
+        .select((pl.col("mae_pct") / pl.col("atr_pct")).alias("r"))
+        .drop_nulls()["r"]
+    )
+    return float(ratio.quantile(quantile)) if len(ratio) else None
+
+
 barrier_rows = []
 
 if spy_mfe_mae is not None:
-    barrier_rows.append(("ETF (SPY)", "21d", mfe_pctls, mae_pctls, avg_atr))
+    barrier_rows.append(
+        ("ETF (SPY)", "21d", mfe_pctls, mae_pctls, atr_scaled_stop_multiple(spy_mfe_mae, spy_atr))
+    )
 if btc_mfe_mae is not None:
     btc_mfe_pctls = compute_percentiles(btc_mfe_mae["mfe_pct"], [50, 75])
     btc_mae_pctls = compute_percentiles(btc_mfe_mae["mae_pct"], [50, 75])
     barrier_rows.append(("Crypto (BTC)", "8h", btc_mfe_pctls, btc_mae_pctls, None))
 if es_mfe_mae is not None:
-    barrier_rows.append(("Futures (ES)", "21d", es_mfe_pctls, es_mae_pctls, es_avg_atr))
+    barrier_rows.append(
+        (
+            "Futures (ES)",
+            "21d",
+            es_mfe_pctls,
+            es_mae_pctls,
+            atr_scaled_stop_multiple(es_mfe_mae, es_atr),
+        )
+    )
 
 print("Barrier widths derived from each instrument's own excursion distribution\n")
 header = f"{'Instrument':<14}{'Horizon':<9}{'TP p50':>8}{'SL p50':>8}{'TP p75':>8}{'SL p75':>8}"
-print(header + f"{'ATR':>8}{'SL p75 / ATR':>14}")
-print("-" * (len(header) + 22))
-for name, horizon, mfe_p, mae_p, atr in barrier_rows:
+print(header + f"{'stop, p75 of MAE/ATR':>23}")
+print("-" * (len(header) + 23))
+for name, horizon, mfe_p, mae_p, stop_mult in barrier_rows:
     line = (
         f"{name:<14}{horizon:<9}"
         f"{mfe_p[50]:>7.2f}%{mae_p[50]:>7.2f}%{mfe_p[75]:>7.2f}%{mae_p[75]:>7.2f}%"
     )
-    if atr is not None:
-        line += f"{atr:>7.2f}%{mae_p[75] / atr:>13.2f}x"
-    else:
-        line += f"{'n/a':>8}{'n/a':>14}"
+    line += f"{stop_mult:>22.2f}x" if stop_mult is not None else f"{'n/a':>23}"
     print(line)
 
 if spy_mfe_mae is not None and es_mfe_mae is not None:
