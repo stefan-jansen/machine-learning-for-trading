@@ -58,11 +58,70 @@ def combine_existing(output_path: Path, new_df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def get_update_start(output_path: Path, end_date: str, interval_hours: int) -> str | None:
+def missing_symbols(
+    df: pl.DataFrame, symbols: list[str], failed: list[str], *, updating: bool
+) -> list[str]:
+    """Which requested symbols this run did not deliver.
+
+    On a plain run the answer comes from the merged dataset, not from the symbols
+    that failed in this request: combine_existing() folds a retry into what a
+    previous run already wrote, so a symbol that fails on the retry is still
+    present, and reporting the request's failures would fail a download that is in
+    fact complete.
+
+    --update inverts that. Every symbol is already on disk by construction, so
+    presence proves nothing about whether the window was extended - there the
+    request's failures are exactly what did not arrive.
+    """
+    present = set() if df.is_empty() else set(df["symbol"].unique().to_list())
+    absent = {s for s in symbols if s not in present}
+    if updating:
+        absent |= {s for s in failed if s in symbols}
+    return sorted(absent)
+
+
+def _empty_response_note(output_path: Path, force: bool) -> str:
+    """What happens next when nothing arrived."""
+    if force:
+        return "--force replaces rather than merges, so there is nothing to fall back to."
+    if not output_path.exists():
+        return "Nothing has been downloaded before either."
+    return "Falling back to what is already on disk."
+
+
+def get_update_start(
+    output_path: Path,
+    end_date: str,
+    interval_hours: int,
+    symbols: list[str] | None = None,
+    configured_start: str | None = None,
+) -> str | None:
+    """Where an incremental update has to start so no symbol is left short.
+
+    The *earliest* per-symbol last timestamp, not the dataset-wide maximum. Those
+    differ exactly when an earlier update was partial: the symbols that succeeded
+    carry the dataset maximum, so starting there would step over the gap left by
+    the ones that failed and never fill it, while the run reported success. The
+    cost of starting earlier is refetching rows for symbols that are already
+    current, which combine_existing() dedups on (symbol, timestamp).
+
+    A symbol missing from the file entirely has no history at all, not a recent
+    gap, so the window has to reopen at *configured_start* — otherwise the symbol
+    arrives with only the tail, and its presence then reads as success.
+    """
     if not output_path.exists():
         return None
 
-    last_ts = pl.read_parquet(output_path).select(pl.col("timestamp").max()).item()
+    per_symbol = pl.read_parquet(output_path).group_by("symbol").agg(pl.col("timestamp").max())
+    if per_symbol.is_empty():
+        return None
+
+    if symbols and configured_start:
+        present = set(per_symbol["symbol"].to_list())
+        if any(s not in present for s in symbols):
+            return None if configured_start > end_date else configured_start
+
+    last_ts = per_symbol["timestamp"].min()
     if last_ts is None:
         return None
 
@@ -163,6 +222,11 @@ def main() -> None:
         action="store_true",
         help="Extend the configured end date to today and append new rows",
     )
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Exit 0 even if symbols are missing (keeps what arrived; re-run to retry them)",
+    )
     args = parser.parse_args()
 
     load_dotenv()
@@ -217,19 +281,25 @@ def main() -> None:
     storage_path.mkdir(parents=True, exist_ok=True)
     dictionary_path = write_dictionary(storage_path, symbol_groups)
     summary: dict[str, object] = {"dictionary_file": str(dictionary_path)}
+    # What is absent from the merged dataset, which is what the exit status is
+    # about. Not the same as the failed lists below, which are per-request.
+    perps_missing: list[str] = []
+    premium_missing: list[str] = []
+    perps_failed: list[str] = []
+    premium_failed: list[str] = []
 
     if download_perps_flag:
         perps_output = storage_path / perps_template.format(frequency="1h")
         provider = BinancePublicProvider(market=str(perps_cfg.get("market", "futures")))
         start_date = perps_start
         if args.update and not args.force:
-            incremental_start = get_update_start(perps_output, perps_end, interval_hours=1)
+            incremental_start = get_update_start(perps_output, perps_end, 1, symbols, perps_start)
             if incremental_start is None:
                 print("\nPerpetual OHLCV already up to date.")
                 perps_df = (
                     pl.read_parquet(perps_output) if perps_output.exists() else pl.DataFrame()
                 )
-                perps_failed: list[str] = []
+                perps_failed = []
             else:
                 start_date = incremental_start
                 print(f"\nAppending perpetual OHLCV from {start_date}...")
@@ -238,23 +308,39 @@ def main() -> None:
                     combine_existing(perps_output, new_df)
                     if not new_df.is_empty()
                     else pl.read_parquet(perps_output)
-                )
+                )  # the update branch only runs with an existing file
         else:
             print("\nDownloading perpetual OHLCV...")
             new_df, perps_failed = download_perps(provider, symbols, start_date, perps_end)
             if new_df.is_empty():
-                print("ERROR: no perpetual OHLCV data downloaded")
-                sys.exit(1)
-            perps_df = (
-                combine_existing(perps_output, new_df)
-                if perps_output.exists() and not args.force
-                else new_df.sort(["symbol", "timestamp"])
-            )
+                # Not necessarily a failure: a fully rate-limited retry against a
+                # complete dataset arrives here. Fall through to the merged-dataset
+                # check rather than exiting, so the status reflects what is on disk
+                # and --allow-partial still applies. The provider returns a frame
+                # with no columns at all, so it can be neither combined nor sorted.
+                # --force means replace, not merge, so there is nothing to fall
+                # back to: a forced refresh that returned nothing has failed, and
+                # keeping the old rows would report stale data as the result.
+                print(
+                    f"No perpetual OHLCV rows returned. {_empty_response_note(perps_output, args.force)}"
+                )
+                perps_df = (
+                    pl.read_parquet(perps_output)
+                    if perps_output.exists() and not args.force
+                    else new_df
+                )
+            else:
+                perps_df = (
+                    combine_existing(perps_output, new_df)
+                    if perps_output.exists() and not args.force
+                    else new_df.sort(["symbol", "timestamp"])
+                )
 
         if not perps_df.is_empty():
             perps_df = clamp_date_range(perps_df, perps_start, perps_end)
             if not args.symbol:
                 perps_df = perps_df.filter(pl.col("symbol").is_in(symbols))
+            perps_missing = missing_symbols(perps_df, symbols, perps_failed, updating=args.update)
             atomic_write_parquet(perps_df, perps_output)
             save_partitioned(perps_df, storage_path / "ohlcv_1h")
             profile_path = save_dataset_profile(
@@ -262,22 +348,26 @@ def main() -> None:
             )
             summary["perps_rows"] = len(perps_df)
             summary["perps_symbols"] = perps_df["symbol"].n_unique()
-            summary["perps_failed"] = len(perps_failed)
+            summary["perps_missing"] = len(perps_missing)
             summary["perps_output"] = str(perps_output)
             summary["perps_profile"] = str(profile_path)
+        else:
+            perps_missing = list(symbols)
 
     if download_premium_flag:
         premium_output = storage_path / premium_file
         provider = BinancePublicProvider(market=str(config.get("market", "futures")))
         start_date = premium_start
         if args.update and not args.force:
-            incremental_start = get_update_start(premium_output, premium_end, interval_hours=8)
+            incremental_start = get_update_start(
+                premium_output, premium_end, 8, symbols, premium_start
+            )
             if incremental_start is None:
                 print("\nPremium index already up to date.")
                 premium_df = (
                     pl.read_parquet(premium_output) if premium_output.exists() else pl.DataFrame()
                 )
-                premium_failed: list[str] = []
+                premium_failed = []
             else:
                 start_date = incremental_start
                 print(f"\nAppending premium index from {start_date}...")
@@ -295,18 +385,28 @@ def main() -> None:
                 provider, symbols, start_date, premium_end, premium_interval
             )
             if new_df.is_empty():
-                print("ERROR: no premium index data downloaded")
-                sys.exit(1)
-            premium_df = (
-                combine_existing(premium_output, new_df)
-                if premium_output.exists() and not args.force
-                else new_df.sort(["symbol", "timestamp"])
-            )
+                print(
+                    f"No premium index rows returned. {_empty_response_note(premium_output, args.force)}"
+                )
+                premium_df = (
+                    pl.read_parquet(premium_output)
+                    if premium_output.exists() and not args.force
+                    else new_df
+                )
+            else:
+                premium_df = (
+                    combine_existing(premium_output, new_df)
+                    if premium_output.exists() and not args.force
+                    else new_df.sort(["symbol", "timestamp"])
+                )
 
         if not premium_df.is_empty():
             premium_df = clamp_date_range(premium_df, premium_start, premium_end)
             if not args.symbol:
                 premium_df = premium_df.filter(pl.col("symbol").is_in(symbols))
+            premium_missing = missing_symbols(
+                premium_df, symbols, premium_failed, updating=args.update
+            )
             atomic_write_parquet(premium_df, premium_output)
             save_partitioned(premium_df, storage_path / "premium_index")
             profile_path = save_dataset_profile(
@@ -314,11 +414,36 @@ def main() -> None:
             )
             summary["premium_rows"] = len(premium_df)
             summary["premium_symbols"] = premium_df["symbol"].n_unique()
-            summary["premium_failed"] = len(premium_failed)
+            summary["premium_missing"] = len(premium_missing)
             summary["premium_output"] = str(premium_output)
             summary["premium_profile"] = str(profile_path)
+        else:
+            premium_missing = list(symbols)
 
     print_download_summary(summary)
+
+    # Exit non-zero when a requested symbol is absent from what is now on disk.
+    # Binance rate-limits this download — roughly 700 calls over 10-15 minutes —
+    # so coming back short is the expected failure, and exiting 0 makes it
+    # indistinguishable from a complete download to download_all.py, to CI, and to
+    # a reader who checks the status rather than reading the summary.
+    if perps_missing or premium_missing:
+        for label, missing in (
+            ("perpetual OHLCV", perps_missing),
+            ("premium index", premium_missing),
+        ):
+            if missing:
+                print(f"\n{len(missing)} {label} symbol(s) missing: {', '.join(sorted(missing))}")
+        # Re-running fetches every configured symbol again and merges the result
+        # into what is already on disk, so a symbol that failed once can arrive on
+        # the second run. It is a retry, not a resume; --update is the incremental
+        # path, and it extends the window rather than filling gaps in it.
+        if args.allow_partial:
+            print("\nPartial download accepted (--allow-partial). Re-run to try the rest.")
+        else:
+            print("\nPartial download. Re-run to try the missing symbols again,")
+            print("or pass --allow-partial to accept what arrived.")
+            sys.exit(1)
 
 
 if __name__ == "__main__":

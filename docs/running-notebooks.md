@@ -496,7 +496,11 @@ Some datasets require API keys (set in `.env`):
 - **OANDA** (FX pairs): Free API key from [oanda.com](https://www.oanda.com/)
 - **NASDAQ Data Link** (US equities): Free API key from [data.nasdaq.com](https://data.nasdaq.com/)
 - **Databento** (CME futures): $125 free signup credit from [databento.com](https://databento.com/)
-- **AlgoSeek** (microstructure, options): Requires commercial license
+
+**AlgoSeek** (NASDAQ-100 minute bars, S&P 500 option chains) needs no key and no account. Download
+the archives from [algoseek.com/ml-for-trading](https://algoseek.com/ml-for-trading/) and convert
+them once — see [AlgoSeek datasets](../data/README.md#algoseek-datasets), which also names the two
+datasets AlgoSeek has not published yet and the notebooks that wait on them.
 
 ---
 

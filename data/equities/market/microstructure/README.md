@@ -22,7 +22,7 @@ is identical to the full commercial feed.
 
 | Property | Value |
 |----------|-------|
-| **Source** | AlgoSeek (slim reader package, hosted) |
+| **Source** | AlgoSeek — **not published yet**, see below |
 | **Frequency** | Tick (trades + NBBO quote events) |
 | **Dates** | 2020-03-13, 2020-03-16 |
 | **Symbols** | AAPL |
@@ -30,11 +30,17 @@ is identical to the full commercial feed.
 | **Schema** | `timestamp` (µs), `symbol`, `event_type`, `price`, `quantity`, `exchange`, `conditions` |
 | **License** | Commercial — slim slice redistributed under reader license |
 
-```bash
-# Slim package download (URL + instructions pending AlgoSeek reader bundle)
-# For book readers: fetch the bundle, unpack under:
-#   $ML4T_DATA_PATH/equities/market/microstructure/trade_and_quotes_slim/
-```
+**AlgoSeek has not published this slice.** It was staged for hosting and has not
+been packaged, so `11_algoseek_taq_eda` and `12_algoseek_taq_lob_reconstruction`
+cannot run yet. Check <https://algoseek.com/ml-for-trading/>, which is where
+AlgoSeek publishes this book's datasets; when it appears, unpack it under
+`$ML4T_DATA_PATH/equities/market/microstructure/trade_and_quotes_slim/`.
+
+The NASDAQ-100 archive AlgoSeek *has* published cannot stand in. Despite the
+"taq-ext" in its name it is quote-aware minute-bar aggregates — `OpenBidPrice`,
+`TradeAtBid`, `NBBOQuoteCount` and so on — not individual events, and an order
+book cannot be reconstructed from bars. It converts to the minute-bar dataset
+instead; see [AlgoSeek datasets](../../../README.md#algoseek-datasets).
 
 ```python
 from data import load_nasdaq100_taq

@@ -22,20 +22,29 @@ After materialization, notebooks use:
 
 from __future__ import annotations
 
+import argparse
 import gc
 import time
 from pathlib import Path
 
 import polars as pl
 
+from utils.downloading import resolve_data_dir
+
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-RAW_DIR = Path(__file__).parent / "options"
-OUT_DIR = Path(__file__).parent
+def sp500_data_dir(data_path: Path | None = None) -> Path:
+    """Where the loaders read this dataset from.
 
-SURFACE_OUT = OUT_DIR / "options_surface_daily.parquet"
-STRADDLES_OUT = OUT_DIR / "options_straddles_daily.parquet"
+    Not ``Path(__file__).parent``: the converter writes under ``$ML4T_DATA_PATH``,
+    which a reader may point outside the repository, and a build script anchored
+    to its own directory would then look in the wrong place and leave its output
+    somewhere the loaders never read.
+    """
+    return resolve_data_dir(data_path) / "equities" / "market" / "sp500"
+
 
 YEARS = [2017, 2018, 2019, 2020, 2021]
 
@@ -341,6 +350,21 @@ def compute_straddles(df: pl.DataFrame) -> pl.DataFrame:
 # Main: year-by-year processing
 # ===================================================================
 def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--data-path",
+        type=Path,
+        default=None,
+        help="Data storage location (default: $ML4T_DATA_PATH or repo/data)",
+    )
+    args = parser.parse_args()
+
+    base = sp500_data_dir(args.data_path)
+    RAW_DIR = base / "options"
+    SURFACE_OUT = base / "options_surface_daily.parquet"
+    STRADDLES_OUT = base / "options_straddles_daily.parquet"
+    base.mkdir(parents=True, exist_ok=True)
+
     print("=" * 60)
     print("SP500 Options Materialization")
     print(f"Raw data: {RAW_DIR}")

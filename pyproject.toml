@@ -47,7 +47,9 @@ dependencies = [
     # ===================
     # ML4T Libraries (PyPI, pre-release)
     # ===================
-    "ml4t-data>=0.1.0b15",
+    # b19: the missing-data errors name the download command a reader can run and
+    # the path the data root resolved from, instead of a Python API call.
+    "ml4t-data>=0.1.0b19",
     "ml4t-diagnostic>=0.1.0b25",
     "ml4t-engineer>=0.1.0b10",
     "ml4t-backtest>=0.1.0b20",
@@ -247,6 +249,15 @@ dev = [
 # than the deprecated "if-necessary-or-explicit", which makes uv print a deprecation
 # warning on every single `uv run` a reader types.
 prerelease = "if-necessary"
+
+# Download CPython rather than reusing whatever the machine already has. uv reuses
+# the system interpreter whenever it satisfies requires-python, so on a distro that
+# ships 3.14 (Ubuntu 26.04 does) a reader inherits Debian's interpreter behaviour:
+# missing Python.h unless python3-dev is installed, and a distro sitecustomize.py in
+# the stdlib directory that shadows this repo's and silently disables chapter imports
+# and the data-root anchor. Pinning the interpreter gives every reader the environment
+# the book was validated on.
+python-preference = "only-managed"
 
 # Force protobuf >= 5.0 for Python 3.14 compatibility.
 # protobuf 4.x has a C extension metaclass bug on Python 3.14.

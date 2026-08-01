@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,23 @@ CASE_STUDY_IDS = [
 ]
 
 
+def generated_env_contents(repo_root: Path, environ: Mapping[str, str]) -> str:
+    """What a generated ``.env`` should contain, given the environment.
+
+    Carries only a data path someone actually chose. ``sitecustomize.py`` sets
+    ML4T_DATA_PATH to ``<repo>/data`` when nothing else did, and marks it as a
+    default; writing that into ``.env`` would promote the default to an explicit
+    setting that step 2 of ``_resolve_data_path()`` returns — shadowing the
+    populated test-data checkout and silently skipping every data-dependent
+    notebook test on a clean clone.
+    """
+    lines = [f"ML4T_PATH={repo_root}\n"]
+    data_path = environ.get("ML4T_DATA_PATH")
+    if data_path and not environ.get("ML4T_DATA_PATH_IS_DEFAULT"):
+        lines.append(f"ML4T_DATA_PATH={data_path}\n")
+    return "".join(lines)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def ci_env_setup():
     """Create .env file if running in CI (where ML4T_DATA_PATH is set externally).
@@ -45,11 +63,7 @@ def ci_env_setup():
     created = False
 
     if not env_file.exists():
-        # Create minimal .env for CI
-        env_file.write_text(
-            f"ML4T_PATH={REPO_ROOT}\n"
-            f"ML4T_DATA_PATH={os.environ.get('ML4T_DATA_PATH', REPO_ROOT / 'data')}\n"
-        )
+        env_file.write_text(generated_env_contents(REPO_ROOT, os.environ))
         created = True
 
     yield
@@ -65,9 +79,14 @@ def _resolve_data_path() -> Path | None:
     pytest-xdist workers may not inherit env vars set by the parent process,
     so we also check the .env file and well-known test-data locations.
     """
-    # 1. Explicit env var (works in single-process pytest and CI)
+    # 1. Explicit env var (works in single-process pytest and CI).
+    #    sitecustomize.py sets ML4T_DATA_PATH to <repo>/data when nothing else
+    #    did, and marks it. That default must not win here: the tracked data/
+    #    tree is never empty, so taking it would shadow the populated test-data
+    #    checkout below and silently skip every data-dependent notebook test.
+    #    Step 4 applies the real test — does it hold parquet — to that path.
     env_path = os.environ.get("ML4T_DATA_PATH")
-    if env_path:
+    if env_path and not os.environ.get("ML4T_DATA_PATH_IS_DEFAULT"):
         p = Path(env_path).expanduser().resolve()
         if p.exists() and any(p.iterdir()):
             return p

@@ -22,14 +22,26 @@ Run from repo root:
 
 from __future__ import annotations
 
+import argparse
 import gc
 import time
 from pathlib import Path
 
 import polars as pl
 
-RAW_DIR = Path(__file__).parent / "options"
-OUT_DIR = Path(__file__).parent / "options_straddles_raw"
+from utils.downloading import resolve_data_dir
+
+
+def sp500_data_dir(data_path: Path | None = None) -> Path:
+    """Where the loaders read this dataset from.
+
+    Not ``Path(__file__).parent``: the converter writes under ``$ML4T_DATA_PATH``,
+    which a reader may point outside the repository, and a build script anchored
+    to its own directory would then look in the wrong place and leave its output
+    somewhere the loaders never read.
+    """
+    return resolve_data_dir(data_path) / "equities" / "market" / "sp500"
+
 
 YEARS = [2017, 2018, 2019, 2020, 2021]
 
@@ -69,11 +81,24 @@ def identify_candidate_contracts(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--data-path",
+        type=Path,
+        default=None,
+        help="Data storage location (default: $ML4T_DATA_PATH or repo/data)",
+    )
+    args = parser.parse_args()
+
+    base = sp500_data_dir(args.data_path)
+    RAW_DIR = base / "options"
+    OUT_DIR = base / "options_straddles_raw"
+
     if not RAW_DIR.exists():
         msg = f"Raw options directory not found: {RAW_DIR}"
         raise FileNotFoundError(msg)
 
-    OUT_DIR.mkdir(exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
     print("Building SP500 options straddles raw slice (ATM-band, lifecycle-preserving)")
