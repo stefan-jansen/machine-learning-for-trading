@@ -609,8 +609,11 @@ display(pl.DataFrame(endpoint_rows))
 # finding that one-day reversal is absent from this panel, and it is not a
 # tradeability result. Both would need the measurements named above.
 # **The general rule: a feature ending at $t$ and a label beginning at $t$ share a
-# price, and that alone will manufacture a t-statistic - so a cell that only exists
-# while they share one has to be re-measured before it is believed.**
+# price, and shared noise in that price induces covariance between them whether or
+# not any effect exists. That is a property of the construction, provable without
+# looking at data - which is exactly why it cannot be read backwards. Seeing a cell
+# fail this check does not establish that the mechanism fired; it establishes that
+# the cell has to be re-measured before it is believed.**
 
 # %% [markdown]
 # ### Feature selection for diagnostic deep-dive
