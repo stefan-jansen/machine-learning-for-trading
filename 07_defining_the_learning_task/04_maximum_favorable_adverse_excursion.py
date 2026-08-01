@@ -377,17 +377,29 @@ if spy is not None:
 
 # %%
 if spy_mfe_mae is not None:
+    # Shared x and y ranges across the two panels. The title makes a comparison
+    # between them, and panels on independent axes cannot support one: plotly's
+    # default fits each histogram to its own extent, so the narrower distribution
+    # is drawn as wide as the broader one. The shared limit is the 99.5th
+    # percentile of whichever series runs further, which keeps the bulk legible
+    # without letting a handful of crisis observations set the scale.
+    SPY_HIST_MAX = max(
+        float(spy_mfe_mae["mfe_pct"].quantile(0.995)),
+        float(spy_mfe_mae["mae_pct"].quantile(0.995)),
+    )
+
     fig = make_subplots(
         rows=1,
         cols=2,
         subplot_titles=["Favorable (MFE)", "Adverse (MAE)"],
+        shared_yaxes=True,
     )
 
     # MFE histogram
     fig.add_trace(
         go.Histogram(
             x=spy_mfe_mae["mfe_pct"].to_numpy(),
-            nbinsx=50,
+            xbins=dict(start=0, end=SPY_HIST_MAX, size=SPY_HIST_MAX / 50),
             name="MFE",
             marker_color=COLORS["positive"],
         ),
@@ -399,7 +411,7 @@ if spy_mfe_mae is not None:
     fig.add_trace(
         go.Histogram(
             x=spy_mfe_mae["mae_pct"].to_numpy(),
-            nbinsx=50,
+            xbins=dict(start=0, end=SPY_HIST_MAX, size=SPY_HIST_MAX / 50),
             name="MAE",
             marker_color=COLORS["negative"],
         ),
@@ -407,13 +419,25 @@ if spy_mfe_mae is not None:
         col=2,
     )
 
+    # Median markers, so the claim in the title is readable off the chart.
+    for col, median in ((1, mfe_pctls[50]), (2, mae_pctls[50])):
+        fig.add_vline(
+            x=median,
+            line_dash="dash",
+            line_color=COLORS["neutral"],
+            row=1,
+            col=col,
+            annotation_text="median",
+            annotation_font_size=10,
+        )
+
     fig.update_layout(
-        title=f"SPY {etf_horizon}-day favorable moves (median 3.1%) run wider than adverse (2.1%)",
+        title="SPY favorable moves run wider than adverse ones at the median",
         showlegend=False,
         height=400,
     )
-    fig.update_xaxes(title_text="Excursion (%)", row=1, col=1)
-    fig.update_xaxes(title_text="Excursion (%)", row=1, col=2)
+    fig.update_xaxes(title_text="Excursion (%)", range=[0, SPY_HIST_MAX], row=1, col=1)
+    fig.update_xaxes(title_text="Excursion (%)", range=[0, SPY_HIST_MAX], row=1, col=2)
     fig.update_yaxes(title_text="Count", row=1, col=1)
 
     fig.show()
@@ -468,17 +492,25 @@ except Exception as e:
 
 # %%
 if btc_mfe_mae is not None:
+    # Shared limits, for the same reason as the SPY panels above: the title
+    # compares the two distributions, so they have to be drawn on one scale.
+    BTC_HIST_MAX = max(
+        float(btc_mfe_mae["mfe_pct"].quantile(0.995)),
+        float(btc_mfe_mae["mae_pct"].quantile(0.995)),
+    )
+
     fig = make_subplots(
         rows=1,
         cols=2,
         subplot_titles=["Favorable (MFE)", "Adverse (MAE)"],
+        shared_yaxes=True,
     )
 
     # MFE histogram
     fig.add_trace(
         go.Histogram(
             x=btc_mfe_mae["mfe_pct"].to_numpy(),
-            nbinsx=50,
+            xbins=dict(start=0, end=BTC_HIST_MAX, size=BTC_HIST_MAX / 50),
             name="MFE",
             marker_color=COLORS["positive"],
         ),
@@ -490,7 +522,7 @@ if btc_mfe_mae is not None:
     fig.add_trace(
         go.Histogram(
             x=btc_mfe_mae["mae_pct"].to_numpy(),
-            nbinsx=50,
+            xbins=dict(start=0, end=BTC_HIST_MAX, size=BTC_HIST_MAX / 50),
             name="MAE",
             marker_color=COLORS["negative"],
         ),
@@ -500,31 +532,31 @@ if btc_mfe_mae is not None:
 
 # %%
 if btc_mfe_mae is not None:
-    # Add barrier reference lines (2% from typical crypto settings)
-    fig.add_vline(
-        x=2.0,
-        line_dash="dash",
-        line_color=COLORS["copper"],
-        row=1,
-        col=1,
-        annotation_text="2% barrier",
-    )
-    fig.add_vline(
-        x=2.0,
-        line_dash="dash",
-        line_color=COLORS["copper"],
-        row=1,
-        col=2,
-        annotation_text="2% barrier",
-    )
+    # Reference line at each side's own 75th percentile.
+    #
+    # This line used to sit at a flat 2.0% "from typical crypto settings" - a round
+    # number asserted as typical, in the notebook whose argument is that barrier
+    # widths should be measured rather than assumed. The measured p75 is what the
+    # rest of the notebook calibrates against, and drawing each panel's own value is
+    # what makes the near-symmetry in the title checkable.
+    for col, pctl in ((1, btc_mfe_pctls[75]), (2, btc_mae_pctls[75])):
+        fig.add_vline(
+            x=pctl,
+            line_dash="dash",
+            line_color=COLORS["copper"],
+            row=1,
+            col=col,
+            annotation_text="75th pctl",
+            annotation_font_size=10,
+        )
 
     fig.update_layout(
-        title=f"Most BTC {crypto_horizon}-hour excursions stay under the 2% barrier",
+        title="BTC favorable and adverse excursions are near mirror images",
         showlegend=False,
         height=400,
     )
-    fig.update_xaxes(title_text="Excursion (%)", row=1, col=1)
-    fig.update_xaxes(title_text="Excursion (%)", row=1, col=2)
+    fig.update_xaxes(title_text="Excursion (%)", range=[0, BTC_HIST_MAX], row=1, col=1)
+    fig.update_xaxes(title_text="Excursion (%)", range=[0, BTC_HIST_MAX], row=1, col=2)
     fig.update_yaxes(title_text="Count", row=1, col=1)
 
     fig.show()
@@ -593,9 +625,22 @@ try:
     print(f"  MAE mean: {es_mfe_mae['mae_pct'].mean():.2f}%")
     print(f"  MAE median: {es_mfe_mae['mae_pct'].median():.2f}%")
 
+    es_mfe_pctls = compute_percentiles(es_mfe_mae["mfe_pct"], [25, 50, 75, 90, 95])
+    es_mae_pctls = compute_percentiles(es_mfe_mae["mae_pct"], [25, 50, 75, 90, 95])
+    print(f"\nMFE Percentiles: {es_mfe_pctls}")
+    print(f"MAE Percentiles: {es_mae_pctls}")
+
+    es_atr = compute_atr(
+        es, "timestamp", high_col="adj_high", low_col="adj_low", close_col="adj_close", unit="pct"
+    )
+    es_avg_atr = float(es_atr["atr_pct"].mean())
+    print(f"\nES 14-day ATR: {es_avg_atr:.2f}% (average)")
+
 except Exception as e:
     print(f"Futures data not found - skipping: {e}")
     es_mfe_mae = None
+    es_atr = None
+    es_avg_atr = None
 
 # %% [markdown]
 # ## 6. MFE/MAE Scatter Plot
@@ -772,20 +817,74 @@ if spy is not None:
 # %% [markdown]
 # ## 9. Recommendations Summary
 #
-# Based on MFE/MAE analysis, the following triple-barrier parameters are justified:
+# Each instrument's barriers come from its own excursion distribution, at the same
+# percentile, so the take-profit is read off the MFE and the stop off the MAE. The
+# table below is built from the measured quantiles rather than typed, which is the
+# whole point of the exercise: a barrier width is a claim about how far price
+# travels, and this notebook measured how far it travels.
 #
-# | Dataset      | Horizon | Upper   | Lower   | Rationale                          |
-# |--------------|---------|---------|---------|-----------------------------------|
-# | ETF (SPY)    | 21d     | 2xATR   | 1xATR   | Adapts to volatility regime       |
-# | Crypto (BTC) | 8h      | ~1%     | ~1%     | Near MFE/MAE medians (~0.9%)      |
-# | Futures (ES) | 21d     | 1.5xATR | 1xATR   | Tighter for institutional flow    |
+# For the two daily instruments the table also reports what ATR multiple each width
+# corresponds to. That is the translation an ATR-scaled implementation needs, and it
+# is a *consequence* of the measured distribution rather than an input to it - which
+# is why the multiple differs by instrument instead of being a round number chosen in
+# advance.
+
+# %%
+barrier_rows = []
+
+if spy_mfe_mae is not None:
+    barrier_rows.append(("ETF (SPY)", "21d", mfe_pctls, mae_pctls, avg_atr))
+if btc_mfe_mae is not None:
+    btc_mfe_pctls = compute_percentiles(btc_mfe_mae["mfe_pct"], [50, 75])
+    btc_mae_pctls = compute_percentiles(btc_mfe_mae["mae_pct"], [50, 75])
+    barrier_rows.append(("Crypto (BTC)", "8h", btc_mfe_pctls, btc_mae_pctls, None))
+if es_mfe_mae is not None:
+    barrier_rows.append(("Futures (ES)", "21d", es_mfe_pctls, es_mae_pctls, es_avg_atr))
+
+print("Barrier widths derived from each instrument's own excursion distribution\n")
+header = f"{'Instrument':<14}{'Horizon':<9}{'TP p50':>8}{'SL p50':>8}{'TP p75':>8}{'SL p75':>8}"
+print(header + f"{'ATR':>8}{'SL p75 / ATR':>14}")
+print("-" * (len(header) + 22))
+for name, horizon, mfe_p, mae_p, atr in barrier_rows:
+    line = (
+        f"{name:<14}{horizon:<9}"
+        f"{mfe_p[50]:>7.2f}%{mae_p[50]:>7.2f}%{mfe_p[75]:>7.2f}%{mae_p[75]:>7.2f}%"
+    )
+    if atr is not None:
+        line += f"{atr:>7.2f}%{mae_p[75] / atr:>13.2f}x"
+    else:
+        line += f"{'n/a':>8}{'n/a':>14}"
+    print(line)
+
+if spy_mfe_mae is not None and es_mfe_mae is not None:
+    print("\nES vs SPY adverse excursions, same 21-day horizon:")
+    for label, q in (("median", 50), ("p75", 75)):
+        print(f"  MAE {label:<7} SPY {mae_pctls[q]:.2f}%   ES {es_mae_pctls[q]:.2f}%")
+
+# %% [markdown]
+# **What the table says.** BTC's 8-hour excursions are an order of magnitude smaller
+# than the daily instruments' 21-day excursions, which is horizon rather than asset:
+# a fixed percentage barrier is workable there because the funding cycle fixes the
+# holding period. For SPY and ES the stop that the p75 adverse excursion implies is
+# *wider* than one ATR, so an implementation that reaches for a round `1xATR` stop
+# will be stopped out by ordinary movement.
 #
+# Note the ES-versus-SPY comparison printed above. ES adverse excursions are wider
+# than SPY's at both quantiles, so the intuition that an index future deserves a
+# *tighter* stop than the matching ETF is contradicted by the measurement. This is
+# the same trap as the take-profit/stop-loss ordering in §8: a plausible-sounding
+# asymmetry, asserted rather than measured, pointing the wrong way.
+
+# %% [markdown]
 # **Key findings:**
 #
-# 1. ETF daily ATR averages ~1.3% → 2xATR take profit captures majority of moves
-# 2. Crypto 8h MFE/MAE medians are ~0.9% - tight barriers match the funding rate cycle
-# 3. Regime matters: High vol periods have ~2x wider excursions than low vol
-# 4. ATR-scaled barriers recommended for daily; fixed OK for high-frequency
+# 1. A barrier width is a property of one instrument at one horizon, not of an asset
+#    class - the printed table is the calibration, recomputed whenever the data is.
+# 2. Regime conditioning matters more than the choice of instrument: §7 shows the
+#    high-volatility tercile carrying roughly twice the excursion of the low one, a
+#    ratio larger than any gap between SPY and ES.
+# 3. ATR-scaled barriers adapt to that regime shift; fixed percentage barriers are
+#    defensible only where the holding period is short and externally fixed.
 
 # %% [markdown]
 # ## 10. Export Statistics for Documentation
@@ -933,9 +1032,14 @@ if spy_mfe_mae is not None:
 #
 # ### Key Results
 #
-# - **ETF (SPY)**: 2xATR take profit, 1xATR stop loss for 21-day horizon (ATR avg 1.26%)
-# - **Crypto (BTC)**: ~1% fixed barriers for 8-hour funding rate cycle (MFE/MAE medians ~0.9%)
-# - **Volatility scaling**: Required for daily strategies; less critical for high-frequency
+# - **Barriers are measured, not chosen**: §8's widths come from the MFE and MAE
+#   quantiles and §9's table reports them per instrument, so a re-run recalibrates
+#   them rather than confirming a number typed here.
+# - **The asymmetry is not the one intuition offers**: at the 90th percentile SPY's
+#   stop belongs wider than its take-profit, and ES's adverse excursions are wider
+#   than SPY's - both the reverse of the conventional framing.
+# - **Volatility scaling**: required for daily strategies; less critical where the
+#   holding period is short and externally fixed, as with the crypto funding cycle.
 #
 # ### Production Usage
 #
