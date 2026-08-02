@@ -291,41 +291,55 @@ features:
       failure_mode: >-
         The deviation is a few tenths of a cent on a wide book and a rounding artifact
         on a one-tick one, so it is not comparable across names until it is ranked.
+    - name: volatility
+      pattern: r1m*|rv_*|quote_range*
+      role: state
+      hypothesis: >-
+        How much the quoted price is moving is what decides whether an imbalance is
+        information or noise, and it varies by name and by hour.
+      inputs: NBBO quote midpoint and quote extremes
+      lookback: 60
+      lag: 0
+      frame: per symbol-session, trailing
+      representation: level and cross-sectional z-score
+      failure_mode: >-
+        Every estimator here is a variance over a short window, so a single bad quote
+        dominates it and reports turbulence where there was a data error.
     - name: order_flow
       pattern: signed_vol_share*|tick_imb_share*|trade_to_mid*|trades_per_1k_shares*|cross_locked_share*
       role: signal
       hypothesis: >-
         Aggressive volume arrives in runs, so the side that has been paying the spread
         over the last few minutes keeps paying it over the next few.
-      inputs: AlgoSeek trade-location and tick buckets, volume
+      inputs: AlgoSeek trade-location and tick buckets, total traded volume
       lookback: 60
-      lag: 0
+      lag: 1
       frame: per symbol-session, trailing
       representation: level and cross-sectional z-score
       failure_mode: >-
         Trade location is assigned against the prevailing quote, so a bar whose quote
         was stale attributes its volume to the wrong side rather than to neither.
-    - name: volatility_impact
-      pattern: r1m*|rv_*|trade_range*|quote_range*|dollar_vol*|illiq*|kyle_lambda*
+    - name: price_impact
+      pattern: dollar_vol*|illiq*|kyle_lambda*|trade_range*
       role: state
       hypothesis: >-
-        How far a given quantity of order flow moves the price is what decides whether
-        an imbalance is information or noise, and it varies by name and by hour.
-      inputs: quote midpoint returns, trade range, dollar volume
+        How far a given quantity of order flow moves the price is what separates a
+        crowded name from a thin one, and it is the cost side of every signal here.
+      inputs: consolidated trade prices, traded dollars across both venues
       lookback: 60
-      lag: 0
+      lag: 1
       frame: per symbol-session, trailing
       representation: level and cross-sectional z-score
       failure_mode: >-
-        Every estimator here is a variance over a short window, so a single bad print
-        dominates it and reports impact where there was a data error.
+        Amihud is undefined on a bar that printed nothing, and its rolling average
+        carries that gap across the whole window rather than skipping the bar.
     - name: hidden_liquidity
       pattern: finra_share_60m*
       role: state
       hypothesis: >-
         The share of volume printing away from the exchanges tracks how much of the
         session's liquidity is not visible in the book, and it moves over hours.
-      inputs: FINRA/TRF reported volume, exchange volume
+      inputs: FINRA/TRF reported volume, total traded volume
       lookback: 60
       lag: 1
       frame: per symbol-session, trailing

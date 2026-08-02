@@ -156,8 +156,12 @@ print(f"Holdout starts {HOLDOUT_START}; Section D rebuilds the matrix without it
 # is carried beside its z-score within the minute, and the register claims both under one
 # family because they are one hypothesis on two scales.
 #
-# The register is declared in `config/setup.yaml`, one row per family. Every lag in it is
-# zero except the FINRA family's, for the reason Section B gives.
+# The register is declared in `config/setup.yaml`, one row per family, and it is split by
+# **observability** rather than by economics: the three families read off the NBBO carry no
+# lag, and the three built from the trade tape carry one bar, for the reason Section B gives.
+# That is why volatility and price impact are separate rows although they describe the same
+# thing - a quote-based variance is knowable at the bar it is stamped with and a traded-dollar
+# statistic is not, and a register row cannot carry two lags.
 
 # %%
 register_frame(FAMILIES).select(
@@ -184,9 +188,16 @@ register_frame(FAMILIES).select(
 #
 # FINRA/TRF prints are reported with a delay of up to ten seconds. A print executed in the
 # last seconds of a bar can therefore be attributed to that bar while still being unpublished
-# at its close, so the share is **lagged by one bar** before it is smoothed. On a
-# sixty-minute average the lag costs nothing; without it the family's most recent input is
-# one nobody had.
+# at its close.
+#
+# That delay is not confined to the off-exchange share, and this is the part worth being
+# careful about. The trade-location and tick buckets are TRF-inclusive, so **every** feature
+# built from the trade tape - the order-flow shares, the traded dollars, Amihud, the trade
+# range - carries the same unpublished prints. The whole trade record is therefore lagged one
+# bar, once, in Section C.2, and the quote record is not lagged at all: an NBBO update is on
+# the wire when it happens. Whether the vendor stamps a TRF print by execution time or by the
+# time it reached the tape is not documented in the data contract, so the conservative reading
+# is the one taken here.
 
 # %%
 OPEN_HOUR, OPEN_MINUTE, CLOSE_HOUR = 9, 30, 16
@@ -351,6 +362,54 @@ def quote_features(df: pl.DataFrame) -> pl.DataFrame:
 # reported away from the exchanges, which is what the buckets themselves are counted over.
 
 # %% [markdown]
+# Everything below this point is built from the **previous** bar's trade record, and the
+# shift is applied once, here, to the whole record rather than to one feature at a time.
+#
+# The reason is the one Section B gives for the off-exchange share, and it reaches further
+# than that share does. The trade-location and tick buckets are TRF-inclusive - they sum to
+# `volume + finra_volume` on every bar of this panel - so an order-flow numerator, a traded
+# volume and a dollar volume all carry prints that may not have been published when the bar
+# closed. Lagging the off-exchange share alone would have left the notebook asserting a
+# publication delay in one feature and ignoring it in fifteen others.
+#
+# Shifting the record whole is what keeps a share a share: the numerator and the denominator
+# come from the same bar, so the assertion that no order-flow share exceeds one still holds.
+# Shifting the FINRA volume alone would have divided one bar's buckets by another bar's
+# volume, which is neither a share nor knowable.
+
+# %% [markdown]
+# `TRADE_RECORD` is the bar's trade record: the location and tick buckets, what they sum to,
+# and the prices they printed at. The quote columns are not in it - an NBBO update is on the
+# wire when it happens, so the quote families read their own bar.
+
+# %%
+TRADE_RECORD = [
+    "trade_at_bid",
+    "trade_at_bid_mid",
+    "trade_at_mid_ask",
+    "trade_at_ask",
+    "trade_at_cross",
+    "uptick_volume",
+    "downtick_volume",
+    "repeat_uptick_volume",
+    "repeat_downtick_volume",
+    "trade_to_mid_vol_weight_rel",
+    "total_trades",
+    "volume",
+    "finra_volume",
+    "vwap",
+    "finra_vwap",
+    "high_trade_price",
+    "low_trade_price",
+]
+
+
+def lag_trade_record(df: pl.DataFrame) -> pl.DataFrame:
+    """Shift the whole trade record one bar within the symbol-session."""
+    return df.with_columns(pl.col(c).shift(1).over(ENTITY) for c in TRADE_RECORD)
+
+
+# %% [markdown]
 # `DOLLAR_VOLUME` is the dollars behind that volume, from both venues. Each side's VWAP is
 # null exactly where that side traded nothing, so each product is taken as zero there and the
 # bar is null only when neither venue printed - the one case in which "dollars traded" has no
@@ -497,7 +556,7 @@ def regime_and_clock_features(df: pl.DataFrame) -> pl.DataFrame:
     length = pl.col("session_bars")
     edge = W["edge_block"]
     return df.with_columns(
-        finra.shift(1).over(ENTITY).rolling_mean(W["hour"]).over(ENTITY).alias("finra_share_60m"),
+        finra.rolling_mean(W["hour"]).over(ENTITY).alias("finra_share_60m"),
         bar.alias("bar_of_day"),
         (bar / length).clip(0.0, 1.0).alias("time_since_open"),
         (1.0 - bar / length).clip(0.0, 1.0).alias("time_to_close"),
@@ -609,6 +668,7 @@ def build_features(bars: pl.DataFrame) -> pl.DataFrame:
     return (
         bars.join(sessions, on="session_date", how="left")
         .pipe(cap_stale_quotes)
+        .pipe(lag_trade_record)
         .pipe(quote_features)
         .pipe(order_flow_features)
         .pipe(volatility_features)
@@ -798,11 +858,11 @@ print(
 # sessions**, from **2020-01-02 10:30** to **2021-12-31 15:59**. The null policy dropped
 # **3,113,911 rows**, **15.6%**, which is the hour of warmup every session pays before Kyle's
 # lambda exists - and it is why the panel starts at 10:30 rather than at the open. The
-# thinnest family-month is **0.996** covered, in the order-flow family. Of those
+# thinnest family-month is **0.991** covered, in the price-impact family. Of those
 # rows, **1,119,676** fall on the **11,101** minutes of the 15-minute decision grid, which is
 # the subset F3 and F6 read.
 #
-# Bars on which neither venue printed are **0.09%** of the matrix, and they leave **1.19%** of
+# Bars on which neither venue printed are **0.09%** of the matrix, and they leave **1.20%** of
 # it without an Amihud value - a thirteenfold amplification, because the estimator's rolling
 # average nulls every one of the thirty bars whose window contains one of them.
 
@@ -815,9 +875,9 @@ print(
 # axis is drawn on the range the data occupies rather than on nought to one, because the
 # whole of what this figure has to show sits in its top sliver.
 #
-# The split it shows is by input, not by family: the four families built from quotes, from
-# the calendar and from the TRF tape are complete on every row, and the two built from
-# trades are not, because a bar on which nothing traded defines none of them.
+# The split it shows is the register's own: the five families read off the NBBO, the calendar
+# and the smoothed off-exchange share are complete on every row, and the two read off the
+# trade tape are not, because a bar on which neither venue printed defines none of them.
 
 # %%
 plot_coverage_through_time(
@@ -827,12 +887,12 @@ plot_coverage_through_time(
     subtitle="Monthly non-null share per feature family, after the null policy",
     alt=(
         "Line chart of non-null share by feature family by month, on a y-axis spanning "
-        "roughly 0.994 to 1.0. The quote liquidity, microprice, hidden liquidity and session "
-        "clock families lie exactly on one for the whole sample, drawn on top of each other as "
-        "a single flat line. The volatility and impact family runs just below, between about "
-        "0.9965 and 0.9997. The order flow family is the lowest throughout, between about "
-        "0.9958 and 0.9990. Both of the lower two are ragged month to month with no trend, "
-        "and both fall away in the final month."
+        "roughly 0.990 to 1.0. Five families - quote liquidity, microprice, volatility, hidden "
+        "liquidity and session clock - lie exactly on one for the whole sample, drawn on top "
+        "of each other as a single flat line at the top. The order flow family runs below it "
+        "between about 0.9957 and 0.9990, and the price impact family is the lowest and most "
+        "ragged, between about 0.9913 and 0.9993, dipping hardest in early 2020 and late 2020. "
+        "The two lower lines track each other closely and both fall away in the final month."
     ),
 )
 
@@ -843,15 +903,16 @@ plot_coverage_through_time(
 plot_timing_contract(
     FAMILIES,
     bar_unit="minute bars",
-    title="Only the off-exchange family waits for its input to be published",
+    title="Everything read off the trade tape waits a bar; the quotes do not",
     subtitle="Register lookback per family; a gap at the right edge is a lag",
     alt=(
         "Horizontal bars, one per feature family, each extending leftward from the decision "
-        "line by that family's lookback: 60 minute bars for quote liquidity, order flow, "
-        "volatility and impact, and hidden liquidity, 15 for the microprice family, and none "
-        "for the session clock. Every bar reaches the decision line except the hidden "
-        "liquidity one, which stops one bar short of it - the lag with which FINRA prints "
-        "become public."
+        "line by that family's lookback: 60 minute bars for quote liquidity, volatility, "
+        "order flow, price impact and hidden liquidity, 15 for the microprice family, and "
+        "none for the session clock. The quote liquidity, volatility and microprice bars run "
+        "flush to the decision line. The order flow, price impact and hidden liquidity bars "
+        "each stop one bar short of it, and the gap is hatched - the delay with which a "
+        "TRF print becomes public."
     ),
 )
 
@@ -954,7 +1015,7 @@ clusters = plot_redundancy_clusters(
 )
 
 # %% [markdown] tags=["results"]
-# Cutting the redundancy tree at $|\rho_s| = 0.7$ leaves **27 clusters** across the **66**
+# Cutting the redundancy tree at $|\rho_s| = 0.7$ leaves **28 clusters** across the **66**
 # columns, so well over half the matrix repeats an ordering another column already carries.
 # Almost all of that is the level-and-z-score pairing, which is deliberate: the two are one
 # hypothesis on two scales and a model that can use either is meant to choose. Nothing here
