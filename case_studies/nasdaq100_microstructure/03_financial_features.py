@@ -193,11 +193,15 @@ register_frame(FAMILIES).select(
 # That delay is not confined to the off-exchange share, and this is the part worth being
 # careful about. The trade-location and tick buckets are TRF-inclusive, so **every** feature
 # built from the trade tape - the order-flow shares, the traded dollars, Amihud, the trade
-# range - carries the same unpublished prints. The whole trade record is therefore lagged one
-# bar, once, in Section C.2, and the quote record is not lagged at all: an NBBO update is on
-# the wire when it happens. Whether the vendor stamps a TRF print by execution time or by the
-# time it reached the tape is not documented in the data contract, so the conservative reading
-# is the one taken here.
+# range - carries the same unpublished prints. Whether the vendor stamps a TRF print by
+# execution time or by the time it reached the tape is not documented in the data contract,
+# so the conservative reading is the one taken here.
+#
+# Each of those features is still **computed** on the bar it describes, and only then shifted
+# by the lag its register row declares. The order matters: Amihud and Kyle's lambda relate a
+# return to the flow that moved it, so building them from a lagged tape against an unlagged
+# quote return would pair this bar's move with last bar's flow and measure nothing. Compute
+# the same-bar quantity, then publish it late.
 
 # %%
 OPEN_HOUR, OPEN_MINUTE, CLOSE_HOUR = 9, 30, 16
@@ -360,54 +364,6 @@ def quote_features(df: pl.DataFrame) -> pl.DataFrame:
 # %% [markdown]
 # The volume every share in this family is a share *of*: the exchange prints plus the ones
 # reported away from the exchanges, which is what the buckets themselves are counted over.
-
-# %% [markdown]
-# Everything below this point is built from the **previous** bar's trade record, and the
-# shift is applied once, here, to the whole record rather than to one feature at a time.
-#
-# The reason is the one Section B gives for the off-exchange share, and it reaches further
-# than that share does. The trade-location and tick buckets are TRF-inclusive - they sum to
-# `volume + finra_volume` on every bar of this panel - so an order-flow numerator, a traded
-# volume and a dollar volume all carry prints that may not have been published when the bar
-# closed. Lagging the off-exchange share alone would have left the notebook asserting a
-# publication delay in one feature and ignoring it in fifteen others.
-#
-# Shifting the record whole is what keeps a share a share: the numerator and the denominator
-# come from the same bar, so the assertion that no order-flow share exceeds one still holds.
-# Shifting the FINRA volume alone would have divided one bar's buckets by another bar's
-# volume, which is neither a share nor knowable.
-
-# %% [markdown]
-# `TRADE_RECORD` is the bar's trade record: the location and tick buckets, what they sum to,
-# and the prices they printed at. The quote columns are not in it - an NBBO update is on the
-# wire when it happens, so the quote families read their own bar.
-
-# %%
-TRADE_RECORD = [
-    "trade_at_bid",
-    "trade_at_bid_mid",
-    "trade_at_mid_ask",
-    "trade_at_ask",
-    "trade_at_cross",
-    "uptick_volume",
-    "downtick_volume",
-    "repeat_uptick_volume",
-    "repeat_downtick_volume",
-    "trade_to_mid_vol_weight_rel",
-    "total_trades",
-    "volume",
-    "finra_volume",
-    "vwap",
-    "finra_vwap",
-    "high_trade_price",
-    "low_trade_price",
-]
-
-
-def lag_trade_record(df: pl.DataFrame) -> pl.DataFrame:
-    """Shift the whole trade record one bar within the symbol-session."""
-    return df.with_columns(pl.col(c).shift(1).over(ENTITY) for c in TRADE_RECORD)
-
 
 # %% [markdown]
 # `DOLLAR_VOLUME` is the dollars behind that volume, from both venues. Each side's VWAP is
@@ -639,6 +595,29 @@ INTERMEDIATE = {
     "_stale_run",
 }
 RANKED_FAMILIES = [f.name for f in FAMILIES if f.name != "session_clock"]
+LAGGED_FAMILIES = {f.name for f in FAMILIES if f.lag > 0}
+
+
+def publish_with_lag(df: pl.DataFrame) -> pl.DataFrame:
+    """Shift each family's levels by the lag its register row declares.
+
+    Every feature is computed on the bar it describes, so a price-impact estimator
+    relates a return to the flow that moved it rather than to the previous bar's flow.
+    The shift is applied afterwards, to the finished quantity, which is what "published
+    late" means: the value is about bar t and it is not readable until t + lag.
+
+    Shifting the finished feature and shifting its inputs are the same thing for a
+    trailing window over one entity, and they are not the same thing for anything that
+    reads two sources. That is the whole of this function's reason to exist.
+    """
+    levels = [c for c in df.columns if c not in LOADER_COLS and c not in INTERMEDIATE]
+    claimed = assign_families(levels, FAMILIES)
+    lag = {f.name: f.lag for f in FAMILIES}
+    return df.with_columns(
+        pl.col(c).shift(lag[family]).over(ENTITY)
+        for c, family in claimed.items()
+        if family in LAGGED_FAMILIES
+    )
 
 
 def cross_sectional(df: pl.DataFrame) -> pl.DataFrame:
@@ -668,13 +647,13 @@ def build_features(bars: pl.DataFrame) -> pl.DataFrame:
     return (
         bars.join(sessions, on="session_date", how="left")
         .pipe(cap_stale_quotes)
-        .pipe(lag_trade_record)
         .pipe(quote_features)
         .pipe(order_flow_features)
         .pipe(volatility_features)
         .pipe(kyle_lambda)
         .pipe(regime_and_clock_features)
         .pipe(multi_resolution)
+        .pipe(publish_with_lag)
         .pipe(cross_sectional)
         .drop("_stale_run")
     )
@@ -854,12 +833,13 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# The matrix carries **66 features** on **16,794,133 rows** across **114 symbols** and **505
-# sessions**, from **2020-01-02 10:30** to **2021-12-31 15:59**. The null policy dropped
-# **3,113,911 rows**, **15.6%**, which is the hour of warmup every session pays before Kyle's
-# lambda exists - and it is why the panel starts at 10:30 rather than at the open. The
+# The matrix carries **66 features** on **16,742,969 rows** across **114 symbols** and **505
+# sessions**, from **2020-01-02 10:31** to **2021-12-31 15:59**. The null policy dropped
+# **3,165,075 rows**, **15.9%**, which is the hour of warmup every session pays before Kyle's
+# lambda exists plus the bar its publication lag costs - and it is why the panel starts at
+# 10:31 rather than at the open. The
 # thinnest family-month is **0.991** covered, in the price-impact family. Of those
-# rows, **1,119,676** fall on the **11,101** minutes of the 15-minute decision grid, which is
+# rows, **1,068,834** fall on the **10,598** minutes of the 15-minute decision grid, which is
 # the subset F3 and F6 read.
 #
 # Bars on which neither venue printed are **0.09%** of the matrix, and they leave **1.20%** of
