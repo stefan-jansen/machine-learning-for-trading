@@ -119,9 +119,11 @@ MAX_SYMBOLS = 0
 # Returns and every price-derived feature below still read `adj_close`: a return
 # has to divide out splits and dividends to mean anything.
 #
-# **Alignment check**: After loading and filtering, we verify the feature
-# index is a subset of the label index. Any mismatch indicates divergent
-# filter logic.
+# **Alignment check**: Section 8 reconciles the feature index against the label
+# index and prints the residual both ways. They are not expected to match
+# exactly - a label needs a forward window that the last sessions of a stock's
+# series do not have - so the check states that exemption and reports what is
+# left over rather than asserting equality.
 
 # %%
 raw_df = load_us_equities(start_date=START_DATE, end_date=END_DATE)
@@ -495,17 +497,22 @@ def winsorize_features(
 
 # %% [markdown]
 # ## 6. Run Feature Pipeline
+#
+# Every per-symbol feature is a shift or a rolling window over `symbol`, and those
+# count rows. On the screened frame they would count *eligible* rows rather than
+# trading sessions, so a stock that drops below a threshold and recovers would
+# carry windows spanning the whole excursion: skip-month momentum would reach back
+# 252 eligible rows, which can be years. So they run on the complete series, and
+# the screen is applied afterwards. [`02_labels`](02_labels.ipynb) Section B makes
+# this argument for the forward window; this is the backward-looking half of it,
+# and the two have to agree on what a session is.
+#
+# The cross-sectional ranks then run on the screened frame, because a rank is only
+# meaningful against the names the strategy could have sorted on that day.
 
 # %%
 print("Computing features...")
 
-# Every per-symbol feature is a shift or a rolling window `.over("symbol")`, and
-# those count rows. On the screened frame they would count *eligible* rows rather
-# than trading sessions, so a stock that drops below a threshold and recovers
-# would carry windows spanning the whole excursion: `ret_12m_skip` would reach
-# back 252 eligible rows, which can be years. So they run on the complete series.
-# `02_labels` Section B makes this argument for the forward window; this is the
-# backward-looking half of it, and the two have to agree on what a session is.
 raw_df = raw_df.pipe(compute_momentum_returns).pipe(compute_volatility_sharpe)
 print("  Momentum and volatility done")
 
@@ -699,6 +706,26 @@ _label_col = "fwd_ret_1d"
 
 eval_df = output_df.join(_label_df, on=["timestamp", "symbol"], how="inner")
 print(f"Evaluation set: {len(eval_df):,} rows, label column: {_label_col}")
+
+# Section 1's alignment check, performed rather than asserted. The two indices are
+# built from the same screen on the same data, so anything left over is either the
+# forward-window exemption or divergent filter logic - and the two are told apart
+# by whether the orphan is a stock's last feature session.
+_orphans = output_df.join(_label_df, on=["timestamp", "symbol"], how="anti")
+_last_session = output_df.group_by("symbol").agg(pl.col("timestamp").max().alias("_last"))
+_tail = (
+    _orphans.join(_last_session, on="symbol", how="left")
+    .filter(pl.col("timestamp") == pl.col("_last"))
+    .height
+)
+print(
+    f"  features with no label: {_orphans.height:,} rows over "
+    f"{_orphans['symbol'].n_unique():,} stocks, {_tail:,} of them a stock's last session"
+)
+print(
+    f"  labels with no feature: "
+    f"{_label_df.join(output_df, on=['timestamp', 'symbol'], how='anti').height:,} rows"
+)
 # %% [markdown]
 # ### Per-Feature IC with HAC Adjustment
 
@@ -756,13 +783,21 @@ if ic_results:
     print(f"Inflation factor: {inflation:.1f}x")
     print(eval_summary.select("feature", "family", "ic_mean", "hac_tstat", "significant_fdr05"))
 
-    # Fundamental Law of Active Management
-    # IR = IC * sqrt(BR) where BR ~ number of independent bets
-    mean_ic = float(eval_summary["ic_mean"].mean())
+    # Fundamental Law of Active Management: IR = IC * sqrt(BR).
+    # The law describes ONE signal, so the IC it takes is one signal's skill. The
+    # signed mean across every feature is not that: the panel's predictors point in
+    # both directions and cancel to roughly zero, which says nothing about any of
+    # them. Two defensible readings are printed instead - the typical feature's
+    # skill, and the strongest one's.
     breadth = output_df["symbol"].n_unique()
-    ir_estimate = abs(mean_ic) * np.sqrt(breadth)
-    print(f"\nFundamental Law: IC={mean_ic:.4f} x sqrt({breadth}) = IR={ir_estimate:.2f}")
-    print(f"Even tiny ICs are significant with {breadth:,} stocks")
+    typical_ic = float(eval_summary["ic_mean"].abs().mean())
+    best = eval_summary.sort(pl.col("ic_mean").abs(), descending=True).row(0, named=True)
+    print(f"\nFundamental Law, IR = IC x sqrt(BR), with BR={breadth:,} stocks")
+    print(f"  typical feature |IC| {typical_ic:.4f} -> IR {typical_ic * np.sqrt(breadth):.2f}")
+    print(
+        f"  strongest feature {best['feature']} |IC| {abs(best['ic_mean']):.4f} "
+        f"-> IR {abs(best['ic_mean']) * np.sqrt(breadth):.2f}"
+    )
 
 # %% [markdown]
 # ### IC Bar Chart (Top 20)
@@ -872,7 +907,7 @@ if ic_results:
         )
     )
     fig.update_layout(
-        title="HAC vs Naive t-statistics (points below line = HAC deflation)",
+        title="HAC shrinks every t-statistic toward zero, and barely",
         xaxis_title="Naive t-stat",
         yaxis_title="HAC t-stat",
         template="plotly_white",
@@ -882,11 +917,13 @@ if ic_results:
 
 # %% [markdown]
 # **Interpretation**:
-# - With ~3,177 stocks the Fundamental Law is the key insight: even ICs of
-#   0.01-0.02 generate portfolio-level $IR \approx 0.5\text{--}1.0$ because
-#   $IR = IC \cdot \sqrt{BR}$ and breadth is enormous.
-# - HAC adjustment should be minimal (inflation factor ~1.0x) because 1-day
-#   non-overlapping returns produce low IC autocorrelation.
+# - Breadth is the point of this panel: $IR = IC \cdot \sqrt{BR}$, so a per-stock
+#   edge far too small to trade on its own becomes a portfolio-level one once it
+#   is applied across thousands of names. The cell above prints that arithmetic
+#   for the typical feature and for the strongest, on the breadth it just used.
+# - HAC adjustment should be minimal because one-session, non-overlapping returns
+#   produce little IC autocorrelation; the printed inflation factor says whether
+#   it was.
 # - Cross-sectional rank features likely dominate because they are stationary
 #   across the 28-year sample (1990-2018), while raw return levels shift
 #   dramatically between regimes.
@@ -894,11 +931,15 @@ if ic_results:
 #   horizons, volatility horizons). Dimensionality reduction or feature
 #   clustering recommended before modeling.
 #
-# **Fundamental Law teaching moment**: This is the book's highest-breadth
-# case study. A mean IC of just 0.01 across 3,177 stocks implies
-# $IR = 0.01 \times \sqrt{3177} \approx 0.56$ -- competitive with many
-# hedge fund strategies. The lesson: in large cross-sections, signal
-# quality matters less than signal consistency and cost control.
+# **Fundamental Law teaching moment**: this is the book's highest-breadth case
+# study, and the arithmetic above is why that matters -- an information
+# coefficient small enough to look like noise on any one stock reaches a
+# respectable information ratio once the square root of the breadth multiplies
+# it. The lesson is that in a wide cross-section, signal *consistency* and cost
+# control decide the outcome rather than signal strength. Note what the same
+# arithmetic says about the panel taken as a whole: its features point in both
+# directions and their signed ICs very nearly cancel, so the breadth is only
+# worth anything to a strategy that has already chosen a direction to bet in.
 
 # %% [markdown]
 # ## Results Collection
@@ -978,9 +1019,12 @@ if ic_results:
         "n_significant_fdr05": n_significant,
         "inflation_factor": round(inflation, 1),
         "fundamental_law": {
-            "mean_ic": round(mean_ic, 4),
+            "typical_abs_ic": round(typical_ic, 4),
             "breadth": breadth,
-            "ir_estimate": round(ir_estimate, 2),
+            "ir_typical": round(typical_ic * np.sqrt(breadth), 2),
+            "best_feature": best["feature"],
+            "best_abs_ic": round(abs(best["ic_mean"]), 4),
+            "ir_best": round(abs(best["ic_mean"]) * np.sqrt(breadth), 2),
         },
         "top_features": [
             {

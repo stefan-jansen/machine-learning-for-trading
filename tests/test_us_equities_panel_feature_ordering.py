@@ -283,3 +283,112 @@ def test_notebook_applies_the_screen_between_the_two_kinds_of_feature() -> None:
             "names is not the ranking the strategy sorts on"
         )
         assert target == "df", f"{step} must build on the screened frame, not {target!r}"
+
+
+def test_every_piped_step_is_classified() -> None:
+    """A new step must be classified, not silently unguarded.
+
+    `PER_SYMBOL_STEPS` and `CROSS_SECTIONAL_STEPS` are an allowlist, and the ordering
+    test above iterates them. Without this assertion #235 could be reintroduced
+    verbatim under a new function name and the suite would stay green.
+    """
+    tree = _notebook_tree()
+    piped = {
+        arg.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        for call in ast.walk(node.value)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "pipe"
+        and call.args
+        for arg in [call.args[0]]
+        if isinstance(arg, ast.Name)
+    }
+    classified = set(PER_SYMBOL_STEPS) | set(CROSS_SECTIONAL_STEPS)
+    unclassified = piped - classified
+    assert not unclassified, (
+        f"{sorted(unclassified)} are piped in {NOTEBOOK} but classified neither "
+        "per-symbol nor cross-sectional. Add each to the right tuple: a windowed step "
+        "on the screened frame is the #235 defect, and this list is what guards it."
+    )
+    assert not classified - piped, f"{sorted(classified - piped)} are listed but no longer piped"
+
+
+def _pipeline_assignments() -> dict[str, list[ast.Assign]]:
+    """Module-level `raw_df = ...` / `df = ...` assignments, by target name."""
+    out: dict[str, list[ast.Assign]] = {"raw_df": [], "df": []}
+    for node in ast.parse(NOTEBOOK.read_text()).body:
+        if isinstance(node, ast.Assign) and node.targets:
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and target.id in out:
+                out[target.id].append(node)
+    return out
+
+
+def test_no_cross_sectional_work_before_the_screen_and_no_windows_after() -> None:
+    """Catch an ordering violation written inline instead of through `.pipe`.
+
+    The step-based test only sees `.pipe(fn)`. A rank added directly to a `raw_df`
+    assignment, or a rolling window added to a `df` one, would slip past it.
+    """
+    assigns = _pipeline_assignments()
+
+    def over_keys(node: ast.AST) -> set[str]:
+        found = set()
+        for call in ast.walk(node):
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "over"
+            ):
+                for arg in call.args:
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        found.add(arg.value)
+        return found
+
+    for node in assigns["raw_df"]:
+        assert "timestamp" not in over_keys(node), (
+            f'{NOTEBOOK}:{node.lineno}: a cross-sectional `.over("timestamp")` is computed '
+            "on raw_df, before the eligibility screen. It would rank each stock against "
+            "names the strategy could not have traded."
+        )
+
+    windowed = {"shift", "rolling_mean", "rolling_std", "rolling_sum", "rolling_max", "rolling_min"}
+    for node in assigns["df"]:
+        for call in ast.walk(node):
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute):
+                assert call.func.attr not in windowed, (
+                    f"{NOTEBOOK}:{node.lineno}: `{call.func.attr}` is a per-symbol window "
+                    "computed on the screened frame, so it counts eligible rows rather than "
+                    "trading sessions. That is #235."
+                )
+
+
+SCREENED_NOTEBOOKS = (
+    "01_feasibility_analysis.py",
+    "02_labels.py",
+    "03_financial_features.py",
+    "04_model_based_features.py",
+)
+
+
+def test_every_stage_screens_on_the_printed_price() -> None:
+    """Guard #146 across all four stages.
+
+    `adj_close` and `adj_volume` are divided by the cumulative split-and-dividend
+    factor from the row to the *last* session in the vendor file, so a $5 floor on
+    `adj_close` screens on corporate actions that had not happened at the decision
+    date. `close` and `close * volume` are what the tape carried on the day.
+    """
+    case_dir = NOTEBOOK.parent
+    for stem in SCREENED_NOTEBOOKS:
+        src = (case_dir / stem).read_text()
+        assert 'pl.col("adj_close") > MIN_PRICE' not in src, (
+            f"{stem}: the price floor reads `adj_close`, which is anchored at the end of "
+            "the vendor file. That is #146."
+        )
+        assert 'pl.col("adj_close") * pl.col("adj_volume")' not in src, (
+            f"{stem}: dollar volume is built from the adjusted columns, which retains the "
+            "end-anchored dividend factor. Use `close * volume`. That is #146."
+        )
