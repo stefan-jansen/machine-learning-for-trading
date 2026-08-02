@@ -487,9 +487,9 @@ def kyle_lambda(df: pl.DataFrame) -> pl.DataFrame:
 # %% [markdown]
 # ### C.4 Hidden liquidity and the session clock
 #
-# The FINRA share is the fraction of a bar's volume that printed away from the exchanges,
-# and it is the one family carrying a lag: the shift below is what makes the sixty-minute
-# average read only bars whose prints were public by the time it is computed.
+# The FINRA share is the fraction of a bar's volume that printed away from the exchanges. It
+# is computed on its own bar like everything else and shifted afterwards, along with the two
+# other trade-derived families, by `publish_with_lag`.
 #
 # The session clock is where the previous version of this notebook was wrong, and the error
 # is worth naming because it is invisible in the values. It divided the bar's position by
@@ -688,12 +688,20 @@ print(f"{len(SHARE_COLUMNS)} order-flow shares, largest magnitude {_worst:.4f}")
 # Four kinds of operation appear above. A **rolling** window - every realized volatility, every
 # multi-resolution aggregate, the Amihud average and the four moments Kyle's lambda is built
 # from - ends at its own bar and reads a fixed number of earlier bars **within one
-# symbol-session**, so none of them spans a night. A **shift** reads exactly one earlier bar of
-# the same series, and the FINRA family is the one place it is used to defer an input rather
-# than to difference one. A **contemporaneous** relation - the spread, the depth imbalance,
-# the microprice deviation, the two ranges - reads one bar's own quote and no other bar at
-# all. A **cross-sectional** statistic - the z-scores - is taken with `.over("timestamp")`, so
-# it reads every symbol quoted in that minute and nothing dated before or after it.
+# symbol-session**, so none of them spans a night. A **shift** appears twice and means two
+# different things: inside a construction it differences a series, and in `publish_with_lag`
+# it defers a finished value to the bar at which it could be read. A **contemporaneous**
+# relation - the spread, the depth imbalance, the microprice deviation, the quote range -
+# reads one bar's own quote and no other bar at all. A **cross-sectional** statistic - the
+# z-scores - is taken with `.over("timestamp")`, so it reads every symbol quoted in that
+# minute and nothing dated before or after it, and it runs after the publication shift so a
+# minute's cross-section is ranked on what was readable in it.
+#
+# **Three families are deferred and three are not, and the split is the register's.** Quote
+# liquidity, the microprice and volatility read the NBBO, which is on the wire when it moves.
+# Order flow, price impact and hidden liquidity read the trade tape, which carries TRF prints
+# that may not be published yet - so the trade range is deferred with them, and it is the one
+# of the two ranges that is not contemporaneous.
 #
 # The session clock is the fifth thing, and it is the one that was wrong: it reads the
 # exchange's published schedule, which is knowable before the session opens, rather than the
