@@ -77,11 +77,19 @@ def gapped_panel() -> pl.DataFrame:
     `GAPPY` trades under the $5 floor for sessions 120-219 and clears it either side,
     so its eligible history has a 100-session interior gap. `CLEAN` never leaves. The
     price path is a deterministic ramp so a hand-computed expectation is exact.
+
+    Inside the gap `returns` and `dollar_volume` take values sharply unlike the ones
+    either side of it. That is what makes the Amihud window discriminating: a rolling
+    mean taken over the complete series has to pick the gap values up, and one taken
+    over the screened frame reaches past them to rows a hundred sessions earlier.
+    `adv_21d` is pinned to a constant well above the $1M floor so that eligibility is
+    driven purely by price and the gap has exactly the extent the tests assert.
     """
     start = date(2000, 1, 3)
     rows = []
     for i in range(400):
         stamp = start + timedelta(days=i)
+        gapped = 120 <= i < 220
         # CLEAN: 100.0, 100.1, 100.2, ... always well above the floor.
         rows.append(
             {
@@ -92,25 +100,24 @@ def gapped_panel() -> pl.DataFrame:
                 "adj_high": 100.0 + i * 0.1,
                 "adj_low": 100.0 + i * 0.1,
                 "volume": 1_000_000.0,
-                "returns": 0.001,
+                "returns": 0.01,
                 "dollar_volume": 1_000_000_000.0,
                 "adv_21d": 1_000_000_000.0,
             }
         )
-        # GAPPY: 50 + i/10 normally, but 1.0 (a penny stock) across the gap.
-        gapped = 120 <= i < 220
-        price = 1.0 if gapped else 50.0 + i * 0.1
+        # GAPPY: 50 + i/10 normally, but 1.0 (a penny stock) across the gap, where it
+        # is also far more volatile and far thinner.
         rows.append(
             {
                 "symbol": "GAPPY",
                 "timestamp": stamp,
-                "close": price,
-                "adj_close": price,
-                "adj_high": price,
-                "adj_low": price,
+                "close": 1.0 if gapped else 50.0 + i * 0.1,
+                "adj_close": 1.0 if gapped else 50.0 + i * 0.1,
+                "adj_high": 1.0 if gapped else 50.0 + i * 0.1,
+                "adj_low": 1.0 if gapped else 50.0 + i * 0.1,
                 "volume": 1_000_000.0,
-                "returns": 0.001,
-                "dollar_volume": 1_000_000_000.0,
+                "returns": 0.50 if gapped else 0.01,
+                "dollar_volume": 2_000_000.0 if gapped else 1_000_000_000.0,
                 "adv_21d": 1_000_000_000.0,
             }
         )
@@ -184,16 +191,42 @@ def test_rolling_liquidity_counts_sessions_not_eligible_rows(
     (compute_rolling_liquidity,) = _load_notebook_functions("compute_rolling_liquidity").values()
 
     correct = compute_rolling_liquidity(gapped_panel).filter(ELIGIBLE)
-    first_after_gap = (
-        correct.filter((pl.col("symbol") == "GAPPY") & (pl.col("timestamp") >= date(2000, 1, 3)))
-        .sort("timestamp")
-        .filter(pl.col("timestamp") > date(2000, 1, 3) + timedelta(days=219))
-        .head(1)
+    wrong = compute_rolling_liquidity(gapped_panel.filter(ELIGIBLE))
+
+    gappy = gapped_panel.filter(pl.col("symbol") == "GAPPY").sort("timestamp")
+    stamps = list(gappy["timestamp"])
+    ratio = [
+        abs(r) / (dv + 1) for r, dv in zip(gappy["returns"], gappy["dollar_volume"], strict=True)
+    ]
+    # Session 220 is GAPPY's first eligible session after the gap. Its 21-session
+    # window is sessions 200..220: twenty inside the gap, plus itself.
+    first_after_gap = stamps[220]
+    expected = sum(ratio[200:221]) / 21
+
+    got = correct.filter((pl.col("symbol") == "GAPPY") & (pl.col("timestamp") == first_after_gap))[
+        "amihud_illiq"
+    ].item()
+    assert got == pytest.approx(expected, rel=1e-12), (
+        "on the complete series the Amihud window must cover the 21 sessions before it, "
+        "which lie inside the gap"
     )
-    # On the complete series the window covers the 21 sessions before it, which are
-    # inside the gap, so the value is defined and finite rather than borrowed from
-    # months earlier.
-    assert first_after_gap["amihud_illiq"].item() is not None
+
+    # On the screened frame the same row's window reaches back over the gap to the
+    # twenty eligible sessions that precede it - sessions 100..119, a hundred sessions
+    # earlier - so it must differ, and by a wide margin given the fixture's values.
+    eligible_ratio = [ratio[i] for i in range(400) if not (120 <= i < 220)]
+    expected_wrong = (sum(eligible_ratio[100:120]) + ratio[220]) / 21
+    got_wrong = wrong.filter(
+        (pl.col("symbol") == "GAPPY") & (pl.col("timestamp") == first_after_gap)
+    )["amihud_illiq"].item()
+    assert got_wrong == pytest.approx(expected_wrong, rel=1e-12)
+
+    assert got != pytest.approx(got_wrong, rel=1e-6), (
+        "fixture does not discriminate the two orderings for the Amihud window"
+    )
+    assert got > got_wrong * 100, (
+        "the gap sessions are thin and volatile, so the correct window must be far larger"
+    )
 
 
 def test_notebook_applies_the_screen_between_the_two_kinds_of_feature() -> None:
