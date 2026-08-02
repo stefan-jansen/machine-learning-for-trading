@@ -736,7 +736,7 @@ clusters = plot_redundancy_clusters(
     features,
     FEATURE_COLUMNS,
     cut=CUT,
-    title="Implied and realized levels are one ordering; the premium is not",
+    title="The premium sits apart from its own two inputs",
     subtitle=r"Average linkage on $1 - |\rho_s|$, cut drawn at $|\rho_s| = 0.7$",
     alt=(
         "Dendrogram of every feature in the matrix. The largest cluster below the cut holds ten "
