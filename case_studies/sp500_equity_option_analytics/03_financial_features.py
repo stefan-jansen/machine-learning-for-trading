@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -49,7 +49,6 @@
 # - **Downstream**: `04_temporal.py` (GARCH improves VRP), Ch11+ (ML models)
 
 # %%
-import json
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -59,6 +58,7 @@ import polars as pl
 
 import utils.style  # noqa: F401  (activates the ML4T Plotly template)
 from data import load_sp500_daily_bars, load_sp500_options_surface
+from utils.cv_splits import load_evaluation_config
 from utils.paths import get_case_study_dir
 from utils.style import ml4t_palette
 
@@ -529,22 +529,18 @@ print(f"  Coverage <  70%: {n_below_70} (may be dropped in evaluation)")
 # ## 12. CV Configuration Reference
 #
 # Features are computed on the full sample (acceptable for decision-time-observable
-# features). The CV config from `cv_config.json` defines the evaluation
-# splits used for IC testing and downstream modeling.
+# features). The evaluation section of `config/setup.yaml` declares the walk-forward
+# geometry used for IC testing and downstream modeling, and
+# [`05_evaluation`](05_evaluation.ipynb) reads the same section through the same
+# loader. No stage writes this configuration; it is hand-declared and read.
 
 # %%
-import yaml
-
-cv_config_path = CASE_DIR / "config" / "cv_config.json"
-if cv_config_path.exists():
-    with open(cv_config_path) as f:
-        cv_config = json.load(f)
-    print(
-        f"CV config: {cv_config['n_splits']} splits, "
-        f"train={cv_config.get('train_size', 'N/A')}, test={cv_config.get('test_size', 'N/A')}"
-    )
-else:
-    print("CV config not found - run 02_labels.py first")
+cv_config = load_evaluation_config(CASE_STUDY_ID)
+print(
+    f"CV config: {cv_config['n_splits']} splits, "
+    f"train={cv_config['train_size']}, val={cv_config['val_size']}"
+)
+print(f"Holdout: {cv_config['holdout_start']} to {cv_config['holdout_end']}")
 
 # %% [markdown]
 # ## 13. Save Features
