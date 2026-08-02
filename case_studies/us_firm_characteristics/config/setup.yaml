@@ -91,6 +91,118 @@ labels:
   classification_eval_label:
     fwd_class_1m: fwd_ret_1m
 
+features:
+  # Window over which the feature matrix is built. Both endpoints are inclusive and
+  # 03_financial_features binds them from here rather than retyping them.
+  window:
+    start: 1990-01-01
+    end: 2016-12-31
+
+  # The feature register. Rendered by case_studies.utils.feature_engineering
+  # .register_frame and drawn as the timing contract by plot_timing_contract, so
+  # `lookback` and `lag` are read by the figure as well as by the prose.
+  #
+  # `lookback` and `lag` are counted in months, this case study's bar.
+  #
+  # A caveat that belongs with the numbers rather than under them: the release does
+  # not publish a per-characteristic estimation window. What is published is the
+  # update convention (decision.yearly_update, decision.monthly_update), and some
+  # characteristics name their own window - r36_13 reads 36 months back to 13. The
+  # lookbacks below are those two sources and nothing else; where a characteristic
+  # publishes neither, the entry is the span of one provider observation. The lag is
+  # the load-bearing column for look-ahead and it is fully sourced: an annual variable
+  # is published at the end of June against a December fiscal year end.
+  families:
+    - name: value
+      pattern: "BEME|E2P|CF2P|D2P|S2P|A2ME"
+      role: signal
+      hypothesis: A firm priced low against its fundamentals earns the higher subsequent return
+      inputs: released annual accounting characteristics, provider rank-transformed
+      lookback: 12
+      lag: 6
+      frame: cross section
+      representation: provider cross-sectional rank in [-0.5, 0.5]
+      failure_mode: cheapness that reflects permanent impairment rather than mispricing
+
+    - name: quality
+      pattern: "PROF|ROE|ROA|OP|PM|PCM|RNA"
+      role: signal
+      hypothesis: A more profitable firm earns the higher subsequent return at the same price
+      inputs: released annual accounting characteristics, provider rank-transformed
+      lookback: 12
+      lag: 6
+      frame: cross section
+      representation: provider cross-sectional rank in [-0.5, 0.5]
+      failure_mode: margins mean-revert faster than the annual update reports them
+
+    - name: investment
+      pattern: "Investment|NOA|DPI2A|NI|OA|AC"
+      role: signal
+      hypothesis: A firm growing its asset base aggressively earns the lower subsequent return
+      inputs: released annual accounting characteristics, provider rank-transformed
+      lookback: 24
+      lag: 6
+      frame: cross section
+      representation: provider cross-sectional rank in [-0.5, 0.5]
+      failure_mode: a growth measure spans two annual observations, so one restatement moves both
+
+    - name: momentum
+      pattern: "r12_2|r2_1|r12_7|r36_13|ST_REV|LT_Rev|SUV|Rel2High"
+      role: signal
+      hypothesis: Recent relative price trends persist over a quarter to a year and reverse beyond it
+      inputs: released monthly price and return characteristics, provider rank-transformed
+      lookback: 36
+      lag: 0
+      frame: cross section
+      representation: provider cross-sectional rank in [-0.5, 0.5]
+      failure_mode: trends break at a reversal faster than a 12-month window unwinds
+
+    - name: risk
+      pattern: "Beta|MktBeta|IdioVol|Resid_Var|Variance|Spread|LTurnover|LME"
+      role: state
+      hypothesis: Volatility, liquidity and size describe the regime a signal is read in
+      inputs: released monthly risk and liquidity characteristics, provider rank-transformed
+      lookback: 12
+      lag: 0
+      frame: cross section
+      representation: provider cross-sectional rank in [-0.5, 0.5]
+      failure_mode: >-
+        LME travels with this family in the provider's grouping but behaves as a signal,
+        so a family-level reading of the group mixes a size premium with regime description
+
+    - name: other
+      pattern: "Q|C|CF|AT|ATO|CTO|D2A|FC2Y|Lev|OL|SGA2S"
+      role: signal
+      hypothesis: Leverage, turnover and cost structure carry information the five named families omit
+      inputs: released accounting characteristics, provider rank-transformed
+      lookback: 12
+      lag: 6
+      frame: cross section
+      representation: provider cross-sectional rank in [-0.5, 0.5]
+      failure_mode: a residual grouping has no single thesis, so a family average over it means little
+
+    - name: composite
+      pattern: "composite_*"
+      role: signal
+      hypothesis: Averaging ranks within and across families cancels characteristic-specific noise
+      inputs: the released characteristics above, within the same row
+      lookback: 24
+      lag: 6
+      frame: cross section
+      representation: equal-weight mean of member ranks, on the members' own scale
+      failure_mode: an equal weight asserts the members are equally informative, which is untested here
+
+    - name: interaction
+      pattern: "interaction_*"
+      role: signal
+      hypothesis: Some theses are conditional - cheap is worth more when the firm is also profitable
+      inputs: the released characteristics above, within the same row
+      lookback: 36
+      lag: 6
+      frame: cross section
+      representation: product of two member ranks, so the sign encodes agreement
+      failure_mode: a product of two centred ranks is large at both extremes and cannot separate them
+
 backtest:
   rebalance:
     # Per-asset rebalance thresholds. A rebalance is skipped when the
