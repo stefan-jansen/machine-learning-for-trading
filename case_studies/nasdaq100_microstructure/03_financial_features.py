@@ -210,6 +210,7 @@ READ = [
     "volume",
     "total_trades",
     "finra_volume",
+    "finra_vwap",
     "trade_at_bid",
     "trade_at_bid_mid",
     "trade_at_mid_ask",
@@ -349,8 +350,22 @@ def quote_features(df: pl.DataFrame) -> pl.DataFrame:
 # The volume every share in this family is a share *of*: the exchange prints plus the ones
 # reported away from the exchanges, which is what the buckets themselves are counted over.
 
+# %% [markdown]
+# `DOLLAR_VOLUME` is the dollars behind that volume, from both venues. Each side's VWAP is
+# null exactly where that side traded nothing, so each product is taken as zero there and the
+# bar is null only when neither venue printed - the one case in which "dollars traded" has no
+# value rather than a small one.
+
 # %%
 TRADED_VOLUME = (pl.col("volume") + pl.col("finra_volume")).clip(lower_bound=1)
+DOLLAR_VOLUME = (
+    pl.when((pl.col("volume") + pl.col("finra_volume")) > 0)
+    .then(
+        pl.col("vwap").fill_null(0.0) * pl.col("volume")
+        + pl.col("finra_vwap").fill_null(0.0) * pl.col("finra_volume")
+    )
+    .otherwise(None)
+)
 
 
 def order_flow_features(df: pl.DataFrame) -> pl.DataFrame:
@@ -385,10 +400,17 @@ def order_flow_features(df: pl.DataFrame) -> pl.DataFrame:
 # the library's estimator, and it is an *average* of the absolute return per dollar traded
 # over a window - not the single-bar ratio that this notebook previously shipped under the
 # name, which is a much noisier quantity with a different scale. It is null on a bar that
-# printed no trades, because price impact per dollar traded is undefined when nothing
+# printed no trades at all, because price impact per dollar traded is undefined when nothing
 # traded. **Kyle's lambda** regresses the return on the signed share over a rolling hour
 # and is kept local: the identity form below has a warmup of exactly its window where a
 # two-pass covariance would need twice that.
+#
+# **Dollar volume counts both venues, for the same reason the order-flow denominator does.**
+# `vwap` and `volume` describe the exchange prints alone, and a bar whose trades all printed
+# to the TRF would otherwise report no dollars traded and no price impact - which is not that
+# the bar was quiet but that this notebook was looking at one venue. The two venues' dollars
+# are added, and the price Amihud is given is the volume-weighted average across both, so
+# each venue's shares are priced at the average they actually traded at.
 
 
 # %%
@@ -409,9 +431,12 @@ def volatility_features(df: pl.DataFrame) -> pl.DataFrame:
         .alias(f"rv_ewma_{W['ewma_half_life']}m"),
         (pl.col("high_trade_price").log() - pl.col("low_trade_price").log()).alias("trade_range"),
         (pl.col("high_ask_price").log() - pl.col("low_bid_price").log()).alias("quote_range"),
-        (pl.col("vwap") * pl.col("volume")).alias("dollar_vol"),
+        DOLLAR_VOLUME.alias("dollar_vol"),
         amihud_illiquidity(
-            returns=pl.col("r1m"), volume=pl.col("volume"), price=pl.col("vwap"), period=W["slow"]
+            returns=pl.col("r1m"),
+            volume=TRADED_VOLUME,
+            price=DOLLAR_VOLUME / TRADED_VOLUME,
+            period=W["slow"],
         )
         .over(ENTITY)
         .alias("illiq"),
@@ -706,12 +731,11 @@ seal.filter(pl.col("column").is_in(["kyle_lambda", f"{CARRIER}_xs", "finra_share
 # Section C.5 fill in at the same bar, which is what F1 shows.
 #
 # What the policy keeps is not everywhere dense, and the gaps are all of one kind. A bar on
-# which nothing traded has no VWAP, so it has no dollar volume, no Amihud value and no
-# volume-weighted trade-to-mid distance; and because the Amihud average nulls a whole window
-# for one missing bar, a small share of untraded bars costs an order of magnitude more rows
-# than it occupies. The results cell below reports both. Those rows keep a null rather than a
-# fabricated number, which is what F1 shows as the shortfall in the two trade-derived
-# families.
+# which neither venue printed has no dollar volume, no Amihud value and no volume-weighted
+# trade-to-mid distance; and because the Amihud average nulls a whole window for one missing
+# bar, a small share of such bars costs far more rows than it occupies. The results cell
+# below reports both. Those rows keep a null rather than a fabricated number, which is what
+# F1 shows as the shortfall in the two trade-derived families.
 #
 # The policy also costs one feature outright, and the arithmetic below states it rather than
 # leaving it to be discovered. Kyle's lambda needs an hour, so the matrix begins 60 bars into
@@ -762,11 +786,11 @@ print(f"{features['timestamp'].min()} to {features['timestamp'].max()}, warmup {
 print(f"{dropped:,} rows dropped by the null policy ({dropped / built.height:.1%})")
 print(f"thinnest family-month {min(coverage[c].min() for c in set(assignment.values())):.3f}")
 print(f"{len(DECISION_TIMES):,} decision minutes carrying {decisions.height:,} rows")
-# What an untraded bar costs: it defines no dollar volume itself, and it nulls the whole
-# Amihud window that contains it.
+# What a bar with no prints on either venue costs: it defines no dollar volume itself, and
+# it nulls the whole Amihud window that contains it.
 _untraded = features["dollar_vol"].null_count() / features.height
 print(
-    f"untraded bars {_untraded:.2%} of rows, but illiq null on {features['illiq'].null_count() / features.height:.2%}"
+    f"bars with no prints {_untraded:.2%} of rows, but illiq null on {features['illiq'].null_count() / features.height:.2%}"
 )
 
 # %% [markdown] tags=["results"]
@@ -774,13 +798,13 @@ print(
 # sessions**, from **2020-01-02 10:30** to **2021-12-31 15:59**. The null policy dropped
 # **3,113,911 rows**, **15.6%**, which is the hour of warmup every session pays before Kyle's
 # lambda exists - and it is why the panel starts at 10:30 rather than at the open. The
-# thinnest family-month is **0.984** covered, in the volatility and impact family. Of those
+# thinnest family-month is **0.996** covered, in the order-flow family. Of those
 # rows, **1,119,676** fall on the **11,101** minutes of the 15-minute decision grid, which is
 # the subset F3 and F6 read.
 #
-# Bars on which nothing traded are **0.52%** of the matrix, and they leave **8.14%** of it
-# without an Amihud value - a sixteenfold amplification, because the estimator's rolling
-# average nulls every one of the thirty bars whose window contains an untraded one.
+# Bars on which neither venue printed are **0.09%** of the matrix, and they leave **1.19%** of
+# it without an Amihud value - a thirteenfold amplification, because the estimator's rolling
+# average nulls every one of the thirty bars whose window contains one of them.
 
 # %% [markdown]
 # ### F1. Coverage through time
@@ -803,11 +827,12 @@ plot_coverage_through_time(
     subtitle="Monthly non-null share per feature family, after the null policy",
     alt=(
         "Line chart of non-null share by feature family by month, on a y-axis spanning "
-        "roughly 0.98 to 1.0. The quote liquidity, microprice, hidden liquidity and session "
-        "clock families lie exactly on one for the whole sample, drawn on top of each other. "
-        "The order flow family runs just below them, between about 0.995 and 0.999, dipping "
-        "at the end of 2021. The volatility and impact family is the lowest and the only "
-        "ragged one, oscillating between about 0.985 and 0.996 month to month with no trend."
+        "roughly 0.994 to 1.0. The quote liquidity, microprice, hidden liquidity and session "
+        "clock families lie exactly on one for the whole sample, drawn on top of each other as "
+        "a single flat line. The volatility and impact family runs just below, between about "
+        "0.9965 and 0.9997. The order flow family is the lowest throughout, between about "
+        "0.9958 and 0.9990. Both of the lower two are ragged month to month with no trend, "
+        "and both fall away in the final month."
     ),
 )
 
@@ -900,9 +925,10 @@ plot_cross_sectional_dispersion(
 #
 # Clustering on the distance $1 - |\rho|$ groups features that carry the same ordering,
 # whatever the sign. Above the cut two features are close enough that a linear model cannot
-# separate their contributions. This states the clusters; choosing one representative from
-# each needs a fold-aware criterion, which is why `05_evaluation` makes that choice and this
-# notebook does not.
+# separate their contributions. This figure states the clusters and stops there. What
+# `05_evaluation` does next is narrower than picking one member of each: it counts the pairs
+# above the same threshold and triages every feature independently, so the choice of which
+# member to keep is a modelling decision and Chapter 11 makes it.
 
 # %%
 CUT = 0.7
@@ -931,9 +957,9 @@ clusters = plot_redundancy_clusters(
 # Cutting the redundancy tree at $|\rho_s| = 0.7$ leaves **27 clusters** across the **66**
 # columns, so well over half the matrix repeats an ordering another column already carries.
 # Almost all of that is the level-and-z-score pairing, which is deliberate: the two are one
-# hypothesis on two scales and a model that can use either is meant to choose. Which
-# representative each cluster keeps needs a fold-aware criterion, and `05_evaluation` makes
-# that choice rather than this notebook.
+# hypothesis on two scales and a model that can use either is meant to choose. Nothing here
+# or in `05_evaluation` drops a cluster member: the next stage reports the correlated pairs
+# and triages each feature on its own, and which member to keep is Chapter 11's choice.
 
 # %%
 print(f"{len(set(clusters.values()))} clusters over {len(feature_cols)} features at cut {CUT}")
