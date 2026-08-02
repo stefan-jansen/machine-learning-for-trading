@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -15,61 +16,170 @@
 # %% [markdown]
 # # S&P 500 Options: Feature Engineering
 #
-# This notebook generates the feature matrix for the S&P 500 Options case study.
-# Features are organized into three groups:
+# The thesis of this case study is that implied variance is priced above the variance that
+# subsequently realizes, and that the gap is wider for some S&P 500 names than others. The matrix
+# built here carries that gap, the surface it is quoted on, the realized volatility it is measured
+# against, and the cost of the straddle that would have to be sold to collect it.
 #
-# 1. **Instrument state** -- straddle mid, Greeks, DTE, relative spread
-# 2. **Surface features** -- IV level, skew, term structure, VRP, dynamics
-# 3. **Quality features** -- convergence codes, staleness proxies
+# One property of the data shapes every window below. A 30-day at-the-money straddle is **not
+# listed for every symbol on every session**, and B.1 measures how often two consecutive quotes
+# are more than one session apart. A window counted in straddle rows is therefore not a window
+# counted in sessions, and this notebook counts sessions.
 #
-# **Learning Objectives**:
-# - Construct instrument-specific features from straddle Greeks and prices
-# - Compute VRP (IV - RV) with trailing z-score and cross-sectional normalization
-# - Separate instrument features from surface summary features
-# - Build cross-sectional rank features for relative value
+# ## Learning objectives
 #
-# **Book Reference**: Chapter 8, Section 8.3 (Structural and Cross-Instrument Features)
+# - State each family's lookback and information lag before writing the code that computes it
+# - Count every trailing window on the underlying's session grid rather than on the rows an
+#   intermittently quoted instrument happens to occupy
+# - Separate what is being traded (the straddle and its Greeks) from what is being predicted about
+#   (the volatility surface), and rank the second within the date a decision is taken
+# - Show that withholding the holdout leaves every feature value unchanged
 #
-# **Prerequisites**: [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) (trading setup), [`02_labels`](02_labels.ipynb) (labels)
+# ## Book reference, prerequisites and artifacts
+#
+# Chapter 8, Sections 8.1-8.6. Reads pre-materialized 30-day ATM straddles via
+# `load_sp500_options_straddles()`, underlying daily bars via `load_sp500_daily_bars()`, and
+# `config/setup.yaml`. Writes `features/financial.parquet` with a `.digest.json` sidecar, read by
+# [`04_model_based_features`](04_model_based_features.ipynb), which fits GARCH and stochastic-
+# volatility features on top of it, and by [`05_evaluation`](05_evaluation.ipynb), which tests fold
+# by fold whether any of it predicts.
 
 # %%
-"""S&P 500 Options: Feature Engineering - Instrument + Surface Features."""
+"""S&P 500 Options: Feature Engineering."""
 
-import subprocess
 import warnings
-from datetime import UTC, datetime
+from datetime import date
 
-import numpy as np
 import polars as pl
 import yaml
 
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
+from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.feature_engineering import (
+    EPS,
+    assert_values_agree,
+    assign_families,
+    cross_sectional_percentile,
+    families_from_config,
+    family_coverage,
+    plot_coverage_through_time,
+    plot_cross_sectional_dispersion,
+    plot_feature_distributions,
+    plot_persistence,
+    plot_redundancy_clusters,
+    plot_timing_contract,
+    register_frame,
+    trailing_return,
+    trailing_volatility,
+    warmup_audit,
+)
 from data import load_sp500_daily_bars, load_sp500_options_straddles
-from utils.paths import get_case_study_dir
-from utils.style import COLORS, ml4t_diverging  # registers the ml4t Plotly template on import
+from utils.paths import display_path, get_case_study_dir
 
 warnings.filterwarnings("ignore")
 
-# %% tags=["parameters"]
-# Scale parameters (Papermill overrides for testing; readers see production values)
-START_DATE = None  # None = use full dataset
-
-# %%
 CASE_DIR = get_case_study_dir("sp500_options")
 FEATURES_DIR = CASE_DIR / "features"
-LABELS_DIR = CASE_DIR / "labels"
-
-STRATEGY_ID = "sp500_options"
-INSTRUMENT_ID = "straddle_30d_atm"
 
 # %% [markdown]
-# ## 1. Load Instrument Prices and Underlying
+# Production runs `START_DATE` as `None`; CI overrides it to shorten the window. There is no
+# symbol cap, because the cross-sectional percentiles below rank within a date and need the
+# whole cross-section to rank over.
+
+# %% tags=["parameters"]
+START_DATE = None
+
+# %% [markdown]
+# ## Configuration
 #
-# Pre-materialized 30D ATM straddles with straddle-level data: mid/bid/ask,
-# ATM IV, aggregated Greeks (delta, gamma, theta, vega), DTE, relative spread,
-# and quality flags for each (symbol, date) pair. Underlying daily bars provide
-# split-adjusted returns and realized volatility for VRP computation. Raw closes
-# remain available for same-date price-level calculations.
+# Every window, threshold, ranked column and the null policy are declared in `config/setup.yaml`
+# and bound here. A window retyped in the notebook is a second source of truth for a decision the
+# register, the warmup assertion and the timing figure all have to agree on.
+#
+# `min_observations_fraction` is the one parameter this case study needs and the other eight do
+# not. Because the straddle panel is not dense on the session grid, a 252-session window holds
+# fewer than 252 straddle quotes, and this is the share of the window that must be quoted before
+# it produces a value.
+
+# %%
+setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+FEATURES = setup["features"]
+FAMILIES = families_from_config(setup)
+WINDOWS = FEATURES["windows"]
+LEVEL = FEATURES["thresholds"]
+RANKED = FEATURES["ranked"]
+METADATA = list(FEATURES["metadata"])
+NULL_POLICY = list(FEATURES["null_policy"])
+TARGET_DTE = FEATURES["target_dte"]
+HOLD_SESSIONS = FEATURES["hold_sessions"]
+MIN_OBS = FEATURES["min_observations_fraction"]
+PERIODS_PER_YEAR = setup["evaluation"]["periods_per_year"]
+HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
+
+# The panel key, and the segment every trailing window is taken within. `sec_id` is the security
+# identity: a symbol that is reassigned to a different company is a different series, not a move.
+SEGMENT = ["symbol", "sec_id"]
+PANEL_KEY = ["symbol", "instrument_id", "timestamp"]
+
+print(
+    f"{len(FAMILIES)} declared families, {TARGET_DTE}-day straddle held ~{HOLD_SESSIONS} sessions"
+)
+print(f"Holdout starts {HOLDOUT_START}; Section D rebuilds the panel without it")
+
+# %% [markdown]
+# ## A. What the thesis says should carry information
+#
+# The **carrier** is the variance risk premium: at-the-money implied volatility minus the realized
+# volatility of the same underlying. Selling a straddle collects it, and the claim is that it is
+# positive on average and unevenly distributed across names. It is carried at five horizons,
+# because the horizon over which realized volatility is measured is a modelling choice and not a
+# fact, and as a difference, a ratio and a z-score, because a five-point premium means one thing
+# on a name that usually quotes at two and another on a name that usually quotes at fifteen.
+#
+# The **conditioning** is everything that decides whether the premium is collectable rather than
+# merely on offer. The instrument-state family is the cost side: an at-the-money option's quoted
+# spread is wide relative to its premium, and a straddle whose spread is in the top decile is one
+# whose edge is spent on entry. The realized-volatility and underlying families are the risk side.
+# The quality family predicts nothing by construction and is carried so that a model leaning on it
+# is visible.
+#
+# The **frame** is the decision date. The strategy sells some straddles and not others on the same
+# Friday, so only relative standing within that date can drive it, which is what the four
+# percentiles record. Every lag in the register is zero: straddle quotes and underlying closes are
+# both dated to the session that produced them, and the decision is taken at that session's close.
+#
+# The register is declared in `config/setup.yaml`, one row per family.
+
+# %%
+register_frame(FAMILIES).select(
+    ["family", "role", "inputs", "lookback (bars)", "lag (bars)", "frame"]
+)
+
+# %% [markdown]
+# ## B. Inputs and their observability
+#
+# Two sources arrive. The straddle panel is one row per symbol-session carrying the 30-day ATM
+# straddle's mid, bid, ask, implied volatilities, aggregated Greeks, days to expiry and solver
+# convergence codes. The underlying panel is one row per symbol-session carrying the close, the
+# cumulative adjustment factor, volume, and `sec_id` - the identity of the company the ticker
+# denoted on that session.
+#
+# `sec_id` is the reason the underlying panel is loaded at all rather than the straddle panel
+# alone. A ticker reassigned from one company to another produces a price ratio that is not a
+# return, and `reconcile_underlying_log_returns` nulls it rather than letting it propagate through
+# every window that contains it. The join below fails loudly rather than dropping a straddle whose
+# identity cannot be established.
+
+# %%
+straddles = load_sp500_options_straddles()
+underlying = load_sp500_daily_bars()
+if START_DATE is not None:
+    window = pl.lit(START_DATE).str.to_date()
+    straddles = straddles.filter(pl.col("timestamp") >= window)
+    underlying = underlying.filter(pl.col("timestamp") >= window)
+
+print(f"{len(straddles):,} straddle quotes over {straddles['symbol'].n_unique()} symbols")
+print(f"{len(underlying):,} underlying sessions, {underlying['timestamp'].n_unique()} trading days")
 
 
 # %%
@@ -84,1199 +194,670 @@ def attach_security_identity(straddle_df: pl.DataFrame, prices_df: pl.DataFrame)
         )
     if identity["sec_id"].null_count():
         raise ValueError("Underlying identity map contains null sec_id values")
-
-    joined = straddle_df.join(
-        identity,
-        on=["timestamp", "symbol"],
-        how="left",
-        validate="m:1",
-    )
+    joined = straddle_df.join(identity, on=["timestamp", "symbol"], how="left", validate="m:1")
     if joined["sec_id"].null_count():
         raise ValueError(
             "Straddle rows lack contemporaneous security identity: "
             f"{joined['sec_id'].null_count()} unmapped rows"
         )
-    return joined.sort(["symbol", "sec_id", "timestamp"])
+    return joined
 
-
-# %%
-straddles = load_sp500_options_straddles()
-
-# Load underlying for RV computation and attach its stable security identity.
-underlying = load_sp500_daily_bars()
-straddles = attach_security_identity(straddles, underlying)
-
-print(f"Loaded straddle instruments with security identity: {straddles.shape}")
-print(f"Underlying: {underlying.shape[0]:,} rows, {underlying['symbol'].n_unique()} symbols")
 
 # %% [markdown]
-# ## 2. Underlying Features: Returns and Realized Volatility
+# ### B.1 The session grid, and why every window is counted on it
 #
-# These provide the "RV" side of the VRP equation and basic momentum features.
-
-
-# %%
-def compute_underlying_features(prices_df: pl.DataFrame) -> pl.DataFrame:
-    """Compute returns and volatility within stable security identities."""
-    df = reconcile_underlying_log_returns(prices_df)
-    segment = ["symbol", "sec_id"]
-    return_windows = [1, 5, 10, 21]
-    rv_windows = [5, 10, 21, 42, 63]
-    return_exprs = [
-        pl.col("clean_log_return")
-        .rolling_sum(w, min_samples=w)
-        .over(segment)
-        .exp()
-        .sub(1)
-        .alias(f"ret_{w}d")
-        for w in return_windows
-    ]
-    rv_exprs = [
-        (
-            pl.col("clean_log_return").rolling_std(w, min_samples=w).over(segment) * np.sqrt(252)
-        ).alias(f"rv_{w}d")
-        for w in rv_windows
-    ]
-    volume_expr = (
-        (pl.col("volume") - pl.col("volume").rolling_mean(20).over(segment))
-        / pl.col("volume").rolling_std(20).over(segment)
-    ).alias("volume_zscore")
-    df = df.with_columns(return_exprs + rv_exprs + [volume_expr])
-    cols = (
-        ["timestamp", "symbol", "sec_id", "close", "adjusted_close", "identity_boundary"]
-        + [f"ret_{w}d" for w in return_windows]
-        + [f"rv_{w}d" for w in rv_windows]
-        + ["volume_zscore"]
-    )
-    return df.select([c for c in cols if c in df.columns])
-
+# The straddle panel is sparse. Reindexing it onto the sessions the underlying traded is the single
+# structural decision in this notebook: on the grid below, `shift(5)` means five sessions and
+# `rolling(252)` means 252 sessions, for every symbol, whatever its quoting history. On the
+# straddle rows themselves it does not - the census printed here is what that costs.
 
 # %%
-underlying_feats = compute_underlying_features(underlying)
-print(f"Underlying features: {underlying_feats.shape}")
-
-# %% [markdown]
-# ### Corporate-Action Integrity Check
-#
-# A split changes the quoted close but not the investor's economic return. The
-# check below independently reconstructs adjusted one-day returns and verifies
-# that raw split jumps do not survive in the engineered feature.
-
-
-# %%
-def audit_underlying_feature_windows(
-    prices_df: pl.DataFrame, features_df: pl.DataFrame
-) -> dict[str, float | int]:
-    """Verify daily-return arithmetic and warmup isolation at every identity boundary."""
-    segment = ["symbol", "sec_id"]
-    audit = features_df.with_columns(
-        pl.col("timestamp").cum_count().over(segment).alias("segment_position")
-    ).join(
-        reconcile_underlying_log_returns(prices_df).select(
-            "timestamp", "symbol", "clean_log_return"
-        ),
-        on=["timestamp", "symbol"],
-        how="left",
-    )
-    audit = audit.with_columns(
-        (pl.col("ret_1d") - pl.col("clean_log_return").exp().sub(1)).abs().alias("error")
-    )
-    max_error = float(audit["error"].drop_nulls().max() or 0.0)
-    warmup_violations = 0
-    for horizon in [1, 5, 10, 21]:
-        warmup_violations += audit.filter(
-            (pl.col("segment_position") <= horizon) & pl.col(f"ret_{horizon}d").is_not_null()
-        ).height
-    boundaries = audit.filter(pl.col("identity_boundary"))
-    if (
-        max_error > 1e-12
-        or warmup_violations
-        or boundaries["ret_1d"].null_count() != len(boundaries)
-    ):
-        raise ValueError(
-            "Security-segment return audit failed: "
-            f"max error={max_error:.3e}, warmup violations={warmup_violations}"
-        )
-    return {
-        "identity_boundaries": len(boundaries),
-        "warmup_violations": warmup_violations,
-        "max_identity_error": max_error,
-    }
-
-
-# %%
-adjustment_audit = audit_underlying_feature_windows(underlying, underlying_feats)
-print(
-    "Security-identity check: "
-    f"{adjustment_audit['identity_boundaries']} boundaries, "
-    f"{adjustment_audit['warmup_violations']} warmup violations, "
-    f"max return error {adjustment_audit['max_identity_error']:.1e}"
-)
-
-# %% [markdown]
-# Three familiar split events make the adjustment concrete: the raw quote jumps
-# vanish once the cumulative price factor is applied.
-
-# %%
-split_examples = underlying_feats.filter(
-    ((pl.col("symbol") == "FAST") & (pl.col("timestamp") == pl.date(2019, 5, 23)))
-    | ((pl.col("symbol") == "AAPL") & (pl.col("timestamp") == pl.date(2020, 8, 31)))
-    | ((pl.col("symbol") == "NVDA") & (pl.col("timestamp") == pl.date(2021, 7, 20)))
-).select("timestamp", "symbol", pl.col("ret_1d").alias("adjusted_return"))
-split_examples
-
-# %% [markdown]
-# Security-identity changes are not returns. The first observation for the new
-# security, and each horizon's full warmup window, therefore remain null.
-
-# %%
-identity_examples = underlying_feats.filter(
-    pl.col("identity_boundary") & pl.col("symbol").is_in(["DD", "DIS", "ARNC", "IR", "APA", "STX"])
-).select("timestamp", "symbol", "sec_id", "ret_1d", "ret_5d", "rv_5d")
-identity_examples
-
-# %% [markdown]
-# ## 3. Instrument State Features
-#
-# These describe the straddle itself: mid price, relative spread, Greeks, DTE.
-# They capture the cost and risk profile of the instrument we are trading.
-
-
-# %%
-def compute_instrument_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Compute instrument-specific features from straddle data.
-
-    These features describe the instrument we are actually trading.
-    """
-    segment = ["symbol", "sec_id"]
-    df = df.sort(segment + ["timestamp"])
-
-    df = df.with_columns(
-        # Theta/vega ratio: how much time decay per unit of vol exposure
-        (pl.col("instr_theta") / pl.col("instr_vega").clip(lower_bound=0.001)).alias(
-            "theta_vega_ratio"
-        ),
-        # Straddle premium as pct of underlying
-        # (already in prices as instr_pct_of_S)
-        # DTE normalized to [0,1] range for comparability
-        (pl.col("instr_dte") / 30.0).alias("dte_normalized"),
-        # Absolute delta (should be near zero for ATM straddle)
-        pl.col("instr_delta").abs().alias("abs_net_delta"),
-    )
-
-    # Lagged instrument returns (time-series momentum of straddle price)
-    df = df.with_columns(
-        (pl.col("instr_mid") / pl.col("instr_mid").shift(1).over(segment) - 1).alias(
-            "instr_ret_1d"
-        ),
-        (pl.col("instr_mid") / pl.col("instr_mid").shift(5).over(segment) - 1).alias(
-            "instr_ret_5d"
-        ),
-    )
-
-    return df
-
-
-# %%
-straddles = compute_instrument_features(straddles)
-print(f"With instrument features: {straddles.shape}")
-
-# %% [markdown]
-# ## 4. Surface Features: VRP, IV Dynamics, Skew
-#
-# These describe the volatility surface and risk premium. The VRP (IV - RV)
-# is the core signal for short vol strategies.
-
-# %% [markdown]
-# ### 4a. VRP and IV Level Features
-
-
-# %%
-def compute_vrp_level_features(
-    straddle_df: pl.DataFrame, underlying_rv: pl.DataFrame
-) -> pl.DataFrame:
-    """Compute VRP level features: VRP at various horizons, IV-RV ratio, IV skew."""
-    rv_cols = [c for c in underlying_rv.columns if c.startswith("rv_")]
-    df = straddle_df.join(
-        underlying_rv.select(["timestamp", "symbol", "sec_id"] + rv_cols),
-        on=["timestamp", "symbol", "sec_id"],
-        how="left",
-        validate="m:1",
-    )
-
-    df = df.with_columns(
-        (pl.col("iv_atm") - pl.col("rv_5d")).alias("vrp_5d"),
-        (pl.col("iv_atm") - pl.col("rv_10d")).alias("vrp_10d"),
-        (pl.col("iv_atm") - pl.col("rv_21d")).alias("vrp_21d"),
-        (pl.col("iv_atm") - pl.col("rv_42d")).alias("vrp_42d"),
-        (pl.col("iv_atm") - pl.col("rv_63d")).alias("vrp_63d"),
-        (pl.col("iv_atm") / pl.col("rv_21d").clip(lower_bound=0.01)).alias("iv_rv_ratio"),
-        (pl.col("call_iv") - pl.col("put_iv")).alias("iv_skew_atm"),
-    )
-
-    return df
-
-
-# %% [markdown]
-# ### 4b. VRP Normalization and IV Z-Scores
-#
-# Normalize VRP by its own 252-day history to remove regime-level effects.
-# A VRP of 5% means different things in calm vs stressed markets.
-#
-# **Warmup note**: The 252-day rolling window requires ~1 year of straddle data
-# per symbol before producing values. With options data starting in 2017, these
-# features become available from ~2018 onward. In production (2017-2021), they
-# cover the 2019-2020 test periods well. In TEST mode (single year), they will
-# be mostly null and are excluded from evaluation.
-
-
-# %%
-def compute_vrp_normalization(df: pl.DataFrame) -> pl.DataFrame:
-    """Add trailing VRP and IV z-scores."""
-    segment = ["symbol", "sec_id"]
-    df = df.sort(segment + ["timestamp"])
-    df = df.with_columns(
-        (
-            pl.col("vrp_21d").rolling_quantile(0.5, window_size=252, min_samples=252).over(segment)
-        ).alias("vrp_21d_median_252"),
-        (pl.col("vrp_21d").rolling_mean(252, min_samples=252).over(segment)).alias(
-            "vrp_21d_mean_252"
-        ),
-        (pl.col("vrp_21d").rolling_std(252, min_samples=252).over(segment)).alias(
-            "vrp_21d_std_252"
-        ),
-    )
-
-    df = df.with_columns(
-        (
-            (pl.col("vrp_21d") - pl.col("vrp_21d_mean_252"))
-            / pl.col("vrp_21d_std_252").clip(lower_bound=0.001)
-        ).alias("vrp_zscore_252"),
-    )
-
-    df = df.with_columns(
-        (
-            (pl.col("iv_atm") - pl.col("iv_atm").rolling_mean(63, min_samples=63).over(segment))
-            / pl.col("iv_atm").rolling_std(63, min_samples=63).over(segment).clip(lower_bound=0.001)
-        ).alias("iv_atm_z_63"),
-        (
-            (pl.col("iv_atm") - pl.col("iv_atm").rolling_mean(252, min_samples=252).over(segment))
-            / pl.col("iv_atm")
-            .rolling_std(252, min_samples=252)
-            .over(segment)
-            .clip(lower_bound=0.001)
-        ).alias("iv_atm_z_252"),
-    )
-
-    return df
-
-
-# %%
-straddles_vrp = compute_vrp_level_features(straddles, underlying_feats)
-straddles_vrp = compute_vrp_normalization(straddles_vrp)
-print(f"With VRP features: {straddles_vrp.shape}")
-
-# %% [markdown]
-# ### 4c. IV and VRP Dynamics
-#
-# Changes in IV and VRP over time capture momentum and mean-reversion in
-# the volatility surface.
-
-
-# %%
-def compute_dynamics_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Compute time-series dynamics: IV momentum, VRP momentum."""
-    segment = ["symbol", "sec_id"]
-    df = df.sort(segment + ["timestamp"])
-
-    # IV momentum (change in ATM IV)
-    df = df.with_columns(
-        (pl.col("iv_atm") - pl.col("iv_atm").shift(5).over(segment)).alias("iv_mom_5d"),
-        (pl.col("iv_atm") - pl.col("iv_atm").shift(10).over(segment)).alias("iv_mom_10d"),
-        (pl.col("iv_atm") - pl.col("iv_atm").shift(21).over(segment)).alias("iv_mom_21d"),
-    )
-
-    # VRP momentum
-    df = df.with_columns(
-        (pl.col("vrp_21d") - pl.col("vrp_21d").shift(5).over(segment)).alias("vrp_mom_5d"),
-        (pl.col("vrp_21d") - pl.col("vrp_21d").shift(10).over(segment)).alias("vrp_mom_10d"),
-    )
-
-    # Instrument cost momentum (is the straddle getting cheaper/more expensive?)
-    df = df.with_columns(
-        (pl.col("instr_pct_of_S") - pl.col("instr_pct_of_S").shift(5).over(segment)).alias(
-            "instr_cost_mom_5d"
-        ),
-    )
-
-    return df
-
-
-# %%
-straddles_dyn = compute_dynamics_features(straddles_vrp)
-print(f"With dynamics features: {straddles_dyn.shape}")
-
-
-# %%
-STATEFUL_WARMUP_REQUIREMENTS = {
-    "instr_ret_1d": ("instrument return", 2),
-    "instr_ret_5d": ("instrument return", 6),
-    "vrp_21d_median_252": ("VRP rolling normalization", 252),
-    "vrp_21d_mean_252": ("VRP rolling normalization", 252),
-    "vrp_21d_std_252": ("VRP rolling normalization", 252),
-    "vrp_zscore_252": ("VRP rolling normalization", 252),
-    "iv_atm_z_63": ("IV rolling normalization", 63),
-    "iv_atm_z_252": ("IV rolling normalization", 252),
-    "iv_mom_5d": ("IV momentum", 6),
-    "iv_mom_10d": ("IV momentum", 11),
-    "iv_mom_21d": ("IV momentum", 22),
-    "vrp_mom_5d": ("VRP momentum", 6),
-    "vrp_mom_10d": ("VRP momentum", 11),
-    "instr_cost_mom_5d": ("instrument-cost momentum", 6),
-}
-
-# %% [markdown]
-# The audit below turns each required segment warmup into a fail-loud census.
-
-
-# %%
-def audit_stateful_feature_warmups(df: pl.DataFrame) -> pl.DataFrame:
-    """Census required leading nulls for every stateful instrument feature family."""
-    segment = ["symbol", "sec_id"]
-    missing = sorted(set(STATEFUL_WARMUP_REQUIREMENTS) - set(df.columns))
-    if missing:
-        raise ValueError(f"Stateful feature audit is missing columns: {missing}")
-
-    positioned = df.sort(segment + ["timestamp"]).with_columns(
-        pl.col("timestamp").cum_count().over(segment).alias("segment_position")
-    )
-    rows: list[dict[str, str | int]] = []
-    for feature, (family, first_possible_position) in STATEFUL_WARMUP_REQUIREMENTS.items():
-        warmup = positioned.filter(pl.col("segment_position") < first_possible_position)
-        nulls = warmup[feature].null_count()
-        rows.append(
-            {
-                "family": family,
-                "feature": feature,
-                "required_warmup_rows": len(warmup),
-                "warmup_nulls": nulls,
-                "violations": len(warmup) - nulls,
-            }
-        )
-    census = pl.DataFrame(rows)
-    violations = census["violations"].sum()
-    if violations:
-        raise ValueError(f"Stateful security-segment warmup audit failed: {violations} violations")
-    return census
-
-
-# %%
-stateful_warmup_census = audit_stateful_feature_warmups(straddles_dyn)
-print("Stateful security-segment warmup census:")
-print(stateful_warmup_census)
-
-# %% [markdown]
-# ## 5. Cross-Sectional Rank Features
-#
-# Rank features normalize signals within each date's cross-section, making
-# them robust to time-varying levels. We rank VRP, IV, and spread across
-# the eligible universe.
-
-
-# %%
-def compute_cross_sectional_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Compute cross-sectional rank features within each date.
-
-    Uses rank("min") / (count + 1) for a proper percentile mapping to (0, 100).
-    Nulls are excluded from both rank and count (Polars default behavior).
-    """
-    rank_cols = [
-        ("vrp_21d", "vrp_21d_pctl"),
-        ("iv_atm", "iv_atm_pctl"),
-        ("instr_rel_spread", "spread_pctl"),
-        ("iv_rv_ratio", "iv_rv_ratio_pctl"),
-    ]
-
-    for src_col, dst_col in rank_cols:
-        if src_col in df.columns:
-            df = df.with_columns(
-                (
-                    pl.col(src_col).rank("min").over("timestamp")
-                    / (pl.col(src_col).count().over("timestamp") + 1)
-                    * 100
-                ).alias(dst_col)
-            )
-
-    return df
-
-
-# %%
-straddles_ranked = compute_cross_sectional_features(straddles_dyn)
-print(f"With cross-sectional features: {straddles_ranked.shape}")
-
-# %% [markdown]
-# ## 6. Quality Features
-#
-# Convergence quality and spread tightness indicate data reliability.
-# These serve as control features -- they should not predict returns,
-# but help identify unreliable observations.
-
-
-# %%
-def compute_quality_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Compute data quality features from convergence codes and spreads."""
-    df = df.with_columns(
-        # Both legs converged
-        pl.when(
-            (pl.col("call_convergence") == "Converged") & (pl.col("put_convergence") == "Converged")
-        )
-        .then(1.0)
-        .otherwise(0.0)
-        .alias("qc_both_converged"),
-    )
-
-    return df
-
-
-# %%
-feature_table = compute_quality_features(straddles_ranked)
-
-# %% [markdown]
-# ## 7. Join Underlying Features and Final Assembly
-
-# %%
-# Join underlying returns and volume
-feature_table = feature_table.join(
-    underlying_feats.select(
-        ["timestamp", "symbol", "sec_id"]
-        + [f"ret_{w}d" for w in [1, 5, 10, 21]]
-        + ["volume_zscore"]
-    ),
-    on=["timestamp", "symbol", "sec_id"],
-    how="left",
-    validate="m:1",
-)
-
-print(f"Final feature table: {feature_table.shape}")
-
-# %% [markdown]
-# ### Feature Selection
-#
-# Select the modeling features organized by category.
-
-# %%
-# Identifiers. sec_id remains internal until the final public-schema write.
-id_cols = ["timestamp", "symbol", "sec_id", "instrument_id"]
-
-# Instrument state features (describe what we trade)
-# Note: instr_mid/bid/ask are raw price levels (vary by symbol and time);
-# instr_pct_of_S and instr_rel_spread are the normalized versions for modeling.
-instrument_cols = [
+STRADDLE_COLUMNS = [
+    "instrument_id",
+    "instr_mid",
+    "instr_bid",
+    "instr_ask",
     "instr_rel_spread",
     "instr_pct_of_S",
     "instr_dte",
-    "dte_normalized",
     "instr_delta",
-    "abs_net_delta",
     "instr_gamma",
     "instr_theta",
     "instr_vega",
-    "theta_vega_ratio",
-    "instr_ret_1d",
-    "instr_ret_5d",
-]
-
-# Surface features (describe the vol surface)
-surface_cols = [
     "iv_atm",
     "call_iv",
     "put_iv",
-    "iv_skew_atm",
-    "iv_atm_z_63",
-    "iv_atm_z_252",
-    "iv_mom_5d",
-    "iv_mom_10d",
-    "iv_mom_21d",
+    "call_convergence",
+    "put_convergence",
+    "qc_any_estimated_iv",
+    "underlying_price",
 ]
-
-# %% [markdown]
-# The remaining groups capture risk-premium levels, realized risk, ranks, and controls.
-
-# %%
-# VRP features (core signal)
-vrp_cols = [
-    "vrp_5d",
-    "vrp_10d",
-    "vrp_21d",
-    "vrp_42d",
-    "vrp_63d",
-    "iv_rv_ratio",
-    "vrp_zscore_252",
-    "vrp_mom_5d",
-    "vrp_mom_10d",
-    "instr_cost_mom_5d",
-]
-
-# Realized vol features
-rv_cols = ["rv_5d", "rv_10d", "rv_21d", "rv_42d", "rv_63d"]
-
-# Cross-sectional rank features
-rank_cols = ["vrp_21d_pctl", "iv_atm_pctl", "spread_pctl", "iv_rv_ratio_pctl"]
-
-# Underlying features
-underlying_cols = ["ret_1d", "ret_5d", "ret_10d", "ret_21d", "volume_zscore"]
-
-# Quality features
-quality_cols = ["qc_both_converged", "qc_any_estimated_iv"]
-
-# Metadata (for reference, not modeling)
-meta_cols = ["underlying_price", "instr_mid", "instr_bid", "instr_ask"]
-
-# %% [markdown]
-# Assemble the ordered public schema and report each modeling category.
-
-# %%
-all_feature_cols = (
-    id_cols
-    + instrument_cols
-    + surface_cols
-    + vrp_cols
-    + rv_cols
-    + rank_cols
-    + underlying_cols
-    + quality_cols
-    + meta_cols
+quotes = attach_security_identity(straddles, underlying).select(
+    ["timestamp", *SEGMENT, *STRADDLE_COLUMNS]
 )
-
-# Select only columns that exist
-available = [c for c in all_feature_cols if c in feature_table.columns]
-feature_table = feature_table.select(available)
-
-print(f"Selected {len(available)} columns")
-print(f"  Instrument: {sum(1 for c in instrument_cols if c in available)}")
-print(f"  Surface: {sum(1 for c in surface_cols if c in available)}")
-print(f"  VRP: {sum(1 for c in vrp_cols if c in available)}")
-print(f"  RV: {sum(1 for c in rv_cols if c in available)}")
-print(f"  Rank: {sum(1 for c in rank_cols if c in available)}")
-print(f"  Underlying: {sum(1 for c in underlying_cols if c in available)}")
-print(f"  Quality: {sum(1 for c in quality_cols if c in available)}")
-
-# %% [markdown]
-# ### Drop Warmup Rows
-#
-# Rows where rolling features have not yet accumulated enough data.
-
-# %%
-# Drop rows with nulls in key features (warmup period)
-key_features = ["vrp_21d", "rv_21d", "iv_mom_10d"]
-key_available = [c for c in key_features if c in feature_table.columns]
-
-n_before = len(feature_table)
-feature_table = feature_table.drop_nulls(subset=key_available)
-n_after = len(feature_table)
-print(f"Dropped {n_before - n_after:,} warmup rows, {n_after:,} remaining")
-
-# %% [markdown]
-# ## 8. Save Outputs
-
-# %%
-FEATURES_DIR.mkdir(parents=True, exist_ok=True)
-
-features_path = FEATURES_DIR / "financial.parquet"
-feature_table = feature_table.drop("sec_id")
-feature_table.write_parquet(features_path)
-print(f"Saved features: case_studies/{STRATEGY_ID}/features/{features_path.name}")
-print(f"  Shape: {feature_table.shape}")
-print(f"  Size: {features_path.stat().st_size / 1024 / 1024:.1f} MB")
-
-# %% [markdown]
-# ## 9. Summary Statistics
-
-# %%
-_setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
-_holdout_start = pl.Series([str(_setup["evaluation"]["holdout_start"])]).str.to_date().item()
-baseline_features = feature_table.filter(pl.col("timestamp") < _holdout_start)
-
-print("\n" + "=" * 60)
-print("S&P 500 OPTIONS - FEATURE ENGINEERING SUMMARY")
-print("=" * 60)
-
-print(f"\nRows: {len(feature_table):,}")
-print(f"Features: {len(feature_table.columns)}")
-print(f"Symbols: {feature_table['symbol'].n_unique()}")
-print(f"Instrument: {INSTRUMENT_ID}")
-print(f"Date range: {feature_table['timestamp'].min()} to {feature_table['timestamp'].max()}")
-
-print(f"\nVRP Statistics (pre-{_holdout_start.year} CV window):")
-vrp_stats = baseline_features.select(
-    pl.col("vrp_21d").mean().alias("mean"),
-    pl.col("vrp_21d").std().alias("std"),
-    pl.col("vrp_21d").median().alias("median"),
-    pl.col("vrp_21d").quantile(0.25).alias("q25"),
-    pl.col("vrp_21d").quantile(0.75).alias("q75"),
+panel = (
+    underlying.select(["timestamp", *SEGMENT, "close", "adj_factor", "volume"])
+    .join(quotes, on=["timestamp", *SEGMENT], how="left")
+    .sort([*SEGMENT, "timestamp"])
 )
-print(vrp_stats)
-
-# %% [markdown]
-# ### VRP Interpretation
-#
-# The pre-holdout panel has a small positive average 21-day VRP of 0.43
-# percentage points, compared with a 12.08-point standard deviation. This is
-# far below the concept note's 9.67% **index-level** estimate and shows that the
-# individual-stock premium is weak relative to its cross-sectional dispersion.
-#
-# The cross-sectional variation is the key opportunity: within each date, some
-# stocks have much higher VRP than others. The ML model's value lies in selecting
-# the right straddles, not in timing aggregate VRP.
-
-# %% [markdown]
-# ### Deferred Features and Feature Count
-#
-# The concept note targets ~50 features across 5 families. We produce 7 families
-# with a similar total count, but the composition differs because:
-#
-# - **IV term structure** (7d/30d/90d ratio) and **risk reversal** (25d, 10d delta)
-#   require multiple DTE buckets or out-of-the-money options, not available from
-#   the single 30D ATM straddle selection (see [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) for criteria)
-# - We add **underlying features** (returns, volume) and **cross-sectional ranks**
-#   not originally planned, which compensate for the missing surface width features
-#
-# The net feature count is close to target; the family structure evolved from
-# data availability rather than the a priori blueprint.
-
-# %% [markdown]
-# ## 10. Feature Evaluation
-#
-# We evaluate engineered features against forward return labels using:
-# - **Information Coefficient (IC)**: Spearman rank correlation between feature and label
-# - **HAC adjustment**: Newey-West errors matched to each label's trading-day overlap
-# - **BH-FDR**: Benjamini-Hochberg false discovery rate for multiple testing
-# - **Pairwise correlation**: Identify redundant feature pairs
+QUOTED = pl.col("instrument_id").is_not_null()
 
 # %%
-import plotly.graph_objects as go
-
-# Load labels (primary from setup.yaml)
-from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
-from ml4t.diagnostic.metrics import compute_ic_hac_stats
-from scipy.stats import spearmanr
-
-_primary_name = _setup["labels"]["primary"]
-primary_label = pl.read_parquet(LABELS_DIR / f"{_primary_name}.parquet")
-_label_col = [
-    c
-    for c in primary_label.columns
-    if c not in ("timestamp", "symbol", "timestamp", "instrument_id")
-][0]
-print(f"Primary label ({_label_col}): {primary_label.shape}")
-
-# %% [markdown]
-# Seal the feature screen to the cross-validation window before ranking any feature.
-
-# %%
-# Join features with primary label. Feature evaluation (IC ranking, HAC, BH-FDR
-# discovery) is a selection-adjacent diagnostic, so it is sealed to the pre-2021
-# cross-validation window (setup.yaml::evaluation.holdout_start); the 2021 holdout
-# never enters the feature-significance screen. The saved feature parquet (Section 8)
-# still spans all dates - features must exist for the holdout too; only this
-# evaluation is sealed.
-eval_df = feature_table.join(
-    primary_label.select(["timestamp", "symbol", _label_col]),
-    on=["timestamp", "symbol"],
-    how="inner",
-).filter(pl.col("timestamp") < _holdout_start)
-print(f"Evaluation dataset (pre-{_holdout_start.year} CV window): {eval_df.shape}")
-
-# Identify modeling features (exclude id + meta)
-id_meta_set = {"timestamp", "symbol", "instrument_id", "underlying_price"}
-eval_feature_cols = [c for c in eval_df.columns if c not in id_meta_set and c != _label_col]
-
-# Filter features with <50% nulls (iv_atm_z_252, vrp_zscore_252 have ~99.5% null)
-null_rates = {c: eval_df[c].null_count() / len(eval_df) for c in eval_feature_cols}
-valid_features = [c for c in eval_feature_cols if null_rates[c] < 0.50]
-excluded_features = [c for c in eval_feature_cols if null_rates[c] >= 0.50]
-if excluded_features:
-    print(f"Excluded {len(excluded_features)} features (>50% null): {excluded_features}")
-print(f"Evaluating {len(valid_features)} features")
-
-# %% [markdown]
-# ### Per-Feature IC with HAC Adjustment
-
-
-# %%
-def cross_sectional_ic_series(
-    df: pl.DataFrame, feature_col: str, label_col: str, min_obs: int = 3
-) -> pl.DataFrame:
-    """Return a chronologically sorted per-date Spearman IC series."""
-    rows = []
-    for key, group in df.partition_by("timestamp", as_dict=True).items():
-        valid = group.select([feature_col, label_col]).drop_nulls()
-        if len(valid) < min_obs:
-            continue
-        p, r = valid[feature_col].to_numpy(), valid[label_col].to_numpy()
-        if np.std(p) == 0 or np.std(r) == 0:
-            continue
-        corr, _ = spearmanr(p, r)
-        if np.isfinite(corr):
-            rows.append({"timestamp": key[0], "ic": float(corr)})
-    return pl.DataFrame(rows, schema={"timestamp": pl.Date, "ic": pl.Float64}).sort("timestamp")
-
-
-# The primary contract is about 30 calendar days to expiry, or approximately
-# 21 NYSE sessions. The secondary diagnostic is a fixed 10-trading-day label.
-PRIMARY_HAC_HORIZON = 21
-SECONDARY_HAC_HORIZON = 10
-
-ic_results = {}
-for feat in valid_features:
-    ic_series = cross_sectional_ic_series(eval_df, feat, _label_col, min_obs=3)
-    if len(ic_series) >= 10:
-        hac_stats = compute_ic_hac_stats(ic_series, ic_col="ic", label_horizon=PRIMARY_HAC_HORIZON)
-        if np.isfinite(hac_stats.get("mean_ic", float("nan"))):
-            ic_results[feat] = hac_stats
-
-print(f"IC computed for {len(ic_results)} features")
-if ic_results:
-    _primary_lags = next(iter(ic_results.values()))["effective_lags"]
-    print(
-        f"Primary HAC overlap: {PRIMARY_HAC_HORIZON} trading days ({_primary_lags} Newey-West lags)"
-    )
-
-# %% [markdown]
-# ### BH-FDR Correction
-
-# %%
-feature_names = list(ic_results.keys())
-p_values = [ic_results[f]["p_value"] for f in feature_names]
-
-fdr_result = benjamini_hochberg_fdr(p_values, alpha=0.05, return_details=True)
-
-eval_summary = pl.DataFrame(
-    {
-        "feature": feature_names,
-        "ic_mean": [ic_results[f]["mean_ic"] for f in feature_names],
-        "hac_se": [ic_results[f]["hac_se"] for f in feature_names],
-        "hac_tstat": [ic_results[f]["t_stat"] for f in feature_names],
-        "p_value": p_values,
-        "adjusted_p": list(fdr_result["adjusted_p_values"]),
-        "significant_fdr05": list(fdr_result["rejected"]),
-        "naive_se": [ic_results[f]["naive_se"] for f in feature_names],
-        "naive_tstat": [ic_results[f]["naive_t_stat"] for f in feature_names],
-    }
-).sort("ic_mean", descending=True)
-
-n_significant = int(sum(fdr_result["rejected"]))
-n_naive_sig = sum(1 for p in p_values if p < 0.05)
-inflation_factor = n_naive_sig / n_significant if n_significant else None
-
-print(f"Features tested: {len(feature_names)}")
-print(f"Naive significant (p < 0.05): {n_naive_sig}")
-print(f"FDR-corrected significant: {n_significant}")
-print(
-    f"Naive/FDR count ratio: {inflation_factor:.1f}x"
-    if inflation_factor is not None
-    else "Naive/FDR count ratio: undefined (no FDR-significant features)"
-)
-print()
-print(eval_summary.head(15))
-
-# %% [markdown]
-# ### Secondary Label Comparison (Delta-Hedged)
-#
-# Comparing IC against delta-hedged returns separates volatility signal from
-# directional exposure.
-
-# %%
-# The setup declares no modelled variants (labels.variants is empty), so contrast
-# the primary hold-to-expiry label against the 10-day delta-hedged return built in
-# 02_labels. Delta hedging removes the directional P&L, so a feature whose IC holds
-# up against the hedged label is predicting volatility rather than direction.
-_secondary_name = "fwd_ret_dh_10d"
-secondary_label = pl.read_parquet(LABELS_DIR / f"{_secondary_name}.parquet")
-_secondary_col = [
-    c
-    for c in secondary_label.columns
-    if c not in ("timestamp", "symbol", "timestamp", "instrument_id")
-][0]
-print(f"Secondary label ({_secondary_col}): {secondary_label.shape}")
-
-eval_dh = feature_table.join(
-    secondary_label.select(["timestamp", "symbol", _secondary_col]),
-    on=["timestamp", "symbol"],
-    how="inner",
-).filter(pl.col("timestamp") < _holdout_start)
-
-ic_secondary = {}
-for feat in valid_features:
-    ic_series = cross_sectional_ic_series(eval_dh, feat, _secondary_col, min_obs=3)
-    if len(ic_series) >= 10:
-        hac_stats = compute_ic_hac_stats(
-            ic_series, ic_col="ic", label_horizon=SECONDARY_HAC_HORIZON
-        )
-        if np.isfinite(hac_stats.get("mean_ic", float("nan"))):
-            ic_secondary[feat] = hac_stats
-
-# %% [markdown]
-# Compare primary and delta-hedged IC only after both chronological series pass the HAC gate.
-
-# %%
-if ic_secondary:
-    _secondary_lags = next(iter(ic_secondary.values()))["effective_lags"]
-    print(
-        f"Secondary HAC overlap: {SECONDARY_HAC_HORIZON} trading days "
-        f"({_secondary_lags} Newey-West lags)"
-    )
-
-comparison = []
-for feat in set(ic_results) & set(ic_secondary):
-    comparison.append(
-        {
-            "feature": feat,
-            f"ic_{_label_col}": ic_results[feat]["mean_ic"],
-            f"ic_{_secondary_col}": ic_secondary[feat]["mean_ic"],
-            "diff": ic_results[feat]["mean_ic"] - ic_secondary[feat]["mean_ic"],
-        }
-    )
-
-if comparison:
-    comp_df = pl.DataFrame(comparison).sort(pl.col("diff").abs(), descending=True)
-    print(f"Features with largest IC difference ({_label_col} vs {_secondary_col}):")
-    print(comp_df.head(10))
-
-# %% [markdown]
-# ### Feature Family Analysis
-
-# %%
-
-
-def assign_feature_family(name: str) -> str:
-    """Map feature name to its family using the lists defined in §7."""
-    if name in instrument_cols:
-        return "instrument_state"
-    if name in surface_cols:
-        return "surface"
-    if name in vrp_cols:
-        return "vrp"
-    if name in rv_cols:
-        return "realized_vol"
-    if name in rank_cols:
-        return "cross_sectional"
-    if name in underlying_cols:
-        return "underlying"
-    if name in quality_cols:
-        return "quality"
-    return "other"
-
-
-family_ic = {}
-for feat, stats in ic_results.items():
-    family = assign_feature_family(feat)
-    family_ic.setdefault(family, []).append(stats["mean_ic"])
-
-family_avg_ic = {f: float(np.mean(ics)) for f, ics in family_ic.items()}
-print("Family average IC:")
-for family, avg in sorted(family_avg_ic.items(), key=lambda x: -abs(x[1])):
-    print(f"  {family}: mean IC = {avg:.4f} ({len(family_ic[family])} features)")
-
-# %% [markdown]
-# ### IC Bar Chart
-
-# %%
-top_20 = eval_summary.sort(pl.col("ic_mean").abs(), descending=True).head(20)
-
-colors = [
-    COLORS["positive"] if sig else COLORS["silver_muted"]
-    for sig in top_20["significant_fdr05"].to_list()
-]
-fig = go.Figure()
-fig.add_trace(
-    go.Bar(
-        x=top_20["feature"].to_list(),
-        y=top_20["ic_mean"].to_list(),
-        marker_color=colors,
-        text=[f"{t:.1f}" for t in top_20["hac_tstat"].to_list()],
-        textposition="outside",
-    )
-)
-fig.update_layout(
-    title="Top 20 features by |IC| (green = FDR-significant at 5%; label = HAC t-stat)",
-    xaxis_title="Feature",
-    yaxis_title="Mean IC (Spearman)",
-    template="ml4t",
-    xaxis_tickangle=-45,
-    height=500,
-)
-fig.show()
-
-# %% [markdown]
-# ### Feature Correlation Heatmap
-
-# %%
-sample_dates = eval_df["timestamp"].unique().sort().to_list()
-sample_dates = sample_dates[::3]  # Every 3rd date (small dataset)
-
-corr_features = [c for c in valid_features if c in eval_df.columns]
-corr_data = eval_df.filter(pl.col("timestamp").is_in(sample_dates)).select(corr_features)
-corr_matrix = corr_data.to_pandas().corr(method="spearman")
-
-high_corr_pairs = []
-for i, f1 in enumerate(corr_matrix.columns):
-    for j, f2 in enumerate(corr_matrix.columns):
-        if i < j and abs(corr_matrix.iloc[i, j]) > 0.7:
-            high_corr_pairs.append((f1, f2, float(corr_matrix.iloc[i, j])))
-
-display_features = [
-    name for name in eval_summary.sort(pl.col("ic_mean").abs(), descending=True)["feature"][:24]
-]
-display_corr = corr_matrix.loc[display_features, display_features]
-display_pairs = sum(
-    abs(display_corr.iloc[i, j]) > 0.7
-    for i in range(len(display_corr.columns))
-    for j in range(i + 1, len(display_corr.columns))
-)
-
-# %% [markdown]
-# Render the highest-IC subset on the canonical negative-neutral-positive scale.
-
-# %%
-fig = go.Figure(
-    data=go.Heatmap(
-        z=display_corr.values,
-        x=display_corr.columns.tolist(),
-        y=display_corr.columns.tolist(),
-        colorscale=ml4t_diverging(),
-        zmid=0,
-        zmin=-1,
-        zmax=1,
-    )
-)
-fig.update_layout(
-    title=f"Top-IC feature correlations ({display_pairs} pairs with |r| > 0.7)",
-    template="ml4t",
-    height=760,
-    width=960,
-    margin=dict(l=145, r=60, t=80, b=135),
-    yaxis=dict(automargin=True),
-    xaxis=dict(automargin=True),
-)
-fig.show()
-
-# %% [markdown]
-# The full-matrix pair count identifies redundancy beyond the displayed subset.
-
-# %%
-print(f"\nHigh-correlation pairs (|r| > 0.7): {len(high_corr_pairs)}")
-for f1, f2, r in sorted(high_corr_pairs, key=lambda x: -abs(x[2]))[:10]:
-    print(f"  {f1} <-> {f2}: {r:.3f}")
-
-# %% [markdown]
-# ### Naive vs HAC t-statistics
-
-# %%
-fig = go.Figure()
-fig.add_trace(
-    go.Scatter(
-        x=eval_summary["naive_tstat"].to_list(),
-        y=eval_summary["hac_tstat"].to_list(),
-        mode="markers",
-        text=eval_summary["feature"].to_list(),
-        marker=dict(
-            color=[
-                COLORS["positive"] if s else COLORS["neutral"]
-                for s in eval_summary["significant_fdr05"].to_list()
-            ],
-            size=8,
+WIDEST = WINDOWS["iv_momentum"][-1]
+on_rows = (
+    straddles.select(["timestamp", "symbol", "strike", "expiration"])
+    .join(underlying.select(["timestamp", *SEGMENT]), on=["timestamp", "symbol"])
+    .join(
+        panel.with_columns(pl.col("timestamp").rank("dense").alias("session")).select(
+            "timestamp", *SEGMENT, "session"
         ),
-        showlegend=False,
+        on=["timestamp", *SEGMENT],
+    )
+    .sort([*SEGMENT, "timestamp"])
+    .with_columns(
+        (pl.col("session") - pl.col("session").shift(WIDEST).over(SEGMENT)).alias("spanned"),
+        (pl.col("session") - pl.col("session").shift(1).over(SEGMENT) == 1).alias("adjacent"),
+        (
+            (pl.col("strike") == pl.col("strike").shift(1).over(SEGMENT))
+            & (pl.col("expiration") == pl.col("expiration").shift(1).over(SEGMENT))
+        ).alias("same_contract"),
     )
 )
-deflation_ratios = eval_summary.with_columns(
-    (pl.col("naive_tstat").abs() / pl.col("hac_tstat").abs().clip(lower_bound=0.01)).alias("ratio")
+spanned = on_rows.drop_nulls("spanned")
+off_grid = spanned.filter(pl.col("spanned") != WIDEST)
+pairs = on_rows.drop_nulls("adjacent")
+
+# %%
+print(f"{len(panel):,} session rows, {panel.filter(QUOTED).height:,} of them quoted")
+print(
+    f"consecutive quotes one session apart: {pairs['adjacent'].mean():.1%}; "
+    f"on the same strike and expiration: {pairs['same_contract'].mean():.1%}"
 )
-median_deflation = float(deflation_ratios["ratio"].median())
-
-# %% [markdown]
-# The identity line shows where HAC leaves a statistic unchanged; the median summarizes the shift.
-
-# %%
-naive_max = float(eval_summary["naive_tstat"].abs().max())
-hac_max = float(eval_summary["hac_tstat"].abs().max())
-max_t = max(naive_max, hac_max, 1.0) * 1.1
-fig.add_trace(
-    go.Scatter(
-        x=[-max_t, max_t],
-        y=[-max_t, max_t],
-        mode="lines",
-        line=dict(dash="dash", color=COLORS["neutral"]),
-        showlegend=False,
-    )
+print(
+    f"a {WIDEST}-row shift on the straddle rows alone spans something other than {WIDEST} "
+    f"sessions on {off_grid.height:,} of {spanned.height:,} rows "
+    f"({off_grid.height / spanned.height:.1%}), up to {spanned['spanned'].max()} sessions"
 )
-fig.update_layout(
-    title=f"HAC usually reduces |t-statistics| (median naive/HAC: {median_deflation:.2f}x)",
-    xaxis_title="Naive t-stat",
-    yaxis_title="HAC t-stat",
-    template="ml4t",
-    height=500,
-)
-fig.show()
-print(f"Median naive/HAC |t-stat| ratio: {median_deflation:.2f}x")
 
 # %% [markdown]
-# **Interpretation**:
+# ## C. Feature construction, one subsection per family
 #
-# The HAC adjustment is essential for this case study: the primary hold-to-expiry
-# label overlaps for about 21 trading sessions, while the secondary diagnostic
-# spans 10. Consecutive IC observations are therefore autocorrelated, inflating
-# naive t-statistics. The FDR correction further filters multiple tests.
+# ### C.1 Underlying returns and realized volatility
 #
-# No individual feature survives BH-FDR after the HAC bandwidth is matched to
-# the hold-to-expiry overlap. The largest positive mean IC, 0.0226 for 21-day
-# momentum, has a HAC t-statistic of 2.20 but an adjusted p-value of 0.22. This
-# rules out a standalone discovery claim; multivariate models still test whether
-# weak features combine into useful cross-sectional forecasts.
-#
-# The delta-hedged label comparison reveals whether features predict directional
-# movement (high unhedged IC, low hedged IC) or pure volatility (similar IC for
-# both). Features with high hedged IC are the most valuable for a short vol strategy.
-
-# %%
-# Build evaluation block for results JSON
-evaluation_block = {
-    "primary_label": _label_col,
-    "n_features_tested": len(feature_names),
-    "n_significant_naive05": n_naive_sig,
-    "n_significant_fdr05": n_significant,
-    "naive_to_fdr_count_ratio": round(inflation_factor, 1)
-    if inflation_factor is not None
-    else None,
-    "primary_hac_horizon_trading_days": PRIMARY_HAC_HORIZON,
-    "secondary_hac_horizon_trading_days": SECONDARY_HAC_HORIZON,
-    "top_features": [
-        {
-            "name": row["feature"],
-            "ic_mean": round(row["ic_mean"], 4),
-            "hac_tstat": round(row["hac_tstat"], 2),
-            "hac_pval": round(row["p_value"], 4),
-        }
-        for row in eval_summary.head(10).to_dicts()
-    ],
-    "max_pairwise_corr": round(max(abs(c) for _, _, c in high_corr_pairs), 3)
-    if high_corr_pairs
-    else 0.0,
-    "corr_pairs_above_07": len(high_corr_pairs),
-    "feature_family_avg_ic": {
-        k: round(v, 4) for k, v in sorted(family_avg_ic.items(), key=lambda x: -abs(x[1]))
-    },
-}
-
-# %% [markdown]
-# ## 11. Results Collection
+# The underlying panel is dense - two gaps in 635,050 consecutive sessions - so these windows are
+# counted with every observation required. `trailing_return` and `trailing_volatility` are the
+# shared primitives, called with `sec_id` in the segment so that neither a return nor a volatility
+# ever spans a security identity change. Realized volatility is the RV side of the premium and is
+# kept under its own `rv_` prefix rather than the primitive's `vol_` name, which is the name every
+# later stage reads.
 
 
 # %%
-def _git_commit_hash():
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], text=True, timeout=5
-        ).strip()
-    except Exception:
-        return "unknown"
-
-
-# %% [markdown]
-# Derive the feature count from the final public table and verify it against the category totals.
-
-# %%
-feature_family_counts = {
-    "instrument_state": sum(1 for c in instrument_cols if c in feature_table.columns),
-    "surface": sum(1 for c in surface_cols if c in feature_table.columns),
-    "vrp": sum(1 for c in vrp_cols if c in feature_table.columns),
-    "realized_vol": sum(1 for c in rv_cols if c in feature_table.columns),
-    "cross_sectional": sum(1 for c in rank_cols if c in feature_table.columns),
-    "underlying": sum(1 for c in underlying_cols if c in feature_table.columns),
-    "quality": sum(1 for c in quality_cols if c in feature_table.columns),
-}
-public_id_cols = ["timestamp", "symbol", "instrument_id"]
-model_feature_cols = [
-    c for c in feature_table.columns if c not in public_id_cols and c not in meta_cols
-]
-n_features = len(model_feature_cols)
-if n_features != sum(feature_family_counts.values()):
-    raise ValueError("Public feature count does not match the feature-family total")
-
-results = {
-    "case_study_id": STRATEGY_ID,
-    "chapter": 8,
-    "stage": "features",
-    "timestamp": datetime.now(UTC).isoformat(),
-    "git_commit": _git_commit_hash(),
-    "notebook": f"case_studies/{STRATEGY_ID}/03_financial_features.py",
-    "summary": {
-        "n_observations": len(feature_table),
-        "n_features": n_features,
-        "n_symbols": feature_table["symbol"].n_unique(),
-        "date_range": [
-            str(feature_table["timestamp"].min()),
-            str(feature_table["timestamp"].max()),
+def underlying_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Adjusted returns, realized volatility and relative volume, within one security identity."""
+    df = reconcile_underlying_log_returns(df)
+    volume_window = WINDOWS["volume_zscore"]
+    mean = pl.col("volume").rolling_mean(volume_window).over(SEGMENT)
+    std = pl.col("volume").rolling_std(volume_window).over(SEGMENT)
+    return df.with_columns(
+        *[
+            trailing_return("adjusted_close", w, SEGMENT).alias(f"ret_{w}d")
+            for w in WINDOWS["underlying_return"]
         ],
-        "feature_families": feature_family_counts,
-    },
-}
+        *[
+            trailing_volatility(
+                "clean_log_return", w, SEGMENT, periods_per_year=PERIODS_PER_YEAR
+            ).alias(f"rv_{w}d")
+            for w in WINDOWS["realized_volatility"]
+        ],
+        ((pl.col("volume") - mean) / std.clip(lower_bound=EPS)).alias("volume_zscore"),
+    )
+
 
 # %% [markdown]
-# Complete the record with methods, diagnostics, findings, and the inference block.
+# ### C.2 Instrument state
+#
+# What the straddle costs and how it is exposed. `theta_vega_ratio` is time decay per unit of
+# volatility exposure - what the position earns for what it risks - and its denominator is floored
+# at the configured `vega_floor` rather than at the shared numerical guard, because a vega of a
+# thousandth is a real quote and the ratio is genuinely unreadable there.
+#
+# `instr_ret_1d` and `instr_ret_5d` are **not returns anyone could have held**. The 30-day ATM
+# straddle is reselected each session, and the census in B.1 counts how rarely two consecutive
+# quotes are even the same strike and expiration - under a third of the time. The change in
+# `instr_mid` is therefore the change in the price of a rolling synthetic. It is carried because
+# that price level tracks what the option market charges for variance, and it is described here
+# so that no later stage reads it as a P&L.
+
 
 # %%
-results.update(
+def instrument_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Cost, exposure and price change of the straddle being traded."""
+    mid = pl.col("instr_mid")
+    return df.with_columns(
+        (pl.col("instr_theta") / pl.col("instr_vega").clip(lower_bound=LEVEL["vega_floor"])).alias(
+            "theta_vega_ratio"
+        ),
+        (pl.col("instr_dte") / TARGET_DTE).alias("dte_normalized"),
+        pl.col("instr_delta").abs().alias("abs_net_delta"),
+        *[
+            (mid / mid.shift(w).over(SEGMENT).clip(lower_bound=EPS) - 1).alias(f"instr_ret_{w}d")
+            for w in WINDOWS["instrument_return"]
+        ],
+    )
+
+
+# %% [markdown]
+# ### C.3 The variance risk premium and the surface level
+#
+# The premium is implied minus realized at each realized-volatility horizon, on one scale because
+# both are annualized volatilities. The ratio is the same contrast in multiplicative form, floored
+# at the configured `realized_volatility_floor`: a name whose underlying has not moved at all over
+# the reference window would otherwise divide by nothing and dominate every ranking.
+#
+# `iv_skew_atm` is the call implied volatility minus the put implied volatility at the same strike.
+# For a true at-the-money pair put-call parity forces these together, so what it measures is the
+# residual disagreement between the two legs - a quote-quality signal as much as a surface one.
+
+
+# %%
+def premium_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Implied minus realized, at every realized-volatility horizon."""
+    reference = WINDOWS["vrp_reference"]
+    return df.with_columns(
+        *[(pl.col("iv_atm") - pl.col(f"rv_{w}d")).alias(f"vrp_{w}d") for w in WINDOWS["vrp"]],
+        (
+            pl.col("iv_atm")
+            / pl.col(f"rv_{reference}d").clip(lower_bound=LEVEL["realized_volatility_floor"])
+        ).alias("iv_rv_ratio"),
+        (pl.col("call_iv") - pl.col("put_iv")).alias("iv_skew_atm"),
+    )
+
+
+# %% [markdown]
+# ### C.4 Surface and premium dynamics
+#
+# Where implied volatility and the premium sit against their own recent history, and how far each
+# has moved. Both z-scores are trailing: the mean and standard deviation at each row come from that
+# row's own past, so nothing is estimated across the sample.
+#
+# The z-score below is the one construction this case study writes locally, because every shared
+# primitive requires its window to be complete and on this panel that is the wrong requirement.
+# Demanding a straddle quote on all 252 sessions leaves the z-score defined on a small fraction
+# of the rows that carry one at the configured rule, and
+# `config/setup.yaml::features.min_observations_fraction` records both shares beside the rule
+# itself. `session_zscore` takes the same trailing mean over the same trailing dispersion under
+# the same denominator guard as `rolling_zscore`, and adds the minimum-observation argument.
+
+
+# %%
+def min_observations(window: int) -> int:
+    """Quoted sessions a window must hold before it produces a value."""
+    return max(2, round(window * MIN_OBS))
+
+
+def session_zscore(column: str, window: int) -> pl.Expr:
+    """Standardize against the trailing *window* sessions, however many are quoted."""
+    observations = min_observations(window)
+    mean = pl.col(column).rolling_mean(window, min_samples=observations).over(SEGMENT)
+    std = pl.col(column).rolling_std(window, min_samples=observations).over(SEGMENT)
+    return (pl.col(column) - mean) / std.clip(lower_bound=EPS)
+
+
+# %%
+def dynamics_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Trailing z-scores and changes of the surface and the premium."""
+    reference = f"vrp_{WINDOWS['vrp_reference']}d"
+    implied, cost = pl.col("iv_atm"), pl.col("instr_pct_of_S")
+    momentum = WINDOWS["instrument_cost_momentum"]
+    return df.with_columns(
+        *[session_zscore("iv_atm", w).alias(f"iv_atm_z_{w}") for w in WINDOWS["iv_zscore"]],
+        session_zscore(reference, WINDOWS["vrp_zscore"]).alias(
+            f"vrp_zscore_{WINDOWS['vrp_zscore']}"
+        ),
+        *[
+            (implied - implied.shift(w).over(SEGMENT)).alias(f"iv_mom_{w}d")
+            for w in WINDOWS["iv_momentum"]
+        ],
+        *[
+            (pl.col(reference) - pl.col(reference).shift(w).over(SEGMENT)).alias(f"vrp_mom_{w}d")
+            for w in WINDOWS["vrp_momentum"]
+        ],
+        (cost - cost.shift(momentum).over(SEGMENT)).alias(f"instr_cost_mom_{momentum}d"),
+    )
+
+
+# %% [markdown]
+# ### C.5 Quality controls, the null policy, and cross-sectional standing
+#
+# The two quality columns are indicators over the solver's own convergence codes. They are the
+# controls: a model that leans on them is reading the pricing engine rather than the market.
+#
+# The null policy is applied here, once, and it is what defines the tradable set: a row is kept
+# when it was quoted and when the premium the thesis is about can be measured on it at the
+# reference horizon. Nothing else is required. A feature that is unavailable on a row is shipped
+# null on that row, because dropping the row instead turns the availability of one conditioning
+# feature into a screen on the universe - and one does exactly that here. Requiring `iv_mom_10d`
+# as well cuts the panel from 620 symbols to 322, because a symbol quoted in bursts shorter than
+# ten sessions never has a session ten back to compare against.
+#
+# The percentiles are taken **after** the policy, because a percentile is a property of the
+# cross-section a decision is actually taken over, and a row that has been dropped is not in it.
+
+
+# %%
+def tradable_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Quality controls, the one null policy, then standing within the decision date."""
+    converged = (pl.col("call_convergence") == "Converged") & (
+        pl.col("put_convergence") == "Converged"
+    )
+    return (
+        df.with_columns(converged.cast(pl.Float64).alias("qc_both_converged"))
+        .filter(QUOTED)
+        .drop_nulls(subset=NULL_POLICY)
+        .with_columns(
+            cross_sectional_percentile(source, "timestamp").alias(name)
+            for source, name in RANKED.items()
+        )
+    )
+
+
+# %% [markdown]
+# The subsections compose into two functions rather than one. `build_grid` is everything computed
+# on the session grid, and it is the frame D.2 audits, because a warmup counted in rows is only a
+# warmup counted in sessions before the tradable set is cut out of it. `build_features` adds the
+# cut and the percentiles, and is what D.3 re-runs on a shorter panel. Order matters once: the
+# premium needs realized volatility, and the dynamics need the premium.
+
+
+# %%
+def build_grid(df: pl.DataFrame) -> pl.DataFrame:
+    """Every trailing family, on one row per security-session."""
+    return (
+        df.pipe(underlying_features)
+        .pipe(instrument_features)
+        .pipe(premium_features)
+        .pipe(dynamics_features)
+    )
+
+
+def build_features(df: pl.DataFrame) -> pl.DataFrame:
+    """The tradable matrix: the grid, cut to quoted and warmed-up rows, then ranked."""
+    return build_grid(df).pipe(tradable_features)
+
+
+# %%
+grid = build_grid(panel)
+built = tradable_features(grid)
+FEATURE_COLUMNS = [
+    # instrument state
+    "instr_rel_spread", "instr_pct_of_S", "instr_dte", "dte_normalized", "instr_delta",
+    "abs_net_delta", "instr_gamma", "instr_theta", "instr_vega", "theta_vega_ratio",
+    "instr_ret_1d", "instr_ret_5d",
+    # surface level and dynamics
+    "iv_atm", "call_iv", "put_iv", "iv_skew_atm", "iv_atm_z_63", "iv_atm_z_252",
+    "iv_mom_5d", "iv_mom_10d", "iv_mom_21d",
+    # variance risk premium
+    "vrp_5d", "vrp_10d", "vrp_21d", "vrp_42d", "vrp_63d", "iv_rv_ratio", "vrp_zscore_252",
+    "vrp_mom_5d", "vrp_mom_10d", "instr_cost_mom_5d",
+    # realized volatility, cross-sectional standing, underlying, quality
+    "rv_5d", "rv_10d", "rv_21d", "rv_42d", "rv_63d",
+    "vrp_21d_pctl", "iv_atm_pctl", "spread_pctl", "iv_rv_ratio_pctl",
+    "ret_1d", "ret_5d", "ret_10d", "ret_21d", "volume_zscore",
+    "qc_both_converged", "qc_any_estimated_iv",
+]  # fmt: skip
+print(f"{len(grid):,} security-sessions on the grid, {len(built):,} of them tradable")
+print(f"{len(FEATURE_COLUMNS)} features declared across {len(FAMILIES)} register families")
+
+# %% [markdown]
+# ## D. The timing contract
+#
+# ### D.1 What each construction reads
+#
+# Four kinds of operation appear above. A **rolling** window - the realized volatilities, the
+# relative volume, and the two z-score families - ends at its own row and reads a fixed number of
+# **sessions** backward within one security identity. A **shift** reads the row a fixed number of
+# sessions earlier in the same series, and is null when that session carried no quote. A
+# **contemporaneous** relation - the premium at each horizon, the ratio, the skew, the Greeks
+# ratios - reads one symbol on one session and no other date at all. A **cross-sectional**
+# statistic - the four percentiles - is taken with `.over("timestamp")`, so it reads every symbol
+# tradable on that date and nothing dated before or after it.
+#
+# None of the four is fitted: no bound, scaler or encoder here has parameters estimated once and
+# applied to every row. D.2 checks the windows and D.3 checks all four at once.
+#
+# ### D.2 Warmup
+#
+# The audit checks each column's leading nulls against the number of sessions its window spans,
+# and raises when a column carries a value before its window could have filled. The z-scores are
+# held to their minimum-observation count rather than to the full window, because that is the
+# first session at which the configured rule permits a value.
+
+# %%
+warmup_audit(
+    grid,
     {
-        "techniques": {
-            "instrument_features": "straddle mid, Greeks, DTE, relative spread",
-            "vrp_features": "IV-RV spread at 5/10/21/42/63d and trailing 252d z-score",
-            "dynamics": "IV momentum (5/10/21d), VRP momentum (5/10d)",
-            "cross_sectional": "percentile ranks for VRP, IV, spread, IV-RV ratio",
-        },
-        "diagnostics": {
-            "vrp_mean_pre_holdout": float(baseline_features["vrp_21d"].mean()),
-            "vrp_std_pre_holdout": float(baseline_features["vrp_21d"].std()),
-            "null_fraction": float(
-                feature_table.null_count().sum_horizontal().item()
-                / (len(feature_table) * len(feature_table.columns))
-            ),
-        },
-        "key_findings": [
-            f"Feature matrix: {len(feature_table):,} rows x {n_features} features",
-            f"Pre-holdout VRP(21d) mean: {float(baseline_features['vrp_21d'].mean()):.4f}",
-            "Instrument state features separate from surface features",
-            "VRP z-score (252d) captures the regime-adjusted VRP level",
-        ],
-    }
+        "ret_21d": WINDOWS["underlying_return"][-1],
+        "rv_63d": WINDOWS["realized_volatility"][-1],
+        "volume_zscore": WINDOWS["volume_zscore"],
+        "instr_ret_5d": WINDOWS["instrument_return"][-1],
+        "iv_mom_21d": WINDOWS["iv_momentum"][-1],
+        "vrp_mom_10d": WINDOWS["vrp_momentum"][-1],
+        "iv_atm_z_63": min_observations(WINDOWS["iv_zscore"][0]),
+        "iv_atm_z_252": min_observations(WINDOWS["iv_zscore"][1]),
+        "vrp_zscore_252": min_observations(WINDOWS["vrp_zscore"]),
+    },
+    entity=SEGMENT,
 )
 
-results["evaluation"] = evaluation_block
-print(f"Results metadata: {n_features} model features across 7 categories")
+# %% [markdown]
+# ### D.3 Withholding the holdout changes nothing
+#
+# Trailing and within-date statistics share a property worth checking directly: recomputed on a
+# panel that stops before the holdout, they reproduce the same values on the rows the two panels
+# share. A parameter fitted over a whole column does not, because truncating the column moves the
+# parameter and with it every row it was applied to. Comparing two builds tests every emitted
+# column at once and does not depend on anyone having flagged the transform that fits. A value on
+# one side against a null on the other counts as a difference.
 
+# %%
+seal = assert_values_agree(
+    built.filter(pl.col("timestamp") < HOLDOUT_START),
+    build_features(panel.filter(pl.col("timestamp") < HOLDOUT_START)),
+    columns=FEATURE_COLUMNS,
+    keys=PANEL_KEY,
+)
+seal.filter(pl.col("column").is_in(["vrp_zscore_252", "vrp_21d_pctl", "rv_63d"]))
 
 # %% [markdown]
-# ## Key Takeaways
+# ## E. Matrix assembly and coverage
 #
-# 1. **Instrument vs surface features**: Instrument features (straddle mid,
-#    Greeks, DTE, spread) describe what we trade; surface features (IV, skew,
-#    VRP) describe the volatility environment. Keeping them separate aids
-#    interpretability.
+# The panel key is `symbol` + `instrument_id` + `timestamp`. Nine columns the two loaders supplied
+# or the construction needed are excluded, each for its own reason, and the exclusion list below
+# carries them. The assertion under it is what keeps the list honest: a column added to the
+# construction and registered nowhere fails here rather than reaching the parquet unnoticed.
 #
-# 2. **VRP z-score (252d)**: Normalizing VRP by its own history removes
-#    the level effect -- a VRP of 5% means different things in calm vs
-#    stressed regimes. The trailing z-score captures this regime context.
+# Four further columns are written that are **not** features and are declared as such in
+# `config/setup.yaml::features.metadata`: the underlying price and the straddle's mid, bid and ask.
+# `05_evaluation` excludes them by the same name, and the backtest needs them to price a position.
+
+# %%
+EXCLUDED = {
+    "sec_id": "the segment the windows were counted within, not a model input",
+    "close": "the unadjusted quote, superseded by adjusted_close",
+    "adjusted_close": "a contemporaneous price beside a label derived from the same series",
+    "adj_factor": "the cumulative corporate-action factor, an input to the adjustment",
+    "identity_boundary": "a flag on the input series, consumed by the return construction",
+    "clean_log_return": "the intermediate the realized-volatility family standardizes",
+    "volume": "a raw level across symbols of very different size, shipped as its z-score",
+    "call_convergence": "a solver status string, summarized by qc_both_converged",
+    "put_convergence": "a solver status string, summarized by qc_both_converged",
+}
+
+# %%
+accounted = {*PANEL_KEY, *FEATURE_COLUMNS, *METADATA, *EXCLUDED}
+assert set(built.columns) == accounted, f"unaccounted columns: {set(built.columns) ^ accounted}"
+features = built.select([*PANEL_KEY, *FEATURE_COLUMNS, *METADATA]).sort(PANEL_KEY)
+assert features.select(PANEL_KEY).is_duplicated().sum() == 0, "duplicate panel key"
+assignment = assign_families(FEATURE_COLUMNS, FAMILIES)
+register_frame(FAMILIES, FEATURE_COLUMNS).select(["family", "columns", "role", "representation"])
+
+# %% [markdown] tags=["results"]
+# The matrix carries **47 features** on **354,265 rows** across **620 symbols**, from
+# **2017-02-02** to **2021-12-31**. The session grid it was built on held **635,703** rows;
+# **281,438** of them were either unquoted or inside the null policy's warmup. Past the warmup
+# boundary at **2018-01-03** the thinnest family in any month is **0.500** covered, which is
+# surface dynamics in **April 2020**: a 252-session window needs 202 of those sessions quoted, and
+# the universe churned hard enough that spring to leave half of them short.
+
+# %% [markdown]
+# The warmup boundary below is the register's own longest lookback counted forward from the
+# panel's first session - a declared number, not a date read off the values.
+
+# %%
+SESSIONS = panel["timestamp"].unique().sort()
+WARMUP_END = SESSIONS[max(f.lookback for f in FAMILIES)]
+coverage = family_coverage(features, assignment, every="1mo")
+floor = coverage.filter(pl.col("timestamp") >= WARMUP_END)
+thinnest = min(floor[c].min() for c in set(assignment.values()))
+print(
+    f"{len(FEATURE_COLUMNS)} features, {len(features):,} rows, {features['symbol'].n_unique()} symbols"
+)
+print(f"{features['timestamp'].min()} to {features['timestamp'].max()}, warmup ends {WARMUP_END}")
+print(f"{len(grid) - len(built):,} grid rows were unquoted or inside the null policy's warmup")
+print(f"thinnest family-month past warmup {thinnest:.3f}")
+
+# %% [markdown]
+# ### F1. Coverage through time
 #
-# 3. **Cross-sectional ranks**: Ranking VRP and IV within each date's universe
-#    produces stationary features that work well for cross-sectional selection
-#    (which straddles to sell vs avoid).
+# Four families are complete everywhere by construction: they read the underlying, which is dense,
+# or the quote itself. The three that thin out are the ones whose windows need a straddle to have
+# been quoted on a particular earlier session, and they thin together, because it is the same
+# churn in the quoted universe that empties all three.
+
+# %%
+plot_coverage_through_time(
+    coverage,
+    warmup_boundary=WARMUP_END,
+    title="April 2020 is the worst coverage month for every family that thins",
+    subtitle="Monthly non-null share per feature family",
+    alt=(
+        "Line chart of non-null share by feature family by month, on a y-axis running from about "
+        "0.47 to one. The cross-sectional, quality, surface-level and underlying families sit "
+        "flat at one for the whole sample and realized volatility just below them. Instrument "
+        "state runs near 0.97. The variance-risk-premium family runs near 0.90 and surface "
+        "dynamics is the lowest line throughout, rising from about 0.6 in 2017 to about 0.8 by "
+        "2019. All three of the lines that move dip sharply in April 2020, surface dynamics "
+        "furthest, to 0.5, and all three recover over the following year without regaining their "
+        "2019 level."
+    ),
+)
+
+# %% [markdown]
+# ### F4. The timing contract
+
+# %%
+plot_timing_contract(
+    FAMILIES,
+    bar_unit="NYSE sessions",
+    title="Three families reach back a year, and none reads past the decision",
+    subtitle="Register lookback per family; a gap at the right edge is a lag",
+    alt=(
+        "Horizontal bars, one per feature family, each extending leftward from the decision line "
+        "by that family's lookback: 252 sessions for surface dynamics, the variance risk premium "
+        "and the cross-sectional percentiles, 63 for realized volatility, 21 for the underlying "
+        "family and five for instrument state. The surface-level and quality families read only "
+        "the current session and so are drawn with no bar at all. Every bar reaches the decision "
+        "line, so none of them is drawn with a gap at its right-hand end."
+    ),
+)
+
+# %% [markdown]
+# ## F. What the features look like
 #
-# 4. **Quality as control**: Convergence quality features should not predict
-#    returns, but unreliable IV observations can introduce noise.
+# Four properties decide whether this matrix can be used at all: the scale each feature arrives on,
+# whether the cross-section disagrees enough to rank on, how much of the set is one ordering under
+# several names, and how long a value lasts. `05_evaluation` is where the matrix is tested fold by
+# fold for whether any of it predicts.
 #
-# 5. **Inference changes the verdict**: Nine features look significant under
-#    naive errors, but none survives horizon-aware HAC plus BH-FDR. Individual
-#    feature ICs are diagnostics, not standalone discoveries.
+# ### F2. The premium family, in every form it is carried
+
+# %%
+plot_feature_distributions(
+    features,
+    ["vrp_21d", "vrp_63d", "iv_rv_ratio", "vrp_zscore_252", "vrp_mom_5d", "vrp_21d_pctl"],
+    title="The same premium is peaked, bell-shaped or flat by representation",
+    subtitle="Premium family across all quoted symbol-sessions, display tails clipped",
+    alt=(
+        "Six histograms in two rows. The 21-session and 63-session premiums and the five-session "
+        "premium change are all very sharply peaked just above zero with a long thin tail to the "
+        "left and almost none to the right. The implied-to-realized ratio below them is a broad "
+        "asymmetric hump peaking a little above one and running from about 0.4 to 2.6, and the "
+        "252-session z-score is a broad bell centred near zero and skewed left, spanning about "
+        "minus four to two. The percentile is flat across its whole zero-to-100 range, with a "
+        "single narrow notch at the middle."
+    ),
+)
+
+# %% [markdown]
+# ### F3. Cross-sectional dispersion through time
 #
-# **Next**: [`04_model_based_features`](04_model_based_features.ipynb) adds GARCH and Bayesian SV temporal features.
+# A cross-sectional strategy needs the cross-section to disagree. On a date where the band narrows
+# to nothing there is nothing to rank, whatever the average level of the premium.
+
+# %%
+plot_cross_sectional_dispersion(
+    features,
+    "vrp_21d",
+    every="1mo",
+    title="April 2020 is the one month the whole cross-section was negative",
+    subtitle="Interdecile band of the 21-session premium, by month",
+    alt=(
+        "Shaded band of the 10th to 90th percentile of the 21-session premium by month, with the "
+        "median drawn through it. The median sits between zero and 0.05 for almost the whole "
+        "sample and the band is roughly plus or minus 0.1 wide, never narrowing to nothing. In "
+        "April 2020 the median falls to about minus 0.32 and the band drops with it, its upper "
+        "edge reaching about minus 0.08 and its lower edge about minus 0.7 - the only month in "
+        "which the whole band lies below zero. Both recover by late 2020."
+    ),
+)
+
+# %% [markdown]
+# ### F5. Redundancy structure
+#
+# Clustering on the distance $1 - |\rho|$ groups features that carry the same ordering, whatever
+# the sign. Above the cut two features are close enough that a linear model cannot separate their
+# contributions. This states the clusters. Choosing one representative from each needs a
+# fold-aware criterion, which `05_evaluation` applies fold by fold.
+
+# %%
+CUT = 0.7
+clusters = plot_redundancy_clusters(
+    features,
+    FEATURE_COLUMNS,
+    cut=CUT,
+    title="Implied and realized levels are one ordering; the premium is not",
+    subtitle=r"Average linkage on $1 - |\rho_s|$, cut drawn at $|\rho_s| = 0.7$",
+    alt=(
+        "Dendrogram of every feature in the matrix. The largest cluster below the cut holds ten "
+        "columns and mixes the two things the premium is the difference of: the three implied "
+        "volatilities and the implied-volatility percentile join the four longer realized-"
+        "volatility windows, together with the straddle's premium as a share of spot and the "
+        "theta-vega ratio. The premium columns themselves sit in a separate branch, where the "
+        "42-session and 63-session premiums pair off and the 21-session premium joins the ratio, "
+        "the z-score and their percentiles. The momentum columns form a third branch. The two "
+        "quality controls, the skew and the two spread columns attach only near the root, "
+        "sharing an ordering with nothing else."
+    ),
+)
+
+# %% [markdown] tags=["results"]
+# Cutting the redundancy tree at $|\rho_s| = 0.7$ leaves **26 clusters** across the **47**
+# columns, and only **8** of them hold more than one member. The largest holds **10**: the implied
+# volatilities and the realized volatilities are one ordering, which is what makes the premium -
+# their difference, and in a different cluster - the part of this matrix that is not already
+# carried by a volatility level.
+
+# %%
+print(f"{len(set(clusters.values()))} clusters over {len(FEATURE_COLUMNS)} features at cut {CUT}")
+
+# %% [markdown]
+# ### F6. Persistence and rank stability
+#
+# The right-hand panel compares the ordering across consecutive **decisions**, which
+# `config/setup.yaml` declares as a weekly Friday close. The autocorrelation on the left is of the
+# feature, not of the return, and it runs to twice the holding period: a feature whose value has
+# decayed before the position is closed cannot support this cadence, however well it predicts on
+# the day it is computed. It is estimated per symbol on pairs of dates exactly one lag apart and
+# summarized by the median over symbols, with a bootstrap interval over symbols; a correlation
+# pooled over every symbol-date pair would read high whenever symbols sit at different levels,
+# whether or not any one of them persists.
+
+# %%
+DECISION_DATES = (
+    features.group_by(pl.col("timestamp").dt.truncate("1w"))
+    .agg(pl.col("timestamp").max().alias("decision"))["decision"]
+    .sort()
+    .to_list()
+)
+
+plot_persistence(
+    features,
+    ["vrp_21d", "vrp_zscore_252", "iv_atm", "rv_21d", "instr_rel_spread"],
+    entity="symbol",
+    max_lag=2 * HOLD_SESSIONS,
+    decision_dates=DECISION_DATES,
+    title="The premium decays to zero inside the holding period; the levels do not",
+    subtitle=f"Median over symbols to {2 * HOLD_SESSIONS} sessions",
+    alt=(
+        "Two panels. On the left, autocorrelation against lag. The 21-session premium and its "
+        "252-session z-score both start near 0.94 at lag one and fall almost on top of each "
+        "other in a near-straight line, crossing zero at lag 20 and lag 18 respectively and "
+        "drifting a little below it, to about minus 0.06, out to lag 42. Implied volatility and "
+        "21-session realized volatility start slightly higher, near 0.97, and decay far more "
+        "slowly, still at 0.35 and 0.20 at lag 42 and never crossing zero. The relative spread "
+        "starts much lower, at about 0.51, and flattens near 0.19. The bootstrap ribbons are "
+        "narrow throughout. On the right, the cross-sectional rank correlation between "
+        "consecutive weekly decisions puts implied volatility highest at 0.95 and realized "
+        "volatility next at 0.90, the premium and its z-score together near 0.69, and the "
+        "relative spread lowest at 0.51."
+    ),
+)
+
+# %% [markdown]
+# ## G. Emit
+#
+# The parquet is written with a sidecar recording the digest of its values, its row count and key
+# columns, and the digest of what it was built from. This stage reads no upstream case-study
+# artifact, so the sidecar records the two loaded panels alone, each restricted to the columns and
+# window actually consumed - which is what answers "which market-data vintage produced these
+# values". The digest is computed over content rather than file bytes, so row order and parquet
+# metadata leave it alone and any feature value moves it.
+
+# %%
+record = write_artifact(
+    features,
+    FEATURES_DIR / "financial.parquet",
+    keys=PANEL_KEY,
+    written_by="case_studies/sp500_options/03_financial_features.py",
+    inputs={
+        "load_sp500_options_straddles": value_digest(quotes),
+        "load_sp500_daily_bars": value_digest(
+            underlying.select(["timestamp", *SEGMENT, "close", "adj_factor", "volume"])
+        ),
+    },
+)
+print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}, digest {record['digest']}")
+
+# %% [markdown]
+# ## Key takeaways
+#
+# - **Count the window on the grid the quantity lives on, not on the rows it happens to occupy.**
+#   An intermittently listed instrument makes `shift(21)` mean 21 quotes rather than 21 sessions,
+#   and the two differ on nearly half of this panel. Reindexing onto the underlying's sessions is
+#   what makes the register's declared lookbacks true.
+# - **State the timing contract before writing the feature.** The register fixes each family's
+#   lookback and lag in the configuration, and the warmup assertion, the timing figure and the
+#   review a reader can run all read those numbers rather than re-deriving them from the code.
+# - **Say what a column is when its name suggests something better.** The change in the price of a
+#   reselected 30-day straddle is not a return anyone held, and only the prose can carry that.
+# - **Test the seal by construction, not by inspection.** Rebuilding the panel with later dates
+#   withheld and comparing values catches any transform that fits across the sample, including the
+#   ones nobody thought to flag.
+# - **Read the matrix before modelling it.** Distribution, dispersion, redundancy and decay each
+#   rule out a use: a feature with no cross-sectional spread cannot rank, and one whose ordering
+#   decays inside the holding period cannot be traded at this cadence.
+#
+# ### Known limitations
+#
+# - The premium contrasts a forward-looking quote with a backward-looking estimate. It is a
+#   premium only to the extent realized volatility persists over the contract's life, which is an
+#   assumption this notebook carries rather than tests.
+# - The minimum-observation rule buys coverage with comparability: a 252-session z-score built
+#   from 202 quotes and one built from 252 are not the same statistic, and nothing downstream
+#   knows which it received.
+# - Only a single 30-day at-the-money straddle is materialized per symbol-session, so the term
+#   structure and the wings of the surface are not observable here at all. The skew column is the
+#   residual between two legs at one strike, not a smile.
+# - Every feature here is a rule written in advance. `04_model_based_features` adds the features
+#   that are themselves model outputs, where the rule is estimated from the data.
