@@ -166,7 +166,7 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
 # that rebuilds the whole panel with the holdout withheld and compares all 57 columns,
 # which is checked by executing the notebook rather than by reading its source. A
 # source pattern cannot see the stronger check, so listing it here only produces a
-# false red. See agent-workspace #141.
+# false red.
 PER_SYMBOL_ENDPOINT_NOTEBOOKS = [
     ("case_studies/etfs/02_labels.py", "symbol"),
     ("case_studies/crypto_perps_funding/02_labels.py", "symbol"),
