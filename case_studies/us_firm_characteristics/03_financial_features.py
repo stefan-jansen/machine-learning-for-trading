@@ -82,10 +82,12 @@ CASE_DIR = get_case_study_dir("us_firm_characteristics")
 FEATURES_DIR = CASE_DIR / "features"
 LABELS_DIR = CASE_DIR / "labels"
 
+# %% [markdown]
+# Production runs both dates as `None` and takes the window from `setup.yaml`; CI overrides them
+# to shorten it. There is no firm cap: every family below is cross-sectional, so capping the
+# cross-section would change the ranks rather than the runtime.
+
 # %% tags=["parameters"]
-# Production runs both as None and takes the window from `setup.yaml`; CI overrides them to shorten
-# it. There is no firm cap: every family below is cross-sectional, and capping the cross-section
-# changes the ranks rather than the runtime.
 START_DATE = None
 END_DATE = None
 
@@ -183,8 +185,9 @@ print(f"Released characteristics consumed: {len(RELEASED)}")
 # %% [markdown]
 # ### C.1 The released characteristics, carried through unchanged
 #
-# The 46 characteristics are already cross-sectionally rank-transformed to $[-0.5, 0.5]$, which is
-# the representation the register records. They are carried through as they arrive. Re-ranking them
+# The 46 characteristics arrive already cross-sectionally rank-transformed onto the symmetric
+# interval the register records under `representation`, and Section E prints the range they
+# actually span. They are carried through as they arrive. Re-ranking them
 # here would be a second cross-sectional transform over a quantity that is already one, and a
 # rolling z-score over a bounded rank is a statistic of the ranking, not of the firm.
 
@@ -460,6 +463,9 @@ print(
     f"max {per_month.max():,}"
 )
 print(f"Features: {len(FEATURE_COLS)}")
+released_min = min(features[c].min() for c in RELEASED)
+released_max = max(features[c].max() for c in RELEASED)
+print(f"Released characteristics span [{released_min:.3f}, {released_max:.3f}]")
 print(register_frame(FAMILIES, columns=FEATURE_COLS).select("family", "columns", "role"))
 
 # %% [markdown]
@@ -487,7 +493,7 @@ plot_feature_distributions(
 plot_cross_sectional_dispersion(
     features,
     "composite_value",
-    title="Cross-sectional spread in the value composite is stable across three decades",
+    title="Spread in the value composite is stable across three decades",
     subtitle="10th-90th percentile band with the median, taken within each month",
     alt=(
         "A band between the 10th and 90th percentile of the value composite computed within "
