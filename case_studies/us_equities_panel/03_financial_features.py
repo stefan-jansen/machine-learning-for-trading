@@ -83,6 +83,10 @@ MIN_ADV_USD = 1_000_000
 MIN_PRICE = 5.0
 ADV_WINDOW = 21
 
+# The primary label is a one-session forward return, so a strategy trading it decides
+# at every close. Used only by the Fundamental Law arithmetic in Section 9.
+REBALANCES_PER_YEAR = 252
+
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
 START_DATE = "1990-01-01"
@@ -119,11 +123,12 @@ MAX_SYMBOLS = 0
 # Returns and every price-derived feature below still read `adj_close`: a return
 # has to divide out splits and dividends to mean anything.
 #
-# **Alignment check**: Section 8 reconciles the feature index against the label
-# index and prints the residual both ways. They are not expected to match
-# exactly - a label needs a forward window that the last sessions of a stock's
-# series do not have - so the check states that exemption and reports what is
-# left over rather than asserting equality.
+# **Alignment check**: the two indices are not expected to match exactly - a label
+# needs a forward window the last session of a stock's series does not have, and a
+# feature needs a warm-up the first sessions do not have. Section 8 attributes
+# every row on both sides to one of those causes and **asserts the remainder is
+# empty**, so a screen that drifted apart between the two stages fails there rather
+# than printing a larger number and passing.
 
 # %%
 raw_df = load_us_equities(start_date=START_DATE, end_date=END_DATE)
@@ -707,25 +712,80 @@ _label_col = "fwd_ret_1d"
 eval_df = output_df.join(_label_df, on=["timestamp", "symbol"], how="inner")
 print(f"Evaluation set: {len(eval_df):,} rows, label column: {_label_col}")
 
-# Section 1's alignment check, performed rather than asserted. The two indices are
-# built from the same screen on the same data, so anything left over is either the
-# forward-window exemption or divergent filter logic - and the two are told apart
-# by whether the orphan is a stock's last feature session.
-_orphans = output_df.join(_label_df, on=["timestamp", "symbol"], how="anti")
-_last_session = output_df.group_by("symbol").agg(pl.col("timestamp").max().alias("_last"))
-_tail = (
-    _orphans.join(_last_session, on="symbol", how="left")
-    .filter(pl.col("timestamp") == pl.col("_last"))
-    .height
+# %% [markdown]
+# ### Reconciling the feature index against the label index
+#
+# Section 1 promised this check. Both residuals are attributed to a named cause and the
+# unexplained remainder is asserted empty in both directions, because counting the
+# mismatches and printing them is not a check: divergent screening between stage 02 and
+# stage 03 - which is what both #146 and #235 were - would print a larger number and pass.
+#
+# A feature row can lack a label only where [`02_labels`](02_labels.ipynb) wrote none, and
+# its Section D enumerates exactly three causes: the row is the last session of the stock's
+# price series, so no forward window exists; the window to the next session spans more
+# calendar time than holidays explain, which is that notebook's one-session span tolerance;
+# or a price is missing at one end of the window. All three are reproduced below, because a
+# cause left out would be indistinguishable from the two screens having drifted apart.
+#
+# A label row can lack a feature row only where a feature the selection requires is still
+# null, which is the warm-up at the start of a stock's series. `essential_cols` is the set
+# that decides it, so the dropped rows are recomputed from that same condition rather than
+# guessed at.
+
+# %%
+_fwd = raw_df.select(
+    "symbol",
+    "timestamp",
+    (pl.col("timestamp").shift(-1).over("symbol") - pl.col("timestamp"))
+    .dt.total_days()
+    .alias("_fwd_days"),
+    (pl.col("adj_close").is_null() | pl.col("adj_close").shift(-1).over("symbol").is_null()).alias(
+        "_unpriced"
+    ),
+)
+LABEL_SPAN_TOLERANCE_1D = 9  # 02_labels: ceil(1 * 7 / 5) + 7
+
+_feature_orphans = output_df.join(_label_df, on=["timestamp", "symbol"], how="anti").join(
+    _fwd, on=["symbol", "timestamp"], how="left"
+)
+_no_forward_window = pl.col("_fwd_days").is_null()
+_window_spans_a_hole = pl.col("_fwd_days") > LABEL_SPAN_TOLERANCE_1D
+_no_price_at_an_end = pl.col("_unpriced")
+_unexplained_features = _feature_orphans.filter(
+    ~(_no_forward_window | _window_spans_a_hole | _no_price_at_an_end)
+)
+
+_essential_features = [c for c in essential_cols if c not in ("symbol", "timestamp")]
+_warmup = raw_df.filter(ELIGIBLE).filter(
+    pl.any_horizontal(pl.col(c).is_null() for c in _essential_features)
+)
+_label_orphans = _label_df.join(output_df, on=["timestamp", "symbol"], how="anti")
+_unexplained_labels = _label_orphans.join(
+    _warmup.select("symbol", "timestamp"), on=["symbol", "timestamp"], how="anti"
+)
+
+print(
+    f"  features with no label: {_feature_orphans.height:,} — "
+    f"{_feature_orphans.filter(_no_forward_window).height:,} at the end of a stock's series, "
+    f"{_feature_orphans.filter(~_no_forward_window & _window_spans_a_hole).height:,} whose next "
+    f"session is more than {LABEL_SPAN_TOLERANCE_1D} calendar days away, "
+    f"{_feature_orphans.filter(~_no_forward_window & ~_window_spans_a_hole & _no_price_at_an_end).height:,} "
+    "with no price at an end of the window"
 )
 print(
-    f"  features with no label: {_orphans.height:,} rows over "
-    f"{_orphans['symbol'].n_unique():,} stocks, {_tail:,} of them a stock's last session"
+    f"  labels with no feature: {_label_orphans.height:,} — "
+    f"{_label_orphans.height - _unexplained_labels.height:,} still inside the feature warm-up"
 )
-print(
-    f"  labels with no feature: "
-    f"{_label_df.join(output_df, on=['timestamp', 'symbol'], how='anti').height:,} rows"
+
+assert _unexplained_features.height == 0, (
+    f"{_unexplained_features.height} feature rows have no label and neither end a stock's "
+    "series nor precede a gap. The two stages are screening different universes."
 )
+assert _unexplained_labels.height == 0, (
+    f"{_unexplained_labels.height} label rows have no feature row and are not explained by "
+    "the feature warm-up. The two stages are screening different universes."
+)
+print("  reconciled: no unexplained rows on either side")
 # %% [markdown]
 # ### Per-Feature IC with HAC Adjustment
 
@@ -750,7 +810,31 @@ if eval_df is not None:
     print(f"IC computed for {len(ic_results)} / {len(feature_cols)} features")
 
 # %% [markdown]
-# ### BH-FDR Multiple Testing Correction
+# ### BH-FDR correction, the HAC effect, and the Fundamental Law's two inputs
+#
+# Three quantities that are easy to confuse, so each is computed and named separately.
+# The **FDR discovery ratio** compares how many features clear the significance
+# threshold before and after Benjamini-Hochberg: it sizes the multiple-testing
+# correction. The **HAC effect**
+# compares the HAC t-statistic against the naive one: it sizes the autocorrelation
+# correction. Neither stands in for the other.
+#
+# The **Fundamental Law**, $IR = IC \cdot \sqrt{BR}$, has two inputs that are easy to
+# overstate, so both are reported as what they are and the product is not reported as an
+# achievable information ratio at all.
+#
+# *Breadth* is not the symbol count of the panel. Those symbols are spread over 28 years
+# and were never all tradable at once, and $BR$ counts **independent** bets **per year**.
+# The contemporaneous eligible cross-section is the honest starting point; multiplying it
+# by the rebalancing frequency gives the count only if every bet is independent, and they
+# are not - names in one cross-section share factor exposure, and consecutive days re-bet
+# the same slow-moving signals. This notebook does not estimate that dependence, so what
+# it prints is an upper bound on an upper bound.
+#
+# *Skill* is not the largest $|IC|$ among the features scored above. That maximum was
+# picked on the sample it is measured on, so it is a selection artifact and overstates what the feature
+# would repeat out of sample. The typical feature's $|IC|$ is the defensible summary; the
+# maximum is printed only so the gap between the two is visible.
 
 # %%
 if ic_results:
@@ -775,28 +859,47 @@ if ic_results:
 
     n_significant = int(fdr_result["n_rejected"])
     n_naive_sig = sum(1 for p in _p_values if p < 0.05)
-    inflation = n_naive_sig / max(n_significant, 1)
+    fdr_discovery_ratio = n_naive_sig / max(n_significant, 1)
+    # A ratio below 1 means HAC widened the standard error.
+    _t_ratio = (eval_summary["hac_tstat"].abs() / eval_summary["naive_tstat"].abs()).drop_nans()
+    hac_t_ratio_median = float(_t_ratio.median())
+    n_t_grew = int((_t_ratio > 1).sum())
 
     print(f"Features tested: {len(_feat_names)}")
     print(f"Naive significant (p < 0.05): {n_naive_sig}")
     print(f"FDR-corrected significant: {n_significant}")
-    print(f"Inflation factor: {inflation:.1f}x")
+    print(f"FDR discovery ratio: {fdr_discovery_ratio:.2f}x (multiple testing, not HAC)")
+    print(
+        f"HAC effect on |t|: median ratio {hac_t_ratio_median:.3f}, "
+        f"range {_t_ratio.min():.3f} to {_t_ratio.max():.3f}; "
+        f"{n_t_grew} of {len(_t_ratio)} features have a larger |t| under HAC"
+    )
     print(eval_summary.select("feature", "family", "ic_mean", "hac_tstat", "significant_fdr05"))
 
-    # Fundamental Law of Active Management: IR = IC * sqrt(BR).
-    # The law describes ONE signal, so the IC it takes is one signal's skill. The
-    # signed mean across every feature is not that: the panel's predictors point in
-    # both directions and cancel to roughly zero, which says nothing about any of
-    # them. Two defensible readings are printed instead - the typical feature's
-    # skill, and the strongest one's.
-    breadth = output_df["symbol"].n_unique()
+    xs_per_date = eval_df.group_by("timestamp").len()["len"]
+    breadth_date = int(xs_per_date.median())
+    br_independent = breadth_date * REBALANCES_PER_YEAR
     typical_ic = float(eval_summary["ic_mean"].abs().mean())
     best = eval_summary.sort(pl.col("ic_mean").abs(), descending=True).row(0, named=True)
-    print(f"\nFundamental Law, IR = IC x sqrt(BR), with BR={breadth:,} stocks")
-    print(f"  typical feature |IC| {typical_ic:.4f} -> IR {typical_ic * np.sqrt(breadth):.2f}")
+
+    print("\nFundamental Law inputs, IR = IC x sqrt(BR)")
     print(
-        f"  strongest feature {best['feature']} |IC| {abs(best['ic_mean']):.4f} "
-        f"-> IR {abs(best['ic_mean']) * np.sqrt(breadth):.2f}"
+        f"  cross-section per decision date: median {breadth_date:,} eligible stocks "
+        f"(the panel holds {output_df['symbol'].n_unique():,} across the whole sample)"
+    )
+    print(f"  typical feature |IC|: {typical_ic:.4f} over {len(eval_summary)} features")
+    print(
+        f"  largest |IC| in sample: {abs(best['ic_mean']):.4f} ({best['feature']}) "
+        "- a maximum over 63, not a signal's skill"
+    )
+    print(
+        f"  if all {breadth_date:,} names x {REBALANCES_PER_YEAR} rebalances were independent "
+        f"bets, BR would be {br_independent:,} and the typical feature would imply "
+        f"IR {typical_ic * np.sqrt(br_independent):.1f}."
+    )
+    print(
+        "  They are not independent, and this notebook does not estimate the discount, "
+        "so that figure is an upper bound on an upper bound and no IR is claimed here."
     )
 
 # %% [markdown]
@@ -907,7 +1010,7 @@ if ic_results:
         )
     )
     fig.update_layout(
-        title="HAC shrinks every t-statistic toward zero, and barely",
+        title="HAC shrinks most t-statistics by about a tenth; a few grow",
         xaxis_title="Naive t-stat",
         yaxis_title="HAC t-stat",
         template="plotly_white",
@@ -921,9 +1024,12 @@ if ic_results:
 #   edge far too small to trade on its own becomes a portfolio-level one once it
 #   is applied across thousands of names. The cell above prints that arithmetic
 #   for the typical feature and for the strongest, on the breadth it just used.
-# - HAC adjustment should be minimal because one-session, non-overlapping returns
-#   produce little IC autocorrelation; the printed inflation factor says whether
-#   it was.
+# - The HAC adjustment is modest here, because one-session, non-overlapping returns
+#   leave little IC autocorrelation to correct for - but it is not negligible and it
+#   is not one-directional, and the printed effect gives both the median and the
+#   number of features whose statistic grew. The FDR discovery ratio beside it is the
+#   multiple-testing correction and is a different quantity measuring a different
+#   thing; neither number stands in for the other.
 # - Cross-sectional rank features likely dominate because they are stationary
 #   across the 28-year sample (1990-2018), while raw return levels shift
 #   dramatically between regimes.
@@ -1017,14 +1123,18 @@ if ic_results:
         "n_features_tested": len(ic_results),
         "n_significant_naive05": n_naive_sig,
         "n_significant_fdr05": n_significant,
-        "inflation_factor": round(inflation, 1),
+        "fdr_discovery_ratio": round(fdr_discovery_ratio, 2),
+        "hac_t_ratio_median": round(hac_t_ratio_median, 3),
+        # Inputs only. No IR is serialized, for the reason Section 9 states: an
+        # independent-bet count is what turns these into one, and this notebook does
+        # not estimate it.
         "fundamental_law": {
             "typical_abs_ic": round(typical_ic, 4),
-            "breadth": breadth,
-            "ir_typical": round(typical_ic * np.sqrt(breadth), 2),
-            "best_feature": best["feature"],
-            "best_abs_ic": round(abs(best["ic_mean"]), 4),
-            "ir_best": round(abs(best["ic_mean"]) * np.sqrt(breadth), 2),
+            "largest_abs_ic_in_sample": round(abs(best["ic_mean"]), 4),
+            "largest_abs_ic_feature": best["feature"],
+            "median_cross_section": breadth_date,
+            "rebalances_per_year": REBALANCES_PER_YEAR,
+            "br_if_bets_were_independent": br_independent,
         },
         "top_features": [
             {
