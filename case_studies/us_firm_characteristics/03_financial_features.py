@@ -297,11 +297,13 @@ plot_timing_contract(
     subtitle=("Register lookback and lag, in months; zero is the decision date"),
     alt=(
         "Horizontal bars, one per register family, spanning the months each family's window "
-        "reads and ending at a gap equal to the months before it becomes knowable. Eleven bars: "
-        "seven end six months short of the decision timestamp - value, quality, investment, "
-        "other, and the accounting composite and interaction groups - and four reach it, being "
-        "momentum, risk, and the momentum composite and interaction groups. Momentum spans the "
-        "longest window at 36 months; investment and the investment composite span 24."
+        "reads and ending at a gap equal to the months before it becomes knowable. Thirteen "
+        "bars. Seven stop six months short of the decision timestamp, their gap drawn hatched: "
+        "value, quality, investment, other, composite accounting, composite investment and "
+        "interaction accounting. Six reach the decision: momentum, risk, composite momentum, "
+        "interaction momentum, and the two mixed groups, which pair an accounting member with "
+        "a price member and so span 18 months with no gap. Momentum spans the longest window "
+        "at 36 months; the investment rows span 24."
     ),
 )
 
@@ -519,10 +521,14 @@ print(register_frame(FAMILIES, columns=FEATURE_COLS).select("family", "columns",
 #
 # **Every view below reads development rows only.** Section E wrote the full panel, because the
 # artifact has to carry the holdout rows for a later stage to score them. This section is
-# different: it is where a reader decides which features are worth carrying forward, and the
-# redundancy clusters in particular are what `04_evaluation` uses to pick one representative per
-# cluster. A judgement made about the feature set is selection, whether or not a metric is
-# attached to it, so it is made on the rows before the boundary.
+# different: it is where a reader forms a judgement about which features are worth carrying
+# forward, and a judgement about the feature set is selection whether or not a metric is
+# attached to it. So it is formed on the rows before the boundary.
+#
+# The cluster assignment below is **descriptive and local**: it stays in this notebook, and
+# `04_evaluation` builds its own pairwise Spearman matrix and triages every feature rather than
+# one representative per cluster. What this view is for is telling a reader how many distinct
+# orderings 57 columns actually carry, before any of them is scored.
 
 # %%
 development = features.filter(pl.col("timestamp") < pl.lit(HOLDOUT_START))

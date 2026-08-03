@@ -185,14 +185,21 @@ features:
     # bundled under one row per construction. A single `composite` entry would have to
     # claim one lookback and one lag for `composite_value` (annual accounting, published
     # end-June) and `composite_momentum` (monthly prices, no publication lag), and would
-    # be wrong about one of them whichever pair it named. Where a construction mixes the
-    # two, the lag is the later-published member's: that is when the value first exists.
+    # be wrong about one of them whichever pair it named.
+    #
+    # A construction that mixes the two gets its own row, and the row spans everything it
+    # reads: lookback 18 and lag 0. An earlier version gave these the accounting member's
+    # lag of 6, which made `plot_timing_contract` draw them as reading nothing from the six
+    # months before the decision - and they do, through the momentum member. The composite
+    # itself is knowable at the decision timestamp, because its accounting member was
+    # published six months earlier and its price member is current, so the lag is zero and
+    # the window reaches back to the oldest input.
 
     - name: composite accounting
-      pattern: "composite_value|composite_quality|composite_value_quality|composite_value_momentum|composite_quality_momentum"
+      pattern: "composite_value|composite_quality|composite_value_quality"
       role: signal
       hypothesis: Averaging ranks within and across families cancels characteristic-specific noise
-      inputs: the released value, quality and 12-month momentum characteristics, within the same row
+      inputs: the released value and quality characteristics, within the same row
       lookback: 12
       lag: 6
       frame: cross section
@@ -222,7 +229,7 @@ features:
       failure_mode: both members skip a recent month, so neither reflects the last few weeks
 
     - name: interaction accounting
-      pattern: "interaction_value_x_quality|interaction_value_x_roe|interaction_size_x_value"
+      pattern: "interaction_value_x_quality|interaction_value_x_roe"
       role: signal
       hypothesis: Some theses are conditional - cheap is worth more when the firm is also profitable
       inputs: BEME with PROF, ROE or LME, within the same row
@@ -231,6 +238,30 @@ features:
       frame: cross section
       representation: product of two member ranks, so the sign encodes agreement
       failure_mode: a product of two centred ranks is large at both extremes and cannot separate them
+
+    - name: composite mixed
+      pattern: "composite_value_momentum|composite_quality_momentum"
+      role: signal
+      hypothesis: Pairing a slow accounting view with a fast price view cancels noise in both
+      inputs: an annual accounting composite and the 12-month momentum composite, within the same row
+      lookback: 18
+      lag: 0
+      frame: cross section
+      representation: equal-weight mean of two composites, on the members' own scale
+      failure_mode: >-
+        the two halves move at different speeds, so the average is stale against the price
+        member and current against the accounting one at the same time
+
+    - name: interaction mixed
+      pattern: "interaction_size_x_value"
+      role: signal
+      hypothesis: The value premium is larger among smaller firms
+      inputs: LME and BEME, within the same row
+      lookback: 18
+      lag: 0
+      frame: cross section
+      representation: product of two member ranks, so the sign encodes agreement
+      failure_mode: size is current while book-to-market is six months old, so the product pairs two different dates
 
     - name: interaction momentum
       pattern: "interaction_momentum_x_ivol"
