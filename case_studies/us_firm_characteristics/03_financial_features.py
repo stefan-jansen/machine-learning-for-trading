@@ -410,7 +410,11 @@ null_counts = {c: features[c].null_count() for c in FEATURE_COLS}
 populated = {c: n for c, n in null_counts.items() if n}
 assert not populated, f"released panel is not complete: {populated}"
 
-labels = pl.read_parquet(LABELS_DIR / f"{PRIMARY_LABEL}.parquet").select(PANEL_KEY)
+labels = (
+    pl.read_parquet(LABELS_DIR / f"{PRIMARY_LABEL}.parquet")
+    .select(PANEL_KEY)
+    .filter(pl.col("timestamp").is_between(pl.lit(WINDOW_START), pl.lit(WINDOW_END)))
+)
 joined = features.select(PANEL_KEY).join(labels, on=PANEL_KEY, how="inner")
 assert joined.height == len(features) == labels.height, (
     f"feature and label identities do not align one to one: {len(features):,} features, "
@@ -475,10 +479,24 @@ print(register_frame(FAMILIES, columns=FEATURE_COLS).select("family", "columns",
 # states an information coefficient - `04_evaluation` owns predictive strength and computes it
 # fold-aware. What these establish is whether the columns are shaped the way the register says they
 # are, and whether they are distinct enough and stable enough to be worth screening at all.
+#
+# **Every view below reads development rows only.** Section E wrote the full panel, because the
+# artifact has to carry the holdout rows for a later stage to score them. This section is
+# different: it is where a reader decides which features are worth carrying forward, and the
+# redundancy clusters in particular are what `04_evaluation` uses to pick one representative per
+# cluster. A judgement made about the feature set is selection, whether or not a metric is
+# attached to it, so it is made on the rows before the boundary.
+
+# %%
+development = features.filter(pl.col("timestamp") < pl.lit(HOLDOUT_START))
+print(
+    f"Section F reads {len(development):,} of {len(features):,} rows "
+    f"({development['timestamp'].max()} is the last, holdout starts {HOLDOUT_START})"
+)
 
 # %%
 plot_feature_distributions(
-    features,
+    development,
     MEMBERS["value"],
     title="The released ranks are uniform on the provider's interval, not bell-shaped",
     subtitle="Value family, pooled over the whole window; tails clipped at 0.5% for display",
@@ -491,7 +509,7 @@ plot_feature_distributions(
 
 # %%
 plot_cross_sectional_dispersion(
-    features,
+    development,
     "composite_value",
     title="Spread in the value composite is stable across three decades",
     subtitle="10th-90th percentile band with the median, taken within each month",
@@ -504,7 +522,7 @@ plot_cross_sectional_dispersion(
 
 # %%
 clusters = plot_redundancy_clusters(
-    features,
+    development,
     FEATURE_COLS,
     cut=0.7,
     title="The composites and their members fall in the same redundancy clusters",
@@ -516,9 +534,9 @@ clusters = plot_redundancy_clusters(
 )
 
 # %%
-decision_dates = features["timestamp"].unique().sort().to_list()
+decision_dates = development["timestamp"].unique().sort().to_list()
 plot_persistence(
-    features,
+    development,
     ["composite_value", "composite_quality", "r12_2"],
     entity=ENTITY,
     max_lag=12,
@@ -536,7 +554,8 @@ plot_persistence(
 # ### F. Redundancy and persistence, as numbers
 #
 # The two figures above are read together: a cluster count says how many distinct orderings the
-# 57 columns actually carry, and rank survival says how long any of them lasts.
+# 57 columns actually carry, and rank survival says how long any of them lasts. Both are over
+# development rows only.
 
 # %%
 n_clusters = len(set(clusters.values()))
@@ -545,12 +564,12 @@ print(f"Redundancy clusters at |rho| > 0.7: {n_clusters} over {len(FEATURE_COLS)
 print(f"Largest cluster: {largest} columns")
 
 survival = (
-    features.select(["timestamp", "composite_value", "r12_2"])
+    development.select(["timestamp", "composite_value", "r12_2"])
     .sort("timestamp")
     .group_by("timestamp")
     .agg(pl.len())
 )
-print(f"Decision dates: {survival.height} months, {WINDOW_START} to {WINDOW_END}")
+print(f"Decision dates before the holdout: {survival.height} months, from {WINDOW_START}")
 
 # %% [markdown]
 # ## G. Emit
