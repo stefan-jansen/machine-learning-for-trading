@@ -336,12 +336,20 @@ plot_timing_contract(
 census = warmup_audit(features, dict.fromkeys(CONSTRUCTED, 0), entity=ENTITY)
 print(census)
 
+# All seven composites, not just the four built straight from released columns: the three
+# cross-family ones average two composites, so their declared member list is those two.
 COMPOSED_OF = {
     "composite_value": MEMBERS["value"],
     "composite_quality": MEMBERS["quality"],
     "composite_investment": MEMBERS["investment"],
     "composite_momentum": MOMENTUM_12M,
+    "composite_value_quality": ["composite_value", "composite_quality"],
+    "composite_value_momentum": ["composite_value", "composite_momentum"],
+    "composite_quality_momentum": ["composite_quality", "composite_momentum"],
 }
+assert set(COMPOSED_OF) == set(COMPOSITES), (
+    f"composites built but not audited: {sorted(set(COMPOSITES) - set(COMPOSED_OF))}"
+)
 
 # 1. the register partitions the released columns: claimed exactly once, no family empty
 claimed = [c for family in FAMILIES for c in RELEASED if family.matches(c)]
@@ -349,9 +357,9 @@ assert sorted(claimed) == sorted(RELEASED), (
     "the register does not claim the released columns exactly once: "
     f"{sorted(set(claimed) ^ set(RELEASED))} claimed twice or not at all"
 )
-assert all(MEMBERS[f.name] for f in FAMILIES if any(f.matches(c) for c in RELEASED)), (
-    "a register family matching released columns resolved to an empty member list"
-)
+resolved = {f.name: [c for c in FEATURE_COLS if f.matches(c)] for f in FAMILIES}
+empty = sorted(name for name, cols in resolved.items() if not cols)
+assert not empty, f"register families that claim no column in the matrix: {empty}"
 
 # 2. each composite equals the mean of its declared members, recomputed separately
 for name, members in COMPOSED_OF.items():
@@ -663,8 +671,9 @@ print(f"  rows {record['n_rows']:,}   digest {record['digest']}")
 # 2. State what an audit can reach. The provider releases complete cases, so its warmup nulls are
 #    gone and no assertion made here can recover the windows the register records; saying so is
 #    worth more than an assertion that passes because there is nothing left for it to catch.
-# 3. A composite is only a composite if it averages the member list it declares. The nullity check
-#    in D.2 is what separates that from a mean over whichever members happened to be present.
+# 3. A composite is only a composite if it averages the member list it declares, and what
+#    establishes that is D.2 recomputing each one from its declared members by a separate route.
+#    The nullity check sitting beside it cannot fail on a complete panel, and is labelled so.
 # 4. A null policy keyed on column order is a screen nobody chose. Asserting the completeness the
 #    release already guarantees says the same thing and fails loudly when it stops being true.
 # 5. The firm identity is part of the artifact's contract, not an implementation detail. Section E

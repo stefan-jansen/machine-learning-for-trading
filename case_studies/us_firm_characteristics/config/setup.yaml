@@ -232,7 +232,7 @@ features:
       pattern: "interaction_value_x_quality|interaction_value_x_roe"
       role: signal
       hypothesis: Some theses are conditional - cheap is worth more when the firm is also profitable
-      inputs: BEME with PROF, ROE or LME, within the same row
+      inputs: BEME with PROF or ROE, within the same row
       lookback: 12
       lag: 6
       frame: cross section
