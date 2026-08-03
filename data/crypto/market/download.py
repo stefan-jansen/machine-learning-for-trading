@@ -236,6 +236,10 @@ def main() -> None:
 
     from ml4t.data.providers.binance_public import BinancePublicProvider
 
+    from utils.binance_public_monthly import apply_binance_monthly_async_patch
+
+    apply_binance_monthly_async_patch(BinancePublicProvider)
+
     config = load_section(args.config, "crypto")
     data_root = resolve_data_dir(args.data_path)
     storage_path = resolve_storage_path(data_root, config.get("storage_path"), "crypto")
