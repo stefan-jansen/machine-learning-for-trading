@@ -282,8 +282,10 @@ print(
 # | Family mean | C.2 | its own row, member columns | none |
 # | Product of two ranks | C.3 | its own row | none |
 #
-# There is no rolling operation, no expanding operation, no ranking and no cross-sectional
-# aggregate in this notebook. Every value is a function of its own row. The provider's windows are
+# No feature is built by a rolling operation, an expanding operation, a ranking or a
+# cross-sectional aggregate: every value in the matrix is a function of its own row. Sections E
+# and F do group by timestamp, to count coverage and to take within-month percentiles for the
+# figures, but nothing they compute is written to the artifact. The provider's windows are
 # upstream and are recorded in the register; the figure below draws them so that a reader of the
 # model matrix knows what each column spans, even though the span was not computed here.
 
@@ -294,10 +296,12 @@ plot_timing_contract(
     title="Accounting families become knowable six months after their period",
     subtitle=("Register lookback and lag, in months; zero is the decision date"),
     alt=(
-        "Horizontal bars, one per feature family, spanning the months each family's window "
-        "reads, ending at a gap equal to the months before it becomes knowable. The four "
-        "accounting families end six months short of the decision timestamp; momentum and risk "
-        "reach it."
+        "Horizontal bars, one per register family, spanning the months each family's window "
+        "reads and ending at a gap equal to the months before it becomes knowable. Eleven bars: "
+        "seven end six months short of the decision timestamp - value, quality, investment, "
+        "other, and the accounting composite and interaction groups - and four reach it, being "
+        "momentum, risk, and the momentum composite and interaction groups. Momentum spans the "
+        "longest window at 36 months; investment and the investment composite span 24."
     ),
 )
 
@@ -315,27 +319,60 @@ plot_timing_contract(
 # own, so their declared floor is zero and the branch that fires for them is the one that catches a
 # column that is null everywhere - which is what a mis-typed member list produces.
 #
-# The check that carries the weight for this notebook is the second one: a composite must be null
-# exactly where all of its members are null, and non-null otherwise. That is what distinguishes a
-# mean over the members that are present from a mean that silently dropped some.
+# **A nullity check would be vacuous here, so it is not the evidence.** The obvious second check -
+# that a composite is null exactly where all its members are null - compares two conditions that
+# are both false on every row of a complete panel, so it passes whatever the composites contain.
+# It is kept below because it is the check that would bite on an incomplete release, and it is
+# labelled as vacuous rather than reported as though it had discriminated.
+#
+# What can actually fail is the member list. Two assertions cover it: the register's patterns must
+# partition the 46 released columns - each claimed exactly once, no family empty - and each
+# composite must equal the mean of its declared members recomputed by a separate route. A mistyped
+# pattern breaks the first; a fault in `family_mean` breaks the second.
 
 # %%
 census = warmup_audit(features, dict.fromkeys(CONSTRUCTED, 0), entity=ENTITY)
 print(census)
 
-for name, members in (
-    ("composite_value", MEMBERS["value"]),
-    ("composite_quality", MEMBERS["quality"]),
-    ("composite_investment", MEMBERS["investment"]),
-    ("composite_momentum", MOMENTUM_12M),
-):
-    all_null = pl.all_horizontal(pl.col(c).is_null() for c in members)
-    mismatched = features.filter(pl.col(name).is_null() != all_null).height
-    assert mismatched == 0, (
-        f"{name} is null on {mismatched} rows where its members are not all null, or "
-        "populated where they are: the mean is not reading the member list it declares"
+COMPOSED_OF = {
+    "composite_value": MEMBERS["value"],
+    "composite_quality": MEMBERS["quality"],
+    "composite_investment": MEMBERS["investment"],
+    "composite_momentum": MOMENTUM_12M,
+}
+
+# 1. the register partitions the released columns: claimed exactly once, no family empty
+claimed = [c for family in FAMILIES for c in RELEASED if family.matches(c)]
+assert sorted(claimed) == sorted(RELEASED), (
+    "the register does not claim the released columns exactly once: "
+    f"{sorted(set(claimed) ^ set(RELEASED))} claimed twice or not at all"
+)
+assert all(MEMBERS[f.name] for f in FAMILIES if any(f.matches(c) for c in RELEASED)), (
+    "a register family matching released columns resolved to an empty member list"
+)
+
+# 2. each composite equals the mean of its declared members, recomputed separately
+for name, members in COMPOSED_OF.items():
+    independent = features.select(members).mean_horizontal()
+    gap = (features[name] - independent).abs().max()
+    assert gap is not None and gap < 1e-12, (
+        f"{name} does not equal the mean of {members}: max gap {gap}"
     )
-print(f"Composite nullity matches member nullity on all {len(features):,} rows")
+print(f"Register claims all {len(RELEASED)} released columns exactly once")
+print(f"All {len(COMPOSED_OF)} composites equal the mean of their declared members")
+
+# 3. kept for an incomplete release, and vacuous on this one - say so rather than score it
+rows_all_members_null = sum(
+    features.filter(pl.all_horizontal(pl.col(c).is_null() for c in members)).height
+    for members in COMPOSED_OF.values()
+)
+for name, members in COMPOSED_OF.items():
+    all_null = pl.all_horizontal(pl.col(c).is_null() for c in members)
+    assert features.filter(pl.col(name).is_null() != all_null).height == 0
+print(
+    f"Nullity check passed on {len(features):,} rows and is VACUOUS: "
+    f"{rows_all_members_null} rows have all members of any composite null"
+)
 
 # %% [markdown]
 # ### D.3 Rebuild without the holdout, and compare
@@ -499,7 +536,7 @@ plot_feature_distributions(
     development,
     MEMBERS["value"],
     title="The released ranks are uniform on the provider's interval, not bell-shaped",
-    subtitle="Value family, pooled over the whole window; tails clipped at 0.5% for display",
+    subtitle="Value family, pooled across development months; tails clipped at 0.5%",
     alt=(
         "Six histograms, one per value characteristic. Each is flat across the interval "
         "minus 0.5 to 0.5 rather than peaked in the middle, which is what a cross-sectional "
@@ -525,11 +562,16 @@ clusters = plot_redundancy_clusters(
     development,
     FEATURE_COLS,
     cut=0.7,
-    title="The composites and their members fall in the same redundancy clusters",
+    title="Only the momentum composite clusters with all the columns it averages",
     subtitle=r"Hierarchical clustering on $1-|\rho|$ over Spearman ranks; cut drawn at 0.7",
     alt=(
-        "A dendrogram over all feature columns with a cut line drawn at a distance of 0.7. "
-        "Each composite sits in the same cluster as the characteristics it averages."
+        "A dendrogram over all 57 columns with a cut line drawn at a distance of 0.7, leaving "
+        "37 clusters of which ten hold more than one column. Averaging does not make a composite "
+        "redundant with what it averages: composite_momentum is the only one sharing a cluster "
+        "with all of its members, r12_2 and r12_7, and the two cross-family momentum composites "
+        "sit in that cluster as well. composite_quality shares its cluster with four of its "
+        "seven members, composite_value with only CF2P of its six, and composite_investment and "
+        "all four interaction columns with none of theirs."
     ),
 )
 
