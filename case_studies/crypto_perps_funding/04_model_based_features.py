@@ -351,9 +351,9 @@ if len(garch_df) > 0:
 else:
     raise RuntimeError("No GARCH features produced")
 
-# %% [markdown]
+# %% [markdown] tags=["results"]
 # **GARCH Interpretation**: The mean asymmetry parameter is positive in both
-# development folds, at 0.040 and 0.033. Downside shocks therefore raise the
+# development folds - the `mean_gamma` column printed above, 0.039728 and 0.033362. Downside shocks therefore raise the
 # conditional-volatility recursion more than equally sized upside shocks, though
 # the asymmetry is modest. Parameters are frozen at the fold boundary;
 # `model.fix()` updates volatility without re-estimation.
@@ -709,7 +709,35 @@ ax.axhline(0.5, color=COLORS["neutral"], linewidth=0.8, linestyle="--")
 ax.set(xlabel="Decision timestamp (UTC)", ylabel="Filtered stress probability")
 ax.set_ylim(0, 1)
 ax.legend()
-add_message_title(ax, "Funding stress is episodic across both validation windows")
+# The per-fold shares are computed here rather than typed into the string. They are
+# not stable across runs - two executions of this unchanged notebook produced 35.2%
+# and 18.4% on one, 29.3% and 32.8% on the next, which reverses which fold is the
+# more stressed. The HMM is seeded (set_global_seeds, and random_state per restart),
+# so the drift is environmental rather than a missing seed; BLAS thread count is the
+# first suspect. Until that is pinned, a hard-coded share in this subtitle would be
+# wrong on the next run, and so would any title that ranks the two folds.
+_stress_share = {
+    fold["fold"]: float(
+        (
+            hmm_df.filter(
+                (pl.col("fold") == fold["fold"])
+                & pl.col("timestamp").is_between(
+                    fold["test_start"], fold["test_end"], closed="both"
+                )
+            )["hmm_regime_prob_stress"]
+            > 0.5
+        ).mean()
+    )
+    for fold in active_folds
+}
+add_message_title(
+    ax,
+    "Funding stress arrives in bursts rather than persisting",
+    subtitle=(
+        "Filtered P(stress) on each fold's validation window; above 0.5 on "
+        + ", ".join(f"{share:.1%} of fold {fold}" for fold, share in sorted(_stress_share.items()))
+    ),
+)
 fig.tight_layout()
 plt.show()
 
@@ -805,7 +833,11 @@ print(f"Validation diagnostic: {len(eval_df):,} rows, label={label_col}")
 LABEL_HORIZON_BARS = 1  # fwd_ret_8h resolves in exactly one 8-hour bar
 
 temporal_ic = {}
-partitions = eval_df.partition_by("timestamp", as_dict=True, maintain_order=True)
+# Sorted here rather than relying on the sort at construction: partition_by returns
+# groups in FRAME order under maintain_order, and compute_ic_hac_stats treats row
+# order as time order without sorting, so an unsorted input silently applies the
+# Newey-West correction over a permuted timeline.
+partitions = eval_df.sort("timestamp").partition_by("timestamp", as_dict=True, maintain_order=True)
 for feature in temporal_feature_cols:
     ic_values = []
     for group in partitions.values():
@@ -842,7 +874,14 @@ colors = [COLORS["blue"] if value >= 0 else COLORS["amber"] for value in plot_su
 ax.barh(plot_summary["feature"].to_list(), plot_summary["mean_ic"].to_list(), color=colors)
 ax.axvline(0, color=COLORS["neutral"], linewidth=0.8)
 ax.set(xlabel="Mean validation rank IC", ylabel="Temporal feature")
-add_message_title(ax, "Temporal features provide modest stand-alone directional IC")
+add_message_title(
+    ax,
+    "Only conditional volatility carries a significant stand-alone IC",
+    subtitle=(
+        "GARCH features only, 3 of the 5 emitted: the two regime probabilities are "
+        "constant within a settlement, so a cross-sectional IC cannot rank them"
+    ),
+)
 fig.tight_layout()
 plt.show()
 
