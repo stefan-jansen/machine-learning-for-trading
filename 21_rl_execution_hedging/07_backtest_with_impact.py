@@ -76,6 +76,9 @@ BOOK_USD = 5_000_000
 IMPACT_COEFFICIENTS = [0.0, 0.1, 0.3, 0.6]
 GROSS_MIN = 0.3
 COHORT_SAMPLE = 60
+COMMISSION_RATE = 0.001  # 10 bps
+SLIPPAGE_RATE = 0.0005  # 5 bps
+MIN_TRADE_NOTIONAL = 1_000.0
 SEED = 42
 EXPORT_RESULTS = False
 
@@ -93,16 +96,28 @@ rng = np.random.default_rng(SEED)
 # %% [markdown]
 # ## Load Real US Equity Data
 #
-# We load daily bars for the broad US equity universe and use the
-# split- and dividend-**adjusted** OHLCV series, so corporate actions do not
-# create artificial jumps in the momentum signal. Dollar volume
-# (price $\times$ volume) is invariant to splits and serves as our liquidity
-# measure throughout.
+# We load daily bars for the broad US equity universe and take two different
+# views of them, because the momentum signal and the liquidity measure have
+# opposite requirements.
+#
+# The **signal** uses the split- and dividend-adjusted series, so corporate
+# actions do not create artificial jumps. The adjustment factor is safe there
+# because momentum is a ratio of two adjusted prices and the factor cancels.
+#
+# The **liquidity measure** cannot use it. In this dataset the factor in
+# `adj_close` runs from each bar to the end of the whole sample, so a dollar
+# volume built from `adj_close` would be scaled by dividends paid *after* the
+# formation window - future information inside a screen this notebook calls ex
+# ante. `adj_volume` carries only the split half of the correction, so the
+# product does not even cancel. We therefore measure liquidity with the
+# unadjusted close and volume: the dollars that actually changed hands that day,
+# which is what an order competes with, and which is already continuous across
+# splits because price and share count move inversely.
 
 
 # %%
 def load_adjusted_equities(start: str, end: str) -> pl.DataFrame:
-    """Load daily US equities and return adjusted OHLCV under canonical column names."""
+    """Load daily US equities: adjusted OHLCV for the signal, traded dollars for liquidity."""
     raw = load_us_equities(start_date=start, end_date=end).sort(["symbol", "timestamp"])
     return raw.select(
         "symbol",
@@ -112,6 +127,7 @@ def load_adjusted_equities(start: str, end: str) -> pl.DataFrame:
         pl.col("adj_low").alias("low"),
         pl.col("adj_close").alias("close"),
         pl.col("adj_volume").alias("volume"),
+        (pl.col("close") * pl.col("volume")).alias("traded_dollar_volume"),
     ).drop_nulls()
 
 
@@ -121,6 +137,8 @@ formation_prices = prices.filter(pl.col("timestamp") <= pl.lit(FORMATION_END_DAT
 evaluation_prices = prices.filter(
     pl.col("timestamp") >= pl.lit(EVALUATION_START_DATE).str.to_date()
 )
+# The liquidity column is a formation-window input, not a bar the engine trades on.
+backtest_prices = evaluation_prices.drop("traded_dollar_volume")
 assert formation_prices["timestamp"].max() < evaluation_prices["timestamp"].min()
 print(
     f"Loaded {prices.height:,} daily bars for {prices['symbol'].n_unique():,} symbols "
@@ -140,12 +158,11 @@ def formation_statistics(prices: pl.DataFrame) -> pl.DataFrame:
     """Liquidity and volatility estimated only from the formation window."""
     return (
         prices.with_columns(
-            (pl.col("close") * pl.col("volume")).alias("dollar_volume"),
             pl.col("close").pct_change().over("symbol").alias("daily_return"),
         )
         .group_by("symbol")
         .agg(
-            pl.col("dollar_volume").median().alias("adv_usd"),
+            pl.col("traded_dollar_volume").median().alias("adv_usd"),
             pl.col("daily_return").std().alias("ex_ante_volatility"),
             pl.len().alias("formation_obs"),
         )
@@ -294,7 +311,7 @@ spectrum
 class MomentumStrategy(Strategy):
     """Long-only momentum: fully invested when LOOKBACK-day momentum is positive, else flat."""
 
-    def __init__(self, symbol: str, lookback: int = 21, min_trade_notional: float = 1_000.0):
+    def __init__(self, symbol: str, lookback: int, min_trade_notional: float):
         self.symbol = symbol
         self.lookback = lookback
         self.min_trade_notional = min_trade_notional
@@ -349,11 +366,15 @@ def run_backtest(
     feed = DataFeed(prices_df=stock_data)
     engine_config = BacktestConfig(
         initial_cash=book_usd,
-        commission_rate=0.001,  # 10 bps
-        slippage_rate=0.0005,  # 5 bps
+        commission_rate=COMMISSION_RATE,
+        slippage_rate=SLIPPAGE_RATE,
         execution_mode=ExecutionMode.NEXT_BAR,
     )
-    engine = Engine(feed=feed, strategy=MomentumStrategy(symbol, LOOKBACK), config=engine_config)
+    engine = Engine(
+        feed=feed,
+        strategy=MomentumStrategy(symbol, LOOKBACK, MIN_TRADE_NOTIONAL),
+        config=engine_config,
+    )
     engine.broker = Broker.from_config(engine_config, market_impact_model=impact_model)
     return float(engine.run().equity.total_return)
 
@@ -403,7 +424,7 @@ def run_spectrum(prices: pl.DataFrame, spectrum: pl.DataFrame, book_usd: float) 
 
 
 # %%
-spectrum_results = run_spectrum(evaluation_prices, spectrum, BOOK_USD)
+spectrum_results = run_spectrum(backtest_prices, spectrum, BOOK_USD)
 spectrum_results
 
 # %% [markdown]
@@ -488,8 +509,8 @@ thin_group = pool_part.filter(pl.col("order_participation") > 1.0)
 assert not liquid_group.is_empty(), "liquid_group is empty after participation filter"
 assert not thin_group.is_empty(), "thin_group is empty after participation filter"
 
-liquid_flip = flip_rate(evaluation_prices, liquid_group, BOOK_USD, COHORT_SAMPLE)
-thin_flip = flip_rate(evaluation_prices, thin_group, BOOK_USD, COHORT_SAMPLE)
+liquid_flip = flip_rate(backtest_prices, liquid_group, BOOK_USD, COHORT_SAMPLE)
+thin_flip = flip_rate(backtest_prices, thin_group, BOOK_USD, COHORT_SAMPLE)
 print(
     f"Liquid names (order < 10% of ADV): {liquid_flip['flips']}/{liquid_flip['n']} "
     f"evaluation winners flipped negative ({liquid_flip['flip_rate']:.0%}); "
