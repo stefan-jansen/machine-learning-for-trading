@@ -56,6 +56,7 @@ from datetime import date
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+import yaml
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.preprocessing import StandardScaler
@@ -91,7 +92,10 @@ TRADING_DAYS_PER_YEAR = 252
 
 # %% tags=[]
 features = pl.read_parquet(CASE_DIR / "features" / "financial.parquet")
-labels = pl.read_parquet(CASE_DIR / "labels" / "fwd_ret_21d.parquet")
+SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+TARGET_COL = SETUP["labels"]["primary"]
+LABEL_BUFFER = SETUP["labels"]["buffer"]
+labels = pl.read_parquet(CASE_DIR / "labels" / f"{TARGET_COL}.parquet")
 
 prices = (
     load_etfs()
@@ -105,7 +109,7 @@ print(f"Labels:   {labels.shape[0]:,} rows")
 # %% tags=[]
 # Join features + labels
 data = features.join(labels, on=["timestamp", "symbol"], how="inner").drop_nulls(
-    subset=["fwd_ret_21d"]
+    subset=[TARGET_COL]
 )
 
 if MAX_SYMBOLS > 0:
@@ -113,13 +117,13 @@ if MAX_SYMBOLS > 0:
     data = data.filter(pl.col("symbol").is_in(keep_assets))
     prices = prices.filter(pl.col("symbol").is_in(keep_assets))
 
-EXCLUDE = {"timestamp", "symbol", "regime", "fwd_ret_21d"}
+EXCLUDE = {"timestamp", "symbol", "regime", TARGET_COL}
 feature_cols = [c for c in data.columns if c not in EXCLUDE and data[c].dtype.is_numeric()]
 print(f"Combined: {data.shape[0]:,} rows, {len(feature_cols)} features")
 
 # %% tags=[]
 # Generate walk-forward CV splits from setup.yaml evaluation section
-splits = generate_cv_splits(data, case_study_id="etfs", label_buffer="21D")
+splits = generate_cv_splits(data, case_study_id="etfs", label_buffer=LABEL_BUFFER)
 if MAX_FOLDS > 0:
     splits = splits[:MAX_FOLDS]
 print(f"CV folds: {len(splits)}")
@@ -168,7 +172,7 @@ for fold in splits:
         continue
 
     X_train = np.nan_to_num(train.select(feature_cols).to_numpy(), nan=0.0)
-    y_train = train["fwd_ret_21d"].to_numpy()
+    y_train = train[TARGET_COL].to_numpy()
 
     scaler = StandardScaler()
     X_train_s = scaler.fit_transform(X_train)
@@ -215,7 +219,7 @@ for fold_num, scaler, ridge, logit, val, _ in fold_models:
 
         assets = cs["symbol"].to_list()
         n_assets = len(assets)
-        y_actual = cs["fwd_ret_21d"].to_numpy()
+        y_actual = cs[TARGET_COL].to_numpy()
         mom_scores = cs["ret_126d"].to_numpy()
 
         X_val = np.nan_to_num(cs.select(feature_cols).to_numpy(), nan=0.0)
@@ -413,8 +417,7 @@ for strat in strategies:
 ax1.set_ylabel(r"Growth of \$1")
 ax1.legend(loc="upper left", frameon=False, fontsize=8)
 ax1.set_title(
-    "ETF Strategies: ML vs Momentum vs Equal-Weight (2016-2023)\n"
-    "solid = gross, dashed = net of cost",
+    "Every active strategy pays a visible cost drag\nsolid = gross, dashed = net of cost",
     fontsize=11,
 )
 
@@ -508,7 +511,7 @@ for col, color, label in [
 ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
 ax.set_ylabel("Rolling 12-Month IC (Spearman)")
 ax.set_xlabel("Date")
-ax.set_title("Cross-Sectional IC: Positive IC Does Not Guarantee Profitability")
+ax.set_title("A positive IC does not make the strategy profitable")
 ax.legend(frameon=False)
 fig.tight_layout()
 plt.show()
