@@ -1399,7 +1399,7 @@ if cs_names:
                     fontsize=7,
                     color="white" if v > 0.5 else COLORS["blue"],
                 )
-    ax.set_title(f"Top-{TOP_N} coefficient features overlap little across panels")
+    ax.set_title("The leading coefficient features overlap little across panels")
     colorbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.04)
     colorbar.set_label("Jaccard overlap")
     fig.show()
