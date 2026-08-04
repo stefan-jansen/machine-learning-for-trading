@@ -75,6 +75,9 @@ OUTPUT_DIR = get_output_dir(21, "crypto_execution_rl")
 
 # %% tags=["parameters"]
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
+# The five symbols above set what is loaded and charted; this one is the book
+# the agent actually executes, in training and in evaluation.
+TRADING_SYMBOL = "BTCUSDT"
 START_DATE = "2022-01-01"
 END_DATE = "2024-12-01"
 EVAL_START_DATE = "2024-01-01"
@@ -94,6 +97,7 @@ set_global_seeds(SEED)
 # Configuration
 config = {
     "symbols": SYMBOLS,
+    "trading_symbol": TRADING_SYMBOL,
     "start_date": START_DATE,
     "end_date": END_DATE,
     "eval_start_date": EVAL_START_DATE,
@@ -348,7 +352,7 @@ def make_env(seed: int = 42):
     def _init():
         return CryptoExecutionEnv(
             market_data=train_data,
-            symbol="BTCUSDT",
+            symbol=config["trading_symbol"],
             total_shares=config["total_shares"],
             horizon=config["execution_horizon"],
             risk_aversion=config["risk_aversion"],
@@ -364,7 +368,8 @@ env = DummyVecEnv([make_env(seed=SEED)])
 
 print(
     "Training environment created with "
-    f"{train_data.filter(pl.col('symbol') == 'BTCUSDT').height} hours of point-in-time data"
+    f"{train_data.filter(pl.col('symbol') == config['trading_symbol']).height} hours "
+    f"of point-in-time {config['trading_symbol']} data"
 )
 
 # %%
@@ -460,7 +465,7 @@ def evaluate_strategy(strategy_name: str, strategy_fn, n_episodes: int = 20, see
         episode_seed = seed_base + i
         env = CryptoExecutionEnv(
             market_data=evaluation_data,
-            symbol="BTCUSDT",
+            symbol=config["trading_symbol"],
             total_shares=config["total_shares"],
             horizon=config["execution_horizon"],
             risk_aversion=config["risk_aversion"],
@@ -750,8 +755,41 @@ fig.add_trace(
     row=1,
     col=2,
 )
+
+
+# The title is derived from the two panels rather than asserted over them. Written as a
+# fixed string it claimed the policy paces on both conditioners, while the premium panel
+# spanned about 3% and the funding panel about 20% - a claim the left-hand chart did not
+# support and could not be trusted to support after a re-run.
+def _spread(values: list[float]) -> float:
+    """Range of a panel as a share of its mean, so the two panels are comparable."""
+    return (max(values) - min(values)) / np.mean(values) if values else 0.0
+
+
+MATERIAL = 0.10  # a tenth of the mean rate; below this the bars read as flat
+_premium_spread = _spread(premium_summary["shares_per_hour"].to_list())
+_funding_spread = _spread(funding_summary["shares_per_hour"].to_list())
+_moves = [
+    name
+    for name, spread in (("premium state", _premium_spread), ("funding proximity", _funding_spread))
+    if spread >= MATERIAL
+]
+_conditional_title = (
+    f"PPO paces on {_moves[0]}, not on {_moves[1] if len(_moves) > 1 else 'premium state'}"
+    if len(_moves) == 1
+    else "PPO changes execution pace with premium state and funding proximity"
+    if len(_moves) == 2
+    else "PPO holds one execution pace across premium state and funding proximity"
+)
+if len(_moves) == 1 and _moves[0] == "funding proximity":
+    _conditional_title = "PPO paces on funding proximity, not on premium state"
+print(
+    f"premium spread {_premium_spread:.1%} of mean, "
+    f"funding spread {_funding_spread:.1%} of mean (material at {MATERIAL:.0%})"
+)
+
 fig.update_layout(
-    title="PPO changes execution pace with premium state and funding proximity",
+    title=_conditional_title,
     height=420,
     showlegend=False,
 )
