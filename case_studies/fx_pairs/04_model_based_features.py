@@ -79,6 +79,10 @@ MAX_FOLDS = 0
 KALMAN_MAXITER = 300
 START_DATE = "2011-01-01"
 N_HMM_RESTARTS = 10
+# A restart is rejected when its final EM step falls by more than this fraction of
+# the log-likelihood's own magnitude. Real divergence moves hundreds of nats; the
+# noise this has to tolerate is single digits against a likelihood of ~4.3e4.
+HMM_STABILITY_REL_TOL = 1e-3
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -443,7 +447,13 @@ def fit_best_hmm(X_train: np.ndarray) -> tuple[GaussianHMM, float, int]:
             ).fit(X_train)
             history = list(model.monitor_.history)
             final_delta = history[-1] - history[-2] if len(history) >= 2 else 0.0
-            if final_delta < -1e-7:
+            # Judged against the scale of the likelihood being stepped on, not an
+            # absolute bound. The training log-likelihood here is ~4.3e4, so ordinary
+            # floating-point chatter at the optimum is a few nats - a relative move of
+            # ~3e-4. An absolute -1e-7 threshold called every one of those unstable,
+            # discarded all ten restarts, and left nothing to return.
+            scale = max(abs(history[-2]) if len(history) >= 2 else 1.0, 1.0)
+            if final_delta < -HMM_STABILITY_REL_TOL * scale:
                 unstable += 1
                 continue
             score = model.score(X_train)
@@ -769,10 +779,19 @@ if len(eval_summary):
         else COLORS["neutral"]
         for row in plot_summary.to_dicts()
     ]
+    # The subtitle carries the two things the bars cannot say for themselves: which
+    # features are missing from the chart and why, and what the single gold bar means.
+    # Without it a reader sees one highlighted bar under a title saying nothing is
+    # significant, and no way to tell whether the highlight contradicts the title.
     ic_title = (
         "Some model-based features survive FDR on out-of-sample folds"
         if n_fdr_sig
         else "No model-based feature survives FDR on out-of-sample folds"
+    ) + (
+        f"<br><sup>{len(feature_names)} of {len(temporal_feature_cols)} features scored; "
+        f"gold marks the largest |IC|, {leader}, which is not significant. "
+        "The regime features are constant within a decision date, so a "
+        "cross-sectional IC cannot rank them.</sup>"
     )
 
 # %%
