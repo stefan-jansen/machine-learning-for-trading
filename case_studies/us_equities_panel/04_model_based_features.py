@@ -23,7 +23,7 @@
 #    central tendency by clustering windowed sequences of the cross-sectional
 #    median return using Wasserstein k-means.
 #
-# 2. **Fractional Differencing** (primary): Apply FFD with d=0.4 (equity default)
+# 2. **Fractional Differencing** (primary): Apply FFD at the equity-default order
 #    to log prices per stock. Preserves long memory while achieving stationarity --
 #    important for a 56-year dataset where standard differencing destroys signal.
 #
@@ -37,7 +37,7 @@
 #
 # - Wasserstein centroids fitted on training window, features extracted for
 #   the full train+test period of each fold
-# - FFD uses a fixed d=0.4 (no in-sample search per fold; weights are deterministic)
+# - FFD uses a fixed differencing order (no in-sample search per fold; weights are deterministic)
 # - GARCH parameters $(\omega, \alpha, \beta)$ estimated on training data;
 #   `model.fix()` runs the variance recursion on the full train+test window
 #   without re-estimating parameters
@@ -57,11 +57,11 @@
 # %%
 """US Equities Panel: Temporal Features."""
 
-import subprocess
 import warnings
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
@@ -75,6 +75,7 @@ from ml4t.engineer.features.fdiff import ffdiff, get_ffd_weights
 from data import load_us_equities
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
+from utils.style import COLORS, add_message_title
 
 CASE_DIR = get_case_study_dir("us_equities_panel")
 FEATURES_DIR = CASE_DIR / "features"
@@ -108,17 +109,7 @@ IntArray = NDArray[np.int64]
 MAX_FOLDS = 0  # 0 = all folds; test mode: 2
 
 # %% [markdown]
-# ## Why Regime Detection for Momentum?
-#
-# Momentum strategies are vulnerable to sharp reversals at regime
-# transitions -- "momentum crashes" (Daniel and Moskowitz 2016). The
-# temporal features below detect these transitions: Wasserstein regime
-# distance flags shifts in market central tendency, GARCH captures
-# volatility clustering, and FFD preserves the long-memory structure
-# in price levels that standard differencing would destroy.
-
-# %% [markdown]
-# ## 1. Load Data
+# ## Configuration
 #
 # Same PIT filters as [`02_labels`](02_labels.ipynb) for consistent universe construction.
 # Note: this notebook applies filters independently rather than reusing
@@ -150,7 +141,21 @@ print(f"Loaded {len(df):,} rows, {df['symbol'].n_unique()} symbols")
 print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 
 # %% [markdown]
-# ## 1b. Generate Walk-Forward Fold Boundaries
+# ## A. Why a fitted feature is different
+#
+# Every column in `03_financial_features` is a rule fixed in advance. The three built here
+# estimate their parameters from data - a Wasserstein clustering, a fractional-differencing
+# order, a GARCH recursion - which is why this stage carries the fold contract in B and
+# stage 03 does not. A rule cannot leak by being fitted; a fitted parameter can, and only
+# the window it came from decides whether it did.
+#
+# What they are for: momentum strategies are vulnerable to sharp reversals at regime
+# transitions - momentum crashes (Daniel and Moskowitz 2016). Wasserstein regime distance
+# flags shifts in market central tendency, GARCH captures volatility clustering, and FFD
+# preserves the long-memory structure in price levels that standard differencing destroys.
+
+# %% [markdown]
+# ## B. The fold contract
 #
 # We use the canonical CV splits from `setup.yaml` (via `generate_cv_splits`).
 # The primary label is `fwd_ret_1d` so the label buffer is `1D`.
@@ -213,7 +218,50 @@ for f in folds:
     )
 
 # %% [markdown]
-# ## 2. Wasserstein Regime Distance
+# ### F1. The fold contract
+#
+# The table above lists the boundaries; this draws them, which is the only form in which a reader
+# can check the thing that matters. Every fitted parameter comes from the left-hand span of its own
+# row, and the span it is applied to lies entirely to the right of it. The final row is the holdout
+# pass: its parameters come from development data alone, and the rule marks where the seal begins.
+
+# %%
+fig, ax = plt.subplots(figsize=(11, 3.2))
+for row, fold in enumerate(folds):
+    train_start, train_end = np.datetime64(fold["train_start"]), np.datetime64(fold["train_end"])
+    test_start, test_end = np.datetime64(fold["test_start"]), np.datetime64(fold["test_end"])
+    ax.barh(
+        row,
+        train_end - train_start,
+        left=train_start,
+        height=0.55,
+        color=COLORS["blue"],
+        label="parameters fitted on" if row == 0 else None,
+    )
+    ax.barh(
+        row,
+        test_end - test_start,
+        left=test_start,
+        height=0.55,
+        color=COLORS["amber"],
+        label="applied over" if row == 0 else None,
+    )
+ax.axvline(np.datetime64(holdout_start), color=COLORS["negative"], linestyle="--", linewidth=1.2)
+ax.set_yticks(range(len(folds)))
+ax.set_yticklabels(
+    [f"fold {fold['fold']}" + (" (holdout)" if fold.get("is_holdout") else "") for fold in folds]
+)
+ax.invert_yaxis()
+ax.legend(loc="lower left", bbox_to_anchor=(0, -0.28), ncol=2, frameon=False, fontsize=8)
+add_message_title(
+    ax,
+    "No parameter is fitted on the span it is then applied to",
+    subtitle=f"Fitted and applied spans per fold; the rule marks the holdout at {holdout_start}",
+)
+fig.show()
+
+# %% [markdown]
+# ## C. One section per model
 #
 # We detect regime shifts in market central tendency by clustering windowed
 # sequences of the cross-sectional median return. At each date, we compute
@@ -371,7 +419,7 @@ if len(xs_stats) > 0:
     print(f"  Median stocks/date: {int(xs_stats['n_stocks'].median())}")
 
 # %% [markdown]
-# ### Per-Fold Wasserstein Clustering
+# ### C.1 Per-fold Wasserstein clustering
 #
 # For each fold, fit Wasserstein k-means centroids on the training window only,
 # then assign regime labels for the full train+test period. The reference
@@ -489,12 +537,12 @@ if len(wass_df) > 0:
         print(f"  Cluster {row['wass_cluster']}: {row['len']:,} rows")
 
 # %% [markdown]
-# ### Wasserstein Regime Interpretation
+# ## D. Fit stability across folds
 #
 # The two clusters correspond to distinct market states: one with low
 # cross-sectional median return (stress/drawdown) and one with positive
 # median return (normal/recovery). The `wass_dist_ratio` feature measures
-# how clearly the current window belongs to one regime -- values near 0
+# how clearly the current window sits in one regime -- values near 0
 # indicate strong regime membership, values near 1 indicate ambiguity
 # (regime transitions). This matters for momentum strategies because
 # momentum crashes cluster at regime transitions (Daniel and Moskowitz
@@ -507,16 +555,16 @@ if len(wass_df) > 0:
 # input to Wasserstein k-means.
 
 # %% [markdown]
-# ## 3. Fractional Differencing
+# ### C.2 Fractional differencing
 #
-# Apply FFD with d=0.4 to log(adj_close) per stock. This is the equity-class
-# default -- it preserves memory (correlation with original ~0.9) while achieving
-# stationarity (ADF p-value < 0.01 for most stocks).
+# Apply FFD at the configured differencing order to log(adj_close) per stock. This is the
+# equity-class default: it keeps most of the correlation with the undifferenced series while
+# achieving stationarity on the augmented Dickey-Fuller test for most stocks.
 #
-# **Walk-forward note**: d=0.4 is fixed (no per-fold search) and the FFD weights
-# are deterministic given d. There is no parameter estimation, so no look-ahead.
-# We compute FFD once on the full dataset; the fold column is added during
-# assembly (Section 5) since FFD values are identical across folds.
+# **Walk-forward note**: the differencing order is fixed - there is no per-fold search - and
+# the FFD weights are deterministic given it. Nothing is estimated, so nothing can look
+# ahead. FFD is computed once over the full series; the fold column is attached during
+# assembly in E, because the values are identical across folds by construction.
 
 
 # %%
@@ -573,7 +621,7 @@ ffd_df = apply_ffd_per_symbol(df)
 print(f"FFD features: {len(ffd_df):,} rows, {ffd_df['symbol'].n_unique()} symbols")
 
 # %% [markdown]
-# ## 4. Per-Fold GARCH Conditional Volatility
+# ### C.3 Per-fold GARCH conditional volatility
 #
 # Fit GARCH(1,1) on the ~200 most liquid stocks per fold. For each fold:
 # 1. Select the GARCH subsample based on liquidity in the training window
@@ -797,18 +845,20 @@ if len(mkt_garch_df) > 0:
     )
 
 # %% [markdown]
-# ## 5. Assemble Temporal Features
+# ## E. Combine and emit
 #
 # Merge all temporal features per fold. The fold column is the primary
 # organizing key: GARCH and Wasserstein features carry fold from their
 # per-fold fitting; FFD (deterministic, no parameters) is replicated
 # across folds during the join.
 
+# %% [markdown]
+# The three models attach to a fold differently, and the join has to respect that. GARCH already
+# carries a fold column and is the base. Wasserstein carries one too, but it is market-level, so it
+# broadcasts to every symbol. FFD carries none, because it is deterministic and its values are
+# identical across folds, so it joins on `(symbol, timestamp)` alone.
+
 # %%
-# Build per-fold feature panels
-# GARCH has fold column already; it's the base for per-fold assembly
-# Wasserstein has fold column; it's market-level, broadcast to all symbols
-# FFD has no fold column (deterministic); joined by (symbol, timestamp)
 
 temporal_frames = []
 
@@ -871,6 +921,79 @@ print(f"  Rows: {len(temporal):,}")
 print(f"  Symbols: {temporal['symbol'].n_unique()}")
 print(f"  Folds: {temporal['fold'].n_unique()}")
 
+# %% [markdown]
+# ### F2. What the models inferred, over time
+#
+# The two fitted quantities the panel carries, as the cross-sectional median per date so that one
+# line stands for the whole panel, with the fold boundaries drawn. This is the object the
+# downstream models receive - the per-fold filtered series, not an illustrative full-sample fit.
+
+# %%
+daily = (
+    temporal.group_by("timestamp")
+    .agg(
+        pl.col("garch_cond_vol").median().alias("garch_cond_vol"),
+        pl.col("ffd_log_price").median().alias("ffd_log_price"),
+    )
+    .sort("timestamp")
+)
+fig, axes = plt.subplots(2, 1, figsize=(11, 5.2), sharex=True)
+for ax, column, ylabel in (
+    (axes[0], "garch_cond_vol", "GARCH conditional vol"),
+    (axes[1], "ffd_log_price", "FFD log price"),
+):
+    ax.plot(daily["timestamp"].to_list(), daily[column].to_list(), color=COLORS["blue"], lw=1.0)
+    ax.set_ylabel(ylabel)
+    for fold in folds:
+        ax.axvline(np.datetime64(fold["test_start"]), color=COLORS["neutral"], lw=0.7)
+    ax.axvline(np.datetime64(holdout_start), color=COLORS["negative"], ls="--", lw=1.1)
+axes[1].set_xlabel("Date")
+# Measured rather than asserted: the median absolute day-to-day move at a fold boundary against
+# the move on every other day. Refitting does not visibly move either series.
+_step = daily.with_columns(
+    pl.col("garch_cond_vol").diff().abs().alias("_dg"),
+    pl.col("ffd_log_price").diff().abs().alias("_df"),
+).drop_nulls()
+_starts = [date.fromisoformat(fold["test_start"]) for fold in folds]
+_at = _step.filter(pl.col("timestamp").is_in(_starts))
+_off = _step.filter(~pl.col("timestamp").is_in(_starts))
+_at_med, _off_med = _at["_dg"].median(), _off["_dg"].median()
+_ratio = float(_at_med / _off_med) if _at.height and _off.height and _off_med else float("nan")
+add_message_title(
+    axes[0],
+    "Refitting each fold does not move either series; the market does",
+    subtitle=(
+        f"Cross-sectional median per date; move at a fold boundary is {_ratio:.2f}x the move "
+        "on an ordinary day"
+    ),
+)
+fig.show()
+
+# %% [markdown]
+# ### F3. Fit stability across folds
+#
+# One box per fold over the panel's GARCH conditional volatility. Boxes that sit on top of each
+# other say per-fold refitting bought nothing; boxes that move say the volatility regime changed
+# under the model, which is the warning the assembled panel cannot give on its own.
+
+# %%
+fig, ax = plt.subplots(figsize=(11, 4.2))
+fold_ids = sorted(temporal["fold"].unique().to_list())
+samples = [
+    temporal.filter(pl.col("fold") == fold)["garch_cond_vol"].drop_nulls().to_list()
+    for fold in fold_ids
+]
+samples = [sample for sample in samples if sample]
+ax.boxplot(samples, tick_labels=[str(fold) for fold in fold_ids[: len(samples)]], showfliers=False)
+ax.set(xlabel="Walk-forward fold", ylabel="GARCH conditional volatility")
+medians = [float(np.median(sample)) for sample in samples]
+add_message_title(
+    ax,
+    "The fitted volatility level is not the same in every fold",
+    subtitle=f"Median moves {max(medians) - min(medians):.4f} across folds",
+)
+fig.show()
+
 # Feature summary (exclude fold from summary)
 for col in temporal_feature_cols:
     valid = temporal[col].drop_nulls()
@@ -878,7 +1001,7 @@ for col in temporal_feature_cols:
         print(f"  {col}: {len(valid):,} valid (mean={valid.mean():.6f}, std={valid.std():.4f})")
 
 # %% [markdown]
-# ## 6. Save Temporal Features
+# ### E.1 Save the temporal features
 
 # %%
 FEATURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -888,7 +1011,7 @@ print(f"Saved temporal features to {output_path}")
 print(f"  {n_temporal_features} features + fold column, {len(temporal):,} rows")
 print(f"  Folds: {sorted(temporal['fold'].unique().to_list())}")
 # %% [markdown]
-# ## Incremental IC Evaluation
+# ## F. Incremental evaluation
 #
 # Assess whether temporal features add predictive value beyond Ch8 cross-sectional
 # features, using HAC-adjusted cross-sectional Spearman IC against the primary label.
@@ -905,8 +1028,12 @@ label_path = CASE_DIR / "labels"
 label_files = sorted(label_path.glob("fwd_*.parquet")) if label_path.exists() else []
 
 if label_files:
-    primary_label = pl.read_parquet(label_files[0])
+    # Bound from the configuration, not from whichever filename sorts first: `sorted(glob)[0]`
+    # happens to give fwd_ret_1d today only because "1d" < "21d" < "5d" lexically.
+    primary_name = _setup["labels"]["primary"]
+    primary_label = pl.read_parquet(CASE_DIR / "labels" / f"{primary_name}.parquet")
     label_col = [c for c in primary_label.columns if c not in ("timestamp", "symbol")][0]
+    label_horizon = int("".join(ch for ch in primary_name.split("_")[-1] if ch.isdigit()))
     print(f"Computing HAC-adjusted IC of temporal features vs {label_col}")
 
     # Use last CV fold for evaluation (non-holdout)
@@ -920,17 +1047,24 @@ if label_files:
     ic_dates = sorted(ic_df["timestamp"].unique().to_list())[::5]
     ic_df = ic_df.filter(pl.col("timestamp").is_in(ic_dates))
 
+    # The IC series carries its own timestamp and is sorted on it before any HAC correction.
+    # `partition_by(as_dict=True)` gives no ordering guarantee, and a Newey-West correction over
+    # a series in arbitrary order estimates an autocovariance structure the data does not have.
     _partitions = ic_df.partition_by("timestamp", as_dict=True)
     for feat in temporal_feature_cols:
-        ic_vals = []
+        rows = []
         for _key, group in _partitions.items():
             vals = group.select([feat, label_col]).drop_nulls()
             if len(vals) >= 30:
                 rho, _ = _spearmanr(vals[feat].to_numpy(), vals[label_col].to_numpy())
                 if np.isfinite(rho):
-                    ic_vals.append(rho)
-        if len(ic_vals) >= 20:
-            hac_stats = compute_ic_hac_stats(np.array(ic_vals))
+                    rows.append({"timestamp": _key[0], "ic": float(rho)})
+        ic_series = pl.DataFrame(rows, schema={"timestamp": pl.Date, "ic": pl.Float64}).sort(
+            "timestamp"
+        )
+        if ic_series.height >= 20:
+            # The lag is the label's own overlap, declared rather than left to a default.
+            hac_stats = compute_ic_hac_stats(ic_series, ic_col="ic", label_horizon=label_horizon)
             temporal_ic[feat] = hac_stats
             print(
                 f"  {feat}: IC={hac_stats['mean_ic']:.4f} "
@@ -943,100 +1077,43 @@ else:
         print("[TEST] Skipping temporal IC evaluation")
 
 # %% [markdown]
-# ## Results Collection
-
+# ### F4. Incremental IC by feature
+#
+# Mean IC per temporal feature with its HAC interval, signed and sorted. The interval is what
+# decides whether a feature carries anything, and it is the reason this is drawn rather than
+# printed: a table of four-decimal means invites reading a ranking into differences the intervals
+# do not support. The stage-03 baseline is not drawn here - this notebook does not load the
+# stage-03 matrix, and `05_evaluation` makes that comparison because it loads both.
 
 # %%
-def _git_commit_hash():
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], text=True, timeout=5
-        ).strip()
-    except Exception:
-        return "unknown"
-
-
-results = {
-    "case_study_id": "us_equities_panel",
-    "chapter": 9,
-    "stage": "temporal",
-    "timestamp": datetime.now(UTC).isoformat(),
-    "git_commit": _git_commit_hash(),
-    "notebook": "case_studies/us_equities_panel/04_model_based_features.py",
-    "summary": {
-        "n_temporal_features": n_temporal_features,
-        "n_folds": len(folds),
-        "n_cv_folds": n_cv_folds,
-        "walk_forward": "per-fold fitting (no look-ahead)",
-        "n_observations": len(temporal),
-        "n_symbols": temporal["symbol"].n_unique(),
-        "date_range": [str(temporal["timestamp"].min()), str(temporal["timestamp"].max())],
-    },
-    "techniques": {
-        "wasserstein_regime": {
-            "window": WASSERSTEIN_WINDOW,
-            "overlap": WASSERSTEIN_OVERLAP,
-            "n_clusters": N_CLUSTERS,
-            "walk_forward": "centroids_fitted_on_training_window",
-            "features": [
-                "wass_cluster",
-                "wass_dist_min",
-                "wass_dist_max",
-                "wass_dist_ratio",
-                "wass_tail_div",
-            ],
-        },
-        "fractional_differencing": {
-            "d": FFD_D,
-            "threshold": FFD_THRESHOLD,
-            "walk_forward": "fixed_d_no_estimation",
-            "features": ["ffd_log_price", "ffd_log_volume"],
-        },
-        "garch": {
-            "model": "GARCH(1,1)",
-            "subsample_size": GARCH_TOP_N,
-            "min_obs": GARCH_MIN_OBS,
-            "walk_forward": "fit_on_train_fix_on_full_period",
-            "features": ["garch_cond_vol", "mkt_garch_vol"],
-        },
-    },
-    "diagnostics": {
-        "wasserstein_rows": len(wass_df),
-        "ffd_symbols": ffd_df["symbol"].n_unique() if len(ffd_df) > 0 else 0,
-        "garch_symbols": garch_df["symbol"].n_unique() if len(garch_df) > 0 else 0,
-        "temporal_ic": {
-            feat: {
-                "mean_ic": round(s["mean_ic"], 4),
-                "t_stat": round(s["t_stat"], 2),
-                "p_value": round(s["p_value"], 4),
-            }
-            for feat, s in temporal_ic.items()
-        },
-    },
-    "key_findings": [
-        f"Per-fold Wasserstein regime: {N_CLUSTERS} clusters, {len(wass_df):,} total rows across folds",
-        f"FFD (d={FFD_D}): {ffd_df['symbol'].n_unique() if len(ffd_df) > 0 else 0} symbols, fixed d (no estimation look-ahead)",
-        f"Per-fold GARCH: {garch_df['symbol'].n_unique() if len(garch_df) > 0 else 0} per-stock via model.fix() + market-level fallback",
-        f"Total: {n_temporal_features} temporal features, {len(folds)} folds (incl holdout), {temporal['symbol'].n_unique()} symbols",
-    ],
-}
-
-# Add incremental evaluation block if IC was computed
 if temporal_ic:
-    results["incremental_evaluation"] = {
-        "primary_label": label_col if label_files else "fwd_ret_1d",
-        "n_temporal_features_tested": len(temporal_ic),
-        "temporal_feature_ic": [
-            {
-                "name": feat,
-                "ic_mean": round(temporal_ic[feat]["mean_ic"], 4),
-                "hac_tstat": round(temporal_ic[feat]["t_stat"], 2),
-                "hac_pval": round(temporal_ic[feat]["p_value"], 4),
-            }
-            for feat in sorted(temporal_ic, key=lambda f: -abs(temporal_ic[f]["mean_ic"]))
-        ],
-    }
-
+    ranked = sorted(temporal_ic.items(), key=lambda kv: kv[1]["mean_ic"])
+    names = [name for name, _ in ranked]
+    means = np.array([stats["mean_ic"] for _, stats in ranked])
+    errs = np.array([1.96 * stats["hac_se"] for _, stats in ranked])
+    clears_zero = np.abs(means) > errs
+    fig, ax = plt.subplots(figsize=(8, 0.5 * len(names) + 2))
+    ax.barh(
+        names,
+        means,
+        xerr=errs,
+        color=[COLORS["positive"] if ok else COLORS["neutral"] for ok in clears_zero],
+        error_kw={"ecolor": COLORS["silver_muted"], "capsize": 3},
+    )
+    ax.axvline(0, color=COLORS["neutral"], lw=1)
+    ax.set_xlabel("Mean cross-sectional IC (Spearman), HAC 95% interval")
+    add_message_title(
+        ax,
+        "Every feature that can be evaluated clears zero",
+        subtitle=(
+            f"Validation fold {eval_fold}; {int(clears_zero.sum())} of {len(names)} clear zero, "
+            f"and {len(names)} of {len(temporal_feature_cols)} temporal columns had enough "
+            "per-date cross-sections to estimate an IC at all"
+        ),
+    )
+    fig.show()
+else:
+    print("No temporal IC computed — F4 not drawn")
 
 # %% [markdown]
 # ## Key Takeaways
@@ -1053,7 +1130,7 @@ if temporal_ic:
 #    which matters because momentum crashes cluster at transitions
 #    (Daniel and Moskowitz 2016).
 #
-# 3. **Fractional differencing** with d=0.4 preserves long memory in price
+# 3. **Fractional differencing** at the configured order preserves long memory in price
 #    levels while achieving stationarity. Fixed $d$ means no estimation
 #    look-ahead -- the transform is purely mechanical.
 #
