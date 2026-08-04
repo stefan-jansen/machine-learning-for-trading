@@ -53,7 +53,7 @@ from scipy.stats import spearmanr
 
 import utils.style as style
 from utils.cv_splits import load_evaluation_config
-from utils.paths import get_case_study_dir
+from utils.paths import display_path, get_case_study_dir
 
 # Register the ML4T Plotly template (colorway, fonts, gridlines) as the default
 # and expose the book palette so every figure sources color from utils.style.
@@ -736,7 +736,7 @@ for feat in all_feature_cols:
 
 triage_ledger = pl.DataFrame(ledger_rows)
 triage_ledger.write_parquet(EVAL_DIR / "triage_ledger.parquet")
-print(f"Triage ledger saved: {EVAL_DIR / 'triage_ledger.parquet'}")
+print(f"Triage ledger saved: {display_path(EVAL_DIR / 'triage_ledger.parquet')}")
 print(triage_ledger.group_by("decision").len().sort("decision"))
 
 # %%
@@ -748,7 +748,7 @@ for feat, ts in ic_timeseries.items():
 if ic_ts_frames:
     ic_ts_all = pl.concat(ic_ts_frames)
     ic_ts_all.write_parquet(EVAL_DIR / "ic_timeseries.parquet")
-    print(f"IC time series saved: {EVAL_DIR / 'ic_timeseries.parquet'}")
+    print(f"IC time series saved: {display_path(EVAL_DIR / 'ic_timeseries.parquet')}")
 
 # %%
 # Write results JSON
