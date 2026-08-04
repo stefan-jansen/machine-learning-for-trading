@@ -683,19 +683,27 @@ splits_nyse = list(cv_nyse.split(df_dates))
 
 print("Walk-forward with 21 trading-day label buffer (NYSE calendar):\n")
 for i, (tr, va) in enumerate(splits_nyse):
-    gap_sessions = va[0] - tr[-1]
+    # va[0] - tr[-1] is an *index* difference: with 21 sessions purged between the
+    # two blocks the indices are 22 apart. Report the sessions actually withheld,
+    # which is the quantity `label_horizon=21` asks for.
+    purged_sessions = va[0] - tr[-1] - 1
     train_end_date = dates[tr[-1]]
     val_start_date = dates[va[0]]
     gap_calendar = (val_start_date - train_end_date).days
     print(f"  Fold {i + 1}: train ends {train_end_date.date()}, val starts {val_start_date.date()}")
-    print(f"          gap = {gap_sessions} trading days ({gap_calendar} calendar days)")
+    print(f"          purged = {purged_sessions} trading sessions ({gap_calendar} calendar days)")
 
 # %% [markdown]
-# Each fold's label buffer spans 22 trading sessions, which covers ~30 calendar
-# days due to weekends and holidays. A naive implementation that counts 21
-# *calendar* days (e.g. Jan 11-31, 2024) would only purge 14 trading days —
-# leaving 7 days of label leakage. The `calendar='XNYS'` parameter ensures the
-# gap is measured in actual trading days.
+# Each fold withholds 21 trading sessions - the label horizon - and those 21
+# sessions span roughly 30 calendar days once weekends and holidays are counted.
+# A naive implementation that purges 21 *calendar* days instead (Jan 11-31, 2024,
+# say) removes only 14 trading days and leaves 7 days of label leakage. The
+# `calendar='XNYS'` parameter is what makes the buffer count sessions.
+#
+# One arithmetic note, because it is easy to misread the numbers above: the *index*
+# distance between the last training row and the first validation row is 22, not 21.
+# Purging 21 sessions leaves 21 rows in between, so the endpoints sit 22 apart. The
+# buffer is 21; 22 is an off-by-one waiting to be quoted as a fact.
 
 # %% [markdown]
 # ---
@@ -868,55 +876,100 @@ n_paths = (K * n_splits) // N  # = 5
 print(f"N={N} blocks, k={K} held out → {n_splits} splits, {n_paths} backtest paths")
 
 # %%
-# Visualize first 4 splits
+# Block occupancy for every split. The y axis is the split; the x axis is the
+# sample index. Nothing is plotted against a value, because a split has no value -
+# it is a partition, and the only information in it is which block each sample is in.
 set_global_seeds(SEED)
 X_viz = np.random.randn(N_VIZ, 5)
-y_viz = np.random.randn(N_VIZ)
 
 cv_cpcv = CombinatorialCV(n_groups=6, n_test_groups=2, label_horizon=5, embargo_size=2)
 splits_cpcv = list(cv_cpcv.split(X_viz))
 
-fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.08)
+# 0 = purged/embargoed, 1 = training, 2 = validation
+occupancy = np.zeros((len(splits_cpcv), N_VIZ))
+for r, (train_idx, val_idx) in enumerate(splits_cpcv):
+    occupancy[r, train_idx] = 1
+    occupancy[r, val_idx] = 2
 
-for split_idx in range(min(4, len(splits_cpcv))):
-    train_idx, val_idx = splits_cpcv[split_idx]
-    split_type = np.zeros(N_VIZ)
-    split_type[train_idx] = 1
-    split_type[val_idx] = 2
-
-    for stype, (color, label) in enumerate(
-        [
-            (COLORS["neutral"], "Purged"),
-            (COLORS["slate"], "Training"),
-            (COLORS["amber"], "Validation"),
-        ]
-    ):
-        mask = split_type == stype
-        if np.any(mask):
-            fig.add_trace(
-                go.Scatter(
-                    x=np.arange(N_VIZ)[mask],
-                    y=y_viz[mask],
-                    mode="markers",
-                    marker=dict(color=color, size=6),
-                    name=label if split_idx == 0 else None,
-                    showlegend=(split_idx == 0),
-                ),
-                row=split_idx + 1,
-                col=1,
-            )
-    fig.update_yaxes(title_text=f"Split {split_idx + 1}", row=split_idx + 1, col=1)
-
-fig.update_layout(
-    title=f"CPCV: First 4 of {n_splits} Splits (N={N}, k={K})",
-    height=500,
-    width=900,
-    showlegend=True,
-    margin=dict(l=80),
+fig = go.Figure(
+    go.Heatmap(
+        z=occupancy,
+        x=np.arange(N_VIZ),
+        y=[f"Split {i + 1}" for i in range(len(splits_cpcv))],
+        colorscale=[
+            [0.0, COLORS["neutral"]],
+            [0.33, COLORS["neutral"]],
+            [0.34, COLORS["slate"]],
+            [0.66, COLORS["slate"]],
+            [0.67, COLORS["amber"]],
+            [1.0, COLORS["amber"]],
+        ],
+        zmin=0,
+        zmax=2,
+        showscale=False,
+        hovertemplate="Sample %{x}<br>%{y}<extra></extra>",
+    )
 )
-fig.update_xaxes(title_text="Sample Index", row=4, col=1)
-fig.update_yaxes(title_standoff=8)
+fig.update_layout(
+    title="Every CPCV split validates a different pair of blocks",
+    xaxis_title="Sample index",
+    height=460,
+    width=900,
+    yaxis=dict(autorange="reversed"),
+)
 fig.show()
+
+# %% [markdown]
+# Amber is validation and slate is training. Purged and embargoed samples are grey,
+# but at this scale they are a sliver a few pixels wide at each block boundary - the
+# buffer is 5 + 2 samples against blocks of 84 - so the counts are printed below
+# rather than left to the eye. Read across the amber positions: no two splits
+# validate the same pair of blocks, which is what "combinatorial" means here.
+#
+# ### Assembling the paths
+#
+# The claim this section rests on is that $C(6,2) = 15$ splits yield **5** backtest
+# paths, and that is worth showing rather than asserting. A *path* is a set of splits
+# whose validation blocks tile the whole timeline exactly once - so each path needs
+# $6/2 = 3$ splits, and $15/3 = 5$ paths. Each block is validated in $C(5,1) = 5$
+# different splits, once per path.
+#
+# Constructing them is the round-robin pairing used to schedule a tournament: fix one
+# block, rotate the rest, and read off the pairs.
+
+# %%
+# Round-robin 1-factorization of the 6 blocks into 5 paths of 3 disjoint pairs
+blocks = list(range(N))
+fixed, rotating = blocks[0], blocks[1:]
+paths = []
+for round_i in range(N - 1):
+    order = rotating[round_i:] + rotating[:round_i]
+    pairs = [(fixed, order[0])]
+    pairs += [(order[j], order[len(order) - j]) for j in range(1, N // 2)]
+    paths.append(sorted(tuple(sorted(pr)) for pr in pairs))
+
+# Map each split to the block pair it validates, so paths can be named by split
+block_bounds = np.array_split(np.arange(N_VIZ), N)
+split_pair = {}
+for r, (_, val_idx) in enumerate(splits_cpcv):
+    val_blocks = tuple(
+        sorted({b for b, idx in enumerate(block_bounds) if len(np.intersect1d(idx, val_idx))})
+    )
+    split_pair[r] = val_blocks
+
+n_purged = (occupancy == 0).sum(axis=1)
+print(
+    f"Purged/embargoed per split: {n_purged.min()} to {n_purged.max()} samples "
+    f"of {N_VIZ} (median {int(np.median(n_purged))})"
+)
+print(f"{len(splits_cpcv)} splits, each validating {K} of {N} blocks")
+print(f"Each block is validated {sum(1 for v in split_pair.values() if 0 in v)} times")
+print(f"\nPaths (each tiles all {N} blocks exactly once):\n")
+for i, pth in enumerate(paths):
+    members = [str(r + 1) for pr in pth for r, v in split_pair.items() if v == pr]
+    covered = sorted(b for pr in pth for b in pr)
+    print(f"  Path {i + 1}: validation pairs {pth} -> blocks {covered}, splits {members}")
+print(f"\n{len(paths)} paths, as C(N,k)*k/N = {n_splits}*{K}/{N} = {n_paths} predicts")
 
 # %% [markdown]
 # Gray regions are samples removed by the label buffer (purge) and feature

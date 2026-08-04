@@ -58,7 +58,7 @@ from __future__ import annotations
 import logging
 import warnings
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import plotly.graph_objects as go
@@ -143,9 +143,12 @@ def check_index_integrity(
         results["unique_pairs"] = n_unique
         results["checks"]["unique_date_symbol"] = n_unique == len(df)
 
-        # Check monotonicity within each symbol
-        sorted_df = df.sort([symbol_col, time_col])
-        mono_check = sorted_df.group_by(symbol_col).agg(
+        # Check monotonicity within each symbol, in the order the rows arrive.
+        # Sorting by [symbol, time] before asking whether time is sorted makes the
+        # check unfalsifiable - it would return True for any input, including a
+        # frame whose rows are in the wrong order. `maintain_order=True` keeps each
+        # group's rows in their original sequence so the comparison means something.
+        mono_check = df.group_by(symbol_col, maintain_order=True).agg(
             is_mono=(pl.col(time_col) == pl.col(time_col).sort()).all()
         )
         all_mono = mono_check["is_mono"].all()
@@ -340,7 +343,8 @@ def coverage_heatmap(
     value_col: str = "close",
     title: str = "Data Coverage Heatmap",
     max_symbols: int = 50,
-) -> go.Figure:
+    order_by: Literal["symbol", "first_observation"] = "first_observation",
+) -> tuple[go.Figure, np.ndarray]:
     """Create time × asset coverage heatmap.
 
     Args:
@@ -350,9 +354,14 @@ def coverage_heatmap(
         value_col: Column to check for presence
         title: Plot title
         max_symbols: Maximum symbols to show (for readability)
+        order_by: Column order along the x axis. Alphabetical order scatters entry
+            dates at random, so a survivorship-free panel reads as a ragged skyline
+            with no visible structure. Ordering by first observation is what turns
+            the same data into the listing staircase the pattern actually is.
 
     Returns:
-        Plotly figure
+        The figure, and the presence matrix it draws (months x assets), so the
+        notebook can quantify the pattern rather than assert it.
     """
     # Aggregate to reduce data size - use monthly periods
     coverage_df = (
@@ -361,10 +370,20 @@ def coverage_heatmap(
         .agg(has_data=(pl.col(value_col).is_not_null().sum() > 0).cast(pl.Int8))
     )
 
-    # Pivot to matrix
-    symbols = coverage_df[symbol_col].unique().sort().to_list()
+    # Column order
+    if order_by == "first_observation":
+        symbols = (
+            coverage_df.filter(pl.col("has_data") == 1)
+            .group_by(symbol_col)
+            .agg(first_seen=pl.col("period").min())
+            .sort(["first_seen", symbol_col])[symbol_col]
+            .to_list()
+        )
+    else:
+        symbols = coverage_df[symbol_col].unique().sort().to_list()
+
     if len(symbols) > max_symbols:
-        # Sample symbols for readability
+        # Even sample across the ordering, so the thinned axis keeps its shape
         symbols = symbols[:: len(symbols) // max_symbols][:max_symbols]
         coverage_df = coverage_df.filter(pl.col(symbol_col).is_in(symbols))
 
@@ -374,10 +393,34 @@ def coverage_heatmap(
         on=symbol_col,
     ).sort("period")
 
-    # Extract matrix
+    # Reindex onto a continuous month range before anything reads the matrix.
+    #
+    # The pivot emits one row per month that HAS data, so a month in which the whole
+    # panel is missing - a vendor outage, an ingestion gap - is simply absent from the
+    # matrix rather than present as an all-zero row. Any count of "months missing for
+    # every asset" taken off the un-reindexed matrix is therefore zero by
+    # construction, which is the same unfalsifiable-check defect this notebook exists
+    # to find, committed by the notebook itself.
+    if len(pivot_df):
+        full_months = pl.DataFrame(
+            {
+                "period": pl.datetime_range(
+                    pivot_df["period"].min(),
+                    pivot_df["period"].max(),
+                    interval="1mo",
+                    eager=True,
+                ).cast(pivot_df["period"].dtype)
+            }
+        )
+        pivot_df = full_months.join(pivot_df, on="period", how="left").fill_null(0).sort("period")
+
+    # Pivot emits columns in order of first appearance, which is not `symbols`.
+    # Select explicitly, or the x labels would name different assets than the
+    # columns they sit under.
+    symbols = [s for s in symbols if s in pivot_df.columns]
     periods = pivot_df["period"].to_list()
     period_labels = [str(p)[:7] for p in periods]  # YYYY-MM format
-    matrix = pivot_df.drop("period").to_numpy()
+    matrix = pivot_df.select(symbols).to_numpy()
 
     # Create heatmap - present bars are filled (blue), missing periods stay white, so the
     # listing/delisting staircase reads as "where do we have data" rather than the reverse.
@@ -402,7 +445,7 @@ def coverage_heatmap(
         width=min(900, max(600, len(symbols) * 15)),
     )
 
-    return fig
+    return fig, matrix
 
 
 # %% [markdown]
@@ -554,114 +597,6 @@ def outlier_flags(
 
 
 # %% [markdown]
-# ### 1.7 Calendar Gap Check
-#
-# Compares observed trading dates against expected calendar.
-
-
-# %%
-def calendar_gap_check(
-    df: pl.DataFrame,
-    time_col: str = "timestamp",
-    symbol_col: str | None = "symbol",
-    expected_freq: str = "1d",
-    exclude_weekends: bool = True,
-) -> dict[str, Any]:
-    """Check for unexpected gaps in time series.
-
-    Args:
-        df: Input DataFrame
-        time_col: Time column name
-        symbol_col: Symbol column (checks gaps per symbol if provided)
-        expected_freq: Expected frequency ('1d', '1h', '8h', etc.)
-        exclude_weekends: If True, weekend gaps are expected (for daily data)
-
-    Returns:
-        Dictionary with gap analysis
-    """
-    results = {"expected_freq": expected_freq, "gaps": []}
-
-    if symbol_col and symbol_col in df.columns:
-        # Analyze gaps per symbol
-        symbols = df[symbol_col].unique().to_list()
-        gap_counts = []
-
-        for sym in symbols[:20]:  # Limit for performance
-            sym_df = df.filter(pl.col(symbol_col) == sym).sort(time_col)
-            gaps = _find_gaps(sym_df, time_col, expected_freq, exclude_weekends)
-            gap_counts.append({"symbol": sym, "n_gaps": len(gaps)})
-
-        results["gap_counts"] = gap_counts
-        total_gaps = sum(g["n_gaps"] for g in gap_counts)
-        results["total_gaps"] = total_gaps
-    else:
-        # Single time series
-        sorted_df = df.sort(time_col)
-        gaps = _find_gaps(sorted_df, time_col, expected_freq, exclude_weekends)
-        results["gaps"] = gaps[:10]  # First 10 gaps
-        results["total_gaps"] = len(gaps)
-
-    results["passed"] = results["total_gaps"] == 0
-
-    return results
-
-
-# %% [markdown]
-# #### Gap Detection Helper
-# Identify unexpected gaps between consecutive timestamps in a sorted series.
-
-
-# %%
-def _find_gaps(
-    df: pl.DataFrame,
-    time_col: str,
-    expected_freq: str,
-    exclude_weekends: bool,
-) -> list[dict]:
-    """Find gaps in a sorted time series."""
-    gaps = []
-
-    times = df[time_col].to_list()
-    if len(times) < 2:
-        return gaps
-
-    # Parse expected frequency
-    freq_map = {"1d": 1, "1h": 1 / 24, "4h": 4 / 24, "8h": 8 / 24}
-    expected_days = freq_map.get(expected_freq, 1)
-
-    for i in range(1, len(times)):
-        prev = times[i - 1]
-        curr = times[i]
-
-        if hasattr(prev, "timestamp"):
-            delta_days = (curr - prev).total_seconds() / 86400
-        else:
-            delta_days = (curr - prev).days
-
-        # Adjust for weekends
-        if exclude_weekends and expected_freq == "1d":
-            if hasattr(prev, "weekday"):
-                weekday = prev.weekday()
-            else:
-                weekday = prev.day_of_week().to_physical()
-            if weekday == 4:  # Friday
-                expected_days = 3
-            else:
-                expected_days = 1
-
-        if delta_days > expected_days * 1.5:  # Allow 50% tolerance
-            gaps.append(
-                {
-                    "from": str(prev),
-                    "to": str(curr),
-                    "gap_days": round(delta_days, 2),
-                }
-            )
-
-    return gaps
-
-
-# %% [markdown]
 # ## 2. Dataset Registry
 #
 # Central registry mapping dataset names to loader functions and metadata.
@@ -744,7 +679,7 @@ DATASET_REGISTRY = {
     "firm_characteristics": {
         "loader": load_firm_characteristics,
         "time_col": "timestamp",
-        "symbol_col": None,
+        "symbol_col": "symbol",
         "freq": "monthly",
         "price_cols": [],
         "volume_col": None,
@@ -905,6 +840,57 @@ if us_equities is not None:
     )
     print(f"Extreme returns (>100%):   {len(extreme_ret):,} rows")
 
+# %% [markdown]
+# ### A one-sided filter, and the column that shows it
+#
+# It is tempting to read "extreme returns" as "corporate actions" and move on. This
+# dataset ships a `split_ratio` column, so we do not have to guess - and checking
+# turns the reading around.
+#
+# A raw return is bounded below by $-1$: a price cannot fall by more than 100%. So a
+# symmetric-looking filter on $|r| > 1$ **can only ever fire on the upside**. A
+# reverse split, which multiplies the price, clears the threshold easily. A forward
+# split, which divides it, produces a return near $-0.5$ and is invisible to the
+# filter no matter how large the split.
+
+# %%
+if us_equities is not None:
+    splits = us_equities_ret.filter(
+        (pl.col("split_ratio") != 1) & pl.col("split_ratio").is_not_null()
+    )
+    forward = splits.filter(pl.col("split_ratio") > 1)
+    reverse = splits.filter(pl.col("split_ratio") < 1)
+
+    print(f"Rows flagged by |return| > 1.0:  {len(extreme_ret):,}")
+    print(f"  smallest flagged return:      {extreme_ret['returns'].min():+.4f}")
+    print(
+        f"  that are a split day:         {splits.filter(pl.col('returns').abs() > 1.0).height:,}"
+    )
+    print(f"\nRows with split_ratio != 1:      {len(splits):,}")
+    print(
+        f"  forward splits (ratio > 1):   {len(forward):,}, "
+        f"median same-day return {forward['returns'].median():+.4f}, "
+        f"caught by the filter: {forward.filter(pl.col('returns').abs() > 1.0).height:,}"
+    )
+    print(
+        f"  reverse splits (ratio < 1):   {len(reverse):,}, "
+        f"median same-day return {reverse['returns'].median():+.4f}, "
+        f"caught by the filter: {reverse.filter(pl.col('returns').abs() > 1.0).height:,}"
+    )
+
+# %% [markdown]
+# The smallest flagged return is positive, which is the whole story in one number:
+# not a single row was flagged for falling. The filter catches most reverse splits
+# and essentially none of the forward splits, even though forward splits are the far
+# more common event here by roughly eight to one.
+#
+# So "extreme returns signal corporate actions" is the wrong direction of inference.
+# Most flagged rows are *not* splits, and the great majority of splits are *not*
+# flagged. The lesson is the general one: **when a dataset records an event
+# directly, detect it from that column rather than inferring it from a threshold on
+# something else** - and check the bounds of the quantity you are thresholding before
+# assuming a two-sided rule is two-sided.
+
 # %%
 if us_equities is not None:
     # Outlier flags
@@ -937,18 +923,20 @@ if us_equities is not None:
 # %% [markdown]
 # ### Coverage Heatmap: US Equities
 #
-# Visualize data availability across time and assets. Shaded cells mark months
-# with data; white marks gaps. The staircase pattern along the edges reflects
-# new listings (lower-left) and delistings (upper-right).
+# Visualize data availability across time and assets. Shaded cells mark months with
+# data; white marks their absence. **Assets are ordered left to right by the month
+# they first appear**, which is what makes the pattern legible: in alphabetical order
+# the same panel is a ragged skyline with no visible structure, because a ticker's
+# spelling says nothing about when it listed.
 
 # %%
 if us_equities is not None:
-    fig = coverage_heatmap(
+    fig, matrix_for_summary = coverage_heatmap(
         us_equities,
         time_col="timestamp",
         symbol_col="symbol",
         value_col="close",
-        title="US equities is survivorship-free: assets enter and exit as they list and delist",
+        title="US equities is survivorship-free: assets list and delist mid-panel",
         max_symbols=50,
     )
     fig.update_layout(
@@ -958,11 +946,53 @@ if us_equities is not None:
     fig.show()
 
 # %% [markdown]
-# The diagonal coverage pattern reflects the survivorship-free nature of this
-# panel: assets enter and exit the dataset as they are listed and delisted.
-# Vertical bands of missing data correspond to exchange closures or data-vendor
-# gaps. These coverage patterns inform the missing-data strategy discussed
-# in Section 7.1.
+# Two things to read off it. The **staircase rising to the right** is the listing
+# history: each column begins at the month its asset first traded, and because the
+# columns are ordered by that month the start dates form a step rather than
+# scattering. The **broken top edge** is delisting - a column that stops short of the
+# present is an asset that left the panel, and it is still in the data. That is what
+# survivorship-free means, and it is the reason a universe must be rebuilt as of each
+# decision date rather than taken from today's index membership.
+#
+# What is *not* here is equally informative, but only one of the two absences is
+# something this figure can report. There are **no full-width white rows**: the month
+# axis is a continuous range built from the panel's own bounds, so a month in which
+# nothing traded would be drawn as a blank row, and none is - no vendor outage or
+# exchange closure is written into this panel.
+#
+# The columns cannot answer the matching question. The symbol axis is assembled from
+# the assets that *appear in the data*, so an asset missing throughout would not be a
+# white column - it would not be a column at all. "No asset is entirely absent" is
+# therefore not a finding this figure can produce, and checking it needs an
+# independently defined expected universe to compare against, which this notebook
+# does not have. The cell below counts only what is countable here.
+#
+# Interior gaps, where an asset goes quiet and comes back, do exist but are rare.
+# Missingness is overwhelmingly a question of when each asset entered and left, which
+# makes the Section 7.1 strategy a universe-construction problem rather than an
+# imputation one.
+
+# %%
+# Quantify what the heatmap shows, so the reading above is checkable
+if us_equities is not None:
+    _m = np.nan_to_num(matrix_for_summary.astype(float), nan=0.0)
+    _interior = 0
+    for _j in range(_m.shape[1]):
+        _idx = np.flatnonzero(_m[:, _j] == 1)
+        if len(_idx):
+            _interior += int((_m[_idx[0] : _idx[-1] + 1, _j] == 0).sum())
+    print(f"Sampled panel: {_m.shape[0]} months x {_m.shape[1]} assets")
+    # The month axis is a continuous range, so this count can actually fire; the
+    # symbol axis is the observed universe, so "an asset absent in every month" is
+    # not expressible here and is deliberately not printed as a guaranteed zero.
+    print(f"  Months missing for every asset:       {int((_m.sum(axis=1) == 0).sum())}")
+    print(
+        f"  Assets listing after the first month: {int(sum(1 for j in range(_m.shape[1]) if _m[0, j] == 0))}"
+    )
+    print(
+        f"  Assets ending before the last month:  {int(sum(1 for j in range(_m.shape[1]) if _m[-1, j] == 0))}"
+    )
+    print(f"  Interior gaps (absent, then back):    {_interior} cells")
 
 # %% [markdown]
 # ### 3.3 Crypto Perpetuals
@@ -1140,7 +1170,9 @@ if firm_char is not None:
     n_dates = firm_char["timestamp"].n_unique()
     print(f"Loaded {len(firm_char):,} rows, {n_dates} months, {len(firm_char.columns)} columns")
 
-    idx_check = {"passed": True, "note": "No symbol column (cross-sectional dataset)"}
+    idx_check = check_index_integrity(firm_char, config["time_col"], config["symbol_col"])
+    print(f"Index integrity: {'PASSED' if idx_check['passed'] else 'FAILED'}")
+    print(f"  {idx_check['n_symbols']:,} firms, {idx_check['unique_pairs']:,} unique firm-months")
 
     # Sort columns alphabetically before slicing for reproducibility
     char_cols = sorted(c for c in firm_char.columns if c not in ["timestamp", "split", "ret"])[:10]
@@ -1296,7 +1328,9 @@ if "etfs" in diagnostic_results:
 #
 # **Require active preprocessing** (see `02_preprocessing_pipeline`):
 # 1. **US Equities** - penny-stock filter (1.4% of rows below $1), extreme-return
-#    handling (837 rows above 100% daily moves), and 2,739 price-spike bars.
+#    handling (837 rows above 100% daily moves, every one of them an *upward* move),
+#    and 2,739 price-spike bars. Corporate actions should be taken from `split_ratio`
+#    rather than inferred from return size; see the split analysis in §3.2.
 # 2. **FX Pairs** - of 11,344 weekend timestamps, 11,339 are legitimate Sunday
 #    reopen bars (at or after 21:00 UTC) that belong in the panel; only 5
 #    Saturday or Sunday-daytime bars are anomalies to filter before the
@@ -1308,10 +1342,15 @@ if "etfs" in diagnostic_results:
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Index integrity** is fundamental - time monotonicity and uniqueness must pass
-# 2. **Coverage varies by dataset** - firm characteristics has natural sparsity; OHLCV should be complete
+# 1. **Index integrity** is fundamental - time monotonicity and uniqueness must pass,
+#    and the check has to be capable of failing: sorting a frame before asking whether
+#    it is sorted returns True for every input
+# 2. **Column coverage is not panel coverage** - a dataset can report complete columns
+#    while whole rows are absent, because a null count only sees rows that exist
 # 3. **Domain violations** (negative prices/volume) indicate data quality issues
-# 4. **Extreme returns** in US equities often signal corporate actions (splits, delistings)
+# 4. **Detect events from the column that records them** - `split_ratio` identifies
+#    splits directly, while a `|return| > 1` threshold is one-sided by construction and
+#    misses nearly every forward split
 # 5. **Calendar alignment** matters for FX (weekends) and crypto (24/7)
 #
 # **Next**: See `02_preprocessing_pipeline` for cleaning and split-aware preprocessing.

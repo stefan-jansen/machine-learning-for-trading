@@ -82,6 +82,10 @@ for _lg in list(logging.root.manager.loggerDict):
 SEED = 42
 START_DATE = ""
 N_BOOT = 2000
+# Forward-return horizon, in trading days. Every dependence-aware choice in this
+# notebook is derived from it: the momentum lookback, the IC evaluation period,
+# the HAC lag truncation, and the bootstrap block length.
+LABEL_HORIZON = 21
 
 # %%
 set_global_seeds(SEED)
@@ -106,11 +110,15 @@ etfs = load_etfs()
 if START_DATE:
     etfs = etfs.filter(pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
 
-# Compute 21-day momentum
+# Compute momentum over the label horizon
 factor_df = (
     etfs.sort(["symbol", "timestamp"])
     .with_columns(
-        [(pl.col("close") / pl.col("close").shift(21).over("symbol") - 1).alias("factor")]
+        [
+            (pl.col("close") / pl.col("close").shift(LABEL_HORIZON).over("symbol") - 1).alias(
+                "factor"
+            )
+        ]
     )
     .filter(pl.col("factor").is_not_null())
     .select(["timestamp", "symbol", "factor"])
@@ -122,14 +130,14 @@ prices_df = etfs.select(["timestamp", "symbol", "close"]).rename({"close": "pric
 result = analyze_signal(
     factor_df,
     prices_df,
-    periods=(21,),
+    periods=(LABEL_HORIZON,),
     quantiles=5,
     ic_method="spearman",
     date_col="timestamp",
     asset_col="symbol",
 )
 
-ic_series = np.array(result.ic_series.get("21D", []))
+ic_series = np.array(result.ic_series.get(f"{LABEL_HORIZON}D", []))
 print(f"IC series length: {len(ic_series)}")
 print(f"Mean IC: {np.mean(ic_series):.4f}")
 
@@ -154,7 +162,8 @@ def compute_acf(series, nlags=20):
     return np.array(acf)
 
 
-acf_values = compute_acf(ic_series, nlags=20)
+n_acf_lags = LABEL_HORIZON - 1
+acf_values = compute_acf(ic_series, nlags=n_acf_lags)
 
 # Significance bounds for white noise
 n = len(ic_series)
@@ -168,7 +177,7 @@ n_significant_lags = sum(abs(acf_values[1:]) > sig_bound)
 
 fig.add_trace(
     go.Bar(
-        x=list(range(1, 21)),
+        x=list(range(1, n_acf_lags + 1)),
         y=acf_values[1:],
         name="ACF",
         marker_color=[
@@ -184,15 +193,14 @@ fig.add_hline(y=-sig_bound, line_dash="dash", line_color=COLORS["negative"])
 fig.add_hline(y=0, line_color=COLORS["neutral"])
 
 fig.update_layout(
-    title=f"IC is strongly autocorrelated: {n_significant_lags} of 20 lags breach the "
-    "white-noise band",
+    title="Overlapping labels leave most IC lags outside the white-noise band",
     xaxis_title="Lag (days)",
     yaxis_title="Autocorrelation",
     template="ml4t",
     height=350,
 )
 fig.show()
-print(f"\nSignificant autocorrelation lags: {n_significant_lags}/20")
+print(f"\nSignificant autocorrelation lags: {n_significant_lags}/{n_acf_lags}")
 print("\nThis means naive t-statistics will overstate significance!")
 
 # %% [markdown]
@@ -202,7 +210,7 @@ print("\nThis means naive t-statistics will overstate significance!")
 # which tests the joint null that all autocorrelations up to lag $L$ are zero.
 
 # %%
-acf_analysis = analyze_autocorrelation(ic_series, max_lags=20, alpha=0.05)
+acf_analysis = analyze_autocorrelation(ic_series, max_lags=LABEL_HORIZON - 1, alpha=0.05)
 
 print("=== ml4t-diagnostic Autocorrelation Analysis ===\n")
 print(f"Significant ACF lags:  {acf_analysis.significant_acf_lags}")
@@ -221,16 +229,68 @@ print(f"Suggested ARIMA order: {acf_analysis.suggested_arima_order}")
 # $$\hat{\sigma}^2_{HAC} = \hat{\gamma}_0 + 2\sum_{j=1}^{L} w_j \hat{\gamma}_j$$
 #
 # Where $w_j = 1 - j/(L+1)$ (Bartlett kernel) and $L$ is the lag truncation.
+#
+# **$L$ should not be left to the sample size here.** The usual automatic rule
+# $L = \lfloor 4(T/100)^{2/9} \rfloor$ reads only $T$, and on this series it
+# returns 9. The labels are $h$-day *overlapping* forward returns, so date $t$ and
+# date $t+j$ share part of their outcome window for every $j < h$ - and the signal
+# is 21-day momentum, whose cross-sectional ranks change slowly. Overlapping
+# outcomes measured against persistent ranks give ICs that move together over
+# roughly the label horizon.
+#
+# **Both halves of that sentence are doing work, and the overlap alone is not
+# enough.** The IC is a rank correlation, not a return: if the signal ranks were
+# redrawn independently every day, the ICs could be serially uncorrelated no matter
+# how much the return windows overlap. So $h-1$ is not a theorem about overlapping
+# labels - it is a **conservative horizon-aware bandwidth for a persistent signal**,
+# and the evidence that it is the right order of magnitude is the measured ACF in
+# the figure above, which stays outside the white-noise band until about lag 16.
+#
+# What is not defensible is $L = 9$, chosen by a rule that never looked at the
+# labels or the signal. Passing `label_horizon` makes the library take
+# $L = \max(h-1, \text{auto rule})$; the ACF is what justifies that choice, and the
+# next section measures what it is worth.
+
+# %% [markdown]
+# ### 2.1 What the Bandwidth Is Worth
+#
+# Worth measuring rather than asserting, so the cell below runs the estimator
+# both ways on the same IC series. The block bootstrap in Section 3 resamples
+# contiguous blocks of length $h$, so it already respects the overlap. If HAC is
+# given a bandwidth that does not, the two will not agree - and the gap is then a
+# property of the bandwidth, not of the estimator families, which is what the
+# side-by-side below is there to establish. Section 3 shows HAC and the bootstrap
+# agreeing once both are horizon-aware.
 
 # %%
 # Compute HAC-adjusted statistics
-hac_result = compute_ic_hac_stats(ic_series)
+hac_result = compute_ic_hac_stats(ic_series, label_horizon=LABEL_HORIZON)
+
+# The same estimator with the bandwidth left to the sample-size rule. This is
+# what the notebook used to report, and printing both is the only way the claim
+# above is checkable from the notebook rather than from its history.
+hac_auto = compute_ic_hac_stats(ic_series)
+print("=== Bandwidth: sample-size rule vs label-horizon aware ===\n")
+print(
+    f"  auto rule            L={hac_auto['effective_lags']:>3}  "
+    f"SE={hac_auto['hac_se']:.6f}  t={hac_auto['t_stat']:.4f}  p={hac_auto['p_value']:.4f}"
+)
+print(
+    f"  label_horizon={LABEL_HORIZON:<8} L={hac_result['effective_lags']:>3}  "
+    f"SE={hac_result['hac_se']:.6f}  t={hac_result['t_stat']:.4f}  p={hac_result['p_value']:.4f}"
+)
+print(f"\n  SE ratio (horizon-aware / auto): {hac_result['hac_se'] / hac_auto['hac_se']:.3f}x")
 
 # Compare naive vs HAC
 naive_se = np.std(ic_series, ddof=1) / np.sqrt(len(ic_series))
 naive_t = np.mean(ic_series) / naive_se
 
 print("=== Naive vs HAC Inference ===\n")
+print(
+    f"HAC lag truncation: {hac_result['effective_lags']} "
+    f"(horizon-aware choice: label horizon {LABEL_HORIZON} -> L = {LABEL_HORIZON - 1}, "
+    f"consistent with the measured ACF above)"
+)
 print(f"Mean IC: {hac_result['mean_ic']:.4f}")
 print("\nStandard Errors:")
 print(f"  Naive SE:    {naive_se:.4f}")
@@ -347,7 +407,7 @@ def block_bootstrap_ic_ci(
 # Run block bootstrap
 n_boot = N_BOOT
 block_result = block_bootstrap_ic_ci(
-    ic_series, n_bootstrap=n_boot, block_length=21, random_state=SEED
+    ic_series, n_bootstrap=n_boot, block_length=LABEL_HORIZON, random_state=SEED
 )
 
 # Compare with HAC CI
@@ -561,7 +621,8 @@ def min_track_record_ic(
     confidence : float
         Required confidence level
     hac_inflation : float
-        HAC SE inflation factor (typically 1.5-2.5 for daily IC)
+        HAC SE inflation factor, measured as ``hac_se / naive_se`` on the
+        IC series in hand rather than assumed
 
     Returns
     -------
@@ -616,7 +677,8 @@ display(track_record_df)
 # The track record requirements are substantial because:
 #
 # 1. **IC is noisy**: Daily cross-sectional IC has high variance
-# 2. **Autocorrelation reduces effective sample**: HAC inflation factor of 1.5-2.5x
+# 2. **Autocorrelation reduces effective sample**: overlapping forward returns
+#    inflate the standard error by the factor printed above
 # 3. **Small effects need large samples**: IC of 0.02 is hard to distinguish from 0
 #
 # **Implication**: Claims of "predictive" factors from 1-2 years of data should be
@@ -630,7 +692,7 @@ display(track_record_df)
 # %%
 # Build IC inference report
 inference_report = {
-    "signal_name": "momentum_21d",
+    "signal_name": f"momentum_{LABEL_HORIZON}d",
     "n_observations": len(ic_series),
     "mean_ic": round(float(np.mean(ic_series)), 4),
     "ic_std": round(float(np.std(ic_series)), 4),
@@ -689,7 +751,7 @@ print(json.dumps(inference_report, indent=2))
 # from ml4t.diagnostic.metrics import compute_ic_hac_stats
 #
 # # HAC-adjusted statistics
-# hac = compute_ic_hac_stats(ic_series)
+# hac = compute_ic_hac_stats(ic_series, label_horizon=21)
 # print(f"HAC t-stat: {hac['t_stat']:.2f}")
 # print(f"HAC p-value: {hac['p_value']:.4f}")
 #

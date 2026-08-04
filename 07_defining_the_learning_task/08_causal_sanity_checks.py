@@ -13,7 +13,7 @@
 #     name: python3
 # ---
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # # Mechanism Plausibility Checks for Feature Triage
 #
 # **Docker image**: `ml4t`
@@ -34,18 +34,21 @@
 #
 # We begin with a **feature × horizon scan** that expands on the ETF results from
 # [`07_multiple_testing`](07_multiple_testing.ipynb), where no feature survived BH-FDR at a 5-day horizon.
-# The scan reveals that long-lookback momentum features (126d+) carry significant
-# cross-sectional information at monthly horizons - confirming the well-established
-# academic finding (Jegadeesh and Titman 1993, Asness et al. 2013). We then apply
-# the three diagnostic checks to two features selected from the scan:
+# Widening the search to 10 features × 3 horizons and correcting across all 30 tests,
+# the long-lookback momentum terms (252d and 12-1) are the only ones that survive, and
+# they survive at the 5-day horizon. Their largest ICs are at 21 days but do not clear
+# the corrected threshold there - a weaker result than the textbook finding
+# (Jegadeesh and Titman 1993, Asness et al. 2013) would lead you to expect from 92 ETFs
+# over 14 years, and the honest one. We then apply the three diagnostic checks to two
+# features selected from the scan:
 #
 # - **12-1 Momentum** (12-month return skipping the most recent month): survives
 #   triage with actionable caveats - it carries genuine cross-sectional information
 #   (strongest at lag 0), does not predict Treasury returns, but concentrates in
 #   low-volatility regimes.
 # - **Short-term reversal** (negated 1-day return): fails triage - no significant
-#   IC at the 21-day horizon, consistent with a microstructure effect that does not
-#   translate to monthly predictability.
+#   IC at the 21-day horizon, and its one significant cell does not survive the
+#   shifted-label check in Section 4.1.
 #
 # ## Learning Objectives
 #
@@ -65,7 +68,7 @@
 # **Prerequisites**: Notebooks [`05_signal_evaluation`](05_signal_evaluation.ipynb) and [`06_ic_inference`](06_ic_inference.ipynb)
 # introduce IC analysis; [`07_multiple_testing`](07_multiple_testing.ipynb) motivates the horizon expansion.
 
-# %%
+# %% tags=[]
 """Mechanism Plausibility Checks for Feature Triage."""
 
 from __future__ import annotations
@@ -81,6 +84,7 @@ from IPython.display import display
 from ml4t.diagnostic.metrics import compute_ic_hac_stats
 from plotly.subplots import make_subplots
 from scipy import stats
+from statsmodels.stats.multitest import multipletests
 
 from data import load_etfs, load_macro
 from utils.reproducibility import set_global_seeds
@@ -92,14 +96,16 @@ warnings.filterwarnings("ignore")
 # %% tags=["parameters"]
 SEED = 42
 START_DATE = "2010-01-01"
-N_PERMUTATIONS = 200
+# A permutation test cannot resolve a p-value finer than 1/(B+1). At B=200 that
+# floor is 0.005, which is coarser than the significance this notebook reports.
+N_PERMUTATIONS = 1000
 OUTPUT_DIR = Path("07_defining_the_learning_task/output")
 
-# %%
+# %% tags=[]
 set_global_seeds(SEED)
 
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 1. Motivation: Why Expand the Search?
 #
 # The multiple-testing scan in [`07_multiple_testing`](07_multiple_testing.ipynb) found that 0 out of 13
@@ -113,14 +119,14 @@ set_global_seeds(SEED)
 # This empirical scan determines which feature–horizon combinations carry signal,
 # and two are selected for the mechanism plausibility checks that follow.
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 2. Load Data
 #
 # We use the full ETF universe (~92 non-bond assets) and load VIX from FRED macro
 # data for regime conditioning. Treasury ETFs are excluded from the analysis
 # universe but IEF is retained for the shared-driver control.
 
-# %%
+# %% tags=[]
 etfs = load_etfs()
 
 END_DATE = date(2024, 1, 1)
@@ -132,7 +138,7 @@ etfs = etfs.filter(
 print(f"ETF universe: {etfs['symbol'].n_unique()} symbols, {len(etfs):,} rows")
 print(f"Date range: {etfs['timestamp'].min()} to {etfs['timestamp'].max()}")
 
-# %%
+# %% tags=[]
 # Load VIX for regime conditioning
 vix_raw = load_macro(series=["vixcls"])
 vix = vix_raw.filter(
@@ -142,7 +148,7 @@ vix = vix_raw.filter(
 print(f"VIX: {len(vix):,} observations")
 print(f"VIX range: {vix['vixcls'].min():.1f} to {vix['vixcls'].max():.1f}")
 
-# %%
+# %% tags=[]
 # Compute Treasury 21d forward return (shared-driver control)
 TREASURY_SYMBOL = "IEF"  # 7-10 Year Treasury Bond ETF
 LABEL_HORIZON = 21  # days
@@ -157,7 +163,19 @@ treasury_fwd = (
     .drop_nulls()
 )
 
-# %% [markdown]
+# The shared-driver control is joined below with an inner semantics
+# (`drop_nulls` on the joined column), so an absent Treasury series does not
+# weaken the analysis - it empties it, and every statistic downstream is then
+# computed on nothing. Say so here rather than let a later cell fail on whichever
+# column happens to be missing first.
+if treasury_fwd.is_empty():
+    raise ValueError(
+        f"No {TREASURY_SYMBOL} rows between {START_DATE} and {END_DATE}, so the "
+        f"shared-driver control cannot be built and the analysis frame would be empty. "
+        f"Universe contains: {sorted(etfs['symbol'].unique().to_list())}"
+    )
+
+# %% [markdown] tags=[]
 # ### Compute features and labels
 #
 # We compute 10 features spanning four families (momentum, reversal, trend,
@@ -166,7 +184,7 @@ treasury_fwd = (
 # academic convention of skipping the most recent month to avoid short-term
 # reversal contamination.
 
-# %%
+# %% tags=[]
 # Exclude Treasury/Bond ETFs from the analysis universe
 TREASURY_SYMBOLS = ["IEF", "TLT", "SHY", "AGG", "BND", "TIP", "GOVT", "BNDX", "VGSH"]
 
@@ -208,14 +226,14 @@ analysis = (
     )
 )
 
-# %%
+# %% tags=[]
 # Risk-adjusted features and label alias (requires vol_126d from previous step)
 analysis = analysis.with_columns(
     (pl.col("mom_126d") / pl.col("vol_126d")).alias("adj_mom_126d"),
     pl.col("fwd_21d").alias("forward_return"),
 )
 
-# %%
+# %% tags=[]
 # Join VIX for regime conditioning
 analysis = analysis.join(vix, on="timestamp", how="left").drop_nulls(subset=["vixcls"])
 
@@ -232,7 +250,7 @@ if n_dates > 0:
 else:
     print("Cross-section size: N/A (no dates after join)")
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 3. Cross-Sectional IC Function
 #
 # We compute Spearman rank correlation between each feature and forward returns at
@@ -240,7 +258,85 @@ else:
 # Section 7.3.
 
 
-# %%
+# %% tags=[]
+def _contiguous_groups(sorted_keys: np.ndarray) -> list[np.ndarray]:
+    """Row indices of each run of equal keys, for an array already sorted by key."""
+    if len(sorted_keys) == 0:
+        return []
+    starts = np.flatnonzero(np.r_[True, sorted_keys[1:] != sorted_keys[:-1]])
+    return np.split(np.arange(len(sorted_keys)), starts[1:])
+
+
+def block_permutation_null(
+    df: pl.DataFrame,
+    feature_col: str,
+    baseline_ic: float,
+    seed: int,
+    n_permutations: int,
+) -> tuple[np.ndarray, float, float]:
+    """Permutation null for a cross-sectional IC, blocked at the label horizon.
+
+    Shuffling assets independently on each date would imply the per-date ICs are
+    independent, so the null mean's spread would shrink like sigma/sqrt(n_dates).
+    The labels are LABEL_HORIZON-day forward returns sampled daily - consecutive
+    dates share all but one day of return - so both the returns and the per-date
+    ICs are strongly autocorrelated and the true spread is far larger. One asset
+    relabeling is therefore drawn per block of LABEL_HORIZON sessions and held
+    fixed across the block, exactly as ``05_signal_evaluation`` does.
+
+    Returns ``(null_ics, perm_p, perm_resolution)``. The p-value is
+    ``(r + 1) / (B + 1)``: a permutation p-value can never be exactly zero, since
+    the observed assignment is itself one of the arrangements under the null, and
+    with B permutations the finest resolvable value is ``1 / (B + 1)``.
+    """
+    perm_df = df.drop_nulls([feature_col, "forward_return"]).sort(["timestamp", "symbol"])
+    dates_arr = perm_df["timestamp"].to_numpy()
+    symbol_codes = perm_df["symbol"].cast(pl.Categorical).to_physical().to_numpy()
+    n_symbols = int(symbol_codes.max()) + 1
+    feat_arr_p = perm_df[feature_col].to_numpy()
+    ret_arr_p = perm_df["forward_return"].to_numpy()
+
+    # Ranks are invariant to relabeling, so pre-compute both sides once per date.
+    # Standardize them here too: a permutation changes neither a vector's mean nor its
+    # standard deviation, so the Spearman IC of a permuted pair is just the dot product
+    # of the two standardized rank vectors divided by n. That is identical to
+    # np.corrcoef to floating-point noise and about 17x faster, which matters because
+    # this loop runs n_permutations x n_dates times.
+    def _z(v: np.ndarray) -> np.ndarray | None:
+        sd = v.std()
+        return (v - v.mean()) / sd if sd > 0 else None
+
+    date_groups = [idx for idx in _contiguous_groups(dates_arr) if len(idx) >= 20]
+    feat_ranks, ret_ranks, syms_by_date = [], [], []
+    for idx in date_groups:
+        fz = _z(stats.rankdata(feat_arr_p[idx]))
+        rz = _z(stats.rankdata(ret_arr_p[idx]))
+        if fz is None or rz is None:
+            continue
+        feat_ranks.append(fz)
+        ret_ranks.append(rz)
+        syms_by_date.append(symbol_codes[idx])
+
+    rng = np.random.default_rng(seed)
+    null_ics = []
+    for _ in range(n_permutations):
+        ic_per_date = []
+        block_keys = None
+        for i, f_ranks in enumerate(feat_ranks):
+            # New relabeling only when a block boundary is crossed
+            if i % LABEL_HORIZON == 0:
+                block_keys = rng.permutation(n_symbols)
+            # Same key vector across the block => same asset->asset map across the block
+            order = np.argsort(block_keys[syms_by_date[i]], kind="stable")
+            ic_per_date.append(float(f_ranks @ ret_ranks[i][order]) / len(f_ranks))
+        if ic_per_date:
+            null_ics.append(np.mean(ic_per_date))
+
+    null_ics = np.array(null_ics)
+    n_at_least = int(np.sum(np.abs(null_ics) >= abs(baseline_ic)))
+    return null_ics, (n_at_least + 1) / (len(null_ics) + 1), 1.0 / (len(null_ics) + 1)
+
+
 def compute_cross_sectional_ic(
     df: pl.DataFrame, feature_col: str, outcome_col: str, min_obs: int = 20
 ) -> tuple[float, float, list[float]]:
@@ -275,7 +371,7 @@ def compute_cross_sectional_ic(
     return mean_ic, t_stat, ic_values
 
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 4. Feature × Horizon Scan
 #
 # We scan 10 features across three forward-return horizons (5d, 21d, 63d) using
@@ -283,7 +379,7 @@ def compute_cross_sectional_ic(
 # momentum features (126d+) carry significant cross-sectional information,
 # while short-term features remain noise regardless of horizon.
 
-# %%
+# %% tags=[]
 SCAN_FEATURES = [
     ("mom_21d", "21d Momentum"),
     ("mom_63d", "63d Momentum"),
@@ -299,7 +395,7 @@ SCAN_FEATURES = [
 
 SCAN_HORIZONS = [("fwd_5d", "5d"), ("fwd_21d", "21d"), ("fwd_63d", "63d")]
 
-# %%
+# %% tags=[]
 # Run scan: IC + HAC t-stat for each feature × horizon pair
 scan_rows = []
 for feat_col, feat_label in SCAN_FEATURES:
@@ -307,23 +403,66 @@ for feat_col, feat_label in SCAN_FEATURES:
         sub = analysis.drop_nulls(subset=[feat_col, hz_col])
         _, _, ic_series = compute_cross_sectional_ic(sub, feat_col, hz_col)
         if len(ic_series) < 50:
+            # Carry the key even when there is nothing to put in it: if every pair
+            # took this branch the column would not exist at all, and the
+            # multiple-testing correction below would fail on a missing column
+            # rather than on an empty scan.
             scan_rows.append(
-                {"feature": feat_label, "horizon": hz_label, "ic": np.nan, "t_hac": np.nan}
+                {
+                    "feature_col": feat_col,
+                    "feature": feat_label,
+                    "horizon": hz_label,
+                    "ic": np.nan,
+                    "t_hac": np.nan,
+                    "p_hac": None,
+                }
             )
             continue
         hac = compute_ic_hac_stats(ic_series, label_horizon=int(hz_label[:-1]))
         scan_rows.append(
             {
+                "feature_col": feat_col,
                 "feature": feat_label,
                 "horizon": hz_label,
                 "ic": round(hac["mean_ic"], 4),
                 "t_hac": round(hac["t_stat"], 2),
+                "p_hac": hac["p_value"],
             }
         )
 
-scan_df = pl.DataFrame(scan_rows)
+scan_df = pl.DataFrame(scan_rows, schema_overrides={"p_hac": pl.Float64})
 
-# %%
+# %% [markdown] tags=[]
+# ### Correcting the scan for multiple testing
+#
+# The scan above is not one test, it is
+# $10 \times 3 = 30$. At $\alpha = 0.05$ we expect 1.5 false positives from noise
+# alone, so reading `|t| > 2` off 30 cells is precisely the error
+# [`07_multiple_testing`](07_multiple_testing.ipynb) exists to prevent. We control
+# the false discovery rate across the whole grid with Benjamini-Hochberg, and mark
+# significance with the corrected decision rather than the raw threshold.
+
+# %% tags=[]
+scan_valid = scan_df.drop_nulls("p_hac")
+bh_reject, bh_qvalues = multipletests(scan_valid["p_hac"].to_numpy(), alpha=0.05, method="fdr_bh")[
+    :2
+]
+scan_df = scan_df.join(
+    scan_valid.select("feature", "horizon").with_columns(
+        q_bh=pl.Series(bh_qvalues), sig_bh=pl.Series(bh_reject)
+    ),
+    on=["feature", "horizon"],
+    how="left",
+)
+
+n_raw = int((scan_df["p_hac"] < 0.05).sum())
+n_bh = int(scan_df["sig_bh"].fill_null(False).sum())
+print(f"Tests in the scan: {len(scan_valid)}")
+print(f"Significant at raw p < 0.05:        {n_raw}")
+print(f"Significant after BH FDR control:   {n_bh}")
+print(f"Expected false positives if all 30 were null: {0.05 * len(scan_valid):.1f}")
+
+# %% tags=[]
 # Heatmap: HAC t-statistics by feature × horizon
 feat_labels = [f[1] for f in SCAN_FEATURES]
 hz_labels = [h[1] for h in SCAN_HORIZONS]
@@ -338,13 +477,17 @@ for feat_label in feat_labels:
         match = scan_df.filter((pl.col("feature") == feat_label) & (pl.col("horizon") == hz_label))
         t_val = match["t_hac"][0] if len(match) > 0 else np.nan
         ic_val = match["ic"][0] if len(match) > 0 else np.nan
+        sig_bh = (
+            bool(match["sig_bh"][0]) if len(match) > 0 and match["sig_bh"][0] is not None else False
+        )
         row_z.append(t_val if not np.isnan(t_val) else 0)
-        sig = "*" if abs(t_val) > 2 else ""
+        # The star is the BH-corrected decision across all 30 cells, not |t| > 2
+        sig = "*" if sig_bh else ""
         row_text.append(f"IC={ic_val:.3f}<br>t={t_val:.1f}{sig}" if not np.isnan(t_val) else " - ")
     z_matrix.append(row_z)
     text_matrix.append(row_text)
 
-# %%
+# %% tags=[]
 fig = go.Figure(
     data=go.Heatmap(
         z=z_matrix,
@@ -361,39 +504,140 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title="Feature × Horizon IC Scan (HAC t-statistics)",
+    title="Three of 30 cells survive FDR correction, all at the 5-day horizon",
     xaxis_title="Forward Return Horizon",
-    yaxis_title="Feature",
     height=450,
-    width=600,
+    width=760,
+    # The feature names are long; without the left margin they render clipped
+    margin=dict(l=150),
     yaxis=dict(autorange="reversed"),
 )
 fig.show()
 
-# %% [markdown]
-# **Findings from the scan:**
+# %% [markdown] tags=[]
+# **Findings from the scan.** Read the starred cells, not the $|t| > 2$ ones: six cells
+# clear raw $p < 0.05$ and **three survive BH across the grid**, which is close to the
+# 1.5 false positives 30 null tests would produce on their own.
 #
-# 1. **5-day horizon**: 252d momentum ($t = 3.4$), 12-1 momentum ($t = 3.7$), and
-#    1-day reversal ($t = 3.0$) reach HAC $|t| > 2$ - 3 of 10 features. The two
-#    momentum terms persist across horizons; the reversal hit is a short-horizon
-#    effect that the mechanism checks below flag as unstable.
-# 2. **21-day horizon**: The same two features remain significant (12-1 at $t = 2.6$,
-#    252d at $t = 2.3$). Shorter momentum (21d, 63d) and all non-momentum features
-#    remain noise.
-# 3. **63-day horizon**: Signal fades. Only distance from the 200-day MA ($t = 2.2$)
-#    clears $|t| > 2$; the momentum terms (12-1 at $t = 1.7$, 252d at $t = 1.7$,
-#    126d at $t = 1.5$) all slip below significance, consistent with momentum being
-#    strongest at the monthly horizon rather than the quarterly one.
-# 4. **Short-term features**: 5d reversal and the vol ratio show no signal at any
-#    horizon, and 1d reversal is significant only at the 5d horizon ($t = 3.0$)
-#    before failing the mechanism checks below - the microstructure reversal
-#    effect does not translate into stable cross-sectional predictability here.
+# 1. **The three survivors all sit at the 5-day horizon**: 12-1 momentum ($t = 3.7$),
+#    252d momentum ($t = 3.4$), and 1-day reversal ($t = 3.0$). Section 4.1 shows the
+#    third does not survive a five-day label measured one session later, which
+#    leaves two to carry forward.
+# 2. **The 21-day cells do not survive the correction.** 12-1 momentum reaches
+#    $t = 2.6$ and 252d momentum $t = 2.3$ - the largest ICs anywhere in the grid
+#    (0.053 and 0.045) - but against 30 tests that is not enough. This is the honest
+#    reading, and it is *weaker* than the chapter's later worked example needs; the
+#    deep-dive below proceeds on 12-1 momentum at 21 days anyway, with the caveat that
+#    its evidence is a large effect at borderline significance rather than a clean one.
+# 3. **63-day horizon**: signal fades. Distance from the 200-day MA is the largest
+#    remaining $t$ at 2.1, and the momentum terms slip to $t = 1.7$ (12-1 and 252d)
+#    and $t = 1.4$ (126d) - consistent with momentum being a monthly rather than a
+#    quarterly effect.
+# 4. **Short-lookback and non-momentum features are noise throughout.** 21d and 63d
+#    momentum, risk-adjusted momentum, 5d reversal and the vol ratio never exceed
+#    $|t| = 1.8$ at any horizon.
 #
-# The pattern is consistent with well-established findings on cross-asset momentum:
+# Note what the correction changed. Reading $|t| > 2$ off the grid would have credited
+# six discoveries, including two at the horizon the rest of the chapter uses. The
+# correction is not a formality here - it removes half of them.
+#
+# The surviving pattern is consistent with well-established findings on cross-asset
+# momentum:
 # the effect requires long lookbacks (6–12 months) and manifests at monthly+
 # horizons.
 
-# %% [markdown]
+# %% [markdown] tags=[]
+# ### 4.1 A Significant Cell That Does Not Survive a Shift of Its Label
+#
+# One cell in the scan deserves a second look before we trust it: 1-day reversal at
+# the 5-day horizon. Write the two quantities out in logs, with $p_t = \log P_t$:
+#
+# $$\text{rev\_1d}_t = p_{t-1} - p_t \qquad \text{fwd\_5d}_t = p_{t+5} - p_t$$
+#
+# Both contain $-p_t$. Whatever noise sits in the close on day $t$ - a wide bid-ask
+# spread, a stale print, a bad tick - enters the feature and the label with the
+# *same* sign, so it induces positive covariance between them whether or not any
+# reversal exists. The feature and the label share an endpoint.
+#
+# This is not a hypothetical. The check is to move the label one day forward, so it
+# spans $p_{t+6} - p_{t+1}$: the same five-day holding period and no shared endpoint.
+#
+# **What this check can and cannot settle.** It is a *shift* of the return window,
+# not a removal of the shared price alone. Going from $p_{t+5} - p_t$ to
+# $p_{t+6} - p_{t+1}$ drops the $t \to t+1$ session **and adds a $t+5 \to t+6$
+# session**, on top of dropping the shared $p_t$. At least four things could
+# produce the decline we are about to see:
+#
+# 1. shared-endpoint noise inflated the original statistic;
+# 2. a real effect concentrated in the $t \to t+1$ session, now excluded;
+# 3. the added $t+5 \to t+6$ session contributes returns that offset the rest;
+# 4. sampling variation, on a $t$ that was not large to begin with.
+#
+# **This test distinguishes none of them.** One comparison with several
+# simultaneous changes cannot attribute its own result, and the only honest reading
+# is that the statistic moved when the window did.
+#
+# Nor does the drop say anything about tradeability. A signal computed from the
+# day-$t$ close executes at the $t+1$ *open*, which is this repository's label
+# convention, so neither of these close-to-close labels is what a strategy would
+# earn. Separating the four needs measurements this notebook does not make: an
+# independent price for day $t$ - a quote midpoint rather than a last trade - to
+# isolate endpoint noise, one-session-at-a-time attribution across the window, and
+# an open-to-open label for the tradeable quantity. All belong with the execution
+# assumptions in Chapter 16.
+#
+# What the check does establish is enough for the decision at hand: **the cell does
+# not survive a five-day label measured one session later.** A result that depends
+# on which five sessions are used is not one to build on, whichever of the four
+# explanations holds. That is a reason to withhold belief until it is re-measured -
+# not a demonstration that no reversal effect exists.
+
+# %% tags=[]
+shared_endpoint = analysis.with_columns(
+    # Same 5-day span, measured from t+1: shares no price with rev_1d
+    (pl.col("close").shift(-6).over("symbol") / pl.col("close").shift(-1).over("symbol"))
+    .log()
+    .alias("fwd_5d_from_t1"),
+)
+
+endpoint_rows = []
+for label_col, label_desc in [
+    ("fwd_5d", "p(t+5) - p(t)   [shares p(t) with the feature]"),
+    ("fwd_5d_from_t1", "p(t+6) - p(t+1) [no shared endpoint]"),
+]:
+    sub = shared_endpoint.drop_nulls(subset=["rev_1d", label_col])
+    _, _, ic_series_ep = compute_cross_sectional_ic(sub, "rev_1d", label_col)
+    hac_ep = compute_ic_hac_stats(ic_series_ep, label_horizon=5)
+    endpoint_rows.append(
+        {
+            "label": label_desc,
+            "mean_ic": f"{hac_ep['mean_ic']:+.4f}",
+            "t_hac": f"{hac_ep['t_stat']:+.2f}",
+            "p_hac": f"{hac_ep['p_value']:.4f}",
+            "n_dates": len(ic_series_ep),
+        }
+    )
+
+display(pl.DataFrame(endpoint_rows))
+
+# %% [markdown] tags=[]
+# Removing the shared endpoint takes the 1-day reversal hit from HAC $t \approx 2.9$
+# to $t \approx 1.6$ - from "significant" to not - on the same panel and the same
+# five-day holding period, moved forward by one day.
+#
+# So the scan's short-horizon reversal cell does not survive its own robustness
+# check, and the deep-dive below therefore treats 1-day reversal as a near-null
+# baseline rather than as a signal to explain. Note what that is *not*: it is not a
+# finding that one-day reversal is absent from this panel, and it is not a
+# tradeability result. Both would need the measurements named above.
+# **The general rule: a feature ending at $t$ and a label beginning at $t$ share a
+# price, and shared noise in that price induces covariance between them whether or
+# not any effect exists. That is a property of the construction, provable without
+# looking at data - which is exactly why it cannot be read backwards. Seeing a cell
+# fail this check does not establish that the mechanism fired; it establishes that
+# the cell has to be re-measured before it is believed.**
+
+# %% [markdown] tags=[]
 # ### Feature selection for diagnostic deep-dive
 #
 # We select two features for the mechanism plausibility checks, chosen to
@@ -403,20 +647,21 @@ fig.show()
 #   in the scan. Follows the Jegadeesh–Titman convention of skipping the most
 #   recent month to separate momentum from short-term reversal. The question:
 #   does it survive mechanism checks, or is the signal driven by a confound?
-# - **1-day Reversal** (IC = 0.001, HAC $t$ = 0.4 at 21d; a raw $t = 3.0$ at 5d
-#   that vanishes by 21d and flips sign across VIX regimes): a near-null,
-#   regime-driven baseline. We expect the mechanism checks to return STOP,
-#   confirming the framework rejects an unstable signal even when the raw
-#   short-horizon t-stat looks significant.
+# - **1-day Reversal** (IC = 0.001, HAC $t$ = 0.4 at 21d): a near-null baseline that
+#   also flips sign across VIX regimes. Its one significant cell, $t = 3.0$ at the
+#   5-day horizon, is the one Section 4.1 shows collapsing under a shifted label. We
+#   expect the mechanism checks to return STOP - and the useful part is *which* check
+#   catches it, since neither a timing placebo nor a shared-driver control was
+#   designed to detect how a feature and its label are constructed.
 
-# %%
+# %% tags=[]
 # Selected features for deep diagnostics
 FEATURES = {
     "mom_12_1": "12-1 Momentum",
     "rev_1d": "1-day Reversal",
 }
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 5. Mechanism Hypotheses
 #
 # Before running diagnostics, we state the assumed causal mechanism for each
@@ -449,7 +694,7 @@ FEATURES = {
 #       1-day Return  -->?  21-day Forward Return
 # ```
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ### Why run these checks?
 #
 # These checks cost minutes; building a full model pipeline costs chapters.
@@ -463,13 +708,13 @@ FEATURES = {
 # checks. The diagnostic information - *where* and *when* a feature works -
 # matters more than the triage label.
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 6. Baseline IC (HAC-Adjusted)
 #
 # We report the HAC-adjusted IC for both features at the 21-day horizon. This
 # establishes the baseline that the diagnostic checks will probe.
 
-# %%
+# %% tags=[]
 baseline = {}
 for feat_col, feat_label in FEATURES.items():
     sub = analysis.drop_nulls(subset=[feat_col, "forward_return"])
@@ -481,6 +726,27 @@ for feat_col, feat_label in FEATURES.items():
     )
     baseline[feat_col] = {"ic": ic, "t": t, "series": series, "hac": hac}
 
+
+# The BH decision for these same two cells is carried alongside the raw p-value.
+# Reporting a raw p here without it is what let this section call a cell
+# "significant" that Section 4's own grid-wide correction rejects.
+def _bh_for(feat_col: str) -> tuple[str, str]:
+    # Join on the feature column, not the display label. SCAN_FEATURES and FEATURES
+    # spell the same feature differently ("1d Reversal" vs "1-day Reversal"), so a
+    # label join silently returns "n/a" for one of the two features here - which is
+    # exactly the kind of quiet miss this table exists to prevent.
+    row = scan_df.filter(
+        (pl.col("feature_col") == feat_col) & (pl.col("horizon") == f"{LABEL_HORIZON}d")
+    )
+    if len(row) == 0:
+        raise KeyError(f"{feat_col} at {LABEL_HORIZON}d is not in the scan grid")
+    if row["q_bh"][0] is None:
+        return "n/a", "n/a"
+    return f"{row['q_bh'][0]:.4f}", "yes" if row["sig_bh"][0] else "no"
+
+
+_bh = {f: _bh_for(f) for f in FEATURES}
+
 print(
     pl.DataFrame(
         {
@@ -488,26 +754,41 @@ print(
             "mean_ic": [f"{baseline[f]['ic']:.4f}" for f in FEATURES],
             "t_naive": [f"{baseline[f]['t']:.2f}" for f in FEATURES],
             "t_hac": [f"{baseline[f]['hac']['t_stat']:.2f}" for f in FEATURES],
-            "p_hac": [f"{baseline[f]['hac']['p_value']:.4f}" for f in FEATURES],
+            "p_hac_raw": [f"{baseline[f]['hac']['p_value']:.4f}" for f in FEATURES],
+            "q_bh_grid": [_bh[f][0] for f in FEATURES],
+            "survives_bh": [_bh[f][1] for f in FEATURES],
         }
     )
 )
 
-# %% [markdown]
-# 12-1 momentum shows IC = 0.053 (HAC $t$ = 2.6, $p = 0.009$) - a statistically
-# significant cross-sectional signal. Reversal IC is indistinguishable from zero
-# (HAC $t$ = 0.4). The naive t-stat for momentum is higher because it ignores
-# autocorrelation in the IC series; the HAC correction is more conservative but
-# still significant.
+# %% [markdown] tags=[]
+# 12-1 momentum has the largest IC in the grid and the smallest raw p-value of the
+# two features here, and it **does not survive the grid-wide BH correction** - the
+# `survives_bh` column says so, and Section 4 said so about the same cell. The raw
+# $p$ is a post-selection number: this feature and this horizon were chosen by
+# looking at the scan, so the 30 comparisons that produced the choice have to be
+# paid for, and BH is the bill. Reversal IC is indistinguishable from zero on any
+# reading.
+#
+# The naive t-stat for momentum is higher than the HAC one because it ignores
+# autocorrelation in the IC series. That correction and the multiplicity correction
+# are separate, and both apply: HAC widens the interval for one test, BH sets the
+# threshold that test has to clear given the other 29.
+#
+# The deep-dive continues on 12-1 momentum regardless, because the chapter needs a
+# worked example and this is the strongest candidate the scan produced. What it is
+# an example of is a **large effect at borderline significance** - which is the
+# ordinary situation in cross-sectional equity work, and a more useful thing to
+# demonstrate the diagnostics on than a clean winner would be.
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 7. Reusable Diagnostic Functions
 #
 # We extract each falsification test into a reusable function so we can apply
 # the same checks to both features systematically.
 
 
-# %%
+# %% tags=[]
 def run_timing_placebo(
     df: pl.DataFrame,
     feature_col: str,
@@ -586,13 +867,13 @@ def run_timing_placebo(
     return lag_df, result, msg
 
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ### Shared-Driver Check
 # Test whether a common exogenous factor (Treasury returns) or permutation
 # control explains the observed feature-outcome correlation.
 
 
-# %%
+# %% tags=[]
 def run_shared_driver_check(
     df: pl.DataFrame,
     feature_col: str,
@@ -646,50 +927,49 @@ def run_shared_driver_check(
         ic_tsy, t_tsy = np.nan, np.nan
     tsy_pass = abs(t_tsy) < 2.0 if not np.isnan(t_tsy) else True
 
-    # Permutation control (cross-sectional shuffle)
-    rng = np.random.default_rng(seed)
-    null_ics = []
-    for _ in range(n_permutations):
-        shuffled = df.with_columns(
-            pl.col("forward_return")
-            .shuffle(seed=rng.integers(0, 2**31))
-            .over("timestamp")
-            .alias("shuffled_return")
-        )
-        ic_perm, _, _ = compute_cross_sectional_ic(shuffled, feature_col, "shuffled_return")
-        null_ics.append(ic_perm)
-
-    null_ics = np.array(null_ics)
-    perm_p = np.mean(np.abs(null_ics) >= abs(baseline_ic))
-    perm_pass = perm_p < 0.05
+    # Permutation control: block permutation at the label horizon.
+    null_ics, perm_p, perm_resolution = block_permutation_null(
+        df, feature_col, baseline_ic, seed=seed, n_permutations=n_permutations
+    )
+    perm_signal = perm_p < 0.05
 
     metrics = {
         "ic_treasury": ic_tsy,
         "t_treasury": t_tsy,
         "tsy_pass": tsy_pass,
         "perm_p": perm_p,
-        "perm_pass": perm_pass,
+        "perm_resolution": perm_resolution,
+        "perm_signal": perm_signal,
+        "null_std": float(np.std(null_ics)),
         "n_rolling_windows": len(tsy_ic_series),
-        "n_permutations": n_permutations,
+        "n_permutations": len(null_ics),
     }
 
-    if tsy_pass and perm_pass:
-        result = "PASS"
-    elif not tsy_pass and not perm_pass:
-        result = "STOP"
-    else:
-        result = "CAUTION"
+    # The verdict is about the shared driver, and only the Treasury arm speaks to
+    # that. The permutation control answers a different question - "is there any
+    # signal at all?" - so it is reported beside the verdict and does not enter it.
+    #
+    # An earlier version said exactly that and then wrote `elif not perm_signal:
+    # result = "CAUTION"`, which is the gate the paragraph disclaims. It marked a
+    # feature CAUTION for a *shared-driver confound* when its real problem is
+    # having no signal to confound - a different finding, already reported by the
+    # permutation row and by the timing check.
+    #
+    # So PASS here means "not explained by the Treasury driver", which for a
+    # feature with no signal is true and uninformative. Read it with the
+    # permutation p beside it; neither number means anything alone.
+    result = "PASS" if tsy_pass else "STOP"
 
     return metrics, result
 
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ### Regime Heterogeneity
 # Partition by VIX regime and test whether signal effectiveness varies
 # across market states.
 
 
-# %%
+# %% tags=[]
 def run_regime_heterogeneity(
     df: pl.DataFrame,
     feature_col: str,
@@ -778,14 +1058,14 @@ def run_regime_heterogeneity(
     return regime_results, result, msg
 
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 8. Run All Checks on Both Features
 #
 # We apply each plausibility check to 12-1 momentum and 1-day reversal, collecting
 # results for the comparison scorecard. All t-statistics use Newey-West (HAC)
 # standard errors to account for serial dependence in overlapping IC series.
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ### 8.1 Timing Placebo
 #
 # For a rolling-window feature with lookback $L$, a $\Delta$-shifted version
@@ -798,7 +1078,7 @@ def run_regime_heterogeneity(
 # For 12-1 momentum (lookback ~231 trading days), we extend the lag grid to
 # 252d so the furthest lag reaches beyond the lookback window entirely.
 
-# %%
+# %% tags=[]
 timing = {}
 
 # 12-1 Momentum: extended lag grid for long lookback (~231d)
@@ -819,7 +1099,7 @@ lag_df, result, msg = run_timing_placebo(
 timing["rev_1d"] = {"lag_df": lag_df, "result": result, "msg": msg}
 print(f"{FEATURES['rev_1d']}: {result} - {msg}")
 
-# %%
+# %% tags=[]
 # Side-by-side timing placebo visualization
 fig = make_subplots(
     rows=1,
@@ -842,13 +1122,16 @@ for i, feat_col in enumerate(FEATURES):
     )
     fig.add_hline(y=0, line_dash="dash", line_color="gray", row=1, col=i + 1)
 
-fig.update_layout(height=350, title="Timing Placebo: IC Decay with Feature Staleness")
+fig.update_layout(
+    height=350,
+    title="12-1 momentum keeps most of its IC even when the feature is stale",
+)
 fig.update_yaxes(title_text="Mean IC", row=1, col=1)
 fig.update_xaxes(title_text="Feature Lag", row=1, col=1)
 fig.update_xaxes(title_text="Feature Lag", row=1, col=2)
 fig.show()
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # 12-1 momentum IC is strongest at lag 0 (IC = 0.053) and decays gradually to
 # IC ≈ 0.034 at lag 252d. The persistence is partly mechanical: with a 231-day
 # lookback, shifted features share most of their input data with the original.
@@ -857,7 +1140,7 @@ fig.show()
 # beyond the lookback) retains some residual predictability. Reversal IC is near
 # zero at all lags - there is no timely information to decay.
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ### 8.2 Shared-Driver Check
 #
 # We test whether each feature's cross-sectional mean predicts Treasury (IEF)
@@ -865,7 +1148,7 @@ fig.show()
 # risk-on/risk-off dynamics is plausible, so a non-zero Treasury IC would flag
 # a shared-driver concern rather than strictly falsify the mechanism.
 
-# %%
+# %% tags=[]
 n_perms = N_PERMUTATIONS
 
 nc = {}
@@ -878,18 +1161,32 @@ for feat_col in FEATURES:
     m = metrics
     print(
         f"{FEATURES[feat_col]}: {result}\n"
-        f"  Treasury IC={m['ic_treasury']:.4f} (HAC t={m['t_treasury']:.2f}), "
-        f"Perm p={m['perm_p']:.3f}"
+        f"  Treasury IC={m['ic_treasury']:.4f} (HAC t={m['t_treasury']:.2f})\n"
+        f"  Block-permutation p={m['perm_p']:.4f} "
+        f"(B={m['n_permutations']}, finest resolvable p={m['perm_resolution']:.4f}, "
+        f"null sd={m['null_std']:.4f})"
     )
 
-# %% [markdown]
-# 12-1 momentum passes both checks: its cross-sectional mean does not
-# significantly predict Treasury returns (HAC $t$ = 0.2), and its IC is well
-# above the permutation null ($p < 0.001$). Reversal's Treasury IC is also
-# near zero, but the permutation test does not reject ($p$ = 0.38) - its
-# unconditional IC is indistinguishable from shuffled noise.
+# %% [markdown] tags=[]
+# The verdict on this row is the **Treasury** column, and only that column. Neither
+# feature's cross-sectional mean predicts Treasury forward returns, so neither shows
+# the shared-driver confound this check exists to detect.
+#
+# The permutation column is reported beside it but does not set the verdict, because
+# it answers a different question - *is there any signal here at all?* - and the
+# timing check already reports that. Gating the shared-driver verdict on it would
+# mark a feature as having a confound when its actual problem is having nothing to
+# confound.
+#
+# Two things to read off the permutation column. First, the p-value is computed as
+# $(r+1)/(B+1)$ and printed beside the finest value $B$ permutations can resolve; a
+# permutation p-value is never exactly zero, because the observed assignment is
+# itself one of the arrangements under the null. Second, the null is **block**
+# permuted at the 21-day label horizon, so its spread reflects how persistent this
+# data actually is. An independent within-date shuffle would produce a null roughly
+# an order of magnitude too narrow and would reject nearly anything.
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ### 8.3 Regime Heterogeneity (VIX Regimes)
 #
 # A sign flip is only flagged as STOP if the opposite-sign partition has
@@ -898,7 +1195,7 @@ for feat_col in FEATURES:
 # than genuine heterogeneity. This criterion is stated here as an a priori
 # design choice.
 
-# %%
+# %% tags=[]
 # Tercile cutoffs; results are qualitatively similar with median splits or
 # quartiles - the key diagnostic is sign stability, not exact boundaries.
 VIX_LOW_THRESHOLD = 15
@@ -915,7 +1212,7 @@ for feat_col in FEATURES:
     for r in regime_results:
         print(f"  {r['regime']:10s}: IC={r['ic']:+.4f} (HAC t={r['t_hac']:+.2f}, n={r['n']:,})")
 
-# %%
+# %% tags=[]
 # Side-by-side conditioning visualization
 fig = make_subplots(
     rows=1,
@@ -938,17 +1235,20 @@ for i, feat_col in enumerate(FEATURES):
     )
     fig.add_hline(y=0, line_dash="dash", line_color="gray", row=1, col=i + 1)
 
-fig.update_layout(height=350, title="Regime Heterogeneity: IC by VIX Regime")
+fig.update_layout(
+    height=350,
+    title="Momentum concentrates in calm regimes; reversal flips sign across them",
+)
 fig.update_yaxes(title_text="Mean IC", row=1, col=1)
 fig.show()
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ### Publication Figure Artifact
 #
 # The book scorecard figure reads this compact artifact so formatting changes do
 # not rerun ETF/VIX preparation or permutation checks.
 
-# %%
+# %% tags=[]
 FIGURE_7_10_LAGS = [0, 1, 5, 21, 63, 126, 252]
 FIGURE_7_10_FEATURES = {"mom_12_1": "12-1 Momentum", "rev_1d": "1-day Reversal"}
 
@@ -981,20 +1281,18 @@ def _figure_7_10_regime(df: pl.DataFrame, feature_col: str) -> np.ndarray:
 
 def _figure_7_10_permutation(
     df: pl.DataFrame, feature_col: str, baseline_ic: float
-) -> tuple[np.ndarray, float]:
-    rng = np.random.default_rng(SEED)
-    perm_ics = []
-    for _ in range(N_PERMUTATIONS):
-        shuffled = df.with_columns(
-            pl.col(feature_col)
-            .shuffle(seed=rng.integers(0, 2**31))
-            .over("timestamp")
-            .alias("_shuf")
-        )
-        perm_ics.append(compute_cross_sectional_ic(shuffled, "_shuf", "forward_return")[0])
-    perm_ics_arr = np.array(perm_ics)
-    perm_p = float(np.mean(np.abs(perm_ics_arr) >= abs(baseline_ic)))
-    return perm_ics_arr, perm_p
+) -> tuple[np.ndarray, float, float]:
+    # Same null as the shared-driver check above, and for the same two reasons.
+    #
+    # This path used to draw its own: an independent within-date shuffle, scored
+    # with `np.mean(|null| >= |observed|)`. Both are the defects §4 corrects - the
+    # iid null is roughly an order of magnitude too narrow against overlapping
+    # labels, and the plain proportion can return exactly 0, which no permutation
+    # test can resolve. It mattered more here than anywhere else in the notebook,
+    # because this p-value is what the published figure reports.
+    return block_permutation_null(
+        df, feature_col, baseline_ic, seed=SEED, n_permutations=N_PERMUTATIONS
+    )
 
 
 def write_figure_7_10_artifact() -> Path:
@@ -1002,12 +1300,19 @@ def write_figure_7_10_artifact() -> Path:
     for feature_col in FIGURE_7_10_FEATURES:
         sub = analysis.drop_nulls(subset=[feature_col, "forward_return", "vixcls"])
         baseline_ic = compute_cross_sectional_ic(sub, feature_col, "forward_return")[0]
-        perm_ics, perm_p = _figure_7_10_permutation(sub, feature_col, baseline_ic)
+        perm_ics, perm_p, perm_resolution = _figure_7_10_permutation(sub, feature_col, baseline_ic)
         artifact_data[f"baseline__{feature_col}"] = baseline_ic
         artifact_data[f"timing__{feature_col}"] = _figure_7_10_timing(sub, feature_col)
         artifact_data[f"regime__{feature_col}"] = _figure_7_10_regime(sub, feature_col)
         artifact_data[f"perm__{feature_col}"] = perm_ics
         artifact_data[f"perm_p__{feature_col}"] = perm_p
+        # The floor travels with the value: a figure caption quoting p without it
+        # cannot tell a measurement from the smallest number B can express.
+        artifact_data[f"perm_resolution__{feature_col}"] = perm_resolution
+        print(
+            f"  {feature_col}: permutation p={perm_p:.4f} "
+            f"(B={N_PERMUTATIONS}, finest resolvable p={perm_resolution:.4f})"
+        )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     artifact = OUTPUT_DIR / "figure_7_10_inputs.npz"
@@ -1018,7 +1323,7 @@ def write_figure_7_10_artifact() -> Path:
 figure_7_10_artifact = write_figure_7_10_artifact()
 print(f"Wrote publication figure artifact: {figure_7_10_artifact}")
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # 12-1 momentum maintains positive IC across all VIX regimes, though the
 # magnitude varies roughly 5x - strongest in low VIX (IC = 0.086, HAC $t$ = 3.0)
 # and attenuated in high VIX (IC = 0.017, $t$ = 0.4). This is consistent with
@@ -1036,7 +1341,7 @@ print(f"Wrote publication figure artifact: {figure_7_10_artifact}")
 # have a mechanism that operates differently across states. Chapter 15 provides
 # multivariate sensitivity analysis to separate these cases.
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 9. Collider Bias: A Synthetic Demonstration
 #
 # We place this simulation here - after the three main checks - because its
@@ -1052,7 +1357,7 @@ print(f"Wrote publication figure artifact: {figure_7_10_artifact}")
 # ($Z$) are a function of both: $Z = \beta_1 X + \beta_2 Y + \varepsilon$. Because
 # $Z$ is a collider, conditioning on it opens a path between $X$ and $Y$.
 
-# %%
+# %% tags=[]
 # Collider-bias simulation
 rng_collider = np.random.default_rng(123)
 n_obs = 5000
@@ -1084,20 +1389,20 @@ print(
     )
 )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Conditioning on high fund flows (the collider) induces a negative correlation
 # between momentum and returns: among high-flow funds, strong momentum implies
 # weaker returns and vice versa. This is an artifact of the conditioning, not a
 # real effect. The practical lesson: never condition on a variable that is
 # *caused by* both the feature and the label.
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 10. Plausibility Scorecard
 #
 # Aggregate results into a dual-feature scorecard aligned with the
 # proceed / revise / stop framework from Section 7.3.
 
-# %%
+# %% tags=[]
 # Build scorecard for both features
 scorecard_rows = []
 for feat_col, feat_label in FEATURES.items():
@@ -1127,7 +1432,7 @@ scorecard = pl.DataFrame(scorecard_rows)
 print(f"Label: 21-day forward return | Universe: ETFs | N={len(analysis):,}")
 display(scorecard.select("feature", "timing", "shared_driver", "regime"))
 
-# %%
+# %% tags=[]
 # Triage decisions
 for feat_col, feat_label in FEATURES.items():
     results = [timing[feat_col]["result"], nc[feat_col]["result"], cond[feat_col]["result"]]
@@ -1143,7 +1448,7 @@ for feat_col, feat_label in FEATURES.items():
 
     print(f"{feat_label}: {decision} ({n_pass}/3 passed, checks={results})")
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # **Interpretation**: 12-1 momentum earns REVISE or PROCEED - it carries timely
 # cross-sectional information (timing check) that does not predict unrelated
 # Treasury returns (shared-driver check). The regime heterogeneity check reveals
@@ -1159,7 +1464,7 @@ for feat_col, feat_label in FEATURES.items():
 # Section 4 and the mechanism checks here redirect effort toward features with
 # genuine cross-sectional predictive power.
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 11. Event-Time Alignment (Concept Only)
 #
 # This fourth check from Section 7.5 requires event-specific features (e.g.,
@@ -1173,7 +1478,7 @@ for feat_col, feat_label in FEATURES.items():
 # - IC peaking *before* the event (anticipation or leakage)
 # - Symmetric pre- and post-event IC (confound, not causal timing)
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## Key Takeaways
 #
 # 1. **Match feature lookback to label horizon**: The scan in Section 4 shows that

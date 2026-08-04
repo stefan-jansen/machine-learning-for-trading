@@ -236,8 +236,25 @@
   # N_RAD_ETF, not n_rad_etf: the lowercase name is assigned from this one
   # inside `if min_len > 1:` and read only there, so papermill's value could
   # never be the one used and the Rademacher run stayed at its 5000 default.
+  # Every name here is uppercase because that is how the notebook's parameters
+  # cell declares them. An earlier lowercase block (n_rad_sims, n_factors, ...)
+  # was injected by papermill as unused variables, so the per-commit tier silently
+  # ran at full production scale; the pm-helper guard now rejects such names.
   parameters:
+    ETF_START_DATE: '2020-01-01'
+    N_ASSETS: 20
+    N_ASSETS_ZOO: 30
+    N_COMBOS_PBO: 10
+    N_DAYS_DSR: 252
+    N_FACTORS: 30
+    N_FACTORS_ZOO: 50
+    N_PERIODS: 120
+    N_PERIODS_ZOO: 252
     N_RAD_ETF: 500
+    N_RAD_SIMS: 500
+    N_STRAT_PBO: 8
+    N_STRATEGIES_DSR: 10
+    N_TRUE_ZOO: 3
   timeout: 300
 07_defining_the_learning_task/08_causal_sanity_checks:
   parameters:
