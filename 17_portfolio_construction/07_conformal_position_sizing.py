@@ -13,7 +13,7 @@
 #     name: python3
 # ---
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # # Conformal Prediction Position Sizing: Two Case Studies
 #
 # **Docker image**: `ml4t`
@@ -39,7 +39,7 @@
 # Chapter 11 (`06_conformal_prediction`); registered GBM predictions for the
 # ETFs and CME futures case studies.
 
-# %%
+# %% tags=[]
 """Compare conformal, score, and equal-weight sizing on registered GBM predictions."""
 
 import sqlite3
@@ -62,7 +62,7 @@ HORIZON_ETF = 21  # fwd_ret_21d → 21 trading days between non-overlapping reba
 HORIZON_CME = 5  # fwd_ret_5d  → 5 trading days
 TRADING_DAYS_PER_YEAR = 252
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 1. The Conformal-to-Confidence Transform
 #
 # Conformal prediction produces prediction intervals
@@ -83,14 +83,14 @@ TRADING_DAYS_PER_YEAR = 252
 # began. Entities with historically wider residuals get larger $\Delta_i$ and
 # therefore smaller weight.
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 2. Load Registered Predictions
 #
 # We load the best-IC GBM validation prediction set for each case study from
 # its registry. During publication verification, `ML4T_OUTPUT_DIR` points to the
 # immutable teaching-registry overlay; readers can omit it to use their local run logs.
 
-# %%
+# %% tags=[]
 REGISTRY_ROOTS = {
     "etfs": get_case_study_dir("etfs", create=False) / "run_log",
     "cme_futures": get_case_study_dir("cme_futures", create=False) / "run_log",
@@ -105,12 +105,12 @@ BEST_GBM = {
     "cme_futures": {"label": "fwd_ret_5d", "id_col": "product"},
 }
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Registry reads are opened in SQLite read-only, immutable mode. The query excludes
 # prediction sets with a degenerate fold before ranking by the daily-pooled IC.
 
 
-# %%
+# %% tags=[]
 def resolve_best_prediction(case_study: str, label: str) -> dict[str, str | float]:
     """Resolve the top validation GBM prediction set without writing to the registry."""
     registry = REGISTRY_ROOTS[case_study] / "registry.db"
@@ -145,7 +145,7 @@ def resolve_best_prediction(case_study: str, label: str) -> dict[str, str | floa
     return {"prediction_hash": row[0], "config_name": row[1], "ic_mean": float(row[2])}
 
 
-# %%
+# %% tags=[]
 for _case_study, _config in BEST_GBM.items():
     _best = resolve_best_prediction(_case_study, _config["label"])
     _config.update(_best)
@@ -155,7 +155,7 @@ for _case_study, _config in BEST_GBM.items():
     )
 
 
-# %%
+# %% tags=[]
 def load_predictions(case_study: str) -> pl.DataFrame:
     """Load one canonical validation prediction panel and reject malformed keys."""
     cfg = BEST_GBM[case_study]
@@ -173,17 +173,20 @@ def load_predictions(case_study: str) -> pl.DataFrame:
     return df.select(required)
 
 
-# %%
+# %% tags=[]
 preds = {cs: load_predictions(cs) for cs in REGISTRY_ROOTS}
 for cs, df in preds.items():
     cfg = BEST_GBM[cs]
     print(
         f"{cs}: {df.height:,} rows, {df[cfg['id_col']].n_unique()} entities, "
         f"{df['fold'].n_unique()} validation folds, "
-        f"{df['timestamp'].min().date()} to {df['timestamp'].max().date()}"
+        # Cast rather than calling .date() on the Python object: the column is
+        # Datetime in some panels and Date in others, and a datetime.date has no
+        # .date(). The cast gives a date either way.
+        f"{df['timestamp'].cast(pl.Date).min()} to {df['timestamp'].cast(pl.Date).max()}"
     )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 3. Signal Strength of the Underlying GBM Predictions
 #
 # Conformal position sizing only adds value when the underlying signal has
@@ -197,7 +200,7 @@ for cs, df in preds.items():
 # descriptive diagnostics on the same validation panel used to select the GBM,
 # so they do not establish an unbiased out-of-sample edge.
 
-# %%
+# %% tags=[]
 ic_summaries = {}
 for cs, df in preds.items():
     id_col = BEST_GBM[cs]["id_col"]
@@ -232,14 +235,14 @@ for cs, s in ic_summaries.items():
         f"of {s['n_dates']:,} validation dates"
     )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Mean IC and the share of positive dates describe whether the selected signal
 # ranks returns at all; the HAC statistic prevents overlapping labels from
 # manufacturing precision. The result remains selection-conditioned validation
 # evidence. The next section asks a separate question: whether residual widths
 # vary enough across entities for inverse-width sizing to differ from equal weight.
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 4. Per-Entity Mondrian Widths Without Future-Fold Calibration
 #
 # For each fold $k$ and entity $i$, we compute the conformal order statistic from
@@ -260,12 +263,12 @@ for cs, s in ic_summaries.items():
 # conformal weights to equal weights.
 
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # The finite-sample rank uses the standard split-conformal $(n+1)$ correction.
 # This small helper is also exercised against a hand-calculated oracle before execution.
 
 
-# %%
+# %% tags=[]
 def conformal_order_stat(residuals: np.ndarray, alpha: float) -> float:
     """Return the finite-sample split-conformal residual order statistic."""
     ordered = np.sort(np.asarray(residuals, dtype=float))
@@ -275,13 +278,13 @@ def conformal_order_stat(residuals: np.ndarray, alpha: float) -> float:
     return float(ordered[rank - 1])
 
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Fold order is derived from timestamps rather than numeric fold IDs. A residual
 # enters fold $k$'s calibration pool only when its origin plus the label horizon
 # is strictly earlier than fold $k$'s first timestamp.
 
 
-# %%
+# %% tags=[]
 def mondrian_widths(df: pl.DataFrame, id_col: str, horizon: int, alpha: float) -> pl.DataFrame:
     """Compute strictly prior, horizon-embargoed widths for each evaluable fold."""
     calendar = df.select("timestamp").unique().sort("timestamp").with_row_index("time_index")
@@ -317,7 +320,7 @@ def mondrian_widths(df: pl.DataFrame, id_col: str, horizon: int, alpha: float) -
     return pl.DataFrame(rows)
 
 
-# %%
+# %% tags=[]
 widths = {}
 for cs, df in preds.items():
     config = BEST_GBM[cs]
@@ -331,14 +334,14 @@ for cs, w in widths.items():
         f"{w['width'].max():.4f}"
     )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Because the two labels have different horizons, raw widths are not directly
 # comparable. Normalizing each width by its case-study median isolates relative
 # cross-sectional dispersion, the quantity that makes inverse-width weights depart
 # from equal weight.
 
 
-# %%
+# %% tags=[]
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 for (cs, w), color in zip(widths.items(), ml4t_palette(2, categorical=True), strict=True):
     relative_width = np.sort(w["width"].to_numpy() / w["width"].median())
@@ -358,7 +361,7 @@ add_message_title(
 fig.tight_layout()
 fig.show()
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 5. Allocation Rules
 #
 # At each timestamp $t$ we (a) select the top-$K$ entities by signed
@@ -377,13 +380,13 @@ fig.show()
 # size; if none are positive the timestamp is skipped.
 
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # A single global schedule is built after the uncalibrated first fold is removed.
 # It never resets at fold boundaries, so adjacent folds cannot reintroduce
 # overlapping forward-return windows.
 
 
-# %%
+# %% tags=[]
 def nonoverlap_schedule(df: pl.DataFrame, horizon: int) -> pl.DataFrame:
     """Select every horizon-th timestamp once across the full evaluation panel."""
     return (
@@ -396,12 +399,12 @@ def nonoverlap_schedule(df: pl.DataFrame, horizon: int) -> pl.DataFrame:
     )
 
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # The three allocators share the same positive-score top-$K$ selection. Only the
 # within-selection weights differ, which isolates the sizing decision.
 
 
-# %%
+# %% tags=[]
 def build_portfolio_returns(
     df: pl.DataFrame,
     widths: pl.DataFrame,
@@ -443,12 +446,12 @@ def build_portfolio_returns(
     return realized, weights_long
 
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # One-way turnover is half the $L_1$ change in weights. The factor of one-half
 # avoids counting every sale and offsetting purchase as two separate reallocations.
 
 
-# %%
+# %% tags=[]
 def compute_turnover(weights_long: pl.DataFrame, id_col: str, weight_col: str) -> float:
     """Return mean one-way turnover across consecutive rebalances."""
     w = weights_long.pivot(
@@ -460,13 +463,13 @@ def compute_turnover(weights_long: pl.DataFrame, id_col: str, weight_col: str) -
     return float(0.5 * np.mean(np.abs(np.diff(arr, axis=0)).sum(axis=1)))
 
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Sharpe and Sortino scale by the number of non-overlapping horizon periods per
 # year. Annual return comes from the realized compounded path, not by compounding
 # the arithmetic mean return.
 
 
-# %%
+# %% tags=[]
 def metric_block(
     rets: pl.DataFrame, weights: pl.DataFrame, id_col: str, horizon: int
 ) -> dict[str, dict[str, float]]:
@@ -507,7 +510,7 @@ def metric_block(
     return out
 
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # **On rebalancing and annualization.** The prediction panel is daily but each
 # row's `actual` is a forward 5-day or 21-day return. To avoid the overlap that
 # would inflate Sharpe and break drawdown accounting, one global schedule keeps
@@ -518,7 +521,7 @@ def metric_block(
 # is the $h$-day forward return and the cohort is held to maturity (no
 # intra-period rebalancing).
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 6. ETFs (`fwd_ret_21d`)
 #
 # The first validation fold is excluded because it has no strictly prior
@@ -526,14 +529,14 @@ def metric_block(
 # rebalance schedule. These metrics compare allocators on the selected GBM's
 # validation panel; they are not final holdout performance.
 
-# %%
+# %% tags=[]
 etf_rets, etf_weights = build_portfolio_returns(
     preds["etfs"], widths["etfs"], "symbol", TOP_K_ETF, HORIZON_ETF
 )
 etf_metrics = metric_block(etf_rets, etf_weights, "symbol", HORIZON_ETF)
 print(f"ETFs: {etf_rets.height} non-overlapping validation rebalances")
 
-# %%
+# %% tags=[]
 for label, key in [
     ("Equal Weight", "baseline_equal_weight"),
     ("Conformal Weighted", "conformal_weighted"),
@@ -545,21 +548,21 @@ for label, key in [
         f"max drawdown {m['max_drawdown']:.1%}, one-way turnover {m['avg_turnover']:.3f}"
     )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 7. CME Futures (`fwd_ret_5d`)
 #
 # The same protocol excludes the first fold and uses a global five-session
 # schedule across the rest. Keeping `product` as the identifier preserves the
 # canonical CME schema.
 
-# %%
+# %% tags=[]
 cme_rets, cme_weights = build_portfolio_returns(
     preds["cme_futures"], widths["cme_futures"], "product", TOP_K_CME, HORIZON_CME
 )
 cme_metrics = metric_block(cme_rets, cme_weights, "product", HORIZON_CME)
 print(f"CME futures: {cme_rets.height} non-overlapping validation rebalances")
 
-# %%
+# %% tags=[]
 for label, key in [
     ("Equal Weight", "baseline_equal_weight"),
     ("Conformal Weighted", "conformal_weighted"),
@@ -571,14 +574,14 @@ for label, key in [
         f"max drawdown {m['max_drawdown']:.1%}, one-way turnover {m['avg_turnover']:.3f}"
     )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 8. Allocation Trade-offs on Validation
 #
 # Each panel uses the same case-study axis and allocator colors. Sharpe and
 # annual return measure reward, max drawdown measures path risk, and one-way
 # turnover shows how aggressively each sizing rule changes positions.
 
-# %%
+# %% tags=[]
 case_metrics = {"ETFs": etf_metrics, "CME futures": cme_metrics}
 method_keys = ["baseline_equal_weight", "conformal_weighted", "score_weighted"]
 method_labels = ["Equal weight", "Conformal", "Score"]
@@ -615,7 +618,7 @@ fig.legend(legend_handles, method_labels, loc="lower center", ncol=3)
 fig.tight_layout(rect=(0, 0.06, 1, 0.96))
 fig.show()
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## Key Takeaways
 #
 # 1. **Per-entity calibration creates the sizing signal.** Pooled calibration
