@@ -244,15 +244,28 @@ quotes = attach_security_identity(straddles, underlying).select(
     ["timestamp", *SEGMENT, *STRADDLE_COLUMNS]
 )
 
+
 # %%
-CALENDAR = underlying.select("timestamp").unique().sort("timestamp")
-grid = (
-    underlying.group_by(SEGMENT)
-    .agg(pl.col("timestamp").min().alias("_first"), pl.col("timestamp").max().alias("_last"))
-    .join(CALENDAR, how="cross")
-    .filter(pl.col("timestamp").is_between(pl.col("_first"), pl.col("_last")))
-    .select(["timestamp", *SEGMENT])
-)
+def session_grid(prices: pl.DataFrame) -> pl.DataFrame:
+    """Every market session inside each security identity's own active span.
+
+    The calendar is the union of sessions **any** security traded, not the rows this one happens
+    to have, so a security absent for a stretch gets those sessions back as rows carrying no
+    price - which is what stops a window closing over the absence.
+    """
+    calendar = prices.select("timestamp").unique().sort("timestamp")
+    return (
+        prices.group_by(SEGMENT)
+        .agg(pl.col("timestamp").min().alias("_first"), pl.col("timestamp").max().alias("_last"))
+        .join(calendar, how="cross")
+        .filter(pl.col("timestamp").is_between(pl.col("_first"), pl.col("_last")))
+        .select(["timestamp", *SEGMENT])
+        .sort([*SEGMENT, "timestamp"])
+    )
+
+
+# %%
+grid = session_grid(underlying)
 panel = (
     grid.join(
         underlying.select(["timestamp", *SEGMENT, "close", "adj_factor", "volume"]),

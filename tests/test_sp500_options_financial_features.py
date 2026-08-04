@@ -300,3 +300,60 @@ def test_notebook_code_cells_respect_publication_line_limit() -> None:
     ]
 
     assert oversized == []
+
+
+def _gapped_underlying() -> pl.DataFrame:
+    """Two securities on one calendar; GAPPY is absent for one interior session."""
+    start = date(2020, 1, 1)
+    sessions = [start + timedelta(days=i) for i in range(10)]
+    rows: list[dict[str, object]] = []
+    for i, ts in enumerate(sessions):
+        rows.append(
+            {
+                "timestamp": ts,
+                "symbol": "DENSE",
+                "sec_id": 1,
+                "close": 100.0 + i,
+                "adj_factor": 1.0,
+                "volume": 1_000,
+            }
+        )
+        if i != 4:  # GAPPY does not trade on session 4, but the market is open
+            rows.append(
+                {
+                    "timestamp": ts,
+                    "symbol": "GAPPY",
+                    "sec_id": 1,
+                    "close": 50.0 + i,
+                    "adj_factor": 1.0,
+                    "volume": 1_000,
+                }
+            )
+    return pl.DataFrame(rows)  # fmt: skip
+
+
+def test_the_grid_is_the_market_calendar_not_each_security_own_rows() -> None:
+    """The regression this guards: a per-security observed-row grid closes over the absence."""
+    prices = _gapped_underlying()
+    grid = _load_notebook_functions("session_grid")["session_grid"](prices)
+    sessions = sorted(prices["timestamp"].unique().to_list())
+    gappy = grid.filter(pl.col("symbol") == "GAPPY").sort("timestamp")
+
+    # GAPPY supplies nine rows; its span covers all ten sessions, so the grid restores the hole.
+    assert prices.filter(pl.col("symbol") == "GAPPY").height == 9
+    assert gappy.height == 10
+    assert gappy["timestamp"].to_list() == sessions
+
+    # And the restored hole must break the one-session return rather than be closed over.
+    panel = grid.join(prices, on=["timestamp", *SEGMENT], how="left").sort([*SEGMENT, "timestamp"])
+    features = _load_notebook_functions("underlying_features")["underlying_features"](panel)
+    g = features.filter(pl.col("symbol") == "GAPPY").sort("timestamp")
+
+    assert g.filter(pl.col("timestamp") == sessions[4])["ret_1d"].item() is None
+    # The session after the hole has no previous close either, so it carries no return.
+    assert g.filter(pl.col("timestamp") == sessions[5])["ret_1d"].item() is None
+    # Sessions on either side of the hole are unaffected.
+    assert g.filter(pl.col("timestamp") == sessions[3])["ret_1d"].item() is not None
+    assert g.filter(pl.col("timestamp") == sessions[6])["ret_1d"].item() is not None
+    # DENSE trades every session, so only its own first row lacks a return.
+    assert features.filter(pl.col("symbol") == "DENSE")["ret_1d"].null_count() == 1
