@@ -61,6 +61,7 @@ import numpy as np
 import optuna
 import pandas as pd
 import polars as pl
+import yaml
 from matplotlib.colors import LinearSegmentedColormap
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from ml4t.diagnostic.splitters import WalkForwardCV
@@ -101,8 +102,14 @@ N_TRIALS_EFFECTIVE = N_TRIALS if CV_MAX_TRIALS <= 0 else min(N_TRIALS, CV_MAX_TR
 # %% tags=[]
 # Load ETF features and labels from centralized case study store
 CASE_DIR = get_case_study_dir("etfs")
+
+# The label and its horizon are declared once, in the case study's own config.
+SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+TARGET_COL = SETUP["labels"]["primary"]
+LABEL_HORIZON = int(SETUP["labels"]["buffer"].rstrip("Dd"))
+
 FEATURES_PATH = CASE_DIR / "features" / "financial.parquet"
-LABELS_PATH = CASE_DIR / "labels" / "fwd_ret_21d.parquet"
+LABELS_PATH = CASE_DIR / "labels" / f"{TARGET_COL}.parquet"
 
 assert FEATURES_PATH.exists(), (
     f"Features not found: {FEATURES_PATH}\nRun Ch8 feature engineering first."
@@ -113,7 +120,6 @@ features_df = pl.read_parquet(FEATURES_PATH).with_columns(pl.col("timestamp").ca
 labels_df = pl.read_parquet(LABELS_PATH).with_columns(pl.col("timestamp").cast(pl.Date))
 
 # Join features and labels
-TARGET_COL = "fwd_ret_21d"
 ASSET_COL = "symbol"
 dataset = features_df.join(labels_df, on=["timestamp", ASSET_COL], how="inner").drop_nulls(
     subset=[TARGET_COL]
@@ -207,7 +213,6 @@ print(f"Target: {TARGET_COL}")
 # %% tags=[]
 # Alpha grid spanning weak to strong regularization
 ALPHAS = np.logspace(-2, 9, ALPHA_GRID_POINTS)  # 0.01 to 1e9
-LABEL_HORIZON = 21  # 1-month forward returns
 
 # %% [markdown] tags=[]
 # ### Evaluate Alpha Grid
@@ -329,7 +334,7 @@ ax.set_xticklabels(
 ax.set_yticks(range(len(ic_matrix.index)))
 ax.set_yticklabels([f"Fold {i}" for i in ic_matrix.index])
 ax.set_xlabel(r"Alpha (log spacing, $10^{-2}$ to $10^{9}$)")
-ax.set_title("Information Coefficient Across Alpha Grid")
+ax.set_title("Folds disagree on the sign of IC at every alpha")
 fig.colorbar(im, ax=ax, label="IC", shrink=0.8)
 fig.show()
 
@@ -365,7 +370,7 @@ ax.semilogx(
 )
 ax.set_xlabel("Alpha (log scale)")
 ax.set_ylabel("Information Coefficient")
-ax.set_title("Performance Stability Across Regularization Levels")
+ax.set_title("The IC band spans zero at every regularization level")
 fig.show()
 
 # %% [markdown] tags=[]
@@ -896,7 +901,7 @@ axes[0].bar(
 axes[0].set_xticks(x)
 axes[0].set_xticklabels([f"Fold {f}" for f in folds])
 axes[0].set_ylabel("Information Coefficient")
-axes[0].set_title("(a) IC by Fold")
+axes[0].set_title("(a) The unbiased estimate is lower in every fold")
 axes[0].legend(frameon=False)
 
 # (b) Alpha selection
@@ -906,13 +911,10 @@ axes[1].semilogy(
 axes[1].semilogy(folds, nested_results["best_alpha"], "s-", color=COLORS["amber"], label="Nested")
 axes[1].set_xlabel("Fold")
 axes[1].set_ylabel("Best Alpha (log)")
-axes[1].set_title("(b) Alpha Selection by Fold")
+axes[1].set_title("(b) Single-loop alpha swings; nested stays put")
 axes[1].legend(frameon=False)
 
-fig.suptitle(
-    f"Isolating HPO Flips Ridge IC from {single_mean_ic:+.3f} to {nested_mean_ic:+.3f}",
-    fontsize=13,
-)
+fig.suptitle("Isolating HPO flips Ridge IC from positive to negative", fontsize=13)
 fig.show()
 
 # %% [markdown] tags=[]
