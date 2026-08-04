@@ -13,7 +13,7 @@
 #     name: python3
 # ---
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # # Futures Backtesting with Contract Specifications
 #
 # **Docker image**: `ml4t`
@@ -46,10 +46,10 @@
 # - Ch2 NB 06 ([`06_futures_continuous`](../02_financial_data_universe/06_futures_continuous.ipynb)): Continuous contract construction
 # - Ch16 NB 01-03: Backtesting first principles and ml4t-backtest basics
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## Setup
 
-# %%
+# %% tags=[]
 """Futures backtesting with multiplier-aware simulation in ml4t-backtest."""
 
 import warnings
@@ -93,23 +93,23 @@ SHORT_N = 2  # Short bottom 2 by momentum
 RUN_FULL_UNIVERSE = True
 
 
-# %%
+# %% tags=[]
 def format_usd(value: float) -> str:
     """Format signed dollar values with the sign before the currency symbol."""
     sign = "-" if value < 0 else ""
     return f"{sign}${abs(value):,.0f}"
 
 
-# %%
+# %% tags=[]
 # Six demo products - one per sector
 PRODUCTS = ["ES", "CL", "GC", "ZN", "6E", "ZC"]
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Contract specifications are current static metadata. The margin percentages in the YAML are
 # anchored to 2025-12-31 prices and a 2026-05-16 CME rates snapshot; the simulation applies them
 # across 2018-2023 and does not model historical specification or margin changes.
 
-# %%
+# %% tags=[]
 SPECS_PATH = REPO_ROOT / "data" / "futures" / "market" / "futures_specs.yaml"
 
 
@@ -137,14 +137,14 @@ def load_contract_specs_from_yaml(yaml_path: Path) -> dict[str, ContractSpec]:
 FULL_SPECS = load_contract_specs_from_yaml(SPECS_PATH)
 DEMO_SPECS = {product: FULL_SPECS[product] for product in PRODUCTS}
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 1. Load CME Futures Data
 #
 # We load session-aligned daily bars via `load_cme_futures()`. These bars use
 # **4 PM CT session boundaries** (not midnight UTC) - see Ch2 NB 05 for the
 # aggregation methodology that converts hourly Databento bars to daily sessions.
 
-# %%
+# %% tags=[]
 cme_data = load_cme_futures(products=PRODUCTS, tenors=[0], start_date=START_DATE, end_date=END_DATE)
 
 available_products = sorted(cme_data["product"].unique().to_list())
@@ -161,13 +161,13 @@ print(f"Loaded {len(cme_data):,} daily bars for {cme_data['product'].n_unique()}
 print(f"Date range: {cme_data['session_date'].min()} to {cme_data['session_date'].max()}")
 print(f"Products: {sorted(cme_data['product'].unique().to_list())}")
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Sample of the loaded session-daily bars (first six rows):
 
-# %%
+# %% tags=[]
 cme_data.head(6)
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 2. Contract Specifications - Why Multipliers Matter
 #
 # Each futures contract has a **multiplier** (point value) that converts price
@@ -178,7 +178,7 @@ cme_data.head(6)
 # Omitting the multiplier understates or overstates dollar P&L whenever the point value differs
 # from one. The table below computes the effect from the current contract specifications.
 
-# %%
+# %% tags=[]
 spec_rows = []
 for product in PRODUCTS:
     spec = DEMO_SPECS[product]
@@ -193,10 +193,10 @@ for product in PRODUCTS:
     )
 pl.DataFrame(spec_rows)
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Multiplier range and approximate notional value per contract:
 
-# %%
+# %% tags=[]
 notional_rows = []
 for product in PRODUCTS:
     spec = DEMO_SPECS[product]
@@ -212,12 +212,12 @@ for product in PRODUCTS:
     )
 pl.DataFrame(notional_rows)
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # **P&L error without contract multipliers.** A representative price move is
 # repriced as if every contract had multiplier = 1. The "correct" column shows
 # actual dollar P&L per contract; the error grows with the multiplier.
 
-# %%
+# %% tags=[]
 examples = [
     ("ES", 10.0),  # 10 S&P index points
     ("CL", 0.50),  # 50 cents per barrel
@@ -240,7 +240,7 @@ for product, move in examples:
     )
 pl.DataFrame(error_rows)
 
-# %%
+# %% tags=[]
 # Visualize multiplier range across products
 fig = go.Figure()
 fig.add_trace(
@@ -264,7 +264,7 @@ fig.update_layout(
 )
 fig.show()
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 3. Prepare Data for DataFeed
 #
 # The ml4t-backtest `DataFeed` requires: `timestamp` (Datetime), `symbol`,
@@ -277,7 +277,7 @@ fig.show()
 # not represent explicit rolls. The reported dollar P&L is a continuous-series research
 # approximation that excludes roll orders, roll costs, and contract-specific fill history.
 
-# %%
+# %% tags=[]
 feed_source = cme_data.with_columns(
     pl.col("session_date").cast(pl.Datetime).alias("timestamp"),
     pl.col("product").alias("symbol"),
@@ -307,20 +307,20 @@ print(f"DataFeed prices: {prices_df.shape}")
 print(f"Schema: {dict(prices_df.schema)}")
 print(f"Detected ratio-adjustment transitions in the demo panel: {roll_transitions:,}")
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Sample DataFeed bar (first timestamp, all assets):
 
-# %%
+# %% tags=[]
 first_ts = prices_df["timestamp"][0]
 prices_df.filter(pl.col("timestamp") == first_ts)
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 4. Momentum Signal
 #
 # We compute a 63-session trailing return for each product. This signal drives
 # cross-sectional ranking in the strategy.
 
-# %%
+# %% tags=[]
 # Compute trailing momentum per product
 momentum_df = feed_source.sort(["symbol", "timestamp"]).with_columns(
     (pl.col("adj_close") / pl.col("adj_close").shift(LOOKBACK).over("symbol") - 1).alias("momentum")
@@ -332,7 +332,7 @@ signals_df = momentum_df.select(["timestamp", "symbol", "raw_close", "momentum"]
 valid_count = signals_df.filter(pl.col("momentum").is_not_null()).shape[0]
 print(f"Signal rows: {len(signals_df):,} ({valid_count:,} with valid momentum)")
 
-# %%
+# %% tags=[]
 # Visualize momentum by product over time
 fig = go.Figure()
 for product in PRODUCTS:
@@ -348,7 +348,7 @@ for product in PRODUCTS:
     )
 
 fig.update_layout(
-    title=f"The {LOOKBACK}-session momentum ranks diverge across the six products",
+    title=f"{LOOKBACK}-session momentum spreads widest across products in 2020",
     xaxis_title="Date",
     yaxis_title="Return",
     yaxis_tickformat=".0%",
@@ -357,7 +357,7 @@ fig.update_layout(
 )
 fig.show()
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 5. Futures Momentum Strategy
 #
 # Cross-sectional momentum ranks products by recent performance. We go **long**
@@ -378,7 +378,7 @@ fig.show()
 # that allocation, the target is not traded rather than being forced into an oversized position.
 
 
-# %%
+# %% tags=[]
 def compute_target_contracts(
     data,
     specs: dict[str, ContractSpec],
@@ -413,7 +413,7 @@ def compute_target_contracts(
     return targets, skipped
 
 
-# %%
+# %% tags=[]
 def submit_contract_deltas(target_quantities: dict[str, int], broker) -> None:
     """Submit signed order deltas from current to target contract quantities."""
     for asset in sorted(set(broker.positions) | set(target_quantities)):
@@ -426,7 +426,7 @@ def submit_contract_deltas(target_quantities: dict[str, int], broker) -> None:
         broker.submit_order(asset, abs(delta), side)
 
 
-# %%
+# %% tags=[]
 class FuturesMomentumStrategy(Strategy):
     """Cross-sectional momentum on futures with proper contract sizing.
 
@@ -468,7 +468,7 @@ class FuturesMomentumStrategy(Strategy):
         submit_contract_deltas(target_quantities, broker)
 
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 6. Configure and Run Backtest
 #
 # The `BacktestConfig` controls all behavioral settings. For futures:
@@ -488,7 +488,7 @@ class FuturesMomentumStrategy(Strategy):
 # knob. Pass `contract_specs=` to the `Engine` constructor - the Engine threads
 # it through to the `Broker` automatically.
 
-# %%
+# %% tags=[]
 config = BacktestConfig(
     initial_cash=INITIAL_CASH,
     execution_mode=ExecutionMode.NEXT_BAR,
@@ -524,10 +524,10 @@ result = engine.run()
 print(f"Completed target rebalances: {len(strategy.target_history):,}")
 print(f"Targets below one-contract granularity: {strategy.zero_contract_targets:,}")
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # **Futures momentum backtest - with contract specs.**
 
-# %%
+# %% tags=[]
 pl.DataFrame(
     {
         "metric": [
@@ -551,9 +551,9 @@ pl.DataFrame(
     }
 )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 #
-# %%
+# %% tags=[]
 display(
     Markdown(
         f"The six-product teaching run returns **{result.metrics['total_return_pct']:.2f}%** with "
@@ -564,22 +564,22 @@ display(
     )
 )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 7. Analyze Trades
 #
 # Verify that the broker applied the correct multiplier per product.
 # Each trade's P&L should reflect the contract multiplier.
 
-# %%
+# %% tags=[]
 trades_df = result.to_trades_dataframe()
 closed_trades = trades_df.filter(pl.col("status") == "closed")
 
 print(f"Total trades: {len(trades_df)} ({len(closed_trades)} closed)")
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Sample of closed trades with multiplier-correct P&L and cost decomposition:
 
-# %%
+# %% tags=[]
 closed_trades.select(
     [
         "symbol",
@@ -595,10 +595,10 @@ closed_trades.select(
     ]
 ).head(10)
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Trade summary by product (P&L, win rate):
 
-# %%
+# %% tags=[]
 trade_summary = (
     closed_trades.group_by("symbol")
     .agg(
@@ -611,7 +611,7 @@ trade_summary = (
 )
 trade_summary
 
-# %%
+# %% tags=[]
 best_product = trade_summary.row(0, named=True)
 worst_product = trade_summary.row(-1, named=True)
 display(
@@ -624,7 +624,7 @@ display(
     )
 )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 8. Without Multipliers - The Error
 #
 # A controlled counterfactual replaces every broker multiplier with 1.0 while replaying the exact
@@ -632,7 +632,7 @@ display(
 # different equity path from feeding back into sizing. The counterfactual changes the engine's
 # position valuation, margin basis, and point-to-dollar P&L conversion, not the intended orders.
 
-# %%
+# %% tags=[]
 UNIT_MULTIPLIER_SPECS = {
     product: ContractSpec(
         symbol=product,
@@ -660,7 +660,7 @@ class TargetScheduleStrategy(Strategy):
         submit_contract_deltas(target_quantities, broker)
 
 
-# %%
+# %% tags=[]
 target_schedule = dict(strategy.target_history)
 feed_nomult = DataFeed(prices_df=prices_df, signals_df=signals_df)
 strategy_nomult = TargetScheduleStrategy(target_schedule)
@@ -674,7 +674,7 @@ result_nomult = engine_nomult.run()
 
 assert strategy.target_history == strategy_nomult.target_history
 
-# %%
+# %% tags=[]
 pl.DataFrame(
     {
         "metric": ["Final value ($)", "Total return (%)", "Max drawdown (%)"],
@@ -691,7 +691,7 @@ pl.DataFrame(
     }
 )
 
-# %%
+# %% tags=[]
 # Overlay equity curves
 fig = go.Figure()
 ec_with = result.equity
@@ -725,9 +725,9 @@ fig.update_layout(
 )
 fig.show()
 
-# %% [markdown]
+# %% [markdown] tags=[]
 #
-# %%
+# %% tags=[]
 display(
     Markdown(
         f"With the same intended contract targets, the multiplier-aware run returns "
@@ -738,13 +738,13 @@ display(
     )
 )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 9. Sector Attribution
 #
 # Futures span multiple asset classes. We map each product to its sector and compute P&L
 # contribution without assuming those sectors are uncorrelated.
 
-# %%
+# %% tags=[]
 SECTOR_MAP = {
     "ES": "Equity Index",
     "CL": "Energy",
@@ -768,7 +768,7 @@ sector_pnl = (
 )
 sector_pnl
 
-# %%
+# %% tags=[]
 # Visualize sector P&L
 fig = go.Figure()
 fig.add_trace(
@@ -783,8 +783,12 @@ fig.add_trace(
         textposition="outside",
     )
 )
+_losing_sectors = int((sector_pnl["total_pnl"] < 0).sum())
 fig.update_layout(
-    title="Sector attribution reveals concentration in the six-product run",
+    title=(
+        f"{_losing_sectors} of {sector_pnl.height} sectors lose money, "
+        f"{sector_pnl.row(-1, named=True)['sector']} the most"
+    ),
     xaxis_title="Sector",
     yaxis_title="Total P&L ($)",
     yaxis_tickformat="$,.0f",
@@ -792,9 +796,7 @@ fig.update_layout(
 )
 fig.show()
 
-# %% [markdown]
-#
-# %%
+# %% tags=[]
 best_sector = sector_pnl.row(0, named=True)
 worst_sector = sector_pnl.row(-1, named=True)
 display(
@@ -803,12 +805,13 @@ display(
         f"**{best_sector['sector']}** contributes the most P&L "
         f"(**{format_usd(best_sector['total_pnl'])}**), while "
         f"**{worst_sector['sector']}** contributes the least "
-        f"(**{format_usd(worst_sector['total_pnl'])}**). The wider universe tests whether "
-        "adding eligible products changes this concentration."
+        f"(**{format_usd(worst_sector['total_pnl'])}**). With six products there is no "
+        "sector diversification to measure here; the wider universe below tests whether "
+        "adding eligible products changes the spread of P&L across sectors."
     )
 )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 10. Full Available Universe
 #
 # Scale from six demo products to every product present in both the current CME data snapshot and
@@ -816,14 +819,14 @@ display(
 # membership or a survivorship-free universe estimate. Product eligibility on each bar still
 # depends on data availability at that timestamp.
 
-# %%
+# %% tags=[]
 print(f"Loaded {len(FULL_SPECS)} product specifications from YAML")
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Cross-check the instantiated point values against the independent tick-value identity in the raw
 # YAML: point value equals tick value divided by tick size.
 
-# %%
+# %% tags=[]
 with SPECS_PATH.open() as file:
     raw_specification = yaml.safe_load(file)["products"]
 
@@ -845,7 +848,7 @@ multiplier_check = pl.DataFrame(verify_rows)
 assert multiplier_check["match"].all()
 multiplier_check
 
-# %%
+# %% tags=[]
 if RUN_FULL_UNIVERSE:
     cme_all = load_cme_futures(tenors=[0], start_date=START_DATE, end_date=END_DATE)
     available_products = set(cme_all["product"].unique().to_list())
@@ -858,7 +861,7 @@ if RUN_FULL_UNIVERSE:
 
     cme_all = cme_all.filter(pl.col("product").is_in(universe))
 
-# %%
+# %% tags=[]
 if RUN_FULL_UNIVERSE:
     feed_full_source = cme_all.with_columns(
         pl.col("session_date").cast(pl.Datetime).alias("timestamp"),
@@ -885,7 +888,7 @@ if RUN_FULL_UNIVERSE:
         .select(["timestamp", "symbol", "raw_close", "momentum"])
     )
 
-# %%
+# %% tags=[]
 if RUN_FULL_UNIVERSE:
     universe_specs = {p: FULL_SPECS[p] for p in universe}
 
@@ -904,10 +907,10 @@ if RUN_FULL_UNIVERSE:
     print(f"Full-universe target rebalances: {len(strategy_full.target_history):,}")
     print(f"Full-universe targets below one contract: {strategy_full.zero_contract_targets:,}")
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Six-product baseline vs full CME universe - same momentum rule, same costs:
 
-# %%
+# %% tags=[]
 if RUN_FULL_UNIVERSE:
     comparison = pl.DataFrame(
         {
@@ -938,9 +941,9 @@ else:
     comparison = pl.DataFrame({"note": ["Skipped full-universe scaling (RUN_FULL_UNIVERSE=False)"]})
 comparison
 
-# %% [markdown]
+# %% [markdown] tags=[]
 #
-# %%
+# %% tags=[]
 if RUN_FULL_UNIVERSE:
     sharpe_relation = (
         "higher" if result_full.metrics["sharpe"] > result.metrics["sharpe"] else "lower"
@@ -963,20 +966,20 @@ if RUN_FULL_UNIVERSE:
         )
     )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## 11. Cost Analysis - Per-Contract vs Percentage
 #
 # A single percentage-of-notional commission cannot reproduce a constant per-contract fee across
 # products with different unit notionals. We compare the configured illustrative $2-per-contract
 # per-side fee with current notionals; this is not a broker quote.
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Notional value per contract by product, and a flat \$2 commission expressed as
 # a percentage of notional. The cost percentage varies materially across
 # products because their multipliers and prices differ; the printed min/max
 # below quantifies the spread for the six demo contracts.
 
-# %%
+# %% tags=[]
 cost_rows = []
 for product in PRODUCTS:
     spec = DEMO_SPECS[product]
@@ -1000,7 +1003,7 @@ print(
 )
 cost_table
 
-# %%
+# %% tags=[]
 smallest_notional = cost_table.sort("notional_usd").row(0, named=True)
 largest_notional = cost_table.sort("notional_usd").row(-1, named=True)
 display(
@@ -1014,7 +1017,7 @@ display(
     )
 )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ## Key Takeaways
 #
 # 1. **Contract metadata is part of accounting.** Point-value multipliers convert price moves to
