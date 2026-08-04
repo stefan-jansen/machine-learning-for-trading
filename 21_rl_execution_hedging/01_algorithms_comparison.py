@@ -70,6 +70,7 @@ OUTPUT_DIR = get_output_dir(21, "algorithms_comparison")
 TIMESTEPS_PER_EPISODE = 252
 TOTAL_TIMESTEPS = 50_000
 EVAL_EPISODES = 10
+TRADING_COST_BPS = 10  # Round-trip cost the reward is charged, in basis points
 SEED = 314  # Reproducible training across re-runs
 EXPORT_RESULTS = False
 
@@ -82,6 +83,7 @@ config = {
     "timesteps_per_episode": TIMESTEPS_PER_EPISODE,
     "total_timesteps": TOTAL_TIMESTEPS,
     "eval_episodes": EVAL_EPISODES,
+    "trading_cost_bps": TRADING_COST_BPS,
 }
 
 print(f"Configuration: {config}")
@@ -110,7 +112,8 @@ print(f"Uncond vol:  {UNCOND_VOL:.4f} ({UNCOND_VOL * 100:.2f}%)")
 # The environment provides:
 # - State: Recent returns and technical features
 # - Actions: Short (-1), Hold (0), Long (+1)
-# - Reward: Position return minus transaction costs
+# - Reward: Position return minus transaction costs, charged at `TRADING_COST_BPS`
+#   basis points per unit of position change
 
 # %% [markdown]
 # ### Return-generating process
@@ -218,7 +221,7 @@ def make_env(seed: int = 42):
     def _init():
         env = SimpleTradingEnv(
             n_steps=config["timesteps_per_episode"],
-            trading_cost_bps=10,
+            trading_cost_bps=config["trading_cost_bps"],
             seed=seed,
         )
         return env
