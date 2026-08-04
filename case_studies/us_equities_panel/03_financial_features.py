@@ -97,10 +97,12 @@ MAX_SYMBOLS = 0
 #
 # The feasibility notebook ([`01_feasibility_analysis`](01_feasibility_analysis.ipynb)) frames **behavioral persistence** as
 # the edge source: momentum and reversal signals exploit slow information
-# diffusion across ~3,200 stocks. The Fundamental Law of Active Management
-# predicts that even weak per-stock signals ($IC \approx 0.02$) can generate
-# meaningful portfolio-level alpha when breadth is large:
-# $IR = IC \cdot \sqrt{BR}$. The features below operationalize this hypothesis.
+# diffusion across ~3,200 stocks. The Fundamental Law of Active Management,
+# $IR = IC \cdot \sqrt{BR}$, is why a weak per-stock signal is worth measuring
+# across a cross-section this wide at all. Section 9 reports its two inputs
+# separately rather than their product, because breadth counts *independent* bets
+# per year and independence is exactly what a panel of correlated names does not
+# give you. The features below operationalize the hypothesis.
 
 # %% [markdown]
 # ## 1. Load Data
@@ -671,8 +673,9 @@ print(f"Saved {n_features} features to {output_path}")
 #   in the IC time series
 # - **BH-FDR**: Benjamini-Hochberg false discovery rate correction for multiple
 #   testing across all features
-# - **Fundamental Law of Active Management**: With ~3,177 stocks, even tiny ICs
-#   compound into significant portfolio-level IR
+# - **Fundamental Law of Active Management**: $IR = IC \cdot \sqrt{BR}$, reported as
+#   its two inputs rather than as a product, because breadth here is an
+#   independence assumption the notebook does not verify
 # - **Pairwise correlation**: Identify redundant feature pairs (|corr| > 0.7)
 
 
@@ -1020,10 +1023,14 @@ if ic_results:
 
 # %% [markdown]
 # **Interpretation**:
-# - Breadth is the point of this panel: $IR = IC \cdot \sqrt{BR}$, so a per-stock
-#   edge far too small to trade on its own becomes a portfolio-level one once it
-#   is applied across thousands of names. The cell above prints that arithmetic
-#   for the typical feature and for the strongest, on the breadth it just used.
+# - Breadth is the point of this panel: $IR = IC \cdot \sqrt{BR}$ is why a per-stock
+#   edge far too small to trade on its own is worth measuring across thousands of
+#   names at all. The cell above runs that arithmetic once, for the typical feature,
+#   and on a breadth that assumes every name and every rebalance is an independent
+#   bet. They are not, the notebook does not estimate the discount, and so the
+#   figure it prints is an upper bound on an upper bound rather than an information
+#   ratio this feature set would earn. No IR is claimed for the strongest feature,
+#   because the largest $|IC|$ among 63 was picked on the sample it is scored on.
 # - The HAC adjustment is modest here, because one-session, non-overlapping returns
 #   leave little IC autocorrelation to correct for - but it is not negligible and it
 #   is not one-directional, and the printed effect gives both the median and the
@@ -1038,14 +1045,17 @@ if ic_results:
 #   clustering recommended before modeling.
 #
 # **Fundamental Law teaching moment**: this is the book's highest-breadth case
-# study, and the arithmetic above is why that matters -- an information
-# coefficient small enough to look like noise on any one stock reaches a
-# respectable information ratio once the square root of the breadth multiplies
-# it. The lesson is that in a wide cross-section, signal *consistency* and cost
-# control decide the outcome rather than signal strength. Note what the same
-# arithmetic says about the panel taken as a whole: its features point in both
-# directions and their signed ICs very nearly cancel, so the breadth is only
-# worth anything to a strategy that has already chosen a direction to bet in.
+# study, and the arithmetic above is where the law's two inputs stop being
+# bookkeeping. Both are easy to overstate and the notebook overstates neither: the
+# breadth it uses assumes independence it has not established, and the skill it
+# uses is the typical feature rather than the best one. What survives is the
+# direction of the effect, not a number -- an $|IC|$ that looks like noise on one
+# stock is worth measuring across a wide cross-section, and there signal
+# *consistency* and cost control decide the outcome rather than signal strength.
+# Note what the same arithmetic says about the panel taken as a whole: its
+# features point in both directions and their signed ICs very nearly cancel, so
+# the breadth is only worth anything to a strategy that has already chosen a
+# direction to bet in.
 
 # %% [markdown]
 # ## Results Collection
