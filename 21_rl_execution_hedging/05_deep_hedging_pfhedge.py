@@ -118,6 +118,7 @@ TRAINING_SEEDS = [42, 314, 2718]
 EVAL_SEED = 999
 VALIDATION_SEED = 777
 WHALLEY_WILMOTT_RISK_AVERSION = 1.0
+QLBS_RISK_AVERSION = 0.5
 HESTON_KAPPA = 1.5
 HESTON_THETA = VOLATILITY**2
 HESTON_SIGMA = 0.35
@@ -149,6 +150,7 @@ config = {
     "eval_seed": EVAL_SEED,
     "validation_seed": VALIDATION_SEED,
     "ww_risk_aversion": WHALLEY_WILMOTT_RISK_AVERSION,
+    "qlbs_risk_aversion": QLBS_RISK_AVERSION,
     "heston_kappa": HESTON_KAPPA,
     "heston_theta": HESTON_THETA,
     "heston_sigma": HESTON_SIGMA,
@@ -329,25 +331,15 @@ def simulate_gbm_paths(
 
 
 # %% [markdown]
-# ### Black-Scholes Delta and Call Payoff
+# ### Call Payoff at Maturity
 #
-# The analytical delta for a European call is the benchmark hedging strategy:
+# The self-financing P&L below settles the short call against its terminal
+# payoff. The analytical delta it is benchmarked against,
 #
 # $$\Delta = \Phi(d_1), \quad d_1 = \frac{\ln(S/K) + \tfrac{1}{2}\sigma^2 T}{\sigma\sqrt{T}}$$
 #
-# where $\Phi$ is the standard normal CDF.
-
-
-# %%
-def black_scholes_delta(S, K, T, sigma):
-    """Black-Scholes delta for a call option."""
-    from scipy.stats import norm
-
-    if T <= 0:
-        return np.where(S > K, 1.0, 0.0)
-
-    d1 = (np.log(S / K) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
-    return norm.cdf(d1)
+# where $\Phi$ is the standard normal CDF, comes from `pfhedge.nn.BlackScholes`
+# in Section 3 rather than a second implementation here.
 
 
 # %%
@@ -656,46 +648,19 @@ else:
 # %% [markdown]
 # ## 4. Compare with Analytical and Value-Based Benchmarks
 #
-# ### Delta Hedging P&L Simulator
+# ### Analytical Baselines on the Sealed Evaluation Paths
 #
-# Simulate the classical delta-neutral strategy: at each rebalancing step,
-# set the hedge ratio to the Black-Scholes delta and pay proportional
-# transaction costs on each trade. All methods below are evaluated on the
-# same simulated paths using the self-financing convention implemented by
-# `pfhedge.nn.functional.pl`.
-
-
-# %%
-def delta_hedging_pnl(
-    prices: np.ndarray,
-    strike: float,
-    volatility: float | np.ndarray,
-    maturity: float,
-    cost_rate: float,
-) -> np.ndarray:
-    """Simulate delta hedging and compute P&L distribution."""
-    n_paths, n_times = prices.shape
-    dt = maturity / (n_times - 1)
-    positions = np.zeros((n_paths, n_times - 1))
-
-    for path_idx in range(n_paths):
-        S = prices[path_idx]
-        for t in range(n_times - 1):
-            sigma = volatility[path_idx, t] if isinstance(volatility, np.ndarray) else volatility
-            positions[path_idx, t] = black_scholes_delta(S[t], strike, maturity - t * dt, sigma)
-
-    return hedging_pnl_from_positions(
-        prices=prices,
-        positions=positions,
-        strike=strike,
-        cost_rate=cost_rate,
-    )
-
+# The Black-Scholes delta and Whalley-Wilmott hedgers built in Section 3 are
+# rolled through the same sealed evaluation option as the deep hedger, and
+# `pfhedge` settles all three with the self-financing convention in
+# `pfhedge.nn.functional.pl`. The rows of the comparison table therefore differ
+# only in the policy that chose the positions, not in how the P&L is accounted.
+# The tabular baseline in Section 8 reproduces that convention in NumPy through
+# `hedging_pnl_from_positions`.
 
 # %%
-# Generate matched evaluation paths
+# The evaluation spot paths, reused by the tabular baseline in Section 8.
 test_prices = eval_option.ul().spot.detach().cpu().numpy() * config["spot"]
-test_volatility = eval_option.ul().volatility.detach().cpu().numpy()
 
 # %%
 # Compute baseline P&L distributions
@@ -1062,7 +1027,7 @@ qlbs_result = qlbs_hedging(
     strike=config["strike"],
     maturity=config["maturity"],
     cost_rate=config["cost_bps"] / 10_000,
-    risk_aversion=0.5,
+    risk_aversion=config["qlbs_risk_aversion"],
 )
 
 print("Q-learning training complete (trained on independent paths).")
