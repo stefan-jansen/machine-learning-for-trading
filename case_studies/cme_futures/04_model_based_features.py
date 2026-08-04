@@ -573,14 +573,23 @@ def fit_hmm_kmeans_init(X: np.ndarray, n_states: int = 2, random_state: int = 42
 
 
 # %% [markdown]
-# Helper: enforce stable state labeling by sorting states on variance.
+# Helper: enforce stable state labeling by sorting states on mean carry.
 
 
 # %%
-def sort_states_by_variance(model: GaussianHMM) -> np.ndarray:
-    """Sort HMM states by variance (ascending) for consistent labeling."""
-    variances = np.array([np.trace(model.covars_[k]) for k in range(model.n_components)])
-    return np.argsort(variances)  # Low vol first
+def sort_states_by_carry(model: GaussianHMM) -> np.ndarray:
+    """Sort HMM states by mean carry (ascending), so state 1 is the high-carry state.
+
+    The emitted feature is called `hmm_carry_regime_prob` and is plotted as
+    P(high-carry), so the ordering has to be on the quantity the name claims. This
+    previously sorted on variance, which is a different statistic that happened to
+    agree: the higher-variance state is the higher-carry one in all five folds
+    (mean carry +0.0085 against -0.0990 in fold 0, and the same sign in folds 1-4).
+    Sorting on the mean makes the label true by construction rather than by luck,
+    and leaves every emitted value unchanged.
+    """
+    means = np.array([float(model.means_[k][0]) for k in range(model.n_components)])
+    return np.argsort(means)  # low-carry first
 
 
 # %% [markdown]
@@ -682,7 +691,7 @@ def _fit_hmm_fold(portfolio_df: pl.DataFrame, split: dict[str, str], fold_idx: i
         print(f"Fold {fold_idx}: HMM fit failed ({exc})")
         return None
 
-    order = sort_states_by_variance(model)
+    order = sort_states_by_carry(model)
 
     # Forward-filter on train+test (causal — no look-ahead)
     X_full = np.vstack([X_train, X_test])
@@ -998,13 +1007,27 @@ else:
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# Portfolio carry with HMM regime for the most recent fold. Folds are
-# time-descending (fold 0 has the latest validation window), so fold 0 gives
-# the most recent train+test span. Inner-join keeps both panels on the same
-# x-range (the fold's own window) rather than trailing the full carry history.
+# Portfolio carry with HMM regime, over the most recent fold's VALIDATION window.
+# Folds are time-descending, so fold 0 is the latest. The window matters: an
+# earlier version drew the fold's whole train+validation span, about 2,300 daily
+# points across 700 pixels, which rendered runs of ~18 days as a picket fence and
+# told the reader the regime flips daily. It does not - state changes occur on
+# 5.0-5.9% of days across the five folds, a mean run of 17-20 days. Drawing the
+# validation window alone gives each run enough pixels to be seen.
 if len(hmm_pl) > 0:
     viz_fold = hmm_pl["fold"].min()
-    hmm_viz = hmm_pl.filter(pl.col("fold") == viz_fold).sort("timestamp")
+    viz_split = next(sp for sp in splits if sp["fold"] == viz_fold)
+    hmm_viz = (
+        hmm_pl.filter(pl.col("fold") == viz_fold)
+        .filter(
+            (pl.col("timestamp") >= _as_date(viz_split["val_start"]))
+            & (pl.col("timestamp") <= _as_date(viz_split["val_end"]))
+        )
+        .sort("timestamp")
+    )
+    _states = (hmm_viz["hmm_carry_regime_prob"] > 0.5).cast(int).to_numpy()
+    _changes = int((np.diff(_states) != 0).sum()) if len(_states) > 1 else 0
+    _mean_run = len(_states) / max(_changes + 1, 1)
     port_viz = portfolio_carry.join(
         hmm_viz.select(["timestamp", "hmm_carry_regime_prob"]), on="timestamp", how="inner"
     ).sort("timestamp")
@@ -1013,7 +1036,10 @@ if len(hmm_pl) > 0:
         rows=2,
         cols=1,
         shared_xaxes=True,
-        subplot_titles=["Portfolio Carry (21d avg)", "HMM Regime Probability"],
+        subplot_titles=[
+            "Portfolio carry, 21-session average",
+            f"P(high-carry state), {_changes} state changes over {len(_states)} sessions",
+        ],
         vertical_spacing=0.1,
     )
 
@@ -1044,7 +1070,7 @@ if len(hmm_pl) > 0:
 
     fig.update_layout(
         height=500,
-        title_text="HMM filtered regime probability tracks portfolio carry (most recent fold)",
+        title_text=(f"Carry regimes persist about {_mean_run:.0f} sessions, not one"),
     )
     fig.update_yaxes(title_text="Carry (annualized, 21d avg)", row=1, col=1)
     fig.update_yaxes(title_text="P(high-carry state)", row=2, col=1)
