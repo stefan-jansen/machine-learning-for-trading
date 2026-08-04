@@ -10,10 +10,18 @@ import polars as pl
 
 SP500_OPTIONS_EXECUTION_UNIVERSES: tuple[str, str] = ("full", "liquid")
 
-ACCEPTED_DEEP_PRODUCERS: dict[str, tuple[str, str]] = {
-    "lstm_h64": ("256627760faa", "159d481af175"),
-    "patchtst": ("b19c49228948", "c592ca4defbb"),
-}
+# The deep configurations this case study's carrier may be resolved from. `09a_lstm` and
+# `09b_patchtst` are what produce them.
+#
+# This used to pin the training and prediction hashes of one production run
+# (lstm_h64 256627760faa/159d481af175, patchtst b19c49228948/c592ca4defbb) and require the
+# registry to hold exactly that pair and nothing else. A content hash is provenance, not a
+# contract: it cannot hold for anyone who retrains, which is every reader and every CI run, and
+# it is why notebooks 09, 11, 12 and 14 could not execute outside the one machine that minted
+# those hashes. What the downstream notebooks actually need is that each required configuration
+# is present and complete, so that is what is checked. A sweep that also trained something else
+# is not a broken sweep.
+REQUIRED_DEEP_PRODUCERS: frozenset[str] = frozenset({"lstm_h64", "patchtst"})
 
 
 def validate_accepted_deep_predictions(prediction_index: pl.DataFrame) -> pl.DataFrame:
@@ -31,10 +39,15 @@ def validate_accepted_deep_predictions(prediction_index: pl.DataFrame) -> pl.Dat
             named=True
         )
     }
-    if observed != ACCEPTED_DEEP_PRODUCERS:
+    incomplete = {
+        name for name, pair in observed.items() if name in REQUIRED_DEEP_PRODUCERS and not all(pair)
+    }
+    missing = REQUIRED_DEEP_PRODUCERS - set(observed)
+    if missing or incomplete:
         raise RuntimeError(
-            "Deep-producer identity mismatch: "
-            f"expected {ACCEPTED_DEEP_PRODUCERS!r}, observed {observed!r}"
+            "Deep producers are missing from the prediction index: "
+            f"missing={sorted(missing)}, incomplete={sorted(incomplete)}; "
+            f"observed {sorted(observed)}. Run 09a_lstm and 09b_patchtst first."
         )
     return prediction_index
 
@@ -59,17 +72,29 @@ def assert_accepted_deep_registry(db_path: Path) -> None:
     observed = {
         config: (training_hash, prediction_hash) for config, training_hash, prediction_hash in rows
     }
-    if observed != ACCEPTED_DEEP_PRODUCERS:
+    missing = REQUIRED_DEEP_PRODUCERS - set(observed)
+    if missing:
         raise RuntimeError(
-            "Registry deep-producer identity mismatch: "
-            f"expected {ACCEPTED_DEEP_PRODUCERS!r}, observed {observed!r}"
+            f"Registry is missing deep producers {sorted(missing)}; it carries "
+            f"{sorted(observed)}. Run 09a_lstm and 09b_patchtst before resolving a carrier."
         )
 
 
 def assert_accepted_deep_baselines(db_path: Path) -> None:
     """Require baseline backtests for both accepted deep predictions."""
     assert_accepted_deep_registry(db_path)
-    prediction_hashes = [pair[1] for pair in ACCEPTED_DEEP_PRODUCERS.values()]
+    with _read_only_registry(db_path) as db:
+        pairs = db.execute(
+            """
+            SELECT t.config_name, p.prediction_hash
+            FROM training_runs t
+            JOIN prediction_sets p ON p.training_hash = t.training_hash
+            WHERE t.family = 'deep_learning' AND p.split = 'validation'
+            """
+        ).fetchall()
+    prediction_hashes = [
+        prediction_hash for config, prediction_hash in pairs if config in REQUIRED_DEEP_PRODUCERS
+    ]
     placeholders = ",".join("?" for _ in prediction_hashes)
     with _read_only_registry(db_path) as db:
         rows = db.execute(

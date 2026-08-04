@@ -32,7 +32,7 @@
 import warnings
 
 from case_studies.sp500_options.backtest_contract import (
-    ACCEPTED_DEEP_PRODUCERS,
+    REQUIRED_DEEP_PRODUCERS,
     validate_accepted_deep_predictions,
 )
 from case_studies.utils.registry import load_prediction_index
@@ -54,10 +54,11 @@ accepted = validate_accepted_deep_predictions(
         family="deep_learning",
     )
 )
-if accepted.height != len(ACCEPTED_DEEP_PRODUCERS):
+resolved = set(accepted["config_name"])
+if not resolved >= REQUIRED_DEEP_PRODUCERS:
     raise RuntimeError(
-        f"Expected {len(ACCEPTED_DEEP_PRODUCERS)} accepted deep predictions, "
-        f"found {accepted.height}"
+        f"Missing deep predictions {sorted(REQUIRED_DEEP_PRODUCERS - resolved)}; "
+        f"the index carries {sorted(resolved)}"
     )
 print(
     accepted.select(

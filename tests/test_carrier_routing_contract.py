@@ -10,7 +10,7 @@ import polars as pl
 import pytest
 
 from case_studies.sp500_options.backtest_contract import (
-    ACCEPTED_DEEP_PRODUCERS,
+    REQUIRED_DEEP_PRODUCERS,
     SP500_OPTIONS_EXECUTION_UNIVERSES,
     assert_accepted_deep_baselines,
     assert_accepted_deep_registry,
@@ -242,7 +242,8 @@ def _accepted_deep_registry(path: Path) -> None:
             );
             """
         )
-        for config_name, (training_hash, prediction_hash) in ACCEPTED_DEEP_PRODUCERS.items():
+        for config_name in sorted(REQUIRED_DEEP_PRODUCERS):
+            training_hash, prediction_hash = f"t_{config_name}", f"p_{config_name}"
             db.execute(
                 "INSERT INTO training_runs VALUES (?, 'deep_learning', ?)",
                 (training_hash, config_name),
@@ -253,7 +254,7 @@ def _accepted_deep_registry(path: Path) -> None:
             )
 
 
-def test_accepted_deep_hashes_are_exact_and_complete(tmp_path: Path) -> None:
+def test_required_deep_producers_must_all_be_present(tmp_path: Path) -> None:
     rows = [
         {
             "family": "deep_learning",
@@ -261,19 +262,44 @@ def test_accepted_deep_hashes_are_exact_and_complete(tmp_path: Path) -> None:
             "training_hash": training_hash,
             "prediction_hash": prediction_hash,
         }
-        for config_name, (training_hash, prediction_hash) in ACCEPTED_DEEP_PRODUCERS.items()
+        for config_name, training_hash, prediction_hash in (
+            (name, f"t_{name}", f"p_{name}") for name in sorted(REQUIRED_DEEP_PRODUCERS)
+        )
     ]
     frame = pl.DataFrame(rows)
     assert validate_accepted_deep_predictions(frame).equals(frame)
 
-    wrong = frame.with_columns(
-        pl.when(pl.col("config_name") == "patchtst")
-        .then(pl.lit("obsolete"))
-        .otherwise(pl.col("prediction_hash"))
-        .alias("prediction_hash")
+    # A retrained cohort keeps the contract: the hashes are provenance, not identity, and a
+    # reader who re-runs 09a and 09b mints new ones. This is what used to fail CI and every
+    # reader, and it is the regression this case guards.
+    retrained = frame.with_columns(
+        (pl.col("prediction_hash") + "_v2").alias("prediction_hash"),
+        (pl.col("training_hash") + "_v2").alias("training_hash"),
     )
-    with pytest.raises(RuntimeError, match="identity mismatch"):
-        validate_accepted_deep_predictions(wrong)
+    assert validate_accepted_deep_predictions(retrained).equals(retrained)
+
+    # A sweep that also trained something else is not a broken sweep.
+    with_extra = pl.concat(
+        [
+            frame,
+            pl.DataFrame(
+                [
+                    {
+                        "family": "deep_learning",
+                        "config_name": "nlinear",
+                        "training_hash": "t_nlinear",
+                        "prediction_hash": "p_nlinear",
+                    }
+                ]
+            ),
+        ]
+    )
+    assert validate_accepted_deep_predictions(with_extra).equals(with_extra)
+
+    # A missing required producer is still a failure, and that is the whole contract.
+    without_patchtst = frame.filter(pl.col("config_name") != "patchtst")
+    with pytest.raises(RuntimeError, match="missing=\\['patchtst'\\]"):
+        validate_accepted_deep_predictions(without_patchtst)
 
     db_path = tmp_path / "registry.db"
     _accepted_deep_registry(db_path)
