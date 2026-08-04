@@ -56,6 +56,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
+import yaml
 from sklearn.linear_model import QuantileRegressor, Ridge
 from sklearn.preprocessing import StandardScaler
 
@@ -100,7 +101,11 @@ NEED_TRAINING = RETRAIN or not RESULTS_PATH.exists()
 # %% tags=[]
 CASE_DIR = get_case_study_dir("etfs")
 FEATURES_PATH = CASE_DIR / "features" / "financial.parquet"
-LABELS_PATH = CASE_DIR / "labels" / "fwd_ret_21d.parquet"
+SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+TARGET_COL = SETUP["labels"]["primary"]
+LABEL_BUFFER = SETUP["labels"]["buffer"]
+LABEL_HORIZON_SESSIONS = int(LABEL_BUFFER.rstrip("Dd"))
+LABELS_PATH = CASE_DIR / "labels" / f"{TARGET_COL}.parquet"
 
 assert FEATURES_PATH.exists(), (
     f"Features not found: {FEATURES_PATH}\nRun the Ch8 ETF features notebook first."
@@ -113,12 +118,10 @@ features_df = pl.read_parquet(FEATURES_PATH)
 labels_df = pl.read_parquet(LABELS_PATH)
 
 # %% tags=[]
-TARGET_COL = "fwd_ret_21d"
 ASSET_COL = "symbol"
 
 # Sessions between a decision date and the resolution of its label. ACI's online
 # feedback is delayed by this many decision dates.
-LABEL_HORIZON_SESSIONS = 21
 
 df = features_df.join(labels_df, on=["timestamp", ASSET_COL], how="inner")
 
@@ -181,7 +184,9 @@ print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 # this notebook with `papermill -p TRAIN_SUBSAMPLE 1.0` to compare.
 
 # %% tags=[]
-splits = generate_cv_splits(df, case_study_id="etfs", label_buffer="21D", date_col="timestamp")
+splits = generate_cv_splits(
+    df, case_study_id="etfs", label_buffer=LABEL_BUFFER, date_col="timestamp"
+)
 
 features_array = df.select(FEATURE_COLS).to_numpy()
 target_array = df[TARGET_COL].to_numpy()
@@ -627,7 +632,7 @@ bars = ax.bar(methods, coverages, color=colors, width=0.5, edgecolor="white")
 ax.axhline(y=0.9, color="gray", linestyle="--", linewidth=1, label="Target (90%)")
 ax.set_ylabel("Actual Coverage")
 ax.set_ylim(0.8, 1.0)
-ax.set_title("(a) Coverage vs Target")
+ax.set_title("(a) All three methods undershoot the target")
 # upper left: the bars top out below the 0.9 target line, so this corner is the only
 # clear space — a legend over a bar is unreadable at either bottom corner
 ax.legend(loc="upper left")
@@ -662,10 +667,10 @@ ax.axhline(y=0.9, color="gray", linestyle="--", linewidth=1)
 ax.set_xlabel("Fold")
 ax.set_ylabel("Coverage")
 ax.set_ylim(0.5, 1.0)
-ax.set_title("(b) Per-Fold Coverage")
+ax.set_title("(b) Coverage holds on average, not fold by fold")
 ax.legend(loc="lower right", fontsize=8)
 
-fig.suptitle("Conformal Prediction Calibration")
+fig.suptitle("Marginal coverage is an average, and no fold is average")
 fig.tight_layout()
 plt.show()
 
@@ -718,7 +723,7 @@ ax.plot([0, 1], [0, 1], ls="--", color="grey", label="Perfect calibration")
 ax.plot(target_levels, mean_emp, "o-", markersize=6, lw=2, label="Split-Conformal")
 ax.set_xlabel("Target Coverage Level")
 ax.set_ylabel("Empirical Coverage")
-ax.set_title("Multi-Level Calibration (Split-Conformal)")
+ax.set_title("Empirical coverage sits just under target at every level")
 ax.legend()
 ax.set_xlim(0, 1)
 ax.set_ylim(0, 1)
@@ -755,7 +760,7 @@ if conformal_results["aci"]["alpha_histories"]:
     ax.axhline(y=0.1, color="gray", linestyle="--", label="Target alpha (0.1)")
     ax.set_xlabel("Decision date (index within fold)")
     ax.set_ylabel("Alpha (miscoverage rate)")
-    ax.set_title("ACI Alpha Adaptation (Most Recent Fold)")
+    ax.set_title("ACI raises alpha all fold long, never settling at target")
     ax.legend()
     fig.tight_layout()
     plt.show()
@@ -786,10 +791,10 @@ for ax, (method, label, color) in zip(
     ax.hist(widths, bins=edges, color=color, alpha=0.7, edgecolor="white")
     ax.axvline(np.mean(widths), color="black", linestyle="--", linewidth=1)
     ax.set_xlabel("Interval Width")
-    ax.set_title(f"{label}\n(mean={np.mean(widths):.4f}, std={np.std(widths):.4f})")
+    ax.set_title(label)
 
 axes[0].set_ylabel("Frequency")
-fig.suptitle("Prediction Interval Width Distributions")
+fig.suptitle("Split-conformal gives one width per fold; CQR and ACI vary per point")
 fig.tight_layout()
 plt.show()
 
@@ -865,7 +870,7 @@ if fold_stats:
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", frameon=False)
 
-    ax1.set_title("Conformal Interval Width Over Time")
+    ax1.set_title("CQR widens with volatility; split-conformal cannot")
     plt.show()
 
 # %% [markdown] tags=[]
@@ -972,7 +977,7 @@ fig, ax = plt.subplots(figsize=(8, 4))
 ax.scatter(cqr_widths * 1e4, position_weight, alpha=0.1, s=5)
 ax.set_xlabel("CQR Interval Width (bps)")
 ax.set_ylabel("Relative Position Weight")
-ax.set_title("Uncertainty-Scaled Position Sizing (CQR)")
+ax.set_title("Position weight falls away as the interval widens")
 ax.axhline(y=1.0, color="gray", linestyle="--", linewidth=1, label="Baseline weight")
 ax.legend()
 fig.tight_layout()
