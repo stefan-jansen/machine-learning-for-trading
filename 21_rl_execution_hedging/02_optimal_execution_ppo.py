@@ -497,9 +497,20 @@ colors = {
 # %% [markdown]
 # The execution-rate band shows the central 80% of episode paths without
 # duplicating its trace construction inside the strategy loop.
+#
+# The fill needs its alpha inside the colour. A trace-level `opacity` does not
+# reach `fillcolor` in Plotly, so setting it there leaves three opaque ribbons
+# stacked in draw order and only the last one visible - which hid both TWAP and
+# Almgren-Chriss behind PPO in the published render of this figure.
 
 
 # %%
+def _translucent(hex_color: str, alpha: float = 0.18) -> str:
+    """Hex colour as an rgba string, so the alpha survives into `fillcolor`."""
+    r, g, b = (int(hex_color.lstrip("#")[i : i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 def add_execution_rate_band(fig, strategy_df: pl.DataFrame, name: str, color: str) -> None:
     """Add the 10th-to-90th-percentile execution-rate ribbon."""
     steps = strategy_df["step"].to_list()
@@ -523,8 +534,7 @@ def add_execution_rate_band(fig, strategy_df: pl.DataFrame, name: str, color: st
             mode="lines",
             line=dict(width=0),
             fill="tonexty",
-            fillcolor=color,
-            opacity=0.12,
+            fillcolor=_translucent(color),
             showlegend=False,
             hoverinfo="skip",
             legendgroup=name,
@@ -584,7 +594,7 @@ for name in colors:
 # Configure layout and display
 fig.update_layout(
     title=(
-        "PPO clears inventory earlier than the Almgren-Chriss schedule"
+        "Both adaptive schedules hold inventory that TWAP clears linearly"
         "<br><sup>Lines are episode means; shaded bands show the 10th to 90th percentile execution rate</sup>"
     ),
     height=700,
