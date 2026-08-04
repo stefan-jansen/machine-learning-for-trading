@@ -94,6 +94,13 @@ ID_COLS = {
 
 # Meta columns that may leak or are composites (not independent features)
 META_LEAK = {
+    # Provenance, not a feature: `cv_label` records which label a stage-04 model-based
+    # feature was fitted against, so it names the target rather than describing the
+    # market. It reaches the frame from features/model_based.parquet, and because it is
+    # a string of label names it fails loudly ("could not convert string to float:
+    # 'fwd_ret_5d'") rather than leaking quietly - but a numeric encoding of the same
+    # column would have leaked.
+    "cv_label",
     "underlying_price",
     "instr_mid",
     "instr_bid",
