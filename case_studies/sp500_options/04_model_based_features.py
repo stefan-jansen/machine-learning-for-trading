@@ -47,7 +47,6 @@
 
 import hashlib
 import logging
-import subprocess
 import warnings
 from datetime import UTC, date, datetime, timedelta
 
@@ -96,7 +95,7 @@ STRATEGY_ID = "sp500_options"
 set_global_seeds(SEED)
 
 # %% [markdown]
-# ## 1. Load Data
+# ## Configuration
 
 # %%
 prices = load_sp500_options_straddles()
@@ -131,6 +130,76 @@ for fold in cv_folds:
 print(f"  Holdout: {holdout_start}..{holdout_end}")
 
 # %% [markdown]
+# ## A. Why a fitted feature is different
+#
+# Every feature in `03_financial_features` is a rule written in advance: a window, a difference, a
+# rank. Nothing in it can leak by being fitted, because nothing in it is fitted. The three columns
+# built here are the opposite - a GJR-GARCH variance recursion and a stochastic-volatility state,
+# both with parameters estimated from data - and that is the whole reason this stage carries a
+# fold contract while stage 03 does not.
+#
+# The rule both models follow is **fit, then filter**: parameters are estimated on the training
+# window of a fold and then held frozen while the recursion or the particle filter runs forward.
+# A parameter re-estimated inside the window it is applied to would read its own future, and no
+# amount of care about the *inputs* would recover it.
+#
+# ## B. The fold contract
+#
+# What the figure below has to show, and what the printed table above cannot: every fitted
+# parameter comes from the left-hand span of its own row, and the span it is then applied to lies
+# entirely to the right of it. The holdout is drawn as a rule. The final row is the holdout pass,
+# where parameters fitted on development data alone are filtered forward over the sealed period -
+# deliberate, because a volatility feature has to be defined there for a later stage to score it,
+# and safe only because nothing from the right of the rule enters the fit.
+
+# %%
+fig, ax = plt.subplots(figsize=(11, 3.2))
+rows = [
+    (
+        f"fold {fold['fold']}",
+        fold["train_start"],
+        fold["train_end"],
+        fold["val_start"],
+        fold["val_end"],
+    )
+    for fold in cv_folds
+]
+# The holdout pass fits on everything up to the day before the seal; section D.1 recomputes
+# this same boundary where it runs the pass.
+holdout_fit_end = (date.fromisoformat(holdout_start) - timedelta(days=1)).isoformat()
+rows.append(("holdout", cv_folds[0]["train_start"], holdout_fit_end, holdout_start, holdout_end))
+for row, (label, tr_start, tr_end, ap_start, ap_end) in enumerate(rows):
+    tr_start, tr_end = pd.Timestamp(tr_start), pd.Timestamp(tr_end)
+    ap_start, ap_end = pd.Timestamp(ap_start), pd.Timestamp(ap_end)
+    ax.barh(
+        row,
+        tr_end - tr_start,
+        left=tr_start,
+        height=0.55,
+        color=COLORS["blue"],
+        label="parameters fitted on" if row == 0 else None,
+    )
+    ax.barh(
+        row,
+        ap_end - ap_start,
+        left=ap_start,
+        height=0.55,
+        color=COLORS["amber"],
+        label="filtered forward over" if row == 0 else None,
+    )
+ax.axvline(pd.Timestamp(holdout_start), color=COLORS["negative"], linestyle="--", linewidth=1.2)
+ax.set_yticks(range(len(rows)))
+ax.set_yticklabels([r[0] for r in rows])
+ax.invert_yaxis()
+ax.legend(loc="lower left", bbox_to_anchor=(0, -0.32), ncol=2, frameon=False, fontsize=8)
+add_message_title(
+    ax,
+    "No parameter is fitted on the span it is then applied to",
+    subtitle=f"Fitted and filtered spans per fold; the rule marks the holdout at {holdout_start}",
+)
+fig.show()
+
+# %% [markdown]
 # ### Prepare Returns
 #
 # GARCH and the particle filter both require adjusted returns scaled by 100 for
@@ -154,10 +223,12 @@ print(
     "all boundary returns omitted before model fitting"
 )
 
+# %% [markdown]
+# Both models read the same per-security return series, so it is loaded once. `sec_id` stays in the
+# key because that is what stops a fitted parameter or a latent state crossing a corporate identity
+# boundary while the displayed ticker is unchanged.
+
 # %%
-# Pre-load per-security return series (used by both GARCH and SV). Keeping
-# `sec_id` in the key prevents any fitted or latent state from crossing a
-# corporate identity boundary even when the displayed ticker is unchanged.
 segment_returns: dict[tuple[str, int], pd.Series] = {}
 for segment in returns_df.partition_by(["symbol", "sec_id"], maintain_order=True):
     symbol = segment["symbol"].item(0)
@@ -172,7 +243,7 @@ print(
 )
 
 # %% [markdown]
-# ## 2. GJR-GARCH Temporal Features
+# ## C. One section per model
 #
 # GJR-GARCH captures the leverage effect: negative returns increase volatility
 # more than positive returns (Glosten, Jagannathan, and Runkle 1993).
@@ -348,7 +419,7 @@ def fit_gjr_garch_symbol(
 
 
 # %% [markdown]
-# ### Process All Symbols Across Folds
+# ### C.1 GJR-GARCH across folds
 #
 # For each fold, GARCH features cover the full date range from training start
 # through validation end. The fixed-parameter filter produces values for every
@@ -409,7 +480,7 @@ for fold in cv_folds:
     print(f"  Fitted: {len(fold_results)} security segments, Skipped: {fold_skip}")
 
 # %% [markdown]
-# ### GARCH Fit Quality
+# ## D. Fit stability across folds
 #
 # Convergence counts reveal whether the feature panel rests on broad coverage or
 # a small, selectively successful subset. The fitted panel retains every
@@ -461,13 +532,54 @@ ax.set_ylim(0, garch_fit_summary["fitted"].max() * 1.25)
 fig.subplots_adjust(top=0.82)
 add_message_title(
     ax,
-    f"{convergence_rate:.1%} of GJR-GARCH fits converge",
-    subtitle="Canonical rolling training windows; successful fits retained",
+    "Almost every security-segment fit converges",
+    subtitle=(
+        f"Canonical rolling training windows; {convergence_rate:.1%} converged, "
+        "successful fits retained"
+    ),
 )
 fig.show()
 
 # %% [markdown]
-# ### Holdout Pass
+# ### F3. Does refitting per fold buy anything?
+#
+# One box per fold over the fitted persistences, $\alpha + \gamma/2 + \beta$. If the boxes sit on
+# top of each other, per-fold refitting bought nothing and a single fit would have served; if they
+# move, the parameter is telling the reader that the volatility regime changed under it. That is
+# the judgement the raw convergence count above cannot support.
+
+# %%
+persistence_by_fold = (
+    pl.DataFrame(garch_diagnostics)
+    .filter(pl.col("converged") & pl.col("persistence").is_not_null() & (pl.col("fold") >= 0))
+    .select("fold", "persistence")
+    .sort("fold")
+)
+fig, ax = plt.subplots()
+fold_ids = sorted(set(persistence_by_fold["fold"].to_list()))
+samples = [
+    persistence_by_fold.filter(pl.col("fold") == fold)["persistence"].to_list() for fold in fold_ids
+]
+ax.boxplot(samples, tick_labels=[f"Fold {fold}" for fold in fold_ids], showfliers=False)
+ax.axhline(1.0, color=COLORS["negative"], linestyle="--", linewidth=1)
+ax.set(xlabel="Walk-forward fold", ylabel=r"Persistence $\alpha + \gamma/2 + \beta$")
+medians = [float(np.median(sample)) for sample in samples if sample]
+spread = max(medians) - min(medians) if medians else 0.0
+_iqr = float(
+    np.median([np.percentile(sample, 75) - np.percentile(sample, 25) for sample in samples])
+)
+add_message_title(
+    ax,
+    "Refitting moves the median far less than securities differ",
+    subtitle=(
+        f"Fitted persistence per converged security-segment; median moves {spread:.3f} across "
+        f"folds against a typical within-fold interquartile range of {_iqr:.3f}"
+    ),
+)
+fig.show()
+
+# %% [markdown]
+# ### D.1 The holdout pass
 #
 # Fit GARCH on all pre-holdout data and generate features from data start
 # through holdout end. The 2017-2020 rows are retrospective transforms under
@@ -552,6 +664,7 @@ if garch_results:
     print(f"  Symbols: {garch_df['symbol'].n_unique()}")
     print(f"  Date range: {garch_df['timestamp'].min()} to {garch_df['timestamp'].max()}")
     print(f"  Mean cond vol: {garch_df['garch_cond_vol'].mean():.4f}")
+
 else:
     garch_df = pl.DataFrame(
         schema={
@@ -565,7 +678,57 @@ else:
     print("WARNING: No GARCH features generated")
 
 # %% [markdown]
-# ## 3. Bayesian Stochastic Volatility
+# ### F2. What the model inferred, over time
+#
+# The filtered conditional volatility for the security with the most complete history, on
+# validation dates only, with the fold boundaries drawn. This is the object the downstream models
+# actually receive - not the illustrative full-sample fit, which would be a different and easier
+# quantity. Where the line steps at a boundary, a new fold's parameters took over.
+
+# %%
+carrier = garch_df.group_by("symbol").len().sort("len", descending=True)["symbol"][0]
+carrier_path = garch_df.filter(pl.col("symbol") == carrier).sort("timestamp")
+fig, ax = plt.subplots(figsize=(11, 3.6))
+ax.plot(
+    carrier_path["timestamp"].to_list(),
+    carrier_path["garch_cond_vol"].to_list(),
+    color=COLORS["blue"],
+    linewidth=1.0,
+)
+for fold in cv_folds:
+    ax.axvline(pd.Timestamp(fold["val_start"]).date(), color=COLORS["neutral"], linewidth=0.8)
+ax.axvline(
+    pd.Timestamp(holdout_start).date(), color=COLORS["negative"], linestyle="--", linewidth=1.2
+)
+ax.set(xlabel="Date", ylabel="Annualized conditional volatility")
+# Measured rather than asserted: the median absolute day-to-day move at a fold boundary against
+# the move on every other day, pooled over every security rather than the one drawn.
+_moves = (
+    garch_df.sort(["symbol", "timestamp"])
+    .with_columns(pl.col("garch_cond_vol").diff().abs().over("symbol").alias("_d"))
+    .drop_nulls("_d")
+)
+_bounds = garch_df.group_by("fold").agg(pl.col("timestamp").min().alias("_s"))["_s"].to_list()
+_at = _moves.filter(pl.col("timestamp").is_in(_bounds))
+_off = _moves.filter(~pl.col("timestamp").is_in(_bounds))
+_off_med = _off["_d"].median()
+_step = (
+    float(_at["_d"].median() / _off_med)
+    if _at.height and _off.height and _off_med
+    else float("nan")
+)
+add_message_title(
+    ax,
+    "Refitting each fold does not move the series; the market does",
+    subtitle=(
+        f"{carrier}; pooled over every security the move at a fold boundary is {_step:.2f}x "
+        "the move on an ordinary day"
+    ),
+)
+fig.show()
+
+# %% [markdown]
+# ### C.2 Bayesian stochastic volatility
 #
 # Stochastic volatility treats log-variance as a latent random walk:
 #
@@ -584,9 +747,9 @@ else:
 #    features for every date, just like GARCH.
 
 # %% [markdown]
-# The calibration universe is selected independently inside each training
-# window. Using full-sample coverage here would let 2021 availability influence
-# the pre-2021 folds even if the MCMC observations themselves were truncated.
+# The calibration universe is selected inside each training window, from the coverage that window
+# can see. That is what keeps a fold's calibration a function of its own training data, and it is
+# a stronger condition than truncating the MCMC observations alone would give.
 
 
 # %%
@@ -1076,7 +1239,7 @@ else:
     print("No SV features generated")
 
 # %% [markdown]
-# ## 4. Combine Temporal Features
+# ## E. Combine and emit
 #
 # Merge GARCH and SV features, compute VRP (IV minus model vol), and prepare
 # two output views:
@@ -1150,7 +1313,7 @@ print(f"\nCombined temporal features: {temporal.shape}")
 print(f"  Feature columns: {feature_cols}")
 
 # %% [markdown]
-# ## 5. Save Outputs
+# ### E.1 Save the outputs
 #
 # Save the full temporal panel (training + validation per fold, plus holdout) with the
 # `fold` column retained. Downstream Ch11+ models join on
@@ -1166,7 +1329,7 @@ print(f"  Folds: {sorted(temporal['fold'].unique().to_list())}")
 print(f"  Columns: {temporal.columns}")
 
 # %% [markdown]
-# ## 6. Summary Statistics
+# ### E.2 Summary statistics
 
 # %%
 print("\n" + "=" * 60)
@@ -1195,7 +1358,7 @@ for feat in feature_cols:
         print(f"  {feat}: all null")
 
 # %% [markdown]
-# ## 7. Incremental Evaluation
+# ## F. Incremental evaluation
 #
 # Sanity check: do temporal features predict hold-to-expiry straddle returns?
 # We compute per-feature cross-sectional IC on validation dates only. The
@@ -1388,108 +1551,6 @@ n_temporal_discoveries_fdr05, temporal_ic_payload = evaluate_incremental_tempora
     eval_data, feature_cols, label_col
 )
 incremental_block.update(temporal_ic_payload)
-
-# %% [markdown]
-# ## 8. Results Collection
-
-
-# %%
-def _git_commit_hash():
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], text=True, timeout=5
-        ).strip()
-    except Exception:
-        return "unknown"
-
-
-# %%
-n_temporal_features = len(feature_cols)
-n_garch_attempted_fits = len(garch_diagnostics)
-n_garch_failed_fits = sum(not diagnostic["converged"] for diagnostic in garch_diagnostics)
-n_garch_error_fits = sum(diagnostic["error_type"] is not None for diagnostic in garch_diagnostics)
-techniques = ["GJR-GARCH(1,1) conditional volatility"]
-if sv_df.height > 0:
-    techniques.append("Bayesian SV (particle-filtered, equal-segment pooled sigma_eta)")
-
-
-# %%
-result_summary = {
-    "n_observations_eval": len(temporal_eval),
-    "n_observations_full": len(temporal),
-    "n_temporal_features": n_temporal_features,
-    "n_temporal_discoveries_fdr05": n_temporal_discoveries_fdr05,
-    "n_label_endpoint_purged_rows": n_endpoint_purged_rows,
-    "n_symbols": temporal["symbol"].n_unique(),
-    "date_range": [str(temporal["timestamp"].min()), str(temporal["timestamp"].max())],
-    "feature_columns": feature_cols,
-}
-
-
-# %%
-result_techniques = {
-    "garch": "GJR-GARCH(1,1) per security segment, walk-forward fit-then-filter",
-    "sv": "Bayesian SV: pooled sigma_eta (MCMC) + bootstrap particle filter",
-    "sv_pool_estimator": "equal-weight mean of accepted security-segment posterior means",
-    "seed_contract": "BLAKE2s-32 of base seed, model namespace, symbol, and sec_id",
-    "sv_pool_size": SV_POOL_SIZE,
-    "sv_n_particles": SV_N_PARTICLES,
-    "architecture": "fit-then-filter: retrospective training and PIT evaluation features",
-    "inference": "HAC p-values with Benjamini-Hochberg FDR across temporal features",
-    "hac_max_lags": LABEL_HORIZON_TRADING_DAYS - 1,
-}
-
-
-# %%
-result_diagnostics = {
-    "garch_attempted_fits": n_garch_attempted_fits,
-    "garch_failed_fits": n_garch_failed_fits,
-    "garch_error_fits": n_garch_error_fits,
-    "garch_mean_vol": float(temporal_eval["garch_cond_vol"].mean())
-    if "garch_cond_vol" in temporal_eval.columns
-    and temporal_eval["garch_cond_vol"].null_count() < len(temporal_eval)
-    else None,
-    "garch_vrp_mean": float(temporal_eval["garch_vrp"].mean())
-    if "garch_vrp" in temporal_eval.columns
-    and temporal_eval["garch_vrp"].null_count() < len(temporal_eval)
-    else None,
-}
-
-
-# %%
-key_findings = [
-    f"Temporal features: {n_temporal_features} features, "
-    f"{len(temporal_eval):,} eval rows, {len(temporal):,} full rows",
-    f"Techniques: {', '.join(techniques)}",
-    f"BH-FDR discoveries: {n_temporal_discoveries_fdr05} of "
-    f"{incremental_block['n_temporal_features_tested']} temporal features at q < 0.05",
-    f"Label-endpoint seal removes {n_endpoint_purged_rows:,} validation rows; "
-    f"latest retained endpoint {max_retained_label_endpoint}",
-    "Both models produce retrospective training and PIT validation features",
-    "GARCH VRP (IV minus GARCH vol) provides forward-looking VRP estimate",
-]
-if sv_df.height > 0:
-    key_findings.append(
-        f"SV particle-filtered on all {sv_df['symbol'].n_unique()} symbols "
-        f"(calibrated from {SV_POOL_SIZE}-symbol pool)"
-    )
-
-
-# %%
-results = {
-    "case_study_id": STRATEGY_ID,
-    "chapter": 9,
-    "stage": "temporal",
-    "timestamp": datetime.now(UTC).isoformat(),
-    "git_commit": _git_commit_hash(),
-    "notebook": f"case_studies/{STRATEGY_ID}/04_model_based_features.py",
-    "summary": result_summary,
-    "techniques": result_techniques,
-    "diagnostics": result_diagnostics,
-    "key_findings": key_findings,
-}
-results["incremental_evaluation"] = incremental_block
-
 
 # %% [markdown]
 # ## Key Takeaways
