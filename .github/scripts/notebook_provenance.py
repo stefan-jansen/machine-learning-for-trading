@@ -54,6 +54,16 @@ Notebooks WITHOUT a stamp are reported as "unverified" but do not fail unless
 as they are re-run through the canonical path, and the gate enforces only where
 provenance exists. Flip to ``--strict`` once the backfill is complete.
 
+SCOPE. ``check`` takes the paths it should judge, and the pre-commit hook passes
+the staged ones. It used to take none and walk the whole repository on every
+commit, which meant any stale pair anywhere blocked every commit in that
+worktree: on 2026-08-04 ``public-ch11-12`` held nine stale notebooks, so a
+one-word fix to a chapter 11 markdown cell could not be committed until nine
+unrelated notebooks had been re-run. The gate's purpose is to stop a stale
+notebook being *committed*, and that only ever needed the commit's own files.
+``--all`` keeps the repository-wide sweep for CI, which is where a whole-tree
+answer is the thing being asked for.
+
 Usage::
 
     uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --production
@@ -317,13 +327,40 @@ def stamp_notebook(
     return stamp
 
 
-def check_all(strict: bool = False) -> tuple[list[str], list[str], list[str], list[str]]:
+def selected_notebooks(paths: list[str]) -> list[Path]:
+    """The notebooks these paths ask about: each ``.ipynb``, and each ``.py``'s pair.
+
+    A ``.py`` is included because editing it is exactly what makes its notebook
+    stale, so a commit that stages only the ``.py`` is the case the gate exists
+    to catch.
+    """
+    out: set[Path] = set()
+    for raw in paths:
+        p = (REPO_ROOT / raw).resolve()
+        if SKIP_PARTS & set(p.parts):
+            continue
+        if p.suffix == ".ipynb":
+            candidate = p
+        elif p.suffix == ".py":
+            candidate = p.with_suffix(".ipynb")
+        else:
+            continue
+        if candidate.name.startswith("_executed_") or candidate.name.startswith("_lock_"):
+            continue
+        if candidate.exists():
+            out.add(candidate)
+    return sorted(out)
+
+
+def check_all(
+    strict: bool = False, notebooks: list[Path] | None = None
+) -> tuple[list[str], list[str], list[str], list[str]]:
     """Return (stale, testmode, contradicted, unverified) repo-relative offenders."""
     stale: list[str] = []
     testmode: list[str] = []
     contradicted: list[str] = []
     unverified: list[str] = []
-    for nb_path in iter_notebooks():
+    for nb_path in iter_notebooks() if notebooks is None else notebooks:
         rel = str(nb_path.relative_to(REPO_ROOT))
         py = paired_py(nb_path)
         if py is None:
@@ -367,7 +404,13 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
-    stale, testmode, contradicted, unverified = check_all(strict=args.strict)
+    if args.all:
+        notebooks = None
+    else:
+        notebooks = selected_notebooks(args.paths)
+        if not notebooks:
+            return 0
+    stale, testmode, contradicted, unverified = check_all(strict=args.strict, notebooks=notebooks)
     fail = bool(stale or testmode or contradicted) or (args.strict and bool(unverified))
     if stale:
         print(
@@ -428,6 +471,10 @@ def main() -> int:
 
     cp = sub.add_parser("check", help="gate: fail on stale or test-mode stamped notebooks")
     cp.add_argument("--strict", action="store_true", help="also fail on unstamped notebooks")
+    cp.add_argument(
+        "--all", action="store_true", help="judge every notebook in the repo, not just PATHS"
+    )
+    cp.add_argument("paths", nargs="*", help="notebooks and/or paired .py files to judge")
     cp.set_defaults(func=_cmd_check)
 
     args = ap.parse_args()
