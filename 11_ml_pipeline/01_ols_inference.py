@@ -60,6 +60,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import statsmodels.api as sm
+import yaml
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 from sklearn.preprocessing import StandardScaler
 from statsmodels.stats.diagnostic import het_breuschpagan
@@ -90,8 +91,16 @@ set_global_seeds(SEED)
 # %%
 CASE_DIR = get_case_study_dir("etfs")
 
+# The label and its horizon are declared once, in the case study's own config. Typing
+# "21" here as well is a second copy of a value the folds and the overlap corrections
+# below all read, and the two drift apart the first time either is edited.
+SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+TARGET_COL = SETUP["labels"]["primary"]
+LABEL_BUFFER = SETUP["labels"]["buffer"]
+LABEL_HORIZON_DAYS = int(LABEL_BUFFER.rstrip("Dd"))  # sets every overlap correction below
+
 FEATURES_PATH = CASE_DIR / "features" / "financial.parquet"
-LABELS_PATH = CASE_DIR / "labels" / "fwd_ret_21d.parquet"
+LABELS_PATH = CASE_DIR / "labels" / f"{TARGET_COL}.parquet"
 
 assert FEATURES_PATH.exists(), f"Features not found: {FEATURES_PATH}\nRun Ch8 ETF features first."
 assert LABELS_PATH.exists(), f"Labels not found: {LABELS_PATH}\nRun Ch7 ETF labels first."
@@ -100,9 +109,7 @@ features_df = pl.read_parquet(FEATURES_PATH).with_columns(pl.col("timestamp").ca
 labels_df = pl.read_parquet(LABELS_PATH).with_columns(pl.col("timestamp").cast(pl.Date))
 
 # %%
-TARGET_COL = "fwd_ret_21d"
 ASSET_COL = "symbol"
-LABEL_HORIZON_DAYS = 21  # the forward window in TARGET_COL; sets every overlap correction below
 
 df = features_df.join(labels_df, on=["timestamp", ASSET_COL], how="inner")
 
@@ -165,7 +172,9 @@ print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 # the validation set for a prediction comparison at the end.
 
 # %%
-splits = generate_cv_splits(df, case_study_id="etfs", label_buffer="21D", date_col="timestamp")
+splits = generate_cv_splits(
+    df, case_study_id="etfs", label_buffer=LABEL_BUFFER, date_col="timestamp"
+)
 
 s = splits[0]
 tr_start = np.datetime64(s["train_start"])
