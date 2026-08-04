@@ -148,12 +148,18 @@ print(f"Cross-validation buffer {LABEL_BUFFER}; holdout opens {HOLDOUT_START}")
 # names rather than judged in isolation, and the strategy that consumes it sells the names
 # it ranks highest.
 #
-# The decision cadence comes from `setup.yaml`: a Friday close is observed and the position
-# is opened at the next session's open, on a straddle written about a month out. That fixes
-# the primary label's outcome: the position is carried to expiration and settles into cash
-# at whatever the underlying is worth that day. Labels are sampled every session rather than
-# only on Fridays - that buys five times the rows at the price of overlapping trades, and
-# Section F measures what they are worth.
+# The decision cadence comes from `setup.yaml`: a session's close is observed and the
+# position is opened at the next session's close, on a straddle written about a month out.
+# The close is the only price available. AlgoSeek's option chain carries one end-of-session
+# observation per contract per day - `LastBidPrice`, `LastAskPrice`, `LastMidPrice` and the
+# matching underlying mid - and no open, high or low, so both the signal and the fill are
+# quoted at a close and entry is priced at the mid of the next session's quote. A signal
+# formed at one close and filled at the next is one session late against the 16 to 24
+# sessions the position is then held for, and Section D reports that exposure window with
+# the entry session already excluded from it. Carrying the position to expiration fixes the
+# primary label's outcome: it settles into cash at whatever the underlying is worth that
+# day. Labels are sampled every session rather than only on Fridays - that buys five times
+# the rows at the price of overlapping trades, and Section F measures what they are worth.
 
 # %% [markdown]
 # ## B. Preparation before the label

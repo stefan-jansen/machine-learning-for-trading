@@ -12,7 +12,11 @@ universe:
 decision:
   entry_cadence: weekly_friday
   entry_time: friday_close
-  execution_delay: monday_open
+  # The AlgoSeek option chain is one end-of-session quote per contract per day
+  # (LastBidPrice / LastAskPrice / LastMidPrice); it carries no open, high or low.
+  # Every fill in this case study is therefore priced at a close, one session after
+  # the signal. Declarative metadata: no code reads this key.
+  execution_delay: next_session_close
   holding_period_days: 10
   exit_time: 10_days_after_entry_or_expiry
   hedge_cadence: daily_close
