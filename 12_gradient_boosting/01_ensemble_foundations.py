@@ -307,11 +307,20 @@ plt.show()
 
 # %% [markdown]
 # **Interpretation**: All three GBM libraries outperform the Random Forest baseline
-# (test IC 0.058-0.060 vs 0.056), confirming that sequential error correction adds
-# value beyond variance reduction alone. The 0.004 IC gap between the best GBM and
-# RF is modest but consistent across validation and test. The gap between GBM
-# variants (0.002) is even smaller — consistent with §12.2's observation that
-# hyperparameter quality matters more than library choice.
+# on test IC, confirming that sequential error correction adds value beyond variance
+# reduction alone. The IC gap between the best GBM and RF is modest but consistent
+# across validation and test, and the gap between GBM variants is smaller still —
+# consistent with §12.2's observation that hyperparameter quality matters more than
+# library choice.
+#
+# The right-hand panel is the reason that claim is stated about IC and not about
+# accuracy in general. On out-of-sample $R^2$ the ranking does not survive: CatBoost
+# edges the Random Forest, and XGBoost and LightGBM both fall below it — LightGBM
+# ranks first on IC and last on $R^2$. The two metrics ask different questions. IC
+# scores the cross-sectional *ranking*, which is what a long-short book trades; $R^2$
+# scores the level of each prediction, which it does not. A model can order names well
+# while mis-sizing every one of them, and here three of them do. Where the two
+# disagree, this book follows the one the strategy actually consumes.
 
 # %% [markdown]
 # ## 5. Feature Importance
