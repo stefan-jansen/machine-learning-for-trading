@@ -619,50 +619,70 @@ display(
 # alone.
 
 # %%
+# A log-log slope needs a cross-section to be a slope. Four positive coefficients is the floor
+# below which the fit and its interval mean nothing, so below it the fit is not computed and the
+# three places that would have quoted it say so instead. On the full universe this never binds;
+# on a reduced sample - a partial data subscription, or the CI fixture, which carries six symbols
+# - it does, and a reader is better served by the shortfall than by a regression through noise.
+MIN_CROSS_SECTION = 4
 lambda_cross = lambda_df.filter(pl.col("lambda_participation") > 0).to_pandas()
-if len(lambda_cross) < 4:
-    raise ValueError("Too few positive normalized coefficients for cross-sectional inference.")
+cross_section_resolved = len(lambda_cross) >= MIN_CROSS_SECTION
+cross_section_note = (
+    f"{len(lambda_cross)} of {len(lambda_df)} symbols have a positive normalized coefficient; "
+    f"{MIN_CROSS_SECTION} are needed for a log-log cross-sectional slope"
+)
 
 log_adv = np.log10(lambda_cross["adv_usd"].to_numpy())
 log_lambda = np.log10(lambda_cross["lambda_participation"].to_numpy())
-coefficients, covariance = np.polyfit(log_adv, log_lambda, 1, cov=True)
-slope, intercept = coefficients
-slope_se = float(np.sqrt(covariance[0, 0]))
-slope_low, slope_high = slope - 1.96 * slope_se, slope + 1.96 * slope_se
-fitted = intercept + slope * log_adv
-r_squared_cross = 1 - np.sum((log_lambda - fitted) ** 2) / np.sum(
-    (log_lambda - log_lambda.mean()) ** 2
-)
+if cross_section_resolved:
+    coefficients, covariance = np.polyfit(log_adv, log_lambda, 1, cov=True)
+    slope, intercept = coefficients
+    slope_se = float(np.sqrt(covariance[0, 0]))
+    slope_low, slope_high = slope - 1.96 * slope_se, slope + 1.96 * slope_se
+    fitted = intercept + slope * log_adv
+    r_squared_cross = 1 - np.sum((log_lambda - fitted) ** 2) / np.sum(
+        (log_lambda - log_lambda.mean()) ** 2
+    )
+    print(f"Cross-sectional slope {slope:.3f}, 95% CI [{slope_low:.3f}, {slope_high:.3f}]")
+else:
+    print(f"Cross-sectional slope not resolved: {cross_section_note}")
 
 # %%
 fig, ax = plt.subplots(figsize=(10, 6))
 ax.scatter(log_adv, log_lambda, color=COLORS["blue"], alpha=0.65, s=30)
-x_line = np.linspace(log_adv.min(), log_adv.max(), 100)
-ax.plot(x_line, intercept + slope * x_line, color=COLORS["amber"], linestyle="--")
 ax.set_xlabel("log10(Average Daily Dollar Turnover)")
 ax.set_ylabel("log10(Return bps per Signed-Participation bp)")
-if slope_low <= 0 <= slope_high:
-    slope_message = "Normalized flow does not resolve a liquidity gradient"
+if cross_section_resolved:
+    x_line = np.linspace(log_adv.min(), log_adv.max(), 100)
+    ax.plot(x_line, intercept + slope * x_line, color=COLORS["amber"], linestyle="--")
+    if slope_low <= 0 <= slope_high:
+        slope_message = "Normalized flow does not resolve a liquidity gradient"
+    else:
+        direction = "falls" if slope < 0 else "rises"
+        slope_message = f"Normalized flow association {direction} with dollar liquidity"
+    subtitle = f"Log-log OLS slope {slope:.2f}, 95% CI [{slope_low:.2f}, {slope_high:.2f}]"
 else:
-    direction = "falls" if slope < 0 else "rises"
-    slope_message = f"Normalized flow association {direction} with dollar liquidity"
-add_message_title(
-    ax,
-    slope_message,
-    subtitle=f"Log-log OLS slope {slope:.2f}, 95% CI [{slope_low:.2f}, {slope_high:.2f}]",
-)
+    slope_message = "This sample is too thin to resolve a liquidity gradient"
+    subtitle = cross_section_note
+add_message_title(ax, slope_message, subtitle=subtitle)
 fig.show()
 
 # %%
-interval_reading = "excludes zero" if slope_low * slope_high > 0 else "includes zero"
-display(
-    Markdown(
+if cross_section_resolved:
+    interval_reading = "excludes zero" if slope_low * slope_high > 0 else "includes zero"
+    cross_section_reading = (
         f"**Cross-sectional reading:** The slope is {slope:.2f} with a 95% interval from "
         f"{slope_low:.2f} to {slope_high:.2f}; the interval {interval_reading}. The regression "
         f"R-squared is {r_squared_cross:.3f}. This is descriptive evidence for the selected "
         "late-2021 sample, not a universal liquidity law."
     )
-)
+else:
+    cross_section_reading = (
+        f"**Cross-sectional reading:** not available on this sample - {cross_section_note}. "
+        "The scatter above is still the evidence the fit would have used; what is missing is "
+        "enough of it to estimate a slope whose interval means anything."
+    )
+display(Markdown(cross_section_reading))
 
 # %% [markdown]
 # ## 4. A Representative Symbol
@@ -1126,11 +1146,20 @@ display(
                 f"for {low_scenario['market']} to {high_scenario['impact_1pct_bps']:.2f} bps "
                 f"for {high_scenario['market']}, using stated literature eta assumptions.",
                 "",
-                "2. **Normalized signed-flow estimates support a descriptive liquidity "
-                "comparison.** The cross-sectional log slope is "
-                f"{slope:.2f} with a 95% interval from {slope_low:.2f} to "
-                f"{slope_high:.2f}; same-minute returns and tick-rule signs do not "
-                "identify causal permanent impact.",
+                (
+                    "2. **Normalized signed-flow estimates support a descriptive liquidity "
+                    "comparison.** The cross-sectional log slope is "
+                    f"{slope:.2f} with a 95% interval from {slope_low:.2f} to "
+                    f"{slope_high:.2f}; same-minute returns and tick-rule signs do not "
+                    "identify causal permanent impact."
+                )
+                if cross_section_resolved
+                else (
+                    "2. **The cross-sectional comparison is not available on this sample.** "
+                    f"{cross_section_note}, so no slope is reported. Same-minute returns and "
+                    "tick-rule signs would not have identified causal permanent impact in any "
+                    "case."
+                ),
                 "",
                 "3. **Regular-session activity is concentrated near the boundaries.** "
                 f"The first and final 30 minutes contain {boundary_share:.1%} of the "
