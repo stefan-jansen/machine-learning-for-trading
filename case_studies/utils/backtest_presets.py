@@ -16,8 +16,14 @@ except (ImportError, ModuleNotFoundError):  # pragma: no cover - import depends 
     EngineBacktestConfig = None
 
 
+# The token names the bar a signal is filled on, not the price within it. Every
+# entry here that maps to "next_bar" fills on the bar after the decision bar; which
+# price that is belongs to the dataset. `NEXT_SESSION_CLOSE` is `sp500_options`,
+# whose AlgoSeek option chain carries one end-of-session quote per contract per day
+# and no open, so the next bar's only price is its close.
 _EXECUTION_MODE_BY_DELAY = {
     "NEXT_BAR_OPEN": "next_bar",
+    "NEXT_SESSION_CLOSE": "next_bar",
     "MONDAY_OPEN": "next_bar",
     "1_BAR": "next_bar",
     "AT_FUNDING_TIMESTAMP": "same_bar",
