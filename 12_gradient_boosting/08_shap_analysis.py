@@ -102,8 +102,6 @@ OUTPUT_DIR = get_output_dir(12, "shap_analysis")
 
 # %%
 set_global_seeds(SEED)
-# %%
-
 # %% [markdown]
 # ## 2. Load Data
 
@@ -317,7 +315,7 @@ scatter = ax.scatter(
 )
 ax.set_xlabel(top_feat)
 ax.set_ylabel("SHAP Value")
-ax.set_title(f"SHAP Dependence: {top_feat}")
+ax.set_title("Spread at one feature level exceeds the trend across levels")
 plt.colorbar(scatter, ax=ax, label=second_feat)
 fig.subplots_adjust(left=0.12, right=0.92, top=0.9, bottom=0.12)
 plt.show()
@@ -355,7 +353,7 @@ ax.set_xticks(range(TOP_N))
 ax.set_xticklabels(top_feature_names, rotation=45, ha="right", fontsize=9)
 ax.set_yticks(range(TOP_N))
 ax.set_yticklabels(top_feature_names, fontsize=9)
-ax.set_title(f"SHAP Feature Interactions (Top {TOP_N})")
+ax.set_title("Interaction strength sits almost entirely on the diagonal")
 plt.colorbar(im, ax=ax, label="Mean |Interaction|", shrink=0.8)
 fig.subplots_adjust(left=0.18, right=0.9, top=0.9, bottom=0.2)
 plt.show()
