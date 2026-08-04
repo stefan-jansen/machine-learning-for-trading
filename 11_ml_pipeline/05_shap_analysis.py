@@ -65,6 +65,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import shap
+import yaml
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
@@ -97,7 +98,10 @@ set_global_seeds(SEED)
 # %% tags=[]
 CASE_DIR = get_case_study_dir("etfs")
 FEATURES_PATH = CASE_DIR / "features" / "financial.parquet"
-LABELS_PATH = CASE_DIR / "labels" / "fwd_ret_21d.parquet"
+SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+TARGET_COL = SETUP["labels"]["primary"]
+LABEL_BUFFER = SETUP["labels"]["buffer"]
+LABELS_PATH = CASE_DIR / "labels" / f"{TARGET_COL}.parquet"
 
 assert FEATURES_PATH.exists(), (
     f"Features not found: {FEATURES_PATH}\nRun the Ch8 ETF features notebook first."
@@ -110,7 +114,6 @@ features_df = pl.read_parquet(FEATURES_PATH).with_columns(pl.col("timestamp").ca
 labels_df = pl.read_parquet(LABELS_PATH).with_columns(pl.col("timestamp").cast(pl.Date))
 
 # %% tags=[]
-TARGET_COL = "fwd_ret_21d"
 ASSET_COL = "symbol"
 
 df = features_df.join(labels_df, on=["timestamp", ASSET_COL], how="inner")
@@ -154,7 +157,9 @@ print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 # out-of-sample evaluation.
 
 # %% tags=[]
-splits = generate_cv_splits(df, case_study_id="etfs", label_buffer="21D", date_col="timestamp")
+splits = generate_cv_splits(
+    df, case_study_id="etfs", label_buffer=LABEL_BUFFER, date_col="timestamp"
+)
 
 features_array = df.select(FEATURE_COLS).to_numpy()
 target_array = df[TARGET_COL].to_numpy()
@@ -540,7 +545,7 @@ shap.plots.scatter(
     show=False,
 )
 ax = plt.gca()
-ax.set_title(f"SHAP Dependence: {dep_feature} (color: {color_feature})")
+ax.set_title("SHAP attribution varies with the feature's own level")
 plt.show()
 
 # %% [markdown] tags=[]
@@ -703,7 +708,7 @@ ax.barh(x - width / 2, wrong_vals, width, label="Wrong (incorrect)", alpha=0.8)
 ax.set_yticks(x)
 ax.set_yticklabels(top_features, fontsize=9)
 ax.set_xlabel("Mean |SHAP value|")
-ax.set_title("Feature Importance: Right vs Wrong High-Magnitude Predictions")
+ax.set_title("Right and wrong predictions lean on the same features")
 ax.legend(loc="lower right")
 ax.invert_yaxis()
 plt.show()
@@ -855,7 +860,7 @@ if fold_importance is not None:
 
     ax.set_xlabel("Fold")
     ax.set_ylabel("Mean |SHAP value| on test fold")
-    ax.set_title("SHAP Feature Importance Stability Across Folds")
+    ax.set_title("SHAP importance is not stable: the top features change by fold")
     ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
     ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
     plt.show()
@@ -933,7 +938,7 @@ ax.set_yticks(ypos)
 ax.set_yticklabels(top_boot)
 ax.invert_yaxis()
 ax.set_xlabel("Mean |SHAP value| (with 95% bootstrap CI)")
-ax.set_title("Within-Fold Bootstrap Confidence Bands on Top-10 Features")
+ax.set_title("Bootstrap bands within a fold are far tighter than across folds")
 plt.show()
 
 # %% [markdown] tags=[]
