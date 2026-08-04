@@ -316,7 +316,10 @@ features:
       role: signal
       hypothesis: The strategy sells some straddles and not others, so only relative standing within the date can drive it
       inputs: the level features named in features.ranked
-      lookback: 252
+      # The percentile is a within-date operation and adds no lookback of its own, so this is the
+      # longest window any of its four ranked sources reads: vrp_21d and iv_rv_ratio both read
+      # rv_21d, and iv_atm and instr_rel_spread are contemporaneous.
+      lookback: 21
       lag: 0
       frame: every symbol quoted on the decision date
       representation: percentile in (0, 100)

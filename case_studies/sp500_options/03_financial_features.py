@@ -47,6 +47,7 @@
 # %%
 """S&P 500 Options: Feature Engineering."""
 
+import math
 import warnings
 from datetime import date
 
@@ -206,10 +207,17 @@ def attach_security_identity(straddle_df: pl.DataFrame, prices_df: pl.DataFrame)
 # %% [markdown]
 # ### B.1 The session grid, and why every window is counted on it
 #
-# The straddle panel is sparse. Reindexing it onto the sessions the underlying traded is the single
+# The straddle panel is sparse. Reindexing it onto the market's own session calendar is the single
 # structural decision in this notebook: on the grid below, `shift(5)` means five sessions and
 # `rolling(252)` means 252 sessions, for every symbol, whatever its quoting history. On the
 # straddle rows themselves it does not - the census printed here is what that costs.
+#
+# The grid is the **market calendar**, not each security's own observed rows. The two differ on
+# only a handful of rows here, but they differ in the direction that matters: a security absent
+# from its own series for a stretch - a halt, or a ticker that resumes after a corporate action -
+# has consecutive rows that are not consecutive sessions, which is exactly the hole this section
+# exists to close. Building the span from the calendar and left-joining the security onto it makes
+# the absence explicit, so a return across it is null rather than silently spanning the gap.
 
 # %%
 STRADDLE_COLUMNS = [
@@ -235,8 +243,22 @@ STRADDLE_COLUMNS = [
 quotes = attach_security_identity(straddles, underlying).select(
     ["timestamp", *SEGMENT, *STRADDLE_COLUMNS]
 )
+
+# %%
+CALENDAR = underlying.select("timestamp").unique().sort("timestamp")
+grid = (
+    underlying.group_by(SEGMENT)
+    .agg(pl.col("timestamp").min().alias("_first"), pl.col("timestamp").max().alias("_last"))
+    .join(CALENDAR, how="cross")
+    .filter(pl.col("timestamp").is_between(pl.col("_first"), pl.col("_last")))
+    .select(["timestamp", *SEGMENT])
+)
 panel = (
-    underlying.select(["timestamp", *SEGMENT, "close", "adj_factor", "volume"])
+    grid.join(
+        underlying.select(["timestamp", *SEGMENT, "close", "adj_factor", "volume"]),
+        on=["timestamp", *SEGMENT],
+        how="left",
+    )
     .join(quotes, on=["timestamp", *SEGMENT], how="left")
     .sort([*SEGMENT, "timestamp"])
 )
@@ -392,8 +414,12 @@ def premium_features(df: pl.DataFrame) -> pl.DataFrame:
 
 # %%
 def min_observations(window: int) -> int:
-    """Quoted sessions a window must hold before it produces a value."""
-    return max(2, round(window * MIN_OBS))
+    """Quoted sessions a window must hold before it produces a value.
+
+    Rounded **up**: the configured fraction is a floor, and rounding to nearest would accept
+    a window below it - 63 sessions at 80% is 50.4, and 50 of 63 is 79.4%.
+    """
+    return max(2, math.ceil(window * MIN_OBS))
 
 
 def session_zscore(column: str, window: int) -> pl.Expr:
@@ -604,9 +630,9 @@ register_frame(FAMILIES, FEATURE_COLUMNS).select(["family", "columns", "role", "
 
 # %% [markdown] tags=["results"]
 # The matrix carries **47 features** on **354,265 rows** across **620 symbols**, from
-# **2017-02-02** to **2021-12-31**. The session grid it was built on held **635,703** rows;
-# **281,438** of them were either unquoted or inside the null policy's warmup. Past the warmup
-# boundary at **2018-01-03** the thinnest family in any month is **0.500** covered, which is
+# **2017-02-02** to **2021-12-31**. The session grid it was built on held **635,727** rows;
+# **281,462** of them were either unquoted or inside the null policy's warmup. Past the warmup
+# boundary at **2018-01-03** the thinnest family in any month is **0.494** covered, which is
 # surface dynamics in **April 2020**: a 252-session window needs 202 of those sessions quoted, and
 # the universe churned hard enough that spring to leave half of them short.
 
@@ -648,8 +674,8 @@ plot_coverage_through_time(
         "state runs near 0.97. The variance-risk-premium family runs near 0.90 and surface "
         "dynamics is the lowest line throughout, rising from about 0.6 in 2017 to about 0.8 by "
         "2019. All three of the lines that move dip sharply in April 2020, surface dynamics "
-        "furthest, to 0.5, and all three recover over the following year without regaining their "
-        "2019 level."
+        "furthest, to 0.49, and all three recover over the following year without regaining "
+        "their 2019 level."
     ),
 )
 
@@ -660,15 +686,16 @@ plot_coverage_through_time(
 plot_timing_contract(
     FAMILIES,
     bar_unit="NYSE sessions",
-    title="Three families reach back a year, and none reads past the decision",
+    title="Two families reach back a year, and none reads past the decision",
     subtitle="Register lookback per family; a gap at the right edge is a lag",
     alt=(
         "Horizontal bars, one per feature family, each extending leftward from the decision line "
-        "by that family's lookback: 252 sessions for surface dynamics, the variance risk premium "
-        "and the cross-sectional percentiles, 63 for realized volatility, 21 for the underlying "
-        "family and five for instrument state. The surface-level and quality families read only "
-        "the current session and so are drawn with no bar at all. Every bar reaches the decision "
-        "line, so none of them is drawn with a gap at its right-hand end."
+        "by that family's lookback: 252 sessions for surface dynamics and the variance risk "
+        "premium, 63 for realized volatility, 21 for the underlying family and for the "
+        "cross-sectional percentiles, and five for instrument state. The surface-level and "
+        "quality families read only the current session and so are drawn with no bar at all. "
+        "Every bar reaches the decision line, so none of them is drawn with a gap at its "
+        "right-hand end."
     ),
 )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import math
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -47,6 +48,7 @@ def _load_notebook_functions(*wanted_names: str) -> dict[str, object]:
         raise AssertionError(f"the notebook no longer defines {sorted(missing)}")
     module = ast.Module(body=definitions, type_ignores=[])
     namespace = {
+        "math": math,
         "np": np,
         "pl": pl,
         "EPS": EPS,
@@ -178,7 +180,9 @@ def test_a_shift_spans_sessions_and_not_quotes() -> None:
 def test_the_zscore_needs_the_configured_share_of_the_window_quoted() -> None:
     dense = _stateful(_session_panel(set(range(400))))
     positions = dense.with_columns(pl.col("timestamp").cum_count().over(SEGMENT).alias("position"))
-    required = round(WINDOWS["iv_zscore"][0] * MIN_OBS)
+    # Rounded up, not to nearest: the configured fraction is a floor. 63 * 0.8 is 50.4, and
+    # 50 of 63 would be 79.4% - below the rule the configuration states.
+    required = math.ceil(WINDOWS["iv_zscore"][0] * MIN_OBS)
 
     # Even on a fully quoted grid the rule, not the window, sets the first session that can
     # carry a value: 50 of the 63, so the value appears at position 50 and not at 63.
@@ -189,7 +193,7 @@ def test_the_zscore_needs_the_configured_share_of_the_window_quoted() -> None:
     # window never holds enough and the z-score is null throughout.
     thin = _stateful(_session_panel({i for i in range(400) if i % 4}))
     assert thin["iv_atm_z_63"].null_count() == len(thin)
-    assert required == 50
+    assert required == 51
 
 
 def test_a_prior_security_cannot_change_the_next_security_features() -> None:
