@@ -82,7 +82,9 @@ BC_EPOCHS = 500
 IRL_ITERATIONS = 100
 N_CANDIDATE_TRAJECTORIES = 400
 MAXENT_L2 = 0.05
+MAXENT_LEARNING_RATE = 0.05
 FEATURE_MATCH_ITERATIONS = 50
+FEATURE_MATCH_LEARNING_RATE = 0.2
 N_FEATURE_MATCH_TRAJECTORIES = 50
 SEED = 42  # base seed; downstream rng instances seeded from this
 EXPORT_RESULTS = False
@@ -100,7 +102,9 @@ config = {
     "irl_iterations": IRL_ITERATIONS,
     "n_candidate_trajectories": N_CANDIDATE_TRAJECTORIES,
     "maxent_l2": MAXENT_L2,
+    "maxent_learning_rate": MAXENT_LEARNING_RATE,
     "feature_match_iterations": FEATURE_MATCH_ITERATIONS,
+    "feature_match_learning_rate": FEATURE_MATCH_LEARNING_RATE,
     "n_feature_match_trajectories": N_FEATURE_MATCH_TRAJECTORIES,
 }
 
@@ -205,7 +209,7 @@ def collect_expert_trajectories(
 # %%
 print(f"\nCollecting {config['n_expert_trajectories']} expert (TWAP) trajectories...")
 expert_data = collect_expert_trajectories(
-    env, twap_policy, n_trajectories=config["n_expert_trajectories"]
+    env, twap_policy, n_trajectories=config["n_expert_trajectories"], seed=SEED
 )
 
 print(f"Total state-action pairs: {len(expert_data['states'])}")
@@ -263,7 +267,7 @@ bc_linear.fit(X_train, y_train)
 bc_nn = MLPRegressor(
     hidden_layer_sizes=(64, 32),
     max_iter=config["bc_epochs"],
-    random_state=42,
+    random_state=SEED,
     early_stopping=True,
     validation_fraction=0.1,
 )
@@ -649,7 +653,7 @@ irl_result = maxent_irl(
     candidate_trajectories=candidate_trajectories,
     extract_features_fn=extract_features,
     n_iterations=config["irl_iterations"],
-    learning_rate=0.05,
+    learning_rate=config["maxent_learning_rate"],
     l2_penalty=config["maxent_l2"],
 )
 
@@ -744,7 +748,7 @@ feature_match_result = feature_expectation_irl(
     env=env,
     extract_features_fn=extract_features,
     n_iterations=config["feature_match_iterations"],
-    learning_rate=0.2,
+    learning_rate=config["feature_match_learning_rate"],
     n_sample_trajectories=config["n_feature_match_trajectories"],
     seed=SEED + 20_000,
 )
