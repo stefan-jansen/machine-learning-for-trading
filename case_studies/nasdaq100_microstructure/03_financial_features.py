@@ -291,6 +291,16 @@ print(
 # a padded 390-bar grid on every date, so a half-session's realized bar count says 390 where
 # the exchange closed after 210. Counting from the schedule is also the only form of the
 # quantity a trader had at the open, which is the property Section D.1 turns on.
+#
+# The schedule is what decides which bars exist at all, so it is applied before anything is
+# built. A bar the vendor emits after the exchange has closed is not a quiet bar: its quote is
+# a carry-forward from before the close and no position could have been opened on it. Those
+# bars are dropped here rather than carried and flagged, because a feature computed on one is
+# a feature for a time at which no decision existed.
+#
+# They are a contiguous tail of three sessions rather than holes inside them, so removing them
+# shortens those sessions and gaps nothing: every trailing window still reads consecutive
+# minutes, and `04_model_based_features` reads the same unbroken sequences.
 
 # %%
 _schedule = TradingCalendar(CALENDAR).calendar.schedule(start_date=START_DATE, end_date=END_DATE)
@@ -305,6 +315,24 @@ sessions = pl.DataFrame(
 SHORT = sessions.filter(pl.col("session_bars") < sessions["session_bars"].max())
 print(f"{sessions.height} scheduled sessions, {SHORT.height} of them early closes")
 print(f"scheduled lengths in bars: {sorted(sessions['session_bars'].unique().to_list())}")
+
+# %%
+_minute_of_day = (
+    pl.col("timestamp").dt.hour().cast(pl.Int32) * 60
+    + pl.col("timestamp").dt.minute().cast(pl.Int32)
+    - (OPEN_HOUR * 60 + OPEN_MINUTE)
+)
+_padded = bars.height
+bars = (
+    bars.join(sessions, on="session_date", how="inner")
+    .filter(_minute_of_day < pl.col("session_bars"))
+    .drop("session_bars")
+    .sort([*ENTITY, "timestamp"])
+)
+print(
+    f"{_padded - bars.height:,} bars dropped past the scheduled close on {SHORT.height} early closes"
+)
+print(f"{bars.height:,} bars inside scheduled hours")
 
 # %% [markdown]
 # ## C. Feature construction
@@ -841,16 +869,16 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# The matrix carries **66 features** on **16,742,969 rows** across **114 symbols** and **505
+# The matrix carries **66 features** on **16,726,378 rows** across **114 symbols** and **505
 # sessions**, from **2020-01-02 10:31** to **2021-12-31 15:59**. The null policy dropped
-# **3,165,075 rows**, **15.9%**, which is the hour of warmup every session pays before Kyle's
+# **3,127,306 rows**, **15.8%**, which is the hour of warmup every session pays before Kyle's
 # lambda exists plus the bar its publication lag costs - and it is why the panel starts at
 # 10:31 rather than at the open. The
 # thinnest family-month is **0.991** covered, in the price-impact family. Of those
-# rows, **1,068,834** fall on the **10,598** minutes of the 15-minute decision grid, which is
+# rows, **1,067,580** fall on the **10,562** minutes of the 15-minute decision grid, which is
 # the subset F3 and F6 read.
 #
-# Bars on which neither venue printed are **0.09%** of the matrix, and they leave **1.20%** of
+# Bars on which neither venue printed are **0.05%** of the matrix, and they leave **1.13%** of
 # it without an Amihud value - a thirteenfold amplification, because the estimator's rolling
 # average nulls every one of the thirty bars whose window contains one of them.
 
@@ -1103,11 +1131,11 @@ print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}, digest {record
 #   busiest part of the U - is not representable here at all. The column is kept for the
 #   feature count Chapter 8 reports and Section E asserts that it is dead, but a model has 65
 #   usable features, not 66, and the open is a gap in what this matrix can condition on.
-# - The vendor emits a padded 390-bar grid on early closes, so the three half-sessions in
-#   this window - 2020-11-27, 2020-12-24 and 2021-11-26 - carry bars stamped after the
-#   exchange had closed. The clock family is measured against the schedule and so reports
-#   them correctly, but they remain in the panel because the bar universe is `02_labels`'s to
-#   set and not this notebook's.
+# - The vendor emits a padded 390-bar grid on early closes, so the three half-sessions in this
+#   window - 2020-11-27, 2020-12-24 and 2021-11-26 - arrive carrying bars stamped after the
+#   exchange had closed. Section B drops them. `02_labels` does not, so it still labels those
+#   bars; the join in `05_evaluation` discards them because this matrix no longer carries them,
+#   but the label artifacts themselves remain to be corrected upstream.
 # - Trade location is assigned against the prevailing quote, so a bar whose quote was stale
 #   attributes its volume to a side rather than to neither. The staleness cap bounds how long
 #   that can persist; it does not undo it on the bars inside the cap.
