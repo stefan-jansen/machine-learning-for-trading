@@ -29,6 +29,11 @@ decision:
   cadence: daily_ny_close
   snapshot: ny_5pm_close
   execution_delay: next_bar_open
+  # The venue calendar that implements the 5PM rollover, and so the one that assigns a
+  # four-hour bar to the session it was printed in. Distinct from `evaluation.calendar`,
+  # which is the calendar the cross-validation splitter counts train and validation
+  # windows on. `02_labels` and `04_model_based_features` aggregate on this same value.
+  session_calendar: CME_FX
 
 # Engine-level execution defaults. Single source of truth — Ch16-19 notebooks
 # read these via get_backtest_config(); never declare a local INITIAL_CASH
@@ -123,6 +128,123 @@ backtest:
         - {name: time_exit_10,    type: time_exit,     bars: 10}
         - {name: time_exit_20,    type: time_exit,     bars: 20}
         - {name: time_exit_40,    type: time_exit,     bars: 40}
+
+# The feature-specification register. ``03_financial_features`` binds every window
+# from here and renders ``families`` as the register table; nothing in that notebook
+# retypes a number this block declares. ``lookback`` is the longest chain of trailing
+# bars a family reads, counted from the decision timestamp, and it is the floor the
+# warmup audit holds each column to. ``lag`` is zero throughout: every input is an
+# OANDA spot bar, on the tape at the NY 5PM snapshot the decision is taken at.
+features:
+  windows:
+    momentum: [5, 10, 21, 42, 63, 126, 252]
+    close_to_close_volatility: [21, 63]
+    garman_klass: [21, 63, 126, 252]
+    zscore: 252              # trailing window the multi-horizon returns are standardized against
+    zscore_horizons: [21, 63, 126]
+    channel: [21, 63, 126]
+    skip_recent: 21
+    drawdown: [63]
+    rsi: [14, 63]
+    moving_average: [21, 63, 252]
+    range: [21, 63]
+    bollinger: 21
+    dollar: [21, 63]         # horizons the dollar proxy is accumulated over
+    dollar_exposure: 252     # window each pair's correlation with the proxy is taken over
+  ranked:
+    - ret_21d
+    - ret_63d
+    - ret_126d
+    - vol_gk_21d
+    - vol_gk_63d
+    - sharpe_21d
+    - sharpe_63d
+    - sharpe_126d
+  # Rows are kept from the bar this column can first hold a value, which is the
+  # longest chain in the matrix and the point past which every family is dense.
+  null_policy_carrier: zscore_126d
+  persistence_horizon: 63    # bars F6 reads the feature autocorrelation out to
+  families:
+    - name: momentum
+      pattern: ret_*d|mom_skip_recent|accel_*
+      role: signal
+      hypothesis: A pair that has moved keeps moving over the following session
+      inputs: daily close
+      lookback: 252
+      lag: 0
+      frame: time series
+      representation: simple return, and differences between horizons
+      failure_mode: reverses at the shortest horizons
+    - name: risk-adjusted momentum
+      pattern: sharpe_*d
+      role: signal
+      hypothesis: Trend earned with less dispersion repeats more reliably
+      inputs: daily log return
+      lookback: 252
+      lag: 0
+      frame: time series
+      representation: mean log return over its own dispersion, annualized
+      failure_mode: unbounded when dispersion approaches zero
+    - name: mean reversion
+      pattern: zscore_*|channel_pos_*|bollinger_pctb_*
+      role: signal
+      hypothesis: A pair stretched against its own recent range comes back
+      inputs: daily close
+      lookback: 378
+      lag: 0
+      frame: time series
+      representation: trailing z-score, position in the trailing range
+      failure_mode: a trending pair sits at the edge of its channel for months
+    - name: volatility
+      pattern: vol_gk_*|vol_cc_*|vol_ratio_*
+      role: state
+      hypothesis: Dispersion sets how far apart the cross-section can spread
+      inputs: daily OHLC
+      lookback: 252
+      lag: 0
+      frame: time series
+      representation: Garman-Klass and close-to-close deviation, and ratios of windows
+      failure_mode: lags a shock by roughly half its window
+    - name: range and drawdown
+      pattern: max_dd_*|avg_range_*
+      role: state
+      hypothesis: How far a pair sits below its peak conditions what a signal is worth
+      inputs: daily OHLC
+      lookback: 63
+      lag: 0
+      frame: time series
+      representation: share below the trailing peak, mean normalized daily range
+      failure_mode: says nothing about direction
+    - name: oscillator and trend
+      pattern: rsi_*|price_to_ma_*
+      role: signal
+      hypothesis: Price against its own recent path separates trend from exhaustion
+      inputs: daily close
+      lookback: 252
+      lag: 0
+      frame: time series
+      representation: Wilder-smoothed oscillator, ratio to a moving average
+      failure_mode: saturates in a sustained trend
+    - name: dollar factor
+      pattern: usd_factor_*|usd_beta_*
+      role: state
+      hypothesis: A broad dollar move is common to seven pairs and is not pair-specific
+      inputs: daily returns of the seven USD pairs
+      lookback: 315
+      lag: 0
+      frame: cross-asset
+      representation: signed average return, and each pair's rolling correlation with it
+      failure_mode: a signed average is not an estimated factor
+    - name: cross-sectional position
+      pattern: rank_*
+      role: signal
+      hypothesis: Only relative standing is tradable in a long-short rank strategy
+      inputs: ret_21d, ret_63d, ret_126d, vol_gk_21d, vol_gk_63d, sharpe_21d, sharpe_63d, sharpe_126d
+      lookback: 252
+      lag: 0
+      frame: cross-section
+      representation: percentile within the decision date
+      failure_mode: discards the level the state families carry instead
 
 evaluation:
   n_splits: 8

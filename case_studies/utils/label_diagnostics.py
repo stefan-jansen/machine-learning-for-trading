@@ -68,11 +68,19 @@ def panel_autocorrelation(
 def effective_sample_size(
     frame: pl.DataFrame,
     *,
-    horizon: int,
     bar_col: str,
+    horizon: int | None = None,
+    horizon_col: str | None = None,
     entity_col: str = "symbol",
 ) -> tuple[int, float]:
     """Return (rows, N_eff) for a label sampled every bar over *horizon* bars.
+
+    Pass ``horizon_col`` instead of ``horizon`` where the window is not the same length
+    for every row - an event label that resolves when a barrier is hit or when a contract
+    expires. The column holds each row's window in the same units as ``bar_col``, and a
+    single ``horizon`` is the special case where every row carries the same value. A
+    median window standing in for a variable one prices the overlap of a label none of
+    the rows has.
 
     ``N_eff`` is Chapter 7.2's average-uniqueness sum: each row is weighted by the
     share of its forward window no concurrent label also spans. Concurrency is a
@@ -102,14 +110,16 @@ def effective_sample_size(
     array extended past the last window's end rather than truncated, which would
     shorten exactly those windows.
     """
+    if (horizon is None) == (horizon_col is None):
+        raise ValueError("pass exactly one of horizon and horizon_col")
     rows, weight = 0, 0.0
     for _, group in frame.group_by([entity_col]):
         bars = group[bar_col].to_numpy()
-        bars = bars - bars.min()
-        events = np.sort(bars)
-        weights = calculate_label_uniqueness(
-            events, events + horizon - 1, n_bars=int(events[-1]) + horizon
-        )
+        order = np.argsort(bars)
+        events = bars[order] - bars.min()
+        windows = horizon if horizon_col is None else group[horizon_col].to_numpy()[order]
+        ends = events + windows - 1
+        weights = calculate_label_uniqueness(events, ends, n_bars=int(ends.max()) + 1)
         rows += group.height
         weight += float(weights.sum())
     return rows, weight

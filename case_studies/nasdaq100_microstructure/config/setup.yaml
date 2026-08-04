@@ -241,6 +241,127 @@ decision:
   execution_delay: 1_bar
   execution_price_assumption: next_bar_open_or_vwap
 
+# The feature specification read by 03_financial_features. Windows are counted
+# in minute bars and every one of them is session-bounded: a window never spans
+# an overnight gap, so each session restarts its own warmup.
+features:
+  windows:
+    fast: 5              # one fast aggregate
+    decision: 15         # one decision bar at the declared bar_frequency
+    slow: 30             # realized-volatility horizon and the Amihud average
+    hour: 60             # Kyle's lambda regression and the slow regime average
+    ewma_half_life: 30   # half-life of the EWMA volatility, in bars
+    stale_cap: 5         # consecutive stale-quote bars tolerated before nulling
+    edge_block: 30       # width of the open and close blocks the flags mark
+  # The carrier: the order-flow imbalance measured over one decision bar. It is
+  # also this case study's causal treatment (see `causal.treatment` below), and
+  # it is what F3 and F7 read.
+  carrier: signed_vol_share_15m
+  # One row per family. `pattern` claims a family's columns in both
+  # representations - the level and its cross-sectional z-score twin - because
+  # the two carry the same hypothesis on two scales. `lookback` and `lag` are
+  # minute bars, and they are what the warmup audit and the timing figure read.
+  families:
+    - name: quote_liquidity
+      pattern: rel_spread_*|depth_imb*|quote_rate*
+      role: state
+      hypothesis: >-
+        The cost and the depth of the book describe the environment a signal is read
+        in: an imbalance is worth acting on only where the round trip is cheap enough
+        to leave something behind.
+      inputs: NBBO close quotes, quote update count
+      lookback: 60
+      lag: 0
+      frame: per symbol-session, trailing
+      representation: level and cross-sectional z-score
+      failure_mode: >-
+        A carried-forward quote reports a stale spread as a live one, so the state
+        looks calm exactly where the book has stopped updating.
+    - name: microprice
+      pattern: microprice_dev*
+      role: signal
+      hypothesis: >-
+        The depth-weighted price leans toward the thin side of the book, so its distance
+        from the midpoint is where the next trade is more likely to print (Stoikov, 2018).
+      inputs: NBBO close prices and sizes
+      lookback: 15
+      lag: 0
+      frame: per symbol-session, trailing
+      representation: level and cross-sectional z-score
+      failure_mode: >-
+        The deviation is a few tenths of a cent on a wide book and a rounding artifact
+        on a one-tick one, so it is not comparable across names until it is ranked.
+    - name: volatility
+      pattern: r1m*|rv_*|quote_range*
+      role: state
+      hypothesis: >-
+        How much the quoted price is moving is what decides whether an imbalance is
+        information or noise, and it varies by name and by hour.
+      inputs: NBBO quote midpoint and quote extremes
+      lookback: 60
+      lag: 0
+      frame: per symbol-session, trailing
+      representation: level and cross-sectional z-score
+      failure_mode: >-
+        Every estimator here is a variance over a short window, so a single bad quote
+        dominates it and reports turbulence where there was a data error.
+    - name: order_flow
+      pattern: signed_vol_share*|tick_imb_share*|trade_to_mid*|trades_per_1k_shares*|cross_locked_share*
+      role: signal
+      hypothesis: >-
+        Aggressive volume arrives in runs, so the side that has been paying the spread
+        over the last few minutes keeps paying it over the next few.
+      inputs: AlgoSeek trade-location and tick buckets, total traded volume
+      lookback: 60
+      lag: 1
+      frame: per symbol-session, trailing
+      representation: level and cross-sectional z-score
+      failure_mode: >-
+        Trade location is assigned against the prevailing quote, so a bar whose quote
+        was stale attributes its volume to the wrong side rather than to neither.
+    - name: price_impact
+      pattern: dollar_vol*|illiq*|kyle_lambda*|trade_range*
+      role: state
+      hypothesis: >-
+        How far a given quantity of order flow moves the price is what separates a
+        crowded name from a thin one, and it is the cost side of every signal here.
+      inputs: consolidated trade prices, traded dollars across both venues
+      lookback: 60
+      lag: 1
+      frame: per symbol-session, trailing
+      representation: level and cross-sectional z-score
+      failure_mode: >-
+        Amihud is undefined on a bar that printed nothing, and its rolling average
+        carries that gap across the whole window rather than skipping the bar.
+    - name: hidden_liquidity
+      pattern: finra_share_60m*
+      role: state
+      hypothesis: >-
+        The share of volume printing away from the exchanges tracks how much of the
+        session's liquidity is not visible in the book, and it moves over hours.
+      inputs: FINRA/TRF reported volume, total traded volume
+      lookback: 60
+      lag: 1
+      frame: per symbol-session, trailing
+      representation: level and cross-sectional z-score
+      failure_mode: >-
+        TRF prints are reported with a delay, so the share attributed to a bar is not
+        fully public at that bar's close unless it is lagged.
+    - name: session_clock
+      pattern: time_since_open|time_to_close|is_first_30m|is_last_30m
+      role: state
+      hypothesis: >-
+        Intraday liquidity is U-shaped, so where in the session a bar sits conditions
+        every other family without predicting anything on its own.
+      inputs: exchange calendar
+      lookback: 0
+      lag: 0
+      frame: per session, from the scheduled open and close
+      representation: fraction of the session and block flags
+      failure_mode: >-
+        Measured against the session's realized bar count rather than its scheduled
+        close, it is a quantity no one had at the time.
+
 # Engine-level execution defaults. Single source of truth — Ch16-19 notebooks
 # read these via get_backtest_config(); never declare a local INITIAL_CASH
 # or share_type constant. Changing values here invalidates every existing

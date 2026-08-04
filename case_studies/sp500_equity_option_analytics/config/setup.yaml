@@ -11,6 +11,138 @@ decision:
   execution_delay: monday_open
   iv_feature_lag: 1_day
 
+# The feature-specification register for 03_financial_features, and every window
+# it computes over. It lives here rather than in the notebook for the same reason
+# the label name and the holdout boundary do: it is the statement of what this
+# case study's feature set is, and a statement only the notebook holds cannot be
+# read by a test, by a later stage, or by anyone asking what changed.
+#
+# ``lookback`` is counted in daily bars back from the decision timestamp and is
+# the floor the warmup audit holds each column to. ``lag`` is the delay with
+# which the input becomes knowable: every option-derived family carries one
+# session because the surface summary is stamped at the close it summarizes and
+# is not read until the next session's decision, and every equity-price family
+# carries zero because the close is the decision snapshot itself.
+features:
+  # Surface contract selection, fixed by data/equities/market/sp500/materialize_options.py.
+  # Repeated here only so section B can state the observability of what it loads.
+  surface:
+    dte_buckets: {'7d': [5, 10], '30d': [25, 35], '90d': [80, 110]}
+    delta_targets: {atm: 0.50, '25d': 0.25, '10d': 0.10}
+  windows:
+    iv_zscore: [63, 252]
+    iv_percentile: 252
+    iv_momentum: [5, 21]
+    skew_zscore: 63
+    term_zscore: 63
+    vrp_zscore: 63
+    realized_vol: [20, 63]
+    garman_klass: 21
+    vol_of_vol: 21
+    realized_skew: 21
+    momentum: [5, 21, 63, 126, 252]
+    skip_recent: 21          # skip-month momentum runs t-252 to t-21
+    skip_start: 252
+    risk_adjusted: 63        # the momentum horizon its own volatility scales
+    # Annualized volatility floor in the risk-adjusted momentum denominator. A share
+    # that realized almost nothing over a quarter would otherwise carry an unbounded
+    # ratio, and one such row dominates the within-date percentile taken from it.
+    risk_adjusted_vol_floor: 0.01
+    iv_forward_fill: 5       # sessions a lagged surface value may be carried forward
+  # Source column -> the name its within-date percentile is written under. The
+  # names predate this register and later stages select by them, so the mapping
+  # is explicit rather than a suffix rule.
+  ranked:
+    iv_30_atm: iv_rank
+    skew_rr_30_25d: skew_rank
+    ivrv_spread: vrp_rank
+    mom_21d: mom_21d_rank
+    mom_63d: mom_63d_rank
+    rv_20: rv_rank
+    iv_mom_21d: iv_mom_rank
+    d_iv_30_atm: d_iv_rank
+  families:
+    - name: cross-sectional rank
+      pattern: '*_rank'
+      role: signal
+      hypothesis: A long-short book acts on relative standing, not on the level of a quantity
+      inputs: the eight level and dynamics columns named under features.ranked
+      lookback: 252
+      lag: 1
+      frame: cross section within the decision date
+      representation: percentile within the date, in (0, 100)
+      failure_mode: a thin cross-section makes the percentile a coarse ordering of few names
+    - name: implied volatility level
+      pattern: iv_30_atm|iv_7_atm|iv_90_atm|iv_30_put_25d|iv_30_call_25d
+      role: signal
+      hypothesis: What the option market charges for a name's coming month is priced against what its shares then do
+      inputs: daily IV surface summary, delta-selected within fixed DTE buckets
+      lookback: 1
+      lag: 1
+      frame: time series
+      representation: annualized implied volatility, in variance points
+      failure_mode: a name whose surface is quoted thinly carries a level set by one stale contract
+    - name: implied volatility dynamics
+      pattern: d_iv_30_atm|iv_mom_*|iv_30_atm_z_*|iv_30_atm_pct_*
+      role: signal
+      hypothesis: Where implied volatility sits against its own recent history says more than its level
+      inputs: at-the-money 30-day implied volatility
+      lookback: 252
+      lag: 1
+      frame: time series
+      representation: first difference, multi-session change, trailing z-score and trailing percentile
+      failure_mode: the z-score is unbounded as a name's own dispersion approaches zero
+    - name: skew and term structure
+      pattern: skew_*|term_*|d_skew_*|d_term_*
+      role: signal
+      hypothesis: The shape of the surface prices asymmetry and horizon that its level cannot express
+      inputs: 25-delta put and call IV, and the 7-, 30- and 90-day at-the-money points
+      lookback: 63
+      lag: 1
+      frame: term structure
+      representation: differences and ratios between surface points, and their trailing z-scores
+      failure_mode: the far segment reads a bucket whose contracts were interpolated rather than quoted
+    - name: variance risk premium
+      pattern: ivrv_spread|vrp_z_*
+      role: signal
+      hypothesis: A name whose implied volatility stands above what it goes on to realize is richly priced
+      inputs: at-the-money implied volatility and trailing realized volatility
+      lookback: 63
+      lag: 1
+      frame: time series
+      representation: spread in volatility points and its trailing z-score
+      failure_mode: it compares a forward-looking month against a backward-looking one, which differ around an event
+    - name: realized volatility
+      pattern: rv_20|rv_63|gk_vol_*|vol_of_vol_*|realized_skew_*
+      role: state
+      hypothesis: Dispersion and the asymmetry of the realized path set what a ranking can earn
+      inputs: split- and dividend-adjusted OHLC bars
+      lookback: 63
+      lag: 0
+      frame: time series
+      representation: annualized standard deviation, a range-based estimator, and third moments
+      failure_mode: close-to-close misses the overnight gap the range-based estimator is here to catch
+    - name: equity momentum
+      pattern: mom_*
+      role: signal
+      hypothesis: Option-derived information has to earn its place beside the price signal it would replace
+      inputs: split- and dividend-adjusted close
+      lookback: 252
+      lag: 0
+      frame: time series
+      representation: simple return at five horizons, its skip-month form, and its volatility-scaled twin
+      failure_mode: reverses over the most recent month, which skip-month momentum drops
+    - name: surface quality
+      pattern: spread_atm_*|qc_converged_share
+      role: state
+      hypothesis: A surface point solved from wide or unconverged quotes should not be read like one that was not
+      inputs: bid-ask spread and solver convergence flags of the selected contracts
+      lookback: 1
+      lag: 1
+      frame: time series
+      representation: relative spread, and the share of selected points that converged
+      failure_mode: it measures quotation quality, not liquidity, and the two part company around expiry
+
 # Engine-level execution defaults. Single source of truth — Ch16-19 notebooks
 # read these via get_backtest_config(); never declare a local INITIAL_CASH
 # or share_type constant. Changing values here invalidates every existing
