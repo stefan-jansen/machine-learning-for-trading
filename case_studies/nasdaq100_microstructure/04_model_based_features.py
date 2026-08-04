@@ -1179,10 +1179,10 @@ print(f"Validation span: {eval_df['timestamp'].min()} .. {eval_df['timestamp'].m
 assert eval_df["timestamp"].max() < HOLDOUT_START, "IC evaluation reached into the holdout"
 
 # Thin to one decision per label horizon so consecutive IC observations do not
-# share a return window.
-all_timestamps = eval_df["timestamp"].unique().sort()
-sample_ts = all_timestamps.gather_every(IC_SAMPLE_STEP)
-eval_sample = eval_df.filter(pl.col("timestamp").is_in(sample_ts))
+# share a return window. Selected by semi-join: `is_in` against a Series of the
+# same dtype is ambiguous and changes meaning in a later Polars.
+sample_ts = eval_df["timestamp"].unique().sort().gather_every(IC_SAMPLE_STEP)
+eval_sample = eval_df.join(sample_ts.to_frame("timestamp"), on="timestamp", how="semi")
 print(f"Sampled {len(sample_ts):,} timestamps ({len(eval_sample):,} rows)")
 
 # %%
