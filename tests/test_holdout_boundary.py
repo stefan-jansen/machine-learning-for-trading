@@ -579,12 +579,17 @@ def evaluation_notebook_label() -> tuple[str, int]:
             "_label_end; another horizon there purges a window this check is not "
             "measuring"
         )
-    # Resolved the way 05 resolves them -- through the same function, so a label
-    # spec file that overrides setup.yaml moves this check with the notebook
-    # rather than silently past it.
-    from utils.artifact_specs import load_setup_config, resolve_label_buffer
+    # Resolved through the same function 05 calls, so a label spec that overrides
+    # setup.yaml moves this check with the notebook rather than silently past it.
+    #
+    # The setup mapping is read from SETUP_YAML rather than through
+    # `load_setup_config`, which resolves the case-study directory from the
+    # environment: under CI's ML4T_OUTPUT_DIR it returns a different file and the
+    # helper died on `KeyError: 'labels'`. This test is a static check on the
+    # committed source, so it must read the committed config.
+    from utils.artifact_specs import resolve_label_buffer
 
-    setup = load_setup_config("etfs")
+    setup = yaml.safe_load(SETUP_YAML.read_text())
     primary = str(setup["labels"]["primary"])
     buffer = resolve_label_buffer("etfs", primary, setup)
     assert buffer, f"no label buffer configured for {primary}"
