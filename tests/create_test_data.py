@@ -343,21 +343,39 @@ def build_institutional_holdings_13f(source: Path, output: Path) -> list[Path]:
 # horizon is a duration, the notebooks convert it to a bar count by measuring the
 # grid, and a fixture that changes the grid changes what every consumer computes.
 #
-# So whole sessions are kept at native one-minute resolution, including
-# extended hours, which 03_market_microstructure profiles by session. The stride
-# is uniform across the two years rather than a contiguous block, because the
-# case study builds two cross-validation folds plus a holdout over the full span
-# and validate_temporal_fold_coverage fails when an artifact covers none of a
-# fold. Sessions are the safe axis to drop: features here restart their warmup at
-# every session boundary, so a wider overnight gap changes nothing they compute.
+# So whole sessions are kept at native one-minute resolution, including extended
+# hours, which 03_market_microstructure profiles by session. They are kept in
+# consecutive runs rather than one session in six, because not every window in
+# this case study is session-bounded: 04_model_based_features fits HAR on a
+# 120-bar rolling window and signatures on 30-bar windows spanning overnight
+# gaps, and it documents the resulting contamination in its own prose. One
+# session in six would silently turn every one of those overnight gaps into a
+# six-session gap. Inside a run the gaps are the production gaps.
+#
+# The runs are spread evenly over the two years rather than taken as one block,
+# because the case study builds two cross-validation folds plus a holdout over
+# the full span and validate_temporal_fold_coverage fails when an artifact
+# covers none of a fold.
 
 NASDAQ100_MINUTE_DIR = Path("equities") / "market" / "nasdaq100" / "minute_bars"
 NASDAQ100_MINUTE_SYMBOLS = ("AAPL", "AMD", "AMZN", "FB", "GOOGL", "MSFT")
-NASDAQ100_MINUTE_SESSION_STRIDE = 6
+# Six consecutive sessions kept per six skipped runs: one week in six, which
+# keeps a fifth of the fixture's sessions preceded by their true predecessor and
+# leaves 84 of 505 sessions, holding the fixture near its previous size.
+NASDAQ100_MINUTE_RUN_SESSIONS = 6
+NASDAQ100_MINUTE_RUN_STRIDE = 6
+
+
+def _session_runs(sessions: pl.Series, run: int, stride: int) -> pl.Series:
+    """Every ``stride``-th consecutive run of ``run`` sessions, in order."""
+    keep: list = []
+    for start in range(0, len(sessions), run * stride):
+        keep.extend(sessions[start : start + run].to_list())
+    return pl.Series("date", keep, dtype=sessions.dtype)
 
 
 def build_nasdaq100_minute_bars(source: Path, output: Path) -> list[Path]:
-    """Keep every sixth session, whole and at native one-minute spacing."""
+    """Keep one week of sessions in six, whole and at native one-minute spacing."""
     source_dir = source / NASDAQ100_MINUTE_DIR
     if not source_dir.exists() or not list(source_dir.glob("year=*")):
         raise FileNotFoundError(
@@ -371,7 +389,7 @@ def build_nasdaq100_minute_bars(source: Path, output: Path) -> list[Path]:
         pl.col("symbol").is_in(NASDAQ100_MINUTE_SYMBOLS)
     )
     sessions = lf.select("date").unique().collect()["date"].sort()
-    keep = sessions.gather(range(0, len(sessions), NASDAQ100_MINUTE_SESSION_STRIDE))
+    keep = _session_runs(sessions, NASDAQ100_MINUTE_RUN_SESSIONS, NASDAQ100_MINUTE_RUN_STRIDE)
     frame = lf.filter(pl.col("date").is_in(keep.implode())).collect().sort("symbol", "timestamp")
 
     # The reduction is only sound if the grid it leaves is the production grid.
@@ -400,14 +418,16 @@ DATASETS: tuple[Dataset, ...] = (
         name="nasdaq100_minute_bars",
         description=(
             f"{len(NASDAQ100_MINUTE_SYMBOLS)} symbols, every "
-            f"{NASDAQ100_MINUTE_SESSION_STRIDE}th session kept whole at native "
-            "one-minute spacing including extended hours"
+            f"{NASDAQ100_MINUTE_RUN_STRIDE}th run of "
+            f"{NASDAQ100_MINUTE_RUN_SESSIONS} consecutive sessions kept whole at "
+            "native one-minute spacing including extended hours"
         ),
         build=build_nasdaq100_minute_bars,
         owns=(NASDAQ100_MINUTE_DIR,),
         budget={
             "symbols": list(NASDAQ100_MINUTE_SYMBOLS),
-            "session_stride": NASDAQ100_MINUTE_SESSION_STRIDE,
+            "session_run": NASDAQ100_MINUTE_RUN_SESSIONS,
+            "run_stride": NASDAQ100_MINUTE_RUN_STRIDE,
             "bar_spacing": "1m (unchanged from production)",
         },
     ),
