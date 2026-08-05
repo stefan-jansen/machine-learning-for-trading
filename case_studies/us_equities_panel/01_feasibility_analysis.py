@@ -267,8 +267,8 @@ plt.show()
 beyond_one = acf.filter(pl.col("lag") > 1)["acf"].abs().max()
 print(
     f"Lag one mean {acf['acf'][0]:+.4f} against a band of {acf['band'][0]:.4f}, over a per-stock "
-    f"10th-90th spread of {acf['acf_p90'][0] - acf['acf_p10'][0]:.4f} | largest mean beyond lag "
-    f"one {beyond_one:.4f}, on {acf['n_entities'][0]:,} stocks"
+    f"10th-90th spread of {acf['acf_p90'][0] - acf['acf_p10'][0]:.4f} | largest absolute mean "
+    f"beyond lag one {beyond_one:.4f}, on {acf['n_entities'][0]:,} stocks"
 )
 
 # %% [markdown]
