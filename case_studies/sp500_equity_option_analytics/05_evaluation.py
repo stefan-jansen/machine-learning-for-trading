@@ -69,6 +69,7 @@ from scipy.stats import spearmanr
 from scipy.stats import t as student_t
 
 import utils.style as style
+from case_studies.utils.cv_window import modeling_fold_boundaries
 from utils.cv_splits import load_evaluation_config
 from utils.paths import display_path, get_case_study_dir
 
@@ -121,18 +122,44 @@ FDR_ALPHA = 0.05
 SIGN_CONSISTENCY_MIN = 0.60
 REDUNDANCY_CUT = 0.70
 IC_THRESHOLD = 0.005  # Weekly horizon
-# Metadata columns carried in the feature parquets that are NOT predictive features
-# (mirrors the exclusion in utils.modeling so evaluation and modeling agree).
+# Metadata columns carried in the feature parquets that are not predictive
+# features. `fold` is the one that matters: it is the third key of the temporal
+# artifact, not a column to drop and forget - see section 0.
 NON_FEATURE_COLS = {"fold", "is_holdout"}
 
 # %% [markdown]
 # ## 0. Load Artifacts & Build Evaluation Panel
 #
-# Load features (45 IV/equity), temporal (3 GARCH per symbol), and labels.
-# Both features and temporal have a symbol column, so we join on [date, symbol].
-# The `fold` metadata column in the temporal parquet is not a feature and is
-# dropped here (`NON_FEATURE_COLS`), matching how `utils.modeling` builds the
-# modeling dataset.
+# Three artifacts: the Ch8 financial features, the Ch9 temporal features, and
+# the primary label. The financial columns are deterministic transforms of
+# observable prices and surfaces, one row per `(timestamp, symbol)`, and they
+# join straight on.
+#
+# **The temporal artifact does not.** Stage 04 fits GJR-GARCH per symbol *per
+# fold*, so `model_based.parquet` carries one row per `(timestamp, symbol,
+# fold)` - the same date and name three times, with three sets of fitted
+# parameters. Each fold's rows span its training window *and* its validation
+# window, and only the validation half is out of sample: inside the training
+# window the fitted value at a date was estimated from a span that includes that
+# date and everything after it up to the training end. The holdout fold is the
+# sharpest case - it trains through the last development session, so its rows
+# dated 2019 carry parameters that read 2020.
+#
+# Joining that frame on `(timestamp, symbol)` alone does two things at once. It
+# **duplicates panel rows**, because the key is not unique on the right side, so
+# a name appears up to three times in the same cross-section and is counted
+# three times by every statistic below - including the staleness screen, which
+# sees the duplicates as adjacent identical rows and reads them as a column that
+# does not move. And it **mixes fold provenance**, because whichever of the
+# three rows a downstream cell reads may be an in-sample fitted value or a
+# forward-looking one.
+#
+# So the temporal frame is restricted to each fold's validation window before it
+# is joined, and the restriction is asserted rather than assumed. The
+# consequence is that the GARCH columns exist only where a fold validated them,
+# which is the later part of the development window and not all of it - and the
+# screens in section 1 measure them on that window rather than against a
+# denominator they cannot reach.
 
 # %%
 features = _normalize_asset_column(pl.read_parquet(CASE_DIR / "features" / "financial.parquet"))
@@ -151,8 +178,52 @@ print(f"Labels: {label_df.shape}, column: {label_col}")
 financial_cols = [c for c in features.columns if c not in JOIN_COLS and c not in NON_FEATURE_COLS]
 temporal_cols = [c for c in temporal.columns if c not in JOIN_COLS and c not in NON_FEATURE_COLS]
 
-# Join: features + temporal (both have symbol) + labels
-eval_panel = features.join(temporal, on=JOIN_COLS, how="left")
+# The producer folds, from the generator stage 04 itself called, so the fold ids
+# mean the same thing on both sides. The holdout fold stage 04 appends is not in
+# this list and is therefore never selected here.
+producer_folds = modeling_fold_boundaries(CASE_STUDY_ID, PRIMARY_LABEL)
+if not producer_folds:
+    msg = f"No canonical modeling folds for {CASE_STUDY_ID}/{PRIMARY_LABEL}"
+    raise RuntimeError(msg)
+
+temporal_oos = pl.concat(
+    [
+        temporal.filter(
+            (pl.col("fold") == f["fold"])
+            & (pl.col(DATE_COL) >= f["val_start"])
+            & (pl.col(DATE_COL) <= f["val_end"])
+        )
+        for f in producer_folds
+    ]
+).drop("fold")
+if temporal_oos.select(JOIN_COLS).n_unique() != len(temporal_oos):
+    msg = "Fold validation windows overlap: the out-of-sample temporal frame is not one row per key"
+    raise ValueError(msg)
+
+# The window the temporal columns can be screened on. Outside it they are absent
+# by construction rather than missing, and section 1 divides by this rather than
+# by the whole development panel.
+TEMPORAL_WINDOW = (
+    min(f["val_start"] for f in producer_folds),
+    max(f["val_end"] for f in producer_folds),
+)
+
+for f in producer_folds:
+    print(
+        f"temporal fold {f['fold']}: fitted {f['train_start']} to {f['train_end']}, "
+        f"kept {f['val_start']} to {f['val_end']}"
+    )
+print(
+    f"Temporal rows: {len(temporal):,} across folds -> {len(temporal_oos):,} out of sample "
+    f"({TEMPORAL_WINDOW[0]} to {TEMPORAL_WINDOW[1]})"
+)
+
+# Join: features + out-of-sample temporal + labels. The left join cannot now
+# change the row count, and that is asserted rather than trusted.
+eval_panel = features.join(temporal_oos, on=JOIN_COLS, how="left")
+if len(eval_panel) != len(features):
+    msg = f"Temporal join changed the panel row count: {len(features):,} -> {len(eval_panel):,}"
+    raise ValueError(msg)
 eval_panel = eval_panel.join(label_df, on=JOIN_COLS, how="inner")
 
 all_feature_cols = financial_cols + temporal_cols
@@ -219,7 +290,10 @@ validate_modeling_inputs(
     label_col=label_col,
     join_cols=JOIN_COLS,
     asset_col="symbol",
-    max_abs_return=10.0,  # 5-day equity returns (max observed ~6.83, small caps)
+    # An order-of-magnitude tripwire on the label, not a bound on what a small cap
+    # can do over five sessions: it fires on a corrupted price series, and the
+    # observed extreme sits far inside it.
+    max_abs_return=10.0,
     fail_on_critical=True,
 )
 
@@ -237,21 +311,42 @@ validate_modeling_inputs(
 # when its coverage reaches `COVERAGE_MIN` and its staleness stays at or below
 # `STALENESS_MAX`, and the figure below shows where every candidate sits against
 # those two bounds rather than printing only the ones that failed.
+#
+# **Each column is screened on the window it can reach.** For the financial
+# columns that is every development session. For the three GARCH columns it is
+# the union of the producer folds' validation windows, because outside that
+# window stage 04 produces no out-of-sample fitted value and the column is
+# absent by construction rather than missing. Dividing those by the whole
+# development panel would report a structural property of the fold contract as
+# though it were a data-quality failure, and the gate would then remove them for
+# a reason that is not true of them.
 
 # %%
 coverage = {}
 staleness = {}
 
+# The rows each column is eligible on. Temporal columns exist only inside the
+# producer folds' validation windows; everything else spans the panel.
+eligible_rows = {}
 for feat in all_feature_cols:
-    col = eval_panel[feat]
-    coverage[feat] = col.drop_nulls().len() / n_rows
+    if feat in temporal_cols:
+        eligible_rows[feat] = eval_panel.filter(
+            (pl.col(DATE_COL) >= TEMPORAL_WINDOW[0]) & (pl.col(DATE_COL) <= TEMPORAL_WINDOW[1])
+        )
+    else:
+        eligible_rows[feat] = eval_panel
+
+for feat in all_feature_cols:
+    frame = eligible_rows[feat]
+    denom = len(frame)
+    coverage[feat] = frame[feat].drop_nulls().len() / denom
 
     unchanged = (
-        eval_panel.sort(JOIN_COLS)
+        frame.sort(JOIN_COLS)
         .select((pl.col(feat) == pl.col(feat).shift(1).over("symbol")).alias("same"))["same"]
         .sum()
     )
-    staleness[feat] = float(unchanged) / max(n_rows - n_symbols, 1)
+    staleness[feat] = float(unchanged) / max(denom - frame["symbol"].n_unique(), 1)
 
 correctness = {
     feat: coverage[feat] >= COVERAGE_MIN and staleness[feat] <= STALENESS_MAX
@@ -414,7 +509,9 @@ print(f"Skipped {len(date_level_features)} date-level features")
 # assumes independent sessions, the Newey-West interval that does not, and the
 # block-bootstrap bounds that assume neither a variance formula nor a distribution.
 # With a five-session label the sessions overlap heavily, so the gap between the
-# grey band and the navy bar is the cost of pretending otherwise.
+# grey band and the navy bar is the cost of pretending otherwise. That cost is
+# not cosmetic: the one leading feature whose naive interval sits entirely below
+# zero has a Newey-West interval that crosses it.
 #
 # The series drawn here is the one the notebook later writes to
 # `evaluation/ic_timeseries.parquet`, so the artifact is not written for nobody:
@@ -539,7 +636,7 @@ if leader:
         x=0, line={"color": COLORS["neutral"], "width": 0.8, "dash": "dash"}, row=1, col=2
     )
     fig.update_layout(
-        title="Pricing the overlap widens the intervals; all but one then cover zero",
+        title="Pricing the overlap widens every interval; none of them still excludes zero",
         height=560,
         width=1150,
         margin={"l": 60, "r": 210},
@@ -556,53 +653,43 @@ if leader:
 # Sign consistency across the walk-forward folds. A feature whose IC flips sign
 # between folds is unreliable regardless of its full-sample t-statistic.
 #
-# **Where the boundaries come from, and what that costs.** `load_evaluation_config`
-# returns the declared walk-forward geometry - `n_splits`, `train_size`, `val_size`,
-# the holdout bounds - but **not** a materialized `splits` array, so the branch
-# below falls through to an equal partition of the development sessions. Those are
-# not the fold boundaries the modeling notebooks train against: an equal split of
-# the session index ignores `train_size` and `val_size` entirely. It moves
-# `sign_consistency` and `worst_fold_ic` in the ledger, so it is tracked in the
-# stage-05 notebook standard rather than changed here. The fallback is announced
-# below rather than taken silently, which is the part that was wrong: the comment
-# at this site used to claim the declared boundaries were being used.
+# **Where the boundaries come from.** One live source, the same one section 0
+# used to decide which temporal rows are out of sample:
+# `modeling_fold_boundaries`, which is what stage 04 itself called. The earlier
+# form of this cell looked for a materialized `splits` array on the evaluation
+# config and cut the development window into equal halves when it found none -
+# which it always did, because `load_evaluation_config` returns the declared
+# geometry and not its expansion. Halves are not folds: they ignore
+# `train_size`, `val_size` and the label buffer, so a statistic computed over
+# them is not the one the prose claims. The consequence of using the real folds
+# is that stability is measured on the validation windows only, which is the
+# later part of the development window and not all of it, and the overall IC in
+# section 2 spans more sessions than these folds do.
 #
-# With `n_splits` folds, sign consistency takes only the values zero, one half and
-# one, so a quartile across the folds is not a quantity worth reporting. The figure
-# shows the fold means themselves.
+# With the two folds `setup.yaml::evaluation.n_splits` declares, sign consistency
+# takes only the values zero, one half and one, so a quartile across the folds is
+# not a quantity worth reporting - the figure shows the fold means themselves.
+# It also means `SIGN_CONSISTENCY_MIN` is not a proportion here but a yes or no:
+# a feature clears the stability arm exactly when both folds agree. Two folds is
+# a weak test of stability, and the count is printed below rather than left to be
+# inferred from the ledger's `sign_consistency` column.
 #
-# The figure also exposes a limit of the rule the ledger applies. Sign consistency
-# is scored as the share of folds with a *positive* IC, not the share sharing the
-# feature's own direction, so a feature whose folds agree on a negative sign scores
-# zero and can never clear the stability arm. Every negative-IC feature below is in
-# that position, which is why the count printed above is smaller than the figure
-# would suggest.
+# Sign consistency is measured **against the feature's own direction**, not
+# against positive. A candidate negative in every fold is as consistent as one
+# positive in every fold; scoring the share of *positive* folds would have made
+# the stability arm unreachable for every negative-IC feature, which is a rule
+# about sign rather than about stability.
 
 # %%
-cv_splits = cv_config.get("splits", [])
-if cv_splits:
-    from datetime import date as dt_date
-
-    fold_boundaries = [
-        (
-            dt_date.fromisoformat(str(s["val_start"])[:10]),
-            dt_date.fromisoformat(str(s["val_end"])[:10]),
-        )
-        for s in cv_splits
-    ]
-else:
+fold_boundaries = [(f["val_start"], f["val_end"]) for f in producer_folds]
+for i, f in enumerate(producer_folds, start=1):
     print(
-        "cv_config declares no materialized splits; falling back to an equal "
-        "partition of the development sessions"
+        f"fold {i}: fitted {f['train_start']} to {f['train_end']}, "
+        f"validated {f['val_start']} to {f['val_end']}"
     )
-    all_dates = eval_panel[DATE_COL].unique().sort().to_list()
-    n_folds = cv_config.get("n_splits", 2)
-    fold_size = len(all_dates) // n_folds
-    fold_boundaries = []
-    for i in range(n_folds):
-        start_idx = i * fold_size
-        end_idx = min((i + 1) * fold_size - 1, len(all_dates) - 1)
-        fold_boundaries.append((all_dates[start_idx], all_dates[end_idx]))
+if max(end for _, end in fold_boundaries) >= holdout_start_date:
+    msg = "A validation fold ends at or after the holdout boundary"
+    raise ValueError(msg)
 
 fold_stats = {}
 for feat in ic_results:
@@ -614,12 +701,17 @@ for feat in ic_results:
             fold_ics.append(float(fold_ic["ic"].mean()))
 
     if fold_ics:
-        sign_consistency = sum(1 for ic in fold_ics if ic > 0) / len(fold_ics)
+        # Direction from the feature's own overall estimate, then the share of
+        # folds that agree with it. `worst_fold_ic` is likewise the fold
+        # furthest against that direction, not the raw minimum, which for a
+        # negative-IC feature is its *best* fold.
+        direction = 1.0 if (ic_results[feat]["mean_ic"] or 0.0) >= 0 else -1.0
+        signed = [ic * direction for ic in fold_ics]
         fold_stats[feat] = {
             "n_folds": len(fold_ics),
-            "sign_consistency": sign_consistency,
-            "worst_fold_ic": min(fold_ics),
-            "best_fold_ic": max(fold_ics),
+            "sign_consistency": sum(1 for s in signed if s > 0) / len(fold_ics),
+            "worst_fold_ic": fold_ics[int(np.argmin(signed))],
+            "best_fold_ic": fold_ics[int(np.argmax(signed))],
             "median_fold_ic": float(np.median(fold_ics)),
             "fold_ics": fold_ics,
         }
@@ -668,7 +760,7 @@ if stability_features:
     )
     _ = fig.add_vline(x=0, line={"color": COLORS["neutral"], "width": 0.8, "dash": "dash"})
     fig.update_layout(
-        title="Both folds share the sign for every one of the leading features",
+        title="Several of the leading features reverse their IC sign between the two folds",
         xaxis_title="Mean cross-sectional IC within the fold",
         height=500,
         width=1000,
@@ -1078,7 +1170,7 @@ if high_corr_pairs:
         )
     )
     fig.update_layout(
-        title="Redundancy sits in the volatility and momentum columns, not the IV surface",
+        title="The strongest redundancy is among the 30-day implied-volatility columns",
         xaxis_title="Spearman rank correlation on sampled development sessions",
         height=640,
         width=1150,
@@ -1091,8 +1183,6 @@ if high_corr_pairs:
 # %% [markdown]
 # ## 6. Triage & Handoff
 #
-# | Decision | Criteria |
-# |----------|----------|
 # The book's Table 7.2 rule, with every bound taken from the configuration cell.
 # The promotion rule is a **disjunction**, so a feature reaches PROCEED on either
 # arm and the promoted count can exceed the count that cleared the adjustment.
@@ -1263,12 +1353,20 @@ for f in proceed_features:
 #
 # ### Known limitations of this screen
 #
-# - The fold boundaries are an equal partition of the development sessions, not the
-#   declared walk-forward geometry, because `cv_config` carries no materialized
-#   splits. `sign_consistency` and `worst_fold_ic` in the ledger reflect that.
-# - Sign consistency counts folds with a positive IC rather than folds sharing the
-#   feature's own direction, so a stably negative feature cannot clear the
-#   stability arm.
+# - Fold stability is measured on the producer folds' validation windows, which
+#   cover the later part of the development window rather than all of it, because
+#   a walk-forward scheme spends its early sessions training. The overall IC in
+#   section 2 spans more sessions than these folds do, and the two are not
+#   expected to agree exactly.
+# - The three GARCH columns exist only inside those validation windows, so they
+#   are screened on that window rather than on the whole panel. Their coverage is
+#   not comparable to a financial column's. Their IC is measured on those sessions
+#   too, so the searched set the adjustment is applied across does not rest on one
+#   common span.
+# - The stability arm is a two-fold test. With `n_splits` at two it promotes a
+#   feature when both validation folds share its sign and nothing more, which is
+#   the weakest reading the `sign_consistency` column supports, and in this run it
+#   is the only arm that promoted anything.
 # - Quantile bins are assigned over the pooled sample rather than within each
 #   session.
 # - The IC is screened on the primary label only. The case study ships a ten-session
