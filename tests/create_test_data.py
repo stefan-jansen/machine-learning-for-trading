@@ -47,6 +47,7 @@ import shutil
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 
 import polars as pl
@@ -332,7 +333,84 @@ def build_institutional_holdings_13f(source: Path, output: Path) -> list[Path]:
     return written
 
 
+# --- nasdaq100 minute bars ----------------------------------------------------
+#
+# This fixture is reduced on symbol and on session, never on the clock. The
+# previous one kept every session and every symbol but only every fifth minute,
+# so CI ran a one-minute dataset at five-minute spacing: every declared horizon
+# was five times its nominal length, `fwd_ret_5m` resolved to a single bar, and
+# the microstructure chapter analysed bars the exchange never published. A
+# horizon is a duration, the notebooks convert it to a bar count by measuring the
+# grid, and a fixture that changes the grid changes what every consumer computes.
+#
+# So whole sessions are kept at native one-minute resolution, including
+# extended hours, which 03_market_microstructure profiles by session. The stride
+# is uniform across the two years rather than a contiguous block, because the
+# case study builds two cross-validation folds plus a holdout over the full span
+# and validate_temporal_fold_coverage fails when an artifact covers none of a
+# fold. Sessions are the safe axis to drop: features here restart their warmup at
+# every session boundary, so a wider overnight gap changes nothing they compute.
+
+NASDAQ100_MINUTE_DIR = Path("equities") / "market" / "nasdaq100" / "minute_bars"
+NASDAQ100_MINUTE_SYMBOLS = ("AAPL", "AMD", "AMZN", "FB", "GOOGL", "MSFT")
+NASDAQ100_MINUTE_SESSION_STRIDE = 6
+
+
+def build_nasdaq100_minute_bars(source: Path, output: Path) -> list[Path]:
+    """Keep every sixth session, whole and at native one-minute spacing."""
+    source_dir = source / NASDAQ100_MINUTE_DIR
+    if not source_dir.exists() or not list(source_dir.glob("year=*")):
+        raise FileNotFoundError(
+            f"NASDAQ-100 minute bars not found at {source_dir}. Build them with "
+            "data/equities/market/algoseek_convert.py."
+        )
+
+    # Not hive_partitioning: the production layout is year=/month=, and reading
+    # those as columns would add two the fixture's consumers do not expect.
+    lf = pl.scan_parquet(source_dir / "**/*.parquet", hive_partitioning=False).filter(
+        pl.col("symbol").is_in(NASDAQ100_MINUTE_SYMBOLS)
+    )
+    sessions = lf.select("date").unique().collect()["date"].sort()
+    keep = sessions.gather(range(0, len(sessions), NASDAQ100_MINUTE_SESSION_STRIDE))
+    frame = lf.filter(pl.col("date").is_in(keep.implode())).collect().sort("symbol", "timestamp")
+
+    # The reduction is only sound if the grid it leaves is the production grid.
+    # Measured the way the notebooks measure it: consecutive spacing within a
+    # symbol-session, which must be one minute and nothing else.
+    gap = pl.col("timestamp") - pl.col("timestamp").shift(1).over("symbol", "date")
+    spacing = frame.select(gap.drop_nulls().unique().alias("gap"))["gap"].to_list()
+    if spacing != [timedelta(minutes=1)]:
+        raise ValueError(f"fixture grid is not one-minute within a session: {sorted(spacing)}")
+
+    written: list[Path] = []
+    for year, part in frame.group_by(pl.col("date").dt.year(), maintain_order=True):
+        dst = output / NASDAQ100_MINUTE_DIR / f"year={year[0]}" / "data.parquet"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        part.write_parquet(dst)
+        print(
+            f"    year={year[0]}: {len(part):,} rows ({dst.stat().st_size / 1e6:.1f} MB), "
+            f"{part['date'].n_unique()} sessions, {part['symbol'].n_unique()} symbols"
+        )
+        written.append(dst)
+    return written
+
+
 DATASETS: tuple[Dataset, ...] = (
+    Dataset(
+        name="nasdaq100_minute_bars",
+        description=(
+            f"{len(NASDAQ100_MINUTE_SYMBOLS)} symbols, every "
+            f"{NASDAQ100_MINUTE_SESSION_STRIDE}th session kept whole at native "
+            "one-minute spacing including extended hours"
+        ),
+        build=build_nasdaq100_minute_bars,
+        owns=(NASDAQ100_MINUTE_DIR,),
+        budget={
+            "symbols": list(NASDAQ100_MINUTE_SYMBOLS),
+            "session_stride": NASDAQ100_MINUTE_SESSION_STRIDE,
+            "bar_spacing": "1m (unchanged from production)",
+        },
+    ),
     Dataset(
         name="firm_characteristics",
         description=(
