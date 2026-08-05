@@ -350,9 +350,12 @@ print(f"HAC/FDR multiplicity ratio: {multiple_testing_ratio:.2f}x")
 # series. Two failure modes are visible only in the series and in no summary of
 # it - an IC that comes from one episode and is flat around it, and an IC that
 # changes sign between folds - so the series is drawn before it is reduced. Two
-# bands are drawn around the full-sample mean: the HAC interval, which allows for
-# serial dependence in the monthly IC series, and a block bootstrap, which assumes
-# no parametric form for it.
+# bands are drawn around the full-sample mean: the HAC interval, at the same
+# `HAC_MAXLAGS` bandwidth as the t-statistics reported below, and a block
+# bootstrap, which assumes no parametric form for the dependence at all. The HAC
+# half-width comes from the `compute_ic_hac_stats` standard error rather than from
+# `compute_ic_uncertainty`, which would have used the Newey-West automatic lag and
+# so drawn a band at a different bandwidth from the test beside it.
 
 # %%
 LEADING_FOR_SERIES = 3
@@ -364,7 +367,16 @@ fig, axes = plt.subplots(
 )
 for ax, feat in zip(axes, series_features, strict=True):
     series = ic_timeseries[feat].sort(DATE_COL)
-    bands = compute_ic_uncertainty(series, horizon=LABEL_HORIZON_MONTHS, ic_col="ic")
+    bootstrap = compute_ic_uncertainty(series, horizon=LABEL_HORIZON_MONTHS, ic_col="ic")
+    hac = compute_ic_hac_stats(series, ic_col="ic", maxlags=HAC_MAXLAGS)
+    half_width = 1.96 * hac["hac_se"]
+    bands = {
+        "mean_ic": hac["mean_ic"],
+        "ci_hac_lower": hac["mean_ic"] - half_width,
+        "ci_hac_upper": hac["mean_ic"] + half_width,
+        "ci_boot_lower": bootstrap["ci_boot_lower"],
+        "ci_boot_upper": bootstrap["ci_boot_upper"],
+    }
     dates = series[DATE_COL].to_list()
     ax.plot(dates, series["ic"].to_list(), color=COLORS["slate"], linewidth=0.5, alpha=0.45)
     ax.plot(

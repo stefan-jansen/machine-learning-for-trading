@@ -41,7 +41,7 @@ import numpy as np
 import polars as pl
 import yaml
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
-from ml4t.diagnostic.metrics import compute_ic_hac_stats, compute_ic_uncertainty
+from ml4t.diagnostic.metrics import compute_ic_hac_stats
 from scipy.stats import norm, spearmanr
 
 from utils.cv_splits import load_evaluation_config
@@ -255,7 +255,11 @@ print(f"Same IC sign in both validation folds: {stable_count}/{len(fold_stats)}"
 # series. Two things are visible only in the series - an IC that comes from a
 # single episode and is flat around it, and an IC that changes sign between the
 # two validation windows - so it is drawn first. The band is the HAC interval
-# around the full-sample mean. Each validation window is drawn as its own segment:
+# around the full-sample mean, computed from the same `compute_ic_hac_stats` call
+# and therefore at the same `HAC_MAXLAGS` bandwidth as the t-statistics reported
+# below. `compute_ic_uncertainty` would have drawn it at the Newey-West automatic
+# lag instead, so the band and the significance test in one notebook would have
+# rested on different bandwidths. Each validation window is drawn as its own segment:
 # the folds do not abut, and a line joining the last bar of one to the first bar of
 # the next would draw a trend across months the notebook never evaluated.
 
@@ -269,7 +273,13 @@ series_features = (
 fig, axes = plt.subplots(len(series_features), 1, figsize=(10, 7), sharex=True, sharey=True)
 for ax, feature in zip(axes, series_features, strict=True):
     series = ic_timeseries[feature].sort("timestamp")
-    bands = compute_ic_uncertainty(series, horizon=HAC_MAXLAGS, ic_col="ic")
+    stats = ic_results[feature]
+    half_width = 1.96 * stats["hac_se"]
+    bands = {
+        "mean_ic": stats["mean_ic"],
+        "ci_hac_lower": stats["mean_ic"] - half_width,
+        "ci_hac_upper": stats["mean_ic"] + half_width,
+    }
     for index, (_, window) in enumerate(
         sorted(series.group_by("cv_fold"), key=lambda item: item[1]["timestamp"].min())
     ):
