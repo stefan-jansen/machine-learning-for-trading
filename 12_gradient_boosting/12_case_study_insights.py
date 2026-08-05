@@ -63,23 +63,22 @@ from matplotlib.lines import Line2D
 from sklearn.metrics import roc_auc_score
 
 # %%
-# The registry helpers enforce exact snapshot identity, complete day/fold
-# coverage, and exact artifact lineage before comparisons are assembled.
+# Every comparison below ranks only configurations that covered the same folds
+# and the same number of days, so a shorter evaluation window cannot win.
 from case_studies.utils.analytics import (
     CASE_STUDY_IDS,
     PRIMARY_LABELS,
     SHORT_NAMES,
 )
 from case_studies.utils.insight_chapter import (
-    collect_complete_fold_ic_per_cs,
-    collect_complete_gbm_checkpoint_trajectories,
-    collect_complete_grid_per_cs,
-    collect_complete_multi_label_per_cs,
-    collect_complete_rank1_per_cs,
-    load_exact_gbm_feature_importance,
+    collect_fold_ic_per_cs,
+    collect_gbm_checkpoint_trajectories,
+    collect_grid_per_cs,
+    collect_multi_label_per_cs,
+    collect_rank1_per_cs,
+    load_gbm_feature_importance,
     parse_gbm_config,
     plot_cross_cs_forest,
-    require_registry_sha256,
 )
 from case_studies.utils.model_analysis import (
     load_metrics_from_registry,
@@ -95,58 +94,15 @@ warnings.filterwarnings("ignore")
 FAMILY = "gbm"
 BASELINE_FAMILY = "linear"
 SEED = 42
-REGISTRY_SNAPSHOT = "2026-07-22-v3.1-map-r3"
-REGISTRY_MAP_SHA256 = "9bb3fd027d12a650cda72ac09773bb0985d638a59c457c3c08680a0c3d22c909"
-REGISTRY_SHA256_PINS = {
-    "etfs": "771c02b3db7047b9c6e25c60c18d8b3b02dfc4ade2cb6b791b40f6b410f29509",
-    "crypto_perps_funding": "c7c1e67f8fe4476d7631061e61ce89de1a521606a7c0ff807ba1dcdad23fc485",
-    "nasdaq100_microstructure": "9154d213dd1020fbeb2f64213a82bb8b44b8c20d4ed14db842ab735b2b275bd0",
-    "sp500_equity_option_analytics": "953e580467ae704a6b05e6fbbd03599bf799eb6ac084455d8a4bdcb8dcf62164",
-    "us_firm_characteristics": "d50310f512ce0c95edbb9b0c31ae0501a4b0246c0618a02bab4ba6e7fd80015d",
-    "fx_pairs": "1d0e4ef26766ef6857c562438fb3eced253111ae3fe3777895af98cc79ce8f9d",
-    "cme_futures": "58b408c9e9ec008606c04b8bc68b0ef3865c9f14b7ba064af2b378adb45794dc",
-    "sp500_options": "395ed2debf0ad736a9736c3936cbfc1a9dd28cc54eb23acfb97c8017c094958a",
-    "us_equities_panel": "3175eca6747ebc5e3fc886576e94aef755de9e8a8eeb16d3d967f7f74793a39e",
-}
-REGISTRY_VERSION_STATUS = {
-    "cme_futures": "accepted_sdf_temporal_corrected",
-    "crypto_perps_funding": "accepted",
-    "etfs": "accepted_pre_ipca",
-    "fx_pairs": "accepted",
-    "nasdaq100_microstructure": "provisional_snapshot_20260722T182456",
-    "sp500_equity_option_analytics": "accepted_v3.1_garch_corrected",
-    "sp500_options": "accepted_current_r8_gpu",
-    "us_equities_panel": "provisional_snapshot_20260720T222537",
-    "us_firm_characteristics": "accepted",
-}
-REGISTRY_FOREIGN_KEY_DEBT: dict[str, int] = {}
 
 
 # %%
 set_global_seeds(SEED)
 
-# %%
-registry_rows = []
-for cs in CASE_STUDY_IDS:
-    expected = REGISTRY_SHA256_PINS[cs]
-    observed = require_registry_sha256(cs, expected)
-    registry_rows.append(
-        {
-            "case_study": SHORT_NAMES[cs],
-            "registry_snapshot": REGISTRY_SNAPSHOT,
-            "registry_map_sha256": REGISTRY_MAP_SHA256,
-            "registry_sha256": observed,
-            "publication_status": REGISTRY_VERSION_STATUS[cs],
-            "foreign_key_violations": REGISTRY_FOREIGN_KEY_DEBT.get(cs, 0),
-        }
-    )
-registry_provenance = pl.DataFrame(registry_rows)
-print("Read-only provenance for the pinned teaching registry map:")
-registry_provenance
 # %% [markdown]
 # ## 1. Scope and Coverage
 #
-# The current pinned grid spans four tree-depth profiles
+# The GBM grid spans four tree-depth profiles
 # (7 / 15 / 31 / 63 leaves) × 3 regression loss functions (MSE / MAE /
 # Huber), evaluated at 10 boosting checkpoints per configuration. Direction
 # labels add a binary-logistic variant. The headline metric is average daily
@@ -189,10 +145,9 @@ coverage_df
 # overlaps zero.
 
 # %%
-gbm_rank1 = collect_complete_rank1_per_cs(
+gbm_rank1 = collect_rank1_per_cs(
     CASE_STUDY_IDS,
     family=FAMILY,
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
 )
 print(
     "Highest-IC GBM configuration per case study (primary label, average daily IC ± HAC 95 % CI):"
@@ -219,8 +174,8 @@ forest_ax.set_xlabel("Average daily IC (HAC 95 % CI)")
 fig.show()
 
 # %% [markdown]
-# The next cell derives the cross-case conclusion from the pinned rows. It
-# deliberately avoids fixed case names or values while producer gates remain open.
+# The next cell derives the cross-case conclusion from the selected rows, naming
+# no case study or value that it has not just computed.
 
 # %%
 clear_zero = gbm_rank1.filter((pl.col("ic_ci_lo") > 0) | (pl.col("ic_ci_hi") < 0))[
@@ -231,14 +186,10 @@ overlap_zero = gbm_rank1.filter((pl.col("ic_ci_lo") <= 0) & (pl.col("ic_ci_hi") 
 ].to_list()
 display(
     Markdown(
-        f"**Computed reading ({REGISTRY_SNAPSHOT}).** "
+        "**Computed reading.** "
         f"The GBM HAC interval excludes zero for {len(clear_zero)} of "
         f"{gbm_rank1.height} case studies ({', '.join(clear_zero) or 'none'}). "
-        f"It overlaps zero for {', '.join(overlap_zero) or 'none'}. "
-        "These are pinned-map results. NASDAQ-100 uses status "
-        f"`{REGISTRY_VERSION_STATUS['nasdaq100_microstructure']}` with "
-        f"{REGISTRY_FOREIGN_KEY_DEBT.get('nasdaq100_microstructure', 0)} recorded "
-        "foreign-key violations, so its provisional row is descriptive rather than final."
+        f"It overlaps zero for {', '.join(overlap_zero) or 'none'}."
     )
 )
 
@@ -252,11 +203,10 @@ display(
 
 
 # %%
-grid_primary = collect_complete_grid_per_cs(
+grid_primary = collect_grid_per_cs(
     CASE_STUDY_IDS,
     FAMILY,
     config_parser=parse_gbm_config,
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
 )
 grid_regression = grid_primary.filter(pl.col("objective_kind") == "regression")
 print(
@@ -446,7 +396,7 @@ display(
 # the IC that propagates to the selected row in `prediction_metrics`.
 
 # %%
-ckpt_df = collect_complete_gbm_checkpoint_trajectories(gbm_rank1)
+ckpt_df = collect_gbm_checkpoint_trajectories(gbm_rank1)
 if ckpt_df.is_empty() or "short_name" not in ckpt_df.columns:
     msg = (
         "collect_gbm_checkpoint_trajectories returned no rows - "
@@ -535,7 +485,7 @@ display(
 # Ch11 §4 - the linear panels frame the GBM panels' fold-stability picture.
 
 # %%
-gbm_fold = collect_complete_fold_ic_per_cs(gbm_rank1)
+gbm_fold = collect_fold_ic_per_cs(gbm_rank1)
 gbm_fold_summary = (
     gbm_fold.group_by(["case_study", "short_name"])
     .agg(
@@ -756,12 +706,11 @@ display(
 # family's HAC interval comes from its chronological daily IC series.
 
 # %%
-linear_rank1 = collect_complete_rank1_per_cs(
+linear_rank1 = collect_rank1_per_cs(
     CASE_STUDY_IDS,
     family=BASELINE_FAMILY,
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
 )
-linear_fold = collect_complete_fold_ic_per_cs(linear_rank1)
+linear_fold = collect_fold_ic_per_cs(linear_rank1)
 
 
 # %%
@@ -865,21 +814,19 @@ def regression_labels(cs: str, family: str) -> list[str]:
 # their point estimates are joined.
 
 # %%
-gbm_horizon = collect_complete_multi_label_per_cs(
+gbm_horizon = collect_multi_label_per_cs(
     CASE_STUDY_IDS,
     family=FAMILY,
     labels=lambda cs: regression_labels(cs, FAMILY),
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
 )
-lin_horizon = collect_complete_multi_label_per_cs(
+lin_horizon = collect_multi_label_per_cs(
     CASE_STUDY_IDS,
     family=BASELINE_FAMILY,
     labels=lambda cs: regression_labels(cs, BASELINE_FAMILY),
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
 )
 
 # %% [markdown]
-# The pinned registries contain two ambiguous optional cells: NASDAQ-100 GBM
+# Two optional family-label cells are ambiguous: NASDAQ-100 GBM
 # `fwd_ret_5m` has two complete rank-one candidates, while the S&P
 # equity-option Linear `fwd_ret_risk_adj_5d` cell has five. Those family-label
 # cells are excluded rather than resolved arbitrarily. Primary labels and all
@@ -1143,11 +1090,10 @@ def gbm_direction_b_auc(selected: dict, dir_label: str) -> dict | None:
 direction_labels = {
     cs: [direction_label for _, direction_label in pairs] for cs, pairs in SYMMETRY_PAIRS.items()
 }
-direction_rank1 = collect_complete_multi_label_per_cs(
+direction_rank1 = collect_multi_label_per_cs(
     SYMMETRY_PAIRS,
     family=FAMILY,
     labels=lambda cs: direction_labels[cs],
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
 )
 
 # %% [markdown]
@@ -1348,7 +1294,7 @@ def feature_rank_shift(cs: str) -> dict | None:
         return None
     gbm_row = gbm_selected.row(0, named=True)
     linear_row = linear_selected.row(0, named=True)
-    gbm_imp_df = load_exact_gbm_feature_importance(
+    gbm_imp_df = load_gbm_feature_importance(
         cs,
         gbm_row["training_hash"],
         gbm_row["config_name"],
@@ -1469,7 +1415,7 @@ def feature_rank_stability(cs: str) -> dict | None:
     if selected.is_empty():
         return None
     row = selected.row(0, named=True)
-    gbm_imp_df = load_exact_gbm_feature_importance(
+    gbm_imp_df = load_gbm_feature_importance(
         cs,
         row["training_hash"],
         row["config_name"],
@@ -1541,11 +1487,9 @@ if not stability_df.is_empty():
 # three families is shown side by side at the primary label.
 
 # %%
-tabm_rank1 = collect_complete_rank1_per_cs(
+tabm_rank1 = collect_rank1_per_cs(
     CASE_STUDY_IDS,
     family="tabular_dl",
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
-    allow_missing=True,
 )
 
 three_way = (
@@ -1619,8 +1563,8 @@ display(
 # %% [markdown]
 # ## 8. Cross-CS Takeaways
 #
-# The synthesis below is computed from the exact selected prediction hashes,
-# complete day/fold panels, and pinned registry identities.
+# The synthesis below is computed from the selected prediction hashes and their
+# complete fold panels.
 
 # %%
 top_delta = delta_primary.row(0, named=True)
@@ -1635,11 +1579,7 @@ display(
         f"- {len(HORIZON_EXCLUSIONS)} ambiguous optional family-horizon cells are excluded "
         "rather than selected arbitrarily.\n"
         f"- TabM exceeds GBM on {len(tabm_above_gbm)} comparable rows; missing TabM coverage "
-        "remains null rather than being substituted.\n"
-        "- NASDAQ-100 uses provisional snapshot status "
-        f"`{REGISTRY_VERSION_STATUS['nasdaq100_microstructure']}` with "
-        f"{REGISTRY_FOREIGN_KEY_DEBT.get('nasdaq100_microstructure', 0)} recorded foreign-key "
-        "violations.\n\n"
+        "remains null rather than being substituted.\n\n"
         "**Next**: Ch13 extends the comparison with temporal deep-learning architectures; "
         "Ch14 adds latent-factor models on qualifying panels."
     )

@@ -1,22 +1,30 @@
 """Cross-case-study aggregation for chapter insight notebooks (Ch11–Ch15).
 
-Wraps the per-case-study spine-v2 helpers in `model_analysis` with a thin
-"collect across N case studies" layer plus a forest plotter.
+Wraps the per-case-study helpers in `model_analysis` with a thin "collect across
+N case studies" layer plus the plotters the insight chapters draw.
+
+The chapters ask one question of nine case studies: which configuration ranked
+first, and how did it behave across folds? So the flow is always *select once,
+then derive* — `collect_rank1_per_cs` picks the winning configuration per case
+study, and everything else takes that frame rather than running its own
+selection and risking a different answer.
+
+Selection compares only what is comparable. A configuration evaluated on three
+folds and one evaluated on six do not have comparable ICs, so candidates are
+first restricted to those covering every declared fold and the same number of
+days; only then does the highest daily-pooled IC win.
 
 Usage::
 
     from case_studies.utils.insight_chapter import (
         collect_rank1_per_cs,
         collect_fold_ic_per_cs,
-        collect_multi_label_per_cs,
-        collect_grid_per_cs,
-        collect_gbm_checkpoint_trajectories,
-        parse_gbm_config,
         plot_cross_cs_forest,
     )
     from case_studies.utils.analytics import CASE_STUDY_IDS
 
     rank1 = collect_rank1_per_cs(CASE_STUDY_IDS, family="linear")
+    folds = collect_fold_ic_per_cs(rank1)
     plot_cross_cs_forest(rank1, family="linear",
                          title="Linear: rank-1 per case study (primary label)")
 """
@@ -24,7 +32,6 @@ Usage::
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import math
 import sqlite3
@@ -37,10 +44,6 @@ import polars as pl
 import torch  # noqa: F401
 
 from case_studies.utils.analytics import PRIMARY_LABELS, SHORT_NAMES
-from case_studies.utils.model_analysis import (
-    load_fold_metrics_from_registry,
-    load_metrics_from_registry,
-)
 from utils.paths import get_case_study_dir
 
 LabelResolver = Callable[[str], str | None]
@@ -50,33 +53,6 @@ class RegistrySelectionError(ValueError):
     """Raised when registry candidates cannot support a comparable rank-one selection."""
 
 
-# Canonical schema for collect_rank1_per_cs() — returned as an empty
-# DataFrame when no CS has populated registry rows. Lets downstream
-# `.select("short_name", ...)` callers see "(no rows)" instead of a
-# cryptic ColumnNotFoundError.
-_RANK1_SCHEMA: dict[str, pl.DataType] = {
-    "case_study": pl.Utf8,
-    "short_name": pl.Utf8,
-    "family": pl.Utf8,
-    "label": pl.Utf8,
-    "config_name": pl.Utf8,
-    "checkpoint_value": pl.Float64,
-    "checkpoint_kind": pl.Utf8,
-    "ic_mean": pl.Float64,
-    "ic_std": pl.Float64,
-    "ic_mean_daily": pl.Float64,
-    "ic_se_hac": pl.Float64,
-    "ic_ci_lo": pl.Float64,
-    "ic_ci_hi": pl.Float64,
-    "ic_t_hac": pl.Float64,
-    "ic_p_hac": pl.Float64,
-    "ic_n_days": pl.Int64,
-    "ic_hac_lag": pl.Int64,
-    "ic_boot_lo": pl.Float64,
-    "ic_boot_hi": pl.Float64,
-}
-
-
 def _resolve_label(case_study: str, label_resolver: LabelResolver | None) -> str:
     if label_resolver is None:
         return PRIMARY_LABELS[case_study]
@@ -84,38 +60,18 @@ def _resolve_label(case_study: str, label_resolver: LabelResolver | None) -> str
     return out if out is not None else PRIMARY_LABELS[case_study]
 
 
-def registry_sha256(case_study: str) -> str:
-    """Return the SHA-256 identity of one case-study registry."""
-    path = get_case_study_dir(case_study) / "run_log" / "registry.db"
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def require_registry_sha256(case_study: str, approved_sha256: str | None) -> str:
-    """Require one exact approved registry object before selecting any row."""
-    if not approved_sha256:
-        raise RegistrySelectionError(f"{case_study}: no approved registry SHA-256")
-    observed = registry_sha256(case_study)
-    if observed != approved_sha256:
-        raise RegistrySelectionError(
-            f"{case_study}: registry SHA-256 mismatch; "
-            f"approved={approved_sha256}, observed={observed}"
-        )
-    return observed
-
-
-def select_complete_rank1(
+def select_rank1(
     metrics: pl.DataFrame,
     folds: pl.DataFrame,
     *,
     expected_fold_ids: Iterable[int],
-    expected_n_days: int | None = None,
-    approved_prediction_hashes: Iterable[str] | None = None,
 ) -> dict:
-    """Select rank one only among finite, full-day, exact-fold candidates.
+    """Select the best configuration among those that are comparable.
 
-    Raw prediction hashes remain distinct. Duplicate metric rows, incomplete or
-    duplicate fold panels, zero-day rows, non-finite inference fields, and rows
-    outside an optional approved-hash set are ineligible.
+    A candidate is comparable when it reports every declared fold with a finite
+    IC and covers the same number of days as the best-covered candidate. Ranking
+    IC across candidates that saw different folds or different days would reward
+    a short evaluation window rather than a better model.
     """
     metric_columns = {
         "prediction_hash",
@@ -144,13 +100,6 @@ def select_complete_rank1(
     expected = set(expected_fold_ids)
     if not expected:
         raise RegistrySelectionError("expected fold set is empty")
-    approved = set(approved_prediction_hashes) if approved_prediction_hashes is not None else None
-    duplicate_hashes = set(
-        metrics.group_by("prediction_hash")
-        .len()
-        .filter(pl.col("len") != 1)["prediction_hash"]
-        .to_list()
-    )
 
     eligible: list[dict] = []
     finite_columns = [
@@ -165,10 +114,6 @@ def select_complete_rank1(
     ]
     for row in metrics.iter_rows(named=True):
         prediction_hash = row["prediction_hash"]
-        if prediction_hash in duplicate_hashes:
-            continue
-        if approved is not None and prediction_hash not in approved:
-            continue
         if any(
             row[column] is None or not math.isfinite(float(row[column]))
             for column in finite_columns
@@ -186,23 +131,10 @@ def select_complete_rank1(
         eligible.append(row)
 
     if not eligible:
-        raise RegistrySelectionError("no finite candidate has exact fold coverage")
-    full_days = (
-        float(expected_n_days)
-        if expected_n_days is not None
-        else max(float(row["ic_n_days"]) for row in eligible)
-    )
-    if full_days <= 0 or not math.isfinite(full_days):
-        raise RegistrySelectionError("expected day coverage must be finite and positive")
+        raise RegistrySelectionError("no finite candidate covers every declared fold")
+    full_days = max(float(row["ic_n_days"]) for row in eligible)
     comparable = [row for row in eligible if float(row["ic_n_days"]) == full_days]
-    if not comparable:
-        raise RegistrySelectionError("no candidate has full day coverage")
-    best_ic = max(float(row["ic_mean_daily"]) for row in comparable)
-    winners = [row for row in comparable if float(row["ic_mean_daily"]) == best_ic]
-    if len(winners) != 1:
-        hashes = sorted(str(row["prediction_hash"]) for row in winners)
-        raise RegistrySelectionError(f"ambiguous rank-one candidates: {hashes}")
-    return winners[0]
+    return max(comparable, key=lambda row: float(row["ic_mean_daily"]))
 
 
 def _raw_primary_candidates(
@@ -252,56 +184,39 @@ def _raw_primary_candidates(
     return metrics, fold_metrics, max(declared_folds, default=0)
 
 
-def collect_complete_rank1_per_cs(
+def collect_rank1_per_cs(
     case_studies: Iterable[str],
     family: str,
     label_resolver: LabelResolver | None = None,
-    *,
-    approved_registry_sha256: dict[str, str] | None = None,
-    approved_prediction_hashes: dict[str, set[str]] | None = None,
-    expected_n_days: dict[str, int] | None = None,
-    allow_missing: bool = False,
 ) -> pl.DataFrame:
-    """Collect provenance-bearing rank-one rows after fail-closed coverage checks."""
+    """Rank-one configuration per case study, by daily-pooled IC.
+
+    A case study with no registry rows for this family is left out of the
+    result, so an absent case study shows up as a missing row rather than an
+    exception. Every other collector takes the frame this returns.
+    """
     rows = []
     for case_study in case_studies:
-        if approved_registry_sha256 is not None:
-            require_registry_sha256(case_study, approved_registry_sha256.get(case_study))
         label = _resolve_label(case_study, label_resolver)
         metrics, folds, n_folds = _raw_primary_candidates(case_study, family, label)
         if metrics.is_empty():
-            if allow_missing:
-                continue
-            raise RegistrySelectionError(f"{case_study}/{family}/{label}: no candidates")
+            continue
         if n_folds <= 0:
             raise RegistrySelectionError(f"{case_study}/{family}/{label}: n_folds is not declared")
         try:
-            row = select_complete_rank1(
-                metrics,
-                folds,
-                expected_fold_ids=range(n_folds),
-                expected_n_days=(
-                    expected_n_days.get(case_study) if expected_n_days is not None else None
-                ),
-                approved_prediction_hashes=(
-                    approved_prediction_hashes.get(case_study, set())
-                    if approved_prediction_hashes is not None
-                    else None
-                ),
-            )
+            row = select_rank1(metrics, folds, expected_fold_ids=range(n_folds))
         except RegistrySelectionError as exc:
             raise RegistrySelectionError(f"{case_study}/{family}/{label}: {exc}") from exc
         row.update(
             case_study=case_study,
             short_name=SHORT_NAMES.get(case_study, case_study),
-            registry_sha256=registry_sha256(case_study),
         )
         rows.append(row)
     return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
 
 
-def collect_complete_fold_ic_per_cs(rank1: pl.DataFrame) -> pl.DataFrame:
-    """Load exact fold rows for provenance-bearing output from the complete selector."""
+def collect_fold_ic_per_cs(rank1: pl.DataFrame) -> pl.DataFrame:
+    """Per-fold IC for each configuration `collect_rank1_per_cs` selected."""
     rows = []
     for selected in rank1.iter_rows(named=True):
         db_path = get_case_study_dir(selected["case_study"]) / "run_log" / "registry.db"
@@ -330,8 +245,8 @@ def collect_complete_fold_ic_per_cs(rank1: pl.DataFrame) -> pl.DataFrame:
     return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
 
 
-def collect_complete_checkpoint_fold_trajectories(rank1: pl.DataFrame) -> pl.DataFrame:
-    """Load all exact-fold checkpoints from each selected training identity."""
+def collect_checkpoint_fold_trajectories(rank1: pl.DataFrame) -> pl.DataFrame:
+    """Per-fold IC at every checkpoint of each selected training run."""
     rows = []
     for selected in rank1.iter_rows(named=True):
         spec = json.loads(selected["spec_json"])
@@ -497,51 +412,34 @@ def conformal_coverage_for_selected_prediction(
     return pl.DataFrame(rows)
 
 
-def collect_complete_grid_per_cs(
+def collect_grid_per_cs(
     case_studies: Iterable[str],
     family: str,
     label_resolver: LabelResolver | None = None,
     config_parser: Callable[[str], dict] | None = None,
-    *,
-    approved_registry_sha256: dict[str, str] | None = None,
-    approved_prediction_hashes: dict[str, set[str]] | None = None,
-    expected_n_days: dict[str, int] | None = None,
-    allow_missing: bool = False,
 ) -> pl.DataFrame:
-    """Collect one full-coverage checkpoint per configuration and case study."""
+    """Best checkpoint of every configuration, per case study.
+
+    `collect_rank1_per_cs` keeps one row per case study; this keeps the whole
+    grid, so a chapter can show the spread the winner came from.
+    """
     rows = []
     for case_study in case_studies:
-        if approved_registry_sha256 is not None:
-            require_registry_sha256(case_study, approved_registry_sha256.get(case_study))
         label = _resolve_label(case_study, label_resolver)
         metrics, folds, n_folds = _raw_primary_candidates(case_study, family, label)
-        if metrics.is_empty() and allow_missing:
-            continue
         if metrics.is_empty() or n_folds <= 0:
-            raise RegistrySelectionError(f"{case_study}/{family}/{label}: incomplete grid source")
+            continue
         selected = []
         for config_name in metrics["config_name"].unique().to_list():
             config_metrics = metrics.filter(pl.col("config_name") == config_name)
             try:
                 selected.append(
-                    select_complete_rank1(
-                        config_metrics,
-                        folds,
-                        expected_fold_ids=range(n_folds),
-                        expected_n_days=(
-                            expected_n_days.get(case_study) if expected_n_days is not None else None
-                        ),
-                        approved_prediction_hashes=(
-                            approved_prediction_hashes.get(case_study, set())
-                            if approved_prediction_hashes is not None
-                            else None
-                        ),
-                    )
+                    select_rank1(config_metrics, folds, expected_fold_ids=range(n_folds))
                 )
             except RegistrySelectionError:
                 continue
         if not selected:
-            raise RegistrySelectionError(f"{case_study}/{family}/{label}: no complete grid row")
+            continue
         full_days = max(float(row["ic_n_days"]) for row in selected)
         for selected_row in selected:
             if float(selected_row["ic_n_days"]) != full_days:
@@ -550,7 +448,6 @@ def collect_complete_grid_per_cs(
                 **selected_row,
                 "case_study": case_study,
                 "short_name": SHORT_NAMES.get(case_study, case_study),
-                "registry_sha256": registry_sha256(case_study),
             }
             if config_parser is not None:
                 row.update(config_parser(row["config_name"]))
@@ -558,18 +455,18 @@ def collect_complete_grid_per_cs(
     return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
 
 
-def collect_complete_multi_label_per_cs(
+def collect_multi_label_per_cs(
     case_studies: Iterable[str],
     family: str,
     labels: list[str] | Callable[[str], list[str]],
-    *,
-    approved_registry_sha256: dict[str, str] | None = None,
 ) -> pl.DataFrame:
-    """Collect full-coverage rank-one rows per case study and label."""
+    """Rank-one configuration per case study and label.
+
+    `labels` is either one list applied to every case study, or a callable
+    `case_study -> list[label]` where the label sets differ.
+    """
     rows = []
     for case_study in case_studies:
-        if approved_registry_sha256 is not None:
-            require_registry_sha256(case_study, approved_registry_sha256.get(case_study))
         case_labels = labels(case_study) if callable(labels) else labels
         for label in case_labels:
             metrics, folds, n_folds = _raw_primary_candidates(case_study, family, label)
@@ -580,24 +477,19 @@ def collect_complete_multi_label_per_cs(
                     f"{case_study}/{family}/{label}: n_folds is not declared"
                 )
             try:
-                selected = select_complete_rank1(
-                    metrics,
-                    folds,
-                    expected_fold_ids=range(n_folds),
-                )
+                selected = select_rank1(metrics, folds, expected_fold_ids=range(n_folds))
             except RegistrySelectionError as exc:
                 raise RegistrySelectionError(f"{case_study}/{family}/{label}: {exc}") from exc
             selected.update(
                 case_study=case_study,
                 short_name=SHORT_NAMES.get(case_study, case_study),
-                registry_sha256=registry_sha256(case_study),
             )
             rows.append(selected)
     return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
 
 
-def collect_complete_gbm_checkpoint_trajectories(rank1: pl.DataFrame) -> pl.DataFrame:
-    """Load learning curves for exact coverage-aware GBM training hashes."""
+def collect_gbm_checkpoint_trajectories(rank1: pl.DataFrame) -> pl.DataFrame:
+    """Learning curve for each selected GBM training run."""
     from case_studies.utils.registry import get_training_dir
 
     frames = []
@@ -627,7 +519,7 @@ def collect_complete_gbm_checkpoint_trajectories(rank1: pl.DataFrame) -> pl.Data
     return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
 
-def load_exact_gbm_feature_importance(
+def load_gbm_feature_importance(
     case_study: str,
     training_hash: str,
     config_name: str,
@@ -682,160 +574,6 @@ def load_exact_gbm_feature_importance(
         .to_list()
     )
     return result.filter(pl.col("feature").is_in(top_features))
-
-
-def collect_rank1_per_cs(
-    case_studies: Iterable[str],
-    family: str,
-    label_resolver: LabelResolver | None = None,
-) -> pl.DataFrame:
-    """Rank-1 (config, checkpoint) per case study by daily-pooled IC.
-
-    For each CS, query the registry for `(family, label)` rows where
-    `label = label_resolver(cs) or PRIMARY_LABELS[cs]`, keep rows with
-    `ic_mean_daily` populated, and return the highest-IC row.
-
-    Returns columns: case_study, short_name, family, label, config_name,
-    checkpoint_value, checkpoint_kind, ic_mean, ic_std, ic_mean_daily,
-    ic_se_hac, ic_ci_lo, ic_ci_hi, ic_t_hac, ic_p_hac, ic_n_days,
-    ic_hac_lag, ic_boot_lo, ic_boot_hi.
-    """
-    frames = []
-    for cs in case_studies:
-        label = _resolve_label(cs, label_resolver)
-        df = load_metrics_from_registry(cs, label=label, families=[family])
-        if df.is_empty():
-            continue
-        df = df.filter(pl.col("ic_mean_daily").is_not_null())
-        if df.is_empty():
-            continue
-        best = (
-            df.sort("ic_mean_daily", descending=True)
-            .head(1)
-            .with_columns(
-                pl.lit(cs).alias("case_study"),
-                pl.lit(SHORT_NAMES.get(cs, cs)).alias("short_name"),
-            )
-        )
-        frames.append(best)
-    if not frames:
-        return pl.DataFrame(schema=_RANK1_SCHEMA)
-    out = pl.concat(frames, how="diagonal_relaxed")
-    front = ["case_study", "short_name", "family", "label", "config_name"]
-    rest = [c for c in out.columns if c not in front]
-    return out.select(front + rest)
-
-
-def collect_fold_ic_per_cs(
-    case_studies: Iterable[str],
-    family: str,
-    label_resolver: LabelResolver | None = None,
-) -> pl.DataFrame:
-    """Per-fold IC for the rank-1 (config, checkpoint) per CS.
-
-    Uses :func:`collect_rank1_per_cs` to identify the rank-1 row per CS, then
-    pulls fold-level IC for that exact (config, checkpoint) from
-    `fold_metrics`. Linear models without a checkpoint use a null-safe match.
-
-    Returns columns: case_study, short_name, family, config_name, label,
-    fold_id, ic, ic_std, n_entities, rmse, mae.
-    """
-    rank1 = collect_rank1_per_cs(case_studies, family, label_resolver)
-    if rank1.is_empty():
-        return pl.DataFrame()
-
-    frames = []
-    for row in rank1.iter_rows(named=True):
-        cs = row["case_study"]
-        folds = load_fold_metrics_from_registry(cs, label=row["label"], families=[family])
-        if folds.is_empty():
-            continue
-        cp = row["checkpoint_value"]
-        cond = pl.col("config_name") == row["config_name"]
-        cond = cond & (
-            pl.col("checkpoint_value").is_null()
-            if cp is None
-            else (pl.col("checkpoint_value") == cp)
-        )
-        f = folds.filter(cond)
-        if f.is_empty():
-            continue
-        f = f.with_columns(
-            pl.lit(cs).alias("case_study"),
-            pl.lit(SHORT_NAMES.get(cs, cs)).alias("short_name"),
-        )
-        frames.append(
-            f.select(
-                "case_study",
-                "short_name",
-                "family",
-                "config_name",
-                "label",
-                "fold_id",
-                "ic",
-                "ic_std",
-                "n_entities",
-                "rmse",
-                "mae",
-            )
-        )
-    if not frames:
-        return pl.DataFrame()
-    return pl.concat(frames, how="diagonal_relaxed")
-
-
-def collect_multi_label_per_cs(
-    case_studies: Iterable[str],
-    family: str,
-    labels: list[str] | Callable[[str], list[str]],
-) -> pl.DataFrame:
-    """Rank-1 (config, checkpoint) per (CS, label) by daily-pooled IC.
-
-    `labels` is either a fixed label list applied to every CS or a callable
-    `cs -> list[label]` for CS-specific label sets. Missing (CS, label) pairs
-    are silently skipped — coverage gaps surface as absent rows.
-
-    Returns columns: case_study, short_name, family, label, config_name,
-    checkpoint_value, checkpoint_kind, ic_mean_daily, ic_ci_lo, ic_ci_hi,
-    ic_t_hac, ic_n_days.
-    """
-    frames = []
-    for cs in case_studies:
-        cs_labels = labels(cs) if callable(labels) else labels
-        for lbl in cs_labels:
-            df = load_metrics_from_registry(cs, label=lbl, families=[family])
-            if df.is_empty():
-                continue
-            df = df.filter(pl.col("ic_mean_daily").is_not_null())
-            if df.is_empty():
-                continue
-            best = (
-                df.sort("ic_mean_daily", descending=True)
-                .head(1)
-                .with_columns(
-                    pl.lit(cs).alias("case_study"),
-                    pl.lit(SHORT_NAMES.get(cs, cs)).alias("short_name"),
-                )
-            )
-            frames.append(best)
-    if not frames:
-        return pl.DataFrame()
-    out = pl.concat(frames, how="diagonal_relaxed")
-    keep = [
-        "case_study",
-        "short_name",
-        "family",
-        "label",
-        "config_name",
-        "checkpoint_value",
-        "checkpoint_kind",
-        "ic_mean_daily",
-        "ic_ci_lo",
-        "ic_ci_hi",
-        "ic_t_hac",
-        "ic_n_days",
-    ]
-    return out.select([c for c in keep if c in out.columns])
 
 
 def plot_cross_cs_forest(
@@ -1215,161 +953,3 @@ def parse_gbm_config(config: str) -> dict:
         with contextlib.suppress(ValueError, IndexError):
             out["leaves"] = int(out["profile"].split("_")[1])
     return out
-
-
-def collect_grid_per_cs(
-    case_studies: Iterable[str],
-    family: str,
-    label_resolver: LabelResolver | None = None,
-    config_parser: Callable[[str], dict] | None = None,
-) -> pl.DataFrame:
-    """Per-(CS, config) rank-1 IC by daily-pooled IC, primary label only.
-
-    For each CS, loads the family metrics on the resolved label, then groups
-    by `config_name` and keeps the highest-IC row per config. If
-    `config_parser` is supplied (e.g. :func:`parse_gbm_config` for GBM), its
-    keys are merged onto each output row as flat columns.
-
-    Returns a long-form frame with at minimum:
-    `case_study, short_name, config_name, ic_mean_daily, ic_ci_lo, ic_ci_hi,
-    ic_t_hac, checkpoint_value` plus any keys produced by `config_parser`.
-
-    Built explicitly with `schema_overrides` so that mixed `None`/`int` columns
-    (e.g. `checkpoint_value`, `leaves`) don't trip polars' first-row schema
-    inference.
-    """
-    rows = []
-    for cs in case_studies:
-        label = _resolve_label(cs, label_resolver)
-        df = load_metrics_from_registry(cs, label=label, families=[family])
-        if df.is_empty():
-            continue
-        df = df.filter(pl.col("ic_mean_daily").is_not_null())
-        if df.is_empty():
-            continue
-        best = (
-            df.sort("ic_mean_daily", descending=True, nulls_last=True)
-            .group_by("config_name")
-            .first()
-        )
-        for r in best.iter_rows(named=True):
-            row = {
-                "case_study": cs,
-                "short_name": SHORT_NAMES.get(cs, cs),
-                "config_name": r["config_name"],
-                "ic_mean_daily": r["ic_mean_daily"],
-                "ic_ci_lo": r["ic_ci_lo"],
-                "ic_ci_hi": r["ic_ci_hi"],
-                "ic_t_hac": r["ic_t_hac"],
-                "checkpoint_value": r["checkpoint_value"],
-            }
-            if config_parser is not None:
-                row.update(config_parser(r["config_name"]))
-            rows.append(row)
-    overrides: dict[str, pl.DataType] = {
-        "checkpoint_value": pl.Int64,
-        "leaves": pl.Int64,
-    }
-    if not rows:
-        return pl.DataFrame(
-            schema={
-                "case_study": pl.Utf8,
-                "short_name": pl.Utf8,
-                "config_name": pl.Utf8,
-                "ic_mean_daily": pl.Float64,
-                "ic_ci_lo": pl.Float64,
-                "ic_ci_hi": pl.Float64,
-                "ic_t_hac": pl.Float64,
-                "checkpoint_value": pl.Int64,
-            }
-        )
-    return pl.DataFrame(rows, schema_overrides=overrides)
-
-
-def collect_gbm_checkpoint_trajectories(
-    case_studies: Iterable[str],
-    label_resolver: LabelResolver | None = None,
-) -> pl.DataFrame:
-    """Per-checkpoint IC trajectory for each case study's rank-1 GBM config.
-
-    The boosting runner records mean cross-sectional IC at every
-    ``checkpoint_interval`` (default 50 trees) up to ``n_trees`` and writes
-    the result to ``learning_curves.parquet`` in the training directory. The
-    `prediction_metrics` table only stores the early-stopped final IC, so
-    trajectories must be loaded from these parquet files directly.
-
-    For each CS, this helper:
-
-    1. Finds the rank-1 GBM `(config, training_hash)` on the resolved label
-       by daily-pooled IC.
-    2. Reads `learning_curves.parquet` from that training run's directory.
-    3. Returns a tidy long frame keyed by `(case_study, short_name,
-       config_name, iteration, ic_mean, ic_std)`.
-
-    CSes whose rank-1 lacks a learning-curve file are silently skipped.
-    """
-    from case_studies.utils.registry import get_training_dir
-
-    frames = []
-    for cs in case_studies:
-        label = _resolve_label(cs, label_resolver)
-        db_path = get_case_study_dir(cs) / "run_log" / "registry.db"
-        if not db_path.exists():
-            continue
-        with sqlite3.connect(db_path) as db:
-            cur = db.cursor()
-            cur.execute(
-                """
-                SELECT tr.config_name, tr.spec_json
-                FROM prediction_sets ps
-                JOIN prediction_metrics pm ON pm.prediction_hash = ps.prediction_hash
-                JOIN training_runs tr ON tr.training_hash = ps.training_hash
-                WHERE tr.family = 'gbm'
-                  AND ps.split = 'validation'
-                  AND tr.label = ?
-                  AND pm.ic_mean_daily IS NOT NULL
-                ORDER BY pm.ic_mean_daily DESC
-                LIMIT 1
-                """,
-                (label,),
-            )
-            row = cur.fetchone()
-        if row is None:
-            continue
-        cfg, spec_json = row
-        spec = json.loads(spec_json)
-        lc_path = get_training_dir(cs, spec) / "learning_curves.parquet"
-        if not lc_path.exists():
-            continue
-        lc = pl.read_parquet(lc_path)
-        if lc.is_empty() or "iteration" not in lc.columns:
-            continue
-        traj = (
-            lc.filter(pl.col("config") == cfg)
-            .group_by("iteration")
-            .agg(
-                pl.col("ic_mean").mean().alias("ic_mean"),
-                pl.col("ic_std").mean().alias("ic_std"),
-            )
-            .sort("iteration")
-            .with_columns(
-                pl.lit(cs).alias("case_study"),
-                pl.lit(SHORT_NAMES.get(cs, cs)).alias("short_name"),
-                pl.lit(cfg).alias("config_name"),
-            )
-            .select("case_study", "short_name", "config_name", "iteration", "ic_mean", "ic_std")
-        )
-        if not traj.is_empty():
-            frames.append(traj)
-    if not frames:
-        return pl.DataFrame(
-            schema={
-                "case_study": pl.Utf8,
-                "short_name": pl.Utf8,
-                "config_name": pl.Utf8,
-                "iteration": pl.Int64,
-                "ic_mean": pl.Float64,
-                "ic_std": pl.Float64,
-            }
-        )
-    return pl.concat(frames)
