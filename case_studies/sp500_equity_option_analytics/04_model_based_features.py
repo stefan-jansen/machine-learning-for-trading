@@ -52,6 +52,7 @@ from arch import arch_model
 
 from case_studies.utils.cv_window import modeling_fold_boundaries
 from data import load_sp500_daily_bars
+from utils.artifact_specs import load_setup_config, resolve_label_horizon
 from utils.cv_splits import load_evaluation_config
 from utils.paths import get_case_study_dir
 from utils.style import ml4t_palette
@@ -102,11 +103,22 @@ prices = prices.sort(["symbol", "timestamp"])
 # in `05_evaluation` and in the Ch11 models that join on it.
 
 # %%
-canonical_splits = modeling_fold_boundaries(CASE_STUDY_ID, "fwd_ret_5d")
+SETUP = load_setup_config(CASE_STUDY_ID)
+PRIMARY_LABEL = SETUP["labels"]["primary"]
+# The outcome horizon, not the CV buffer: `labels.buffer` is 10D here because the
+# purge has to clear the longest variant, while this label realizes in 5 sessions.
+# Section F's HAC bandwidth is the one that has to cover the overlap.
+_horizon = resolve_label_horizon(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
+if not _horizon or not str(_horizon).endswith("D"):
+    raise ValueError(f"Expected a daily label horizon for {PRIMARY_LABEL}, found {_horizon!r}")
+LABEL_HORIZON = int(str(_horizon)[:-1])
+
+canonical_splits = modeling_fold_boundaries(CASE_STUDY_ID, PRIMARY_LABEL)
 if not canonical_splits:
-    raise RuntimeError("Canonical fwd_ret_5d modeling folds are unavailable")
+    raise RuntimeError(f"Canonical {PRIMARY_LABEL} modeling folds are unavailable")
 evaluation_config = load_evaluation_config(CASE_STUDY_ID)
 print(f"Canonical modeling folds: {len(canonical_splits)} validation splits")
+print(f"Primary label {PRIMARY_LABEL}, outcome horizon {LABEL_HORIZON} sessions")
 
 # %%
 # Load Ch8 features for IV data (needed for garch_ivrv_spread)
@@ -668,10 +680,10 @@ print(f"  Shape: {temporal.shape}")
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
 # Load primary label
-label_path = CASE_DIR / "labels" / "fwd_ret_5d.parquet"
+label_path = CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet"
 if label_path.exists() and len(temporal) > 0:
     label_df = pl.read_parquet(label_path)
-    label_col = "fwd_ret_5d"
+    label_col = PRIMARY_LABEL
 
     validation_parts = [
         temporal.filter(
@@ -709,7 +721,7 @@ if label_path.exists() and len(temporal) > 0:
             min_obs=10,
         )
         if len(ic_series) > 10:
-            hac_stats = compute_ic_hac_stats(ic_series)
+            hac_stats = compute_ic_hac_stats(ic_series, label_horizon=LABEL_HORIZON)
             temporal_ic_results.append(
                 {
                     "name": feat,
@@ -738,11 +750,11 @@ if label_path.exists() and len(temporal) > 0:
             f"\nShared VRP rows: {len(vrp_eval):,} over {vrp_eval['timestamp'].n_unique():,} dates"
         )
 
-        def _vrp_hac(frame: pl.DataFrame, column: str) -> tuple[float, float]:
+        def _vrp_ic_series(frame: pl.DataFrame, column: str) -> pl.DataFrame:
             scored = frame.select(["timestamp", "symbol", column, "forward_return"]).rename(
                 {column: "prediction"}
             )
-            series = cross_sectional_ic_series(
+            return cross_sectional_ic_series(
                 scored,
                 scored,
                 date_col="timestamp",
@@ -750,24 +762,61 @@ if label_path.exists() and len(temporal) > 0:
                 method="spearman",
                 min_obs=10,
             )
-            if len(series) <= 10:
-                return 0.0, 0.0
-            stats = compute_ic_hac_stats(series)
-            return round(stats["mean_ic"], 4), round(stats["t_stat"], 2)
 
-        static_ic_mean, static_tstat = _vrp_hac(vrp_eval, "ivrv_spread")
-        dynamic_ic_mean, dynamic_tstat = _vrp_hac(vrp_eval, "garch_ivrv_spread")
+        static_series = _vrp_ic_series(vrp_eval, "ivrv_spread")
+        dynamic_series = _vrp_ic_series(vrp_eval, "garch_ivrv_spread")
+
+        # The two variants are scored on the same rows, so they produce an IC on the
+        # same dates: pair them date by date rather than comparing two independent
+        # summaries of them. The sort is load-bearing - `compute_ic_hac_stats` reads
+        # the row order as the time order, and a join does not promise one.
+        paired_ic = (
+            static_series.select(["timestamp", pl.col("ic").alias("ic_static")])
+            .join(
+                dynamic_series.select(["timestamp", pl.col("ic").alias("ic_dynamic")]),
+                on="timestamp",
+                how="inner",
+            )
+            .drop_nulls()
+            .sort("timestamp")
+            .with_columns((pl.col("ic_dynamic") - pl.col("ic_static")).alias("ic"))
+        )
+        if not paired_ic["timestamp"].is_sorted():
+            raise RuntimeError("Paired IC series is not in date order")
+
+        static_stats = compute_ic_hac_stats(static_series, label_horizon=LABEL_HORIZON)
+        dynamic_stats = compute_ic_hac_stats(dynamic_series, label_horizon=LABEL_HORIZON)
+        static_ic_mean = round(static_stats["mean_ic"], 4)
+        static_tstat = round(static_stats["t_stat"], 2)
+        dynamic_ic_mean = round(dynamic_stats["mean_ic"], 4)
+        dynamic_tstat = round(dynamic_stats["t_stat"], 2)
+
+        # Neither t-statistic above tests the question the section asks. Each tests its
+        # own mean IC against zero, and two dependent series can differ from each other
+        # by more than either differs from zero - or by less, depending on the sign of
+        # the dependence. The difference needs its own test, on the paired daily series.
+        paired_corr = paired_ic.select(pl.corr("ic_static", "ic_dynamic")).item()
+        diff_stats = compute_ic_hac_stats(paired_ic, label_horizon=LABEL_HORIZON)
+        diff_mean = round(diff_stats["mean_ic"], 4)
+        diff_tstat = round(diff_stats["t_stat"], 2)
+        diff_pval = round(diff_stats["p_value"], 4)
 
         print("Static vs Dynamic VRP, on the same rows:")
         print(f"  Static (ivrv_spread):     IC={static_ic_mean:.4f}, t={static_tstat:.2f}")
         print(f"  Dynamic (garch_ivrv):     IC={dynamic_ic_mean:.4f}, t={dynamic_tstat:.2f}")
-        print(f"  |IC| difference:          {abs(dynamic_ic_mean) - abs(static_ic_mean):.4f}")
+        print(f"  Daily IC correlation:     {paired_corr:.3f} over {len(paired_ic):,} dates")
+        print(
+            f"  Paired difference:        {diff_mean:+.4f}, "
+            f"HAC t={diff_tstat:.2f}, p={diff_pval:.4f}"
+        )
     else:
         static_ic_mean, static_tstat = 0, 0
         dynamic_ic_mean, dynamic_tstat = 0, 0
+        diff_mean = diff_tstat = diff_pval = paired_corr = 0
 else:
     temporal_ic_results = []
     static_ic_mean = static_tstat = dynamic_ic_mean = dynamic_tstat = 0
+    diff_mean = diff_tstat = diff_pval = paired_corr = 0
     print("Skipping incremental evaluation (label or temporal data not available)")
 
 # %% [markdown]
@@ -798,7 +847,7 @@ if temporal_ic_results:
     fig.update_layout(
         title="The three temporal features split in sign and all sit near zero",
         xaxis_title=(
-            "Mean cross-sectional IC vs 5-day forward return; "
+            f"Mean cross-sectional IC vs {LABEL_HORIZON}-day forward return; "
             "a |t| near two would be the conventional threshold"
         ),
         xaxis=dict(range=[-_span, _span]),
@@ -814,27 +863,52 @@ if temporal_ic_results:
 # denominator change what the variance risk premium tells you, against the
 # backward-looking realized-vol denominator from Ch8? Both variants are scored on
 # the same rows, so the only thing that differs between the two bars is the
-# denominator. Each bar carries its own HAC t-statistic, because a difference in
-# |IC| is only worth reading once at least one of the two is separable from zero.
+# denominator.
+#
+# The first two bars carry their own HAC t-statistics, and neither of those answers
+# the question. Each tests one mean IC against zero; the question is whether the two
+# differ from *each other*. Scored on the same rows, the two variants produce an IC
+# on the same dates, and those two daily series are dependent - so the difference
+# has a variance of its own that neither level's standard error contains. Dependent
+# series can separate from each other while neither separates from zero, and can
+# fail to separate from each other while both do; which way it goes is set by the
+# sign of the dependence, printed on the axis below. So the difference gets its own
+# test, on the paired daily series - one observation per date,
+# `ic_dynamic - ic_static` - and that is the third bar. Signed IC is plotted rather
+# than |IC| so the quantity on the axis is the quantity the test is about.
 
 # %%
 if temporal_ic_results and (static_ic_mean or dynamic_ic_mean):
+    # The two levels are the same kind of quantity; the difference is derived from
+    # them and is the one the section's claim rests on, so it gets the accent.
+    level_color, diff_color = ml4t_palette(2, categorical=True)
     fig = go.Figure()
     fig.add_bar(
-        x=["Static VRP<br>(realized-vol denom, Ch8)", "Dynamic VRP<br>(GARCH denom)"],
-        y=[abs(static_ic_mean), abs(dynamic_ic_mean)],
-        marker_color=[ml4t_palette(2)[0], ml4t_palette(2)[1]],
+        x=[
+            "Static VRP<br>(realized-vol denom, Ch8)",
+            "Dynamic VRP<br>(GARCH denom)",
+            "Paired difference<br>(dynamic - static)",
+        ],
+        y=[static_ic_mean, dynamic_ic_mean, diff_mean],
+        marker_color=[level_color, level_color, diff_color],
         text=[
-            f"|IC| {abs(static_ic_mean):.4f}<br>HAC t {static_tstat:+.2f}",
-            f"|IC| {abs(dynamic_ic_mean):.4f}<br>HAC t {dynamic_tstat:+.2f}",
+            f"IC {static_ic_mean:+.4f}<br>HAC t {static_tstat:+.2f}",
+            f"IC {dynamic_ic_mean:+.4f}<br>HAC t {dynamic_tstat:+.2f}",
+            f"Δ {diff_mean:+.4f}<br>HAC t {diff_tstat:+.2f}",
         ],
         textposition="outside",
+        cliponaxis=False,
     )
+    fig.add_hline(y=0.0, line_width=1, line_color="black")
     fig.update_layout(
-        title="Neither VRP denominator produces a t-statistic near two",
-        yaxis_title="|Mean cross-sectional IC|",
-        xaxis_title="Both variants scored on the rows where both are defined",
-        height=420,
+        title="Neither level nor the paired difference separates from zero",
+        yaxis_title=f"Mean cross-sectional IC vs {LABEL_HORIZON}-day forward return",
+        xaxis_title=(
+            "Both variants scored on the rows where both are defined; "
+            f"their daily ICs correlate at {paired_corr:.2f}"
+        ),
+        margin=dict(t=90),
+        height=440,
     )
     fig.show()
 
@@ -844,11 +918,13 @@ if temporal_ic_results and (static_ic_mean or dynamic_ic_mean):
 # 1. **The GARCH denominator does not settle the VRP question either way**: on the
 #    rows where both variants are defined, neither the dynamic spread nor the static
 #    `ivrv_spread` it was meant to improve on reaches an HAC t-statistic anywhere
-#    near two - the comparison above prints both, and the difference in their
-#    absolute IC is smaller than what a sample this size can resolve. Reading that
-#    difference as one denominator working better than the other is reading noise.
-#    The GARCH features enter the downstream multivariate models as candidate
-#    inputs, and the ablation there is what decides whether they earned the place.
+#    near two, and neither does the paired difference between them, which is tested
+#    separately because two levels that each fail to separate from zero can still
+#    separate from each other. Reading either denominator as the better one is
+#    reading noise, and that now rests on a test of the difference rather than on an
+#    inference from two tests that were not about it. The GARCH features enter the
+#    downstream multivariate models as candidate inputs, and the ablation there is
+#    what decides whether they earned the place.
 #
 # 2. **Walk-forward discipline**: GARCH is fitted only on training data for
 #    each CV fold. The variance recursion runs on the full train+test window
