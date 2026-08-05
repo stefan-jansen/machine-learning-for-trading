@@ -1200,17 +1200,28 @@ for feature in all_feature_cols:
 triage_ledger = pl.DataFrame(ledger_rows).sort(["decision", "feature"])
 triage_ledger.write_parquet(EVAL_DIR / "triage_ledger.parquet")
 
+IC_SERIES_SCHEMA = {
+    "feature": pl.String,
+    DATE_COL: pl.Date,
+    "fold": pl.Int64,
+    "ic": pl.Float64,
+    "n_obs": pl.Int64,
+}
 ic_frames = [
     series.with_columns(pl.lit(feature).alias("feature"))
     for feature, series in ic_timeseries.items()
 ]
-if ic_frames:
-    pl.concat(ic_frames).select(["feature", DATE_COL, "fold", "ic", "n_obs"]).write_parquet(
-        EVAL_DIR / "ic_timeseries.parquet"
-    )
+# Written even when the run produced nothing, so a reader never finds an earlier
+# run's series sitting behind this one's ledger.
+ic_series = (
+    pl.concat(ic_frames).select(*IC_SERIES_SCHEMA).cast(IC_SERIES_SCHEMA)
+    if ic_frames
+    else pl.DataFrame(schema=IC_SERIES_SCHEMA)
+)
+ic_series.write_parquet(EVAL_DIR / "ic_timeseries.parquet")
 
-print("Wrote evaluation/triage_ledger.parquet")
-print("Wrote evaluation/ic_timeseries.parquet")
+print(f"Wrote evaluation/triage_ledger.parquet: {len(triage_ledger):,} rows")
+print(f"Wrote evaluation/ic_timeseries.parquet: {len(ic_series):,} rows")
 print(triage_ledger.group_by("decision").len().sort("decision"))
 
 # %%
