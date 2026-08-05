@@ -122,15 +122,21 @@ MAX_STALENESS = 0.50  # unchanged-from-prior-date fraction the correctness gate 
 # downstream.
 #
 # **The fold contract for the Ch9 features.** `model_based.parquet` carries one
-# row per `(timestamp, product, position, fold)`, and for the fitted families the
-# value depends on the fold: `04_model_based_features` fits the ARIMA and the HMM
-# on each fold's training window and emits a value for the training dates as well
-# as the validation dates. A training-date value is in-sample — the parameters
-# behind it were estimated from a window that extends past that date — so it may
-# not enter a screen. The fold column is therefore resolved rather than dropped:
-# a fitted feature is read only inside the validation window of the fold that
-# produced it, and the fold-invariant FFT features, which carry no fitted
-# parameter, are read from any fold once that invariance is asserted.
+# row per `(timestamp, product, position, fold)`, and for the two fitted families
+# the value depends on the fold. They do not depend on it the same way.
+# `04_model_based_features` fits the HMM on each fold's *training* window and then
+# forward-filters it over train and validation together (`04:669`), so a
+# training-date probability is in-sample: the transition matrix behind it was
+# estimated from a window that extends past that date. The ARIMA is a walk-forward
+# one-step-ahead `cross_validation` inside the fold window (`04:319-326`), so after
+# its burn-in every value is a forecast made from data strictly earlier than the
+# date it sits on, on training dates as much as on validation dates.
+#
+# The fold column is therefore resolved rather than dropped: a fitted feature is
+# read only inside the validation window of the fold that produced it. That is
+# forced by the HMM, and for the ARIMA it is what puts the two families on one
+# frame. The fold-invariant FFT features, which carry no fitted parameter, are read
+# from any fold once that invariance is asserted.
 #
 # **The evaluation frame is the union of the validation windows**, not the whole
 # pre-holdout span, and the Ch8 features are screened on the same rows as the Ch9
@@ -290,22 +296,27 @@ print(f"Label: {label_col}")
 # broken back-adjustment, division by zero in derived features) before they
 # propagate to model training where they surface as cryptic `ValueError`s.
 #
-# The gate runs on the evaluation frame, not on the artifacts as they sit on disk.
-# Its counts are printed, so reading the holdout rows here would put a description
-# of the sealed window into this notebook's output; and its `fail_on_critical`
-# makes whether this notebook runs at all depend on what it reads. Both are
-# decisions, and both belong inside the frame the screens read.
+# **This gate and the per-feature screens below run on different rows, and the
+# difference is not an oversight.** The screens are a selection decision, so they
+# run on the frame where every candidate exists - the validation windows. This gate
+# asks whether the artifact is sound, and the rows Ch11 trains on include every
+# fold's training window back to the start of the panel, so a broken value there
+# reaches the model whether or not this notebook screened it. It therefore runs on
+# the whole pre-holdout span. It stops at `holdout_start` for two reasons: its
+# counts are printed, so reading holdout rows would put a description of the sealed
+# window into this notebook's output, and its `fail_on_critical` makes whether this
+# notebook runs at all depend on what it reads.
 
 # %%
 from utils.data_quality import validate_modeling_inputs
 
-framed_features = features.filter(pl.col(DATE_COL) < HOLDOUT_START).filter(IN_VALIDATION)
-framed_temporal = temporal.filter(pl.col(DATE_COL) < HOLDOUT_START).filter(IN_VALIDATION)
-framed_labels = label_df.filter(pl.col(DATE_COL) < HOLDOUT_START).filter(IN_VALIDATION)
+sealed_features = features.filter(pl.col(DATE_COL) < HOLDOUT_START)
+sealed_temporal = temporal.filter(pl.col(DATE_COL) < HOLDOUT_START)
+sealed_labels = label_df.filter(pl.col(DATE_COL) < HOLDOUT_START)
 
 quality_result = validate_modeling_inputs(
-    features_df=framed_features,
-    label_df=framed_labels,
+    features_df=sealed_features,
+    label_df=sealed_labels,
     feature_cols=[c for c in features.columns if c not in {"timestamp", "product", "position"}],
     label_col=label_col,
     join_cols=JOIN_COLS,
@@ -316,10 +327,10 @@ quality_result = validate_modeling_inputs(
 )
 
 # Also check temporal features if loaded
-if len(framed_temporal) > 0:
+if len(sealed_temporal) > 0:
     temporal_quality = validate_modeling_inputs(
-        features_df=framed_temporal,
-        label_df=framed_labels,
+        features_df=sealed_temporal,
+        label_df=sealed_labels,
         feature_cols=temporal_cols,
         label_col=label_col,
         join_cols=JOIN_COLS,
