@@ -1344,7 +1344,12 @@ case_studies/etfs/04_model_based_features:
   timeout: 300
 case_studies/etfs/05_evaluation:
   parameters:
-    MAX_SYMBOLS: 5
+    # MAX_SYMBOLS must stay above the notebook's MIN_PERIODS (10), the symbols a
+    # date needs before its IC enters the series. At 5 no date could ever qualify,
+    # so every date was dropped, eval_summary came out empty, and the first figure
+    # failed on make_subplots(rows=0). The fixture carries 56 symbols; 20 leaves
+    # margin for dates where some are null. Measured at 112s against the 300s cap.
+    MAX_SYMBOLS: 20
   timeout: 300
 case_studies/etfs/06_linear:
   parameters:
