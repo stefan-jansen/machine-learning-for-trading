@@ -682,9 +682,9 @@ if leader:
 
 # %%
 fold_boundaries = [(f["val_start"], f["val_end"]) for f in producer_folds]
-for i, f in enumerate(producer_folds, start=1):
+for f in producer_folds:
     print(
-        f"fold {i}: fitted {f['train_start']} to {f['train_end']}, "
+        f"fold {f['fold']}: fitted {f['train_start']} to {f['train_end']}, "
         f"validated {f['val_start']} to {f['val_end']}"
     )
 if max(end for _, end in fold_boundaries) >= holdout_start_date:
@@ -755,7 +755,7 @@ if stability_features:
                 "symbol": "x-thin",
                 "line": {"width": 2, "color": COLORS["negative"]},
             },
-            name="Lowest fold",
+            name="Least favorable fold",
         )
     )
     _ = fig.add_vline(x=0, line={"color": COLORS["neutral"], "width": 0.8, "dash": "dash"})
