@@ -375,28 +375,50 @@ def conformal_coverage_for_selected_prediction(
             f"{selected['case_study']}/{selected['prediction_hash']}: "
             f"expected fold IDs {list(range(n_folds))}, observed {fold_ids}"
         )
-    calibration = predictions.filter(pl.col("fold_id") == 0)
-    test = predictions.filter(pl.col("fold_id") != 0)
+    # Walk-forward folds are numbered backward from the most recent window, so
+    # fold 0 is the newest and the highest fold id is the oldest. Split conformal
+    # needs calibration residuals drawn from before the data whose coverage they
+    # certify, so order the folds by time and calibrate on the earliest one.
+    date_col = next((c for c in ("timestamp", "date") if c in predictions.columns), None)
+    if date_col is None:
+        raise RegistrySelectionError(
+            f"{selected['case_study']}/{selected['prediction_hash']}: "
+            "prediction artifact has no timestamp column to order folds by"
+        )
+    calibration_fold = (
+        predictions.group_by("fold_id")
+        .agg(pl.col(date_col).max().alias("_fold_end"))
+        .sort("_fold_end")["fold_id"]
+        .item(0)
+    )
+    calibration = predictions.filter(pl.col("fold_id") == calibration_fold)
+    test = predictions.filter(pl.col("fold_id") != calibration_fold)
     if calibration.height < 30 or test.height < 30:
         raise RegistrySelectionError(
             f"{selected['case_study']}/{selected['prediction_hash']}: "
             "conformal calibration or test panel has fewer than 30 rows"
         )
 
-    scale = float(predictions["y_true"].std() or 0.0)
+    # Width is reported in units of the calibration target's spread; letting the
+    # evaluation folds into this statistic would make the reported width depend
+    # on the outcome being measured.
+    scale = float(calibration["y_true"].std() or 0.0)
     if not math.isfinite(scale) or scale <= 0:
         raise RegistrySelectionError(
             f"{selected['case_study']}/{selected['prediction_hash']}: invalid target scale"
         )
-    calibration_residuals = calibration["abs_resid"].to_numpy()
+    calibration_residuals = np.sort(calibration["abs_resid"].to_numpy())
     test_residuals = test["abs_resid"].to_numpy()
     n_calibration = len(calibration_residuals)
     rows = []
     for level in levels:
         if not 0 < level < 1:
             raise RegistrySelectionError(f"invalid conformal level: {level}")
-        quantile_level = min(math.ceil((n_calibration + 1) * level) / n_calibration, 1.0)
-        quantile = float(np.quantile(calibration_residuals, quantile_level))
+        # Split conformal takes the ceil((n + 1) * level)-th smallest residual
+        # itself, not an interpolated quantile between two of them. When that
+        # rank exceeds the calibration set, no finite residual attains the level.
+        rank = math.ceil((n_calibration + 1) * level)
+        quantile = float(calibration_residuals[rank - 1]) if rank <= n_calibration else math.inf
         rows.append(
             {
                 "case_study": selected["case_study"],
