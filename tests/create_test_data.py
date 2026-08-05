@@ -369,7 +369,7 @@ NASDAQ100_MINUTE_RUN_STRIDE = 6
 def _session_runs(sessions: pl.Series, run: int, stride: int) -> pl.Series:
     """Every ``stride``-th consecutive run of ``run`` sessions, in order."""
     keep: list = []
-    for start in range(0, len(sessions), run * stride):
+    for start in range(0, len(sessions) - run + 1, run * stride):
         keep.extend(sessions[start : start + run].to_list())
     return pl.Series("date", keep, dtype=sessions.dtype)
 
