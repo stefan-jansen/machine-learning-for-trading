@@ -38,13 +38,17 @@
 # **What it writes**:
 # - `evaluation/triage_ledger.parquet` — one row per feature with triage decision
 # - `evaluation/ic_timeseries.parquet` — long-format IC time series, plotted below by
-#   the IC-through-time figure and read downstream by the modeling chapters
+#   the IC-through-time figure
 #
 # **Cross-References**:
 # - **Upstream**: [`03_financial_features`](03_financial_features.ipynb),
 #   [`04_model_based_features`](04_model_based_features.ipynb),
 #   [`02_labels`](02_labels.ipynb)
-# - **Downstream**: model training and feature selection
+# - **Downstream**: `20_strategy_synthesis/02_feature_evaluation.py`, which reads the
+#   triage ledger of every case study and tabulates them together. Nothing else reads
+#   either artifact today: the model notebooks train on the full feature matrix and
+#   let regularization and importance do the selecting, so a STOP here is a recorded
+#   judgment about a feature, not a filter applied on the reader's behalf.
 
 # %% papermill={"duration": 2.655142, "end_time": "2026-05-15T14:10:08.790098+00:00", "exception": false, "start_time": "2026-05-15T14:10:06.134956+00:00", "status": "completed"}
 """Feature Evaluation - NASDAQ-100 Microstructure
@@ -573,8 +577,9 @@ if leader:
 # the feature's own direction, so a feature whose folds agree on a negative sign
 # scores zero and can never clear the stability arm of the promotion rule. Every
 # negative-IC feature below is in that position. The rule is recorded as a live
-# defect in `rules/stages/05-evaluation.md` and moves ledger values, so it is
-# tracked there rather than changed here.
+# defect in the stage-05 notebook standard, and correcting it moves ledger values in
+# six of the nine case studies at once, so it is tracked there rather than changed
+# here.
 
 # %% papermill={"duration": 0.026864, "end_time": "2026-05-15T14:11:19.956539+00:00", "exception": false, "start_time": "2026-05-15T14:11:19.929675+00:00", "status": "completed"}
 # Generate approximate fold boundaries from sampled IC timestamps
@@ -966,9 +971,9 @@ fig.show()
 # the pooled sealed sample rather than from within each decision time, so a bar
 # mixes cross-sectional position with time-series level and every other timestamp's
 # distribution helps set this timestamp's edges. Book §7.3 specifies the within-date
-# construction, which is what the companion IC already uses. The divergence is
-# recorded as a live defect in `rules/stages/05-evaluation.md`; it moves the
-# `monotonicity` column of the ledger and is tracked there rather than changed here.
+# construction, which is what the companion IC already uses. The divergence moves
+# the `monotonicity` column of the ledger and is tracked in the stage-05 notebook
+# standard rather than changed here.
 # Read the profiles below as pooled shape, not as a within-date sort. The clearest
 # reading of what that costs is a feature and its own cross-sectional z-score twin:
 # ranking within a date leaves the two identical, so their cross-sectional ICs are
@@ -1395,7 +1400,7 @@ print(f"Promoted by arm: {arm_counts}")
 #
 # - Sign consistency counts folds with a positive IC rather than folds sharing the
 #   feature's own direction, so a stably negative feature cannot clear the stability
-#   arm. Recorded in `rules/stages/05-evaluation.md`.
+#   arm.
 # - Quantile bins are assigned over the pooled sealed sample rather than within each
 #   decision time, which is a different question from the one the IC answers.
 # - The minimum cross-section is applied to panel rows, not to non-null
@@ -1404,5 +1409,7 @@ print(f"Promoted by arm: {arm_counts}")
 # - Univariate triage is necessary and not sufficient. Nothing here claims
 #   tradability; the multivariate fit and the backtest decide that.
 #
-# **Next**: model training reads `evaluation/triage_ledger.parquet` and
-# `evaluation/ic_timeseries.parquet`.
+# **Next**: `20_strategy_synthesis/02_feature_evaluation.py` reads
+# `evaluation/triage_ledger.parquet` from every case study and puts the nine screens
+# side by side. `evaluation/ic_timeseries.parquet` is read here, by the
+# IC-through-time figure above.
