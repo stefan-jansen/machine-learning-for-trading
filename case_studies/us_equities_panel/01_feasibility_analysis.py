@@ -264,11 +264,18 @@ add_message_title(
 )
 plt.show()
 
+beyond_one = acf.filter(pl.col("lag") > 1)["acf"].abs().max()
+print(
+    f"Lag one mean {acf['acf'][0]:+.4f} against a band of {acf['band'][0]:.4f}, over a per-stock "
+    f"10th-90th spread of {acf['acf_p90'][0] - acf['acf_p10'][0]:.4f} | largest absolute mean "
+    f"beyond lag one {beyond_one:.4f}, on {acf['n_entities'][0]:,} stocks"
+)
+
 # %% [markdown]
 # One session back is the only lag whose mean clears the band, and it is negative: a weak reversal,
-# an order of magnitude smaller than the spread of the per-stock curves behind it, and not something
-# a book can be built on alone. Every longer lag sits inside the band. So what the strategy ranks on
-# has to come from the cross-section, which `mapping.class` builds.
+# about a quarter of the width of the per-stock spread behind it, and not something a book can be
+# built on alone. Every longer lag sits inside the band. So what the strategy ranks on has to come
+# from the cross-section, which `mapping.class` builds.
 #
 # ### B.5 Move scale against cost
 #
