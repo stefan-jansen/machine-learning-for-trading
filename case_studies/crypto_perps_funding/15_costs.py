@@ -494,14 +494,17 @@ print(
 # determine the implementation budget.
 #
 # The two corrected curves are replayed here, so they measure the carrier only where the replay can
-# reproduce what the carrier does. The carrier holds the top five perpetuals by score, and a universe
-# of five or fewer hands it every perpetual on every settlement: the selection that the edge consists
-# of never happens, and the curve that comes back describes a different strategy. Its crossing is
-# then not a budget, and on the reduced surface used for execution tests it has none to report,
-# because the replayed Sharpe is already negative at zero cost. An injected test grid can also stop
-# short of a crossing simply by being shorter than the registered one, so it is reported the same
-# way. The frozen curve is read from the registry rather than replayed, so neither reaches it and
-# its crossing is still required whenever the registered grid is the one in hand.
+# reproduce what the carrier does. The carrier is long-short at `top_k`, so it needs `2 * top_k`
+# perpetuals in a settlement to take a position on both sides - the same breadth the capped-settlement
+# count above is measured against. A cross-section that never reaches it hands the selector
+# everything it has on every settlement, the selection that the edge consists of never happens, and
+# the curve that comes back describes a different strategy. Its crossing is then not a budget, so it
+# is not reported as one even when the arithmetic produces a number; on the reduced surface used for
+# execution tests there is none to report anyway, because the replayed Sharpe is already negative at
+# zero cost. An injected test grid can separately stop short of a crossing by being shorter than the
+# registered one, and is reported unavailable for that reason instead. The frozen curve is read from
+# the registry rather than replayed, so neither condition reaches it and its crossing is still
+# required whenever the registered grid is the one in hand.
 
 
 # %%
@@ -522,8 +525,9 @@ def _breakeven(frame: pl.DataFrame, metric: str) -> float | None:
 price_breakeven = _breakeven(replay, "price_only_sharpe")
 funding_breakeven = _breakeven(replay, "with_funding_sharpe")
 stored_breakeven = _breakeven(replay, "stored_sharpe")
-replay_universe = prices["symbol"].n_unique()
-selection_is_degenerate = replay_universe <= allocation["top_k"]
+required_breadth = 2 * allocation["top_k"]
+widest_panel = panel_sizes["n_assets"].max()
+selection_is_degenerate = widest_panel < required_breadth
 
 if using_fallback_grid:
     print("Frozen registry breakeven: unavailable for an unregistered test grid")
@@ -532,19 +536,20 @@ elif stored_breakeven is None or not np.isfinite(stored_breakeven):
 else:
     print(f"Frozen registry breakeven: {stored_breakeven:.2f} bps")
 
-if using_fallback_grid or selection_is_degenerate:
-    reason = (
-        f"a {replay_universe}-perpetual replay universe, which cannot express the carrier's "
-        f"top-{allocation['top_k']} selection"
-        if selection_is_degenerate
-        else "an unregistered test grid, which may end before a crossing"
+if selection_is_degenerate:
+    print(
+        f"Corrected price-only breakeven: unavailable\n"
+        f"Corrected funding-inclusive breakeven: unavailable\n"
+        f"  the widest replay cross-section is {widest_panel}, and this long-short carrier needs "
+        f"{required_breadth} to hold top-{allocation['top_k']} on both sides"
     )
+elif using_fallback_grid:
     for label, value in (
         ("Corrected price-only", price_breakeven),
         ("Corrected funding-inclusive", funding_breakeven),
     ):
         rendered = f"{value:.2f} bps" if value is not None and np.isfinite(value) else "unavailable"
-        print(f"{label} breakeven: {rendered} ({reason})")
+        print(f"{label} breakeven: {rendered} (unregistered test grid)")
 elif any(value is None or not np.isfinite(value) for value in (price_breakeven, funding_breakeven)):
     raise RuntimeError("A replayed cost curve has no finite zero crossing")
 else:

@@ -204,7 +204,13 @@ fig.show()
 # for ([#63](https://github.com/ml4t/agent-workspace/issues/63)), so a later reparameterization that
 # happened to score well could take a cell away from the specification that was actually trialled.
 # A row registered after the cohort is therefore admitted only when the cohort already trialled its
-# exact strategy specification - which is what a rerun is, and what a reparameterization is not.
+# exact specification - which is what a rerun is, and what a reparameterization is not.
+#
+# `created_at` is the evidence for "already trialled", and it is not immutable: re-registering an
+# identical specification rewrites the row and resets it. That direction fails safe - the cell loses
+# its pre-cohort evidence, the row is excluded, and the grid assertion below reports a missing cell
+# rather than admitting anything. Persisting the cohort's member hashes when it is computed would
+# remove the dependence entirely, and is the durable fix (#63).
 
 
 # %%
@@ -231,6 +237,29 @@ print(f"Validation window: {validation_start} through {validation_end}")
 
 
 # %%
+def _spec_identity(spec_json: str) -> str:
+    """The stored specification, less what does not define it.
+
+    Provenance keys are dropped: the registry writes `_runtime_backtest_config` as a repr
+    carrying absolute paths. Null values are dropped with them, because the serializer has
+    gained explicitly-null keys over time - `margin_pct_schedule` appeared between the
+    2026-05 sweep and its 2026-06 reruns - and an absent key and a null one say the same
+    thing. Everything else is compared, so a changed commission, slippage, execution or
+    feed setting reads as a different specification rather than as a rerun.
+    """
+
+    def prune(value):
+        if isinstance(value, dict):
+            return {
+                key: prune(item)
+                for key, item in sorted(value.items())
+                if item is not None and not key.startswith("_")
+            }
+        return value
+
+    return json.dumps(prune(json.loads(spec_json)), sort_keys=True)
+
+
 def _allocation_cells(registry_path, prediction_hash: str, frozen_as_of: str) -> list[dict]:
     """Return one stored specification per semantic allocation cell of the frozen trial set."""
     query = """
@@ -241,15 +270,12 @@ def _allocation_cells(registry_path, prediction_hash: str, frozen_as_of: str) ->
     with sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True) as connection:
         rows = connection.execute(query, (prediction_hash,)).fetchall()
     frozen_specs = {
-        json.dumps(json.loads(spec_json)["strategy"], sort_keys=True)
+        _spec_identity(spec_json)
         for _, created_at, spec_json, _ in rows
         if created_at <= frozen_as_of
     }
     admitted = [
-        row
-        for row in rows
-        if row[1] <= frozen_as_of
-        or json.dumps(json.loads(row[2])["strategy"], sort_keys=True) in frozen_specs
+        row for row in rows if row[1] <= frozen_as_of or _spec_identity(row[2]) in frozen_specs
     ]
     if len(admitted) < len(rows):
         print(
