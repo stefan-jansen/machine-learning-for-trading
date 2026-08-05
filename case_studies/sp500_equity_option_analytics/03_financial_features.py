@@ -510,8 +510,11 @@ print(f"{built.height:,} rows carrying {len(feature_cols)} features in {len(FAMI
 # A trailing window cannot produce a value until it has enough sessions to fill. The audit checks
 # that length rather than describing it: a column carrying a value before its window could have
 # filled is reading rows that do not exist, and that is the failure it raises on. The declared
-# lengths are the windows themselves, so a column that is late because the surface lag pushed it
-# one session further out still passes, and a column that is early does not.
+# lengths are the windows themselves, composed where one window reads another: the variance
+# premium's z-score spans its own 63 sessions of a spread whose realized-volatility input already
+# needed 20, so it is declared at their sum rather than at the number in its name. A column that is
+# late because the surface lag pushed it one session further out still passes, and a column that is
+# early does not.
 #
 # It runs on the assembled panel rather than on the matrix that ships, because the null policy in
 # Section E removes rows from the middle of a series and counting bars after it would understate the
@@ -528,7 +531,7 @@ warmup_audit(
         f"iv_mom_{W['iv_momentum'][1]}d": W["iv_momentum"][1],
         f"skew_rr_z_{W['skew_zscore']}": W["skew_zscore"],
         f"term_ratio_z_{W['term_zscore']}": W["term_zscore"],
-        f"vrp_z_{W['vrp_zscore']}": W["vrp_zscore"],
+        f"vrp_z_{W['vrp_zscore']}": W["vrp_zscore"] + W["realized_vol"][0],
         f"rv_{W['realized_vol'][1]}": W["realized_vol"][1],
         f"gk_vol_{W['garman_klass']}": W["garman_klass"],
         f"vol_of_vol_{W['vol_of_vol']}": W["vol_of_vol"],
@@ -812,7 +815,7 @@ record = write_artifact(
     written_by=f"case_studies/{CASE_STUDY_ID}/03_financial_features.py",
     inputs={
         "load_sp500_daily_bars": value_digest(
-            daily.select([*PANEL_KEY, "open", "high", "low", "close", "adj_factor"])
+            daily.select([*PANEL_KEY, SECURITY, "open", "high", "low", "close", "adj_factor"])
         ),
         "load_sp500_options_surface": value_digest(surface_raw.select([*PANEL_KEY, *SURFACE_COLS])),
     },
