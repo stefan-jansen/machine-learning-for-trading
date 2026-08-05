@@ -562,14 +562,24 @@ n_significant_naive = sum(1 for f in feature_names if abs(ic_results[f]["naive_t
 n_significant_hac = sum(1 for f in feature_names if abs(ic_results[f]["t_stat"]) > NAIVE_T)
 n_significant_fdr = int(fdr_result["n_rejected"])
 
-inflation_hac = n_significant_naive / max(n_significant_hac, 1)
-inflation_fdr = n_significant_naive / max(n_significant_fdr, 1)
+
+def inflation(numerator: int, denominator: int) -> str:
+    """The ratio, or the reason there isn't one.
+
+    Substituting 1 for a zero denominator turns "the corrected test rejected
+    nothing" into a finite ratio that reads as a measurement. The two are
+    different statements and the reader gets the one that is true.
+    """
+    if denominator == 0:
+        return "undefined (the corrected test rejects nothing)"
+    return f"{numerator / denominator:.2f}x"
+
 
 print(f"Naive significant (|t| > {NAIVE_T}): {n_significant_naive}")
 print(f"HAC significant (|t| > {NAIVE_T}):   {n_significant_hac}")
 print(f"FDR significant (q < {FDR_ALPHA}):    {n_significant_fdr}")
-print(f"Inflation factor (HAC): {inflation_hac:.2f}x")
-print(f"Inflation factor (FDR): {inflation_fdr:.2f}x")
+print(f"Inflation factor (HAC): {inflation(n_significant_naive, n_significant_hac)}")
+print(f"Inflation factor (FDR): {inflation(n_significant_naive, n_significant_fdr)}")
 
 # %% [markdown]
 # ### The IC series itself

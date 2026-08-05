@@ -464,11 +464,15 @@ def test_a_gapped_calendar_separates_the_two_purges() -> None:
 def evaluation_notebook_label() -> tuple[str, int]:
     """The label file and horizon ``05_evaluation`` actually uses.
 
-    05 hardcodes both, so the equivalence check has to run on its values rather
-    than the configured ones -- otherwise a config change would leave the check
-    validating a purge the notebook does not perform. Requiring them to equal the
-    configured label is what makes the hardcoding safe, and is the assertion that
-    fails if `labels.primary` moves and 05 is not moved with it.
+    05 used to hardcode both, and this helper read the literals so the
+    equivalence check ran on the notebook's values rather than the configured
+    ones. It now resolves them from ``setup.yaml`` -- ``labels.primary`` for the
+    file and ``labels.buffer`` for the horizon -- so the two can no longer
+    disagree. What is still parsed is that the notebook takes them from there and
+    from nowhere else: that a literal has not reappeared, that the label frame is
+    read through ``PRIMARY_LABEL``, and that the purge shifts by ``LABEL_HORIZON``
+    aliasing ``HAC_MAXLAGS``. Without those, this helper would report a purge the
+    notebook does not perform.
     """
     tree = ast.parse((REPO_ROOT / "case_studies" / "etfs" / "05_evaluation.py").read_text())
 
@@ -478,24 +482,28 @@ def evaluation_notebook_label() -> tuple[str, int]:
     # call the label frame is not built from.
     literals: dict[str, object] = {}
     horizon_alias: ast.expr | None = None
+    label_source: ast.expr | None = None
     for node in tree.body:
         if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
             continue
         target = node.targets[0]
         if not isinstance(target, ast.Name):
             continue
-        if target.id in ("PRIMARY_LABEL_FILE", "HAC_MAXLAGS") and isinstance(
-            node.value, ast.Constant
-        ):
+        if target.id in ("PRIMARY_LABEL", "HAC_MAXLAGS") and isinstance(node.value, ast.Constant):
             literals[target.id] = node.value.value
+        elif target.id == "PRIMARY_LABEL":
+            label_source = node.value
         elif target.id == "LABEL_HORIZON":
             horizon_alias = node.value
 
-    assert set(literals) == {"PRIMARY_LABEL_FILE", "HAC_MAXLAGS"}, (
-        "05_evaluation no longer assigns PRIMARY_LABEL_FILE and HAC_MAXLAGS a "
-        "plain literal each; read its label and horizon from wherever it now "
-        f"takes them (found {sorted(literals)})"
+    assert not literals, (
+        "05_evaluation assigns a literal to "
+        f"{sorted(literals)} again; its label and horizon come from setup.yaml, "
+        "and a literal there can disagree with the label the case study selects"
     )
+    assert label_source is not None and "SETUP" in {
+        sub.id for sub in ast.walk(label_source) if isinstance(sub, ast.Name)
+    }, "05_evaluation's PRIMARY_LABEL no longer comes from the loaded setup config"
     assert isinstance(horizon_alias, ast.Name) and horizon_alias.id == "HAC_MAXLAGS", (
         "05_evaluation's purge horizon is no longer HAC_MAXLAGS itself, so this "
         "helper would report a horizon the notebook does not use"
@@ -522,8 +530,8 @@ def evaluation_notebook_label() -> tuple[str, int]:
         and any(isinstance(t, ast.Name) and t.id == "label_df" for t in node.targets)
         for read in calls_to(node.value, "read_parquet")
     ]
-    assert label_reads and all("PRIMARY_LABEL_FILE" in names_in(read) for read in label_reads), (
-        "05_evaluation must load label_df through PRIMARY_LABEL_FILE; a hardcoded "
+    assert label_reads and all("PRIMARY_LABEL" in names_in(read) for read in label_reads), (
+        "05_evaluation must load label_df through PRIMARY_LABEL; a hardcoded "
         "path there would leave the constant, and this check, describing a file "
         "the notebook does not read"
     )
@@ -545,7 +553,13 @@ def evaluation_notebook_label() -> tuple[str, int]:
             "_label_end; another horizon there purges a window this check is not "
             "measuring"
         )
-    return str(literals["PRIMARY_LABEL_FILE"]), int(literals["HAC_MAXLAGS"])  # type: ignore[arg-type]
+    # Resolved the way the notebook resolves them, now that the checks above have
+    # established the notebook reads them from here.
+    setup = yaml.safe_load(SETUP_YAML.read_text())
+    buffer = str(setup["labels"]["buffer"])
+    match = re.match(r"^(\d+)", buffer)
+    assert match, f"setup.yaml labels.buffer is {buffer!r}, which carries no leading integer"
+    return f"{setup['labels']['primary']}.parquet", int(match.group(1))
 
 
 def test_the_two_purges_agree_on_the_shipped_label_panel() -> None:
