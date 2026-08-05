@@ -315,8 +315,10 @@ print(f"Carry data: {len(carry):,} product-dates")
 # The carry signal is slowly mean-reverting (term structure changes gradually), and
 # ARIMA captures the predictable component of the carry z-score. The order is not
 # fixed here: `AutoARIMA` runs the stepwise Hyndman-Khandakar search, taking `p` and
-# `q` up to 5 with `p + q` capped at 5, choosing the differencing order `d` by a
-# unit-root test, and ranking candidates by AICc. `season_length=1` leaves the
+# `q` up to 5, choosing the differencing order `d` by a unit-root test, and ranking
+# candidates by AICc. The `max_order` cap on `p + q` is not in force, because
+# `statsforecast` applies it in `search_arima`, the branch the non-stepwise search
+# takes (`statsforecast/arima.py:868`). `season_length=1` leaves the
 # seasonal terms out of that search; the seasonality this case study cares about is
 # read by the FFT in section 4 instead.
 #
@@ -1450,7 +1452,10 @@ else:
 #
 # The two HMM features are absent from the chart because they are constant across
 # products within a decision date, so a cross-sectional rank correlation on them is
-# undefined. They are conditioning variables, and stage 05 evaluates them as such.
+# undefined. Nothing here says they are worthless: a regime variable acts by
+# conditioning other signals, and testing that needs an interaction or a
+# with-and-without model comparison. This stage runs neither, and neither does the
+# univariate screen in `05_evaluation`.
 #
 # **This selects nothing.** Every feature above is already written to
 # `model_based.parquet` in section 7, whatever the bar says.
@@ -1654,9 +1659,11 @@ print("=" * 60)
 #    `FFT_TARGET_PERIODS`, quarterly and semi-annual. As a deterministic rolling
 #    transform, FFT is identical across folds.
 # 3. **HMM regime detection** decodes a two-state carry regime from one
-#    portfolio-level observation per session, taken over a basket held fixed so
-#    the observation moves with carry and not with which products settled.
-#    Filtered (not smoothed) probabilities prevent look-ahead bias.
+#    portfolio-level observation per session. The basket behind that observation is
+#    only partly stable: a product that misses a settlement keeps its last one for
+#    two sessions, which covers four fifths of the absences, and a longer absence
+#    still drops it. Section 5 prints both the run lengths and the resulting basket
+#    sizes. Filtered (not smoothed) probabilities prevent look-ahead bias.
 # 4. All temporal models are fitted **per fold**: parameters estimated on
 #    training data only, features extracted for both train+test periods.
 #    The `fold` column enables downstream per-fold join.
