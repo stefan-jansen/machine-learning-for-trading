@@ -47,7 +47,6 @@
 
 import hashlib
 import logging
-import subprocess
 import warnings
 from datetime import UTC, date, datetime, timedelta
 
@@ -85,7 +84,6 @@ SV_CHAINS = 4  # MCMC chains
 SV_TARGET_ACCEPT = 0.99
 SV_RETRY_DRAWS = 4000
 SV_RETRY_TUNE = 4000
-LABEL_HORIZON_TRADING_DAYS = 21  # 25-35 calendar DTE; Newey-West uses 20 lags
 
 # %%
 CASE_DIR = get_case_study_dir("sp500_options")
@@ -96,7 +94,7 @@ STRATEGY_ID = "sp500_options"
 set_global_seeds(SEED)
 
 # %% [markdown]
-# ## 1. Load Data
+# ## Configuration
 
 # %%
 prices = load_sp500_options_straddles()
@@ -115,6 +113,13 @@ _eval = load_evaluation_config(STRATEGY_ID)
 holdout_start = str(_eval["holdout_start"])
 holdout_end = str(_eval["holdout_end"])
 label_buffer = str(_setup["labels"]["buffer"])
+# The straddle runs to its ~30-calendar-day expiry, which `setup.yaml` records as
+# `features.hold_sessions` NYSE sessions; Newey-West therefore uses one lag fewer.
+# `03_financial_features` reads the same two keys, and a second copy typed here is
+# a second source of truth for the horizon the HAC correction and the annualization
+# both depend on.
+LABEL_HORIZON_TRADING_DAYS = int(_setup["features"]["hold_sessions"])
+PERIODS_PER_YEAR = int(_eval["periods_per_year"])
 cv_folds = generate_cv_splits(
     features.select("timestamp"),
     case_study_id=STRATEGY_ID,
@@ -129,6 +134,90 @@ for fold in cv_folds:
         f"validation {fold['val_start']}..{fold['val_end']}"
     )
 print(f"  Holdout: {holdout_start}..{holdout_end}")
+
+# %% [markdown]
+# ## A. Why a fitted feature is different
+#
+# Every feature in `03_financial_features` is a rule written in advance: a window, a difference, a
+# rank. Nothing in it can leak by being fitted, because nothing in it is fitted. The three columns
+# built here are the opposite - a GJR-GARCH variance recursion and a stochastic-volatility state,
+# both with parameters estimated from data - and that is the whole reason this stage carries a
+# fold contract while stage 03 does not.
+#
+# The rule both models follow is **fit, then filter**: parameters are estimated on the training
+# window of a fold and then held frozen while the recursion or the particle filter runs forward.
+# A parameter re-estimated inside the window it is applied to would read its own future, and no
+# amount of care about the *inputs* would recover it.
+#
+# ## B. The fold contract
+#
+# What the figure below has to show, and what the printed table above cannot: every fitted
+# parameter comes from the left-hand span of its own row, and no fit sees anything to the right of
+# it. The holdout is drawn as a rule. The final row is the holdout pass, where parameters fitted on
+# development data alone are run forward over the sealed period - deliberate, because a volatility
+# feature has to be defined there for a later stage to score it, and safe only because nothing from
+# the right of the rule enters the fit.
+#
+# **The amber bar is the point-in-time span, not the whole of what is written.** The recursion runs
+# across the fitting span too, and those values are emitted: a fold's rows cover `train_start` to
+# `val_end`, and the holdout pass covers `data_start` to `holdout_end`. Those retrospective rows are
+# a legitimate feature for a model *training* on that fold, because their parameters come from the
+# window they sit in - but they are not point-in-time, and drawing them the same colour would say
+# they were. The amber span is the part a later stage may score.
+
+# %%
+fig, ax = plt.subplots(figsize=(11, 3.2))
+rows = [
+    (
+        f"fold {fold['fold']}",
+        fold["train_start"],
+        fold["train_end"],
+        fold["val_start"],
+        fold["val_end"],
+    )
+    for fold in cv_folds
+]
+# The holdout pass fits on everything from the start of the data to the day before the seal;
+# section D.1 and the SV holdout pass both take `data_start` as their fit start, so this row has
+# to as well. Reading `cv_folds[0]["train_start"]` here drew the bar starting at the most recent
+# fold's training start, which is eleven months later than the window actually fitted.
+holdout_fit_end = (date.fromisoformat(holdout_start) - timedelta(days=1)).isoformat()
+rows.append(("holdout", data_start, holdout_fit_end, holdout_start, holdout_end))
+for row, (label, tr_start, tr_end, ap_start, ap_end) in enumerate(rows):
+    tr_start, tr_end = pd.Timestamp(tr_start), pd.Timestamp(tr_end)
+    ap_start, ap_end = pd.Timestamp(ap_start), pd.Timestamp(ap_end)
+    ax.barh(
+        row,
+        tr_end - tr_start,
+        left=tr_start,
+        height=0.55,
+        color=COLORS["blue"],
+        label="parameters fitted on" if row == 0 else None,
+    )
+    ax.barh(
+        row,
+        ap_end - ap_start,
+        left=ap_start,
+        height=0.55,
+        color=COLORS["amber"],
+        # Not "filtered over": the recursion also runs across the blue bar and those rows are
+        # emitted. Amber is the span whose values no parameter of its own row could have seen.
+        label="scored point-in-time over" if row == 0 else None,
+    )
+ax.axvline(pd.Timestamp(holdout_start), color=COLORS["negative"], linestyle="--", linewidth=1.2)
+ax.set_yticks(range(len(rows)))
+ax.set_yticklabels([r[0] for r in rows])
+ax.invert_yaxis()
+ax.legend(loc="lower left", bbox_to_anchor=(0, -0.32), ncol=2, frameon=False, fontsize=8)
+add_message_title(
+    ax,
+    "No fit sees the span it is scored on",
+    subtitle=(
+        "Fitting span and point-in-time span per fold; values are also emitted across the "
+        f"fitting span. The rule marks the holdout at {holdout_start}"
+    ),
+)
+fig.show()
 
 # %% [markdown]
 # ### Prepare Returns
@@ -154,10 +243,12 @@ print(
     "all boundary returns omitted before model fitting"
 )
 
+# %% [markdown]
+# Both models read the same per-security return series, so it is loaded once. `sec_id` stays in the
+# key because that is what stops a fitted parameter or a latent state crossing a corporate identity
+# boundary while the displayed ticker is unchanged.
+
 # %%
-# Pre-load per-security return series (used by both GARCH and SV). Keeping
-# `sec_id` in the key prevents any fitted or latent state from crossing a
-# corporate identity boundary even when the displayed ticker is unchanged.
 segment_returns: dict[tuple[str, int], pd.Series] = {}
 for segment in returns_df.partition_by(["symbol", "sec_id"], maintain_order=True):
     symbol = segment["symbol"].item(0)
@@ -172,7 +263,7 @@ print(
 )
 
 # %% [markdown]
-# ## 2. GJR-GARCH Temporal Features
+# ## C. One section per model
 #
 # GJR-GARCH captures the leverage effect: negative returns increase volatility
 # more than positive returns (Glosten, Jagannathan, and Runkle 1993).
@@ -342,13 +433,13 @@ def fit_gjr_garch_symbol(
         filtered = causal_gjr_garch_filter(
             filter_returns, result.params, fit_scale, backcast, static_bounds
         )
-        return filtered / 100 * np.sqrt(252), diagnostics
+        return filtered / 100 * np.sqrt(PERIODS_PER_YEAR), diagnostics
     except Exception as exc:
         return None, failed_garch_diagnostic(train_returns, retried, exc)
 
 
 # %% [markdown]
-# ### Process All Symbols Across Folds
+# ### C.1 GJR-GARCH across folds
 #
 # For each fold, GARCH features cover the full date range from training start
 # through validation end. The fixed-parameter filter produces values for every
@@ -409,7 +500,7 @@ for fold in cv_folds:
     print(f"  Fitted: {len(fold_results)} security segments, Skipped: {fold_skip}")
 
 # %% [markdown]
-# ### GARCH Fit Quality
+# ## D. Fit stability across folds
 #
 # Convergence counts reveal whether the feature panel rests on broad coverage or
 # a small, selectively successful subset. The fitted panel retains every
@@ -461,13 +552,60 @@ ax.set_ylim(0, garch_fit_summary["fitted"].max() * 1.25)
 fig.subplots_adjust(top=0.82)
 add_message_title(
     ax,
-    f"{convergence_rate:.1%} of GJR-GARCH fits converge",
-    subtitle="Canonical rolling training windows; successful fits retained",
+    "Almost every security-segment fit converges",
+    subtitle=(
+        f"Canonical rolling training windows; {convergence_rate:.1%} converged, "
+        "successful fits retained"
+    ),
 )
 fig.show()
 
 # %% [markdown]
-# ### Holdout Pass
+# ### Figure F3. Does refitting per fold buy anything?
+#
+# One box per fold over the fitted persistences, $\alpha + \gamma/2 + \beta$. This reads the
+# **distribution** across securities, which is the question the raw convergence count above cannot
+# answer: whether the window the parameters came from changed what the estimator saw. The boxes
+# overlap, so it did not.
+#
+# What that does **not** license is the conclusion that a single fit would have served. A stable
+# marginal distribution is compatible with every individual security's parameters moving, provided
+# they move in both directions; the box plot cannot separate the two cases. Figure F2 below asks
+# the per-security question directly, on the filtered output rather than on the parameters, and
+# answers it the other way.
+
+# %%
+persistence_by_fold = (
+    pl.DataFrame(garch_diagnostics)
+    .filter(pl.col("converged") & pl.col("persistence").is_not_null() & (pl.col("fold") >= 0))
+    .select("fold", "persistence")
+    .sort("fold")
+)
+fig, ax = plt.subplots()
+fold_ids = sorted(set(persistence_by_fold["fold"].to_list()))
+samples = [
+    persistence_by_fold.filter(pl.col("fold") == fold)["persistence"].to_list() for fold in fold_ids
+]
+ax.boxplot(samples, tick_labels=[f"Fold {fold}" for fold in fold_ids], showfliers=False)
+ax.axhline(1.0, color=COLORS["negative"], linestyle="--", linewidth=1)
+ax.set(xlabel="Walk-forward fold", ylabel=r"Persistence $\alpha + \gamma/2 + \beta$")
+medians = [float(np.median(sample)) for sample in samples if sample]
+spread = max(medians) - min(medians) if medians else 0.0
+_iqr = float(
+    np.median([np.percentile(sample, 75) - np.percentile(sample, 25) for sample in samples])
+)
+add_message_title(
+    ax,
+    "Refitting moves the median far less than securities differ",
+    subtitle=(
+        f"Fitted persistence per converged security-segment; median moves {spread:.3f} across "
+        f"folds against a typical within-fold interquartile range of {_iqr:.3f}"
+    ),
+)
+fig.show()
+
+# %% [markdown]
+# ### D.1 The holdout pass
 #
 # Fit GARCH on all pre-holdout data and generate features from data start
 # through holdout end. The 2017-2020 rows are retrospective transforms under
@@ -552,6 +690,7 @@ if garch_results:
     print(f"  Symbols: {garch_df['symbol'].n_unique()}")
     print(f"  Date range: {garch_df['timestamp'].min()} to {garch_df['timestamp'].max()}")
     print(f"  Mean cond vol: {garch_df['garch_cond_vol'].mean():.4f}")
+
 else:
     garch_df = pl.DataFrame(
         schema={
@@ -565,7 +704,83 @@ else:
     print("WARNING: No GARCH features generated")
 
 # %% [markdown]
-# ## 3. Bayesian Stochastic Volatility
+# ### Figure F2. What the model inferred, over time
+#
+# `garch_df` is not one series per security. Every pass writes its own row, so a date inside two
+# folds' spans carries two conditional volatilities, and inside all three it carries three - the
+# same day filtered under three different parameter sets. That is what the panel hands downstream,
+# so it is what the figure has to draw: one line per pass for the security with the longest history,
+# with each fold's validation start marked by a dotted rule and the holdout seal by a dashed one.
+#
+# Drawing them as one line sorted by date, which is the obvious thing to do, silently splices the
+# three passes into a sawtooth and makes the vertical gap between them look like day-to-day
+# movement. The gap is the quantity of interest here and is measured below.
+
+# %%
+# Hundreds of symbols tie on row count, and `group_by` does not return groups in a stable order,
+# so sorting on the count alone drew a different security on every run. The symbol breaks the tie.
+carrier = (
+    garch_df.group_by("symbol").len().sort(["len", "symbol"], descending=[True, False])["symbol"][0]
+)
+fig, ax = plt.subplots(figsize=(11, 3.6))
+# `slate` reads as `blue` at this line width - the two passes were one line on the render.
+_pass_color = {-1: COLORS["blue"], 0: COLORS["copper"], 1: COLORS["amber"]}
+for _fold_id in sorted(garch_df["fold"].unique().to_list()):
+    _path = garch_df.filter((pl.col("symbol") == carrier) & (pl.col("fold") == _fold_id)).sort(
+        "timestamp"
+    )
+    ax.plot(
+        _path["timestamp"].to_list(),
+        _path["garch_cond_vol"].to_list(),
+        color=_pass_color.get(_fold_id, COLORS["neutral"]),
+        linewidth=1.0,
+        label="holdout pass" if _fold_id < 0 else f"fold {_fold_id}",
+    )
+# Rules rather than shaded spans: fold 1's validation window ends three days before fold 0's
+# begins, so two shaded spans render as one block and read as a single validation period.
+for fold in cv_folds:
+    ax.axvline(
+        pd.Timestamp(fold["val_start"]).date(),
+        color=COLORS["neutral"],
+        linestyle=":",
+        linewidth=0.9,
+    )
+ax.axvline(
+    pd.Timestamp(holdout_start).date(), color=COLORS["negative"], linestyle="--", linewidth=1.2
+)
+ax.set(xlabel="Date", ylabel="Annualized conditional volatility")
+ax.legend(loc="upper left", frameon=False, fontsize=8, ncol=3)
+# Measured rather than asserted, and pooled over every security rather than the one drawn: the
+# spread between passes on the dates two or more of them cover, against the median absolute
+# day-to-day move inside a single pass.
+_shared = (
+    garch_df.group_by(["symbol", "timestamp"])
+    .agg(
+        (pl.col("garch_cond_vol").max() - pl.col("garch_cond_vol").min()).alias("_spread"),
+        pl.len().alias("_n_passes"),
+    )
+    .filter(pl.col("_n_passes") > 1)
+)
+_within_pass_move = (
+    garch_df.sort(["fold", "symbol", "timestamp"])
+    .with_columns(pl.col("garch_cond_vol").diff().abs().over(["fold", "symbol"]).alias("_d"))
+    .drop_nulls("_d")
+)
+_spread_med = float(_shared["_spread"].median())
+_move_med = float(_within_pass_move["_d"].median())
+add_message_title(
+    ax,
+    "A refit moves the filtered series further than an ordinary day does",
+    subtitle=(
+        f"One security ({carrier}); across every security the median disagreement between passes "
+        f"on a shared date "
+        f"is {_spread_med:.3f} against a median daily move of {_move_med:.3f}"
+    ),
+)
+fig.show()
+
+# %% [markdown]
+# ### C.2 Bayesian stochastic volatility
 #
 # Stochastic volatility treats log-variance as a latent random walk:
 #
@@ -584,9 +799,9 @@ else:
 #    features for every date, just like GARCH.
 
 # %% [markdown]
-# The calibration universe is selected independently inside each training
-# window. Using full-sample coverage here would let 2021 availability influence
-# the pre-2021 folds even if the MCMC observations themselves were truncated.
+# The calibration universe is selected inside each training window, from the coverage that window
+# can see. That is what keeps a fold's calibration a function of its own training data, and it is
+# a stronger condition than truncating the MCMC observations alone would give.
 
 
 # %%
@@ -929,7 +1144,7 @@ def particle_filter_sv(
         particles = particles[indices]
 
         particles += rng.normal(0, sigma_eta, size=n_particles)
-    return predicted_vol / 100 * np.sqrt(252)
+    return predicted_vol / 100 * np.sqrt(PERIODS_PER_YEAR)
 
 
 # %% [markdown]
@@ -983,7 +1198,6 @@ def filter_sv_segments(
 
 # %%
 sv_results = []
-sv_calibration_diagnostics = []
 for fold in cv_folds:
     fold_idx = fold["fold"]
     train_start = fold["train_start"]
@@ -996,7 +1210,7 @@ for fold in cv_folds:
         f"\n--- SV Fold {fold_idx}: {len(sv_pool)}-symbol training-only pool, "
         f"{train_start.date()}..{train_end.date()} ---"
     )
-    sigma_eta_est, fold_diagnostics = calibrate_sigma_eta(
+    sigma_eta_est, _ = calibrate_sigma_eta(
         sv_pool,
         segment_returns,
         train_start,
@@ -1004,9 +1218,6 @@ for fold in cv_folds:
         n_draws=SV_DRAWS,
         n_tune=SV_TUNE,
         n_chains=SV_CHAINS,
-    )
-    sv_calibration_diagnostics.extend(
-        {"fold": fold_idx, **diagnostic} for diagnostic in fold_diagnostics
     )
     print(f"  Filtering {len(segment_returns)} security segments (sigma_eta={sigma_eta_est:.4f})")
     fold_results = filter_sv_segments(
@@ -1033,7 +1244,7 @@ holdout_pool = select_sv_pool(
     date.fromisoformat(holdout_train_end),
     SV_POOL_SIZE,
 )
-sigma_eta_holdout, holdout_diagnostics = calibrate_sigma_eta(
+sigma_eta_holdout, _ = calibrate_sigma_eta(
     holdout_pool,
     segment_returns,
     data_start,
@@ -1042,7 +1253,6 @@ sigma_eta_holdout, holdout_diagnostics = calibrate_sigma_eta(
     n_tune=SV_TUNE,
     n_chains=SV_CHAINS,
 )
-sv_calibration_diagnostics.extend({"fold": -1, **diagnostic} for diagnostic in holdout_diagnostics)
 print(f"  Filtering {len(segment_returns)} security segments (sigma_eta={sigma_eta_holdout:.4f})")
 holdout_results = filter_sv_segments(
     segment_returns,
@@ -1076,7 +1286,7 @@ else:
     print("No SV features generated")
 
 # %% [markdown]
-# ## 4. Combine Temporal Features
+# ## E. Combine and emit
 #
 # Merge GARCH and SV features, compute VRP (IV minus model vol), and prepare
 # two output views:
@@ -1150,7 +1360,7 @@ print(f"\nCombined temporal features: {temporal.shape}")
 print(f"  Feature columns: {feature_cols}")
 
 # %% [markdown]
-# ## 5. Save Outputs
+# ### E.1 Save the outputs
 #
 # Save the full temporal panel (training + validation per fold, plus holdout) with the
 # `fold` column retained. Downstream Ch11+ models join on
@@ -1166,7 +1376,7 @@ print(f"  Folds: {sorted(temporal['fold'].unique().to_list())}")
 print(f"  Columns: {temporal.columns}")
 
 # %% [markdown]
-# ## 6. Summary Statistics
+# ### E.2 Summary statistics
 
 # %%
 print("\n" + "=" * 60)
@@ -1195,7 +1405,7 @@ for feat in feature_cols:
         print(f"  {feat}: all null")
 
 # %% [markdown]
-# ## 7. Incremental Evaluation
+# ## F. Incremental evaluation
 #
 # Sanity check: do temporal features predict hold-to-expiry straddle returns?
 # We compute per-feature cross-sectional IC on validation dates only. The
@@ -1282,6 +1492,7 @@ def summarize_temporal_ic(temporal_ic: dict[str, dict]) -> tuple[pl.DataFrame, i
         {
             "feature": feature_names,
             "ic_mean": [temporal_ic[feature]["mean_ic"] for feature in feature_names],
+            "hac_se": [temporal_ic[feature]["hac_se"] for feature in feature_names],
             "hac_tstat": [temporal_ic[feature]["t_stat"] for feature in feature_names],
             "hac_pval": p_values,
             "fdr_pval": [float(value) for value in fdr_result["adjusted_p_values"]],
@@ -1292,7 +1503,10 @@ def summarize_temporal_ic(temporal_ic: dict[str, dict]) -> tuple[pl.DataFrame, i
 
 
 # %%
-def cross_sectional_ic_series(
+# Named for what it does rather than `cross_sectional_ic_series`, which is a library call with the
+# same signature in `ml4t.diagnostic.metrics`. Shadowing it made every reader of this cell have to
+# check which one the line below resolved to.
+def per_date_ic_series(
     frame: pl.DataFrame, feature_col: str, label_col: str, min_obs: int = 3
 ) -> list[float]:
     """Compute per-date Spearman IC between feature and label."""
@@ -1316,7 +1530,7 @@ def compute_temporal_ic(frame: pl.DataFrame, features: list[str], target: str) -
     """Compute finite HAC statistics for temporal features with adequate support."""
     temporal_ic = {}
     for feature in features:
-        ic_values = cross_sectional_ic_series(frame, feature, target, min_obs=3)
+        ic_values = per_date_ic_series(frame, feature, target, min_obs=3)
         if len(ic_values) < 10:
             continue
         hac_stats = compute_ic_hac_stats(
@@ -1331,165 +1545,96 @@ def compute_temporal_ic(frame: pl.DataFrame, features: list[str], target: str) -
 
 
 # %%
-def temporal_ic_records(summary: pl.DataFrame) -> list[dict]:
-    """Convert the corrected temporal IC table into serializable records."""
-    return [
-        {
-            "name": row["feature"],
-            "ic_mean": round(row["ic_mean"], 4),
-            "hac_tstat": round(row["hac_tstat"], 2),
-            "hac_pval": round(row["hac_pval"], 4),
-            "fdr_pval": round(row["fdr_pval"], 4),
-            "significant_fdr05": row["significant_fdr05"],
-        }
-        for row in summary.iter_rows(named=True)
-    ]
-
-
-# %%
 def evaluate_incremental_temporal_features(
     frame: pl.DataFrame, features: list[str], target: str
-) -> tuple[int, dict]:
-    """Evaluate the temporal family and return its corrected inference payload."""
-    empty = {
-        "n_temporal_features_tested": 0,
-        "n_temporal_discoveries_fdr05": 0,
-        "temporal_feature_ic": [],
-    }
+) -> tuple[pl.DataFrame, int]:
+    """Evaluate the temporal family and return its BH-corrected IC table."""
     if len(frame) < 20:
-        print(f"Insufficient overlap ({len(frame)} rows) -- skipping IC")
-        return 0, empty
+        raise RuntimeError(f"Incremental evaluation has only {len(frame)} overlapping rows")
     temporal_ic = compute_temporal_ic(frame, features, target)
     if not temporal_ic:
-        print("No temporal features had enough non-null observations for IC")
-        return 0, empty
+        raise RuntimeError("No temporal feature had enough non-null observations for IC")
     summary, discoveries = summarize_temporal_ic(temporal_ic)
     print(f"BH-FDR discoveries (q < 0.05): {discoveries} of {len(temporal_ic)} temporal features")
     print(summary)
-    payload = {
-        "n_temporal_features_tested": len(temporal_ic),
-        "n_temporal_discoveries_fdr05": discoveries,
-        "temporal_feature_ic": temporal_ic_records(summary),
-    }
-    return discoveries, payload
+    return summary, discoveries
 
 
 # %%
-incremental_block = {
-    "primary_label": label_col,
-    "multiple_testing": "Benjamini-Hochberg FDR across temporal features",
-    "fdr_alpha": 0.05,
-    "hac_label_horizon_trading_days": LABEL_HORIZON_TRADING_DAYS,
-    "hac_max_lags": LABEL_HORIZON_TRADING_DAYS - 1,
-    "n_label_endpoint_purged_rows": n_endpoint_purged_rows,
-    "max_retained_label_endpoint": str(max_retained_label_endpoint),
-}
-n_temporal_discoveries_fdr05, temporal_ic_payload = evaluate_incremental_temporal_features(
+ic_summary, n_temporal_discoveries_fdr05 = evaluate_incremental_temporal_features(
     eval_data, feature_cols, label_col
 )
-incremental_block.update(temporal_ic_payload)
 
 # %% [markdown]
-# ## 8. Results Collection
-
-
-# %%
-def _git_commit_hash():
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], text=True, timeout=5
-        ).strip()
-    except Exception:
-        return "unknown"
-
+# ### Figure F4. What the screen actually found
+#
+# The printed table above is the whole result of this stage's one supervised question, and a table
+# is the wrong shape for it: the reader has to hold four columns in mind to see whether an IC is
+# distinguishable from zero. Drawn, the HAC interval either crosses zero or it does not.
+#
+# The colour reads the BH-adjusted $q$-value, not the nominal p-value. A feature whose interval
+# clears zero but whose $q$ does not clear the family threshold is drawn as a non-discovery, because
+# four features screened against one label is a family and a nominal p-value does not price that.
 
 # %%
-n_temporal_features = len(feature_cols)
-n_garch_attempted_fits = len(garch_diagnostics)
-n_garch_failed_fits = sum(not diagnostic["converged"] for diagnostic in garch_diagnostics)
-n_garch_error_fits = sum(diagnostic["error_type"] is not None for diagnostic in garch_diagnostics)
-techniques = ["GJR-GARCH(1,1) conditional volatility"]
-if sv_df.height > 0:
-    techniques.append("Bayesian SV (particle-filtered, equal-segment pooled sigma_eta)")
+_ic_ordered = ic_summary.sort("ic_mean")
+fig, ax = plt.subplots(figsize=(8, 3.2))
+_y = np.arange(_ic_ordered.height)
+ax.errorbar(
+    _ic_ordered["ic_mean"].to_numpy(),
+    _y,
+    xerr=1.96 * _ic_ordered["hac_se"].to_numpy(),
+    fmt="none",
+    ecolor=COLORS["neutral"],
+    elinewidth=1.0,
+    capsize=3,
+)
+ax.scatter(
+    _ic_ordered["ic_mean"].to_numpy(),
+    _y,
+    color=[
+        COLORS["blue"] if significant else COLORS["silver_muted"]
+        for significant in _ic_ordered["significant_fdr05"].to_list()
+    ],
+    zorder=3,
+)
+ax.axvline(0.0, color=COLORS["negative"], linestyle="--", linewidth=1)
+ax.set_yticks(_y)
+ax.set_yticklabels(_ic_ordered["feature"].to_list())
+ax.set(xlabel="Mean cross-sectional IC (95% HAC interval)")
+add_message_title(
+    ax,
+    "Every temporal feature's HAC interval crosses zero",
+    subtitle=(
+        f"Mean cross-sectional IC against {label_col} on validation dates; "
+        f"{n_temporal_discoveries_fdr05} of {ic_summary.height} clear BH-FDR at q < 0.05, "
+        "and a filled marker is what one that did would carry"
+    ),
+)
+fig.show()
 
-
-# %%
-result_summary = {
-    "n_observations_eval": len(temporal_eval),
-    "n_observations_full": len(temporal),
-    "n_temporal_features": n_temporal_features,
-    "n_temporal_discoveries_fdr05": n_temporal_discoveries_fdr05,
-    "n_label_endpoint_purged_rows": n_endpoint_purged_rows,
-    "n_symbols": temporal["symbol"].n_unique(),
-    "date_range": [str(temporal["timestamp"].min()), str(temporal["timestamp"].max())],
-    "feature_columns": feature_cols,
-}
-
-
-# %%
-result_techniques = {
-    "garch": "GJR-GARCH(1,1) per security segment, walk-forward fit-then-filter",
-    "sv": "Bayesian SV: pooled sigma_eta (MCMC) + bootstrap particle filter",
-    "sv_pool_estimator": "equal-weight mean of accepted security-segment posterior means",
-    "seed_contract": "BLAKE2s-32 of base seed, model namespace, symbol, and sec_id",
-    "sv_pool_size": SV_POOL_SIZE,
-    "sv_n_particles": SV_N_PARTICLES,
-    "architecture": "fit-then-filter: retrospective training and PIT evaluation features",
-    "inference": "HAC p-values with Benjamini-Hochberg FDR across temporal features",
-    "hac_max_lags": LABEL_HORIZON_TRADING_DAYS - 1,
-}
-
-
-# %%
-result_diagnostics = {
-    "garch_attempted_fits": n_garch_attempted_fits,
-    "garch_failed_fits": n_garch_failed_fits,
-    "garch_error_fits": n_garch_error_fits,
-    "garch_mean_vol": float(temporal_eval["garch_cond_vol"].mean())
-    if "garch_cond_vol" in temporal_eval.columns
-    and temporal_eval["garch_cond_vol"].null_count() < len(temporal_eval)
-    else None,
-    "garch_vrp_mean": float(temporal_eval["garch_vrp"].mean())
-    if "garch_vrp" in temporal_eval.columns
-    and temporal_eval["garch_vrp"].null_count() < len(temporal_eval)
-    else None,
-}
-
-
-# %%
-key_findings = [
-    f"Temporal features: {n_temporal_features} features, "
-    f"{len(temporal_eval):,} eval rows, {len(temporal):,} full rows",
-    f"Techniques: {', '.join(techniques)}",
-    f"BH-FDR discoveries: {n_temporal_discoveries_fdr05} of "
-    f"{incremental_block['n_temporal_features_tested']} temporal features at q < 0.05",
-    f"Label-endpoint seal removes {n_endpoint_purged_rows:,} validation rows; "
-    f"latest retained endpoint {max_retained_label_endpoint}",
-    "Both models produce retrospective training and PIT validation features",
-    "GARCH VRP (IV minus GARCH vol) provides forward-looking VRP estimate",
-]
-if sv_df.height > 0:
-    key_findings.append(
-        f"SV particle-filtered on all {sv_df['symbol'].n_unique()} symbols "
-        f"(calibrated from {SV_POOL_SIZE}-symbol pool)"
-    )
-
-
-# %%
-results = {
-    "case_study_id": STRATEGY_ID,
-    "chapter": 9,
-    "stage": "temporal",
-    "timestamp": datetime.now(UTC).isoformat(),
-    "git_commit": _git_commit_hash(),
-    "notebook": f"case_studies/{STRATEGY_ID}/04_model_based_features.py",
-    "summary": result_summary,
-    "techniques": result_techniques,
-    "diagnostics": result_diagnostics,
-    "key_findings": key_findings,
-}
-results["incremental_evaluation"] = incremental_block
-
+# %% [markdown]
+# **No one of these four columns ranks the cross-section on its own**, at this horizon, on these
+# validation rows. Reading any of them as a signal on the strength of its sign would be reading
+# noise. That is the finding, not a failure of the stage: the two models were fitted correctly under
+# the fold contract and the panel is written.
+#
+# Two things it is not. It is not evidence that the columns carry nothing - failing to reject a zero
+# IC is not the same as establishing one, and a feature that is useless alone can still matter
+# inside a model that has the others. And it is not an *incremental* result: nothing above computes
+# a stage-03 baseline, so "adds nothing over stage 03" is a claim this notebook has not tested and
+# does not make.
+#
+# Nor does the next one. [`05_evaluation`](05_evaluation.ipynb) reads `financial.parquet` and
+# `model_based.parquet` together and screens both on the same validation rows - univariate IC with
+# HAC errors, BH-FDR across the combined family, and a cross-family correlation pass that asks
+# whether these four columns are redundant with the stage-03 ones. That is a redundancy question,
+# not an incremental one. **What would settle incremental value is a baseline model scored against
+# the same model with these columns added**, and that ablation is not what stage 05 runs. Saying so
+# is better than deferring the question to a stage that does not answer it.
+#
+# This stage's job was to produce the columns under a fold contract and report what a single-feature
+# screen can see in them.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -1501,7 +1646,11 @@ results["incremental_evaluation"] = incremental_block
 #
 # 2. **GJR-GARCH** runs independently within every eligible security segment.
 #    The explicit fixed-parameter recursion produces daily conditional
-#    volatility. GARCH VRP (IV minus GARCH vol) is the primary temporal signal.
+#    volatility, and subtracting it from ATM implied volatility gives the GARCH
+#    variance risk premium. On validation its stand-alone IC is indistinguishable
+#    from zero, as is that of every other column this stage writes, so none of the
+#    four is carried forward as a signal in its own right. Whether they matter
+#    inside a model, and whether they add to stage 03, is stage 05's question.
 #
 # 3. **Bayesian SV** calibrates $\sigma_\eta$ via MCMC on a small liquid pool,
 #    averages accepted posterior means with equal weight per security segment,
@@ -1512,7 +1661,9 @@ results["incremental_evaluation"] = incremental_block
 #
 # 4. **Incremental inference controls multiplicity**: HAC p-values describe
 #    individual temporal features, while Benjamini-Hochberg adjusted p-values
-#    determine discoveries across the screened family.
+#    determine discoveries across the screened family. Both are reported, and
+#    figure F4 draws the intervals rather than leaving the reader to reconstruct
+#    them from a table of t-statistics.
 #
 # 5. **Output**: `model_based.parquet` contains the full training and validation
 #    panel per fold (plus holdout) with the `fold` column retained. Downstream
