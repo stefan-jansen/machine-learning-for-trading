@@ -492,6 +492,14 @@ print(
 # The frozen curve is retained as history. The corrected curves enforce a disjoint long-short book;
 # the total-return curve additionally settles official funding. Their horizontal-zero crossings
 # determine the implementation budget.
+#
+# The two corrected curves are replayed here, so they measure the carrier only where the replay can
+# reproduce what the carrier does. The carrier holds the top five perpetuals by score, and a universe
+# of five or fewer hands it every perpetual on every settlement: the selection that the edge consists
+# of never happens, and the curve that comes back describes a different strategy. Its crossing is
+# then not a budget, and on the reduced surface used for execution tests it has none to report,
+# because the replayed Sharpe is already negative at zero cost. The frozen curve is read from the
+# registry rather than replayed, so it is unaffected and its crossing is still required.
 
 
 # %%
@@ -512,21 +520,24 @@ def _breakeven(frame: pl.DataFrame, metric: str) -> float | None:
 price_breakeven = _breakeven(replay, "price_only_sharpe")
 funding_breakeven = _breakeven(replay, "with_funding_sharpe")
 stored_breakeven = _breakeven(replay, "stored_sharpe")
+replay_universe = prices["symbol"].n_unique()
+selection_is_degenerate = replay_universe <= allocation["top_k"]
+
 if using_fallback_grid:
     print("Frozen registry breakeven: unavailable for an unregistered test grid")
-    for label, value in (
-        ("Corrected price-only", price_breakeven),
-        ("Corrected funding-inclusive", funding_breakeven),
-    ):
-        rendered = "unavailable" if value is None else f"{value:.2f} bps"
-        print(f"{label} breakeven: {rendered}")
+elif stored_breakeven is None or not np.isfinite(stored_breakeven):
+    raise RuntimeError("The registered cost curve has no finite zero crossing")
 else:
-    if any(
-        value is None or not np.isfinite(value)
-        for value in (stored_breakeven, price_breakeven, funding_breakeven)
-    ):
-        raise RuntimeError("A registered cost curve has no finite zero crossing")
     print(f"Frozen registry breakeven: {stored_breakeven:.2f} bps")
+
+if selection_is_degenerate:
+    print(
+        f"Corrected breakevens: unavailable on a {replay_universe}-perpetual replay universe, "
+        f"which cannot express the carrier's top-{allocation['top_k']} selection"
+    )
+elif any(value is None or not np.isfinite(value) for value in (price_breakeven, funding_breakeven)):
+    raise RuntimeError("A replayed cost curve has no finite zero crossing")
+else:
     print(f"Corrected price-only breakeven: {price_breakeven:.2f} bps")
     print(f"Corrected funding-inclusive breakeven: {funding_breakeven:.2f} bps")
 
