@@ -72,22 +72,30 @@ from case_studies.utils.signals import (
     fixed_threshold_signal,
     rolling_percentile_signal,
 )
-from utils import CASE_STUDIES_DIR
-from utils.paths import get_output_dir
+from utils.paths import get_case_study_dir, get_output_dir
 from utils.style import COLORS
 
+# The approved prediction set is pinned by the identity the selector resolves to,
+# not by a SHA-256 of the registry file. A registry is a SQLite database that is
+# rewritten whenever a run is recorded and sampled down for CI, so its bytes
+# differ between the teaching registry and the test fixture by construction: one
+# constant cannot be correct in both, and the pin that was here matched neither.
+# The resolved config and prediction hash are the same in both, and they are what
+# the section actually depends on - which model won the selection.
 CASE_STUDIES = {
     "crypto_perps_funding": {
         "label": "fwd_ret_24h",
         "display": "Crypto perpetuals",
         "registry_status": "accepted",
-        "registry_sha256": "c7c1e67f8fe4476d7631061e61ce89de1a521606a7c0ff807ba1dcdad23fc485",
+        "config_name": "leaves_31_mae",
+        "prediction_hash": "f6bd7cd2d208",
     },
     "etfs": {
         "label": "fwd_ret_21d",
         "display": "ETFs",
         "registry_status": "accepted_pre_ipca",
-        "registry_sha256": "771c02b3db7047b9c6e25c60c18d8b3b02dfc4ade2cb6b791b40f6b410f29509",
+        "config_name": "leaves_7_mae",
+        "prediction_hash": "226acb97bed9",
     },
 }
 REGISTRY_MAP_SHA256 = "624ff8dd52251d97ffe770a027edd24b3b9f7899d1da00c24ad4e8c843405d3e"
@@ -189,12 +197,26 @@ def load_registered_predictions(
     case_study: str, label: str, family: str = "gbm"
 ) -> tuple[pl.DataFrame, dict[str, object]]:
     """Load the complete validation prediction set with the highest daily rank IC."""
-    run_log = CASE_STUDIES_DIR / case_study / "run_log"
+    # Resolved through get_case_study_dir, which is what every other chapter
+    # notebook reading a run log uses. CASE_STUDIES_DIR is the repository path and
+    # ignores ML4T_OUTPUT_DIR, but `case_studies/*/run_log` is not tracked in git,
+    # so on a fresh checkout that path holds no registry at all.
+    run_log = get_case_study_dir(case_study, create=False) / "run_log"
     db_path = run_log / "registry.db"
     registry_sha256 = hashlib.sha256(db_path.read_bytes()).hexdigest()
-    if registry_sha256 != str(CASE_STUDIES[case_study]["registry_sha256"]):
-        raise RuntimeError(f"Registry identity mismatch for {case_study}: {registry_sha256}")
     metadata = select_registered_prediction(db_path, family, label)
+    expected = (
+        CASE_STUDIES[case_study]["config_name"],
+        CASE_STUDIES[case_study]["prediction_hash"],
+    )
+    resolved = (metadata["config_name"], metadata["prediction_hash"])
+    if resolved != expected:
+        raise RuntimeError(
+            f"Selector resolved {resolved} for {case_study}, expected {expected}; "
+            f"registry sha256 {registry_sha256}"
+        )
+    # Recorded, not gated: which registry file the numbers came from is worth
+    # carrying into the output even though it cannot be pinned in source.
     metadata["registry_sha256"] = registry_sha256
     pred_path = run_log / "predictions" / str(metadata["prediction_hash"]) / "predictions.parquet"
     return validate_prediction_set(pred_path, metadata), metadata
