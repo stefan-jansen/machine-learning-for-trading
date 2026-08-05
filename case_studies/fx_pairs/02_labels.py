@@ -107,7 +107,7 @@ PRIMARY_HORIZON = HORIZONS[PRIMARY_LABEL]
 LONGEST_LABEL = max(HORIZONS, key=HORIZONS.get)
 HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
 HOLDOUT_END = date.fromisoformat(setup["evaluation"]["holdout_end"])
-CALENDAR = "CME_FX"  # the venue calendar that implements the NY 5pm rollover
+CALENDAR = setup["decision"]["session_calendar"]
 
 print(f"Labels: {LABEL_NAMES}, primary {PRIMARY_LABEL}, horizons {HORIZONS} sessions")
 print(f"Holdout opens {HOLDOUT_START}, and seals the label endpoint")
@@ -135,9 +135,10 @@ print(f"Holdout opens {HOLDOUT_START}, and seals the label endpoint")
 # Spot FX has no exchange close, so a daily bar is a convention rather than an observation.
 # The provider delivers four-hour bars stamped in UTC; the decision cadence is defined at the
 # New York 5pm rollover, and for eight hours out of every twenty-four the two clocks put a
-# bar on different calendar days. `TradingCalendar("CME_FX")` assigns each
-# four-hour bar to the session it actually traded in, and the daily close is the last bar of
-# that session rather than the last bar before midnight UTC. Aggregating on the UTC date
+# bar on different calendar days. `TradingCalendar`, on the venue calendar
+# `setup.yaml::decision.session_calendar` declares, assigns each four-hour bar to the session
+# it actually traded in, and the daily close is the last bar of that session rather than the
+# last bar before midnight UTC. Aggregating on the UTC date
 # instead puts a Sunday-evening bar and the Monday session in the same row.
 #
 # The aggregation sorts within each session group before taking its last bar, because a
