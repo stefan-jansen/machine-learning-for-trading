@@ -389,111 +389,132 @@ ic_uncertainty = {
     feature: compute_ic_uncertainty(ic_timeseries[feature], horizon=LABEL_HORIZON, ic_col="ic")
     for feature in leaders
 }
-leader = leaders[0]
-leader_series = ic_timeseries[leader].with_columns(
-    pl.col("ic").rolling_mean(IC_ROLLING_WINDOW).alias("rolling")
-)
+leader = leaders[0] if leaders else None
+if leader:
+    leader_series = ic_timeseries[leader].with_columns(
+        pl.col("ic").rolling_mean(IC_ROLLING_WINDOW).alias("rolling")
+    )
 print(f"Leading feature by absolute mean IC: {leader}")
 
 # %%
-fig = make_subplots(
-    rows=1,
-    cols=2,
-    column_widths=[0.6, 0.4],
-    subplot_titles=(
-        "Daily IC of the leading feature, under its rolling mean",
-        "Mean IC against three ways of bounding it",
-    ),
-    horizontal_spacing=0.16,
-)
-_ = fig.add_trace(
-    go.Scatter(
-        x=leader_series[DATE_COL],
-        y=leader_series["ic"],
-        mode="lines",
-        line={"color": COLORS["neutral"], "width": 0.6},
-        opacity=0.45,
-        name="Daily IC",
-    ),
-    row=1,
-    col=1,
-)
-_ = fig.add_trace(
-    go.Scatter(
-        x=leader_series[DATE_COL],
-        y=leader_series["rolling"],
-        mode="lines",
-        line={"color": COLORS["blue"], "width": 2},
-        name=f"{IC_ROLLING_WINDOW}-session mean",
-    ),
-    row=1,
-    col=1,
-)
-_ = fig.add_hline(
-    y=0, line={"color": COLORS["neutral"], "width": 0.8, "dash": "dash"}, row=1, col=1
-)
+if leader:
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        column_widths=[0.6, 0.4],
+        subplot_titles=(
+            "Daily IC of the leading feature, under its rolling mean",
+            "Mean IC against three ways of bounding it",
+        ),
+        horizontal_spacing=0.16,
+    )
+    _ = fig.add_trace(
+        go.Scatter(
+            x=leader_series[DATE_COL],
+            y=leader_series["ic"],
+            mode="lines",
+            line={"color": COLORS["neutral"], "width": 0.6},
+            opacity=0.45,
+            name="Daily IC",
+        ),
+        row=1,
+        col=1,
+    )
+    _ = fig.add_trace(
+        go.Scatter(
+            x=leader_series[DATE_COL],
+            y=leader_series["rolling"],
+            mode="lines",
+            line={"color": COLORS["blue"], "width": 2},
+            name=f"{IC_ROLLING_WINDOW}-session mean",
+        ),
+        row=1,
+        col=1,
+    )
+    _ = fig.add_hline(
+        y=0, line={"color": COLORS["neutral"], "width": 0.8, "dash": "dash"}, row=1, col=1
+    )
 
 # %% [markdown]
-# The companion panel puts the three intervals for the leading features on one axis.
-# Where the Newey-West interval is materially wider than the naive one, the daily ICs
-# of that feature carry the serial dependence the overlapping label window creates.
+# The companion panel puts the three intervals on one axis for the same features. The
+# naive interval is the wide grey bar, so where the Newey-West one does not sit inside
+# it the daily ICs carry the serial dependence the overlapping label window creates.
+
 
 # %%
-interval_features = list(reversed(leaders))
-_ = fig.add_trace(
-    go.Scatter(
-        x=[ic_uncertainty[name]["mean_ic"] for name in interval_features],
-        y=interval_features,
-        mode="markers",
-        marker={"color": COLORS["blue"], "size": 9},
-        error_x={
-            "type": "data",
-            "symmetric": False,
-            "array": [
-                ic_uncertainty[name]["ci_hac_upper"] - ic_uncertainty[name]["mean_ic"]
-                for name in interval_features
-            ],
-            "arrayminus": [
-                ic_uncertainty[name]["mean_ic"] - ic_uncertainty[name]["ci_hac_lower"]
-                for name in interval_features
-            ],
-            "color": COLORS["blue"],
-            "thickness": 1.5,
-        },
-        name="Newey-West interval",
-    ),
-    row=1,
-    col=2,
-)
-_ = fig.add_trace(
-    go.Scatter(
-        x=[ic_uncertainty[name][bound] for name in interval_features for bound in BOOT_BOUNDS],
-        y=[name for name in interval_features for _ in BOOT_BOUNDS],
-        mode="markers",
-        marker={"color": COLORS["copper"], "size": 8, "symbol": "line-ns-open"},
-        name="Block-bootstrap bounds",
-    ),
-    row=1,
-    col=2,
-)
-_ = fig.add_vline(
-    x=0, line={"color": COLORS["neutral"], "width": 0.8, "dash": "dash"}, row=1, col=2
-)
-fig.update_layout(
-    title="A small average IC sits inside a daily series that swings across zero",
-    height=560,
-    width=1150,
-    margin={"l": 60, "r": 200},
-    legend={"orientation": "h", "y": -0.18},
-)
-fig.update_yaxes(title_text="Daily Spearman IC", row=1, col=1)
-fig.update_xaxes(
-    title_text=f"Validation session; mean rolls over {IC_ROLLING_WINDOW} sessions",
-    row=1,
-    col=1,
-)
-fig.update_xaxes(title_text="Mean daily Spearman IC, 95% intervals", row=1, col=2)
-fig.show()
+def interval_arms(features: list[str], lower: str, upper: str) -> dict:
+    """Asymmetric Plotly error bars from a pair of interval bounds."""
+    return {
+        "type": "data",
+        "symmetric": False,
+        "array": [
+            ic_uncertainty[name][upper] - ic_uncertainty[name]["mean_ic"] for name in features
+        ],
+        "arrayminus": [
+            ic_uncertainty[name]["mean_ic"] - ic_uncertainty[name][lower] for name in features
+        ],
+    }
+
+
+# %%
+if leader:
+    interval_features = list(reversed(leaders))
+    means = [ic_uncertainty[name]["mean_ic"] for name in interval_features]
+    _ = fig.add_trace(
+        go.Scatter(
+            x=means,
+            y=interval_features,
+            mode="markers",
+            marker={"color": COLORS["neutral"], "size": 1, "opacity": 0.0},
+            error_x=interval_arms(interval_features, "ci_naive_lower", "ci_naive_upper")
+            | {"color": COLORS["silver_muted"], "thickness": 9, "width": 0},
+            name="Naive interval",
+        ),
+        row=1,
+        col=2,
+    )
+    _ = fig.add_trace(
+        go.Scatter(
+            x=means,
+            y=interval_features,
+            mode="markers",
+            marker={"color": COLORS["blue"], "size": 9},
+            error_x=interval_arms(interval_features, "ci_hac_lower", "ci_hac_upper")
+            | {"color": COLORS["blue"], "thickness": 1.5},
+            name="Newey-West interval",
+        ),
+        row=1,
+        col=2,
+    )
+    _ = fig.add_trace(
+        go.Scatter(
+            x=[ic_uncertainty[name][bound] for name in interval_features for bound in BOOT_BOUNDS],
+            y=[name for name in interval_features for _ in BOOT_BOUNDS],
+            mode="markers",
+            marker={"color": COLORS["copper"], "size": 8, "symbol": "line-ns-open"},
+            name="Block-bootstrap bounds",
+        ),
+        row=1,
+        col=2,
+    )
+    _ = fig.add_vline(
+        x=0, line={"color": COLORS["neutral"], "width": 0.8, "dash": "dash"}, row=1, col=2
+    )
+    fig.update_layout(
+        title="A small average IC sits inside a daily series that swings across zero",
+        height=560,
+        width=1150,
+        margin={"l": 60, "r": 200},
+        legend={"orientation": "h", "y": -0.18},
+    )
+    fig.update_yaxes(title_text="Daily Spearman IC", row=1, col=1)
+    fig.update_xaxes(
+        title_text=f"Validation session; mean rolls over {IC_ROLLING_WINDOW} sessions",
+        row=1,
+        col=1,
+    )
+    fig.update_xaxes(title_text="Mean daily Spearman IC, 95% intervals", row=1, col=2)
+    fig.show()
 
 # %% [markdown]
 # ### Fold Stability
@@ -791,7 +812,7 @@ for label_name, horizon in sorted(LABEL_HORIZONS.items(), key=lambda item: item[
         )
 
 horizon_ic = pl.DataFrame(horizon_rows)
-print(f"Horizon profile computed for {horizon_ic['feature'].n_unique()} features")
+print(f"Horizon profile computed for {len(horizon_rows)} feature-horizon pairs")
 
 # %%
 fig = make_subplots(
@@ -804,7 +825,7 @@ fig = make_subplots(
     horizontal_spacing=0.12,
 )
 shown_direction = set()
-for feature in leaders:
+for feature in leaders if horizon_rows else []:
     profile = horizon_ic.filter(pl.col("feature") == feature).sort("horizon")
     if not len(profile):
         continue
