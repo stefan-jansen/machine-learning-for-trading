@@ -841,7 +841,7 @@ fig = px.bar(
         "flat": COLORS["neutral"],
         "contango": COLORS["negative"],
     },
-    title="One date's cross-section splits evenly between the two regimes",
+    title="The two regimes split evenly, with four products inside the band",
     labels={"carry_pct": "Annualized carry", "product": "Product"},
 )
 fig.update_layout(height=400)

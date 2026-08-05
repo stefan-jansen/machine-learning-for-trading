@@ -879,8 +879,8 @@ print(
 # the subset F3 and F6 read.
 #
 # Bars on which neither venue printed are **0.05%** of the matrix, and they leave **1.13%** of
-# it without an Amihud value - a thirteenfold amplification, because the estimator's rolling
-# average nulls every one of the thirty bars whose window contains one of them.
+# it without an Amihud value, because the estimator's rolling average nulls every one of the
+# thirty bars whose window contains one of them.
 
 # %% [markdown]
 # ### F1. Coverage through time

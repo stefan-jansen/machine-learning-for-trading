@@ -222,9 +222,6 @@ labels_df = front.with_columns(
 )
 for label_name, horizon in HORIZONS.items():
     labels_df = forward_return(labels_df, horizon, label_name)
-labels_df = labels_df.with_columns(
-    pl.col("timestamp").shift(-PRIMARY_HORIZON).over("product").alias("_label_end")
-)
 
 print(f"Constructed {', '.join(LABEL_NAMES)}")
 gaps = labels_df.group_by("product").agg(pl.col("_holes").max()).filter(pl.col("_holes") > 0)
@@ -512,7 +509,9 @@ for label_name, horizon in HORIZONS.items():
 # The weekly label's 97,951 development rows carry 19,617 effective observations, a ratio of
 # 0.2003 against the 0.2000 a fully overlapped five-session window implies; the monthly
 # label's 97,423 rows carry 4,671, a ratio of 0.0479 against 0.0476. Both sit just above the
-# reference value because the February 2012 outage ends an overlap early. Autocorrelation
+# reference value because each product's series has two ends: the windows there overlap fewer
+# neighbours than an interior one does, and the reference assumes every window is full.
+# Autocorrelation
 # falls from 0.797 at lag one to -0.005 at lag five for the weekly label, and from 0.950 to
 # -0.013 at lag twenty-one for the monthly one. The purge gap a fold needs is set by the
 # forward window itself, not by these counts.

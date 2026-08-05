@@ -39,6 +39,7 @@ from datetime import timedelta
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+import yaml
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats
 from scipy.stats import norm, spearmanr
@@ -55,12 +56,23 @@ MAX_SYMBOLS = 0
 
 # %%
 CASE_STUDY_ID = "crypto_perps_funding"
-PRIMARY_LABEL = "fwd_ret_8h"
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 EVAL_DIR = CASE_DIR / "evaluation"
 EVAL_DIR.mkdir(exist_ok=True)
 
+# The label is read from setup.yaml rather than retyped, so this stage cannot end up
+# evaluating a different label than the one the case study declares and the model
+# stages train on.
+with open(CASE_DIR / "config" / "setup.yaml") as _f:
+    setup_config = yaml.safe_load(_f)
+PRIMARY_LABEL = setup_config["labels"]["primary"]
+
 JOIN_COLS = ["timestamp", "symbol"]
+# Not the label horizon. `fwd_ret_8h` spans exactly one 8-hourly bar, so consecutive
+# decision times share no outcome window and overlap contributes no autocorrelation.
+# The three lags cover one funding day: the premium and funding features are driven
+# by a settlement cycle that repeats every third bar, and that is what the IC series
+# carries instead.
 HAC_MAXLAGS = 3
 MIN_CROSS_SECTION = min(10, MAX_SYMBOLS) if MAX_SYMBOLS else 10
 IC_THRESHOLD = 0.005
@@ -211,12 +223,14 @@ for feature in identifiable:
         ic_results[feature] = compute_ic_hac_stats(series["ic"].to_numpy(), maxlags=HAC_MAXLAGS)
         ic_timeseries[feature] = series
 
-print(f"IC evaluated: {len(ic_results)} of 44 features")
-print(f"Not cross-sectionally identifiable: {44 - len(ic_results)}")
+print(f"IC evaluated: {len(ic_results)} of {len(mds.feature_names)} features")
+print(f"Not cross-sectionally identifiable: {len(mds.feature_names) - len(ic_results)}")
 
 # %% [markdown]
-# Fold stability uses the same two validation windows. With two folds, a
-# consistency score of 1.0 means the sign agrees in both windows.
+# Fold stability uses the same two validation windows. With only two folds the
+# score can take three values and an interquartile range would be degenerate, so
+# what it reports is whether the sign agrees in both windows, in one, or in
+# neither - not a distribution.
 
 # %%
 fold_stats = {}
@@ -233,6 +247,104 @@ for feature, series in ic_timeseries.items():
 
 stable_count = sum(stats["sign_consistency"] == 1.0 for stats in fold_stats.values())
 print(f"Same IC sign in both validation folds: {stable_count}/{len(fold_stats)}")
+
+# %% [markdown]
+# ### The IC series, before it is reduced
+#
+# Everything below is a scalar summary of one object: the per-decision-time IC
+# series. Two things are visible only in the series - an IC that comes from a
+# single episode and is flat around it, and an IC that changes sign between the
+# two validation windows - so it is drawn first. The band is the HAC interval
+# around the full-sample mean, computed from the same `compute_ic_hac_stats` call
+# and therefore at the same `HAC_MAXLAGS` bandwidth as the t-statistics reported
+# below. `compute_ic_uncertainty` would have drawn it at the Newey-West automatic
+# lag instead, so the band and the significance test in one notebook would have
+# rested on different bandwidths. Each validation window is drawn as its own segment:
+# the folds do not abut, and a line joining the last bar of one to the first bar of
+# the next would draw a trend across months the notebook never evaluated.
+
+# %%
+LEADING_FOR_SERIES = 3
+ROLLING_BARS = 90
+series_features = (
+    eval_summary_ordering := sorted(ic_results, key=lambda name: -abs(ic_results[name]["mean_ic"]))
+)[:LEADING_FOR_SERIES]
+
+fig, axes = plt.subplots(len(series_features), 1, figsize=(10, 7), sharex=True, sharey=True)
+for ax, feature in zip(axes, series_features, strict=True):
+    series = ic_timeseries[feature].sort("timestamp")
+    stats = ic_results[feature]
+    half_width = 1.96 * stats["hac_se"]
+    bands = {
+        "mean_ic": stats["mean_ic"],
+        "ci_hac_lower": stats["mean_ic"] - half_width,
+        "ci_hac_upper": stats["mean_ic"] + half_width,
+    }
+    for index, (_, window) in enumerate(
+        sorted(series.group_by("cv_fold"), key=lambda item: item[1]["timestamp"].min())
+    ):
+        window = window.sort("timestamp")
+        stamps = window["timestamp"].to_list()
+        ax.plot(stamps, window["ic"].to_list(), color=COLORS["slate"], linewidth=0.4, alpha=0.5)
+        ax.plot(
+            stamps,
+            window["ic"].rolling_mean(ROLLING_BARS, min_samples=ROLLING_BARS).to_list(),
+            color=COLORS["blue"],
+            linewidth=1.3,
+            label=f"{ROLLING_BARS}-bar mean" if index == 0 else "_nolegend_",
+        )
+    ax.axhline(bands["mean_ic"], color=COLORS["amber"], linewidth=1.0, label="mean IC")
+    ax.axhspan(
+        bands["ci_hac_lower"], bands["ci_hac_upper"], color=COLORS["amber"], alpha=0.25, lw=0
+    )
+    ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
+    ax.set_ylabel(feature, fontsize=7)
+axes[0].legend(frameon=False, fontsize=6, ncols=2, loc="upper left")
+axes[-1].set_xlabel("Decision timestamp (UTC)")
+add_message_title(
+    axes[0],
+    "The per-decision IC swings far wider than the mean it averages to",
+    subtitle="Leading features by absolute IC; amber band is the HAC interval",
+)
+fig.tight_layout()
+plt.show()
+
+# %% [markdown]
+# ### Fold-level IC
+#
+# A pooled mean hides the difference between a feature that works in both
+# validation windows and one that had a single good year. With two folds there is
+# no distribution to summarize, so both fold means are drawn per feature and the
+# reader can see which side of zero each falls on.
+
+# %%
+FOLD_FEATURES_SHOWN = 12
+fold_features = [name for name in eval_summary_ordering if name in fold_stats][:FOLD_FEATURES_SHOWN]
+fig, ax = plt.subplots(figsize=(10, 6))
+for row, feature in enumerate(reversed(fold_features)):
+    per_fold = (
+        ic_timeseries[feature].group_by("cv_fold").agg(pl.col("ic").mean()).sort("cv_fold")["ic"]
+    ).to_list()
+    ax.scatter(per_fold, [row] * len(per_fold), color=COLORS["slate"], s=34, zorder=3)
+    ax.scatter(
+        [ic_results[feature]["mean_ic"]],
+        [row],
+        color=COLORS["amber"],
+        marker="D",
+        s=44,
+        zorder=4,
+    )
+ax.axvline(0, color=COLORS["neutral"], linewidth=0.8)
+ax.set_yticks(range(len(fold_features)))
+ax.set_yticklabels(list(reversed(fold_features)), fontsize=7)
+ax.set_xlabel("Mean IC within validation fold (amber diamond marks the pooled mean)")
+add_message_title(
+    ax,
+    "Every leading feature keeps its sign in both validation windows",
+    subtitle="Per-fold mean IC by feature, ordered by absolute pooled IC",
+)
+fig.tight_layout()
+plt.show()
 
 # %% [markdown]
 # ## 4. Multiple Testing
@@ -270,15 +382,27 @@ print(f"Significant features: naive={n_naive}, HAC={n_hac}, FDR={n_fdr}")
 # The ranked chart shows sign and magnitude; color distinguishes features that
 # survive FDR control without implying that non-significant conditioning features
 # should be discarded.
+#
+# Read the sign before the ranking. Every one of the twenty strongest features
+# carries a **negative** mean rank IC: high premium, high funding and high realized
+# volatility all precede *lower* forward returns over the next eight hours. That is
+# the direction the funding-arbitrage hypothesis predicts - a rich premium is paid
+# by longs and decays - so the sign is the result, not a defect, and a model built
+# on these features has to be allowed to trade them short. A feature ranked by
+# `|IC|` hides that, which is why it is stated here rather than left to the axis.
 
 # %%
 top_ic = eval_summary.head(20).sort("mean_ic")
 fig, ax = plt.subplots(figsize=(10, 7))
-bar_colors = [COLORS["blue"] if value else COLORS["neutral"] for value in top_ic["fdr_sig"]]
+# Blue against amber, the same pair the HAC scatter below uses for the same
+# distinction. COLORS["neutral"] (#334155) beside COLORS["blue"] (#0a1628) is two
+# near-black navies: at bar size the encoding is invisible and the reader is told
+# about a distinction the chart does not draw.
+bar_colors = [COLORS["blue"] if value else COLORS["amber"] for value in top_ic["fdr_sig"]]
 ax.barh(top_ic["feature"].to_list(), top_ic["mean_ic"].to_list(), color=bar_colors)
 ax.axvline(0, color=COLORS["neutral"], linewidth=0.8)
 ax.set(xlabel="Mean validation rank IC", ylabel="Feature")
-add_message_title(ax, "Validation IC is concentrated in volatility and premium features")
+add_message_title(ax, "Every one of the twenty strongest features predicts with a negative IC")
 fig.tight_layout()
 plt.show()
 
@@ -296,7 +420,7 @@ ax.set(
     xlabel="Naive t-statistic", ylabel="HAC t-statistic", xlim=(-limit, limit), ylim=(-limit, limit)
 )
 ax.set_aspect("equal", adjustable="box")
-add_message_title(ax, "HAC inference checks serial dependence in decision-time IC")
+add_message_title(ax, "HAC barely moves these t-statistics: the label does not overlap")
 fig.tight_layout()
 plt.show()
 
@@ -306,6 +430,15 @@ plt.show()
 # Quantiles are assigned separately at each timestamp before returns are averaged.
 # This preserves the cross-sectional meaning of IC and avoids letting market-wide
 # time trends manufacture a pooled quantile relationship.
+#
+# Two summaries of each bin are drawn. The mean is what a long-short book earns;
+# the median is where the typical symbol in that bin ends up. Eight-hourly crypto
+# returns have heavy tails, so the two can point in opposite directions: a handful
+# of very large moves shift a mean and cannot shift a median. Where they disagree,
+# the rank IC above sides with the median - not as a theorem, but because both are
+# insensitive to how far the extreme returns reach, and it is that tail the mean is
+# reading. `monotonicity` in the ledger is computed on the means, which is the
+# convention shared across the nine case studies.
 
 # %%
 shape_features = eval_summary.filter(pl.col("fdr_sig"))["feature"].to_list()[:6]
@@ -327,9 +460,16 @@ for feature in shape_features:
         .cast(pl.Int8)
         .alias("quantile")
     )
-    profile = ranked.group_by("quantile").agg(pl.col(mds.label_col).mean()).sort("quantile")
-    means = profile[mds.label_col].to_list()
-    quantile_profiles[feature] = means
+    profile = (
+        ranked.group_by("quantile")
+        .agg(
+            pl.col(mds.label_col).mean().alias("mean"),
+            pl.col(mds.label_col).median().alias("median"),
+        )
+        .sort("quantile")
+    )
+    means = profile["mean"].to_list()
+    quantile_profiles[feature] = {"mean": means, "median": profile["median"].to_list()}
     monotonicity[feature] = float(spearmanr(range(len(means)), means).statistic)
 
 print(
@@ -339,16 +479,21 @@ print(
 # %%
 fig, axes = plt.subplots(2, 3, figsize=(12, 7), sharex=True)
 for ax, feature in zip(axes.flat, shape_features, strict=False):
-    means = quantile_profiles[feature]
-    ax.bar(range(1, len(means) + 1), means, color=COLORS["blue"])
+    profile = quantile_profiles[feature]
+    bins = range(1, len(profile["mean"]) + 1)
+    ax.bar(bins, profile["mean"], color=COLORS["blue"], label="mean")
+    ax.plot(
+        bins, profile["median"], color=COLORS["amber"], marker="o", markersize=3, label="median"
+    )
     ax.axhline(0, color=COLORS["neutral"], linewidth=0.7)
     ax.set_title(feature)
     ax.set_xlabel("Within-time quintile")
-    ax.set_ylabel("Mean forward return (decimal)")
+    ax.set_ylabel("Forward return (decimal)")
+axes.flat[0].legend(frameon=False, fontsize=7)
 for ax in axes.flat[len(shape_features) :]:
     ax.set_visible(False)
 fig.suptitle(
-    "Top validation signals reveal their cross-sectional return shape",
+    "Where the mean and the median disagree, the rank IC follows the median",
     x=0.06,
     ha="left",
     color=COLORS["blue"],
@@ -450,7 +595,7 @@ ax.barh(
 )
 ax.axvline(0, color=COLORS["neutral"], linewidth=0.8)
 ax.set(xlabel="Spearman correlation", ylabel="Feature pair", xlim=(-1, 1))
-add_message_title(ax, "Redundancy is concentrated in a small set of feature pairs")
+add_message_title(ax, "The strongest pairs are near-duplicates, not merely related")
 fig.tight_layout()
 plt.show()
 

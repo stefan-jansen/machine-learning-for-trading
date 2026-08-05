@@ -194,12 +194,11 @@ print(f"{quoted.height:,} quoted bars over {quoted['session_date'].n_unique():,}
 
 # %% [markdown]
 # The horizon is declared in minutes and applied to a frame of bars, so the spacing of
-# those bars is what converts one into the other. Measuring it is the whole of the fix for
-# a defect this notebook used to carry: a 15-row shift is a 15-minute return only on a
-# one-minute grid, and nothing in the loader promises one. The spacing is measured, the
-# grid is required to be uniform inside a session, and every horizon is required to be a
-# whole number of bars - at least two of them, so that the entry bar and the exit bar are
-# different bars.
+# those bars is what converts one into the other. A 15-row shift is a 15-minute return only
+# on a one-minute grid, and the loader returns the raw partition without promising one. The
+# spacing is therefore measured, the grid is required to be uniform inside a session, and
+# every horizon is required to be a whole number of bars - at least two of them, so that the
+# entry bar and the exit bar are different bars.
 
 # %%
 _gap = pl.col("timestamp") - pl.col("timestamp").shift(1).over(GROUP_COLS)
@@ -342,8 +341,8 @@ print(f"{DIRECTION_LABEL}: null on all {_unlabelled.len():,} bars where {PRIMARY
 # fall to zero over exactly the last `horizon` positions and sit flat beyond them, and the
 # three curves have to step down at three different places. A scalar count of valid rows
 # shows neither failure this catches: a tail fabricated instead of nulled, and a short
-# label carried on a longer one's null set - which is what this notebook shipped until now,
-# and which would draw the 5-minute curve exactly on top of the 15-minute one.
+# label carried on a longer one's null set, which draws the 5-minute curve exactly on top
+# of the 15-minute one.
 
 # %%
 profile = (
@@ -728,10 +727,10 @@ for name in LABEL_NAMES:
 # **Known limitations.** The midprice is not a fill: a marketable order crosses the spread,
 # and the round trip charted in Section E is the quoted spread rather than a measured
 # execution cost - it carries no commission, no market impact and no queue position, so it
-# is a floor on what trading costs. It is also the spread quoted at the decision bar, doubled,
-# rather than the two spreads actually crossed at the entry and exit bars, so it prices the
-# round trip at the moment the decision is taken and not at the moments it is filled. The universe is the fixed NASDAQ-100 membership list
-# `setup.yaml` declares, not a
+# is a floor on what trading costs. It is also the spread quoted at the decision bar,
+# doubled, rather than the two spreads actually crossed at the entry and exit bars, so it
+# prices the round trip at the moment the decision is taken and not at the moments it is
+# filled. The universe is the fixed NASDAQ-100 membership list `setup.yaml` declares, not a
 # point-in-time index reconstruction, so a name that joined or left mid-sample is present
 # throughout. The flat band is a single constant across every symbol and every regime,
 # where the spread it stands for is neither. The baseline is one signal at one horizon.
