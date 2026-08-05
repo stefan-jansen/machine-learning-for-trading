@@ -653,24 +653,34 @@ print(stress_by_fold)
 # GJR recursion coefficient is dimensionless and an expected regime duration is
 # counted in 8-hour bars. Folds are ordered by validation date rather than by id.
 #
-# The left panel shows the **fitted** GJR coefficients, not the conditional
-# volatility they produce - that is a model output, and a series whose level moves
-# with the market says nothing about whether the estimator moved. GARCH is fitted
-# per symbol, so each coefficient is drawn as the cross-symbol median with the
-# interquartile range behind it: a median that holds while the band widens is a
-# fit that has become less uniform across the panel, which an average alone hides.
+# The left panel shows what the **fitted** GJR recursion does, not the conditional
+# volatility it produces - that is a model output, and a series whose level moves
+# with the market says nothing about whether the estimator moved.
+#
+# The quantity plotted is **persistence**, `alpha + beta + gamma / 2`, which is the
+# rate at which a variance shock decays and the one number that says whether the
+# recursion changed. The individual coefficients are printed beside it and they
+# are why persistence has to be read rather than they: they move in opposite
+# directions across these two folds, so each on its own understates the change and
+# a claim of stability read off any one of them would be wrong. GARCH is fitted per
+# symbol, so the median across symbols is drawn with the interquartile range behind
+# it.
 
 # %%
 FOLD_ORDER = [fold["fold"] for fold in sorted(active_folds, key=lambda item: item["test_start"])]
 GARCH_COEFFICIENTS = ["alpha", "gamma", "beta"]
 
-coefficient_frame = pl.DataFrame(garch_coefficients)
+# GJR-GARCH(1,1,1) with symmetric innovations: the leverage term is active half the
+# time, so it enters the decay rate at half weight.
+coefficient_frame = pl.DataFrame(garch_coefficients).with_columns(
+    (pl.col("alpha") + pl.col("beta") + pl.col("gamma") / 2).alias("persistence")
+)
 coefficient_stability = (
     coefficient_frame.group_by("fold")
     .agg(
         [
             expression
-            for name in GARCH_COEFFICIENTS
+            for name in [*GARCH_COEFFICIENTS, "persistence"]
             for expression in (
                 pl.col(name).median().alias(f"{name}_median"),
                 pl.col(name).quantile(0.25).alias(f"{name}_q25"),
@@ -683,30 +693,33 @@ coefficient_stability = (
 duration_stability = pl.DataFrame(hmm_diagnostics).sort(
     pl.col("fold").replace_strict(FOLD_ORDER, range(len(FOLD_ORDER)))
 )
-print(coefficient_stability.select("fold", *[f"{n}_median" for n in GARCH_COEFFICIENTS]))
+print(
+    coefficient_stability.select(
+        "fold", *[f"{n}_median" for n in [*GARCH_COEFFICIENTS, "persistence"]]
+    )
+)
 print(duration_stability.select("fold", "calm_duration_bars", "stress_duration_bars"))
 
 fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
 positions = list(range(len(FOLD_ORDER)))
 labels = [f"Fold {value}" for value in FOLD_ORDER]
-palette = [COLORS["blue"], COLORS["amber"], COLORS["copper"]]
-for name, color in zip(GARCH_COEFFICIENTS, palette, strict=True):
-    axes[0].fill_between(
-        positions,
-        coefficient_stability[f"{name}_q25"].to_list(),
-        coefficient_stability[f"{name}_q75"].to_list(),
-        color=color,
-        alpha=0.2,
-        linewidth=0,
-    )
-    axes[0].plot(
-        positions,
-        coefficient_stability[f"{name}_median"].to_list(),
-        marker="o",
-        color=color,
-        label=name,
-    )
-axes[0].set_ylabel("fitted GJR coefficient")
+axes[0].fill_between(
+    positions,
+    coefficient_stability["persistence_q25"].to_list(),
+    coefficient_stability["persistence_q75"].to_list(),
+    color=COLORS["blue"],
+    alpha=0.2,
+    linewidth=0,
+)
+axes[0].plot(
+    positions,
+    coefficient_stability["persistence_median"].to_list(),
+    marker="o",
+    color=COLORS["blue"],
+    label="alpha + beta + gamma / 2",
+)
+axes[0].axhline(1.0, color=COLORS["negative"], linewidth=0.8, linestyle="--")
+axes[0].set_ylabel("fitted GJR persistence")
 for column, color in zip(
     ["calm_duration_bars", "stress_duration_bars"], (COLORS["blue"], COLORS["amber"]), strict=True
 ):
@@ -717,30 +730,35 @@ axes[1].set_ylabel("expected duration (8h bars)")
 for ax in axes:
     ax.set_xticks(positions)
     ax.set_xticklabels(labels)
-    ax.set_ylim(bottom=0)
     ax.legend(frameon=False, fontsize=7)
+axes[1].set_ylim(bottom=0)
 add_message_title(
     axes[0],
-    "The regime durations move across folds; the GJR coefficients hold",
+    "Both fits move, and the later GJR sits on the integrated boundary",
     subtitle="Cross-symbol median and interquartile range per fold, by validation date",
 )
 fig.tight_layout()
 plt.show()
 
 # %% [markdown] tags=["results"]
-# **The two models disagree about how stable they are.** Across symbols, the
-# median GJR coefficients move from **0.093162** / **0.034552** / **0.862039**
-# (alpha / gamma / beta) in the earlier fold to **0.075402** / **0.034473** /
-# **0.903044** in the later one. The interquartile ranges overlap in all three,
-# so the recursion the reader is shown is the same recursion in both folds, and
-# `garch_cond_vol` means what it meant before. The HMM does not behave that way:
-# the expected calm duration goes from **13.035003** to **26.691917** bars and
-# stress from **10.232229** to **13.993085**. The calm regime the later fold
-# identifies persists about twice as long as the one the earlier fold gave that
-# name, so `hmm_regime_prob_stress` is not one variable measured twice, and a
-# model pooling both folds is pooling two quantities calibrated differently.
-# That is what a per-fold refit is for, and it is why the fold column travels
-# with the artifact into `load_modeling_dataset`.
+# **Both fits move as the window rolls, and one of them moves onto its own
+# constraint.** Median GJR persistence goes from **0.977387** in the earlier fold
+# to **1.0** in the later one, with the interquartile range collapsing onto that
+# value: for at least half the symbols the later fit is integrated, so a variance
+# shock never decays inside the fold. `arch` bounds persistence at one, so what is
+# reported there is censored at the boundary and this fit cannot distinguish "very
+# persistent" from "integrated" - which is the reason to read persistence rather
+# than any single coefficient. The coefficients move in opposite directions and
+# each understates the change on its own: alpha **0.093162** to **0.075402**, beta
+# **0.862039** to **0.903044**, gamma flat at **0.034552** and **0.034473**.
+#
+# The HMM moves too. Its expected calm duration goes from **13.035003** to
+# **26.691917** bars and stress from **10.232229** to **13.993085**, so the calm
+# regime the later fold identifies persists about twice as long as the one the
+# earlier fold gave that name. Neither `garch_cond_vol` nor `hmm_regime_prob_stress`
+# is one variable measured twice, and a model pooling both folds is pooling
+# quantities calibrated differently. That is what a per-fold refit is for, and it
+# is why the fold column travels with the artifact into `load_modeling_dataset`.
 
 # %% [markdown]
 # ## 6. Combine Temporal Features
