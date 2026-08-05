@@ -498,8 +498,10 @@ print(
 # of five or fewer hands it every perpetual on every settlement: the selection that the edge consists
 # of never happens, and the curve that comes back describes a different strategy. Its crossing is
 # then not a budget, and on the reduced surface used for execution tests it has none to report,
-# because the replayed Sharpe is already negative at zero cost. The frozen curve is read from the
-# registry rather than replayed, so it is unaffected and its crossing is still required.
+# because the replayed Sharpe is already negative at zero cost. An injected test grid can also stop
+# short of a crossing simply by being shorter than the registered one, so it is reported the same
+# way. The frozen curve is read from the registry rather than replayed, so neither reaches it and
+# its crossing is still required whenever the registered grid is the one in hand.
 
 
 # %%
@@ -530,11 +532,19 @@ elif stored_breakeven is None or not np.isfinite(stored_breakeven):
 else:
     print(f"Frozen registry breakeven: {stored_breakeven:.2f} bps")
 
-if selection_is_degenerate:
-    print(
-        f"Corrected breakevens: unavailable on a {replay_universe}-perpetual replay universe, "
-        f"which cannot express the carrier's top-{allocation['top_k']} selection"
+if using_fallback_grid or selection_is_degenerate:
+    reason = (
+        f"a {replay_universe}-perpetual replay universe, which cannot express the carrier's "
+        f"top-{allocation['top_k']} selection"
+        if selection_is_degenerate
+        else "an unregistered test grid, which may end before a crossing"
     )
+    for label, value in (
+        ("Corrected price-only", price_breakeven),
+        ("Corrected funding-inclusive", funding_breakeven),
+    ):
+        rendered = f"{value:.2f} bps" if value is not None and np.isfinite(value) else "unavailable"
+        print(f"{label} breakeven: {rendered} ({reason})")
 elif any(value is None or not np.isfinite(value) for value in (price_breakeven, funding_breakeven)):
     raise RuntimeError("A replayed cost curve has no finite zero crossing")
 else:

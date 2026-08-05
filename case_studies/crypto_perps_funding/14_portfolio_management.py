@@ -100,7 +100,7 @@ def _allocation_leaders(registry_path) -> pl.DataFrame:
     query = """
         SELECT c.label, t.family, t.config_name, p.checkpoint_value,
                b.prediction_hash, b.backtest_hash, b.spec_json,
-               c.k_variants, c.dsr_er_pvalue,
+               c.k_variants, c.dsr_er_pvalue, c.computed_at,
                m.sharpe, m.sharpe_ci95_lo, m.sharpe_ci95_hi,
                m.cagr, m.max_drawdown
         FROM cohort_metrics c
@@ -194,11 +194,17 @@ fig.show()
 # reads the best stored Sharpe in it. No result is ranked on the holdout.
 #
 # How many physical rows that is, is not a property of the design: a rerun adds one without changing
-# the grid, and rows have been written against this carrier after the v3.0 cohort metrics were
-# computed, so they are not among the `k_variants` trials the DSR below corrects for
-# ([#63](https://github.com/ml4t/agent-workspace/issues/63)). What the design does fix is the set of
-# semantic cells, and the assertion two cells down requires exactly that set, so a stray allocator or
-# concentration still fails closed while a rerun does not.
+# the grid, and this carrier has two rows for most of its cells for exactly that reason. What the
+# design fixes is the set of semantic cells, and the assertion two cells down requires exactly that
+# set in both directions, so a stray allocator or concentration fails closed while a rerun does not.
+#
+# The collapse reads the best stored Sharpe in a cell, which is safe for a rerun of one specification
+# and not safe for a different one. Rows have been written against this carrier after the cohort
+# metrics below were computed, and they are not among the `k_variants` trials those metrics correct
+# for ([#63](https://github.com/ml4t/agent-workspace/issues/63)), so a later reparameterization that
+# happened to score well could take a cell away from the specification that was actually trialled.
+# A row registered after the cohort is therefore admitted only when the cohort already trialled its
+# exact strategy specification - which is what a rerun is, and what a reparameterization is not.
 
 
 # %%
@@ -225,17 +231,33 @@ print(f"Validation window: {validation_start} through {validation_end}")
 
 
 # %%
-def _allocation_cells(registry_path, prediction_hash: str) -> list[dict]:
-    """Return one stored specification per semantic allocation cell."""
+def _allocation_cells(registry_path, prediction_hash: str, frozen_as_of: str) -> list[dict]:
+    """Return one stored specification per semantic allocation cell of the frozen trial set."""
     query = """
-        SELECT b.backtest_hash, b.spec_json, m.sharpe
+        SELECT b.backtest_hash, b.created_at, b.spec_json, m.sharpe
         FROM backtest_runs b JOIN backtest_metrics m USING (backtest_hash)
         WHERE b.stage = 'allocation' AND b.prediction_hash = ?
     """
     with sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True) as connection:
         rows = connection.execute(query, (prediction_hash,)).fetchall()
+    frozen_specs = {
+        json.dumps(json.loads(spec_json)["strategy"], sort_keys=True)
+        for _, created_at, spec_json, _ in rows
+        if created_at <= frozen_as_of
+    }
+    admitted = [
+        row
+        for row in rows
+        if row[1] <= frozen_as_of
+        or json.dumps(json.loads(row[2])["strategy"], sort_keys=True) in frozen_specs
+    ]
+    if len(admitted) < len(rows):
+        print(
+            f"Excluded {len(rows) - len(admitted)} allocation row(s) registered after the frozen "
+            f"cohort under a specification it never trialled"
+        )
     cells = {}
-    for backtest_hash, spec_json, stored_sharpe in rows:
+    for backtest_hash, _, spec_json, stored_sharpe in admitted:
         strategy = json.loads(spec_json)["strategy"]
         signal = strategy["signal"]
         allocation = strategy["allocation"]
@@ -258,7 +280,7 @@ def _allocation_cells(registry_path, prediction_hash: str) -> list[dict]:
 
 
 # %%
-cells = _allocation_cells(REGISTRY_PATH, CARRIER_PREDICTION)
+cells = _allocation_cells(REGISTRY_PATH, CARRIER_PREDICTION, carrier["computed_at"])
 allocator_names = sorted({cell["allocation"]["method"] for cell in cells})
 top_k_values = sorted({cell["allocation"].get("top_k") for cell in cells})
 observed_grid = {(cell["allocation"]["method"], cell["allocation"].get("top_k")) for cell in cells}
