@@ -210,6 +210,9 @@ for split in splits:
 # validation window of the fold that produced it — the rows where it is genuinely
 # out of sample.
 FITTED_PREFIXES = ("arima_", "hmm_")
+# The artifact as written, one row per (key, fold), kept for the quality gate: the
+# rows this notebook does not screen are still rows Ch11 trains on.
+temporal_artifact = temporal
 temporal_feature_cols = [c for c in temporal.columns if c not in (*JOIN_COLS, "fold")]
 invariant_cols = [c for c in temporal_feature_cols if not c.startswith(FITTED_PREFIXES)]
 fitted_cols = [c for c in temporal_feature_cols if c.startswith(FITTED_PREFIXES)]
@@ -306,12 +309,24 @@ print(f"Label: {label_col}")
 # counts are printed, so reading holdout rows would put a description of the sealed
 # window into this notebook's output, and its `fail_on_critical` makes whether this
 # notebook runs at all depend on what it reads.
+#
+# **One warning it prints is a false positive, and it is not this notebook's to
+# fix.** `validate_features` compares against `max_abs_feature` with a plain Polars
+# comparison, and Polars evaluates `NaN > x` as true, so the warm-up head of the FFT
+# columns is counted as an extreme value. One of the columns it names is a Shannon
+# entropy over a fixed-length spectrum and is bounded well below ten. Filed as
+# `ml4t/agent-workspace#271`; read the extreme-value line as a null count until it
+# lands.
 
 # %%
 from utils.data_quality import validate_modeling_inputs
 
 sealed_features = features.filter(pl.col(DATE_COL) < HOLDOUT_START)
-sealed_temporal = temporal.filter(pl.col(DATE_COL) < HOLDOUT_START)
+# The fold-bearing artifact, not the resolved frame: every fold's value is a value
+# Ch11 can read, and the resolved frame has dropped most of them. The FFT columns
+# are identical across folds, so their counts below are one fold's count times the
+# fold count; the ARIMA and HMM columns are what this pass is here to reach.
+sealed_temporal = temporal_artifact.filter(pl.col(DATE_COL) < HOLDOUT_START)
 sealed_labels = label_df.filter(pl.col(DATE_COL) < HOLDOUT_START)
 
 quality_result = validate_modeling_inputs(
