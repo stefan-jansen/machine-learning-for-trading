@@ -74,7 +74,8 @@ COST_BPS = SETUP["costs"]["round_trip_cost_bps"]
 PER_SHARE = SETUP["costs"]["per_share"]
 HALF_SPREADS = SETUP["backtest"]["sweep"]["cost_grid_half_spread_usd"]
 CARRIER = "iv_30_atm"
-IV_LAG, IV_STALE = 1, 5  # declared feature lag; sessions 03_financial_features forward-fills
+IV_LAG = int(SETUP["decision"]["iv_feature_lag"].split("_")[0])
+IV_STALE = SETUP["features"]["windows"]["iv_forward_fill"]
 
 print(f"Development {START_DATE} to {HOLDOUT_START} | sealed holdout to {HOLDOUT_END}")
 print(f"Universe {SETUP['universe']['n_assets']} names, floor {BREADTH_FLOOR}, horizons {HORIZONS}")
@@ -270,9 +271,10 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# ### B.5 Move scale against cost. The ratio divides the median absolute move at the primary
-# horizon by the declared round trip and the clearance share counts moves above it. Neither says
-# total cost clears.
+# ### B.5 Move scale against cost
+#
+# The ratio divides the median absolute move at the primary horizon by the declared round trip
+# and the clearance share counts moves above it. Neither says total cost clears.
 
 # %%
 primary = f"h{HORIZONS[0]}"
@@ -318,8 +320,10 @@ print(
 # %% [markdown]
 # ## D. Walk-forward structure
 #
-# ### D.1 Effective sample size. What evaluation spends is decision dates, not rows, and B.4 is
-# why this sample is tighter than the count suggests: adjacent weeks are not independent.
+# ### D.1 Effective sample size
+#
+# What evaluation spends is decision dates, not rows, and B.4 is why this sample is tighter than
+# the count suggests: adjacent weeks are not independent.
 
 # %%
 print(
@@ -357,10 +361,14 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# ## E. Derived artifacts. None: `03_financial_features` derives the same universe from the same
-# loader.
+# ## E. Derived artifacts
+#
+# Nothing is written here: `03_financial_features` derives the same universe from the same loader.
 #
 # ## F. Findings vs `setup.yaml`
+#
+# One row per knob: the evidence that motivates it, and what would change it.
+#
 # | Knob | Evidence | Revise it when |
 # |---|---|---|
 # | `universe.n_assets` | B.2 breadth at each decision date | names available on a decision date fall towards the largest position count the sweep asks for |
