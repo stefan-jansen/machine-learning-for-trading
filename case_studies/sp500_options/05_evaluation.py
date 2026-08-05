@@ -1335,7 +1335,7 @@ if dh_rows:
 #
 # | Decision | Criteria |
 # |----------|----------|
-# | **PROCEED** | BH-FDR significant at `FDR_ALPHA`, OR sign consistency at least `SIGN_CONSISTENCY_MIN` AND abs(IC) at least `IC_THRESHOLD` |
+# | **PROCEED** | BH-FDR significant at `FDR_ALPHA`, OR a **positive**-IC fold share of at least `SIGN_CONSISTENCY_MIN` AND abs(IC) at least `IC_THRESHOLD` |
 # | **STOP** | Correctness FAIL (coverage below `COVERAGE_MIN` OR staleness above `STALENESS_MAX`) |
 # | **REVISE** | Everything else (evaluate in multivariate context in Ch11) |
 #
@@ -1344,6 +1344,13 @@ if dh_rows:
 # family-wide correction does not empty the menu on a two-fold screen, and a feature
 # promoted through it has not been confirmed. The ledger's `note` column records which
 # arm fired for each feature.
+#
+# The word `positive` in the first row is the rule as written, not as one might wish it
+# were: the exploration arm asks for folds that agree with each other **and** point up.
+# `instr_delta` carries the fourth-largest absolute IC in this screen, is individually
+# significant under HAC, and is negative in both folds - a stable inverse predictor,
+# which the arm cannot promote at any level of stability. It reaches Ch11 as REVISE
+# rather than as PROCEED, and the fold figure above is where a reader sees why.
 
 # %%
 triage = {}
@@ -1456,8 +1463,9 @@ if stop_features:
 
 # %% [markdown] tags=["results"]
 # **Triage.** Of the 51 candidates the ledger records 7 PROCEED, 42 REVISE and 2 STOP.
-# Both STOP decisions are correctness failures - the two quality flags hold one value on
-# every panel row, so they have neither coverage headroom nor cross-sectional variation.
+# Both STOP decisions are correctness failures on staleness, not on coverage: the two
+# quality flags are present on every panel row and hold the same value on every one of
+# them, so they carry no information to screen.
 # Every one of the 7 promotions came through the exploration arm, because no feature
 # cleared BH-FDR: three underlying-momentum horizons, the 5-day straddle return and
 # three variance-premium features each held their IC sign in both validation folds while
