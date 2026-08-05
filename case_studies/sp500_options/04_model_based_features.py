@@ -1623,8 +1623,18 @@ fig.show()
 # IC is not the same as establishing one, and a feature that is useless alone can still matter
 # inside a model that has the others. And it is not an *incremental* result: nothing above computes
 # a stage-03 baseline, so "adds nothing over stage 03" is a claim this notebook has not tested and
-# does not make. Stage 05 runs that comparison on the same validation rows. This stage's job was to
-# produce the columns under a fold contract and report what a single-feature screen can see.
+# does not make.
+#
+# Nor does the next one. [`05_evaluation`](05_evaluation.ipynb) reads `financial.parquet` and
+# `model_based.parquet` together and screens both on the same validation rows - univariate IC with
+# HAC errors, BH-FDR across the combined family, and a cross-family correlation pass that asks
+# whether these four columns are redundant with the stage-03 ones. That is a redundancy question,
+# not an incremental one. **What would settle incremental value is a baseline model scored against
+# the same model with these columns added**, and that ablation is not what stage 05 runs. Saying so
+# is better than deferring the question to a stage that does not answer it.
+#
+# This stage's job was to produce the columns under a fold contract and report what a single-feature
+# screen can see in them.
 
 # %% [markdown]
 # ## Key Takeaways
