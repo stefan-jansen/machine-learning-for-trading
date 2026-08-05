@@ -24,7 +24,9 @@ Usage::
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
+import math
 import sqlite3
 from collections.abc import Callable, Iterable
 
@@ -42,6 +44,11 @@ from case_studies.utils.model_analysis import (
 from utils.paths import get_case_study_dir
 
 LabelResolver = Callable[[str], str | None]
+
+
+class RegistrySelectionError(ValueError):
+    """Raised when registry candidates cannot support a comparable rank-one selection."""
+
 
 # Canonical schema for collect_rank1_per_cs() — returned as an empty
 # DataFrame when no CS has populated registry rows. Lets downstream
@@ -75,6 +82,606 @@ def _resolve_label(case_study: str, label_resolver: LabelResolver | None) -> str
         return PRIMARY_LABELS[case_study]
     out = label_resolver(case_study)
     return out if out is not None else PRIMARY_LABELS[case_study]
+
+
+def registry_sha256(case_study: str) -> str:
+    """Return the SHA-256 identity of one case-study registry."""
+    path = get_case_study_dir(case_study) / "run_log" / "registry.db"
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def require_registry_sha256(case_study: str, approved_sha256: str | None) -> str:
+    """Require one exact approved registry object before selecting any row."""
+    if not approved_sha256:
+        raise RegistrySelectionError(f"{case_study}: no approved registry SHA-256")
+    observed = registry_sha256(case_study)
+    if observed != approved_sha256:
+        raise RegistrySelectionError(
+            f"{case_study}: registry SHA-256 mismatch; "
+            f"approved={approved_sha256}, observed={observed}"
+        )
+    return observed
+
+
+def select_complete_rank1(
+    metrics: pl.DataFrame,
+    folds: pl.DataFrame,
+    *,
+    expected_fold_ids: Iterable[int],
+    expected_n_days: int | None = None,
+    approved_prediction_hashes: Iterable[str] | None = None,
+) -> dict:
+    """Select rank one only among finite, full-day, exact-fold candidates.
+
+    Raw prediction hashes remain distinct. Duplicate metric rows, incomplete or
+    duplicate fold panels, zero-day rows, non-finite inference fields, and rows
+    outside an optional approved-hash set are ineligible.
+    """
+    metric_columns = {
+        "prediction_hash",
+        "training_hash",
+        "config_name",
+        "ic_mean_daily",
+        "ic_n_days",
+        "ic_se_hac",
+        "ic_ci_lo",
+        "ic_ci_hi",
+        "ic_t_hac",
+        "ic_p_hac",
+        "ic_hac_lag",
+    }
+    fold_columns = {"prediction_hash", "fold_id", "ic"}
+    missing_metrics = metric_columns - set(metrics.columns)
+    missing_folds = fold_columns - set(folds.columns)
+    if missing_metrics or missing_folds:
+        raise RegistrySelectionError(
+            f"missing selection columns: metrics={sorted(missing_metrics)}, "
+            f"folds={sorted(missing_folds)}"
+        )
+    if metrics.is_empty():
+        raise RegistrySelectionError("no registry candidates")
+
+    expected = set(expected_fold_ids)
+    if not expected:
+        raise RegistrySelectionError("expected fold set is empty")
+    approved = set(approved_prediction_hashes) if approved_prediction_hashes is not None else None
+    duplicate_hashes = set(
+        metrics.group_by("prediction_hash")
+        .len()
+        .filter(pl.col("len") != 1)["prediction_hash"]
+        .to_list()
+    )
+
+    eligible: list[dict] = []
+    finite_columns = [
+        "ic_mean_daily",
+        "ic_n_days",
+        "ic_se_hac",
+        "ic_ci_lo",
+        "ic_ci_hi",
+        "ic_t_hac",
+        "ic_p_hac",
+        "ic_hac_lag",
+    ]
+    for row in metrics.iter_rows(named=True):
+        prediction_hash = row["prediction_hash"]
+        if prediction_hash in duplicate_hashes:
+            continue
+        if approved is not None and prediction_hash not in approved:
+            continue
+        if any(
+            row[column] is None or not math.isfinite(float(row[column]))
+            for column in finite_columns
+        ):
+            continue
+        if float(row["ic_n_days"]) <= 0:
+            continue
+
+        candidate_folds = folds.filter(pl.col("prediction_hash") == prediction_hash)
+        fold_ids = candidate_folds["fold_id"].to_list()
+        if len(fold_ids) != len(set(fold_ids)) or set(fold_ids) != expected:
+            continue
+        if any(value is None or not math.isfinite(float(value)) for value in candidate_folds["ic"]):
+            continue
+        eligible.append(row)
+
+    if not eligible:
+        raise RegistrySelectionError("no finite candidate has exact fold coverage")
+    full_days = (
+        float(expected_n_days)
+        if expected_n_days is not None
+        else max(float(row["ic_n_days"]) for row in eligible)
+    )
+    if full_days <= 0 or not math.isfinite(full_days):
+        raise RegistrySelectionError("expected day coverage must be finite and positive")
+    comparable = [row for row in eligible if float(row["ic_n_days"]) == full_days]
+    if not comparable:
+        raise RegistrySelectionError("no candidate has full day coverage")
+    best_ic = max(float(row["ic_mean_daily"]) for row in comparable)
+    winners = [row for row in comparable if float(row["ic_mean_daily"]) == best_ic]
+    if len(winners) != 1:
+        hashes = sorted(str(row["prediction_hash"]) for row in winners)
+        raise RegistrySelectionError(f"ambiguous rank-one candidates: {hashes}")
+    return winners[0]
+
+
+def _raw_primary_candidates(
+    case_study: str, family: str, label: str
+) -> tuple[pl.DataFrame, pl.DataFrame, int]:
+    db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"
+    if not db_path.exists():
+        return pl.DataFrame(), pl.DataFrame(), 0
+    uri = f"file:{db_path}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as db:
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """
+            SELECT p.prediction_hash, t.training_hash, t.family, t.config_name, t.label,
+                   p.checkpoint_value, p.checkpoint_kind, t.git_commit, t.spec_json,
+                   t.created_at AS training_created_at, pm.computed_at,
+                   pm.ic_mean, pm.ic_std, pm.ic_mean_daily, pm.ic_n_days,
+                   pm.ic_se_hac, pm.ic_ci_lo, pm.ic_ci_hi, pm.ic_t_hac,
+                   pm.ic_p_hac, pm.ic_hac_lag
+            FROM training_runs t
+            JOIN prediction_sets p ON p.training_hash = t.training_hash
+            JOIN prediction_metrics pm ON pm.prediction_hash = p.prediction_hash
+            WHERE t.family = ? AND t.label = ? AND p.split = 'validation'
+            """,
+            (family, label),
+        ).fetchall()
+        fold_rows = db.execute(
+            """
+            SELECT p.prediction_hash, fm.fold_id, fm.ic
+            FROM training_runs t
+            JOIN prediction_sets p ON p.training_hash = t.training_hash
+            JOIN fold_metrics fm ON fm.prediction_hash = p.prediction_hash
+            WHERE t.family = ? AND t.label = ? AND p.split = 'validation'
+            """,
+            (family, label),
+        ).fetchall()
+    if not rows:
+        return pl.DataFrame(), pl.DataFrame(), 0
+    metrics = pl.DataFrame([dict(row) for row in rows], infer_schema_length=None)
+    fold_metrics = pl.DataFrame([dict(row) for row in fold_rows], infer_schema_length=None)
+    declared_folds = []
+    for spec_json in metrics["spec_json"].drop_nulls().to_list():
+        with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError):
+            value = int(json.loads(spec_json).get("n_folds", 0))
+            if value > 0:
+                declared_folds.append(value)
+    return metrics, fold_metrics, max(declared_folds, default=0)
+
+
+def collect_complete_rank1_per_cs(
+    case_studies: Iterable[str],
+    family: str,
+    label_resolver: LabelResolver | None = None,
+    *,
+    approved_registry_sha256: dict[str, str] | None = None,
+    approved_prediction_hashes: dict[str, set[str]] | None = None,
+    expected_n_days: dict[str, int] | None = None,
+    allow_missing: bool = False,
+) -> pl.DataFrame:
+    """Collect provenance-bearing rank-one rows after fail-closed coverage checks."""
+    rows = []
+    for case_study in case_studies:
+        if approved_registry_sha256 is not None:
+            require_registry_sha256(case_study, approved_registry_sha256.get(case_study))
+        label = _resolve_label(case_study, label_resolver)
+        metrics, folds, n_folds = _raw_primary_candidates(case_study, family, label)
+        if metrics.is_empty():
+            if allow_missing:
+                continue
+            raise RegistrySelectionError(f"{case_study}/{family}/{label}: no candidates")
+        if n_folds <= 0:
+            raise RegistrySelectionError(f"{case_study}/{family}/{label}: n_folds is not declared")
+        try:
+            row = select_complete_rank1(
+                metrics,
+                folds,
+                expected_fold_ids=range(n_folds),
+                expected_n_days=(
+                    expected_n_days.get(case_study) if expected_n_days is not None else None
+                ),
+                approved_prediction_hashes=(
+                    approved_prediction_hashes.get(case_study, set())
+                    if approved_prediction_hashes is not None
+                    else None
+                ),
+            )
+        except RegistrySelectionError as exc:
+            raise RegistrySelectionError(f"{case_study}/{family}/{label}: {exc}") from exc
+        row.update(
+            case_study=case_study,
+            short_name=SHORT_NAMES.get(case_study, case_study),
+            registry_sha256=registry_sha256(case_study),
+        )
+        rows.append(row)
+    return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
+
+
+def collect_complete_fold_ic_per_cs(rank1: pl.DataFrame) -> pl.DataFrame:
+    """Load exact fold rows for provenance-bearing output from the complete selector."""
+    rows = []
+    for selected in rank1.iter_rows(named=True):
+        db_path = get_case_study_dir(selected["case_study"]) / "run_log" / "registry.db"
+        uri = f"file:{db_path}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as db:
+            db.row_factory = sqlite3.Row
+            fold_rows = db.execute(
+                """
+                SELECT fold_id, ic, ic_std, n_entities, rmse, mae
+                FROM fold_metrics WHERE prediction_hash = ? ORDER BY fold_id
+                """,
+                (selected["prediction_hash"],),
+            ).fetchall()
+        for fold in fold_rows:
+            rows.append(
+                {
+                    "case_study": selected["case_study"],
+                    "short_name": selected["short_name"],
+                    "family": selected["family"],
+                    "config_name": selected["config_name"],
+                    "label": selected["label"],
+                    "prediction_hash": selected["prediction_hash"],
+                    **dict(fold),
+                }
+            )
+    return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
+
+
+def collect_complete_checkpoint_fold_trajectories(rank1: pl.DataFrame) -> pl.DataFrame:
+    """Load all exact-fold checkpoints from each selected training identity."""
+    rows = []
+    for selected in rank1.iter_rows(named=True):
+        spec = json.loads(selected["spec_json"])
+        n_folds = int(spec.get("n_folds", 0))
+        if n_folds <= 0:
+            raise RegistrySelectionError(
+                f"{selected['case_study']}/{selected['training_hash']}: n_folds is not declared"
+            )
+        db_path = get_case_study_dir(selected["case_study"]) / "run_log" / "registry.db"
+        uri = f"file:{db_path}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as db:
+            db.row_factory = sqlite3.Row
+            checkpoint_rows = db.execute(
+                """
+                SELECT p.prediction_hash, p.checkpoint_value, fm.fold_id, fm.ic
+                FROM prediction_sets p
+                JOIN fold_metrics fm ON fm.prediction_hash = p.prediction_hash
+                WHERE p.training_hash = ? AND p.split = 'validation'
+                ORDER BY p.checkpoint_value, fm.fold_id
+                """,
+                (selected["training_hash"],),
+            ).fetchall()
+        checkpoints = pl.DataFrame([dict(row) for row in checkpoint_rows], infer_schema_length=None)
+        if checkpoints.is_empty():
+            raise RegistrySelectionError(
+                f"{selected['case_study']}/{selected['training_hash']}: no checkpoint folds"
+            )
+        expected_folds = set(range(n_folds))
+        for checkpoint in checkpoints["checkpoint_value"].unique().sort().to_list():
+            current = checkpoints.filter(pl.col("checkpoint_value") == checkpoint)
+            fold_ids = current["fold_id"].to_list()
+            if len(fold_ids) != len(set(fold_ids)) or set(fold_ids) != expected_folds:
+                raise RegistrySelectionError(
+                    f"{selected['case_study']}/{selected['training_hash']}/{checkpoint}: "
+                    "checkpoint fold coverage is incomplete or duplicate"
+                )
+            if any(value is None or not math.isfinite(float(value)) for value in current["ic"]):
+                raise RegistrySelectionError(
+                    f"{selected['case_study']}/{selected['training_hash']}/{checkpoint}: "
+                    "checkpoint IC is non-finite"
+                )
+            for row in current.iter_rows(named=True):
+                rows.append(
+                    {
+                        "case_study": selected["case_study"],
+                        "short_name": selected["short_name"],
+                        "config_name": selected["config_name"],
+                        "training_hash": selected["training_hash"],
+                        **row,
+                    }
+                )
+    return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
+
+
+def conformal_coverage_for_selected_prediction(
+    selected: dict,
+    *,
+    levels: tuple[float, ...] = (0.80, 0.90, 0.95),
+) -> pl.DataFrame:
+    """Measure split-conformal coverage for one exact selected prediction artifact."""
+    import numpy as np
+
+    required = {
+        "case_study",
+        "family",
+        "config_name",
+        "prediction_hash",
+        "spec_json",
+    }
+    missing = required - set(selected)
+    if missing:
+        raise RegistrySelectionError(f"selected row missing conformal fields: {sorted(missing)}")
+
+    spec = json.loads(selected["spec_json"])
+    n_folds = int(spec.get("n_folds", 0))
+    if n_folds < 2:
+        raise RegistrySelectionError(
+            f"{selected['case_study']}/{selected['prediction_hash']}: "
+            "conformal coverage requires at least two declared folds"
+        )
+
+    prediction_path = (
+        get_case_study_dir(selected["case_study"])
+        / "run_log"
+        / "predictions"
+        / selected["prediction_hash"]
+        / "predictions.parquet"
+    )
+    if not prediction_path.exists():
+        raise RegistrySelectionError(f"missing prediction artifact: {prediction_path}")
+    predictions = pl.read_parquet(prediction_path)
+    renames = {}
+    if "actual" in predictions.columns and "y_true" not in predictions.columns:
+        renames["actual"] = "y_true"
+    if "prediction" in predictions.columns and "y_score" not in predictions.columns:
+        renames["prediction"] = "y_score"
+    if "fold" in predictions.columns and "fold_id" not in predictions.columns:
+        renames["fold"] = "fold_id"
+    if renames:
+        predictions = predictions.rename(renames)
+
+    required_columns = {"y_true", "y_score", "fold_id"}
+    missing_columns = required_columns - set(predictions.columns)
+    if missing_columns:
+        raise RegistrySelectionError(
+            f"{selected['case_study']}/{selected['prediction_hash']}: "
+            f"prediction artifact missing {sorted(missing_columns)}"
+        )
+    predictions = predictions.drop_nulls(required_columns).with_columns(
+        (pl.col("y_true") - pl.col("y_score")).abs().alias("abs_resid")
+    )
+    if predictions.is_empty():
+        raise RegistrySelectionError(
+            f"{selected['case_study']}/{selected['prediction_hash']}: no finite predictions"
+        )
+    for column in ("y_true", "y_score", "abs_resid"):
+        if not np.isfinite(predictions[column].to_numpy()).all():
+            raise RegistrySelectionError(
+                f"{selected['case_study']}/{selected['prediction_hash']}: "
+                f"non-finite {column} values"
+            )
+
+    fold_ids = sorted(predictions["fold_id"].unique().to_list())
+    if fold_ids != list(range(n_folds)):
+        raise RegistrySelectionError(
+            f"{selected['case_study']}/{selected['prediction_hash']}: "
+            f"expected fold IDs {list(range(n_folds))}, observed {fold_ids}"
+        )
+    calibration = predictions.filter(pl.col("fold_id") == 0)
+    test = predictions.filter(pl.col("fold_id") != 0)
+    if calibration.height < 30 or test.height < 30:
+        raise RegistrySelectionError(
+            f"{selected['case_study']}/{selected['prediction_hash']}: "
+            "conformal calibration or test panel has fewer than 30 rows"
+        )
+
+    scale = float(predictions["y_true"].std() or 0.0)
+    if not math.isfinite(scale) or scale <= 0:
+        raise RegistrySelectionError(
+            f"{selected['case_study']}/{selected['prediction_hash']}: invalid target scale"
+        )
+    calibration_residuals = calibration["abs_resid"].to_numpy()
+    test_residuals = test["abs_resid"].to_numpy()
+    n_calibration = len(calibration_residuals)
+    rows = []
+    for level in levels:
+        if not 0 < level < 1:
+            raise RegistrySelectionError(f"invalid conformal level: {level}")
+        quantile_level = min(math.ceil((n_calibration + 1) * level) / n_calibration, 1.0)
+        quantile = float(np.quantile(calibration_residuals, quantile_level))
+        rows.append(
+            {
+                "case_study": selected["case_study"],
+                "family": selected["family"],
+                "config_name": selected["config_name"],
+                "prediction_hash": selected["prediction_hash"],
+                "nominal_level": float(level),
+                "empirical_coverage": float((test_residuals <= quantile).mean()),
+                "mean_interval_width_frac_std": float((2.0 * quantile) / scale),
+                "n_test": int(len(test_residuals)),
+            }
+        )
+    return pl.DataFrame(rows)
+
+
+def collect_complete_grid_per_cs(
+    case_studies: Iterable[str],
+    family: str,
+    label_resolver: LabelResolver | None = None,
+    config_parser: Callable[[str], dict] | None = None,
+    *,
+    approved_registry_sha256: dict[str, str] | None = None,
+    approved_prediction_hashes: dict[str, set[str]] | None = None,
+    expected_n_days: dict[str, int] | None = None,
+    allow_missing: bool = False,
+) -> pl.DataFrame:
+    """Collect one full-coverage checkpoint per configuration and case study."""
+    rows = []
+    for case_study in case_studies:
+        if approved_registry_sha256 is not None:
+            require_registry_sha256(case_study, approved_registry_sha256.get(case_study))
+        label = _resolve_label(case_study, label_resolver)
+        metrics, folds, n_folds = _raw_primary_candidates(case_study, family, label)
+        if metrics.is_empty() and allow_missing:
+            continue
+        if metrics.is_empty() or n_folds <= 0:
+            raise RegistrySelectionError(f"{case_study}/{family}/{label}: incomplete grid source")
+        selected = []
+        for config_name in metrics["config_name"].unique().to_list():
+            config_metrics = metrics.filter(pl.col("config_name") == config_name)
+            try:
+                selected.append(
+                    select_complete_rank1(
+                        config_metrics,
+                        folds,
+                        expected_fold_ids=range(n_folds),
+                        expected_n_days=(
+                            expected_n_days.get(case_study) if expected_n_days is not None else None
+                        ),
+                        approved_prediction_hashes=(
+                            approved_prediction_hashes.get(case_study, set())
+                            if approved_prediction_hashes is not None
+                            else None
+                        ),
+                    )
+                )
+            except RegistrySelectionError:
+                continue
+        if not selected:
+            raise RegistrySelectionError(f"{case_study}/{family}/{label}: no complete grid row")
+        full_days = max(float(row["ic_n_days"]) for row in selected)
+        for selected_row in selected:
+            if float(selected_row["ic_n_days"]) != full_days:
+                continue
+            row = {
+                **selected_row,
+                "case_study": case_study,
+                "short_name": SHORT_NAMES.get(case_study, case_study),
+                "registry_sha256": registry_sha256(case_study),
+            }
+            if config_parser is not None:
+                row.update(config_parser(row["config_name"]))
+            rows.append(row)
+    return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
+
+
+def collect_complete_multi_label_per_cs(
+    case_studies: Iterable[str],
+    family: str,
+    labels: list[str] | Callable[[str], list[str]],
+    *,
+    approved_registry_sha256: dict[str, str] | None = None,
+) -> pl.DataFrame:
+    """Collect full-coverage rank-one rows per case study and label."""
+    rows = []
+    for case_study in case_studies:
+        if approved_registry_sha256 is not None:
+            require_registry_sha256(case_study, approved_registry_sha256.get(case_study))
+        case_labels = labels(case_study) if callable(labels) else labels
+        for label in case_labels:
+            metrics, folds, n_folds = _raw_primary_candidates(case_study, family, label)
+            if metrics.is_empty():
+                continue
+            if n_folds <= 0:
+                raise RegistrySelectionError(
+                    f"{case_study}/{family}/{label}: n_folds is not declared"
+                )
+            try:
+                selected = select_complete_rank1(
+                    metrics,
+                    folds,
+                    expected_fold_ids=range(n_folds),
+                )
+            except RegistrySelectionError as exc:
+                raise RegistrySelectionError(f"{case_study}/{family}/{label}: {exc}") from exc
+            selected.update(
+                case_study=case_study,
+                short_name=SHORT_NAMES.get(case_study, case_study),
+                registry_sha256=registry_sha256(case_study),
+            )
+            rows.append(selected)
+    return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
+
+
+def collect_complete_gbm_checkpoint_trajectories(rank1: pl.DataFrame) -> pl.DataFrame:
+    """Load learning curves for exact coverage-aware GBM training hashes."""
+    from case_studies.utils.registry import get_training_dir
+
+    frames = []
+    for row in rank1.iter_rows(named=True):
+        spec = json.loads(row["spec_json"])
+        path = get_training_dir(row["case_study"], spec) / "learning_curves.parquet"
+        if not path.exists():
+            raise RegistrySelectionError(f"missing learning curve for {row['training_hash']}")
+        curve = pl.read_parquet(path).filter(pl.col("config") == row["config_name"])
+        if curve.is_empty() or "iteration" not in curve.columns:
+            raise RegistrySelectionError(f"incomplete learning curve for {row['training_hash']}")
+        trajectory = (
+            curve.group_by("iteration")
+            .agg(
+                pl.col("ic_mean").mean().alias("ic_mean"),
+                pl.col("ic_std").mean().alias("ic_std"),
+            )
+            .sort("iteration")
+            .with_columns(
+                pl.lit(row["case_study"]).alias("case_study"),
+                pl.lit(row["short_name"]).alias("short_name"),
+                pl.lit(row["config_name"]).alias("config_name"),
+                pl.lit(row["training_hash"]).alias("training_hash"),
+            )
+        )
+        frames.append(trajectory)
+    return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+
+
+def load_exact_gbm_feature_importance(
+    case_study: str,
+    training_hash: str,
+    config_name: str,
+    *,
+    top_n: int,
+) -> pl.DataFrame:
+    """Load booster importance from one selected GBM training identity."""
+    import lightgbm as lgb
+
+    case_dir = get_case_study_dir(case_study)
+    booster_dir = case_dir / "run_log" / "training" / training_hash / "boosters"
+    if not booster_dir.exists():
+        booster_dir = case_dir / "run_log" / "models" / training_hash / "boosters"
+    if not booster_dir.exists():
+        return pl.DataFrame()
+
+    rows = []
+    for booster_file in sorted(booster_dir.glob("*.txt")):
+        fold_text = booster_file.stem.split("fold")[-1].lstrip("_")
+        with contextlib.suppress(ValueError):
+            fold_id = int(fold_text)
+            model = lgb.Booster(model_file=str(booster_file))
+            rows.extend(
+                {
+                    "config_name": config_name,
+                    "training_hash": training_hash,
+                    "fold_id": fold_id,
+                    "feature": feature,
+                    "importance": float(importance),
+                }
+                for feature, importance in zip(
+                    model.feature_name(),
+                    model.feature_importance(importance_type="gain"),
+                    strict=False,
+                )
+            )
+    if not rows:
+        return pl.DataFrame()
+    result = pl.DataFrame(rows).with_columns(
+        fold_max=pl.col("importance").max().over(["config_name", "fold_id"])
+    )
+    if result.filter(pl.col("fold_max") <= 0).height:
+        raise RegistrySelectionError(f"{case_study}/{training_hash}: zero feature importance")
+    result = result.with_columns(importance_norm=pl.col("importance") / pl.col("fold_max")).drop(
+        "fold_max"
+    )
+    top_features = (
+        result.group_by("feature")
+        .agg(pl.col("importance_norm").mean().alias("mean_importance"))
+        .sort("mean_importance", descending=True)
+        .head(top_n)["feature"]
+        .to_list()
+    )
+    return result.filter(pl.col("feature").is_in(top_features))
 
 
 def collect_rank1_per_cs(
@@ -253,6 +860,8 @@ def plot_cross_cs_forest(
     import matplotlib.pyplot as plt
     import numpy as np
 
+    from utils.style import COLORS
+
     if df.is_empty():
         fig, ax = plt.subplots(figsize=(7, 2.5))
         ax.text(0.5, 0.5, f"No {family} runs in registry", ha="center", va="center")
@@ -276,7 +885,7 @@ def plot_cross_cs_forest(
         y,
         xerr=[ic - lo, hi - ic],
         fmt="none",
-        color="#444",
+        color=COLORS["neutral"],
         lw=1.0,
         capsize=3,
     )
@@ -288,8 +897,8 @@ def plot_cross_cs_forest(
             y[sig],
             s=60,
             marker="o",
-            facecolor="#1f77b4",
-            edgecolor="#1f77b4",
+            facecolor=COLORS["blue"],
+            edgecolor=COLORS["blue"],
             zorder=3,
             label=f"|t_hac| > {sig_t:g}",
         )
@@ -300,18 +909,19 @@ def plot_cross_cs_forest(
             s=60,
             marker="o",
             facecolor="white",
-            edgecolor="#1f77b4",
+            edgecolor=COLORS["blue"],
             zorder=3,
             label=f"|t_hac| ≤ {sig_t:g}",
         )
 
-    ax.axvline(0, color="#888", lw=0.7, linestyle="--")
+    ax.axvline(0, color=COLORS["neutral"], lw=0.7, linestyle="--")
     ax.set_yticks(y)
     ax.set_yticklabels(d["short_name"].tolist())
     ax.set_xlabel("Daily-pooled IC (HAC 95% CI)")
     ax.set_title(title)
     ax.legend(loc="lower right", fontsize=8, frameon=False)
-    fig.tight_layout()
+    if fig.get_layout_engine() is None:
+        fig.tight_layout()
     return fig, ax
 
 
@@ -352,7 +962,8 @@ def plot_per_fold_violin(
     ax.set_xticklabels(present, rotation=30, ha="right")
     ax.set_ylabel("Per-fold Spearman IC")
     ax.set_title(title)
-    fig.tight_layout()
+    if fig.get_layout_engine() is None:
+        fig.tight_layout()
     return fig, ax
 
 
@@ -372,7 +983,7 @@ def _rank1_full_coverage_hash(case_study: str, label: str) -> str | None:
     with sqlite3.connect(db_path) as db:
         rows = db.execute(
             """
-            SELECT p.prediction_hash, pm.ic_mean_daily,
+            SELECT p.prediction_hash, pm.ic_mean_daily, pm.ic_n_days,
                    (SELECT COUNT(*) FROM fold_metrics fm
                     WHERE fm.prediction_hash = p.prediction_hash AND fm.ic IS NULL) AS n_null
             FROM training_runs t
@@ -382,9 +993,11 @@ def _rank1_full_coverage_hash(case_study: str, label: str) -> str | None:
             """,
             (label,),
         ).fetchall()
-    full = [r for r in rows if r[2] == 0]
+    full = [r for r in rows if r[2] is not None and r[3] == 0]
     if not full:
         return None
+    max_n_days = max(r[2] for r in full)
+    full = [r for r in full if r[2] == max_n_days]
     full.sort(key=lambda r: -r[1])
     return full[0][0]
 
@@ -398,6 +1011,7 @@ def plot_rolling_daily_ic(
     title: str = "Persistence of linear ranking signal (rolling daily IC)",
     figsize: tuple[float, float] = (10, 4),
     colors: list[str] | None = None,
+    selected_prediction_hashes: dict[str, str] | None = None,
 ):
     """Rolling-mean daily-IC persistence chart for the rank-1 linear fit per case study.
 
@@ -427,7 +1041,11 @@ def plot_rolling_daily_ic(
     series: dict[str, pl.DataFrame] = {}
     for cs in case_studies:
         label = _resolve_label(cs, label_resolver)
-        h = _rank1_full_coverage_hash(cs, label)
+        h = (
+            selected_prediction_hashes.get(cs)
+            if selected_prediction_hashes is not None
+            else _rank1_full_coverage_hash(cs, label)
+        )
         if h is None:
             continue
         d = load_daily_metrics_series(cs, h)
@@ -464,12 +1082,15 @@ def plot_rolling_daily_ic(
             linewidth=1.6,
             label=SHORT_NAMES.get(cs, cs),
         )
-    ax.axhline(0, color="#888", linewidth=0.8, linestyle="--")
+    from utils.style import COLORS
+
+    ax.axhline(0, color=COLORS["neutral"], linewidth=0.8, linestyle="--")
     ax.set_ylabel(f"{window}-day rolling daily IC")
     ax.set_xlabel("Validation date")
     ax.set_title(title)
     ax.legend(loc="upper right", frameon=False)
-    fig.tight_layout()
+    if fig.get_layout_engine() is None:
+        fig.tight_layout()
     return fig, ax
 
 
@@ -567,7 +1188,8 @@ def plot_multi_label_horizon(
     ax.axhline(0, color="gray", linewidth=0.7, linestyle="--")
     ax.set_title(title)
     ax.legend(loc="best", frameon=False, fontsize=8, ncol=2)
-    fig.tight_layout()
+    if fig.get_layout_engine() is None:
+        fig.tight_layout()
     return fig, ax
 
 
