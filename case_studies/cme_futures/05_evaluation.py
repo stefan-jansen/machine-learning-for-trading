@@ -281,8 +281,9 @@ if n_fail > 0:
 # where $w_k$ are Bartlett kernel weights and $\hat{\rho}_k$ are
 # autocorrelation estimates. With a label horizon of $h$ overlapping days the
 # effective sample is roughly $N / h$, so a naive standard error understates the
-# true one by about $\sqrt{h}$ - the factor the notebook reports below as the
-# naive-to-HAC inflation. The bandwidth is `HAC_MAXLAGS`, set to the label horizon.
+# true one by about $\sqrt{h}$. The counts printed below are a different quantity -
+# how many features cross a fixed threshold under each correction - and the two need
+# not move together. The bandwidth is `HAC_MAXLAGS`, set to the label horizon.
 
 # %%
 evaluable_features = [f for f in all_feature_cols if correctness[f]]
@@ -410,16 +411,19 @@ eval_summary = pl.DataFrame(
     },
 ).sort(pl.col("ic_mean").cast(pl.Float64, strict=False).abs(), descending=True)
 
-n_significant_naive = sum(1 for p in p_values if p < FDR_ALPHA)
+# p_values holds the HAC p-value, so the naive tier has to come from the naive
+# t-statistic. Reading p_values here made "naive" a second name for the HAC test
+# and forced the inflation ratio to 1.00x whatever the data did.
+n_significant_naive = sum(1 for f in feature_names if abs(ic_results[f]["naive_t_stat"]) > NAIVE_T)
 n_significant_hac = sum(1 for f in feature_names if abs(ic_results[f]["t_stat"]) > NAIVE_T)
 n_significant_fdr = int(fdr_result["n_rejected"])
 
 inflation_hac = n_significant_naive / max(n_significant_hac, 1)
 inflation_fdr = n_significant_naive / max(n_significant_fdr, 1)
 
-print(f"Naive significant (p < 0.05): {n_significant_naive}")
-print(f"HAC significant (|t| > 1.96): {n_significant_hac}")
-print(f"FDR significant (q < 0.05):   {n_significant_fdr}")
+print(f"Naive significant (|t| > {NAIVE_T}): {n_significant_naive}")
+print(f"HAC significant (|t| > {NAIVE_T}):   {n_significant_hac}")
+print(f"FDR significant (q < {FDR_ALPHA}):    {n_significant_fdr}")
 print(f"Inflation factor (HAC): {inflation_hac:.2f}x")
 print(f"Inflation factor (FDR): {inflation_fdr:.2f}x")
 
@@ -611,11 +615,11 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# **Interpretation**: Points below the 45-degree line have inflated naive t-statistics
-# — HAC correction reveals that overlapping 5-day returns induce autocorrelation
-# that makes raw significance tests too liberal. FDR further penalizes for the
-# number of simultaneous tests. The green markers surviving both corrections are
-# the genuinely informative features.
+# **Interpretation**: points inside the 45-degree line have naive t-statistics that
+# the HAC correction pulls toward zero, because the overlapping label induces the
+# autocorrelation a raw test ignores. BH-FDR then penalizes the number of
+# simultaneous tests on top of that. The markers drawn in blue are the ones that
+# survive both corrections.
 
 # %% [markdown]
 # ## 4. Shape Diagnostics
