@@ -25,7 +25,9 @@
 # - Assess feature redundancy and family-level signal concentration
 # - Produce a triage ledger for downstream model selection
 #
-# **Book Reference**: Chapter 8, Section 8.5 (Feature Evaluation)
+# **Book Reference**: Chapter 7, Section 7.3 (Univariate feature-label evaluation)
+# and Section 7.4 (Search accounting and multiple testing). Chapter 8.6 is the
+# secondary reference for search control.
 #
 # **Prerequisites**: `03_financial_features.py` and `04_model_based_features.py` must
 # have run (produce `features/financial.parquet` and `features/model_based.parquet`).
@@ -33,22 +35,31 @@
 # %%
 """Feature Evaluation - ETFs case study."""
 
+import re
 import warnings
 from datetime import date
-from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
-import yaml
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
-from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
+from ml4t.diagnostic.metrics import compute_ic_hac_stats, compute_ic_uncertainty
 from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 
+import utils.style as style
+from utils.artifact_specs import load_setup_config, resolve_label_buffer
+from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
+
+# Register the ML4T Plotly template (colorway, fonts, gridlines) as the default
+# and expose the book palette so every figure sources color from utils.style.
+style.apply_ml4t_style()
+COLORS = style.COLORS
+GRAY_FILLS = style.GRAY_FILLS
 
 # %% tags=["parameters"]
 # Production defaults
@@ -60,11 +71,29 @@ CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 EVAL_DIR = CASE_DIR / "evaluation"
 EVAL_DIR.mkdir(exist_ok=True)
 
-# ETFs config
-PRIMARY_LABEL_FILE = "fwd_ret_21d.parquet"
-HAC_MAXLAGS = 21  # 21-day forward return
-MIN_PERIODS = 10  # 99 symbols
-IC_THRESHOLD = 0.01  # Monthly horizon
+# ETFs config. Every threshold the screens, the triage rule and the prose refer to
+# is bound here. A threshold retyped into a markdown table is a second source of
+# truth for a decision the code has already made.
+SETUP = load_setup_config(CASE_STUDY_ID)
+eval_config = SETUP["evaluation"]
+
+# The label and its horizon come from setup.yaml. The HAC bandwidth is the label
+# horizon: it is the overlap the daily-sampled forward return induces, so typing it
+# separately would let the correction and the label drift apart.
+PRIMARY_LABEL = SETUP["labels"]["primary"]
+LABEL_BUFFER = resolve_label_buffer(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
+assert LABEL_BUFFER, f"No label buffer configured for {PRIMARY_LABEL}"
+HAC_MAXLAGS = int(re.match(r"^(\d+)", LABEL_BUFFER).group(1))
+
+MIN_PERIODS = 10  # symbols a date needs before its IC enters the series
+IC_THRESHOLD = 0.01  # |IC| the exploration arm requires, at a monthly horizon
+N_QUANTILES = 5
+MIN_COVERAGE = 0.70  # non-null share the correctness gate requires
+MAX_STALENESS = 0.50  # unchanged-from-prior-date share the correctness gate allows
+FDR_ALPHA = 0.05  # Benjamini-Hochberg level
+NAIVE_T = 1.96  # two-sided normal critical value, for the naive-versus-HAC comparison
+MIN_SIGN_CONSISTENCY = 0.60  # fold-sign agreement the exploration arm requires
+REDUNDANCY_CUT = 0.7  # |rho| above which two features are one piece of evidence
 
 # %% [markdown]
 # ## 0. Load Artifacts & Build Evaluation Panel
@@ -77,33 +106,43 @@ IC_THRESHOLD = 0.01  # Monthly horizon
 # triage here promotes features for downstream modeling, the holdout must not
 # inform feature evaluation. We purge on the 21-day label endpoint, so no
 # pre-holdout date whose forward label reaches into the holdout survives.
+#
+# **The fold contract for the Ch9 features.** `model_based.parquet` carries one row
+# per `(timestamp, symbol, fold)`, and every temporal family in it - the HMM regime
+# probabilities, the fractionally differenced series and the GARCH conditional
+# volatility - is fitted on its fold's training window and then written over the
+# whole fold window (`04_model_based_features.py:20`). A training-date value is
+# therefore in-sample: the parameters behind it came from a window that extends past
+# that date. `04` also writes one extra fold, numbered past the last CV fold, whose
+# training window is everything before `holdout_start`; that one exists to produce
+# holdout features and has no validation window on this side of the seal.
+#
+# So the fold column is resolved rather than dropped: a temporal feature is read
+# only inside the validation window of the fold that produced it, and the extra
+# holdout fold is dropped. **The evaluation frame is then the union of those
+# validation windows**, so the Ch8 features are screened on the same rows as the
+# Ch9 ones. Screening them on the full span instead would compare an IC measured
+# over eighteen years against one measured over eight, and would leave every
+# temporal feature failing the coverage gate for a property of its design rather
+# than a defect.
 
 # %%
 # Load features (normalize date column type to pl.Date for consistent joins)
 features = pl.read_parquet(CASE_DIR / "features" / "financial.parquet").with_columns(
     pl.col("timestamp").cast(pl.Date)
 )
-temporal = pl.read_parquet(CASE_DIR / "features" / "model_based.parquet").with_columns(
+temporal_artifact = pl.read_parquet(CASE_DIR / "features" / "model_based.parquet").with_columns(
     pl.col("timestamp").cast(pl.Date)
 )
-# model_based.parquet now carries one row per (timestamp, symbol, fold);
-# drop fold and de-dup so the join doesn't multiply the eval panel by fold count.
-if "fold" in temporal.columns:
-    temporal = temporal.drop("fold").unique(subset=["timestamp", "symbol"], keep="last")
 
 # Load primary label
-label_df = pl.read_parquet(CASE_DIR / "labels" / PRIMARY_LABEL_FILE).with_columns(
+label_df = pl.read_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet").with_columns(
     pl.col("timestamp").cast(pl.Date)
 )
 label_col = [c for c in label_df.columns if c not in ("timestamp", "symbol")][0]
 
-# Load evaluation config from setup.yaml
-with open(CASE_DIR / "config" / "setup.yaml") as f:
-    setup_config = yaml.safe_load(f)
-eval_config = setup_config.get("evaluation", {})
-
 print(f"Features: {features.shape}")
-print(f"Temporal: {temporal.shape}")
+print(f"Temporal: {temporal_artifact.shape}")
 print(f"Labels: {label_df.shape}, column: {label_col}")
 
 # %%
@@ -112,8 +151,60 @@ JOIN_COLS = ["timestamp", "symbol"]
 DATE_COL = "timestamp"
 
 financial_cols = [c for c in features.columns if c not in JOIN_COLS]
-temporal_cols = [c for c in temporal.columns if c not in ("timestamp", "symbol")]
+temporal_cols = [c for c in temporal_artifact.columns if c not in (*JOIN_COLS, "fold")]
 
+# %% [markdown]
+# ### The walk-forward folds
+#
+# Derived through `generate_cv_splits` from the label frame, which is the call
+# `04_model_based_features` makes and the one `load_modeling_dataset` makes in Ch11.
+# Partitioning the date index into equal blocks here - what this notebook used to do
+# - would let a fold id mean one thing in `model_based.parquet` and another on this
+# side of the join, which is exactly what the resolution below depends on.
+
+# %%
+splits = generate_cv_splits(
+    label_df.select(DATE_COL).unique().sort(DATE_COL),
+    case_study_id=CASE_STUDY_ID,
+    label_buffer=LABEL_BUFFER,
+)
+
+
+def _as_date(value) -> date:
+    return pd.Timestamp(value).date()
+
+
+for split in splits:
+    print(
+        f"  Fold {split['fold']}: train {_as_date(split['train_start'])} → "
+        f"{_as_date(split['train_end'])}, validation {_as_date(split['val_start'])} → "
+        f"{_as_date(split['val_end'])}"
+    )
+
+# %%
+# Resolve the fold column: keep each fitted value only on the dates where the fold
+# that produced it was out of sample, and drop the extra holdout fold.
+val_windows = {int(s["fold"]): (_as_date(s["val_start"]), _as_date(s["val_end"])) for s in splits}
+IN_VALIDATION = pl.any_horizontal(
+    [(pl.col(DATE_COL) >= start) & (pl.col(DATE_COL) <= end) for start, end in val_windows.values()]
+)
+temporal = (
+    temporal_artifact.filter(pl.col("fold").is_in(list(val_windows)))
+    .filter(
+        pl.col("fold").replace_strict({f: s for f, (s, _) in val_windows.items()}, default=None)
+        <= pl.col(DATE_COL)
+    )
+    .filter(
+        pl.col(DATE_COL)
+        <= pl.col("fold").replace_strict({f: e for f, (_, e) in val_windows.items()}, default=None)
+    )
+    .drop("fold")
+)
+assert temporal.select(JOIN_COLS).is_duplicated().sum() == 0, (
+    "validation windows overlap; a fitted feature would take two values on one date"
+)
+
+# %%
 # Join: features + temporal (on [date, symbol]) + labels
 eval_panel = features.join(temporal, on=JOIN_COLS, how="left")
 eval_panel = eval_panel.join(label_df, on=JOIN_COLS, how="inner")
@@ -126,7 +217,7 @@ eval_panel = eval_panel.join(label_df, on=JOIN_COLS, how="inner")
 # prices into the IC ranking, BH-FDR, and triage. The label calendar is dense
 # (built from the full price panel before eligibility gating), so the endpoint is
 # computed there. Same purge as the 02_labels baseline IC and the 03 selection IC.
-holdout_start_dt = date.fromisoformat(setup_config["evaluation"]["holdout_start"])
+holdout_start_dt = date.fromisoformat(eval_config["holdout_start"])
 LABEL_HORIZON = HAC_MAXLAGS  # fwd_ret_21d: forward window whose endpoint must clear the holdout
 last_signal_date = (
     label_df.select("timestamp")
@@ -137,11 +228,12 @@ last_signal_date = (
     .max()
 )
 n_before_seal = len(eval_panel)
-eval_panel = eval_panel.filter(pl.col("timestamp") <= last_signal_date)
+eval_panel = eval_panel.filter(pl.col("timestamp") <= last_signal_date).filter(IN_VALIDATION)
+assert eval_panel[DATE_COL].max() <= last_signal_date
 print(
-    f"Holdout sealed: {n_before_seal:,} -> {len(eval_panel):,} rows "
-    f"(labels end < {setup_config['evaluation']['holdout_start']}; "
-    f"last signal date {last_signal_date})"
+    f"Holdout sealed and narrowed to the validation windows: {n_before_seal:,} -> "
+    f"{len(eval_panel):,} rows (labels end < {eval_config['holdout_start']}; "
+    f"last eligible signal date {last_signal_date})"
 )
 
 all_feature_cols = financial_cols + temporal_cols
@@ -161,22 +253,45 @@ print(
 print(f"Label: {label_col}")
 
 # %% [markdown]
-# ## 0.5 Data Quality Gate
+# ## Data Quality Gate
 #
 # Verify upstream artifacts are free of critical defects (negative prices,
 # infinities, extreme returns) before any statistical evaluation.
+#
+# **This gate and the per-feature screens below read different rows on purpose.**
+# The screens are a selection decision and run on the frame where every candidate
+# exists. This gate asks whether the artifact is sound, and Ch11 trains on every
+# fold's training window back to the start of the panel, so a broken value outside
+# the validation windows reaches the model whether or not this notebook screened it.
+# It reads the whole pre-holdout span, and the temporal artifact as `04` wrote it,
+# one row per key and fold. It stops at the seal because its counts are printed and
+# its `fail_on_critical` decides whether this notebook runs at all.
 
 # %%
 from utils.data_quality import validate_modeling_inputs
 
+sealed_features = features.filter(pl.col(DATE_COL) <= last_signal_date)
+sealed_temporal = temporal_artifact.filter(pl.col(DATE_COL) <= last_signal_date)
+sealed_labels = label_df.filter(pl.col(DATE_COL) <= last_signal_date)
+
 validate_modeling_inputs(
-    features_df=eval_panel,
-    label_df=eval_panel,
-    feature_cols=all_feature_cols,
+    features_df=sealed_features,
+    label_df=sealed_labels,
+    feature_cols=financial_cols,
     label_col=label_col,
     join_cols=JOIN_COLS,
     asset_col="symbol",
-    max_abs_return=1.0,  # 21-day ETF returns (max observed ~0.71)
+    max_abs_return=1.0,  # a 21-day ETF return above this is a price-adjustment failure
+    fail_on_critical=True,
+)
+validate_modeling_inputs(
+    features_df=sealed_temporal,
+    label_df=sealed_labels,
+    feature_cols=temporal_cols,
+    label_col=label_col,
+    join_cols=JOIN_COLS,
+    asset_col="symbol",
+    max_abs_return=1.0,
     fail_on_critical=True,
 )
 
@@ -184,8 +299,9 @@ validate_modeling_inputs(
 # ## 1. Correctness Screens
 #
 # Before evaluating predictive power, we check data quality:
-# - **Coverage**: fraction of non-null values (threshold: 70%)
-# - **Staleness**: fraction of unchanged values from prior date (threshold: 50%)
+# - **Coverage**: fraction of non-null values, against `MIN_COVERAGE`
+# - **Staleness**: fraction of unchanged values from the prior date, against
+#   `MAX_STALENESS`
 #
 # Features that fail either gate are marked STOP in the triage.
 
@@ -206,7 +322,8 @@ for feat in all_feature_cols:
     staleness[feat] = float(unchanged) / max(n_rows - n_symbols, 1)
 
 correctness = {
-    feat: coverage[feat] >= 0.70 and staleness[feat] <= 0.50 for feat in all_feature_cols
+    feat: coverage[feat] >= MIN_COVERAGE and staleness[feat] <= MAX_STALENESS
+    for feat in all_feature_cols
 }
 n_pass = sum(correctness.values())
 n_fail = len(correctness) - n_pass
@@ -328,50 +445,63 @@ print(f"Skipped {len(date_level_features)} date-level features")
 # %% [markdown]
 # ### Fold-Level Stability
 #
-# We divide the evaluation period into approximate annual folds (matching the
-# CV config's 1-year test windows) and check whether IC sign is consistent
-# across folds. Features with > 60% positive-IC folds are more robust.
+# Whether a feature's IC keeps the same sign across the walk-forward validation
+# windows, which is what separates a feature that works across market regimes from
+# one that had a single favorable period. The windows are the ones the folds
+# actually have; this notebook used to cut the date index into equal blocks, which
+# gave the sign-consistency column a different meaning from the fold ids everything
+# else in the pipeline uses.
+#
+# The quantity measured is agreement with the feature's *own* full-sample sign, not
+# agreement with a positive sign. A feature that is negative in every fold is as
+# stable as one that is positive in every fold, and it is the direction a long-short
+# book would take; counting positive folds instead scores a reliably negative
+# predictor at zero and makes it unpromotable by construction.
 
 # %%
-# Generate approximate fold boundaries
-all_dates = eval_panel[DATE_COL].unique().sort().to_list()
-n_folds = eval_config.get("n_splits", 8)
-fold_size = len(all_dates) // n_folds
+MIN_FOLD_DATES = 5  # dates a fold must contribute before its mean IC is read
 
-fold_boundaries = []
-for i in range(n_folds):
-    start_idx = i * fold_size
-    end_idx = min((i + 1) * fold_size - 1, len(all_dates) - 1)
-    fold_boundaries.append((all_dates[start_idx], all_dates[end_idx]))
+
+def per_fold_mean_ics(feat: str) -> list[float]:
+    """Mean IC inside each fold's validation window, under the screen's own rule."""
+    ts = ic_timeseries[feat]
+    out = []
+    for start, end in val_windows.values():
+        window = ts.filter((pl.col(DATE_COL) >= start) & (pl.col(DATE_COL) <= end))
+        if len(window) >= MIN_FOLD_DATES:
+            out.append(float(window["ic"].mean()))
+    return out
+
 
 fold_stats = {}
 for feat in ic_results:
-    fold_ics = []
-    ts = ic_timeseries[feat]
-    for fold_start, fold_end in fold_boundaries:
-        fold_ic = ts.filter((pl.col(DATE_COL) >= fold_start) & (pl.col(DATE_COL) <= fold_end))
-        if len(fold_ic) >= 5:
-            fold_ics.append(float(fold_ic["ic"].mean()))
-
+    fold_ics = per_fold_mean_ics(feat)
     if fold_ics:
-        sign_consistency = sum(1 for ic in fold_ics if ic > 0) / len(fold_ics)
+        pooled_sign = np.sign(ic_results[feat]["mean_ic"])
+        agreeing = sum(1 for ic in fold_ics if np.sign(ic) == pooled_sign and pooled_sign != 0)
         fold_stats[feat] = {
             "n_folds": len(fold_ics),
-            "sign_consistency": sign_consistency,
+            "sign_consistency": agreeing / len(fold_ics),
             "worst_fold_ic": min(fold_ics),
             "best_fold_ic": max(fold_ics),
             "median_fold_ic": float(np.median(fold_ics)),
         }
 
-print(f"Fold stability computed for {len(fold_stats)} features")
+n_consistent = sum(1 for s in fold_stats.values() if s["sign_consistency"] >= MIN_SIGN_CONSISTENCY)
+print(
+    f"Fold stability computed for {len(fold_stats)} features; {n_consistent} agree with their "
+    f"own sign in >= {MIN_SIGN_CONSISTENCY:.0%} of folds"
+)
 
 # %% [markdown]
 # ## 3. Multiple Testing (BH-FDR)
 #
-# Testing 50+ features simultaneously at $\alpha = 0.05$ expects ~2.5 false
-# positives. We apply the Benjamini-Hochberg procedure to control the false
-# discovery rate. The **inflation factor** measures how much naive significance
-# overstates true significance:
+# Testing this many features simultaneously at `FDR_ALPHA` expects several false
+# positives by construction, and how many depends on the size of the searched set -
+# every feature that cleared the correctness gate and produced an IC series, whose
+# count is printed below. Without it no p-value here is interpretable. The
+# Benjamini-Hochberg procedure controls the false discovery rate over that set, and
+# the **inflation factor** measures how much naive significance overstates it:
 #
 # $$\text{Inflation} = \frac{N_{\text{naive significant}}}{N_{\text{FDR significant}}}$$
 
@@ -379,7 +509,7 @@ print(f"Fold stability computed for {len(fold_stats)} features")
 feature_names = list(ic_results.keys())
 p_values = [ic_results[f]["p_value"] for f in feature_names]
 
-fdr_result = benjamini_hochberg_fdr(p_values, alpha=0.05, return_details=True)
+fdr_result = benjamini_hochberg_fdr(p_values, alpha=FDR_ALPHA, return_details=True)
 
 eval_summary = pl.DataFrame(
     {
@@ -395,69 +525,180 @@ eval_summary = pl.DataFrame(
     }
 ).sort(pl.col("ic_mean").cast(pl.Float64, strict=False).abs(), descending=True)
 
-n_significant_naive = sum(1 for p in p_values if p < 0.05)
-n_significant_hac = sum(1 for f in feature_names if abs(ic_results[f]["t_stat"]) > 1.96)
+# `p_values` holds the HAC p-value, so the naive tier has to come from the naive
+# t-statistic. Reading `p_values` here made "naive" a second name for the HAC test
+# and forced the HAC inflation ratio to 1.00x whatever the data did.
+n_significant_naive = sum(1 for f in feature_names if abs(ic_results[f]["naive_t_stat"]) > NAIVE_T)
+n_significant_hac = sum(1 for f in feature_names if abs(ic_results[f]["t_stat"]) > NAIVE_T)
 n_significant_fdr = int(fdr_result["n_rejected"])
 
 inflation_hac = n_significant_naive / max(n_significant_hac, 1)
 inflation_fdr = n_significant_naive / max(n_significant_fdr, 1)
 
 print(f"Features tested: {len(feature_names)}")
-print(f"Naive significant (p < 0.05): {n_significant_naive}")
-print(f"HAC significant (|t| > 1.96): {n_significant_hac}")
-print(f"FDR significant (q < 0.05):   {n_significant_fdr}")
+print(f"Naive significant (|t| > {NAIVE_T}): {n_significant_naive}")
+print(f"HAC significant (|t| > {NAIVE_T}):   {n_significant_hac}")
+print(f"FDR significant (q < {FDR_ALPHA}):    {n_significant_fdr}")
 print(f"Inflation factor (HAC): {inflation_hac:.2f}x")
 print(f"Inflation factor (FDR): {inflation_fdr:.2f}x")
 
+# %% [markdown]
+# ### The IC series itself
+#
+# Every statistic above is a scalar summary of one object: the per-date IC series.
+# Two failure modes are visible only in the series - an IC that comes from a single
+# episode and is flat around it, and an IC that changes sign between folds - so it is
+# drawn before it is reduced. The band is the HAC interval around the full-sample
+# mean, which allows for the serial dependence the overlapping label induces.
+
 # %%
-# Top features table
-print("\nTop 15 features by absolute IC:")
-print(eval_summary.head(15))
+LEADING_FOR_SERIES = 3
+ROLLING_DAYS = 126
+series_features = eval_summary.head(LEADING_FOR_SERIES)["feature"].to_list()
+
+fig = make_subplots(
+    rows=len(series_features), cols=1, shared_xaxes=True, subplot_titles=series_features
+)
+for row, feat in enumerate(series_features, start=1):
+    series = ic_timeseries[feat].sort(DATE_COL)
+    bands = compute_ic_uncertainty(series, horizon=HAC_MAXLAGS, ic_col="ic")
+    dates = series[DATE_COL].to_list()
+    fig.add_trace(
+        go.Scatter(
+            x=dates,
+            y=series["ic"].to_list(),
+            mode="lines",
+            line=dict(color=GRAY_FILLS["muted"], width=0.6),
+            showlegend=False,
+        ),
+        row=row,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=dates,
+            y=series["ic"].rolling_mean(ROLLING_DAYS, min_samples=ROLLING_DAYS).to_list(),
+            mode="lines",
+            line=dict(color=COLORS["blue"], width=1.4),
+            showlegend=False,
+        ),
+        row=row,
+        col=1,
+    )
+    for value, dash in (
+        (bands["mean_ic"], "solid"),
+        (bands["ci_hac_lower"], "dot"),
+        (bands["ci_hac_upper"], "dot"),
+    ):
+        fig.add_hline(y=value, line=dict(color=COLORS["amber"], width=1, dash=dash), row=row, col=1)
+    fig.add_hline(y=0, line=dict(color=GRAY_FILLS["border"], width=0.8), row=row, col=1)
+fig.update_layout(
+    template="ml4t",
+    height=200 * len(series_features) + 80,
+    width=900,
+    title_text="The daily IC swings far wider than the mean it averages to",
+)
+fig.show()
+
+# %% [markdown]
+# ### Feature ranking, with the inference adjustment visible
 
 # %%
 top_n = min(25, len(eval_summary))
-top = eval_summary.head(top_n)
+top = eval_summary.head(top_n).sort("ic_mean")
 
-fig = make_subplots(
-    rows=1,
-    cols=2,
-    subplot_titles=[
-        f"Top {top_n} Features by |IC| (green = FDR-sig)",
-        "HAC vs Naive t-statistics",
-    ],
-    horizontal_spacing=0.12,
-)
+# One colour convention across every figure in this section: the feature survives
+# BH-FDR, or it does not. The earlier version coloured the same category green
+# against grey in one panel and green against red in the next, so a reader mapping
+# colour to meaning got two answers inside one figure.
+SURVIVES, DOES_NOT = COLORS["blue"], GRAY_FILLS["muted"]
 
-# Panel 1: IC bar chart
-colors = ["#2ecc71" if s else "#95a5a6" for s in top["fdr_sig"].to_list()]
-fig.add_trace(
+fig = go.Figure(
     go.Bar(
-        x=top["feature"].to_list(),
-        y=top["ic_mean"].to_list(),
-        marker_color=colors,
-        text=[f"t={t:.1f}" for t in top["hac_t"].to_list()],
+        x=top["ic_mean"].to_list(),
+        y=top["feature"].to_list(),
+        orientation="h",
+        marker_color=[SURVIVES if s else DOES_NOT for s in top["fdr_sig"].to_list()],
+        text=[f"t={value:.1f}" for value in top["hac_t"].to_list()],
         textposition="outside",
         showlegend=False,
-    ),
-    row=1,
-    col=1,
+    )
 )
+fig.add_vline(x=0, line=dict(color=GRAY_FILLS["border"], width=1))
+# Room for the t-statistic label past the end of the longest bar.
+ic_span = max(abs(value) for value in top["ic_mean"].to_list()) * 1.35
+fig.update_layout(
+    template="ml4t",
+    height=620,
+    width=900,
+    title_text="Nothing here survives false-discovery control",
+    xaxis_title="Mean cross-sectional IC (Spearman)",
+    xaxis_range=[-ic_span, ic_span],
+    yaxis_title="Feature",
+    margin=dict(l=170),
+)
+fig.show()
 
-# Panel 2: HAC scatter
-fig.add_trace(
+# %% [markdown]
+# ### Fold-level stability
+#
+# A pooled mean IC hides the difference between a feature that works in every fold
+# and one that had a single good year. Each feature's per-fold means are drawn with
+# its median marked, for the same leading features the ranking shows. The dots and
+# the diamond come from `per_fold_mean_ics`, the function the screen itself reads, so
+# the median cannot be drawn over a set of folds the chart does not show.
+
+# %%
+FOLDS_SHOWN = 12
+fold_features = [f for f in eval_summary["feature"].to_list() if f in fold_stats][:FOLDS_SHOWN]
+fig = go.Figure()
+for feat in fold_features:
+    per_fold = per_fold_mean_ics(feat)
+    fig.add_trace(
+        go.Scatter(
+            x=per_fold,
+            y=[feat] * len(per_fold),
+            mode="markers",
+            marker=dict(color=GRAY_FILLS["muted"], size=7),
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[fold_stats[feat]["median_fold_ic"]],
+            y=[feat],
+            mode="markers",
+            marker=dict(color=COLORS["amber"], size=11, symbol="diamond"),
+            showlegend=False,
+        )
+    )
+fig.add_vline(x=0, line=dict(color=GRAY_FILLS["border"], width=1))
+fig.update_layout(
+    template="ml4t",
+    height=520,
+    width=900,
+    title_text="Every leading feature changes sign in at least one fold",
+    xaxis_title="Mean IC within fold (amber diamond marks the median fold)",
+    margin=dict(l=170),
+)
+fig.show()
+
+# %% [markdown]
+# ### Naive against HAC inference
+
+# %%
+fig = go.Figure(
     go.Scatter(
         x=eval_summary["naive_t"].to_list(),
         y=eval_summary["hac_t"].to_list(),
         mode="markers",
         marker=dict(
-            color=["#2ecc71" if s else "#e74c3c" for s in eval_summary["fdr_sig"].to_list()],
+            color=[SURVIVES if s else DOES_NOT for s in eval_summary["fdr_sig"].to_list()],
             size=7,
         ),
         text=eval_summary["feature"].to_list(),
         showlegend=False,
-    ),
-    row=1,
-    col=2,
+    )
 )
 max_t = (
     max(
@@ -471,60 +712,97 @@ fig.add_trace(
         x=[-max_t, max_t],
         y=[-max_t, max_t],
         mode="lines",
-        line=dict(dash="dash", color="gray"),
+        line=dict(dash="dash", color=GRAY_FILLS["border"]),
         showlegend=False,
-    ),
-    row=1,
-    col=2,
+    )
 )
-
-fig.update_layout(template="plotly_white", height=450, width=1100)
-fig.update_xaxes(tickangle=-45, row=1, col=1)
-fig.update_xaxes(title_text="Naive t", row=1, col=2)
-fig.update_yaxes(title_text="HAC t", row=1, col=2)
+fig.update_layout(
+    template="ml4t",
+    height=480,
+    width=760,
+    title_text="Overlapping labels pull every t-statistic toward zero",
+    xaxis_title="Naive t",
+    yaxis_title="HAC t",
+)
 fig.show()
 
 # %% [markdown]
-# **Interpretation**: Points below the diagonal in the right panel show where
-# HAC adjustment deflates naive t-statistics. With overlapping 21-day returns,
-# daily IC values are autocorrelated and naive standard errors understate
-# uncertainty. The green markers survive both HAC and FDR correction — these
-# features have genuine standalone predictive power.
+# **Interpretation**: points inside the 45-degree line have naive t-statistics that
+# the HAC correction pulls toward zero, because the overlapping label induces the
+# autocorrelation a raw test ignores. BH-FDR then penalizes the number of
+# simultaneous tests on top of that. The markers drawn in blue are the ones that
+# survive both corrections.
 
 # %% [markdown]
 # ## 4. Shape Diagnostics
 #
-# Quantile monotonicity analysis: does the label spread monotonically across
-# feature quintiles? A monotone relationship (Q1 < Q2 < ... < Q5 or reverse)
-# suggests a robust, exploitable signal. Non-monotone shapes may indicate
-# non-linear interactions or noise.
+# Does the label spread monotonically across feature quintiles? A monotone profile
+# is what a linear model can carry in a single coefficient; a U-shaped one says the
+# same information is there but not in a form a linear coefficient can hold.
+#
+# **The quantiles are formed within each date and each date is weighted equally.**
+# The IC beside them is a within-date rank statistic, so a profile built by pooling
+# every row and cutting once would be a different object: it would sort a 2016
+# observation against a 2023 one and let the time-series variation of the feature
+# stand in for the cross-sectional variation the IC measures. A feature with a
+# negative IC would then be free to show a rising profile with nothing in the
+# notebook to reconcile the two.
+#
+# The mean and the median profile are drawn together. The mean is what a long-short
+# book earns; the median describes the typical symbol, and a rank statistic like the
+# IC agrees with the median. Where they disagree the gap is the return tail, not the
+# shape.
 
 # %%
-N_QUANTILES = 5
-top_features_for_shape = eval_summary.filter(pl.col("fdr_sig").fill_null(False))[
-    "feature"
-].to_list()[:15]
-if not top_features_for_shape:
-    top_features_for_shape = eval_summary.head(10)["feature"].to_list()
+# Show the FDR-significant features first, then fill up to the panel count with the
+# next-highest |IC| features, so the diagnostic stays informative when few features
+# clear FDR.
+fdr_shape = eval_summary.filter(pl.col("fdr_sig").fill_null(False))["feature"].to_list()
+ranked_shape = eval_summary["feature"].to_list()
+top_features_for_shape = (fdr_shape + [f for f in ranked_shape if f not in fdr_shape])[:6]
+
+QUANTILE_LABELS = [f"Q{i + 1}" for i in range(N_QUANTILES)]
+MIN_SHAPE_DATES = 20
 
 monotonicity_scores = {}
 quantile_spreads = {}
 
 for feat in top_features_for_shape:
-    valid = eval_panel.select([feat, label_col]).drop_nulls()
-    if len(valid) < N_QUANTILES * 20:
+    valid = eval_panel.select([DATE_COL, feat, label_col]).drop_nulls()
+    # A date needs at least one symbol per bucket before it can be cut into them.
+    valid = valid.filter(pl.len().over(DATE_COL) >= N_QUANTILES)
+    if valid[DATE_COL].n_unique() < MIN_SHAPE_DATES:
         continue
 
-    valid = valid.with_columns(
+    binned = valid.with_columns(
         pl.col(feat)
-        .qcut(N_QUANTILES, labels=[f"Q{i + 1}" for i in range(N_QUANTILES)])
+        .qcut(N_QUANTILES, labels=QUANTILE_LABELS, allow_duplicates=True)
+        .over(DATE_COL)
         .alias("quantile")
     )
-    q_means = valid.group_by("quantile").agg(pl.col(label_col).mean()).sort("quantile")
-    means = q_means[label_col].to_list()
-    spread = means[-1] - means[0]
-    quantile_spreads[feat] = {"q_means": means, "spread": spread}
+    # Per date first, then across dates: every date carries the same weight, which is
+    # how the IC series beside this is built and how a rebalance experiences it.
+    per_date = binned.group_by([DATE_COL, "quantile"]).agg(
+        pl.col(label_col).mean().alias("date_mean"),
+        pl.col(label_col).median().alias("date_median"),
+    )
+    profile = (
+        per_date.group_by("quantile")
+        .agg(
+            pl.col("date_mean").mean().alias("mean"),
+            pl.col("date_median").mean().alias("median"),
+        )
+        .sort("quantile")
+    )
+    means = profile["mean"].to_list()
+    quantile_spreads[feat] = {
+        "q_means": means,
+        "q_medians": profile["median"].to_list(),
+        "spread": means[-1] - means[0],
+    }
 
+    # monotonicity in the ledger is the Spearman rank correlation between quantile
+    # index and mean return, which is the convention the other case studies share.
     mono_corr, _ = spearmanr(range(len(means)), means)
     monotonicity_scores[feat] = float(mono_corr)
 
@@ -535,48 +813,71 @@ if quantile_spreads:
     n_show = min(6, len(quantile_spreads))
     feats_to_show = list(quantile_spreads.keys())[:n_show]
     n_rows_fig = (n_show + 2) // 3
-    fig = make_subplots(rows=n_rows_fig, cols=3, subplot_titles=feats_to_show)
+    fig = make_subplots(rows=n_rows_fig, cols=3, subplot_titles=feats_to_show, shared_yaxes=True)
     for idx, feat in enumerate(feats_to_show):
         r, c = divmod(idx, 3)
-        q_means = quantile_spreads[feat]["q_means"]
-        mono = monotonicity_scores.get(feat, 0)
         fig.add_trace(
             go.Bar(
-                x=[f"Q{i + 1}" for i in range(len(q_means))],
-                y=q_means,
-                marker_color=[
-                    "#e74c3c",
-                    "#f39c12",
-                    "#95a5a6",
-                    "#3498db",
-                    "#2ecc71",
-                ],
-                showlegend=False,
-                text=[f"{m:.4f}" for m in q_means],
-                textposition="outside",
+                x=QUANTILE_LABELS,
+                y=quantile_spreads[feat]["q_means"],
+                marker_color=COLORS["blue"],
+                name="mean",
+                legendgroup="mean",
+                showlegend=idx == 0,
             ),
             row=r + 1,
             col=c + 1,
         )
+        fig.add_trace(
+            go.Scatter(
+                x=QUANTILE_LABELS,
+                y=quantile_spreads[feat]["q_medians"],
+                mode="markers",
+                marker=dict(color=COLORS["amber"], size=9, symbol="diamond"),
+                name="median",
+                legendgroup="median",
+                showlegend=idx == 0,
+            ),
+            row=r + 1,
+            col=c + 1,
+        )
+    # One y range across the panels: the point of six panels side by side is that
+    # their heights are comparable, which independent auto-scaling destroys. The
+    # range is taken from the values and includes zero, rather than being made
+    # symmetric, so a panel of same-signed buckets does not spend half its height
+    # on empty space.
+    profile_values = [
+        value
+        for feat in feats_to_show
+        for key in ("q_means", "q_medians")
+        for value in quantile_spreads[feat][key]
+    ]
+    lo, hi = min(0.0, min(profile_values)), max(0.0, max(profile_values))
+    pad = 0.15 * (hi - lo)
+    fig.update_yaxes(range=[lo - pad, hi + pad])
     fig.update_layout(
-        template="plotly_white",
-        height=250 * n_rows_fig,
+        template="ml4t",
+        height=260 * n_rows_fig + 60,
         width=900,
-        title_text="Quantile Mean Returns (Top FDR-Significant Features)",
+        title_text="Every panel rises from Q1 to Q5, and in the volatility panels the step out of Q1 is most of it",
+        legend=dict(orientation="h", y=-0.08),
     )
     fig.show()
 
 # %% [markdown]
-# **Interpretation**: Monotone quintile spreads (Q1 → Q5 increasing or
-# decreasing) confirm a robust relationship. Non-monotone patterns (e.g.,
-# U-shaped) suggest non-linear effects that may require interaction terms or
-# tree-based models to capture.
+# **Interpretation**: a monotone profile — Q1 to Q5 consistently rising or falling —
+# is the shape a Ridge or Lasso fit in Ch11 can carry in a single coefficient.
+# Where a panel instead turns at one end, the same information is present but a
+# linear coefficient has to average the turn away, and a tree in Ch12 can split on
+# it. The median markers separate shape from return tail: where a median sits far
+# from its bar, that bucket's mean is carried by a few large moves rather than by the
+# typical symbol.
 
 # %% [markdown]
 # ## 5. Redundancy & Feature Families
 #
 # We group features into interpretive families and compute family-level IC
-# aggregates. Highly correlated feature pairs (|corr| > 0.7) flag redundancy
+# aggregates. Feature pairs correlated above `REDUNDANCY_CUT` flag redundancy
 # that downstream modeling should address via clustering or selection.
 
 
@@ -629,10 +930,10 @@ high_corr_pairs = []
 cols = corr_matrix.columns
 for i in range(len(cols)):
     for j in range(i + 1, len(cols)):
-        if abs(corr_matrix.iloc[i, j]) > 0.7:
+        if abs(corr_matrix.iloc[i, j]) > REDUNDANCY_CUT:
             high_corr_pairs.append((cols[i], cols[j], float(corr_matrix.iloc[i, j])))
 
-print(f"Feature pairs with |corr| > 0.7: {len(high_corr_pairs)}")
+print(f"Feature pairs with |corr| > {REDUNDANCY_CUT}: {len(high_corr_pairs)}")
 
 # %%
 # Family-level IC summary
@@ -676,44 +977,70 @@ else:
     )
 print(fam_df)
 
+# %% [markdown]
+# ### Redundancy, as ranked pairs
+#
+# A full correlation matrix over this many features has unreadable tick labels and
+# is mostly empty space. What the reader has to decide is which pairs are the same
+# evidence counted twice, so the strongest pairs are ranked instead, and the count
+# above `REDUNDANCY_CUT` is printed rather than written into the title.
+
 # %%
-fig = go.Figure(
-    data=go.Heatmap(
-        z=corr_matrix.values,
-        x=corr_matrix.columns.tolist(),
-        y=corr_matrix.columns.tolist(),
-        colorscale="RdBu_r",
-        zmid=0,
-        zmin=-1,
-        zmax=1,
+TOP_PAIRS = 15
+ranked_pairs = sorted(high_corr_pairs, key=lambda item: -abs(item[2]))[:TOP_PAIRS]
+if ranked_pairs:
+    fig = go.Figure(
+        go.Bar(
+            x=[rho for _, _, rho in ranked_pairs][::-1],
+            y=[f"{a} / {b}" for a, b, _ in ranked_pairs][::-1],
+            orientation="h",
+            marker_color=[
+                COLORS["blue"] if rho > 0 else COLORS["copper"] for _, _, rho in ranked_pairs
+            ][::-1],
+            showlegend=False,
+        )
     )
-)
-fig.update_layout(
-    title=f"Feature Correlation Matrix ({len(high_corr_pairs)} pairs above 0.7)",
-    template="plotly_white",
-    height=700,
-    width=800,
-)
-fig.show()
+    fig.add_vline(x=0, line=dict(color=GRAY_FILLS["border"], width=1))
+    fig.update_layout(
+        template="ml4t",
+        height=520,
+        width=900,
+        title_text="The strongest pairs are near-duplicates, not merely related",
+        xaxis_title="Pairwise Spearman correlation",
+        xaxis_range=[-1, 1],
+        yaxis_title="Feature pair",
+        margin=dict(l=300),
+    )
+    fig.show()
 
 # %% [markdown]
-# **Interpretation**: The correlation heatmap reveals clusters of highly
-# correlated features — particularly within the momentum (multi-horizon
-# returns) and volatility (multi-horizon realized vol) families. Downstream
-# modeling in Ch11 should use clustering or PCA within families to reduce
-# redundancy, or rely on tree-based models that handle correlated inputs
-# natively.
+# **Interpretation**: the leading pairs are multi-horizon members of one family -
+# realized volatility at several windows, returns at several windows, the
+# fractionally differenced series of ETFs that track overlapping markets. Each pair
+# is one piece of evidence entered twice, and a ranking that counts them separately
+# reports a family's breadth as if it were independent corroboration. Ch11 addresses
+# this by clustering or selecting within families, or by using tree-based models,
+# which handle correlated inputs without inflating a coefficient.
 
 # %% [markdown]
 # ## 6. Triage & Handoff
 #
 # Each feature receives a triage decision:
 #
-# | Decision | Criteria |
-# |----------|----------|
-# | **PROCEED** | FDR-significant at 5%, OR sign consistent across > 60% of folds AND abs(IC) > 0.01 |
-# | **STOP** | Correctness failure (coverage < 70% or staleness > 50%) |
-# | **REVISE** | Everything else — evaluate in multivariate context in Ch11 |
+# | Decision | Criteria | Arm |
+# |----------|----------|-----|
+# | **PROCEED** | BH-FDR significant at `FDR_ALPHA` | confirmation |
+# | **PROCEED** | sign consistency at least `MIN_SIGN_CONSISTENCY` and abs(IC) at least `IC_THRESHOLD` | exploration |
+# | **STOP** | correctness FAIL: coverage below `MIN_COVERAGE` or staleness above `MAX_STALENESS` | - |
+# | **REVISE** | everything else, to be judged in the multivariate context of Ch11 | - |
+#
+# The rule is a **disjunction**, so PROCEED can exceed the count of FDR-significant
+# features, and the `note` column records which arm fired. The second arm is an
+# exploration filter in the sense of Section 7.4, not a significance test: it exists
+# so false-discovery control does not empty the menu, and a feature promoted through
+# it has not been confirmed. `IC_THRESHOLD` is a stated judgement about what a
+# monthly rebalance would need to clear its costs, not a quantity derived from the
+# data.
 #
 # Date-level features are triaged as REVISE with a note, since their value
 # lies in regime-conditional interactions rather than standalone cross-sectional IC.
@@ -739,7 +1066,7 @@ for feat in all_feature_cols:
 
     if is_fdr_sig:
         triage[feat] = ("PROCEED", "fdr_significant")
-    elif sign_con >= 0.60 and abs_ic >= IC_THRESHOLD:
+    elif sign_con >= MIN_SIGN_CONSISTENCY and abs_ic >= IC_THRESHOLD:
         triage[feat] = ("PROCEED", "stable_and_above_threshold")
     else:
         triage[feat] = ("REVISE", "not_significant_standalone")
@@ -811,37 +1138,52 @@ for f in proceed_features:
     t = ic_results[f]["t_stat"]
     print(f"  {f:40s}  IC={ic:+.4f}  t={t:.2f}  [{families.get(f, '?')}]")
 
-# %% [markdown]
-# ### Quality Gate Verdict
+# %% [markdown] tags=["results"]
+# **What the triage decided, and on what.** The counts printed above are the whole
+# output of this notebook: a per-feature decision, with the `note` column recording
+# which arm promoted it, and **no feature on this panel survives BH-FDR, so every
+# promotion is an exploration promotion.** The confirmation arm never fires and the
+# `note` column reads `stable_and_above_threshold` for the whole PROCEED set.
 #
-# **Fit for modeling.** The triage promotes a broad set of features to PROCEED,
-# concentrated in the volatility and momentum families. Standalone predictive
-# power is modest and thin: only one feature (`dist_52w_low`, IC 0.07) survives
-# BH-FDR correction, and naive significance overstates the FDR-confirmed count
-# by roughly an order of magnitude. The strongest signals — 52-week-low distance,
-# realized-volatility, and NATR — reach |IC| in the 0.05--0.07 range, with most
-# promoted features between 0.01 and 0.05, consistent with monthly-horizon
-# cross-sectional equity signals over a 100-ETF universe. Date-level regime and
-# macro features are excluded from cross-sectional IC but carry forward as
-# conditioning variables for tree-based and interaction models in Ch11+.
+# That is a property of the data rather than a fault in the screen. The effective
+# sample printed above is what a 21-day label leaves of a daily IC series, and
+# false-discovery control over this many candidates rejects nothing at that sample
+# size. What the exploration arm keeps on the table is a set that agrees with its own
+# sign across folds and clears `IC_THRESHOLD`; none of it has been confirmed, and
+# Ch11 has to read the `note` column to know that.
+#
+# This notebook does not pronounce on the case study. A univariate screen is
+# necessary and not sufficient, and whether any of these features are tradable is
+# settled by a backtest Sharpe several stages later.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **FDR correction is essential**: With 50+ features, naive p-values
-#    dramatically overstate the number of true signals. The inflation factor
-#    quantifies the gap between naive and corrected significance.
+# 1. **Report the searched set beside the p-value.** The naive, HAC and BH-FDR
+#    counts printed above are three different answers to "how many features carry
+#    signal", and the gap between them is the price of having tested every feature
+#    rather than one. A significance claim without the size of the search that
+#    produced it cannot be read.
 #
-# 2. **HAC adjustment matters**: Overlapping 21-day returns create
-#    autocorrelation in the IC time series. Newey-West standard errors
-#    with bandwidth = 21 properly account for this.
+# 2. **HAC adjustment matters**: overlapping 21-day returns create autocorrelation
+#    in the IC time series, and the Newey-West bandwidth is bound to the label
+#    horizon rather than typed, so the correction cannot drift from the label.
 #
-# 3. **Date-level features require special handling**: Regime and macro
-#    features have zero cross-sectional IC by construction. Their value
-#    emerges through conditional interactions in Ch11 modeling.
+# 3. **Screen on the frame where every candidate exists.** The Ch9 features are
+#    fitted per fold and are out of sample only inside their own validation window.
+#    Measured over the whole pre-holdout span their coverage is the share of it the
+#    folds happen to reach, and the correctness gate reads a design property as a
+#    broken feature; measured over the union of the windows, they are covered and
+#    comparable with the Ch8 features beside them.
 #
-# 4. **Redundancy within families**: Momentum and volatility features are
-#    highly correlated. Downstream modeling should cluster or select
+# 4. **Date-level features require special handling**: regime and macro features
+#    have zero cross-sectional IC by construction. Their value emerges through
+#    conditional interactions in Ch11 modeling, so they are triaged REVISE with a
+#    note rather than scored against a statistic they cannot have.
+#
+# 5. **Redundancy within families**: momentum and volatility features are highly
+#    correlated, and the ranked-pairs figure says which pairs are one piece of
+#    evidence counted twice. Downstream modeling should cluster or select
 #    representative features from each family.
 #
 # **Next**: `06_linear.py` (Ch11) trains ridge/lasso baselines on the promoted
