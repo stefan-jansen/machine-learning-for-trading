@@ -96,9 +96,12 @@ print(f"Loaded prices: {prices.shape[0]:,} rows, {prices['symbol'].n_unique()} s
 
 prices = prices.sort(["symbol", "timestamp"])
 
+# %% [markdown]
+# The producer folds resolve from the same label timeline and split generator every
+# downstream model consumer reads, so a fold id means the same thing here as it does
+# in `05_evaluation` and in the Ch11 models that join on it.
+
 # %%
-# Resolve producer folds from the same label timeline and split generator used
-# by every downstream model consumer.
 canonical_splits = modeling_fold_boundaries(CASE_STUDY_ID, "fwd_ret_5d")
 if not canonical_splits:
     raise RuntimeError("Canonical fwd_ret_5d modeling folds are unavailable")
@@ -159,8 +162,13 @@ folds = [
     for split in canonical_splits
 ]
 
-# Add holdout fold (train on last 2 dev years, test on holdout)
-train_years = 2
+# Add holdout fold (train on the last development years, test on holdout). The
+# training span is the one setup.yaml declares for every other fold rather than a
+# second number kept here.
+_train_size = str(evaluation_config["train_size"])
+if not _train_size.endswith("Y"):
+    raise ValueError(f"Expected an annual evaluation.train_size, found {_train_size!r}")
+train_years = int(_train_size[:-1])
 holdout_start = str(evaluation_config["holdout_start"])[:10]
 holdout_end = str(evaluation_config["holdout_end"])[:10]
 holdout_train_start = f"{int(holdout_start[:4]) - train_years}-01-01"
@@ -508,8 +516,8 @@ if persist_df is not None and median_persist is not None:
         annotation_position="top left",
     )
     fig.update_layout(
-        title=f"Equity volatility is highly persistent: median α+γ/2+β = {median_persist:.2f}",
-        xaxis_title="GJR-GARCH persistence (α + γ/2 + β)",
+        title="Fitted GJR-GARCH persistence concentrates just below one",
+        xaxis_title="GJR-GARCH persistence (α + γ/2 + β); dashed rule marks the median",
         yaxis_title="Number of stocks",
         height=420,
     )
@@ -644,10 +652,17 @@ print(f"  Shape: {temporal.shape}")
 # the VRP signal specifically.
 #
 # **Scope of this evaluation**: the IC below uses only each canonical validation
-# fold. It selects or drops **no** feature - all three temporal features are
-# written to `model_based.parquet` in section 7 before this diagnostic runs. The
+# fold - the holdout fold added in section B is excluded, so nothing here reads a
+# holdout row. It selects or drops **no** feature: all three temporal features are
+# written to `model_based.parquet` in section E.2 before this diagnostic runs. The
 # authoritative feature evaluation remains `05_evaluation.py`; this section only
-# characterizes the dynamic-vs-static VRP comparison without touching the holdout.
+# characterizes the dynamic-vs-static VRP comparison.
+#
+# The two VRP variants differ only in the denominator, so both are scored on the
+# rows where both are defined. The GARCH spread is missing wherever a fit failed or
+# the surface is thin, and scoring the Ch8 spread over its own wider panel would put
+# a difference in sample into a comparison that is supposed to isolate the
+# denominator.
 
 # %%
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
@@ -708,49 +723,45 @@ if label_path.exists() and len(temporal) > 0:
     for r in temporal_ic_results:
         print(f"  {r['name']:25s}: IC={r['ic_mean']:.4f}, t={r['hac_tstat']:.2f}")
 
-    # Compare static vs dynamic VRP
+    # Compare static vs dynamic VRP on the rows where both are defined.
     base_features_path = FEATURES_DIR / "financial.parquet"
-    if base_features_path.exists():
+    if base_features_path.exists() and "garch_ivrv_spread" in temporal_eval.columns:
         base = _normalize_symbol_column(pl.read_parquet(base_features_path)).select(
             ["timestamp", "symbol", "ivrv_spread"]
         )
-        validation_start = min(split["val_start"] for split in canonical_splits)
-        validation_end = max(split["val_end"] for split in canonical_splits)
-        static_eval = (
-            base.filter(
-                (pl.col("timestamp") >= validation_start) & (pl.col("timestamp") <= validation_end)
-            )
-            .join(
-                label_df.rename({label_col: "forward_return"}),
-                on=["timestamp", "symbol"],
-                how="inner",
-            )
+        vrp_eval = (
+            temporal_eval.select(["timestamp", "symbol", "garch_ivrv_spread", "forward_return"])
+            .join(base, on=["timestamp", "symbol"], how="inner")
             .drop_nulls()
         )
-        static_eval = static_eval.rename({"ivrv_spread": "prediction"})
-        static_ic = cross_sectional_ic_series(
-            static_eval,
-            static_eval,
-            date_col="timestamp",
-            entity_col="symbol",
-            method="spearman",
-            min_obs=10,
+        print(
+            f"\nShared VRP rows: {len(vrp_eval):,} over {vrp_eval['timestamp'].n_unique():,} dates"
         )
-        if len(static_ic) > 10:
-            static_hac = compute_ic_hac_stats(static_ic)
-            static_ic_mean = round(static_hac["mean_ic"], 4)
-            static_tstat = round(static_hac["t_stat"], 2)
-        else:
-            static_ic_mean, static_tstat = 0, 0
 
-        dynamic_r = next((r for r in temporal_ic_results if r["name"] == "garch_ivrv_spread"), None)
-        dynamic_ic_mean = dynamic_r["ic_mean"] if dynamic_r else 0
-        dynamic_tstat = dynamic_r["hac_tstat"] if dynamic_r else 0
+        def _vrp_hac(frame: pl.DataFrame, column: str) -> tuple[float, float]:
+            scored = frame.select(["timestamp", "symbol", column, "forward_return"]).rename(
+                {column: "prediction"}
+            )
+            series = cross_sectional_ic_series(
+                scored,
+                scored,
+                date_col="timestamp",
+                entity_col="symbol",
+                method="spearman",
+                min_obs=10,
+            )
+            if len(series) <= 10:
+                return 0.0, 0.0
+            stats = compute_ic_hac_stats(series)
+            return round(stats["mean_ic"], 4), round(stats["t_stat"], 2)
 
-        print("\nStatic vs Dynamic VRP:")
+        static_ic_mean, static_tstat = _vrp_hac(vrp_eval, "ivrv_spread")
+        dynamic_ic_mean, dynamic_tstat = _vrp_hac(vrp_eval, "garch_ivrv_spread")
+
+        print("Static vs Dynamic VRP, on the same rows:")
         print(f"  Static (ivrv_spread):     IC={static_ic_mean:.4f}, t={static_tstat:.2f}")
         print(f"  Dynamic (garch_ivrv):     IC={dynamic_ic_mean:.4f}, t={dynamic_tstat:.2f}")
-        print(f"  Improvement:              {abs(dynamic_ic_mean) - abs(static_ic_mean):.4f}")
+        print(f"  |IC| difference:          {abs(dynamic_ic_mean) - abs(static_ic_mean):.4f}")
     else:
         static_ic_mean, static_tstat = 0, 0
         dynamic_ic_mean, dynamic_tstat = 0, 0
@@ -761,59 +772,68 @@ else:
 
 # %% [markdown]
 # The chart ranks the three temporal features by their standalone information
-# coefficient against the 5-day forward return. Consistent with the Ch8 finding,
-# the individual signal is weak: the GARCH features earn their place as an input
-# to the multivariate models downstream, not as a standalone alpha.
+# coefficient against the 5-day forward return, and prints each one's HAC
+# t-statistic beside its bar. The three disagree about the sign of the
+# relationship and none of them reaches a t-statistic the sample can separate
+# from zero, which is the same result Ch8 reached for the options-derived
+# features. These are candidate inputs to the multivariate models downstream;
+# what they contribute there is a question this notebook does not answer.
 
 # %%
 if temporal_ic_results:
     ic_sorted = sorted(temporal_ic_results, key=lambda r: abs(r["ic_mean"]), reverse=True)
-    _best = ic_sorted[0]
     fig = go.Figure()
     fig.add_bar(
         x=[r["ic_mean"] for r in ic_sorted],
         y=[r["name"] for r in ic_sorted],
         orientation="h",
         marker_color=ml4t_palette(1)[0],
+        text=[f"HAC t {r['hac_tstat']:+.2f}" for r in ic_sorted],
+        textposition="outside",
+        cliponaxis=False,
     )
     fig.add_vline(x=0.0, line_width=1, line_color="black")
+    # Room for the t-statistic printed past each bar end, on whichever side the bar runs.
+    _span = max(abs(r["ic_mean"]) for r in ic_sorted) * 1.6
     fig.update_layout(
-        title=(
-            f"Temporal features carry weak standalone signal: "
-            f"|IC| peaks at {abs(_best['ic_mean']):.3f} ({_best['name']})"
+        title="The three temporal features split in sign and all sit near zero",
+        xaxis_title=(
+            "Mean cross-sectional IC vs 5-day forward return; "
+            "a |t| near two would be the conventional threshold"
         ),
-        xaxis_title="Mean cross-sectional IC vs 5-day forward return",
+        xaxis=dict(range=[-_span, _span]),
         yaxis_title=None,
         yaxis=dict(autorange="reversed"),
-        margin=dict(l=160),
+        margin=dict(l=160, r=60),
         height=360,
     )
     fig.show()
 
 # %% [markdown]
-# The key test for this notebook: does the GARCH conditional-vol denominator
-# improve the variance-risk-premium signal over the backward-looking realized-vol
-# denominator from Ch8? The chart compares the two VRP variants' |IC| head to head.
+# The question this notebook was written to ask: does the GARCH conditional-vol
+# denominator change what the variance risk premium tells you, against the
+# backward-looking realized-vol denominator from Ch8? Both variants are scored on
+# the same rows, so the only thing that differs between the two bars is the
+# denominator. Each bar carries its own HAC t-statistic, because a difference in
+# |IC| is only worth reading once at least one of the two is separable from zero.
 
 # %%
 if temporal_ic_results and (static_ic_mean or dynamic_ic_mean):
-    _improve = abs(dynamic_ic_mean) - abs(static_ic_mean)
-    _verb = "beats" if _improve > 0 else "trails"
     fig = go.Figure()
     fig.add_bar(
         x=["Static VRP<br>(realized-vol denom, Ch8)", "Dynamic VRP<br>(GARCH denom)"],
         y=[abs(static_ic_mean), abs(dynamic_ic_mean)],
         marker_color=[ml4t_palette(2)[0], ml4t_palette(2)[1]],
-        text=[f"{abs(static_ic_mean):.4f}", f"{abs(dynamic_ic_mean):.4f}"],
+        text=[
+            f"|IC| {abs(static_ic_mean):.4f}<br>HAC t {static_tstat:+.2f}",
+            f"|IC| {abs(dynamic_ic_mean):.4f}<br>HAC t {dynamic_tstat:+.2f}",
+        ],
         textposition="outside",
     )
     fig.update_layout(
-        title=(
-            f"Dynamic (GARCH) VRP {_verb} static VRP by {_improve:+.4f} |IC| "
-            f"against the 5-day label"
-        ),
+        title="Neither VRP denominator produces a t-statistic near two",
         yaxis_title="|Mean cross-sectional IC|",
-        xaxis_title=None,
+        xaxis_title="Both variants scored on the rows where both are defined",
         height=420,
     )
     fig.show()
@@ -821,12 +841,14 @@ if temporal_ic_results and (static_ic_mean or dynamic_ic_mean):
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **The GARCH denominator does not improve the VRP signal here**: the dynamic
-#    feature's absolute IC is smaller than the static `ivrv_spread` it was meant to
-#    improve on - both are printed by the comparison above. Neither variant is
-#    significant on its own, with an HAC t-statistic well below two, consistent with the
-#    result that no single feature carries a standalone edge. The GARCH features enter
-#    the downstream multivariate models as candidate inputs, not as lone signals.
+# 1. **The GARCH denominator does not settle the VRP question either way**: on the
+#    rows where both variants are defined, neither the dynamic spread nor the static
+#    `ivrv_spread` it was meant to improve on reaches an HAC t-statistic anywhere
+#    near two - the comparison above prints both, and the difference in their
+#    absolute IC is smaller than what a sample this size can resolve. Reading that
+#    difference as one denominator working better than the other is reading noise.
+#    The GARCH features enter the downstream multivariate models as candidate
+#    inputs, and the ablation there is what decides whether they earned the place.
 #
 # 2. **Walk-forward discipline**: GARCH is fitted only on training data for
 #    each CV fold. The variance recursion runs on the full train+test window
