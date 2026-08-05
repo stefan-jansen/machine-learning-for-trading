@@ -521,12 +521,18 @@ for feat in top_features_for_shape:
         .cast(pl.Int8)
         .alias("quantile_index")
     )
+    # Each month contributes equally, which is how the IC series above is built and
+    # how a monthly rebalance actually experiences the panel. Pooling every row
+    # instead would weight months by their cross-section, and the cross-section
+    # here grows by an order of magnitude over the sample.
     q_profile = (
-        valid.group_by("quantile_index")
+        valid.group_by(DATE_COL, "quantile_index")
         .agg(
             pl.col(label_col).mean().alias("mean"),
             pl.col(label_col).median().alias("median"),
         )
+        .group_by("quantile_index")
+        .agg(pl.col("mean").mean(), pl.col("median").mean())
         .sort("quantile_index")
     )
     means = q_profile["mean"].to_list()
