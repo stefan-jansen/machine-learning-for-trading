@@ -152,11 +152,18 @@ print(f"  Holdout: {holdout_start}..{holdout_end}")
 # ## B. The fold contract
 #
 # What the figure below has to show, and what the printed table above cannot: every fitted
-# parameter comes from the left-hand span of its own row, and the span it is then applied to lies
-# entirely to the right of it. The holdout is drawn as a rule. The final row is the holdout pass,
-# where parameters fitted on development data alone are filtered forward over the sealed period -
-# deliberate, because a volatility feature has to be defined there for a later stage to score it,
-# and safe only because nothing from the right of the rule enters the fit.
+# parameter comes from the left-hand span of its own row, and no fit sees anything to the right of
+# it. The holdout is drawn as a rule. The final row is the holdout pass, where parameters fitted on
+# development data alone are run forward over the sealed period - deliberate, because a volatility
+# feature has to be defined there for a later stage to score it, and safe only because nothing from
+# the right of the rule enters the fit.
+#
+# **The amber bar is the point-in-time span, not the whole of what is written.** The recursion runs
+# across the fitting span too, and those values are emitted: a fold's rows cover `train_start` to
+# `val_end`, and the holdout pass covers `data_start` to `holdout_end`. Those retrospective rows are
+# a legitimate feature for a model *training* on that fold, because their parameters come from the
+# window they sit in - but they are not point-in-time, and drawing them the same colour would say
+# they were. The amber span is the part a later stage may score.
 
 # %%
 fig, ax = plt.subplots(figsize=(11, 3.2))
@@ -193,7 +200,9 @@ for row, (label, tr_start, tr_end, ap_start, ap_end) in enumerate(rows):
         left=ap_start,
         height=0.55,
         color=COLORS["amber"],
-        label="filtered forward over" if row == 0 else None,
+        # Not "filtered over": the recursion also runs across the blue bar and those rows are
+        # emitted. Amber is the span whose values no parameter of its own row could have seen.
+        label="scored point-in-time over" if row == 0 else None,
     )
 ax.axvline(pd.Timestamp(holdout_start), color=COLORS["negative"], linestyle="--", linewidth=1.2)
 ax.set_yticks(range(len(rows)))
@@ -202,8 +211,11 @@ ax.invert_yaxis()
 ax.legend(loc="lower left", bbox_to_anchor=(0, -0.32), ncol=2, frameon=False, fontsize=8)
 add_message_title(
     ax,
-    "No parameter is fitted on the span it is then applied to",
-    subtitle=f"Fitted and filtered spans per fold; the rule marks the holdout at {holdout_start}",
+    "No fit sees the span it is scored on",
+    subtitle=(
+        "Fitting span and point-in-time span per fold; values are also emitted across the "
+        f"fitting span. The rule marks the holdout at {holdout_start}"
+    ),
 )
 fig.show()
 
@@ -1602,12 +1614,17 @@ add_message_title(
 fig.show()
 
 # %% [markdown]
-# Nothing here predicts the straddle return on validation. That is the finding, not a failure of the
-# stage: the two models were fitted correctly under the fold contract, the panel is written, and
-# what it buys over the stage-03 features is indistinguishable from zero at this horizon. Reading
-# any of the four as a signal on the strength of its sign would be reading noise. Stage 05 asks the
-# selection question against the full feature set and is where that gets settled; this stage's job
-# was to produce the columns and say honestly what a single-feature screen can see in them.
+# **No one of these four columns ranks the cross-section on its own**, at this horizon, on these
+# validation rows. Reading any of them as a signal on the strength of its sign would be reading
+# noise. That is the finding, not a failure of the stage: the two models were fitted correctly under
+# the fold contract and the panel is written.
+#
+# Two things it is not. It is not evidence that the columns carry nothing - failing to reject a zero
+# IC is not the same as establishing one, and a feature that is useless alone can still matter
+# inside a model that has the others. And it is not an *incremental* result: nothing above computes
+# a stage-03 baseline, so "adds nothing over stage 03" is a claim this notebook has not tested and
+# does not make. Stage 05 runs that comparison on the same validation rows. This stage's job was to
+# produce the columns under a fold contract and report what a single-feature screen can see.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -1620,9 +1637,10 @@ fig.show()
 # 2. **GJR-GARCH** runs independently within every eligible security segment.
 #    The explicit fixed-parameter recursion produces daily conditional
 #    volatility, and subtracting it from ATM implied volatility gives the GARCH
-#    variance risk premium. On validation its IC is indistinguishable from zero,
-#    as is every other column this stage writes, so none of the four is carried
-#    forward as a signal on its own account.
+#    variance risk premium. On validation its stand-alone IC is indistinguishable
+#    from zero, as is that of every other column this stage writes, so none of the
+#    four is carried forward as a signal in its own right. Whether they matter
+#    inside a model, and whether they add to stage 03, is stage 05's question.
 #
 # 3. **Bayesian SV** calibrates $\sigma_\eta$ via MCMC on a small liquid pool,
 #    averages accepted posterior means with equal weight per security segment,
