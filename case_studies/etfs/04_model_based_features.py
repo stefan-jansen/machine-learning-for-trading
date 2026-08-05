@@ -45,13 +45,15 @@
 #
 # ## Book Reference
 #
-# Chapter 9, Sections 9.1 (Fractional Differencing), 9.3 (GARCH), and
-# 9.5 (Regime Features)
+# Chapter 9 — the fractional-differencing, GARCH and regime-feature sections
 #
 # ## Prerequisites
 #
-# - [`02_labels`](02_labels.ipynb) (produces label parquet files)
-# - `03_financial_features.py` (produces `features/financial.parquet`)
+# - [`02_labels`](02_labels.ipynb) — this notebook reads the primary label parquet
+#   for the incremental evaluation at the end
+#
+# `03_financial_features` is a sibling stage: its output is joined to this one
+# downstream, in Ch11, and is not read here.
 
 # %%
 """ETFs: Model-Based Features (per-fold HMM + FFD + GARCH)."""
@@ -66,7 +68,8 @@ import seaborn as sns
 import yaml
 from arch import arch_model
 from hmmlearn.hmm import GaussianHMM
-from ml4t.diagnostic.evaluation.stats import robust_ic
+from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr, robust_ic
+from ml4t.diagnostic.metrics import compute_ic_hac_stats
 from ml4t.engineer.features.fdiff import ffdiff
 from sklearn.cluster import KMeans
 
@@ -80,13 +83,21 @@ warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 # Production defaults — Papermill injects overrides for CI
+CASE_STUDY_ID = "etfs"
 START_DATE = None  # None = use full dataset
 N_RESTARTS = 10
 GARCH_MIN_OBS = 504  # Minimum observations for GARCH fit (~2 years)
 MAX_SYMBOLS = 0  # 0 = all symbols (production)
 
 # %%
-CASE_DIR = get_case_study_dir("etfs")
+CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
+
+SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+PRIMARY_LABEL = SETUP["labels"]["primary"]
+LABEL_BUFFER = SETUP["labels"]["buffer"]
+# Trading days, for the HAC lag on an overlapping-return IC series.
+LABEL_HORIZON_DAYS = int(LABEL_BUFFER.rstrip("Dd"))
+print(f"Label: {PRIMARY_LABEL}, buffer {LABEL_BUFFER}")
 
 prices = load_etfs()
 print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} assets")
@@ -96,26 +107,112 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} assets")
 #
 # We load the walk-forward CV splits from `setup.yaml` and add a holdout
 # fold. All temporal models are fit per fold on training data only.
+#
+# `generate_cv_splits` steps backward from the holdout boundary, so fold 0 is the
+# **most recent** fold and carries the **latest** training start; the list runs
+# newest to oldest. The holdout fold is meant to train on everything before
+# `holdout_start`, so its start is the earliest across folds. Indexing the list
+# hands it the shortest window of the set, silently.
 
 # %%
-# Generate CV splits
-cv_splits = generate_cv_splits(prices, case_study_id="etfs", label_buffer="21D")
-eval_config = load_evaluation_config("etfs")
+cv_splits = generate_cv_splits(prices, case_study_id=CASE_STUDY_ID, label_buffer=LABEL_BUFFER)
+eval_config = load_evaluation_config(CASE_STUDY_ID)
 
-# Add holdout fold: fit on all pre-holdout data, extract for holdout period
 holdout_start = str(eval_config["holdout_start"])
 holdout_end = str(eval_config.get("holdout_end", prices["timestamp"].max()))
 
-# The last CV fold's val_end is the boundary before holdout
-# For holdout, train on everything up to holdout_start
+# Earliest start, not cv_splits[0] - see the note above.
 holdout_fold = {
     "fold": len(cv_splits),
-    "train_start": cv_splits[0]["train_start"],
+    "train_start": min(f["train_start"] for f in cv_splits),
     "train_end": holdout_start,
     "val_start": holdout_start,
     "val_end": str(holdout_end),
 }
 all_folds = cv_splits + [holdout_fold]
+
+assert all(holdout_fold["train_start"] <= f["train_start"] for f in cv_splits), (
+    "holdout fold must train on at least as much history as any CV fold"
+)
+
+# %% [markdown]
+# ### The Fold Contract
+#
+# Figure F1 draws what the saved artifact will contain: for each fold, the
+# window the parameters are estimated on and the window they are then applied
+# to out of sample, with the sealed holdout shaded. Every fitted transform
+# below - the HMM, the GARCH fits, the FFD warmup - respects these boundaries,
+# so this is the one picture in which a parameter-level leak would be visible.
+#
+# Inference runs forward across both bars, not only the amber one: the artifact
+# carries a value for every date in the fold window. What the amber bar marks is
+# the part of that window the fold's parameters had not seen.
+#
+# The training bars overlap because the walk-forward windows roll rather than
+# expand, and the holdout fold trains on the union of all of them.
+
+# %%
+fig_folds, ax = plt.subplots(figsize=(12, 0.5 * len(all_folds) + 2))
+
+for f in all_folds:
+    y = f["fold"]
+    tr0, tr1 = pd.Timestamp(f["train_start"]), pd.Timestamp(f["train_end"])
+    va0, va1 = pd.Timestamp(f["val_start"]), pd.Timestamp(f["val_end"])
+    is_holdout = f["fold"] == len(cv_splits)
+    ax.barh(y, tr1 - tr0, left=tr0, height=0.55, color=COLORS["blue"])
+    ax.barh(
+        y,
+        va1 - va0,
+        left=va0,
+        height=0.55,
+        color=COLORS["neutral"] if is_holdout else COLORS["amber"],
+    )
+
+ax.axvline(pd.Timestamp(holdout_start), color=COLORS["negative"], linestyle="--", linewidth=1.0)
+ax.axvspan(
+    pd.Timestamp(holdout_start),
+    pd.Timestamp(holdout_end),
+    color=COLORS["neutral"],
+    alpha=0.10,
+    linewidth=0,
+)
+ax.set_yticks([f["fold"] for f in all_folds])
+ax.set_yticklabels(
+    [("HOLDOUT" if f["fold"] == len(cv_splits) else f"Fold {f['fold']}") for f in all_folds]
+)
+ax.invert_yaxis()
+ax.set_xlabel("Date")
+handles = [
+    plt.Rectangle((0, 0), 1, 1, color=COLORS["blue"]),
+    plt.Rectangle((0, 0), 1, 1, color=COLORS["amber"]),
+    plt.Rectangle((0, 0), 1, 1, color=COLORS["neutral"]),
+]
+# Outside the axes: every row is a full-width bar, so any in-axes placement
+# lands the legend on top of one of them.
+ax.legend(
+    handles,
+    ["Parameters estimated here", "Applied out of sample here", "Sealed holdout"],
+    frameon=False,
+    fontsize=8,
+    loc="upper left",
+    bbox_to_anchor=(0.0, -0.18),
+    ncol=3,
+)
+# Keep the earliest training bar off the spine.
+_span = pd.Timestamp(holdout_end) - pd.Timestamp(min(f["train_start"] for f in all_folds))
+ax.set_xlim(
+    pd.Timestamp(min(f["train_start"] for f in all_folds)) - _span * 0.02,
+    pd.Timestamp(holdout_end) + _span * 0.02,
+)
+ax.set_title(
+    "No fold's parameters come from the right of its own training bar",
+    loc="left",
+    color=COLORS["blue"],
+    fontweight="semibold",
+)
+sns.despine()
+fig_folds.tight_layout()
+plt.show()
 
 n_cv = len(cv_splits)
 n_total = len(all_folds)
@@ -302,85 +399,18 @@ def derive_regime_features(
 
 
 # %% [markdown]
-# ### Illustrative Full-Sample HMM Fit
+# ### Number of States
 #
-# Before the per-fold loop, we fit one full-sample HMM for visualization
-# purposes only. This shows readers the regime overlay on SPY and validates
-# the methodology. **These features are NOT used in the saved output.**
+# Two states, calm and stressed. The reader should note what is *not* here: no
+# full-sample fit. It is tempting to fit one HMM over the whole history to show
+# the regime overlay, and that picture is not the object this notebook produces
+# - it is fitted on data the per-fold models never see, and decoding it with
+# Viterbi conditions every date on the whole series including its future. The
+# overlay after the fold loop is drawn from the per-fold filtered probabilities
+# instead, which is what actually leaves this notebook.
 
 # %%
 N_STATES = 2
-X_full = spy_full.select(["log_ret", "vol_21d"]).to_numpy()
-
-best_model_illustrative = None
-best_ll = -np.inf
-
-for seed in range(N_RESTARTS):
-    try:
-        model = fit_hmm_kmeans_init(X_full, n_states=N_STATES, random_state=seed)
-        ll = model.score(X_full)
-        if ll > best_ll:
-            best_ll = ll
-            best_model_illustrative = model
-    except Exception:
-        continue
-
-print(f"Illustrative full-sample HMM: best log-likelihood = {best_ll:.1f}")
-
-order_illustrative = sort_states_by_variance(best_model_illustrative)
-filtered_illustrative = compute_filtered_probs(best_model_illustrative, X_full)
-states_illustrative = best_model_illustrative.predict(X_full)
-states_sorted_ill, _ = relabel_states(
-    states_illustrative, filtered_illustrative, order_illustrative
-)
-
-for k in range(N_STATES):
-    mask = states_sorted_ill == k
-    label = "Low-Vol" if k == 0 else "High-Vol"
-    mean_ret = X_full[mask, 0].mean()
-    mean_vol = X_full[mask, 1].mean()
-    pct = mask.mean()
-    print(f"State {k} ({label}): {pct:.1%} of time, mean ret={mean_ret:.3f}%, vol={mean_vol:.1f}%")
-
-# %% [markdown]
-# ### Regime Overlay on SPY (Illustrative)
-#
-# Shading stressed periods on SPY cumulative returns shows whether the HMM
-# captures known market episodes (GFC, COVID, 2022 rate shock).
-
-# %%
-spy_cum = spy_full.with_columns(cum_ret=(pl.col("close") / pl.col("close").first() - 1) * 100)
-
-fig_regime, ax = plt.subplots(figsize=(12, 5))
-dates = spy_cum["timestamp"].to_numpy()
-cum_ret = spy_cum["cum_ret"].to_numpy()
-ax.plot(dates, cum_ret, linewidth=0.9, color=COLORS["blue"])
-
-# Shade stressed periods
-stressed = states_sorted_ill == 1
-in_stress = False
-start = None
-for i in range(len(stressed)):
-    if stressed[i] and not in_stress:
-        start = dates[i]
-        in_stress = True
-    elif not stressed[i] and in_stress:
-        ax.axvspan(start, dates[i], alpha=0.15, color=COLORS["negative"], linewidth=0)
-        in_stress = False
-if in_stress:
-    ax.axvspan(start, dates[-1], alpha=0.15, color=COLORS["negative"], linewidth=0)
-
-ax.set_xlabel("Date")
-ax.set_ylabel("SPY cumulative return (%)")
-ax.set_title(
-    "The HMM's high-volatility state (shaded) captures the major selloffs: 2008, 2020, 2022",
-    loc="left",
-    color=COLORS["blue"],
-    fontweight="semibold",
-)
-sns.despine()
-fig_regime.tight_layout()
-plt.show()
 
 # %% [markdown]
 # ### Per-Fold HMM Fitting
@@ -393,6 +423,7 @@ plt.show()
 
 # %%
 hmm_fold_results = []
+hmm_fold_params = []
 
 for fold in all_folds:
     fold_idx = fold["fold"]
@@ -444,6 +475,24 @@ for fold in all_folds:
     regime_df = regime_df.with_columns(pl.lit(fold_idx).alias("fold"))
 
     hmm_fold_results.append(regime_df)
+
+    # Keep the fitted parameters, in the sorted state order, so Section
+    # "Fit Stability Across Folds" can draw what was estimated rather than what
+    # the features happened to average to. `order[1]` is the high-variance state.
+    _hi = int(order[1])
+    _lo = int(order[0])
+    hmm_fold_params.append(
+        {
+            "fold": fold_idx,
+            "mean_ret_stress": float(best_fold_model.means_[_hi, 0]),
+            "mean_vol_stress": float(best_fold_model.means_[_hi, 1]),
+            "mean_vol_calm": float(best_fold_model.means_[_lo, 1]),
+            "persist_stress": float(best_fold_model.transmat_[_hi, _hi]),
+            "persist_calm": float(best_fold_model.transmat_[_lo, _lo]),
+            "n_train": int(len(X_train)),
+        }
+    )
+
     print(
         f"  Fold {fold_idx}: HMM LL={best_fold_ll:.1f}, {len(regime_df)} dates, "
         f"stress={regime_df['regime_prob_stress'].mean():.3f}"
@@ -458,6 +507,85 @@ n_hmm_folds = hmm_features["fold"].n_unique() if len(hmm_features) > 0 else 0
 print(f"\nHMM features: {len(hmm_features):,} rows across {n_hmm_folds} folds")
 
 # %% [markdown]
+# ### What the HMM Inferred, on Validation Dates
+#
+# Each CV fold contributes only its **validation** window, and the shading is the
+# per-fold **filtered** probability of the stressed state - the same quantity
+# the saved feature carries. Read across the panel and every shaded band was
+# produced by a model that had not seen it.
+#
+# The holdout fold is not drawn. Its features are computed and saved like every
+# other fold's, but reading them here at development time is exactly the use the
+# seal forbids, and the incremental evaluation below excludes it for the same
+# reason.
+#
+# The bands are drawn where P(stress) exceeds one half. That threshold is a
+# reading aid for the figure; the emitted feature is the probability itself, and
+# nothing downstream thresholds it.
+
+# %%
+STRESS_SHADE_THRESHOLD = 0.5
+
+val_regimes = pl.concat(
+    [
+        hmm_features.filter(
+            (pl.col("fold") == f["fold"])
+            & (pl.col("timestamp") >= pl.lit(f["val_start"]).cast(pl.Date))
+            & (pl.col("timestamp") <= pl.lit(f["val_end"]).cast(pl.Date))
+        )
+        for f in cv_splits
+    ]
+).sort("timestamp")
+
+spy_cum = spy_full.with_columns(cum_ret=(pl.col("close") / pl.col("close").first() - 1) * 100)
+spy_val = spy_cum.join(val_regimes.select("timestamp"), on="timestamp", how="semi").sort(
+    "timestamp"
+)
+print(
+    f"Validation dates plotted: {len(val_regimes):,} "
+    f"({val_regimes['timestamp'].min()} to {val_regimes['timestamp'].max()})"
+)
+
+fig_regime, ax = plt.subplots(figsize=(12, 5))
+ax.plot(
+    spy_val["timestamp"].to_numpy(),
+    spy_val["cum_ret"].to_numpy(),
+    linewidth=0.9,
+    color=COLORS["blue"],
+)
+
+# Shade contiguous runs above the threshold.
+_dates = val_regimes["timestamp"].to_numpy()
+_stress = (val_regimes["regime_prob_stress"] > STRESS_SHADE_THRESHOLD).to_numpy()
+_in_run, _start = False, None
+for _i in range(len(_stress)):
+    if _stress[_i] and not _in_run:
+        _start, _in_run = _dates[_i], True
+    elif not _stress[_i] and _in_run:
+        ax.axvspan(_start, _dates[_i], alpha=0.15, color=COLORS["negative"], linewidth=0)
+        _in_run = False
+if _in_run:
+    ax.axvspan(_start, _dates[-1], alpha=0.15, color=COLORS["negative"], linewidth=0)
+
+# Fold boundaries: one rule per validation window start.
+for f in cv_splits:
+    ax.axvline(pd.Timestamp(f["val_start"]), color=COLORS["neutral"], linestyle=":", linewidth=0.7)
+
+ax.set_xlabel("Date")
+# The curve is the full-history cumulative return sampled at validation dates, so
+# the baseline is the start of the price series and not the start of the plot.
+ax.set_ylabel(f"SPY cumulative return since {spy_cum['timestamp'].min()} (%)")
+ax.set_title(
+    "Stress bands are inferred out of sample, and cluster in the selloffs",
+    loc="left",
+    color=COLORS["blue"],
+    fontweight="semibold",
+)
+sns.despine()
+fig_regime.tight_layout()
+plt.show()
+
+# %% [markdown]
 # ## Part 2: Fractional Differencing (Per Fold)
 #
 # Fractional differencing preserves long-range memory while achieving
@@ -469,15 +597,8 @@ print(f"\nHMM features: {len(hmm_features):,} rows across {n_hmm_folds} folds")
 # purely mechanical. We still compute per fold so each fold window gets a
 # clean series starting from its own `train_start`.
 #
-# | Asset Class     | Reference ETFs | $d$ |
-# |-----------------|---------------|-----|
-# | US Equities     | SPY, QQQ, IWM | 0.4 |
-# | Int'l Equities  | EFA, EEM      | 0.4 |
-# | Fixed Income    | TLT           | 0.5 |
-# | Gold            | GLD           | 0.4 |
-# | Real Estate     | VNQ           | 0.4 |
-# | High Yield      | HYG           | 0.5 |
-# | Inv. Grade      | LQD           | 0.5 |
+# The mapping is declared in the next cell and printed from there, so the values
+# a reader sees are the ones the transform used.
 
 # %%
 REFERENCE_ETFS = {
@@ -492,6 +613,10 @@ REFERENCE_ETFS = {
     "HYG": 0.5,  # High yield bonds
     "LQD": 0.5,  # Investment grade bonds
 }
+
+print("Fractional differencing order by reference ETF:")
+for _sym, _d in REFERENCE_ETFS.items():
+    print(f"  {_sym:<5s} d={_d}")
 
 # %% [markdown]
 # ### Per-Fold FFD Application
@@ -579,7 +704,7 @@ def fit_garch_fold(
     symbols: list[str],
     fold: dict,
     min_obs: int,
-) -> pl.DataFrame:
+) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Fit GARCH(1,1) per symbol for one fold.
 
     Parameters
@@ -604,6 +729,7 @@ def fit_garch_fold(
     val_end = fold["val_end"]
 
     results = []
+    param_rows = []
     n_success = 0
     n_fail = 0
 
@@ -653,6 +779,18 @@ def fit_garch_fold(
             )
             filtered = full_model.fix(train_result.params)
 
+            # Keep the frozen training parameters: persistence (alpha+beta) is the
+            # number that says whether this fold's fit is near-integrated.
+            _pr = train_result.params
+            param_rows.append(
+                {
+                    "symbol": sym,
+                    "omega": float(_pr.get("omega", np.nan)),
+                    "alpha": float(_pr.get("alpha[1]", np.nan)),
+                    "beta": float(_pr.get("beta[1]", np.nan)),
+                }
+            )
+
             # Annualized conditional vol (input is in % daily)
             cond_vol_ann = filtered.conditional_volatility * np.sqrt(252) / 100
 
@@ -672,18 +810,27 @@ def fit_garch_fold(
             n_fail += 1
 
     print(f"  Fold {fold_idx} GARCH: {n_success}/{len(symbols)} fitted, {n_fail} failed/skipped")
-    return pl.concat(results) if results else pl.DataFrame()
+    params = (
+        pl.DataFrame(param_rows).with_columns(pl.lit(fold_idx).alias("fold"))
+        if param_rows
+        else pl.DataFrame()
+    )
+    return (pl.concat(results) if results else pl.DataFrame()), params
 
 
 # %%
 garch_fold_results = []
+garch_fold_params = []
 
 for fold in all_folds:
-    garch_fold = fit_garch_fold(prices, all_symbols, fold, GARCH_MIN_OBS)
+    garch_fold, garch_params = fit_garch_fold(prices, all_symbols, fold, GARCH_MIN_OBS)
     if len(garch_fold) > 0:
         garch_fold_results.append(garch_fold)
+    if len(garch_params) > 0:
+        garch_fold_params.append(garch_params)
 
 garch_df = pl.concat(garch_fold_results) if garch_fold_results else pl.DataFrame()
+garch_param_df = pl.concat(garch_fold_params) if garch_fold_params else pl.DataFrame()
 garch_cols = ["garch_cond_vol"]
 
 if len(garch_df) > 0:
@@ -779,10 +926,16 @@ for col in temporal_cols:
     print(f"  {col:30s}: {valid:,}/{total:,} valid, mean={mean:.4f}, std={std:.4f}")
 
 # %% [markdown]
-# ### Per-Fold Feature Stability
+# ### Fit Stability Across Folds
 #
-# Check that HMM and GARCH features are stable across folds (model
-# parameters should not drift drastically with overlapping training windows).
+# The training windows overlap heavily, so the fitted parameters should move
+# slowly as the window rolls. Two things are worth separating, and the old
+# version of this section conflated them: the **features** a fold produced, and
+# the **parameters** that produced them. Feature means move with the market the
+# fold happens to cover; parameters moving is a statement about the model.
+#
+# A parameter that is flat across folds says per-fold refitting bought nothing.
+# One that swings is a warning about the feature that depends on it.
 
 # %%
 print("\nPer-fold feature means:")
@@ -792,6 +945,84 @@ fold_summary = (
     .sort("fold")
 )
 print(fold_summary)
+
+# %%
+hmm_param_df = pl.DataFrame(hmm_fold_params).sort("fold")
+print("\nPer-fold HMM parameters (states ordered by variance):")
+print(hmm_param_df)
+
+if len(garch_param_df):
+    garch_param_summary = (
+        garch_param_df.with_columns(persistence=pl.col("alpha") + pl.col("beta"))
+        .group_by("fold")
+        .agg(
+            pl.col("alpha").median().alias("alpha_median"),
+            pl.col("beta").median().alias("beta_median"),
+            pl.col("persistence").median().alias("persistence_median"),
+            pl.len().alias("n_fits"),
+        )
+        .sort("fold")
+    )
+    print("\nPer-fold GARCH parameters (median across ETFs):")
+    print(garch_param_summary)
+
+# %%
+fig_stab, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(12, 4))
+
+ax_l.plot(
+    hmm_param_df["fold"],
+    hmm_param_df["persist_stress"],
+    marker="o",
+    color=COLORS["copper"],
+    label="P(stay | stress)",
+)
+ax_l.plot(
+    hmm_param_df["fold"],
+    hmm_param_df["persist_calm"],
+    marker="o",
+    color=COLORS["blue"],
+    label="P(stay | calm)",
+)
+ax_l.set_xlabel("Fold (0 = most recent)")
+ax_l.set_ylabel("Probability of staying in the state")
+ax_l.legend(frameon=False, fontsize=8)
+ax_l.set_title("HMM state persistence", loc="left", fontsize=10)
+
+if len(garch_param_df):
+    ax_r.plot(
+        garch_param_summary["fold"],
+        garch_param_summary["persistence_median"],
+        marker="o",
+        color=COLORS["copper"],
+        label="alpha + beta",
+    )
+    ax_r.axhline(1.0, color=COLORS["neutral"], linestyle="--", linewidth=0.8)
+    ax_r.set_ylabel("Coefficient sum (median across ETFs)")
+    ax_r.legend(frameon=False, fontsize=8)
+ax_r.set_xlabel("Fold (0 = most recent)")
+ax_r.set_title("GARCH persistence", loc="left", fontsize=10)
+
+# Both panels carry a persistence on [0, 1], so they share limits. Letting each
+# autoscale is what makes a flat line and a moving one look equally dramatic,
+# and the claim in the suptitle is a comparison between the two panels.
+_stab_lo = min(
+    float(hmm_param_df["persist_stress"].min()),
+    float(hmm_param_df["persist_calm"].min()),
+    float(garch_param_summary["persistence_median"].min()) if len(garch_param_df) else 1.0,
+)
+for _ax in (ax_l, ax_r):
+    _ax.set_ylim(_stab_lo - 0.01, 1.005)
+
+fig_stab.suptitle(
+    "Refitting moves the GARCH persistence far more than the HMM transitions",
+    x=0.01,
+    ha="left",
+    color=COLORS["blue"],
+    fontweight="semibold",
+)
+sns.despine()
+fig_stab.tight_layout()
+plt.show()
 
 # %% [markdown]
 # ## Save Artifacts
@@ -817,8 +1048,8 @@ print(
 # expectations here would break the seal (mirrors the scoping in 02/03).
 
 # %%
-labels = pl.read_parquet(CASE_DIR / "labels" / "fwd_ret_21d.parquet")
-label_col = "fwd_ret_21d"
+labels = pl.read_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")
+label_col = PRIMARY_LABEL
 
 # Only evaluate on validation periods of the CV folds (exclude the holdout fold)
 val_rows = []
@@ -862,14 +1093,17 @@ for feat in per_asset_features:
         .group_by("timestamp")
         .agg(pl.corr("_feat_rank", "_label_rank").alias("ic"))
         .sort("timestamp")
+        .drop_nulls("ic")
     )
-    ics = ic_series["ic"].drop_nulls().to_numpy()
-    if len(ics) > 50:
+    if len(ic_series) > 50:
+        # Overlapping daily ICs: the horizon sets the HAC lag.
+        stats = compute_ic_hac_stats(ic_series, ic_col="ic", label_horizon=LABEL_HORIZON_DAYS)
         temporal_ic[feat] = {
-            "ic": float(np.nanmean(ics)),
-            "t_stat": float(np.nanmean(ics) / (np.nanstd(ics) / np.sqrt(len(ics)))),
-            "p_value": None,
-            "bootstrap_std": float(np.nanstd(ics)),
+            "ic": stats["mean_ic"],
+            "t_stat": stats["t_stat"],
+            "naive_t_stat": stats["naive_t_stat"],
+            "p_value": stats["p_value"],
+            "bootstrap_std": stats["hac_se"],
         }
 
 # %% [markdown]
@@ -893,6 +1127,17 @@ date_features = (
 )
 eval_ts = date_features.join(avg_ret, on="timestamp", how="inner").drop_nulls()
 
+# `robust_ic` resamples through the stationary bootstrap, and the library draws
+# from numpy's legacy global generator without seeding it
+# (`ml4t/diagnostic/evaluation/stats/bootstrap.py`, `np.random.randint` and
+# `np.random.geometric`). Unseeded, the p-values move from run to run and the
+# Benjamini-Hochberg count below moves with them - two consecutive production runs
+# of this notebook retained 7 and then 8 of the same 14 features, on identical ICs.
+# The seed is what makes the committed number the one a reader reproduces. The
+# per-asset HAC statistics are deterministic and unaffected.
+BOOTSTRAP_SEED = 20260805
+np.random.seed(BOOTSTRAP_SEED)
+
 for feat in date_level_features:
     x = eval_ts[feat].to_numpy()
     y = eval_ts["avg_fwd_ret"].to_numpy()
@@ -901,6 +1146,15 @@ for feat in date_level_features:
         continue
     result = robust_ic(x[valid], y[valid], return_details=True)
     temporal_ic[feat] = result
+
+# %% [markdown]
+# ### Multiplicity Control
+#
+# Every feature above was screened against the same label on the same validation
+# rows, so the per-feature p-values cannot be read one at a time. Benjamini-Hochberg
+# is applied across the whole set, and the retained count is what the figure below
+# reports. Both IC types now carry a dependence-aware standard error: HAC for the
+# per-asset series, stationary bootstrap for the date-level ones.
 
 # %%
 temporal_eval = pl.DataFrame(
@@ -916,25 +1170,56 @@ temporal_eval = pl.DataFrame(
     ]
 ).sort("ic", descending=True)
 
+_p = temporal_eval["p_value"].to_list()
+if temporal_eval.height and all(v is not None for v in _p):
+    _fdr = benjamini_hochberg_fdr(_p, alpha=0.05, return_details=True)
+    temporal_eval = temporal_eval.with_columns(fdr_significant=pl.Series(_fdr["rejected"].tolist()))
+else:
+    temporal_eval = temporal_eval.with_columns(fdr_significant=pl.lit(False, dtype=pl.Boolean))
+n_fdr_sig = int(temporal_eval.filter(pl.col("fdr_significant")).height)
+
 print("\nModel-Based Feature Evaluation (validation periods only):")
 print(temporal_eval)
+print(f"Retained by Benjamini-Hochberg at 5%: {n_fdr_sig} of {temporal_eval.height}")
+
+# %% [markdown]
+# The bars carry no error bars because the two IC types have different
+# uncertainty scales - stationary-bootstrap SE for the date-level features, HAC SE
+# for the per-asset ones - so a shared error-bar axis would mislead. The exact
+# t-statistics and p-values are in the table above.
 
 # %%
-# Visualize the IC table: bars sorted by IC, signed by color. No error bars --
-# the two IC types carry different uncertainty scales (date-level = time-series
-# robust_ic bootstrap SE; per-asset garch = daily cross-sectional IC dispersion),
-# so a shared error-bar axis would mislead; exact t/p are in the printed table.
 te = temporal_eval.sort("ic")
 feats = te["feature"].to_list()
 ics = te["ic"].to_numpy()
-bar_colors = [COLORS["blue"] if v >= 0 else COLORS["copper"] for v in ics]
+# Retained vs not is a semantic distinction, so it needs contrast in lightness
+# rather than shade: the palette's dark end (blue, blue_light, slate, neutral)
+# is four navies that do not separate when read as bars. Unretained features are
+# drawn hollow.
+bar_colors = [
+    (COLORS["blue"] if row["ic"] >= 0 else COLORS["copper"])
+    if row["fdr_significant"]
+    else COLORS["silver_muted"]
+    for row in te.to_dicts()
+]
+bar_edges = [
+    (COLORS["blue"] if row["ic"] >= 0 else COLORS["copper"])
+    if row["fdr_significant"]
+    else COLORS["neutral"]
+    for row in te.to_dicts()
+]
 
 fig_ic, ax = plt.subplots(figsize=(9, max(3.0, 0.4 * len(feats))))
-ax.barh(feats, ics, color=bar_colors)
+ax.barh(feats, ics, color=bar_colors, edgecolor=bar_edges, linewidth=0.9)
 ax.axvline(0, color=COLORS["neutral"], linewidth=0.8)
-ax.set_xlabel("IC (validation periods; per-asset = cross-sectional, date-level = time-series)")
+ax.set_xlabel(
+    "IC (validation periods; per-asset = cross-sectional, date-level = time-series)"
+    "\nFilled = retained by Benjamini-Hochberg at 5%; hollow = not retained"
+)
 ax.set_title(
-    "Regime-stress and fractional-differencing features carry real IC (up to |0.20|)",
+    "No model-based feature is retained after multiplicity control"
+    if n_fdr_sig == 0
+    else "Model-based feature IC on validation folds",
     loc="left",
     color=COLORS["blue"],
     fontweight="semibold",
@@ -944,16 +1229,19 @@ fig_ic.tight_layout()
 plt.show()
 
 # %% [markdown]
-# **Interpretation**: GARCH conditional volatility is evaluated via
-# cross-sectional IC (does higher predicted vol predict lower returns?).
-# Date-level features (HMM, FFD) are evaluated via time-series IC against
-# the average market return. Both types add value through different channels:
-# GARCH enables cross-sectional differentiation, while regime features
-# enable conditional strategies (e.g., reduce exposure in stress regimes).
+# **Reading the two IC types.** They answer different questions and are not
+# comparable to each other. `garch_cond_vol` varies across ETFs on a date, so its
+# IC asks whether the cross-section of predicted volatility orders the
+# cross-section of forward returns - and the sign of that ordering is whatever
+# the table above reports, in either direction. The HMM and FFD features are
+# identical across ETFs on a date, so a cross-sectional IC on them is zero by
+# construction; theirs is a time-series correlation against the average forward
+# return, which is a statement about market timing rather than about ranking.
 #
-# Because all features are now computed per fold with training-only
-# parameters, the IC values reflect genuine out-of-sample signal strength
-# rather than in-sample fit quality.
+# Because every feature is computed per fold from training-only parameters, these
+# are out-of-sample estimates rather than in-sample fit. They are still a screen
+# and not a decision: nothing here drops a feature, and the comparison against the
+# stage-03 financial features belongs to `05_evaluation`.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -971,9 +1259,10 @@ plt.show()
 # 5. **GARCH fit-then-filter**: `model.fix(params)` applies frozen training
 #    parameters to the full fold window, producing causal conditional
 #    volatility without re-estimation.
-# 6. **Fractional differencing**: Fixed $d$ by asset class (equities=0.4,
-#    fixed income=0.5) requires no fitting, but is computed per fold
-#    window for clean warmup handling.
+# 6. **Fractional differencing**: A fixed $d$ per asset class requires no
+#    fitting, so there is no estimation lookahead to exclude; it is still
+#    computed per fold window for clean warmup handling. The orders used are
+#    printed in Part 2.
 # 7. **Per-ETF GARCH**: Conditional volatility provides asset-specific risk
 #    dynamics, enabling cross-sectional differentiation (unlike date-level
 #    features which are shared across all ETFs).
