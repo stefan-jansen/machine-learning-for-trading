@@ -49,7 +49,9 @@ import polars as pl
 from case_studies.crypto_perps_funding.funding_data import load_funding_rates
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
+    get_rebalance_step,
     load_backtest_prices_for,
+    thin_to_rebalance_dates,
     warmup_periods_for,
 )
 from case_studies.utils.backtest_presets import (
@@ -294,11 +296,21 @@ funding = (
         & (pl.col("timestamp") <= prices["timestamp"].max())
     )
 )
-panel_sizes = predictions.group_by("timestamp").len().rename({"len": "n_assets"})
+# Breadth is a property of the settlements the allocator actually sizes, not of every settlement
+# scored. The runner thins predictions to non-overlapping rebalance dates before allocating, so the
+# same thinning is applied here rather than reproduced by hand - a step applied twice thins by its
+# square, which is the failure this shares a helper to avoid.
+rebalance_panel = thin_to_rebalance_dates(
+    predictions,
+    cadence=strategy["rebalance"]["cadence"],
+    step=get_rebalance_step(CASE_STUDY, LABEL),
+)
+panel_sizes = rebalance_panel.group_by("timestamp").len().rename({"len": "n_assets"})
 capped_timestamps = panel_sizes.filter(pl.col("n_assets") < 2 * allocation["top_k"]).height
 print(
     f"Predictions: {predictions.height:,}; prices: {prices.height:,}; "
-    f"settlements: {funding.height:,}; dynamically capped timestamps: {capped_timestamps}"
+    f"settlements: {funding.height:,}; rebalance settlements: {panel_sizes.height:,}; "
+    f"dynamically capped: {capped_timestamps}"
 )
 
 # %% [markdown]
