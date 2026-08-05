@@ -109,6 +109,7 @@ CLIP = features_cfg["clip"]
 MAJORS = set(features_cfg["majors"])
 RANKED = features_cfg["ranked"]
 REDUNDANCY_CUT = features_cfg["redundancy_cut"]
+MIN_CROSS_SECTION = 2
 BAR_HOURS = features_cfg["bar_hours"]
 BARS_PER_YEAR = setup["evaluation"]["periods_per_year"] * 24 / BAR_HOURS
 HOLDOUT_START = datetime.fromisoformat(setup["evaluation"]["holdout_start"]).replace(tzinfo=UTC)
@@ -549,6 +550,16 @@ def regime_features(df: pl.DataFrame) -> pl.DataFrame:
 # and it is what this notebook did until the ordering was measured - at the settlement of
 # 2020-01-31 the emitted cross-section holds two perpetuals, and `premium_rank` was a position
 # among five.
+#
+# Ordering the two steps this way decides which cross-section is read; it does not yet say that
+# there is one. The z-score and the dispersion are both standard deviations over the settlement,
+# which one observation does not define, so a settlement where the gate leaves a single perpetual
+# has no value to write for either. Emitting a null there and then asserting the matrix has none is
+# a contradiction the panel reaches whenever the surviving cross-section narrows to one, so the
+# gate takes `MIN_CROSS_SECTION` as its second clause and that settlement does not reach the matrix.
+# A median and a percentile are defined at one observation and are dropped with it: they are
+# properties of the same cross-section, and keeping the row for the two columns that survive would
+# ship a settlement whose position statistics have nothing to be a position among.
 
 
 # %%
@@ -572,7 +583,8 @@ def build_features(df: pl.DataFrame) -> pl.DataFrame:
     """The whole construction, as one function Section D can re-run on a shorter panel."""
     trailing = per_symbol_features(df)
     eligible = trailing.drop_nulls(subset=[c for c in SYMBOL_COLS if c in trailing.columns])
-    return eligible.pipe(cross_sectional_features).with_columns(
+    contested = eligible.filter(pl.len().over("timestamp") >= MIN_CROSS_SECTION)
+    return contested.pipe(cross_sectional_features).with_columns(
         cross_sectional_percentile(RANKED, "timestamp").alias("premium_rank")
     )
 
@@ -663,10 +675,11 @@ seal.filter(pl.col("column").is_in(["premium_rank", "premium_xs_zscore", "fundin
 # deliberate exception, the premium index under a name that says it is shipped as a signal.
 #
 # One null policy is applied once, and C.7 is where: a row reaches the matrix only when every
-# per-symbol feature on it is observed, and the within-settlement statistics are then taken over
-# exactly the rows that survived. The successor stages include sequence models that cannot take a
-# gap, so a matrix dense by construction is worth more here than the rows a looser rule recovers -
-# and the assertion below is what makes "dense" a fact rather than an intention.
+# per-symbol feature on it is observed and its settlement retains the two perpetuals a
+# within-settlement statistic needs, and those statistics are then taken over exactly the rows that
+# survived. The successor stages include sequence models that cannot take a gap, so a matrix dense
+# by construction is worth more here than the rows a looser rule recovers - and the assertion below
+# is what makes "dense" a fact rather than an intention.
 #
 # What that costs is worth reading rather than absorbing, because almost none of it is warmup. The
 # perpetual close and its volume are complete, but the premium index has scattered gaps, and one
