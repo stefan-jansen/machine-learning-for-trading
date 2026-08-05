@@ -349,10 +349,10 @@ print(f"HAC/FDR multiplicity ratio: {multiple_testing_ratio:.2f}x")
 # Everything below this point is a scalar summary of one object: the monthly IC
 # series. Two failure modes are visible only in the series and in no summary of
 # it - an IC that comes from one episode and is flat around it, and an IC that
-# changes sign between folds - so the series is drawn before it is reduced. The
-# bands are the naive standard error, the HAC standard error that allows for
-# serial dependence between overlapping monthly ICs, and a block bootstrap that
-# assumes neither.
+# changes sign between folds - so the series is drawn before it is reduced. Two
+# bands are drawn around the full-sample mean: the HAC interval, which allows for
+# serial dependence in the monthly IC series, and a block bootstrap, which assumes
+# no parametric form for it.
 
 # %%
 LEADING_FOR_SERIES = 3
@@ -493,10 +493,12 @@ plt.show()
 # mean is what a long-short book earns; the median is where the typical firm in
 # that bin ends up. Under the return distribution of a wide equity cross-section
 # these two can point in opposite directions, because a handful of very large
-# positive returns move a mean and cannot move a median. Where they disagree, the
-# rank IC above agrees with the median, since it is also a rank statistic: a
-# feature can carry a clearly negative IC and still show a mean profile that
-# climbs from Q1 to Q5. `monotonicity` in the ledger is computed on the means,
+# positive returns move a mean and cannot move a median. Where they disagree here,
+# the rank IC above sides with the median. That is not a theorem - the median is a
+# location statistic and Spearman correlation is not a statement about it - but
+# both are insensitive to how far the extreme returns reach, and it is that tail
+# the mean is reading. So a feature can carry a clearly negative IC and still show
+# a mean profile that climbs from Q1 to Q5. `monotonicity` in the ledger is computed on the means,
 # which is the convention all nine case studies share, and it is a description of
 # the shape rather than an input to any triage rule.
 
