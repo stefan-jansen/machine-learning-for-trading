@@ -45,7 +45,7 @@
 #   one it is evaluated over - and keep the first inside the fold
 # - Read a per-fold parameter path as evidence about refit cadence rather than as noise
 # - Measure a stationarity-versus-memory trade instead of quoting the default that encodes it
-# - Score an incremental IC on validation rows, in time order, with the autocorrelation and
+# - Score a marginal IC on validation rows, in time order, with the autocorrelation and
 #   multiplicity corrections separated
 #
 # ## Book reference, prerequisites and artifacts
@@ -53,7 +53,7 @@
 # Chapter 9, Sections 9.1 (Stationarity), 9.3 (Volatility), 9.5 (Regimes). Reads the adjusted
 # daily panel through `load_us_equities()`, `config/setup.yaml` for the fold design and the
 # holdout boundary, and the primary label file written by [`02_labels`](02_labels.ipynb) for
-# the incremental IC in Section 7. Writes `features/model_based.parquet` and its digest
+# the marginal IC in Section 7. Writes `features/model_based.parquet` and its digest
 # sidecar, which the model stages join to the stage-03 matrix on `(symbol, timestamp, fold)`.
 
 # %%
@@ -1157,10 +1157,27 @@ if len(mkt_garch_df) > 0:
 # below give both ranges, and the spread of the GARCH band matters separately from the
 # position of its median: a median that repeats while the interquartile band widens says the
 # typical stock's volatility dynamics are stable and the tails of the subsample are not.
+#
+# **Two things have to be held fixed for the comparison to be about the parameters.** The
+# holdout fold is excluded, because its training window is the whole pre-holdout sample
+# against the CV folds' rolling ten years, so a difference there would be a window-length
+# difference. And the liquidity ranking selects a slightly different top-`GARCH_TOP_N` each
+# fold, so the persistence path is restricted to the symbols every CV fold selected - the
+# count is printed. Without both restrictions the line would move for three reasons at once
+# and support no statement about any of them.
 
 # %%
+_cv_folds = [f["fold"] for f in folds if not f["is_holdout"]]
+_cv_params = garch_params.filter(pl.col("fold").is_in(_cv_folds))
+_common_symbols = (
+    _cv_params.group_by("symbol")
+    .agg(pl.col("fold").n_unique().alias("n_folds"))
+    .filter(pl.col("n_folds") == len(_cv_folds))["symbol"]
+    .to_list()
+)
 _persistence = (
-    garch_params.with_columns((pl.col("alpha") + pl.col("beta")).alias("persistence"))
+    _cv_params.filter(pl.col("symbol").is_in(_common_symbols))
+    .with_columns((pl.col("alpha") + pl.col("beta")).alias("persistence"))
     .group_by("fold")
     .agg(
         pl.col("persistence").median().alias("median"),
@@ -1169,7 +1186,12 @@ _persistence = (
     )
     .sort("fold")
 )
-_centroids = pl.DataFrame(wass_centroid_rows).sort("fold")
+_centroids = pl.DataFrame(wass_centroid_rows).filter(pl.col("fold").is_in(_cv_folds)).sort("fold")
+print(
+    f"{len(_common_symbols)} of the {GARCH_TOP_N} fitted stocks were selected by all "
+    f"{len(_cv_folds)} CV folds; the persistence path below is those, and the holdout fold is "
+    "excluded because its training window is a different length"
+)
 
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
 ax1.plot(_persistence["fold"], _persistence["median"], color=COLORS["blue"], marker="o", ms=3)
@@ -1189,13 +1211,13 @@ ax2.set_xlabel("Fold")
 add_message_title(
     ax1,
     "The volatility fit repeats across folds; the regime fit does not",
-    subtitle="Median GARCH persistence with its interquartile band, and the centroid gap",
+    subtitle="One cohort of stocks across the CV folds, and the centroid gap",
 )
 plt.show()
 
 print(
     f"GARCH persistence: median per fold from {_persistence['median'].min():.4f} to "
-    f"{_persistence['median'].max():.4f} over {_persistence.height} folds"
+    f"{_persistence['median'].max():.4f} over {_persistence.height} CV folds"
 )
 print(
     f"Wasserstein centroid separation: {_centroids['centroid_separation'].min():.5f} to "
@@ -1364,12 +1386,16 @@ print(f"Saved {n_temporal_features} features to {display_path(output_path)}")
 print(f"model_based.parquet: {record['n_rows']:,} rows, digest {record['digest']}")
 print(f"  Folds: {sorted(temporal['fold'].unique().to_list())}")
 # %% [markdown]
-# ## 7. Incremental IC Evaluation
+# ## 7. Marginal IC Evaluation
 #
-# One question: does a fitted feature carry anything against the primary label that the
-# stage-03 matrix did not? It is asked, not answered with a selection - which features to
-# keep is [`05_evaluation`](05_evaluation.ipynb)'s decision, and this section selects
-# nothing.
+# What each feature ranks the cross-section by, on its own, against the primary label. That
+# is a **marginal** quantity and not an incremental one, and the difference matters: a
+# feature can carry a real marginal IC and add nothing a model did not already have from the
+# stage-03 matrix, or carry almost none and still matter once the model conditions on it.
+# Answering the incremental question means fitting with and without these columns on the same
+# folds, which needs both matrices and a model - so it is
+# [`05_evaluation`](05_evaluation.ipynb)'s, and this section neither answers it nor selects
+# anything.
 #
 # **Validation rows only.** Each fold's training bars are the bars its parameters came from,
 # so scoring them measures the fit rather than the feature. The frame below is the union of
@@ -1594,10 +1620,12 @@ plt.show()
 # 4. **Measure the trade a default encodes.** The differencing order is not searched per fold
 #    and does not have to be, but the memory it keeps and the stationarity it buys are
 #    measurable in a few lines and were worth measuring rather than quoting.
-# 5. **Score the increment on validation rows, in time order.** Training rows measure the
-#    fit, not the feature; a per-date IC series in partition order gives a Newey-West
-#    standard error computed over a permutation of time; and the multiplicity correction is a
-#    separate quantity from the autocorrelation one.
+# 5. **Score on validation rows, in time order, and call the result what it is.** Training
+#    rows measure the fit rather than the feature; a per-date IC series in partition order
+#    gives a Newey-West standard error computed over a permutation of time; the multiplicity
+#    correction is a separate quantity from the autocorrelation one; and a per-feature IC is
+#    marginal, so it cannot answer the incremental question however many corrections it
+#    carries.
 # 6. **Check that the statistic can reach the feature before reporting it.** Most of what a
 #    market-level transform emits is constant within a date, and a cross-sectional
 #    correlation against a constant is undefined rather than zero. The helper will still
@@ -1618,6 +1646,13 @@ plt.show()
 #   blind to a regime that keeps its centre and widens its tails.
 # - The refit cadence is one fit per fold with nothing updating between refits. The fit
 #   stability figure says what that costs; choosing a different cadence is not attempted here.
+# - Running the per-symbol transforms on the complete series stops a window from counting
+#   eligible rows instead of sessions, but the complete series still has holes: a stock that
+#   is suspended and resumes has consecutive rows spanning months, and a shift, an FFD
+#   convolution and a variance recursion all read them as consecutive sessions.
+#   [`02_labels`](02_labels.ipynb) Section D measures how often that happens on the forward
+#   side and this notebook does not segment on it, so a feature on the first row after a
+#   suspension is built partly from before it.
 # - `arch`'s `.fix()` recomputes its internal variance bounds over the series it is handed,
 #   which spans training and validation. The clipping envelope therefore depends on the
 #   validation period even though the parameters do not.
