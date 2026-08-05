@@ -482,17 +482,18 @@ def evaluation_notebook_label() -> tuple[str, int]:
     # call the label frame is not built from.
     literals: dict[str, object] = {}
     horizon_alias: ast.expr | None = None
-    label_source: ast.expr | None = None
+    sources: dict[str, ast.expr] = {}
     for node in tree.body:
         if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
             continue
         target = node.targets[0]
         if not isinstance(target, ast.Name):
             continue
-        if target.id in ("PRIMARY_LABEL", "HAC_MAXLAGS") and isinstance(node.value, ast.Constant):
-            literals[target.id] = node.value.value
-        elif target.id == "PRIMARY_LABEL":
-            label_source = node.value
+        if target.id in ("PRIMARY_LABEL", "LABEL_BUFFER", "HAC_MAXLAGS"):
+            if isinstance(node.value, ast.Constant):
+                literals[target.id] = node.value.value
+            else:
+                sources[target.id] = node.value
         elif target.id == "LABEL_HORIZON":
             horizon_alias = node.value
 
@@ -501,9 +502,25 @@ def evaluation_notebook_label() -> tuple[str, int]:
         f"{sorted(literals)} again; its label and horizon come from setup.yaml, "
         "and a literal there can disagree with the label the case study selects"
     )
-    assert label_source is not None and "SETUP" in {
-        sub.id for sub in ast.walk(label_source) if isinstance(sub, ast.Name)
-    }, "05_evaluation's PRIMARY_LABEL no longer comes from the loaded setup config"
+
+    def names_in(node: ast.AST) -> set[str]:
+        return {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)}
+
+    # Each of the three has to be derived from the one below it, or the chain from
+    # `setup.yaml` to the purge is broken somewhere in the middle and this helper
+    # reports a horizon the notebook does not use. `HAC_MAXLAGS = 21 * 2` is not a
+    # literal, so the check above does not catch it; requiring LABEL_BUFFER in the
+    # expression does.
+    for name, required in (
+        ("PRIMARY_LABEL", "SETUP"),
+        ("LABEL_BUFFER", "PRIMARY_LABEL"),
+        ("HAC_MAXLAGS", "LABEL_BUFFER"),
+    ):
+        assert name in sources, f"05_evaluation no longer assigns {name} at module level"
+        assert required in names_in(sources[name]), (
+            f"05_evaluation derives {name} from something other than {required}, so "
+            "the label and horizon this helper resolves are not the ones it purges on"
+        )
     assert isinstance(horizon_alias, ast.Name) and horizon_alias.id == "HAC_MAXLAGS", (
         "05_evaluation's purge horizon is no longer HAC_MAXLAGS itself, so this "
         "helper would report a horizon the notebook does not use"
@@ -517,9 +534,6 @@ def evaluation_notebook_label() -> tuple[str, int]:
             and isinstance(sub.func, ast.Attribute)
             and sub.func.attr == method
         ]
-
-    def names_in(node: ast.AST) -> set[str]:
-        return {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)}
 
     # The label frame must be read through the constant, in every statement that
     # builds it -- not merely somewhere in the file.
