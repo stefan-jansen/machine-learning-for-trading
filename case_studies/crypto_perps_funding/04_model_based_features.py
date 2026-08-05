@@ -42,6 +42,7 @@
 
 import warnings
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -893,6 +894,13 @@ for idx, fold in enumerate(sorted(active_folds, key=lambda item: item["test_star
     )
 ax.axhline(0.5, color=COLORS["neutral"], linewidth=0.8, linestyle="--")
 ax.set(xlabel="Decision timestamp (UTC)", ylabel="Filtered stress probability")
+# The two validation windows span two years at single-column width, where the
+# default locator asks for a quarterly tick and the ISO labels then run into each
+# other. A concise formatter carries the year once in the offset and prints the
+# month alone underneath.
+_locator = mdates.AutoDateLocator(maxticks=7)
+ax.xaxis.set_major_locator(_locator)
+ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(_locator))
 ax.set_ylim(0, 1.35)
 ax.legend(loc="upper left", ncols=2, frameon=False, fontsize=7)
 # The per-fold shares are computed here rather than typed into the string. They are
