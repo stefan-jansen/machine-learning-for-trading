@@ -142,7 +142,7 @@ ax.set_ylabel("Products quoting at the weekly decision")
 ax.legend(frameon=False, fontsize=8, loc="lower right")
 add_message_title(
     ax,
-    "Holiday sessions are the only decision dates a two-sided book cannot fill",
+    "A few thin sessions leave too few products to fill both legs",
     subtitle="Products settling on the week's final session, the date the strategy acts on",
 )
 plt.show()
@@ -283,7 +283,7 @@ print(
 
 # %% [markdown] tags=["results"]
 # The median round-trip spread across the thirty products is 1.13 bps, from 0.43 bps on
-# the two-year note to 5.80 bps on corn. The median absolute five-session move is 121.2
+# the E-mini Nasdaq-100 to 5.80 bps on corn. The median absolute five-session move is 121.2
 # bps, and 0.991 of moves exceed the spread their own product would charge to cross.
 
 # %% [markdown]
@@ -303,7 +303,9 @@ print(
 # which would make an inverted-carry reading a regime artifact; and cost above the median
 # move for most of the products.
 #
-# ### C.3 Mapping class. `setup.yaml::mapping.class` ranks products by carry or momentum and holds both legs, and
+# ### C.3 Mapping class
+#
+# `setup.yaml::mapping.class` ranks products by carry or momentum and holds both legs, and
 # shorting a future carries no borrow, so the short leg costs what the long leg costs.
 # Sizing is equal-risk because volatilities differ by an order of magnitude and notional
 # weighting would hand the book to energy and grains.
@@ -350,8 +352,10 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# ## E. Derived artifacts. Nothing: listings fix the universe, so nothing downstream reads
-# an eligibility file from here.
+# ## E. Derived artifacts
+#
+# Nothing is written here: the exchange listings fix the universe, so nothing downstream
+# reads an eligibility file from this notebook.
 
 # %% [markdown]
 # ## F. Findings vs `setup.yaml`
@@ -377,14 +381,15 @@ print(
 
 # %% [markdown] tags=["results"]
 # Breadth is 29 products until the small-cap index contract lists in 2017 and 30 after, with
-# 8 at its worst on a Good Friday; the floor of 20 binds on 7 of 678 decision dates, every
-# one a holiday session. Five folds are generated, the last validation ending 2023-12-21.
+# 8 at its worst on a Good Friday; the floor of 20 binds on 7 of 678 decision dates, five of
+# them Good Friday and two ordinary Fridays on which the settlement file carries part of the
+# universe. Five folds are generated, the last validation ending 2023-12-21.
 
 # %% [markdown]
 # ## Key takeaways
 #
 # 1. **Count the universe on the session the strategy acts on.** Anywhere-in-the-week hides
-#    the holiday dates where a two-sided book cannot be filled.
+#    the thin sessions where a two-sided book cannot be filled.
 # 2. **Take the tick from the contract specification, not from the prices.** Several
 #    contracts settle on half-ticks, so the observed grid understates what you pay.
 # 3. **Scale moves by each product's own spread before comparing them to cost**, and
