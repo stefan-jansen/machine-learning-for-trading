@@ -98,8 +98,13 @@ EVAL_DIR.mkdir(exist_ok=True)
 JOIN_COLS = ["timestamp", "symbol"]
 DATE_COL = "timestamp"
 
-# Every bound below is read from `config/setup.yaml`; nothing that decides which
-# rows are eligible or where a threshold sits is typed into this notebook.
+# Two kinds of constant, kept apart deliberately. The label, its horizon and the
+# holdout boundary describe the case study and are read from
+# `config/setup.yaml`, so a change there moves this notebook with it. The
+# screening thresholds below them are this notebook's own judgment about what
+# counts as enough coverage or enough stability; they belong to the screen rather
+# than to the case study, and they are named here so the prose can refer to them
+# instead of retyping their values.
 setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 PRIMARY_LABEL = setup["labels"]["primary"]
 PRIMARY_LABEL_FILE = f"{PRIMARY_LABEL}.parquet"

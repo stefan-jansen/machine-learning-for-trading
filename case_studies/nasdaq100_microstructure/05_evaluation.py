@@ -106,9 +106,13 @@ DATE_COL = "timestamp"
 # %% [markdown]
 # ## Configuration
 #
-# Every window, boundary and horizon below is read from `config/setup.yaml`. Nothing
-# that bounds the evaluation is typed into this notebook, so a change to the case
-# study's declared setup moves this notebook with it rather than past it.
+# Two kinds of constant, kept apart deliberately. The label, its horizon and the
+# holdout boundary describe the case study and are read from `config/setup.yaml`, so
+# a change to the declared setup moves this notebook with it rather than past it.
+# The screening thresholds below them are this notebook's own judgment about what
+# counts as enough coverage or enough stability; they belong to the screen rather
+# than to the case study, and they are named here so the prose can refer to them
+# instead of retyping their values.
 
 
 # %%
@@ -432,8 +436,10 @@ print(f"Skipped {len(date_level_features)} date-level features")
 # does not, and the block-bootstrap bounds that assume neither a variance formula nor
 # a distribution.
 #
-# This is the figure that makes `evaluation/ic_timeseries.parquet` read by the
-# notebook that writes it.
+# The series drawn here is the one the notebook later writes to
+# `evaluation/ic_timeseries.parquet`, so the artifact is not written for nobody:
+# the figure is its first reader, in memory, and the parquet is the same values on
+# disk for anyone who wants them at a different grain.
 
 # %%
 # One trading week of IC observations, at one observation per label horizon.
@@ -732,16 +738,26 @@ n_significant_naive = sum(1 for p in naive_p_values if p < FDR_ALPHA)
 n_significant_hac = sum(1 for p in p_values if p < FDR_ALPHA)
 n_significant_fdr = int(fdr_result["n_rejected"])
 
-inflation_hac = n_significant_naive / max(n_significant_hac, 1)
-inflation_fdr = n_significant_naive / max(n_significant_fdr, 1)
+
+def inflation(naive_count: int, adjusted_count: int) -> str:
+    """How much the unadjusted count overstates the adjusted one.
+
+    Undefined when the adjustment rejects nothing: substituting one for a zero
+    denominator reports a finite ratio where none exists, and the reader cannot
+    tell the substitution from a measurement.
+    """
+    if adjusted_count == 0:
+        return "undefined (the adjustment rejected nothing)"
+    return f"{naive_count / adjusted_count:.2f}x"
+
 
 print(f"Searched set: {n_searched} features with a computable IC on {label_col}")
 print(f"Expected false positives at the unadjusted level: {expected_false_positives:.1f}")
 print(f"Naive significant:            {n_significant_naive}")
 print(f"Newey-West significant:       {n_significant_hac}")
 print(f"BH-FDR significant:           {n_significant_fdr}")
-print(f"Inflation factor (Newey-West): {inflation_hac:.2f}x")
-print(f"Inflation factor (BH-FDR):     {inflation_fdr:.2f}x")
+print(f"Inflation factor (Newey-West): {inflation(n_significant_naive, n_significant_hac)}")
+print(f"Inflation factor (BH-FDR):     {inflation(n_significant_naive, n_significant_fdr)}")
 
 # %% [markdown] papermill={"duration": 0.001782, "end_time": "2026-05-15T14:11:19.971375+00:00", "exception": false, "start_time": "2026-05-15T14:11:19.969593+00:00", "status": "completed"}
 # ### Ranking, with the Inference Adjustment Visible
