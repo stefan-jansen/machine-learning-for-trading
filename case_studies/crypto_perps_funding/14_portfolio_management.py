@@ -67,7 +67,6 @@ BAR_HOURS = 8
 MAX_SYMBOLS = 0
 TOP_N_PREDICTIONS = None
 CONFORMAL_ALPHA = 0.20
-EXPECTED_PHYSICAL_ROWS = 25
 EXPECTED_ALLOCATORS = (
     "conformal_weighted",
     "equal_weight",
@@ -189,8 +188,17 @@ fig.show()
 # ## Reconstruct the selected allocation grid
 #
 # The winning cohort row fixes the model, checkpoint, and prediction hash before allocator analysis.
-# Historical reruns produced duplicate hashes for some specifications, so the query collapses them to
-# one semantic `(allocator, top_k, lookback)` cell. No result is ranked on the holdout.
+# Several specifications carry more than one registered row - reruns of the same specification, and
+# reparameterizations of a declared allocator that the strategy spec records but the design does not
+# distinguish - so the query collapses them to one semantic `(allocator, top_k, lookback)` cell and
+# reads the best stored Sharpe in it. No result is ranked on the holdout.
+#
+# How many physical rows that is, is not a property of the design: a rerun adds one without changing
+# the grid, and rows have been written against this carrier after the v3.0 cohort metrics were
+# computed, so they are not among the `k_variants` trials the DSR below corrects for
+# ([#63](https://github.com/ml4t/agent-workspace/issues/63)). What the design does fix is the set of
+# semantic cells, and the assertion two cells down requires exactly that set, so a stray allocator or
+# concentration still fails closed while a rerun does not.
 
 
 # %%
@@ -226,11 +234,6 @@ def _allocation_cells(registry_path, prediction_hash: str) -> list[dict]:
     """
     with sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True) as connection:
         rows = connection.execute(query, (prediction_hash,)).fetchall()
-    if len(rows) != EXPECTED_PHYSICAL_ROWS or len({row[0] for row in rows}) != len(rows):
-        raise RuntimeError(
-            f"Expected {EXPECTED_PHYSICAL_ROWS} unique physical allocation rows for the carrier; "
-            f"found {len(rows)}"
-        )
     cells = {}
     for backtest_hash, spec_json, stored_sharpe in rows:
         strategy = json.loads(spec_json)["strategy"]
@@ -261,7 +264,10 @@ top_k_values = sorted({cell["allocation"].get("top_k") for cell in cells})
 observed_grid = {(cell["allocation"]["method"], cell["allocation"].get("top_k")) for cell in cells}
 expected_grid = {(allocator, top_k) for allocator in set(EXPECTED_ALLOCATORS) for top_k in {5, 10}}
 if len(cells) != len(expected_grid) or observed_grid != expected_grid:
-    raise RuntimeError("The registered allocation grid is incomplete")
+    raise RuntimeError(
+        f"The registered allocation grid is not the declared one: expected {len(expected_grid)} "
+        f"cells {sorted(expected_grid)}, found {len(cells)} cells {sorted(observed_grid)}"
+    )
 print(
     f"Semantic allocation grid: {len(cells)} cells across {len(allocator_names)} allocators "
     f"and {len(top_k_values)} concentrations"
