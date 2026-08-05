@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -25,7 +25,9 @@
 # - Assess quantile monotonicity and fold-level stability (10 walk-forward folds)
 # - Produce a triage ledger (PROCEED / REVISE / STOP) for Ch11 model selection
 #
-# **Book Reference**: Chapter 8, Section 8.5 (Feature Evaluation & Triage)
+# **Book Reference**: Chapter 7, Section 7.3 (Univariate feature-label evaluation)
+# and Section 7.4 (Search accounting and multiple testing). Chapter 8.6 is the
+# secondary reference for search control.
 #
 # **Prerequisites**: Run `03_financial_features.py` first.
 
@@ -43,7 +45,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
-from ml4t.diagnostic.metrics import compute_ic_hac_stats
+from ml4t.diagnostic.metrics import compute_ic_hac_stats, compute_ic_uncertainty
 from scipy.stats import spearmanr
 
 from utils.paths import display_path, get_case_study_dir
@@ -53,11 +55,35 @@ from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
 # Production defaults
 MAX_SYMBOLS = 0
 
+# %% [markdown]
+# ## Configuration
+#
+# Every threshold the screens, the triage rule and the figure subtitles refer to is
+# bound once here. A threshold retyped into a markdown table is a second source of
+# truth for a decision the code has already made, and it is how a table comes to
+# describe a rule the notebook stopped applying.
+
 # %%
 CASE_STUDY_ID = "us_firm_characteristics"
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 EVAL_DIR = CASE_DIR / "evaluation"
 EVAL_DIR.mkdir(exist_ok=True)
+
+MIN_COVERAGE = 0.70  # non-null share a feature needs before it is evaluated at all
+FDR_ALPHA = 0.05  # Benjamini-Hochberg level
+REDUNDANCY_CUT = 0.7  # |rho| above which two features are reported as one piece of evidence
+MIN_SIGN_CONSISTENCY = 0.60  # fold-sign agreement the exploration arm requires
+LABEL_HORIZON_MONTHS = 1  # fwd_ret_1m resolves in one month-end step, so ICs do not overlap
+IC_THRESHOLD = 0.01  # |IC| the exploration arm requires, at a monthly rebalance
+N_QUANTILES = 5
+HAC_MAXLAGS = 4  # monthly IC series; the label resolves in one step, so this is the safe side
+
+# The minimum cross-section is derived from the universe actually loaded rather than
+# typed, so a reduced CI run shrinks the gate with it. Typed, the gate exceeds the
+# reduced cross-section and every statistic below is computed on an empty feature set
+# while the test still passes.
+MIN_CROSS_SECTION = 30
+MIN_PERIODS = MIN_CROSS_SECTION if MAX_SYMBOLS == 0 else min(MIN_CROSS_SECTION, MAX_SYMBOLS)
 
 # %% [markdown]
 # ## Section 0: Load Artifacts
@@ -113,7 +139,7 @@ print(f"Features: {len(financial_cols)} financial")
 print(f"Label: {label_col}")
 
 # %% [markdown]
-# ## 0.5 Data Quality Gate
+# ## Data Quality Gate
 #
 # Verify upstream artifacts are free of critical defects before evaluation.
 
@@ -134,8 +160,8 @@ validate_modeling_inputs(
 # %% [markdown]
 # ## Section 1: Correctness Screens
 #
-# Check coverage before evaluating predictive power. Features below 70%
-# non-null are flagged. The released characteristics deliberately update at
+# Check coverage before evaluating predictive power. Features whose non-null share
+# falls below `MIN_COVERAGE` are flagged. The released characteristics deliberately update at
 # different frequencies, so repeated values can be economically correct rather
 # than a stale-feed defect. The persistent identifier nevertheless lets downstream
 # models construct valid longitudinal histories.
@@ -147,8 +173,8 @@ for feat in all_feature_cols:
     n_valid = eval_panel[feat].drop_nulls().len()
     coverage[feat] = n_valid / n_rows
 
-# Correctness gate: coverage >= 70%.
-correctness = {feat: coverage[feat] >= 0.70 for feat in all_feature_cols}
+# Correctness gate: coverage at or above MIN_COVERAGE.
+correctness = {feat: coverage[feat] >= MIN_COVERAGE for feat in all_feature_cols}
 
 n_pass = sum(correctness.values())
 n_fail = len(correctness) - n_pass
@@ -167,14 +193,12 @@ if n_fail > 0:
 # %% [markdown]
 # ## Section 2: Univariate Association (IC + HAC)
 #
-# For each feature, compute a time series of cross-sectional Spearman IC
-# (one IC per month across ~2,483 stocks), then test significance with
-# HAC standard errors (Newey-West, four lags for the monthly IC series).
+# For each feature, compute a time series of cross-sectional Spearman IC - one per
+# month, across the cross-section printed above - then test significance with HAC
+# standard errors over `HAC_MAXLAGS` lags of the monthly series.
 
 # %%
 evaluable_features = [f for f in all_feature_cols if correctness[f]]
-HAC_MAXLAGS = 4
-MIN_PERIODS = 30  # ~2,483 stocks/month
 
 # Detect date-level features (zero cross-sectional variance)
 cs_std_df = eval_panel.group_by(DATE_COL).agg(
@@ -281,13 +305,13 @@ print(f"Fold stats computed for {len(fold_stats)} features")
 #
 # With 57 features in the classic "factor zoo," multiple testing correction
 # is essential. We distinguish naive mean tests, unadjusted HAC tests, and
-# Benjamini-Hochberg FDR at 5%.
+# Benjamini-Hochberg FDR at `FDR_ALPHA`.
 
 # %%
 feature_names = list(ic_results.keys())
 p_values = [ic_results[f]["p_value"] for f in feature_names]
 
-fdr_result = benjamini_hochberg_fdr(p_values, alpha=0.05, return_details=True)
+fdr_result = benjamini_hochberg_fdr(p_values, alpha=FDR_ALPHA, return_details=True)
 
 # Build evaluation summary
 eval_summary = pl.DataFrame(
@@ -320,6 +344,76 @@ print(f"Naive/HAC ratio: {inflation_hac:.2f}x")
 print(f"HAC/FDR multiplicity ratio: {multiple_testing_ratio:.2f}x")
 
 # %% [markdown]
+# ### The IC Series Itself
+#
+# Everything below this point is a scalar summary of one object: the monthly IC
+# series. Two failure modes are visible only in the series and in no summary of
+# it - an IC that comes from one episode and is flat around it, and an IC that
+# changes sign between folds - so the series is drawn before it is reduced. Two
+# bands are drawn around the full-sample mean: the HAC interval, at the same
+# `HAC_MAXLAGS` bandwidth as the t-statistics reported below, and a block
+# bootstrap, which assumes no parametric form for the dependence at all. The HAC
+# half-width comes from the `compute_ic_hac_stats` standard error rather than from
+# `compute_ic_uncertainty`, which would have used the Newey-West automatic lag and
+# so drawn a band at a different bandwidth from the test beside it.
+
+# %%
+LEADING_FOR_SERIES = 3
+series_features = eval_summary.head(LEADING_FOR_SERIES)["feature"].to_list()
+ROLLING_MONTHS = 12
+
+fig, axes = plt.subplots(
+    len(series_features), 1, figsize=FIGSIZE["dual_v"], sharex=True, sharey=True
+)
+for ax, feat in zip(axes, series_features, strict=True):
+    series = ic_timeseries[feat].sort(DATE_COL)
+    bootstrap = compute_ic_uncertainty(series, horizon=LABEL_HORIZON_MONTHS, ic_col="ic")
+    hac = compute_ic_hac_stats(series, ic_col="ic", maxlags=HAC_MAXLAGS)
+    half_width = 1.96 * hac["hac_se"]
+    bands = {
+        "mean_ic": hac["mean_ic"],
+        "ci_hac_lower": hac["mean_ic"] - half_width,
+        "ci_hac_upper": hac["mean_ic"] + half_width,
+        "ci_boot_lower": bootstrap["ci_boot_lower"],
+        "ci_boot_upper": bootstrap["ci_boot_upper"],
+    }
+    dates = series[DATE_COL].to_list()
+    ax.plot(dates, series["ic"].to_list(), color=COLORS["slate"], linewidth=0.5, alpha=0.45)
+    ax.plot(
+        dates,
+        series["ic"].rolling_mean(ROLLING_MONTHS, min_samples=ROLLING_MONTHS).to_list(),
+        color=COLORS["blue"],
+        linewidth=1.2,
+        label=f"{ROLLING_MONTHS}-month mean",
+    )
+    ax.axhline(bands["mean_ic"], color=COLORS["amber"], linewidth=1.0, label="mean IC")
+    ax.axhspan(
+        bands["ci_hac_lower"], bands["ci_hac_upper"], color=COLORS["amber"], alpha=0.25, lw=0
+    )
+    ax.axhspan(
+        bands["ci_boot_lower"],
+        bands["ci_boot_upper"],
+        facecolor="none",
+        edgecolor=COLORS["copper"],
+        hatch="///",
+        lw=0.6,
+    )
+    zero_line(ax)
+    ax.set_ylabel(feat, fontsize=7)
+axes[0].legend(frameon=False, fontsize=6, ncols=2, loc="upper left")
+axes[-1].set_xlabel("Decision month")
+add_message_title(
+    axes[0],
+    "The 12-month mean crosses zero; the full-sample mean does not",
+    subtitle=(
+        "Leading features by absolute IC; amber band is the HAC interval, "
+        "hatched is the block bootstrap"
+    ),
+)
+fig.tight_layout()
+plt.show()
+
+# %% [markdown]
 # ### IC Strength and HAC Adjustment
 #
 # The first chart ranks the leading features by absolute IC. The second compares
@@ -340,8 +434,11 @@ ax.set_xlabel("Mean monthly cross-sectional IC (Spearman)")
 ax.set_ylabel("Feature")
 add_message_title(
     ax,
-    f"BH-FDR retains {n_significant_fdr} of {len(feature_names)} evaluated features",
-    subtitle=f"Top {top_n} by absolute pre-holdout IC; blue survives FDR at 5%; HAC maxlags={HAC_MAXLAGS}",
+    "Most of the largest ICs survive false-discovery control",
+    subtitle=(
+        f"Leading features by absolute pre-holdout IC; blue survives BH-FDR at "
+        f"{FDR_ALPHA:.0%}; HAC lag {HAC_MAXLAGS}"
+    ),
 )
 plt.show()
 
@@ -382,16 +479,17 @@ ax.set_xlabel("Naive t-statistic")
 ax.set_ylabel("HAC t-statistic")
 add_message_title(
     ax,
-    f"HAC leaves {n_significant_hac} of {n_significant_naive} naive discoveries",
-    subtitle=f"Monthly pre-holdout IC; diagonal marks equal statistics; HAC maxlags={HAC_MAXLAGS}",
+    "Serial correlation shrinks every t-statistic toward zero",
+    subtitle=f"Monthly pre-holdout IC; the diagonal marks equal statistics; HAC lag {HAC_MAXLAGS}",
 )
 plt.show()
 
 # %% [markdown]
-# **Interpretation**: With ~2,483 stocks per month providing ample cross-sectional
-# breadth, even small IC values can achieve statistical significance. HAC inference
-# allows serial dependence in the monthly IC series, while FDR controls the expected
-# fraction of false discoveries among all features declared significant.
+# **Interpretation**: a cross-section this wide gives the mean IC a small standard
+# error, so a small IC can still be significant, and significance stops being the
+# interesting question. HAC inference allows serial dependence in the monthly IC
+# series, and FDR controls the expected share of false discoveries among the
+# features declared significant across the whole searched set.
 
 # %% [markdown]
 # ## Section 4: Shape Diagnostics
@@ -399,10 +497,24 @@ plt.show()
 # Quantile monotonicity analysis: does the label (1-month return) spread
 # monotonically across feature quintiles? A monotone relationship is easier
 # for linear models (Ch11) to capture; non-monotone relationships may need
-# tree-based models (Ch12).
+# tree-based models (Ch12). Quintiles are assigned **within each month**, so the
+# bin a firm lands in is its standing against the firms trading beside it and not
+# against a different month's distribution.
+#
+# Two summaries of each bin are drawn, and they are the point of the figure. The
+# mean is what a long-short book earns; the median is where the typical firm in
+# that bin ends up. Under the return distribution of a wide equity cross-section
+# these two can point in opposite directions, because a handful of very large
+# positive returns move a mean and cannot move a median. Where they disagree here,
+# the rank IC above sides with the median. That is not a theorem - the median is a
+# location statistic and Spearman correlation is not a statement about it - but
+# both are insensitive to how far the extreme returns reach, and it is that tail
+# the mean is reading. So a feature can carry a clearly negative IC and still show
+# a mean profile that climbs from Q1 to Q5. `monotonicity` in the ledger is computed on the means,
+# which is the convention all nine case studies share, and it is a description of
+# the shape rather than an input to any triage rule.
 
 # %%
-N_QUANTILES = 5
 top_features_for_shape = eval_summary.filter(pl.col("fdr_sig").fill_null(False))[
     "feature"
 ].to_list()[:15]
@@ -423,12 +535,26 @@ for feat in top_features_for_shape:
         .cast(pl.Int8)
         .alias("quantile_index")
     )
-    q_means = valid.group_by("quantile_index").agg(pl.col(label_col).mean()).sort("quantile_index")
-    means = q_means[label_col].to_list()
+    # Each month contributes equally, which is how the IC series above is built and
+    # how a monthly rebalance actually experiences the panel. Pooling every row
+    # instead would weight months by their cross-section, and the cross-section
+    # here grows by an order of magnitude over the sample.
+    q_profile = (
+        valid.group_by(DATE_COL, "quantile_index")
+        .agg(
+            pl.col(label_col).mean().alias("mean"),
+            pl.col(label_col).median().alias("median"),
+        )
+        .group_by("quantile_index")
+        .agg(pl.col("mean").mean(), pl.col("median").mean())
+        .sort("quantile_index")
+    )
+    means = q_profile["mean"].to_list()
+    medians = q_profile["median"].to_list()
     if len(means) != N_QUANTILES:
         continue
     spread = means[-1] - means[0]
-    quantile_spreads[feat] = {"q_means": means, "spread": spread}
+    quantile_spreads[feat] = {"q_means": means, "q_medians": medians, "spread": spread}
 
     mono_corr, _ = spearmanr(range(len(means)), means)
     monotonicity_scores[feat] = float(mono_corr)
@@ -439,26 +565,35 @@ print(f"Quantile analysis for {len(quantile_spreads)} features")
 if quantile_spreads:
     n_show = min(6, len(quantile_spreads))
     feats_to_show = list(quantile_spreads.keys())[:n_show]
-    all_means = [
-        value for feature in feats_to_show for value in quantile_spreads[feature]["q_means"]
+    all_values = [
+        value
+        for feature in feats_to_show
+        for key in ("q_means", "q_medians")
+        for value in quantile_spreads[feature][key]
     ]
-    y_limit = max(abs(min(all_means)), abs(max(all_means))) * 1.1
+    y_limit = max(abs(min(all_values)), abs(max(all_values))) * 1.15
     fig, axes = plt.subplots(2, 3, figsize=FIGSIZE["grid_2x3"], sharey=True)
+    bins = [f"Q{i + 1}" for i in range(N_QUANTILES)]
     for idx, feat in enumerate(feats_to_show):
         ax = axes.flat[idx]
-        q_means = quantile_spreads[feat]["q_means"]
-        ax.bar(
-            [f"Q{i + 1}" for i in range(len(q_means))],
-            q_means,
-            color=COLORS["blue"],
+        ax.bar(bins, quantile_spreads[feat]["q_means"], color=COLORS["blue"], label="mean")
+        ax.plot(
+            bins,
+            quantile_spreads[feat]["q_medians"],
+            color=COLORS["amber"],
+            marker="o",
+            markersize=3,
+            linewidth=1.2,
+            label="median",
         )
         zero_line(ax)
         ax.set_ylim(-y_limit, y_limit)
         ax.set_title(feat, fontsize=9)
-    fig.supylabel("Mean next-month return")
+    axes.flat[0].legend(frameon=False, fontsize=6, loc="upper left")
+    fig.supylabel("Next-month return")
     fig.supxlabel("Within-month feature quintile")
     fig.suptitle(
-        "Leading features show distinct cross-sectional return shapes",
+        "Where the mean and the median disagree, the rank IC follows the median",
         color=COLORS["blue"],
         fontweight="semibold",
         x=0.01,
@@ -467,10 +602,13 @@ if quantile_spreads:
     plt.show()
 
 # %% [markdown]
-# **Interpretation**: Monotone quantile profiles (steady increase or decrease
-# from Q1 to Q5) indicate linear factor structure suitable for Ridge/Lasso
-# in Ch11. Non-monotone profiles (U-shaped or inverted-U) suggest interaction
-# effects better captured by tree-based models in Ch12.
+# **Interpretation**: a monotone profile - steady increase or decrease from Q1 to
+# Q5 - is the shape a linear model in Ch11 can express, and a U-shaped or
+# inverted-U profile is the shape that needs the tree-based models in Ch12. Read
+# the two series together rather than either alone: a feature whose mean climbs
+# while its median falls is one whose payoff sits in the right tail of the top
+# bin, which is a different proposition to hold than a feature that lifts the
+# whole bin, and it is not something a single monotonicity score records.
 
 # %% [markdown]
 # ## Section 5: Redundancy & Feature Families
@@ -517,7 +655,7 @@ corr_matrix = corr_data.to_pandas().corr(method="spearman")
 high_corr_pairs = []
 for i in range(len(corr_matrix)):
     for j in range(i + 1, len(corr_matrix)):
-        if abs(corr_matrix.iloc[i, j]) > 0.7:
+        if abs(corr_matrix.iloc[i, j]) > REDUNDANCY_CUT:
             high_corr_pairs.append(
                 (corr_matrix.columns[i], corr_matrix.columns[j], corr_matrix.iloc[i, j])
             )
@@ -529,7 +667,7 @@ pair_summary = pl.DataFrame(
         "correlation": [float(correlation) for _, _, correlation in top_corr_pairs],
     }
 ).sort("correlation")
-print(f"Feature pairs with |corr| > 0.7: {len(high_corr_pairs)}")
+print(f"Feature pairs with |corr| > {REDUNDANCY_CUT}: {len(high_corr_pairs)}")
 
 # %%
 # Family-level IC summary
@@ -591,8 +729,8 @@ ax.set_xlabel("Pairwise Spearman correlation")
 ax.set_ylabel("Feature pair")
 add_message_title(
     ax,
-    f"The feature matrix contains {len(high_corr_pairs)} strongly correlated pairs",
-    subtitle="Top 15 pairs by |rho|; pre-holdout sample; strong means |rho| > 0.7",
+    "The strongest pairs are near-duplicates, not merely related",
+    subtitle=f"Leading pairs by |rho|, pre-holdout; strong means |rho| above {REDUNDANCY_CUT}",
 )
 plt.show()
 
@@ -612,7 +750,7 @@ ax.set_xlabel("Average absolute feature IC")
 ax.set_ylabel("Economic family")
 add_message_title(
     ax,
-    "Predictive strength is concentrated in a subset of feature families",
+    "Average absolute IC falls steadily from the risk family to investment",
     subtitle="Average absolute pre-holdout monthly IC; descriptive, not a family-level test",
 )
 plt.show()
@@ -629,15 +767,22 @@ plt.show()
 #
 # Apply triage rules to categorize features for Ch11 model selection:
 #
-# | Decision | Criteria |
-# |----------|----------|
-# | **PROCEED** | FDR-significant at 5% OR (sign_consistency > 60% AND abs(IC) > 0.01) |
-# | **STOP** | Correctness FAIL (coverage < 70%) |
-# | **REVISE** | Everything else (evaluate in multivariate context in Ch11) |
+# | Decision | Criteria | Arm |
+# |----------|----------|-----|
+# | **PROCEED** | BH-FDR significant at `FDR_ALPHA` | confirmation |
+# | **PROCEED** | sign consistency at least `MIN_SIGN_CONSISTENCY` and abs(IC) at least `IC_THRESHOLD` | exploration |
+# | **STOP** | correctness FAIL: coverage below `MIN_COVERAGE` | - |
+# | **REVISE** | everything else, to be judged in the multivariate context of Ch11 | - |
+#
+# The rule is a **disjunction**, so PROCEED can exceed the count of FDR-significant
+# features. The `note` column records which of the two arms fired. The second arm is
+# an exploration filter in the sense of Section 7.4, not a significance test: it exists
+# so that false-discovery control does not empty the menu, and a feature promoted
+# through it has not been confirmed. Its threshold is a judgement, stated in
+# Configuration as `IC_THRESHOLD` and tied to what a monthly rebalance would need to
+# clear its costs, not derived from the data.
 
 # %%
-IC_THRESHOLD = 0.01  # Monthly rebalance
-
 triage = {}
 for feat in all_feature_cols:
     if not correctness[feat]:
@@ -654,7 +799,7 @@ for feat in all_feature_cols:
 
     if is_fdr_sig:
         triage[feat] = ("PROCEED", "fdr_significant")
-    elif sign_con >= 0.60 and abs_ic >= IC_THRESHOLD:
+    elif sign_con >= MIN_SIGN_CONSISTENCY and abs_ic >= IC_THRESHOLD:
         triage[feat] = ("PROCEED", "stable_and_above_threshold")
     else:
         triage[feat] = ("REVISE", "not_significant_standalone")
@@ -715,10 +860,6 @@ proceed_features = [f for f, (d, _) in triage.items() if d == "PROCEED"]
 revise_features = [f for f, (d, _) in triage.items() if d == "REVISE"]
 stop_features = [f for f, (d, _) in triage.items() if d == "STOP"]
 
-sorted_by_ic = sorted(ic_results.items(), key=lambda x: x[1].get("mean_ic") or 0, reverse=True)
-best = sorted_by_ic[0] if sorted_by_ic else (None, {})
-worst = sorted_by_ic[-1] if sorted_by_ic else (None, {})
-
 # %%
 print(f"PROCEED: {len(proceed_features)} features")
 print(f"REVISE: {len(revise_features)} features")
@@ -726,25 +867,68 @@ print(f"STOP: {len(stop_features)} features")
 
 promoted_summary = (
     triage_ledger.filter(pl.col("decision") == "PROCEED")
-    .select("feature", "family", "ic_mean", "hac_t", "fdr_sig", "sign_consistency")
+    .select("feature", "family", "ic_mean", "hac_t", "fdr_sig", "sign_consistency", "note")
     .sort("ic_mean", descending=True)
 )
-promoted_summary
+print(promoted_summary.group_by("note").len().sort("note"))
 
 # %% [markdown]
-# ### Quality Gate Verdict
+# The funnel is what the searched set costs. Every candidate that clears coverage
+# gets an IC; the confirmation arm keeps the ones that survive BH-FDR over the
+# whole searched set; the exploration arm adds the ones whose sign holds across
+# folds at an effect size worth a monthly rebalance. The two arms are drawn apart
+# because a reader who sees only the total cannot tell how much of the menu was
+# confirmed and how much was carried forward on stability alone.
+
+# %%
+funnel = [
+    ("evaluated", len(all_feature_cols)),
+    ("cleared coverage", len(ic_results)),
+    ("survived BH-FDR", len(fdr_sig_features)),
+    ("promoted, either arm", len(proceed_features)),
+]
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+stage_labels = [name for name, _ in funnel]
+counts = [count for _, count in funnel]
+ax.barh(
+    stage_labels, counts, color=[COLORS["slate"], COLORS["slate"], COLORS["blue"], COLORS["amber"]]
+)
+for row, count in enumerate(counts):
+    ax.annotate(
+        str(count),
+        xy=(count, row),
+        xytext=(4, 0),
+        textcoords="offset points",
+        va="center",
+        fontsize=7,
+    )
+ax.invert_yaxis()
+ax.set_xlabel("Features")
+add_message_title(
+    ax,
+    "Coverage removes nothing here; the FDR correction does the narrowing",
+    subtitle="Candidates surviving each screen; PROCEED is the union of the two arms",
+)
+fig.tight_layout()
+plt.show()
+
+# %% [markdown]
+# ### What the ledger says, and what it does not
 #
-# **PASS.** The triage retains features that survive false-discovery control or
-# combine economically meaningful IC with stable signs across the ten canonical
-# validation folds. The broad monthly cross-section gives high statistical power,
-# so effect size, fold stability, and multiplicity all matter for promotion.
+# The per-feature decision above is the output of this notebook. It is not a
+# judgement on the case study: a univariate screen is necessary and not sufficient,
+# and whether any of this is tradable is settled by a backtest several stages later.
+# What the broad monthly cross-section buys is statistical power, which is why
+# effect size, fold stability and multiplicity all have to enter the rule rather
+# than significance alone.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Large breadth drives significance**: With ~2,483 stocks per month,
-#    even modest IC values achieve statistical significance. FDR correction
-#    is essential to separate genuine signal from noise in this factor zoo.
+# 1. **Large breadth drives significance**: across a cross-section this wide,
+#    even modest IC values achieve statistical significance, which is why the
+#    searched-set size and the FDR correction have to be reported beside any
+#    p-value in this factor zoo.
 #
 # 2. **Composite features are competitive**: Cross-family combinations appear
 #    among the stronger IC estimates, but correlated inputs mean downstream
@@ -760,4 +944,5 @@ promoted_summary
 #
 # **Next**: The triage ledger above defines the feature list for Ch11
 # Ridge/Lasso modeling.
-# **Book**: Chapter 8.5 discusses feature evaluation and the FDR framework.
+# **Book**: Section 7.3 and Section 7.4 set out univariate screening and search
+# accounting.
