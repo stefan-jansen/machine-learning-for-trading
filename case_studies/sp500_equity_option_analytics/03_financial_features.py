@@ -25,7 +25,8 @@
 #
 # - Build implied-volatility level, dynamics, skew and variance-premium families from a daily
 #   surface summary, beside the equity momentum they have to earn their place against
-# - Lag an input that is published late, and say which of the two frames the lag is counted in
+# - Lag an input that is published late, and count the lag in sessions rather than in the rows
+#   the input happens to have
 # - State each family's lookback and information lag before writing the code that computes it,
 #   and assert the warmup that follows from it
 # - Show that withholding later dates leaves every feature value unchanged, which is what
@@ -114,7 +115,7 @@ IV_LAG = int(setup["decision"]["iv_feature_lag"].split("_")[0])
 # The panel key, the entity every trailing window is bounded by, and the partition every
 # cross-sectional statistic is taken over.
 PANEL_KEY = ["symbol", "timestamp"]
-ENTITY = "symbol"
+SECURITY = "sec_id"
 WITHIN_DATE = "timestamp"
 
 print(
@@ -161,8 +162,17 @@ register_frame(FAMILIES).select(
 # Each row is one security and one session. Two frames arrive and they are not observable on the
 # same schedule.
 #
-# The **share bars** are split- and dividend-adjusted daily OHLC. A close is final at the close,
-# so a statistic of the closes through session $t$ is knowable at $t$ and carries no lag.
+# The **share bars** arrive as printed prices beside `adj_factor`, the cumulative factor that puts
+# a price on a comparable footing with the rest of that security's history. A return taken on the
+# printed close is not a return: a four-for-one split reads as a three-quarter loss. Multiplying
+# gives the series every window below is taken over. A close is final at the close, so a statistic
+# of the closes through session $t$ is knowable at $t$ and carries no lag.
+#
+# The entity every trailing window is bounded by is the **security**, `sec_id`, not the ticker. A
+# ticker is reassigned after a merger or a spin-off and `adj_factor` restarts with the new security,
+# so a window that steps across the change reads a price from one company against a price from
+# another. `02_labels` counts the changeovers in this extract and builds its labels the same way,
+# which is what makes a feature and the label it is scored against the same kind of quantity.
 #
 # The **surface summary** reduces the option chain to one row per name and session, selecting the
 # contract closest to each delta target inside each fixed maturity bucket. Those buckets and
@@ -175,34 +185,45 @@ register_frame(FAMILIES).select(
 # dynamics in C.1 are then built on the lagged series rather than lagged after the fact, so a
 # z-score never mixes a lagged level with an unlagged history.
 #
-# **The lag is counted in the surface's own rows, and that is a weaker claim than a session.** A
-# name is not quoted on every session, so where a name's previous quoted row is older than the
-# previous session the shift reaches further back than one session and hands the model a stale
-# level under a fresh name. The forward fill below has the same shape: it carries a level up to
-# the number of sessions `features.windows.iv_forward_fill` declares, which is a deliberate
-# tolerance for a thin quote and not a claim that the level is current. Both are conservative in
-# the direction that matters, because both can only ever use information older than the decision.
+# **The lag is counted in sessions, which is why the surface is reindexed before anything reads
+# it.** A name is not quoted on every session, so a shift over the surface's own rows would reach
+# back to whenever that name was last quoted and hand the model a fortnight-old level under the
+# name of yesterday's. Joining the surface onto the sessions the security traded makes the missing
+# ones visible as nulls, and every window after it - the lag, the fill, the momentum, the z-scores
+# and the trailing percentile - then counts sessions and means what the register says it means. The
+# forward fill carries a level over at most the number of sessions `features.windows.iv_forward_fill`
+# declares, which is a stated tolerance for a thin quote rather than a claim that the level is
+# current.
 
 # %%
-daily = load_sp500_daily_bars(start_date=START_DATE, end_date=END_DATE).sort([ENTITY, "timestamp"])
-surface_raw = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE).sort(
-    [ENTITY, "timestamp"]
+daily = (
+    load_sp500_daily_bars(start_date=START_DATE, end_date=END_DATE)
+    .with_columns((pl.col("close") * pl.col("adj_factor")).alias("adj_close"))
+    .sort([SECURITY, "timestamp"])
 )
+surface_raw = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
 SURFACE_COLS = [c for c in surface_raw.columns if c not in PANEL_KEY]
 
-print(f"{daily.height:,} name-sessions of share bars, {daily[ENTITY].n_unique()} tickers")
+print(f"{daily.height:,} name-sessions of share bars, {daily['symbol'].n_unique()} tickers")
+print(f"{daily[SECURITY].n_unique()} securities behind those tickers")
 print(f"{surface_raw.height:,} surface rows carrying {len(SURFACE_COLS)} columns")
 print(f"{daily['timestamp'].min()} to {daily['timestamp'].max()}")
 
 
 # %%
+def on_session_grid(bars: pl.DataFrame, surface: pl.DataFrame) -> pl.DataFrame:
+    """The surface, reindexed onto the sessions each security actually traded."""
+    grid = bars.select(["symbol", SECURITY, "timestamp"])
+    return grid.join(surface, on=PANEL_KEY, how="left").sort([SECURITY, "timestamp"])
+
+
 def lag_surface(surface: pl.DataFrame) -> pl.DataFrame:
     """Shift every surface column by the declared lag, then carry it over a thin quote."""
-    lagged = surface.sort([ENTITY, "timestamp"]).with_columns(
-        pl.col(c).shift(IV_LAG).over(ENTITY).alias(c) for c in SURFACE_COLS
+    lagged = surface.with_columns(
+        pl.col(c).shift(IV_LAG).over(SECURITY).alias(c) for c in SURFACE_COLS
     )
     return lagged.with_columns(
-        pl.col(c).forward_fill(limit=W["iv_forward_fill"]).over(ENTITY).alias(c)
+        pl.col(c).forward_fill(limit=W["iv_forward_fill"]).over(SECURITY).alias(c)
         for c in SURFACE_COLS
     )
 
@@ -229,23 +250,25 @@ ZERO_FLOOR = 0.001
 
 def _zscore(column: str, window: int) -> pl.Expr:
     """Trailing z-score of *column* over *window* sessions within one security."""
-    mean = pl.col(column).rolling_mean(window).over(ENTITY)
-    std = pl.col(column).rolling_std(window).over(ENTITY).clip(lower_bound=ZERO_FLOOR)
+    mean = pl.col(column).rolling_mean(window).over(SECURITY)
+    std = pl.col(column).rolling_std(window).over(SECURITY).clip(lower_bound=ZERO_FLOOR)
     return (pl.col(column) - mean) / std
 
 
 def surface_dynamics(surface: pl.DataFrame) -> pl.DataFrame:
     """Changes, momentum, z-scores and the trailing percentile of the lagged surface."""
     pct_window = W["iv_percentile"]
-    low = pl.col("iv_30_atm").rolling_min(pct_window).over(ENTITY)
-    high = pl.col("iv_30_atm").rolling_max(pct_window).over(ENTITY)
+    low = pl.col("iv_30_atm").rolling_min(pct_window).over(SECURITY)
+    high = pl.col("iv_30_atm").rolling_max(pct_window).over(SECURITY)
     return surface.with_columns(
         *[
-            (pl.col(c) - pl.col(c).shift(1).over(ENTITY)).alias(f"d_{c}")
+            (pl.col(c) - pl.col(c).shift(1).over(SECURITY)).alias(f"d_{c}")
             for c in ("iv_30_atm", "skew_rr_30_25d", "term_ratio_atm")
         ],
         *[
-            (pl.col("iv_30_atm") - pl.col("iv_30_atm").shift(w).over(ENTITY)).alias(f"iv_mom_{w}d")
+            (pl.col("iv_30_atm") - pl.col("iv_30_atm").shift(w).over(SECURITY)).alias(
+                f"iv_mom_{w}d"
+            )
             for w in W["iv_momentum"]
         ],
         *[_zscore("iv_30_atm", w).alias(f"iv_30_atm_z_{w}") for w in W["iv_zscore"]],
@@ -260,8 +283,9 @@ def surface_dynamics(surface: pl.DataFrame) -> pl.DataFrame:
 # %% [markdown]
 # ### C.2 Realized volatility
 #
-# What the share actually did, on four estimators that disagree in ways worth carrying. The
-# close-to-close standard deviation is the plain one and is computed at two windows. Garman-Klass
+# What the share actually did, on four estimators that disagree in ways worth carrying. All of them
+# read the adjusted close inside one security, for the reason Section B gives. The close-to-close
+# standard deviation is the plain one and is computed at two windows. Garman-Klass
 # reads the whole daily range, so it sees an intraday move that opened and closed in the same
 # place; its per-session term can go negative on a bar whose open and close straddle the range,
 # so the average is floored at zero before the square root rather than after it. The volatility
@@ -278,7 +302,9 @@ def realized_volatility(bars: pl.DataFrame) -> pl.DataFrame:
     """Close-to-close, range-based and higher-moment volatility from the share bars."""
     short, long_ = W["realized_vol"]
     gk_window, vv_window, skew_window = W["garman_klass"], W["vol_of_vol"], W["realized_skew"]
-    df = bars.with_columns(pl.col("close").pct_change().over(ENTITY).alias("_ret")).with_columns(
+    df = bars.with_columns(
+        pl.col("adj_close").pct_change().over(SECURITY).alias("_ret")
+    ).with_columns(
         (
             0.5 * (pl.col("high") / pl.col("low")).log().pow(2)
             - GK_COEFFICIENT * (pl.col("close") / pl.col("open")).log().pow(2)
@@ -286,24 +312,27 @@ def realized_volatility(bars: pl.DataFrame) -> pl.DataFrame:
     )
     df = df.with_columns(
         *[
-            (pl.col("_ret").rolling_std(w).over(ENTITY) * ANNUALIZE).alias(f"rv_{w}")
+            (pl.col("_ret").rolling_std(w).over(SECURITY) * ANNUALIZE).alias(f"rv_{w}")
             for w in (short, long_)
         ],
         (
-            pl.col("_gk_session").rolling_mean(gk_window).over(ENTITY).clip(lower_bound=0.0)
+            pl.col("_gk_session").rolling_mean(gk_window).over(SECURITY).clip(lower_bound=0.0)
             * setup["evaluation"]["periods_per_year"]
         )
         .sqrt()
         .alias(f"gk_vol_{gk_window}"),
     )
-    standardized = pl.col("_ret") / pl.col("_ret").rolling_std(skew_window).over(ENTITY).clip(
+    standardized = pl.col("_ret") / pl.col("_ret").rolling_std(skew_window).over(SECURITY).clip(
         lower_bound=ZERO_FLOOR / 10
     )
     return df.with_columns(
-        pl.col(f"rv_{short}").rolling_std(vv_window).over(ENTITY).alias(f"vol_of_vol_{vv_window}"),
+        pl.col(f"rv_{short}")
+        .rolling_std(vv_window)
+        .over(SECURITY)
+        .alias(f"vol_of_vol_{vv_window}"),
         standardized.pow(3)
         .rolling_mean(skew_window)
-        .over(ENTITY)
+        .over(SECURITY)
         .alias(f"realized_skew_{skew_window}"),
     ).select(
         [
@@ -320,7 +349,8 @@ def realized_volatility(bars: pl.DataFrame) -> pl.DataFrame:
 # %% [markdown]
 # ### C.3 Equity momentum
 #
-# The simple return at five horizons, its skip-month form, and its volatility-scaled twin. Skip-
+# The simple return at five horizons, its skip-month form, and its volatility-scaled twin, all on
+# the adjusted close within one security. Skip-
 # month momentum runs from the start window to the recent window and divides prices rather than
 # subtracting returns, because returns compound and the difference of two window returns is not
 # the return over the gap between them (Jegadeesh and Titman, 1993). The risk-adjusted form
@@ -335,24 +365,27 @@ PRICE_FLOOR = 1e-8
 def equity_momentum(bars: pl.DataFrame) -> pl.DataFrame:
     """Multi-horizon returns, skip-month momentum and its volatility-scaled form."""
     ra_window = W["risk_adjusted"]
-    df = bars.select([*PANEL_KEY, "close"]).with_columns(
-        pl.col("close").pct_change().over(ENTITY).alias("_ret")
+    df = bars.select([*PANEL_KEY, SECURITY, "adj_close"]).with_columns(
+        pl.col("adj_close").pct_change().over(SECURITY).alias("_ret")
     )
     df = df.with_columns(
         *[
             (
-                pl.col("close")
-                / pl.col("close").shift(w).over(ENTITY).clip(lower_bound=PRICE_FLOOR)
+                pl.col("adj_close")
+                / pl.col("adj_close").shift(w).over(SECURITY).clip(lower_bound=PRICE_FLOOR)
                 - 1
             ).alias(f"mom_{w}d")
             for w in W["momentum"]
         ],
         (
-            pl.col("close").shift(W["skip_recent"]).over(ENTITY)
-            / pl.col("close").shift(W["skip_start"]).over(ENTITY).clip(lower_bound=PRICE_FLOOR)
+            pl.col("adj_close").shift(W["skip_recent"]).over(SECURITY)
+            / pl.col("adj_close")
+            .shift(W["skip_start"])
+            .over(SECURITY)
+            .clip(lower_bound=PRICE_FLOOR)
             - 1
         ).alias("mom_skip_recent"),
-        (pl.col("_ret").rolling_std(ra_window).over(ENTITY) * ANNUALIZE).alias("_rv_ra"),
+        (pl.col("_ret").rolling_std(ra_window).over(SECURITY) * ANNUALIZE).alias("_rv_ra"),
     )
     return df.with_columns(
         (
@@ -397,7 +430,7 @@ def variance_premium(df: pl.DataFrame) -> pl.DataFrame:
         (pl.col("iv_30_atm") - pl.col(f"rv_{short}")).alias("ivrv_spread")
     )
     window = W["vrp_zscore"]
-    return with_spread.sort([ENTITY, "timestamp"]).with_columns(
+    return with_spread.sort([SECURITY, "timestamp"]).with_columns(
         _zscore("ivrv_spread", window).alias(f"vrp_z_{window}")
     )
 
@@ -425,7 +458,7 @@ CARRIERS = ["iv_30_atm", f"rv_{W['realized_vol'][0]}"]
 
 def assemble(bars: pl.DataFrame, surface: pl.DataFrame) -> pl.DataFrame:
     """Every trailing and contemporaneous family, on the surface's own rows."""
-    lagged = surface_dynamics(lag_surface(surface))
+    lagged = surface_dynamics(lag_surface(on_session_grid(bars, surface)))
     return (
         lagged.join(realized_volatility(bars), on=PANEL_KEY, how="left")
         .join(equity_momentum(bars), on=PANEL_KEY, how="left")
@@ -450,7 +483,7 @@ def build_features(bars: pl.DataFrame, surface: pl.DataFrame) -> pl.DataFrame:
 
 
 built = build_features(daily, surface_raw)
-EXCLUDED = {*PANEL_KEY, "_ret", "_gk_session", "_rv_ra", "close"}
+EXCLUDED = {*PANEL_KEY, SECURITY, "_ret", "_gk_session", "_rv_ra", "close", "adj_close"}
 feature_cols = sorted(c for c in built.columns if c not in EXCLUDED)
 assignment = assign_families(feature_cols, FAMILIES)
 print(f"{built.height:,} rows carrying {len(feature_cols)} features in {len(FAMILIES)} families")
@@ -480,14 +513,11 @@ print(f"{built.height:,} rows carrying {len(feature_cols)} features in {len(FAMI
 # lengths are the windows themselves, so a column that is late because the surface lag pushed it
 # one session further out still passes, and a column that is early does not.
 #
-# **The two audits count on different frames, and the two inputs force it.** A name trades on
-# every session and is quoted on the option surface on some of them, so a window over the share
-# price and a window over the surface are not the same length of history even when they carry the
-# same number. Counting a realized-volatility window in surface rows would report a warmup that
-# had elapsed before the sessions it spans had happened, which is the audit raising on a frame
-# rather than on a defect. Each audit runs on the frame its windows were taken over rather than on
-# the matrix that ships, because the null policy in Section E removes rows from the middle of a
-# series and counting bars after it would understate the history every column consumed.
+# It runs on the assembled panel rather than on the matrix that ships, because the null policy in
+# Section E removes rows from the middle of a series and counting bars after it would understate the
+# history every column consumed. One audit covers both halves of the matrix, which is a consequence
+# of Section B: the surface is reindexed onto the sessions a security traded before anything reads
+# it, so a surface window and a share window are counted in the same unit.
 
 # %%
 warmup_audit(
@@ -499,21 +529,13 @@ warmup_audit(
         f"skew_rr_z_{W['skew_zscore']}": W["skew_zscore"],
         f"term_ratio_z_{W['term_zscore']}": W["term_zscore"],
         f"vrp_z_{W['vrp_zscore']}": W["vrp_zscore"],
-    },
-    entity=ENTITY,
-)
-
-# %%
-warmup_audit(
-    realized_volatility(daily).join(equity_momentum(daily), on=PANEL_KEY),
-    {
         f"rv_{W['realized_vol'][1]}": W["realized_vol"][1],
         f"gk_vol_{W['garman_klass']}": W["garman_klass"],
         f"vol_of_vol_{W['vol_of_vol']}": W["vol_of_vol"],
         f"mom_{W['momentum'][-1]}d": W["momentum"][-1],
         "mom_skip_recent": W["skip_start"],
     },
-    entity=ENTITY,
+    entity=SECURITY,
 )
 
 # %% [markdown]
@@ -558,12 +580,12 @@ assert features.select(PANEL_KEY).is_duplicated().sum() == 0, "duplicate panel k
 # %%
 coverage = family_coverage(features, assignment, every="1mo")
 WARMUP_END = features["timestamp"].unique().sort()[max(f.lookback for f in FAMILIES)]
-dropped = surface_raw.height - features.height
+dropped = daily.height - features.height
 print(
-    f"{len(feature_cols)} features, {features.height:,} rows, {features[ENTITY].n_unique()} names"
+    f"{len(feature_cols)} features, {features.height:,} rows, {features['symbol'].n_unique()} names"
 )
 print(f"{features['timestamp'].min()} to {features['timestamp'].max()}, warmup ends {WARMUP_END}")
-print(f"{dropped:,} rows dropped by the null policy ({dropped / surface_raw.height:.1%})")
+print(f"{dropped:,} rows dropped by the null policy ({dropped / daily.height:.1%})")
 floor = coverage.filter(pl.col("timestamp") >= WARMUP_END)
 print(
     f"thinnest family-month past warmup {min(floor[c].min() for c in set(assignment.values())):.3f}"
@@ -572,13 +594,14 @@ print(
 register_frame(FAMILIES, feature_cols).select(["family", "columns", "role", "representation"])
 
 # %% [markdown] tags=["results"]
-# The matrix carries **45 features** on **473,493 rows** across **626 names**, from **2017-02-01**
-# to **2021-12-31**. The null policy dropped **57,010 rows**, **10.7%**, which are the sessions on
-# which a name had no quoted surface after the lag and the fill, plus the month of warmup the
-# realized-volatility carrier pays at the start of each name's series. Past the warmup boundary at
-# **2018-02-01** the thinnest family in any month is **0.574** covered, and it is the skew and term
-# structure family: it needs three maturity buckets quoted on the same session, so a name whose far
-# bucket goes unquoted loses the whole family for that date rather than one column of it.
+# The matrix carries **45 features** on **481,833 rows** across **626 names**, from **2017-02-01**
+# to **2021-12-31**. The null policy dropped **153,870 rows**, **24.2%** of the sessions the shares
+# traded, which are the sessions on which a name had no quoted surface even after the lag and the
+# fill, plus the month of warmup the realized-volatility carrier pays at the start of each
+# security's series. Past the warmup boundary at **2018-02-01** the thinnest family in any month is
+# **0.569** covered, and it is the skew and term structure family: it needs three maturity buckets
+# quoted on the same session, so a name whose far bucket goes unquoted loses the whole family for
+# that date rather than one column of it.
 
 # %% [markdown]
 # ### F1. Coverage through time
@@ -595,13 +618,14 @@ plot_coverage_through_time(
     subtitle="Monthly non-null share per feature family, after the null policy",
     alt=(
         "Line chart of non-null share by feature family by month, on an axis running from "
-        "about 0.28 to one. Equity momentum starts lowest and climbs through 2017, reaching "
-        "one at the marked warmup boundary at the start of 2018; the cross-sectional ranks "
-        "and the implied volatility dynamics climb the same way from about 0.4 and 0.5. "
-        "Realized volatility and surface quality lie on one for the whole sample, the implied "
-        "volatility level sits near 0.9, the dynamics and the variance premium settle around "
-        "0.8, and the skew and term structure family is the lowest and the most ragged "
-        "throughout, swinging between roughly 0.57 and 0.75."
+        "about 0.28 to one. Equity momentum starts lowest at roughly 0.28 and climbs through "
+        "2017, reaching one at the marked warmup boundary at the start of 2018. Realized "
+        "volatility climbs from about 0.4 to one within the first two months and stays there "
+        "with surface quality. The implied volatility level and the cross-sectional ranks run "
+        "high throughout, the level between about 0.8 and 0.92 and the ranks close to one after "
+        "the boundary. The dynamics and the variance premium settle around 0.75 to 0.82, and "
+        "the skew and term structure family is the lowest and the most ragged throughout, "
+        "swinging between roughly 0.57 and 0.78."
     ),
 )
 
@@ -739,7 +763,7 @@ DECISION_DATES = (
 )
 
 plot_persistence(
-    features,
+    built,
     [
         "iv_30_atm",
         f"iv_30_atm_z_{W['iv_zscore'][0]}",
@@ -747,7 +771,7 @@ plot_persistence(
         f"rv_{W['realized_vol'][0]}",
         f"mom_{W['momentum'][2]}d",
     ],
-    entity=ENTITY,
+    entity=SECURITY,
     max_lag=4 * DECISION_CYCLE,
     decision_dates=DECISION_DATES,
     title="The z-score turns over fastest of the five",
@@ -755,7 +779,7 @@ plot_persistence(
     alt=(
         "Two panels. On the left, autocorrelation against lag: the implied volatility level, "
         "the realized volatility and the medium-horizon return all start near one and decay "
-        "slowly to roughly 0.45 to 0.55 over twenty sessions, while the z-score and the "
+        "slowly to roughly 0.45 to 0.6 over twenty sessions, while the z-score and the "
         "implied-minus-realized spread fall much faster and reach zero by the end of the axis. "
         "On the right, the cross-sectional rank correlation between consecutive weekly "
         "rebalances puts the medium-horizon return, the level and the realized volatility "
@@ -788,7 +812,7 @@ record = write_artifact(
     written_by=f"case_studies/{CASE_STUDY_ID}/03_financial_features.py",
     inputs={
         "load_sp500_daily_bars": value_digest(
-            daily.select([*PANEL_KEY, "open", "high", "low", "close"])
+            daily.select([*PANEL_KEY, "open", "high", "low", "close", "adj_factor"])
         ),
         "load_sp500_options_surface": value_digest(surface_raw.select([*PANEL_KEY, *SURFACE_COLS])),
     },
@@ -817,9 +841,9 @@ print(f"Read by 04_model_based_features.py and 05_evaluation.py, on {PANEL_KEY}"
 #
 # ### Known limitations
 #
-# - The surface lag and the forward fill are both counted in the surface's own rows, so on a name
-#   whose quotes are sparse they reach further back than the session they name. Both err toward
-#   older information, never newer, and the quality family is what a downstream stage would screen
+# - The forward fill carries a stale level for up to the declared number of sessions, so a name
+#   quoted thinly can present a level several sessions old as the current one. It errs toward older
+#   information, never newer, and the surface quality family is what a downstream stage would screen
 #   on.
 # - The realized-volatility estimators are computed on close-to-close returns and on the daily
 #   range. Neither sees the overnight gap separately, so a name that moves between sessions and
