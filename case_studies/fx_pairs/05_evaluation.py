@@ -158,23 +158,35 @@ def fold_windows(outcome_horizon: str) -> list[dict]:
 
 
 def validation_rows(splits: list[dict]) -> pl.DataFrame:
-    """Each fold's own validation interval, taken from the fold it was fitted out of."""
+    """Each fold's own validation interval, taken from the fold it was fitted out of.
+
+    An artifact written under a reduced fold count carries a subset of the folds the
+    configuration declares, which is fine; a fold id that names a different window on
+    the two sides of the join is not, and is what the raise below catches.
+    """
+    stamped = set(model_based["fold"].unique().to_list())
     frames = []
     for split in splits:
+        fold = int(split["fold"])
+        if fold not in stamped:
+            continue
+        val_start = pd.Timestamp(split["val_start"]).date()
+        val_end = pd.Timestamp(split["val_end"]).date()
         rows = model_based.filter(
-            (pl.col("fold") == int(split["fold"]))
-            & pl.col(DATE_COL).is_between(
-                pd.Timestamp(split["val_start"]).date(),
-                pd.Timestamp(split["val_end"]).date(),
-                closed="both",
-            )
+            (pl.col("fold") == fold)
+            & pl.col(DATE_COL).is_between(val_start, val_end, closed="both")
         )
         if not len(rows):
+            span = model_based.filter(pl.col("fold") == fold)
             raise ValueError(
-                f"Fold {split['fold']} contributes no rows between {split['val_start']} "
-                f"and {split['val_end']}; the artifact's fold ids do not match these windows"
+                f"Fold {fold} is stamped on rows spanning {span[DATE_COL].min()}.."
+                f"{span[DATE_COL].max()} but this configuration validates it over "
+                f"{val_start}..{val_end}, so the fold id names a different window on "
+                f"each side of the join"
             )
         frames.append(rows)
+    if not frames:
+        raise ValueError(f"No fold in {sorted(stamped)} appears in the configured splits")
     return pl.concat(frames).sort([DATE_COL, "symbol"])
 
 
@@ -185,11 +197,9 @@ duplicate_keys = validation_temporal.group_by(JOIN_COLS).len().filter(pl.col("le
 if len(duplicate_keys):
     raise ValueError("Canonical validation folds overlap on timestamp and symbol")
 
-for split in splits:
-    print(
-        f"  Fold {split['fold']}: validation "
-        f"{pd.Timestamp(split['val_start']).date()}..{pd.Timestamp(split['val_end']).date()}"
-    )
+for fold in sorted(validation_temporal["fold"].unique().to_list()):
+    window = validation_temporal.filter(pl.col("fold") == fold)
+    print(f"  Fold {fold}: validation {window[DATE_COL].min()}..{window[DATE_COL].max()}")
 
 # %%
 eval_panel = (
@@ -376,9 +386,10 @@ print(f"Evaluated {len(ic_results)} of {len(evaluable_features)} eligible featur
 # most worth catching: an association that lives in one episode, and one that changes
 # sign from fold to fold. The daily series is the primary object at this stage, so it
 # is drawn before any scalar derived from it. Three intervals accompany the mean
-# because they disagree by construction - the naive one treats each day as
-# independent, Newey-West widens it for the serial dependence overlapping labels
-# induce, and the block bootstrap resamples contiguous stretches instead of days.
+# because each makes a different assumption about how the daily ICs depend on each
+# other: the naive one treats every day as independent, Newey-West rescales it by the
+# serial correlation the series actually has, and the block bootstrap resamples
+# contiguous stretches rather than days.
 
 # %%
 IC_ROLLING_WINDOW = 63
@@ -436,9 +447,14 @@ if leader:
     )
 
 # %% [markdown]
-# The companion panel puts the three intervals on one axis for the same features. The
-# naive interval is the wide grey bar, so where the Newey-West one does not sit inside
-# it the daily ICs carry the serial dependence the overlapping label window creates.
+# The companion panel puts the three intervals on one axis for the same features, with
+# the naive one as the grey band behind. The direction of the adjustment is not fixed:
+# positively autocorrelated ICs widen the Newey-West interval and negatively
+# autocorrelated ones narrow it. The primary label is a one-session forward return, so
+# consecutive ICs score disjoint windows and the correction has little overlap to
+# undo - the size of the gap is the thing to read, not its sign. It is the longer
+# labels, whose windows do overlap, where the adjustment carries weight, and the
+# horizon figure further down is where they are compared.
 
 
 # %%
@@ -652,7 +668,20 @@ eval_summary = pl.DataFrame(
         "hac_p": hac_p_values,
         "fdr_p": list(fdr_result["adjusted_p_values"]),
         "fdr_sig": list(fdr_result["rejected"]),
-    }
+    },
+    # Declared, so that a reduced run with no computable IC still yields a frame the
+    # boolean filters below can read rather than an all-null one.
+    schema={
+        "feature": pl.String,
+        "source": pl.String,
+        "ic_mean": pl.Float64,
+        "naive_t": pl.Float64,
+        "hac_se": pl.Float64,
+        "hac_t": pl.Float64,
+        "hac_p": pl.Float64,
+        "fdr_p": pl.Float64,
+        "fdr_sig": pl.Boolean,
+    },
 ).sort(pl.col("ic_mean").abs(), descending=True)
 
 n_naive = sum(abs(ic_results[feature]["naive_t_stat"]) > 1.96 for feature in feature_names)
