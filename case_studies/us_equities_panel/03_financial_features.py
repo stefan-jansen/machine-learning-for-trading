@@ -1022,8 +1022,8 @@ assert ic_results, "no feature carried enough scored dates to compute an IC"
 #
 # Three quantities that are easy to confuse, so each is computed and named separately.
 # The **FDR discovery ratio** compares how many features clear the significance
-# threshold before and after Benjamini-Hochberg: it sizes the multiple-testing
-# correction. The **HAC effect**
+# threshold before and after Benjamini-Hochberg, both counted from the same
+# HAC-corrected p-values: it sizes the multiple-testing correction alone. The **HAC effect**
 # compares the HAC t-statistic against the naive one: it sizes the autocorrelation
 # correction. Neither stands in for the other.
 #
@@ -1067,26 +1067,37 @@ if ic_results:
     ).sort("ic_mean", descending=True)
 
     n_significant = int(fdr_result["n_rejected"])
-    n_naive_sig = sum(1 for p in _p_values if p < FDR_ALPHA)
-    fdr_discovery_ratio = n_naive_sig / max(n_significant, 1)
+    # Both counts are taken from the same HAC p-values, so the ratio between them prices
+    # the multiple testing and nothing else. "Nominal" here means uncorrected for
+    # multiplicity, not uncorrected for autocorrelation - that second correction is
+    # already inside every p-value on both sides of the ratio, and is sized separately
+    # below.
+    n_nominal_sig = sum(1 for p in _p_values if p < FDR_ALPHA)
+    fdr_discovery_ratio = n_nominal_sig / max(n_significant, 1)
     # A ratio below 1 means HAC widened the standard error.
     _t_ratio = (eval_summary["hac_tstat"].abs() / eval_summary["naive_tstat"].abs()).drop_nans()
     hac_t_ratio_median = float(_t_ratio.median())
     n_t_grew = int((_t_ratio > 1).sum())
 
     # The ranking below compares features against each other, so they have to have been
-    # scored on the same dates. A feature scored on a fraction of them is not a weaker
-    # signal, it is a different sample, and its place in the ranking means nothing. This
-    # fired at a third of the dates before the NaN conversion in Section 7 was added.
+    # scored over near enough the same span. A feature scored on a fraction of the dates is
+    # not a weaker signal, it is a different sample, and its place in the ranking means
+    # nothing. The bound is a share of the widest support rather than equality: a feature
+    # whose cross-section dips under the minimum on a handful of dates is still comparable,
+    # and the defect this guards against - one feature scored on a third of the dates,
+    # before the NaN conversion in Section 7 - is two orders of magnitude larger than that.
     _date_floor, _date_ceiling = eval_summary["n_dates"].min(), eval_summary["n_dates"].max()
     assert _date_floor >= 0.99 * _date_ceiling, (
         f"features were scored on {_date_floor:,} to {_date_ceiling:,} dates, so their ICs "
-        "are not measured on one sample"
+        "are not measured on comparable samples"
     )
 
     print(f"Features tested: {len(_feat_names)}")
-    print(f"Each scored on {_date_floor:,} to {_date_ceiling:,} of the same dates")
-    print(f"Naive significant (p < {FDR_ALPHA}): {n_naive_sig}")
+    print(
+        f"Support per feature: {_date_floor:,} to {_date_ceiling:,} dates of the "
+        f"{len(_dates_in_order):,} scored"
+    )
+    print(f"Nominally significant (p < {FDR_ALPHA}, no multiplicity correction): {n_nominal_sig}")
     print(f"FDR-corrected significant: {n_significant}")
     print(f"FDR discovery ratio: {fdr_discovery_ratio:.2f}x (multiple testing, not HAC)")
     print(
