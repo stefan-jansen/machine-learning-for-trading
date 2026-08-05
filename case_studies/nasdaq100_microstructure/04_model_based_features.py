@@ -1200,9 +1200,13 @@ fig.show()
 #    dates internally. A per-date IC series assembled by grouping arrives in
 #    arbitrary order, and a Newey-West correction computed over a permutation of
 #    time reports no autocorrelation where there is plenty.
-# 3. **The HAC lag comes from the label.** Timestamps are thinned to one per
-#    label horizon, so consecutive IC observations do not overlap and the
-#    horizon in units of the sampled series is one.
+# 3. **The HAC bandwidth is the automatic rule.** Timestamps are thinned to one
+#    per label horizon, so consecutive IC observations share no return window.
+#    That removes the mechanical floor the overlap would otherwise put under the
+#    lag, and the bandwidth falls back to the Newey-West rule of thumb,
+#    $\lfloor 4 (T/100)^{2/9} \rfloor$ on the $T$ observations of the sampled
+#    series. Non-overlapping is not the same as independent, so the lag is left
+#    to that rule rather than pinned; the value it picks is printed below.
 
 # %%
 if not labels_path.exists():
@@ -1255,7 +1259,10 @@ print(f"IC series computed for {len(ic_data)}/{len(temporal_feature_cols)} featu
 # to the temporal feature IC series.
 
 # %%
-# Sampled one step per label horizon, so the overlap is one step of that series.
+# The label horizon expressed in steps of the sampled series. Thinning is one step
+# per label horizon, so this is 1: consecutive observations do not overlap, the
+# overlap floor `label_horizon - 1` is zero, and the helper is left with its
+# automatic bandwidth. `effective_lags` below reports what that came out at.
 IC_LABEL_HORIZON = max(1, -(-LABEL_HORIZON_BARS // IC_SAMPLE_STEP))
 
 hac_rows = []
@@ -1296,12 +1303,19 @@ if n_tested > 0:
         if _hac_mean and _hac_mean > 0
         else 1.0
     )
+    # The bandwidth the correction actually ran at. Series lengths differ across
+    # features, so the automatic rule can land on different lags; report the range.
+    _lag_lo = int(hac_df["effective_lags"].min())
+    _lag_hi = int(hac_df["effective_lags"].max())
+    hac_lags = f"{_lag_lo}" if _lag_lo == _lag_hi else f"{_lag_lo}-{_lag_hi}"
 else:
     inflation = 1.0
+    hac_lags = "none"
 
 print(f"\nTemporal features tested: {n_tested}")
 print(f"Naive significant (|t|>1.96): {n_naive_sig}")
 print(f"FDR significant (alpha=0.05): {n_fdr_sig}")
+print(f"HAC lags in use (automatic bandwidth): {hac_lags}")
 print(f"Inflation factor (naive/HAC): {inflation:.1f}x")
 
 # %% [markdown]
@@ -1367,15 +1381,23 @@ else:
 # inflation factor reports how much of the apparent significance was an artifact
 # of serial correlation in the IC series.
 #
-# **Here it comes out at one, and that is the expected value rather than a
-# warning.** Timestamps were thinned to one per label horizon, so consecutive IC
-# observations share no return window and there is no overlap for Newey-West to
-# correct; the effective lag is one. The reading to be careful about is a factor
-# near one *without* that thinning, on returns that do overlap — which is what a
-# per-date IC series assembled by `group_by` produces, because the series reaches
-# the HAC helper in arbitrary order and reports no autocorrelation where there is
-# plenty. That is why the series here comes from `cross_sectional_ic_series`,
-# which sorts its dates.
+# **Read it against the lag it was computed at, which is printed above.** The
+# correction ran at the automatic Newey-West bandwidth, over that many lags of the
+# sampled IC series. Thinning to one decision per label horizon removed the
+# overlap that would have forced a wider lag, but it is no reason to assume the
+# series is serially independent, so the bandwidth was left to the automatic rule
+# rather than pinned to one.
+#
+# That is what makes a factor near one worth something here: Newey-West looked out
+# over the printed number of lags and found little left to widen the standard error
+# by, so the thinning removed the autocorrelation the overlap induces rather than
+# hiding it. A correction pinned to a single lag could not have told us that.
+#
+# The reading to be careful about is a factor near one on returns that do
+# overlap — which is what a per-date IC series assembled by `group_by` produces,
+# because the series reaches the HAC helper in arbitrary order and reports no
+# autocorrelation where there is plenty. That is why the series here comes from
+# `cross_sectional_ic_series`, which sorts its dates.
 #
 # **This screen selects nothing.** Whether the temporal block adds anything over
 # the Ch8 financial features is a comparison run on the same validation rows in
@@ -1480,8 +1502,9 @@ print(f"Artifact reconciled: {len(temporal_with_folds):,} rows, {len(splits) + 1
 #    order as time order and does not sort, while a Polars `group_by` returns
 #    groups in arbitrary order. The two together silently report a HAC standard
 #    error computed over a permutation of time, and the tell is an inflation
-#    factor near one on returns that overlap. This notebook thins to one decision
-#    per label horizon, so its own factor of one carries no such signal.
+#    factor near one on returns that overlap. This notebook sorts through
+#    `cross_sectional_ic_series` and thins to one decision per label horizon, so a
+#    low factor here is a reading taken at the automatic bandwidth, not that tell.
 #
 # ### Known Limitations
 #
