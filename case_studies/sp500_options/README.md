@@ -29,7 +29,7 @@ The cost-mitigation cascade (O'Donovan & Yu 2024) is encoded in the `strategy.si
 | Stage | Notebook | Chapter | Description | Writes |
 |-------|----------|---------|-------------|--------|
 | Setup | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe breadth, round-trip cost against premium, premium persistence, fold structure | Nothing |
-| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | HTM short-straddle return + delta-hedged and raw forward variants | One parquet per label in `labels/` (hold-to-maturity, delta-hedged, execution, and raw forward variants), and `config/cv_config.json` |
+| Labels | [`02_labels`](02_labels.ipynb) | Ch7 | HTM short-straddle return + delta-hedged and raw forward variants | Five parquets in `labels/` — `ret_to_expiry` plus the 5- and 10-session forward returns and their delta-hedged counterparts — each with a `.digest.json` sidecar. Cross-validation folds come from `config/setup.yaml` |
 | Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | VRP, IV surface, skew, term structure, and Greeks features | `features/financial.parquet` |
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward GJR-GARCH volatility + particle-filtered stochastic volatility | `features/model_based.parquet` |
 | Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7–9 | IC diagnostics on the engineered feature set | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |

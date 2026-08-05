@@ -23,13 +23,6 @@
 # conditional volatility estimates. The primary contribution is an alternative
 # VRP feature: `garch_ivrv_spread = iv_30_atm - garch_cond_vol`.
 #
-# ## Role: Secondary Temporal Model
-#
-# GARCH is assigned as a **secondary** model for this case study. The primary
-# value is in the options-derived features (Ch8), not temporal dynamics.
-# GARCH serves a specific, narrow role: replacing the VRP denominator with a
-# forward-looking realized vol estimate rather than a backward-looking one.
-#
 # ## Walk-Forward Protocol
 # - Fit GJR-GARCH on training window returns (per CV fold)
 # - Run variance recursion on full train+test window with frozen parameters
@@ -83,12 +76,13 @@ CASE_DIR = get_case_study_dir("sp500_equity_option_analytics")
 LABELS_DIR = CASE_DIR / "labels"
 FEATURES_DIR = CASE_DIR / "features"
 
-# GARCH configuration
-MIN_OBS = 252  # Minimum observations for fitting (relaxed in TEST)
-MAX_SYMBOLS = None  # Limit symbols in TEST mode
-
 # %% [markdown]
-# ## 1. Load Data
+# ## Configuration
+#
+# Prices, the canonical fold timeline and the Chapter 8 feature matrix. `MIN_OBS` and
+# `MAX_SYMBOLS` are declared in the parameters cell above and bound here; they used to be
+# re-assigned below it, which silently discarded whatever papermill injected and ran the
+# test suite at production settings.
 #
 # Load prices, CV config, and Ch8 features. We need:
 # - Prices for GARCH fitting (daily returns)
@@ -126,7 +120,19 @@ else:
     has_iv = False
 
 # %% [markdown]
-# ## 2. Define Walk-Forward Fold Boundaries
+# ## A. Why a fitted feature is different
+#
+# Every feature in `03_financial_features` is a rule written in advance. These three are not:
+# their parameters are estimated from the data, which is what makes the fold contract in B
+# load-bearing rather than a formality. A rule cannot leak by being fitted; a GARCH
+# parameter can, and only the window it was fitted on decides whether it did.
+#
+# GARCH is a **secondary** model here. The primary value is in the options-derived features,
+# not temporal dynamics, and its narrow role is to replace the VRP denominator with a
+# forward-looking volatility estimate rather than a backward-looking one.
+
+# %% [markdown]
+# ## B. The fold contract
 #
 # GARCH is fitted on each fold's training window. For the test window,
 # we use the fitted model to generate 1-step-ahead conditional variance
@@ -178,7 +184,44 @@ for fold in folds:
     )
 
 # %% [markdown]
-# ## 3. GJR-GARCH Fitting Function
+# ### F1. The fold contract
+#
+# The figure the fold table cannot replace: every fitted parameter comes from the left-hand bar of
+# its own row, and the inference bar it feeds sits entirely to the right of it. The holdout rule
+# marks where the sealed period begins. The last row is the holdout fold, and it is the one to
+# read carefully - it exists because a conditional-volatility feature has to be defined over the
+# holdout for a later stage to score it, and it is fitted on development prices only.
+
+# %%
+fig = go.Figure()
+palette = ml4t_palette(2)
+for row, fold in enumerate(folds):
+    label = f"fold {fold['fold']}"
+    for span, colour, name in (
+        (("train_start", "train_end"), palette[0], "fitted on"),
+        (("test_start", "test_end"), palette[1], "inferred over"),
+    ):
+        fig.add_trace(
+            go.Scatter(
+                x=[fold[span[0]], fold[span[1]]],
+                y=[label, label],
+                mode="lines",
+                line=dict(color=colour, width=14),
+                name=name,
+                showlegend=row == 0,
+            )
+        )
+fig.add_vline(x=holdout_start, line_dash="dash", line_color="crimson")
+fig.update_layout(
+    title="No parameter comes from the right of its own training bar",
+    xaxis_title=f"Fitted and inference spans per fold; the rule marks {holdout_start}",
+    height=320,
+)
+fig.update_yaxes(autorange="reversed")
+fig.show()
+
+# %% [markdown]
+# ## C. One section per model
 #
 # The GJR-GARCH(1,1) conditional variance model:
 #
@@ -324,7 +367,7 @@ def generate_garch_forecasts(
 
 
 # %% [markdown]
-# ## 4. Walk-Forward GARCH Fitting
+# ### C.1 Walk-forward fitting
 #
 # For each fold, fit GJR-GARCH per symbol on the training window,
 # then run the variance recursion on the full train+test window
@@ -388,11 +431,11 @@ print(
 )
 
 # %% [markdown]
-# ### GARCH Persistence Diagnostics
+# ## D. Fit stability across folds
 #
 # Sample symbol-level GARCH parameters from the first fold to characterize
 # the fitted models. The persistence parameter $\alpha + \gamma/2 + \beta$
-# should be close to but below 1.0 for well-behaved volatility dynamics.
+# should be close to but below one for well-behaved volatility dynamics.
 
 # %%
 # Fit a sample of symbols on fold 0 to extract parameter estimates
@@ -444,7 +487,7 @@ else:
 
 # %% [markdown]
 # The histogram below shows the fitted persistence ($\alpha + \gamma/2 + \beta$)
-# across the sampled stocks. The mass sits just below 1.0, the signature of
+# across the sampled stocks. The mass sits just below one, the signature of
 # highly persistent equity volatility: shocks decay slowly, so a conditional-vol
 # forecast carries real information about tomorrow's variance.
 
@@ -495,7 +538,7 @@ else:
     )
 
 # %% [markdown]
-# ## 5. Compute Derived Features
+# ## E. Combine and emit
 #
 # Using the GARCH conditional volatility, compute:
 # - `garch_ivrv_spread`: IV - GARCH forecast (forward-looking VRP)
@@ -537,7 +580,7 @@ print(f"\nTemporal features: {temporal.shape}")
 print(f"Columns: {temporal.columns}")
 
 # %% [markdown]
-# ## 6. Feature Summary
+# ### E.1 Feature summary
 
 # %%
 feat_cols = [c for c in temporal.columns if c not in ("timestamp", "symbol", "fold")]
@@ -580,7 +623,7 @@ print(summary_df)
 #   to isolate their incremental contribution
 
 # %% [markdown]
-# ## 7. Save Temporal Features
+# ### E.2 Save the temporal features
 
 # %%
 FEATURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -590,14 +633,14 @@ temporal.write_parquet(output_path)
 print(f"Saved model_based.parquet ({output_path.stat().st_size / 1024:.1f} KB)")
 print(f"  Shape: {temporal.shape}")
 # %% [markdown]
-# ## 8. Incremental Evaluation
+# ## F. Incremental evaluation
 #
-# Compute IC for temporal features against the primary label (5d forward return).
+# Compute IC for temporal features against the primary label, the five-day forward return.
 # Compare static VRP (`ivrv_spread` from Ch8) vs dynamic VRP (`garch_ivrv_spread`)
 # to test whether GARCH improves the VRP signal.
 #
 # **Context**: Ch8 feature evaluation found weak individual signal strength
-# (no features survive FDR at 5%). The temporal features attempt to improve
+# (no feature clears the false-discovery threshold). The temporal features attempt to improve
 # the VRP signal specifically.
 #
 # **Scope of this evaluation**: the IC below uses only each canonical validation
@@ -779,8 +822,9 @@ if temporal_ic_results and (static_ic_mean or dynamic_ic_mean):
 # ## Key Takeaways
 #
 # 1. **The GARCH denominator does not improve the VRP signal here**: the dynamic
-#    feature's |IC| is 0.0008, below 0.0019 for Ch8's static `ivrv_spread`. Neither
-#    variant is significant on its own (HAC t well below 2), consistent with the Ch8
+#    feature's absolute IC is smaller than the static `ivrv_spread` it was meant to
+#    improve on - both are printed by the comparison above. Neither variant is
+#    significant on its own, with an HAC t-statistic well below two, consistent with the
 #    result that no single feature carries a standalone edge. The GARCH features enter
 #    the downstream multivariate models as candidate inputs, not as lone signals.
 #
@@ -796,7 +840,7 @@ if temporal_ic_results and (static_ic_mean or dynamic_ic_mean):
 # 4. **GJR asymmetry matters for equities**: The leverage effect (negative
 #    returns increase vol more than positive) is well-documented and directly
 #    relevant because the VRP is larger after negative shocks. The fitted
-#    persistence sits just below 1.0, confirming slow-decaying, forecastable
+#    persistence sits just below one, confirming slow-decaying, forecastable
 #    volatility.
 #
 # **Next**: Ch11+ models combine Ch8 features with these temporal features and

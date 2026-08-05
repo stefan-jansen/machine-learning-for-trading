@@ -35,6 +35,12 @@ HOLDOUT_SCOPED_NOTEBOOKS = [
     ("case_studies/cme_futures/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/fx_pairs/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/us_firm_characteristics/02_labels.py", "cross_sectional_ic_series("),
+    (
+        "case_studies/sp500_equity_option_analytics/02_labels.py",
+        "cross_sectional_ic_series(",
+    ),
+    ("case_studies/sp500_options/02_labels.py", "cross_sectional_ic_series("),
+    ("case_studies/nasdaq100_microstructure/02_labels.py", "cross_sectional_ic_series("),
 ]
 
 
@@ -142,6 +148,9 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
     "case_studies/crypto_perps_funding/02_labels.py",
     "case_studies/cme_futures/02_labels.py",
     "case_studies/fx_pairs/02_labels.py",
+    "case_studies/sp500_equity_option_analytics/02_labels.py",
+    "case_studies/sp500_options/02_labels.py",
+    "case_studies/nasdaq100_microstructure/02_labels.py",
 ]
 
 # Of the four above, only etfs/05 uses a market-wide calendar; the other three
@@ -161,12 +170,32 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
 # ``entity_col`` names the column the endpoint must be shifted within, which is the
 # entity a label may not cross. It is ``symbol`` for seven of the nine case studies and
 # ``product`` for cme_futures.
+# ``sp500_equity_option_analytics/02_labels`` is deliberately absent: its entity is the
+# security (``sec_id``), not the ticker. A ticker there is reassigned to another company
+# after a merger or a spin-off, and ``adj_factor`` restarts with the new security, so
+# shifting within ``symbol`` would be the under-purge this list exists to prevent rather
+# than the fix for it. It is in both lists above, where the mechanism is what is checked.
+# ``nasdaq100_microstructure/02_labels`` is deliberately absent from this third list while
+# being present in the two above. Its labels are intraday and may not cross an overnight
+# gap, so the entity a label may not cross is the compound ``["symbol", "session_date"]``
+# and its endpoint is derived with ``.over(GROUP_COLS)``. The regex below binds a single
+# quoted column name, so it cannot express a compound key -- listing the notebook here
+# would produce a false red against a seal that is strictly stronger than the per-symbol
+# one this test checks.
 # ``etfs/03_financial_features`` is deliberately absent. It was listed here while it
 # purged on a shifted label endpoint; public #447 replaced that mechanism with a seal
 # that rebuilds the whole panel with the holdout withheld and compares all 57 columns,
 # which is checked by executing the notebook rather than by reading its source. A
 # source pattern cannot see the stronger check, so listing it here only produces a
-# false red.
+# false red. See agent-workspace #141.
+# ``sp500_options/02_labels`` is deliberately absent, and for the opposite reason to
+# ``etfs/05``: its endpoint is not an approximation that needs the per-symbol form. The
+# hold-to-expiry label settles on the expiration written into the contract and the
+# fixed-horizon variants on the exit session recorded in the round-trip artifact, so
+# ``_label_end`` is the exact resolution date of each individual trade rather than a
+# calendar shift of the signal date. The notebook checks the recorded exit dates against a
+# shift of the panel calendar by the declared horizon, which is what
+# ``test_holdout_purge_is_on_the_label_endpoint`` above matches on.
 PER_SYMBOL_ENDPOINT_NOTEBOOKS = [
     ("case_studies/etfs/02_labels.py", "symbol"),
     ("case_studies/crypto_perps_funding/02_labels.py", "symbol"),

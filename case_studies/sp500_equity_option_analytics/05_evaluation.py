@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -39,7 +39,6 @@
 # %%
 """S&P 500 Equity Option Analytics: Feature Evaluation."""
 
-import json
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -53,7 +52,8 @@ from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 
 import utils.style as style
-from utils.paths import get_case_study_dir
+from utils.cv_splits import load_evaluation_config
+from utils.paths import display_path, get_case_study_dir
 
 # Register the ML4T Plotly template (colorway, fonts, gridlines) as the default
 # and expose the book palette so every figure sources color from utils.style.
@@ -105,14 +105,7 @@ temporal = _normalize_asset_column(pl.read_parquet(CASE_DIR / "features" / "mode
 label_df = pl.read_parquet(CASE_DIR / "labels" / PRIMARY_LABEL_FILE)
 label_col = [c for c in label_df.columns if c not in ("timestamp", "symbol", "timestamp")][0]
 
-cv_config_path = CASE_DIR / "config" / "cv_config.json"
-if cv_config_path.exists():
-    with open(cv_config_path) as f:
-        cv_config = json.load(f)
-else:
-    from utils.modeling import get_cv_config
-
-    cv_config = get_cv_config(CASE_STUDY_ID).model_dump()
+cv_config = load_evaluation_config(CASE_STUDY_ID)
 
 print(f"Features: {features.shape}")
 print(f"Temporal: {temporal.shape}")
@@ -146,9 +139,7 @@ if MAX_SYMBOLS > 0:
 # %%
 from datetime import date as _date
 
-holdout_start = str(cv_config.get("holdout_start") or cv_config.get("test_start") or "2021-01-01")[
-    :10
-]
+holdout_start = str(cv_config["holdout_start"])[:10]
 holdout_start_date = _date.fromisoformat(holdout_start)
 
 dev_sessions = eval_panel.filter(pl.col(DATE_COL) < holdout_start_date)[DATE_COL].unique().sort()
@@ -745,7 +736,7 @@ for feat in all_feature_cols:
 
 triage_ledger = pl.DataFrame(ledger_rows)
 triage_ledger.write_parquet(EVAL_DIR / "triage_ledger.parquet")
-print(f"Triage ledger saved: {EVAL_DIR / 'triage_ledger.parquet'}")
+print(f"Triage ledger saved: {display_path(EVAL_DIR / 'triage_ledger.parquet')}")
 print(triage_ledger.group_by("decision").len().sort("decision"))
 
 # %%
@@ -757,7 +748,7 @@ for feat, ts in ic_timeseries.items():
 if ic_ts_frames:
     ic_ts_all = pl.concat(ic_ts_frames)
     ic_ts_all.write_parquet(EVAL_DIR / "ic_timeseries.parquet")
-    print(f"IC time series saved: {EVAL_DIR / 'ic_timeseries.parquet'}")
+    print(f"IC time series saved: {display_path(EVAL_DIR / 'ic_timeseries.parquet')}")
 
 # %%
 # Write results JSON
