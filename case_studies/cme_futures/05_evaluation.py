@@ -37,12 +37,14 @@ Consolidated evaluation of Ch8 financial features and Ch9 temporal features
 against forward return labels. Produces triage decisions for Ch11 modeling.
 """
 
+import re
 import warnings
 from datetime import date
 
 warnings.filterwarnings("ignore")
 
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
@@ -50,6 +52,8 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, compute_ic_uncertainty
 from plotly.subplots import make_subplots
 
 import utils.style as style
+from utils.artifact_specs import load_setup_config, resolve_label_buffer
+from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
 
 # Register the ML4T Plotly template (colorway, fonts, gridlines) as the default
@@ -74,12 +78,25 @@ CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 EVAL_DIR = CASE_DIR / "evaluation"
 EVAL_DIR.mkdir(exist_ok=True)
 
+SETUP = load_setup_config(CASE_STUDY_ID)
+eval_config = SETUP["evaluation"]
+
+# The label and its horizon come from setup.yaml. The HAC bandwidth is the label
+# horizon: it is the overlap the daily-sampled forward return induces, so typing
+# it separately would let the correction and the label drift apart.
+PRIMARY_LABEL = SETUP["labels"]["primary"]
+LABEL_BUFFER = resolve_label_buffer(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
+assert LABEL_BUFFER, f"No label buffer configured for {PRIMARY_LABEL}"
+HAC_MAXLAGS = int(re.match(r"^(\d+)", LABEL_BUFFER).group(1))
+
 FDR_ALPHA = 0.05  # Benjamini-Hochberg level
 NAIVE_T = 1.96  # two-sided normal critical value, for the naive-versus-HAC comparison
 REDUNDANCY_CUT = 0.7  # |rho| above which two features are reported as one piece of evidence
 MIN_SIGN_CONSISTENCY = 0.60  # fold-sign agreement the exploration arm requires
 IC_THRESHOLD = 0.008  # |IC| the exploration arm requires, at a weekly horizon
 N_QUANTILES = 5
+MIN_COVERAGE = 0.70  # non-null fraction the correctness gate requires
+MAX_STALENESS = 0.50  # unchanged-from-prior-date fraction the correctness gate allows
 
 # %% [markdown]
 # ## Load Artifacts and Build Evaluation Panel
@@ -100,9 +117,32 @@ N_QUANTILES = 5
 # **Holdout sealing.** Every statistic in this notebook — IC ranking, HAC
 # significance, BH-FDR discovery, and the PROCEED/STOP triage — is a feature-
 # selection input for Ch11. We therefore seal the evaluation to
-# `[START, holdout_start)` (`holdout_start` from `setup.yaml`, here 2024-01-01);
-# the 2024–2025 holdout is never touched here so it stays unbiased for the final
-# model assessment downstream.
+# `[START, holdout_start)` (`holdout_start` from `setup.yaml`); the holdout is
+# never touched here so it stays unbiased for the final model assessment
+# downstream.
+#
+# **The fold contract for the Ch9 features.** `model_based.parquet` carries one
+# row per `(timestamp, product, position, fold)`, and for the fitted families the
+# value depends on the fold: `04_model_based_features` fits the ARIMA and the HMM
+# on each fold's training window and emits a value for the training dates as well
+# as the validation dates. A training-date value is in-sample — the parameters
+# behind it were estimated from a window that extends past that date — so it may
+# not enter a screen. The fold column is therefore resolved rather than dropped:
+# a fitted feature is read only inside the validation window of the fold that
+# produced it, and the fold-invariant FFT features, which carry no fitted
+# parameter, are read from any fold once that invariance is asserted.
+#
+# **The evaluation frame is the union of the validation windows**, not the whole
+# pre-holdout span, and the Ch8 features are screened on the same rows as the Ch9
+# ones. Two things force it. A fitted feature exists out of sample only inside its
+# own validation window, so on the full span its coverage is only the share of
+# dates the folds happen to cover, and the coverage screen would report a design
+# property as a broken feature. And an IC measured over the whole span is not
+# comparable with one measured over the folds alone, so a ranking that mixes them
+# ranks the window as much as the feature. The frame is contiguous because the five
+# windows abut, and `generate_cv_splits` has already dropped the validation dates
+# whose label endpoint would reach the holdout, so the seal below is on the label
+# endpoint rather than on the signal date.
 
 # %%
 # Load features — filter to front month for evaluation
@@ -112,23 +152,12 @@ features = pl.read_parquet(CASE_DIR / "features" / "financial.parquet").filter(
 temporal = pl.read_parquet(CASE_DIR / "features" / "model_based.parquet").filter(
     pl.col("position") == 0
 )
-# model_based.parquet now carries one row per (timestamp, product, position, fold);
-# drop fold and de-dup so the join doesn't multiply the eval panel by fold count.
-if "fold" in temporal.columns:
-    temporal = temporal.drop("fold").unique(subset=["timestamp", "product"], keep="last")
 
 # Load primary label (front month only)
-label_df = pl.read_parquet(CASE_DIR / "labels" / "fwd_ret_5d.parquet").filter(
+label_df = pl.read_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet").filter(
     pl.col("position") == 0
 )
 label_col = [c for c in label_df.columns if c not in ("timestamp", "product", "position")][0]
-
-# Load evaluation config from setup.yaml (single source of truth)
-import yaml
-
-with open(CASE_DIR / "config" / "setup.yaml") as f:
-    setup_config = yaml.safe_load(f)
-eval_config = setup_config["evaluation"]
 
 # Holdout boundary — feature evaluation and triage must be sealed against the
 # holdout (setup.yaml `holdout_start`). Any IC ranking, FDR discovery, or
@@ -139,6 +168,79 @@ HOLDOUT_START = date(*map(int, eval_config["holdout_start"].split("-")))
 # Join keys — position is fixed at 0 but kept for join consistency
 JOIN_COLS = ["timestamp", "product", "position"]
 DATE_COL = "timestamp"
+
+# %% [markdown]
+# ### The walk-forward folds
+#
+# Derived through `generate_cv_splits` from the label frame, which is the call
+# `04_model_based_features` makes and the one `load_modeling_dataset` makes in
+# Ch11. Replaying a fold boundary from a literal here would let the fold ids in
+# `model_based.parquet` mean something different on the two sides of the join,
+# which is what the resolution below depends on.
+
+# %%
+splits = generate_cv_splits(
+    label_df.select(DATE_COL).unique().sort(DATE_COL),
+    case_study_id=CASE_STUDY_ID,
+    label_buffer=LABEL_BUFFER,
+)
+
+
+def _as_date(value) -> date:
+    return pd.Timestamp(value).date()
+
+
+for split in splits:
+    print(
+        f"  Fold {split['fold']}: train {_as_date(split['train_start'])} → "
+        f"{_as_date(split['train_end'])}, validation {_as_date(split['val_start'])} → "
+        f"{_as_date(split['val_end'])}"
+    )
+
+# %%
+# Resolve the fold column. FFT carries no fitted parameter and 04 replicates one
+# set of values across every fold; assert that rather than assume it, then read it
+# once. ARIMA and HMM are fitted per fold, so each value is kept only inside the
+# validation window of the fold that produced it — the rows where it is genuinely
+# out of sample.
+FITTED_PREFIXES = ("arima_", "hmm_")
+temporal_feature_cols = [c for c in temporal.columns if c not in (*JOIN_COLS, "fold")]
+invariant_cols = [c for c in temporal_feature_cols if not c.startswith(FITTED_PREFIXES)]
+fitted_cols = [c for c in temporal_feature_cols if c.startswith(FITTED_PREFIXES)]
+
+folds = sorted(temporal["fold"].unique().to_list())
+_reference = temporal.filter(pl.col("fold") == folds[0]).select([*JOIN_COLS, *invariant_cols])
+for fold_id in folds[1:]:
+    other = temporal.filter(pl.col("fold") == fold_id).select([*JOIN_COLS, *invariant_cols])
+    assert _reference.sort(JOIN_COLS).equals(other.sort(JOIN_COLS)), (
+        f"fold {fold_id} disagrees with fold {folds[0]} on {invariant_cols}, "
+        "which 04_model_based_features declares fold-invariant"
+    )
+
+val_windows = {int(s["fold"]): (_as_date(s["val_start"]), _as_date(s["val_end"])) for s in splits}
+IN_VALIDATION = pl.any_horizontal(
+    [(pl.col(DATE_COL) >= start) & (pl.col(DATE_COL) <= end) for start, end in val_windows.values()]
+)
+fitted_oos = (
+    temporal.select([*JOIN_COLS, "fold", *fitted_cols])
+    .filter(
+        pl.col("fold").replace_strict(
+            {f: start for f, (start, _) in val_windows.items()}, default=None
+        )
+        <= pl.col(DATE_COL),
+    )
+    .filter(
+        pl.col(DATE_COL)
+        <= pl.col("fold").replace_strict(
+            {f: end for f, (_, end) in val_windows.items()}, default=None
+        )
+    )
+    .drop("fold")
+)
+assert fitted_oos.select(JOIN_COLS).is_duplicated().sum() == 0, (
+    "validation windows overlap; a fitted feature would take two values on one date"
+)
+temporal = _reference.join(fitted_oos, on=JOIN_COLS, how="left")
 
 # %%
 # Identify feature columns (exclude metadata and composite signals)
@@ -153,8 +255,10 @@ eval_panel = features.drop(["ls_signal", "risk_adj_score"], strict=False).join(
 eval_panel = eval_panel.join(label_df, on=JOIN_COLS, how="inner")
 
 # Seal the holdout: every IC / FDR / triage statistic below is a selection input
-# for Ch11 modeling, so it may only see pre-holdout data.
-eval_panel = eval_panel.filter(pl.col(DATE_COL) < HOLDOUT_START)
+# for Ch11 modeling, so it may only see pre-holdout data. Then narrow to the
+# validation windows, which is the frame every screen below reads.
+eval_panel = eval_panel.filter(pl.col(DATE_COL) < HOLDOUT_START).filter(IN_VALIDATION)
+assert eval_panel[DATE_COL].max() < HOLDOUT_START
 
 all_feature_cols = financial_cols + temporal_cols
 
@@ -167,7 +271,10 @@ n_rows = len(eval_panel)
 n_symbols = eval_panel["product"].n_unique()
 n_dates = eval_panel[DATE_COL].n_unique()
 print(f"Eval panel: {n_rows:,} rows, {n_symbols} products, {n_dates} dates")
-print(f"  (front-month only — position == 0; sealed to < {HOLDOUT_START})")
+print(
+    f"  (front-month only — position == 0; validation windows only, "
+    f"{eval_panel[DATE_COL].min()} to {eval_panel[DATE_COL].max()}, sealed to < {HOLDOUT_START})"
+)
 print(
     f"Features: {len(financial_cols)} financial + {len(temporal_cols)} temporal"
     f" = {len(all_feature_cols)} total"
@@ -182,30 +289,38 @@ print(f"Label: {label_col}")
 # extreme return magnitudes. This gate catches data pipeline failures (e.g.,
 # broken back-adjustment, division by zero in derived features) before they
 # propagate to model training where they surface as cryptic `ValueError`s.
+#
+# The gate runs on the evaluation frame, not on the artifacts as they sit on disk.
+# Its counts are printed, so reading the holdout rows here would put a description
+# of the sealed window into this notebook's output; and its `fail_on_critical`
+# makes whether this notebook runs at all depend on what it reads. Both are
+# decisions, and both belong inside the frame the screens read.
 
 # %%
 from utils.data_quality import validate_modeling_inputs
 
-# Run quality gate on raw inputs (before any filtering or joining)
+framed_features = features.filter(pl.col(DATE_COL) < HOLDOUT_START).filter(IN_VALIDATION)
+framed_temporal = temporal.filter(pl.col(DATE_COL) < HOLDOUT_START).filter(IN_VALIDATION)
+framed_labels = label_df.filter(pl.col(DATE_COL) < HOLDOUT_START).filter(IN_VALIDATION)
+
 quality_result = validate_modeling_inputs(
-    features_df=features,
-    label_df=label_df,
+    features_df=framed_features,
+    label_df=framed_labels,
     feature_cols=[c for c in features.columns if c not in {"timestamp", "product", "position"}],
     label_col=label_col,
     join_cols=JOIN_COLS,
     asset_col="product",
-    max_abs_return=1.0,  # 5-day futures returns (max observed ~0.90, CL/NG)
+    max_abs_return=1.0,  # a 5-day futures return this large is a back-adjustment failure
     max_abs_feature=1e6,
     fail_on_critical=True,
 )
 
 # Also check temporal features if loaded
-if len(temporal) > 0:
-    temporal_feature_cols = [c for c in temporal.columns if c not in JOIN_COLS]
+if len(framed_temporal) > 0:
     temporal_quality = validate_modeling_inputs(
-        features_df=temporal,
-        label_df=label_df,
-        feature_cols=temporal_feature_cols,
+        features_df=framed_temporal,
+        label_df=framed_labels,
+        feature_cols=temporal_cols,
         label_col=label_col,
         join_cols=JOIN_COLS,
         asset_col="product",
@@ -218,11 +333,13 @@ if len(temporal) > 0:
 # ## 1. Correctness Screens
 #
 # Before evaluating predictive power, we check each feature for:
-# - **Coverage**: Fraction of non-null values (gate: $\geq 70\%$)
-# - **Staleness**: Fraction of dates where the value is unchanged from the prior date
-#   within the same product (gate: $\leq 50\%$)
+# - **Coverage**: fraction of non-null values, against `MIN_COVERAGE`
+# - **Staleness**: fraction of dates where the value is unchanged from the prior date
+#   within the same product, against `MAX_STALENESS`
 #
-# Features failing either gate are triaged as STOP.
+# Features failing either gate are triaged as STOP. Both are measured on the
+# evaluation frame, so a feature fitted per fold is measured over the rows on
+# which it is out of sample rather than over a span where it does not exist.
 
 # %%
 # Coverage: fraction non-null per feature
@@ -244,8 +361,8 @@ for feat in all_feature_cols:
 # Correctness gate
 correctness = {}
 for feat in all_feature_cols:
-    cov_ok = coverage[feat] >= 0.70
-    stale_ok = staleness[feat] <= 0.50
+    cov_ok = coverage[feat] >= MIN_COVERAGE
+    stale_ok = staleness[feat] <= MAX_STALENESS
     correctness[feat] = cov_ok and stale_ok
 
 n_pass = sum(correctness.values())
@@ -271,10 +388,10 @@ if n_fail > 0:
 #
 # ### Why HAC correction matters
 #
-# The 5-day forward return label is computed daily, so consecutive observations
-# overlap by 4 days. This induces autocorrelation of order ~5 in the IC series,
-# inflating naive standard errors. HAC (Newey-West) standard errors with
-# bandwidth $= 5$ correct for this:
+# The forward return label is computed daily over a horizon of several sessions,
+# so consecutive observations overlap. This induces autocorrelation of the order
+# of the horizon in the IC series, inflating naive standard errors. HAC
+# (Newey-West) standard errors with a bandwidth of `HAC_MAXLAGS` correct for this:
 #
 # $$N_{\text{eff}} \approx \frac{N}{1 + 2\sum_{k=1}^{q} w_k \hat{\rho}_k}$$
 #
@@ -287,7 +404,6 @@ if n_fail > 0:
 
 # %%
 evaluable_features = [f for f in all_feature_cols if correctness[f]]
-HAC_MAXLAGS = 5  # 5-day forward return → 5 trading days HAC bandwidth
 
 ic_results = {}
 ic_timeseries = {}
@@ -323,50 +439,52 @@ print(f"Evaluated {len(ic_results)} features (of {len(evaluable_features)} evalu
 # %% [markdown]
 # ### Fold-Level Stability
 #
-# Check whether IC sign is consistent across the 5 walk-forward folds.
-# Sign consistency $\geq 60\%$ (i.e., same sign in 3+ of 5 folds) indicates
-# a feature that works across market regimes, not just one favorable period.
+# Whether a feature's IC keeps the same sign across the walk-forward validation
+# windows, which is what separates a feature that works across market regimes from
+# one that had a single favorable period. The quantity measured is agreement with
+# the feature's *own* full-sample sign, not agreement with a positive sign: a
+# feature that is negative in every fold is as stable as one that is positive in
+# every fold, and it is the direction a long-short book would take. Counting
+# positive folds instead scores a reliably negative predictor at zero, and would
+# have kept `mom_accel_long` - the largest absolute IC in this panel, negative in
+# every fold - out of the exploration arm entirely.
 
 # %%
-# Derive fold boundaries from setup.yaml evaluation config
-n_splits = eval_config["n_splits"]
-holdout_start_year = int(eval_config["holdout_start"][:4])
-train_years = int(eval_config["train_size"].rstrip("Y"))
+MIN_FOLD_DATES = 5  # dates a fold must contribute before its mean IC is read
 
-splits = []
-for i in range(n_splits):
-    test_year = holdout_start_year - n_splits + i
-    splits.append(
-        {
-            "test_start": date(test_year, 1, 1),
-            "test_end": date(test_year, 12, 31),
-        }
-    )
 
-# Per-fold IC
+def per_fold_mean_ics(feat: str) -> list[float]:
+    """Mean IC inside each fold's validation window, under the screen's own rule."""
+    ts = ic_timeseries[feat]
+    out = []
+    for split in splits:
+        window = ts.filter(
+            (pl.col(DATE_COL) >= _as_date(split["val_start"]))
+            & (pl.col(DATE_COL) <= _as_date(split["val_end"]))
+        )
+        if len(window) >= MIN_FOLD_DATES:
+            out.append(window["ic"].mean())
+    return out
+
+
 fold_stats = {}
 for feat in ic_results:
-    fold_ics = []
-    for split in splits:
-        ts = ic_timeseries[feat]
-        fold_ic = ts.filter(
-            (pl.col(DATE_COL) >= split["test_start"]) & (pl.col(DATE_COL) <= split["test_end"])
-        )
-        if len(fold_ic) >= 5:
-            fold_ics.append(fold_ic["ic"].mean())
-
+    fold_ics = per_fold_mean_ics(feat)
     if fold_ics:
-        sign_consistency = sum(1 for ic in fold_ics if ic > 0) / len(fold_ics)
+        pooled_sign = np.sign(ic_results[feat]["mean_ic"])
+        agreeing = sum(1 for ic in fold_ics if np.sign(ic) == pooled_sign and pooled_sign != 0)
         fold_stats[feat] = {
             "n_folds": len(fold_ics),
-            "sign_consistency": sign_consistency,
+            "sign_consistency": agreeing / len(fold_ics),
             "worst_fold_ic": min(fold_ics),
             "best_fold_ic": max(fold_ics),
             "median_fold_ic": float(np.median(fold_ics)),
         }
 
-n_consistent = sum(1 for s in fold_stats.values() if s["sign_consistency"] >= 0.6)
-print(f"Fold stability: {n_consistent} features with sign consistency >= 60%")
+n_consistent = sum(1 for s in fold_stats.values() if s["sign_consistency"] >= MIN_SIGN_CONSISTENCY)
+print(
+    f"Fold stability: {n_consistent} features agree with their own sign in >= {MIN_SIGN_CONSISTENCY:.0%} of folds"
+)
 
 # %% [markdown]
 # ## 3. Multiple Testing Correction (BH-FDR)
@@ -511,12 +629,17 @@ fig = go.Figure(
     )
 )
 fig.add_vline(x=0, line=dict(color=GRAY_FILLS["border"], width=1))
+# Room for the t-statistic label on the longest bar: `textposition="outside"` draws
+# it past the bar end, and at the default range the leftmost one runs into the
+# feature names.
+ic_span = max(abs(value) for value in top["ic_mean"].to_list()) * 1.35
 fig.update_layout(
     template="ml4t",
     height=620,
     width=900,
     title_text="Almost nothing here survives false-discovery control",
     xaxis_title="Mean cross-sectional IC (Spearman)",
+    xaxis_range=[-ic_span, ic_span],
     yaxis_title="Feature",
     margin=dict(l=170),
 )
@@ -527,21 +650,16 @@ fig.show()
 #
 # A pooled mean IC hides the difference between a feature that works in every fold
 # and one that had a single good year. Each feature's per-fold means are drawn with
-# its median marked, for the same leading features the ranking shows.
+# its median marked, for the same leading features the ranking shows. The dots and
+# the diamond come from `per_fold_mean_ics`, the same function the screen reads, so
+# the median cannot be drawn over a set of folds the chart does not show.
 
 # %%
 FOLDS_SHOWN = 12
 fold_features = [f for f in eval_summary["feature"].to_list() if f in fold_stats][:FOLDS_SHOWN]
 fig = go.Figure()
 for feat in fold_features:
-    ts = ic_timeseries[feat]
-    per_fold = [
-        ts.filter(
-            (pl.col(DATE_COL) >= split["test_start"]) & (pl.col(DATE_COL) <= split["test_end"])
-        )["ic"].mean()
-        for split in splits
-    ]
-    per_fold = [value for value in per_fold if value is not None]
+    per_fold = per_fold_mean_ics(feat)
     fig.add_trace(
         go.Scatter(
             x=per_fold,
@@ -624,12 +742,24 @@ fig.show()
 # %% [markdown]
 # ## 4. Shape Diagnostics
 #
-# Quantile monotonicity checks whether the relationship between a feature and
-# the label is monotone — i.e., whether moving from Q1 to Q5 consistently
-# increases (or decreases) the forward return. High monotonicity (Spearman
-# $|\rho| \geq 0.8$ between quantile rank and mean return) indicates a
-# clean, exploitable signal. Non-monotone features may still be useful
-# but require non-linear models.
+# Quantile monotonicity asks whether the relationship between a feature and the
+# label is monotone — whether moving from Q1 to Q5 consistently increases or
+# decreases the forward return. A monotone profile is what a linear model can
+# use; a U-shaped one says the same information is there but not in a form a
+# linear coefficient can carry.
+#
+# **The quantiles are formed within each date and each date is weighted equally.**
+# The IC beside them is a within-date rank statistic, so a profile built by
+# pooling every row and cutting once would be a different object: it would sort a
+# 2011 observation against a 2023 one and let the time-series variation of the
+# feature stand in for the cross-sectional variation the IC measures. A feature
+# with a negative IC would then be free to show a rising profile with nothing to
+# reconcile the two.
+#
+# The mean and the median profile are drawn together. The mean is what a
+# long-short book earns; the median describes the typical product, and a rank
+# statistic like the IC agrees with the median. Where they disagree the gap is the
+# return tail, not the shape.
 
 # %%
 from scipy.stats import spearmanr
@@ -642,22 +772,46 @@ ranked_shape = eval_summary["feature"].to_list()
 top_features_for_shape = fdr_shape + [f for f in ranked_shape if f not in fdr_shape]
 top_features_for_shape = top_features_for_shape[:6]
 
+QUANTILE_LABELS = [f"Q{i + 1}" for i in range(N_QUANTILES)]
+
 monotonicity_scores = {}
 quantile_spreads = {}
 for feat in top_features_for_shape:
-    valid = eval_panel.select([feat, label_col]).drop_nulls()
-    if len(valid) < N_QUANTILES * 20:
+    valid = eval_panel.select([DATE_COL, feat, label_col]).drop_nulls()
+    # A date needs at least one product per bucket before it can be cut into them.
+    valid = valid.filter(pl.len().over(DATE_COL) >= N_QUANTILES)
+    if valid[DATE_COL].n_unique() < 20:
         continue
-    valid = valid.with_columns(
+    binned = valid.with_columns(
         pl.col(feat)
-        .qcut(N_QUANTILES, labels=[f"Q{i + 1}" for i in range(N_QUANTILES)])
+        .qcut(N_QUANTILES, labels=QUANTILE_LABELS, allow_duplicates=True)
+        .over(DATE_COL)
         .alias("quantile")
     )
-    q_means = valid.group_by("quantile").agg(pl.col(label_col).mean()).sort("quantile")
-    means = q_means[label_col].to_list()
-    spread = means[-1] - means[0]
-    quantile_spreads[feat] = {"q_means": means, "spread": spread}
+    # Per date first, then across dates: every date carries the same weight, which
+    # is how the IC series beside this is built and how a rebalance experiences it.
+    per_date = binned.group_by([DATE_COL, "quantile"]).agg(
+        pl.col(label_col).mean().alias("date_mean"),
+        pl.col(label_col).median().alias("date_median"),
+    )
+    profile = (
+        per_date.group_by("quantile")
+        .agg(
+            pl.col("date_mean").mean().alias("mean"),
+            pl.col("date_median").mean().alias("median"),
+        )
+        .sort("quantile")
+    )
+    means = profile["mean"].to_list()
+    medians = profile["median"].to_list()
+    quantile_spreads[feat] = {
+        "q_means": means,
+        "q_medians": medians,
+        "spread": means[-1] - means[0],
+    }
 
+    # monotonicity in the ledger is the Spearman rank correlation between quantile
+    # index and mean return, which is the convention the other case studies share.
     mono_corr, _ = spearmanr(range(len(means)), means)
     monotonicity_scores[feat] = float(mono_corr)
 
@@ -666,34 +820,68 @@ if quantile_spreads:
     n_show = min(6, len(quantile_spreads))
     feats_to_show = list(quantile_spreads.keys())[:n_show]
     n_rows_fig = (n_show + 2) // 3
-    fig = make_subplots(rows=n_rows_fig, cols=3, subplot_titles=feats_to_show)
+    fig = make_subplots(rows=n_rows_fig, cols=3, subplot_titles=feats_to_show, shared_yaxes=True)
     for idx, feat in enumerate(feats_to_show):
         r, c = divmod(idx, 3)
-        q_means = quantile_spreads[feat]["q_means"]
         fig.add_trace(
             go.Bar(
-                x=[f"Q{i + 1}" for i in range(len(q_means))],
-                y=q_means,
+                x=QUANTILE_LABELS,
+                y=quantile_spreads[feat]["q_means"],
                 marker_color=COLORS["blue"],
-                showlegend=False,
+                name="mean",
+                legendgroup="mean",
+                showlegend=idx == 0,
             ),
             row=r + 1,
             col=c + 1,
         )
+        fig.add_trace(
+            go.Scatter(
+                x=QUANTILE_LABELS,
+                y=quantile_spreads[feat]["q_medians"],
+                mode="markers",
+                marker=dict(color=COLORS["amber"], size=9, symbol="diamond"),
+                name="median",
+                legendgroup="median",
+                showlegend=idx == 0,
+            ),
+            row=r + 1,
+            col=c + 1,
+        )
+    # One y range across the panels: the point of six panels side by side is that
+    # their heights are comparable, which independent auto-scaling destroys.
+    span = max(
+        abs(value)
+        for feat in feats_to_show
+        for key in ("q_means", "q_medians")
+        for value in quantile_spreads[feat][key]
+    )
+    fig.update_yaxes(range=[-1.15 * span, 1.15 * span])
     fig.update_layout(
         template="ml4t",
-        height=250 * n_rows_fig,
+        height=260 * n_rows_fig + 60,
         width=900,
-        title_text="Only some of the leading features rise monotonically by quintile",
+        title_text="Every profile runs with the sign of its own IC, and the volatility features peak at Q4",
+        legend=dict(orientation="h", y=-0.08),
     )
     fig.show()
 
 # %% [markdown]
-# **Interpretation**: Monotone staircase patterns (Q1 → Q5 consistently rising or
-# falling) confirm that the feature has a linear relationship with the forward return
-# — ideal for linear models like Ridge/Lasso in Ch11. Non-monotone patterns
-# (e.g., U-shaped) suggest interaction effects or non-linearities that
-# tree-based models (Ch12) may capture better.
+# **Interpretation**: a monotone profile — Q1 to Q5 consistently rising or falling —
+# is the shape a linear model in Ch11 can carry in a single coefficient, and every
+# panel here has most of one. The two negative-IC panels fall from Q1 to Q5 and the
+# four volatility panels rise, so each runs in the direction the ranking figure
+# gives it. That agreement is a consequence of forming the quantiles within each
+# date: cut once over the pooled panel, a feature is free to show a profile that
+# contradicts its own IC with nothing in the notebook to reconcile them.
+#
+# What none of the volatility panels has is the last step. All four peak at Q4 and
+# give part of it back at Q5, which is why their monotonicity scores stop short of
+# 1. A Ridge or Lasso coefficient fitted on the rank has to average that reversal
+# away; a tree in Ch12 can cut Q5 off. The median markers say the shape is not a
+# tail artifact — they track the means except in the middle buckets of the two
+# negative panels, where the mean is carried by a few large returns and the typical
+# product is flat.
 
 # %% [markdown]
 # ## 5. Redundancy and Feature Families
@@ -834,17 +1022,18 @@ if ranked_pairs:
     fig.show()
 
 # %% [markdown] tags=["results"]
-# **The sign split across the carry family is economically coherent, not a data
-# error.** The carry *level* features carry a positive cross-sectional IC:
-# `carry_21d` is the strongest of them, and `carry_pct` and `carry_rank` are
-# positive but weaker. Higher carry predicts higher forward returns, which is the
-# conventional roll-yield premium that motivates the long-short carry-ranked
-# strategy in the backtest. The negative signs are confined to the *rate of change*
-# of those quantities - `carry_momentum_5d` and `carry_momentum_21d` - and to
-# momentum acceleration, `mom_accel_long`, which carries the largest absolute IC in
-# the panel. A level premium alongside a change-of-slope reversal over the weekly
-# horizon is what the sign pattern says, and the ranking figure above shows both
-# groups with their HAC t-statistics attached.
+# **The carry family points the wrong way on this frame, and the screen reports
+# that rather than resolving it.** Every carry feature with a computable IC over the
+# validation windows is negative except `carry_21d`, whose HAC t-statistic leaves it
+# indistinguishable from zero. The strongest of them is `carry_momentum_5d`, the
+# five-day change in carry, and it is the one feature in the whole panel that
+# survives BH-FDR. Read as a sign rather than a magnitude, that says a product whose
+# carry has just risen underperformed one whose carry has just fallen, at the weekly
+# horizon, across these five validation years - the opposite direction from the
+# roll-yield premium that motivates the long-short carry-ranked mapping in
+# `setup.yaml`. A univariate screen over one window is not the instrument that
+# settles which is right; the ranking figure above shows the whole family with its
+# HAC t-statistics attached, and Ch11 sees it in a multivariate context.
 
 # %% [markdown]
 # ## 6. Triage and Handoff
@@ -969,6 +1158,13 @@ for f in sorted(proceed_features):
 # table for the multivariate models in Ch11, and the ledger says which features
 # reached PROCEED that way.
 #
+# **PROCEED here means "not yet ruled out".** Nearly half the panel reaches it, and
+# almost all of that through the exploration arm rather than through BH-FDR. With
+# five folds the sign-consistency bar is agreement in three of them, which a coin
+# flip clears half the time, so the arm screens against an IC that came from a
+# single episode and does nothing more. The `note` column is what separates the two
+# populations, and Ch11 has to read it.
+#
 # This notebook does not pronounce on the case study. A univariate screen is
 # necessary and not sufficient, and whether any of these features are tradable is
 # settled by a backtest Sharpe several stages later.
@@ -980,13 +1176,21 @@ for f in sorted(proceed_features):
 #    counts printed above differ by a wide margin on this panel, and the gap is
 #    the price of having tested every feature rather than one. A significance
 #    claim without the size of the search that produced it cannot be read.
-# 2. **Read the sign, not only the magnitude.** The carry family splits: the level
-#    predicts positively, and its rate of change predicts negatively. That split is
-#    economically coherent, and a screen ranking on absolute IC alone would have
-#    hidden it.
-# 3. **Fold stability** filters for features that work across market regimes,
-#    not just one favorable in-sample window
-# 4. **Triage decisions** feed directly into Ch11: PROCEED features enter modeling,
+# 2. **Read the sign, not only the magnitude.** The carry family's ICs run negative
+#    on this frame, the change-in-carry features most strongly, and that is the
+#    opposite of the direction the case study's own mapping assumes. A screen
+#    ranking on absolute IC alone promotes them without ever showing it.
+# 3. **Screen on the frame where every candidate exists.** The Ch9 features are
+#    fitted per fold and are out of sample only inside their own validation window.
+#    Measured over the whole pre-holdout span their coverage is the share of it the
+#    folds happen to reach, and the correctness gate reads a design property as a
+#    broken feature; measured over the union of the windows, they are covered and
+#    they are comparable with the Ch8 features beside them.
+# 4. **Fold stability is a weak filter at five folds.** Sign consistency can only
+#    take six values, and the bar the exploration arm sets is three folds out of
+#    five. It rules out the single-episode IC and it is not evidence of a stable
+#    association.
+# 5. **Triage decisions** feed directly into Ch11: PROCEED features enter modeling,
 #    REVISE features may be included in ensembles, STOP features are excluded
 #
 # **Next**: [`06_linear`](06_linear.ipynb) (Ch11) uses the triage ledger and IC time series
