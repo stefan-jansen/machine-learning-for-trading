@@ -180,7 +180,10 @@ for cs, df in preds.items():
     print(
         f"{cs}: {df.height:,} rows, {df[cfg['id_col']].n_unique()} entities, "
         f"{df['fold'].n_unique()} validation folds, "
-        f"{df['timestamp'].min().date()} to {df['timestamp'].max().date()}"
+        # The two panels do not share a timestamp dtype: the ETF predictions are
+        # stored as Date and the CME ones as Datetime, so `.date()` exists on one
+        # and not the other. Formatting works on both.
+        f"{df['timestamp'].min():%Y-%m-%d} to {df['timestamp'].max():%Y-%m-%d}"
     )
 
 # %% [markdown]
