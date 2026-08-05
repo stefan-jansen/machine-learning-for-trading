@@ -49,6 +49,7 @@
 
 import math
 import warnings
+from collections import Counter
 from datetime import date
 
 import polars as pl
@@ -302,6 +303,15 @@ spanned = on_rows.drop_nulls("spanned")
 off_grid = spanned.filter(pl.col("spanned") != WIDEST)
 pairs = on_rows.drop_nulls("adjacent")
 
+# The same census for the underlying, which C.1 counts its windows on with every
+# observation required: a run is one stretch of consecutive grid sessions on which the
+# security carried no close.
+absent = pl.col("close").is_null()
+underlying_gaps = panel.select(
+    absent.sum().alias("sessions"),
+    (absent & ~absent.shift(1, fill_value=False).over(SEGMENT)).sum().alias("runs"),
+).row(0, named=True)
+
 # %%
 print(f"{len(panel):,} session rows, {panel.filter(QUOTED).height:,} of them quoted")
 print(
@@ -313,14 +323,19 @@ print(
     f"sessions on {off_grid.height:,} of {spanned.height:,} rows "
     f"({off_grid.height / spanned.height:.1%}), up to {spanned['spanned'].max()} sessions"
 )
+print(
+    f"the underlying carries no close on {underlying_gaps['sessions']:,} grid sessions, "
+    f"in {underlying_gaps['runs']:,} runs"
+)
 
 # %% [markdown]
 # ## C. Feature construction, one subsection per family
 #
 # ### C.1 Underlying returns and realized volatility
 #
-# The underlying panel is dense - two gaps in 635,050 consecutive sessions - so these windows are
-# counted with every observation required. `trailing_return` and `trailing_volatility` are the
+# The underlying panel is dense - B.1's census counts the grid sessions it leaves without a close,
+# and the runs they fall in - so these windows are counted with every observation required, unlike
+# the straddle windows in C.4. `trailing_return` and `trailing_volatility` are the
 # shared primitives, called with `sec_id` in the segment so that neither a return nor a volatility
 # ever spans a security identity change. Realized volatility is the RV side of the premium and is
 # kept under its own `rv_` prefix rather than the primitive's `vol_` name, which is the name every
@@ -476,9 +491,9 @@ def dynamics_features(df: pl.DataFrame) -> pl.DataFrame:
 # when it was quoted and when the premium the thesis is about can be measured on it at the
 # reference horizon. Nothing else is required. A feature that is unavailable on a row is shipped
 # null on that row, because dropping the row instead turns the availability of one conditioning
-# feature into a screen on the universe - and one does exactly that here. Requiring `iv_mom_10d`
-# as well cuts the panel from 620 symbols to 322, because a symbol quoted in bursts shorter than
-# ten sessions never has a session ten back to compare against.
+# feature into a screen on the universe - and one does exactly that here. The build below prices
+# it: a symbol quoted in bursts shorter than ten sessions never has a session ten back to compare
+# against, so requiring `iv_mom_10d` too drops the symbol rather than nulling one of its columns.
 #
 # The percentiles are taken **after** the policy, because a percentile is a property of the
 # cross-section a decision is actually taken over, and a row that has been dropped is not in it.
@@ -545,8 +560,13 @@ FEATURE_COLUMNS = [
     "ret_1d", "ret_5d", "ret_10d", "ret_21d", "volume_zscore",
     "qc_both_converged", "qc_any_estimated_iv",
 ]  # fmt: skip
+stricter = grid.filter(QUOTED).drop_nulls(subset=[*NULL_POLICY, "iv_mom_10d"])
 print(f"{len(grid):,} security-sessions on the grid, {len(built):,} of them tradable")
 print(f"{len(FEATURE_COLUMNS)} features declared across {len(FAMILIES)} register families")
+print(
+    f"requiring iv_mom_10d as well would leave {stricter['symbol'].n_unique()} of the "
+    f"{built['symbol'].n_unique()} symbols the null policy keeps"
+)
 
 # %% [markdown]
 # ## D. The timing contract
@@ -750,7 +770,7 @@ plot_cross_sectional_dispersion(
     features,
     "vrp_21d",
     every="1mo",
-    title="April 2020 is the one month the whole cross-section was negative",
+    title="April 2020 is the one month the interdecile band sat below zero",
     subtitle="Interdecile band of the 21-session premium, by month",
     alt=(
         "Shaded band of the 10th to 90th percentile of the 21-session premium by month, with the "
@@ -799,7 +819,12 @@ clusters = plot_redundancy_clusters(
 # carried by a volatility level.
 
 # %%
-print(f"{len(set(clusters.values()))} clusters over {len(FEATURE_COLUMNS)} features at cut {CUT}")
+sizes = Counter(clusters.values())
+print(f"{len(sizes)} clusters over {len(FEATURE_COLUMNS)} features at cut {CUT}")
+print(
+    f"{sum(1 for n in sizes.values() if n > 1)} of them hold more than one column, "
+    f"the largest {max(sizes.values())}"
+)
 
 # %% [markdown]
 # ### F6. Persistence and rank stability
