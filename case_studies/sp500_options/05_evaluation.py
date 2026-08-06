@@ -15,18 +15,23 @@
 # %% [markdown]
 # # S&P 500 Options: Feature Evaluation
 #
-# Consolidated evaluation of Ch8 financial features (47) and Ch9 temporal features
-# (4) against short straddle return labels. Produces a diagnostic triage ledger;
-# downstream model notebooks do not consume it programmatically.
+# Consolidated evaluation of the Ch8 financial features in `features/financial.parquet`
+# and the Ch9 temporal features in `features/model_based.parquet`, against the short
+# straddle return labels in `labels/`. Writes `evaluation/triage_ledger.parquet`, which
+# Ch20 reads, and `evaluation/ic_timeseries.parquet`, whose contents this notebook plots
+# in Section 2 before saving them; the downstream model notebooks consume neither.
 #
 # **Learning Objectives**:
 # - Evaluate feature predictive power via cross-sectional IC with HAC adjustment
-# - Apply Benjamini-Hochberg FDR correction across the 51 candidate features
+# - Apply Benjamini-Hochberg FDR correction across the full candidate set
 # - Compare IC sensitivity across hold-to-expiry and delta-hedged labels
 # - Assess feature redundancy via correlation analysis and family-level aggregation
 # - Produce a triage ledger categorizing features as PROCEED / REVISE / STOP
 #
-# **Book Reference**: Chapter 8, Section 8.6 (Feature Evaluation)
+# **Book Reference**: Chapter 7, Section 7.3 (Univariate feature-label evaluation) and
+# Section 7.4 (Search accounting and multiple testing), with Chapter 8, Section 8.6
+# (Combining features and controlling search) as the secondary reference for search
+# control.
 #
 # **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) (financial features) and [`04_model_based_features`](04_model_based_features.ipynb) (temporal features)
 #
@@ -40,7 +45,6 @@ Consolidated evaluation of Ch8 financial features and Ch9 temporal features
 against forward return labels. Produces a diagnostic triage ledger.
 """
 
-import warnings
 from datetime import date, datetime
 
 import numpy as np
@@ -48,7 +52,7 @@ import plotly.graph_objects as go
 import polars as pl
 import yaml
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
-from ml4t.diagnostic.metrics import compute_ic_hac_stats
+from ml4t.diagnostic.metrics import compute_ic_hac_stats, compute_ic_uncertainty
 from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 
@@ -56,8 +60,6 @@ from utils import style
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.paths import get_case_study_dir
 from utils.style import COLORS  # registers the ml4t Plotly template on import
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 # Production defaults (Papermill overrides for testing)
@@ -73,7 +75,15 @@ JOIN_COLS = ["timestamp", "symbol"]
 DATE_COL = "timestamp"
 HAC_MAXLAGS = 20  # Roughly 21 trading days from entry to the selected expiry
 MIN_PERIODS = 30  # Conservative minimum cross-section for rank IC
-IC_THRESHOLD = 0.01  # Weekly horizon, moderate threshold
+
+# Screening thresholds, declared once and named wherever the prose refers to them.
+# None is estimated from the panel: each is a judgment about what this notebook is
+# willing to carry forward, and a retyped copy in prose is what goes stale.
+COVERAGE_MIN = 0.70  # smallest share of panel rows a feature may be observed on
+STALENESS_MAX = 0.50  # largest share of rows a feature may repeat its prior value
+FDR_ALPHA = 0.05  # Benjamini-Hochberg family-wide false discovery rate
+SIGN_CONSISTENCY_MIN = 0.60  # share of validation folds that must share the IC sign
+IC_THRESHOLD = 0.01  # exploration arm: the |IC| a stable feature must also reach
 
 # Meta columns in financial.parquet that are NOT predictive features
 META_COLS = {
@@ -206,9 +216,17 @@ temporal = pl.read_parquet(CASE_DIR / "features" / "model_based.parquet")
 # short-straddle return as primary and no modelled variants (labels.variants is
 # empty); the delta-hedged 10-day return built in 02_labels is the secondary
 # label used in Section 6 to separate volatility signal from directional exposure.
+# The secondary name is a choice this notebook makes, not a declaration it reads, so
+# check it against the variants setup.yaml does declare rather than trust a filename.
 _setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 _primary_name = _setup["labels"]["primary"]
 _secondary_name = "fwd_ret_dh_10d"
+_declared_variants = set(_setup["labels"]["variant_buffers"])
+if _secondary_name not in _declared_variants:
+    raise ValueError(
+        f"Secondary label {_secondary_name!r} is not among the labels setup.yaml declares: "
+        f"{sorted(_declared_variants)}"
+    )
 primary_label_df = pl.read_parquet(CASE_DIR / "labels" / f"{_primary_name}.parquet")
 secondary_label_df = pl.read_parquet(CASE_DIR / "labels" / f"{_secondary_name}.parquet")
 
@@ -330,8 +348,9 @@ else:
 # ## 1. Correctness Screens
 #
 # Before evaluating predictive power, we check feature coverage (fraction non-null)
-# and staleness (fraction of dates where the value is unchanged). Features below
-# 70% coverage or above 50% staleness are flagged.
+# and staleness (fraction of dates where the value is unchanged). A feature observed
+# on a smaller share of rows than `COVERAGE_MIN`, or repeating its prior value on a
+# larger share than `STALENESS_MAX`, is flagged.
 
 # %%
 coverage = {}
@@ -351,8 +370,8 @@ for feat in all_feature_cols:
 # Correctness gate
 correctness = {}
 for feat in all_feature_cols:
-    cov_ok = coverage[feat] >= 0.70
-    stale_ok = staleness[feat] <= 0.50
+    cov_ok = coverage[feat] >= COVERAGE_MIN
+    stale_ok = staleness[feat] <= STALENESS_MAX
     correctness[feat] = cov_ok and stale_ok
 
 n_pass = sum(correctness.values())
@@ -405,9 +424,9 @@ print(f"Evaluable features: {len(evaluable_features)}")
 # Batch IC computation: group_by date, compute Spearman IC for all features
 cs_features = [f for f in evaluable_features if f not in date_level_features]
 
-# Filter to dates with enough observations
+# Filter to dates with enough observations, by semi-join on the retained dates
 ts_counts = eval_panel.group_by(DATE_COL).len().filter(pl.col("len") >= MIN_PERIODS)
-eval_sub = eval_panel.filter(pl.col(DATE_COL).is_in(ts_counts[DATE_COL]))
+eval_sub = eval_panel.join(ts_counts.select(DATE_COL), on=DATE_COL, how="semi")
 
 # Vectorized IC via Polars group_by + pl.corr
 ic_wide = (
@@ -441,44 +460,280 @@ print(f"HAC stats for {len(ic_results)} cross-sectional features")
 print(f"Skipped {len(date_level_features)} date-level features")
 
 # %% [markdown]
+# ### The IC Series Behind the Averages
+#
+# Every statistic above is a mean of the daily IC series, the same series Section 7
+# saves to `evaluation/ic_timeseries.parquet`, and two things a mean cannot carry live
+# in that series: an association produced by one episode rather than by the whole
+# window, and an association that changes sign inside it. The left panel plots the
+# series for the feature with the largest absolute mean IC; the right panel puts the
+# naive, HAC and block-bootstrap intervals for the leading features on one axis.
+
+# %%
+leading_features = sorted(ic_results, key=lambda f: abs(ic_results[f]["mean_ic"]), reverse=True)[
+    :10
+]
+
+uncertainty = {
+    feat: compute_ic_uncertainty(ic_timeseries[feat], horizon=HAC_MAXLAGS + 1, ic_col="ic")
+    for feat in leading_features
+}
+
+# compute_ic_uncertainty picks its lag as max(horizon - 1, Newey-West automatic), so
+# passing HAC_MAXLAGS + 1 requests the same bandwidth the reported t-statistics use.
+# Assert it rather than assume it: a figure whose band and whose t come from two
+# different bandwidths, with nothing saying so, is the defect this check exists for.
+mismatched_lags = {f: u["hac_lag"] for f, u in uncertainty.items() if u["hac_lag"] != HAC_MAXLAGS}
+if mismatched_lags:
+    raise ValueError(
+        f"Interval bandwidth disagrees with HAC_MAXLAGS={HAC_MAXLAGS}: {mismatched_lags}"
+    )
+
+# %%
+IC_ROLLING_WINDOW = 21  # sessions, one hold-to-expiry horizon of the daily IC series
+
+series_feature = leading_features[0]
+series = (
+    ic_timeseries[series_feature]
+    .sort(DATE_COL)
+    .with_columns(
+        pl.col("ic").rolling_mean(IC_ROLLING_WINDOW, min_samples=IC_ROLLING_WINDOW).alias("ic_roll")
+    )
+)
+
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=[
+        f"Daily rank IC of {series_feature} through the validation window",
+        "Wider intervals once overlap is priced in",
+    ],
+    horizontal_spacing=0.14,
+    column_widths=[0.55, 0.45],
+)
+fig.add_trace(
+    go.Scatter(
+        x=series[DATE_COL].to_list(),
+        y=series["ic"].to_list(),
+        mode="lines",
+        line=dict(color=COLORS["silver_muted"], width=1),
+        name="Daily IC",
+    ),
+    row=1,
+    col=1,
+)
+fig.add_trace(
+    go.Scatter(
+        x=series[DATE_COL].to_list(),
+        y=series["ic_roll"].to_list(),
+        mode="lines",
+        line=dict(color=COLORS["amber"], width=2.5),
+        name="Rolling mean",
+    ),
+    row=1,
+    col=1,
+)
+fig.add_hline(y=0, line=dict(color=COLORS["neutral"], width=1), row=1, col=1)
+# Only boundaries strictly inside the plotted range are drawn; the first fold's start
+# is the left edge of the axis, and a rule there would read as a border.
+series_start, series_end = series[DATE_COL].min(), series[DATE_COL].max()
+for split in cv_folds:
+    boundary = _as_date(split["val_start"])
+    if series_start < boundary < series_end:
+        fig.add_vline(
+            x=str(boundary),
+            line=dict(color=COLORS["neutral"], width=1, dash="dot"),
+            row=1,
+            col=1,
+        )
+
+# %% [markdown]
+# The right panel ranks the same features by absolute mean IC. The naive interval is
+# the one a reader would draw from the daily series alone; the other two price in the
+# overlap that a hold-to-expiry outcome forces on consecutive dates.
+
+# %%
+interval_order = list(reversed(leading_features))
+# Three intervals per feature drawn on one categorical row sit on top of each other and
+# the widest simply hides the rest. Place them on a numeric axis at a fixed offset so
+# the difference between the three is the thing the panel shows.
+BAND_OFFSET = 0.24
+for rank, (band, color, label) in enumerate(
+    [
+        ("naive", COLORS["silver_muted"], "Naive 95%"),
+        ("hac", COLORS["copper"], "HAC 95%"),
+        ("boot", COLORS["blue"], "Block bootstrap 95%"),
+    ]
+):
+    lower = [uncertainty[f][f"ci_{band}_lower"] for f in interval_order]
+    upper = [uncertainty[f][f"ci_{band}_upper"] for f in interval_order]
+    means = [uncertainty[f]["mean_ic"] for f in interval_order]
+    fig.add_trace(
+        go.Scatter(
+            x=means,
+            y=[i + (rank - 1) * BAND_OFFSET for i in range(len(interval_order))],
+            mode="markers",
+            marker=dict(color=color, size=6),
+            error_x=dict(
+                type="data",
+                symmetric=False,
+                array=[u - m for u, m in zip(upper, means, strict=True)],
+                arrayminus=[m - lo for m, lo in zip(means, lower, strict=True)],
+                color=color,
+                thickness=1.4,
+                width=3,
+            ),
+            text=interval_order,
+            name=label,
+        ),
+        row=1,
+        col=2,
+    )
+fig.add_vline(x=0, line=dict(color=COLORS["neutral"], width=1), row=1, col=2)
+
+n_boot_excludes_zero = sum(
+    1
+    for feat in leading_features
+    if uncertainty[feat]["ci_boot_lower"] * uncertainty[feat]["ci_boot_upper"] > 0
+)
+fig.update_layout(
+    template="ml4t",
+    height=560,
+    width=1150,
+    title={
+        "text": (
+            f"{n_boot_excludes_zero} of the leading features hold a bootstrap interval clear of zero"
+            f"<br><sup>Daily cross-sectional rank IC against the hold-to-expiry label; dotted rules "
+            f"mark validation-fold starts; rolling mean over {IC_ROLLING_WINDOW} sessions</sup>"
+        )
+    },
+    margin=dict(l=60, r=30, t=110, b=60),
+    legend=dict(orientation="h", y=-0.16, x=0),
+)
+fig.update_xaxes(title_text="Validation date", row=1, col=1)
+fig.update_xaxes(title_text="Mean daily rank IC", row=1, col=2)
+fig.update_yaxes(title_text="Daily rank IC", row=1, col=1)
+fig.update_yaxes(
+    title_text="Feature",
+    tickmode="array",
+    tickvals=list(range(len(interval_order))),
+    ticktext=interval_order,
+    tickfont=dict(size=9),
+    row=1,
+    col=2,
+)
+fig.show()
+
+# %% [markdown]
 # ### Fold-Level Stability
 #
-# Use the same canonical validation windows as the temporal-feature estimators
-# and check whether IC sign is consistent. Features with > 60% positive-IC
-# folds are more robust.
+# Use the same canonical validation windows as the temporal-feature estimators and
+# check whether the IC sign is consistent. A feature clears the stability arm when its
+# share of positive-IC folds reaches `SIGN_CONSISTENCY_MIN`. `setup.yaml` declares two
+# validation folds for this case study, so that share takes only three values and an
+# interquartile view across folds would be a decoration rather than a statistic; the
+# per-fold ICs themselves are plotted below instead. The rule also counts positive
+# folds rather than folds agreeing with the feature's own direction, so a feature
+# negative in both folds scores zero on stability and can never be promoted through
+# this arm however stable it is. Six of the nine case studies share that rule and write
+# the column into one ledger table, so it is changed in all nine at once or in none; the
+# figure below counts folds that agree with each other, which is the view the rule does
+# not give.
 
 # %%
 fold_stats = {}
 for feat in ic_results:
-    fold_ics = []
+    fold_ics = {}
     ts = ic_timeseries[feat]
     for split in cv_folds:
         fold_start = _as_date(split["val_start"])
         fold_end = _as_date(split["val_end"])
         fold_ic = ts.filter(pl.col(DATE_COL).is_between(fold_start, fold_end, closed="both"))
         if len(fold_ic) >= 5:
-            fold_ics.append(float(fold_ic["ic"].mean()))
+            # Keyed by fold id, not appended: a fold with too few IC dates is skipped,
+            # and a positional list would then relabel every fold after it.
+            fold_ics[int(split["fold"])] = float(fold_ic["ic"].mean())
 
     if fold_ics:
-        sign_consistency = sum(1 for ic in fold_ics if ic > 0) / len(fold_ics)
+        sign_consistency = sum(1 for ic in fold_ics.values() if ic > 0) / len(fold_ics)
         fold_stats[feat] = {
             "n_folds": len(fold_ics),
+            "fold_ics": fold_ics,
             "sign_consistency": sign_consistency,
-            "worst_fold_ic": min(fold_ics),
-            "best_fold_ic": max(fold_ics),
-            "median_fold_ic": float(np.median(fold_ics)),
+            "worst_fold_ic": min(fold_ics.values()),
+            "best_fold_ic": max(fold_ics.values()),
+            "median_fold_ic": float(np.median(list(fold_ics.values()))),
         }
 
-n_consistent = sum(1 for s in fold_stats.values() if s["sign_consistency"] >= 0.6)
-print(f"Fold stability: {n_consistent}/{len(fold_stats)} features with sign consistency >= 60%")
+n_consistent = sum(1 for s in fold_stats.values() if s["sign_consistency"] >= SIGN_CONSISTENCY_MIN)
+print(
+    f"Fold stability: {n_consistent}/{len(fold_stats)} features clear "
+    f"sign consistency {SIGN_CONSISTENCY_MIN}"
+)
+
+# %% [markdown]
+# One bar per validation fold, for the features with the largest absolute mean IC. A
+# feature whose two bars point the same way carried the same direction through both
+# windows; a feature whose bars point opposite ways has a mean IC that is an average
+# over a sign change, which is the case the pooled statistic hides.
+
+# %%
+fold_plot_features = [f for f in leading_features if f in fold_stats]
+same_sign = [
+    f
+    for f in fold_stats
+    if fold_stats[f]["n_folds"] > 1
+    and min(fold_stats[f]["fold_ics"].values()) * max(fold_stats[f]["fold_ics"].values()) > 0
+]
+
+# The split generator numbers folds backwards - fold 0 is the latest window - so the
+# legend carries each fold's window rather than its number alone.
+fold_windows = {
+    int(split["fold"]): (_as_date(split["val_start"]), _as_date(split["val_end"]))
+    for split in cv_folds
+}
+
+fig = go.Figure()
+plot_fold_ids = sorted({fid for f in fold_plot_features for fid in fold_stats[f]["fold_ics"]})
+for position, fold_id in enumerate(plot_fold_ids):
+    val_start, val_end = fold_windows[fold_id]
+    fig.add_trace(
+        go.Bar(
+            x=[fold_stats[f]["fold_ics"].get(fold_id) for f in fold_plot_features],
+            y=fold_plot_features,
+            orientation="h",
+            marker_color=[COLORS["blue"], COLORS["amber"]][position % 2],
+            name=f"Fold {fold_id}: {val_start:%b %Y} - {val_end:%b %Y}",
+        )
+    )
+fig.add_vline(x=0, line=dict(color=COLORS["neutral"], width=1))
+fig.update_layout(
+    template="ml4t",
+    height=520,
+    width=900,
+    barmode="group",
+    title={
+        "text": (
+            f"{len(same_sign)} of {len(fold_stats)} features keep one IC sign in both folds"
+            "<br><sup>Mean daily rank IC inside each validation window, for the features with "
+            "the largest absolute mean IC over the two windows combined</sup>"
+        )
+    },
+    margin=dict(l=140, r=30, t=110, b=60),
+    legend=dict(orientation="h", y=-0.12, x=0),
+)
+fig.update_xaxes(title_text="Mean daily rank IC within the fold")
+fig.update_yaxes(title_text="Feature", autorange="reversed")
+fig.show()
 
 # %% [markdown]
 # ## 3. Multiple Testing (BH-FDR)
 #
-# Testing 49 eligible features simultaneously at $\alpha = 0.05$ expects several false
-# positives. We apply the Benjamini-Hochberg procedure to control the false
-# discovery rate. The **inflation factor** measures how much naive significance
-# overstates true significance:
+# The searched set is every feature that cleared the correctness screens and has a
+# computable cross-sectional IC, screened against the one primary label. Testing them
+# simultaneously at `FDR_ALPHA` expects several false positives. We apply the
+# Benjamini-Hochberg procedure to control the false discovery rate. The **inflation
+# factor** measures how much naive significance overstates true significance:
 #
 # $$\text{Inflation} = \frac{N_{\text{naive significant}}}{N_{\text{FDR significant}}}$$
 
@@ -486,7 +741,7 @@ print(f"Fold stability: {n_consistent}/{len(fold_stats)} features with sign cons
 feature_names = list(ic_results.keys())
 p_values = [ic_results[f]["p_value"] for f in feature_names]
 
-fdr_result = benjamini_hochberg_fdr(p_values, alpha=0.05, return_details=True)
+fdr_result = benjamini_hochberg_fdr(p_values, alpha=FDR_ALPHA, return_details=True)
 
 # Build evaluation summary table
 eval_summary = pl.DataFrame(
@@ -520,7 +775,7 @@ eval_summary = pl.DataFrame(
 n_significant_naive = sum(
     1 for feature in feature_names if abs(ic_results[feature]["naive_t_stat"]) > 1.96
 )
-n_significant_hac = sum(1 for p_value in p_values if p_value < 0.05)
+n_significant_hac = sum(1 for p_value in p_values if p_value < FDR_ALPHA)
 n_significant_fdr = int(fdr_result["n_rejected"])
 
 inflation_hac = n_significant_naive / max(n_significant_hac, 1)
@@ -528,13 +783,21 @@ inflation_fdr = n_significant_naive / n_significant_fdr if n_significant_fdr els
 
 print(f"Features tested: {len(feature_names)}")
 print(f"Naive significant (|t| > 1.96): {n_significant_naive}")
-print(f"HAC significant (p < 0.05):     {n_significant_hac}")
-print(f"FDR significant (q < 0.05):   {n_significant_fdr}")
+print(f"HAC significant (p < {FDR_ALPHA}):     {n_significant_hac}")
+print(f"FDR significant (q < {FDR_ALPHA}):   {n_significant_fdr}")
 print(f"Inflation factor (HAC): {inflation_hac:.2f}x")
 if np.isfinite(inflation_fdr):
     print(f"Inflation factor (FDR): {inflation_fdr:.2f}x")
 else:
     print("Inflation factor (FDR): undefined because no feature survives FDR")
+
+# %% [markdown] tags=["results"]
+# **Screen result.** 49 of the 51 candidates carry a cross-sectional IC over the sealed
+# window. 13 clear the naive threshold, 3 hold up at HAC p < 0.05 once the overlap
+# between consecutive hold-to-expiry outcomes is priced in, and none survives BH-FDR
+# across the family - a naive-to-HAC inflation of 4.33x, and an FDR inflation that is
+# undefined rather than large. The largest absolute mean daily rank IC in the screen is
+# 0.0349, on the 21-day underlying return.
 
 # %% [markdown]
 # ### IC Bar Chart + HAC Scatter
@@ -699,12 +962,15 @@ print(
 
 # %%
 if quantile_spreads:
-    n_show = min(6, len(quantile_spreads))
-    feats_to_show = list(quantile_spreads.keys())[:n_show]
-    n_cols = min(3, n_show)
+    # Every feature the shape diagnostic scored is drawn. The title counts monotone
+    # profiles over exactly this set, so a subset would leave the count unverifiable
+    # against the chart it sits on.
+    feats_to_show = list(quantile_spreads.keys())
+    n_show = len(feats_to_show)
+    n_cols = min(5, n_show)
     n_rows_fig = (n_show + n_cols - 1) // n_cols
 
-    fig = make_subplots(rows=n_rows_fig, cols=n_cols, subplot_titles=feats_to_show[:n_show])
+    fig = make_subplots(rows=n_rows_fig, cols=n_cols, subplot_titles=feats_to_show)
     for idx, feat in enumerate(feats_to_show):
         r, c = divmod(idx, n_cols)
         q_means = quantile_spreads[feat]["q_means"]
@@ -726,14 +992,20 @@ if quantile_spreads:
         )
     fig.update_layout(
         template="ml4t",
-        height=250 * n_rows_fig,
-        width=900,
-        title_text=(
-            f"{n_monotone} of {len(monotonicity_scores)} leading features form monotone "
-            "quintile spreads"
-        ),
+        height=280 * n_rows_fig,
+        width=1150,
+        title={
+            "text": (
+                f"{n_monotone} of {len(monotonicity_scores)} leading features form monotone "
+                "quintile spreads"
+                "<br><sup>Mean hold-to-expiry short-straddle return by within-date feature "
+                "quintile; every feature the shape diagnostic scored is shown</sup>"
+            )
+        },
+        margin=dict(t=120),
     )
-    fig.update_xaxes(title_text="Cross-sectional feature quintile")
+    for col in range(1, n_cols + 1):
+        fig.update_xaxes(title_text="Cross-sectional feature quintile", row=n_rows_fig, col=col)
     for row in range(1, n_rows_fig + 1):
         fig.update_yaxes(title_text="Mean hold-to-expiry return", row=row, col=1)
     fig.show()
@@ -919,6 +1191,37 @@ dh_eval = eval_sub.join(
     how="inner",
 )
 
+# The secondary label has its own endpoint, and the panel was sealed on the primary
+# one. That seal covers this label only because every primary expiry is longer than
+# the hedged horizon; assert it rather than inherit it, because a shorter primary
+# expiry would open a hole here without touching anything above.
+#
+# The horizon is counted in sessions, not calendar days: 02_labels numbers the straddle
+# panel's own sessions and takes the exit at `shift(-horizon - 1)`, because entry is the
+# session after the signal. Ten sessions run about a fortnight, so adding ten calendar
+# days would understate the endpoint and could pass a trade that settles inside the
+# holdout. The grid used here is the feature panel's own sessions, which is a subset of
+# the straddle calendar, so counting positions on it never lands earlier than the label
+# construction did.
+SECONDARY_HORIZON_SESSIONS = int(_setup["labels"]["variant_buffers"][_secondary_name].rstrip("D"))
+session_grid = features[DATE_COL].unique().sort()
+dh_endpoints = (
+    dh_eval.select(DATE_COL)
+    .unique()
+    .join(
+        pl.DataFrame({DATE_COL: session_grid}).with_columns(
+            session_grid.shift(-SECONDARY_HORIZON_SESSIONS - 1).alias("_dh_end")
+        ),
+        on=DATE_COL,
+        how="left",
+    )
+)
+if dh_endpoints["_dh_end"].null_count():
+    raise ValueError("A delta-hedged signal date has no exit session on the feature panel grid")
+dh_endpoint_max = dh_endpoints["_dh_end"].max()
+if dh_endpoint_max >= HOLDOUT_START:
+    raise ValueError(f"A delta-hedged label endpoint ({dh_endpoint_max}) reaches the holdout")
+
 # Compute IC against delta-hedged label
 dh_ic_wide = (
     dh_eval.group_by(DATE_COL)
@@ -1027,13 +1330,27 @@ if dh_rows:
 # %% [markdown]
 # ## 7. Triage & Handoff
 #
-# Apply triage rules to categorize features for Ch11 modeling:
+# Apply triage rules to categorize features for Ch11 modeling. Every threshold below
+# is the configured constant of the same name; none is retyped here.
 #
 # | Decision | Criteria |
 # |----------|----------|
-# | **PROCEED** | FDR-significant at 5%, OR sign consistent across at least 60% of folds AND abs(IC) > 0.01 |
-# | **STOP** | Correctness FAIL (coverage < 70% OR staleness > 50%) |
+# | **PROCEED** | BH-FDR significant at `FDR_ALPHA`, OR a **positive**-IC fold share of at least `SIGN_CONSISTENCY_MIN` AND abs(IC) at least `IC_THRESHOLD` |
+# | **STOP** | Correctness FAIL (coverage below `COVERAGE_MIN` OR staleness above `STALENESS_MAX`) |
 # | **REVISE** | Everything else (evaluate in multivariate context in Ch11) |
+#
+# The two arms are not the same kind of claim. The first is a confirmation test with
+# its multiplicity paid for; the second is an **exploration** arm that exists so the
+# family-wide correction does not empty the menu on a two-fold screen, and a feature
+# promoted through it has not been confirmed. The ledger's `note` column records which
+# arm fired for each feature.
+#
+# The word `positive` in the first row is the rule as written, not as one might wish it
+# were: the exploration arm asks for folds that agree with each other **and** point up.
+# `instr_delta` carries the fourth-largest absolute IC in this screen, is individually
+# significant under HAC, and is negative in both folds - a stable inverse predictor,
+# which the arm cannot promote at any level of stability. It reaches Ch11 as REVISE
+# rather than as PROCEED, and the fold figure above is where a reader sees why.
 
 # %%
 triage = {}
@@ -1062,7 +1379,7 @@ for feat in all_feature_cols:
             triage[feat] = ("REVISE", "fold_constant")
     elif is_fdr_sig:
         triage[feat] = ("PROCEED", "fdr_significant")
-    elif sign_con >= 0.60 and abs_ic >= IC_THRESHOLD:
+    elif sign_con >= SIGN_CONSISTENCY_MIN and abs_ic >= IC_THRESHOLD:
         triage[feat] = ("PROCEED", "stable_and_above_threshold")
     else:
         triage[feat] = ("REVISE", "not_significant_standalone")
@@ -1144,16 +1461,19 @@ if stop_features:
     for f in sorted(stop_features):
         print(f"  {f:40s}  [{triage[f][1]}]")
 
-# %% [markdown]
-# ### Quality Gate Reading
-#
-# The triage promotes 4 of 51 candidates to PROCEED: three underlying-momentum
-# horizons and the 5-day straddle return. The 10- and 21-day momentum features are
-# individually significant after 20-lag HAC adjustment, but none of the 49
-# evaluable features survives BH-FDR. All four promotions therefore reflect
-# stability across both validation folds rather than a standalone discovery.
-# The 486-symbol panel supports continued multivariate testing, not a claim that
-# any feature clears the strategy's implementation-cost hurdle by itself.
+# %% [markdown] tags=["results"]
+# **Triage.** Of the 51 candidates the ledger records 7 PROCEED, 42 REVISE and 2 STOP.
+# Both STOP decisions are correctness failures on staleness, not on coverage: the two
+# quality flags are present on every panel row and hold the same value on every one of
+# them, so they carry no information to screen.
+# Every one of the 7 promotions came through the exploration arm, because no feature
+# cleared BH-FDR: three underlying-momentum horizons, the 5-day straddle return and
+# three variance-premium features each held their IC sign in both validation folds while
+# reaching `IC_THRESHOLD`. Two of the seven, `iv_rv_ratio` and `iv_rv_ratio_pctl`, carry
+# the same mean IC to four decimals, because a within-date percentile is a monotone
+# transform of the value it ranks and rank IC cannot distinguish them - the promoted set
+# is seven columns and fewer than seven pieces of evidence. Each is a candidate for the
+# multivariate work in Ch11, not a standalone result.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -1167,17 +1487,22 @@ if stop_features:
 #    have positive IC in both validation folds. No feature survives FDR across the
 #    full screen, so PROCEED marks a diagnostic priority, not an accepted edge.
 #
-# 3. **The secondary label is a sensitivity check**: Momentum stays positive for
+# 3. **A promotion count is not a count of distinct evidence**: the screen is
+#    univariate, so a feature and a monotone transform of it are promoted twice for one
+#    association. Section 5's correlation view is where that is visible; resolving it is
+#    Ch11's job.
+#
+# 4. **The secondary label is a sensitivity check**: Momentum stays positive for
 #    the 10-day delta-hedged outcome, but hedge treatment and horizon both differ
 #    from the primary label. Their IC difference cannot be assigned to hedging.
 #
-# 4. **Economic viability remains downstream**: The screen measures association,
+# 5. **Economic viability remains downstream**: The screen measures association,
 #    not net returns. Ch16-18 determine whether a modeled signal survives option
 #    spreads, hedge trading, and portfolio constraints.
 #
 # **Next**: Ch11 ([`06_linear`](06_linear.ipynb)) fits Ridge/Lasso models to the full
 # modeling feature panel and does not consume this ledger. Ch20
 # ([`02_feature_evaluation`](../../20_strategy_synthesis/02_feature_evaluation.ipynb))
-# does consume it for nine-case feature-survival analysis. The current SP500 row
-# changes from the printed Table 20.3 values of 6 PROCEED, 4 FDR-significant, and
-# 11.8% PROCEED to 4, 0, and 7.84%; this does not change model inputs or the registry.
+# does consume it, and builds its cross-case feature-survival table out of the ledgers
+# the nine case studies write, so this notebook's counts reach that table directly. No
+# model input and no registry row depends on them.

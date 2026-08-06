@@ -27,8 +27,10 @@
 # - Check the universe is quotable at every decision bar, that the return a signal rides does
 #   not persist to the next one, and that the declared folds fit the sample
 #
-# ## Book reference. Chapter 6, Sections 6.2-6.6. Reads AlgoSeek bars and `config/setup.yaml`,
-# and writes the per-symbol cost profile the backtest charges itself.
+# ## Book reference
+#
+# Chapter 6, Sections 6.2-6.6. Reads AlgoSeek bars and `config/setup.yaml`, and writes the
+# per-symbol cost profile the backtest charges itself.
 
 # %%
 """NASDAQ-100 Microstructure Case Study - Feasibility Analysis."""
@@ -291,26 +293,34 @@ for h in HORIZONS:
 # %% [markdown]
 # ## C. Design decisions
 #
-# ### C.1 Cadence. `setup.yaml::decision.bar_frequency` rebalances on the fifteen-minute bar and
+# ### C.1 Cadence
+#
+# `setup.yaml::decision.bar_frequency` rebalances on the fifteen-minute bar and
 # `execution_delay` puts the trade in the following one. B.5 prices that from both sides: a
 # shorter horizon clears the round trip less often, a longer one spends fewer decisions on the
 # same sample. Scoring a bar with its own close and trading there would restate the signal's
 # own price, so the delay is declared once here.
 #
-# ### C.2 Kill conditions. Three falsifiable thresholds, tested where the evidence for each
-# exists rather than here: no feature reaches an information coefficient distinguishable from
+# ### C.2 Kill conditions
+#
+# Three falsifiable thresholds, tested where the evidence for each exists rather than here: no feature reaches an information coefficient distinguishable from
 # zero across the folds, Chapter 8's measurement; gross expected edge stays under the measured
 # round trip, which Chapter 17 prices; the signal dies inside the one-bar delay, Chapter 7's.
 #
-# ### C.3 Mapping class. `setup.yaml::mapping.class` ranks symbols each bar and holds both legs.
-# These names borrow cheaply, so the short leg costs what the long leg does, and holding both
+# ### C.3 Mapping class
+#
+# `setup.yaml::mapping.class` ranks symbols each bar and holds both legs. These names borrow
+# cheaply, so the short leg costs what the long leg does, and holding both
 # strips out the market move a cross-sectional score cannot claim to predict.
 
 # %% [markdown]
 # ## D. Walk-forward structure
 #
-# ### D.1 Effective sample size. What evaluation spends is decision bars, not rows, and this
-# panel is wide rather than long: a hundred symbols share each bar, and what moved the market.
+# ### D.1 Effective sample size
+#
+# What evaluation spends is decision bars, not rows, and this panel is wide rather than long:
+# a hundred symbols share each bar, so the market move common to them is one observation and
+# not a hundred.
 
 # %%
 print(
@@ -346,9 +356,11 @@ add_message_title(
 plt.show()
 
 # %% [markdown]
-# ## E. Derived artifacts. `setup.yaml::costs.asset_spreads_source` names
-# `liquidity_profile.parquet`: the cost preset joins `median_half_spread_usd` per symbol, and
-# `_build_cost_feasible_universe.py` ranks on it to freeze the screen.
+# ## E. Derived artifacts
+#
+# `setup.yaml::costs.asset_spreads_source` names `liquidity_profile.parquet`: the cost preset
+# joins `median_half_spread_usd` per symbol, and `_build_cost_feasible_universe.py` ranks on it
+# to freeze the screen.
 
 # %%
 profile_path = CASE_DIR / "liquidity_profile.parquet"
@@ -393,8 +405,10 @@ print(
 # 3. **Take midpoint returns, not traded closes**: a traded price alternates between bid and ask.
 # 4. **Compute a panel autocorrelation inside one entity**: pooling wider measures its joins.
 #
-# ### Known limitations. Cost is the quoted spread plus commission at the size one bar absorbs
-# and impact enters at the cost stage; a horizon counted in bars is the clock interval it names
-# for all but a fiftieth of them.
+# ### Known limitations
+#
+# Cost is the quoted spread plus commission at the size one bar absorbs, and impact enters at
+# the cost stage. A horizon counted in bars is the clock interval it names only where every
+# bar in between is quoted; a gap in quoting stretches it.
 #
 # **Next**: labels at the declared horizons, built on midpoint prices over this same window.

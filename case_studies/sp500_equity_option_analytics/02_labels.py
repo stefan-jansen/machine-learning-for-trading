@@ -154,10 +154,10 @@ print(f"Holdout opens {HOLDOUT_START}, and seals the label endpoint")
 # The entity a label may not cross is the **security**, and the column that identifies it is
 # `sec_id` rather than the ticker. A ticker gets reassigned after a merger or a spin-off and
 # `adj_factor` restarts with the new security, so a window that steps across the change reads a
-# price from one company against a price from another. Fifteen tickers here cover two securities
-# each, thirteen of them on consecutive sessions, and a further two dozen securities trade under
-# more than one ticker. `case_studies/sp500_options/_underlying_returns.py` already reconciles
-# this dataset the same way.
+# price from one company against a price from another. How much of that this extract carries is
+# counted below, and most of it arrives with no gap in the series to notice it by.
+# `case_studies/sp500_options/_underlying_returns.py` already reconciles this dataset the same
+# way.
 #
 # `session` numbers the market's own trading sessions, and Sections C, D and F count in it rather
 # than in rows: a name that stops trading for a fortnight and returns has consecutive rows
@@ -184,8 +184,26 @@ PRICE_COLS = ["symbol", "sec_id", "timestamp", "open", "close", "adj_factor"]
 MARKET_DATA_DIGEST = value_digest(bars, PRICE_COLS)
 print(f"market_data digest: {MARKET_DATA_DIGEST}")
 
+pairs = prices.select("symbol", ENTITY).unique()
+shared = {
+    key: pairs.group_by(key).len().filter(pl.col("len") > 1).height for key in ("symbol", ENTITY)
+}
+moves = (
+    prices.sort(["symbol", "session"])
+    .with_columns(
+        (pl.col(ENTITY) != pl.col(ENTITY).shift(1).over("symbol")).alias("_moved"),
+        pl.col("session").diff().over("symbol").alias("_gap"),
+    )
+    .filter(pl.col("_moved") & pl.col("_gap").is_not_null())
+)
+
 print(f"{prices['symbol'].n_unique()} tickers over {sessions.height:,} sessions")
 print(f"{prices.height:,} name-sessions in {prices[ENTITY].n_unique()} securities")
+print(
+    f"{shared['symbol']} tickers cover more than one security and {shared[ENTITY]} securities "
+    f"trade under more than one ticker; {moves.filter(pl.col('_gap') == 1).height} of "
+    f"{moves.height} changeovers land on the very next session"
+)
 
 # %% [markdown]
 # ## C. Label construction
@@ -238,9 +256,9 @@ for label_name in PLAIN_RETURNS:
 # month, annualized on the sessions per year `setup.yaml` declares, so that a five percent week
 # in a quiet utility and a five percent week in a semiconductor are not the same target value.
 # The denominator is guarded twice. A daily return is only a daily return between two adjacent
-# sessions, so it is null wherever the security missed the session before - seven do here, one
-# of them for a month - and the rolling window stays null until it holds a full month of
-# consecutive returns rather than closing over the gap. And a security that did not move at all
+# sessions, so it is null wherever the security missed the session before, and the rolling window
+# stays null until it holds a full month of consecutive returns rather than closing over the gap
+# as though nothing had been missed. And a security that did not move at all
 # over the lookback has an undefined ratio, which is left undefined rather than floored at a
 # constant that would answer with a very large number instead.
 #
@@ -279,8 +297,8 @@ for label_name, source in DIRECTION_SOURCE.items():
 # The third assertion bounds the calendar span a window may cover, which is what makes the hole
 # rule falsifiable rather than a definition: $h$ trading sessions span about $7h/5$ calendar days
 # on a five-session week, plus a week for exchange holidays. Without the rule, the windows around
-# the two securities that stop trading for a year and return span more days than any holiday
-# pattern accounts for.
+# a security that stops trading for a year and returns span more days than any holiday pattern
+# accounts for.
 
 # %%
 for label_name in [*PLAIN_RETURNS, SCALED_LABEL]:

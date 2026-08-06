@@ -105,8 +105,6 @@ FAMILIES = families_from_config(setup)
 WINDOWS = setup["features"]["windows"]
 RANKED = setup["features"]["ranked"]
 REGIME_THRESHOLD = setup["features"]["regime_threshold"]
-OSC = setup["features"]["oscillators"]
-STATE = setup["features"]["state"]
 DECISION_CYCLE = int(resolve_label_horizon("etfs", setup["labels"]["primary"], setup).rstrip("Dd"))
 HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
 
@@ -227,46 +225,22 @@ def momentum_features(df: pl.DataFrame) -> pl.DataFrame:
 def oscillator_features(df: pl.DataFrame) -> pl.DataFrame:
     """Bounded oscillators, moving-average ratios, normalized range and regime exponents."""
     df = df.with_columns(
-        *[rsi("close", period=p).over("symbol").alias(f"rsi_{p}") for p in OSC["rsi"]],
-        macd("close", fast_period=OSC["macd_fast"], slow_period=OSC["macd_slow"])
-        .over("symbol")
-        .alias("macd_line"),
-        adx("high", "low", "close", period=OSC["adx"]).over("symbol").alias(f"adx_{OSC['adx']}"),
-        *[
-            cci("high", "low", "close", period=p).over("symbol").alias(f"cci_{p}")
-            for p in OSC["cci"]
-        ],
-        stochastic("high", "low", "close", fastk_period=OSC["stochastic"])
-        .over("symbol")
-        .alias("stoch_k"),
-        aroon("high", "low", timeperiod=OSC["aroon"]).over("symbol").alias("_aroon"),
-        natr("high", "low", "close", period=OSC["natr"])
-        .over("symbol")
-        .alias(f"natr_{OSC['natr']}"),
-        choppiness_index("high", "low", "close", period=OSC["choppiness"])
-        .over("symbol")
-        .alias(f"chop_{OSC['choppiness']}"),
-        # Rounded, and it is the only column here that is. The Hurst exponent is the slope of a
-        # log-log least-squares fit over rescaled-range statistics, so its last bits depend on
-        # the order the cumulative sums accumulate in, which differs between a full panel and a
-        # truncated one on some BLAS builds even though the window is fixed at `period` and the
-        # lag set at `period // 2`. That is float accumulation, not a look-ahead: on this data
-        # the two builds agree to 0.0 exactly, while CI trips D.3's 1e-12 tolerance. Six
-        # decimals is far below any reading of a persistence exponent and far above the noise,
-        # so D.3 tests the feature rather than the platform.
-        hurst_exponent("close", period=OSC["hurst"])
-        .over("symbol")
-        .round(6)
-        .alias(f"hurst_{OSC['hurst']}"),
-        *[
-            (pl.col("close") / sma("close", period=p).over("symbol")).alias(f"sma_ratio_{p}")
-            for p in OSC["sma"]
-        ],
-        (pl.col("close") / ema("close", period=OSC["ema"]).over("symbol")).alias(
-            f"ema_ratio_{OSC['ema']}"
-        ),
-        pl.col("close").rolling_mean(OSC["bollinger"]).over("symbol").alias("_mid"),
-        pl.col("close").rolling_std(OSC["bollinger"]).over("symbol").alias("_sd"),
+        rsi("close", period=7).over("symbol").alias("rsi_7"),
+        rsi("close", period=14).over("symbol").alias("rsi_14"),
+        macd("close", fast_period=12, slow_period=26).over("symbol").alias("macd_line"),
+        adx("high", "low", "close", period=14).over("symbol").alias("adx_14"),
+        cci("high", "low", "close", period=14).over("symbol").alias("cci_14"),
+        cci("high", "low", "close", period=21).over("symbol").alias("cci_21"),
+        stochastic("high", "low", "close", fastk_period=14).over("symbol").alias("stoch_k"),
+        aroon("high", "low", timeperiod=25).over("symbol").alias("_aroon"),
+        natr("high", "low", "close", period=14).over("symbol").alias("natr_14"),
+        choppiness_index("high", "low", "close", period=14).over("symbol").alias("chop_14"),
+        hurst_exponent("close", period=100).over("symbol").alias("hurst_100"),
+        (pl.col("close") / sma("close", period=50).over("symbol")).alias("sma_ratio_50"),
+        (pl.col("close") / sma("close", period=200).over("symbol")).alias("sma_ratio_200"),
+        (pl.col("close") / ema("close", period=26).over("symbol")).alias("ema_ratio_26"),
+        pl.col("close").rolling_mean(20).over("symbol").alias("_mid"),
+        pl.col("close").rolling_std(20).over("symbol").alias("_sd"),
     )
     return df.with_columns(
         (pl.col("_aroon").struct.field("up") - pl.col("_aroon").struct.field("down")).alias(
@@ -274,7 +248,7 @@ def oscillator_features(df: pl.DataFrame) -> pl.DataFrame:
         ),
         pl.when(pl.col("_sd") > 0)
         .then((pl.col("close") - (pl.col("_mid") - 2 * pl.col("_sd"))) / (4 * pl.col("_sd")))
-        .alias(f"bb_pctb_{OSC['bollinger']}"),
+        .alias("bb_pctb_20"),
     ).drop(["_aroon", "_mid", "_sd"])
 
 
@@ -296,21 +270,19 @@ def drawdown_and_extremes(df: pl.DataFrame) -> pl.DataFrame:
     df = df.with_columns(obv("close", "volume").over("symbol").alias("_obv"))
     return df.with_columns(
         (
-            (pl.col("_obv") - pl.col("_obv").rolling_mean(STATE["obv_zscore"]).over("symbol"))
-            / pl.col("_obv").rolling_std(STATE["obv_zscore"]).over("symbol").clip(lower_bound=EPS)
-        ).alias(f"obv_zscore_{STATE['obv_zscore']}d"),
+            (pl.col("_obv") - pl.col("_obv").rolling_mean(63).over("symbol"))
+            / pl.col("_obv").rolling_std(63).over("symbol").clip(lower_bound=EPS)
+        ).alias("obv_zscore_63d"),
         (pl.col("log_return") > 0)
         .cast(pl.Float64)
-        .rolling_mean(STATE["positive_share"])
+        .rolling_mean(63)
         .over("symbol")
-        .alias(f"pct_positive_{STATE['positive_share']}d"),
+        .alias("pct_positive_63d"),
         (
-            pl.col("close")
-            / pl.col("close").rolling_max(STATE["extremes"]).over("symbol").clip(lower_bound=EPS)
+            pl.col("close") / pl.col("close").rolling_max(252).over("symbol").clip(lower_bound=EPS)
         ).alias("dist_52w_high"),
         (
-            pl.col("close")
-            / pl.col("close").rolling_min(STATE["extremes"]).over("symbol").clip(lower_bound=EPS)
+            pl.col("close") / pl.col("close").rolling_min(252).over("symbol").clip(lower_bound=EPS)
         ).alias("dist_52w_low"),
     ).drop("_obv")
 
@@ -342,8 +314,8 @@ def regime_and_state(df: pl.DataFrame) -> pl.DataFrame:
         .sort("timestamp")
         .select(
             "timestamp",
-            pl.rolling_corr(pl.col("_spy"), pl.col("_tlt"), window_size=STATE["correlation"]).alias(
-                f"corr_spy_tlt_{STATE['correlation']}d"
+            pl.rolling_corr(pl.col("_spy"), pl.col("_tlt"), window_size=63).alias(
+                "corr_spy_tlt_63d"
             ),
         )
     )
@@ -358,8 +330,8 @@ def regime_and_state(df: pl.DataFrame) -> pl.DataFrame:
         pl.when(pl.col("slope") > REGIME_THRESHOLD).then(1).otherwise(0).alias("regime"),
         pl.col("slope").alias("yield_curve_slope"),
         (
-            (pl.col("slope") - pl.col("slope").rolling_mean(STATE["curve_zscore"]))
-            / pl.col("slope").rolling_std(STATE["curve_zscore"]).clip(lower_bound=EPS)
+            (pl.col("slope") - pl.col("slope").rolling_mean(252))
+            / pl.col("slope").rolling_std(252).clip(lower_bound=EPS)
         ).alias("yield_curve_zscore"),
     )
     return (
@@ -600,7 +572,7 @@ clusters = plot_redundancy_clusters(
     features,
     feature_cols,
     cut=0.7,
-    title="Adjacent horizons pair off; short and long momentum do not",
+    title="Adjacent horizons pair off; short and long momentum stay apart",
     subtitle=r"Average linkage on $1 - |\rho|$, cut drawn at $|\rho| = 0.7$",
     alt=(
         "Dendrogram of every feature in the matrix. Neighbouring horizons join at very small "

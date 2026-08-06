@@ -42,14 +42,14 @@
 
 import warnings
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
 from arch import arch_model
 from hmmlearn.hmm import GaussianHMM
-from ml4t.diagnostic.metrics import compute_ic_hac_stats
-from scipy.stats import spearmanr
+from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
 from data import load_crypto_perps
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
@@ -57,7 +57,7 @@ from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.modeling import load_modeling_dataset
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title
 
 warnings.filterwarnings("ignore")
 
@@ -92,7 +92,7 @@ set_global_seeds(SEED)
 # `features/model_based.parquet`, which is this notebook's own output, so
 # calling it before the write would validate the previous run's artifact
 # against the current fold geometry. The assembly check runs after the write
-# instead, in section 7.
+# instead, in section 8.
 
 # %%
 financial = pl.read_parquet(FEATURES_DIR / "financial.parquet")
@@ -108,11 +108,15 @@ training_frame = financial.join(labels, on=["timestamp", "symbol"], how="inner")
     ["timestamp", "symbol", *financial_feature_cols, label_col]
 )
 if MAX_SYMBOLS > 0:
-    # Same rule the shared loader applies: keep the symbols with the most rows.
+    # Same rule the shared loader applies - most rows first - but with the
+    # symbol name as an explicit tie-break. Row counts tie readily on this
+    # panel, and a tie broken by frame order is not stable across runs; the
+    # universe is passed to the loader explicitly below so both sides cannot
+    # disagree even if the rule changes.
     keep = (
         training_frame.group_by("symbol")
         .len()
-        .sort("len", descending=True)
+        .sort(["len", "symbol"], descending=[True, False])
         .head(MAX_SYMBOLS)["symbol"]
         .to_list()
     )
@@ -166,7 +170,9 @@ active_folds = [
         labels, case_study_id=CASE_STUDY_ID, label_buffer=LABEL_BUFFER, date_col="timestamp"
     )
 ]
-holdout_start = pd.Timestamp(load_evaluation_config(CASE_STUDY_ID)["holdout_start"], tz="UTC")
+_evaluation = load_evaluation_config(CASE_STUDY_ID)
+holdout_start = pd.Timestamp(_evaluation["holdout_start"], tz="UTC")
+holdout_end = pd.Timestamp(_evaluation["holdout_end"], tz="UTC")
 
 print(f"Canonical purged folds: {len(active_folds)}")
 for f in active_folds:
@@ -181,9 +187,60 @@ for f in active_folds:
     )
 
 # %% [markdown]
-# The 2024-2025 holdout remains sealed. This notebook emits only the two
-# development folds used for model selection; it does not fit or display a
-# holdout regime model.
+# The holdout remains sealed. This notebook emits only the development folds used
+# for model selection; it does not fit or display a holdout regime model.
+#
+# ### The fold contract, drawn
+#
+# Everything the rest of the notebook does has to fit inside this picture. Each
+# fold contributes one training bar, from which every parameter is estimated, and
+# one validation bar, over which the frozen model is run forward. Between them is
+# the embargo asserted above. The hatched region on the right is the holdout, drawn
+# from `evaluation.holdout_start` to `evaluation.holdout_end`, and no bar reaches
+# it. The fold ids run backwards in time: `generate_cv_splits` builds the splits
+# with `fold_direction="backward"` over a rolling window, numbering outward from
+# the most recent development data, so fold 1's validation year precedes fold 0's.
+
+# %%
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for row, fold in enumerate(sorted(active_folds, key=lambda item: item["test_start"])):
+    for span_start, span_end, color, label in (
+        (fold["train_start"], fold["train_end"], COLORS["blue"], "fitted on"),
+        (fold["test_start"], fold["test_end"], COLORS["amber"], "run forward over"),
+    ):
+        ax.barh(
+            row,
+            width=span_end - span_start,
+            left=span_start,
+            height=0.5,
+            color=color,
+            label=label if row == 0 else "_nolegend_",
+        )
+ax.axvspan(
+    holdout_start,
+    holdout_end,
+    facecolor="none",
+    edgecolor=COLORS["neutral"],
+    hatch="///",
+    linewidth=0.8,
+    label="sealed holdout",
+)
+ax.axvline(holdout_start, color=COLORS["negative"], linewidth=1.2)
+ax.set_xlim(min(f["train_start"] for f in active_folds) - pd.Timedelta(days=30), holdout_end)
+ax.set_yticks(range(len(active_folds)))
+ax.set_yticklabels(
+    [f"Fold {f['fold']}" for f in sorted(active_folds, key=lambda item: item["test_start"])]
+)
+ax.set_ylim(-0.6, len(active_folds) + 0.1)
+ax.set(xlabel="Decision timestamp (UTC)")
+ax.legend(frameon=False, fontsize=7, loc="upper left", ncols=3)
+add_message_title(
+    ax,
+    "Every parameter comes from the left of its fold's validation bar",
+    subtitle="Training and validation spans per fold, with the embargo between them",
+)
+fig.tight_layout()
+plt.show()
 
 # %% [markdown]
 # ## 3. GJR-GARCH(1,1) Per Symbol
@@ -224,6 +281,10 @@ def fit_gjr_garch_symbol(returns: pd.Series) -> dict | None:
     return {
         "params": result.params,
         "gamma": result.params.get("gamma[1]", 0),
+        "coefficients": {
+            name: float(result.params.get(f"{name}[1]", float("nan")))
+            for name in ("alpha", "gamma", "beta")
+        },
     }
 
 
@@ -265,8 +326,10 @@ def run_frozen_garch_path(close: pd.Series, fold: dict, params: pd.Series) -> pd
 
 
 # %%
-def extract_symbol_garch(prices: pl.DataFrame, symbol: str, fold: dict) -> list[dict]:
-    """Return one symbol's fold-specific GARCH features."""
+def extract_symbol_garch(
+    prices: pl.DataFrame, symbol: str, fold: dict
+) -> tuple[list[dict], dict | None]:
+    """Return one symbol's fold-specific GARCH features and its fitted coefficients."""
     sym_data = (
         prices.filter(pl.col("symbol") == symbol)
         .select("timestamp", "close")
@@ -284,14 +347,14 @@ def extract_symbol_garch(prices: pl.DataFrame, symbol: str, fold: dict) -> list[
     ]
     train_returns = train_close.pct_change().dropna()
     if len(train_returns) < MIN_TRAIN_BARS or test_close.empty:
-        return []
+        return [], None
     fitted = fit_gjr_garch_symbol(train_returns)
     if fitted is None:
-        return []
+        return [], None
     conditional_vol = run_frozen_garch_path(sym_data["close"], fold, fitted["params"])
     if conditional_vol is None:
-        return []
-    return [
+        return [], None
+    rows = [
         {
             "timestamp": pd.Timestamp(ts, tz="UTC") if ts.tzinfo is None else ts,
             "symbol": symbol,
@@ -301,6 +364,7 @@ def extract_symbol_garch(prices: pl.DataFrame, symbol: str, fold: dict) -> list[
         }
         for ts, vol in conditional_vol.items()
     ]
+    return rows, fitted["coefficients"]
 
 
 # %% [markdown]
@@ -311,10 +375,14 @@ def extract_symbol_garch(prices: pl.DataFrame, symbol: str, fold: dict) -> list[
 
 # %%
 garch_results = []
+garch_coefficients = []
 for fold in active_folds:
     fold_results = []
     for symbol in symbols:
-        fold_results.extend(extract_symbol_garch(prices, symbol, fold))
+        rows, coefficients = extract_symbol_garch(prices, symbol, fold)
+        fold_results.extend(rows)
+        if coefficients is not None:
+            garch_coefficients.append({"fold": fold["fold"], "symbol": symbol, **coefficients})
     garch_results.extend(fold_results)
     successes = len({row["symbol"] for row in fold_results})
     print(f"Fold {fold['fold']}: GARCH success={successes}/{n_symbols}")
@@ -351,11 +419,11 @@ if len(garch_df) > 0:
 else:
     raise RuntimeError("No GARCH features produced")
 
-# %% [markdown]
-# **GARCH Interpretation**: The mean asymmetry parameter is positive in both
-# development folds, at 0.040 and 0.033. Downside shocks therefore raise the
-# conditional-volatility recursion more than equally sized upside shocks, though
-# the asymmetry is modest. Parameters are frozen at the fold boundary;
+# %% [markdown] tags=["results"]
+# **GARCH Interpretation**: the mean asymmetry parameter printed above is positive
+# in both development folds, so downside shocks raise the conditional-volatility
+# recursion more than equally sized upside shocks. Section 5 asks whether that
+# holds as the training window rolls. Parameters are frozen at the fold boundary;
 # `model.fix()` updates volatility without re-estimation.
 
 # %% [markdown]
@@ -525,6 +593,7 @@ def extract_hmm_fold(agg_pd: pd.DataFrame, fold: dict) -> tuple[list[dict], dict
 
 # %%
 hmm_results = []
+hmm_diagnostics = []
 agg_pd = agg_series.to_pandas().set_index("timestamp")
 for fold in active_folds:
     extracted = extract_hmm_fold(agg_pd, fold)
@@ -532,6 +601,7 @@ for fold in active_folds:
         raise RuntimeError(f"Fold {fold['fold']}: HMM fitting failed")
     rows, diagnostics = extracted
     hmm_results.extend(rows)
+    hmm_diagnostics.append({"fold": fold["fold"], **diagnostics})
     print(f"Fold {fold['fold']} HMM: {diagnostics}")
 
 # %%
@@ -555,9 +625,6 @@ print(f"\nHMM features: {len(hmm_df):,} timestamps")
 # windows, so the regime state is time-varying rather than a fixed market label,
 # and the forward filter adapts as each settlement arrives.
 
-# %% [markdown] tags=["results"]
-# **Mean filtered stress probability, per validation window**
-
 # %%
 stress_by_fold = (
     hmm_df.join(
@@ -579,7 +646,127 @@ stress_by_fold = (
 print(stress_by_fold)
 
 # %% [markdown]
-# ## 5. Combine Temporal Features
+# ## 5. Do the Fitted Parameters Move as the Window Rolls?
+#
+# Both models are refitted once per fold, and that choice is only worth its cost
+# if the parameters actually move. A transform whose estimates are identical fold
+# to fold says the refit bought nothing; one whose estimates swing says the
+# feature it produces means something different in each fold, which is a warning
+# the model notebooks need before they pool folds.
+#
+# The two models are drawn on separate axes because their units do not compare: a
+# GJR recursion coefficient is dimensionless and an expected regime duration is
+# counted in 8-hour bars. Folds are ordered by validation date rather than by id.
+#
+# The left panel shows what the **fitted** GJR recursion does, not the conditional
+# volatility it produces - that is a model output, and a series whose level moves
+# with the market says nothing about whether the estimator moved.
+#
+# The quantity plotted is **persistence**, `alpha + beta + gamma / 2`, which is the
+# rate at which a variance shock decays and the one number that says whether the
+# recursion changed. The individual coefficients are printed beside it and they
+# are why persistence has to be read rather than they: they move in opposite
+# directions across these two folds, so each on its own understates the change and
+# a claim of stability read off any one of them would be wrong. GARCH is fitted per
+# symbol, so the median across symbols is drawn with the interquartile range behind
+# it.
+
+# %%
+FOLD_ORDER = [fold["fold"] for fold in sorted(active_folds, key=lambda item: item["test_start"])]
+GARCH_COEFFICIENTS = ["alpha", "gamma", "beta"]
+
+# GJR-GARCH(1,1,1) with symmetric innovations: the leverage term is active half the
+# time, so it enters the decay rate at half weight.
+coefficient_frame = pl.DataFrame(garch_coefficients).with_columns(
+    (pl.col("alpha") + pl.col("beta") + pl.col("gamma") / 2).alias("persistence")
+)
+coefficient_stability = (
+    coefficient_frame.group_by("fold")
+    .agg(
+        [
+            expression
+            for name in [*GARCH_COEFFICIENTS, "persistence"]
+            for expression in (
+                pl.col(name).median().alias(f"{name}_median"),
+                pl.col(name).quantile(0.25).alias(f"{name}_q25"),
+                pl.col(name).quantile(0.75).alias(f"{name}_q75"),
+            )
+        ]
+    )
+    .sort(pl.col("fold").replace_strict(FOLD_ORDER, range(len(FOLD_ORDER))))
+)
+duration_stability = pl.DataFrame(hmm_diagnostics).sort(
+    pl.col("fold").replace_strict(FOLD_ORDER, range(len(FOLD_ORDER)))
+)
+print(
+    coefficient_stability.select(
+        "fold", *[f"{n}_median" for n in [*GARCH_COEFFICIENTS, "persistence"]]
+    )
+)
+print(duration_stability.select("fold", "calm_duration_bars", "stress_duration_bars"))
+
+fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
+positions = list(range(len(FOLD_ORDER)))
+labels = [f"Fold {value}" for value in FOLD_ORDER]
+axes[0].fill_between(
+    positions,
+    coefficient_stability["persistence_q25"].to_list(),
+    coefficient_stability["persistence_q75"].to_list(),
+    color=COLORS["blue"],
+    alpha=0.2,
+    linewidth=0,
+)
+axes[0].plot(
+    positions,
+    coefficient_stability["persistence_median"].to_list(),
+    marker="o",
+    color=COLORS["blue"],
+    label="alpha + beta + gamma / 2",
+)
+axes[0].axhline(1.0, color=COLORS["negative"], linewidth=0.8, linestyle="--")
+axes[0].set_ylabel("fitted GJR persistence")
+for column, color in zip(
+    ["calm_duration_bars", "stress_duration_bars"], (COLORS["blue"], COLORS["amber"]), strict=True
+):
+    axes[1].plot(
+        positions, duration_stability[column].to_list(), marker="o", color=color, label=column
+    )
+axes[1].set_ylabel("expected duration (8h bars)")
+for ax in axes:
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels)
+    ax.legend(frameon=False, fontsize=7)
+axes[1].set_ylim(bottom=0)
+add_message_title(
+    axes[0],
+    "Both fits move, and the later GJR sits on the integrated boundary",
+    subtitle="Cross-symbol median and interquartile range per fold, by validation date",
+)
+fig.tight_layout()
+plt.show()
+
+# %% [markdown] tags=["results"]
+# **Both fits move as the window rolls, and one of them moves onto its own
+# constraint.** Median GJR persistence goes from **0.977387** in the earlier fold
+# to **1.0** in the later one, with the interquartile range collapsing onto that
+# value: for at least half the symbols the later fit is integrated, so a variance
+# shock never decays inside the fold. `arch` bounds persistence at one, so what is
+# reported there is censored at the boundary and this fit cannot distinguish "very
+# persistent" from "integrated" - which is the reason to read persistence rather
+# than any single coefficient. The coefficients move in opposite directions and
+# each understates the change on its own: alpha **0.093162** to **0.075402**, beta
+# **0.862039** to **0.903044**, gamma flat at **0.034552** and **0.034473**.
+#
+# The HMM moves too. Its expected calm duration goes from **13.035003** to
+# **26.691917** bars and stress from **10.232229** to **13.993085**, so the calm
+# regime the later fold identifies persists about twice as long as the one the
+# earlier fold gave that name. Neither `garch_cond_vol` nor `hmm_regime_prob_stress`
+# is one variable measured twice, and a model pooling both folds is pooling
+# quantities calibrated differently. That is what a per-fold refit is for, and it
+# is why the fold column travels with the artifact into `load_modeling_dataset`.
+
+# %% [markdown]
+# ## 6. Combine Temporal Features
 #
 # Merge GARCH (per-symbol) and HMM (market-level, broadcast to all symbols)
 # features into a single temporal feature matrix.
@@ -685,14 +872,14 @@ if len(temporal) > 0:
     print(feature_summary)
 
 # %% [markdown]
-# ## 6. Inspect Validation Regimes
+# ## 7. Inspect Validation Regimes
 #
 # The chart uses validation periods only. Each line comes from a model fitted on
 # that fold's purged training window, so the displayed probabilities are out of
 # sample and forward-filtered.
 
 # %%
-fig, ax = plt.subplots(figsize=(10, 5))
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 fold_colors = [COLORS["blue"], COLORS["amber"]]
 for idx, fold in enumerate(sorted(active_folds, key=lambda item: item["test_start"])):
     fold_line = hmm_df.filter(
@@ -707,14 +894,50 @@ for idx, fold in enumerate(sorted(active_folds, key=lambda item: item["test_star
     )
 ax.axhline(0.5, color=COLORS["neutral"], linewidth=0.8, linestyle="--")
 ax.set(xlabel="Decision timestamp (UTC)", ylabel="Filtered stress probability")
-ax.set_ylim(0, 1)
-ax.legend()
-add_message_title(ax, "Funding stress is episodic across both validation windows")
+# The two validation windows span two years at single-column width, where the
+# default locator asks for a quarterly tick and the ISO labels then run into each
+# other. A concise formatter carries the year once in the offset and prints the
+# month alone underneath.
+_locator = mdates.AutoDateLocator(maxticks=7)
+ax.xaxis.set_major_locator(_locator)
+ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(_locator))
+ax.set_ylim(0, 1.35)
+ax.legend(loc="upper left", ncols=2, frameon=False, fontsize=7)
+# The per-fold shares are computed here rather than typed into the string. They are
+# not stable across runs - three executions of this notebook, unchanged apart from
+# figure text, put P(stress) above 0.5 on 35.2%/18.4%, then 29.3%/32.8%, then
+# 21.2%/15.1% of the two windows, which reverses which fold is the more stressed.
+# The HMM is seeded (set_global_seeds, and random_state per restart), so the drift is
+# environmental rather than a missing seed; BLAS thread count is the first suspect.
+# Until that is pinned, a hard-coded share in this subtitle would be wrong on the next
+# run, and so would any title that ranks the two folds.
+_stress_share = {
+    fold["fold"]: float(
+        (
+            hmm_df.filter(
+                (pl.col("fold") == fold["fold"])
+                & pl.col("timestamp").is_between(
+                    fold["test_start"], fold["test_end"], closed="both"
+                )
+            )["hmm_regime_prob_stress"]
+            > 0.5
+        ).mean()
+    )
+    for fold in active_folds
+}
+add_message_title(
+    ax,
+    "Funding stress arrives in bursts rather than persisting",
+    subtitle=(
+        "Filtered P(stress) on each fold's validation window; above 0.5 on "
+        + ", ".join(f"{share:.1%} of fold {fold}" for fold, share in sorted(_stress_share.items()))
+    ),
+)
 fig.tight_layout()
 plt.show()
 
 # %% [markdown]
-# ## 7. Save and Reassemble the Training Frame
+# ## 8. Save and Reassemble the Training Frame
 #
 # The output carries a fold column because each learned feature has fold-specific
 # parameters. The schema is frozen against the expected five names, and no
@@ -740,7 +963,7 @@ assert temporal.select("timestamp", "symbol", "fold").is_duplicated().sum() == 0
 FEATURES_DIR.mkdir(parents=True, exist_ok=True)
 temporal.write_parquet(FEATURES_DIR / "model_based.parquet")
 
-assembled = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
+assembled = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, symbols=symbols)
 assert len(assembled.feature_names) == 44
 assert set(assembled.temporal_feature_names) == expected_temporal
 assert sorted(assembled.temporal_by_fold["fold"].unique()) == sorted(
@@ -761,7 +984,7 @@ print("Training assembly: 39 financial + 5 fold-specific temporal features [OK]"
 print("Reassembled financial frame matches the frame read in section 1 [OK]")
 
 # %% [markdown]
-# ## 8. Measure Out-of-Sample Incremental IC
+# ## 9. Measure Out-of-Sample Incremental IC
 #
 # Directional IC is computed at each decision timestamp on the validation slices,
 # then averaged with HAC-adjusted inference. Market-level HMM probabilities are
@@ -793,9 +1016,20 @@ print(f"Validation diagnostic: {len(eval_df):,} rows, label={label_col}")
 # The IC series must be in time order before the HAC correction is applied:
 # `compute_ic_hac_stats` reads row order as time order and does not sort, and a
 # Polars `partition_by` returns groups in the frame's order rather than in sorted
-# key order. The sort above is therefore load-bearing, not cosmetic - without it
-# the Newey-West standard error is computed over an arbitrary permutation of the
-# timeline and the t-statistic is not even stable across runs.
+# key order. Rather than sort by hand and rely on that sort surviving every later
+# edit, the series comes from `cross_sectional_ic_series`, which ranks within each
+# decision timestamp and returns the result sorted on that timestamp. A notebook
+# that groups straight into `compute_ic_hac_stats` is one edit away from a
+# Newey-West correction computed over an arbitrary permutation of the timeline,
+# and the resulting t-statistic is not even stable across runs.
+#
+# It also decides the HMM columns' fate without a special case: a market-level
+# probability takes the same value for every symbol at a timestamp, so the ranks
+# it produces within a date have no variance and the correlation is undefined.
+# The filter below is on `is_finite` rather than on nulls because that is the
+# form an undefined correlation arrives in - a `NaN` from a zero denominator, not
+# a missing value - and dropping nulls alone would carry both HMM columns into
+# the HAC call and out the other side as a row of NaN statistics.
 #
 # The HAC lag comes from the label buffer rather than a hand-picked constant:
 # the 8-hour forward return means consecutive decision timestamps do not share an
@@ -803,21 +1037,24 @@ print(f"Validation diagnostic: {len(eval_df):,} rows, label={label_col}")
 
 # %%
 LABEL_HORIZON_BARS = 1  # fwd_ret_8h resolves in exactly one 8-hour bar
+MIN_CROSS_SECTION = 10  # symbols a decision timestamp needs before its IC is used
+MIN_DECISION_TIMES = 20  # decision timestamps a feature needs before it is reported
 
 temporal_ic = {}
-partitions = eval_df.partition_by("timestamp", as_dict=True, maintain_order=True)
 for feature in temporal_feature_cols:
-    ic_values = []
-    for group in partitions.values():
-        values = group.select(feature, label_col).drop_nulls()
-        if len(values) < 10 or values[feature].n_unique() < 2:
-            continue
-        ic, _ = spearmanr(values[feature].to_numpy(), values[label_col].to_numpy())
-        if np.isfinite(ic):
-            ic_values.append(ic)
-    if len(ic_values) >= 20:
+    ic_series = cross_sectional_ic_series(
+        eval_df,
+        eval_df,
+        pred_col=feature,
+        ret_col=label_col,
+        date_col="timestamp",
+        entity_col="symbol",
+        method="spearman",
+        min_obs=MIN_CROSS_SECTION,
+    ).filter(pl.col("ic").is_finite())
+    if len(ic_series) >= MIN_DECISION_TIMES:
         temporal_ic[feature] = compute_ic_hac_stats(
-            np.asarray(ic_values), label_horizon=LABEL_HORIZON_BARS
+            ic_series, ic_col="ic", label_horizon=LABEL_HORIZON_BARS
         )
 
 temporal_summary = pl.DataFrame(
@@ -837,12 +1074,24 @@ print(temporal_summary)
 
 # %%
 plot_summary = temporal_summary.sort("mean_ic")
-fig, ax = plt.subplots(figsize=(9, 4.5))
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 colors = [COLORS["blue"] if value >= 0 else COLORS["amber"] for value in plot_summary["mean_ic"]]
 ax.barh(plot_summary["feature"].to_list(), plot_summary["mean_ic"].to_list(), color=colors)
 ax.axvline(0, color=COLORS["neutral"], linewidth=0.8)
 ax.set(xlabel="Mean validation rank IC", ylabel="Temporal feature")
-add_message_title(ax, "Temporal features provide modest stand-alone directional IC")
+# The chart draws only the features the screen could rank, which is fewer than the
+# notebook emits, so the count is computed here rather than typed: the two regime
+# probabilities are market-level and take one value per settlement, so a
+# cross-sectional rank correlation over them has no variance to work with.
+add_message_title(
+    ax,
+    "Only conditional volatility carries a significant stand-alone IC",
+    subtitle=(
+        f"GARCH features only, {len(plot_summary)} of the {len(temporal_feature_cols)} emitted: "
+        "the regime probabilities are constant within a settlement, so a "
+        "cross-sectional IC cannot rank them"
+    ),
+)
 fig.tight_layout()
 plt.show()
 

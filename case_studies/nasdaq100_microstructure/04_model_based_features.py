@@ -1,12 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
-#     cell_metadata_filter: -all
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -55,18 +55,19 @@
 """NASDAQ-100 Microstructure: Temporal Features (Ch9)."""
 
 import warnings
-from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import polars as pl
 import yaml
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
-from ml4t.diagnostic.metrics import compute_ic_hac_stats
+from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
 from data import load_nasdaq100_bars
-from utils.cv_splits import generate_cv_splits
+from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.paths import get_case_study_dir
+from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
 
@@ -78,10 +79,45 @@ MAX_SYMBOLS = 0
 
 # %%
 # Configuration
-CASE_DIR = get_case_study_dir("nasdaq100_microstructure")
+CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 FEATURES_DIR = CASE_DIR / "features"
 
+SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+EVAL_CFG = load_evaluation_config(CASE_STUDY_ID)
+PRIMARY_LABEL = SETUP["labels"]["primary"]
+LABEL_BUFFER = SETUP["labels"]["buffer"]
+HOLDOUT_START = pd.Timestamp(EVAL_CFG["holdout_start"])
+HOLDOUT_END = pd.Timestamp(EVAL_CFG["holdout_end"])
+
+# The bar is one minute, so the label horizon and the IC sampling step are both
+# expressed in bars and derived from the configured buffer rather than typed.
+BAR = pd.Timedelta(minutes=1)
+LABEL_HORIZON_BARS = int(pd.Timedelta(LABEL_BUFFER) // BAR)
+IC_SAMPLE_STEP = LABEL_HORIZON_BARS  # thin to one decision per label horizon
+
+
+def iso(value: object) -> str:
+    """Date-like -> ISO string, for anything handed to Plotly.
+
+    Plotly stores layout shape coordinates verbatim, and kaleido serialises the
+    figure spec with orjson, which has no encoder for pandas.Timestamp. A figure
+    built with Timestamps renders in a browser and raises
+    "Type is not JSON serializable: Timestamp" at export time - i.e. it fails on
+    the run that matters, not on the one you are watching.
+    """
+    return pd.Timestamp(value).isoformat()
+
+
+# Estimation windows for the three fitted models, in bars. Declared once here;
+# nothing below re-types them.
+HAR_COMPONENTS = (5, 15, 60)
+HAR_FIT_WINDOW = 120
+FFT_WINDOW = 60
+SIG_WINDOW = 30
+
 print(f"Date range: {START_DATE} to {END_DATE}")
+print(f"Label: {PRIMARY_LABEL}, buffer {LABEL_BUFFER} ({LABEL_HORIZON_BARS} bars)")
+print(f"Holdout: {HOLDOUT_START.date()} .. {HOLDOUT_END.date()}")
 if MAX_SYMBOLS:
     print(f"Symbol limit: {MAX_SYMBOLS}")
 
@@ -176,27 +212,48 @@ df = df.with_columns(
 #
 # **Session boundary note**: HAR regressors are computed across all sessions
 # concatenated per symbol. Overnight gaps appear as zero-return bars (via
-# `nan_to_num`), which biases windows that span overnight gaps. The fraction
-# of contaminated rows varies by window size: ~8% for signatures (30-bar),
-# ~15% for FFT (60-bar), and ~31% for HAR (120-bar). A production system
-# would use session-bounded windowing (as in `03_financial_features.py`); here we
-# accept the approximation for teaching clarity. Note that `r1m` itself is
-# session-bounded — the contamination is only in the aggregation windows.
+# `nan_to_num`), which biases windows that span overnight gaps. A row is affected
+# when its trailing window reaches back past the session open, so the affected
+# share is the window length divided by the session length and grows with the
+# window. The next cell measures it for the three windows this notebook uses.
+# A production system would use session-bounded windowing (as in
+# `03_financial_features.py`); here we accept the approximation for teaching
+# clarity. Note that `r1m` itself is session-bounded — the contamination is
+# only in the aggregation windows.
+
+# %% [markdown]
+# `bar_of_day` is the position within the session, so a row with
+# `bar_of_day < window` is one whose trailing window reaches back across the
+# overnight gap. That makes the affected share something to measure rather than
+# assert.
+
+# %%
+print("Rows whose trailing window crosses a session boundary:")
+for _name, _w in [
+    ("signatures", SIG_WINDOW),
+    ("FFT", FFT_WINDOW),
+    ("HAR regressors", HAR_COMPONENTS[-1]),
+    ("HAR fit window", HAR_FIT_WINDOW),
+]:
+    _share = df.select((pl.col("bar_of_day") < _w).mean()).item()
+    print(f"  {_name:<16s} ({_w:>3d}-bar): {_share:6.1%}")
 
 
 # %%
 def build_har_features_intraday(
-    r1m: np.ndarray, window_5: int = 5, window_15: int = 15, window_60: int = 60
+    r1m: np.ndarray, components: tuple[int, int, int] = HAR_COMPONENTS
 ) -> dict[str, np.ndarray]:
     """Build HAR regressors from 1-minute returns.
 
     Computes realized volatility at 3 horizons by averaging squared returns
-    over trailing windows.
+    over trailing windows. Every window ends at ``t`` exclusive, so the value
+    at ``t`` is a function of bars strictly before ``t``.
 
     Returns dict with rv_5m, rv_15m, rv_60m arrays.
     """
     n = len(r1m)
     r2 = r1m**2
+    window_5, window_15, window_60 = components
 
     rv_5 = np.full(n, np.nan)
     rv_15 = np.full(n, np.nan)
@@ -221,17 +278,22 @@ def fit_har_rolling(
     rv_5: np.ndarray,
     rv_15: np.ndarray,
     rv_60: np.ndarray,
-    fit_window: int = 120,
-) -> tuple[np.ndarray, np.ndarray]:
+    fit_window: int = HAR_FIT_WINDOW,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Fit HAR model with rolling OLS and produce walk-forward forecasts.
+
+    The window for the fit at ``t`` is ``[t - fit_window, t)``, so no
+    coefficient is estimated from a bar at or after its own decision time.
 
     Returns:
         har_forecast: 1-step-ahead HAR forecast of rv_5m
         har_residual: Actual rv_5m minus HAR forecast (surprise vol)
+        har_betas: (n, 4) rolling coefficients [const, beta_5, beta_15, beta_60]
     """
     n = len(rv_5)
     har_forecast = np.full(n, np.nan)
     har_residual = np.full(n, np.nan)
+    har_betas = np.full((n, 4), np.nan)
 
     for t in range(fit_window + 1, n):
         # Training window: [t - fit_window, t)
@@ -262,6 +324,8 @@ def fit_har_rolling(
         except np.linalg.LinAlgError:
             continue
 
+        har_betas[t] = beta
+
         # har_forecast[t] = E[rv_5_{t+1} | info_t], so residual at t = rv_5[t] - forecast[t-1]
         x_t = np.array([1.0, rv_5[t], rv_15[t], rv_60[t]])
         if np.all(np.isfinite(x_t)):
@@ -271,7 +335,7 @@ def fit_har_rolling(
                     rv_5[t] - har_forecast[t - 1] if np.isfinite(har_forecast[t - 1]) else np.nan
                 )
 
-    return har_forecast, har_residual
+    return har_forecast, har_residual, har_betas
 
 
 # %% [markdown]
@@ -283,10 +347,14 @@ def fit_har_rolling(
 # %%
 def compute_har_per_symbol(
     symbol_df: pl.DataFrame,
-) -> pl.DataFrame:
+) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Compute HAR features for a single symbol's data (all sessions combined).
 
-    Returns DataFrame with timestamp, symbol, har_forecast, har_residual columns.
+    Returns:
+        features: timestamp, symbol, har_rv5_pred, har_residual
+        betas: the rolling coefficients thinned to the last bar of each session,
+            which is what Section D draws. The full path is one row per bar and
+            is not carried past this function.
     """
     r1m = symbol_df["r1m"].to_numpy().copy()
     r1m = np.nan_to_num(r1m, nan=0.0)
@@ -295,14 +363,14 @@ def compute_har_per_symbol(
     har_regs = build_har_features_intraday(r1m)
 
     # Fit HAR with rolling OLS
-    har_forecast, har_residual = fit_har_rolling(
+    har_forecast, har_residual, har_betas = fit_har_rolling(
         har_regs["rv_5m"],
         har_regs["rv_15m"],
         har_regs["rv_60m"],
-        fit_window=120,
+        fit_window=HAR_FIT_WINDOW,
     )
 
-    return pl.DataFrame(
+    features = pl.DataFrame(
         {
             "timestamp": symbol_df["timestamp"],
             "symbol": symbol_df["symbol"],
@@ -311,20 +379,43 @@ def compute_har_per_symbol(
         }
     )
 
+    betas = (
+        pl.DataFrame(
+            {
+                "timestamp": symbol_df["timestamp"],
+                "symbol": symbol_df["symbol"],
+                "session_date": symbol_df["session_date"],
+                "bar_of_day": symbol_df["bar_of_day"],
+                "beta_5": har_betas[:, 1],
+                "beta_15": har_betas[:, 2],
+                "beta_60": har_betas[:, 3],
+            }
+        )
+        .filter(pl.col("bar_of_day") == pl.col("bar_of_day").max().over("session_date"))
+        .drop("bar_of_day")
+        .with_columns(pl.col("^beta_.*$").fill_nan(None))
+        .drop_nulls(["beta_5", "beta_15", "beta_60"])
+    )
+
+    return features, betas
+
 
 # %%
 # Compute HAR features per symbol
 symbols = df["symbol"].unique().sort().to_list()
 har_results = []
+beta_results = []
 
 for i, sym in enumerate(symbols):
     sym_df = df.filter(pl.col("symbol") == sym).sort("timestamp")
-    result = compute_har_per_symbol(sym_df)
+    result, betas = compute_har_per_symbol(sym_df)
     har_results.append(result)
+    beta_results.append(betas)
     if (i + 1) % 20 == 0 or (i + 1) == len(symbols):
         print(f"  HAR: {i + 1}/{len(symbols)} symbols processed")
 
 har_df = pl.concat(har_results)
+har_beta_df = pl.concat(beta_results)
 
 # Convert NaN to null
 for c in ["har_rv5_pred", "har_residual"]:
@@ -334,34 +425,18 @@ for c in ["har_rv5_pred", "har_residual"]:
 valid_forecasts = har_df["har_rv5_pred"].drop_nulls()
 print(f"HAR features computed: {len(valid_forecasts):,} valid forecasts out of {len(har_df):,}")
 
+# %% [markdown]
+# There is no single representative HAR fit here. The model is refitted every bar
+# on its trailing window, so the object to describe is the distribution of those
+# fits, not one of them.
+
 # %%
-# Report average HAR persistence coefficients across symbols
-# Fit a single HAR on the last complete symbol for representative coefficients
-_last_sym_df = df.filter(pl.col("symbol") == symbols[-1]).sort("timestamp")
-_r1m = _last_sym_df["r1m"].to_numpy().copy()
-_r1m = np.nan_to_num(_r1m, nan=0.0)
-_regs = build_har_features_intraday(_r1m)
-_valid = np.isfinite(_regs["rv_5m"]) & np.isfinite(_regs["rv_15m"]) & np.isfinite(_regs["rv_60m"])
-_n_valid = _valid.sum()
-if _n_valid > 200:
-    X = np.column_stack(
-        [
-            np.ones(_n_valid),
-            _regs["rv_5m"][_valid],
-            _regs["rv_15m"][_valid],
-            _regs["rv_60m"][_valid],
-        ]
-    )
-    y = np.roll(_regs["rv_5m"], -1)[_valid]
-    y_valid = np.isfinite(y)
-    beta = np.linalg.lstsq(X[y_valid], y[y_valid], rcond=None)[0]
-    persistence = beta[1] + beta[2] + beta[3]
-    print(f"\nHAR coefficients (representative, {symbols[-1]}):")
-    print(f"  beta_5={beta[1]:.3f}, beta_15={beta[2]:.3f}, beta_60={beta[3]:.3f}")
-    print(f"  Persistence (sum of betas): {persistence:.3f}")
-else:
-    persistence = float("nan")
-    print("Insufficient data for persistence reporting")
+har_beta_summary = har_beta_df.select(
+    pl.col("beta_5", "beta_15", "beta_60").median().name.suffix("_median"),
+    (pl.col("beta_5") + pl.col("beta_15") + pl.col("beta_60")).median().alias("persistence_median"),
+)
+print(f"Rolling HAR fits retained (one per symbol-session): {len(har_beta_df):,}")
+print(har_beta_summary)
 
 # %% [markdown]
 # **HAR Interpretation**: Positive HAR residuals (`rv_5_actual > har_forecast`)
@@ -369,6 +444,26 @@ else:
 # expectation, often associated with news arrivals or sudden liquidity events.
 # Negative residuals indicate unusually calm markets relative to the recent
 # volatility regime.
+#
+# **The forecast is an unconstrained linear extrapolation, and it shows.** The
+# HAR is a linear regression on a variance, with no constraint keeping its
+# prediction non-negative. When a symbol's realized variance jumps far outside
+# the range the trailing window was fitted on — a single-name event, an earnings
+# gap, a halt — the fit extrapolates and the forecast can land far below zero.
+# The next cell measures how often and how far, because the mean and standard
+# deviation of this column are set by a handful of those rows and describe
+# nothing a reader can use. A production system would model log-variance or
+# constrain the forecast; leaving it unconstrained is what makes the failure
+# mode visible here.
+
+# %%
+_fc = har_df["har_rv5_pred"].drop_nulls()
+print(f"HAR forecast rows: {len(_fc):,}")
+print(f"  median              : {_fc.median():.3e}")
+print(f"  1st-99th percentile : {_fc.quantile(0.01):.3e} .. {_fc.quantile(0.99):.3e}")
+print(f"  min / max           : {_fc.min():.3e} / {_fc.max():.3e}")
+print(f"  negative            : {(_fc < 0).mean():.2%}")
+print(f"  beyond +/-1e-3      : {(_fc.abs() > 1e-3).sum():,} rows")
 
 # %% [markdown]
 # ## 3. FFT Spectral Features on Intraday Volume
@@ -386,7 +481,7 @@ else:
 # %%
 def rolling_fft_features(
     signal: np.ndarray,
-    window: int = 60,
+    window: int = FFT_WINDOW,
 ) -> dict[str, np.ndarray]:
     """Compute rolling FFT spectral features on a 1D signal.
 
@@ -457,7 +552,7 @@ def rolling_fft_features(
 # %%
 def compute_fft_per_symbol(
     symbol_df: pl.DataFrame,
-    window: int = 60,
+    window: int = FFT_WINDOW,
 ) -> pl.DataFrame:
     """Compute FFT spectral features on volume and volatility for one symbol.
 
@@ -502,7 +597,7 @@ fft_results = []
 
 for i, sym in enumerate(symbols):
     sym_df = df.filter(pl.col("symbol") == sym).sort("timestamp")
-    result = compute_fft_per_symbol(sym_df, window=60)
+    result = compute_fft_per_symbol(sym_df, window=FFT_WINDOW)
     fft_results.append(result)
     if (i + 1) % 20 == 0 or (i + 1) == len(symbols):
         print(f"  FFT: {i + 1}/{len(symbols)} symbols processed")
@@ -600,7 +695,7 @@ def _window_normalize(x: np.ndarray) -> np.ndarray:
 # %%
 def compute_signatures_per_symbol(
     symbol_df: pl.DataFrame,
-    window: int = 30,
+    window: int = SIG_WINDOW,
 ) -> pl.DataFrame:
     """Compute rolling depth-2 path signatures for one symbol.
 
@@ -610,15 +705,15 @@ def compute_signatures_per_symbol(
     Each window is z-score normalized before computing cumulative sums. This makes
     signature terms scale-invariant across windows — depth-1 terms measure relative
     displacement within the window's own distribution, not absolute price moves.
+
+    That per-window normalization is also what keeps the path free of any
+    full-sample statistic: the three dimensions arrive on wildly different scales
+    and are put on a common one by their own window, never by a constant computed
+    over the symbol's whole history.
     """
     r1m = symbol_df["r1m"].to_numpy().copy()
     svs = symbol_df["signed_vol_share"].to_numpy().copy()
     trades = symbol_df["total_trades"].to_numpy().astype(float).copy()
-
-    # Normalize trade count to similar scale as other dimensions
-    trades_std = np.nanstd(trades)
-    if trades_std > 0:
-        trades = trades / trades_std
 
     # Replace NaN with 0
     r1m = np.nan_to_num(r1m, nan=0.0)
@@ -681,7 +776,7 @@ sig_results = []
 
 for i, sym in enumerate(symbols):
     sym_df = df.filter(pl.col("symbol") == sym).sort("timestamp")
-    result = compute_signatures_per_symbol(sym_df, window=30)
+    result = compute_signatures_per_symbol(sym_df, window=SIG_WINDOW)
     sig_results.append(result)
     if (i + 1) % 20 == 0 or (i + 1) == len(symbols):
         print(f"  Signatures: {i + 1}/{len(symbols)} symbols processed")
@@ -708,9 +803,12 @@ print(f"Signature features computed: {len(valid_sig):,} valid out of {len(sig_df
 # The asymmetry between `sig2_ret_svs` and `sig2_svs_ret` is the key
 # microstructure signal — it distinguishes informed from liquidity-driven flow.
 #
-# **Computational note**: Path signatures with 30-bar windows over millions of
-# minute bars per symbol are expensive. With ~100 symbols the loop takes several
-# minutes. For faster iteration, use TEST mode or consider 5-minute resampling.
+# **Computational note**: all three per-symbol loops are Python-level passes over
+# every minute bar, and together they dominate this notebook's runtime — the
+# full universe over the configured date range takes a bit over an hour on one
+# core, of which the signatures and the rolling FFT are the larger share. For
+# faster iteration, restrict the universe with `MAX_SYMBOLS` or resample to
+# 5-minute bars before computing the signature paths.
 
 # %% [markdown]
 # ## 5. Combine Temporal Features
@@ -770,13 +868,151 @@ for col in temporal_feature_cols:
         print(f"  {col:<25s}: all null")
 
 # %% [markdown]
-# ## 7. Join Validation
+# ## 7. The Fold Contract
+#
+# Resolve the walk-forward folds **before** anything is evaluated, so every
+# readout below can be restricted to the rows it is entitled to see. The
+# boundaries come from `setup.yaml` through `generate_cv_splits`, which also
+# purges any validation bar whose label endpoint would land inside the holdout.
+#
+# The three procedures here are refitted **per bar**, not per fold: the HAR
+# coefficients come from the trailing fit window, and the FFT and signature
+# transforms estimate nothing at all. So a fold tag changes no feature value —
+# it tells downstream training which rows it may read. That is why the fold
+# spans below overlap, and why the same feature value can appear under two
+# fold ids.
+
+# %%
+splits = generate_cv_splits(
+    temporal_clean,
+    case_study_id=CASE_STUDY_ID,
+    label_buffer=LABEL_BUFFER,
+    date_col="timestamp",
+)
+
+print(f"CV folds: {len(splits)}")
+for s in splits:
+    print(
+        f"  Fold {s['fold']}: train [{s['train_start']} .. {s['train_end']}] "
+        f"validation [{s['val_start']} .. {s['val_end']}]"
+    )
+print(f"  Holdout: [{HOLDOUT_START.date()} .. {HOLDOUT_END.date()}]")
+
+# %% [markdown]
+# The next cell executes the contract the figure is about to draw, so it can fail
+# rather than be believed. The second check is the supervised one: a validation
+# bar at $t$ carries a label resolving at $t + \text{buffer}$, so the usable
+# boundary is `holdout_start - buffer`, not `holdout_start`.
+
+# %%
+for s in splits:
+    assert pd.Timestamp(s["train_end"]) < pd.Timestamp(s["val_start"]), (
+        f"fold {s['fold']}: training window runs into its own validation window"
+    )
+    assert pd.Timestamp(s["val_end"]) + pd.Timedelta(LABEL_BUFFER) <= HOLDOUT_START, (
+        f"fold {s['fold']}: a validation label resolves inside the holdout"
+    )
+print(f"Fold contract holds for {len(splits)} folds.")
+
+
+# %%
+def validation_rows(frame: pl.DataFrame) -> pl.DataFrame:
+    """Restrict a frame to rows inside some fold's validation window.
+
+    Every quality readout in this notebook goes through this function. Without
+    it a readout built from the full feature frame silently spans the holdout,
+    because the features themselves carry no fold column.
+    """
+    parts = [
+        frame.filter(
+            (pl.col("timestamp") >= pd.Timestamp(s["val_start"]))
+            & (pl.col("timestamp") <= pd.Timestamp(s["val_end"]))
+        ).with_columns(pl.lit(s["fold"], dtype=pl.Int32).alias("fold"))
+        for s in splits
+    ]
+    return pl.concat(parts)
+
+
+# %% [markdown]
+# **Figure F1** draws what the artifact will contain. Training and validation
+# spans are shown per fold, the sealed holdout is shaded, and `holdout_start` is
+# drawn as a rule. The emitted holdout fold carries pre-holdout training rows
+# plus the holdout period itself, so that downstream models have temporal
+# features available across the window they are finally scored on.
+
+# %%
+# One row per fold: training bars, then validation bars. The last row is the
+# emitted holdout fold, which trains on every pre-holdout bar.
+spans = [
+    (f"Fold {s['fold']}", kind, iso(s[f"{key}_start"]), iso(s[f"{key}_end"]))
+    for s in splits
+    for kind, key in (("Training bars", "train"), ("Validation bars", "val"))
+]
+spans += [
+    (
+        f"Fold {len(splits)}",
+        "Training bars",
+        iso(min(s["train_start"] for s in splits)),
+        iso(HOLDOUT_START),
+    ),
+    (f"Fold {len(splits)}", "Sealed holdout", iso(HOLDOUT_START), iso(HOLDOUT_END)),
+]
+span_colors = {
+    "Training bars": COLORS["blue"],
+    "Validation bars": COLORS["amber"],
+    "Sealed holdout": COLORS["neutral"],
+}
+
+fig = go.Figure()
+seen = set()
+for row, kind, start, end in spans:
+    fig.add_trace(
+        go.Scatter(
+            x=[start, end],
+            y=[row, row],
+            mode="lines",
+            line={"width": 16, "color": span_colors[kind]},
+            name=kind,
+            legendgroup=kind,
+            showlegend=kind not in seen,
+        )
+    )
+    seen.add(kind)
+
+fig.add_vrect(
+    x0=iso(HOLDOUT_START),
+    x1=iso(HOLDOUT_END),
+    fillcolor=COLORS["neutral"],
+    opacity=0.10,
+    line_width=0,
+    layer="below",
+)
+fig.add_vline(x=iso(HOLDOUT_START), line_dash="dash", line_color=COLORS["negative"])
+fig.update_layout(
+    # Plotly centres a title and clips whatever runs past the figure width, so a one-line <sup>
+    # loses text off both ends. Every subtitle in this notebook is broken by hand for that reason.
+    title=(
+        "Every fold trains left of the validation span it is scored on"
+        "<br><sup>Shaded region is the sealed holdout and the dashed rule is its start. Fold 2 is"
+        "<br>the emitted holdout fold, whose training bars all predate that rule. Spans overlap"
+        "<br>because the fold tag selects rows rather than changing feature values.</sup>"
+    ),
+    xaxis_title="Session",
+    yaxis_title="",
+    # Three subtitle lines need the room; at height=360 the last one landed on the Fold 2 bar.
+    height=460,
+    margin={"l": 90, "t": 130},
+)
+fig.show()
+
+# %% [markdown]
+# ## 8. Join Validation
 #
 # Verify that temporal features join correctly with Ch8 features and Ch7 labels.
 # This confirms compatible keys (`timestamp`, `symbol`) and overlapping row counts.
 
 # %%
-labels_path = CASE_DIR / "labels" / "fwd_ret_15m.parquet"
+labels_path = CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet"
 features_path = CASE_DIR / "features" / "financial.parquet"
 
 if labels_path.exists() and features_path.exists():
@@ -798,49 +1034,218 @@ else:
     )
 
 # %% [markdown]
-# ## 8. Incremental IC Evaluation
+# ## 9. What the HAR Model Inferred
 #
-# Evaluate whether temporal features add predictive content beyond the Ch8
-# cross-sectional features. We compute the Information Coefficient (IC) —
-# cross-sectional Spearman rank correlation between each temporal feature and
-# `fwd_ret_15m` — then apply HAC standard errors and FDR correction.
+# The HAR forecast is the only quantity here produced by a fitted model rather
+# than a fixed transform, so it is the one worth looking at directly. Figure F2
+# shows it against the realized volatility it forecasts, on validation rows
+# only, with the fold boundary marked.
 #
-# **Comparison**: Load Ch8 feature evaluation results to compare temporal
-# feature IC magnitudes against cross-sectional feature ICs.
+# At the level of a daily cross-sectional median the two series are close, and where they part it
+# is the forecast that runs higher. That is the same unconstrained linear extrapolation described
+# in Section 2, seen from the other side: a regression on a variance with nothing holding it down
+# overshoots a jump rather than lagging it.
+#
+# The realized series is reconstructed exactly from what the notebook emits:
+# `har_residual[t] = rv_5[t] - har_forecast[t-1]`, so
+# `rv_5[t] = har_forecast[t-1] + har_residual[t]`. Both series are shown as the
+# cross-sectional median over symbols per session, because a single symbol's
+# minute-level realized variance is too noisy to read at this span.
 
 # %%
-# Load labels and join with temporal features
-labels_path = CASE_DIR / "labels" / "fwd_ret_15m.parquet"
+har_view = (
+    validation_rows(temporal_clean.select("timestamp", "symbol", "har_rv5_pred", "har_residual"))
+    .sort(["symbol", "timestamp"])
+    .with_columns(realized=pl.col("har_rv5_pred").shift(1).over("symbol") + pl.col("har_residual"))
+    .with_columns(session=pl.col("timestamp").dt.date())
+    .group_by("session")
+    .agg(
+        pl.col("har_rv5_pred").median().alias("forecast"),
+        pl.col("realized").median().alias("realized"),
+    )
+    .sort("session")
+)
+print(f"Validation sessions plotted: {len(har_view):,}")
 
-eval_results = {}  # Store for evaluation metrics
+# %%
+fig = go.Figure()
+fig.add_trace(
+    go.Scatter(
+        x=har_view["session"],
+        y=har_view["realized"],
+        mode="lines",
+        name="Realized 5-bar variance",
+        line={"color": COLORS["neutral"], "width": 1.5},
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=har_view["session"],
+        y=har_view["forecast"],
+        mode="lines",
+        name="HAR forecast",
+        line={"color": COLORS["amber"], "width": 2},
+    )
+)
+# `splits` arrives in descending recency, so `splits[1:]` dropped the *latest* fold's boundary and
+# drew the earliest one - which is the left edge of the plot, where there is nothing to separate.
+# Sorting first and dropping the earliest puts the rule where one fold's parameters give way to
+# the next.
+for s in sorted(splits, key=lambda s: pd.Timestamp(s["val_start"]))[1:]:
+    fig.add_vline(x=iso(s["val_start"]), line_dash="dot", line_color=COLORS["neutral"])
+fig.update_layout(
+    title=(
+        "The HAR forecast tracks realized variance closely, and overshoots its peaks"
+        "<br><sup>Cross-sectional median across symbols per session, validation rows only."
+        "<br>The dotted rule is the boundary between the two validation windows. Both series"
+        "<br>are means of squared one-minute log returns.</sup>"
+    ),
+    xaxis_title="Session",
+    yaxis_title="Mean squared 1-minute log return",
+    height=420,
+)
+fig.show()
 
+# %% [markdown]
+# ## 10. Fit Stability Across Folds
+#
+# The HAR is refitted every bar, so "stability across folds" is a question about
+# the distribution of the rolling coefficients rather than about three numbers
+# per fold. Figure F3 shows that distribution per fold. A component whose
+# coefficient is centred near zero in every fold is telling the reader that the
+# horizon it represents is not carrying information at this frequency.
+
+# %%
+beta_by_fold = validation_rows(
+    har_beta_df.select("timestamp", "symbol", "beta_5", "beta_15", "beta_60")
+)
+beta_long = beta_by_fold.unpivot(
+    index=["fold"],
+    on=["beta_5", "beta_15", "beta_60"],
+    variable_name="component",
+    value_name="coefficient",
+)
+
+beta_summary = (
+    beta_long.group_by(["fold", "component"])
+    .agg(
+        pl.col("coefficient").median().alias("median"),
+        pl.col("coefficient").quantile(0.25).alias("q25"),
+        pl.col("coefficient").quantile(0.75).alias("q75"),
+        pl.len().alias("n_fits"),
+    )
+    .sort(["component", "fold"])
+)
+print(beta_summary)
+
+# %%
+fig = go.Figure()
+_component_colors = {
+    "beta_5": COLORS["amber"],
+    "beta_15": COLORS["copper"],
+    "beta_60": COLORS["blue"],
+}
+for component, color in _component_colors.items():
+    part = beta_long.filter(pl.col("component") == component)
+    fig.add_trace(
+        go.Box(
+            x=part["fold"],
+            y=part["coefficient"],
+            name=component,
+            marker_color=color,
+            boxpoints=False,
+        )
+    )
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
+# The rolling OLS is unconstrained on a variance, so a handful of the 25,673 fits run to three
+# figures and a single whisker sets a y-range of roughly [-250, 1500] - on which all six boxes
+# collapse onto the zero line and the figure shows nothing. The axis is clipped to the quartiles
+# it is about, with the padding taken from the data rather than typed, and the subtitle says so.
+_q_low = beta_summary["q25"].min()
+_q_high = beta_summary["q75"].max()
+_pad = 0.35 * (_q_high - _q_low)
+fig.update_layout(
+    title=(
+        "The short-horizon HAR component carries the fit in every fold"
+        "<br><sup>Distribution of the rolling OLS coefficients, one fit retained per"
+        "<br>symbol-session, on validation rows only. The axis is clipped to the"
+        "<br>interquartile ranges; the unconstrained fit has tails far beyond it.</sup>"
+    ),
+    xaxis_title="Fold",
+    yaxis_title="Rolling OLS coefficient",
+    yaxis_range=[_q_low - _pad, _q_high + _pad],
+    boxmode="group",
+    height=420,
+)
+fig.show()
+
+# %% [markdown]
+# ## 11. Validation IC of the Temporal Features
+#
+# Does a temporal feature rank the cross-section on its own? We compute the
+# Information Coefficient — cross-sectional Spearman rank correlation between
+# each feature and the primary label — then apply HAC standard errors and a
+# Benjamini-Hochberg correction across the features tested.
+#
+# **This selects nothing.** It is a screen on validation rows that says whether
+# a feature carries any stand-alone cross-sectional signal. The comparison
+# against the Ch8 financial features, and any decision that follows from it, is
+# run in `05_evaluation`.
+#
+# Three constraints make this readout mean what it says:
+#
+# 1. **Validation rows only.** The features carry no fold column, so the frame
+#    is routed through `validation_rows` and the holdout is never scored.
+# 2. **The IC series is chronological.** `cross_sectional_ic_series` sorts its
+#    dates internally. A per-date IC series assembled by grouping arrives in
+#    arbitrary order, and a Newey-West correction computed over a permutation of
+#    time reports no autocorrelation where there is plenty.
+# 3. **The HAC bandwidth is the automatic rule.** Timestamps are thinned to one
+#    per label horizon, so consecutive IC observations share no return window.
+#    That removes the mechanical floor the overlap would otherwise put under the
+#    lag, and the bandwidth falls back to the Newey-West rule of thumb,
+#    $\lfloor 4 (T/100)^{2/9} \rfloor$ on the $T$ observations of the sampled
+#    series. Non-overlapping is not the same as independent, so the lag is left
+#    to that rule rather than pinned; the value it picks is printed below.
+
+# %%
 if not labels_path.exists():
-    raise FileNotFoundError("Labels not available — run 02_labels.py first.")
+    raise FileNotFoundError(f"Labels not available — run 02_labels.py first ({labels_path}).")
 
-labels_15m = pl.read_parquet(labels_path)
-eval_df = temporal_clean.join(labels_15m, on=["timestamp", "symbol"], how="inner")
-print(f"Evaluation DataFrame: {len(eval_df):,} rows")
+labels_primary = pl.read_parquet(labels_path)
+eval_df = validation_rows(temporal_clean).join(
+    labels_primary, on=["timestamp", "symbol"], how="inner"
+)
+print(f"Validation rows with a label: {len(eval_df):,}")
+print(f"Validation span: {eval_df['timestamp'].min()} .. {eval_df['timestamp'].max()}")
+assert eval_df["timestamp"].max() < HOLDOUT_START, "IC evaluation reached into the holdout"
 
-# Sample every 15th timestamp for approximate independence
-all_timestamps = eval_df["timestamp"].unique().sort()
-sample_ts = all_timestamps.gather_every(15)
-eval_sample = eval_df.filter(pl.col("timestamp").is_in(sample_ts))
+# Thin to one decision per label horizon so consecutive IC observations do not
+# share a return window. Selected by semi-join: `is_in` against a Series of the
+# same dtype is ambiguous and changes meaning in a later Polars.
+sample_ts = eval_df["timestamp"].unique().sort().gather_every(IC_SAMPLE_STEP)
+eval_sample = eval_df.join(sample_ts.to_frame("timestamp"), on="timestamp", how="semi")
 print(f"Sampled {len(sample_ts):,} timestamps ({len(eval_sample):,} rows)")
 
-# Compute IC series for each temporal feature
+# %%
+# One IC series per feature, from the library call that sorts its dates.
 n_symbols = eval_sample["symbol"].n_unique()
 min_cs_size = min(10, n_symbols)
 
 ic_data = {}
 for feat in temporal_feature_cols:
-    ic_by_ts = (
-        eval_sample.filter(pl.col(feat).is_not_null() & pl.col("fwd_ret_15m").is_not_null())
-        .group_by("timestamp")
-        .agg(
-            pl.corr(feat, "fwd_ret_15m", method="spearman").alias("ic"),
-            pl.len().alias("n"),
-        )
-        .filter(pl.col("n") >= min_cs_size)
+    frame = eval_sample.select("timestamp", "symbol", feat, PRIMARY_LABEL).drop_nulls()
+    if frame.is_empty():
+        continue
+    ic_by_ts = cross_sectional_ic_series(
+        frame,
+        frame,
+        pred_col=feat,
+        ret_col=PRIMARY_LABEL,
+        date_col="timestamp",
+        entity_col="symbol",
+        method="spearman",
+        min_obs=min_cs_size,
     )
     if len(ic_by_ts) >= 20:
         ic_data[feat] = ic_by_ts
@@ -854,9 +1259,15 @@ print(f"IC series computed for {len(ic_data)}/{len(temporal_feature_cols)} featu
 # to the temporal feature IC series.
 
 # %%
+# The label horizon expressed in steps of the sampled series. Thinning is one step
+# per label horizon, so this is 1: consecutive observations do not overlap, the
+# overlap floor `label_horizon - 1` is zero, and the helper is left with its
+# automatic bandwidth. `effective_lags` below reports what that came out at.
+IC_LABEL_HORIZON = max(1, -(-LABEL_HORIZON_BARS // IC_SAMPLE_STEP))
+
 hac_rows = []
 for feat, ic_df in ic_data.items():
-    stats = compute_ic_hac_stats(ic_df, ic_col="ic", maxlags=26)
+    stats = compute_ic_hac_stats(ic_df, ic_col="ic", label_horizon=IC_LABEL_HORIZON)
     stats["feature"] = feat
     hac_rows.append(stats)
 
@@ -892,64 +1303,108 @@ if n_tested > 0:
         if _hac_mean and _hac_mean > 0
         else 1.0
     )
+    # The bandwidth the correction actually ran at. Series lengths differ across
+    # features, so the automatic rule can land on different lags; report the range.
+    _lag_lo = int(hac_df["effective_lags"].min())
+    _lag_hi = int(hac_df["effective_lags"].max())
+    hac_lags = f"{_lag_lo}" if _lag_lo == _lag_hi else f"{_lag_lo}-{_lag_hi}"
 else:
     inflation = 1.0
+    hac_lags = "none"
 
 print(f"\nTemporal features tested: {n_tested}")
 print(f"Naive significant (|t|>1.96): {n_naive_sig}")
 print(f"FDR significant (alpha=0.05): {n_fdr_sig}")
+print(f"HAC lags in use (automatic bandwidth): {hac_lags}")
 print(f"Inflation factor (naive/HAC): {inflation:.1f}x")
+
+# %% [markdown]
+# **Figure F4** replaces the ranked table this section used to print. Each bar is
+# a feature's mean validation IC with its HAC confidence interval; a bar is
+# colored when the FDR correction retains the feature and neutral when it does
+# not. The interval is what stops the ranking from being read as a result: the
+# features are ordered by point estimate, and most of those estimates cannot be
+# distinguished from zero.
 
 # %%
 if n_tested > 0:
-    print("Top temporal features by |IC|:")
-    for row in hac_df.head(10).iter_rows(named=True):
-        sig = "**" if row["fdr_significant"] else ("*" if abs(row["naive_t_stat"]) > 1.96 else " ")
-        print(
-            f"  {sig} {row['feature']:<30s} IC={row['mean_ic']:+.5f}  "
-            f"HAC t={row['t_stat']:+.2f}  naive t={row['naive_t_stat']:+.2f}"
-        )
-    print("  ** = FDR-significant  * = naive-significant only")
-else:
-    print("Insufficient cross-sectional data for IC testing")
-
-# Store evaluation metrics
-top_feats = []
-for row in hac_df.head(10).iter_rows(named=True):
-    top_feats.append(
-        {
-            "name": row["feature"],
-            "ic_mean": round(row["mean_ic"], 5),
-            "hac_tstat": round(row["t_stat"], 2),
-            "hac_pval": round(row["p_value"], 4),
-            "fdr_significant": bool(row["fdr_significant"]),
-        }
+    plot_ic = hac_df.sort("mean_ic")
+    bar_colors = [
+        COLORS["positive"]
+        if row["fdr_significant"] and row["mean_ic"] > 0
+        else COLORS["negative"]
+        if row["fdr_significant"]
+        else COLORS["neutral"]
+        for row in plot_ic.to_dicts()
+    ]
+    ic_title = (
+        "A few path-signature terms rank the cross-section; the rest do not"
+        if n_fdr_sig
+        else "No temporal feature ranks the cross-section on its own"
+    ) + (
+        "<br><sup>Mean cross-sectional Spearman IC on validation rows, with HAC 95% intervals."
+        "<br>Colored bars are the features retained by Benjamini-Hochberg at 5% across those"
+        "<br>tested; neutral bars are exploratory estimates.</sup>"
     )
+    fig = go.Figure(
+        go.Bar(
+            x=plot_ic["mean_ic"],
+            y=plot_ic["feature"],
+            orientation="h",
+            marker_color=bar_colors,
+            error_x={
+                "type": "data",
+                "array": (1.96 * plot_ic["hac_se"]).to_list(),
+                "color": COLORS["slate"],
+                "thickness": 1,
+            },
+            showlegend=False,
+        )
+    )
+    fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
+    fig.update_layout(
+        title=ic_title,
+        xaxis_title="Mean cross-sectional Spearman IC (validation folds)",
+        yaxis_title="Feature",
+        margin={"l": 180},
+        height=560,
+    )
+    fig.show()
+else:
+    print("Validation IC chart omitted: too few symbols per timestamp to rank a cross-section.")
 
-eval_results = {
-    "primary_label": "fwd_ret_15m",
-    "n_features_tested": n_tested,
-    "n_significant_naive05": n_naive_sig,
-    "n_significant_fdr05": n_fdr_sig,
-    "inflation_factor": inflation,
-    "top_features": top_feats,
-}
+# %% [markdown] tags=["results"]
+# ### What the validation screen found
+#
+# Of the temporal features tested on validation rows, the count retained by
+# Benjamini-Hochberg at 5% is printed above and drawn in F4. The HAC-to-naive
+# inflation factor reports how much of the apparent significance was an artifact
+# of serial correlation in the IC series.
+#
+# **Read it against the lag it was computed at, which is printed above.** The
+# correction ran at the automatic Newey-West bandwidth, over that many lags of the
+# sampled IC series. Thinning to one decision per label horizon removed the
+# overlap that would have forced a wider lag, but it is no reason to assume the
+# series is serially independent, so the bandwidth was left to the automatic rule
+# rather than pinned to one.
+#
+# That is what makes a factor near one worth something here: Newey-West looked out
+# over the printed number of lags and found little left to widen the standard error
+# by, so the thinning removed the autocorrelation the overlap induces rather than
+# hiding it. A correction pinned to a single lag could not have told us that.
+#
+# The reading to be careful about is a factor near one on returns that do
+# overlap — which is what a per-date IC series assembled by `group_by` produces,
+# because the series reaches the HAC helper in arbitrary order and reports no
+# autocorrelation where there is plenty. That is why the series here comes from
+# `cross_sectional_ic_series`, which sorts its dates.
+#
+# **This screen selects nothing.** Whether the temporal block adds anything over
+# the Ch8 financial features is a comparison run on the same validation rows in
+# `05_evaluation`; nothing downstream reads a decision from this section.
 
 # %% [markdown]
-# ### Incremental Value Assessment
-#
-# Temporal features capture time-series dynamics (volatility persistence, spectral
-# structure, path geometry) that are orthogonal to cross-sectional features (order
-# flow, liquidity, microstructure). The IC comparison shows whether these temporal
-# patterns carry additional predictive content for 15-minute forward returns.
-#
-# In a cost-dominant regime like NASDAQ-100 microstructure, even statistically
-# significant features may not translate to economic edge. The evaluation here
-# establishes *statistical* significance; economic viability is assessed in Ch11+
-# when transaction costs are applied to model-generated signals.
-
-# %% [markdown]
-# ## 9. Tag with CV Folds and Save
+# ## 12. Tag with CV Folds and Save
 #
 # The temporal features (HAR, FFT, signatures) are inherently causal — each
 # value depends only on a trailing window of past data — so the computed
@@ -961,50 +1416,26 @@ eval_results = {
 # downstream models need temporal features for the full fold period.
 
 # %%
-# Generate CV splits from setup.yaml
-setup_cfg = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
-eval_cfg = setup_cfg["evaluation"]
-
-# generate_cv_splits needs a DataFrame with the timestamp column to derive
-# fold boundaries. We use temporal_clean since it has the relevant date range.
-splits = generate_cv_splits(
-    temporal_clean,
-    case_study_id=CASE_STUDY_ID,
-    label_buffer=setup_cfg.get("labels", {}).get("buffer", "0D"),
-    date_col="timestamp",
-)
-
-holdout_start = pd.Timestamp(eval_cfg["holdout_start"])
-holdout_end = pd.Timestamp(eval_cfg["holdout_end"])
-
-print(f"CV folds: {len(splits)}")
-for s in splits:
-    print(
-        f"  Fold {s['fold']}: train [{s['train_start']} .. {s['train_end']}] "
-        f"test [{s['val_start']} .. {s['val_end']}]"
-    )
-print(f"  Holdout: [{holdout_start.date()} .. {holdout_end.date()}]")
-
-# %%
-# Replicate temporal features per fold (train+test period each) + holdout
+# Folds were resolved in Section 7; nothing here re-derives them.
 fold_frames = []
 
 for s in splits:
     train_start = pd.Timestamp(s["train_start"])
-    val_end_key = "val_end" if "val_end" in s else "test_end"
-    test_end = pd.Timestamp(s[val_end_key])
+    val_end = pd.Timestamp(s["val_end"])
     fold_df = temporal_clean.filter(
-        (pl.col("timestamp") >= train_start) & (pl.col("timestamp") <= test_end)
+        (pl.col("timestamp") >= train_start) & (pl.col("timestamp") <= val_end)
     ).with_columns(pl.lit(s["fold"]).alias("fold"))
     fold_frames.append(fold_df)
-    print(f"  Fold {s['fold']}: {len(fold_df):,} rows (train+test)")
+    print(f"  Fold {s['fold']}: {len(fold_df):,} rows (train+validation)")
 
-# Holdout fold: train up to holdout_start, test through holdout_end
-# Use fold index = n_splits (one past last CV fold)
+# Folds arrive in descending recency, so the earliest training bar is the
+# minimum across folds rather than the last one's.
 holdout_fold_idx = len(splits)
-last_train_start = pd.Timestamp(splits[-1]["train_start"]) if splits else holdout_start
+earliest_train_start = (
+    min(pd.Timestamp(s["train_start"]) for s in splits) if splits else HOLDOUT_START
+)
 holdout_df = temporal_clean.filter(
-    (pl.col("timestamp") >= last_train_start) & (pl.col("timestamp") <= holdout_end)
+    (pl.col("timestamp") >= earliest_train_start) & (pl.col("timestamp") <= HOLDOUT_END)
 ).with_columns(pl.lit(holdout_fold_idx).alias("fold"))
 fold_frames.append(holdout_df)
 print(f"  Holdout fold {holdout_fold_idx}: {len(holdout_df):,} rows")
@@ -1022,61 +1453,20 @@ output_path = FEATURES_DIR / "model_based.parquet"
 temporal_with_folds.write_parquet(output_path)
 print(f"Saved: {output_path} ({output_path.stat().st_size / 1e6:.1f} MB)")
 
-# %%
-# Results JSON
-results = {
-    "case_study_id": "nasdaq100_microstructure",
-    "chapter": 9,
-    "stage": "temporal",
-    "timestamp": datetime.now(UTC).isoformat(),
-    "git_commit": "unknown",
-    "notebook": "case_studies/nasdaq100_microstructure/code/04_temporal.py",
-    "summary": {
-        "n_rows": len(temporal_with_folds),
-        "n_rows_unique": len(temporal_clean),
-        "n_features": len(temporal_feature_cols),
-        "n_symbols": temporal_clean["symbol"].n_unique(),
-        "n_folds": int(temporal_with_folds["fold"].n_unique()),
-        "feature_groups": {
-            "har": 2,
-            "fft_volume": 4,
-            "fft_volatility": 4,
-            "path_signatures": 12,
-        },
-    },
-    "techniques": [
-        "HAR(5,15,60) intraday volatility (Corsi 2009)",
-        "Rolling FFT on volume profiles (60-bar window)",
-        "Rolling FFT on squared returns (60-bar window)",
-        "Depth-2 path signatures on (ret, signed_vol, trades) paths",
-        "Walk-forward HAR fitting (120-bar rolling OLS)",
-    ],
-    "diagnostics": {
-        "har_valid_forecasts": int(har_df["har_rv5_pred"].drop_nulls().len()),
-        "fft_valid": int(fft_df["vol_spectral_energy"].drop_nulls().len()),
-        "sig_valid": int(sig_df["sig1_ret"].drop_nulls().len()),
-        "rows_after_warmup": len(temporal_clean),
-    },
-    "key_findings": [
-        f"Total {len(temporal_feature_cols)} temporal features across 3 model families",
-        f"HAR(5,15,60): {int(har_df['har_rv5_pred'].drop_nulls().len()):,} valid walk-forward forecasts",
-        "FFT on volume reveals intraday periodicity structure",
-        "Depth-2 signatures capture price-flow lead-lag in 30-min windows",
-        f"Temporal feature matrix: {len(temporal_clean):,} unique rows x {len(temporal_feature_cols)} features",
-        f"Saved with fold column: {int(temporal_with_folds['fold'].n_unique())} folds, {len(temporal_with_folds):,} total rows",
-    ],
-}
+# %% [markdown]
+# Reconcile the artifact against the frame it was built from, so that a key or
+# fold error fails here rather than in the first model that reads it.
 
 # %%
-if eval_results:
-    results["incremental_evaluation"] = eval_results
-    n_fdr_sig_r = eval_results.get("n_significant_fdr05", 0)
-    n_tested_r = eval_results.get("n_features_tested", 0)
-    infl_r = eval_results.get("inflation_factor", 0)
-    results["key_findings"].append(
-        f"IC evaluation: {n_fdr_sig_r}/{n_tested_r} features FDR-significant "
-        f"(inflation {infl_r:.1f}x)"
-    )
+_written = pl.scan_parquet(output_path)
+assert _written.select(pl.len()).collect().item() == len(temporal_with_folds)
+assert temporal_with_folds.select(
+    pl.struct("timestamp", "symbol", "fold").n_unique()
+).item() == len(temporal_with_folds), (
+    "duplicate (timestamp, symbol, fold) key in the emitted artifact"
+)
+assert set(temporal_with_folds["fold"].unique().to_list()) == set(range(len(splits) + 1))
+print(f"Artifact reconciled: {len(temporal_with_folds):,} rows, {len(splits) + 1} folds")
 
 # %% [markdown]
 # ## Key Takeaways
@@ -1104,11 +1494,31 @@ if eval_results:
 #
 # ### Feature Evaluation
 #
-# 5. **HAC adjustment is essential**: Overlapping 15-minute returns create strong
-#    IC autocorrelation; HAC standard errors correct for this
-# 6. **Incremental value**: Comparing temporal feature ICs against Ch8
-#    cross-sectional feature ICs shows whether time-series dynamics add
-#    predictive content beyond liquidity and order flow measures
+# 5. **Resolve the folds before you evaluate anything.** These features carry no
+#    fold column of their own, so any readout built from the feature frame spans
+#    whatever the frame spans — including the sealed holdout. Section 7 resolves
+#    the folds first and every readout below it goes through `validation_rows`.
+# 6. **A per-date IC series has to be in date order.** Newey-West treats row
+#    order as time order and does not sort, while a Polars `group_by` returns
+#    groups in arbitrary order. The two together silently report a HAC standard
+#    error computed over a permutation of time, and the tell is an inflation
+#    factor near one on returns that overlap. This notebook sorts through
+#    `cross_sectional_ic_series` and thins to one decision per label horizon, so a
+#    low factor here is a reading taken at the automatic bandwidth, not that tell.
+#
+# ### Known Limitations
+#
+# 7. **The HAR forecast is unconstrained.** It is a linear regression on a
+#    variance with nothing holding it above zero, so a symbol-level shock outside
+#    the trailing window's range extrapolates to a negative forecast. The share
+#    is small and measured in Section 2, but the column's mean and standard
+#    deviation are set by those rows and should not be read as a description of
+#    the feature. Modeling log-variance is the standard remedy; this notebook
+#    leaves the forecast unconstrained so the failure mode stays visible.
+# 8. **Aggregation windows cross session boundaries.** `r1m` is session-bounded,
+#    but the trailing HAR, FFT and signature windows are not; the affected share
+#    is measured in Section 2 and grows with the window.
 #
 # **Next**: Ch11+ combines Ch8 cross-sectional features with Ch9 temporal
-# features for model training.
+# features for model training. The comparison of this feature block against the
+# Ch8 financial features happens there, on the same validation rows.

@@ -27,41 +27,61 @@
 # - control the false discovery rate across the full feature set
 # - distinguish cross-sectional signals from market-level conditioning variables
 #
-# **Book reference**: Chapters 8-9, feature evaluation
+# **Book reference**: Chapter 7, Section 7.3 (univariate feature-label evaluation) and
+# Section 7.4 (search accounting and multiple testing)
 #
 # **Prerequisites**: `03_financial_features.py` and `04_model_based_features.py`
 #
 # **Outputs**
 #
 # - `evaluation/triage_ledger.parquet`: one diagnostic decision per feature
-# - `evaluation/ic_timeseries.parquet`: daily validation IC by feature and fold
+# - `evaluation/ic_timeseries.parquet`: daily validation IC by feature and fold, which
+#   this notebook reads back to draw the IC series and its uncertainty band
 
 # %%
 """Evaluate FX financial and model-based features on canonical validation folds."""
 
-import json
 import warnings
 from datetime import date
 
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
-from IPython.display import Markdown, display
+import yaml
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
-from ml4t.diagnostic.metrics import compute_ic_hac_stats
+from ml4t.diagnostic.metrics import compute_ic_hac_stats, compute_ic_uncertainty
 from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 
+from utils.artifact_specs import resolve_label_buffer
+from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.data_quality import validate_modeling_inputs
 from utils.paths import get_case_study_dir
 from utils.style import COLORS
 
-warnings.filterwarnings("ignore")
+# The library's HAC-bandwidth guard is the warning most worth seeing here, so the
+# suppression names the one category that would otherwise bury it.
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 # %% tags=["parameters"]
 # Production defaults. Papermill can reduce symbols or folds for a smoke test.
 MAX_SYMBOLS = 0
 MAX_FOLDS = 0
+
+# %% [markdown]
+# ## Configuration
+#
+# Every window, label and boundary below is read from `config/setup.yaml`, which is the
+# same file the label and feature stages bound their own parameters from. The forward
+# horizon in bars comes from each label's declared buffer, so the Newey-West bandwidth
+# and the holdout seal both follow the label rather than a typed constant.
+#
+# Two thresholds are judgments rather than measurements, and are stated as such.
+# `IC_THRESHOLD` is the effect-size floor the exploration arm promotes above: it sits an
+# order of magnitude below the daily IC an FX rank strategy needs to clear the spread it
+# pays, so clearing it means clearing a floor and not passing a test. `REDUNDANCY_CUT`
+# is where two features stop counting as separate evidence.
 
 # %%
 CASE_STUDY_ID = "fx_pairs"
@@ -69,13 +89,25 @@ CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 EVAL_DIR = CASE_DIR / "evaluation"
 EVAL_DIR.mkdir(exist_ok=True)
 
+setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+evaluation_config = load_evaluation_config(CASE_STUDY_ID)
+
 JOIN_COLS = ["timestamp", "symbol"]
 DATE_COL = "timestamp"
-LABEL_COL = "fwd_ret_1d"
-LABEL_HORIZON = 1
-MIN_PERIODS = 5
-IC_THRESHOLD = 0.005
+LABEL_COL = setup["labels"]["primary"]
+LABEL_BUFFERS = {LABEL_COL: setup["labels"]["buffer"], **setup["labels"]["variant_buffers"]}
+LABEL_HORIZONS = {name: int(buffer.rstrip("Dd")) for name, buffer in LABEL_BUFFERS.items()}
+LABEL_HORIZON = LABEL_HORIZONS[LABEL_COL]
+HOLDOUT_START = date.fromisoformat(str(evaluation_config["holdout_start"]))
 N_QUANTILES = 5
+MIN_FOLD_DAYS = 5  # decision times a fold needs before its mean IC is reported
+REDUNDANCY_CUT = 0.70  # |Spearman| above which two features are treated as one cluster
+
+IC_THRESHOLD = 0.005
+STABILITY_THRESHOLD = 0.60  # share of folds that must share the feature's own direction
+
+print(f"Primary label {LABEL_COL} over {LABEL_HORIZON} session(s); holdout opens {HOLDOUT_START}")
+print(f"Declared label horizons: {LABEL_HORIZONS}")
 
 # %% [markdown]
 # ## 1. Build the Out-of-Sample Validation Panel
@@ -90,66 +122,89 @@ financial = pl.read_parquet(CASE_DIR / "features" / "financial.parquet")
 model_based = pl.read_parquet(CASE_DIR / "features" / "model_based.parquet")
 labels = pl.read_parquet(CASE_DIR / "labels" / f"{LABEL_COL}.parquet")
 
-cv_path = CASE_DIR / "config" / "cv_config.json"
-if not cv_path.exists():
-    raise FileNotFoundError(f"Canonical CV configuration not found: {cv_path}")
-cv_config = json.loads(cv_path.read_text())
-raw_splits = sorted(cv_config["splits"], key=lambda split: int(split["fold"]))
-if MAX_FOLDS > 0:
-    raw_splits = raw_splits[:MAX_FOLDS]
-
 required_temporal = {*JOIN_COLS, "fold"}
 missing_temporal = required_temporal.difference(model_based.columns)
 if missing_temporal:
     raise ValueError(f"Model-based artifact lacks fold provenance: {sorted(missing_temporal)}")
 
 # %% [markdown]
-# ### Select Each Fold's Validation Rows
+# ### Derive the Fold Boundaries, and Seal Them in the Same Call
 #
-# Explicit configured boundaries provide the only admissible model-based row for
-# each validation date. Overlapping keys would indicate a broken fold contract.
+# `generate_cv_splits` reads the label calendar and the walk-forward window declared
+# in `setup.yaml`, which is the route `04_model_based_features` took when it stamped
+# the `fold` column this notebook joins on. Deriving them again here rather than
+# replaying a stored splits array is what keeps a `fold` id naming the same window on
+# both sides of the join.
+#
+# The `outcome_horizon` argument is the holdout seal. It drops validation timestamps
+# whose forward label would settle at or after the holdout opens, counted by position
+# on the panel's own trading grid rather than in calendar days, so a signal is
+# eligible only when the bar its label settles on is still inside development.
 
 # %%
-validation_frames = []
-for split in raw_splits:
-    fold = int(split["fold"])
-    val_start = date.fromisoformat(split["val_start"])
-    val_end = date.fromisoformat(split["val_end"])
-    validation_frames.append(
-        model_based.filter(
+LABEL_BUFFER = resolve_label_buffer(CASE_STUDY_ID, LABEL_COL, setup)
+UNIQUE_DATES = labels.select(DATE_COL).unique().sort(DATE_COL)
+
+
+def fold_windows(outcome_horizon: str) -> list[dict]:
+    """Canonical walk-forward folds, with validation sealed at one outcome horizon."""
+    splits = generate_cv_splits(
+        UNIQUE_DATES,
+        case_study_id=CASE_STUDY_ID,
+        label_buffer=LABEL_BUFFER,
+        outcome_horizon=outcome_horizon,
+    )
+    return splits[:MAX_FOLDS] if MAX_FOLDS > 0 else splits
+
+
+def validation_rows(splits: list[dict]) -> pl.DataFrame:
+    """Each fold's own validation interval, taken from the fold it was fitted out of.
+
+    An artifact written under a reduced fold count carries a subset of the folds the
+    configuration declares, which is fine; a fold id that names a different window on
+    the two sides of the join is not, and is what the raise below catches.
+    """
+    stamped = set(model_based["fold"].unique().to_list())
+    frames = []
+    for split in splits:
+        fold = int(split["fold"])
+        if fold not in stamped:
+            continue
+        val_start = pd.Timestamp(split["val_start"]).date()
+        val_end = pd.Timestamp(split["val_end"]).date()
+        rows = model_based.filter(
             (pl.col("fold") == fold)
             & pl.col(DATE_COL).is_between(val_start, val_end, closed="both")
         )
-    )
+        if not len(rows):
+            span = model_based.filter(pl.col("fold") == fold)
+            raise ValueError(
+                f"Fold {fold} is stamped on rows spanning {span[DATE_COL].min()}.."
+                f"{span[DATE_COL].max()} but this configuration validates it over "
+                f"{val_start}..{val_end}, so the fold id names a different window on "
+                f"each side of the join"
+            )
+        frames.append(rows)
+    if not frames:
+        raise ValueError(f"No fold in {sorted(stamped)} appears in the configured splits")
+    return pl.concat(frames).sort([DATE_COL, "symbol"])
 
-validation_temporal = pl.concat(validation_frames).sort([DATE_COL, "symbol"])
+
+# %%
+splits = fold_windows(LABEL_BUFFER)
+validation_temporal = validation_rows(splits)
 duplicate_keys = validation_temporal.group_by(JOIN_COLS).len().filter(pl.col("len") > 1)
 if len(duplicate_keys):
     raise ValueError("Canonical validation folds overlap on timestamp and symbol")
 
-# %% [markdown]
-# ### Seal Label Endpoints Before Joining
-#
-# The signal date alone is insufficient at a holdout boundary. The endpoint of
-# its forward label must also remain in the development period.
+for fold in sorted(validation_temporal["fold"].unique().to_list()):
+    window = validation_temporal.filter(pl.col("fold") == fold)
+    print(f"  Fold {fold}: validation {window[DATE_COL].min()}..{window[DATE_COL].max()}")
 
 # %%
-# A signal at t is eligible only when its one-day label endpoint is before the holdout.
-holdout_start_value = cv_config.get("test_start") or cv_config.get("holdout_start")
-if not holdout_start_value:
-    raise ValueError("Canonical CV configuration does not define a holdout start")
-holdout_start = date.fromisoformat(holdout_start_value)
-label_endpoints = (
-    labels.select(JOIN_COLS)
-    .sort(["symbol", DATE_COL])
-    .with_columns(pl.col(DATE_COL).shift(-LABEL_HORIZON).over("symbol").alias("_label_end"))
-)
-labels = labels.join(label_endpoints, on=JOIN_COLS, how="left")
-
 eval_panel = (
     validation_temporal.join(financial, on=JOIN_COLS, how="inner")
     .join(labels, on=JOIN_COLS, how="inner")
-    .filter(pl.col("_label_end") < holdout_start)
     .sort([DATE_COL, "symbol"])
 )
 
@@ -164,17 +219,22 @@ all_feature_cols = financial_cols + temporal_cols
 # %% [markdown]
 # ### Verify the Joined Panel
 #
-# The final development frame must remain unique and stop before the holdout.
+# The seal was applied when the folds were derived, and the assertion below proves it
+# held on the joined frame, which is the one every statistic in this notebook is
+# computed on. The frame must also remain unique on its key. The minimum cross-section
+# a date needs before it contributes an IC is derived from the universe actually
+# loaded, so a reduced run shrinks the gate with it rather than screening every date
+# out.
 
 # %%
-if eval_panel[DATE_COL].max() >= holdout_start:
-    raise ValueError("Evaluation panel reaches the sealed holdout")
+assert eval_panel[DATE_COL].max() < HOLDOUT_START, "Evaluation panel reaches the sealed holdout"
 if eval_panel.select(JOIN_COLS).n_unique() != len(eval_panel):
     raise ValueError("Evaluation panel has duplicate timestamp-symbol rows")
 
 n_rows = len(eval_panel)
 n_symbols = eval_panel["symbol"].n_unique()
 n_dates = eval_panel[DATE_COL].n_unique()
+MIN_PERIODS = max(3, n_symbols // 4)
 print(
     f"Validation panel: {n_rows:,} rows, {n_symbols} symbols, {n_dates:,} dates, "
     f"{eval_panel['fold'].n_unique()} folds"
@@ -185,7 +245,7 @@ print(
 )
 print(
     f"Window: {eval_panel[DATE_COL].min()} to {eval_panel[DATE_COL].max()}; "
-    f"label endpoints < {holdout_start}"
+    f"label endpoints < {HOLDOUT_START}; minimum cross-section {MIN_PERIODS}"
 )
 
 # %% [markdown]
@@ -320,6 +380,159 @@ for feature in evaluable_features:
 print(f"Evaluated {len(ic_results)} of {len(evaluable_features)} eligible features")
 
 # %% [markdown]
+# ### The Series Behind the Average
+#
+# A mean IC is a summary of a series, and two things it cannot show are the patterns
+# most worth catching: an association that lives in one episode, and one that changes
+# sign from fold to fold. The daily series is the primary object at this stage, so it
+# is drawn before any scalar derived from it. Three intervals accompany the mean
+# because each makes a different assumption about how the daily ICs depend on each
+# other: the naive one treats every day as independent, Newey-West rescales it by the
+# serial correlation the series actually has, and the block bootstrap resamples
+# contiguous stretches rather than days.
+
+# %%
+IC_ROLLING_WINDOW = 63
+BOOT_BOUNDS = ("ci_boot_lower", "ci_boot_upper")
+
+leaders = sorted(ic_results, key=lambda name: abs(ic_results[name]["mean_ic"]), reverse=True)[:8]
+ic_uncertainty = {
+    feature: compute_ic_uncertainty(ic_timeseries[feature], horizon=LABEL_HORIZON, ic_col="ic")
+    for feature in leaders
+}
+leader = leaders[0] if leaders else None
+if leader:
+    leader_series = ic_timeseries[leader].with_columns(
+        pl.col("ic").rolling_mean(IC_ROLLING_WINDOW).alias("rolling")
+    )
+print(f"Leading feature by absolute mean IC: {leader}")
+
+# %%
+if leader:
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        column_widths=[0.6, 0.4],
+        subplot_titles=(
+            "Daily IC of the leading feature, under its rolling mean",
+            "Mean IC against three ways of bounding it",
+        ),
+        horizontal_spacing=0.16,
+    )
+    _ = fig.add_trace(
+        go.Scatter(
+            x=leader_series[DATE_COL],
+            y=leader_series["ic"],
+            mode="lines",
+            line={"color": COLORS["neutral"], "width": 0.6},
+            opacity=0.45,
+            name="Daily IC",
+        ),
+        row=1,
+        col=1,
+    )
+    _ = fig.add_trace(
+        go.Scatter(
+            x=leader_series[DATE_COL],
+            y=leader_series["rolling"],
+            mode="lines",
+            line={"color": COLORS["blue"], "width": 2},
+            name=f"{IC_ROLLING_WINDOW}-session mean",
+        ),
+        row=1,
+        col=1,
+    )
+    _ = fig.add_hline(
+        y=0, line={"color": COLORS["neutral"], "width": 0.8, "dash": "dash"}, row=1, col=1
+    )
+
+# %% [markdown]
+# The companion panel puts the three intervals on one axis for the same features, with
+# the naive one as the grey band behind. The direction of the adjustment is not fixed:
+# positively autocorrelated ICs widen the Newey-West interval and negatively
+# autocorrelated ones narrow it. The primary label is a one-session forward return, so
+# consecutive ICs score disjoint windows and the correction has little overlap to
+# undo - the size of the gap is the thing to read, not its sign. It is the longer
+# labels, whose windows do overlap, where the adjustment carries weight, and the
+# horizon figure further down is where they are compared.
+
+
+# %%
+def interval_arms(features: list[str], lower: str, upper: str) -> dict:
+    """Asymmetric Plotly error bars from a pair of interval bounds."""
+    return {
+        "type": "data",
+        "symmetric": False,
+        "array": [
+            ic_uncertainty[name][upper] - ic_uncertainty[name]["mean_ic"] for name in features
+        ],
+        "arrayminus": [
+            ic_uncertainty[name]["mean_ic"] - ic_uncertainty[name][lower] for name in features
+        ],
+    }
+
+
+# %%
+if leader:
+    interval_features = list(reversed(leaders))
+    means = [ic_uncertainty[name]["mean_ic"] for name in interval_features]
+    _ = fig.add_trace(
+        go.Scatter(
+            x=means,
+            y=interval_features,
+            mode="markers",
+            marker={"color": COLORS["neutral"], "size": 1, "opacity": 0.0},
+            error_x=interval_arms(interval_features, "ci_naive_lower", "ci_naive_upper")
+            | {"color": COLORS["silver_muted"], "thickness": 9, "width": 0},
+            name="Naive interval",
+        ),
+        row=1,
+        col=2,
+    )
+    _ = fig.add_trace(
+        go.Scatter(
+            x=means,
+            y=interval_features,
+            mode="markers",
+            marker={"color": COLORS["blue"], "size": 9},
+            error_x=interval_arms(interval_features, "ci_hac_lower", "ci_hac_upper")
+            | {"color": COLORS["blue"], "thickness": 1.5},
+            name="Newey-West interval",
+        ),
+        row=1,
+        col=2,
+    )
+    _ = fig.add_trace(
+        go.Scatter(
+            x=[ic_uncertainty[name][bound] for name in interval_features for bound in BOOT_BOUNDS],
+            y=[name for name in interval_features for _ in BOOT_BOUNDS],
+            mode="markers",
+            marker={"color": COLORS["copper"], "size": 8, "symbol": "line-ns-open"},
+            name="Block-bootstrap bounds",
+        ),
+        row=1,
+        col=2,
+    )
+    _ = fig.add_vline(
+        x=0, line={"color": COLORS["neutral"], "width": 0.8, "dash": "dash"}, row=1, col=2
+    )
+    fig.update_layout(
+        title="A small average IC sits inside a daily series that swings across zero",
+        height=560,
+        width=1150,
+        margin={"l": 60, "r": 200},
+        legend={"orientation": "h", "y": -0.18},
+    )
+    fig.update_yaxes(title_text="Daily Spearman IC", row=1, col=1)
+    fig.update_xaxes(
+        title_text=f"Validation session; mean rolls over {IC_ROLLING_WINDOW} sessions",
+        row=1,
+        col=1,
+    )
+    fig.update_xaxes(title_text="Mean daily Spearman IC, 95% intervals", row=1, col=2)
+    fig.show()
+
+# %% [markdown]
 # ### Fold Stability
 #
 # The full validation IC determines direction. Stability is the share of fold
@@ -334,7 +547,7 @@ for feature, full_stats in ic_results.items():
         fold_values = (
             ic_timeseries[feature].filter(pl.col("fold") == fold).sort(DATE_COL)["ic"].to_numpy()
         )
-        if len(fold_values) >= 5:
+        if len(fold_values) >= MIN_FOLD_DAYS:
             fold_means.append(float(np.mean(fold_values)))
     if not fold_means:
         continue
@@ -347,15 +560,92 @@ for feature, full_stats in ic_results.items():
         "worst_fold_ic": min(fold_means),
         "best_fold_ic": max(fold_means),
         "median_fold_ic": float(np.median(fold_means)),
+        "fold_ics": fold_means,
     }
 
 print(f"Fold stability computed for {len(fold_stats)} features")
 
 # %% [markdown]
+# One number per feature hides whether the folds agreed. Each row below carries every
+# fold mean, its median, and the fold that went furthest against the rest, so a
+# feature whose association rests on one window is separable from one that repeated.
+
+
+# %%
+def signed_direction(feature: str) -> int:
+    """+1 where the feature's overall IC is positive, -1 where it is negative."""
+    return 1 if fold_stats[feature]["direction"] == "positive" else -1
+
+
+# %%
+stability_features = [name for name in reversed(leaders) if name in fold_stats]
+fig = go.Figure()
+_ = fig.add_trace(
+    go.Scatter(
+        x=[value for name in stability_features for value in fold_stats[name]["fold_ics"]],
+        y=[name for name in stability_features for _ in fold_stats[name]["fold_ics"]],
+        mode="markers",
+        marker={"color": COLORS["neutral"], "size": 8, "opacity": 0.6},
+        name="Fold mean",
+    )
+)
+_ = fig.add_trace(
+    go.Scatter(
+        x=[fold_stats[name]["median_fold_ic"] for name in stability_features],
+        y=stability_features,
+        mode="markers",
+        marker={"color": COLORS["blue"], "size": 13, "symbol": "diamond"},
+        name="Median fold",
+    )
+)
+_ = fig.add_trace(
+    go.Scatter(
+        x=[
+            min(fold_stats[name]["fold_ics"], key=lambda value: value * signed_direction(name))
+            for name in stability_features
+        ],
+        y=stability_features,
+        mode="markers",
+        marker={
+            "color": COLORS["negative"],
+            "size": 12,
+            "symbol": "x-thin",
+            "line": {"width": 2, "color": COLORS["negative"]},
+        },
+        name="Fold furthest against the feature's own direction",
+    )
+)
+_ = fig.add_vline(x=0, line={"color": COLORS["neutral"], "width": 0.8, "dash": "dash"})
+fig.update_layout(
+    title="Folds disagree on the sign of most leading features",
+    xaxis_title="Mean daily Spearman IC within the fold",
+    height=520,
+    width=1000,
+    margin={"l": 200},
+    legend={"orientation": "h", "y": -0.16},
+)
+fig.show()
+
+# %% [markdown]
 # ## 4. Multiple Testing
 #
-# Benjamini-Hochberg controls the false discovery rate across all cross-sectional
-# feature tests. Naive and HAC significance counts are kept distinct.
+# A p-value is only interpretable against the set of tests it came out of, so the
+# search is declared before the adjustment is applied. The candidate set is generated
+# by `03_financial_features` from the window register in `setup.yaml` and by
+# `04_model_based_features` from its four estimator families; no feature here was
+# chosen after seeing an IC. Benjamini-Hochberg then controls the false discovery rate
+# across every feature with a computable cross-sectional IC on the primary label.
+# Naive and Newey-West significance counts are kept distinct.
+
+# %%
+searched_set = {
+    "candidate features generated": len(all_feature_cols),
+    "cleared correctness screens": sum(correctness.values()),
+    "tested on the primary label": len(ic_results),
+    "declared label horizons": len(LABEL_HORIZONS),
+}
+for description, count in searched_set.items():
+    print(f"{description:<32} {count}")
 
 # %%
 feature_names = list(ic_results)
@@ -378,7 +668,20 @@ eval_summary = pl.DataFrame(
         "hac_p": hac_p_values,
         "fdr_p": list(fdr_result["adjusted_p_values"]),
         "fdr_sig": list(fdr_result["rejected"]),
-    }
+    },
+    # Declared, so that a reduced run with no computable IC still yields a frame the
+    # boolean filters below can read rather than an all-null one.
+    schema={
+        "feature": pl.String,
+        "source": pl.String,
+        "ic_mean": pl.Float64,
+        "naive_t": pl.Float64,
+        "hac_se": pl.Float64,
+        "hac_t": pl.Float64,
+        "hac_p": pl.Float64,
+        "fdr_p": pl.Float64,
+        "fdr_sig": pl.Boolean,
+    },
 ).sort(pl.col("ic_mean").abs(), descending=True)
 
 n_naive = sum(abs(ic_results[feature]["naive_t_stat"]) > 1.96 for feature in feature_names)
@@ -388,40 +691,52 @@ print(f"Naive significant (|t| > 1.96): {n_naive}")
 print(f"HAC significant (p < 0.05):     {n_hac}")
 print(f"FDR significant (q < 0.05):     {n_fdr}")
 
+leading_row = eval_summary.row(0, named=True) if len(eval_summary) else None
+if leading_row:
+    print(
+        f"Largest absolute estimate: {leading_row['feature']} "
+        f"(mean daily IC {leading_row['ic_mean']:+.4f}, "
+        f"Newey-West t {leading_row['hac_t']:+.2f})"
+    )
+
+# %% [markdown] tags=["results"]
+# Of 63 candidate features, 59 clear the correctness screens and 54 have a computable
+# cross-sectional IC on the primary label across 8 validation folds. One of those
+# clears the Newey-West screen, and none clears the Benjamini-Hochberg adjustment at
+# q < 0.05. The largest absolute estimate is a mean daily IC of -0.0178, at a
+# Newey-West t of -1.85.
+
 # %%
 top_n = min(20, len(eval_summary))
 top = eval_summary.head(top_n).sort("ic_mean")
-bar_colors = [
-    COLORS["positive"]
-    if row["fdr_sig"] and row["ic_mean"] > 0
-    else COLORS["negative"]
-    if row["fdr_sig"]
-    else COLORS["amber"]
-    for row in top.to_dicts()
-]
 
 fig = make_subplots(
     rows=1,
     cols=2,
     subplot_titles=(
-        f"{n_fdr} FDR discoveries; largest |IC| is {abs(float(eval_summary['ic_mean'][0])):.3f}",
+        "Ranked mean IC, split by the false-discovery decision",
         "Newey-West leaves most t-statistics near naive estimates",
     ),
     horizontal_spacing=0.18,
 )
-_ = fig.add_trace(
-    go.Bar(
-        x=top["ic_mean"],
-        y=top["feature"],
-        orientation="h",
-        marker_color=bar_colors,
-        text=[f"{value:+.3f}" for value in top["ic_mean"]],
-        textposition="inside",
-        showlegend=False,
-    ),
-    row=1,
-    col=1,
-)
+for cleared, color, name in (
+    (True, COLORS["blue"], "Cleared BH-FDR"),
+    (False, COLORS["amber"], "Did not clear"),
+):
+    arm = top.filter(pl.col("fdr_sig") == cleared)
+    _ = fig.add_trace(
+        go.Bar(
+            x=arm["ic_mean"],
+            y=arm["feature"],
+            orientation="h",
+            marker_color=color,
+            text=[f"{value:+.3f}" for value in arm["ic_mean"]],
+            textposition="inside",
+            name=name,
+        ),
+        row=1,
+        col=1,
+    )
 
 # %% [markdown]
 # The companion panel compares naive and Newey-West inference. Points near the
@@ -460,10 +775,131 @@ if finite_t:
         row=1,
         col=2,
     )
-fig.update_layout(height=600, width=1100, margin={"l": 180})
+fig.update_layout(
+    title="No candidate feature survives the false-discovery adjustment",
+    height=620,
+    width=1100,
+    margin={"l": 180},
+    barmode="relative",
+    legend={"orientation": "h", "y": -0.16},
+)
 fig.update_xaxes(title_text="Mean daily Spearman IC", row=1, col=1)
 fig.update_xaxes(title_text="Naive t-statistic", row=1, col=2)
 fig.update_yaxes(title_text="Newey-West t-statistic", row=1, col=2)
+fig.show()
+
+# %% [markdown]
+# ### Association Across the Declared Label Horizons
+#
+# The case study ships three forward-return labels, and a feature that predicts the
+# next session need not predict the next month. Each horizon is sealed on its own
+# label endpoint, so the longer ones evaluate over a shorter development window. The
+# information ratio beside the mean is the fold-level one: the average fold IC over
+# the dispersion of fold ICs, which separates a small association that repeats from a
+# larger one that does not.
+
+
+# %%
+def build_horizon_panel(label_name: str) -> pl.DataFrame:
+    """Join the validation rows to one declared label, sealed at that label's horizon."""
+    label_frame = pl.read_parquet(CASE_DIR / "labels" / f"{label_name}.parquet")
+    panel = (
+        validation_rows(fold_windows(LABEL_BUFFERS[label_name]))
+        .join(financial, on=JOIN_COLS, how="inner")
+        .join(label_frame, on=JOIN_COLS, how="inner")
+        .sort([DATE_COL, "symbol"])
+    )
+    if MAX_SYMBOLS > 0:
+        panel = panel.filter(pl.col("symbol").is_in(selected_symbols))
+    return panel
+
+
+# %%
+horizon_rows = []
+for label_name, horizon in sorted(LABEL_HORIZONS.items(), key=lambda item: item[1]):
+    panel = build_horizon_panel(label_name)
+    assert panel[DATE_COL].max() < HOLDOUT_START, f"{label_name} panel reaches the sealed holdout"
+    for feature in leaders:
+        series = compute_cross_sectional_ic(
+            panel, feature=feature, return_col=label_name, min_periods=MIN_PERIODS
+        )
+        if len(series) < 20:
+            continue
+        fold_means = [
+            float(part["ic"].mean())
+            for part in series.partition_by("fold")
+            if len(part) >= MIN_FOLD_DAYS
+        ]
+        dispersion = float(np.std(fold_means, ddof=1)) if len(fold_means) > 1 else np.nan
+        horizon_rows.append(
+            {
+                "feature": feature,
+                "horizon": horizon,
+                "ic_mean": float(series["ic"].mean()),
+                "icir": float(np.mean(fold_means)) / dispersion if dispersion else np.nan,
+            }
+        )
+
+horizon_ic = pl.DataFrame(horizon_rows)
+print(f"Horizon profile computed for {len(horizon_rows)} feature-horizon pairs")
+
+# %%
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=(
+        "Mean IC by forward horizon",
+        "Fold-level information ratio by forward horizon",
+    ),
+    horizontal_spacing=0.12,
+)
+shown_direction = set()
+for feature in leaders if horizon_rows else []:
+    profile = horizon_ic.filter(pl.col("feature") == feature).sort("horizon")
+    if not len(profile):
+        continue
+    positive = float(profile["ic_mean"][0]) > 0
+    group = "Positive at the primary horizon" if positive else "Negative at the primary horizon"
+    style = {
+        "color": COLORS["blue"] if positive else COLORS["copper"],
+        "width": 2.5 if feature == leader else 1.2,
+    }
+    for column, column_index in (("ic_mean", 1), ("icir", 2)):
+        first = column_index == 1 and group not in shown_direction
+        _ = fig.add_trace(
+            go.Scatter(
+                x=profile["horizon"],
+                y=profile[column],
+                mode="lines+markers",
+                line=style,
+                opacity=0.85,
+                name=group,
+                legendgroup=group,
+                showlegend=first,
+                hovertext=feature,
+            ),
+            row=1,
+            col=column_index,
+        )
+    shown_direction.add(group)
+_ = fig.add_hline(y=0, line={"color": COLORS["neutral"], "width": 0.8, "dash": "dash"})
+fig.update_layout(
+    title="Most features carry a larger mean IC at the longer horizons",
+    height=520,
+    width=1100,
+    legend={"orientation": "h", "y": -0.22},
+)
+horizon_ticks = sorted(LABEL_HORIZONS.values())
+for column_index in (1, 2):
+    fig.update_xaxes(
+        title_text="Forward horizon (sessions)",
+        tickmode="array",
+        tickvals=horizon_ticks,
+        row=1,
+        col=column_index,
+    )
+fig.update_yaxes(title_text="Mean Spearman IC", row=1, col=1)
+fig.update_yaxes(title_text="Mean fold IC / dispersion across folds", row=1, col=2)
 fig.show()
 
 # %% [markdown]
@@ -534,8 +970,11 @@ if quantile_spreads:
         height=280 * figure_rows,
         width=1000,
     )
+    # One shared y range, so a weak profile cannot be rescaled to look like a strong one.
+    span = max(abs(value) for feature in features_to_show for value in quantile_spreads[feature])
+    fig.update_yaxes(range=[-1.1 * span, 1.1 * span], tickformat=".0e")
     for row in range(1, figure_rows + 1):
-        fig.update_yaxes(title_text="Mean next-day return", tickformat=".0e", row=row, col=1)
+        fig.update_yaxes(title_text="Mean next-day return", row=row, col=1)
     fig.show()
 
 # %% [markdown]
@@ -543,7 +982,11 @@ if quantile_spreads:
 #
 # Correlations are sampled across validation dates. A ranked pair chart exposes
 # the strongest redundancies without compressing 50-plus labels into an
-# unreadable heatmap.
+# unreadable heatmap. Features joined by a correlation above the cut below form a
+# cluster, and one member of each cluster stands for the rest: the one whose median
+# fold IC is largest and whose fold-to-fold dispersion is smallest, in that order.
+# Standing for a cluster does not promote a feature - the representative still has to
+# earn its own decision in the triage below.
 
 
 # %%
@@ -583,23 +1026,85 @@ high_correlation_pairs = []
 for left_index in range(len(correlation_matrix)):
     for right_index in range(left_index + 1, len(correlation_matrix)):
         correlation = float(correlation_matrix.iloc[left_index, right_index])
-        if np.isfinite(correlation) and abs(correlation) > 0.70:
+        if np.isfinite(correlation) and abs(correlation) > REDUNDANCY_CUT:
             high_correlation_pairs.append(
                 {
-                    "pair": (
-                        f"{correlation_matrix.columns[left_index]} / "
-                        f"{correlation_matrix.columns[right_index]}"
-                    ),
+                    "left": str(correlation_matrix.columns[left_index]),
+                    "right": str(correlation_matrix.columns[right_index]),
                     "correlation": correlation,
                 }
             )
 
 high_correlation_pairs.sort(key=lambda row: abs(row["correlation"]), reverse=True)
-print(f"Feature pairs with |correlation| > 0.70: {len(high_correlation_pairs)}")
+print(f"Feature pairs above the redundancy cut: {len(high_correlation_pairs)}")
+
+# %% [markdown]
+# ### One Representative per Cluster
+#
+# Transitively correlated features form a cluster, so the pairs above are collapsed
+# into connected components before a representative is chosen. A feature with no
+# recorded fold statistics cannot be compared on the criterion, so it is ranked last
+# within its cluster rather than dropped from it.
+
+
+# %%
+def cluster_key(feature: str) -> tuple[float, float]:
+    """Rank within a cluster: largest median fold IC first, then tightest dispersion."""
+    stats = fold_stats.get(feature)
+    if not stats:
+        return (-1.0, 0.0)
+    return (abs(stats["median_fold_ic"]), -float(np.std(stats["fold_ics"], ddof=0)))
+
+
+# %%
+component_of: dict[str, str] = {feature: feature for feature in evaluable_features}
+
+
+def root(feature: str) -> str:
+    """Representative label of the connected component a feature currently sits in."""
+    while component_of[feature] != feature:
+        component_of[feature] = component_of[component_of[feature]]
+        feature = component_of[feature]
+    return feature
+
+
+for pair in high_correlation_pairs:
+    left_root, right_root = root(pair["left"]), root(pair["right"])
+    if left_root != right_root:
+        component_of[left_root] = right_root
+
+clusters: dict[str, list[str]] = {}
+for feature in evaluable_features:
+    clusters.setdefault(root(feature), []).append(feature)
+
+representative = {}
+for members in clusters.values():
+    chosen = max(members, key=cluster_key)
+    for member in members:
+        representative[member] = chosen
+
+redundant_clusters = {name: members for name, members in clusters.items() if len(members) > 1}
+print(f"Correlation clusters with more than one member: {len(redundant_clusters)}")
+print(f"Features standing for a cluster: {len(set(representative.values()))}")
+
+
+# %%
+def pair_label(pair: dict) -> str:
+    """Name both members, marking whichever of them stands for their cluster."""
+    return " / ".join(
+        f"{member}*" if representative[member] == member else member
+        for member in (pair["left"], pair["right"])
+    )
+
 
 # %%
 if high_correlation_pairs:
-    correlation_plot = pl.DataFrame(high_correlation_pairs[:20]).sort("correlation")
+    correlation_plot = pl.DataFrame(
+        [
+            {"pair": pair_label(pair), "correlation": pair["correlation"]}
+            for pair in high_correlation_pairs[:20]
+        ]
+    ).sort("correlation")
     fig = go.Figure(
         go.Bar(
             x=correlation_plot["correlation"],
@@ -615,10 +1120,13 @@ if high_correlation_pairs:
     )
     fig.update_layout(
         title="Many engineered features carry nearly identical rank information",
-        xaxis_title="Spearman correlation on sampled validation rows",
-        yaxis_title="Feature pair",
+        xaxis_title=(
+            "Spearman correlation on sampled validation rows; "
+            "* marks the feature standing for its cluster"
+        ),
         height=650,
-        margin={"l": 300},
+        width=1000,
+        margin={"l": 320},
     )
     fig.show()
 
@@ -629,6 +1137,13 @@ if high_correlation_pairs:
 # model-selection decision. `STOP` is reserved for failed correctness screens;
 # market-level variables and weak standalone associations remain available for
 # interactions under `REVISE`.
+#
+# Two arms can promote a feature, and the ledger records which one fired. The first
+# is confirmatory: the feature cleared the false-discovery adjustment over the
+# declared search. The second is exploratory in the sense of book Section 7.4: it
+# promotes on fold stability and effect size rather than on significance, so that a
+# small cross-section cannot empty the menu, and a feature promoted through it has
+# not been confirmed by anything.
 
 # %%
 fdr_significant = set(eval_summary.filter(pl.col("fdr_sig"))["feature"].to_list())
@@ -643,7 +1158,7 @@ for feature in all_feature_cols:
     elif feature in fdr_significant:
         triage[feature] = ("PROCEED", "fdr_significant")
     elif (
-        fold_stats.get(feature, {}).get("sign_consistency", 0) >= 0.60
+        fold_stats.get(feature, {}).get("sign_consistency", 0) >= STABILITY_THRESHOLD
         and abs(ic_results[feature]["mean_ic"]) >= IC_THRESHOLD
     ):
         triage[feature] = ("PROCEED", "stable_and_above_threshold")
@@ -685,48 +1200,59 @@ for feature in all_feature_cols:
 triage_ledger = pl.DataFrame(ledger_rows).sort(["decision", "feature"])
 triage_ledger.write_parquet(EVAL_DIR / "triage_ledger.parquet")
 
+IC_SERIES_SCHEMA = {
+    "feature": pl.String,
+    DATE_COL: pl.Date,
+    "fold": pl.Int64,
+    "ic": pl.Float64,
+    "n_obs": pl.Int64,
+}
 ic_frames = [
     series.with_columns(pl.lit(feature).alias("feature"))
     for feature, series in ic_timeseries.items()
 ]
-if ic_frames:
-    pl.concat(ic_frames).select(["feature", DATE_COL, "fold", "ic", "n_obs"]).write_parquet(
-        EVAL_DIR / "ic_timeseries.parquet"
-    )
+# Written even when the run produced nothing, so a reader never finds an earlier
+# run's series sitting behind this one's ledger.
+ic_series = (
+    pl.concat(ic_frames).select(*IC_SERIES_SCHEMA).cast(IC_SERIES_SCHEMA)
+    if ic_frames
+    else pl.DataFrame(schema=IC_SERIES_SCHEMA)
+)
+ic_series.write_parquet(EVAL_DIR / "ic_timeseries.parquet")
 
-print("Wrote evaluation/triage_ledger.parquet")
-print("Wrote evaluation/ic_timeseries.parquet")
+print(f"Wrote evaluation/triage_ledger.parquet: {len(triage_ledger):,} rows")
+print(f"Wrote evaluation/ic_timeseries.parquet: {len(ic_series):,} rows")
 print(triage_ledger.group_by("decision").len().sort("decision"))
+
+# %%
+print(
+    triage_ledger.group_by(["decision", "note"])
+    .len()
+    .sort(["decision", "note"])
+    .rename({"len": "features"})
+)
+
+# %% [markdown] tags=["results"]
+# The ledger records 27 PROCEED, 32 REVISE and 4 STOP decisions over the 63
+# candidates. Every PROCEED comes from the exploration arm, so no feature in this
+# case study advances on a confirmed association.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# The result below is generated from the sealed validation panel so it cannot
-# drift away from the executed evidence.
-
-# %%
-proceed_features = [feature for feature, (decision, _) in triage.items() if decision == "PROCEED"]
-revise_features = [feature for feature, (decision, _) in triage.items() if decision == "REVISE"]
-stop_features = [feature for feature, (decision, _) in triage.items() if decision == "STOP"]
-leader = eval_summary.row(0, named=True) if len(eval_summary) else None
-
-if leader:
-    result = (
-        f"**Result.** Across **{eval_panel['fold'].n_unique()} canonical validation folds**, "
-        f"**{n_fdr} of {len(eval_summary)} cross-sectional features survive BH-FDR at 5%**. "
-        f"The largest absolute estimate is `{leader['feature']}` "
-        f"(mean daily IC {leader['ic_mean']:+.4f}, Newey-West t {leader['hac_t']:+.2f}). "
-        f"The diagnostic ledger assigns **{len(proceed_features)} PROCEED**, "
-        f"**{len(revise_features)} REVISE**, and **{len(stop_features)} STOP** decisions."
-    )
-else:
-    result = "**Result.** The reduced run did not contain enough pairs for cross-sectional IC."
-
-display(Markdown(result))
-
-# %% [markdown]
-# `PROCEED` features advance only to multivariate validation. Date-level HMM and
-# USD variables remain conditioning candidates, while strongly correlated
-# feature clusters call for regularization rather than duplicate evidence.
+# Univariate screening answers whether a feature carries information about the label
+# on its own, and it answers nothing about whether a model built on several of them
+# trades. The method a reader takes from this notebook is the order the screens run
+# in: seal the label endpoint before anything is measured, compute the association
+# one decision time at a time and let a lag-aware estimator bound the average, ask
+# whether the folds agreed before believing the average, declare the search before
+# reading a p-value out of it, and record a decision per feature with the evidence
+# that produced it rather than a shortlist.
+#
+# Two limits travel with the result. Rank correlation reads a monotone association
+# only, so a feature that matters through an interaction or a threshold is invisible
+# here and lands in `REVISE` rather than `STOP`. And the exploration arm promotes on
+# stability and effect size instead of significance, so a `PROCEED` from that arm is
+# a candidate for multivariate work and not a confirmed finding.
 #
 # **Next**: `06_linear.py` evaluates linear models on the same canonical folds.

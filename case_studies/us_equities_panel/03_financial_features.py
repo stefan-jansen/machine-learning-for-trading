@@ -16,98 +16,141 @@
 # %% [markdown]
 # # US Equities Panel: Feature Engineering
 #
-# This notebook implements cross-sectional factor construction for the US
-# Equities Panel case study. The broad universe (~3,200 stocks) is the book's
-# highest-breadth case study, so features emphasize cross-sectional ranking
-# and the Fundamental Law of Active Management: weak per-stock signals
-# compensated by large breadth.
+# The panel is the book's widest cross-section, so what a feature has to do here is rank
+# thousands of stocks against each other rather than time any one of them. This notebook
+# builds eight families of price-derived features on that panel, applies the eligibility
+# screen where it cannot change the window of a row it keeps, clips each feature against
+# the cross-section it was measured in, and scores every one of them against the primary
+# label on the development window alone.
 #
-# ## Feature Families
+# ## Learning objectives
 #
-# 1. **Momentum/Trend**: Multi-horizon returns, skip-month, risk-adjusted Sharpe
-# 2. **Mean Reversion**: Short-horizon reversal ranks, RSI, distance from extremes
-# 3. **Volatility**: Multi-horizon vol, vol ratios, vol z-scores
-# 4. **Liquidity**: Amihud illiquidity, dollar volume rank, volume ratio
-# 5. **Technical Indicators**: RSI, MACD, ADX, CCI, Stochastic, NATR
-# 6. **Composites**: Momentum-reversal score, size-conditional features
+# - Order per-symbol windows, the eligibility screen and cross-sectional ranks so each is
+#   computed on the frame that gives it its meaning
+# - Winsorize against the cross-section a feature is ranked in, rather than against a
+#   sample the strategy has not lived through yet
+# - Seal a feature evaluation on the label's endpoint, so the holdout scores nothing here
+# - Separate the multiple-testing correction from the autocorrelation correction, and read
+#   the Fundamental Law's two inputs as the bounds they are
 #
-# ## Key Design Decisions
+# ## Book reference, prerequisites and artifacts
 #
-# - **Survivorship-safe**: Features computed only on data available at decision time
-# - **Winsorized at 1st/99th percentile**: Reduces extreme value influence
-# - **Cross-sectional ranks**: Ensure stationarity across market regimes
-# - **Amihud illiquidity**: Added per strategic review (captures liquidity premium)
-# - **Size-conditional features**: Momentum interacted with size decile
-#
-# ## Book Reference
-#
-# Chapter 8, Section 8.2 (Price-Derived Features)
-#
-# ## Prerequisites
-#
-# - US equities data (via `load_us_equities()` canonical loader)
+# Chapter 8, Section 8.2. Reads the adjusted daily panel through `load_us_equities()`,
+# `config/setup.yaml` for the holdout boundary, and `labels/fwd_ret_1d.parquet` written by
+# [`02_labels`](02_labels.ipynb). Writes `features/financial.parquet`, which
+# [`04_model_based_features`](04_model_based_features.ipynb) reads and extends.
 
 # %%
 """US Equities Panel: Feature Engineering."""
 
-import subprocess
 import warnings
-from datetime import UTC, datetime
+from datetime import date
 
+import matplotlib.pyplot as plt
 import numpy as np
+import plotly.graph_objects as go
 import polars as pl
+import yaml
+from scipy.stats import spearmanr
 
 warnings.filterwarnings("ignore")
 
+from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
+from ml4t.diagnostic.metrics import compute_ic_hac_stats
 from ml4t.engineer.features.momentum import adx, cci, macd, rsi, stochastic
 from ml4t.engineer.features.trend import ema, kama, sma
 from ml4t.engineer.features.volatility import natr
 
+from case_studies.utils.artifact_digest import read_digest, value_digest, write_artifact
 from data import load_us_equities
-from utils.paths import get_case_study_dir
+from utils.paths import display_path, get_case_study_dir
+from utils.style import COLORS, FIGSIZE, add_message_title, ml4t_diverging
 
 CASE_DIR = get_case_study_dir("us_equities_panel")
 FEATURES_DIR = CASE_DIR / "features"
 
-# Configuration
+# Feature horizons, in trading sessions. These define the features rather than the
+# strategy, so they are declared here; everything that defines the strategy is bound
+# from setup.yaml below.
 MOMENTUM_HORIZONS = [5, 10, 21, 42, 63, 126, 189, 252]
 VOLATILITY_HORIZONS = [21, 63, 126, 252]
 MA_HORIZONS = [10, 20, 50, 100, 200]
 
-# Data range
-START_DATE = "1990-01-01"
-END_DATE = "2018-03-31"
+# The tradability screen, declared in Section 1 and applied in Section 6.
+# `02_labels` carries the same three constants and rebuilds the screen from them.
+MIN_PRICE, MIN_ADV_USD, ADV_WINDOW = 5.0, 1_000_000, 21
 
-# Liquidity filters
-MIN_ADV_USD = 1_000_000
-MIN_PRICE = 5.0
-ADV_WINDOW = 21
+# Winsorization and redundancy thresholds, named once so prose and code cannot drift.
+WINSOR_LOWER, WINSOR_UPPER = 0.01, 0.99
+REDUNDANT_CORR = 0.7
+FDR_ALPHA = 0.05
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
 START_DATE = "1990-01-01"
-MAX_SYMBOLS = 0
 
 # %% [markdown]
-# ## Connecting to the Edge Hypothesis
+# ## Configuration
 #
-# The feasibility notebook ([`01_feasibility_analysis`](01_feasibility_analysis.ipynb)) frames **behavioral persistence** as
-# the edge source: momentum and reversal signals exploit slow information
-# diffusion across ~3,200 stocks. The Fundamental Law of Active Management
-# predicts that even weak per-stock signals ($IC \approx 0.02$) can generate
-# meaningful portfolio-level alpha when breadth is large:
-# $IR = IC \cdot \sqrt{BR}$. The features below operationalize this hypothesis.
+# The holdout boundary and the primary label come from `config/setup.yaml`, which is also
+# what [`02_labels`](02_labels.ipynb) read to write the label file this notebook scores
+# against. The decision cadence fixes the rebalance count the Fundamental Law's breadth
+# input is multiplied by: the primary label is a one-session forward return, so a strategy
+# trading it decides at every close.
+
+# %%
+SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+
+PRIMARY_LABEL = SETUP["labels"]["primary"]
+HOLDOUT_START = date.fromisoformat(SETUP["evaluation"]["holdout_start"])
+END_DATE = str(SETUP["evaluation"]["holdout_end"])
+REBALANCES_PER_YEAR = SETUP["evaluation"]["periods_per_year"]
+
+print(f"Primary label {PRIMARY_LABEL}, holdout opens {HOLDOUT_START}, panel ends {END_DATE}")
+print(
+    f"Screen: printed close over ${MIN_PRICE:.0f}, {ADV_WINDOW}-session ADV over ${MIN_ADV_USD:,}"
+)
+
+# %% [markdown]
+# ## Connecting to the edge hypothesis
+#
+# [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) found no time-series signal in
+# the panel worth trading - only the one-session lag clears its band, and it is a weak
+# reversal - so whatever edge exists has to come from the cross-section. That is the
+# hypothesis the features below operationalize: slow information diffusion across thousands
+# of stocks, read as a ranking rather than as a forecast for any one name.
+#
+# The Fundamental Law of Active Management, $IR = IC \cdot \sqrt{BR}$, is why a per-stock
+# correlation far too small to trade on its own is worth building here: breadth multiplies
+# it. Section 9 computes both of its inputs and reports what each of them actually bounds.
 
 # %% [markdown]
 # ## 1. Load Data
 #
-# Load from the canonical data loader with the same PIT filters as [`02_labels`](02_labels.ipynb).
-# Both notebooks apply identical filters (MIN_PRICE=\$5, ADV>\$1M) via the
-# same constants.
+# Load from the canonical data loader and declare the same eligibility screen as
+# [`02_labels`](02_labels.ipynb): a printed close above \$5, and dollar volume
+# `close * volume` averaging above \$1M over the previous 21 sessions. Both legs
+# read figures the tape carried on the day, so neither depends on a corporate
+# action that had not happened yet. Section B of [`02_labels`](02_labels.ipynb)
+# derives why the adjusted close cannot serve here. Both notebooks rebuild the
+# screen from the same three constants on the same columns, so the trainable
+# panel and the label files agree on the universe.
 #
-# **Alignment check**: After loading and filtering, we verify the feature
-# index is a subset of the label index. Any mismatch indicates divergent
-# filter logic.
+# **Declared here, applied in Section 6.** The screen removes whole rows, and a
+# per-symbol shift or rolling window applied afterwards counts the rows that
+# survived rather than trading sessions. Section 6 states what that costs and
+# applies the screen between the per-symbol features and the cross-sectional
+# ones, which is the only ordering that gives both their intended meaning.
+#
+# Returns and every price-derived feature below still read `adj_close`: a return
+# has to divide out splits and dividends to mean anything.
+#
+# **Alignment check**: the two indices are not expected to match exactly - a label
+# needs a forward window the last session of a stock's series does not have, and a
+# feature needs a warm-up the first sessions do not have. Section 9 attributes
+# every row on both sides to one of those causes and **asserts the remainder is
+# empty**, so a screen that drifted apart between the two stages fails there rather
+# than printing a larger number and passing.
 
 # %%
 raw_df = load_us_equities(start_date=START_DATE, end_date=END_DATE)
@@ -118,20 +161,38 @@ if raw_df.schema["timestamp"] == pl.Datetime:
 
 raw_df = raw_df.sort(["symbol", "timestamp"])
 
+# The digest of the panel this stage read, over the same five columns
+# [`02_labels`](02_labels.ipynb) digests. The two stages screen the same universe only if they
+# read the same download, and printing the digest here is what makes that checkable: it has to
+# equal the `market_data` digest in the label sidecars, and the assertions in Section 9 are
+# reconciling two files rather than one file against a stale copy of another.
+MARKET_DATA_DIGEST = value_digest(raw_df, ["symbol", "timestamp", "close", "volume", "adj_close"])
+LABEL_INPUT_DIGEST = read_digest(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")["inputs"][
+    "market_data"
+]
+print(f"market_data digest: {MARKET_DATA_DIGEST}")
+assert MARKET_DATA_DIGEST == LABEL_INPUT_DIGEST, (
+    f"the labels were written against market_data {LABEL_INPUT_DIGEST} and this stage read "
+    f"{MARKET_DATA_DIGEST}. Re-run 02_labels before scoring features against its output."
+)
+
 # Compute base columns
 raw_df = raw_df.with_columns(
     (pl.col("adj_close") / pl.col("adj_close").shift(1).over("symbol") - 1).alias("returns"),
-    (pl.col("adj_close") * pl.col("adj_volume")).alias("dollar_volume"),
+    (pl.col("close") * pl.col("volume")).alias("dollar_volume"),
 )
 
-# Apply PIT eligibility filters
 raw_df = raw_df.with_columns(
     pl.col("dollar_volume").rolling_mean(ADV_WINDOW).over("symbol").alias("adv_21d")
 )
-df = raw_df.filter((pl.col("adj_close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD))
 
-print(f"Loaded {len(df):,} rows, {df['symbol'].n_unique()} symbols")
-print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
+# The screen is declared here and applied in Section 6, between the per-symbol
+# features and the cross-sectional ones. It is not applied yet, and that ordering
+# is the point: see Section 6.
+ELIGIBLE = (pl.col("close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD)
+
+print(f"Loaded {len(raw_df):,} rows, {raw_df['symbol'].n_unique()} symbols")
+print(f"Date range: {raw_df['timestamp'].min()} to {raw_df['timestamp'].max()}")
 
 # %% [markdown]
 # ## 2. Momentum and Volatility Features
@@ -296,7 +357,11 @@ def compute_trend_distance(data: pl.DataFrame) -> pl.DataFrame:
 # %% [markdown]
 # ## 4. Cross-Sectional Ranks, Liquidity, and Composites
 #
-# Cross-sectional ranking ensures features are stationary across market regimes.
+# A raw feature level carries whatever the whole panel was doing that day, so its
+# distribution moves with the regime; its rank within that day's cross-section is
+# bounded in the unit interval whatever the regime is, which is what makes one
+# model coefficient mean the same thing in 1997 and in 2009.
+#
 # The Amihud (2002) illiquidity measure captures price impact per unit of
 # trading volume:
 #
@@ -305,11 +370,6 @@ def compute_trend_distance(data: pl.DataFrame) -> pl.DataFrame:
 # where $D = 21$ days, $r_{i,d}$ is the daily return, and $\text{DVOL}_{i,d}$
 # is dollar volume. Higher values indicate less liquid stocks. Amihud (2002)
 # showed that expected illiquidity positively predicts cross-sectional returns.
-#
-# **New features from strategic review**:
-# - Amihud illiquidity (rolling 21-day)
-# - Composite momentum-reversal score (exploiting negative correlation)
-# - Size-conditional features (momentum interacted with size decile)
 
 
 # %%
@@ -360,30 +420,36 @@ def compute_xs_ranks(data: pl.DataFrame) -> pl.DataFrame:
 
 
 # %%
-def compute_liquidity_reversion(data: pl.DataFrame) -> pl.DataFrame:
-    """Liquidity measures, Amihud illiquidity, reversion signals, and size proxy."""
-    # Liquidity features
+def compute_rolling_liquidity(data: pl.DataFrame) -> pl.DataFrame:
+    """Per-symbol liquidity measures. Rolling, so the complete series."""
     data = data.with_columns((pl.col("dollar_volume") / pl.col("adv_21d")).alias("volume_ratio"))
-    data = data.with_columns(
-        (
-            pl.col("adv_21d").rank().over("timestamp") / pl.col("adv_21d").count().over("timestamp")
-        ).alias("liq_rank")
-    )
-    # Amihud illiquidity: |return| / dollar_volume (rolling 21-day mean)
+    # Amihud illiquidity: |return| / dollar_volume (rolling 21-session mean)
     data = data.with_columns(
         (pl.col("returns").abs() / (pl.col("dollar_volume") + 1))
         .rolling_mean(21)
         .over("symbol")
         .alias("amihud_illiq")
     )
-    data = data.with_columns(
+    return data
+
+
+# %% [markdown]
+# The ranks below are the cross-sectional half of the same block, and they run on
+# the eligible frame: a rank is only meaningful against the names the strategy
+# could actually have sorted on that day.
+
+
+# %%
+def compute_xs_liquidity_reversion(data: pl.DataFrame) -> pl.DataFrame:
+    """Cross-sectional ranks of the liquidity, reversion, and size signals."""
+    return data.with_columns(
+        (
+            pl.col("adv_21d").rank().over("timestamp") / pl.col("adv_21d").count().over("timestamp")
+        ).alias("liq_rank"),
         (
             pl.col("amihud_illiq").rank().over("timestamp")
             / pl.col("amihud_illiq").count().over("timestamp")
-        ).alias("illiq_rank")
-    )
-    # Mean reversion signals
-    data = data.with_columns(
+        ).alias("illiq_rank"),
         (
             pl.col("ret_5d").rank().over("timestamp") / pl.col("ret_5d").count().over("timestamp")
         ).alias("reversal_rank"),
@@ -391,14 +457,6 @@ def compute_liquidity_reversion(data: pl.DataFrame) -> pl.DataFrame:
             pl.col("rsi_14").rank().over("timestamp") / pl.col("rsi_14").count().over("timestamp")
         ).alias("rsi_rank"),
     )
-    # Size proxy (log dollar volume rank as mcap proxy)
-    data = data.with_columns(
-        (
-            pl.col("adv_21d").log().rank().over("timestamp")
-            / pl.col("adv_21d").log().count().over("timestamp")
-        ).alias("size_rank")
-    )
-    return data
 
 
 # %% [markdown]
@@ -406,8 +464,16 @@ def compute_liquidity_reversion(data: pl.DataFrame) -> pl.DataFrame:
 #
 # Composites blend related ranks into single signals. The momentum-reversal
 # spread exploits the negative correlation between trend and reversion
-# signals. Size-conditional features test whether momentum varies by
-# market cap (Fama and French 1992).
+# signals. The interactions multiply a momentum rank by the dollar-volume
+# rank, so a model can let momentum act differently on the names that trade
+# and on the ones that barely do.
+#
+# The panel carries prices and share volume and no shares outstanding, so it
+# has no market capitalization and this is a liquidity interaction rather than
+# the size-conditional momentum of Fama and French (1992). Taking the logarithm
+# of dollar volume before ranking does not recover one: a rank is invariant
+# under any increasing transform, so `rank(log(ADV))` and `rank(ADV)` are the
+# same column to the last bit.
 
 
 # %%
@@ -426,10 +492,10 @@ def compute_composites(data: pl.DataFrame) -> pl.DataFrame:
     data = data.with_columns(
         (pl.col("momentum_composite") - pl.col("contrarian_composite")).alias("mom_rev_spread")
     )
-    # Size-conditional momentum
+    # Liquidity-conditional momentum
     data = data.with_columns(
-        (pl.col("mom_rank_126d") * pl.col("size_rank")).alias("mom_x_size"),
-        (pl.col("mom_rank_252d") * pl.col("size_rank")).alias("mom12m_x_size"),
+        (pl.col("mom_rank_126d") * pl.col("liq_rank")).alias("mom_x_liq"),
+        (pl.col("mom_rank_252d") * pl.col("liq_rank")).alias("mom12m_x_liq"),
     )
     return data
 
@@ -437,54 +503,84 @@ def compute_composites(data: pl.DataFrame) -> pl.DataFrame:
 # %% [markdown]
 # ## 5. Winsorization
 #
-# Apply winsorization at the 1st/99th percentile per feature to limit
-# the influence of extreme values (split artifacts, data errors).
+# A split the vendor did not adjust, or a price of a fraction of a cent, enters a return
+# feature as a move of thousands of percent. Clipping each feature at its first and
+# ninety-ninth percentile keeps those rows in the panel without letting them set the scale
+# every other value is measured against.
 #
-# **Known deviation**: Quantiles are computed over the full time series
-# rather than per cross-section date. This is a minor form of lookahead:
-# the clip boundaries at date $t$ reflect values at all dates, including
-# future ones. The bias is small because (a) the 1st and 99th percentiles
-# of returns are relatively stable over decades, and (b) the cross-sectional
-# ranks (which are per-date) are the primary transformed features —
-# winsorization only affects raw return levels that feed into the ranking.
-# A production pipeline would compute per-date quantiles to eliminate this.
+# **The percentiles are taken within each cross-section, not over the whole sample.** A
+# bound estimated over every date is estimated partly on dates the strategy has not reached
+# yet, including the sealed holdout, and it is then applied to rows that precede them - the
+# clip a stock receives in 1994 would depend on what the panel did in 2017. It is also the
+# wrong bound: the width of a daily cross-section is not a constant of the panel.
+# [`02_labels`](02_labels.ipynb) measured that directly, and cross-sectional dispersion more
+# than doubles between its quietest and loudest year, so one pair of bounds clips almost
+# nothing in a crisis and cuts into the body of the distribution in a calm decade. The
+# figure below shows the second effect on the primary momentum feature.
+#
+# It shows it on the development window alone. The flat pair it draws is the counterfactual,
+# and computing the true sample-wide one is the very read the seal forbids, so the
+# counterfactual is estimated on development rows only - which understates the case rather
+# than overstating it, since the sample-wide pair would additionally be wrong by whatever
+# the two holdout years did. The clip itself still runs on every row the file carries: a
+# per-date quantile reads nothing but the date it is applied to, so it crosses no boundary.
+#
+# Taking the percentiles per date fixes the leak and the mis-scaling with the same
+# expression, and it is the same frame the cross-sectional ranks are already computed in.
 
 
 # %%
 def winsorize_features(
-    data: pl.DataFrame, feature_cols: list[str], lower: float = 0.01, upper: float = 0.99
+    data: pl.DataFrame,
+    feature_cols: list[str],
+    lower: float = WINSOR_LOWER,
+    upper: float = WINSOR_UPPER,
 ) -> pl.DataFrame:
-    """Winsorize feature columns at specified quantiles.
-
-    Production alternative (per-date, no look-ahead):
-        data.with_columns(
-            pl.col(col).clip(
-                pl.col(col).quantile(lower).over("timestamp"),
-                pl.col(col).quantile(upper).over("timestamp"),
-            )
+    """Clip each feature at per-date quantiles, so no bound crosses a decision date."""
+    present = [c for c in feature_cols if c in data.columns]
+    return data.with_columns(
+        pl.col(col)
+        .clip(
+            pl.col(col).quantile(lower).over("timestamp"),
+            pl.col(col).quantile(upper).over("timestamp"),
         )
-    """
-    for col in feature_cols:
-        if col in data.columns:
-            q_low = data[col].quantile(lower)
-            q_high = data[col].quantile(upper)
-            if q_low is not None and q_high is not None and q_low < q_high:
-                data = data.with_columns(pl.col(col).clip(lower_bound=q_low, upper_bound=q_high))
-    return data
+        .alias(col)
+        for col in present
+    )
 
 
 # %% [markdown]
 # ## 6. Run Feature Pipeline
+#
+# Every per-symbol feature is a shift or a rolling window over `symbol`, and those
+# count rows. On the screened frame they would count *eligible* rows rather than
+# trading sessions, so a stock that drops below a threshold and recovers would
+# carry windows spanning the whole excursion: skip-month momentum would reach back
+# 252 eligible rows, which can be years. So they run on the complete series, and
+# the screen is applied afterwards. [`02_labels`](02_labels.ipynb) Section B makes
+# this argument for the forward window; this is the backward-looking half of it,
+# and the two have to agree on what a session is.
+#
+# The cross-sectional ranks then run on the screened frame, because a rank is only
+# meaningful against the names the strategy could have sorted on that day.
 
 # %%
 print("Computing features...")
-df = df.pipe(compute_momentum_returns).pipe(compute_volatility_sharpe)
+
+raw_df = raw_df.pipe(compute_momentum_returns).pipe(compute_volatility_sharpe)
 print("  Momentum and volatility done")
 
-df = df.pipe(compute_oscillators).pipe(compute_trend_distance)
+raw_df = raw_df.pipe(compute_oscillators).pipe(compute_trend_distance)
 print("  Technical indicators done")
 
-df = df.pipe(compute_xs_ranks).pipe(compute_liquidity_reversion).pipe(compute_composites)
+raw_df = raw_df.pipe(compute_rolling_liquidity)
+print("  Rolling liquidity done")
+
+# The screen is applied here, between the two kinds of feature.
+df = raw_df.filter(ELIGIBLE)
+print(f"  Eligible: {df.height:,} of {raw_df.height:,} rows, {df['symbol'].n_unique()} stocks")
+
+df = df.pipe(compute_xs_ranks).pipe(compute_xs_liquidity_reversion).pipe(compute_composites)
 print("  Cross-sectional ranks and composites done")
 
 # %% [markdown]
@@ -526,9 +622,88 @@ output_cols = ["symbol", "timestamp"] + feature_cols
 available_cols = [c for c in output_cols if c in df.columns]
 output_df = df.select(available_cols).drop_nulls(subset=essential_cols)
 
-# Winsorize at 1st/99th percentile
-print("Winsorizing features at 1st/99th percentile...")
+# A missing value is a null. Several of the library oscillators return a float NaN instead -
+# an efficiency ratio that divides by zero on a flat window, a true range that does the same
+# - and Polars treats the two as different things: `drop_nulls` keeps a NaN, and every
+# summary it reaches returns NaN rather than skipping the row. The consequence is not a
+# dropped row but a dropped *date*: `spearmanr` propagates NaN, so a single stock carrying
+# one poisons that feature's correlation for the whole cross-section it sits in, and the
+# feature is then scored on whatever dates happen to be left. Converting to null once, here,
+# is what makes the rest of the notebook's null handling apply to them.
+_nan_counts = {
+    c: int(output_df[c].is_nan().sum())
+    for c in feature_cols
+    if output_df.schema[c] in (pl.Float32, pl.Float64)
+}
+_nan_carriers = {c: n for c, n in _nan_counts.items() if n}
+output_df = output_df.with_columns(
+    pl.col(c).fill_nan(None)
+    for c in feature_cols
+    if output_df.schema[c] in (pl.Float32, pl.Float64)
+)
+print(
+    f"NaN converted to null in {len(_nan_carriers)} of {len(_nan_counts)} float features, "
+    f"{sum(_nan_carriers.values()):,} values: {sorted(_nan_carriers)}"
+)
+
+# The bounds are measured before the clip is applied, so the figure below can show what a
+# single flat pair would have done to each cross-section it was applied to. Both are read
+# from development rows only - see the section note above on why the counterfactual is not
+# the true sample-wide pair.
+WINSOR_EXAMPLE = "ret_21d"
+_winsor_dev = output_df.filter(pl.col("timestamp") < HOLDOUT_START)
+per_date_bounds = (
+    _winsor_dev.group_by("timestamp")
+    .agg(
+        pl.col(WINSOR_EXAMPLE).quantile(WINSOR_LOWER).alias("lower"),
+        pl.col(WINSOR_EXAMPLE).quantile(WINSOR_UPPER).alias("upper"),
+    )
+    .sort("timestamp")
+)
+flat_lower = _winsor_dev[WINSOR_EXAMPLE].quantile(WINSOR_LOWER)
+flat_upper = _winsor_dev[WINSOR_EXAMPLE].quantile(WINSOR_UPPER)
+
+print("Winsorizing each feature against its own cross-section...")
 output_df = winsorize_features(output_df, feature_cols)
+
+# %% [markdown]
+# The two lines are the percentiles the clip uses on each date; the flat pair is what one
+# estimate over all of them would have applied to every one of them. Where the flat bound
+# sits outside the daily pair it clips nothing, and where it sits inside it cuts into the
+# body of that day's cross-section. The gap is a regime effect, not noise: it tracks the
+# crises, and the print below gives the narrowest and widest daily pair against the flat one.
+
+# %%
+fig, ax = plt.subplots(figsize=FIGSIZE["single_wide"])
+ax.plot(per_date_bounds["timestamp"], per_date_bounds["upper"], color=COLORS["blue"], lw=0.7)
+ax.plot(per_date_bounds["timestamp"], per_date_bounds["lower"], color=COLORS["blue"], lw=0.7)
+ax.fill_between(
+    per_date_bounds["timestamp"],
+    per_date_bounds["lower"],
+    per_date_bounds["upper"],
+    color=COLORS["blue"],
+    alpha=0.15,
+)
+for bound in (flat_lower, flat_upper):
+    ax.axhline(bound, color=COLORS["copper"], ls="--", lw=1.4)
+ax.axhline(0, color=COLORS["neutral"], lw=0.6)
+ax.set_xlabel("Date")
+ax.set_ylabel(f"Clip bounds on {WINSOR_EXAMPLE}")
+add_message_title(
+    ax,
+    "One flat clip bound is too wide in calm years and too tight in crises",
+    subtitle="Per-date first and ninety-ninth percentile against a single flat pair (dashed), "
+    "development window",
+)
+plt.show()
+
+print(
+    f"{WINSOR_EXAMPLE}: flat bounds {flat_lower:.4f} to {flat_upper:.4f} | per-date "
+    f"width from {(per_date_bounds['upper'] - per_date_bounds['lower']).min():.4f} to "
+    f"{(per_date_bounds['upper'] - per_date_bounds['lower']).max():.4f}, median "
+    f"{(per_date_bounds['upper'] - per_date_bounds['lower']).median():.4f} against the "
+    f"flat {flat_upper - flat_lower:.4f}"
+)
 
 # Rename backward-looking returns to avoid collision with forward label names.
 # Labels use ret_1d/ret_5d/ret_21d for *forward* returns; features use
@@ -560,89 +735,123 @@ trend_feats = [
     if any(c.startswith(p) for p in ["sma_", "ema_", "kama_", "dist_from_52w"])
 ]
 rank_feats = [c for c in feature_cols if "rank" in c]
-composite_feats = [c for c in feature_cols if "composite" in c or "spread" in c or "x_size" in c]
+composite_feats = [c for c in feature_cols if "composite" in c or "spread" in c or "x_liq" in c]
 liquidity_feats = [c for c in feature_cols if "liq" in c or "illiq" in c or "volume_ratio" in c]
 
-EXPECTED_FEATURES = 63  # concept note target: ~71 features across 6 families
-
 print("\nFeature breakdown:")
-print(f"  Momentum/Returns: {len(momentum_feats)}")
-print(f"  Volatility: {len(vol_feats)}")
-print(f"  Sharpe: {len(sharpe_feats)}")
-print(f"  Technical: {len(tech_feats)}")
-print(f"  Trend/MA: {len(trend_feats)}")
-print(f"  Ranks: {len(rank_feats)}")
-print(f"  Composites/Interactions: {len(composite_feats)}")
-print(f"  Liquidity: {len(liquidity_feats)}")
+for _family, _members in (
+    ("Momentum/returns", momentum_feats),
+    ("Volatility", vol_feats),
+    ("Sharpe", sharpe_feats),
+    ("Technical", tech_feats),
+    ("Trend/MA", trend_feats),
+    ("Ranks", rank_feats),
+    ("Composites/interactions", composite_feats),
+    ("Liquidity", liquidity_feats),
+):
+    print(f"  {_family}: {len(_members)}")
 
-# Validate against concept note expectations
-if n_features < EXPECTED_FEATURES - 10:
-    print(f"\n  WARNING: Only {n_features} features; concept note targets ~{EXPECTED_FEATURES}")
-else:
-    print(
-        f"\n  Feature count ({n_features}) aligns with concept note target (~{EXPECTED_FEATURES})"
-    )
+# Every feature the matrix carries belongs to a family the notebook can name; a column that
+# matched none of the prefixes above would be a feature nobody could interpret downstream.
+_unfamilied = sorted(
+    set(feature_cols)
+    - set(momentum_feats + vol_feats + sharpe_feats + tech_feats)
+    - set(trend_feats + rank_feats + composite_feats + liquidity_feats)
+)
+assert not _unfamilied, f"features in no family: {_unfamilied}"
 
 # %% [markdown]
-# ### Feature Summary Interpretation
+# ### What the matrix is made of
 #
-# The feature matrix spans 6 families designed to capture distinct sources
-# of cross-sectional return variation:
+# The eight families are meant to carry distinct sources of cross-sectional variation, and
+# the counts above say which of them the matrix is weighted towards. They are groups rather
+# than a partition, so they do not sum to the column count: a momentum rank is counted under
+# both Momentum/returns and Ranks, because it is one of each.
 #
-# - **Momentum/returns** dominate the feature count, reflecting the primary
-#   edge hypothesis (behavioral persistence). The skip-month construction
-#   (Jegadeesh and Titman 1993) isolates medium-term continuation from
-#   short-term reversal.
-# - **Ranks and composites** are the most numerous derived features. These
-#   ensure stationarity across market regimes -- raw momentum levels shift
-#   dramatically between the 1990s bull market and the 2008 crisis, but
-#   cross-sectional ranks remain uniformly distributed.
-# - **Amihud illiquidity** captures the tension between alpha and tradability:
-#   momentum signals are strongest among illiquid names, but these have the
-#   highest execution costs. The interaction with size rank (`mom_x_size`)
-#   tests whether this tradeoff is monotonic.
-# - **Technical oscillators** (RSI, MACD, ADX) overlap with momentum but
-#   capture non-linear aspects (overbought/oversold thresholds) that linear
-#   models cannot extract from raw returns alone.
+# - **Momentum and returns** dominate the count, which follows from the edge hypothesis:
+#   the skip-month construction of Jegadeesh and Titman (1993) separates medium-term
+#   continuation from the short-term reversal inside the last month.
+# - **Ranks and composites** are the next largest group. A raw momentum level in 1997 and
+#   the same level in 2009 mean different things; its rank within that day's cross-section
+#   does not, which is what makes the ranks usable across a 28-year sample.
+# - **Amihud illiquidity** carries the tension between alpha and tradability: the names
+#   whose prices move most per dollar traded are the ones a position moves against itself.
+#   Multiplying a momentum rank by the dollar-volume rank lets a model price momentum
+#   differently in the part of the panel where it could be traded.
+# - **Technical oscillators** overlap with momentum by construction. Section 9 measures
+#   that overlap rather than assuming it away.
 
 # %% [markdown]
 # ## 8. Save Features
+#
+# Written with a digest sidecar beside it, as [`02_labels`](02_labels.ipynb) writes its label
+# files: the record carries the content digest of the values written, the row count, the key
+# columns, the notebook that wrote them, and the digest of the price panel they were built
+# from. Prices are the only input - the labels are read in Section 9, after this write, and
+# score the features rather than shaping them.
 
 # %%
 output_path = FEATURES_DIR / "financial.parquet"
-FEATURES_DIR.mkdir(parents=True, exist_ok=True)
-output_df.write_parquet(output_path)
-print(f"Saved {n_features} features to {output_path}")
+# No NaN reaches the artifact. A column that carried one would be scored on a different set
+# of dates from every other column, and nothing downstream would say so.
+_still_nan = [
+    c
+    for c in feature_cols
+    if output_df.schema[c] in (pl.Float32, pl.Float64) and output_df[c].is_nan().any()
+]
+assert not _still_nan, f"features reaching the artifact with NaN: {_still_nan}"
+
+record = write_artifact(
+    output_df,
+    output_path,
+    keys=["symbol", "timestamp"],
+    written_by="03_financial_features",
+    inputs={"market_data": MARKET_DATA_DIGEST},
+)
+print(f"Saved {n_features} features to {display_path(output_path)}")
+print(f"financial.parquet: {record['n_rows']:,} rows, digest {record['digest']}")
 # %% [markdown]
 # ## 9. Feature Evaluation
 #
-# We evaluate all engineered features against the primary 1-day forward return
-# label using:
-# - **Information Coefficient (IC)**: Cross-sectional Spearman rank correlation
-#   per date, then averaged across dates
-# - **HAC adjustment**: Newey-West standard errors accounting for autocorrelation
-#   in the IC time series
-# - **BH-FDR**: Benjamini-Hochberg false discovery rate correction for multiple
-#   testing across all features
-# - **Fundamental Law of Active Management**: With ~3,149 stocks, even tiny ICs
-#   compound into significant portfolio-level IR
-# - **Pairwise correlation**: Identify redundant feature pairs (|corr| > 0.7)
+# Every feature is scored against the primary label with four quantities, each of which
+# answers a different question and none of which stands in for another:
+#
+# - **Information coefficient**: the cross-sectional Spearman correlation on each date,
+#   averaged over dates - the quantity a ranking model is scored on.
+# - **HAC standard errors**: Newey-West, because the IC series carries autocorrelation of
+#   its own even where the label does not overlap.
+# - **Benjamini-Hochberg**: the panel is scored on dozens of features at once, so some
+#   clear a nominal threshold by construction.
+# - **Pairwise correlation**: which features are close enough to be one feature.
+#
+# **The evaluation is sealed on the label's endpoint**, not on the observation date. A row
+# observed the session before the holdout opens resolves inside it, so a filter on the
+# observation date looks sealed and is not - this is the boundary
+# [`02_labels`](02_labels.ipynb) Section E derives. The feature file written above keeps
+# every eligible row, holdout included, because the seal governs what this notebook reads
+# rather than what it writes: the model stages need holdout features to score the holdout
+# once, and nothing here may look at them.
 
 
 # %%
 def assign_feature_family(feature_name: str) -> str:
-    """Map feature name to family for US equities panel."""
+    """Map feature name to family for US equities panel.
+
+    The blends and the interactions are matched first, so a composite of momentum
+    ranks is filed as a composite rather than as momentum. Everything after that is
+    the construction the feature comes from, which is what makes a diagonal block of
+    the correlation matrix mean anything: a rank and the level it ranks belong to the
+    same family. The classification is total, and the cell below asserts it is.
+    """
     family_map = [
+        (["composite", "quality_", "spread", "_x_liq"], "composite"),
         (["mom_", "ret_", "skip_recent", "cumret"], "momentum"),
         (["rev_", "reversal", "str_"], "reversal"),
         (["vol_", "rv_", "realized", "natr", "range_", "mdd_"], "volatility"),
         (["sharpe_", "risk_adj"], "sharpe"),
         (["rsi", "macd", "adx", "cci", "stoch", "bb_", "aroon"], "technical"),
-        (["sma_", "ema_", "trend"], "trend"),
-        (["rank_"], "cross_sectional"),
-        (["composite", "quality"], "composite"),
-        (["illiq", "turnover", "volume", "amihud"], "liquidity"),
-        (["size", "mktcap", "ln_"], "size"),
+        (["sma_", "ema_", "kama_", "dist_from_52w", "trend"], "trend"),
+        (["liq", "turnover", "volume", "amihud"], "liquidity"),
     ]
     for prefixes, family in family_map:
         if any(p in feature_name.lower() for p in prefixes):
@@ -650,57 +859,203 @@ def assign_feature_family(feature_name: str) -> str:
     return "other"
 
 
+# A feature filed under "other" would sit in a block of the correlation heatmap that shares
+# no construction, and would carry a bar in the family chart that means nothing.
+_unfamilied_eval = sorted(f for f in feature_cols if assign_feature_family(f) == "other")
+assert not _unfamilied_eval, f"features in no evaluation family: {_unfamilied_eval}"
+
+
 # %% [markdown]
-# ### Load Labels and Join
+# ### Load labels, join, and seal on the label endpoint
 
 # %%
-import plotly.graph_objects as go
-from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
-from ml4t.diagnostic.metrics import compute_ic_hac_stats
-from scipy.stats import spearmanr as _spearmanr
+_label_col = PRIMARY_LABEL
+_label_df = pl.read_parquet(CASE_DIR / "labels" / f"{_label_col}.parquet")
 
-_label_df = pl.read_parquet(CASE_DIR / "labels" / "fwd_ret_1d.parquet")
-_label_col = "fwd_ret_1d"
+# The endpoint of a one-session label is the next session in that stock's own series, so it
+# is derived on the complete price frame. Shifting the screened frame would return the next
+# *eligible* session, which is a later date and depends on eligibility after the decision.
+_label_end = raw_df.select(
+    "symbol",
+    "timestamp",
+    pl.col("timestamp").shift(-1).over("symbol").alias("_label_end"),
+)
 
-eval_df = output_df.join(_label_df, on=["timestamp", "symbol"], how="inner")
-print(f"Evaluation set: {len(eval_df):,} rows, label column: {_label_col}")
+_joined = output_df.join(_label_df, on=["timestamp", "symbol"], how="inner")
+eval_df = (
+    _joined.join(_label_end, on=["symbol", "timestamp"], how="left")
+    .filter(pl.col("_label_end") < HOLDOUT_START)
+    .drop("_label_end")
+)
+assert eval_df["timestamp"].max() < HOLDOUT_START, "a scored row resolves inside the holdout"
+
+print(f"Feature rows joined to a label: {_joined.height:,}, label column {_label_col}")
+print(
+    f"Evaluation set after the endpoint seal: {eval_df.height:,} rows through "
+    f"{eval_df['timestamp'].max()}, holdout opens {HOLDOUT_START}"
+)
+
 # %% [markdown]
-# ### Per-Feature IC with HAC Adjustment
+# ### Reconciling the feature index against the label index
+#
+# Section 1 promised this check. Both residuals are attributed to a named cause and the
+# unexplained remainder is asserted empty in both directions, because counting the
+# mismatches and printing them is not a check: two stages that screened on different prices
+# would print a larger number and pass, which is how the two defects this check was written
+# for survived a review each.
+#
+# A feature row can lack a label only where [`02_labels`](02_labels.ipynb) wrote none, and
+# its Section D enumerates exactly three causes: the row is the last session of the stock's
+# price series, so no forward window exists; the window to the next session spans more
+# calendar time than holidays explain, which is that notebook's one-session span tolerance;
+# or a price is missing at one end of the window. All three are reproduced below, because a
+# cause left out would be indistinguishable from the two screens having drifted apart.
+#
+# A label row can lack a feature row only where a feature the selection requires is still
+# null, which is the warm-up at the start of a stock's series. `essential_cols` is the set
+# that decides it, so the dropped rows are recomputed from that same condition rather than
+# guessed at.
+
+# %%
+_fwd = raw_df.select(
+    "symbol",
+    "timestamp",
+    (pl.col("timestamp").shift(-1).over("symbol") - pl.col("timestamp"))
+    .dt.total_days()
+    .alias("_fwd_days"),
+    (pl.col("adj_close").is_null() | pl.col("adj_close").shift(-1).over("symbol").is_null()).alias(
+        "_unpriced"
+    ),
+)
+LABEL_SPAN_TOLERANCE_1D = 9  # 02_labels: ceil(1 * 7 / 5) + 7
+
+_feature_orphans = output_df.join(_label_df, on=["timestamp", "symbol"], how="anti").join(
+    _fwd, on=["symbol", "timestamp"], how="left"
+)
+_no_forward_window = pl.col("_fwd_days").is_null()
+_window_spans_a_hole = pl.col("_fwd_days") > LABEL_SPAN_TOLERANCE_1D
+_no_price_at_an_end = pl.col("_unpriced")
+_unexplained_features = _feature_orphans.filter(
+    ~(_no_forward_window | _window_spans_a_hole | _no_price_at_an_end)
+)
+
+_essential_features = [c for c in essential_cols if c not in ("symbol", "timestamp")]
+_warmup = raw_df.filter(ELIGIBLE).filter(
+    pl.any_horizontal(pl.col(c).is_null() for c in _essential_features)
+)
+_label_orphans = _label_df.join(output_df, on=["timestamp", "symbol"], how="anti")
+_unexplained_labels = _label_orphans.join(
+    _warmup.select("symbol", "timestamp"), on=["symbol", "timestamp"], how="anti"
+)
+
+print(
+    f"  features with no label: {_feature_orphans.height:,} — "
+    f"{_feature_orphans.filter(_no_forward_window).height:,} at the end of a stock's series, "
+    f"{_feature_orphans.filter(~_no_forward_window & _window_spans_a_hole).height:,} whose next "
+    f"session is more than {LABEL_SPAN_TOLERANCE_1D} calendar days away, "
+    f"{_feature_orphans.filter(~_no_forward_window & ~_window_spans_a_hole & _no_price_at_an_end).height:,} "
+    "with no price at an end of the window"
+)
+print(
+    f"  labels with no feature: {_label_orphans.height:,} — "
+    f"{_label_orphans.height - _unexplained_labels.height:,} still inside the feature warm-up"
+)
+
+assert _unexplained_features.height == 0, (
+    f"{_unexplained_features.height} feature rows have no label and neither end a stock's "
+    "series nor precede a gap. The two stages are screening different universes."
+)
+assert _unexplained_labels.height == 0, (
+    f"{_unexplained_labels.height} label rows have no feature row and are not explained by "
+    "the feature warm-up. The two stages are screening different universes."
+)
+print("  reconciled: no unexplained rows on either side")
+# %% [markdown]
+# ### Per-feature IC with a HAC standard error
+#
+# Two properties of this loop decide whether the standard error means anything.
+#
+# **The dates are visited in order.** A Newey-West correction reads the autocovariances of
+# the series it is handed, so a series assembled in whatever order the partitions came back
+# in is a permutation of time and its lag structure is an artifact of that permutation.
+# `partition_by` gives no ordering guarantee, so the keys are sorted before the loop runs.
+#
+# **The minimum cross-section is half the median**, as in
+# [`02_labels`](02_labels.ipynb) Section G, rather than a fixed count. A rank correlation
+# over a handful of names is mostly noise, and a bare threshold means something different on
+# a panel of a hundred names than on one of three thousand.
 
 # %%
 ic_results = {}
 
-if eval_df is not None:
-    _partitions = eval_df.partition_by("timestamp", as_dict=True)
+# The order comes from a sort on the time axis, not from the partition scan.
+_partitions = eval_df.partition_by("timestamp", as_dict=True)
+_dates_in_order = [
+    (d,) for d in eval_df.select("timestamp").unique().sort("timestamp")["timestamp"].to_list()
+]
+assert set(_dates_in_order) == set(_partitions), "the scored dates and the partitions disagree"
+_min_cross_section = int(eval_df.group_by("timestamp").len()["len"].median() // 2)
+print(
+    f"Scoring {len(_dates_in_order):,} dates, minimum cross-section {_min_cross_section:,} stocks"
+)
 
-    for feat in feature_cols:
-        ic_vals = []
-        for _key, group in _partitions.items():
-            vals = group.select([feat, _label_col]).drop_nulls()
-            if len(vals) >= 30:
-                ic, _ = _spearmanr(vals[feat].to_numpy(), vals[_label_col].to_numpy())
-                if not np.isnan(ic):
-                    ic_vals.append(ic)
-        if len(ic_vals) >= 20:
-            hac_stats = compute_ic_hac_stats(np.array(ic_vals))
-            ic_results[feat] = hac_stats
+ic_series = {}  # kept per feature, so the stability figure below reads the same numbers
 
-    print(f"IC computed for {len(ic_results)} / {len(feature_cols)} features")
+for feat in feature_cols:
+    ic_vals, ic_dates = [], []
+    for _key in _dates_in_order:
+        vals = _partitions[_key].select([feat, _label_col]).drop_nulls()
+        if len(vals) >= _min_cross_section:
+            ic, _ = spearmanr(vals[feat].to_numpy(), vals[_label_col].to_numpy())
+            if not np.isnan(ic):
+                ic_vals.append(ic)
+                ic_dates.append(_key[0])
+    if len(ic_vals) >= 20:
+        ic_results[feat] = compute_ic_hac_stats(np.array(ic_vals), label_horizon=1)
+        ic_series[feat] = pl.DataFrame({"timestamp": ic_dates, "ic": ic_vals})
+
+print(f"IC computed for {len(ic_results)} of {len(feature_cols)} features")
+assert ic_results, "no feature carried enough scored dates to compute an IC"
 
 # %% [markdown]
-# ### BH-FDR Multiple Testing Correction
+# ### BH-FDR correction, the HAC effect, and the Fundamental Law's two inputs
+#
+# Three quantities that are easy to confuse, so each is computed and named separately.
+# The **FDR discovery ratio** compares how many features clear the significance
+# threshold before and after Benjamini-Hochberg, both counted from the same
+# HAC-corrected p-values: it sizes the multiple-testing correction alone. The **HAC effect**
+# compares the HAC t-statistic against the naive one: it sizes the autocorrelation
+# correction. Neither stands in for the other.
+#
+# The **Fundamental Law**, $IR = IC \cdot \sqrt{BR}$, has two inputs that are easy to
+# overstate, so both are reported as what they are and the product is not reported as an
+# achievable information ratio at all.
+#
+# *Breadth* is not the symbol count of the panel. Those symbols are spread over 28 years
+# and were never all tradable at once, and $BR$ counts **independent** bets **per year**.
+# The contemporaneous eligible cross-section is the honest starting point; multiplying it
+# by the rebalancing frequency gives the count only if every bet is independent, and they
+# are not - names in one cross-section share factor exposure, and consecutive days re-bet
+# the same slow-moving signals. This notebook does not estimate that dependence, so what
+# it prints is an upper bound on an upper bound.
+#
+# *Skill* is not the largest $|IC|$ among the features scored above. That maximum was
+# picked on the sample it is measured on, so it is a selection artifact and overstates what the feature
+# would repeat out of sample. The typical feature's $|IC|$ is the defensible summary; the
+# maximum is printed only so the gap between the two is visible.
 
 # %%
 if ic_results:
     _feat_names = list(ic_results.keys())
     _p_values = [ic_results[f]["p_value"] for f in _feat_names]
 
-    fdr_result = benjamini_hochberg_fdr(_p_values, alpha=0.05, return_details=True)
+    fdr_result = benjamini_hochberg_fdr(_p_values, alpha=FDR_ALPHA, return_details=True)
 
     eval_summary = pl.DataFrame(
         {
             "feature": _feat_names,
             "family": [assign_feature_family(f) for f in _feat_names],
+            "n_dates": [ic_series[f].height for f in _feat_names],
             "ic_mean": [ic_results[f]["mean_ic"] for f in _feat_names],
             "hac_se": [ic_results[f]["hac_se"] for f in _feat_names],
             "hac_tstat": [ic_results[f]["t_stat"] for f in _feat_names],
@@ -712,277 +1067,383 @@ if ic_results:
     ).sort("ic_mean", descending=True)
 
     n_significant = int(fdr_result["n_rejected"])
-    n_naive_sig = sum(1 for p in _p_values if p < 0.05)
-    inflation = n_naive_sig / max(n_significant, 1)
+    # Both counts are taken from the same HAC p-values, so the ratio between them prices
+    # the multiple testing and nothing else. "Nominal" here means uncorrected for
+    # multiplicity, not uncorrected for autocorrelation - that second correction is
+    # already inside every p-value on both sides of the ratio, and is sized separately
+    # below.
+    n_nominal_sig = sum(1 for p in _p_values if p < FDR_ALPHA)
+    fdr_discovery_ratio = n_nominal_sig / max(n_significant, 1)
+    # A ratio below 1 means HAC widened the standard error.
+    _t_ratio = (eval_summary["hac_tstat"].abs() / eval_summary["naive_tstat"].abs()).drop_nans()
+    hac_t_ratio_median = float(_t_ratio.median())
+    n_t_grew = int((_t_ratio > 1).sum())
+
+    # The ranking below compares features against each other, so they have to have been
+    # scored over near enough the same span. A feature scored on a fraction of the dates is
+    # not a weaker signal, it is a different sample, and its place in the ranking means
+    # nothing.
+    #
+    # A feature's IC series begins once its own rolling window has filled, so the spread
+    # between the widest and the narrowest support is bounded by the longest window in the
+    # set - and that is the bound applied here, in the sessions the windows are declared in
+    # rather than as a share of the sample. On this panel the observed spread is far under
+    # it, because names enter over decades and the early dates fall below the minimum
+    # cross-section for every feature at once; a denser panel whose names all start on the
+    # same day loses the first window from its longest features alone, and nothing is wrong
+    # in either case. What the bound still rejects is the defect it was written for - a
+    # feature scored on a fraction of the dates before the NaN conversion in Section 7,
+    # which is short by thousands of sessions, not by one window.
+    _max_warmup = max(*MOMENTUM_HORIZONS, *VOLATILITY_HORIZONS, *MA_HORIZONS)
+    _date_floor, _date_ceiling = eval_summary["n_dates"].min(), eval_summary["n_dates"].max()
+    _short = (
+        eval_summary.filter(pl.col("n_dates") < _date_ceiling - _max_warmup)
+        .sort("n_dates")
+        .select("feature", "n_dates")
+    )
+    assert _date_floor >= _date_ceiling - _max_warmup, (
+        f"features were scored on {_date_floor:,} to {_date_ceiling:,} dates, a spread the "
+        f"{_max_warmup}-session longest window cannot explain, so their ICs are not measured "
+        f"on comparable samples. Short of it: {_short.rows()}"
+    )
 
     print(f"Features tested: {len(_feat_names)}")
-    print(f"Naive significant (p < 0.05): {n_naive_sig}")
+    print(
+        f"Support per feature: {_date_floor:,} to {_date_ceiling:,} dates of the "
+        f"{len(_dates_in_order):,} scored"
+    )
+    print(f"Nominally significant (p < {FDR_ALPHA}, no multiplicity correction): {n_nominal_sig}")
     print(f"FDR-corrected significant: {n_significant}")
-    print(f"Inflation factor: {inflation:.1f}x")
+    print(f"FDR discovery ratio: {fdr_discovery_ratio:.2f}x (multiple testing, not HAC)")
+    print(
+        f"HAC effect on |t|: median ratio {hac_t_ratio_median:.3f}, "
+        f"range {_t_ratio.min():.3f} to {_t_ratio.max():.3f}; "
+        f"{n_t_grew} of {len(_t_ratio)} features have a larger |t| under HAC"
+    )
     print(eval_summary.select("feature", "family", "ic_mean", "hac_tstat", "significant_fdr05"))
 
-    # Fundamental Law of Active Management
-    # IR = IC * sqrt(BR) where BR ~ number of independent bets
-    mean_ic = float(eval_summary["ic_mean"].mean())
-    breadth = output_df["symbol"].n_unique()
-    ir_estimate = abs(mean_ic) * np.sqrt(breadth)
-    print(f"\nFundamental Law: IC={mean_ic:.4f} x sqrt({breadth}) = IR={ir_estimate:.2f}")
-    print(f"Even tiny ICs are significant with {breadth:,} stocks")
+    xs_per_date = eval_df.group_by("timestamp").len()["len"]
+    breadth_date = int(xs_per_date.median())
+    br_independent = breadth_date * REBALANCES_PER_YEAR
+    typical_ic = float(eval_summary["ic_mean"].abs().mean())
+    best = eval_summary.sort(pl.col("ic_mean").abs(), descending=True).row(0, named=True)
+
+    print("\nFundamental Law inputs, IR = IC x sqrt(BR)")
+    print(
+        f"  cross-section per decision date: median {breadth_date:,} eligible stocks "
+        f"(the panel holds {output_df['symbol'].n_unique():,} across the whole sample)"
+    )
+    print(f"  typical feature |IC|: {typical_ic:.4f} over {len(eval_summary)} features")
+    print(
+        f"  largest |IC| in sample: {abs(best['ic_mean']):.4f} ({best['feature']}) "
+        f"- a maximum over {len(eval_summary)}, not a signal's skill"
+    )
+    print(
+        f"  if all {breadth_date:,} names x {REBALANCES_PER_YEAR} rebalances were independent "
+        f"bets, BR would be {br_independent:,} and the typical feature would imply "
+        f"IR {typical_ic * np.sqrt(br_independent):.1f}."
+    )
+    print(
+        "  They are not independent, and this notebook does not estimate the discount, "
+        "so that figure is an upper bound on an upper bound and no IR is claimed here."
+    )
 
 # %% [markdown]
-# ### IC Bar Chart (Top 20)
+# ### The twenty strongest features, and which of them clear the correction
+#
+# The bars are signed, because the sign is the claim: a feature the panel ranks in one
+# direction and a feature it ranks in the other are different signals, and the sorted
+# magnitude hides that. The label on each bar is its HAC t-statistic, and colour marks
+# whether Benjamini-Hochberg still rejects the null - which at the top of the ranking it
+# does for every one of them, so what separates these twenty is their direction and not
+# their significance. The count that does vary is printed above.
 
 # %%
-if ic_results:
-    top_20 = eval_summary.sort(pl.col("ic_mean").abs(), descending=True).head(20)
+top_20 = eval_summary.sort(pl.col("ic_mean").abs(), descending=True).head(20)
 
-    fig = go.Figure()
-    colors = ["#2ecc71" if sig else "#95a5a6" for sig in top_20["significant_fdr05"].to_list()]
-    fig.add_trace(
-        go.Bar(
-            x=top_20["feature"].to_list(),
-            y=top_20["ic_mean"].to_list(),
-            marker_color=colors,
-            text=[f"{t:.1f}" for t in top_20["hac_tstat"].to_list()],
-            textposition="outside",
-        )
+fig = go.Figure()
+fig.add_trace(
+    go.Bar(
+        x=top_20["feature"].to_list(),
+        y=top_20["ic_mean"].to_list(),
+        marker_color=[
+            COLORS["blue"] if sig else COLORS["silver_muted"]
+            for sig in top_20["significant_fdr05"].to_list()
+        ],
+        marker_line=dict(color=COLORS["neutral"], width=0.6),
+        text=[f"{t:.1f}" for t in top_20["hac_tstat"].to_list()],
+        textposition="outside",
     )
-    fig.update_layout(
-        title="Top 20 Features by IC (green = FDR-significant at 5%)",
-        xaxis_title="Feature",
-        yaxis_title="Mean IC (Spearman)",
-        template="plotly_white",
-        xaxis_tickangle=-45,
-        height=500,
-    )
-    fig.show()
+)
+fig.update_layout(
+    title="The strongest features point in both directions, and none is large",
+    xaxis_title="Feature, ordered by the size of its information coefficient",
+    yaxis_title="Mean IC (Spearman)",
+    xaxis_tickangle=-45,
+    height=620,
+    margin=dict(b=190),
+)
+fig.show()
 
 # %% [markdown]
-# ### Pairwise Feature Correlation
+# ### Pairwise feature correlation
+#
+# Sixty-odd features built from one price series are not sixty-odd signals. The heatmap is
+# ordered by family, so the blocks along the diagonal are the horizons of one construction
+# and the off-diagonal blocks are where two families measure the same thing. Every twentieth
+# date is sampled: a Spearman matrix over every row of the development panel costs hours and
+# moves nothing here, because what the figure has to establish is block structure.
 
 # %%
-high_corr_pairs = []
-
-if eval_df is not None:
-    # Sample every 20th date for efficiency (~4.5M rows is very large)
-    _sample_dates = eval_df["timestamp"].unique().sort().gather_every(20)
-    _corr_data = (
-        eval_df.filter(pl.col("timestamp").is_in(_sample_dates))
-        .select(feature_cols)
-        .to_pandas()
-        .corr(method="spearman")
+_sample_dates = eval_df["timestamp"].unique().sort().gather_every(20)
+_corr_order = [
+    f
+    for f, _ in sorted(
+        ((c, assign_feature_family(c)) for c in feature_cols), key=lambda p: (p[1], p[0])
     )
+]
+_corr_data = (
+    eval_df.filter(pl.col("timestamp").is_in(_sample_dates))
+    .select(_corr_order)
+    .to_pandas()
+    .corr(method="spearman")
+)
 
-    for i, f1 in enumerate(_corr_data.columns):
-        for j, f2 in enumerate(_corr_data.columns):
-            if i < j and abs(_corr_data.iloc[i, j]) > 0.7:
-                high_corr_pairs.append((f1, f2, float(_corr_data.iloc[i, j])))
+high_corr_pairs = [
+    (f1, f2, float(_corr_data.iloc[i, j]))
+    for i, f1 in enumerate(_corr_data.columns)
+    for j, f2 in enumerate(_corr_data.columns)
+    if i < j and abs(_corr_data.iloc[i, j]) > REDUNDANT_CORR
+]
+print(
+    f"Sampled {len(_sample_dates):,} of {eval_df['timestamp'].n_unique():,} dates | feature pairs "
+    f"correlated above {REDUNDANT_CORR}: {len(high_corr_pairs):,} of "
+    f"{len(feature_cols) * (len(feature_cols) - 1) // 2:,}"
+)
 
-    print(f"Feature pairs with |corr| > 0.7: {len(high_corr_pairs)}")
-
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=_corr_data.values,
-            x=_corr_data.columns.tolist(),
-            y=_corr_data.columns.tolist(),
-            colorscale="RdBu_r",
-            zmid=0,
-            zmin=-1,
-            zmax=1,
-        )
+fig = go.Figure(
+    data=go.Heatmap(
+        z=_corr_data.values,
+        x=_corr_data.columns.tolist(),
+        y=_corr_data.columns.tolist(),
+        colorscale=ml4t_diverging(),
+        zmid=0,
+        zmin=-1,
+        zmax=1,
     )
-    fig.update_layout(
-        title=f"Feature Pairwise Correlation ({len(high_corr_pairs)} pairs above 0.7)",
-        template="plotly_white",
-        height=700,
-        width=800,
-    )
-    fig.show()
+)
+fig.update_layout(
+    title="The features cluster into blocks, so they carry fewer signals than columns",
+    height=900,
+    width=1000,
+    xaxis=dict(tickfont=dict(size=8)),
+    yaxis=dict(tickfont=dict(size=8)),
+    margin=dict(l=170, b=170),
+)
+fig.show()
 
 # %% [markdown]
-# ### HAC vs Naive t-statistics
+# ### The HAC correction against the naive one
 
 # %%
-if ic_results:
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=eval_summary["naive_tstat"].to_list(),
-            y=eval_summary["hac_tstat"].to_list(),
-            mode="markers",
-            text=eval_summary["feature"].to_list(),
-            marker=dict(
-                color=[
-                    "#2ecc71" if s else "#e74c3c"
-                    for s in eval_summary["significant_fdr05"].to_list()
-                ],
-                size=8,
-            ),
-        )
+fig = go.Figure()
+_max_t = max(abs(eval_summary["naive_tstat"]).max(), abs(eval_summary["hac_tstat"]).max()) * 1.1
+fig.add_trace(
+    go.Scatter(
+        x=[-_max_t, _max_t],
+        y=[-_max_t, _max_t],
+        mode="lines",
+        line=dict(dash="dash", color=COLORS["neutral"], width=1),
+        name="no correction",
+        hoverinfo="skip",
     )
-    _max_t = (
-        max(
-            abs(eval_summary["naive_tstat"].max()),
-            abs(eval_summary["hac_tstat"].max()),
-        )
-        * 1.1
+)
+fig.add_trace(
+    go.Scatter(
+        x=eval_summary["naive_tstat"].to_list(),
+        y=eval_summary["hac_tstat"].to_list(),
+        mode="markers",
+        text=eval_summary["feature"].to_list(),
+        name="feature",
+        marker=dict(
+            color=[
+                COLORS["blue"] if s else COLORS["copper"]
+                for s in eval_summary["significant_fdr05"].to_list()
+            ],
+            size=8,
+        ),
     )
-    fig.add_trace(
-        go.Scatter(
-            x=[-_max_t, _max_t],
-            y=[-_max_t, _max_t],
-            mode="lines",
-            line=dict(dash="dash", color="gray"),
-            showlegend=False,
-        )
-    )
-    fig.update_layout(
-        title="HAC vs Naive t-statistics (points below line = HAC deflation)",
-        xaxis_title="Naive t-stat",
-        yaxis_title="HAC t-stat",
-        template="plotly_white",
-        height=500,
-    )
-    fig.show()
+)
+fig.update_layout(
+    title="The autocorrelation correction pulls almost every feature toward zero",
+    xaxis_title="t-statistic under the naive standard error",
+    yaxis_title="t-statistic under the HAC standard error",
+    height=500,
+)
+fig.show()
 
 # %% [markdown]
 # **Interpretation**:
-# - With ~3,149 stocks the Fundamental Law is the key insight: even ICs of
-#   0.01-0.02 generate portfolio-level $IR \approx 0.5\text{--}1.0$ because
-#   $IR = IC \cdot \sqrt{BR}$ and breadth is enormous.
-# - HAC adjustment should be minimal (inflation factor ~1.0x) because 1-day
-#   non-overlapping returns produce low IC autocorrelation.
-# - Cross-sectional rank features likely dominate because they are stationary
-#   across the 28-year sample (1990-2018), while raw return levels shift
-#   dramatically between regimes.
-# - Feature correlation is expected to be high within families (momentum
-#   horizons, volatility horizons). Dimensionality reduction or feature
-#   clustering recommended before modeling.
+# - The scatter puts almost every feature between the diagonal and the horizontal axis -
+#   above the line where the naive statistic is negative, below it where it is positive,
+#   which in both cases is closer to zero. That is the
+#   autocorrelation correction doing its work: a daily IC series is persistent enough
+#   that the naive standard error is too narrow. It is modest here, because
+#   one-session, non-overlapping returns leave little of that persistence to price in,
+#   and the print above gives both the median ratio and the count of features whose
+#   statistic grew instead. The FDR discovery ratio beside it is the multiple-testing
+#   correction, a different quantity measuring a different thing; neither number stands
+#   in for the other.
+# - The bars in the top-twenty chart run in both directions and none of them is large,
+#   which is the shape a cross-sectional edge is supposed to have. It is also why the
+#   colouring matters more than the height: clearing Benjamini-Hochberg is the claim,
+#   and the ranking by magnitude is not.
+# - The heatmap's diagonal blocks are wide, and the count printed beside it says how many
+#   pairs exceed the redundancy threshold. The matrix carries fewer signals than columns,
+#   and the selection that acts on that happens downstream rather than here.
 #
-# **Fundamental Law teaching moment**: This is the book's highest-breadth
-# case study. A mean IC of just 0.01 across 3,149 stocks implies
-# $IR = 0.01 \times \sqrt{3149} \approx 0.56$ -- competitive with many
-# hedge fund strategies. The lesson: in large cross-sections, signal
-# quality matters less than signal consistency and cost control.
+# **What the Fundamental Law does and does not license here**: this is the book's
+# highest-breadth case study, and $IR = IC \cdot \sqrt{BR}$ is why an information
+# coefficient this small is worth
+# building for at all. But the arithmetic above stops at an upper bound on an upper
+# bound, and it stops there deliberately: breadth counts *independent* bets, the names
+# in one cross-section share factor exposure, consecutive days re-bet the same
+# slow-moving signals, and nothing in this notebook estimates that dependence. So the
+# figure printed above is what the law permits, not what a strategy would earn. The
+# figures below say something the law's arithmetic cannot: the families rank the panel in
+# opposing directions, so a model that has not chosen between them inherits the
+# disagreement rather than the strength of its strongest member, and the strongest member
+# itself varies by more than an order of magnitude between years. Breadth multiplies a
+# direction; it neither supplies one nor holds it steady.
 
 # %% [markdown]
-# ## Results Collection
-
+# ### What the families are worth, signed
+#
+# The interpretation above rests on a claim the top-twenty chart cannot settle, because it
+# sorts on magnitude: that the panel's features do not agree on a direction. Averaging the
+# signed IC within each family is the direct test. A family whose mean sits near zero is
+# not a family without signal - it is one whose members disagree, and a model that has not
+# chosen a direction inherits that disagreement rather than the strength of its strongest
+# member.
 
 # %%
-def _git_commit_hash():
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], text=True, timeout=5
-        ).strip()
-    except Exception:
-        return "unknown"
-
-
-results = {
-    "case_study_id": "us_equities_panel",
-    "chapter": 8,
-    "stage": "features",
-    "timestamp": datetime.now(UTC).isoformat(),
-    "git_commit": _git_commit_hash(),
-    "notebook": "case_studies/us_equities_panel/03_financial_features.py",
-    "summary": {
-        "n_features": n_features,
-        "n_observations": len(output_df),
-        "n_symbols": output_df["symbol"].n_unique(),
-        "date_range": [str(output_df["timestamp"].min()), str(output_df["timestamp"].max())],
-    },
-    "techniques": {
-        "feature_families": [
-            "momentum",
-            "reversal",
-            "volatility",
-            "liquidity",
-            "technical",
-            "trend",
-            "composites",
-            "size_interactions",
-        ],
-        "winsorization": "1st/99th percentile",
-        "cross_sectional_ranks": True,
-        "amihud_illiquidity": True,
-        "size_conditional_features": True,
-    },
-    "diagnostics": {
-        "feature_count_by_family": {
-            "momentum": len(momentum_feats),
-            "volatility": len(vol_feats),
-            "sharpe": len(sharpe_feats),
-            "technical": len(tech_feats),
-            "trend": len(trend_feats),
-            "ranks": len(rank_feats),
-            "composites": len(composite_feats),
-            "liquidity": len(liquidity_feats),
-        },
-    },
-    "key_findings": [
-        f"{n_features} features computed across {output_df['symbol'].n_unique()} symbols",
-        "Amihud illiquidity added as rolling 21-day measure",
-        "Momentum-reversal spread and size-conditional features included",
-        "Winsorized at 1st/99th percentile to limit extreme values",
-    ],
-}
-
-# Add evaluation block if IC analysis was performed
-if ic_results:
-    family_ic = {}
-    for feat, stats in ic_results.items():
-        family = assign_feature_family(feat)
-        family_ic.setdefault(family, []).append(stats["mean_ic"])
-    family_avg_ic = {f: float(np.mean(ics)) for f, ics in family_ic.items()}
-
-    results["evaluation"] = {
-        "primary_label": _label_col,
-        "n_features_tested": len(ic_results),
-        "n_significant_naive05": n_naive_sig,
-        "n_significant_fdr05": n_significant,
-        "inflation_factor": round(inflation, 1),
-        "fundamental_law": {
-            "mean_ic": round(mean_ic, 4),
-            "breadth": breadth,
-            "ir_estimate": round(ir_estimate, 2),
-        },
-        "top_features": [
-            {
-                "name": row["feature"],
-                "ic_mean": round(row["ic_mean"], 4),
-                "hac_tstat": round(row["hac_tstat"], 2),
-                "hac_pval": round(row["p_value"], 4),
-            }
-            for row in eval_summary.head(10).to_dicts()
-        ],
-        "max_pairwise_corr": (
-            round(max(abs(c) for _, _, c in high_corr_pairs), 3) if high_corr_pairs else 0.0
-        ),
-        "corr_pairs_above_07": len(high_corr_pairs),
-        "feature_family_avg_ic": {
-            k: round(v, 4) for k, v in sorted(family_avg_ic.items(), key=lambda x: -abs(x[1]))
-        },
+family_ic = {}
+for feat, stats in ic_results.items():
+    family_ic.setdefault(assign_feature_family(feat), []).append(stats["mean_ic"])
+family_summary = pl.DataFrame(
+    {
+        "family": list(family_ic),
+        "mean_ic": [float(np.mean(v)) for v in family_ic.values()],
+        "n_features": [len(v) for v in family_ic.values()],
     }
+).sort("mean_ic")
 
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.barh(
+    family_summary["family"],
+    family_summary["mean_ic"],
+    color=[
+        COLORS["blue"] if v > 0 else COLORS["copper"] for v in family_summary["mean_ic"].to_list()
+    ],
+)
+ax.axvline(0, color=COLORS["neutral"], lw=0.8)
+ax.set_xlabel(f"Mean signed IC against {_label_col}")
+add_message_title(
+    ax,
+    "The families split on direction, and the negative side is the larger",
+    subtitle="Mean of the signed information coefficients of each family's members",
+)
+plt.show()
+
+print(family_summary)
+print(
+    f"  signed mean across all {len(ic_results)} features "
+    f"{float(np.mean([s['mean_ic'] for s in ic_results.values()])):+.5f}, against a mean "
+    f"absolute IC of {typical_ic:.5f}"
+)
 
 # %% [markdown]
-# ## Key Takeaways
+# ### How stable the strongest feature is
 #
-# 1. **Cross-sectional ranks** ensure features are stationary across decades
-#    of US equity history. Raw returns and volatility levels are non-stationary;
-#    their ranks within the cross-section at each date are not.
+# One number for a 26-year sample says nothing about whether a feature would have been
+# worth trading in any particular part of it. The annual mean of the same daily IC series
+# the statistics above are computed from is the cheapest test of that, and it separates two
+# things a single average cannot: whether the direction of the effect held, and whether its
+# size did. They fail independently, and only the first is what "the sign is stable" means.
 #
-# 2. **Amihud illiquidity** captures the tension between alpha and tradability:
-#    momentum is stronger among illiquid names (Amihud, 2002), but these are
-#    exactly the stocks with highest transaction costs.
+# The bars begin later than the panel does: a date is scored only where its eligible
+# cross-section reaches the minimum set above, and the panel's first years do not reach it.
+
+# %%
+_strongest = best["feature"]
+annual_ic = (
+    ic_series[_strongest]
+    .with_columns(pl.col("timestamp").dt.year().alias("year"))
+    .group_by("year")
+    .agg(pl.col("ic").mean())
+    .sort("year")
+)
+_full_sample = float(ic_series[_strongest]["ic"].mean())
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single_wide"])
+ax.bar(
+    annual_ic["year"],
+    annual_ic["ic"],
+    color=[COLORS["blue"] if v > 0 else COLORS["copper"] for v in annual_ic["ic"].to_list()],
+    width=0.7,
+)
+ax.axhline(_full_sample, color=COLORS["amber"], ls="--", lw=1.4, label="full-sample mean")
+ax.axhline(0, color=COLORS["neutral"], lw=0.8)
+ax.set_xticks(annual_ic["year"].to_list()[::4])
+ax.set_xlabel("Year")
+ax.set_ylabel(f"Mean IC of {_strongest}")
+ax.legend(frameon=False, fontsize=8, loc="lower right")
+add_message_title(
+    ax,
+    "The strongest feature holds its sign between years but not its size",
+    subtitle="Annual mean of the daily information coefficient behind its full-sample average",
+)
+plt.show()
+
+_negative_years = int((annual_ic["ic"] < 0).sum())
+_by_size = annual_ic["ic"].abs()
+print(
+    f"{_strongest}: full-sample mean IC {_full_sample:+.5f} | annual means from "
+    f"{annual_ic['ic'].min():+.4f} to {annual_ic['ic'].max():+.4f}, negative in "
+    f"{_negative_years} of {annual_ic.height} years, and the largest year is "
+    f"{_by_size.max() / _by_size.min():.0f}x the smallest"
+)
+
+# %% [markdown]
+# ## Key takeaways
 #
-# 3. **Size-conditional features** (momentum x size rank) test whether the
-#    momentum signal varies by market cap -- a key finding in the academic
-#    literature (Fama and French, 1992).
+# 1. **Order the screen against the windows.** Per-symbol shifts and rolling windows count
+#    rows, so they run on the complete price series; cross-sectional ranks are only
+#    meaningful against the names that were sortable that day, so they run on the screened
+#    one. The screen goes between them, and it is the same screen
+#    [`02_labels`](02_labels.ipynb) applies for the same reason.
+# 2. **Winsorize against the cross-section, not against the sample.** A bound estimated over
+#    every date is estimated partly on dates that have not happened yet, and it is the wrong
+#    width on almost all of them, because the panel's dispersion more than doubles between
+#    regimes.
+# 3. **A feature evaluation is sealed on the label's endpoint.** The last development
+#    session's label resolves after the holdout opens, so an observation-date filter looks
+#    sealed and is not.
+# 4. **Sort the IC series before correcting it.** A Newey-West standard error reads the
+#    autocovariances of the series it is handed, and `partition_by` returns groups in no
+#    particular order, so the correction is otherwise computed over a permutation of time.
+# 5. **The multiple-testing correction and the autocorrelation correction are different
+#    quantities.** One says how many features clear a threshold by construction; the other
+#    says how much of a single feature's statistic is left once its own persistence is
+#    priced in.
 #
-# 4. **Winsorization at 1st/99th percentile** protects against split artifacts
-#    and data errors that produce extreme outlier values in daily data.
+# ### Known limitations
 #
-# **Next**: `04_temporal.py` in Ch9 adds Wasserstein regime detection,
-# fractional differencing, and GARCH volatility features.
+# - Every feature is price-derived. No fundamentals, no ownership, no text.
+# - The families are highly correlated by construction, and this notebook measures that
+#   without acting on it; the selection happens downstream.
+# - The Fundamental Law arithmetic here is an upper bound on an upper bound, because
+#   nothing in it estimates how dependent the bets are.
+#
+# **Next**: [`04_model_based_features`](04_model_based_features.ipynb) fits features that
+# have to be learned per fold, and extends this matrix with them.

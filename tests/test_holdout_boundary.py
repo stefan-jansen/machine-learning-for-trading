@@ -464,38 +464,72 @@ def test_a_gapped_calendar_separates_the_two_purges() -> None:
 def evaluation_notebook_label() -> tuple[str, int]:
     """The label file and horizon ``05_evaluation`` actually uses.
 
-    05 hardcodes both, so the equivalence check has to run on its values rather
-    than the configured ones -- otherwise a config change would leave the check
-    validating a purge the notebook does not perform. Requiring them to equal the
-    configured label is what makes the hardcoding safe, and is the assertion that
-    fails if `labels.primary` moves and 05 is not moved with it.
+    05 used to hardcode both, and this helper read the two literals so the
+    equivalence check below ran on the notebook's values rather than the
+    configured ones. It no longer hardcodes them: it takes the label from
+    ``setup.yaml`` and the horizon from ``resolve_label_buffer``, so there is one
+    source of truth and a config change moves the notebook with it.
+
+    What has to be checked therefore moves too. The risk was 05 purging on a
+    label the case study no longer selects; that is now prevented by
+    construction, but only while 05 really does bind both to the config. So this
+    asserts the binding structurally and resolves the values the same way the
+    notebook does, and the caller keeps its teeth by comparing the
+    buffer-derived horizon against the one implied by the label's own name --
+    two independent config entries that a typo can still separate.
     """
     tree = ast.parse((REPO_ROOT / "case_studies" / "etfs" / "05_evaluation.py").read_text())
 
-    # Parsed rather than pattern-matched: a text match on an assignment reports
-    # the value it can see, so `HAC_MAXLAGS = 21 * 2` reads as 21 while the
-    # notebook purges on 42, and a match anywhere in the file is satisfied by a
-    # call the label frame is not built from.
-    literals: dict[str, object] = {}
-    horizon_alias: ast.expr | None = None
+    # Parsed rather than pattern-matched: a text match anywhere in the file is
+    # satisfied by a call the label frame is not built from.
+    bindings: dict[str, ast.expr] = {}
     for node in tree.body:
         if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
             continue
         target = node.targets[0]
-        if not isinstance(target, ast.Name):
-            continue
-        if target.id in ("PRIMARY_LABEL_FILE", "HAC_MAXLAGS") and isinstance(
-            node.value, ast.Constant
-        ):
-            literals[target.id] = node.value.value
-        elif target.id == "LABEL_HORIZON":
-            horizon_alias = node.value
+        if isinstance(target, ast.Name):
+            bindings[target.id] = node.value
 
-    assert set(literals) == {"PRIMARY_LABEL_FILE", "HAC_MAXLAGS"}, (
-        "05_evaluation no longer assigns PRIMARY_LABEL_FILE and HAC_MAXLAGS a "
-        "plain literal each; read its label and horizon from wherever it now "
-        f"takes them (found {sorted(literals)})"
+    def _calls_named(node: ast.AST, func: str) -> bool:
+        return any(
+            isinstance(sub, ast.Call)
+            and (
+                (isinstance(sub.func, ast.Name) and sub.func.id == func)
+                or (isinstance(sub.func, ast.Attribute) and sub.func.attr == func)
+            )
+            for sub in ast.walk(node)
+        )
+
+    missing = {"PRIMARY_LABEL", "HAC_MAXLAGS", "LABEL_HORIZON"} - set(bindings)
+    assert not missing, (
+        "05_evaluation no longer binds "
+        f"{sorted(missing)}; read its label and horizon from wherever it now "
+        "takes them"
     )
+
+    # The label must come from setup.yaml, not from a literal reintroduced here.
+    primary_src = ast.dump(bindings["PRIMARY_LABEL"])
+    assert "'labels'" in primary_src and "'primary'" in primary_src, (
+        "05_evaluation's PRIMARY_LABEL is no longer read from "
+        "SETUP['labels']['primary'], so it can now name a label setup.yaml does "
+        "not select"
+    )
+    assert not isinstance(bindings["PRIMARY_LABEL"], ast.Constant), (
+        "05_evaluation hardcodes PRIMARY_LABEL again; it must be read from setup.yaml"
+    )
+
+    # ...and the HAC bandwidth from the label's configured buffer.
+    assert _calls_named(bindings["HAC_MAXLAGS"], "match") and "LABEL_BUFFER" in {
+        sub.id for sub in ast.walk(bindings["HAC_MAXLAGS"]) if isinstance(sub, ast.Name)
+    }, (
+        "05_evaluation's HAC_MAXLAGS is no longer derived from LABEL_BUFFER, so "
+        "the HAC correction and the label can drift apart"
+    )
+    assert _calls_named(bindings.get("LABEL_BUFFER", ast.Constant(None)), "resolve_label_buffer"), (
+        "05_evaluation no longer resolves LABEL_BUFFER through resolve_label_buffer"
+    )
+
+    horizon_alias = bindings["LABEL_HORIZON"]
     assert isinstance(horizon_alias, ast.Name) and horizon_alias.id == "HAC_MAXLAGS", (
         "05_evaluation's purge horizon is no longer HAC_MAXLAGS itself, so this "
         "helper would report a horizon the notebook does not use"
@@ -522,8 +556,8 @@ def evaluation_notebook_label() -> tuple[str, int]:
         and any(isinstance(t, ast.Name) and t.id == "label_df" for t in node.targets)
         for read in calls_to(node.value, "read_parquet")
     ]
-    assert label_reads and all("PRIMARY_LABEL_FILE" in names_in(read) for read in label_reads), (
-        "05_evaluation must load label_df through PRIMARY_LABEL_FILE; a hardcoded "
+    assert label_reads and all("PRIMARY_LABEL" in names_in(read) for read in label_reads), (
+        "05_evaluation must load label_df through PRIMARY_LABEL; a hardcoded "
         "path there would leave the constant, and this check, describing a file "
         "the notebook does not read"
     )
@@ -545,7 +579,23 @@ def evaluation_notebook_label() -> tuple[str, int]:
             "_label_end; another horizon there purges a window this check is not "
             "measuring"
         )
-    return str(literals["PRIMARY_LABEL_FILE"]), int(literals["HAC_MAXLAGS"])  # type: ignore[arg-type]
+    # Resolved through the same function 05 calls, so a label spec that overrides
+    # setup.yaml moves this check with the notebook rather than silently past it.
+    #
+    # The setup mapping is read from SETUP_YAML rather than through
+    # `load_setup_config`, which resolves the case-study directory from the
+    # environment: under CI's ML4T_OUTPUT_DIR it returns a different file and the
+    # helper died on `KeyError: 'labels'`. This test is a static check on the
+    # committed source, so it must read the committed config.
+    from utils.artifact_specs import resolve_label_buffer
+
+    setup = yaml.safe_load(SETUP_YAML.read_text())
+    primary = str(setup["labels"]["primary"])
+    buffer = resolve_label_buffer("etfs", primary, setup)
+    assert buffer, f"no label buffer configured for {primary}"
+    match = re.match(r"^(\d+)", str(buffer))
+    assert match, f"label buffer {buffer!r} does not start with an integer"
+    return f"{primary}.parquet", int(match.group(1))
 
 
 def test_the_two_purges_agree_on_the_shipped_label_panel() -> None:

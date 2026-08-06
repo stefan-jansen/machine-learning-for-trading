@@ -154,9 +154,9 @@ print(f"Cross-validation buffer {LABEL_BUFFER}; holdout opens {HOLDOUT_START}")
 # observation per contract per day - `LastBidPrice`, `LastAskPrice`, `LastMidPrice` and the
 # matching underlying mid - and no open, high or low, so both the signal and the fill are
 # quoted at a close and entry is priced at the mid of the next session's quote. A signal
-# formed at one close and filled at the next is one session late against the 16 to 24
-# sessions the position is then held for, and Section D reports that exposure window with
-# the entry session already excluded from it. Carrying the position to expiration fixes the
+# formed at one close and filled at the next is one session late against the several weeks
+# the position is then held for, and Section C measures that exposure window with the entry
+# session already excluded from it. Carrying the position to expiration fixes the
 # primary label's outcome: it settles into cash at whatever the underlying is worth that
 # day. Labels are sampled every session rather than only on Fridays - that buys five times
 # the rows at the price of overlapping trades, and Section F measures what they are worth.
