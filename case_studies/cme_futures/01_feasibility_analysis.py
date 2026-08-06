@@ -29,7 +29,8 @@
 #
 # ## Book reference
 #
-# Chapter 6, Sections 6.2-6.6. Reads CME settlements and `config/setup.yaml`, never writes.
+# Chapter 6, Sections 6.2-6.6. Reads CME settlements, `config/setup.yaml` and the contract
+# specifications, never writes.
 
 # %%
 """CME Futures Case Study - Feasibility Analysis."""
@@ -60,8 +61,9 @@ END_DATE = "2025-12-31"
 # %% [markdown]
 # ## Configuration
 #
-# Every knob is read from `setup.yaml`, and Section B computes on the development window
-# alone, so nothing the holdout contains can shape a choice made here.
+# The strategy's knobs are read from `setup.yaml`; the development window is a parameter of
+# this notebook. Section B computes on that window alone, so nothing the holdout contains
+# can shape a choice made here.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -155,10 +157,12 @@ plt.show()
 # %% [markdown]
 # ### B.3 What the spread costs, and what a move is worth
 #
-# `setup.yaml::costs` prices a trade as a commission plus a spread in ticks: one for most of
-# the universe, two for the products it lists as illiquid. The tick is a contract spec that
-# `futures_specs.yaml` carries - do not infer it, since the smallest settlement increment is
-# a half-tick on several contracts, halving the cost you charge yourself.
+# `setup.yaml::costs` prices a trade as commission, spread and roll slippage, and sets the
+# spread as a number of ticks: one for most of the universe, two for the products it lists
+# as illiquid. The tick itself is a contract specification, read here from
+# `futures_specs.yaml` rather than inferred from the settlements, because some products
+# print between their own ticks and a spread inferred from those prints charges less than
+# the exchange does. Those products are listed below.
 
 # %%
 products = yaml.safe_load((REPO_ROOT / "data/futures/market/futures_specs.yaml").read_text())
@@ -170,6 +174,27 @@ ticks = pl.DataFrame(
 )
 unticked = sorted(set(research["product"].unique().to_list()) - set(products["products"]))
 assert not unticked, f"no tick size in futures_specs.yaml for: {unticked}"
+
+between = (
+    research.join(ticks, "product")
+    .with_columns((pl.col("raw_close") / pl.col("tick")).alias("in_ticks"))
+    .with_columns((pl.col("in_ticks") - pl.col("in_ticks").round()).abs().alias("offset"))
+    .filter(pl.col("offset") > 1e-6)  # an on-grid settlement divides exactly, to ~1e-12
+    .group_by("product")
+    .agg(pl.col("offset").min())
+    .sort("product")
+)
+print(
+    f"{between.height} of {research['product'].n_unique()} products settle between their "
+    f"own ticks ({', '.join(between['product'])}), the smallest offset "
+    f"{between['offset'].min():.2f} tick"
+)
+
+# %% [markdown]
+# With the tick fixed by the specification, the configured spread becomes a cost in basis
+# points at each product's own settlement level.
+
+# %%
 illiquid, liquid = SPREAD_TICKS["illiquid"], SPREAD_TICKS["liquid"]
 spread = pl.when(pl.col("product").is_in(ILLIQUID)).then(illiquid).otherwise(liquid)
 cost = (
@@ -232,11 +257,12 @@ plt.show()
 # ### B.4 How long the carrier stays put
 #
 # Rebalancing weekly is only worth the turnover if what the data says at one decision date
-# still says something at the next. This strategy reads carry, visible in the raw prices as
-# the slope between the front contract and the one behind it: a positive slope means a long
-# position rolls into a more expensive contract and gives back part of the spot move. How
-# long that lasts is an autocorrelation, computed inside each product, since stacking every
-# product and correlating the result measures their joins instead.
+# still says something at the next. The ranking reads carry and momentum, and carry is
+# visible in the raw prices as the slope between the front contract and the one behind it: a
+# positive slope means a long position rolls into a more expensive contract and gives back
+# part of the spot move. How long that lasts is an autocorrelation, computed inside each
+# product, since stacking every product and correlating the result measures their joins
+# instead.
 
 # %%
 sealed = pl.col("session_date") < pl.lit(HOLDOUT_START).str.to_date()
@@ -254,9 +280,12 @@ acf = panel_acf(term, entity_col="product", value_col="slope", max_lags=max(HORI
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 ax.fill_between(acf["lag"], acf["acf_p10"], acf["acf_p90"], color=COLORS["blue"], alpha=0.15)
 ax.bar(acf["lag"], acf["acf"], color=COLORS["blue"], width=0.6)
-ax.axhspan(-acf["band"][0], acf["band"][0], color=COLORS["copper"], alpha=0.3)
+ax.axhspan(
+    -acf["band"][0], acf["band"][0], color=COLORS["copper"], alpha=0.3, label="white-noise band"
+)
 ax.set_xlabel("Lag (sessions)")
 ax.set_ylabel("Autocorrelation of the term-structure slope")
+ax.legend(frameon=False, fontsize=8, loc="upper right")
 add_message_title(
     ax,
     "Carry moves slowly enough that a weekly rebalance still acts on it",
@@ -282,9 +311,9 @@ median_move_bps, clears_cost = (
     .row(0)
 )
 print(
-    f"Round-trip spread {cost['spread_bps'].min():.2f} to "
-    f"{cost['spread_bps'].max():.2f} bps, median {COST_BPS:.2f} bps | median "
-    f"{PRIMARY_HORIZON}-session move {median_move_bps:.1f} bps, ratio "
+    f"Round-trip spread {cost['spread_bps'][0]:.2f} bps on {cost['product'][0]} to "
+    f"{cost['spread_bps'][-1]:.2f} bps on {cost['product'][-1]}, median {COST_BPS:.2f} bps"
+    f" | median {PRIMARY_HORIZON}-session move {median_move_bps:.1f} bps, ratio "
     f"{median_move_bps / COST_BPS:.0f}x, over its own product's spread {clears_cost:.3f}"
 )
 
@@ -298,24 +327,27 @@ print(
 #
 # ### C.1 Cadence
 #
-# `setup.yaml::decision.cadence` rebalances at the Friday settlement and executes at the
-# Monday open. B.3 supports that: moves at both horizons clear their own spread, so the
-# signal sets the cadence rather than cost.
+# `setup.yaml::decision` rebalances at the Friday settlement and executes at the Monday
+# open. B.3 supports that: moves at both horizons clear their own spread, so the signal
+# sets the cadence rather than cost.
 #
 # ### C.2 Kill conditions
 #
-# Three thresholds send the strategy back to the drawing board, tested where the evidence
-# exists rather than here: a combined carry-and-momentum information coefficient below its
-# floor across folds; long-backwardation carry turning profitable over the full sample,
-# which would make an inverted-carry reading a regime artifact; and cost above the median
-# move for most of the products.
+# A kill condition is the evidence that sends a design back to the trading setup rather
+# than forward to a model. The one this notebook can read is cost: a spread above the
+# median move for most of the products would mean the ranking pays more to cross than the
+# move it is trying to capture, which is what B.5 measures. The rest are strategy
+# outcomes, evaluated where the backtests are - `17_strategy_analysis` asks the validation
+# Sharpe confidence interval to clear zero, and the holdout difference against the
+# equal-weight baseline not to fall entirely below it.
 #
 # ### C.3 Mapping class
 #
-# `setup.yaml::mapping.class` ranks products by carry or momentum and holds both legs, and
+# `setup.yaml::mapping` ranks products by carry or momentum and holds both legs, and
 # shorting a future carries no borrow, so the short leg costs what the long leg costs.
-# Sizing is equal-risk: weighting by notional would let contract size decide how much each
-# position moves the book, when what the ranking expresses is conviction.
+# Sizing is left open between equal-risk and notional weighting, and the allocator sweep
+# `backtest.sweep.allocators` declares is what settles it: equal weight sizes by notional,
+# inverse volatility and risk parity by realized dispersion.
 
 # %% [markdown]
 # ## D. Walk-forward structure
@@ -333,10 +365,10 @@ print(
 # %% [markdown]
 # ### D.2 Fold demonstration
 #
-# `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone. Between each
-# training and validation block sits a purge gap set by `labels.buffer`, stopping a label
-# computed inside training from resolving inside validation; the longer-horizon variant
-# declares its own buffer and is split under it downstream. That gap spans a few sessions
+# `generate_cv_splits` derives the folds from `setup.yaml::evaluation` and takes the purge
+# gap from the `labels.buffer` it is passed. That gap stops a label computed inside training
+# from resolving inside validation; the longer-horizon variant declares its own buffer and
+# is split under it downstream. The gap spans a few sessions
 # against a training block of years, so the figure below cannot resolve it and the assertion
 # is what establishes its width. The figure draws the boundaries the splitter returned rather
 # than recomputing them, so it and the folds cannot disagree.
@@ -433,8 +465,9 @@ print(
 #
 # 1. **Count the universe on the session the strategy acts on.** Anywhere-in-the-week hides
 #    the thin sessions where a two-sided book cannot be filled.
-# 2. **Take the tick from the contract specification, not from the prices.** Several
-#    contracts settle on half-ticks, so the observed grid understates what you pay.
+# 2. **Take the tick from the contract specification, not from the prices.** A few products
+#    settle between their own ticks, so a tick inferred from the prints understates the
+#    spread you cross.
 # 3. **Scale moves by each product's own spread before comparing them to cost**, and
 #    compute a panel autocorrelation inside each entity, never across the stack.
 # 4. **Guard every denominator.** A back-adjusted series can cross zero once the accumulated
@@ -443,7 +476,7 @@ print(
 #
 # ### Known limitations
 #
-# - Cost here is the spread alone; commission and roll slippage need a notional and enter at
-#   the cost stage, which also tests whether a persistent carry reading is profitable.
+# - Cost here is the spread alone; commission and roll slippage need a position's notional
+#   and enter with the backtest.
 #
 # **Next**: labels at the declared horizons, built on this development window.
