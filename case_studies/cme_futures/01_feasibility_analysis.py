@@ -163,6 +163,8 @@ ticks = pl.DataFrame(
         "tick": [p["tick_size"] for p in products["products"].values()],
     }
 )
+unticked = sorted(set(research["product"].unique().to_list()) - set(products["products"]))
+assert not unticked, f"no tick size in futures_specs.yaml for: {unticked}"
 illiquid, liquid = SPREAD_TICKS["illiquid"], SPREAD_TICKS["liquid"]
 spread = pl.when(pl.col("product").is_in(ILLIQUID)).then(illiquid).otherwise(liquid)
 cost = (
@@ -307,8 +309,8 @@ print(
 #
 # `setup.yaml::mapping.class` ranks products by carry or momentum and holds both legs, and
 # shorting a future carries no borrow, so the short leg costs what the long leg costs.
-# Sizing is equal-risk because volatilities differ by an order of magnitude and notional
-# weighting would hand the book to energy and grains.
+# Sizing is equal-risk: weighting by notional would let contract size decide how much each
+# position moves the book, when what the ranking expresses is conviction.
 
 # %% [markdown]
 # ## D. Walk-forward structure
@@ -327,9 +329,12 @@ print(
 # ### D.2 Fold demonstration
 #
 # `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone. Between each
-# training and validation block sits a purge gap the width of the label horizon, stopping a
-# label computed inside training from resolving inside validation. The figure draws those
-# boundaries rather than recomputing them, so it and the folds cannot disagree.
+# training and validation block sits a purge gap set by `labels.buffer`, stopping a label
+# computed inside training from resolving inside validation; the longer-horizon variant
+# declares its own buffer and is split under it downstream. That gap spans a few sessions
+# against a training block of years, so the figure below cannot resolve it and the assertion
+# is what establishes its width. The figure draws the boundaries the splitter returned rather
+# than recomputing them, so it and the folds cannot disagree.
 
 # %%
 splits = generate_cv_splits(
@@ -339,8 +344,11 @@ splits = generate_cv_splits(
     date_col="timestamp",
 )
 last_val = max(s["val_end"] for s in splits)
+sessions = research["session_date"].unique().sort().to_numpy()
+purge = min(int(((sessions > s["train_end"]) & (sessions < s["val_start"])).sum()) for s in splits)
 assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
 assert last_val < np.datetime64(HOLDOUT_START), "a fold reaches into the holdout"
+assert purge >= HORIZONS[0], "the purge gap is narrower than the primary label horizon"
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 fold_timeline(ax, splits, holdout=(HOLDOUT_START, HOLDOUT_END))
@@ -376,14 +384,17 @@ print(
     f"{breadth.filter(pl.col('n_products') < BREADTH_FLOOR).height} of {len(breadth)} dates\n"
     f"decision.cadence {SETUP['decision']['cadence']} | labels.primary {PRIMARY_LABEL}\n"
     f"evaluation.n_splits {SETUP['evaluation']['n_splits']}, generated {len(splits)}, "
-    f"last validation ends {last_val.date()}, holdout untouched"
+    f"last validation ends {last_val.date()}, holdout untouched\n"
+    f"labels.buffer {LABEL_BUFFER}, narrowest purge {purge} sessions"
 )
 
 # %% [markdown] tags=["results"]
 # Breadth is 29 products until the small-cap index contract lists in 2017 and 30 after, with
 # 8 at its worst on a Good Friday; the floor of 20 binds on 7 of 678 decision dates, five of
 # them Good Friday and two ordinary Fridays on which the settlement file carries part of the
-# universe. Five folds are generated, the last validation ending 2023-12-21.
+# universe. Five folds are generated, the last validation ending 2023-12-21, and the
+# narrowest gap between a training block and the validation window that follows it is 5
+# sessions, the horizon of the primary label.
 
 # %% [markdown]
 # ## Key takeaways
@@ -394,8 +405,9 @@ print(
 #    contracts settle on half-ticks, so the observed grid understates what you pay.
 # 3. **Scale moves by each product's own spread before comparing them to cost**, and
 #    compute a panel autocorrelation inside each entity, never across the stack.
-# 4. **Guard every denominator**: crude settled below zero in 2020, and a percentage change
-#    off a negative price is not a return.
+# 4. **Guard every denominator.** A back-adjusted series can cross zero once the accumulated
+#    roll adjustment outgrows the price, and a change measured off a non-positive base is not
+#    a return.
 #
 # ### Known limitations
 #
