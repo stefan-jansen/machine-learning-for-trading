@@ -58,9 +58,14 @@ ADV_THRESHOLD = 10e6
 # %% [markdown]
 # ## Configuration
 #
-# Every knob comes from `setup.yaml`, and Section B computes on the development window alone, so
-# nothing the holdout contains can shape a choice made here. `universe.eligibility_rule` declares
-# the rule without its number, so the dollar-volume floor is declared in the parameters cell.
+# Every knob comes from `setup.yaml`. Every statistic and every figure below is computed on
+# `research`, the development window, and the two frames built from the whole panel cannot carry a
+# sealed observation into one. The eligibility table admits a fund to a year on the *previous*
+# year's volume, so a development year is decided by development data and the sealed years it also
+# covers are joined to nothing here; E says what those extra rows are for. The session timeline in
+# D.2 goes to the splitter whole, because sealing it is the splitter's job and it does so at the
+# boundary `evaluation` declares. `universe.eligibility_rule` declares the rule without its number,
+# so the dollar-volume floor is declared in the parameters cell.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
