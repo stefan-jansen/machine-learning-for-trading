@@ -341,7 +341,7 @@ _estimated = _v.filter(pl.col("both_defects").is_not_null())
 _at_window = (_estimated["both_defects"] == float(_bars)).mean()
 assert (_v["now"] == float(_bars)).sum() == 0, "a reverted coefficient reports the window length"
 assert _differs.mean() > 0.5, "the variance is being clipped: thin rows agree with the EPS oracle"
-assert _at_window > 0.01, "the oracle no longer shows it"
+assert _at_window > 0.01, "no row reaches the window length carrying both defects"
 print(f"variance below the shared guard on {_v['thin'].mean():.2%} of rows")
 print(f"  of those, {_differs.mean():.2%} would move if the denominator were clipped there")
 print(f"at the window length, of rows with a coefficient: {_at_window:.2%} with both, 0 now")
