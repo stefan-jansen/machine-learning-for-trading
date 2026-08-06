@@ -30,6 +30,11 @@
 # ## Book reference
 #
 # Chapter 6, Sections 6.2-6.6. Reads OANDA FX bars and `config/setup.yaml`, never writes.
+#
+# ## Prerequisites
+#
+# Polars for frame work, and the walk-forward cross-validation vocabulary from Chapter 6: training
+# window, validation window, purge gap, holdout. No model fitting is needed to follow this.
 
 # %%
 """FX Pairs Case Study - Feasibility Analysis."""
@@ -45,7 +50,7 @@ from ml4t.diagnostic.splitters.calendar import TradingCalendar
 
 from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
 from data import load_fx_pairs
-from utils.cv_splits import _map_calendar_id, generate_cv_splits
+from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, ml4t_palette
 
@@ -60,8 +65,10 @@ END_DATE = "2025-12-31"
 # ## Configuration
 #
 # Every knob is read from `setup.yaml`, and Section B computes on the development window alone, so
-# nothing the holdout contains can shape a choice made here. `setup.yaml` names its calendar `FX`,
-# and the splitter's mapping to the exchange the calendar library knows is reused, not repeated.
+# nothing the holdout contains can shape a choice made here. Two calendars are declared and they
+# answer different questions: `decision.session_calendar` is the venue whose rollover decides which
+# session a four-hour bar belongs to, which is what this notebook needs to find each day's close,
+# while `evaluation.calendar` is the one the splitter counts train and validation windows on.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -74,7 +81,7 @@ PRIMARY_LABEL = SETUP["labels"]["primary"]
 HORIZONS = sorted(int(n.split("_")[-1][:-1]) for n in [PRIMARY_LABEL, *SETUP["labels"]["variants"]])
 BREADTH_FLOOR = 2 * max(SETUP["backtest"]["sweep"]["top_k_grid"][PRIMARY_LABEL])
 SPREAD_BPS = SETUP["costs"]["spread_bps"]
-CALENDAR = _map_calendar_id(SETUP["evaluation"]["calendar"])
+SESSION_CALENDAR = SETUP["decision"]["session_calendar"]
 
 print(f"Development {START_DATE} to {HOLDOUT_START} | sealed holdout to {HOLDOUT_END}")
 print(f"{len(DECLARED_PAIRS)} pairs, floor {BREADTH_FLOOR} | horizons {HORIZONS} sessions")
@@ -102,7 +109,7 @@ print(f"{len(DECLARED_PAIRS)} pairs, floor {BREADTH_FLOOR} | horizons {HORIZONS}
 
 # %%
 bars = load_fx_pairs(start_date=START_DATE, end_date=END_DATE)
-calendar = TradingCalendar(CALENDAR)
+calendar = TradingCalendar(SESSION_CALENDAR)
 sessions = calendar.get_sessions(pd.DatetimeIndex(bars["timestamp"].to_pandas()))
 bars = bars.with_columns(pl.Series("session", sessions.values).cast(pl.Date)).drop_nulls("session")
 
@@ -129,9 +136,12 @@ grid = research.group_by("timestamp").agg(pl.col("symbol").n_unique().alias("n")
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 gaps = grid.filter(pl.col("n") < BREADTH_FLOOR)
-ax.plot(snap["session"], snap["n"], color=COLORS["blue"], lw=1.4, label="daily close")
+# The floor sits exactly on the daily-close series, since a both-leg book of the declared size
+# needs all twenty pairs. Drawing it wide and pale underneath keeps both readable.
+floor = dict(color=COLORS["copper"], lw=5, alpha=0.35, zorder=1)
+ax.axhline(BREADTH_FLOOR, label="both-leg position floor", **floor)
+ax.plot(snap["session"], snap["n"], color=COLORS["blue"], lw=1.4, label="daily close", zorder=3)
 ax.plot(gaps["timestamp"], gaps["n"], ".", ms=3, color=COLORS["neutral"], label="four-hour gap")
-ax.axhline(BREADTH_FLOOR, color=COLORS["copper"], ls="--", lw=1.5, label="both-leg position floor")
 ax.set_ylim(0, len(DECLARED_PAIRS) + 2)
 ax.set_ylabel("Pairs quoting at the snapshot")
 ax.legend(frameon=False, fontsize=8, loc="center right")
@@ -185,6 +195,9 @@ cost = (
     .sort(["cost_bps", "symbol"])
 )
 COST_BPS = float(cost["cost_bps"].median())
+by_class = cost.group_by("cost_bps").len().sort("cost_bps").rows()
+tiers = " | ".join(f"{n} pairs at {bps} bps" for bps, n in by_class)
+print(f"{tiers} | universe median {COST_BPS:.0f} bps")
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 ax.bar(cost["symbol"], cost["cost_bps"], color=COLORS["blue"], width=0.7)
@@ -250,12 +263,22 @@ acf = panel_acf(returns, entity_col="symbol", value_col="ret", max_lags=max(HORI
 acf = acf.filter(pl.col("lag") > 0)
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
-ax.fill_between(acf["lag"], acf["acf_p10"], acf["acf_p90"], color=COLORS["blue"], alpha=0.15)
-ax.bar(acf["lag"], acf["acf"], color=COLORS["blue"], width=0.6)
-ax.axhspan(-acf["band"][0], acf["band"][0], color=COLORS["copper"], alpha=0.3)
+band, spread = dict(alpha=0.3, zorder=1), dict(alpha=0.15, zorder=2)
+ax.axhspan(-acf["band"][0], acf["band"][0], color=COLORS["copper"], label="white noise", **band)
+ax.fill_between(
+    acf["lag"],
+    acf["acf_p10"],
+    acf["acf_p90"],
+    color=COLORS["blue"],
+    label="per-pair p10-p90",
+    **spread,
+)
+ax.bar(acf["lag"], acf["acf"], color=COLORS["blue"], width=0.6, zorder=3, label="cross-pair mean")
 ax.set(xlim=(0.4, max(HORIZONS) + 0.6), ylim=(-0.1, 0.1))
+ax.set_xticks(range(1, max(HORIZONS) + 1, 2))
 ax.set_xlabel("Lag (sessions)")
 ax.set_ylabel("Autocorrelation of the daily return")
+ax.legend(frameon=False, fontsize=8, loc="upper right", ncol=3)
 add_message_title(ax, "One session of return tells the next almost nothing, at any lag")
 plt.show()
 
@@ -350,8 +373,10 @@ add_message_title(ax, "Folds roll back from the sealed holdout and stop short of
 plt.show()
 
 # %% [markdown]
-# ## E. Derived artifacts. Nothing: the universe is fixed and declared, so no downstream file
-# reads an eligibility list from here.
+# ## E. Derived artifacts
+#
+# The universe is fixed and declared in `setup.yaml`, so every downstream notebook reads it from
+# there and nothing is written here.
 
 # %% [markdown]
 # ## F. Findings vs `setup.yaml`
