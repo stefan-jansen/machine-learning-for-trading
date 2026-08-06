@@ -79,6 +79,7 @@ HOLDOUT_END = str(SETUP["evaluation"]["holdout_end"])
 DECLARED_PAIRS = sorted(SETUP["universe"]["symbols"])
 PRIMARY_LABEL = SETUP["labels"]["primary"]
 HORIZONS = sorted(int(n.split("_")[-1][:-1]) for n in [PRIMARY_LABEL, *SETUP["labels"]["variants"]])
+PRIMARY_HORIZON = int(PRIMARY_LABEL.split("_")[-1][:-1])
 BREADTH_FLOOR = 2 * max(SETUP["backtest"]["sweep"]["top_k_grid"][PRIMARY_LABEL])
 SPREAD_BPS = SETUP["costs"]["spread_bps"]
 SESSION_CALENDAR = SETUP["decision"]["session_calendar"]
@@ -137,7 +138,7 @@ grid = research.group_by("timestamp").agg(pl.col("symbol").n_unique().alias("n")
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 gaps = grid.filter(pl.col("n") < BREADTH_FLOOR)
 # The floor sits exactly on the daily-close series, since a both-leg book of the declared size
-# needs all twenty pairs. Drawing it wide and pale underneath keeps both readable.
+# needs all twenty pairs.
 floor = dict(color=COLORS["copper"], lw=5, alpha=0.35, zorder=1)
 ax.axhline(BREADTH_FLOOR, label="both-leg position floor", **floor)
 ax.plot(snap["session"], snap["n"], color=COLORS["blue"], lw=1.4, label="daily close", zorder=3)
@@ -289,14 +290,14 @@ plt.show()
 # the clearance share counts moves above their own pair's cost. Neither says total cost clears.
 
 # %%
-primary = f"h{HORIZONS[0]}"
+primary = f"h{PRIMARY_HORIZON}"
 cleared = moves.drop_nulls(primary)
 median_move_bps = float((cleared[primary] * cleared["cost_bps"]).median())
 clears_cost = float((cleared[primary] > 1).mean())
 clears_intraday = float((intraday["bar"].drop_nulls() > 1).mean())
 print(
     f"Round-trip cost {cost['cost_bps'].min()} to {cost['cost_bps'].max()} bps, median "
-    f"{COST_BPS:.0f} bps | median {HORIZONS[0]}-session move {median_move_bps:.1f} bps, "
+    f"{COST_BPS:.0f} bps | median {PRIMARY_HORIZON}-session move {median_move_bps:.1f} bps, "
     f"ratio {median_move_bps / COST_BPS:.1f}x, over its own pair's round trip {clears_cost:.3f}"
     f" | four-hour moves over it {clears_intraday:.3f}"
 )
@@ -320,9 +321,10 @@ print(
 # ### C.2 Kill conditions
 #
 # Three findings would send the strategy back to the drawing board, tested where the evidence
-# exists rather than here: a reversal information coefficient below its declared floor at every
-# horizon; a signal explained entirely by the dollar factor, which would make the cross-sectional
-# ranking a directional bet; and a sign that flips across consecutive folds.
+# exists rather than here: a reversal information coefficient no better at any horizon than the
+# baseline floor `02_labels` measures; a signal explained entirely by the dollar factor, which
+# would make the cross-sectional ranking a directional bet; and a sign that flips across
+# consecutive folds.
 #
 # ### C.3 Mapping class
 #
@@ -356,10 +358,15 @@ print(
 # it leaves a gap, which stops a label computed on the last training date from resolving inside
 # validation.
 #
-# The gap is set by the primary label alone: `labels.buffer` is one session, matching the
-# one-session `fwd_ret_1d`, so it covers that label exactly and covers neither the five- nor the
-# twenty-one-session variant. The width is a scalar, and a bar a single session wide is invisible
-# on a fifteen-year axis, so it is printed rather than read off the figure below.
+# The gap is set by the label the folds are generated for. `labels.buffer` is one session,
+# matching the one-session `fwd_ret_1d`, so the design below covers that label exactly. The two
+# variants declare their own gaps in `setup.yaml::labels.variant_buffers` - five sessions for
+# `fwd_ret_5d`, twenty-one for `fwd_ret_21d` - and every stage that generates folds resolves the
+# buffer for the label it is about to train on, so each label gets its own set of boundaries. The
+# timeline below is therefore the primary label's design, not one design shared by all three.
+#
+# The width is a scalar, and a bar a single session wide is invisible on a fifteen-year axis, so
+# it is printed rather than read off the figure below.
 
 # %%
 splits = generate_cv_splits(
@@ -393,14 +400,15 @@ print(
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
 fold_timeline(ax, splits, holdout=(HOLDOUT_START, HOLDOUT_END))
-add_message_title(ax, "Folds roll back from the sealed holdout and stop short of it")
+ax.set_xlabel("Session")
+add_message_title(ax, "Folds roll back from the sealed holdout and none reaches into it")
 plt.show()
 
 # %% [markdown]
 # ## E. Derived artifacts
 #
-# The universe is fixed and declared in `setup.yaml`, so every downstream notebook reads it from
-# there and nothing is written here.
+# Nothing is written here. The universe is fixed and declared in `setup.yaml::universe.symbols`,
+# which is where this notebook reads it and where a later stage that needs the list reads it too.
 
 # %% [markdown]
 # ## F. Findings vs `setup.yaml`
