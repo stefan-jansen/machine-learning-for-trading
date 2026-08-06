@@ -47,15 +47,26 @@ def _parse(text: str) -> dict[str, str]:
     return rows
 
 
-def _staged_paths() -> list[str]:
-    out = _git("diff", "--cached", "--name-only", "--diff-filter=ACMRT")
-    return [p for p in out.splitlines() if p.endswith(".py")]
+def _index_blobs(paths: list[str]) -> dict[str, str]:
+    """path -> the blob git would commit for it. Absent means the commit has no such file.
 
-
-def _staged_blob(path: str) -> str | None:
-    """The blob hash git would commit for ``path``, or None if it is not staged."""
-    out = _git("ls-files", "--stage", "--", path).split()
-    return out[1] if len(out) >= 2 else None
+    Asking about the listed paths rather than about the staged ones is what makes a
+    deletion and a rename visible. Both leave the recorded path with no blob in the index,
+    and a rename additionally writes the same content somewhere the manifest cannot vouch
+    for, so neither can be distinguished from "still there" by looking at what changed.
+    """
+    if not paths:
+        return {}
+    out = _git("ls-files", "--stage", "-z", "--", *paths)
+    blobs: dict[str, str] = {}
+    for entry in out.split("\0"):
+        if not entry:
+            continue
+        meta, _, path = entry.partition("\t")
+        fields = meta.split()
+        if len(fields) >= 2 and path:
+            blobs[path] = fields[1]
+    return blobs
 
 
 def main(argv: list[str]) -> int:
@@ -65,26 +76,26 @@ def main(argv: list[str]) -> int:
     audit = "--audit" in argv
     if audit:
         recorded = _parse(MANIFEST.read_text())
-        changed = [
-            (p, b)
-            for p, b in recorded.items()
-            if (REPO_ROOT / p).exists() and _git("hash-object", str(REPO_ROOT / p)).strip() != b
-        ]
-        for path, blob in changed:
-            print(f"CHANGED  {path}  verified at {blob[:8]}, worktree differs")
-        print(f"--- {len(changed)} of {len(recorded)} verified notebooks have moved ---")
-        return 1 if changed else 0
+        moved = []
+        for path, blob in recorded.items():
+            target = REPO_ROOT / path
+            if not target.exists():
+                moved.append((path, blob, "GONE", "no such file in the worktree"))
+            elif _git("hash-object", str(target)).strip() != blob:
+                moved.append((path, blob, "CHANGED", "worktree differs"))
+        for path, blob, kind, why in moved:
+            print(f"{kind:8} {path}  verified at {blob[:8]}, {why}")
+        print(f"--- {len(moved)} of {len(recorded)} verified notebooks have moved ---")
+        return 1 if moved else 0
 
     # The manifest as this commit will leave it: a row dropped or updated here is consent.
     after = _parse(_git("show", ":" + MANIFEST.name) or MANIFEST.read_text())
 
     violations = []
-    for path in _staged_paths():
-        recorded = after.get(path)
-        if recorded is None:
-            continue
-        staged = _staged_blob(path)
-        if staged is not None and staged != recorded:
+    blobs = _index_blobs(list(after))
+    for path, recorded in after.items():
+        staged = blobs.get(path)
+        if staged != recorded:
             violations.append((path, recorded, staged))
 
     if not violations:
@@ -92,13 +103,16 @@ def main(argv: list[str]) -> int:
 
     print("a verified notebook is being changed while its verification still stands:")
     for path, recorded, staged in violations:
-        print(f"  {path}\n      verified at {recorded[:8]}, this commit writes {staged[:8]}")
+        wrote = f"this commit writes {staged[:8]}" if staged else "this commit removes it"
+        print(f"  {path}\n      verified at {recorded[:8]}, {wrote}")
     print(
         f"\nA verdict describes one exact version of the file. Changing it here voids the verdict\n"
         f"without saying so, which is how four batch rewrites erased ~30 verifications in the week\n"
         f"to 2026-08-06.\n"
         f"\nIf the change is intended, drop or update the row in {MANIFEST.name} in this same commit\n"
-        f"and re-run the verifier afterwards. If it is not, unstage the notebook."
+        f"and re-run the verifier afterwards. If it is not, unstage the notebook.\n"
+        f"A renamed notebook is a removal here and an unverified file at the new path: move the\n"
+        f"row too, and it is the verifier who decides whether the verdict survives the move."
     )
     return 1
 

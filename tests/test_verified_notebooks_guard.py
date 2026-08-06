@@ -103,6 +103,54 @@ def test_updating_the_row_to_the_new_blob_is_allowed(repo: Path) -> None:
     assert _run_gate(repo).returncode == 0
 
 
+def test_deleting_a_verified_notebook_is_rejected(repo: Path) -> None:
+    """Removing the file voids the verdict as surely as rewriting it."""
+    _verify(repo)
+    _git(repo, "rm", "-q", NOTEBOOK)
+
+    result = _run_gate(repo)
+
+    assert result.returncode == 1, result.stdout
+    assert NOTEBOOK in result.stdout
+    assert "removes it" in result.stdout
+
+
+def test_renaming_a_verified_notebook_is_rejected(repo: Path) -> None:
+    """A rename leaves the row pointing at nothing and the content somewhere unvouched for."""
+    _verify(repo)
+    _git(repo, "mv", NOTEBOOK, "case_studies/demo/01_renamed.py")
+
+    result = _run_gate(repo)
+
+    assert result.returncode == 1, result.stdout
+    assert NOTEBOOK in result.stdout
+
+
+def test_moving_the_row_with_the_rename_is_allowed(repo: Path) -> None:
+    """Consent for a rename is moving the row, which puts the decision in the diff."""
+    _verify(repo)
+    renamed = "case_studies/demo/01_renamed.py"
+    _git(repo, "mv", NOTEBOOK, renamed)
+    blob = _git(repo, "ls-files", "--stage", "--", renamed).stdout.split()[1]
+    (repo / MANIFEST_NAME).write_text(HEADER + f"{renamed}\t{blob}\t2026-08-06\ttester\n")
+    _git(repo, "add", MANIFEST_NAME)
+
+    assert _run_gate(repo).returncode == 0
+
+
+def test_audit_reports_a_verified_notebook_that_is_gone(repo: Path) -> None:
+    """--audit must not read a missing file as an unchanged one."""
+    _verify(repo)
+    _git(repo, "commit", "-qm", "record the verification")
+    (repo / NOTEBOOK).unlink()
+
+    result = _run_gate(repo, "--audit")
+
+    assert result.returncode == 1, result.stdout
+    assert "GONE" in result.stdout
+    assert NOTEBOOK in result.stdout
+
+
 def test_an_unlisted_notebook_is_untouched(repo: Path) -> None:
     """Nothing is verified yet, so the gate must not stand in the way of ordinary work."""
     (repo / NOTEBOOK).write_text("# %%\nprint('nobody has verified this')\n")
