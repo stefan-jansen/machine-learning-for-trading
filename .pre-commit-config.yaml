@@ -61,3 +61,16 @@ repos:
         entry: python3 .github/scripts/notebook_provenance.py check
         pass_filenames: false
         always_run: true
+
+      # Verification gate: a notebook whose verifier signed off on one exact
+      # version may not be silently changed. `.verified-notebooks.tsv` records
+      # the .py blob at sign-off; this fails a commit that changes a listed .py
+      # while leaving its row intact. Four batch rewrites in the week to
+      # 2026-08-06 erased ~30 verifications this way, PR #478 doing 34 notebooks
+      # in one commit. See .github/scripts/check_verified_notebooks.py.
+      - id: verified-notebooks
+        name: verified notebook not silently changed
+        language: system
+        entry: python3 .github/scripts/check_verified_notebooks.py
+        pass_filenames: false
+        always_run: true
