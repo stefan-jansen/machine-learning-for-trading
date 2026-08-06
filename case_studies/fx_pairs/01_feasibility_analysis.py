@@ -350,10 +350,16 @@ print(
 # %% [markdown]
 # ### D.2 Fold demonstration
 #
-# `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone, numbering them
-# backwards from the most recent, so they are sorted here before they are drawn. Between each
-# training and validation block sits a purge gap the width of the label horizon, which stops a
-# label computed inside training from resolving inside validation.
+# `generate_cv_splits` reads the fold count and window lengths from `setup.yaml::evaluation` and
+# the purge width from `setup.yaml::labels.buffer`, and numbers the folds backwards from the most
+# recent, so they are sorted here before they are drawn. Between each training and validation block
+# it leaves a gap, which stops a label computed on the last training date from resolving inside
+# validation.
+#
+# The gap is set by the primary label alone: `labels.buffer` is one session, matching the
+# one-session `fwd_ret_1d`, so it covers that label exactly and covers neither the five- nor the
+# twenty-one-session variant. The width is a scalar, and a bar a single session wide is invisible
+# on a fifteen-year axis, so it is printed rather than read off the figure below.
 
 # %%
 splits = generate_cv_splits(
@@ -366,6 +372,24 @@ splits = sorted(splits, key=lambda split: split["val_start"])
 last_val = max(split["val_end"] for split in splits)
 assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
 assert last_val < np.datetime64(HOLDOUT_START), "a fold reaches into the holdout"
+
+session_grid = pd.DatetimeIndex(sorted(daily["session"].unique().to_list()))
+purge = {
+    int(
+        session_grid.searchsorted(pd.Timestamp(s["val_start"]))
+        - session_grid.searchsorted(pd.Timestamp(s["train_end"]))
+        - 1
+    )
+    for s in splits
+}
+to_holdout = int(
+    session_grid.searchsorted(pd.Timestamp(HOLDOUT_START)) - session_grid.searchsorted(last_val) - 1
+)
+print(
+    f"purge {sorted(purge)} session(s) at each of {len(splits)} boundaries, from "
+    f"labels.buffer {SETUP['labels']['buffer']} | last validation {pd.Timestamp(last_val).date()}, "
+    f"holdout opens {HOLDOUT_START}, {to_holdout} session between them"
+)
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
 fold_timeline(ax, splits, holdout=(HOLDOUT_START, HOLDOUT_END))
