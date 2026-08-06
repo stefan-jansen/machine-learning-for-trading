@@ -174,7 +174,7 @@ plt.show()
 #
 # `setup.yaml::costs` prices a trade as a per-share commission plus a half-spread assigned by
 # liquidity tier: daily bars carry no bid and ask, so the spread is asserted rather than measured,
-# and `18_cost_sensitivity` stresses that assumption. Both are dollars per share, so what they cost
+# and `16_costs` stresses that assumption. Both are dollars per share, so what they cost
 # as a fraction of the position falls as a fund's price rises; the chart takes each at its median.
 
 # %%
@@ -193,6 +193,7 @@ fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 ax.bar(cost["symbol"], cost["cost_bps"], color=COLORS["blue"], width=0.7)
 ax.axhline(COST_BPS, color=COLORS["copper"], ls="--", lw=1.5, label="universe median")
 ax.set_ylabel("Round-trip cost (bps)")
+ax.set_xlabel("Funds, sorted by round-trip cost")
 ax.set_xticks([])  # a hundred tickers are unreadable, and the spread of the curve is the point
 ax.legend(frameon=False, fontsize=8)
 add_message_title(
@@ -235,8 +236,8 @@ plt.show()
 # ### B.4 Serial correlation of the carrier
 #
 # The carrier is what the ranking is built from: the return between consecutive decision dates. Its
-# serial correlation inside each fund says how much of one month's return the next repeats - a
-# property of that series, not of the cross-sectional ranking, which `05_evaluation` measures.
+# serial correlation inside each fund says how much of one month's return the next repeats, a
+# property of that series and not of the cross-sectional ranking, which `05_evaluation` measures.
 # Stacking a hundred funds and correlating the result would measure their joins instead.
 
 # %%
@@ -251,7 +252,7 @@ ax.axhspan(-acf["band"][0], acf["band"][0], color=COLORS["copper"], alpha=0.18, 
 ax.fill_between(acf["lag"], acf["acf_p10"], acf["acf_p90"], color=COLORS["blue"], alpha=0.15)
 ax.bar(acf["lag"], acf["acf"], color=COLORS["blue"], width=0.6)
 ax.set_xlabel("Lag (decision dates)")
-ax.set_ylabel("Autocorrelation of the month-to-month return")
+ax.set_ylabel("Autocorrelation")
 add_message_title(
     ax,
     "A single month's return says almost nothing about the next month's",
@@ -286,22 +287,20 @@ print(
 # ## C. Design decisions
 #
 # ### C.1 Cadence. `setup.yaml::decision.cadence` ranks funds at the month-end close and executes at
-# the next open. B.3 supports rebalancing at least that often, since moves at both declared horizons
-# clear the round trip their own fund charges, so cost is not what sets the cadence. A monthly
-# schedule also buys a purge gap the width of the primary label; the weekly horizon stays in
-# `labels.variants` so the shorter holding period is measured rather than assumed away.
+# the next open. B.3 supports rebalancing that often, since moves at both declared horizons clear
+# the round trip their own fund charges. A month also buys a purge gap the width of the primary
+# label, and the weekly horizon stays in `labels.variants` so the shorter holding period is measured.
 #
 # ### C.2 Kill conditions. Three thresholds send the strategy back to the drawing board, each tested
 # where its evidence exists rather than here: a cross-sectional information coefficient
 # indistinguishable from zero at every lookback, measured in Chapter 8; a move-to-cost ratio under
-# one once realistic costs are charged, and an equal-weight book earning a higher Sharpe ratio at a
-# smaller drawdown across folds, both measured in Chapter 16.
+# one once realistic costs are charged, measured in Chapter 18; and an equal-weight book earning a
+# higher Sharpe ratio at a smaller drawdown across folds, measured in Chapter 16.
 #
 # ### C.3 Mapping class. `setup.yaml::mapping.class` holds the leaders long only, because many of
 # these funds are expensive or impossible to borrow and a short leg would price that constraint
-# rather than the signal. Sizing is equal weight, the rule that adds no second estimate: an
-# optimized weighting folds a covariance estimate in and leaves the ranking's own contribution
-# unidentifiable. Chapter 17 sweeps those alternatives.
+# rather than the signal. Sizing is equal weight: an optimized weighting folds a covariance estimate
+# in and leaves the ranking's own contribution unidentifiable. Chapter 17 sweeps those alternatives.
 
 # %% [markdown]
 # ## D. Walk-forward structure
@@ -319,14 +318,14 @@ print(
 # %% [markdown]
 # ### D.2 Fold demonstration
 #
-# `generate_cv_splits` derives the folds from `setup.yaml::evaluation` alone. Between each training
-# and validation block sits a purge gap the width of the label horizon, which stops a label computed
-# inside training from resolving inside validation. The figure draws the boundaries the splitter
-# returned rather than recomputing them, so the two cannot disagree.
+# `generate_cv_splits` takes the whole session timeline and seals the holdout at the boundary
+# `setup.yaml::evaluation` declares, so a caller passes every session rather than a window it trimmed
+# first. Between training and validation sits a purge gap the width of the label horizon, drawn at
+# true scale, which stops a label computed inside training from resolving inside validation.
 
 # %%
 splits = generate_cv_splits(
-    research.select("timestamp"),
+    prices.select("timestamp"),
     case_study_id=CASE_STUDY_ID,
     label_buffer=LABEL_BUFFER,
     date_col="timestamp",
@@ -337,7 +336,8 @@ assert last_val < np.datetime64(HOLDOUT_START), "a fold reaches into the holdout
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 fold_timeline(ax, splits, holdout=(HOLDOUT_START, HOLDOUT_END))
-add_message_title(ax, "Folds roll back from the holdout, drawn from the splitter's own output")
+purge_note = f"Train, the {PRIMARY_HORIZON}-session purge, validation, and the sealed holdout"
+add_message_title(ax, "Folds roll back from the sealed holdout and never reach it", purge_note)
 plt.show()
 
 # %% [markdown]
