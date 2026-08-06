@@ -41,6 +41,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import yaml
+from pandas.tseries.holiday import GoodFriday
 
 from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
 from data import load_cme_futures
@@ -76,9 +77,13 @@ SPREAD_TICKS = SETUP["costs"]["spread_ticks"]
 ILLIQUID = set(SETUP["costs"]["illiquid_products"])
 LABELS = [PRIMARY_LABEL, *SETUP["labels"]["variants"]]
 HORIZONS = sorted(int(re.search(r"(\d+)d$", name).group(1)) for name in LABELS)
+PRIMARY_HORIZON = int(re.search(r"(\d+)d$", PRIMARY_LABEL).group(1))
 
 print(f"Development {START_DATE} to {HOLDOUT_START} | sealed holdout to {HOLDOUT_END}")
-print(f"{len(DECLARED_PRODUCTS)} products, floor {BREADTH_FLOOR} | horizons {HORIZONS} sessions")
+print(
+    f"{len(DECLARED_PRODUCTS)} products, floor {BREADTH_FLOOR} | horizons {HORIZONS} sessions, "
+    f"primary {PRIMARY_LABEL} at {PRIMARY_HORIZON}"
+)
 
 # %% [markdown]
 # ## A. Orientation
@@ -230,8 +235,8 @@ plt.show()
 # still says something at the next. This strategy reads carry, visible in the raw prices as
 # the slope between the front contract and the one behind it: a positive slope means a long
 # position rolls into a more expensive contract and gives back part of the spot move. How
-# long that lasts is an autocorrelation, computed inside each product, since stacking thirty
-# and correlating the result measures their joins instead.
+# long that lasts is an autocorrelation, computed inside each product, since stacking every
+# product and correlating the result measures their joins instead.
 
 # %%
 sealed = pl.col("session_date") < pl.lit(HOLDOUT_START).str.to_date()
@@ -267,9 +272,9 @@ plt.show()
 # cost clears.
 
 # %%
-multiple = pl.col(f"h{HORIZONS[0]}")
+multiple = pl.col(f"h{PRIMARY_HORIZON}")
 median_move_bps, clears_cost = (
-    returns.drop_nulls(f"h{HORIZONS[0]}")
+    returns.drop_nulls(f"h{PRIMARY_HORIZON}")
     .select(
         (multiple * pl.col("spread_bps")).median().alias("mid"),
         (multiple > 1).mean().alias("share"),
@@ -279,7 +284,7 @@ median_move_bps, clears_cost = (
 print(
     f"Round-trip spread {cost['spread_bps'].min():.2f} to "
     f"{cost['spread_bps'].max():.2f} bps, median {COST_BPS:.2f} bps | median "
-    f"{HORIZONS[0]}-session move {median_move_bps:.1f} bps, ratio "
+    f"{PRIMARY_HORIZON}-session move {median_move_bps:.1f} bps, ratio "
     f"{median_move_bps / COST_BPS:.0f}x, over its own product's spread {clears_cost:.3f}"
 )
 
@@ -348,7 +353,7 @@ sessions = research["session_date"].unique().sort().to_numpy()
 purge = min(int(((sessions > s["train_end"]) & (sessions < s["val_start"])).sum()) for s in splits)
 assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
 assert last_val < np.datetime64(HOLDOUT_START), "a fold reaches into the holdout"
-assert purge >= HORIZONS[0], "the purge gap is narrower than the primary label horizon"
+assert purge >= PRIMARY_HORIZON, "the purge gap is narrower than the primary label horizon"
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 fold_timeline(ax, splits, holdout=(HOLDOUT_START, HOLDOUT_END))
@@ -376,25 +381,52 @@ plt.show()
 # | `decision.cadence` | B.3 exceedance, B.4 persistence | moves stop clearing the spread, or the slope decays inside one rebalancing interval |
 # | `costs.spread_ticks` | B.3 tick per product from `futures_specs.yaml` | the exchange changes a tick, or a product changes liquidity class |
 # | `evaluation.n_splits` | D.1 decision dates, D.2 boundaries | the folds no longer fit the development window |
+#
+# The count alone does not say whether `universe.n_products` needs revising, so each date the
+# floor binds on is listed with its weekday and whether it is Good Friday. A floor that binds
+# on a recurring exchange holiday, when the settlement file carries only the part of the
+# universe that traded, asks a different question than one that binds on arbitrary dates. The
+# same applies to the step in breadth: it is dated by the last product to list rather than
+# read off the chart.
 
 # %%
+listings = (
+    research.group_by("product").agg(pl.col("session_date").min().alias("listed")).sort("listed")
+)
+newest = listings.row(-1, named=True)
+modal_before = breadth.filter(pl.col("session_date") < newest["listed"])["n_products"].mode().max()
+modal_after = breadth.filter(pl.col("session_date") >= newest["listed"])["n_products"].mode().max()
+
+thin = breadth.filter(pl.col("n_products") < BREADTH_FLOOR).sort("session_date")
+good_friday = set(
+    GoodFriday.dates(str(breadth["session_date"].min()), str(breadth["session_date"].max())).date
+)
+thin_lines = "\n".join(
+    f"  {d} {d:%a} breadth {n:>2} " + ("Good Friday" if d in good_friday else "regular session")
+    for d, n in zip(thin["session_date"], thin["n_products"], strict=True)
+)
+
 print(
     f"universe.n_products {SETUP['universe']['n_products']}, breadth per decision date "
-    f"{breadth['n_products'].min()} to {breadth['n_products'].max()}, under the floor on "
-    f"{breadth.filter(pl.col('n_products') < BREADTH_FLOOR).height} of {len(breadth)} dates\n"
+    f"{breadth['n_products'].min()} to {breadth['n_products'].max()}, modal {modal_before} "
+    f"before {newest['product']} first settles {newest['listed']} and {modal_after} after\n"
+    f"under the floor of {BREADTH_FLOOR} on {thin.height} of {len(breadth)} decision dates, "
+    f"{sum(d in good_friday for d in thin['session_date'])} of them Good Friday:\n"
+    f"{thin_lines}\n"
     f"decision.cadence {SETUP['decision']['cadence']} | labels.primary {PRIMARY_LABEL}\n"
     f"evaluation.n_splits {SETUP['evaluation']['n_splits']}, generated {len(splits)}, "
     f"last validation ends {last_val.date()}, holdout untouched\n"
-    f"labels.buffer {LABEL_BUFFER}, narrowest purge {purge} sessions"
+    f"labels.buffer {LABEL_BUFFER}, narrowest purge {purge} sessions against the "
+    f"{PRIMARY_HORIZON}-session primary horizon"
 )
 
 # %% [markdown] tags=["results"]
-# Breadth is 29 products until the small-cap index contract lists in 2017 and 30 after, with
-# 8 at its worst on a Good Friday; the floor of 20 binds on 7 of 678 decision dates, five of
-# them Good Friday and two ordinary Fridays on which the settlement file carries part of the
-# universe. Five folds are generated, the last validation ending 2023-12-21, and the
-# narrowest gap between a training block and the validation window that follows it is 5
-# sessions, the horizon of the primary label.
+# Breadth is 29 products until the small-cap index contract (RTY) first settles on
+# 2017-07-10 and 30 after, with 8 at its worst on a Good Friday; the floor of 20 binds on 7
+# of 678 decision dates, five of them Good Friday and two regular Fridays on which the
+# settlement file carries part of the universe. Five folds are generated, the last validation
+# ending 2023-12-21, and the narrowest gap between a training block and the validation window
+# that follows it is 5 sessions, the horizon of the primary label.
 
 # %% [markdown]
 # ## Key takeaways
