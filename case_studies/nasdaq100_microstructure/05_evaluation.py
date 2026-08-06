@@ -1,6 +1,8 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -12,7 +14,7 @@
 #     name: python3
 # ---
 
-# %% [markdown] papermill={"duration": 0.011963, "end_time": "2026-05-15T14:10:06.127024+00:00", "exception": false, "start_time": "2026-05-15T14:10:06.115061+00:00", "status": "completed"}
+# %% [markdown]
 # # Feature Evaluation: NASDAQ-100 Microstructure
 #
 # Univariate screening of the financial and model-based feature sets against the
@@ -50,7 +52,7 @@
 #   let regularization and importance do the selecting, so a STOP here is a recorded
 #   judgment about a feature, not a filter applied on the reader's behalf.
 
-# %% papermill={"duration": 2.655142, "end_time": "2026-05-15T14:10:08.790098+00:00", "exception": false, "start_time": "2026-05-15T14:10:06.134956+00:00", "status": "completed"}
+# %%
 """Feature Evaluation - NASDAQ-100 Microstructure
 
 Univariate screening of the financial and model-based feature sets against the
@@ -75,6 +77,7 @@ from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 from scipy.stats import t as student_t
 
+from utils.cv_splits import generate_cv_splits
 from utils.data_quality import validate_modeling_inputs
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, GRAY_FILLS
@@ -87,12 +90,12 @@ def _normalize_symbol_column(df: pl.DataFrame) -> pl.DataFrame:
     raise KeyError(msg)
 
 
-# %% papermill={"duration": 0.004816, "end_time": "2026-05-15T14:10:08.796541+00:00", "exception": false, "start_time": "2026-05-15T14:10:08.791725+00:00", "status": "completed"} tags=["parameters"]
+# %% tags=["parameters"]
 # Production defaults — Papermill overrides for testing
 # MAX_SYMBOLS: 0 = all symbols; set to 20 for fast CI
 MAX_SYMBOLS = 0
 
-# %% papermill={"duration": 0.005763, "end_time": "2026-05-15T14:10:08.804288+00:00", "exception": false, "start_time": "2026-05-15T14:10:08.798525+00:00", "status": "completed"}
+# %%
 CASE_STUDY_ID = "nasdaq100_microstructure"
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 EVAL_DIR = CASE_DIR / "evaluation"
@@ -166,7 +169,7 @@ REDUNDANCY_CUT = 0.70
 IC_THRESHOLD = 0.003
 MIN_PERIODS_DEFAULT = 10  # 101-114 symbols → 10 is conservative
 
-# %% [markdown] papermill={"duration": 0.001775, "end_time": "2026-05-15T14:10:08.808127+00:00", "exception": false, "start_time": "2026-05-15T14:10:08.806352+00:00", "status": "completed"}
+# %% [markdown]
 # ## 0. Panel and the Holdout Seal
 #
 # Load the financial features, the model-based features and the primary label, and
@@ -180,11 +183,20 @@ MIN_PERIODS_DEFAULT = 10  # 101-114 symbols → 10 is conservative
 # statistic in this notebook — not the coverage screen, not the quantile profile, not
 # the redundancy correlation — ever sees a holdout row.
 
-# %% papermill={"duration": 11.251787, "end_time": "2026-05-15T14:10:20.061358+00:00", "exception": false, "start_time": "2026-05-15T14:10:08.809571+00:00", "status": "completed"}
+# %%
 # Identify feature columns before loading (peek at schema)
 features_path = CASE_DIR / "features" / "financial.parquet"
 temporal_path = CASE_DIR / "features" / "model_based.parquet"
 label_path = CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet"
+
+# The walk-forward folds. `generate_cv_splits` derives them from the label frame, the
+# same call `04_model_based_features` makes when it fits the temporal features, so a
+# fold id denotes the same window on both sides of the join below.
+splits = generate_cv_splits(
+    pl.scan_parquet(label_path).select(DATE_COL).unique().sort(DATE_COL).collect(),
+    case_study_id=CASE_STUDY_ID,
+    label_buffer=setup["labels"]["buffer"],
+)
 
 financial_cols = [
     c for c in pl.read_parquet_schema(features_path) if c not in ("timestamp", "symbol")
@@ -222,22 +234,45 @@ label_df = label_df.filter(holdout_seal)
 
 features = _normalize_symbol_column(features.collect())
 temporal = _normalize_symbol_column(temporal.collect())
-# Drop fold column (per-fold features are for training, not evaluation)
-if "fold" in temporal.columns:
-    temporal = temporal.drop("fold").unique(subset=["timestamp", "symbol"], keep="last")
+# Resolve the fold dimension. `model_based.parquet` carries one fitted value per
+# fold, so `fold` is part of its key while the panel needs one temporal row per
+# `(timestamp, symbol)`. A fitted value is out of sample only inside its own fold's
+# validation window, so keeping it there and dropping the holdout fold selects
+# exactly one value per bar and symbol.
+val_windows = {int(s["fold"]): (s["val_start"], s["val_end"]) for s in splits}
+_ts_dtype = temporal.schema[DATE_COL]
+temporal = (
+    temporal.filter(pl.col("fold").is_in(list(val_windows)))
+    .filter(
+        pl.col("fold")
+        .replace_strict({f: s for f, (s, _) in val_windows.items()}, default=None)
+        .cast(_ts_dtype)
+        <= pl.col(DATE_COL)
+    )
+    .filter(
+        pl.col(DATE_COL)
+        <= pl.col("fold")
+        .replace_strict({f: e for f, (_, e) in val_windows.items()}, default=None)
+        .cast(_ts_dtype)
+    )
+    .drop("fold")
+)
+assert temporal.select(JOIN_COLS).is_duplicated().sum() == 0, (
+    "validation windows overlap; a fitted feature would take two values on one bar"
+)
 label_df = _normalize_symbol_column(label_df.collect())
 
 # Auto-detect label column
 label_col = [c for c in label_df.columns if c not in ("timestamp", "symbol")][0]
 
-# %% [markdown] papermill={"duration": 0.00264, "end_time": "2026-05-15T14:10:20.067024+00:00", "exception": false, "start_time": "2026-05-15T14:10:20.064384+00:00", "status": "completed"}
+# %% [markdown]
 # ## Artifact Quality Gate
 #
 # Verify upstream artifacts are free of critical defects before evaluation. This is
 # the artifact gate — infinities, negative prices, extreme returns — and it is a
 # different question from the per-feature coverage and staleness screens below.
 
-# %% papermill={"duration": 2.287479, "end_time": "2026-05-15T14:10:22.356095+00:00", "exception": false, "start_time": "2026-05-15T14:10:20.068616+00:00", "status": "completed"}
+# %%
 validate_modeling_inputs(
     features_df=features,
     label_df=label_df,
@@ -249,7 +284,7 @@ validate_modeling_inputs(
     fail_on_critical=True,
 )
 
-# %% papermill={"duration": 5.529039, "end_time": "2026-05-15T14:10:27.887567+00:00", "exception": false, "start_time": "2026-05-15T14:10:22.358528+00:00", "status": "completed"}
+# %%
 # Build unified eval panel, then free source DataFrames
 eval_panel = features.join(temporal, on=JOIN_COLS, how="left")
 eval_panel = eval_panel.join(label_df, on=JOIN_COLS, how="inner")
@@ -260,6 +295,26 @@ del features, temporal, label_df
 # so it raises here rather than surfacing as a quietly wrong IC.
 assert eval_panel.select(label_endpoint.max()).item() < HOLDOUT_START
 assert eval_panel.select(pl.struct(JOIN_COLS).n_unique()).item() == len(eval_panel)
+
+# Screen every candidate on the frame where it can exist. A Chapter 9 feature is out
+# of sample only inside the validation window of the fold that fitted it, so over the
+# whole pre-holdout span its coverage is the share of that span the windows reach and
+# the correctness gate below reads a property of the design as a broken feature. The
+# panel is the union of the windows, which puts the Chapter 8 features on the same
+# bars as the Chapter 9 ones and makes the two ICs comparable.
+IN_VALIDATION = pl.any_horizontal(
+    [
+        (pl.col(DATE_COL) >= pl.lit(start).cast(_ts_dtype))
+        & (pl.col(DATE_COL) <= pl.lit(end).cast(_ts_dtype))
+        for start, end in val_windows.values()
+    ]
+)
+n_before_windows = len(eval_panel)
+eval_panel = eval_panel.filter(IN_VALIDATION)
+print(
+    f"Narrowed to the union of the validation windows: {n_before_windows:,} -> "
+    f"{len(eval_panel):,} rows"
+)
 
 n_rows = len(eval_panel)
 n_symbols = eval_panel["symbol"].n_unique()
@@ -276,7 +331,7 @@ print(
 )
 print(f"Label: {label_col}")
 
-# %% [markdown] papermill={"duration": 0.011368, "end_time": "2026-05-15T14:10:27.900720+00:00", "exception": false, "start_time": "2026-05-15T14:10:27.889352+00:00", "status": "completed"}
+# %% [markdown]
 # ## 1. Correctness Screens
 #
 # Check coverage (fraction non-null) and staleness (fraction unchanged from prior
@@ -293,7 +348,7 @@ print(f"Label: {label_col}")
 # staleness stays at or below `STALENESS_MAX`. Both bounds are declared in the
 # configuration cell and printed with the counts below.
 
-# %% papermill={"duration": 50.666787, "end_time": "2026-05-15T14:11:18.569933+00:00", "exception": false, "start_time": "2026-05-15T14:10:27.903146+00:00", "status": "completed"}
+# %%
 # Coverage: fraction non-null per feature
 coverage = {}
 for feat in all_feature_cols:
@@ -313,7 +368,7 @@ staleness = {
 }
 del stale_df, sorted_panel
 
-# %% papermill={"duration": 0.006863, "end_time": "2026-05-15T14:11:18.578585+00:00", "exception": false, "start_time": "2026-05-15T14:11:18.571722+00:00", "status": "completed"}
+# %%
 # Apply correctness gate
 correctness = {}
 for feat in all_feature_cols:
@@ -336,7 +391,7 @@ if n_fail > 0:
     )
     print(fail_df)
 
-# %% [markdown] papermill={"duration": 0.001493, "end_time": "2026-05-15T14:11:18.581661+00:00", "exception": false, "start_time": "2026-05-15T14:11:18.580168+00:00", "status": "completed"}
+# %% [markdown]
 # ## 2. Univariate Association (IC + HAC)
 #
 # Compute the Information Coefficient (IC) — the cross-sectional Spearman rank
@@ -357,7 +412,7 @@ if n_fail > 0:
 # timestamp can therefore sit at a different offset within one session than within
 # the next.
 
-# %% papermill={"duration": 0.345248, "end_time": "2026-05-15T14:11:18.928453+00:00", "exception": false, "start_time": "2026-05-15T14:11:18.583205+00:00", "status": "completed"}
+# %%
 evaluable_features = [f for f in all_feature_cols if correctness[f]]
 
 # One timestamp per label horizon, to approximate independence
@@ -369,7 +424,7 @@ print(
     f" sampled timestamps ({len(eval_sampled):,} rows)"
 )
 
-# %% papermill={"duration": 0.264749, "end_time": "2026-05-15T14:11:19.194973+00:00", "exception": false, "start_time": "2026-05-15T14:11:18.930224+00:00", "status": "completed"}
+# %%
 # Detect date-level features (zero cross-sectional variance)
 cs_std_df = eval_sampled.group_by(DATE_COL).agg(
     [pl.col(f).std().alias(f) for f in evaluable_features]
@@ -383,7 +438,7 @@ for feat in evaluable_features:
 if date_level_features:
     print(f"Date-level features (zero CS variance): {sorted(date_level_features)}")
 
-# %% papermill={"duration": 0.662339, "end_time": "2026-05-15T14:11:19.860584+00:00", "exception": false, "start_time": "2026-05-15T14:11:19.198245+00:00", "status": "completed"}
+# %%
 # Vectorized IC: Polars group_by + pl.corr computes all features × timestamps at once
 cs_features = [f for f in evaluable_features if f not in date_level_features]
 
@@ -403,7 +458,7 @@ ic_wide = (
 
 print(f"IC computed: {len(cs_features)} features × {len(ic_wide):,} timestamps")
 
-# %% papermill={"duration": 0.059671, "end_time": "2026-05-15T14:11:19.923603+00:00", "exception": false, "start_time": "2026-05-15T14:11:19.863932+00:00", "status": "completed"}
+# %%
 # Unpivot to per-feature IC series and compute HAC stats.
 # `pl.corr` returns NaN, not null, for a cross-section with no variance in the
 # feature, and a NaN is not an observation of the IC: left in, it poisons every
@@ -569,7 +624,7 @@ if leader:
     fig.update_xaxes(title_text="Mean IC, 95% intervals", row=1, col=2)
     fig.show()
 
-# %% [markdown] papermill={"duration": 0.001682, "end_time": "2026-05-15T14:11:19.927786+00:00", "exception": false, "start_time": "2026-05-15T14:11:19.926104+00:00", "status": "completed"}
+# %% [markdown]
 # ### Fold-Level Stability
 #
 # Check sign consistency across CV folds. A feature whose IC flips sign between
@@ -587,17 +642,16 @@ if leader:
 # six of the nine case studies at once, so it is tracked there rather than changed
 # here.
 
-# %% papermill={"duration": 0.026864, "end_time": "2026-05-15T14:11:19.956539+00:00", "exception": false, "start_time": "2026-05-15T14:11:19.929675+00:00", "status": "completed"}
-# Generate approximate fold boundaries from sampled IC timestamps
-all_ic_dates = ic_wide[DATE_COL].to_list()
-fold_size = len(all_ic_dates) // N_FOLDS if N_FOLDS > 0 else 0
-
-fold_boundaries = []
-if fold_size > 0:
-    for i in range(N_FOLDS):
-        start_idx = i * fold_size
-        end_idx = min((i + 1) * fold_size - 1, len(all_ic_dates) - 1)
-        fold_boundaries.append((all_ic_dates[start_idx], all_ic_dates[end_idx]))
+# %%
+# Score each fold over the window its features were fitted out of sample on, so the
+# consistency below is measured on the same folds the panel was resolved with.
+fold_boundaries = [
+    (
+        pl.lit(split["val_start"]).cast(_ts_dtype),
+        pl.lit(split["val_end"]).cast(_ts_dtype),
+    )
+    for split in splits
+]
 
 fold_stats = {}
 for feat in ic_results:
@@ -672,7 +726,7 @@ if stability_features:
     )
     fig.show()
 
-# %% [markdown] papermill={"duration": 0.001644, "end_time": "2026-05-15T14:11:19.959880+00:00", "exception": false, "start_time": "2026-05-15T14:11:19.958236+00:00", "status": "completed"}
+# %% [markdown]
 # ## 3. Search Accounting and Multiple Testing
 #
 # **The searched set.** A p-value is interpretable only against the set of tests it
@@ -694,7 +748,7 @@ if stability_features:
 # is printed alongside the three significance counts, which is what makes the
 # adjustment's effect legible.
 
-# %% papermill={"duration": 0.006369, "end_time": "2026-05-15T14:11:19.967912+00:00", "exception": false, "start_time": "2026-05-15T14:11:19.961543+00:00", "status": "completed"}
+# %%
 feature_names = list(ic_results.keys())
 p_values = [ic_results[f]["p_value"] for f in feature_names]
 
@@ -759,7 +813,7 @@ print(f"BH-FDR significant:           {n_significant_fdr}")
 print(f"Inflation factor (Newey-West): {inflation(n_significant_naive, n_significant_hac)}")
 print(f"Inflation factor (BH-FDR):     {inflation(n_significant_naive, n_significant_fdr)}")
 
-# %% [markdown] papermill={"duration": 0.001782, "end_time": "2026-05-15T14:11:19.971375+00:00", "exception": false, "start_time": "2026-05-15T14:11:19.969593+00:00", "status": "completed"}
+# %% [markdown]
 # ### Ranking, with the Inference Adjustment Visible
 #
 # The left panel ranks the leading features by absolute mean IC and colours each bar
@@ -777,7 +831,7 @@ print(f"Inflation factor (BH-FDR):     {inflation(n_significant_naive, n_signifi
 # Bars run horizontally. At this many feature names a rotated vertical axis is not
 # legible.
 
-# %% papermill={"duration": 0.828307, "end_time": "2026-05-15T14:11:20.801398+00:00", "exception": false, "start_time": "2026-05-15T14:11:19.973091+00:00", "status": "completed"}
+# %%
 RANKED_FEATURES = 25
 top = eval_summary.head(min(RANKED_FEATURES, len(eval_summary))).reverse()
 
@@ -975,7 +1029,7 @@ fig.update_yaxes(title_text="Mean cross-sectional IC", row=1, col=1)
 fig.update_yaxes(title_text="Mean IC / standard deviation of the IC series", row=1, col=2)
 fig.show()
 
-# %% [markdown] papermill={"duration": 0.003431, "end_time": "2026-05-15T14:11:20.935767+00:00", "exception": false, "start_time": "2026-05-15T14:11:20.932336+00:00", "status": "completed"}
+# %% [markdown]
 # ## 4. Shape Diagnostics
 #
 # Quantile monotonicity: does the mean forward return spread monotonically across
@@ -996,7 +1050,7 @@ fig.show()
 # equal to every digit, and any difference in their quantile profiles here is the
 # pooled binning speaking rather than the features.
 
-# %% papermill={"duration": 1.051184, "end_time": "2026-05-15T14:11:21.990307+00:00", "exception": false, "start_time": "2026-05-15T14:11:20.939123+00:00", "status": "completed"}
+# %%
 N_QUANTILES = 5
 top_features_for_shape = eval_summary.filter(pl.col("fdr_sig").fill_null(False))[
     "feature"
@@ -1031,7 +1085,7 @@ print(
     f" |monotonicity| >= {MONOTONICITY_MIN}"
 )
 
-# %% papermill={"duration": 0.078446, "end_time": "2026-05-15T14:11:22.079889+00:00", "exception": false, "start_time": "2026-05-15T14:11:22.001443+00:00", "status": "completed"}
+# %%
 QUANTILE_SHADES = [
     COLORS["negative"],
     COLORS["copper"],
@@ -1073,7 +1127,7 @@ if quantile_spreads:
     fig.update_yaxes(title_text="Mean forward return", col=1)
     fig.show()
 
-# %% [markdown] papermill={"duration": 0.004334, "end_time": "2026-05-15T14:11:22.088826+00:00", "exception": false, "start_time": "2026-05-15T14:11:22.084492+00:00", "status": "completed"}
+# %% [markdown]
 # ## 5. Redundancy & Feature Families
 #
 # Identify highly correlated feature pairs and aggregate IC by family. Correlated
@@ -1091,7 +1145,7 @@ if quantile_spreads:
 # `04_model_based_features` builds — so they are assigned from the column names it
 # writes.
 
-# %% papermill={"duration": 0.007182, "end_time": "2026-05-15T14:11:22.100211+00:00", "exception": false, "start_time": "2026-05-15T14:11:22.093029+00:00", "status": "completed"}
+# %%
 # The declared patterns are globs over column names; `*` is any suffix, which is how
 # a family claims both the level and its `_xs` twin.
 DECLARED_FAMILIES = [
@@ -1135,7 +1189,7 @@ unclaimed = sorted(f for f, fam in families.items() if fam == "other")
 if unclaimed:
     print(f"Features matched by no declared family: {unclaimed}")
 
-# %% papermill={"duration": 4.611176, "end_time": "2026-05-15T14:11:26.727307+00:00", "exception": false, "start_time": "2026-05-15T14:11:22.116131+00:00", "status": "completed"}
+# %%
 # Pairwise correlation (sample timestamps for efficiency)
 sample_corr_step = max(1, n_dates // 200)
 corr_dates = eval_panel[DATE_COL].unique().sort().to_list()[::sample_corr_step]
@@ -1154,7 +1208,7 @@ for i in range(len(corr_matrix)):
 print(f"Redundancy cut: |rank correlation| > {REDUNDANCY_CUT}")
 print(f"Feature pairs above the cut: {len(high_corr_pairs)}")
 
-# %% papermill={"duration": 0.009189, "end_time": "2026-05-15T14:11:26.741105+00:00", "exception": false, "start_time": "2026-05-15T14:11:26.731916+00:00", "status": "completed"}
+# %%
 # Family-level IC summary
 family_ic = {}
 fdr_sig_features = eval_summary.filter(pl.col("fdr_sig").fill_null(False))["feature"].to_list()
@@ -1189,7 +1243,7 @@ else:
     fam_df = pl.DataFrame()
     print("No features passed IC evaluation threshold")
 
-# %% [markdown] papermill={"duration": 0.004353, "end_time": "2026-05-15T14:11:26.749946+00:00", "exception": false, "start_time": "2026-05-15T14:11:26.745593+00:00", "status": "completed"}
+# %% [markdown]
 # ### The Strongest Redundant Pairs
 #
 # Ranked pairs rather than the full matrix. At this many features an unmasked
@@ -1202,7 +1256,7 @@ else:
 # level against its own cross-sectional z-score, which are redundant by
 # construction rather than by anything the data did.
 
-# %% papermill={"duration": 0.11213, "end_time": "2026-05-15T14:11:26.866417+00:00", "exception": false, "start_time": "2026-05-15T14:11:26.754287+00:00", "status": "completed"}
+# %%
 RANKED_PAIRS = 20
 if high_corr_pairs:
     ranked = sorted(high_corr_pairs, key=lambda pair: abs(pair[2]), reverse=True)[:RANKED_PAIRS]
@@ -1241,7 +1295,7 @@ if high_corr_pairs:
     print(f"Of the {len(ranked)} strongest pairs, {cross_family} span two families")
     print(f"Of the {len(ranked)} strongest pairs, {same_twin} are a level against its own z-score")
 
-# %% [markdown] papermill={"duration": 0.005363, "end_time": "2026-05-15T14:11:26.877665+00:00", "exception": false, "start_time": "2026-05-15T14:11:26.872302+00:00", "status": "completed"}
+# %% [markdown]
 # ## 6. Triage & Handoff
 #
 # The book's Table 7.2 rule, with every bound taken from the configuration cell. The
@@ -1260,7 +1314,7 @@ if high_corr_pairs:
 # above. A reader comparing the promoted count to the FDR count should not expect the
 # shape diagnostic to explain the gap.
 
-# %% papermill={"duration": 0.008409, "end_time": "2026-05-15T14:11:26.891366+00:00", "exception": false, "start_time": "2026-05-15T14:11:26.882957+00:00", "status": "completed"}
+# %%
 triage = {}
 for feat in all_feature_cols:
     if not correctness[feat]:
@@ -1282,7 +1336,7 @@ for feat in all_feature_cols:
     else:
         triage[feat] = ("REVISE", "not_significant_standalone")
 
-# %% papermill={"duration": 0.017541, "end_time": "2026-05-15T14:11:26.914253+00:00", "exception": false, "start_time": "2026-05-15T14:11:26.896712+00:00", "status": "completed"}
+# %%
 # Build triage ledger
 ledger_rows = []
 for feat in all_feature_cols:
@@ -1317,7 +1371,7 @@ triage_ledger.write_parquet(EVAL_WRITE_DIR / "triage_ledger.parquet")
 print(f"\nTriage ledger: {EVAL_DIR / 'triage_ledger.parquet'}")
 print(triage_ledger.group_by("decision").len().sort("decision"))
 
-# %% papermill={"duration": 0.022924, "end_time": "2026-05-15T14:11:26.942724+00:00", "exception": false, "start_time": "2026-05-15T14:11:26.919800+00:00", "status": "completed"}
+# %%
 # Save IC time series (long format)
 ic_ts_frames = []
 for feat, ts in ic_timeseries.items():
@@ -1328,7 +1382,7 @@ if ic_ts_frames:
     ic_ts_all.write_parquet(EVAL_WRITE_DIR / "ic_timeseries.parquet")
     print(f"IC time series: {EVAL_DIR / 'ic_timeseries.parquet'}")
 
-# %% papermill={"duration": 0.020548, "end_time": "2026-05-15T14:11:26.969044+00:00", "exception": false, "start_time": "2026-05-15T14:11:26.948496+00:00", "status": "completed"}
+# %%
 proceed_features = [f for f, (d, _) in triage.items() if d == "PROCEED"]
 revise_features = [f for f, (d, _) in triage.items() if d == "REVISE"]
 stop_features = [f for f, (d, _) in triage.items() if d == "STOP"]
@@ -1386,7 +1440,7 @@ fig.update_yaxes(autorange="reversed")
 fig.show()
 print(f"Promoted by arm: {arm_counts}")
 
-# %% [markdown] papermill={"duration": 0.006014, "end_time": "2026-05-15T14:11:27.005741+00:00", "exception": false, "start_time": "2026-05-15T14:11:26.999727+00:00", "status": "completed"}
+# %% [markdown]
 # ## Key Takeaways
 #
 # ### What the screen does

@@ -81,9 +81,8 @@ FEATURES_DIR = CASE_DIR / "features"
 # ## Configuration
 #
 # Prices, the canonical fold timeline and the Chapter 8 feature matrix. `MIN_OBS` and
-# `MAX_SYMBOLS` are declared in the parameters cell above and bound here; they used to be
-# re-assigned below it, which silently discarded whatever papermill injected and ran the
-# test suite at production settings.
+# `MAX_SYMBOLS` are declared in the parameters cell above and bound here, and never
+# re-assigned below it, so the value papermill injects is the value the notebook runs on.
 #
 # Load prices, CV config, and Ch8 features. We need:
 # - Prices for GARCH fitting (daily returns)

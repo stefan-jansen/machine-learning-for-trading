@@ -446,9 +446,8 @@ print(agreement.head())
 # **One null policy, applied once.** The release publishes complete cases, so the policy is to
 # assert completeness rather than to impose a rule: every released characteristic must be fully
 # populated over the window, and every constructed column must be populated wherever its members
-# are. Nothing is dropped. The previous version of this notebook dropped rows on whichever five
-# columns happened to sort first in the released panel, which is a screen keyed on column order -
-# it removed nothing on this data, and would have removed something arbitrary on any other.
+# are. Nothing is dropped. Dropping rows on a subset of columns would key the screen on column
+# order, which removes nothing on this data and something arbitrary on any other.
 
 # %%
 assert features.select(PANEL_KEY).n_unique() == len(features), "panel key is not unique"
@@ -640,9 +639,8 @@ print(f"Decision dates before the holdout: {survival.height} months, from {WINDO
 # | `features/financial.parquet` | `04_evaluation:70`, and the modeling stages downstream of it |
 # | `features/financial.parquet.digest.json` | nothing yet - it is the provenance record a reader checks by hand, and what stage 04 will declare as an input when it adopts the sidecar |
 #
-# The previous version also wrote `feature_doc.json`, a description of the families and the
-# normalization. Nothing in the repository read it, and the register it duplicated now lives in
-# `setup.yaml`, where a test can reach it. It is not written any more.
+# The register of families and their normalization lives in `setup.yaml`, where a test can
+# reach it, rather than in a description this notebook would write beside the matrix.
 
 # %%
 matrix = features.select(PANEL_KEY + FEATURE_COLS).sort(PANEL_KEY)

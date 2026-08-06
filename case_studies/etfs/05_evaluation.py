@@ -1,6 +1,8 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -156,11 +158,9 @@ temporal_cols = [c for c in temporal_artifact.columns if c not in (*JOIN_COLS, "
 # %% [markdown]
 # ### The walk-forward folds
 #
-# Derived through `generate_cv_splits` from the label frame, which is the call
-# `04_model_based_features` makes and the one `load_modeling_dataset` makes in Ch11.
-# Partitioning the date index into equal blocks here - what this notebook used to do
-# - would let a fold id mean one thing in `model_based.parquet` and another on this
-# side of the join, which is exactly what the resolution below depends on.
+# `generate_cv_splits` derives the folds from the label frame. It is the same call
+# `04_model_based_features` makes and the one `load_modeling_dataset` makes in
+# Chapter 11, so a fold id denotes the same window everywhere it appears.
 
 # %%
 splits = generate_cv_splits(
@@ -182,8 +182,8 @@ for split in splits:
     )
 
 # %%
-# Resolve the fold column: keep each fitted value only on the dates where the fold
-# that produced it was out of sample, and drop the extra holdout fold.
+# A fitted value is out of sample only inside its own fold's validation window, so
+# keeping it there and dropping the holdout fold leaves one value per date and symbol.
 val_windows = {int(s["fold"]): (_as_date(s["val_start"]), _as_date(s["val_end"])) for s in splits}
 IN_VALIDATION = pl.any_horizontal(
     [(pl.col(DATE_COL) >= start) & (pl.col(DATE_COL) <= end) for start, end in val_windows.values()]
@@ -447,10 +447,9 @@ print(f"Skipped {len(date_level_features)} date-level features")
 #
 # Whether a feature's IC keeps the same sign across the walk-forward validation
 # windows, which is what separates a feature that works across market regimes from
-# one that had a single favorable period. The windows are the ones the folds
-# actually have; this notebook used to cut the date index into equal blocks, which
-# gave the sign-consistency column a different meaning from the fold ids everything
-# else in the pipeline uses.
+# one that had a single favorable period. The windows are the folds' own validation
+# windows, so this column and the fold ids everything else in the pipeline uses
+# denote the same periods.
 #
 # The quantity measured is agreement with the feature's *own* full-sample sign, not
 # agreement with a positive sign. A feature that is negative in every fold is as
