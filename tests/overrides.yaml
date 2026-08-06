@@ -1148,18 +1148,25 @@ case_studies/cme_futures/02_labels:
 case_studies/cme_futures/03_financial_features:
   timeout: 120
 case_studies/cme_futures/04_model_based_features:
+  # MAX_PRODUCTS: 0 - every product, not a sample. 05_evaluation keeps a date only where
+  # ten products carry the feature, so a fixture covering three of the thirty leaves the
+  # temporal features under the coverage gate and scores nothing.
   parameters:
     FFT_WINDOW: 126
-    MAX_PRODUCTS: 3
+    MAX_PRODUCTS: 0
   skip: true
-  skip_reason: ARIMA/HMM/FFT cells across multiple products and folds exceed 900s on the slower pymc 5.28 / pytensor 2.38
-    / numpy 2.3 stack. All downstream notebooks consume the pre-seeded test-data/intermediates/cme_futures/features and pass;
-    regenerating in CI is redundant work. Re-enable when timing budget allows.
-  timeout: 900
+  skip_reason: ARIMA/HMM/FFT across all 30 products and 5 folds is 20 minutes locally (measured 2026-08-05, 1,188s),
+    and longer on the slower pymc 5.28 / pytensor 2.38 / numpy 2.3 stack CI runs. Downstream notebooks consume the
+    pre-seeded test-data/intermediates/cme_futures/features instead. That fixture is only as current as the last time
+    someone regenerated it with these parameters, and nothing here detects when it drifts from what 05_evaluation reads.
+  timeout: 1800
 case_studies/cme_futures/05_evaluation:
-  parameters:
-    MAX_SYMBOLS: 5
-  timeout: 300
+  # No MAX_SYMBOLS. The cross-sectional IC in Section 4 keeps a date only when at least
+  # ten products carry the feature and the label, so a five-product panel scores nothing
+  # at all - 0 of 48 evaluable features, and the IC-series figure then asks for a
+  # zero-row subplot. The fixture carries all 30 products, which is what production
+  # evaluates, and the reduction bought nothing: the panel is 38k rows either way.
+  timeout: 600
 case_studies/cme_futures/06_linear:
   parameters:
     MAX_FOLDS: 2
@@ -1875,9 +1882,21 @@ case_studies/us_equities_panel/03_financial_features:
     START_DATE: '2000-01-01'
   timeout: 600
 case_studies/us_equities_panel/04_model_based_features:
-  # GARCH_MIN_OBS: 50 removed - the notebook has no parameters cell, so the
-  # injected cell goes to the top and `GARCH_MIN_OBS = 504` on line 100
-  # overwrites it before any function that reads it can run.
+  # START_DATE has to match 02_labels above. 04 asserts that the panel it loads
+  # digests to the value 02_labels recorded against the label file it scores
+  # against, and without this it loaded its own 1990-01-01 default (298,055 rows,
+  # 067a8e7a6b6ed0bf) against labels written from 2000-01-01 (220,378 rows,
+  # 54d5bec0d92f4f7f).
+  #
+  # GARCH_MIN_OBS goes with it. #446 dropped both because neither could be received;
+  # START_DATE now can, and GARCH_MIN_OBS was moved into the notebook's parameters cell
+  # so it can too. At a 2000-01-01 start no symbol carries 504 sessions inside a fold's
+  # training window, so every GARCH fit is skipped and the per-fold assembly joins an
+  # empty frame.
+  parameters:
+    GARCH_MIN_OBS: 50
+    START_DATE: '2000-01-01'
+    XS_MIN_STOCKS: 25
   timeout: 300
 case_studies/us_equities_panel/05_evaluation:
   parameters:

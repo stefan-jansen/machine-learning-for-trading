@@ -116,6 +116,13 @@ IntArray = NDArray[np.int64]
 CASE_STUDY_ID = "us_equities_panel"
 START_DATE = "1990-01-01"
 MAX_FOLDS = 0  # 0 = all folds; papermill injects 2 for CI
+# The narrowest cross-section a daily return distribution is summarized from. The
+# Wasserstein clustering in Section 2 reads the median of that distribution, and a
+# median over a handful of names is not a market. It is declared here rather than with
+# the transform constants above because it is a property of the panel rather than of the
+# transform: a reduced panel has to lower it or every date is dropped and the clustering
+# has nothing to fit on.
+XS_MIN_STOCKS = 50
 
 # %% [markdown]
 # ## Configuration
@@ -474,7 +481,7 @@ xs_stats = (
         pl.col("returns").count().alias("n_stocks"),
     )
     .sort("timestamp")
-    .filter(pl.col("n_stocks") >= 50)
+    .filter(pl.col("n_stocks") >= XS_MIN_STOCKS)
 )
 
 # Use cross-sectional median return as market-level signal for clustering

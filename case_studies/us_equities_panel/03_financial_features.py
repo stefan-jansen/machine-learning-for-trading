@@ -1082,14 +1082,29 @@ if ic_results:
     # The ranking below compares features against each other, so they have to have been
     # scored over near enough the same span. A feature scored on a fraction of the dates is
     # not a weaker signal, it is a different sample, and its place in the ranking means
-    # nothing. The bound is a share of the widest support rather than equality: a feature
-    # whose cross-section dips under the minimum on a handful of dates is still comparable,
-    # and the defect this guards against - one feature scored on a third of the dates,
-    # before the NaN conversion in Section 7 - is two orders of magnitude larger than that.
+    # nothing.
+    #
+    # A feature's IC series begins once its own rolling window has filled, so the spread
+    # between the widest and the narrowest support is bounded by the longest window in the
+    # set - and that is the bound applied here, in the sessions the windows are declared in
+    # rather than as a share of the sample. On this panel the observed spread is far under
+    # it, because names enter over decades and the early dates fall below the minimum
+    # cross-section for every feature at once; a denser panel whose names all start on the
+    # same day loses the first window from its longest features alone, and nothing is wrong
+    # in either case. What the bound still rejects is the defect it was written for - a
+    # feature scored on a fraction of the dates before the NaN conversion in Section 7,
+    # which is short by thousands of sessions, not by one window.
+    _max_warmup = max(*MOMENTUM_HORIZONS, *VOLATILITY_HORIZONS, *MA_HORIZONS)
     _date_floor, _date_ceiling = eval_summary["n_dates"].min(), eval_summary["n_dates"].max()
-    assert _date_floor >= 0.99 * _date_ceiling, (
-        f"features were scored on {_date_floor:,} to {_date_ceiling:,} dates, so their ICs "
-        "are not measured on comparable samples"
+    _short = (
+        eval_summary.filter(pl.col("n_dates") < _date_ceiling - _max_warmup)
+        .sort("n_dates")
+        .select("feature", "n_dates")
+    )
+    assert _date_floor >= _date_ceiling - _max_warmup, (
+        f"features were scored on {_date_floor:,} to {_date_ceiling:,} dates, a spread the "
+        f"{_max_warmup}-session longest window cannot explain, so their ICs are not measured "
+        f"on comparable samples. Short of it: {_short.rows()}"
     )
 
     print(f"Features tested: {len(_feat_names)}")
