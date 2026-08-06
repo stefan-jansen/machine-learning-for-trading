@@ -677,9 +677,20 @@ seal.filter(pl.col("column").is_in(["premium_rank", "premium_xs_zscore", "fundin
 # One null policy is applied once, and C.7 is where: a row reaches the matrix only when every
 # per-symbol feature on it is observed and its settlement retains the two perpetuals a
 # within-settlement statistic needs, and those statistics are then taken over exactly the rows that
-# survived. The successor stages include sequence models that cannot take a gap, so a matrix dense
-# by construction is worth more here than the rows a looser rule recovers - and the assertion below
-# is what makes "dense" a fact rather than an intention.
+# survived. A model handed a null has to be told what to do with it, and the successor stages
+# include sequence models with no answer, so a matrix that carries every feature on every row it
+# emits is worth more here than the rows a looser rule recovers - and the assertion below is what
+# makes that a fact rather than an intention.
+#
+# It is worth being exact about what that does and does not buy, because the two are easy to run
+# together. Every emitted row is complete. The emitted settlements are **not** consecutive: this
+# gate removes rows, and the paragraph below is the measurement of how many. The sequence stages
+# build their windows by position within each symbol's sorted rows
+# (`case_studies/utils/sequence_dataset.py`), so a window closes over whatever rows are adjacent in
+# that array and can span a removed settlement. That is a property of the panel the premium index
+# already forces - one missing observation empties a thirty-day window - and not something the
+# second clause introduces: it removes whole settlements, and on the shipped nineteen-perpetual
+# panel it removes none.
 #
 # What that costs is worth reading rather than absorbing, because almost none of it is warmup. The
 # perpetual close and its volume are complete, but the premium index has scattered gaps, and one
