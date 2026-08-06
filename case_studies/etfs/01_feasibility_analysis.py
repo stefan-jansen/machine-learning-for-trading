@@ -293,7 +293,7 @@ print(
 #
 # ### C.2 Kill conditions. Three thresholds send the strategy back to the drawing board, each tested
 # where its evidence exists rather than here: a cross-sectional information coefficient
-# indistinguishable from zero at every lookback, measured in Chapter 8; a move-to-cost ratio under
+# indistinguishable from zero at every lookback, measured in Chapter 7; a move-to-cost ratio under
 # one once realistic costs are charged, measured in Chapter 18; and an equal-weight book earning a
 # higher Sharpe ratio at a smaller drawdown across folds, measured in Chapter 16.
 #
@@ -320,8 +320,11 @@ print(
 #
 # `generate_cv_splits` takes the whole session timeline and seals the holdout at the boundary
 # `setup.yaml::evaluation` declares, so a caller passes every session rather than a window it trimmed
-# first. Between training and validation sits a purge gap the width of the label horizon, drawn at
-# true scale, which stops a label computed inside training from resolving inside validation.
+# first. Between training and validation sits a purge gap set by `setup.yaml::labels.buffer`, drawn
+# at true scale, which stops a label computed inside training from resolving inside validation. The
+# weekly variant declares its own shorter buffer under `labels.variant_buffers`, so the gap the
+# primary label sets already covers it. The gap below is counted off the session timeline rather
+# than read from the configuration, so the width the figure names is one the notebook measured.
 
 # %%
 splits = generate_cv_splits(
@@ -330,9 +333,19 @@ splits = generate_cv_splits(
     label_buffer=LABEL_BUFFER,
     date_col="timestamp",
 )
+sessions = prices.select("timestamp").unique().sort("timestamp")["timestamp"].to_numpy()
+purge_gaps = {
+    int(
+        (
+            (sessions > np.datetime64(s["train_end"])) & (sessions < np.datetime64(s["val_start"]))
+        ).sum()
+    )
+    for s in splits
+}
 last_val = max(s["val_end"] for s in splits)
 assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
 assert last_val < np.datetime64(HOLDOUT_START), "a fold reaches into the holdout"
+assert purge_gaps == {PRIMARY_HORIZON}, "a purge gap is not the primary label horizon"
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 fold_timeline(ax, splits, holdout=(HOLDOUT_START, HOLDOUT_END))
