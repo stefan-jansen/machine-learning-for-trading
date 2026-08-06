@@ -59,13 +59,17 @@ ADV_THRESHOLD = 10e6
 # ## Configuration
 #
 # Every knob comes from `setup.yaml`. Every statistic and every figure below is computed on
-# `research`, the development window, and the two frames built from the whole panel cannot carry a
-# sealed observation into one. The eligibility table admits a fund to a year on the *previous*
+# `research`, the development window, and neither frame built from the whole panel carries a sealed
+# price, volume or return into one. The eligibility table admits a fund to a year on the *previous*
 # year's volume, so a development year is decided by development data and the sealed years it also
 # covers are joined to nothing here; E says what those extra rows are for. The session timeline in
 # D.2 goes to the splitter whole, because sealing it is the splitter's job and it does so at the
-# boundary `evaluation` declares. `universe.eligibility_rule` declares the rule without its number,
-# so the dollar-volume floor is declared in the parameters cell.
+# boundary `evaluation` declares. Dates cross that way and prices do not, and the fold boundaries
+# that come back are the ones the rest of the pipeline gets from the same configuration: a caller
+# that trims first moves them, and draws a training window the pipeline never trains on.
+# `universe.eligibility_rule` names the rule and `universe.eligibility_note` states its threshold
+# in prose, neither of them as a number a program can read, so the floor is set in the parameters
+# cell.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -115,9 +119,9 @@ prices = (
 )
 research = prices.filter(pl.col("timestamp") < pl.lit(HOLDOUT_START).str.to_date())
 
-undeclared = sorted(set(research["symbol"].unique().to_list()) - DECLARED_ASSETS)
+undeclared = sorted(set(prices["symbol"].unique().to_list()) - DECLARED_ASSETS)
 assert not undeclared, f"loaded but absent from setup.yaml::universe.assets: {undeclared}"
-assert research["close"].min() > 0, "a non-positive close is not a denominator"
+assert prices["close"].min() > 0, "a non-positive close is not a denominator"
 print(
     f"{research['symbol'].n_unique()} funds, {len(research):,} rows to {research['timestamp'].max()}"
 )
