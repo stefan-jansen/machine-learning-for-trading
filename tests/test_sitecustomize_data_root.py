@@ -273,6 +273,11 @@ def test_the_resolved_root_is_the_one_the_loader_uses():
     )
     if out.returncode != 0:
         pytest.skip(f"utils not importable here: {out.stderr.strip()[-200:]}")
-    anchored, resolved = out.stdout.split()
+    anchored, resolved = out.stdout.splitlines()
     assert Path(anchored).resolve() == Path(resolved).resolve()
-    assert sc._has_datasets(Path(resolved))
+    # Only where this machine has data at all. A clean clone that has never run
+    # a downloader resolves correctly to a directory holding none, and that is
+    # the state CI checks out - asserting datasets here would fail every reader
+    # for whom the rule is working exactly as documented.
+    if sc._has_datasets(REPO_ROOT / "data") or sc._main_worktree(REPO_ROOT) is not None:
+        assert sc._has_datasets(Path(resolved))
