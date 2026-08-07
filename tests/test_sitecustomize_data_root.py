@@ -275,9 +275,15 @@ def test_the_resolved_root_is_the_one_the_loader_uses():
         pytest.skip(f"utils not importable here: {out.stderr.strip()[-200:]}")
     anchored, resolved = out.stdout.splitlines()
     assert Path(anchored).resolve() == Path(resolved).resolve()
-    # Only where this machine has data at all. A clean clone that has never run
-    # a downloader resolves correctly to a directory holding none, and that is
-    # the state CI checks out - asserting datasets here would fail every reader
-    # for whom the rule is working exactly as documented.
-    if sc._has_datasets(REPO_ROOT / "data") or sc._main_worktree(REPO_ROOT) is not None:
+    # Only where this machine has data for the rule to find. A clean clone that
+    # has never run a downloader resolves correctly to a directory holding none,
+    # and that is the state CI checks out - asserting datasets here would fail
+    # every reader for whom the rule is working exactly as documented. Being a
+    # linked worktree is not enough on its own: its main tree can be just as
+    # empty, and then the correct answer is again a directory with no data.
+    main_tree = sc._main_worktree(REPO_ROOT)
+    reachable = sc._has_datasets(REPO_ROOT / "data") or (
+        main_tree is not None and sc._has_datasets(main_tree / "data")
+    )
+    if reachable:
         assert sc._has_datasets(Path(resolved))
