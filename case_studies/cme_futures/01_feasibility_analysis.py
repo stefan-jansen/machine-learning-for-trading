@@ -223,6 +223,12 @@ plt.show()
 # Spreads differ by an order of magnitude across the universe, so one cost line on raw
 # returns answers the question for no product in particular. Each move is divided by its own
 # product's spread instead, putting break-even at one on a shared scale.
+#
+# The curve is drawn over every product-session in the development window. This case study has
+# no eligibility rule to restrict it to - the exchange listing decides what is tradable, and a
+# product either settles on a date or does not - so the population is the whole panel. It is a
+# distribution of move sizes, not of the returns a strategy would earn: nothing here is signed,
+# entry-delayed, or sampled at the decision dates alone.
 
 # %%
 returns = (
@@ -346,8 +352,8 @@ print(
 # `setup.yaml::mapping` ranks products by carry or momentum and holds both legs, and
 # shorting a future carries no borrow, so the short leg costs what the long leg costs.
 # Sizing is left open between equal-risk and notional weighting, and the allocator sweep
-# `backtest.sweep.allocators` declares is what settles it: equal weight sizes by notional,
-# inverse volatility and risk parity by realized dispersion.
+# `backtest.sweep.allocators` declares is what settles it: seven allocators, sizing by
+# notional, by the ranking score, by realized dispersion, and by an estimated covariance.
 
 # %% [markdown]
 # ## D. Walk-forward structure
@@ -372,10 +378,15 @@ print(
 # against a training block of years, so the figure below cannot resolve it and the assertion
 # is what establishes its width. The figure draws the boundaries the splitter returned rather
 # than recomputing them, so it and the folds cannot disagree.
+#
+# The splitter is handed the whole panel, holdout included, and seals the holdout itself from
+# `evaluation.holdout_start` - which is what every later stage does. Handing it a frame already
+# cut at the holdout would move the first training date of most folds by a few sessions, and the
+# figure would then draw a training window the pipeline never trains on.
 
 # %%
 splits = generate_cv_splits(
-    research.select("session_date").rename({"session_date": "timestamp"}),
+    front.select("session_date").rename({"session_date": "timestamp"}),
     case_study_id=CASE_STUDY_ID,
     label_buffer=LABEL_BUFFER,
     date_col="timestamp",
