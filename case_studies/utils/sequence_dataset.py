@@ -298,23 +298,25 @@ def _build_val_df_with_priming(
     val_start: pd.Timestamp,
     lookback: int,
 ) -> pd.DataFrame:
-    """Per-symbol, keep last `lookback` train-tail rows + all val rows.
+    """Per-symbol, keep last `lookback` pre-val rows + all val rows.
 
-    Train-tail rows provide the input window (priming) for the first val
+    Pre-val rows provide the input window (priming) for the first val
     target prediction; their labels are not emitted as val targets because
     sequence positions start at index `lookback` within each symbol's
     sorted array, and with exactly `lookback` priming rows the first
-    target falls at val_start.
+    target falls at val_start. The priming window must include every
+    observable feature row immediately before ``val_start``, including
+    any label-buffer gap between ``train_end`` and ``val_start``.
     """
     pieces: list[pd.DataFrame] = []
     for _, sym_df in full_val_source.groupby(entity_col, sort=False):
         sym_df = sym_df.sort_values(date_col, kind="stable")
         is_val = sym_df[date_col] >= val_start
-        train_tail = sym_df.loc[~is_val].tail(lookback)
+        context_tail = sym_df.loc[~is_val].tail(lookback)
         val_part = sym_df.loc[is_val]
-        if train_tail.empty and val_part.empty:
+        if context_tail.empty and val_part.empty:
             continue
-        pieces.append(pd.concat([train_tail, val_part], ignore_index=True))
+        pieces.append(pd.concat([context_tail, val_part], ignore_index=True))
     if not pieces:
         return full_val_source.iloc[0:0].copy()
     return pd.concat(pieces, ignore_index=True)
@@ -340,10 +342,12 @@ def prepare_fold_sequence_stores(
     """Build normalized train/validation sequence stores for a fold.
 
     When ``val_start`` is provided, val sequences are built from the
-    concatenation of (a) each symbol's last ``lookback`` train-tail rows
-    and (b) its val-period rows. This "train-tail priming" ensures the
-    first val sequence predicts the target at ``val_start`` — matching
-    production behavior and Chapter 13's teaching implementation.
+    concatenation of (a) each symbol's last ``lookback`` rows with
+    ``date < val_start`` and (b) its val-period rows. This context priming
+    ensures the first val sequence predicts the target at ``val_start`` —
+    matching production behavior and Chapter 13's teaching implementation.
+    Rows in a label-buffer gap after ``train_end`` remain valid context
+    features and are included in the priming window.
 
     When ``val_start`` is None, val sequences start at position
     ``lookback`` within the val slice, which discards the first
@@ -388,12 +392,13 @@ def prepare_fold_sequence_stores(
         )
 
         if val_start_ts is not None:
-            # Source = train-rows-before-val + val-rows (temporal columns
-            # replaced consistently per fold across both halves).
-            train_tail_mask = train_mask & (dataset_pd[date_col] < val_start_ts)
+            # Source = every observable row before val_start + val rows
+            # (temporal columns replaced consistently per fold). Include
+            # label-buffer gap rows after train_end; they are valid context.
+            context_mask = dataset_pd[date_col] < val_start_ts
             full_val_source = _replace_temporal_columns(
                 dataset_pd,
-                train_tail_mask | val_mask,
+                context_mask | val_mask,
                 temporal_by_fold,
                 temporal_keys,
                 temporal_feature_names,
@@ -423,8 +428,8 @@ def prepare_fold_sequence_stores(
         train_df = dataset_pd.loc[train_mask, use_cols].dropna(subset=[label_col]).copy()
 
         if val_start_ts is not None:
-            train_tail_mask = train_mask & (dataset_pd[date_col] < val_start_ts)
-            full_val_source = dataset_pd.loc[train_tail_mask | val_mask, use_cols].dropna(
+            context_mask = dataset_pd[date_col] < val_start_ts
+            full_val_source = dataset_pd.loc[context_mask | val_mask, use_cols].dropna(
                 subset=[label_col]
             )
             val_df = _build_val_df_with_priming(
