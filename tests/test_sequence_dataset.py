@@ -200,3 +200,55 @@ def test_backwards_compatible_without_val_start():
         assert int(end_positions.min()) == lookback, (
             "Legacy path should start sequences at position=lookback"
         )
+
+
+def test_priming_includes_label_buffer_gap_rows():
+    """Context priming must use the latest bar before val_start, not train_end.
+
+    Walk-forward folds often leave a label-buffer gap between train_end and
+    val_start. Features in that gap are observable at decision time and must
+    prime the first validation sequence.
+    """
+    from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
+
+    train_end = pd.Timestamp("2020-12-30")
+    df, train_mask, val_mask, val_start_ts, _ = _synthetic_fold_df(
+        train_end=str(train_end.date()),
+        val_start="2021-01-04",
+    )
+    gap_mask = (df["timestamp"] > train_end) & (df["timestamp"] < val_start_ts) & ~train_mask
+    assert gap_mask.any(), "Fixture must leave observable rows in the label-buffer gap"
+    lookback = 20
+
+    _, val_store, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0", "feat1"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=lookback,
+        val_start=val_start_ts,
+    )
+
+    for symbol_id in range(val_store.n_symbols):
+        entity = val_store.entities[symbol_id]
+        end_positions = val_store.end_idx[val_store.symbol_idx == symbol_id]
+        if len(end_positions) == 0:
+            continue
+        first_end = int(end_positions.min())
+        first_target = pd.Timestamp(val_store.timestamps[symbol_id][first_end])
+        last_context = pd.Timestamp(val_store.timestamps[symbol_id][first_end - 1])
+        expected_context = pd.Timestamp(
+            df.loc[(df["symbol"] == entity) & (df["timestamp"] < val_start_ts), "timestamp"].max()
+        )
+        assert first_target == val_start_ts
+        assert last_context == expected_context, (
+            f"Symbol {entity!r}: last context is {last_context.date()}, "
+            f"expected {expected_context.date()} (latest observable pre-val row, "
+            f"not train_end={train_end.date()})."
+        )
+        assert last_context > train_end, (
+            f"Symbol {entity!r}: priming stopped at train_end and skipped the gap"
+        )

@@ -369,6 +369,21 @@ def _decision_time_checkpoint_metrics(
     }
 
 
+def _n_invalid_scores(frame: pl.DataFrame) -> int:
+    """Count null / NaN / infinite prediction scores in one checkpoint frame."""
+    if frame.is_empty() or "y_score" not in frame.columns:
+        return 0
+    return int(
+        frame.select(
+            (
+                pl.col("y_score").is_null().sum()
+                + pl.col("y_score").is_nan().sum()
+                + pl.col("y_score").is_infinite().sum()
+            ).alias("n_invalid")
+        ).item()
+    )
+
+
 def _load_incremental_preds_for_config(incr_dir: Path, config_name: str) -> pl.DataFrame:
     """Reassemble one config's predictions from its per-fold incremental saves."""
     parquet_files = sorted(incr_dir.glob(f"{config_name}_fold*.parquet"))
@@ -505,6 +520,8 @@ def _load_cached_tabm_config(
                 "epoch": int(epoch),
                 "ic_mean": float(metric["ic_mean"]),
                 "ic_std": float(metric.get("ic_std", 0.0)),
+                "ic_n_days": int(metric["n_periods"]),
+                "n_invalid": _n_invalid_scores(predictions),
             }
         )
         frames.append(
@@ -515,11 +532,15 @@ def _load_cached_tabm_config(
         )
     if not curves:
         raise ValueError(f"No cached {prediction_split} checkpoints for {config_name}")
-    best = max(curves, key=lambda row: row["ic_mean"])
+    full_days = max(row["ic_n_days"] for row in curves)
+    eligible = [row for row in curves if row["ic_n_days"] == full_days]
+    best = max(eligible, key=lambda row: row["ic_mean"])
     result = {
         "config_name": config_name,
         "best_epoch": best["epoch"],
         "best_ic": best["ic_mean"],
+        "ic_n_days": int(best["ic_n_days"]),
+        "n_invalid": int(best["n_invalid"]),
         "elapsed_s": 0.0,
         "started_at": None,
         "cached": True,
@@ -541,12 +562,80 @@ def _assemble_tabm_results(
     """Select the winner and build the same result for trained or cached configs."""
     if not config_results:
         raise ValueError("No configs completed successfully.")
-    ranked = sorted(
-        config_results,
+
+    def _positive_days(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            days = int(value)
+        except (TypeError, ValueError):
+            return None
+        return days if days > 0 else None
+
+    coverage_days = [
+        days
+        for row in config_results
+        if (days := _positive_days(row.get("ic_n_days"))) is not None
+    ]
+    full_coverage_days = max(coverage_days) if coverage_days else None
+
+    ranked: list[dict[str, Any]] = []
+    for row in config_results:
+        enriched = dict(row)
+        best_ic = float(enriched.get("best_ic", float("nan")))
+        checkpoint_preds = pl.DataFrame()
+        if all_predictions.height and {"config", "epoch"}.issubset(all_predictions.columns):
+            checkpoint_preds = all_predictions.filter(
+                (pl.col("config") == enriched["config_name"])
+                & (pl.col("epoch") == enriched["best_epoch"])
+            )
+        ic_n_days = _positive_days(enriched.get("ic_n_days")) or 0
+        if ic_n_days == 0 and checkpoint_preds.height:
+            actual_col = eval_col if eval_col else "y_true"
+            if actual_col in checkpoint_preds.columns and "y_score" in checkpoint_preds.columns:
+                ic_n_days = int(
+                    _decision_time_checkpoint_metrics(
+                        checkpoint_preds,
+                        date_col=date_col,
+                        entity_col=entity_col,
+                        ret_col=actual_col,
+                    )["ic_n_days"]
+                )
+        n_invalid = (
+            int(enriched["n_invalid"])
+            if "n_invalid" in enriched and enriched["n_invalid"] is not None
+            else _n_invalid_scores(checkpoint_preds)
+        )
+        selectable = bool(
+            np.isfinite(best_ic)
+            and n_invalid == 0
+            and ic_n_days > 0
+            and (full_coverage_days is None or ic_n_days == full_coverage_days)
+        )
+        enriched["ic_n_days"] = ic_n_days
+        enriched["n_invalid"] = n_invalid
+        enriched["selectable"] = selectable
+        ranked.append(enriched)
+
+    # Recompute coverage after optional recovery from predictions.
+    coverage_days = [
+        days for row in ranked if (days := _positive_days(row.get("ic_n_days"))) is not None
+    ]
+    full_coverage_days = max(coverage_days) if coverage_days else None
+    for row in ranked:
+        row["selectable"] = bool(
+            np.isfinite(row["best_ic"])
+            and int(row["n_invalid"]) == 0
+            and int(row["ic_n_days"]) > 0
+            and (full_coverage_days is None or int(row["ic_n_days"]) == full_coverage_days)
+        )
+
+    ranked.sort(
         key=lambda row: row["best_ic"] if not np.isnan(row["best_ic"]) else -999,
         reverse=True,
     )
-    best = ranked[0]
+    selectable_ranked = [row for row in ranked if row["selectable"]]
+    best = selectable_ranked[0] if selectable_ranked else ranked[0]
     best_name = best["config_name"]
     best_epoch = best["best_epoch"]
     best_ic = best["best_ic"]
@@ -1166,18 +1255,40 @@ def run_tabm_cv(
                 int(epoch): {
                     "ic_mean": float(np.nanmean(values)),
                     "ic_std": float(np.nanstd(values)) if len(values) > 1 else 0.0,
+                    "ic_n_days": 0,
                 }
                 for epoch, values in fold_checkpoint_ics.items()
             }
 
+        best_n_invalid = 0
         if checkpoint_metrics:
+            days = [
+                int(metric.get("ic_n_days", 0))
+                for metric in checkpoint_metrics.values()
+                if int(metric.get("ic_n_days", 0)) > 0
+            ]
+            if days:
+                full_days = max(days)
+                eligible_metrics = {
+                    epoch: metric
+                    for epoch, metric in checkpoint_metrics.items()
+                    if int(metric.get("ic_n_days", 0)) == full_days
+                }
+            else:
+                eligible_metrics = checkpoint_metrics
             best_cp = max(
-                checkpoint_metrics, key=lambda epoch: checkpoint_metrics[epoch]["ic_mean"]
+                eligible_metrics, key=lambda epoch: eligible_metrics[epoch]["ic_mean"]
             )
             best_ic_val = float(checkpoint_metrics[best_cp]["ic_mean"])
+            best_ic_n_days = int(checkpoint_metrics[best_cp].get("ic_n_days", 0))
+            if cfg_all_preds.height:
+                best_n_invalid = _n_invalid_scores(
+                    cfg_all_preds.filter(pl.col("epoch") == best_cp)
+                )
         else:
             best_cp = 0
             best_ic_val = float("nan")
+            best_ic_n_days = 0
 
         elapsed = time.perf_counter() - t0
         config_results.append(
@@ -1185,6 +1296,8 @@ def run_tabm_cv(
                 "config_name": config_name,
                 "best_epoch": best_cp,
                 "best_ic": best_ic_val,
+                "ic_n_days": best_ic_n_days,
+                "n_invalid": best_n_invalid,
                 "elapsed_s": elapsed,
                 "started_at": config_started_at,
             }
@@ -1192,11 +1305,18 @@ def run_tabm_cv(
 
         cfg_curves_list = []
         for ep, metric in sorted(checkpoint_metrics.items()):
+            epoch_preds = (
+                cfg_all_preds.filter(pl.col("epoch") == ep)
+                if cfg_all_preds.height
+                else pl.DataFrame()
+            )
             entry = {
                 "config": config_name,
                 "epoch": ep,
                 "ic_mean": float(metric["ic_mean"]),
                 "ic_std": float(metric.get("ic_std", 0.0)),
+                "ic_n_days": int(metric.get("ic_n_days", 0)),
+                "n_invalid": _n_invalid_scores(epoch_preds),
             }
             all_curves.append(entry)
             cfg_curves_list.append(entry)
