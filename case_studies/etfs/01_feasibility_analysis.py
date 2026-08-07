@@ -34,8 +34,8 @@
 # - Turn a commission quoted in cents per share into a cost that can be compared across funds
 #   trading at very different prices
 # - Read off one chart what fraction of price moves are larger than the cost of trading them
-# - Measure how much of one month's return carries into the next, and use that to judge whether a
-#   monthly rebalance is frequent enough to act on
+# - Measure how much of one month's return carries into the next month, computing the correlation
+#   inside each fund rather than across a hundred funds stacked into one series
 # - Check that a walk-forward split of the history fits the sample available and leaves the test
 #   period unread
 #
@@ -314,13 +314,15 @@ breadth = (
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 ax.plot(breadth["timestamp"], breadth["n_eligible"], color=COLORS["blue"], linewidth=1.2)
-ax.axhline(BREADTH_FLOOR, color=COLORS["copper"], ls="--", lw=1.5, label="largest position count")
+ax.axhline(
+    BREADTH_FLOOR, color=COLORS["copper"], ls="--", lw=1.5, label="most positions ever held at once"
+)
 ax.set_ylim(0, len(DECLARED_ASSETS) + 5)
-ax.set_ylabel("Funds eligible at the decision")
+ax.set_ylabel("Funds eligible on the decision date")
 ax.legend(frameon=False, fontsize=8, loc="lower right")
 add_message_title(
     ax,
-    "Breadth clears the largest position count from the second year on",
+    "From the second year on, more funds are eligible than the strategy can hold",
     subtitle="Funds clearing the prior year's dollar-volume floor, counted at each month-end",
 )
 plt.show()
@@ -420,39 +422,72 @@ add_message_title(ax, "Almost every move at either horizon exceeds the cost of t
 plt.show()
 
 # %% [markdown]
-# ### B.4 Serial correlation of the carrier
+# ### B.4 How much of one month's return carries into the next
 #
-# The carrier is what the ranking is built from: the return between consecutive decision dates. Its
-# serial correlation inside each fund says how much of one month's return the next repeats, a
-# property of that series and not of the cross-sectional ranking, which `05_evaluation` measures.
-# Stacking a hundred funds and correlating the result would measure their joins instead.
+# A position opened at one month-end and closed at the next earns that fund's return over the
+# interval. Before building anything that forecasts that return, it is worth asking how much of it
+# the fund's own recent history already accounts for. If funds that rose last month tend to rise
+# again, the simplest imaginable ranking - buy last month's leaders - is already a strategy, and the
+# rebalancing schedule has to be fast enough to act on that tendency before it fades.
+#
+# The measurement is an **autocorrelation**: the correlation between a fund's return in one month
+# and its return some number of months later. Plotted against that number of months, it shows how
+# much of the series its own past accounts for, and how quickly that fades.
+#
+# It is computed inside each fund and then averaged across funds. Stacking a hundred funds into one
+# long series and correlating that returns a number too, and the number is wrong: at every point
+# where one fund's history ends and the next begins, it correlates gold with Brazilian equities. The
+# shaded region shows how much the result varies from fund to fund, and the band around zero shows
+# how large a correlation could plausibly be if a fund's returns carried no information about their
+# own past at all.
 
 # %%
 monthly = month_end.with_columns(monthly_return=pl.col("close").pct_change().over("symbol"))
-# lag zero is a series against itself, and its bar would flatten every other one
+# a series correlated with itself is 1 by construction, and that bar would flatten every other one
 acf = panel_acf(monthly, entity_col="symbol", value_col="monthly_return", max_lags=12).filter(
     pl.col("lag") > 0
 )
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
-ax.axhspan(-acf["band"][0], acf["band"][0], color=COLORS["copper"], alpha=0.18, zorder=0)
-ax.fill_between(acf["lag"], acf["acf_p10"], acf["acf_p90"], color=COLORS["blue"], alpha=0.15)
+ax.axhspan(
+    -acf["band"][0],
+    acf["band"][0],
+    color=COLORS["copper"],
+    alpha=0.18,
+    zorder=0,
+    label="range expected from no information",
+)
+ax.fill_between(
+    acf["lag"],
+    acf["acf_p10"],
+    acf["acf_p90"],
+    color=COLORS["blue"],
+    alpha=0.15,
+    label="10th to 90th percentile across funds",
+)
 ax.bar(acf["lag"], acf["acf"], color=COLORS["blue"], width=0.6)
-ax.set_xlabel("Lag (decision dates)")
-ax.set_ylabel("Autocorrelation")
+ax.set_xlabel("Months between the two returns")
+ax.set_ylabel("Correlation of a fund's return with its own past")
+ax.legend(frameon=False, fontsize=8, ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.18))
 add_message_title(
     ax,
-    "A single month's return says almost nothing about the next month's",
-    subtitle="Mean within-fund autocorrelation, 10th-90th percentile shaded, band in copper",
+    "A fund's own past return accounts for almost none of its next one",
+    subtitle="Averaged within each fund",
 )
 plt.show()
 
 # %% [markdown]
-# ### B.5 Move scale against cost
+# ### B.5 Move size against cost
 #
-# The ratio divides the median absolute move at the primary horizon by the median round trip; the
-# clearance share counts moves above what their own fund charged. Both are unsigned magnitudes, so
-# neither says a strategy earns anything - only that cost is not what would stop one.
+# Two numbers summarise what B.3 drew. The first is the median absolute move over one rebalancing
+# interval divided by the median round trip, which says how much larger a typical move is than a
+# typical cost. The second is the share of moves larger than what their own fund charges, which is
+# where the exceedance curve crosses its break-even line.
+#
+# Neither says the strategy earns anything. Both count a move down exactly as they count a move up,
+# and nothing here decides which side of it a position would have been on. What they rule out is the
+# case where the design fails immediately, because a typical move is smaller than the cost of
+# capturing it.
 
 # %%
 moves = returns.select(
@@ -460,58 +495,110 @@ moves = returns.select(
     clears=pl.col(f"h{PRIMARY_HORIZON}") > 1,
 )
 print(
-    f"Round-trip cost {cost['cost_bps'].min():.2f} to {cost['cost_bps'].max():.2f} bps, median "
-    f"{COST_BPS:.2f} bps | median {PRIMARY_HORIZON}-session move "
-    f"{moves['move_bps'].median():.1f} bps, ratio {moves['move_bps'].median() / COST_BPS:.0f}x, "
-    f"over its own fund's cost {moves['clears'].mean():.3f}"
+    f"Round trip {cost['cost_bps'].min():.2f} to {cost['cost_bps'].max():.2f} bps across funds, "
+    f"median {COST_BPS:.2f} bps\n"
+    f"Median absolute {PRIMARY_HORIZON}-session move {moves['move_bps'].median():.1f} bps, "
+    f"{moves['move_bps'].median() / COST_BPS:.0f}x the median round trip\n"
+    f"Share of moves larger than their own fund's round trip {moves['clears'].mean():.3f}"
 )
 
 # %% [markdown] tags=["results"]
-# The round trip costs 0.90 to 38.91 bps at each fund's median close, a universe median of 9.45. The
-# median absolute 21-session move is 286.2 bps, 30x that, and 0.968 of moves clear their entry cost.
+# The round trip costs between 0.90 and 38.91 bps at each fund's median close, a universe median of
+# 9.45 bps. The median absolute 21-session move is 286.2 bps, thirty times that, and 0.968 of moves
+# are larger than the round trip charged by the fund on which they occurred.
 
 # %% [markdown]
 # ## C. Design decisions
 #
-# ### C.1 Cadence. `setup.yaml::decision.cadence` ranks funds at the month-end close and executes at
-# the next open. B.3 supports rebalancing that often, since moves at both declared horizons clear
-# the round trip their own fund charges. A month also buys a purge gap the width of the primary
-# label, and the weekly horizon stays in `labels.variants` so the shorter holding period is measured.
+# The sections above are evidence. This section is where that evidence meets the choices recorded in
+# `setup.yaml`, and says what each one rests on.
 #
-# ### C.2 Kill conditions. Three thresholds send the strategy back to the drawing board, each tested
-# where its evidence exists rather than here: a cross-sectional information coefficient
-# indistinguishable from zero at every lookback, measured in Chapter 7; a move-to-cost ratio under
-# one once realistic costs are charged, measured in Chapter 18; and an equal-weight book earning a
-# higher Sharpe ratio at a smaller drawdown across folds, measured in Chapter 16.
+# ### C.1 How often to rebalance
 #
-# ### C.3 Mapping class. `setup.yaml::mapping.class` holds the leaders long only, because many of
-# these funds are expensive or impossible to borrow and a short leg would price that constraint
-# rather than the signal. Sizing is equal weight: an optimized weighting folds a covariance estimate
-# in and leaves the ranking's own contribution unidentifiable. Chapter 17 sweeps those alternatives.
+# `setup.yaml` ranks the funds at the month-end close and trades at the next open. Section B.3
+# supports trading that often: moves over one rebalancing interval are far larger than the round
+# trip their own fund charges, so cost is not what would force a slower schedule. Section B.4
+# supports it from the other side, by ruling out the reason to trade faster. A fund's own past
+# return accounts for almost none of its next one, so there is no quickly fading tendency that a
+# monthly schedule would arrive too late for. Whatever the ranking ends up reading has to come from
+# somewhere other than the fund's last return, and Chapter 7 onwards builds it.
+#
+# The interval has one further consequence. The return being predicted is the one 21 sessions
+# ahead, which is about the number of trading sessions in a month, so each position is held for
+# roughly the period its own label measures and one holding is largely finished before the next
+# begins. The 5-session variant stays in `labels.variants` so a shorter holding period is measured
+# as well.
+#
+# ### C.2 What would send this design back
+#
+# A feasibility study is only useful if some result would have stopped it. Three would, and each is
+# measured where its evidence exists rather than here.
+#
+# The one this notebook could have produced is a cost failure: if a typical move were smaller than
+# the round trip needed to capture it, the ranking would pay more to trade than the move it is
+# trying to catch, and no model would repair that. Section B.5 is that measurement, and Chapter 18
+# repeats it against the trades a backtest actually places rather than against raw moves.
+#
+# The other two are outcomes of the strategy rather than properties of the data. Chapter 7 asks
+# whether the ranking has any relationship at all to the returns that follow it, at any lookback
+# window. Chapter 16 asks whether simply holding every eligible fund in equal weight earns more per
+# unit of risk, and loses less at its worst, than the ranking does - if it does, the ranking is not
+# paying for the trading it causes.
+#
+# ### C.3 What the strategy does with the ranking
+#
+# `setup.yaml` buys the funds at the top of the ranking and takes no position in the ones at the
+# bottom. Betting against a fund means borrowing its shares in order to sell them, and for many of
+# these funds those shares are expensive or impossible to borrow, so a short leg would be measuring
+# the cost of the borrow as much as the quality of the ranking.
+#
+# Each fund held gets an equal share of the money. A weighting optimised for risk would fold an
+# estimate of how the funds move together into the result, and the ranking's own contribution could
+# no longer be separated from that estimate's. Chapter 17 compares the alternatives with the ranking
+# held fixed.
 
 # %% [markdown]
 # ## D. Walk-forward structure
 #
-# ### D.1 Effective sample size. Folds are cut on the session timeline, the same one
-# `04_model_based_features` hands the splitter, while the strategy acts only at the month-ends - so
-# the decision count, not the row count, is what a cross-sectional evaluation has to spend.
+# ### D.1 How much an evaluation has to spend
+#
+# A panel of daily prices looks large, but a strategy that changes its positions once a month does
+# not get to treat every row as an independent opportunity. What it spends is decision dates. Three
+# numbers describe the sample from that point of view: how many sessions it contains, how many of
+# them are dates the strategy acts on, and how many funds it can choose between on a typical one.
 
 # %%
 print(
     f"Sessions {research['timestamp'].n_unique():,} | decision dates {len(breadth):,} "
-    f"| eligible funds per decision {breadth['n_eligible'].mean():.0f}"
+    f"| eligible funds per decision date {breadth['n_eligible'].mean():.0f}"
 )
 
 # %% [markdown]
-# ### D.2 Fold demonstration
+# ### D.2 The folds
 #
-# `generate_cv_splits` takes the whole session timeline and seals the holdout at the boundary
-# `setup.yaml::evaluation` declares, so a caller passes every session rather than a window it trimmed
-# first. Between training and validation sits a purge gap set by `setup.yaml::labels.buffer`, drawn
-# at true scale, which stops a label computed inside training from resolving inside validation. The
-# weekly variant declares its own shorter buffer under `labels.variant_buffers`, so the gap the
-# primary label sets already covers it. The gap below is counted off the session timeline rather
-# than read from the configuration, so the width the figure names is one the notebook measured.
+# A model is fitted on one stretch of history and evaluated on the stretch that follows it, then the
+# pair moves forward and the process repeats. Each fit-then-evaluate pair is a **fold**, and
+# evaluating this way is called **walk-forward**, because the split always runs in the direction
+# time does.
+#
+# One detail decides whether the evaluation is honest. The return being predicted lands 21 sessions
+# ahead, so a training row dated near the end of its block is labelled with a price from after the
+# block ends. Validating on the session immediately after training would score the model on data it
+# had partly seen already. The fix is to leave a gap between the two, at least as wide as the
+# horizon, and that gap is called **purging**. Its width comes from `labels.buffer` in `setup.yaml`;
+# the 5-session variant declares a shorter gap of its own, which the primary label's gap covers.
+#
+# The three assertions below establish what the figure cannot. The gap is 21 sessions against
+# training blocks measured in years, too narrow to see, so only counting it off the session timeline
+# can confirm it is as wide as the horizon. The other two check that the number of folds is the
+# number `setup.yaml` declares, and that no validation window reaches into the holdout. The figure
+# then draws the boundaries the splitter returned rather than recomputing them, so the picture and
+# the folds cannot disagree.
+#
+# The splitter is given the whole sample, holdout included, and applies the holdout boundary itself
+# from `evaluation.holdout_start`, which is what every later stage does too. Trimming the data first
+# would shift the first training date of most folds by a few sessions, and the figure would then
+# show a training window the pipeline never trains on.
 
 # %%
 splits = generate_cv_splits(
@@ -536,65 +623,102 @@ assert purge_gaps == {PRIMARY_HORIZON}, "a purge gap is not the primary label ho
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 fold_timeline(ax, splits, holdout=(HOLDOUT_START, HOLDOUT_END))
-purge_note = f"Train, the {PRIMARY_HORIZON}-session purge, validation, and the sealed holdout"
-add_message_title(ax, "Folds roll back from the sealed holdout and never reach it", purge_note)
+purge_note = f"Training, the {PRIMARY_HORIZON}-session purge gap, validation, and the holdout"
+add_message_title(
+    ax, "Each fold trains, pauses, then validates, and none reaches the holdout", purge_note
+)
 plt.show()
 
 # %% [markdown]
-# ## E. Derived artifacts
+# ## E. What this notebook hands on
 #
-# The eligibility table is the one thing this notebook hands downstream: `02_labels` and
-# `03_financial_features` semi-join on it, so a fund contributes rows only in years it cleared, and
-# it covers the sealed years too, since prior-year volume is all the rule ever reads.
+# One table: the fund-year pairs that cleared the liquidity rule. `02_labels` and
+# `03_financial_features` join on it, so a fund contributes rows only in the years it was admitted
+# to. It covers the holdout years as well as the development period, because the strategy has to
+# know which funds it was allowed to hold when it is finally evaluated there. That costs nothing in
+# terms of what the design has seen: membership in a year is decided entirely by the year before it,
+# and none of the diagnostics above read a holdout year.
 
 # %%
 eligibility.write_csv(CASE_DIR / "eligibility.csv")
 print(f"Written: eligibility.csv, {len(eligibility):,} fund-year pairs")
 
 # %% [markdown]
-# ## F. Findings vs `setup.yaml`
+# ## F. What the evidence says about each setting
 #
-# One row per knob: the evidence that motivates it, and what would change it.
+# One row per setting: the evidence behind it, and the condition under which a reader working on
+# their own data would choose differently.
 #
-# | Knob | Evidence | Revise it when |
+# | Setting | Evidence | Choose differently when |
 # |---|---|---|
-# | `universe.eligibility_rule` | B.2 breadth at each decision date | breadth falls under the position count the sweep asks for |
-# | `decision.cadence` | B.3 exceedance | moves stop clearing the round trip, or the label horizon no longer fits inside one rebalancing interval |
-# | `costs.asset_spreads` | B.3 cost per fund from the declared commission and half-spread | quoted spreads become available and disagree with the assigned tier |
-# | `evaluation.n_splits` | D.2 fold boundaries | the folds no longer fit the development window |
+# | `universe.eligibility_rule` | B.2, funds admitted on each decision date | fewer funds are admitted than the strategy has positions to fill |
+# | `decision.cadence` | B.3 move sizes against cost, B.4 how much of a month's return carries | moves stop covering the round trip, or the return being predicted resolves after the next decision date |
+# | `costs.asset_spreads` | B.3, the cost per fund from the declared commission and half-spread | quoted spreads become available and disagree with the assigned tier |
+# | `evaluation.n_splits` | D.1 decision dates, D.2 fold boundaries | the folds no longer fit the development period |
+#
+# The breadth chart raises a question it cannot answer on its own. A count below the number of
+# positions to fill matters if it happens in the middle of the sample, where the strategy would find
+# itself unable to fill the book on an ordinary date. It matters much less if it is confined to the
+# beginning, before any fund has a prior year to be admitted on, since the evaluation can simply
+# start after it. So the dates below the floor are counted per year, and the first date after which
+# breadth never falls below it again is read off the series rather than off the chart.
 
 # %%
+thin = breadth.filter(pl.col("n_eligible") < BREADTH_FLOOR).sort("timestamp")
+by_year = thin.group_by(pl.col("timestamp").dt.year().alias("year")).len().sort("year")
+cleared = breadth.filter(pl.col("timestamp") > thin["timestamp"].max())["timestamp"].min()
+
 print(
     f"universe.n_assets {SETUP['universe']['n_assets']}, eligible per decision date "
-    f"{breadth['n_eligible'].min()} to {breadth['n_eligible'].max()}, under the floor on "
-    f"{breadth.filter(pl.col('n_eligible') < BREADTH_FLOOR).height} of {len(breadth)} dates\n"
+    f"{breadth['n_eligible'].min()} to {breadth['n_eligible'].max()}\n"
+    f"below the floor of {BREADTH_FLOOR} on {thin.height} of {len(breadth)} decision dates ("
+    + ", ".join(f"{n} in {y}" for y, n in zip(by_year["year"], by_year["len"], strict=True))
+    + f"), and never again from {cleared}\n"
     f"decision.cadence {SETUP['decision']['cadence']} | labels.primary {PRIMARY_LABEL}\n"
     f"evaluation.n_splits {SETUP['evaluation']['n_splits']}, generated {len(splits)}, "
-    f"last validation ends {last_val.date()}, holdout untouched"
+    f"last validation ends {last_val.date()}, holdout untouched\n"
+    f"labels.buffer {LABEL_BUFFER}, purge gap {min(purge_gaps)} sessions against the "
+    f"{PRIMARY_HORIZON}-session primary horizon"
 )
 
 # %% [markdown] tags=["results"]
-# Eligible breadth runs from 0 in the first year, before any fund has a prior year to be admitted on,
-# to 96 of the declared 100, and sits under the position floor on 12 of 216 decision dates, every one
-# of them in that first year. Eight folds are generated, the last validation ending 2023-11-29.
+# The number of funds eligible on a decision date runs from 0 to 96 of the declared 100. It sits
+# below the twenty positions the largest book has to fill on 12 of 216 decision dates, all of them
+# in 2006, the first year of the sample, when no fund yet has a prior year to be admitted on; from
+# 2007-01-31 it never falls below twenty again. Eight folds are generated, the last validation
+# window ending 2023-11-29, and the gap between each training block and the validation window that
+# follows it is 21 sessions, exactly the horizon of the primary label.
 
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **Decide membership on prior-year information, and count it on the decision date.** A liquidity
-#    filter fitted to the whole sample keeps the funds that stayed liquid.
-# 2. **Convert a per-share cost into bps before comparing it to a return**, and scale each move by
-#    its own fund's round trip: a cent of spread is a different cost on a low-priced fund.
-# 3. **Compute a panel autocorrelation inside each entity**, never across the stacked panel.
+# 1. **Decide what a strategy was allowed to hold from information that existed before the date the
+#    decision applies to.** A liquidity filter applied to the whole sample at once admits exactly
+#    the funds that turned out to stay liquid, and a backtest run on that universe is measuring a
+#    choice nobody could have made at the time.
+# 2. **Count the universe on the dates the strategy acts, not over the sample.** An average taken
+#    over every session hides whether the book could have been filled on the dates that decide the
+#    result.
+# 3. **Turn a per-share cost into a fraction of the price before comparing it to a return**, and
+#    divide each move by what its own instrument charges. A cent of spread is a heavy cost on a $20
+#    fund and a negligible one on a $500 one, so a single cost line drawn across raw returns answers
+#    the question for no fund in particular.
+# 4. **Measure opportunity over the population the strategy was allowed to trade.** A move in a fund
+#    that failed the liquidity rule that year was never available, and counting it overstates how
+#    often a move covers its own cost.
+# 5. **Compute a panel autocorrelation inside each entity, then average.** Stacking entities into
+#    one series measures the joins between them.
 #
 # ### Known limitations
 #
-# - The funds in `universe.assets` were chosen knowing which of them still trade, so the
-#   point-in-time filter removes a bias inside the list and not the bias in the list itself.
-# - `close` is adjusted for splits and distributions, so early prices sit below what a fund traded
-#   at: dollar volume is understated there, and the round trip, being dollars per share over a
-#   price, is overstated. The half-spread is by tier, and the floor is not inflation-adjusted.
-# - Eligibility is annual while decisions are monthly, so a fund turning illiquid in March keeps its
-#   place until January.
+# - The hundred funds were chosen knowing which of them still trade today. The point-in-time rule
+#   removes a bias within that list; it cannot remove the bias in the list itself.
+# - `close` is adjusted for splits and distributions, so early prices sit below what a fund actually
+#   traded at. Dollar volume is understated there, which makes the eligibility rule stricter in the
+#   distant past, and the round trip, being dollars per share over a price, is overstated.
+# - The half-spread is assigned by liquidity tier rather than measured, because daily bars carry no
+#   bid and no ask. The dollar-volume floor is a fixed amount that is not adjusted for inflation.
+# - Eligibility is decided once a year while positions change once a month, so a fund that becomes
+#   illiquid in March keeps its place until January.
 #
-# **Next**: labels at the declared horizons, built on this development window.
+# **Next**: labels at the declared horizons, built on this development period.

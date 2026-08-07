@@ -32,7 +32,7 @@ def fold_timeline(ax, splits: list[dict], *, holdout: tuple[str, str]) -> None:
         ``train_end``, ``val_start``, ``val_end`` per fold. The span between
         ``train_end`` and ``val_start`` is the purge gap and is drawn as such.
     holdout
-        Start and end of the sealed block, shaded behind the folds.
+        Start and end of the holdout, shaded behind the folds.
     """
     from matplotlib.patches import Patch
 
@@ -57,10 +57,10 @@ def fold_timeline(ax, splits: list[dict], *, holdout: tuple[str, str]) -> None:
     ax.invert_yaxis()
     ax.legend(
         handles=[
-            Patch(color=COLORS["blue"], label="train"),
-            Patch(color=COLORS["silver_muted"], label="purge"),
+            Patch(color=COLORS["blue"], label="training"),
+            Patch(color=COLORS["silver_muted"], label="purge gap"),
             Patch(color=COLORS["amber"], label="validation"),
-            Patch(color=COLORS["copper"], alpha=0.25, label="sealed holdout"),
+            Patch(color=COLORS["copper"], alpha=0.25, label="holdout"),
         ],
         frameon=False,
         fontsize=8,
@@ -93,7 +93,7 @@ def panel_acf(
         Long panel with one row per entity and period, already at the cadence the
         autocorrelation should be read at.
     entity_col, value_col
-        Entity identifier and the carrier series to correlate with its own past.
+        Entity identifier and the series to correlate with its own past.
     max_lags
         Highest lag returned. Entities with fewer than ``max_lags + 1``
         observations are skipped.
