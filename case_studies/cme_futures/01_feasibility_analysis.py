@@ -55,6 +55,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import yaml
+from IPython.display import display
 from pandas.tseries.holiday import GoodFriday
 
 from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
@@ -92,7 +93,7 @@ END_DATE = "2025-12-31"
 #
 # **What a trade is assumed to cost.** Crossing the bid-ask spread is charged as a number of
 # minimum price increments: one for most products, two for the ones `setup.yaml` lists as less
-# liquid. Section B.3 turns that into a cost in basis points.
+# liquid. Section B.3 turns that into a cost that is comparable across products.
 #
 # **What is being predicted.** The strategy forecasts returns 5 sessions ahead, and a second
 # variant looks 21 sessions ahead. The 5-session horizon is the primary one, and it sets both
@@ -208,55 +209,151 @@ print(
 )
 
 # %% [markdown]
-# Here is what those 30 products actually are. The exchange publishes a specification for each
-# one, and three fields from it are worth having in front of you before anything is computed
-# from the prices.
+# Here is what those 30 products are, and what one contract of each of them commits you to. The
+# exchange publishes a specification per product, and six of its fields are worth having in
+# front of you before anything is computed from the prices, because every cost figure in this
+# notebook is built out of them.
 #
-# The **minimum price increment**, or *tick size*, is the smallest amount by which a quote may
-# change. The **tick value** is what one such increment is worth in dollars for one contract,
-# which is the tick size multiplied by the contract's size. And the **contract value** is what
-# one contract is worth outright at recent prices. Notice how far apart these are: a Eurodollar
-# -style currency contract and a live cattle contract are not remotely the same size of bet, and
-# a cost expressed in dollars per contract would not be comparable across them. That is why
-# everything below is expressed in basis points of contract value instead.
+# **Contract size.** A futures contract is written on a fixed quantity, and the quoted price is
+# the price of one unit of that quantity. One corn contract covers 5,000 bushels and corn is
+# quoted per bushel. One Australian dollar contract covers A$100,000 and is quoted per
+# Australian dollar. One E-mini S&P 500 contract covers 50 times the index and is quoted in
+# index points. So the column reads as bushels for corn, as currency units for the Australian
+# dollar and as dollars per index point for the S&P, and its one job is to turn a quote into an
+# amount of money.
+#
+# **Minimum price increment**, or *tick size*. The smallest amount by which a quote may change.
+# Corn moves in quarter-cents per bushel, the E-mini S&P in quarter index points, the 10-year
+# Treasury note in 64ths of a percent of face value.
+#
+# **Tick value.** What one increment is worth on one contract, in dollars, which is the
+# increment multiplied by the contract size. The exchange publishes it separately, and it is
+# worth seeing why the two do not always multiply out. Corn's increment is a quarter of a cent
+# and its contract is 5,000 bushels, so one increment moves the contract by 1,250 - and that is
+# 1,250 cents, not 1,250 dollars, because corn is quoted in cents per bushel. The tick value the
+# exchange publishes is in dollars, and the table below shows what it comes to. The grains and
+# the livestock are quoted in cents; the Treasury contracts are quoted as a percentage of face
+# value rather than as a fraction of it. Either way the quote is in hundredths of the unit the
+# contract size counts, a factor of 100. Dividing the published tick value into the increment
+# times the contract size recovers that factor product by product, which is what the cell below
+# does. Asserting that it comes out at exactly 1 or exactly 100 is what makes the contract
+# values in the table dollars rather than cents.
+#
+# **Contract value**, also called the *notional* value. What one contract is worth outright:
+# the settlement price, converted to dollars per unit, multiplied by the contract size. The
+# table takes it at one reference date, the last settlement before the holdout period begins,
+# so that nothing in it depends on data this notebook is not allowed to read. The spread down
+# that column is the thing to notice: one corn contract is a commitment of about $24,000 and
+# one NASDAQ-100 contract is a commitment of about $340,000. A cost quoted in dollars per
+# contract would therefore mean something different in every row, which is why every cost below
+# is expressed relative to contract value instead.
+#
+# **Initial margin**, and the leverage that comes with it. Holding a contract does not require
+# paying its contract value. It requires posting a deposit with the clearing house, which is
+# settled up or down every day as the price moves. The deposit is a few percent of the contract
+# value, and the ratio between the two is the leverage the position carries: the 2-year
+# Treasury note below controls about $206,000 of notes for a deposit of about $1,300. That
+# ratio is not a measure of how aggressive the position is. The exchange sets the deposit
+# against how much the contract moves, so the contracts that move least carry the highest
+# leverage, and the 2-year note at 158 times is closer in daily risk to silver at 8 times than
+# the two ratios suggest. What it does mean for this strategy is that the capital it has to
+# fund is a multiple of the deposits, not of the contract values it ranks.
+#
+# The margin rates used here come from CME's published schedule and are documented under
+# "Margin Model" in this case study's README, including where they are approximated: the four
+# equity index contracts share one rate and the four energy contracts share another, which is
+# why those rows show identical leverage. They give the right order of magnitude for what a
+# position costs to carry. They are not a quote from a broker.
+#
+# **Delivery months.** How many contracts a product lists each year, which is how often a
+# position in it has to be rolled. The energies list all twelve months, so a position held for a
+# year is rolled twelve times. The currencies, the equity indices and the Treasuries list four,
+# evenly spaced through the year, so it is rolled four times. The metals, the crops and the
+# livestock mostly fall between the two, on cycles that follow their delivery and marketing
+# seasons. Every roll pays the spread twice and
+# collects or gives up carry, so this column is what turns carry from something earned per roll
+# into something earned per year.
+#
+# The last column is the first date on which each product settles in this sample. All of them
+# are present from the beginning except the E-mini Russell 2000, which arrives in 2017, and that
+# is what makes the size of the universe a question rather than a constant. Section B.2 takes it
+# up.
 
 # %%
 specs = yaml.safe_load((REPO_ROOT / "data/futures/market/futures_specs.yaml").read_text())
 unticked = sorted(set(research["product"].unique().to_list()) - set(specs["products"]))
 assert not unticked, f"no contract specification for: {unticked}"
+listed = {p: specs["products"][p] for p in DECLARED_PRODUCTS}
 
 ticks = pl.DataFrame(
     {
-        "product": list(specs["products"]),
-        "name": [p["name"] for p in specs["products"].values()],
-        "tick": [p["tick_size"] for p in specs["products"].values()],
-        "tick_value": [p["tick_value"] for p in specs["products"].values()],
-        "multiplier": [p["multiplier"] for p in specs["products"].values()],
+        "product": list(listed),
+        "name": [p["name"] for p in listed.values()],
+        "contract_size": [int(p["multiplier"]) for p in listed.values()],
+        "tick": [p["tick_size"] for p in listed.values()],
+        "tick_value": [p["tick_value"] for p in listed.values()],
+        "margin_pct": [p["initial_margin_pct"] for p in listed.values()],
+        "months_listed": [len(p["contract_months"]) for p in listed.values()],
     }
+).with_columns(
+    (pl.col("tick") * pl.col("contract_size") / pl.col("tick_value")).round(6).alias("quote_scale")
 )
+scales = set(ticks["quote_scale"].to_list())
+assert scales <= {1.0, 100.0}, f"unexpected quote scale, expected 1 or 100: {sorted(scales)}"
+
 sectors = pl.DataFrame(
     {
         "product": [p for g in PRODUCT_GROUPS.values() for p in g],
         "sector": [s for s, g in PRODUCT_GROUPS.items() for _ in g],
     }
 )
+REFERENCE_DATE = research["session_date"].max()
+reference = research.filter(pl.col("session_date") == REFERENCE_DATE)
+assert reference.height == len(DECLARED_PRODUCTS), (
+    f"{reference.height} of {len(DECLARED_PRODUCTS)} products settle on {REFERENCE_DATE}"
+)
+
 universe = (
-    research.group_by("product")
-    .agg(
-        pl.col("raw_close").median().alias("price"),
-        pl.col("session_date").min().alias("first_session"),
-        pl.len().alias("sessions"),
-    )
+    reference.select("product", "raw_close")
     .join(ticks, "product")
     .join(sectors, "product")
+    .join(research.group_by("product").agg(pl.col("session_date").min()), "product")
     .with_columns(
-        (pl.col("price") * pl.col("multiplier")).round(0).alias("contract_value"),
-        pl.col("price").round(2),
+        (pl.col("raw_close") / pl.col("quote_scale") * pl.col("contract_size")).alias("value")
     )
-    .select("sector", "product", "name", "tick", "tick_value", "contract_value", "first_session")
+    .with_columns(
+        pl.col("value").round().cast(pl.Int64).alias("contract_value_usd"),
+        (pl.col("value") * pl.col("margin_pct")).round().cast(pl.Int64).alias("margin_usd"),
+        (1 / pl.col("margin_pct")).round(1).alias("leverage"),
+        pl.when(pl.col("months_listed") == 12)
+        .then(pl.lit("monthly"))
+        .when(pl.col("months_listed") == 4)
+        .then(pl.lit("quarterly"))
+        .otherwise(pl.format("{} per year", pl.col("months_listed")))
+        .alias("delivery_months"),
+        pl.col("session_date").alias("first_session"),
+    )
+    .select(
+        "sector",
+        "product",
+        "name",
+        "contract_size",
+        "tick",
+        "tick_value",
+        "contract_value_usd",
+        "margin_usd",
+        "leverage",
+        "delivery_months",
+        "first_session",
+    )
     .sort(["sector", "product"])
 )
-universe
+print(
+    f"Contract values are computed from the settlements of {REFERENCE_DATE}, "
+    f"the last session before the holdout begins"
+)
+with pl.Config(tbl_rows=universe.height, tbl_cols=universe.width, tbl_width_chars=250):
+    display(universe)
 
 # %% [markdown]
 # ### B.2 How many products are quoted when the strategy rebalances
