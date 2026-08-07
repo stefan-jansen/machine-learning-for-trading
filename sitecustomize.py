@@ -117,7 +117,10 @@ def _main_worktree(repo_root: Path) -> Path | None:
         )
     except Exception:  # noqa: BLE001 - startup hook: a missing or hung git is not an error here
         return None
-    parts = out.stdout.split()
+    # One path per line, and splitting on whitespace instead would break on any checkout whose
+    # path contains a space: the two paths would arrive as three or more parts, fail the length
+    # test, and silently disable the fallback for exactly the reader who cannot tell why.
+    parts = [line.strip() for line in out.stdout.splitlines() if line.strip()]
     if out.returncode != 0 or len(parts) != 2 or parts[0] == parts[1]:
         return None
     return Path(parts[1]).parent

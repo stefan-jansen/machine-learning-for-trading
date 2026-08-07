@@ -85,6 +85,24 @@ def anchor_ran() -> None:
         pytest.skip("sitecustomize.py did not run in this environment")
 
 
+def _expected_default_root() -> Path:
+    """Where the hook lands with nothing configured.
+
+    ``<repo>/data``, except in a linked ``git worktree``, which gets the tracked
+    skeleton of ``data/`` and none of the gitignored datasets under it: those live
+    only in the main working tree, so the hook borrows that one rather than naming
+    a directory that exists and holds nothing.
+    """
+    sitecustomize = _load_sitecustomize()
+    default = REPO_ROOT / "data"
+    if sitecustomize._has_datasets(default):
+        return default
+    main_tree = sitecustomize._main_worktree(REPO_ROOT)
+    if main_tree is not None and sitecustomize._has_datasets(main_tree / "data"):
+        return main_tree / "data"
+    return default
+
+
 def _expected_root() -> Path:
     """What the hook should resolve to on *this* machine.
 
@@ -92,10 +110,15 @@ def _expected_root() -> Path:
     sets ML4T_DATA_PATH in ``.env``, and honoring that is the whole point of
     reading the file. Asserting the repo path regardless would fail on every
     correctly-configured machine, including this one.
+
+    *Which* of the possible roots the rule picks is pinned in
+    ``tests/test_sitecustomize_data_root.py``, against a repository and a linked
+    worktree built for the test. What the tests here add is the other half: a
+    fresh interpreter started in any directory arrives at that same answer.
     """
     configured = _load_sitecustomize()._data_root_from_dotenv(REPO_ROOT)
     if not configured:
-        return REPO_ROOT / "data"
+        return _expected_default_root()
     path = Path(configured).expanduser()
     return path if path.is_absolute() else REPO_ROOT / path
 
@@ -210,7 +233,7 @@ def test_the_default_is_marked_as_a_default(monkeypatch) -> None:
     monkeypatch.delenv("ML4T_DATA_PATH", raising=False)
     monkeypatch.delenv("ML4T_DATA_PATH_IS_DEFAULT", raising=False)
     sitecustomize._anchor_data_root(REPO_ROOT)
-    assert Path(os.environ["ML4T_DATA_PATH"]) == REPO_ROOT / "data"
+    assert Path(os.environ["ML4T_DATA_PATH"]) == _expected_default_root()
     assert os.environ["ML4T_DATA_PATH_IS_DEFAULT"] == "1"
 
 

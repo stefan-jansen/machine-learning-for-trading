@@ -89,6 +89,107 @@ def test_a_directory_outside_any_repository_is_not_a_worktree(tmp_path):
     assert sc._main_worktree(tmp_path) is None
 
 
+# --- the same rules against a repository built for the test -----------------------------------
+#
+# The three tests above read whatever checkout the suite happens to run in, so the two that
+# matter skip in a plain clone - which is every CI run and every reader. The branch this change
+# exists for would then never be taken under test. Building a real repository with a real linked
+# worktree costs a few git invocations, runs everywhere, and keeps `--git-common-dir` itself
+# under test rather than assuming its contract and mocking around it.
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _repo_with_worktree(root: Path) -> tuple[Path, Path]:
+    """Build ``root/main`` as a repository and ``root/linked`` as a linked worktree of it."""
+    main = root / "main"
+    main.mkdir(parents=True)
+    _git(main, "init", "-q", "-b", "main")
+    _git(main, "config", "user.email", "test@example.com")
+    _git(main, "config", "user.name", "Test")
+    (main / "README.md").write_text("x\n")
+    _git(main, "add", "README.md")
+    _git(main, "commit", "-qm", "init")
+    linked = root / "linked"
+    _git(main, "worktree", "add", "-q", str(linked), "-b", "side")
+    return main, linked
+
+
+@pytest.fixture
+def worktree_pair(tmp_path):
+    return _repo_with_worktree(tmp_path)
+
+
+def _dataset(data_root: Path) -> None:
+    (data_root / "etfs").mkdir(parents=True, exist_ok=True)
+    (data_root / "etfs" / "bars.parquet").write_bytes(b"")
+
+
+def _skeleton(data_root: Path) -> None:
+    """What a linked worktree actually gets: the tracked directories, no parquet."""
+    (data_root / "etfs" / "market").mkdir(parents=True)
+    (data_root / "etfs" / "market" / "config.yaml").write_text("name: etfs\n")
+
+
+def test_a_built_linked_worktree_resolves_to_its_main_tree(worktree_pair):
+    main, linked = worktree_pair
+    assert sc._main_worktree(linked) == main.resolve()
+    assert sc._main_worktree(main) is None
+
+
+def test_a_built_linked_worktree_borrows_the_main_trees_datasets(clean_env, worktree_pair):
+    """The defect, end to end: skeleton in the worktree, datasets in the main tree."""
+    main, linked = worktree_pair
+    _dataset(main / "data")
+    _skeleton(linked / "data")
+    sc._anchor_data_root(linked)
+    assert os.environ["ML4T_DATA_PATH"] == str(main.resolve() / "data")
+    assert os.environ["ML4T_DATA_PATH_IS_DEFAULT"] == "1"
+
+
+def test_a_worktree_with_its_own_datasets_keeps_them(clean_env, worktree_pair):
+    """The fallback refines an empty default; it never moves a data root that works."""
+    main, linked = worktree_pair
+    _dataset(main / "data")
+    _dataset(linked / "data")
+    sc._anchor_data_root(linked)
+    assert os.environ["ML4T_DATA_PATH"] == str(linked / "data")
+
+
+def test_an_empty_main_tree_is_not_borrowed_from(clean_env, worktree_pair):
+    """Borrowing an equally empty directory would only move where the error names."""
+    main, linked = worktree_pair
+    _skeleton(main / "data")
+    _skeleton(linked / "data")
+    sc._anchor_data_root(linked)
+    assert os.environ["ML4T_DATA_PATH"] == str(linked / "data")
+
+
+def test_the_main_working_tree_of_a_built_repo_never_falls_back(clean_env, worktree_pair):
+    """The reader with one clone, stated as a repository rather than as an assumption."""
+    main, _linked = worktree_pair
+    _skeleton(main / "data")
+    sc._anchor_data_root(main)
+    assert os.environ["ML4T_DATA_PATH"] == str(main / "data")
+
+
+def test_a_checkout_path_containing_a_space_still_resolves(clean_env, tmp_path):
+    """`git rev-parse` prints one path per line, so the two paths must be split on lines.
+
+    Splitting on whitespace yields three parts here, fails the length test, and silently
+    disables the fallback - for a reader with a space in a directory name, who has no way to
+    connect that to a missing dataset.
+    """
+    main, linked = _repo_with_worktree(tmp_path / "my checkouts")
+    _dataset(main / "data")
+    _skeleton(linked / "data")
+    assert sc._main_worktree(linked) == main.resolve()
+    sc._anchor_data_root(linked)
+    assert os.environ["ML4T_DATA_PATH"] == str(main.resolve() / "data")
+
+
 # --- the anchoring rule -----------------------------------------------------------------------
 
 
