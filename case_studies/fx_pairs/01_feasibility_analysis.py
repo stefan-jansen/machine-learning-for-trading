@@ -104,9 +104,18 @@ print(f"{len(DECLARED_PAIRS)} pairs, floor {BREADTH_FLOOR} | horizons {HORIZONS}
 #
 # The loader returns four-hour bars and positions change once a day, so the calendar assigns each
 # bar to its session first, which puts the bars after the New York rollover into the next session
-# rather than the one whose date they carry. The session's last bar across the universe is the one
-# the decision reads, and a pair enters the panel only where it has that bar: its own last bar
-# would fill a missing close with a stale earlier one.
+# rather than the one whose date they carry.
+#
+# Within a session the **decision bar** is the latest four-hour timestamp that printed anywhere in
+# the universe, read off the data with `max`. Spot FX has no exchange close to schedule one
+# against, so the price a decision taken at the snapshot could have acted on is whatever traded
+# last before the rollover, and on a thin day - a US holiday, a Friday evening - that is hours
+# earlier than usual. Taking the maximum across the universe rather than per pair is what makes
+# the panel one instant wide: a pair with no bar at that timestamp is absent from the session
+# rather than carried forward at a stale price of its own. It also fixes what B.2 below counts.
+# The count is the pairs quoting at the session's last print, which is the instant the decision is
+# taken on; it is not a check that a bar landed on the scheduled rollover, and no such check is
+# available from a feed that has no scheduled close.
 
 # %%
 bars = load_fx_pairs(start_date=START_DATE, end_date=END_DATE)
@@ -129,7 +138,9 @@ print(
 # ### B.2 Breadth at every decision date
 #
 # A both-leg book holding the declared number of pairs on each side needs the whole universe present
-# on the date it rebalances, which the four-hour grid an alternative cadence trades does not.
+# on the date it rebalances, which the four-hour grid an alternative cadence trades does not. The
+# floor is therefore the size of the declared universe itself, and the decision-bar series runs
+# along it on every date where each pair quotes.
 
 # %%
 snap = daily.group_by("session").agg(pl.col("symbol").n_unique().alias("n")).sort("session")
@@ -137,16 +148,14 @@ grid = research.group_by("timestamp").agg(pl.col("symbol").n_unique().alias("n")
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 gaps = grid.filter(pl.col("n") < BREADTH_FLOOR)
-# The floor sits exactly on the daily-close series, since a both-leg book of the declared size
-# needs all twenty pairs.
 floor = dict(color=COLORS["copper"], lw=5, alpha=0.35, zorder=1)
 ax.axhline(BREADTH_FLOOR, label="both-leg position floor", **floor)
-ax.plot(snap["session"], snap["n"], color=COLORS["blue"], lw=1.4, label="daily close", zorder=3)
+ax.plot(snap["session"], snap["n"], color=COLORS["blue"], lw=1.4, label="decision bar", zorder=3)
 ax.plot(gaps["timestamp"], gaps["n"], ".", ms=3, color=COLORS["neutral"], label="four-hour gap")
 ax.set_ylim(0, len(DECLARED_PAIRS) + 2)
 ax.set_ylabel("Pairs quoting at the snapshot")
 ax.legend(frameon=False, fontsize=8, loc="center right")
-add_message_title(ax, "Every pair quotes at the daily close; the four-hour grid drops some")
+add_message_title(ax, "Every pair quotes at the decision bar; the four-hour grid drops some")
 plt.show()
 
 # %% [markdown]
@@ -329,10 +338,10 @@ print(
 # ### C.3 Mapping class
 #
 # `setup.yaml::mapping.class` ranks pairs and holds both legs. A pair is already a relative price,
-# so the short side carries no borrow and costs what the long side costs, and B.2 is the reason to
-# use it: with the independent bets already well below the number of pairs, dropping a leg would
-# halve what little breadth there is. Sizing is equal-weight because it assumes least; the
-# alternatives sweep in `setup.yaml::backtest.sweep.allocators`.
+# so the short side carries no borrow and costs what the long side costs, and holding both legs
+# puts a position on every pair the ranking covers, which is what spends the whole of the breadth
+# B.2 measures. Sizing is equal-weight because it assumes least; the alternatives sweep in
+# `setup.yaml::backtest.sweep.allocators`.
 
 # %% [markdown]
 # ## D. Walk-forward structure
@@ -415,7 +424,7 @@ plt.show()
 #
 # | Knob | Evidence | Revise it when |
 # |---|---|---|
-# | `universe.symbols` | B.2 breadth and participation ratio | a pair stops quoting at the close, or the independent bets fall further |
+# | `universe.symbols` | B.2 breadth and participation ratio | a pair stops quoting at the decision bar, or the independent bets fall further |
 # | `decision.cadence` | B.2 breadth by snapshot, B.3 exceedance | a shorter horizon starts clearing its round trip on a grid that carries the whole universe |
 # | `costs.spread_bps` | B.3 the declared band, drawn per pair | spreads estimated from quotes sit outside the band |
 # | `evaluation.n_splits` | D.1 session count, D.2 boundaries | the folds no longer fit the development window |
@@ -450,8 +459,10 @@ print(
 #
 # ### Known limitations
 #
-# - Cost here is the declared spread alone. Swap points accrue on every position held overnight, and
-#   both enter at the cost stage, which is where the band is tested against estimated spreads.
+# - Cost here is the declared spread alone, and the cost stage is where that band is tested against
+#   estimated spreads. The swap points a position pays or earns for being held overnight are priced
+#   at no stage of this case study, so every cost figure it reports is the cost of crossing and not
+#   the cost of carrying.
 # - The band is an assumption: a pair whose realized spread sits outside it does not show up here.
 #
 # **Next**: labels at the declared horizons, built on this development window.
