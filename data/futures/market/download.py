@@ -758,21 +758,27 @@ Examples:
     print(f"  full range per product, through {config.default_end} - --years does not narrow it")
     cost = estimate_cost(config, products_needing_update)
 
+    # An unknown cost stops anything paid, but --dry-run and --estimate buy
+    # nothing, and they are what the failure message tells you to reach for -
+    # so they still run and simply report the cost as unknown.
+    unknown = "unknown (estimate failed)" if cost is None else f"${cost:.2f}"
+
+    if args.estimate:
+        if cost is None:
+            print(f"\nEstimated cost: {unknown}. Check DATABENTO_API_KEY.")
+            return 1
+        databento_estimate_only_notice(cost)
+        return 0
+
+    if args.dry_run:
+        print(f"\n[DRY RUN] Estimated cost: {unknown}")
+        print("[DRY RUN] Would download the products listed above.")
+        return 0
+
     if cost is None:
         print("\nCould not establish the cost. Refusing to start a paid download blind.")
         print("Check DATABENTO_API_KEY and re-run; use --dry-run to see what would be requested.")
         return 1
-
-    # If --estimate flag, show cost and exit
-    if args.estimate:
-        databento_estimate_only_notice(cost)
-        return 0
-
-    # If dry run, just show what would be done
-    if args.dry_run:
-        print(f"\n[DRY RUN] Estimated cost: ${cost:.2f}")
-        print("[DRY RUN] Would download the products listed above.")
-        return 0
 
     if args.max_cost is not None and cost > args.max_cost:
         print(f"\nEstimated ${cost:.2f} exceeds --max-cost ${args.max_cost:.2f}. Not downloading.")

@@ -87,7 +87,7 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, symbols):
         date_col="timestamp",
         entity_col="symbol",
     )
-    ic_clean = ic_per_date.drop_nulls("ic")
+    ic_clean = ic_per_date.drop_nans("ic").drop_nulls("ic")
     return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
 
 
@@ -214,7 +214,13 @@ for i, params in enumerate(grid):
         print(f"  {i + 1}/{N_GRID} completed...")
 
 grid_time = time.time() - grid_start
-best_grid = max(grid_results, key=lambda x: x["ic"])
+# Select over finite ICs only. `max()` compares with `<`, and every comparison
+# against NaN is false, so a NaN anywhere in the list makes it return whichever
+# element came first rather than the best one - silently, and with no warning.
+scored = [r for r in grid_results if np.isfinite(r["ic"])]
+if not scored:
+    raise RuntimeError("No grid configuration produced a finite IC.")
+best_grid = max(scored, key=lambda x: x["ic"])
 print(f"Done in {grid_time:.1f}s — Best IC: {best_grid['ic']:.4f}")
 
 # %% [markdown]
@@ -256,11 +262,12 @@ comparison_df = pl.DataFrame(
 comparison_df
 
 # %% [markdown]
-# **Interpretation**: On this small discrete grid the two methods tie. Grid ran
-# every one of the 54 combinations and found the global best (val IC 0.0178);
-# Optuna, given the same 54-trial budget on the same categorical space, rediscovered
-# the identical best configuration (val IC 0.0178) — with only 54 candidates to
-# choose from, TPE has no room to beat exhaustion and no room to lose to it. Wall
+# **Interpretation**: On this small discrete grid, exhaustion is the safer method.
+# Grid ran every one of the 54 combinations, so it found the global best by
+# construction. Optuna, given the same 54-trial budget on the same categorical
+# space, came in below it: TPE samples with replacement, so 54 trials do not cover
+# 54 points, and on a space this small there is nothing for the sampler to exploit
+# in exchange. Search only pays where the space is too big to enumerate. Wall
 # times are within a few seconds of each other on this machine and are dominated by
 # LightGBM fitting, not by the sampler. The lesson is not that one method wins but
 # that on a space this small there is nothing to optimize: the chapter's
@@ -369,13 +376,13 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# **Interpretation**: The gap between the two curves is the point. Raising the
-# budget from 25 to 50 trials lets TPE find a configuration that lifts the best
-# *validation* IC from 0.0226 to 0.0567 — a 150 % jump — but the corresponding
-# *test* IC on the sealed 2024–2025 holdout barely moves, from 0.0802 to 0.0845
-# (about 5 %). Almost none of the extra validation IC transfers: the additional
-# trials mostly bought a configuration that fits the validation window's noise,
-# the signature Box 12.3 warns about. (The test IC sits *above* the val IC in
+# **Interpretation**: The gap between the two curves is the point. Read the table
+# above by column: best *validation* IC rises with every increase in budget and
+# then plateaus, while *test* IC on the sealed 2024–2025 holdout peaks partway
+# through and then falls. Past that peak the extra trials are buying fit to the
+# validation window's noise and paying for it out of sample — the signature Box
+# 12.3 warns about, and the reason a budget is a parameter to choose rather than
+# maximize. (The test IC sits *above* the val IC in
 # absolute terms only because the 2024–2025 holdout was an unusually strong,
 # trending regime for this ETF universe — a level artifact of that window, not
 # evidence that tuning helped.) This single-fold, fixed-seed setup shows the
@@ -454,18 +461,24 @@ final_df
 # %% [markdown]
 # **Interpretation**: This is the load-bearing comparison of the notebook, and it
 # is measured on the case study's **sealed 2024–2025 holdout** — never seen during
-# any search. Grid's val-best discrete configuration (val IC 0.0178) generalises to
-# test IC 0.087; Optuna's val-best continuous configuration, which scored more than
-# three times higher on validation (val IC 0.0567), generalises to only test IC
-# 0.050. The configuration that maximised validation IC is the one that generalised
-# *worst* — the canonical signature of validation overfitting (Box 12.3): Optuna
-# found a region of the larger continuous space that fit the one-year validation
-# window's noise and did not carry to the held-out period. The lesson is not that
-# grid beats Optuna — the continuous space is strictly larger and contains plenty of
-# strong configurations, and on this ETF target every IC here is thin. The lesson is
-# that when validation IC is low and noisy, the configuration that maximises it is
-# not the configuration that generalises, and the only reliable defence is a holdout
-# the search cannot touch (and walk-forward HPO, demonstrated in `04_optuna_tuning`).
+# any search. Widening the space pays here: Optuna's continuous configuration beats
+# grid's discrete one out of sample, because the grid's fixed values simply do not
+# contain the better region.
+#
+# Read it against the budget sweep above rather than on its own, because the two
+# say different things and both are true. *Where* you search can help: a larger
+# space contains configurations a coarse grid cannot express. *How long* you search
+# within it stops helping and starts hurting, which is what the test curve turning
+# down shows. Neither result licenses trusting the validation number itself — on
+# this ETF target every IC here is thin, and the ordering by validation IC is not
+# the ordering by holdout IC at any budget.
+#
+# **Do not read a single run of this notebook as a verdict on grid versus Optuna.**
+# An earlier execution of this same code, on an earlier vintage of the ETF
+# artifacts, ranked them the other way round. That instability is the finding: when
+# validation IC is low and noisy, the search method is not what decides the outcome,
+# and the only reliable defence is a holdout the search cannot touch — plus
+# walk-forward HPO, demonstrated in `04_optuna_tuning`.
 
 # %% [markdown]
 # ## Key Takeaways
