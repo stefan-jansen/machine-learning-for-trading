@@ -198,8 +198,9 @@ print(
 )
 print(f"The tradability gate admits {len(eligibility):,} fund-years")
 print(
-    f"The Treasury spread is published on {len(yield_curve):,} days, "
-    f"{yield_curve['timestamp'].min()} to {yield_curve['timestamp'].max()}"
+    f"The Treasury spread carries {len(yield_curve):,} rows, one per calendar day from "
+    f"{yield_curve['timestamp'].min()} to {yield_curve['timestamp'].max()}, repeating the last "
+    f"published value on weekends and holidays"
 )
 
 # %% [markdown]
