@@ -227,8 +227,8 @@ print(
 # One property of the implied volatility decides how it may be used. Where the solve described in
 # Section A did not converge, the vendor records the failure as a negative number rather than as an
 # empty field, and a difference or ratio taken across tenors inherits it. A negative annualized
-# standard deviation is not a quantity, and it is worse than a missing one: it survives a
-# drop-missing, and in a ranking it sorts that stock to the bottom on the strength of a solver
+# standard deviation is not a quantity, and it is worse than a missing one: a drop-missing leaves
+# it in place, and in a ranking it sorts that stock to the bottom on the strength of a solver
 # failure rather than a cheap option. `load_sp500_options_surface` returns those placeholders as
 # missing values, along with every surface measure derived from one, so that this notebook and
 # every later stage see the same thing. The count of stock-sessions with no value is reported
@@ -803,9 +803,9 @@ print(
 # ## Key takeaways
 #
 # 1. **A placeholder is not a measurement.** Where a vendor writes a sentinel value for a
-#    calculation that failed, a ranking will happily sort on it, because it is a number and it
-#    survives a drop-missing; find out what a file does with failure before computing anything
-#    from the column, and normalise it at the loader so every reader gets the same answer.
+#    calculation that failed, a ranking will happily sort on it, because it is a number and a
+#    drop-missing leaves it in place; find out what a file does with failure before computing
+#    anything from the column, and normalise it at the loader so every reader gets one answer.
 # 2. **Count the universe on the dates the strategy acts.** Where membership follows a listing
 #    calendar rather than a liquidity rule, the count cycles for reasons the strategy does not
 #    control, and an average over all sessions hides it.
