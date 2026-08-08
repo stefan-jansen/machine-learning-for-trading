@@ -206,7 +206,7 @@ features:
     momentum_composite: [mom_rank_63d, mom_rank_126d, mom_rank_252d]
     sharpe_composite: [sharpe_rank_63d, sharpe_rank_126d, sharpe_rank_252d]
   thresholds:
-    carry_regime_band: 0.01          # annualized carry separating the two regimes
+    carry_regime_band: 0.01          # carry, on the x12 scale, separating the two regimes from flat
     signal_long: 60                  # percentile of the carry-momentum composite
     signal_short: 40
     roll_proximity_day: 25           # calendar day from which the roll week is flagged
@@ -222,7 +222,7 @@ features:
       lookback: 146
       lag: 0
       frame: term structure
-      representation: annualized spread, its smoothed level, z-score and change
+      representation: front-to-next spread on a x12 scale, its smoothed level, z-score and change
       failure_mode: the spread inverts around a supply shock faster than the smoothing follows
     - name: momentum
       pattern: ret_*d|skip_month_mom|mom_accel_*|ts_mom_*

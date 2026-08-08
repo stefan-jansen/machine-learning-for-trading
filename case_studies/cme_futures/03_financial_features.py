@@ -17,30 +17,34 @@
 # # CME Futures: Feature Engineering
 #
 # A futures panel offers something an equity panel does not: the price of the same commodity for
-# delivery at two different dates, quoted side by side. The gap between them is the carry, and it is
-# knowable at the moment a position is decided rather than inferred from past returns. This notebook
-# builds that quantity and the momentum, volatility and calendar families it is read against, states
-# what window and what delay each one carries, and shows that none of them reads a settlement dated
-# at or after the decision.
+# delivery at several different dates, quoted side by side. That set of prices is the **term
+# structure**, and the gap between the nearest contract - the **front month** - and the one behind
+# it is the **carry**. Carry is knowable at the moment a position is decided rather than inferred
+# from past returns. This notebook builds it, and the momentum, volatility and calendar families it
+# is read against, states what window and what delay each one carries, and shows that none of them
+# reads a settlement dated at or after the decision.
 #
 # ## Learning objectives
 #
-# - Derive carry and curvature from a term structure, and see why they need the unadjusted prices
-#   when every return in the same notebook needs the adjusted ones
-# - State each family's lookback and information lag before writing the code that computes it
-# - Rank within the decision date **and the contract position**, so a front-month carry is never
-#   compared against a deferred-month one
-# - Show that withholding later dates leaves every feature value unchanged, which is what separates
-#   a trailing statistic from one fitted over the whole sample
+# - Build carry and curve shape from two and three contracts quoted on the same date, and see why
+#   that spread needs the prices the exchange actually settled while every return in the same
+#   notebook needs the roll-adjusted ones
+# - Write down how many past sessions each feature family reads, and how long it waits for its
+#   inputs to be published, before writing the code that computes it
+# - Rank products within one decision date **and** one contract position, so a front-month carry is
+#   never compared against a deferred-month one
+# - Rebuild the whole matrix with the late sessions withheld and check every value agrees, which is
+#   what separates a trailing statistic from one fitted over the whole sample
 #
 # ## Book reference, prerequisites and artifacts
 #
 # Chapter 8, Sections 8.1-8.6. Reads session-aligned daily settlement bars for three tenors per
 # product via `load_cme_futures()`, and `config/setup.yaml`. Writes `features/financial.parquet`
-# with a `.digest.json` sidecar, read by
-# [`04_model_based_features`](04_model_based_features.ipynb), which builds regime and
-# memory-preserving features on top of it, and by [`05_evaluation`](05_evaluation.ipynb), which
-# tests fold by fold whether any of it predicts.
+# with a `.digest.json` sidecar, read by [`05_evaluation`](05_evaluation.ipynb), which tests fold
+# by fold whether any of it predicts, and by the modelling notebooks from
+# [`06_linear`](06_linear.ipynb) onward, which join it with the labels into one training matrix.
+# [`04_model_based_features`](04_model_based_features.ipynb) works from the same settlement bars
+# rather than from this file, and the two feature sets meet at that modelling stage.
 
 # %%
 """CME Futures: Feature Engineering."""
@@ -59,6 +63,7 @@ from ml4t.engineer.features.volatility import yang_zhang_volatility
 from plotly.subplots import make_subplots
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
 from case_studies.utils.feature_engineering import (
     EPS,
     assert_values_agree,
@@ -88,21 +93,27 @@ warnings.filterwarnings("ignore")
 CASE_DIR = get_case_study_dir("cme_futures")
 FEATURES_DIR = CASE_DIR / "features"
 
+# %% [markdown]
+# `START_DATE` is the first session the panel is built from. Left unset, it takes the whole
+# history the loader has; setting it to a date shortens the window, which is what to change for
+# a quick pass over a few recent years rather than the full sample.
+
 # %% tags=["parameters"]
-# Production runs START_DATE as None; CI overrides it to shorten the window. There is no product
-# cap: the universe is 30 products by construction and the cross-sectional families below need the
-# whole cross-section to rank within.
 START_DATE = None
 
 # %% [markdown]
 # ## Configuration
 #
 # Every window, the ranked-column mapping, the composite definitions, the sector map, the decision
-# horizon and the holdout boundary are declared in `config/setup.yaml` and bound here. A window
-# retyped in the notebook is a second source of truth for a decision the register, the warmup
-# assertion and the timing figure all have to agree on. The horizon fixes how far the persistence
-# figure has to look, because a feature has to hold its ordering for at least one decision cycle to
-# be tradable at that cadence.
+# horizon and the holdout boundary are declared in `config/setup.yaml` and bound here, so that the
+# register, the warmup assertion and the timing figure all read one set of numbers.
+#
+# Two of those settings decide how the rest of the notebook is read. The **decision cycle** is how
+# many settlement sessions pass between one rebalance and the next, and it sets how far the
+# persistence figure in Section F has to look: a feature whose ordering has decayed before the
+# next rebalance cannot be traded at that cadence however well it predicts on the day it is
+# computed. The **holdout** is the block of late sessions no feature selection may read; Section D
+# rebuilds the whole matrix without it to show that nothing here depends on having seen it.
 
 # %%
 setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
@@ -118,14 +129,16 @@ DECISION_CYCLE = int(
     resolve_label_horizon("cme_futures", setup["labels"]["primary"], setup).rstrip("Dd")
 )
 HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
+HOLDOUT_END = date.fromisoformat(setup["evaluation"]["holdout_end"])
 
 # The panel key, and the partition every cross-sectional statistic is taken over.
 ENTITY = ["product", "position"]
 PANEL_KEY = ["product", "position", "timestamp"]
 WITHIN_DATE = ["timestamp", "position"]
 
-print(f"{len(FAMILIES)} declared families, decision cycle {DECISION_CYCLE} sessions")
-print(f"Holdout starts {HOLDOUT_START}; Section D rebuilds the panel without it")
+print(f"{len(FAMILIES)} feature families declared, {len(RANKED)} of their levels also ranked")
+print(f"Decision cycle {DECISION_CYCLE} settlement sessions, so the strategy rebalances weekly")
+print(f"Holdout {HOLDOUT_START} to {HOLDOUT_END}, which no selection in this notebook may read")
 
 # %% [markdown]
 # ## A. What the thesis says should carry information
@@ -135,7 +148,7 @@ print(f"Holdout starts {HOLDOUT_START}; Section D rebuilds the panel without it"
 # near contract trades above the deferred one earn the roll that shape implies, and go on earning
 # it over the following week. Three things follow.
 #
-# The **carrier** is carry, and it is the one family here that is not a function of past returns.
+# The **signal** is carry, and it is the one family here that is not a function of past returns.
 # It is quoted directly, so it needs no lookback at all - the smoothing, the z-score and the change
 # in carry are there to say whether today's spread is unusual *for this product*, which is a
 # different claim from the spread being wide.
@@ -191,18 +204,70 @@ print(f"{len(bars):,} bars over {bars['product'].n_unique()} products at 3 contr
 print(f"{bars['timestamp'].min()} to {bars['timestamp'].max()}")
 
 # %% [markdown]
+# The universe is worth looking at before anything is computed from it, because the
+# cross-sectional families below rank these thirty products against each other on every date. The
+# sector groups are the ones declared in `config/setup.yaml`, and the last column is the median
+# number of front-month contracts changing hands in a session.
+#
+# Two things in it matter downstream. The seven sectors are of unequal size, from three products
+# to six, which is what makes the within-sector ranking in C.5 a coarse statistic. And liquidity
+# is not remotely uniform: the Treasury and equity-index curves trade in hundreds of thousands of
+# contracts a session where the livestock curves trade in tens of thousands, so a ranking that
+# treats all thirty as equally fillable is an assumption the cost work in Chapter 18 has to test
+# rather than a fact this stage establishes.
+
+# %%
+(
+    bars.filter(pl.col("position") == 0)
+    .with_columns(pl.col("product").replace_strict(SECTOR, default="unknown").alias("sector"))
+    .group_by("sector")
+    .agg(
+        pl.col("product").unique().sort().str.join(", ").alias("products"),
+        pl.col("timestamp").min().alias("first session"),
+        pl.col("timestamp").max().alias("last session"),
+        pl.col("volume").median().cast(pl.Int64).alias("median front-month volume"),
+    )
+    .sort("median front-month volume", descending=True)
+)
+
+# %% [markdown]
 # ## C. Feature construction, one subsection per family
 #
 # ### C.1 Term structure
 #
-# Carry is the annualized gap between the front and second settlement, and curvature is the second
-# difference across all three tenors - a curve can be in backwardation and still be bent, and the
-# two say different things about where the pressure on it sits. Both are one value per
-# product-date, shared by the three positions, and both read `raw_close` for the reason B gives.
+# Carry is how far the front contract settles above the next one along, as a fraction of the front
+# price, scaled by twelve:
 #
-# There is no library call for either. `ml4t.engineer.features` covers statistics of a single price
-# series, and a term structure is a relation between contemporaneous series, so this subsection is
-# the one place in the notebook where the construction is local rather than imported.
+# $$c_{p,t} = 12 \times \frac{F^{(0)}_{p,t} - F^{(1)}_{p,t}}{F^{(0)}_{p,t}}$$
+#
+# where the superscript is the contract position, so $F^{(0)}$ is the front contract and
+# $F^{(1)}$ the next one along. It is positive in **backwardation**, where the near contract is
+# dearer than the deferred one, and negative in **contango**, where it is cheaper.
+#
+# The twelve would turn a one-month spread into a yearly rate, and four of these thirty products -
+# the energy curves - do list a contract every month. The other twenty-six are on quarterly or
+# irregular cycles, so for them the twelve is a scale factor and not an annual rate. It is the
+# same constant for every product and every date, so it moves no ranking and no z-score; what it
+# does not give is a level comparable between an energy curve and a Treasury one, which is why
+# C.5 also ranks carry inside its own sector.
+#
+# Curvature is the second difference across all three tenors: a curve can be in backwardation and
+# still be bent, and the two say different things about where the pressure on it sits. Both
+# quantities are one value per product-date, shared by the three positions, and both read
+# `raw_close` for the reason B gives.
+#
+# The smoothing, z-score and change windows below span the sessions on which the curve was
+# actually quoted, not every session in the panel. A product-date where the second contract did
+# not trade has no carry at all, and keeping it as a gap would null the smoothed level for the
+# three weeks that follow it; the left join in `build_features` puts those dates back with a null
+# carry. The z-score is clipped at five standard deviations. It is carried as a level and never
+# ranked, so what the clip bounds is the number a model reads and the number the interaction score
+# in C.5 multiplies, in the weeks where a single settlement sends the ratio far out.
+#
+# There is no library call for either quantity. `ml4t.engineer.features` covers statistics of a
+# single price series, and a term structure is a relation between contemporaneous series, so this
+# subsection is the one place in the notebook where the construction is local rather than
+# imported.
 
 
 # %%
@@ -220,10 +285,6 @@ def term_structure(bars: pl.DataFrame) -> pl.DataFrame:
                 "curve_curvature_norm"
             ),
         )
-        # The windows below span the sessions on which the curve was quoted, not calendar
-        # sessions: a product-date where the second contract did not trade has no carry, and
-        # keeping it would null the smoothed level for the three weeks that follow it. The
-        # left join in `build_features` puts those dates back with a null carry.
         .drop_nulls("carry_pct")
     )
     band = LEVEL["carry_regime_band"]
@@ -269,6 +330,9 @@ def term_structure(bars: pl.DataFrame) -> pl.DataFrame:
 # beside the close-to-close estimator because an overnight gap in a futures contract is a real move
 # that a close-to-close estimator cannot see. The variance ratio says whether the recent path
 # trended or reverted, which is a statement about the regime rather than the level of risk.
+#
+# The two ratios of volatility windows are capped at ten. A quiet stretch can put a near-zero
+# window in the denominator, and the cap bounds what that produces without discarding the row.
 
 
 # %%
@@ -396,6 +460,18 @@ def calendar_features(df: pl.DataFrame) -> pl.DataFrame:
 # thesis is stated - a product is attractive when the curve and the trend agree. `ls_signal` bands
 # that score and is null, not zero, wherever the score is: a flat reading and no reading are
 # different things, and a model handed zero for both cannot tell them apart.
+#
+# Two more scores read that composite differently. `risk_adj_score` divides it by the volatility
+# percentile, so a product that reaches a given standing at less dispersion scores higher than one
+# that reaches it at more. The ten added to the denominator bounds how far that can go: the
+# percentile of the calmest product on a date sits close to zero, and dividing by it alone would
+# let one quiet product dominate the whole ordering.
+#
+# `carry_mom_interaction` multiplies the carry z-score by the momentum percentile. The percentile
+# is always positive, so the product keeps the sign of the z-score and changes only its size: an
+# unusual carry reading counts for more where the product also stands high on momentum, and for
+# less where it stands low. It scales one signal by the other rather than testing that the two
+# point the same way, which is what `carry_mom_composite` above does.
 
 
 # %%
@@ -475,8 +551,9 @@ print(f"{len(built):,} rows carrying {len(feature_cols)} features")
 # Four kinds of operation appear above. A **rolling** window - every return, volatility, moving
 # average, extreme, oscillator and carry z-score - ends at its own row and reads a fixed number of
 # sessions backward within one product and contract position. A **shift** reads exactly one earlier
-# row of the same series. A **contemporaneous** relation - carry and curvature - reads three tenors
-# of the same product on the same date and no other date at all. A **cross-sectional** statistic -
+# row of the same series. A **contemporaneous** relation - carry and curvature - reads the two or
+# three tenors of the same product quoted on the same date and no other date at all. A
+# **cross-sectional** statistic -
 # the twelve percentiles - is taken with `.over(["timestamp", "position"])`, so it reads every
 # product quoted at that position on that date and nothing dated before or after it.
 #
@@ -491,9 +568,10 @@ print(f"{len(built):,} rows carrying {len(feature_cols)} features")
 #
 # The two audits count on different frames, and the panel key forces it. A return is a statistic of
 # one contract, counted in that contract's own sessions. Carry is a statistic of the product's
-# curve, counted in product-dates: nine of the 30 products list a deferred contract later than
-# their front month, and counting the carry z-score from that contract's first session would report
-# a warmup that had elapsed before the contract existed.
+# curve, counted in the product-dates on which the curve was quoted: a product whose second
+# contract only begins trading after its front month has no carry at all until then, and counting
+# the carry z-score from the front month's first session would report a warmup that had elapsed
+# before there was a spread to smooth.
 
 # %%
 warmup_audit(
@@ -547,9 +625,14 @@ seal.filter(pl.col("column").is_in(["carry_zscore_126d", "mom_rank_252d", "carry
 # its own answer. `log_return` goes with them, as the intermediate the volatility family
 # standardizes rather than a feature.
 #
-# One null policy is applied once: a row is kept when the two shortest-window carriers, the
+# One null policy is applied once: a row is kept when the two shortest-window features, the
 # one-month return and the one-month volatility, have both warmed up. The longer families fill in
 # above that point, which is what F1 shows.
+#
+# A front-month slice is cut here as well. Carry is one value per product-date, so the figures
+# that read the carry cross-section read this slice rather than the whole matrix, for the reason
+# Section A gives: an ordering taken across contract positions is an ordering of ninety contracts,
+# not the thirty a decision is taken over.
 
 # %%
 features = (
@@ -558,9 +641,6 @@ features = (
     .sort(PANEL_KEY)
 )
 assert features.select(PANEL_KEY).is_duplicated().sum() == 0, "duplicate panel key"
-# The front month, which F3, F6, F7 and F8 read: carry is one value per product-date, and a
-# cross-section taken over all three positions is an ordering of 90 contracts rather than the
-# 30 a decision is taken over.
 front = features.filter(pl.col("position") == 0)
 assignment = assign_families(feature_cols, FAMILIES)
 register_frame(FAMILIES, feature_cols).select(["family", "columns", "role", "representation"])
@@ -568,31 +648,38 @@ register_frame(FAMILIES, feature_cols).select(["family", "columns", "role", "rep
 # %% [markdown] tags=["results"]
 # The matrix carries **62 features** on **310,947 rows** across **30 products** at three contract
 # positions, from **2011-02-01** to **2025-12-31**. The null policy dropped **1,912 rows**. Past the
-# warmup boundary at **2011-12-21** the thinnest family in any month is **0.906** covered, which is
-# momentum: a contract listed part-way through the sample has no one-year return yet.
+# warmup boundary at **2011-12-21** the thinnest family in any month is **0.906** covered, and it is
+# term structure: carry needs a second listed contract and curvature needs a third, so a product
+# quoting only the front and the next has a curvature the panel cannot fill.
+
+# %% [markdown]
+# The warmup boundary below is the register's own longest lookback, counted forward from the
+# panel's first session: the date by which every declared window has had the sessions it needs.
+# That is a statement about the windows and not about coverage. A product that lists its second or
+# third contract later than its front month still has no carry or curvature after the boundary,
+# which is why the thinnest family below sits under one rather than at it.
 
 # %%
-# The warmup boundary is the register's own longest lookback counted forward from the panel's
-# first session - a declared number, not a date read off the values.
 sessions = bars["timestamp"].unique().sort()
 WARMUP_END = sessions[max(f.lookback for f in FAMILIES)]
 coverage = family_coverage(features, assignment, every="1mo")
 floor = coverage.filter(pl.col("timestamp") >= WARMUP_END)
+thinnest = min(((floor[c].min(), c) for c in set(assignment.values())), key=lambda t: t[0])
 print(
     f"{len(feature_cols)} features, {len(features):,} rows, {features['product'].n_unique()} products"
 )
 print(f"{features['timestamp'].min()} to {features['timestamp'].max()}, warmup ends {WARMUP_END}")
 print(f"{len(built) - len(features):,} rows dropped by the null policy")
-print(
-    f"thinnest family-month past warmup {min(floor[c].min() for c in set(assignment.values())):.3f}"
-)
+print(f"thinnest family-month past warmup {thinnest[0]:.3f}, which is {thinnest[1]}")
 
 # %% [markdown]
 # ### F1. Coverage through time
 #
-# Below the boundary the composites are empty by construction - a score built from percentiles of
-# a one-year return cannot exist until a one-year return does - so the axis runs the full range
-# rather than the top percent it would need for a matrix that is dense throughout.
+# Below the boundary the composites are empty by construction: a score built from percentiles of
+# a one-year return cannot exist until a one-year return does. The axis runs the full range from
+# zero to one, and the marked boundary is where the longest declared window has had its sessions.
+# What is left above it is not warmup but the panel itself - a tenor that is not listed on a date
+# has no spread to measure, and that is the one family that stays visibly short of one.
 
 # %%
 plot_coverage_through_time(
@@ -605,7 +692,8 @@ plot_coverage_through_time(
         "zero to one. The composite and cross-sectional families sit at zero until the end of "
         "2011 and then jump to near one at the marked warmup boundary. Every other family "
         "rises through 2011 and all of them then sit between about 0.9 and one for the rest of "
-        "the sample, with momentum the lowest and slightly ragged throughout."
+        "the sample. Term structure is the lowest and the only visibly ragged one, running "
+        "around 0.94; the calendar family sits flat at one and the rest are close to it."
     ),
 )
 
@@ -637,10 +725,15 @@ plot_timing_contract(
 #
 # ### F2. Feature distributions
 #
-# The carry family is shown on the scale a reader would judge it: the raw annualized spread, its
-# smoothed level, the change in it, how far it sits from its own history, and its two rankings.
-# The same quantity looks completely different in level and in percentile form, which is the point
-# of carrying both.
+# The carry family is shown on the scale a reader would judge it: the raw spread, its smoothed
+# level, the change in it, how far it sits from its own history, and its two rankings. The same
+# quantity looks completely different in level and in percentile form, which is the point of
+# carrying both.
+#
+# The percentiles are combed rather than smooth, and that is worth reading rather than dismissing.
+# A percentile taken over thirty products can only land on thirty values, so its histogram is a
+# row of teeth wherever the cross-section is small - and the within-sector ranking, taken over
+# three to six products, is a handful of teeth and nothing between them.
 
 # %%
 plot_feature_distributions(
@@ -653,15 +746,17 @@ plot_feature_distributions(
         "carry_rank",
         "carry_rank_sector",
     ],
-    title="The carry level is sharply peaked where its percentile is flat",
+    title="The same carry is a spike in level and a spread in percentile",
     subtitle="Carry family across all product-sessions, display tails clipped",
     alt=(
-        "Six histograms in two rows. The three level features - the raw annualized carry, its "
+        "Six histograms in two rows. The three level features - the raw carry spread, its "
         "smoothed version and its one-month change - are all sharply peaked at zero with long "
         "thin tails to either side. The 63-session z-score below them is a broad, roughly "
-        "symmetric bell spanning about minus three to three. The two percentiles are close to "
-        "uniform across their range, the within-sector one reduced to a few tall spikes "
-        "because a sector holds only four to six products to rank within."
+        "symmetric bell spanning about minus three to three. The two percentiles spread across "
+        "their whole range instead, both of them combed into discrete teeth: the unconditional "
+        "ranking has teeth across the full zero-to-one-hundred axis with the tallest at either "
+        "end, and the within-sector one is reduced to a few tall spikes because a sector holds "
+        "only three to six products to rank within."
     ),
 )
 
@@ -669,10 +764,8 @@ plot_feature_distributions(
 # ### F3. Cross-sectional dispersion through time
 #
 # A cross-sectional strategy needs the cross-section to disagree. On a date where the band narrows
-# to nothing there is nothing to rank, whatever the average level of carry. Carry is one value per
-# product-date, so this reads the front month alone: including all three positions would repeat
-# every product three times and report a wider spread than the one a decision is actually taken
-# over.
+# to nothing there is nothing to rank, whatever the average level of carry. This reads the
+# front-month slice cut in Section E.
 
 # %%
 plot_cross_sectional_dispersion(
@@ -680,11 +773,11 @@ plot_cross_sectional_dispersion(
     "carry_pct",
     every="1mo",
     title="The cross-section of carry never collapses to one view",
-    subtitle="Interdecile band of annualized front-month carry, by month",
+    subtitle="Interdecile band of front-month carry, by month",
     alt=(
-        "Shaded band of the 10th to 90th percentile of annualized front-month carry by month, "
-        "with the median drawn through it. The median stays close to zero throughout. The band "
-        "is roughly plus or minus 0.2 wide in calm periods and never narrows to nothing; it "
+        "Shaded band of the 10th to 90th percentile of front-month carry by month, with the "
+        "median drawn through it. The median stays close to zero throughout. The band spans "
+        "roughly minus 0.15 to plus 0.15 in calm periods and never narrows to nothing; it "
         "reaches below minus 0.7 in 2020 and widens again through 2021 and 2022."
     ),
 )
@@ -692,10 +785,18 @@ plot_cross_sectional_dispersion(
 # %% [markdown]
 # ### F5. Redundancy structure
 #
-# Clustering on the distance $1 - |\rho|$ groups features that carry the same ordering, whatever
-# the sign. Above the cut two features are close enough that a linear model cannot separate their
-# contributions. This states the clusters; choosing one representative from each needs a fold-aware
-# criterion and belongs to `05_evaluation`.
+# Features are ranked before they are correlated, so the correlation is Spearman's $\rho_s$ and
+# the question it answers is whether two columns carry the same *ordering* rather than the same
+# values. Clustering on the distance $1 - |\rho_s|$ therefore groups columns that order the
+# universe alike, whatever the sign of the relation. The cut is a screen and not a proof: a
+# cluster forming below it is a place to look for columns whose coefficients a linear model will
+# estimate against each other rather than independently. Average linkage joins on the mean
+# distance, so a cluster can also hold a pair that correlates less than the cut on its own.
+#
+# This states the structure and takes no feature out of the matrix. `05_evaluation` tests each
+# column against the label on its own, and separately lists the pairs correlating above the same
+# cut. Both lists are printed there, and reading one against the other is what tells you whether
+# several columns surviving its screen are several findings or one finding under several names.
 
 # %%
 CUT = 0.7
@@ -707,12 +808,12 @@ clusters = plot_redundancy_clusters(
     subtitle=r"Average linkage on $1 - |\rho_s|$, cut drawn at $|\rho_s| = 0.7$",
     alt=(
         "Dendrogram of every feature in the matrix. The clusters below the cut are horizon "
-        "blocks that mix levels with their percentiles: the six-month return, its Sharpe, its "
+        "blocks that mix levels with their percentiles: the three-month return, its Sharpe, its "
         "sign and both of their percentiles join at very small distances, and the same happens "
-        "at the one-year horizon and again for the carry level with its rank, its regime "
-        "indicator and the long-short signal. The volatility windows form one cluster with the "
-        "volatility percentile. The calendar features and the variance ratio attach only near "
-        "the root, sharing an ordering with nothing else."
+        "at the six-month horizon, at the one-year horizon, and again for the carry level with "
+        "its rank, its regime indicator and the long-short signal. The volatility windows form "
+        "one cluster with the volatility percentile. The calendar features and the variance "
+        "ratio attach only near the root, sharing an ordering with nothing else."
     ),
 )
 
@@ -726,27 +827,38 @@ print(f"{len(set(clusters.values()))} clusters over {len(feature_cols)} features
 # %% [markdown]
 # ### F6. Persistence and rank stability
 #
-# The right-hand panel compares the ordering across consecutive **rebalances**, which
-# `config/setup.yaml` declares as `weekly_friday_close`. The autocorrelation on the left is of the
-# feature, not of the return, and it runs to four decision cycles. A feature whose value has
-# decayed before the next rebalance cannot support that cadence, however well it predicts on the
-# day it is computed. It is estimated per product on pairs of dates exactly one lag apart and
-# summarized by the median over products, with a bootstrap interval over products: a correlation
-# pooled over every product-date pair would read high whenever products sit at different levels,
-# whether or not any one of them persists.
+# The left panel is the autocorrelation of the feature itself, not of the return, and it runs to
+# four decision cycles - four weeks, on this strategy's Friday-close rebalance. A feature whose
+# value has decayed before the next rebalance cannot support that cadence, however well it
+# predicts on the day it is computed. It is estimated per product on pairs of dates exactly one
+# lag apart and summarized by the median over products, with a bootstrap interval over products: a
+# correlation pooled over every product-date pair would read high whenever products sit at
+# different levels, whether or not any one of them persists.
 #
-# Both panels read the front month alone, for the same reason C.5 partitions every percentile by
-# contract position. The right-hand panel ranks within a date, and a ranking taken over all three
-# positions at once would be an ordering of 90 contracts - not the one a decision is taken over,
-# and not the one the matrix carries.
+# The right panel asks the same question of the ordering rather than the level, comparing the
+# cross-sectional ranking on one rebalance against the ranking on the next. Both panels read the
+# front-month slice, for the reason Section E gives.
+
+# %% [markdown]
+# The rebalance dates come from the same resolver the backtest uses, given this case study's
+# declared cadence and the sessions the panel actually holds, so the panels below are a statement
+# about the dates the strategy really acts on.
+#
+# The resolver turns the cadence into real dates rather than counting days forward, so it is worth
+# seeing what `weekly_friday_close` comes out as: the last session of each week, which is Friday in
+# almost every week, Thursday where Friday is an exchange holiday, and whatever the final partial
+# week of the sample ends on. The weekday counts below are printed for that reason.
 
 # %%
-DECISION_DATES = (
-    features.group_by(pl.col("timestamp").dt.truncate("1w"))
-    .agg(pl.col("timestamp").max().alias("decision"))["decision"]
-    .sort()
-    .to_list()
+CADENCE = setup["decision"]["cadence"]
+DECISION_DATES = resolve_rebalance_timestamps(
+    features["timestamp"], CADENCE, calendar=setup["evaluation"]["calendar"]
+).to_list()
+by_weekday = (
+    pl.Series(DECISION_DATES).dt.to_string("%A").value_counts().sort("count", descending=True)
 )
+print(f"{len(DECISION_DATES):,} {CADENCE} rebalances, {DECISION_DATES[0]} to {DECISION_DATES[-1]}")
+print(", ".join(f"{r['']} {r['count']}" for r in by_weekday.iter_rows(named=True)))
 
 plot_persistence(
     front,
@@ -757,34 +869,35 @@ plot_persistence(
     title="Carry's ordering is the least stable across rebalances",
     subtitle=f"Front month; median over products to {4 * DECISION_CYCLE} sessions",
     alt=(
-        "Two panels. On the left, autocorrelation against lag: all five features start near one "
-        "and decay over twenty sessions. The six-month return and the one-month volatility fall "
-        "slowest, to roughly 0.6, while the carry z-score falls fastest and reaches zero; the raw "
-        "carry drops steeply over the first ten sessions and then flattens near 0.27, and the "
-        "oscillator ends near 0.2. The bootstrap ribbon is widest around the raw carry and narrow "
-        "elsewhere. On the right, the cross-sectional rank correlation between consecutive weekly "
+        "Two panels. On the left, autocorrelation against lag: four of the five start near one "
+        "and the raw carry starts near 0.8, and all of them decay over twenty sessions. The "
+        "three-month return and the one-month volatility fall slowest, to roughly 0.6, while the "
+        "carry z-score falls fastest and reaches zero; the raw carry drops steeply over the first "
+        "ten sessions and then flattens near 0.27, and the oscillator ends near 0.2. The "
+        "bootstrap ribbon is widest around the raw carry and around the carry z-score as it "
+        "approaches zero, and narrow elsewhere. On the right, the cross-sectional rank "
+        "correlation between consecutive weekly "
         "rebalances puts the one-month volatility highest at nearly one and the raw carry lowest "
-        "at roughly 0.6, with the oscillator, the six-month return and the carry z-score between."
+        "at roughly 0.6, with the oscillator, the three-month return and the carry z-score "
+        "between."
     ),
 )
 
 # %% [markdown]
-# ### F7. The carrier through time
+# ### F7. Two signals through time
 #
-# Two of the families side by side, for one product from each of four sectors, sampled on the
-# decision dates rather than on every session - the strategy never looks at a Wednesday. The carry
-# z-score is a distance from a product's own recent history, so it is bounded and pulled back to
-# zero; the momentum composite is a standing among the other 29 products, so it can sit at one end
-# of the range for years. A signal that oscillates and a signal that trends need different holding
-# periods, which is why both are in the matrix.
+# Two of the families side by side, sampled on the rebalance dates rather than on every session,
+# because a value the strategy never reads is not a value it can act on. Crude oil and the S&P 500
+# e-mini are drawn because they sit at opposite ends of the roll cycle, monthly against quarterly,
+# and a second pair would only add lines over the same shape.
+#
+# The carry z-score is a distance from a product's own recent history, so it is bounded and pulled
+# back to zero; the momentum composite is a standing among the other 29 products, so it can sit at
+# one end of the range for years. A signal that oscillates and a signal that trends need different
+# holding periods, which is why both are in the matrix.
 
 # %%
-KEY_PRODUCTS = {
-    "CL": COLORS["blue"],
-    "GC": COLORS["amber"],
-    "ES": COLORS["positive"],
-    "ZC": COLORS["copper"],
-}
+KEY_PRODUCTS = {"CL": COLORS["blue"], "ES": COLORS["amber"]}
 decisions = front.filter(pl.col("timestamp").is_in(DECISION_DATES)).sort("timestamp")
 fig = make_subplots(
     rows=2,
@@ -818,19 +931,34 @@ fig.show()
 # %% [markdown]
 # ### F8. The curve on one date
 #
-# What the carrier looks like across the universe at a single decision, which is the object the
-# strategy actually ranks. The date is the most recent one on which all 30 products quoted both of
-# the contracts carry is measured between: a snapshot missing a third of the universe would show a
-# cross-section no decision was ever taken over. The regime band declared in the configuration is
-# what separates the three colours, and the vertical scale is what a single ranking has to absorb.
+# What carry looks like across the universe at a single decision, which is the object the strategy
+# actually ranks. The date is the most recent **rebalance** on which all 30 products quoted both of
+# the contracts carry is measured between, so it is a cross-section a decision was really taken
+# over rather than an arbitrary session or a partial universe.
+#
+# The colours come from the regime band declared in the configuration. A product counts as
+# backwardation only once its carry clears that band, and as contango only once it falls below
+# minus it; everything between is called flat, which is what keeps a curve quoted a tick apart out
+# of both baskets. The band is printed with the snapshot below, on the same scale as the axis. The
+# vertical scale itself is what a single ranking has to absorb.
 
 # %%
 REGIME = {1: "backwardation", 0: "flat", -1: "contango"}
-quoted = front.group_by("timestamp").agg(pl.col("carry_pct").is_not_null().sum().alias("n"))
+quoted = (
+    front.filter(pl.col("timestamp").is_in(DECISION_DATES))
+    .group_by("timestamp")
+    .agg(pl.col("carry_pct").is_not_null().sum().alias("n"))
+)
 snapshot_date = quoted.filter(pl.col("n") == front["product"].n_unique())["timestamp"].max()
 snapshot = front.filter(pl.col("timestamp") == snapshot_date).with_columns(
     pl.col("carry_regime_num").replace_strict(REGIME).alias("Regime")
 )
+counts = snapshot["Regime"].value_counts().sort("count", descending=True)
+print(
+    f"{snapshot_date:%A %Y-%m-%d}, regime band +/-{LEVEL['carry_regime_band']} on the carry scale"
+)
+print(", ".join(f"{r['Regime']} {r['count']}" for r in counts.iter_rows(named=True)))
+
 fig = px.bar(
     snapshot.sort("carry_pct").to_pandas(),
     x="product",
@@ -841,8 +969,8 @@ fig = px.bar(
         "flat": COLORS["neutral"],
         "contango": COLORS["negative"],
     },
-    title="The two regimes split evenly, with four products inside the band",
-    labels={"carry_pct": "Annualized carry", "product": "Product"},
+    title="Most curves sit close to flat, with one product at each extreme",
+    labels={"carry_pct": "Carry", "product": "Product"},
 )
 fig.update_layout(height=400)
 fig.show()
@@ -857,6 +985,15 @@ fig.show()
 # values". The digest is computed over content rather than file bytes, so row order and parquet
 # metadata leave it alone and any feature value moves it. That is the property the registry's own
 # hashes lack: a feature-set *name* reaches the registry, a feature-set *value* does not.
+#
+# [`05_evaluation`](05_evaluation.ipynb) opens the file directly and screens these columns fold by
+# fold for whether any of them predicts the label. The modelling notebooks from
+# [`06_linear`](06_linear.ipynb) onward reach it through `load_modeling_dataset`, which joins it to
+# the label parquet and to the model-based features and hands one training matrix to every
+# estimator, so that they are all fitted on the same rows.
+# [`12_model_analysis`](12_model_analysis.ipynb) opens it directly too, on the one path where the
+# gradient-boosting run left no saved booster to read importances out of: it then ranks these
+# columns by their correlation with the linear model's predictions instead.
 
 # %%
 record = write_artifact(
@@ -888,10 +1025,15 @@ print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}, digest {record
 #
 # ### Known limitations
 #
-# - Carry is measured between the first two contract positions, which for most of this universe is
-#   a one-month gap but for the quarterly financial contracts is three. The annualization treats
-#   both as monthly, so the level is not comparable across sectors - which is the reason the
-#   within-sector percentile is carried beside the unconditional one.
+# - Carry is measured between the first two contract positions, and how far apart in time those
+#   two sit depends on the product's own listing cycle: one month for the four energy curves,
+#   three for the equity-index, Treasury and currency contracts, and anywhere from one to three
+#   for the metals, grains and livestock, whose cycles are irregular and whose gap therefore
+#   changes within the year. The construction applies the same factor of twelve to all of them, so
+#   the carry level is a per-year rate only for the monthly cycles and is not comparable
+#   between sectors - which is the reason the within-sector percentile is carried beside the
+#   unconditional one. Making the level comparable would need each contract's own expiry date,
+#   which the continuous panel does not carry.
 # - The roll-week flag is a calendar approximation, not a contract's own expiry. Products on
 #   quarterly cycles do not roll every month, and the flag marks the last week of every month for
 #   all of them.
