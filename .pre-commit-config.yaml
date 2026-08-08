@@ -74,3 +74,18 @@ repos:
         entry: python3 .github/scripts/check_verified_notebooks.py
         pass_filenames: false
         always_run: true
+
+      # OpenMP gate: scikit-learn, LightGBM, XGBoost, CatBoost and torch each
+      # ship an OpenMP runtime and the first one loaded wins for the process.
+      # A reader on macOS ARM64 who gets scikit-learn's first loses the kernel
+      # to a segfault on the next multithreaded LightGBM fit — no traceback
+      # (R2P issues #7 and #10). No Linux runner reproduces it, so CI never saw
+      # it, and "organize imports" silently reintroduces it. Runs repo-wide
+      # because the order can also be broken from a module the commit does not
+      # touch. See .github/scripts/check_openmp_import_order.py.
+      - id: openmp-import-order
+        name: GBM imported before scikit-learn
+        language: system
+        entry: python3 .github/scripts/check_openmp_import_order.py
+        pass_filenames: false
+        always_run: true
