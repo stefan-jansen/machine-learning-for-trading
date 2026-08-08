@@ -558,7 +558,10 @@ print(
 #
 # `generate_cv_splits` places those boundaries from the widths in `setup.yaml::evaluation` and the
 # gap from the label buffer, and the figure draws the boundaries it returned rather than recomputing
-# them, so the picture and the folds cannot disagree.
+# them, so the picture and the folds cannot disagree. It numbers folds from zero backwards from the
+# most recent, so fold 0 is the one that ends against the holdout. The figure and the printout below
+# label each fold with that number, which is why the labels count down as the folds move forward;
+# every later stage prints the same ones.
 #
 # The splitter is given the whole sample, holdout included, and applies the holdout boundary itself
 # from `evaluation.holdout_start`, which is what every later stage does - `02_labels` writes labels
@@ -592,17 +595,12 @@ full_timeline = (
     .unique()
     .sort("timestamp")
 )
-splits = sorted(
-    generate_cv_splits(
-        full_timeline,
-        case_study_id=CASE_STUDY_ID,
-        label_buffer=LABEL_BUFFER,
-        date_col="timestamp",
-    ),
-    key=lambda split: split["train_start"],
+splits = generate_cv_splits(
+    full_timeline,
+    case_study_id=CASE_STUDY_ID,
+    label_buffer=LABEL_BUFFER,
+    date_col="timestamp",
 )
-for position, split in enumerate(splits):
-    split["fold"] = position  # returned newest-first; number them in time order for the figure
 last_val = max(s["val_end"] for s in splits)
 assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
 assert last_val < np.datetime64(HOLDOUT_START), "a fold reaches into the holdout"
@@ -613,7 +611,7 @@ session_ends = set(
     .to_list()
 )
 print(f"{len(splits)} folds over {len(full_timeline):,} decision bars")
-for split in splits:
+for split in sorted(splits, key=lambda s: s["train_start"]):
     train_end, val_start = split["train_end"], split["val_start"]
     purged = int(((grid > np.datetime64(train_end)) & (grid < np.datetime64(val_start))).sum())
     unlabelled = train_end in session_ends
@@ -622,8 +620,8 @@ for split in splits:
     )
     why = "training ends on a session's last bar, which carries no label" if unlabelled else ""
     print(
-        f"  train {split['train_start']} to {train_end} | validate {val_start} to "
-        f"{split['val_end']} | {purged} bar purged{'; ' + why if why else ''}"
+        f"  Fold {split['fold']} | train {split['train_start']} to {train_end} | validate "
+        f"{val_start} to {split['val_end']} | {purged} bar purged{'; ' + why if why else ''}"
     )
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])

@@ -568,24 +568,21 @@ print(
 # from `evaluation.holdout_start`, which is what every later stage does too. It is handed month-end
 # dates and no returns, so nothing the holdout contains reaches a number computed above.
 #
-# `generate_cv_splits` numbers folds backwards from the most recent, so they are sorted into time
-# order and renumbered before being drawn. The two assertions below check what the figure cannot
-# show at this scale: that the number of folds is the number `setup.yaml` declares, and that no
-# validation window reaches into the holdout. The figure then draws the boundaries the splitter
-# returned rather than recomputing them, so the picture and the folds cannot disagree.
+# `generate_cv_splits` numbers folds from zero backwards from the most recent, so fold 0 is the last
+# one before the holdout and the highest number is the earliest. The figure draws them earliest-first
+# and labels each with that number, which is why the labels count down; every later stage prints
+# the same ones. The two assertions below check what the figure cannot show at this scale: that the
+# number of folds is the number `setup.yaml` declares, and that no validation window reaches into
+# the holdout. The figure then draws the boundaries the splitter returned rather than recomputing
+# them, so the picture and the folds cannot disagree.
 
 # %%
-splits = sorted(
-    generate_cv_splits(
-        panel.select("timestamp"),
-        case_study_id=CASE_STUDY_ID,
-        label_buffer=LABEL_BUFFER,
-        date_col="timestamp",
-    ),
-    key=lambda split: split["train_start"],
+splits = generate_cv_splits(
+    panel.select("timestamp"),
+    case_study_id=CASE_STUDY_ID,
+    label_buffer=LABEL_BUFFER,
+    date_col="timestamp",
 )
-for position, split in enumerate(splits):
-    split["fold"] = position
 last_val = max(split["val_end"] for split in splits)
 assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
 assert last_val < np.datetime64(HOLDOUT_START), "a fold reaches into the holdout"

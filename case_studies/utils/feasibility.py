@@ -28,9 +28,17 @@ def fold_timeline(ax, splits: list[dict], *, holdout: tuple[str, str]) -> None:
     Parameters
     ----------
     splits
-        As returned by ``utils.cv_splits.generate_cv_splits``: ``train_start``,
-        ``train_end``, ``val_start``, ``val_end`` per fold. The span between
-        ``train_end`` and ``val_start`` is the purge gap and is drawn as such.
+        As returned by ``utils.cv_splits.generate_cv_splits``: ``fold``,
+        ``train_start``, ``train_end``, ``val_start``, ``val_end`` per fold. Pass
+        them in the order the splitter returned; the rows are drawn earliest-first
+        here so the picture runs forward in time. The span between ``train_end``
+        and ``val_start`` is the purge gap and is drawn as such.
+
+        Each row is labelled with the splitter's own ``fold``, which numbers folds
+        from zero backwards from the most recent, so the labels count down as the
+        rows move forward. Every later stage prints and keys its tables on that
+        same number, so relabelling the rows by position would make this figure's
+        "Fold 0" a different fold from the one the rest of the case study reports.
     holdout
         Start and end of the holdout, shaded behind the folds.
     """
@@ -42,6 +50,7 @@ def fold_timeline(ax, splits: list[dict], *, holdout: tuple[str, str]) -> None:
         ("train_start", "train_end", COLORS["blue"]),
         ("val_start", "val_end", COLORS["amber"]),
     ]
+    splits = sorted(splits, key=lambda split: split["train_start"])
     for row, split in enumerate(splits):
         for lo, hi, color in bands:
             ax.barh(row, split[hi] - split[lo], left=split[lo], height=0.62, color=color)
@@ -53,7 +62,7 @@ def fold_timeline(ax, splits: list[dict], *, holdout: tuple[str, str]) -> None:
             color=COLORS["silver_muted"],
         )
     ax.axvspan(*(np.datetime64(d) for d in holdout), color=COLORS["copper"], alpha=0.25)
-    ax.set_yticks(range(len(splits)), [f"Fold {s['fold'] + 1}" for s in splits])
+    ax.set_yticks(range(len(splits)), [f"Fold {s['fold']}" for s in splits])
     ax.invert_yaxis()
     ax.legend(
         handles=[

@@ -760,8 +760,11 @@ print(
 # lands before the holdout. The splitter applies the same buffer at the far end, which is why the
 # last validation session is the one D.1 identified rather than the last session of the period.
 #
-# `generate_cv_splits` numbers folds backwards from the most recent, so they are sorted into time
-# order before being drawn. The four checks below establish what the figure cannot: the gap is
+# `generate_cv_splits` numbers folds from zero backwards from the most recent, so fold 0 is the
+# last one before the holdout. The figure draws them earliest-first and labels each with that
+# number, which is why the labels count down; every later stage prints the same ones.
+#
+# The four checks below establish what the figure cannot: the gap is
 # narrow against training blocks measured in years, so only counting it off the session timeline can
 # confirm it is as wide as the buffer, and only comparing the last validation date against D.1 can
 # confirm the outcome of the last position evaluated does not land in the holdout. The other two
@@ -770,17 +773,12 @@ print(
 # recomputing them, so the picture and the folds cannot disagree.
 
 # %%
-splits = sorted(
-    generate_cv_splits(
-        research.select("timestamp").unique(),
-        case_study_id=CASE_STUDY_ID,
-        label_buffer=LABEL_BUFFER,
-        date_col="timestamp",
-    ),
-    key=lambda split: split["train_start"],
+splits = generate_cv_splits(
+    research.select("timestamp").unique(),
+    case_study_id=CASE_STUDY_ID,
+    label_buffer=LABEL_BUFFER,
+    date_col="timestamp",
 )
-for position, split in enumerate(splits):
-    split["fold"] = position
 
 grid = timeline["timestamp"].to_numpy()
 purge_gaps = {
@@ -880,7 +878,7 @@ print(
 #    one series measures the joins between them.
 # 6. **Where the outcome arrives after the decision, the last usable date is earlier than the
 #    boundary.** With an outcome known only at expiration, the walk-forward split has to stop a
-#    label horizon short of the holdout, and that date is what the last fold validates to.
+#    label horizon short of the holdout, and that date is what the latest fold validates to.
 #
 # ### Known limitations
 #

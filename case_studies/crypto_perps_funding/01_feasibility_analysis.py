@@ -523,7 +523,10 @@ print(
 # The splitter is given the whole sample, holdout included, and applies the holdout boundary itself
 # from `evaluation.holdout_start`, which is what every later stage does too. Trimming the data first
 # would shift the first training settlement of most folds, and the figure would then show a training
-# window the pipeline never trains on. Folds come back newest first and are reordered here.
+# window the pipeline never trains on. The splitter numbers folds from zero backwards from the most
+# recent, so fold 0 is the one that ends against the holdout. The figure draws them earliest-first
+# and labels each with that number, which is why the labels count down; every later stage prints the
+# same ones.
 #
 # The gap drawn is the buffer for the primary label, `labels.buffer`. The longest declared variant,
 # `fwd_ret_24h`, resolves three settlements out and carries its own wider buffer in
@@ -531,17 +534,12 @@ print(
 # a proportionally wider gap.
 
 # %%
-splits = sorted(
-    generate_cv_splits(
-        bars.select("timestamp"),
-        case_study_id=CASE_STUDY_ID,
-        label_buffer=LABEL_BUFFER,
-        date_col="timestamp",
-    ),
-    key=lambda split: split["train_start"],
+splits = generate_cv_splits(
+    bars.select("timestamp"),
+    case_study_id=CASE_STUDY_ID,
+    label_buffer=LABEL_BUFFER,
+    date_col="timestamp",
 )
-for position, split in enumerate(splits):
-    split["fold"] = position
 last_val = max(split["val_end"] for split in splits)
 assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
 holdout_opens = pd.Timestamp(HOLDOUT_START, tz="UTC")
@@ -555,9 +553,13 @@ purged = {
 assert purged == {BUFFER_SLOTS}, (
     f"{sorted(purged)} settlements purged, not the {BUFFER_SLOTS} the {LABEL_BUFFER} buffer needs"
 )
+widths = {
+    ((s["train_end"] - s["train_start"]).days, (s["val_end"] - s["val_start"]).days) for s in splits
+}
+assert len(widths) == 1, f"folds differ in width: {sorted(widths)}"
+train_days, val_days = widths.pop()
 print(
-    f"{len(splits)} folds | training {(splits[0]['train_end'] - splits[0]['train_start']).days} "
-    f"days and validating {(splits[0]['val_end'] - splits[0]['val_start']).days} days each | "
+    f"{len(splits)} folds | training {train_days} days and validating {val_days} days each | "
     f"{purged.pop()} settlement purged between them, matching the {LABEL_BUFFER} label buffer"
 )
 
