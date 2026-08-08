@@ -414,7 +414,7 @@ for bar, ic in zip(bars, ics, strict=False):
         fontsize=10,
     )
 ax1.set_ylabel("Validation IC")
-ax1.set_title("Continuous search triples the discrete grid's validation IC")
+ax1.set_title("The continuous space reaches a higher validation IC than either discrete search")
 
 # Right: convergence
 ax2 = axes[1]
