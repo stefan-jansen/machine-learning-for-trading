@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Fail when a module imports scikit-learn before LightGBM or XGBoost.
+"""Fail when a module loads scikit-learn before a gradient-boosting library.
 
     python .github/scripts/check_openmp_import_order.py
 
-scikit-learn, LightGBM, XGBoost and torch each ship their own OpenMP runtime.
-The first one loaded wins for the whole process. On macOS ARM64 a reader who
-gets scikit-learn's `libomp` first, and then asks LightGBM to fit with more
-than one thread, loses the kernel to a segfault inside
+scikit-learn, LightGBM, XGBoost, CatBoost and torch each ship their own OpenMP
+runtime. The first one loaded wins for the whole process. On macOS ARM64 a
+reader who gets scikit-learn's `libomp` first, and then asks LightGBM to fit
+with more than one thread, loses the kernel to a segfault inside
 `__kmp_suspend_initialize_thread` - no Python traceback, just a dead kernel.
 It cost a student the better part of a day (see R2P issues #7 and #10), and it
 reproduces on no Linux runner, so nothing in CI saw it.
@@ -14,6 +14,21 @@ reproduces on no Linux runner, so nothing in CI saw it.
 The ordering is easy to restore and just as easy to lose again: it is invisible
 in review, and it is the kind of thing an editor's "organize imports" undoes.
 Hence this gate.
+
+Neither side of the comparison is spelled the way it reads. `ml4t.diagnostic`
+and `shap` pull scikit-learn in transitively, so a module whose only
+scikit-learn contact is `from ml4t.diagnostic.metrics import ...` has the same
+defect and shows nothing at the call site; and `case_studies.utils.gbm` and
+`case_studies.utils.model_analysis` import lightgbm at module scope, so they
+stand in for it on the other side. The first version of this gate watched the
+`sklearn` and `lightgbm` names alone and passed eleven affected modules, among
+them `case_studies/utils/gbm.py`, which every case study's GBM stage imports.
+See BLAS_OMP and GBM_VIA below.
+
+A deferred import does not help either: a function-local `import lightgbm` runs
+long after the module's own header has already brought scikit-learn up, which
+is why the fix is a module-level import even where nothing at module scope uses
+the name.
 
 It reads the paired `.py` of every notebook, so a notebook is covered by its
 own source rather than by parsing JSON. `import` statements sort ahead of
@@ -30,21 +45,90 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 
-# The runtime that must be initialized first, and the ones that must not precede it.
-GBM = {"lightgbm", "xgboost"}
-BLAS_OMP = {"sklearn"}
+# The libraries that bring their own OpenMP runtime and must initialize first.
+GBM = {"lightgbm", "xgboost", "catboost"}
+
+# Repo modules that import one of the above at module scope, and so stand in
+# for it. Both are shared helpers on the production path - `case_studies.utils.
+# gbm` is imported by every case study's GBM stage - so a notebook can be
+# affected without naming a GBM library anywhere. Keep in step with the
+# unused module-level lightgbm import in each, which is there for this reason
+# and marked with an F401 suppression.
+GBM_VIA = ("case_studies.utils.gbm", "case_studies.utils.model_analysis")
+
+# The imports that bring up scikit-learn's OpenMP runtime, and so must not come
+# first. `sklearn` is the obvious one; the other two are here because they
+# import it transitively, which is invisible at the call site and is what the
+# first version of this gate missed. The list is measured, not guessed -
+# re-derive it by importing a candidate in a fresh interpreter and checking
+# whether an OpenMP runtime appears:
+#
+#     python -c "import <pkg>, re; \
+#         print([l for l in open('/proc/self/maps') if re.search(r'lib(omp|gomp|iomp5)', l)])"
+#
+# `econml`, `optuna`, `scipy` and `statsmodels` were checked the same way and
+# load none at import time, so they are deliberately absent.
+BLAS_OMP = ("sklearn", "ml4t.diagnostic", "shap")
 
 SKIP_PARTS = {".venv", ".git", ".ipynb_checkpoints", "_reference", "node_modules"}
 
+# Affected, and deliberately not fixed here.
+#
+# Editing a notebook's `.py` obliges you to re-execute it (notebook_provenance.py
+# enforces that), and re-execution is not free for these. Eight were re-run on
+# 2026-08-08 and every one printed different numbers than it ships with. Two
+# consecutive runs of the same notebook agree exactly, so that is not
+# nondeterminism: the `~/ml4t/code` artifacts have moved since these notebooks
+# were last executed, and re-running them re-baselines their published results.
+# Which artifact vintage the book ships is an open question and not this
+# change's to settle, so the import order stays wrong in these files rather than
+# a ten-line reorder quietly restating the numbers. Three more cannot be
+# executed here at all, for the separate reasons given below.
+#
+# Everything here is reported on every run rather than hidden, and an entry that
+# stops offending fails the gate, so the list cannot rot. The copies students
+# actually run are already fixed in the course repo, where the vendored
+# notebooks ship without a paired `.py` and so carry no re-execution duty - an
+# import-cell edit there leaves the outputs alone.
+#
+# Listed 2026-08-08.
+_REBASELINE = (
+    "fixing this obliges a re-execution, which prints different numbers than the "
+    "notebook ships with - an artifact-vintage re-baseline, not an import fix"
+)
+KNOWN_BLOCKED = {
+    "08_financial_features/05_feature_selection.py": _REBASELINE,
+    "11_ml_pipeline/07_case_study_insights.py": _REBASELINE,
+    "12_gradient_boosting/02_gbm_comparison.py": _REBASELINE,
+    "12_gradient_boosting/07_hpo_comparison.py": _REBASELINE,
+    "12_gradient_boosting/09_xai_limitations.py": _REBASELINE,
+    "12_gradient_boosting/11_conformal_gbm.py": _REBASELINE,
+    "14_latent_factors/09_case_study_insights.py": _REBASELINE,
+    "15_causal_estimation/09_adia_causal_benchmark.py": _REBASELINE,
+    "12_gradient_boosting/12_case_study_insights.py": (
+        "pins an approved etfs registry SHA-256; the local registry has drifted from it, "
+        "and re-approving would re-baseline a number of record"
+    ),
+    "case_studies/crypto_perps_funding/07_gbm.py": (
+        "GPU-only by design - raises unless TRAIN_DEVICE='cuda' and the LightGBM build "
+        "has CUDA; needs a CUDA-LightGBM machine"
+    ),
+    "case_studies/fx_pairs/07_gbm.py": (
+        "fold 0 has no observations for the 10 kalman/hmm/arima temporal features in the "
+        "current local artifacts; needs the feature stage re-run first"
+    ),
+}
 
-def first_import_lines(path: Path) -> dict[str, int]:
-    """Line number of the first import of each watched package."""
+
+def first_import_lines(path: Path) -> tuple[dict[str, int], dict[str, int]]:
+    """Line of the first GBM import and of the first scikit-learn-loading import."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (SyntaxError, UnicodeDecodeError):
-        return {}
+        return {}, {}
 
-    seen: dict[str, int] = {}
+    gbm: dict[str, int] = {}
+    omp: dict[str, int] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names = [a.name for a in node.names]
@@ -53,37 +137,57 @@ def first_import_lines(path: Path) -> dict[str, int]:
         else:
             continue
         for name in names:
-            top = name.split(".")[0]
-            if top in GBM | BLAS_OMP and top not in seen:
-                seen[top] = node.lineno
-    return seen
+            if name.split(".")[0] in GBM:
+                gbm.setdefault(name.split(".")[0], node.lineno)
+            for pkg in GBM_VIA:
+                if name == pkg or name.startswith(pkg + "."):
+                    gbm.setdefault(pkg, node.lineno)
+            for pkg in BLAS_OMP:
+                if name == pkg or name.startswith(pkg + "."):
+                    omp.setdefault(pkg, node.lineno)
+    return gbm, omp
 
 
 def main() -> int:
-    offenders: list[tuple[Path, str, int, str, int]] = []
+    offenders: list[tuple[str, str, int, str, int]] = []
+    blocked: list[tuple[str, str, int, str, int]] = []
     checked = 0
 
     for path in sorted(REPO.rglob("*.py")):
         if any(part in SKIP_PARTS for part in path.parts):
             continue
-        seen = first_import_lines(path)
-        gbm = {k: v for k, v in seen.items() if k in GBM}
-        omp = {k: v for k, v in seen.items() if k in BLAS_OMP}
+        gbm, omp = first_import_lines(path)
         if not gbm or not omp:
             continue
         checked += 1
         first_gbm_pkg, first_gbm_line = min(gbm.items(), key=lambda kv: kv[1])
         first_omp_pkg, first_omp_line = min(omp.items(), key=lambda kv: kv[1])
-        if first_omp_line < first_gbm_line:
-            offenders.append(
-                (
-                    path.relative_to(REPO),
-                    first_omp_pkg,
-                    first_omp_line,
-                    first_gbm_pkg,
-                    first_gbm_line,
-                )
-            )
+        if first_omp_line >= first_gbm_line:
+            continue
+        rel = str(path.relative_to(REPO))
+        row = (rel, first_omp_pkg, first_omp_line, first_gbm_pkg, first_gbm_line)
+        (blocked if rel in KNOWN_BLOCKED else offenders).append(row)
+
+    # A file that was listed and has since been fixed should not stay listed:
+    # a stale entry is how a gate quietly stops covering something.
+    still_bad = {row[0] for row in blocked}
+    resolved = sorted(set(KNOWN_BLOCKED) - still_bad)
+
+    if blocked:
+        print("Known-blocked, reported but not failing:\n")
+        for rel, omp_pkg, omp_line, gbm_pkg, gbm_line in blocked:
+            print(f"  {rel}")
+            print(f"    {omp_pkg} at line {omp_line}, before {gbm_pkg} at line {gbm_line}")
+            print(f"    blocked: {KNOWN_BLOCKED[rel]}")
+        print()
+
+    if resolved:
+        print(
+            "These are in KNOWN_BLOCKED but no longer offend. Fix the import order's\n"
+            "record by deleting their entries in this file:\n"
+            + "".join(f"  {rel}\n" for rel in resolved)
+        )
+        return 1
 
     if offenders:
         print("OpenMP import order (macOS ARM64 kernel death):\n")
@@ -92,14 +196,19 @@ def main() -> int:
             print(f"    {omp_pkg} imported at line {omp_line}, before {gbm_pkg} at line {gbm_line}")
         print(
             f"\n{len(offenders)} of {checked} module(s) that use both.\n"
-            "Move the lightgbm/xgboost import above the scikit-learn one. Merging the two\n"
-            "import blocks into a single isort-canonical block is usually enough, because\n"
-            "plain `import x` sorts ahead of `from x import y`; check with\n"
-            "`ruff check --select I --diff <file>` that the order is stable."
+            "Move the GBM import above the one named on the left. Merging the two import\n"
+            "blocks into a single isort-canonical block is usually enough, because plain\n"
+            "`import x` sorts ahead of `from x import y`; check with\n"
+            "`ruff check --select I --diff <file>` that the order is stable.\n"
+            "If the GBM is only used inside a function, add a module-level\n"
+            "`import lightgbm  # noqa: F401` anyway - a deferred import runs too late."
         )
         return 1
 
-    print(f"OpenMP import order ok ({checked} modules import both a GBM and scikit-learn).")
+    print(
+        f"OpenMP import order ok ({checked} modules import both a GBM and scikit-learn"
+        f"; {len(blocked)} known-blocked)."
+    )
     return 0
 
 

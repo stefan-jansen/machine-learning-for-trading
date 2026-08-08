@@ -20,6 +20,15 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+# Import lightgbm before ml4t.diagnostic, which transitively loads
+# scikit-learn. Both scikit-learn and LightGBM ship their own OpenMP runtime
+# and the first one loaded wins for the whole process; on macOS ARM64 the
+# loser's first multithreaded fit dies inside
+# `__kmp_suspend_initialize_thread`, taking the kernel with it and printing no
+# traceback. Every function below re-imports lightgbm locally for reading;
+# this one exists only to lose no race, for every case study that imports this
+# module. `import x` sorts ahead of `from x import y`, so isort keeps it here.
+import lightgbm  # noqa: F401
 import numpy as np
 import polars as pl
 
