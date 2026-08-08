@@ -891,8 +891,12 @@ warmup_audit(
 # %%
 _before = pl.col("timestamp").dt.date() < HOLDOUT_START
 _emitted = [*PANEL_KEY, *feature_cols]
+pre_holdout = built.filter(_before).select(_emitted)
+assert pre_holdout["timestamp"].max().date() < HOLDOUT_START, (
+    "the panel this section compares reaches into the holdout"
+)
 agreement = assert_values_agree(
-    built.filter(_before).select(_emitted),
+    pre_holdout,
     build_features(bars.filter(_before)).select(_emitted),
     columns=feature_cols,
     keys=PANEL_KEY,
@@ -1163,16 +1167,19 @@ print(f"{len(set(clusters.values()))} clusters over {len(feature_cols)} features
 # of anything. The right panel asks the same question of the ordering rather than the level,
 # between consecutive decisions.
 #
-# What both panels show is how much of the ordering survives one decision, which bears on
-# turnover without measuring it: how much a strategy actually trades also depends on how many
-# names it takes on each side, how it weights them, and how the universe itself moves, none of
-# which is decided here. A feature that keeps its ordering ranks roughly the same names at the
-# next decision, so a strategy reading it has little reason to trade; one whose ordering is
-# gone ranks a fresh set, and the cost of acting on that is Chapter 18's subject. Neither case
-# says anything about whether the feature predicts, which is `05_evaluation`'s question.
-# Reading the two panels together is what separates them: the level can decay while the
-# ordering holds, which is why both are drawn, and why the order-flow imbalance is carried at
-# four windows rather than one.
+# Between them the panels say how much of a feature is left one decision later - its own value
+# on the left, the ordering it puts the names in on the right - and that bears on turnover
+# without measuring it. What a strategy actually trades depends as well on how many names it
+# takes on each side, how it weights them, and how the universe itself moves, none of which is
+# decided here. What can be said is the direction: a feature whose ordering holds ranks roughly
+# the same names at the next decision, so a strategy reading it has little reason to trade,
+# and one whose ordering is gone ranks a fresh set, at the cost Chapter 18 prices. Neither
+# case says anything about whether the feature predicts, which is `05_evaluation`'s question.
+#
+# The ordering is the half that decides which names get picked, and the two halves can
+# disagree: the relative spread below keeps almost none of its own level a few rebalances on,
+# and still puts the names in nearly the order it did at the last one. That is why both are
+# drawn, and why the order-flow imbalance is carried at four windows rather than one.
 
 # %%
 plot_persistence(
