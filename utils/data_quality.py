@@ -436,7 +436,15 @@ def validate_features(
     feature_cols: Sequence[str],
     max_abs_value: float = 1e6,
 ) -> list[str]:
-    """Check feature columns for infinities, all-null, and extreme values.
+    """Check feature columns for infinities, absent values, and extreme values.
+
+    A NaN counts as absent here, not as a number. Polars evaluates ``NaN > x`` as
+    True, so a feature carrying the warm-up head every rolling window leaves would
+    otherwise be reported as holding values above ``max_abs_value``: a 252-session
+    warm-up over 30 products reported 7,560 extreme values for a Shannon entropy
+    bounded well below ten. Reading it the other way round also matters - a column
+    that is entirely NaN carries no value at all, and was previously reported as
+    neither absent nor extreme.
 
     Args:
         df: DataFrame containing feature columns
@@ -446,41 +454,44 @@ def validate_features(
     Returns list of warning/error strings.
     """
     issues: list[str] = []
-    n_rows = df.height
 
     inf_cols = []
-    null_cols = []
+    absent_cols = []
     extreme_cols = []
 
     for col in feature_cols:
         if col not in df.columns:
             continue
 
-        series = df[col]
-        n_null = series.null_count()
-        non_null = series.drop_nulls()
+        present = df[col].drop_nulls()
+        is_float = present.dtype.is_float()
+        if is_float:
+            present = present.filter(present.is_not_nan())
 
-        if n_null == n_rows:
-            null_cols.append(col)
+        if present.len() == 0:
+            absent_cols.append(col)
             continue
 
-        if non_null.len() > 0:
-            n_inf = non_null.filter(non_null.is_infinite()).len()
+        if is_float:
+            n_inf = present.filter(present.is_infinite()).len()
             if n_inf > 0:
                 inf_cols.append((col, n_inf))
+            # The three conditions are reported separately, so an infinity is not
+            # also counted among the finite values that ran large.
+            present = present.filter(present.is_finite())
 
-            n_extreme = non_null.filter(non_null.abs() > max_abs_value).len()
-            if n_extreme > 0:
-                extreme_cols.append((col, n_extreme))
+        n_extreme = present.filter(present.abs() > max_abs_value).len()
+        if n_extreme > 0:
+            extreme_cols.append((col, n_extreme))
 
     if inf_cols:
         details = ", ".join(f"{c}({n})" for c, n in inf_cols[:10])
         issues.append(f"CRITICAL: {len(inf_cols)} features have infinite values: {details}")
 
-    if null_cols:
+    if absent_cols:
         issues.append(
-            f"WARNING: {len(null_cols)} features are entirely null: "
-            f"{null_cols[:10]}{'...' if len(null_cols) > 10 else ''}"
+            f"WARNING: {len(absent_cols)} features carry no value, null or NaN throughout: "
+            f"{absent_cols[:10]}{'...' if len(absent_cols) > 10 else ''}"
         )
 
     if extreme_cols:

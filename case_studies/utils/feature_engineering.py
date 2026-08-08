@@ -560,7 +560,16 @@ def plot_coverage_through_time(
     # is for: where, and by how much, a family is actually thin.
     minima = [coverage[f].min() for f in families]
     lowest = min([float(v) for v in minima if v is not None], default=1.0)
-    ax.set_ylim(min(lowest - 0.02 * (1 - lowest) - 0.002, 0.999), 1.0005)
+    # The headroom scales with the range too, for the same reason the floor does. The
+    # stage-03 notebooks pass the panel before the null policy, so every family starts at
+    # zero and the axis spans the full unit; a fixed 1.0005 ceiling then leaves the dense
+    # stretch half a thousandth below the top, drawn underneath the spine. That stretch is
+    # what the figure claims - the families fill and never thin again - so it has to be
+    # visible as a line rather than as the frame.
+    ax.set_ylim(
+        min(lowest - 0.02 * (1 - lowest) - 0.002, 0.999),
+        1.0 + max(0.0005, 0.03 * (1 - lowest)),
+    )
     ax.set_ylabel("non-null share")
     ax.legend(fontsize=6, ncol=3, frameon=False, loc="lower right")
     add_message_title(ax, title, subtitle=subtitle)
@@ -901,7 +910,12 @@ def plot_persistence(
     acf["_n"] = counts
 
     width, height = FIGSIZE["dual_h_tall"]
-    fig, (left, right) = plt.subplots(1, 2, figsize=(width, height + 0.5))
+    # The left panel carries a full lag axis and every curve the prose reads off; the right
+    # is a horizontal bar per feature on a 0-1 axis. Equal columns compressed the panel that
+    # holds the information and left a band of white between the two.
+    fig, (left, right) = plt.subplots(
+        1, 2, figsize=(width, height + 0.5), gridspec_kw={"width_ratios": [2, 1]}
+    )
     # An interval around each curve, at each lag. A single width drawn around zero is
     # a white-noise significance band, which is a different statement and not one this
     # estimator supports: the quantity plotted is a median over ETFs, so its
@@ -963,8 +977,14 @@ def plot_persistence(
     lowest = float(np.nanmin(stability))
     right.set_xlim(min(lowest, 0.0) - 0.08, 1.0)
     right.axvline(0, color=COLORS["neutral"], linewidth=0.8)
-    right.set_xlabel("rank correlation, consecutive rebalances", fontsize=8)
+    # Wrapped, and anchored to the panel's right edge rather than centred under it. On one
+    # centred line this label is wider than the panel, so it ran past the right edge of the
+    # figure and was cut mid-word - "consecutive rebala" - in every stage-03 render. How far
+    # past depends on how long the feature names are, since those are the panel's y-tick
+    # labels and they set how much width is left; anchoring makes it grow into the gap
+    # between the panels instead, which no case study can exhaust.
+    right.set_xlabel("rank correlation,\nconsecutive rebalances", fontsize=8, ha="right", x=1.0)
     add_message_title(left, title, subtitle=subtitle)
-    fig.tight_layout(w_pad=2.5)
+    fig.tight_layout()
     show_with_alt(fig, alt)
     return None

@@ -17,6 +17,7 @@ from utils.data_quality import (
     check_ohlc_invariants,
     describe_coverage,
     null_rate,
+    validate_features,
 )
 
 
@@ -213,3 +214,50 @@ def test_null_rate_reports_per_column() -> None:
     # 1/3 ≈ 33.33 for a, 2/3 ≈ 66.66 for b
     assert round(by_col["a"], 2) == 33.33
     assert round(by_col["b"], 2) == 66.67
+
+
+# -----------------------------------------------------------------------------
+# validate_features
+# -----------------------------------------------------------------------------
+
+
+def test_validate_features_warm_up_nan_is_not_an_extreme_value() -> None:
+    # The head every rolling window leaves, on a quantity bounded well below the
+    # threshold. Polars evaluates NaN > x as True, so this was reported as extreme.
+    entropy = pl.DataFrame({"fft_spectral_entropy": [float("nan")] * 4 + [4.7, 4.6]})
+    assert validate_features(entropy, ["fft_spectral_entropy"]) == []
+
+
+def test_validate_features_still_reports_a_genuine_extreme_beside_a_nan_head() -> None:
+    df = pl.DataFrame({"f": [float("nan"), 1.0, 5e6]})
+    (issue,) = validate_features(df, ["f"])
+    assert "f(1)" in issue and "|x| >" in issue
+
+
+def test_validate_features_reports_an_all_nan_column_as_carrying_no_value() -> None:
+    df = pl.DataFrame({"f": [float("nan"), float("nan")]})
+    (issue,) = validate_features(df, ["f"])
+    assert "carry no value" in issue and "'f'" in issue
+
+
+def test_validate_features_reports_an_all_null_column_as_carrying_no_value() -> None:
+    df = pl.DataFrame({"f": [None, None]}, schema={"f": pl.Float64})
+    (issue,) = validate_features(df, ["f"])
+    assert "carry no value" in issue
+
+
+def test_validate_features_reports_infinities_separately_from_nan() -> None:
+    df = pl.DataFrame({"f": [float("nan"), float("inf"), 1.0]})
+    (issue,) = validate_features(df, ["f"])
+    assert issue.startswith("CRITICAL") and "f(1)" in issue
+
+
+def test_validate_features_handles_an_integer_column() -> None:
+    # is_nan and is_infinite are undefined on an integer series.
+    df = pl.DataFrame({"f": [1, 2, 3]})
+    assert validate_features(df, ["f"]) == []
+    assert validate_features(pl.DataFrame({"f": [1, 2 * 10**9]}), ["f"], max_abs_value=1e6) != []
+
+
+def test_validate_features_skips_columns_the_frame_does_not_have() -> None:
+    assert validate_features(pl.DataFrame({"a": [1.0]}), ["absent"]) == []
