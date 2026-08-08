@@ -315,7 +315,9 @@ print(
 # universe has to exist. A stock counts on that date under the delay the design assumes: the
 # surface summary describes the close it is stamped at and is not read until the next session, and
 # `03_financial_features` carries a value forward over a short gap, so the count below applies that
-# lag and that tolerance before counting.
+# lag and that tolerance first. Both are declared in sessions, and the summary skips the sessions a
+# stock had no surface point on, so the panel is placed on the trading calendar before either is
+# applied. Counting rows instead would read a month-old value as though it were one session late.
 #
 # The count swings, and the reason is the option listing calendar rather than anything about the
 # stocks. Every optionable US stock has **monthly** expirations, one in the third week of each
@@ -369,9 +371,19 @@ assert len({(d.year, d.month) for d in monthlies}) == len(monthlies), (
     "two monthly expirations fall in the same month"
 )
 
+# The summary carries a row only where a stock had a surface point, so it is not a complete grid:
+# a stock's rows skip whole weeks. Both `iv_feature_lag` and `iv_forward_fill` are declared in
+# sessions, so the panel is placed on the session grid before either is applied. Shifting the rows
+# as they come would read "one session late" off a value up to a month old, and would spend the
+# five-session tolerance on five rows that can span far more than five sessions.
+grid = (
+    summary.select("symbol")
+    .unique()
+    .join(quotes.select("timestamp").unique(), how="cross")
+    .join(summary.select("timestamp", "symbol", ATM_IV), on=["timestamp", "symbol"], how="left")
+)
 rankable = (
-    summary.select("timestamp", "symbol", ATM_IV)
-    .sort(["symbol", "timestamp"])
+    grid.sort(["symbol", "timestamp"])
     .with_columns(pl.col(ATM_IV).shift(IV_LAG).forward_fill(limit=IV_STALE).over("symbol"))
     .drop_nulls(ATM_IV)
     .join(quotes.select("timestamp", "symbol"), ["timestamp", "symbol"])
@@ -620,10 +632,10 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# The median absolute five-session move is 213 bps, sixteen times the declared 13 bps round trip,
-# and 0.965 of moves exceed it. Priced per share instead, the same round trip runs from 0.04 bps on
+# The median absolute five-session move is 211 bps, sixteen times the declared 13 bps round trip,
+# and 0.964 of moves exceed it. Priced per share instead, the same round trip runs from 0.04 bps on
 # the most expensive stock to 619 bps on the cheapest. The implied volatility ordering correlates
-# 0.91 with itself one decision date later and 0.75 after eight.
+# 0.92 with itself one decision date later and 0.75 after eight.
 
 # %% [markdown]
 # ## C. Design decisions
