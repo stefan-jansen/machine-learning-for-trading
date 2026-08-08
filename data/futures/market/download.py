@@ -271,56 +271,49 @@ def analyze_product_coverage(
 # ============================================================================
 
 
-def estimate_cost(
-    config: FuturesConfig,
-    products: list[str],
-    years_by_product: dict[str, list[int]],
-) -> float:
+def estimate_cost(config: FuturesConfig, products: list[str]) -> float | None:
     """
-    Estimate download cost using Databento API.
+    Estimate the cost of the requests `download_full_product` will actually make.
+
+    One API call per product covering `get_product_start(product)` to
+    `config.default_end`, which is exactly the range `download_full_product`
+    requests. Estimating the missing *years* instead would understate the bill
+    whenever a product is partially present, because the download does not take
+    a year list: it re-requests the product's whole range in one call. `--years`
+    therefore selects which products are downloaded, not how much of each, and
+    cannot lower the price.
 
     Returns:
-        Estimated cost in USD
+        Estimated cost in USD, or None if it could not be established. None
+        means unknown, not free - callers must not read it as 0.
     """
     try:
         import databento as db
 
         client = db.Historical()
     except Exception as e:
-        print(f"Warning: Could not initialize Databento client: {e}")
-        return 0.0
+        print(f"Warning: could not initialize the Databento client: {e}")
+        return None
 
-    # Build symbols and date ranges
     total_cost = 0.0
 
-    for product, years in years_by_product.items():
-        if not years:
-            continue
-
-        # Build symbols for this product
+    for product in products:
         symbols = [f"{product}.{config.roll_type}.{pos}" for pos in config.tenors]
+        start = config.get_product_start(product)
+        end = config.default_end
 
-        for year in years:
-            start = f"{year}-01-01"
-            end = f"{year}-12-31"
-
-            # Adjust start for products with later availability
-            product_start = config.get_product_start(product)
-            if product_start > start:
-                start = product_start
-
-            try:
-                cost = client.metadata.get_cost(
-                    dataset=config.dataset,
-                    symbols=symbols,
-                    schema=config.schema,
-                    start=start,
-                    end=end,
-                    stype_in="continuous",
-                )
-                total_cost += cost
-            except Exception as e:
-                print(f"Warning: Cost estimation failed for {product} {year}: {e}")
+        try:
+            total_cost += client.metadata.get_cost(
+                dataset=config.dataset,
+                symbols=symbols,
+                schema=config.schema,
+                start=start,
+                end=end,
+                stype_in="continuous",
+            )
+        except Exception as e:
+            print(f"Warning: cost estimation failed for {product} ({start} to {end}): {e}")
+            return None
 
     return total_cost
 
@@ -678,8 +671,13 @@ Examples:
     else:
         products = config.get_all_products(include_extension=args.extension)
 
-    # Get end date
-    end_date = args.end_date or config.default_end
+    # An end override lowers config.default_end itself, not just the window the
+    # coverage analysis reports on. `download_full_product` reads default_end
+    # directly, so setting only a local `end_date` here would narrow the report
+    # while leaving the request, and the bill, at the full range.
+    if args.end_date:
+        config.default_end = min(config.default_end, args.end_date)
+    end_date = config.default_end
 
     # A start override raises every product's start, so a product that only
     # lists later is not pulled back to a date it has no data for.
@@ -751,10 +749,19 @@ Examples:
             print("Use --force to re-download anyway.")
             return 0
 
-    # Cost estimation - ALWAYS estimate before any download
+    # Cost estimation - ALWAYS estimate before any download. Estimate the
+    # products that will actually be requested, over the whole range each
+    # request covers, so the figure shown, the figure acknowledged and the
+    # figure charged are the same number.
     print()
     print("Estimating download cost...")
-    cost = estimate_cost(config, products, years_to_download)
+    print(f"  full range per product, through {config.default_end} - --years does not narrow it")
+    cost = estimate_cost(config, products_needing_update)
+
+    if cost is None:
+        print("\nCould not establish the cost. Refusing to start a paid download blind.")
+        print("Check DATABENTO_API_KEY and re-run; use --dry-run to see what would be requested.")
+        return 1
 
     # If --estimate flag, show cost and exit
     if args.estimate:
@@ -769,7 +776,7 @@ Examples:
 
     if args.max_cost is not None and cost > args.max_cost:
         print(f"\nEstimated ${cost:.2f} exceeds --max-cost ${args.max_cost:.2f}. Not downloading.")
-        print("Raise --max-cost, or narrow it with --product / --year / --start-date.")
+        print("Raise --max-cost, or narrow it with --product / --start-date.")
         return 1
 
     # Require explicit acknowledgment before paid download
