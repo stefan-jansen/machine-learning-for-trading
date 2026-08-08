@@ -1163,13 +1163,16 @@ print(f"{len(set(clusters.values()))} clusters over {len(feature_cols)} features
 # of anything. The right panel asks the same question of the ordering rather than the level,
 # between consecutive decisions.
 #
-# What this measures is turnover, not predictive power. A feature that keeps its ordering
-# from one decision to the next names roughly the same positions each time, so a portfolio
-# built on it trades little; one whose ordering is gone by the next decision names a fresh
-# set every time, and the cost of that churn is Chapter 18's subject. Either can predict, and
-# whether any of these does is `05_evaluation`'s question. Reading the two panels together is
-# what tells them apart: the level can decay while the ordering holds, which is why both are
-# drawn, and it is why the order-flow imbalance is carried at four windows rather than one.
+# What both panels show is how much of the ordering survives one decision, which bears on
+# turnover without measuring it: how much a strategy actually trades also depends on how many
+# names it takes on each side, how it weights them, and how the universe itself moves, none of
+# which is decided here. A feature that keeps its ordering ranks roughly the same names at the
+# next decision, so a strategy reading it has little reason to trade; one whose ordering is
+# gone ranks a fresh set, and the cost of acting on that is Chapter 18's subject. Neither case
+# says anything about whether the feature predicts, which is `05_evaluation`'s question.
+# Reading the two panels together is what separates them: the level can decay while the
+# ordering holds, which is why both are drawn, and why the order-flow imbalance is carried at
+# four windows rather than one.
 
 # %%
 plot_persistence(
