@@ -40,6 +40,12 @@
 
 import warnings
 
+# lightgbm must be imported before anything that pulls in scikit-learn, which
+# ml4t.diagnostic does transitively: the first OpenMP runtime loaded wins the
+# process, and getting this order wrong segfaults on macOS ARM64. Keeping it in
+# this block is what makes the order stable - isort sorts plain `import x` above
+# `from x import y`, so lightgbm cannot drift back below the ml4t import.
+import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
@@ -47,7 +53,6 @@ from ml4t.diagnostic.metrics import cross_sectional_ic_series
 
 warnings.filterwarnings("ignore")
 
-import lightgbm as lgb
 import shap
 from sklearn.ensemble import RandomForestRegressor
 
@@ -231,14 +236,12 @@ rashomon_df = pl.DataFrame(model_results)
 rashomon_df
 
 # %% [markdown]
-# Across the four configurations the validation IC ranges from −0.037
-# (LightGBM seed 42) through −0.033 and −0.019 (seeds 123 and 456) up to
-# +0.002 (Random Forest). The three LightGBM seeds span a range (≈0.018)
-# on the same order as the gap from the nearest LightGBM seed to the
-# Random Forest (≈0.021) — stochastic training alone produces meaningful IC
-# variation, comparable to changing model family. The Rashomon point holds in
-# either direction: similar predictive performance, different feature
-# attributions.
+# Read the table by the spread rather than by any single value. The three
+# LightGBM seeds differ only in their random seed, and they span a wider range
+# than separates any of them from the Random Forest, which lands inside that
+# span. Changing the seed therefore moves validation IC by more than changing
+# the model family does here. The Rashomon point holds in either direction:
+# similar predictive performance, different feature attributions.
 
 # %%
 # Show top-5 features per model
