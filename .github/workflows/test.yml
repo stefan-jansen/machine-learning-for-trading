@@ -524,6 +524,42 @@ jobs:
             tests/test_holdout_boundary.py \
             -v --tb=short
 
+      # Where every entry point in the repo looks for data. Forty tests covered
+      # the rule and no job ran any of them, so the contract was unguarded on
+      # every PR — found when adding the linked-worktree fallback turned three
+      # of them red and CI stayed green, because the failure only appears in a
+      # worktree and the file did not run anywhere anyway.
+      #
+      # The precondition is the load-bearing half. `anchor_ran` skips rather
+      # than fails when the startup hook did not load, which is right locally
+      # (Debian's own sitecustomize.py shadows this one on a system-interpreter
+      # venv) and wrong here: it would turn the whole step green while testing
+      # nothing. Asserting the same condition the fixture skips on makes that
+      # state red instead. It has to be the hook FIRING, not the module being
+      # importable — cwd is on sys.path, so `import sitecustomize` succeeds in
+      # the workspace whether or not anything ran it at startup.
+      - name: Run data-root anchoring contract
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          ML4T_PATH: ${{ github.workspace }}
+          ML4T_DATA_PATH: ${{ github.workspace }}/data
+        run: |
+          .venv/bin/python - <<'PY'
+          import os, subprocess, sys
+          env = {k: v for k, v in os.environ.items() if k != "ML4T_DATA_PATH"}
+          out = subprocess.run(
+              [sys.executable, "-c", "import os; print(os.environ.get('ML4T_DATA_PATH', ''))"],
+              env=env, cwd=os.environ["ML4T_PATH"], capture_output=True, text=True,
+          )
+          if not out.stdout.strip():
+              sys.exit("sitecustomize did not run at startup; every test below would skip")
+          print("startup hook ran ->", out.stdout.strip())
+          PY
+          .venv/bin/python -m pytest \
+            tests/test_data_root_anchor.py \
+            tests/test_sitecustomize_data_root.py \
+            -v --tb=short -rs
+
   # ---------------------------------------------------------------------------
   # Chapter notebook tests — inside Docker (ml4t/ml4t:latest)
   #

@@ -47,6 +47,7 @@ here is one nothing downstream can correct.
 """
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -82,6 +83,49 @@ def _data_root_from_dotenv(repo_root: Path) -> str | None:
     return dotenv_values(env_file).get("ML4T_DATA_PATH") or None
 
 
+def _has_datasets(data_root: Path) -> bool:
+    """True where a data directory holds datasets and not just the tracked skeleton.
+
+    ``data/`` is committed for ``download.py``, each dataset's ``config.yaml`` and the dataset
+    cards, while every parquet under it is gitignored. So the directory existing proves nothing,
+    and neither does a subdirectory: ``data/etfs/market/`` is tracked and arrives empty. Datasets
+    land at ``data/<domain>/*.parquet`` or ``data/<domain>/<source>/*.parquet``; both globs stop
+    at the first match and neither descends into the full tree.
+    """
+    return any(next(data_root.glob(p), None) for p in ("*/*.parquet", "*/*/*.parquet"))
+
+
+def _main_worktree(repo_root: Path) -> Path | None:
+    """The repository's main working tree, or ``None`` if ``repo_root`` is not a linked worktree.
+
+    ``--git-dir`` and ``--git-common-dir`` are equal in the main working tree and differ in a
+    linked one, and the common dir's parent IS the main working tree. Both are plumbing commands
+    with a stable contract.
+
+    Every failure returns ``None`` rather than propagating, and that is load-bearing: this runs
+    before ``ML4T_DATA_PATH`` is assigned, so an escaping error would reach the module-level
+    guard and leave the variable unset entirely - worse than the default it was refining. No
+    git, no git on PATH, a tarball install and a hung invocation all fall back to the default.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:  # noqa: BLE001 - startup hook: a missing or hung git is not an error here
+        return None
+    # One path per line, and splitting on whitespace instead would break on any checkout whose
+    # path contains a space: the two paths would arrive as three or more parts, fail the length
+    # test, and silently disable the fallback for exactly the reader who cannot tell why.
+    parts = [line.strip() for line in out.stdout.splitlines() if line.strip()]
+    if out.returncode != 0 or len(parts) != 2 or parts[0] == parts[1]:
+        return None
+    return Path(parts[1]).parent
+
+
 def _anchor_data_root(repo_root: Path) -> None:
     if os.environ.get("ML4T_DATA_PATH"):
         return
@@ -91,6 +135,20 @@ def _anchor_data_root(repo_root: Path) -> None:
     data_root = Path(configured).expanduser() if configured else repo_root / "data"
     if not data_root.is_absolute():
         data_root = repo_root / data_root
+    if configured is None and not _has_datasets(data_root):
+        # A reader has one clone, downloads into <repo>/data, and never reaches this branch.
+        # A linked `git worktree` does: it is a second working directory of one repository, so
+        # it gets the tracked skeleton of data/ and none of the gitignored datasets, which live
+        # only in the main working tree. Defaulting to the worktree's own data/ therefore names
+        # a directory that exists and holds nothing, and the reader is told to download tens of
+        # gigabytes already on the disk.
+        #
+        # Symlinking the datasets into the worktree is the other obvious fix and is worse: a
+        # directory symlink under data/ is not gitignored, so a `git add -A` commits an absolute
+        # machine-specific path into the repository.
+        main_tree = _main_worktree(repo_root)
+        if main_tree is not None and _has_datasets(main_tree / "data"):
+            data_root = main_tree / "data"
     os.environ["ML4T_DATA_PATH"] = str(data_root)
     if configured is None:
         # This value is the repo-anchored default, not something anyone asked for.

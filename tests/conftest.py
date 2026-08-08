@@ -73,6 +73,17 @@ def ci_env_setup():
         env_file.unlink()
 
 
+def _holds_datasets(path: Path) -> bool:
+    """True where a data directory holds parquet at either documented depth.
+
+    The same test ``sitecustomize._has_datasets`` applies, and for the same
+    reason: ``data/`` is tracked for its ``config.yaml`` and ``download.py``
+    while every parquet under it is gitignored, so existing and being non-empty
+    say nothing about whether there is data to read.
+    """
+    return any(next(path.glob(p), None) for p in ("*/*.parquet", "*/*/*.parquet"))
+
+
 def _resolve_data_path() -> Path | None:
     """Find ML4T_DATA_PATH from env var, .env file, or default location.
 
@@ -91,7 +102,12 @@ def _resolve_data_path() -> Path | None:
         if p.exists() and any(p.iterdir()):
             return p
 
-    # 2. Read from .env file (works in xdist workers)
+    # 2. Read from .env file (works in xdist workers).
+    #    Non-empty is not the test here either, for the same reason it is not in
+    #    step 1: a .env naming the repo's own data/ passes it on the strength of
+    #    the tracked skeleton, which reintroduces exactly what the marker above
+    #    and the glob in step 4 both exist to block. CI writes such a .env by
+    #    hand, so this branch is the one that fires there.
     env_file = REPO_ROOT / ".env"
     if env_file.exists():
         for line in env_file.read_text().splitlines():
@@ -100,7 +116,7 @@ def _resolve_data_path() -> Path | None:
                 val = line.split("=", 1)[1].strip().strip('"').strip("'")
                 if val and not val.startswith("#"):
                     p = Path(val).expanduser().resolve()
-                    if p.exists() and any(p.iterdir()):
+                    if _holds_datasets(p):
                         return p
 
     # 3. Well-known test-data repo location
