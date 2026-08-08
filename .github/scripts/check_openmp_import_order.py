@@ -72,42 +72,55 @@ BLAS_OMP = ("sklearn", "ml4t.diagnostic", "shap")
 
 SKIP_PARTS = {".venv", ".git", ".ipynb_checkpoints", "_reference", "node_modules"}
 
-# Affected, and deliberately not fixed here.
+# Affected, and blocked on something other than the import order itself.
 #
-# Editing a notebook's `.py` obliges you to re-execute it (notebook_provenance.py
-# enforces that), and re-execution is not free for these. Eight were re-run on
-# 2026-08-08 and every one printed different numbers than it ships with. Two
-# consecutive runs of the same notebook agree exactly, so that is not
-# nondeterminism: the `~/ml4t/code` artifacts have moved since these notebooks
-# were last executed, and re-running them re-baselines their published results.
-# Which artifact vintage the book ships is an open question and not this
-# change's to settle, so the import order stays wrong in these files rather than
-# a ten-line reorder quietly restating the numbers. Three more cannot be
-# executed here at all, for the separate reasons given below.
+# An earlier revision of this list held eleven entries on one shared excuse: that
+# editing a notebook's `.py` obliges a re-execution (notebook_provenance.py
+# enforces that), and re-execution restates whatever the `~/ml4t/code` artifacts
+# now produce. That is true, and it is not a reason to leave a crash in place.
+# Six of the eleven were fixed and re-executed instead. What the re-run moved was
+# prose that had hard-coded a third decimal place, and where a notebook's own
+# commentary quoted values it no longer printed, the commentary was rewritten to
+# state the ordering it was actually arguing for.
 #
-# Everything here is reported on every run rather than hidden, and an entry that
-# stops offending fails the gate, so the list cannot rot. The copies students
-# actually run are already fixed in the course repo, where the vendored
-# notebooks ship without a paired `.py` and so carry no re-execution duty - an
-# import-cell edit there leaves the outputs alone.
+# So an entry here is not "we would rather not re-run this". It names a blocker
+# that a re-execution cannot clear:
 #
-# Listed 2026-08-08.
-_REBASELINE = (
-    "fixing this obliges a re-execution, which prints different numbers than the "
-    "notebook ships with - an artifact-vintage re-baseline, not an import fix"
-)
+#   - the *book* quotes the notebook's figures, so restating them is an errata
+#     decision about the manuscript, taken deliberately and not as a side effect
+#     of an import fix;
+#   - or the notebook cannot be executed in this environment at all.
+#
+# Every entry is printed on every run, and an entry that stops offending fails
+# the gate, so the list cannot rot into a place where things are quietly parked.
+#
+# The copies students actually run carry none of this: the course repo's
+# vendored notebooks ship without a paired `.py`, so an import-cell edit fixes
+# the crash there and leaves every output alone. All fourteen are already clean
+# in that repo.
+#
+# Revised 2026-08-08.
 KNOWN_BLOCKED = {
-    "08_financial_features/05_feature_selection.py": _REBASELINE,
-    "11_ml_pipeline/07_case_study_insights.py": _REBASELINE,
-    "12_gradient_boosting/02_gbm_comparison.py": _REBASELINE,
-    "12_gradient_boosting/07_hpo_comparison.py": _REBASELINE,
-    "12_gradient_boosting/09_xai_limitations.py": _REBASELINE,
-    "12_gradient_boosting/11_conformal_gbm.py": _REBASELINE,
-    "14_latent_factors/09_case_study_insights.py": _REBASELINE,
-    "15_causal_estimation/09_adia_causal_benchmark.py": _REBASELINE,
+    "11_ml_pipeline/07_case_study_insights.py": (
+        "does not execute at all today: it calls insight_chapter.plot_rolling_daily_ic with a "
+        "selected_prediction_hashes= argument that function has never accepted (line 678, "
+        "TypeError). Predates this gate; reads registries and fits nothing, so it cannot crash"
+    ),
+    "08_financial_features/05_feature_selection.py": (
+        "Section 8.6 quotes this notebook's figures, so re-executing it is a manuscript "
+        "errata decision, not an import fix; fits a GBM, so it can still crash a reader"
+    ),
+    "12_gradient_boosting/02_gbm_comparison.py": (
+        "Section 12.2 quotes its library timings and speedup ratios throughout, and a live "
+        "worktree (group/ch11-12) is mid-edit on it; fits a GBM, so it can still crash"
+    ),
+    "12_gradient_boosting/09_xai_limitations.py": (
+        "Section 12.5 quotes its ~1.3% prediction-difference figure; fits a GBM, so it can "
+        "still crash a reader"
+    ),
     "12_gradient_boosting/12_case_study_insights.py": (
-        "pins an approved etfs registry SHA-256; the local registry has drifted from it, "
-        "and re-approving would re-baseline a number of record"
+        "pins an approved etfs registry SHA-256 that the local registry no longer matches, "
+        "so it cannot be executed here; reads registries and fits nothing, so it cannot crash"
     ),
     "case_studies/crypto_perps_funding/07_gbm.py": (
         "GPU-only by design - raises unless TRAIN_DEVICE='cuda' and the LightGBM build "
