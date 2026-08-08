@@ -116,15 +116,21 @@ PRIMARY_HORIZON = HORIZONS[PRIMARY_LABEL]
 HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
 GROUPS = setup["universe"]["product_groups"]
 SECTORS = {product: sector for sector, ps in GROUPS.items() for product in ps}
+REBALANCE_STEP = setup["labels"]["rebalance_step"]
 
 print(
     f"{PRIMARY_LABEL} is the primary label - the return over the next {PRIMARY_HORIZON}"
     f" trading sessions, and what every model here is trained to predict. {VARIANT_LABEL} is"
-    f" the one variant, the same return over {HORIZONS[VARIANT_LABEL]} sessions, which turns"
-    f" a book over a fifth as often.\nSessions from {HOLDOUT_START} on are the held-out test"
-    f" period, and a label belongs to it as soon as its outcome falls there, so that is the"
-    f" boundary every diagnostic below stops at.\nThe universe is the fixed list of"
-    f" {len(SECTORS)} products the file declares, in {len(GROUPS)} sectors."
+    f" the one variant, the same return over {HORIZONS[VARIANT_LABEL]} sessions.\nBoth are"
+    f" traded off the same weekly rebalancing schedule, and the horizon decides how many of"
+    f" its slots a position occupies: the backtest advances"
+    f" {REBALANCE_STEP[PRIMARY_LABEL]} slot per trade on the primary and"
+    f" {REBALANCE_STEP[VARIANT_LABEL]} on the variant, so the variant trades a"
+    f" {REBALANCE_STEP[VARIANT_LABEL]}-times-longer holding period.\nSessions from"
+    f" {HOLDOUT_START} on are the held-out test period, and a label belongs to it as soon as"
+    f" its outcome falls there, so that is the boundary every diagnostic below stops at.\n"
+    f"The universe is the fixed list of {len(SECTORS)} products the file declares, in"
+    f" {len(GROUPS)} sectors."
 )
 
 # %% [markdown]
@@ -143,10 +149,11 @@ print(
 #
 # The decision cadence comes from `setup.yaml`: a Friday settlement is observed, and the
 # resulting position is entered at Monday's open. That fixes the primary horizon at one
-# trading week. The monthly variant asks whether the same curve signal still pays when the
-# book turns over a fifth as often - a question about cost and turnover rather than a second
-# hypothesis. Labels are sampled every session rather than only on Fridays: that buys five
-# times the rows at the price of overlap, and Section F measures what they are worth.
+# trading week. The monthly variant asks whether the same curve signal still pays when a
+# position is held for a month instead - a question about cost and turnover rather than a
+# second hypothesis, and the two are compared on the same weekly schedule. Labels are
+# sampled on every session rather than only on Fridays: that buys five times the rows at
+# the price of overlap, and Section F measures what they are worth.
 
 # %% [markdown]
 # ## B. Preparation before the label
@@ -664,8 +671,10 @@ for label_name, horizon in HORIZONS.items():
 # next one along, and both are **raw** settlements: a difference between two adjusted series
 # would measure their accumulated roll history rather than today's curve. The quantity is
 # positive in backwardation and negative in contango.
-# [`03_financial_features`](03_financial_features.ipynb) builds this same spread as its
-# `carry_pct` feature.
+# [`03_financial_features`](03_financial_features.ipynb) builds the same spread as its
+# `carry_pct` feature, on a twelve-times-larger scale. Multiplying by a positive constant
+# leaves every within-session ranking untouched, so it changes nothing the score below
+# reads; it does mean the two notebooks print the quantity at different magnitudes.
 #
 # The score is the **information coefficient**: the rank correlation between the signal and
 # the label, computed across the products quoted on each session and then averaged over
