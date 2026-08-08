@@ -650,6 +650,12 @@ def load_sp500_options_surface(
     qc_converged_share, term_slope_near_atm, term_slope_far_atm,
     term_ratio_atm, term_convexity, skew_to_atm_ratio.
 
+    An implied volatility is solved for, not quoted, and the vendor records a
+    failed solve as -1 rather than as a missing value. Those placeholders are
+    returned as nulls, along with every surface measure derived from one, so
+    that a caller sees a value it does not have as missing rather than as a
+    negative volatility. See ``_null_unsolved_iv``.
+
     Used by sp500_equity_option_analytics/03_financial_features.py, which
     also shows how this summary is computed from raw option chains.
     """
@@ -675,7 +681,58 @@ def load_sp500_options_surface(
     if symbols:
         df = df.filter(pl.col("symbol").is_in(symbols))
     df = apply_max_symbols(df, max_symbols)
-    return df.sort(["timestamp", "symbol"])
+    return _null_unsolved_iv(df).sort(["timestamp", "symbol"])
+
+
+#: Surface measures and the implied volatilities each one is computed from, per
+#: ``data/equities/market/sp500/materialize_options.py``. A measure is only as
+#: solved as its inputs, so nulling a placeholder has to reach the differences
+#: and ratios taken from it as well.
+_IV_LEVELS = (
+    "iv_30_atm",
+    "iv_7_atm",
+    "iv_90_atm",
+    "iv_30_put_25d",
+    "iv_30_call_25d",
+)
+_IV_DERIVED = {
+    "skew_rr_30_25d": ("iv_30_put_25d", "iv_30_call_25d"),
+    "term_slope_near_atm": ("iv_30_atm", "iv_7_atm"),
+    "term_slope_far_atm": ("iv_90_atm", "iv_30_atm"),
+    "term_ratio_atm": ("iv_90_atm", "iv_7_atm"),
+    "term_convexity": ("iv_7_atm", "iv_90_atm", "iv_30_atm"),
+    "skew_to_atm_ratio": ("iv_30_put_25d", "iv_30_call_25d", "iv_30_atm"),
+}
+
+
+def _null_unsolved_iv(df: pl.DataFrame) -> pl.DataFrame:
+    """Return a failed implied-volatility solve as a null rather than as -1.
+
+    The option chain carries one quote per contract and the implied volatility is
+    recovered from it numerically. Where that does not converge the vendor writes
+    -1, and ``materialize_options.py`` carries the placeholder through: averaging
+    an unsolved leg with a solved one leaves a value that is negative without
+    being recognisably a placeholder, and every difference and ratio taken across
+    tenors or strikes inherits it the same way.
+
+    A negative annualized standard deviation is not a quantity a caller can do
+    anything with, and it is worse than missing: it survives ``drop_nulls``, it
+    sorts to the bottom of a ranking, and it enters a mean. Normalising it here
+    means every reader of this dataset gets the same answer to what the file does
+    with failure, rather than each one rediscovering it.
+    """
+    levels = [c for c in _IV_LEVELS if c in df.columns]
+    if not levels:
+        return df
+    df = df.with_columns(pl.when(pl.col(c) > 0).then(pl.col(c)).alias(c) for c in levels)
+    derived = [
+        pl.when(pl.all_horizontal(pl.col(i).is_not_null() for i in inputs if i in levels))
+        .then(pl.col(name))
+        .alias(name)
+        for name, inputs in _IV_DERIVED.items()
+        if name in df.columns and any(i in levels for i in inputs)
+    ]
+    return df.with_columns(derived) if derived else df
 
 
 def load_sp500_options_straddles(
