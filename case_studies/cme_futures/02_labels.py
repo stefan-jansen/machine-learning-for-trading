@@ -122,11 +122,10 @@ print(
     f"{PRIMARY_LABEL} is the primary label - the return over the next {PRIMARY_HORIZON}"
     f" trading sessions, and what every model here is trained to predict. {VARIANT_LABEL} is"
     f" the one variant, the same return over {HORIZONS[VARIANT_LABEL]} sessions.\nBoth are"
-    f" traded off the same weekly rebalancing schedule, and the horizon decides how many of"
-    f" its slots a position occupies: the backtest advances"
-    f" {REBALANCE_STEP[PRIMARY_LABEL]} slot per trade on the primary and"
-    f" {REBALANCE_STEP[VARIANT_LABEL]} on the variant, so the variant trades a"
-    f" {REBALANCE_STEP[VARIANT_LABEL]}-times-longer holding period.\nSessions from"
+    f" traded off the same weekly rebalancing schedule, and the longer horizon is traded"
+    f" less often: the backtest advances {REBALANCE_STEP[PRIMARY_LABEL]} slot per trade on"
+    f" the primary and {REBALANCE_STEP[VARIANT_LABEL]} on the variant, so the variant"
+    f" rebalances a third as often.\nSessions from"
     f" {HOLDOUT_START} on are the held-out test period, and a label belongs to it as soon as"
     f" its outcome falls there, so that is the boundary every diagnostic below stops at.\n"
     f"The universe is the fixed list of {len(SECTORS)} products the file declares, in"
@@ -149,9 +148,10 @@ print(
 #
 # The decision cadence comes from `setup.yaml`: a Friday settlement is observed, and the
 # resulting position is entered at Monday's open. That fixes the primary horizon at one
-# trading week. The monthly variant asks whether the same curve signal still pays when a
-# position is held for a month instead - a question about cost and turnover rather than a
-# second hypothesis, and the two are compared on the same weekly schedule. Labels are
+# trading week. The variant asks whether the same curve signal still pays when the outcome
+# is measured twenty-one sessions out instead of five - a question about how long the signal
+# stays informative, and about the cost of trading it, rather than a second hypothesis. Both
+# are traded off the same weekly schedule, rebalanced at different rates. Labels are
 # sampled on every session rather than only on Fridays: that buys five times the rows at
 # the price of overlap, and Section F measures what they are worth.
 
