@@ -106,17 +106,9 @@ KNOWN_BLOCKED = {
         "selected_prediction_hashes= argument that function has never accepted (line 678, "
         "TypeError). Predates this gate; reads registries and fits nothing, so it cannot crash"
     ),
-    "08_financial_features/05_feature_selection.py": (
-        "Section 8.6 quotes this notebook's figures, so re-executing it is a manuscript "
-        "errata decision, not an import fix; fits a GBM, so it can still crash a reader"
-    ),
     "12_gradient_boosting/02_gbm_comparison.py": (
         "Section 12.2 quotes its library timings and speedup ratios throughout, and a live "
         "worktree (group/ch11-12) is mid-edit on it; fits a GBM, so it can still crash"
-    ),
-    "12_gradient_boosting/09_xai_limitations.py": (
-        "Section 12.5 quotes its ~1.3% prediction-difference figure; fits a GBM, so it can "
-        "still crash a reader"
     ),
     "12_gradient_boosting/12_case_study_insights.py": (
         "pins an approved etfs registry SHA-256 that the local registry no longer matches, "

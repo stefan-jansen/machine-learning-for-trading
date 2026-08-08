@@ -59,6 +59,13 @@
 import warnings
 from datetime import date
 
+# This notebook fits a LightGBM model far below, at the ML-importance step, behind
+# a deferred `from lightgbm import ...`. That deferral cannot fix the OpenMP order:
+# ml4t.diagnostic pulls in scikit-learn here, and the first OpenMP runtime loaded
+# wins the process, so by then the race is already lost and macOS ARM64 segfaults.
+# The module-level import is what settles it, which is why it is here despite
+# nothing at module scope using the name.
+import lightgbm  # noqa: F401
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
