@@ -53,6 +53,14 @@
 
 import warnings
 
+# lightgbm must be imported before anything that loads scikit-learn, and
+# ml4t.diagnostic loads it transitively. Both ship their own OpenMP runtime and
+# the first one loaded wins for the whole process; on macOS ARM64, getting
+# scikit-learn's libomp first makes LightGBM's next multithreaded fit segfault
+# in __kmp_suspend_initialize_thread, killing the kernel with no traceback.
+# Plain `import` statements sort ahead of `from ... import` ones, so one
+# canonical block keeps this order and isort will not undo it.
+import lightgbm as lgb
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
@@ -60,8 +68,6 @@ import polars as pl
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
 
 warnings.filterwarnings("ignore")
-
-import lightgbm as lgb
 
 from utils.modeling import load_modeling_dataset
 from utils.reproducibility import set_global_seeds

@@ -36,6 +36,12 @@
 # %%
 """Cross-case-study synthesis of latent-factor validation results."""
 
+# case_studies.utils.model_analysis imports lightgbm at module scope, so it must
+# not be reached after ml4t.diagnostic, which brings scikit-learn up: both ship
+# an OpenMP runtime and the first loaded wins for the process, which segfaults
+# LightGBM on macOS ARM64. This notebook only reads registries and fits nothing,
+# so the binding is stated here rather than left to import order further down.
+import lightgbm  # noqa: F401
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
