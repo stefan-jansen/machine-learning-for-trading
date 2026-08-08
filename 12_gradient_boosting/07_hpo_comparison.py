@@ -20,23 +20,18 @@
 #
 # **Chapter 12, Section 12.4**: Advanced Hyperparameter Tuning with Optuna
 #
-# > **GPU recommended**: This notebook trains models with PyTorch/CUDA. It will run on CPU
-# > but training may be very slow. For GPU acceleration:
-# > ```bash
-# > docker compose run --rm ml4t-gpu python 12_gradient_boosting/07_hpo_comparison.py
-# > ```
-#
-#
 # ## Purpose
-# This notebook compares grid search against Optuna's Bayesian optimization
-# on the same parameter budget, demonstrating the efficiency advantage of
-# TPE-based sampling. It also investigates validation overfitting — how
+# This notebook compares grid search against Optuna's Bayesian optimization on
+# the same parameter budget, first on a space grid can enumerate and then on a
+# continuous one it cannot. It also investigates validation overfitting — how
 # test IC diverges from validation IC as trial count increases.
 #
 # ## Key Insight
-# Grid search is simple but scales poorly. Optuna finds better solutions
-# with fewer evaluations through intelligent sampling, and continuous
-# spaces unlock configurations that discrete grids miss entirely.
+# The comparison is decided by the space, not by the sampler. On a grid small
+# enough to exhaust, search has nothing to exploit and exhaustion wins by
+# construction; a continuous space is where sampling reaches configurations a
+# discrete grid cannot represent at all. Both searches fit the same number of
+# models here, so neither is the cheaper method.
 #
 # ## Cross-References
 # - **Section 12.4**: TPE, pruning, validation overfitting (Box 12.3)
@@ -267,11 +262,12 @@ comparison_df
 # construction. Optuna, given the same 54-trial budget on the same categorical
 # space, came in below it: TPE samples with replacement, so 54 trials do not cover
 # 54 points, and on a space this small there is nothing for the sampler to exploit
-# in exchange. Search only pays where the space is too big to enumerate. Wall
-# times are within a few seconds of each other on this machine and are dominated by
-# LightGBM fitting, not by the sampler. The lesson is not that one method wins but
-# that on a space this small there is nothing to optimize: the chapter's
-# recommendation stands — grid is fine for ≤4 parameters × ≤3 values each. Optuna's
+# in exchange. Search only pays where the space is too big to enumerate. Both
+# methods fit the same 54 models, so the wall-time column records what else the
+# machine was doing during the run rather than a cost difference between the two
+# searches — do not read it as one method being faster. The lesson is not that
+# one method wins but that on a space this small there is nothing to optimize:
+# the chapter's recommendation stands — grid is fine for ≤4 parameters × ≤3 values each. Optuna's
 # advantage appears only in the continuous space tested next, which grid cannot
 # represent at all.
 
@@ -387,12 +383,13 @@ plt.show()
 # trending regime for this ETF universe — a level artifact of that window, not
 # evidence that tuning helped.) This single-fold, fixed-seed setup shows the
 # *direction* of overfitting but is a blunt instrument for quantifying it, because
-# it lacks trial-level variance. Section 10 sharpens the picture: after refitting
-# on `train + val`, Optuna's val-best continuous configuration produces a *worse*
-# holdout IC than grid search's val-best discrete configuration — exactly the
-# inversion validation overfitting predicts. For a higher-resolution view of the
-# same effect, `04_optuna_tuning` shows how single-fold HPO collapses to a
-# one-tree model on a different fold.
+# it lacks trial-level variance. Section 10 asks a different question — how the two
+# selected configurations compare after refitting on `train + val` — and does not
+# reproduce this curve's shape, which is the honest state of the evidence rather
+# than a contradiction: a budget sweep within one space and a comparison of two
+# picks from different spaces are not the same experiment. For a higher-resolution
+# view of the effect this section does show, `04_optuna_tuning` shows how
+# single-fold HPO collapses to a one-tree model on a different fold.
 
 # %% [markdown]
 # ## 9. Visualization
@@ -502,8 +499,10 @@ final_df
 #
 # 1. **Grid Search**: Fine for <=4 parameters with <=3 values each
 # 2. **Optuna**: Preferred for >4 parameters or continuous ranges
-# 3. **Budget**: 50–100 trials for standard GBM tuning — more risks
-#    validation overfitting (see Section 8 above)
+# 3. **Budget**: 50–100 trials is the common convention for GBM tuning, but
+#    treat it as a parameter to choose on a holdout rather than a default — on
+#    this run the test IC peaked below that band and had already fallen by the
+#    time the band was reached (Section 8 above)
 # 4. **Always**: Hold out a test set untouched during optimization
 #
 # **Next**: See `04_optuna_tuning` for the full Optuna workflow with pruning
