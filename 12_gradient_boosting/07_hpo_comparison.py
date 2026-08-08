@@ -30,8 +30,8 @@
 # The comparison is decided by the space, not by the sampler. On a grid small
 # enough to exhaust, search has nothing to exploit and exhaustion wins by
 # construction; a continuous space is where sampling reaches configurations a
-# discrete grid cannot represent at all. Both searches fit the same number of
-# models here, so neither is the cheaper method.
+# discrete grid cannot represent at all. The wall times reported along the way
+# are single uncontrolled runs, not a cost comparison.
 #
 # ## Cross-References
 # - **Section 12.4**: TPE, pruning, validation overfitting (Box 12.3)
@@ -262,14 +262,15 @@ comparison_df
 # construction. Optuna, given the same 54-trial budget on the same categorical
 # space, came in below it: TPE samples with replacement, so 54 trials do not cover
 # 54 points, and on a space this small there is nothing for the sampler to exploit
-# in exchange. Search only pays where the space is too big to enumerate. Both
-# methods fit the same 54 models, so the wall-time column records what else the
-# machine was doing during the run rather than a cost difference between the two
-# searches — do not read it as one method being faster. The lesson is not that
-# one method wins but that on a space this small there is nothing to optimize:
-# the chapter's recommendation stands — grid is fine for ≤4 parameters × ≤3 values each. Optuna's
-# advantage appears only in the continuous space tested next, which grid cannot
-# represent at all.
+# in exchange. Search only pays where the space is too big to enumerate. The
+# wall-time column is one uncontrolled measurement on a shared machine, and the
+# two searches fit different sets of configurations, which cost different amounts
+# to train — so it is neither a benchmark nor evidence that either method is
+# cheaper. The lesson is not that one method wins but that on a space this small
+# there is nothing to optimize: the chapter's recommendation stands — grid is
+# fine for ≤4 parameters × ≤3 values each. What the continuous space tested next
+# adds is reach, to configurations a discrete grid cannot represent at all; that
+# is a property of the space, and it is not a measurement of the sampler.
 
 # %% [markdown]
 # ## 6. Optuna with Continuous Space
@@ -499,10 +500,11 @@ final_df
 #
 # 1. **Grid Search**: Fine for <=4 parameters with <=3 values each
 # 2. **Optuna**: Preferred for >4 parameters or continuous ranges
-# 3. **Budget**: 50–100 trials is the common convention for GBM tuning, but
-#    treat it as a parameter to choose on a holdout rather than a default — on
-#    this run the test IC peaked below that band and had already fallen by the
-#    time the band was reached (Section 8 above)
+# 3. **Budget**: 50–100 trials is the common convention for GBM tuning, but it is
+#    a parameter, not a default. Choose it with nested or walk-forward
+#    validation, then score the holdout once. Section 8 reads the sealed holdout
+#    across budgets to *show* that the turn exists; that is a diagnostic run
+#    after the fact, not a way to select the budget
 # 4. **Always**: Hold out a test set untouched during optimization
 #
 # **Next**: See `04_optuna_tuning` for the full Optuna workflow with pruning
