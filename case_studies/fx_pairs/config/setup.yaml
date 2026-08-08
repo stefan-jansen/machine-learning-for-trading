@@ -164,6 +164,9 @@ features:
   # longest chain in the matrix and the point past which every family is dense.
   null_policy_carrier: zscore_126d
   persistence_horizon: 63    # bars F6 reads the feature autocorrelation out to
+  # Rank correlation at which the redundancy tree is cut: two columns agreeing this
+  # closely on their ordering are one column as far as a linear model is concerned.
+  redundancy_cut: 0.7
   families:
     - name: momentum
       pattern: ret_*d|mom_skip_recent|accel_*
@@ -226,7 +229,7 @@ features:
       representation: Wilder-smoothed oscillator, ratio to a moving average
       failure_mode: saturates in a sustained trend
     - name: dollar factor
-      pattern: usd_factor_*|usd_beta_*
+      pattern: usd_factor_*|usd_corr_*
       role: state
       hypothesis: A broad dollar move is common to seven pairs and is not pair-specific
       inputs: daily returns of the seven USD pairs
