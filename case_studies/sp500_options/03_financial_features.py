@@ -853,13 +853,32 @@ plot_cross_sectional_dispersion(
 # %% [markdown]
 # ### F5. Redundancy structure
 #
-# Two features that rank the cross-section the same way carry the same information twice, and a
-# linear model cannot then say which of them its coefficient belongs to. Clustering on the
-# distance $1 - |\rho|$ groups features by that ordering, taking a strong negative correlation to
-# be the same information as a strong positive one. The dashed line is the cut, drawn at the rank
-# correlation named in the subtitle; every branch that has already merged to the right of it is
-# one group. Naming the groups is all this section does. Choosing one member of each to keep is a decision
-# that has to be made without seeing the test data, so `05_evaluation` makes it fold by fold.
+# Two features that order the panel almost the same way add little to each other. Fit an
+# unpenalized linear model on both and it splits their shared contribution between two
+# coefficients that are then unstable from fold to fold - each can move a long way while the
+# pair's joint effect barely changes. A penalty on the coefficients damps that, and a tree does
+# not have the problem in the same form, but in every case the second column is buying less than
+# its own presence suggests. Grouping the features is how the notebook makes that visible before
+# any model is fitted.
+#
+# Each column is replaced by its rank, the ranks are correlated pairwise - a Spearman
+# correlation - and the features are clustered on the distance $1 - |\rho|$, so a strongly
+# negative correlation counts as the same information as a strongly positive one. The dashed line
+# is the cut, drawn at the rank correlation named in the subtitle; every branch that has already
+# merged to the right of it is one group.
+#
+# Two properties of that estimate are worth knowing before reading the tree. The ranking is over
+# rows pooled across symbols and dates, not within each date, so two features can land in one
+# group because they separate symbols the same way, because they move together through time, or
+# both - which is the right question for whether the matrix carries a column twice, and a
+# different question from whether they order the same names on the same Friday. And it is taken
+# on a fixed random sample of the rows rather than all of them, because the pairwise correlation
+# is quadratic in the columns; the sample is drawn under a fixed seed, so the tree is the same on
+# every run.
+#
+# The groups are what this section produces. `05_evaluation` runs its own pooled Spearman
+# correlation later, over the features that reach its screen and on dates before the holdout, and
+# counts the pairs that clear the same threshold before printing the strongest of them.
 
 # %%
 CUT = 0.7
