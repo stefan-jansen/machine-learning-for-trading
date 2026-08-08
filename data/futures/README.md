@@ -48,6 +48,14 @@ uv run python data/futures/market/download.py                        # full
 uv run python data/futures/market/download.py --product ES --product NQ
 uv run python data/futures/market/download.py --start-date 2020-01-01 --end-date 2023-12-31
 
+# Individual contracts (ES and CL), needed by 02_futures_continuous to
+# reconstruct the roll. download.py fetches only the continuous series, which
+# have already been rolled, so the roll cannot be taught from them.
+
+uv run python data/futures/market/databento_individual.py --estimate
+uv run python data/futures/market/databento_individual.py              # ES and CL
+uv run python data/futures/market/databento_individual.py --product ES
+
 # === Positioning (CFTC CoT — free, weekly) ===
 
 uv run python data/futures/positioning/cot_download.py               # all products, 2020-current

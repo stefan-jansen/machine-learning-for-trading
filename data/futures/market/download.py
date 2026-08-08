@@ -607,9 +607,21 @@ Examples:
 
     # Date override
     parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Override the per-product start date from config (YYYY-MM-DD)",
+    )
+    parser.add_argument(
         "--end-date",
         default=None,
         help="Override end date from config (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--max-cost",
+        type=float,
+        default=None,
+        metavar="USD",
+        help="Refuse to download if the estimate exceeds this (data/download_all.py passes 125)",
     )
 
     # Options
@@ -668,6 +680,15 @@ Examples:
 
     # Get end date
     end_date = args.end_date or config.default_end
+
+    # A start override raises every product's start, so a product that only
+    # lists later is not pulled back to a date it has no data for.
+    if args.start_date:
+        config.default_start = max(config.default_start, args.start_date)
+        for table in (config.products, config.extension_products):
+            for spec in table.values():
+                if "start" in spec:
+                    spec["start"] = max(spec["start"], args.start_date)
 
     print("=" * 70)
     print("DATABENTO FUTURES DOWNLOAD (Config-Driven)")
@@ -745,6 +766,11 @@ Examples:
         print(f"\n[DRY RUN] Estimated cost: ${cost:.2f}")
         print("[DRY RUN] Would download the products listed above.")
         return 0
+
+    if args.max_cost is not None and cost > args.max_cost:
+        print(f"\nEstimated ${cost:.2f} exceeds --max-cost ${args.max_cost:.2f}. Not downloading.")
+        print("Raise --max-cost, or narrow it with --product / --year / --start-date.")
+        return 1
 
     # Require explicit acknowledgment before paid download
     if not databento_acknowledge(cost, force=args.force):
