@@ -273,8 +273,8 @@ print(f"Bar spacing {BAR}, uniform within every session; horizons in bars {HORIZ
 # The decision is taken on the bar closing at $t$, so the earliest bar that can be acted on
 # is the one after it, and the position is held until $H$ after the decision. Both ends are
 # quote midpoints observed inside the session, so what the formula measures is how far the
-# market moved over the holding period; a trade capturing that move pays the spread at each
-# end, which Section E prices separately.
+# market moved over the holding period; a trade capturing that move pays half the spread at
+# each end, one full spread over the round trip, which Section E prices separately.
 #
 # All four labels are computed on the **minute** grid the data arrives on, and what differs
 # between them is the horizon: five, fifteen and sixty minutes, plus a direction label cut
