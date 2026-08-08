@@ -76,10 +76,13 @@ def test_vrp_rv_respects_splits_security_boundaries_and_segment_scale() -> None:
             "load_sp500_daily_bars": lambda: prices,
             "load_sp500_options_straddles": lambda: straddles,
             "PRIMARY_LABEL": "ret_to_expiry",
+            "RV_WINDOW": 21,
+            "SESSIONS_PER_YEAR": 252,
             "dev": {"ret_to_expiry": labels},
         }
         _run_assignments(
-            ("straddles", "underlying", "annualised_rv", "realised", "baseline"), namespace
+            ("straddles", "underlying", "dense", "RV_COL", "annualised_rv", "realised", "baseline"),
+            namespace,
         )
         return namespace
 
@@ -153,6 +156,58 @@ def test_expiry_intrinsic_value_keeps_historical_close_basis() -> None:
     assert result["dte_calendar"].item() == 28
     # Entry is one session after the signal, so 21 sessions to expiry is 20 of exposure.
     assert result["window"].item() == 20
+
+
+def test_rv_window_is_counted_on_the_market_calendar_not_on_quoted_rows() -> None:
+    """A session the market was open for and the stock missed must null the window.
+
+    Counting the window on the stock's own rows closes over the absence, so a 21-session
+    volatility spans 21 rows that cover more than 21 sessions and nothing says so. The
+    two symbols are what makes the check bind: `FULL` trades every session and keeps its
+    value on the session `GAPS` misses, so a fix that simply nulled more would fail here.
+    """
+    dates = pl.date_range(pl.date(2020, 1, 1), pl.date(2020, 3, 20), eager=True)
+    n, hole = len(dates), 30
+    frames = []
+    for symbol in ("FULL", "GAPS"):
+        frame = pl.DataFrame(
+            {
+                "timestamp": dates,
+                "symbol": [symbol] * n,
+                "sec_id": [1] * n,
+                "close": np.linspace(100.0, 110.0, n),
+                "adj_factor": [1.0] * n,
+            }
+        )
+        frames.append(
+            frame.filter(pl.col("timestamp") != dates[hole]) if symbol == "GAPS" else frame
+        )
+    bars = pl.concat(frames)
+
+    namespace = {
+        "np": np,
+        "pl": pl,
+        "reconcile_underlying_log_returns": reconcile_underlying_log_returns,
+        "load_sp500_daily_bars": lambda: bars,
+        "RV_WINDOW": 21,
+        "SESSIONS_PER_YEAR": 252,
+    }
+    _run_assignments(("underlying", "dense", "RV_COL", "annualised_rv", "realised"), namespace)
+
+    assert namespace["dense"].height == 2 * n, "the absent session is not reindexed back in"
+    realised = namespace["realised"].sort(["symbol", "timestamp"])
+    rv = {
+        symbol: group["rv_21d"].to_list()
+        for (symbol,), group in realised.group_by(["symbol"], maintain_order=True)
+    }
+
+    # The absent session leaves no return on itself and none on the session after it, and
+    # the window is 21 returns wide, so every window from the absence to 21 sessions past
+    # the session after it is short of an observation and yields nothing.
+    assert rv["FULL"][21] is not None and rv["FULL"][hole] is not None
+    assert rv["GAPS"][hole - 1] is not None
+    assert all(value is None for value in rv["GAPS"][hole : hole + 22])
+    assert rv["GAPS"][hole + 22] is not None
 
 
 def test_notebook_rv_rolls_within_full_security_identity() -> None:
