@@ -6,18 +6,35 @@ from typing import Literal
 import polars as pl
 
 from data.exceptions import DataNotFoundError
-from utils import ML4T_DATA_PATH
+from utils import ML4T_DATA_PATH, REPO_ROOT
 from utils.data_quality import apply_max_symbols
+
+
+def _bundled(*parts: str) -> Path:
+    """Locate a dataset that ships with the repository.
+
+    ML4T_DATA_PATH defaults to ``<repo>/data``, so a clone finds these with no setup.
+    A reader who points ML4T_DATA_PATH at a directory of downloads elsewhere has moved
+    the datasets they downloaded, not the ones git delivered, so fall back to the
+    repository copy rather than raising on a file that is checked in.
+    """
+    external = ML4T_DATA_PATH.joinpath(*parts)
+    return external if external.exists() else REPO_ROOT.joinpath("data", *parts)
+
 
 # --------------------------------------------------------------------------------
 # AlgoSeek datasets
 # --------------------------------------------------------------------------------
 #
-# AlgoSeek publishes two of the four datasets this book uses, openly and with no
-# account, at the page below. Both are CSV; every loader here reads parquet, so the
-# reader's path is download -> algoseek_convert.py -> (for the options, one build
-# script) -> loader. The instructions below are what a reader sees when a dataset is
-# missing, so they name that path rather than an address to write to.
+# The book uses four AlgoSeek datasets. Three are published openly at the page below,
+# with no account and no API key; the fourth, the S&P 500 daily bars, ships inside this
+# repository by AlgoSeek's permission (see data/README.md#attribution).
+#
+# Two of the three downloads are CSV, and every loader here reads parquet, so their
+# path is download -> algoseek_convert.py -> (for the options, one build script) ->
+# loader. The trade-and-quote ticks are already parquet in the layout the loader scans
+# and only need unzipping. The instructions below are what a reader sees when a dataset
+# is missing, so they name that path rather than an address to write to.
 
 ALGOSEEK_PAGE = "https://algoseek.com/ml-for-trading/"
 ALGOSEEK_CONVERT = "data/equities/market/algoseek_convert.py"
@@ -36,7 +53,7 @@ Coverage: 505 trading days, 2020-01-02 to 2021-12-31, extended-hours minute bars
 _SP500_OPTIONS_INSTRUCTIONS = f"""AlgoSeek publishes this dataset for the book.
 No account, no API key, no license request.
 
-  1. Download options_daily_greeks_sp500.zip (13.8 GB) from
+  1. Download options_daily_greeks_sp500.zip (14.1 GB) from
      {ALGOSEEK_PAGE}
   2. Convert it to the layout this loader reads:
      uv run python {ALGOSEEK_CONVERT} \\
@@ -49,35 +66,34 @@ the zip.
 Coverage: 1,259 trading days 2017-2021, 634 symbols, full daily chains with Greeks."""
 
 
+def _nasdaq100_taq_instructions(base_path: Path) -> str:
+    """Instructions for the ticks, which are published as parquet and need no conversion."""
+    return f"""AlgoSeek publishes this dataset for the book.
+No account, no API key, no license request.
+
+  1. Download symbol=AAPL.zip (67 MB) from
+     {ALGOSEEK_PAGE}
+  2. Unzip it into the partition this loader scans — the archive holds the two
+     date=YYYYMMDD.parquet files, not the symbol directory, so name it yourself:
+     unzip -q "symbol=AAPL.zip" "*.parquet" -d "{base_path / "symbol=AAPL"}"
+
+Naming the members matters: Dropbox writes a stray root entry into the archive,
+and unzipping without "*.parquet" warns and exits 2 having extracted them anyway.
+
+Already parquet in the layout this loader reads, so there is nothing to convert.
+
+Coverage: AAPL on 2020-03-13 and 2020-03-16, trades and NBBO quote events."""
+
+
 def _derived_from_raw_options(build_script: str) -> str:
     """Instructions for a dataset built out of the raw option chains."""
     return f"""This dataset is derived from the raw S&P 500 option chains.
 
   1. Obtain the raw chains first — download options_daily_greeks_sp500.zip
-     (13.8 GB) from {ALGOSEEK_PAGE} and convert it:
+     (14.1 GB) from {ALGOSEEK_PAGE} and convert it:
      uv run python {ALGOSEEK_CONVERT} --dataset sp500-options --source <path>
   2. Build this dataset from them:
      uv run python {build_script}"""
-
-
-def _not_yet_published(what: str, affects: str, why_no_substitute: str = "") -> str:
-    """Instructions for the two datasets AlgoSeek has not packaged yet.
-
-    Saying so plainly is the point: without it a reader hits a missing file with no
-    way to tell whether they did something wrong.
-    """
-    lines = [
-        f"AlgoSeek has not yet published {what}.",
-        "",
-        "It was staged for hosting and has not been packaged. Nothing you can run",
-        "will produce it, so this is not something you have done wrong.",
-        "",
-        f"Affected: {affects}",
-    ]
-    if why_no_substitute:
-        lines += ["", why_no_substitute]
-    lines += ["", f"Check for it at: {ALGOSEEK_PAGE}"]
-    return "\n".join(lines)
 
 
 def load_sp500_index() -> pl.DataFrame:
@@ -93,7 +109,7 @@ def load_sp500_index() -> pl.DataFrame:
         >>> sp500 = load_sp500_index()
         >>> sp500.head()
     """
-    path = ML4T_DATA_PATH / "equities" / "market" / "sp500" / "sp500.csv"
+    path = _bundled("equities", "market", "sp500", "sp500.csv")
     if not path.exists():
         msg = f"S&P 500 index data not found at {path}."
         raise FileNotFoundError(msg)
@@ -360,18 +376,22 @@ def load_sp500_daily_bars(
         DataFrame with columns: timestamp, symbol, open, high, low, close, volume,
         adj_factor (cumulative price factor for split adjustment)
 
-    Coverage: 2017-2021, ~638 symbols (S&P 500 + some changes)
+    Coverage: 635,703 rows, 638 symbols, 2017-01-03 to 2021-12-31.
+
+    Bundled with the repository at data/equities/market/sp500/daily_bars.parquet and
+    redistributed by permission of AlgoSeek; see data/README.md#attribution.
     """
-    path = ML4T_DATA_PATH / "equities" / "market" / "sp500" / "daily_bars.parquet"
+    path = _bundled("equities", "market", "sp500", "daily_bars.parquet")
     if not path.exists():
         raise DataNotFoundError(
             dataset_name="S&P 500 Daily Bars",
             path=path,
-            instructions=_not_yet_published(
-                "the S&P 500 daily bars",
-                "18_transaction_costs/01_cost_taxonomy, 02_spread_estimation and "
-                "03_market_impact_calibration, and the sp500_equity_option_analytics "
-                "case-study backtest",
+            instructions=(
+                "This dataset ships with the repository at\n"
+                "data/equities/market/sp500/daily_bars.parquet, so a missing file means\n"
+                "the checkout is incomplete rather than that a download is outstanding.\n"
+                "Restore it with:\n"
+                "  git checkout -- data/equities/market/sp500/daily_bars.parquet"
             ),
         )
 
@@ -796,14 +816,14 @@ def load_nasdaq100_taq(
 ) -> pl.DataFrame:
     """Load AlgoSeek TAQ tick data for March 2020 (COVID crash period).
 
-    High-frequency tick data including trades and quotes with nanosecond
-    precision timestamps. Data covers AAPL, AMZN, MSFT during the
-    March 2020 market crash - ideal for studying market microstructure
-    during extreme volatility.
+    Individual trade and NBBO quote events at microsecond precision, on the two
+    days Chapter 3 contrasts: 2020-03-13, and the circuit-breaker session of
+    2020-03-16.
 
     Args:
-        symbols: Optional list of symbols to filter (e.g., ["AAPL"])
-                Available: AAPL, AMZN, MSFT
+        symbols: Optional list of symbols to filter. The published slice holds
+                AAPL only; the full commercial feed shares this layout, so a
+                reader with more symbols on disk can pass them here.
         event_types: Optional list of event types to filter. Available:
             - "TRADE": Executed trades
             - "TRADE NB": Non-binding trades
@@ -818,16 +838,12 @@ def load_nasdaq100_taq(
             timestamp (microsecond precision), symbol, event_type,
             price, quantity, exchange, conditions
 
-    Coverage: 21 trading days in March 2020, 3 tickers (~500M rows total)
+    Coverage: 21,284,141 events — 13,651,726 on 2020-03-13 and 7,632,415 on
+    2020-03-16 — for AAPL.
     """
     base_path = ML4T_DATA_PATH / "equities" / "market" / "microstructure" / "trade_and_quotes"
 
-    algoseek_instructions = _not_yet_published(
-        "the NASDAQ-100 trade-and-quote ticks",
-        "03_market_microstructure/11_algoseek_taq_eda and 12_algoseek_taq_lob_reconstruction",
-        "The published minute-bar archive cannot stand in: it is quote-aware bar\n"
-        "aggregates, and reconstructing an order book needs the individual events.",
-    )
+    algoseek_instructions = _nasdaq100_taq_instructions(base_path)
 
     if not base_path.exists() or not list(base_path.glob("symbol=*")):
         raise DataNotFoundError(

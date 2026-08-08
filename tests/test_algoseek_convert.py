@@ -351,6 +351,44 @@ def test_day_source_reads_an_extracted_options_tree(convert, tmp_path):
     assert convert.parse_sp500_options_csv(payloads[0]).height == 1
 
 
+def test_day_source_reads_the_options_archive_as_algoseek_serves_it(convert, tmp_path):
+    """The published options zip was re-zipped on macOS, and that broke every reader.
+
+    It nests everything under one top-level folder and carries explicit directory
+    entries, a __MACOSX shadow tree and .DS_Store files. The directory entry for a
+    day's own folder was collected as a member of that day, read back as zero bytes
+    and hit polars NoDataError, so the conversion died on the first day it reached.
+    """
+    archive = tmp_path / "options_daily_greeks_sp500.zip"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("options_daily_greeks_sp500/", b"")
+        z.writestr("options_daily_greeks_sp500/.DS_Store", b"\x00")
+        z.writestr("__MACOSX/._options_daily_greeks_sp500", b"\x00")
+        z.writestr("options_daily_greeks_sp500/2020/", b"")
+        z.writestr("options_daily_greeks_sp500/2020/20200313/", b"")
+        for symbol in ("AAPL", "MSFT"):
+            z.writestr(
+                f"options_daily_greeks_sp500/2020/20200313/{symbol}.csv.gz",
+                gzip.compress(_options_csv(convert, symbol=symbol)),
+            )
+            z.writestr(
+                f"__MACOSX/options_daily_greeks_sp500/2020/20200313/._{symbol}.csv.gz",
+                b"\x00",
+            )
+        z.writestr("options_daily_greeks_sp500/2020/20200313/.DS_Store", b"\x00")
+
+    days = list(convert.DaySource(archive, "sp500-options").days())
+    assert [d for d, _ in days] == ["20200313"]
+    payloads = days[0][1]()
+    assert len(payloads) == 2
+    assert all(convert.parse_sp500_options_csv(p).height == 1 for p in payloads)
+
+    out = tmp_path / "data"
+    assert convert.convert_sp500_options(archive, out, workers=1, force=False) == 0
+    written = out / "equities" / "market" / "sp500" / "options" / "year=2020" / "20200313.parquet"
+    assert pl.read_parquet(written).height == 2
+
+
 def test_day_source_reads_an_extracted_nasdaq_tree(convert, tmp_path):
     """Extracting the NASDAQ-100 archive one level gives day *zips*, not CSVs.
 
