@@ -72,10 +72,16 @@ def _select_surface_point(
     call_put: str | None = None,
 ) -> pl.DataFrame:
     """Select contract closest to target delta within DTE bucket."""
+    # The vendor writes -1 where the implied-volatility solve did not converge, so a
+    # contract whose solve failed is not a candidate for the surface point: without
+    # this the nearest-delta contract can win the rank carrying a placeholder, and
+    # every average, difference and ratio taken from it inherits one. Rows already
+    # written with a placeholder are normalised on the way in by
+    # ``data/equities/loader.py::_null_unsolved_iv``.
     filtered = df.filter(
         (pl.col("days_to_maturity").is_between(dte_bucket[0], dte_bucket[1]))
         & pl.col("delta").is_not_null()
-        & pl.col("implied_vol").is_not_null()
+        & (pl.col("implied_vol") > 0)
     )
     if call_put is not None:
         filtered = filtered.filter(pl.col("call_put") == call_put)
