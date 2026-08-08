@@ -253,9 +253,10 @@ features:
     ewma_half_life: 30   # half-life of the EWMA volatility, in bars
     stale_cap: 5         # consecutive stale-quote bars tolerated before nulling
     edge_block: 30       # width of the open and close blocks the flags mark
-  # The carrier: the order-flow imbalance measured over one decision bar. It is
-  # also this case study's causal treatment (see `causal.treatment` below), and
-  # it is what F3 and F7 read.
+  # The quantity the thesis puts forward: the order-flow imbalance measured over
+  # one decision bar. Its one-bar form is this case study's causal treatment (see
+  # `causal.treatment` below). Read by 03_financial_features, which draws it in
+  # F2, F3 and F6.
   carrier: signed_vol_share_15m
   # One row per family. `pattern` claims a family's columns in both
   # representations - the level and its cross-sectional z-score twin - because

@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -23,15 +23,17 @@
 # the bar sits - states the window and the delay each family carries, and shows that
 # nothing in it reads a quote dated at or after the decision.
 #
-# The frame is what makes this case study different from the daily ones. Every window is
-# bounded by the **symbol-session**, never by the symbol alone, so no statistic spans an
-# overnight gap; and every cross-sectional statistic is taken over the 114 names quoted in
-# **that one minute**, which is the cross-section a decision is actually taken over.
+# What makes this case study different from the daily ones is the window each statistic is
+# taken over. Every trailing window is bounded by the **symbol-session**, never by the symbol
+# alone, so no statistic spans an overnight gap; and every cross-sectional statistic is taken
+# over the names quoted in **that one minute**, which is the cross-section a decision is
+# actually taken over.
 #
 # ## Learning objectives
 #
-# - Build quote, order-flow, impact and regime families from a raw microstructure schema,
-#   and say which of them is a signal and which describes the state it is read in
+# - Build quote, order-flow, price-impact and session-state features from a raw
+#   microstructure schema, and say which of them is a signal and which describes the state
+#   it is read in
 # - Bound every trailing window by the session, so a window never reaches across a night
 # - Measure the session against the exchange's **scheduled** close rather than against the
 #   bar count the session turned out to have, which is not knowable until it is over
@@ -45,13 +47,13 @@
 # Chapter 8, Sections 8.1-8.6. Reads AlgoSeek NASDAQ-100 minute bars with the full NBBO and
 # trade-location schema through `load_nasdaq100_bars()`, whose coverage
 # [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) establishes, and
-# `config/setup.yaml`, which declares the register, every window, the calendar and the
-# holdout boundary. Writes `features/financial.parquet` with a `.digest.json` sidecar,
-# read by [`04_model_based_features`](04_model_based_features.ipynb), which adds HAR,
-# spectral and path-signature features on top of it, and by
-# [`05_evaluation`](05_evaluation.ipynb), which tests fold by fold whether any of it
-# predicts. No screen for predictive content runs here: `05_evaluation` owns it and runs it
-# fold-aware.
+# `config/setup.yaml`, which declares the feature specification, every window, the calendar
+# and the holdout boundary. Writes `features/financial.parquet` with a `.digest.json`
+# sidecar. [`05_evaluation`](05_evaluation.ipynb) reads its values and tests, fold by fold,
+# whether any of them predicts; [`04_model_based_features`](04_model_based_features.ipynb)
+# builds a second matrix from the same minute bars and reads this one only to confirm that
+# the two carry the same `symbol` and `timestamp` keys. No screen for predictive content
+# runs here: `05_evaluation` owns it and runs it fold-aware.
 
 # %%
 """NASDAQ-100 Microstructure: Feature Engineering."""
@@ -104,21 +106,23 @@ END_DATE = "2021-12-31"
 # %% [markdown]
 # ## Configuration
 #
-# The register, every window, the calendar and the holdout boundary are declared in
-# `config/setup.yaml` and bound here. A window retyped into a cell is a second source of
-# truth for a decision that the register, the warmup assertion and the timing figure all
+# The feature specification, every window, the calendar and the holdout boundary are declared
+# in `config/setup.yaml` and bound here. A window retyped into a cell is a second source of
+# truth for a decision that the specification, the warmup assertion and the timing figure all
 # have to agree on, and the two copies drift apart the first time either is edited.
 #
-# The decision cadence is what the persistence figure is measured against: a feature has to
-# hold its ordering for at least one rebalance to be tradable at that cadence, and this
-# strategy rebalances on the 15-minute grid the configuration declares.
+# The settings below are printed as statements rather than as values, because a window is
+# only meaningful once you know what it decides. They fall into three groups: how often a
+# decision is taken, how far back each trailing statistic reads, and where the data policy
+# draws its lines.
 
 # %%
 setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 FEATURES = setup["features"]
 FAMILIES = families_from_config(setup)
 W = FEATURES["windows"]
-CARRIER = FEATURES["carrier"]
+PRIMARY_SIGNAL = FEATURES["carrier"]
+PRIMARY_LABEL = setup["labels"]["primary"]
 HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
 DECISION_MINUTES = int(setup["decision"]["bar_frequency"].removesuffix("_minute"))
 CALENDAR = setup["evaluation"]["calendar"]
@@ -129,8 +133,43 @@ PANEL_KEY = ["symbol", "timestamp"]
 ENTITY = ["symbol", "session_date"]
 WITHIN_MINUTE = "timestamp"
 
-print(f"{len(FAMILIES)} declared families, carrier {CARRIER}, decision grid {DECISION_MINUTES}min")
-print(f"Holdout starts {HOLDOUT_START}; Section D rebuilds the matrix without it")
+# %%
+print(
+    f"A decision is taken every {DECISION_MINUTES} minutes on the {CALENDAR} calendar, and it "
+    f"is what the persistence figure measures a feature's ordering against. The label those "
+    f"decisions are scored on is {PRIMARY_LABEL}, whose execution convention - which bar the "
+    f"position is entered on and which one it is closed on - `02_labels` defines."
+)
+print(
+    f"Trailing windows, in minute bars: {W['fast']} for the fastest aggregates, "
+    f"{W['decision']} for one decision bar, {W['slow']} for realized volatility and for the "
+    f"average of price impact per dollar traded, {W['hour']} for the impact regression and "
+    f"the off-exchange share."
+)
+print(
+    f"The {W['hour']}-bar window is the longest, so it sets the warmup every session pays "
+    f"before its first row can enter the matrix."
+)
+print(
+    f"Volatility is also carried as an exponentially weighted average with a half-life of "
+    f"{W['ewma_half_life']} bars, which keeps a long window responsive to the last half hour."
+)
+print(
+    f"Data policy: the closing bid and ask, and the size on each, are nulled once the national "
+    f"best bid and offer has failed to update for more than {W['stale_cap']} consecutive bars. "
+    f"The session-clock flags mark the first and last {W['edge_block']} bars of the scheduled "
+    f"session."
+)
+print(
+    f"{len(FAMILIES)} feature families are declared; the quantity the thesis puts forward is "
+    f"{PRIMARY_SIGNAL}, and Sections F2, F3 and F6 read it."
+)
+print(
+    f"The holdout begins {HOLDOUT_START}. The matrix is built across it, because the stages "
+    f"that read this file need features there too, but no value on an earlier row is allowed "
+    f"to depend on one inside it - Section D rebuilds the matrix from the earlier rows alone "
+    f"and checks that every one of them is unchanged."
+)
 
 # %% [markdown]
 # ## A. What the thesis says should carry information
@@ -140,28 +179,35 @@ print(f"Holdout starts {HOLDOUT_START}; Section D rebuilds the matrix without it
 # aggressive volume have been pushing it, and the drift is small enough that what it costs
 # to act on it decides whether anything is left. Three things follow.
 #
-# The **carrier** is order-flow imbalance measured over one decision bar. It is signed
-# volume as a share of volume, so it is scale-free and a mega-cap and a mid-cap can sit in
-# one ordering; it is also this case study's causal treatment, which is why the same
-# quantity is carried at four resolutions rather than one.
+# The **quantity the thesis puts forward** is order-flow imbalance over one decision bar:
+# the volume that crossed the spread to buy, less the volume that crossed it to sell, as a
+# share of everything the bar traded. Dividing by volume makes it scale-free, so a mega-cap
+# and a mid-cap can sit in one ordering. The same imbalance is carried at four window
+# lengths rather than one, because how long aggressive flow keeps arriving is an empirical
+# question and not a modelling assumption; its one-bar form is also the treatment
+# `12_causal_dml` estimates an effect for.
 #
-# The **conditioning** is everything about the environment the carrier is read in: what the
-# round trip costs, how deep the book is, how far a given quantity of flow moves the price,
-# how much of the session is printing away from the exchanges, and where in the session the
-# bar sits. None of these is expected to rank names on its own, which is what the register's
-# `role` column records and what no assertion can recover from the values.
+# The **conditioning** is everything about the environment that imbalance is read in: what
+# the round trip costs, how deep the book is, how far a given quantity of flow moves the
+# price, how much of the session is printing away from the exchanges, and where in the
+# session the bar sits. None of these is expected to rank names on its own, which is what
+# the `role` column below records and what no assertion can recover from the values.
 #
-# The **frame** is the symbol-session for every trailing window and the single minute for
-# every cross-sectional one. A spread is not comparable between AAPL and ALGN, so each level
-# is carried beside its z-score within the minute, and the register claims both under one
-# family because they are one hypothesis on two scales.
+# The **window each statistic is taken over** is the symbol-session for everything trailing
+# and the single minute for everything cross-sectional. A spread of a cent is wide on a
+# hundred-dollar stock and narrow on a five-hundred-dollar one, so each level is carried
+# beside its z-score within the minute, and one row below claims both because they are one
+# hypothesis on two scales.
 #
-# The register is declared in `config/setup.yaml`, one row per family, and it is split by
-# **observability** rather than by economics: the three families read off the NBBO carry no
-# lag, and the three built from the trade tape carry one bar, for the reason Section B gives.
-# That is why volatility and price impact are separate rows although they describe the same
-# thing - a quote-based variance is knowable at the bar it is stamped with and a traded-dollar
-# statistic is not, and a register row cannot carry two lags.
+# The table below is the **feature register**: one row per family, saying what it reads, how
+# far back, with what delay, and how it can fail. It is declared in `config/setup.yaml`
+# rather than written here, so that the warmup assertion, the timing figure and the later
+# stages all read the same numbers. Its rows split by **observability** rather than by
+# economics: the three families read off the quote feed carry no lag, and the three built
+# from the trade tape carry one bar, for the reason Section B gives. That is why volatility
+# and price impact are separate rows although they describe the same thing - a quote-based
+# variance is knowable at the bar it is stamped with, a traded-dollar statistic is not, and
+# one row cannot carry two lags.
 
 # %%
 register_frame(FAMILIES).select(
@@ -171,11 +217,18 @@ register_frame(FAMILIES).select(
 # %% [markdown]
 # ## B. Inputs and their observability
 #
-# Each row is one symbol and one minute of one session. Of the sixty columns the raw
-# AlgoSeek schema carries, sixteen are read; projecting at the scan is what keeps a
-# full-universe run inside a few gigabytes rather than the twenty-eight the whole schema
-# costs. Regular hours only - the pre-market and after-hours books are thin enough that
-# their quotes describe a different market.
+# Each row is one symbol and one minute of one session. The raw AlgoSeek schema is wide -
+# every bar carries the open, high, low and close of both sides of the order book, the
+# trades that printed against it, and the time at which each of those occurred - and this
+# notebook reads a minority of it, in two groups. The **quote** columns describe the
+# national best bid and offer, the single best price available to buy and to sell across
+# all US exchanges at that instant. The **tape** columns describe the trades that actually
+# printed, split by where each one fell against that quote and by whether it was an uptick
+# or a downtick. The cell below prints how many of each is read; projecting them at the scan
+# rather than after it is what keeps a full-universe run inside a few gigabytes.
+#
+# Regular hours only - the pre-market and after-hours books are thin enough that their
+# quotes describe a different market.
 #
 # **Two inputs are not knowable at the bar they are stamped with, and each is handled here
 # rather than downstream.**
@@ -183,8 +236,12 @@ register_frame(FAMILIES).select(
 # A quote with `nbbo_quote_count == 0` is a bar in which the NBBO never updated, so the
 # prices on it are carried forward from whenever it last did. One such bar is harmless; a
 # run of them turns a stale spread into a live-looking one and reports a calm book exactly
-# where the book has stopped. Quote-derived columns are nulled beyond the configured run of
-# consecutive stale bars, which is the single data policy the rest of the notebook inherits.
+# where the book has stopped. The **closing** bid and ask, and the size resting on each, are
+# nulled beyond the configured run of consecutive stale bars. That is the single data policy
+# the rest of the notebook inherits, and it reaches further than the four columns it names:
+# the midpoint is built from the closing quote, every return is a difference of midpoints,
+# and Section E keeps a row only where the return exists - so a bar the cap touches leaves
+# the matrix altogether rather than shipping with some columns filled and some empty.
 #
 # FINRA/TRF prints are reported with a delay of up to ten seconds. A print executed in the
 # last seconds of a bar can therefore be attributed to that bar while still being unpublished
@@ -209,44 +266,57 @@ _hour, _minute = pl.col("timestamp").dt.hour(), pl.col("timestamp").dt.minute()
 REGULAR_HOURS = ((_hour > OPEN_HOUR) | ((_hour == OPEN_HOUR) & (_minute >= OPEN_MINUTE))) & (
     _hour < CLOSE_HOUR
 )
-READ = [
-    "timestamp",
-    "symbol",
+QUOTE_INPUTS = [
     "close_bid_price",
     "close_ask_price",
     "close_bid_size",
     "close_ask_size",
-    "nbbo_quote_count",
-    "high_trade_price",
-    "low_trade_price",
     "high_ask_price",
     "low_bid_price",
+    "nbbo_quote_count",
+]
+# The six location buckets split a bar's volume by where each trade printed against the
+# prevailing quote; the five tick buckets split the same volume by the direction of the
+# print before it. Both are reconciled against the two volume columns in Section C.2.
+LOCATION_BUCKETS = [
+    "trade_at_bid",
+    "trade_at_bid_mid",
+    "trade_at_mid",
+    "trade_at_mid_ask",
+    "trade_at_ask",
+    "trade_at_cross",
+]
+TICK_BUCKETS = [
+    "uptick_volume",
+    "downtick_volume",
+    "repeat_uptick_volume",
+    "repeat_downtick_volume",
+    "unknown_tick_volume",
+]
+TAPE_INPUTS = [
+    "high_trade_price",
+    "low_trade_price",
     "vwap",
     "volume",
     "total_trades",
     "finra_volume",
     "finra_vwap",
-    "trade_at_bid",
-    "trade_at_bid_mid",
-    "trade_at_mid_ask",
-    "trade_at_ask",
-    "trade_at_cross",
-    "uptick_volume",
-    "downtick_volume",
-    "repeat_uptick_volume",
-    "repeat_downtick_volume",
     "trade_to_mid_vol_weight_rel",
+    *LOCATION_BUCKETS,
+    *TICK_BUCKETS,
 ]
+READ = ["timestamp", "symbol", *QUOTE_INPUTS, *TAPE_INPUTS]
 
+_archive = load_nasdaq100_bars(
+    start_date=START_DATE,
+    end_date=END_DATE,
+    include_microstructure=True,
+    max_symbols=MAX_SYMBOLS,
+    lazy=True,
+)
+ARCHIVE_COLUMNS = _archive.collect_schema().names()
 bars = (
-    load_nasdaq100_bars(
-        start_date=START_DATE,
-        end_date=END_DATE,
-        include_microstructure=True,
-        max_symbols=MAX_SYMBOLS,
-        lazy=True,
-    )
-    .select(READ)
+    _archive.select(READ)
     .filter(REGULAR_HOURS)
     .with_columns(pl.col("timestamp").dt.date().alias("session_date"))
     .collect()
@@ -254,6 +324,11 @@ bars = (
 )
 
 LOADER_COLS = {*READ, "session_date"}
+print(
+    f"{len(READ)} of the archive's {len(ARCHIVE_COLUMNS)} columns are read: "
+    f"{len(QUOTE_INPUTS)} from the quote feed, {len(TAPE_INPUTS)} from the trade tape, "
+    f"and the two that key the panel."
+)
 print(f"{bars.height:,} regular-hours bars, {bars['symbol'].n_unique()} symbols")
 print(
     f"{bars['session_date'].n_unique():,} sessions, {bars['timestamp'].min()} to {bars['timestamp'].max()}"
@@ -313,8 +388,15 @@ sessions = pl.DataFrame(
     }
 )
 SHORT = sessions.filter(pl.col("session_bars") < sessions["session_bars"].max())
+# The join below is an inner one, so a session the panel holds and the calendar does not
+# would be dropped silently and counted as padding. Bound that direction explicitly.
+_unscheduled = set(bars["session_date"].unique()) - set(sessions["session_date"])
+assert not _unscheduled, f"{len(_unscheduled)} session dates are not on the {CALENDAR} calendar"
 print(f"{sessions.height} scheduled sessions, {SHORT.height} of them early closes")
 print(f"scheduled lengths in bars: {sorted(sessions['session_bars'].unique().to_list())}")
+_early = ", ".join(str(d) for d in SHORT["session_date"].to_list())
+print(f"early closes: {_early or 'none in this window'}")
+print(f"every one of the panel's {bars['session_date'].n_unique()} sessions is on the calendar")
 
 # %%
 _minute_of_day = (
@@ -345,9 +427,9 @@ print(f"{bars.height:,} bars inside scheduled hours")
 # midpoint is the informative quantity rather than its level (Stoikov, 2018): the level is
 # a price and moves with the stock, the deviation is a pressure and does not.
 #
-# Every ratio takes the shared denominator guard rather than a locally invented one. Five
-# different guards shipped across the nine case studies, which made otherwise identical
-# features incomparable.
+# Every ratio here floors its denominator at the same small constant, so a bar whose book
+# is empty on both sides yields a bounded number rather than an infinity that would then
+# dominate every statistic computed downstream of it.
 
 
 # %%
@@ -379,19 +461,43 @@ def quote_features(df: pl.DataFrame) -> pl.DataFrame:
 #
 # **Which volume it is divided by is the whole of whether the result is a share.** The
 # location and tick buckets cover every trade in the bar, including the ones reported to the
-# FINRA/TRF rather than to an exchange, while `volume` counts the exchange prints alone: the
-# six location buckets sum to `volume + finra_volume` on every bar of this panel, and to
-# `volume` only on the small minority of bars where nothing printed away from the exchanges.
-# `total_trades` counts on the same basis - a bar with no exchange volume and a TRF print
-# still reports trades. Dividing by `volume` therefore divides a total by a part, which is
-# what the version this notebook shipped did: its shares ran far outside $[-1, 1]$, which is
-# not a scale but a contradiction in terms. The assertion below is what turns that into a
-# failure instead of a number nobody looks at.
+# FINRA trade reporting facility rather than to an exchange, while `volume` counts the
+# exchange prints alone. Dividing by `volume` would therefore divide a total by one of its
+# parts, and the result would run outside $[-1, 1]$ - which is not a scale. `total_trades`
+# counts on the same basis: a bar with no exchange volume and one off-exchange print still
+# reports a trade.
+#
+# The cell below reconciles the buckets against both candidate denominators rather than
+# leaving the choice to be taken on trust. It reports how far each set of buckets exceeds
+# the exchange volume alone, and how closely each matches the two venues added together.
 
+# %%
+_location = sum(pl.col(c) for c in LOCATION_BUCKETS)
+_tick = sum(pl.col(c) for c in TICK_BUCKETS)
+_both_venues = pl.col("volume") + pl.col("finra_volume")
+_reconciliation = bars.select(
+    (_location - pl.col("volume")).max().alias("location_over_exchange"),
+    (_tick - pl.col("volume")).max().alias("tick_over_exchange"),
+    (_location - _both_venues).abs().max().alias("location_vs_both"),
+    ((_location - _both_venues) != 0).sum().alias("location_disagreeing"),
+    (_tick - _both_venues).abs().max().alias("tick_vs_both"),
+)
+_r = _reconciliation.row(0, named=True)
+print(
+    f"Against the exchange prints alone, the buckets over-count by up to "
+    f"{_r['location_over_exchange']:,} shares by location and "
+    f"{_r['tick_over_exchange']:,} by tick direction."
+)
+print(
+    f"Against both venues added together, the tick buckets differ by at most "
+    f"{_r['tick_vs_both']:,} shares. Of {bars.height:,} bars the location buckets disagree "
+    f"on {_r['location_disagreeing']:,}, and the largest gap in shares is "
+    f"{_r['location_vs_both']:,}."
+)
 
 # %% [markdown]
-# The volume every share in this family is a share *of*: the exchange prints plus the ones
-# reported away from the exchanges, which is what the buckets themselves are counted over.
+# So the volume every share in this family is a share *of* is the exchange prints plus the
+# ones reported away from them, which is what the buckets themselves are counted over.
 
 # %% [markdown]
 # `DOLLAR_VOLUME` is the dollars behind that volume, from both venues. Each side's VWAP is
@@ -439,12 +545,14 @@ def order_flow_features(df: pl.DataFrame) -> pl.DataFrame:
 # (Hasbrouck, 2007). Realized volatility at three horizons and an EWMA of the same series
 # describe how much uncertainty a signal is being read against.
 #
-# Two impact measures answer the same question on different data. **Amihud illiquidity** is
-# the library's estimator, and it is an *average* of the absolute return per dollar traded
-# over a window - not the single-bar ratio that this notebook previously shipped under the
-# name, which is a much noisier quantity with a different scale. It is null on a bar that
-# printed no trades at all, because price impact per dollar traded is undefined when nothing
-# traded. **Kyle's lambda** regresses the return on the signed share over a rolling hour
+# Two impact measures answer the same question on different data. **Amihud illiquidity**
+# (Amihud, 2002) is the *average*, over a trailing window, of the absolute return per dollar
+# traded, and the library's estimator is what computes it here. Averaging is what makes it a
+# statement about how deep the market for a name is rather than about one bar: a single
+# bar's ratio of return to dollars is dominated by whichever bar happened to trade thinnest,
+# and carries a different scale. It is null on a bar that printed no trades at all, because
+# price impact per dollar traded is undefined when nothing traded. **Kyle's lambda**
+# regresses the return on the signed share over a rolling hour
 # and is kept local: the identity form below has a warmup of exactly its window where a
 # two-pass covariance would need twice that.
 #
@@ -519,13 +627,14 @@ def kyle_lambda(df: pl.DataFrame) -> pl.DataFrame:
 # is computed on its own bar like everything else and shifted afterwards, along with the two
 # other trade-derived families, by `publish_with_lag`.
 #
-# The session clock is where the previous version of this notebook was wrong, and the error
-# is worth naming because it is invisible in the values. It divided the bar's position by
-# the session's **realized** bar count, taken as a maximum over the whole symbol-session -
-# a quantity that does not exist until the session is over. Here the position is counted
-# from the clock, against the length the exchange **scheduled**, and both are knowable at
-# the open. The block flags mark the configured window at each end of the scheduled session,
-# so a bar the vendor emits after an early close falls in neither.
+# The session clock says where in the day a bar sits, as a fraction of the session. Both
+# halves of that fraction come from the clock and from the exchange's published schedule, so
+# both are knowable before the session opens. The obvious alternative is to divide by the
+# number of bars the session turned out to have, and it fails silently: that count is an
+# aggregate over the whole symbol-session, so nobody holds it until the session is over, and
+# a feature built on it is a quantity that did not exist when the decision was taken. The
+# block flags mark the configured window at each end of the scheduled session, so a bar the
+# vendor emits after an early close falls in neither.
 
 
 # %%
@@ -562,8 +671,8 @@ def regime_and_clock_features(df: pl.DataFrame) -> pl.DataFrame:
 # The cross-sectional z-score is taken **within the minute**, over the names quoted in it,
 # which is the cross-section a decision is taken over and the only partition that removes a
 # market-wide move without reaching across time. It is a representation of the same
-# hypothesis rather than a new one, which is why the register claims a level and its z-score
-# under one family.
+# hypothesis rather than a new one, which is why one register row claims a level and its
+# z-score together.
 
 # %% [markdown]
 # Each entry below is one source column, the stem its aggregates are named on, and the
@@ -606,12 +715,10 @@ def multi_resolution(df: pl.DataFrame) -> pl.DataFrame:
 # register rather than listed again here: every level a family claims is ranked, except the
 # session clock, whose values are identical across the cross-section by construction and
 # whose z-score would therefore be a column of zeros divided by nothing.
-
-
-# %% [markdown]
-# The intermediates below are what the families are assembled from, and no model may read
-# them: a contemporaneous price or an unnormalized volume beside a label derived from the
-# same midpoint series is a model reading its own answer.
+#
+# The intermediates listed below are what the families are assembled from, and no model may
+# read them: a contemporaneous price or an unnormalized volume beside a label derived from
+# the same midpoint series is a model reading its own answer.
 
 # %%
 INTERMEDIATE = {
@@ -726,16 +833,16 @@ print(f"{len(SHARE_COLUMNS)} order-flow shares, largest magnitude {_worst:.4f}")
 # minute's cross-section is ranked on what was readable in it.
 #
 # **Three families are deferred and three are not, and the split is the register's.** Quote
-# liquidity, the microprice and volatility read the NBBO, which is on the wire when it moves.
-# Order flow, price impact and hidden liquidity read the trade tape, which carries TRF prints
-# that may not be published yet - so the trade range is deferred with them, and it is the one
-# of the two ranges that is not contemporaneous.
+# liquidity, the microprice and volatility read the quote feed, which is on the wire the
+# moment it moves. Order flow, price impact and hidden liquidity read the trade tape, which
+# carries off-exchange prints that may not be published yet - so the trade range is deferred
+# with them, and it is the one of the two ranges that is not contemporaneous.
 #
-# The session clock is the fifth thing, and it is the one that was wrong: it reads the
-# exchange's published schedule, which is knowable before the session opens, rather than the
-# session's realized bar count, which is not. None of the five is fitted - no bound, scaler or
-# encoder here has a parameter estimated once and applied to every row. D.2 checks the
-# windows; D.3 checks all five at once.
+# The session clock is the fifth kind of operation. It reads the exchange's published
+# schedule, which is knowable before the session opens, and no row of the panel enters it at
+# all. None of the five is fitted - no bound, scaler or encoder here has a parameter
+# estimated once and applied to every row. D.2 checks the windows; D.3 checks all five at
+# once.
 #
 # ### D.2 Warmup
 #
@@ -783,13 +890,14 @@ warmup_audit(
 
 # %%
 _before = pl.col("timestamp").dt.date() < HOLDOUT_START
-seal = assert_values_agree(
-    built.filter(_before),
-    build_features(bars.filter(_before)),
+_emitted = [*PANEL_KEY, *feature_cols]
+agreement = assert_values_agree(
+    built.filter(_before).select(_emitted),
+    build_features(bars.filter(_before)).select(_emitted),
     columns=feature_cols,
     keys=PANEL_KEY,
 )
-seal.filter(pl.col("column").is_in(["kyle_lambda", f"{CARRIER}_xs", "finra_share_60m"]))
+agreement.filter(pl.col("column").is_in(["kyle_lambda", f"{PRIMARY_SIGNAL}_xs", "finra_share_60m"]))
 
 # %% [markdown]
 # ## E. Matrix assembly and coverage
@@ -813,24 +921,25 @@ seal.filter(pl.col("column").is_in(["kyle_lambda", f"{CARRIER}_xs", "finra_share
 # F1 shows as the shortfall in the two trade-derived families.
 #
 # The policy also costs one feature outright, and the arithmetic below states it rather than
-# leaving it to be discovered. Kyle's lambda needs an hour, so the matrix begins 60 bars into
-# every session, while `is_first_30m` marks the first 30 - so every bar the flag could be
-# true of has already been dropped, and the column ships identically zero. The column is kept
-# because the feature count is what Chapter 8 reports, and the assertion is what stops it
-# being mistaken for a live signal.
+# leaving it to be discovered. Kyle's lambda needs an hour of bars, so the matrix begins an
+# hour into every session, while `is_first_30m` marks the first half hour - so every bar the
+# flag could be true of has already been dropped, and the column ships identically zero. It
+# is kept because it is one of the four flags and fractions the session-clock family is
+# defined as, and the assertion below records that it carries nothing here rather than
+# leaving a reader to find that out from a model.
 
 # %%
-CARRIERS = ["r1m", f"rv_{W['slow']}m", "kyle_lambda"]
-features = built.select([*PANEL_KEY, *feature_cols]).drop_nulls(subset=CARRIERS).sort(PANEL_KEY)
+WARMUP_GATE = ["r1m", f"rv_{W['slow']}m", "kyle_lambda"]
+features = built.select([*PANEL_KEY, *feature_cols]).drop_nulls(subset=WARMUP_GATE).sort(PANEL_KEY)
 assert features.select(PANEL_KEY).is_duplicated().sum() == 0, "duplicate panel key"
 
 # %% [markdown]
 # No emitted feature may be constant without the notebook saying why. A column with one value
-# ranks nothing and cannot condition anything, and it is the failure a clipped expression
-# hides best: the session clock shipped as `time_since_open = 0` on every row of this panel,
-# because `dt.hour()` is Int8 and `hour * 60` wrapped to 28, after which `.clip(0, 1)` turned
-# the negative result into a plausible constant. It passed the warmup audit, the holdout seal
-# and the conformance checker; only the redundancy dendrogram showed it.
+# ranks nothing and conditions nothing, and a clipped expression is where that hides best: a
+# `.clip(0, 1)` turns an arithmetic mistake anywhere upstream of it into a plausible constant
+# rather than into an error. Nothing else here would catch it, either - a constant column
+# warms up on time, reproduces exactly when later dates are withheld, and carries no nulls -
+# so the check is made explicitly.
 
 # %%
 DEAD_BY_WARMUP = ["is_first_30m"]
@@ -840,7 +949,7 @@ _variety = features.select(pl.col(c).n_unique().alias(c) for c in feature_cols)
 _flat = [c for c in feature_cols if _variety[c][0] <= 1 and c not in DEAD_BY_WARMUP]
 assert not _flat, f"features that take a single value across the emitted matrix: {_flat}"
 print(f"{len(feature_cols) - len(DEAD_BY_WARMUP)} features vary; {DEAD_BY_WARMUP} dead by warmup")
-# The decision grid the strategy rebalances on, which F3, F6 and F7 read. A figure drawn on
+# The decision grid the strategy rebalances on, which F3 and F6 read. A figure drawn on
 # every minute would describe a cadence no decision is taken at.
 DECISION_TIMES = (
     features.filter(pl.col("timestamp").dt.minute() % DECISION_MINUTES == 0)["timestamp"]
@@ -891,8 +1000,9 @@ print(
 # axis is drawn on the range the data occupies rather than on nought to one, because the
 # whole of what this figure has to show sits in its top sliver.
 #
-# The split it shows is the register's own: the five families read off the NBBO, the calendar
-# and the smoothed off-exchange share are complete on every row, and the two read off the
+# The split it shows is the register's own. Five of the seven families are complete on every
+# row: the three read off the quote feed, the session clock, and the smoothed off-exchange
+# share, which is a ratio of two volumes that are never both absent. The two read off the
 # trade tape are not, because a bar on which neither venue printed defines none of them.
 
 # %%
@@ -907,8 +1017,9 @@ plot_coverage_through_time(
         "liquidity and session clock - lie exactly on one for the whole sample, drawn on top "
         "of each other as a single flat line at the top. The order flow family runs below it "
         "between about 0.9957 and 0.9990, and the price impact family is the lowest and most "
-        "ragged, between about 0.9913 and 0.9993, dipping hardest in early 2020 and late 2020. "
-        "The two lower lines track each other closely and both fall away in the final month."
+        "ragged, between about 0.9913 and 0.9993, dipping hardest in the first month and "
+        "again in mid-2020. The two lower lines track each other closely and both fall away "
+        "in the final month."
     ),
 )
 
@@ -943,7 +1054,7 @@ plot_timing_contract(
 #
 # ### F2. Feature distributions
 #
-# The carrier family is shown on the scale a reader would judge it: the per-bar imbalance,
+# The order-flow family is shown on the scale a reader would judge it: the per-bar imbalance,
 # the same quantity over the fast, decision and hourly windows, and the decision-window
 # version in its cross-sectional form. Aggregating over more bars pulls the share toward
 # zero, and the z-score puts a bounded, heavily-tied quantity onto an unbounded one - which
@@ -955,9 +1066,9 @@ plot_feature_distributions(
     [
         "signed_vol_share",
         "signed_vol_share_5m",
-        CARRIER,
+        PRIMARY_SIGNAL,
         "signed_vol_share_60m",
-        f"{CARRIER}_xs",
+        f"{PRIMARY_SIGNAL}_xs",
         "tick_imb_share_15m",
     ],
     title="Aggregating order flow over more bars concentrates it toward zero",
@@ -984,10 +1095,10 @@ plot_feature_distributions(
 # %%
 plot_cross_sectional_dispersion(
     decisions,
-    CARRIER,
+    PRIMARY_SIGNAL,
     every="1mo",
     title="The cross-section of order flow never collapses to one view",
-    subtitle=f"Interdecile band of {CARRIER} on the decision grid, by month",
+    subtitle=f"Interdecile band of {PRIMARY_SIGNAL} on the decision grid, by month",
     alt=(
         "Shaded band of the 10th to 90th percentile of the fifteen-minute signed volume "
         "share across the universe, by month, with the median drawn through it. The median "
@@ -1014,15 +1125,17 @@ clusters = plot_redundancy_clusters(
     feature_cols,
     cut=CUT,
     title="Each level and its z-score are one ordering under two names",
-    subtitle=r"Average linkage on $1 - |\rho_s|$, cut drawn at $|\rho_s| = 0.7$",
+    subtitle=rf"Average linkage on $1 - |\rho_s|$, cut drawn at $|\rho_s| = {CUT}$",
     alt=(
         "Dendrogram of all 66 features, leaves labelled on the right. The dominant structure "
         "is that almost every level joins its own cross-sectional z-score at a distance near "
         "zero, so the tree reads as a column of tight pairs. Those pairs then group by "
-        "family: the four spread windows with the quote rate, the signed-volume and tick "
-        "imbalance horizons together, the three nested realized volatilities with the EWMA "
-        "and the two ranges, and the microprice deviations with the depth imbalance. The "
-        "off-exchange share pairs with its z-score and joins nothing else. At the foot, time "
+        "family: the four spread windows with the quote rate and the quote range, the "
+        "signed-volume and tick imbalance horizons together, the three nested realized "
+        "volatilities with the EWMA, and the microprice deviations with the depth imbalance. "
+        "The trade range and the impact regression join the volatility group well above the "
+        "cut, and the off-exchange share pairs with its z-score and joins the dollar-volume "
+        "and Amihud pair only far above the cut. At the foot, time "
         "since open and time to close form one pair at distance zero, because each is one "
         "minus the other; the last-30-minutes flag joins them around 0.5; and the "
         "first-30-minutes flag stands alone against the root, sharing an ordering with "
@@ -1050,14 +1163,18 @@ print(f"{len(set(clusters.values()))} clusters over {len(feature_cols)} features
 # of anything. The right panel asks the same question of the ordering rather than the level,
 # between consecutive decisions.
 #
-# A feature whose value has decayed before the next rebalance cannot support that cadence,
-# however well it predicts on the bar it is computed. That is the whole of what this figure
-# decides, and it is why the carrier is carried at four windows rather than one.
+# What this measures is turnover, not predictive power. A feature that keeps its ordering
+# from one decision to the next names roughly the same positions each time, so a portfolio
+# built on it trades little; one whose ordering is gone by the next decision names a fresh
+# set every time, and the cost of that churn is Chapter 18's subject. Either can predict, and
+# whether any of these does is `05_evaluation`'s question. Reading the two panels together is
+# what tells them apart: the level can decay while the ordering holds, which is why both are
+# drawn, and it is why the order-flow imbalance is carried at four windows rather than one.
 
 # %%
 plot_persistence(
     decisions.with_columns(pl.col("timestamp").dt.date().alias("session_date")),
-    ["signed_vol_share", CARRIER, "rel_spread_close", f"rv_{W['slow']}m", "kyle_lambda"],
+    ["signed_vol_share", PRIMARY_SIGNAL, "rel_spread_close", f"rv_{W['slow']}m", "kyle_lambda"],
     entity=ENTITY,
     max_lag=10,
     decision_dates=DECISION_TIMES.to_list(),
@@ -1065,10 +1182,10 @@ plot_persistence(
     subtitle=f"Within symbol-session, to 10 rebalances of the {DECISION_MINUTES}-minute schedule",
     alt=(
         "Two panels. On the left, autocorrelation against lag in decision bars, one to ten. "
-        "Kyle's lambda and the thirty-minute realized volatility start above 0.8 at the first "
-        "lag and fall steeply, reaching zero by about the eighth. The relative spread starts "
-        "near 0.2 and decays gently to zero. Both order-flow series start at or below 0.05 "
-        "and stay flat along zero for every lag. The bootstrap ribbons are too narrow to "
+        "Kyle's lambda and the thirty-minute realized volatility start near 0.8 at the first "
+        "lag and fall steeply, reaching zero by about the seventh. The relative spread starts "
+        "near 0.2 and decays gently to zero. Both order-flow series start below 0.1 and stay "
+        "flat along zero for every lag. The bootstrap ribbons are too narrow to "
         "read. On the right, the cross-sectional rank correlation between consecutive "
         "rebalances: Kyle's lambda, the realized volatility and the relative spread form a "
         "tight group between about 0.75 and 0.85, the fifteen-minute signed volume share "
@@ -1112,12 +1229,14 @@ print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}, digest {record
 # - **A late-published input needs a lag, however short the delay looks.** Ten seconds is
 #   small against a one-minute bar and it is not zero, and the cost of deferring a
 #   sixty-minute average by one bar is nothing.
-# - **Use the library's estimator or rename the column.** The single-bar ratio this notebook
-#   shipped as Amihud illiquidity was a different statistic under a published name; the
-#   averaged form is what the literature and every other case study here mean by it.
-# - **Test the seal by construction, not by inspection.** Rebuilding the matrix with later
-#   dates withheld and comparing values catches any transform that fits across the sample,
-#   including the ones nobody thought to flag.
+# - **A published name is a specification.** Amihud illiquidity is the average, over a
+#   window, of the absolute return per dollar traded. A single bar's ratio of the two is a
+#   different statistic on a different scale, and carrying it under the same name makes it
+#   incomparable with every other use of the name. Call the library's estimator, or call the
+#   column something else.
+# - **Show that withholding later dates changes nothing, rather than reasoning that it
+#   does.** Rebuilding the matrix on a shorter panel and comparing values catches any
+#   transform that fits across the sample, including the ones nobody thought to flag.
 #
 # ### Known limitations
 #
@@ -1126,16 +1245,15 @@ print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}, digest {record
 #   `05_evaluation`'s to price and the downstream models' to weight for; nothing here
 #   subsamples, because thinning the matrix would throw away the fast families it exists to
 #   carry.
-# - `is_first_30m` is identically zero in the emitted matrix. The hour of warmup Kyle's
-#   lambda needs removes every bar the flag marks, so the opening block of the session - the
-#   busiest part of the U - is not representable here at all. The column is kept for the
-#   feature count Chapter 8 reports and Section E asserts that it is dead, but a model has 65
-#   usable features, not 66, and the open is a gap in what this matrix can condition on.
-# - The vendor emits a padded 390-bar grid on early closes, so the three half-sessions in this
-#   window - 2020-11-27, 2020-12-24 and 2021-11-26 - arrive carrying bars stamped after the
-#   exchange had closed. Section B drops them. `02_labels` does not, so it still labels those
-#   bars; the join in `05_evaluation` discards them because this matrix no longer carries them,
-#   but the label artifacts themselves remain to be corrected upstream.
+# - `is_first_30m` is identically zero in the emitted matrix. The hour of warmup the impact
+#   regression needs removes every bar the flag marks, so the opening block of the session -
+#   the busiest part of the day - is not representable here at all. Section E asserts that
+#   the column is dead rather than leaving it to be found, but the open remains a gap in what
+#   this matrix can condition on.
+# - The vendor emits bars stamped after the exchange has closed on an early-close session, so
+#   the half-sessions in this window arrive padded out to a full day. Section B drops those
+#   bars against the published schedule, which is why the matrix is shorter than the raw
+#   panel on exactly those dates.
 # - Trade location is assigned against the prevailing quote, so a bar whose quote was stale
 #   attributes its volume to a side rather than to neither. The staleness cap bounds how long
 #   that can persist; it does not undo it on the bars inside the cap.
