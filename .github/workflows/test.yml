@@ -429,10 +429,14 @@ jobs:
         # scipy/statsmodels/scikit-learn are the import surface of
         # case_studies/utils/causal.py, so the p-value tail test can actually
         # run its numeric case rather than skipping past the behavior it pins.
+        #
+        # matplotlib and hmmlearn are the import surface of the shared stage-03
+        # and stage-04 helpers below. Neither pulls torch or an ml4t-* package,
+        # so this stays a fast per-commit gate.
         run: |
           uv venv --python 3.14
           uv pip install pytest numpy polars pyyaml python-dotenv plotly gymnasium requests \
-            scipy statsmodels scikit-learn
+            scipy statsmodels scikit-learn matplotlib hmmlearn
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -505,6 +509,23 @@ jobs:
           ML4T_DATA_PATH: ${{ github.workspace }}/data
         run: |
           .venv/bin/python -m pytest tests/test_pvalue_tail_precision.py -v --tb=short
+
+      # The helpers the case-study stages share. One defect in any of these is a
+      # defect in eight rendered notebooks at once, which is exactly why they are
+      # fixed centrally rather than per notebook - and why the fix needs a gate
+      # rather than trusting that eight re-runs would catch a regression.
+      - name: Run shared case-study helper tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          ML4T_PATH: ${{ github.workspace }}
+          ML4T_DATA_PATH: ${{ github.workspace }}/data
+          MPLBACKEND: Agg
+        run: |
+          .venv/bin/python -m pytest \
+            tests/test_data_quality.py \
+            tests/test_feature_engineering_figures.py \
+            tests/test_temporal.py \
+            -v --tb=short
 
       # The methodology ratchet. Both files are static AST/source scans over the
       # notebook tree, so they need no data and no model deps, and both were
