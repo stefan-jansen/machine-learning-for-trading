@@ -45,9 +45,15 @@ def filtered_state_probs(model: GaussianHMM, X: np.ndarray) -> np.ndarray:
 
     ``model._compute_log_likelihood`` is a **private** ``hmmlearn`` API (present through
     0.3.x) and is the one version-fragile call in this module. It is here, once, rather
-    than at six call sites. If a future release removes it, the public replacement is
-    ``model.score_samples(X)``, whose second return value is the smoothed posterior - so
-    it substitutes for the emission term only, and this recursion still has to run.
+    than at six call sites.
+
+    What it returns is the per-state emission log-density,
+    :math:`\log p(x_t \mid z_t = k)`, as an ``(n_samples, n_components)`` array. If a
+    future release removes it, there is no public method that returns that:
+    ``score_samples`` gives the sequence log-likelihood and the *smoothed* posterior, and
+    ``predict_proba`` gives the smoothed posterior alone - neither is the emission term.
+    The replacement is to evaluate the fitted Gaussians directly, column ``k`` being
+    ``scipy.stats.multivariate_normal(model.means_[k], model.covars_[k]).logpdf(X)``.
 
     Parameters
     ----------
@@ -142,8 +148,10 @@ def fit_hmm_kmeans_init(
     (``init_params="st"``); the emission parameters are set here and then refit.
 
     The covariance of each cluster is regularised by ``1e-6`` on the diagonal so a cluster
-    whose members are nearly collinear - or a one-observation cluster - still yields a
-    positive-definite matrix.
+    whose members are nearly collinear still yields a positive-definite matrix. A cluster
+    with a single member has no covariance at all - ``np.cov`` divides by zero degrees of
+    freedom and returns NaN, which the ridge does not repair and ``fit`` does not survive
+    - so it starts from the covariance of the whole sample instead.
 
     This is not a reproducible fit on its own. ``KMeans`` reduces its Lloyd iterations in
     parallel, so the partition can differ run to run even at a fixed seed; pinning that
@@ -171,14 +179,24 @@ def fit_hmm_kmeans_init(
         init_params="st",
     )
     model.means_ = kmeans.cluster_centers_
-    # np.cov of a single-feature cluster returns a 0-d array rather than a 1x1 matrix, so
-    # the result is widened before the ridge is added. The univariate case is the common
-    # one here - most of these HMMs read one series.
+    ridge = np.eye(X.shape[1]) * 1e-6
+    pooled = np.atleast_2d(np.cov(X.T))
     model.covars_ = np.array(
-        [
-            np.atleast_2d(np.cov(X[kmeans.labels_ == k].T)) + np.eye(X.shape[1]) * 1e-6
-            for k in range(n_states)
-        ]
+        [_cluster_covariance(X[kmeans.labels_ == k], pooled) + ridge for k in range(n_states)]
     )
     model.fit(X)
     return model
+
+
+def _cluster_covariance(cluster: np.ndarray, pooled: np.ndarray) -> np.ndarray:
+    """Covariance of one k-means cluster, widened to a matrix and never NaN.
+
+    ``np.cov`` of a single-feature cluster returns a 0-d array rather than a 1x1 matrix,
+    so the result is widened; the univariate case is the common one here, since most of
+    these HMMs read one series. With fewer than two members there is nothing to estimate
+    from and ``np.cov`` returns NaN, so the sample covariance stands in - a starting point
+    for EM, which refits it either way.
+    """
+    if cluster.shape[0] < 2:
+        return pooled.copy()
+    return np.atleast_2d(np.cov(cluster.T))

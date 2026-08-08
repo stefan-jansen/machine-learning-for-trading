@@ -12,6 +12,8 @@ value must not.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 from hmmlearn.hmm import GaussianHMM
@@ -195,6 +197,32 @@ def test_fit_hmm_kmeans_init_returns_a_fitted_model_of_the_right_shape(n_feature
     assert model.covars_.shape == (2, n_features, n_features)
     np.testing.assert_allclose(model.transmat_.sum(axis=1), 1.0)
     assert filtered_state_probs(model, X).shape == (X.shape[0], 2)
+
+
+@pytest.mark.parametrize("n_features", [1, 3])
+def test_fit_hmm_kmeans_init_survives_a_one_observation_cluster(n_features) -> None:
+    """np.cov of a single member divides by zero degrees of freedom and returns NaN.
+
+    The 1e-6 ridge does not repair a NaN, so without a fallback the fit is handed a
+    covariance of NaN. A far outlier is the way k-means is made to produce such a cluster.
+    """
+    X = _series(n=200, n_features=n_features)
+    X = np.vstack([X, np.full((1, n_features), 1e6)])
+    model = fit_hmm_kmeans_init(X, n_states=2, random_state=42)
+    assert np.isfinite(model.covars_).all()
+    assert np.isfinite(filtered_state_probs(model, X)).all()
+
+
+def test_cluster_covariance_falls_back_rather_than_returning_nan() -> None:
+    from case_studies.utils.temporal import _cluster_covariance
+
+    pooled = np.array([[2.0]])
+    with np.errstate(invalid="ignore", divide="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        assert np.isnan(np.cov(np.array([[1.5]]).T)), "the condition the fallback is for"
+    np.testing.assert_array_equal(_cluster_covariance(np.array([[1.5]]), pooled), pooled)
+    two = np.array([[1.0], [3.0]])
+    np.testing.assert_allclose(_cluster_covariance(two, pooled), np.cov(two.T).reshape(1, 1))
 
 
 def test_fit_hmm_kmeans_init_separates_the_two_regimes() -> None:
