@@ -236,12 +236,13 @@ features:
     vrp_momentum: [5, 10]
     iv_zscore: [63, 252]
     iv_momentum: [5, 10, 21]
-  # A 30-day ATM straddle is not listed for every symbol on every session: 7.9%
-  # of consecutive straddle rows are more than one session apart. Every window
-  # above is therefore counted on the underlying's own session grid rather than
-  # on the straddle rows, and this is the share of that grid that must carry a
-  # straddle quote before a window produces a value. At 1.0 a 252-session
-  # z-score survives on 6.8% of rows; at 0.8 it survives on 57%.
+  # A 30-day ATM straddle is not listed for every symbol on every session, so
+  # every window above is counted on the underlying's own session grid rather
+  # than on the straddle rows. This is the share of the sessions in a window
+  # that must carry a straddle quote before the window produces a value.
+  # 03_financial_features section C.4 measures what the setting buys: it prints
+  # the share of quoted rows on which the longest z-score is defined under this
+  # rule and under a rule requiring every session in the window.
   min_observations_fraction: 0.8
   thresholds:
     vega_floor: 0.001                # theta/vega is unreadable as vega goes to zero
@@ -254,14 +255,12 @@ features:
     instr_rel_spread: spread_pctl
     iv_rv_ratio: iv_rv_ratio_pctl
   # The one null policy, applied once: a row is kept when the premium the thesis
-  # is about can be measured on it at the reference horizon.
-  #
-  # `iv_mom_10d` was a third member until the windows moved onto the session grid.
-  # It cost nothing while a 10-row shift was called a 10-session change, and once
-  # it means one, it is null for every symbol quoted in bursts shorter than ten
-  # sessions - which cuts the panel from 620 symbols to 322. That is a liquidity
-  # screen, not a warmup rule, and it is not what a null policy is for. The column
-  # is still shipped; it is null where the quote cadence cannot support it.
+  # is about can be measured on it at the reference horizon. Nothing else belongs
+  # here. Requiring a column with a longer lookback - `iv_mom_10d`, say - drops
+  # every symbol quoted in bursts shorter than that lookback, which is a liquidity
+  # screen on the universe rather than a warmup rule, and 03_financial_features
+  # prints what it would cost. Such columns are still shipped; they are null on
+  # the rows where the quote cadence cannot support them.
   null_policy: [vrp_21d, rv_21d]
   # Columns written for the backtest and the reader to price a position against,
   # and excluded from the register because they are not features.
