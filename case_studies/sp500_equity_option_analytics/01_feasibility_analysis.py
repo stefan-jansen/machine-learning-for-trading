@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -132,6 +132,8 @@ COST_BPS = SETUP["costs"]["round_trip_cost_bps"]
 PER_SHARE = SETUP["costs"]["per_share"]
 HALF_SPREADS = SETUP["backtest"]["sweep"]["cost_grid_half_spread_usd"]
 ATM_IV = "iv_30_atm"
+# Every series below is taken inside one security, as 02_labels and 03_financial_features do.
+SECURITY = "sec_id"
 DTE_LOW, DTE_HIGH = SETUP["features"]["surface"]["dte_buckets"]["30d"]
 IV_LAG = int(SETUP["decision"]["iv_feature_lag"].split("_")[0])
 IV_STALE = SETUP["features"]["windows"]["iv_forward_fill"]
@@ -236,6 +238,14 @@ print(
 #
 # The other assertion is that the summary holds at most one row per stock and session, since a
 # second would double that stock's weight in every average taken across the panel.
+#
+# The entity every series below is taken inside is the **security**, `sec_id`, not the ticker. A
+# ticker is reassigned after a merger or a spin-off, and it is also changed while the security
+# behind it stays the same, so a window bounded by the ticker either carries a dead company's
+# implied volatility into its successor or cuts a live company's history in half at a rename.
+# `02_labels` and `03_financial_features` both bound every window by `sec_id` for that reason, and
+# this notebook measures what they will build. The two counts printed below are what the
+# distinction costs: the tickers, and the securities behind them.
 
 # %%
 surface = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
@@ -252,9 +262,10 @@ assert summary.select((pl.col(ATM_IV).drop_nulls() > 0).all()).item(), (
 )
 
 solved = summary.select("timestamp", "symbol", ATM_IV).drop_nulls(ATM_IV)
-panel = solved.join(quotes.drop("sec_id"), ["timestamp", "symbol"]).sort(["symbol", "timestamp"])
+panel = solved.join(quotes, ["timestamp", "symbol"]).sort([SECURITY, "timestamp"])
 print(
-    f"{panel['symbol'].n_unique()} stocks, {len(panel):,} stock-sessions over "
+    f"{panel['symbol'].n_unique()} tickers standing for {panel[SECURITY].n_unique()} securities, "
+    f"{len(panel):,} stock-sessions over "
     f"{panel['timestamp'].n_unique():,} sessions, {panel['timestamp'].min()} to "
     f"{panel['timestamp'].max()}\n"
     f"{summary[ATM_IV].null_count():,} of {len(summary):,} surface rows carry no implied "
@@ -284,13 +295,13 @@ for low, high in zip(PRICE_CUTS, PRICE_CUTS[1:], strict=False):
 label = label.otherwise(pl.lit(f"{PRICE_CUTS[-1]} and over"))
 
 n_sessions = quotes["timestamp"].n_unique()
-by_symbol = panel.group_by("symbol").agg(
+by_security = panel.group_by(SECURITY).agg(
     pl.col("close").median().alias("price"),
     (pl.col(ATM_IV) * 100).median().alias("implied_vol"),
     pl.len().alias("stock_sessions"),
 )
 groups = (
-    by_symbol.with_columns(label.alias("share_price"))
+    by_security.with_columns(label.alias("share_price"))
     .group_by("share_price")
     .agg(
         pl.len().alias("stocks"),
@@ -304,8 +315,8 @@ groups = (
 with pl.Config(tbl_rows=groups.height, tbl_cols=groups.width):
     display(groups)
 print(
-    f"Share price across the universe {by_symbol['price'].min():.2f} to "
-    f"{by_symbol['price'].max():.2f}, over {n_sessions:,} sessions"
+    f"Share price across the universe {by_security['price'].min():.2f} to "
+    f"{by_security['price'].max():.2f}, over {n_sessions:,} sessions"
 )
 
 # %% [markdown]
@@ -378,19 +389,21 @@ assert len({(d.year, d.month) for d in monthlies}) == len(monthlies), (
 # sessions, so the panel is placed on the session grid before either is applied. Shifting the rows
 # as they come would read "one session late" off a value up to a month old, and would spend the
 # five-session tolerance on five rows that can span far more than five sessions.
+#
+# The grid is the sessions each **security** traded, taken from the share bars, which is the grid
+# `03_financial_features::on_session_grid` reindexes the surface onto. Building it that way is what
+# keeps the lag and the fill from crossing a ticker changing hands: they are applied inside
+# `sec_id`, so a dead security's last quoted volatility is not carried into whichever company
+# picked the ticker up.
 
 # %%
-grid = (
-    summary.select("symbol")
-    .unique()
-    .join(quotes.select("timestamp").unique(), how="cross")
-    .join(summary.select("timestamp", "symbol", ATM_IV), on=["timestamp", "symbol"], how="left")
+grid = quotes.select("timestamp", "symbol", SECURITY).join(
+    summary.select("timestamp", "symbol", ATM_IV), on=["timestamp", "symbol"], how="left"
 )
 rankable = (
-    grid.sort(["symbol", "timestamp"])
-    .with_columns(pl.col(ATM_IV).shift(IV_LAG).forward_fill(limit=IV_STALE).over("symbol"))
+    grid.sort([SECURITY, "timestamp"])
+    .with_columns(pl.col(ATM_IV).shift(IV_LAG).forward_fill(limit=IV_STALE).over(SECURITY))
     .drop_nulls(ATM_IV)
-    .join(quotes.select("timestamp", "symbol"), ["timestamp", "symbol"])
 )
 decisions = rankable.group_by(pl.col("timestamp").dt.truncate("1w")).agg(
     pl.col("timestamp").max().alias("decision_date")
@@ -403,7 +416,7 @@ entries = rankable.join(decisions, left_on="timestamp", right_on="decision_date"
 breadth = (
     entries.group_by("timestamp")
     .agg(
-        pl.col("symbol").n_unique().alias("n_stocks"),
+        pl.col(SECURITY).n_unique().alias("n_stocks"),
         pl.col("monthly_in_window").first(),
     )
     .sort("timestamp")
@@ -454,12 +467,12 @@ plt.show()
 
 # %%
 prices = (
-    quotes.join(panel.select("symbol").unique(), on="symbol")
+    quotes.join(panel.select(SECURITY).unique(), on=SECURITY)
     .with_columns((pl.col("close") * pl.col("adj_factor")).alias("adjusted"))
-    .sort(["symbol", "sec_id", "timestamp"])
+    .sort([SECURITY, "timestamp"])
 )
 cost = (
-    prices.group_by("symbol")
+    prices.group_by(SECURITY)
     .agg(pl.col("close").median().alias("price"))
     .with_columns(
         (2 * (min(HALF_SPREADS) + PER_SHARE) / pl.col("price") * 1e4).alias("cheapest"),
@@ -508,11 +521,11 @@ plt.show()
 # %%
 returns = (
     prices.with_columns(
-        (pl.col("adjusted").pct_change(h).abs().over(["symbol", "sec_id"]) * 1e4).alias(f"h{h}")
+        (pl.col("adjusted").pct_change(h).abs().over(SECURITY) * 1e4).alias(f"h{h}")
         for h in HORIZONS
     )
-    .join(rankable.select("timestamp", "symbol"), ["timestamp", "symbol"])
-    .sort(["symbol", "timestamp"])
+    .join(rankable.select("timestamp", SECURITY), ["timestamp", SECURITY])
+    .sort([SECURITY, "timestamp"])
 )
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
@@ -559,7 +572,7 @@ plt.show()
 persistence = cross_sectional_persistence(
     entries,
     time_col="timestamp",
-    entity_col="symbol",
+    entity_col=SECURITY,
     value_col=ATM_IV,
     max_lags=PERSISTENCE_WEEKS,
 )
@@ -791,7 +804,7 @@ plt.show()
 # %%
 thin = breadth.filter(pl.col("n_stocks") < BREADTH_FLOOR)
 print(
-    f"universe.n_assets {SETUP['universe']['n_assets']}, {panel['symbol'].n_unique()} stocks "
+    f"universe.n_assets {SETUP['universe']['n_assets']}, {panel[SECURITY].n_unique()} securities "
     f"quoted a solved implied volatility, {breadth['n_stocks'].min()} to "
     f"{breadth['n_stocks'].max()} of them per decision date, below the {BREADTH_FLOOR} the book "
     f"needs on {thin.height} of {len(breadth)} dates\n"
@@ -806,11 +819,12 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# 609 stocks quote a solved implied volatility over the development period, and between 213 and 503
-# of them can be ranked on a decision date, against a declared universe of 633 and a book of 20
-# that no date comes close to failing to fill. The declared 13 bps round trip is the same charge as
-# anything from 0.04 to 619 bps if it is levied per share instead. Two folds are generated, the
-# last validation ending 2020-12-23, ten sessions of purging at every boundary.
+# 599 securities, trading under 609 tickers, quote a solved implied volatility over the development
+# period, and between 213 and 503 of them can be ranked on a decision date, against a declared
+# universe of 633 and a book of 20 that no date comes close to failing to fill. The declared 13 bps
+# round trip is the same charge as anything from 0.04 to 619 bps if it is levied per share instead.
+# Two folds are generated, the last validation ending 2020-12-23, ten sessions of purging at every
+# boundary.
 
 # %% [markdown]
 # ## Key takeaways
