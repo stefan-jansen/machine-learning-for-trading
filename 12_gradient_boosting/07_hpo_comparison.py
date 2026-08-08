@@ -461,17 +461,16 @@ final_df
 # %% [markdown]
 # **Interpretation**: This is the load-bearing comparison of the notebook, and it
 # is measured on the case study's **sealed 2024–2025 holdout** — never seen during
-# any search. Widening the space pays here: Optuna's continuous configuration beats
-# grid's discrete one out of sample, because the grid's fixed values simply do not
-# contain the better region.
+# any search. Two configurations are compared, and two only: the one each search
+# selected on validation. The continuous selection beats the discrete one out of
+# sample here. That says the configuration Optuna picked was better, not that the
+# continuous space is better than the grid — the rest of the grid was never scored
+# on the holdout, so this measures the picks, not the spaces.
 #
-# Read it against the budget sweep above rather than on its own, because the two
-# say different things and both are true. *Where* you search can help: a larger
-# space contains configurations a coarse grid cannot express. *How long* you search
-# within it stops helping and starts hurting, which is what the test curve turning
-# down shows. Neither result licenses trusting the validation number itself — on
-# this ETF target every IC here is thin, and the ordering by validation IC is not
-# the ordering by holdout IC at any budget.
+# Read it against the budget sweep above rather than on its own. *How long* you
+# search within a space stops helping and starts hurting, which is what the test
+# curve turning down shows. Neither result licenses trusting the validation number
+# itself — on this ETF target every IC here is thin.
 #
 # **Do not read a single run of this notebook as a verdict on grid versus Optuna.**
 # An earlier execution of this same code, on an earlier vintage of the ETF

@@ -239,3 +239,21 @@ def test_request_end_follows_config_default_end(tmp_path, stub_databento):
 
     dl.download_full_product("RTY", config, tmp_path, dry_run=False)
     assert stub_databento.calls[-1][2] == "2018-01-01"
+
+
+def test_dry_run_survives_an_unknown_cost(tmp_path, stub_databento, monkeypatch, capsys):
+    """``--dry-run`` must still run when the estimate fails.
+
+    An unknown cost blocks anything paid, but a dry run buys nothing and is exactly
+    what the failure message tells the reader to reach for. Exiting before the
+    dry-run branch made that suggestion impossible to follow.
+    """
+    stub_databento.cost_fails = True
+    monkeypatch.setattr(dl, "resolve_data_dir", lambda _: tmp_path)
+    monkeypatch.setattr(sys, "argv", ["download.py", "--product", "RTY", "--dry-run", "--force"])
+
+    assert dl.main() == 0
+    out = capsys.readouterr().out
+    assert "[DRY RUN]" in out
+    assert "unknown" in out
+    assert stub_databento.calls == [], "a dry run must not request any data"
