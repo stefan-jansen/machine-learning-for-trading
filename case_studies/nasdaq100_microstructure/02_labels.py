@@ -25,8 +25,8 @@
 #
 # ## Learning objectives
 #
-# - Write an intraday forward return as an execution convention - which price is bought,
-#   at which time, and sold at which time - rather than as a row shift
+# - Write an intraday forward return as an execution convention - which bar the position
+#   opens on and which one it closes on - rather than as a row shift
 # - Measure the bar grid the horizon is counted on, and convert a declared duration into
 #   bars against it instead of assuming the two agree
 # - Assert, rather than describe, that every labelled window is complete inside one session
@@ -149,11 +149,13 @@ print("Each label is sealed on its own endpoint, not on the bar it was observed 
 #
 # Three things have to be true of the price series before a forward window means anything.
 #
-# **The price has to be one a trade could cross at.** Trade prices alternate between bid
-# and ask as buyers and sellers arrive, so a return taken between two of them carries a
-# bounce that has nothing to do with information (Hasbrouck, 2007). The midprice of the
-# closing NBBO quote removes it, and the half-spread taken from the same quote is what
-# Section E prices the move against.
+# **The price has to measure where the market is, not which side happened to trade.** Trade
+# prices alternate between bid and ask as buyers and sellers arrive, so a return taken
+# between two of them carries a bounce that has nothing to do with information (Hasbrouck,
+# 2007). The midpoint of the closing NBBO quote removes that bounce. It is not itself a
+# price anyone transacts at - a marketable order crosses at the bid or the ask - so what is
+# built from it is a midprice return, and the cost of crossing is charged against it
+# separately in Section E, out of the half-spread of the same quote.
 #
 # **The window has to sit inside one session, and the session is the one the exchange
 # scheduled.** An overnight gap is not an intraday move, so `session_date` joins `symbol` in
@@ -268,9 +270,11 @@ print(f"Bar spacing {BAR}, uniform within every session; horizons in bars {HORIZ
 # $$r^{(H)}_{s,t} = \frac{M_{s,t+H}}{M_{s,t+B}} - 1$$
 #
 # where $M$ is symbol $s$'s quote midpoint, $B$ is one bar and $H$ is the declared horizon.
-# The decision is taken on the bar closing at $t$, so the earliest price that can be traded
-# is the one a bar later, and the position is held until $H$ after the decision. Both the
-# numerator and the denominator are prices a trade could have crossed at.
+# The decision is taken on the bar closing at $t$, so the earliest bar that can be acted on
+# is the one after it, and the position is held until $H$ after the decision. Both ends are
+# quote midpoints observed inside the session, so what the formula measures is how far the
+# market moved over the holding period; a trade capturing that move pays the spread at each
+# end, which Section E prices separately.
 #
 # All four labels are computed on the **minute** grid the data arrives on, and what differs
 # between them is the horizon: five, fifteen and sixty minutes, plus a direction label cut
@@ -774,9 +778,9 @@ for name in LABEL_NAMES:
 # ## Key takeaways
 #
 # 1. **Write the label as an execution convention, then resolve the exit by time.** Naming
-#    the two prices a trade crosses - one bar after the decision, and again at the horizon -
-#    fixes what the number means; finding the exit by timestamp rather than by counting rows
-#    is what keeps it meaning that when a bar is missing.
+#    the two moments the position is opened and closed - one bar after the decision, and
+#    again at the horizon - fixes what the number means; finding the exit by timestamp
+#    rather than by counting rows is what keeps it meaning that when a bar is missing.
 # 2. **Measure the bar grid before converting a declared horizon into bars.** A 15-row shift
 #    is a 15-minute return only on a one-minute grid, and a loader that returns a raw
 #    partition promises no such thing. Measure the spacing, require the horizon to be a
