@@ -534,12 +534,13 @@ eval_df
 
 # %% [markdown]
 # **Interpretation**: With complete timestamp groups and horizon-sized embargoes,
-# every asset class in the table above lands below its 0.90 coverage target, ETFs
-# by the widest margin. The finite-sample guarantee assumes exchangeability between
-# calibration and validation residuals; these walk-forward results show why
-# empirical coverage still matters when financial residuals shift over time.
-# Predictive ordering is modest throughout, and the ranking by coverage is not the
-# ranking by IC - read both columns, not one.
+# the coverage column in the table above does not land on its 0.90 target: one
+# asset class overshoots it and the other two fall short, ETFs by the widest
+# margin. The finite-sample guarantee assumes exchangeability between calibration
+# and validation residuals; these walk-forward results show why empirical coverage
+# still matters when financial residuals shift over time. Predictive ordering is
+# modest throughout, and the ranking by coverage is not the ranking by IC - the
+# best-covered asset class here is not the best-ranked one, so read both columns.
 
 # %% [markdown]
 # ## 5. Coverage Visualization
@@ -858,8 +859,8 @@ if processed_datasets:
 #   quantile can fail when the next residual regime changes sharply.
 # - Quantile regression buys the narrowest intervals and still undercovers, and
 #   it carries no conformal coverage guarantee at all.
-# - CQR lands closest to the 0.90 target, by calibrating the asymmetric quantile
-#   models rather than a single symmetric width.
+# - CQR is the only one of the four to reach the 0.90 target, by calibrating the
+#   asymmetric quantile models rather than a single symmetric width.
 # - ACI uses the widest intervals of the four and still misses, because each
 #   update waits for its forward outcome to mature.
 # Width and coverage do not move together here: the widest method is not the best
@@ -920,15 +921,16 @@ sizing_df
 # %% [markdown]
 # ## 8. Key Takeaways
 #
-# 1. **Always verify empirical coverage**: across purged walk-forward folds every
-#    asset class lands short of its 0.90 target, ETFs furthest. The
-#    exchangeability condition is not exact for financial panels, so the
-#    theoretical guarantee does not replace a time-ordered empirical check.
+# 1. **Always verify empirical coverage**: across purged walk-forward folds no
+#    asset class lands on its 0.90 target - one overshoots, the rest fall short,
+#    ETFs furthest. The exchangeability condition is not exact for financial
+#    panels, so the theoretical guarantee does not replace a time-ordered
+#    empirical check.
 #
 # 2. **Adaptivity can matter more than width**: on the 2023 ETF validation fold,
-#    CQR lands closest to the target while ACI uses the widest intervals of the
-#    four and still misses, because the residual regime changes underneath it.
-#    Wider is not better covered.
+#    CQR is the only method to reach the target while ACI uses the widest
+#    intervals of the four and still misses, because the residual regime changes
+#    underneath it. Wider is not better covered.
 #
 # 3. **Match the wrapper to the estimator**: Split conformal and ACI can wrap
 #    a point-prediction model without an error-distribution assumption. QR and
