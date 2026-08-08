@@ -17,23 +17,25 @@
 # # S&P 500 Equity + Option Analytics: Label Engineering
 #
 # The strategy reads a signal off a name's listed options and holds the share, so what every
-# model here predicts is a forward equity return. This notebook fixes the price series that
-# return is measured on, writes the execution convention as a formula, proves that each
-# labelled row has a complete forward window inside one security, prices the overlap that daily
-# sampling of a multi-session label creates, establishes the floor a feature has to clear, and
-# writes the five files stage 03 reads.
+# model here predicts is a forward return on the share. This notebook builds the price series
+# that return is measured on, states which two prices a return is taken between, checks that
+# every labelled row has a complete forward window inside one security, measures how much
+# independent information those rows carry once consecutive windows overlap, measures what the
+# simplest available signal already earns against the label, and writes one file per label.
 #
 # ## Learning objectives
 #
-# - Recover a tradable price series from a raw one, and see what a corporate action does to a
-#   forward return taken on the raw series
-# - Express a forward return as an execution convention, then assert - rather than describe -
-#   that every labelled window is complete and sits inside one security
-# - Derive a binary label from a continuous one without fabricating the rows the continuous one
-#   could not fill
-# - Seal a diagnostic on the label's endpoint rather than on its observation date
-# - Establish the floor a feature has to clear, under a standard error that prices in the
-#   overlap between consecutive labels
+# - Turn raw daily bars into a series a return can be taken on, using the adjustment factor
+#   that carries splits and dividends, and the identifier that stays with a company when its
+#   ticker changes
+# - State a forward return as the pair of prices a strategy could have traded at, then check in
+#   code that every window is complete and stays inside one security
+# - Derive an up-or-down label from a return without inventing a class for the rows the return
+#   itself could not fill
+# - Cut a diagnostic off at the date a label's outcome is known rather than the date its signal
+#   is read, so that nothing measured here has seen the holdout
+# - Measure what one unmodified signal earns against the label, under a standard error that
+#   allows for consecutive labels sharing most of their forward window
 #
 # ## Book reference, prerequisites and artifacts
 #
@@ -42,8 +44,10 @@
 # [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) establishes, and
 # `config/setup.yaml`, which declares the label set, each label's horizon and buffer, and the
 # holdout boundary. Writes one parquet per declared label into `labels/`, each with a
-# `.digest.json` sidecar beside it. `03_financial_features.py` reads the three continuous
-# labels to score its features; the model stages read whichever label they train on.
+# `.digest.json` sidecar beside it. [`05_evaluation`](05_evaluation.ipynb) reads the primary
+# label and scores the engineered features against it, the model stages read whichever label
+# they train on, and `case_studies/utils/cv_window.py` reads each file's own timeline to place
+# the folds those models are trained and validated on.
 
 # %%
 """S&P 500 Equity + Option Analytics - Label Engineering."""
@@ -67,10 +71,10 @@ from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 warnings.filterwarnings("ignore")
 
 # %% [markdown]
-# Both parameters bound the sample and both are read below. The share bars and the option
-# surface are licensed extracts covering these five years, so the defaults span the data.
-# Trimming either end shortens a run at the cost of a shorter history for the trailing
-# volatility in Section C and a shorter development window for everything from Section E on.
+# The share bars and the option surface are licensed extracts covering these five years, so the
+# defaults span the whole of the data. Narrowing the window shortens a run, at the cost of less
+# history behind the trailing volatility in Section C and fewer years in the development window
+# that everything from Section E on is computed over.
 
 # %% tags=["parameters"]
 START_DATE = "2017-01-01"
@@ -83,11 +87,16 @@ END_DATE = "2021-12-31"
 # or a boundary typed into a cell is a second copy of a value the rest of the pipeline reads
 # from the file, and the two drift apart the first time either is edited.
 #
-# This case study separates two quantities the others hold equal. The **outcome horizon** is how
-# long a position is held, and it decides which prices a label is measured between. The
-# **buffer** is the gap left between a training fold and the validation fold after it, and here
-# it is deliberately wider than the horizon. `resolve_label_horizon` and `resolve_label_buffer`
-# read them from separate keys, and Section H records both against every label.
+# Two quantities are declared under separate keys here, and most case studies hold them equal.
+# The **outcome horizon** is how long a position is held, and it decides which two prices a
+# label is measured between. The **buffer** is the gap the walk-forward split leaves between the
+# end of a training fold and the start of the validation fold after it, counted in trading
+# sessions because the evaluation calendar is NYSE. A buffer shorter than the horizon would put
+# a training row whose outcome is still unresolved next to the validation window that resolves
+# it. The primary label carries ten sessions of buffer against a five-session horizon, twice
+# what independence requires; each variant carries exactly its own horizon.
+# `resolve_label_horizon` and `resolve_label_buffer` read the two from their separate keys, and
+# Section H records both against every label.
 
 # %%
 CASE_STUDY_ID = "sp500_equity_option_analytics"
@@ -108,13 +117,20 @@ PRIMARY_HORIZON = HORIZONS[PRIMARY_LABEL]
 HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
 PERIODS_PER_YEAR = setup["evaluation"]["periods_per_year"]
 ENTITY = "sec_id"
-CARRIER = "iv_30_atm"
+IV_COL = "iv_30_atm"
 IV_LAG = int(setup["decision"]["iv_feature_lag"].split("_")[0])
 RV_WINDOW = 20
 
-print(f"Labels {LABEL_NAMES}, primary {PRIMARY_LABEL}")
-print(f"Horizons {HORIZONS} sessions, against fold buffers {BUFFERS}")
-print(f"Holdout opens {HOLDOUT_START}, and seals the label endpoint")
+print(f"{PRIMARY_LABEL} is the primary label, and every later stage defaults to it. Each label:")
+for name in LABEL_NAMES:
+    print(
+        f"  {name} is held {HORIZONS[name]} trading sessions, and a training fold ends "
+        f"{int(BUFFERS[name].rstrip('Dd'))} sessions before its validation fold begins"
+    )
+print(
+    f"The holdout opens {HOLDOUT_START}; each development window ends a label's own horizon of "
+    f"sessions earlier, so nothing measured below resolves inside the holdout"
+)
 
 # %% [markdown]
 # ## A. The learning task
@@ -128,9 +144,10 @@ print(f"Holdout opens {HOLDOUT_START}, and seals the label endpoint")
 # equity.
 #
 # The decision cadence comes from `setup.yaml`. A Friday close is observed, the option
-# quantities are lagged a session behind it for point-in-time correctness, and the resulting book
-# is entered at Monday's open. That fixes the primary horizon at one trading week. The two-week
-# variant asks whether the same signal still pays when the book turns over half as often, which
+# quantities are lagged one session behind it - the surface summary for a session is stamped at
+# that session's close and cannot be acted on until the next one - and the resulting portfolio is
+# entered at Monday's open. That fixes the primary horizon at one trading week. The two-week
+# variant asks whether the same signal still pays when the portfolio turns over half as often, which
 # is a question about cost and turnover rather than a second hypothesis. The volatility-scaled
 # variant asks the same question of a target made comparable across names of very different
 # volatility. The two direction variants reframe the weekly and the two-weekly return as
@@ -156,8 +173,6 @@ print(f"Holdout opens {HOLDOUT_START}, and seals the label endpoint")
 # `adj_factor` restarts with the new security, so a window that steps across the change reads a
 # price from one company against a price from another. How much of that this extract carries is
 # counted below, and most of it arrives with no gap in the series to notice it by.
-# `case_studies/sp500_options/_underlying_returns.py` already reconciles this dataset the same
-# way.
 #
 # `session` numbers the market's own trading sessions, and Sections C, D and F count in it rather
 # than in rows: a name that stops trading for a fortnight and returns has consecutive rows
@@ -219,15 +234,16 @@ print(
 # form: a label anchored on the close of $t$ credits the strategy with the overnight move between
 # the signal and the first price it can trade at.
 #
-# `fixed_time_horizon_labels` divides by the price at $t$ in the column it takes the numerator
-# from, so this construction stays local to the notebook. What it contributes instead is the
-# discipline behind the guard below: a window is a window only if every price in it exists and
-# its two ends are exactly $h$ sessions apart.
+# The library's `fixed_time_horizon_labels` cannot express this convention: it divides by the
+# price at $t$ in the same column it takes the numerator from, and here the numerator is a close
+# and the denominator an open. The construction is written out below instead, under the rule the
+# library would have applied - a window counts only if every price in it exists and its two ends
+# are exactly $h$ sessions apart.
 #
-# Three columns are numbered on the complete series, because each means something only before a
-# row is dropped. `from_end` counts back from each security's last session for Section D's
-# boundary profile, `session` is the market's own session index, and the third is the daily return
-# the scaled label's trailing volatility is built from. None of them reaches a label file.
+# Three working columns are computed on the complete series, because each is only meaningful
+# before a row is dropped: `from_end`, how far back a row sits from the last session its security
+# trades; `session`, the market's own session index; and the one-session return the scaled
+# label's trailing volatility is built from.
 
 
 # %%
@@ -253,7 +269,8 @@ for label_name in PLAIN_RETURNS:
 
 # %% [markdown]
 # The scaled variant divides the weekly return by the volatility realized over the previous
-# month, annualized on the sessions per year `setup.yaml` declares, so that a five percent week
+# twenty sessions, about a month of trading, annualized on the sessions per year `setup.yaml`
+# declares, so that a five percent week
 # in a quiet utility and a five percent week in a semiconductor are not the same target value.
 # The denominator is guarded twice. A daily return is only a daily return between two adjacent
 # sessions, so it is null wherever the security missed the session before, and the rolling window
@@ -294,11 +311,11 @@ for label_name, source in DIRECTION_SOURCE.items():
 # the frame. A label crossing a security boundary, or a short label masked by a longer one's null
 # set, breaks that identity.
 #
-# The third assertion bounds the calendar span a window may cover, which is what makes the hole
-# rule falsifiable rather than a definition: $h$ trading sessions span about $7h/5$ calendar days
-# on a five-session week, plus a week for exchange holidays. Without the rule, the windows around
-# a security that stops trading for a year and returns span more days than any holiday pattern
-# accounts for.
+# The third assertion bounds the calendar span a labelled window may cover, and it is what tests
+# the session count against the calendar instead of against itself: $h$ trading sessions span
+# about $7h/5$ calendar days on a five-session week, plus a week for exchange holidays. A
+# security that stops trading for a year and returns would produce windows far wider than any
+# holiday pattern accounts for.
 
 # %%
 for label_name in [*PLAIN_RETURNS, SCALED_LABEL]:
@@ -342,8 +359,8 @@ for label_name, source in DIRECTION_SOURCE.items():
 # fall exactly where the return it comes from does. A scalar count of valid rows shows neither
 # failure this catches: a tail written as a confident zero reads as fully valid, and a short
 # label masked by a longer one's null set reads as the longer one's count. The figure reads only
-# the null structure and never a value, so it is not sealed - it describes the shape of the
-# artifact.
+# which rows are null and never a label value, so it covers the whole extract rather than the
+# development window that Sections E to G are restricted to.
 
 # %%
 profile = (
@@ -377,11 +394,12 @@ show_with_alt(fig, "Non-null rate of each label by position from the end of a se
 # ## E. Distribution and base rate
 #
 # What scale is each label, and does it mean the same thing across names and across regimes?
-# Everything from here through Section G is computed on the development window only, sealed on
-# the label's **endpoint** rather than its observation date. A row observed shortly before the
-# holdout still resolves inside it, so a filter on the observation date looks sealed and is not.
-# Each label has its own endpoint, because the horizons differ. The label files keep every row:
-# the seal governs what this notebook looks at, not what it writes.
+# Everything from here through Section G is computed on the development window only, and that
+# window is cut at the date each label's outcome is **known** rather than at the date its signal
+# is read. A row observed shortly before the holdout still resolves inside it, so a filter on the
+# observation date leaves holdout outcomes in the diagnostic. Each label is cut at its own
+# endpoint, because the horizons differ. The label files still carry every row: the cut governs
+# what this notebook looks at, not what it writes.
 
 # %%
 dev = {
@@ -415,7 +433,7 @@ ax.set_xlabel("Forward total return on the adjusted share price")
 ax.set_ylabel("Rows per bin, log scale")
 add_message_title(
     ax,
-    "Both labels widen with the square root of their horizon",
+    "The longer horizon adds mass across the whole body, not only the tails",
     subtitle="Identical bins, development window; rows beyond the axis are counted below",
 )
 ax.legend(loc="upper left", frameon=False)
@@ -433,8 +451,8 @@ print(f"width ratio {long_ / short:.2f} against {root_h:.2f} under square-root-o
 # The scaled variant lives on a different axis, a multiple of the name's own volatility rather
 # than a return, so it is not drawn on the return axis above and its width is printed instead.
 # What the division does is visible in the kurtosis: a five percent week is an ordinary week in
-# one name and an extreme one in another, and pooling them unscaled puts the ordinary weeks of the
-# loud names where a model reads them as the extremes of the target.
+# one name and an extreme one in another, and pooling them unscaled puts the ordinary weeks of
+# the most volatile names where a model reads them as the extremes of the target.
 
 # %% [markdown]
 # Chapter 7.2 asks for the base rate to be tracked through time. For a continuous label ranked
@@ -586,7 +604,7 @@ for label_name in PLAIN_RETURNS:
 # %% [markdown]
 # ## G. Baseline floor
 #
-# One signal against the primary label on the sealed development window, with no feature
+# One signal against the primary label on the development window, with no feature
 # engineering: the thirty-day at-the-money implied volatility whose persistence
 # [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) measured, lagged by the session
 # `setup.yaml::decision.iv_feature_lag` declares, and read raw. Every option-derived feature in
@@ -602,21 +620,26 @@ for label_name in PLAIN_RETURNS:
 #
 # The information coefficient is the cross-sectional rank correlation on each session, averaged
 # over sessions, which is the quantity a ranking model is scored on; pooling every name-session
-# instead mixes a cross-sectional claim with a time-series one. The library call returns its
-# series ordered by time, which the standard error depends on. The minimum cross-section is half
-# the median rather than a bare count, so it means the same thing on a universe of another size.
-# The standard error is HAC-adjusted, because the IC series inherits the label's overlap and a
-# naive statistic would treat five consecutive sessions of one week's return as five pieces of
-# evidence.
+# instead mixes a cross-sectional claim with a time-series one. The series is put back in time
+# order before the standard error reads it, because that standard error is built out of the
+# correlations between one session and the next.
+#
+# A correlation over a handful of names is noise, so a session is scored only where at least a
+# minimum number of names are quoted. That minimum is half the median cross-section rather than
+# a fixed count, so it means the same thing on a universe of another size, and the sessions that
+# fall below it are dropped from the statistic - the count printed below is how many of the
+# window's sessions were scored. The standard error is HAC-adjusted, because the series of
+# per-session correlations inherits the label's overlap and a naive statistic would treat five
+# consecutive sessions of one week's return as five separate pieces of evidence.
 
 # %%
 surface = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
 carrier = (
     prices.select("timestamp", "symbol", ENTITY, "session")
-    .join(surface.select("timestamp", "symbol", CARRIER), on=["timestamp", "symbol"], how="left")
+    .join(surface.select("timestamp", "symbol", IV_COL), on=["timestamp", "symbol"], how="left")
     .sort([ENTITY, "session"])
     .with_columns(
-        pl.when(ONE_SESSION).then(pl.col(CARRIER).shift(IV_LAG).over(ENTITY)).alias("signal")
+        pl.when(ONE_SESSION).then(pl.col(IV_COL).shift(IV_LAG).over(ENTITY)).alias("signal")
     )
     .drop_nulls("signal")
 )
@@ -633,33 +656,41 @@ ic = cross_sectional_ic_series(
     date_col="timestamp",
     entity_col="symbol",
     min_obs=min_obs,
-).sort("timestamp")  # HAC autocovariances are meaningless over a permutation of time
+).sort("timestamp")  # a HAC autocovariance over a permutation of the time axis means nothing
 stats = compute_ic_hac_stats(ic, ic_col="ic", label_horizon=PRIMARY_HORIZON)
 
 print(
-    f"Baseline: {CARRIER} lagged {IV_LAG} session against {PRIMARY_LABEL}, "
+    f"Baseline: {IV_COL} lagged {IV_LAG} session against {PRIMARY_LABEL}, "
     f"{baseline.height:,} rows, minimum cross-section {min_obs} names\n"
-    f"  sessions scored {ic.height:,}, mean IC {stats['mean_ic']:.4f}\n"
+    f"  sessions scored {stats['n_periods']:,} of the {ic.height:,} in the window, "
+    f"mean IC {stats['mean_ic']:.4f}\n"
     f"  HAC t {stats['t_stat']:.2f} on {stats['effective_lags']} Bartlett lags, "
     f"naive t {stats['naive_t_stat']:.2f}, p {stats['p_value']:.3g}"
 )
 
 # %% [markdown] tags=["results"]
-# The lagged at-the-money volatility earns a mean information coefficient of -0.0067 against the
-# weekly label over 1,001 scored sessions on a cross-section of at least 130 names. Under the
-# naive standard error that is a t-statistic of -0.87; the Newey-West rule picks 6 lags here,
-# above the four the horizon alone requires, and the HAC statistic is -0.47 with a p-value of
-# 0.638. The floor a feature has to clear is a mean IC the data cannot separate from zero, so the
-# sign of it carries nothing either.
+# The lagged at-the-money volatility earns a mean information coefficient of -0.0072 against the
+# weekly label. Every one of the 1,001 sessions in the development window quotes at least the 130
+# names the minimum cross-section asks for, so all 1,001 are scored. Under the naive standard
+# error that is a t-statistic of -0.93; the Newey-West rule picks 6 lags here, above the four the
+# horizon alone requires, and the HAC statistic is -0.50 with a p-value of 0.614. The floor a
+# feature has to clear is a mean IC the data cannot separate from zero, so the sign of it carries
+# nothing either.
 
 # %% [markdown]
 # ## H. Artifacts and the audit record
 #
-# Each label is written with a digest sidecar beside it, recording the content digest of the
-# values written, the row count, the key columns, the notebook that wrote it and the digest of
-# the price data it was built from. That last field is what ties a label to its data vintage.
-# `sec_id` is the entity the label was built inside but not part of the key, because the
-# downstream join is on ticker and session.
+# Beside each label file the notebook writes a second, small JSON file, `<label>.digest.json`.
+# It is there so that a later stage can tell whether the label it is reading still holds the
+# values it was built against. It does that with a **digest**: a short hash of the values in the
+# file, which changes if any value changes and stays the same if the same values are written
+# again. The sidecar records that digest, the row count, the columns, the key columns, the
+# notebook that wrote the file, and the digest of the price data the label was built from. The
+# last of those is what ties a label to a data vintage - without it, a re-run against a refreshed
+# download looks exactly like a re-run against the same one.
+#
+# The key is `timestamp` and `symbol`, the pair every file downstream joins on. `sec_id` is the
+# entity the label was built inside and is not carried into the file.
 #
 # The folds that train models are derived per label by `case_studies/utils/cv_window.py` from
 # `config/setup.yaml` and the timeline of the label parquet written here, so which rows land in
@@ -683,14 +714,17 @@ for label_name in LABEL_NAMES:
 # separately, because this is the case study that separates them.
 
 # %%
-readers = {PRIMARY_LABEL: "03_financial_features.py, and the model stages, as the primary label"}
+readers = {
+    PRIMARY_LABEL: "05_evaluation.py, which scores the features against it, and the model stages"
+}
 print("\nLabel audit record")
 for label_name, horizon in HORIZONS.items():
     frame, source = dev[label_name], DIRECTION_SOURCE.get(label_name)
     anchor = f"the sign of {source}" if source else "the adjusted open of the session after t"
+    buffer_sessions = int(BUFFERS[label_name].rstrip("Dd"))
     print(
         f"\n{label_name}\n  anchor       {anchor}"
-        f"\n  horizon      {horizon} trading sessions, against a {BUFFERS[label_name]} fold buffer"
+        f"\n  horizon      {horizon} trading sessions, against a {buffer_sessions}-session fold buffer"
         f"\n  resolution   fixed at the close of t+{horizon}; daily bars need no tie-break"
         f"\n  overlap      {horizon - 1} sessions shared by consecutive rows"
         f"\n  base rate    mean {frame[label_name].mean():+.5f}, std {frame[label_name].std():.5f}"
@@ -703,15 +737,16 @@ for label_name, horizon in HORIZONS.items():
 # 1. **On a raw equity panel, rebuild the tradable price series before writing any label.** A
 #    split, a spin-off, or a ticker reassigned to another company all leave the raw prices intact
 #    and the return between them meaningless, and none of them raises anything.
-# 2. **Assert the window and reconcile every unlabelled row to one cause.** An incomplete window,
+# 2. **Check the window in code, and account for every unlabelled row.** An incomplete window,
 #    a hole in a security's series and a window crossing a change of security all fail without
 #    raising, and a reconciliation that has to balance catches what a row count passes over.
 # 3. **Derive a discrete label under an explicit null guard.** A comparison against a null return
 #    is false rather than null, so the naive form writes a confident class into every row the
 #    return could not fill, and no later `drop_nulls` can find it.
-# 4. **Seal a diagnostic on the label's endpoint.** A row observed before the holdout whose
-#    outcome resolves inside it is a holdout row, so each label's usable boundary is the boundary
-#    minus its own horizon, counted in trading sessions.
+# 4. **Cut a diagnostic off at the label's endpoint, not at its observation date.** A row
+#    observed before the holdout whose outcome resolves inside it is a holdout row, so each
+#    label's usable boundary is the holdout date minus its own horizon, counted in trading
+#    sessions.
 # 5. **A row count overstates the evidence when forward windows overlap.** The effective count
 #    says by how much, and it does not set the purge gap - the forward window does.
 #
@@ -724,4 +759,5 @@ for label_name, horizon in HORIZONS.items():
 # adjustment for the level of volatility a name usually carries.
 #
 # **Next**: `03_financial_features.py` builds the volatility-surface, variance-premium, skew and
-# equity-momentum features and evaluates them against these labels.
+# equity-momentum features from the same two sources. `05_evaluation.py` is where those features
+# are first scored against the primary label written here.
