@@ -64,10 +64,13 @@ OSError: dlopen(.../lightgbm/lib/lib_lightgbm.dylib): Library not loaded: @rpath
 ```
 
 The supported way to get it is [Homebrew](https://brew.sh), which a fresh macOS does not have
-either — install it first if `brew` is not already on your `PATH`:
+either. Install it first if `brew` is not already on your `PATH`. Its installer prints PATH
+instructions rather than applying them, so the `eval` below is what it asks you to run, given
+here for Apple Silicon (`/usr/local/bin/brew` on Intel):
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+eval "$(/opt/homebrew/bin/brew shellenv)"      # puts brew on PATH in this shell
 brew install libomp                            # macOS, both chips
 ```
 
