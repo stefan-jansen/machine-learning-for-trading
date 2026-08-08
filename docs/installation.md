@@ -63,7 +63,11 @@ install. Without it the environment builds cleanly and then Chapter 12 stops at 
 OSError: dlopen(.../lightgbm/lib/lib_lightgbm.dylib): Library not loaded: @rpath/libomp.dylib
 ```
 
+The supported way to get it is [Homebrew](https://brew.sh), which a fresh macOS does not have
+either — install it first if `brew` is not already on your `PATH`:
+
 ```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 brew install libomp                            # macOS, both chips
 ```
 
@@ -320,7 +324,8 @@ databases that run as containers. Everything else is `uv`.
 
 ```bash
 xcode-select --install                        # compiler, if you do not have it already
-brew install libomp                           # OpenMP runtime; LightGBM will not import without it
+brew install libomp                           # OpenMP runtime; LightGBM will not import without it.
+                                              # Needs Homebrew - see the prerequisites section above
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env                   # puts uv on PATH in this shell
 git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
