@@ -892,8 +892,11 @@ warmup_audit(
 _before = pl.col("timestamp").dt.date() < HOLDOUT_START
 _emitted = [*PANEL_KEY, *feature_cols]
 pre_holdout = built.filter(_before).select(_emitted)
-assert pre_holdout["timestamp"].max().date() < HOLDOUT_START, (
-    "the panel this section compares reaches into the holdout"
+# Withholding rows tests something only if there are rows to withhold. On a panel that stops
+# before the boundary the two builds are the same rows, and the comparison below passes
+# without anything having been held back.
+assert pre_holdout.height < built.height, (
+    "no row falls on or after the holdout, so this comparison withholds nothing"
 )
 agreement = assert_values_agree(
     pre_holdout,
@@ -1167,7 +1170,7 @@ print(f"{len(set(clusters.values()))} clusters over {len(feature_cols)} features
 # of anything. The right panel asks the same question of the ordering rather than the level,
 # between consecutive decisions.
 #
-# Between them the panels say how much of a feature is left one decision later - its own value
+# Between them the panels say how much of a feature is left as decisions pass - its own value
 # on the left, the ordering it puts the names in on the right - and that bears on turnover
 # without measuring it. What a strategy actually trades depends as well on how many names it
 # takes on each side, how it weights them, and how the universe itself moves, none of which is
