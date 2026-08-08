@@ -337,12 +337,14 @@ print(f"5 tech stocks, 2010-2018: {filtered.shape}")
 #
 # | Provider | Coverage | Cost |
 # |----------|----------|------|
-# | AlgoSeek | 2017-2021 | Licensed |
+# | AlgoSeek | 2017-2021 | Ships with this repository |
 # | Yahoo Finance | Current | Free |
 # | Polygon.io | Current | Paid |
 # | Tiingo | Current | Freemium |
 #
-# See `09_algoseek_licensed.py` for AlgoSeek S&P 500 daily data.
+# The AlgoSeek S&P 500 daily bars (638 symbols, 2017-2021) are bundled at
+# `data/equities/market/sp500/daily_bars.parquet`; load them with
+# `load_sp500_daily_bars()`.
 
 # %% [markdown]
 # ## Summary
