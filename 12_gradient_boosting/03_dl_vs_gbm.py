@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -58,23 +58,28 @@ import warnings
 from collections import defaultdict
 from typing import Any
 
+# lightgbm and torch must be imported before scikit-learn. All three ship their
+# own OpenMP runtime and the first one loaded wins for the whole process; on
+# macOS ARM64, loading scikit-learn's libomp first makes LightGBM's first
+# multithreaded fit segfault in __kmp_suspend_initialize_thread. Plain `import`
+# statements sort ahead of `from ... import` ones, so this order is what isort
+# produces and will not drift back. torch also has to precede ml4t.diagnostic,
+# which dlopens an older libcudart and otherwise wins symbol resolution.
+import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+import torch
+from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from utils.modeling import load_modeling_dataset
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
-
-import lightgbm as lgb
-import torch
-from ml4t.diagnostic.metrics import cross_sectional_ic_series
-
-from utils.modeling import load_modeling_dataset
 
 
 def cross_sectional_ic_mean(y_true, y_pred, dates, symbols):
