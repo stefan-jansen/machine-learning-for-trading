@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -129,9 +129,9 @@ print(
 )
 print(
     f"A stock is tradable on a session when its printed close is over ${MIN_PRICE:.0f} and its "
-    f"dollar volume over its previous {ADV_WINDOW} traded sessions averaged more than "
-    f"${MIN_ADV_USD:,}, which is roughly what a decile-sized position needs in order to be "
-    "filled without moving the price."
+    f"dollar volume over the {ADV_WINDOW} sessions ending on it - all of which it has to have "
+    f"traded - averaged more than ${MIN_ADV_USD:,}, which is roughly what a decile-sized "
+    "position needs in order to be filled without moving the price."
 )
 
 # %% [markdown]
@@ -162,11 +162,17 @@ print(
 # The tradability screen asks a different question and therefore reads a different price. A stock
 # enters on a date only if its **printed close** is above five dollars and the dollar volume it
 # actually traded averaged more than a million a day over the previous month: `close` for the
-# price leg, and `close * volume` averaged over the last 21 sessions **the stock itself traded**
-# for the liquidity leg. A session the stock sat out contributed no volume and is not part of what
-# it turned over, which is why this average runs over its own observations rather than over the
-# market's calendar - the opposite of the rule the forward return needs in Section C. Both figures
+# price leg, and `close * volume` averaged over 21 sessions for the liquidity leg. Both figures
 # are ones the tape carried on the day, so both are knowable when the position is decided.
+#
+# The liquidity leg is counted in sessions, exactly as the forward window in Section C is. The
+# average runs over the stock's own rows - a session it sat out contributed no volume and is not
+# part of what it turned over - but the row qualifies only where those 21 rows are the 21
+# consecutive sessions ending on it. Without that condition a stock returning from a month-long
+# halt qualifies on the volume it traded before the halt, which is not what it turns over now.
+# [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) screens the same panel under the
+# same condition, and [`03_financial_features`](03_financial_features.ipynb) rebuilds it from
+# the same three constants, so all three stages admit the same stock-sessions.
 #
 # The adjusted series cannot answer that question, because its adjustment is anchored at the end
 # of the vendor file rather than at the row. `adj_close` on an early date is that date's price
@@ -181,9 +187,6 @@ print(
 # does not survive the same test: `adj_volume` carries only the split factor while `adj_close`
 # carries splits and dividends, so their product keeps the end-anchored dividend factor and
 # understates what a dividend payer traded, by more the further back the date.
-#
-# [`03_financial_features`](03_financial_features.ipynb) rebuilds the screen from the same three
-# constants on the same columns, so the trainable panel and these files agree on the universe.
 #
 # **The screen runs after the forward return is computed, not before.** Once ineligible rows are
 # dropped, the row that sits one place ahead of a kept row is no longer the next session: a stock
@@ -416,13 +419,25 @@ show_with_alt(fig, "Non-null label rate by position from the end of each stock's
 # closing up; that is the grid the overlap statistics have to be counted on.
 
 # %%
-eligible = labels_df.with_columns(
-    (pl.col("close") * pl.col("volume")).rolling_mean(ADV_WINDOW).over("symbol").alias("adv_21d")
-).filter((pl.col("close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD))
+ADV_COVERED = pl.col("session") - pl.col("session").shift(ADV_WINDOW - 1) == ADV_WINDOW - 1
+
+# Sorted first: the label joins above carry no ordering guarantee, and both the rolling
+# average and the coverage test below read neighbouring rows.
+screened = labels_df.sort(["symbol", "timestamp"]).with_columns(
+    (pl.col("close") * pl.col("volume")).rolling_mean(ADV_WINDOW).over("symbol").alias("adv_21d"),
+    ADV_COVERED.over("symbol").alias("adv_covered"),
+)
+eligible = screened.filter(
+    pl.col("adv_covered") & (pl.col("close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD)
+)
 
 print(
     f"Eligible: {eligible.height:,} of {labels_df.height:,} symbol-sessions "
     f"({eligible.height / labels_df.height:.1%}), {eligible['symbol'].n_unique():,} stocks"
+)
+print(
+    f"  {screened.filter(~pl.col('adv_covered').fill_null(False)).height:,} rows carry no "
+    f"unbroken {ADV_WINDOW}-session volume window and cannot be screened on turnover at all"
 )
 
 # %% [markdown]
@@ -536,11 +551,11 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# On the development window the daily label has a standard deviation of 0.02850, the weekly
-# 0.06189 and the monthly 0.12344 - 2.17x and 4.33x the daily one, against the 2.24x and 4.58x
+# On the development window the daily label has a standard deviation of 0.02849, the weekly
+# 0.06187 and the monthly 0.12338 - 2.17x and 4.33x the daily one, against the 2.24x and 4.58x
 # square-root-of-horizon scaling implies, so the longer horizons come out slightly narrower than
 # a run of independent daily moves would make them. Their tails thin as the horizon lengthens:
-# excess kurtosis falls from 101.2 on the daily label to 22.1 on the monthly one, because a month
+# excess kurtosis falls from 96.5 on the daily label to 21.6 on the monthly one, because a month
 # of returns averages away the single-session jumps that dominate the daily tail. The spread a
 # ranking model works inside is not stable through time: cross-sectional dispersion peaks at
 # 4.31% in 2000 against 1.88% in 2013, a ratio of 2.29, with a median year of 2.15%.
@@ -598,10 +613,10 @@ for label_name, horizon in HORIZONS.items():
     )
 
 # %% [markdown] tags=["results"]
-# The daily label's 8,769,752 development rows carry 8,769,752 effective observations, a ratio of
-# exactly 1.0000, as windows that share nothing require. The weekly label's 8,759,532 rows carry
-# 1,777,895, a ratio of 0.2030 against the 0.2000 a fully overlapped five-session window implies,
-# and the monthly label's 8,719,084 rows carry 436,645, a ratio of 0.0501 against 0.0476. Both
+# The daily label's 8,764,331 development rows carry 8,764,331 effective observations, a ratio of
+# exactly 1.0000, as windows that share nothing require. The weekly label's 8,754,174 rows carry
+# 1,776,784, a ratio of 0.2030 against the 0.2000 a fully overlapped five-session window implies,
+# and the monthly label's 8,713,856 rows carry 436,516, a ratio of 0.0501 against 0.0476. Both
 # variants sit above their reference value because a stock dropping out of the tradable universe
 # ends an overlap early. Autocorrelation at lag 1 is -0.015 for the daily label, 0.784 for the
 # weekly and 0.944 for the monthly, and the two variants fall to -0.044 at lag 5 and -0.019 at
@@ -691,7 +706,7 @@ print(
 # the 1,238 left out are early ones whose cross-section is too thin for a rank correlation to say
 # much. Under the ordinary standard error that is a t-statistic of 5.35; the Newey-West rule picks
 # 9 lags here, well above the zero a one-session horizon needs on its own, and the HAC statistic
-# is 4.76 with a p-value of 2.01e-06. So a feature has to beat a mean IC of 0.0105 that the
+# is 4.76 with a p-value of 2e-06. So a feature has to beat a mean IC of 0.0105 that the
 # correction still separates from zero, and that correction costs about a tenth of the statistic
 # even where the label itself does not overlap - the IC series carries persistence of its own,
 # which is what the lag rule is reading.
