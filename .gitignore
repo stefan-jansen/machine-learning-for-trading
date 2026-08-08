@@ -85,6 +85,13 @@ data/**/__MACOSX/
 data/**/*.xml
 data/**/*.zip
 
+# Bundled datasets — shipped with the repository, not downloaded. ML4T_DATA_PATH
+# defaults to this directory, so a clone runs the notebooks that read them with no
+# setup. daily_bars.parquet is redistributed by permission of AlgoSeek; see
+# data/README.md#attribution.
+!data/equities/market/sp500/sp500.csv
+!data/equities/market/sp500/daily_bars.parquet
+
 # Caches
 data/**/__pycache__/
 data/**/.cache/
