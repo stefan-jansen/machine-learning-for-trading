@@ -19,9 +19,9 @@
 # Every model in this case study predicts the label defined here, so an error in it is
 # silent where it is made and reaches every metric and every backtest after it. This
 # notebook fixes the execution convention, proves each labelled row has a complete
-# forward window inside one trading session, measures how much independent information
-# those rows carry, establishes the floor a feature has to clear, and writes the files
-# stage 03 reads.
+# forward window inside one scheduled trading session, measures how much independent
+# information those rows carry, establishes the floor a feature has to clear, and writes the
+# label files the evaluation and modelling stages read.
 #
 # ## Learning objectives
 #
@@ -38,12 +38,15 @@
 #
 # Chapter 7, Section 7.2. Reads AlgoSeek NASDAQ-100 minute bars with NBBO quotes through
 # `load_nasdaq100_bars()`, whose coverage
-# [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) establishes, and
-# `config/setup.yaml`, which declares the universe, the label set, the horizons and the
-# holdout boundary. Writes `labels/fwd_ret_5m.parquet`, `labels/fwd_ret_15m.parquet`,
-# `labels/fwd_ret_60m.parquet` and `labels/fwd_dir_15m.parquet`, each with a
-# `.digest.json` sidecar beside it. `03_financial_features.py` reads
-# `fwd_ret_15m.parquet`, which it names directly.
+# [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) establishes, the NYSE trading
+# calendar, and `config/setup.yaml`, which declares the universe, the label set, the
+# horizons and the holdout boundary. Writes `labels/fwd_ret_5m.parquet`,
+# `labels/fwd_ret_15m.parquet`, `labels/fwd_ret_60m.parquet` and
+# `labels/fwd_dir_15m.parquet`, each with a `.digest.json` sidecar beside it.
+# [`05_evaluation`](05_evaluation.ipynb) joins these files to the feature panel, and the
+# modelling notebooks from `06_linear` on load the primary label through
+# `utils.modeling.load_modeling_dataset`. `03_financial_features.py` reads none of them:
+# it builds features from the bars and leaves the join to `05_evaluation`.
 
 # %%
 """NASDAQ-100 Microstructure: Label Engineering."""
@@ -56,6 +59,7 @@ import numpy as np
 import polars as pl
 import yaml
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
+from ml4t.diagnostic.splitters.calendar import TradingCalendar
 from ml4t.engineer.labeling import fixed_time_horizon_labels
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
@@ -112,13 +116,15 @@ DIRECTION_LABEL = next(n for n in LABEL_NAMES if n.startswith("fwd_dir"))
 HORIZONS = {name: declared_horizon(name) for name in LABEL_NAMES}
 PRIMARY_HORIZON = HORIZONS[PRIMARY_LABEL]
 FLAT_BAND = setup["costs"]["friction_floor_bps"] / 10_000
+CALENDAR = setup["evaluation"]["calendar"]
 HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
 HOLDOUT_TS = datetime.combine(HOLDOUT_START, time())
 GROUP_COLS = ["symbol", "session_date"]
 PALETTE = dict(zip(RETURN_LABELS, (COLORS["blue"], COLORS["amber"], COLORS["copper"])))
 
 print(f"Labels {LABEL_NAMES}, primary {PRIMARY_LABEL}, flat band {FLAT_BAND:.2%}")
-print(f"Holdout opens {HOLDOUT_START} and seals each label on its own endpoint")
+print(f"Sessions come from the {CALENDAR} calendar; holdout opens {HOLDOUT_START}")
+print("Each label is sealed on its own endpoint, not on the bar it was observed from")
 
 # %% [markdown]
 # ## A. The learning task
@@ -149,10 +155,20 @@ print(f"Holdout opens {HOLDOUT_START} and seals each label on its own endpoint")
 # closing NBBO quote removes it, and the half-spread taken from the same quote is what
 # Section E prices the move against.
 #
-# **The window has to sit inside one session.** An overnight gap is not an intraday move,
-# so `session_date` joins `symbol` in the entity key and no label crosses either. Regular
-# hours only: the pre-market and after-hours books are thin enough that their quotes
-# describe a different market.
+# **The window has to sit inside one session, and the session is the one the exchange
+# scheduled.** An overnight gap is not an intraday move, so `session_date` joins `symbol` in
+# the entity key and no label crosses either. Regular hours only: the pre-market and
+# after-hours books are thin enough that their quotes describe a different market.
+#
+# Where the session ends cannot be read off the clock, because the vendor emits the same
+# padded grid on every date. The half-sessions printed below close early and still carry
+# bars out to the usual hour, quoting a price carried forward from before the close. Two
+# things go wrong if those bars are kept, and only the first is visible: they get labels of
+# their own, and - the one that survives any filter applied further down the pipeline - the
+# genuine bars in the final `horizon` minutes before the close take their **exit** price
+# from a quote that postdates it. No trade could have been closed at that price, so the
+# return is not one anyone could have earned. The bound therefore comes from the exchange
+# calendar and is applied before any label is built.
 #
 # **No eligibility filter runs before the label.** Once rows are dropped from inside a
 # series a shift counts survivors rather than bars, and the window silently spans whatever
@@ -164,11 +180,28 @@ print(f"Holdout opens {HOLDOUT_START} and seals each label on its own endpoint")
 # run inside a couple of gigabytes instead of the twenty-eight the whole schema costs.
 
 # %%
-_hour, _minute = pl.col("timestamp").dt.hour(), pl.col("timestamp").dt.minute()
-REGULAR_HOURS = ((_hour > 9) | ((_hour == 9) & (_minute >= 30))) & (_hour < 16)
+_exchange = TradingCalendar(CALENDAR).calendar
+_schedule = _exchange.schedule(start_date=START_DATE, end_date=END_DATE).apply(
+    lambda col: col.dt.tz_convert(_exchange.tz).dt.tz_localize(None)
+)
+sessions = pl.DataFrame(
+    {
+        "session_date": [stamp.date() for stamp in _schedule.index],
+        "session_open": _schedule["market_open"].to_list(),
+        "session_close": _schedule["market_close"].to_list(),
+    }
+)
+_scheduled = sessions["session_close"] - sessions["session_open"]
+N_EARLY = int((_scheduled < _scheduled.max()).sum())
+_lengths = ", ".join(sorted({str(length) for length in _scheduled}))
+print(f"{sessions.height} {CALENDAR} sessions of length {_lengths}, {N_EARLY} closing early")
+
+# %%
+_clock = pl.col("timestamp").dt.time()
+_widest = (sessions["session_open"].dt.time().min(), sessions["session_close"].dt.time().max())
 _bid, _ask = pl.col("close_bid_price"), pl.col("close_ask_price")
 
-bars = (
+padded = (
     load_nasdaq100_bars(
         start_date=START_DATE,
         end_date=END_DATE,
@@ -177,7 +210,7 @@ bars = (
         lazy=True,
     )
     .select(["timestamp", "symbol", "close_bid_price", "close_ask_price"])
-    .filter(REGULAR_HOURS)
+    .filter((_clock >= _widest[0]) & (_clock < _widest[1]))
     .with_columns(
         ((_bid + _ask) / 2).alias("mid_close"),
         ((_ask - _bid) / (_bid + _ask)).alias("half_spread"),
@@ -185,10 +218,18 @@ bars = (
     )
     .collect()
 )
+bars = (
+    padded.join(sessions, on="session_date", how="inner")
+    .filter(pl.col("timestamp").is_between(pl.col("session_open"), pl.col("session_close"), "left"))
+    .drop(["session_open", "session_close"])
+)
 quoted = bars.filter(pl.col("mid_close") > 0).sort([*GROUP_COLS, "timestamp"])
 
 # %%
-print(f"{bars.height:,} regular-hours bars, {bars['symbol'].n_unique()} symbols")
+print(
+    f"{padded.height:,} bars inside the widest scheduled window, {padded['symbol'].n_unique()} symbols"
+)
+print(f"{padded.height - bars.height:,} dropped past the scheduled close on {N_EARLY} early closes")
 print(f"{bars.height - quoted.height:,} dropped for a missing or non-positive quote midpoint")
 print(f"{quoted.height:,} quoted bars over {quoted['session_date'].n_unique():,} sessions")
 
@@ -199,6 +240,10 @@ print(f"{quoted.height:,} quoted bars over {quoted['session_date'].n_unique():,}
 # spacing is therefore measured, the grid is required to be uniform inside a session, and
 # every horizon is required to be a whole number of bars - at least two of them, so that the
 # entry bar and the exit bar are different bars.
+#
+# Uniformity is a weaker property than it sounds and does not subsume the bound above: a
+# padded grid is exactly uniform, so this assertion passes on an early close whether or not
+# the padding was removed. The schedule is what removes it; this only checks the spacing.
 
 # %%
 _gap = pl.col("timestamp") - pl.col("timestamp").shift(1).over(GROUP_COLS)
@@ -223,11 +268,17 @@ print(f"Bar spacing {BAR}, uniform within every session; horizons in bars {HORIZ
 # $$r^{(H)}_{s,t} = \frac{M_{s,t+H}}{M_{s,t+B}} - 1$$
 #
 # where $M$ is symbol $s$'s quote midpoint, $B$ is one bar and $H$ is the declared horizon.
-# The decision is taken on the bar closing at $t$, so the earliest price that can be
-# traded is the one a bar later - that is the execution delay `setup.yaml` declares - and
-# the position is held until $H$ after the decision. The numerator and the denominator are
-# both prices a trade could have crossed at, and the gap between them is what the strategy
-# actually earns.
+# The decision is taken on the bar closing at $t$, so the earliest price that can be traded
+# is the one a bar later, and the position is held until $H$ after the decision. Both the
+# numerator and the denominator are prices a trade could have crossed at.
+#
+# All four labels are computed on the **minute** grid the data arrives on, and what differs
+# between them is the horizon: five, fifteen and sixty minutes, plus a direction label cut
+# from the fifteen-minute return. $B$ is therefore one minute, and a horizon of $H$ minutes
+# is a shift of $H$ rows only where the minute grid is complete, which is what the section
+# above measures and Section D asserts. Chapter 16 rebalances this case study on a coarser
+# schedule than the one the labels are built on; reconciling the two is that chapter's
+# problem and no claim is made here about how the two line up.
 #
 # The entry price is the next bar's midpoint, which the uniform grid asserted above makes
 # exactly one bar of wall-clock time later; the last bar of a session has no next bar, so it
@@ -375,9 +426,9 @@ show_with_alt(fig, "Non-null label rate by bar position from the end of each tra
 # seal governs what this notebook looks at rather than what it writes.
 #
 # Each label is sealed on its own endpoint, because they do not resolve together: the
-# 60-minute window closes three quarters of an hour after the 15-minute one opened from
-# the same bar, so one boundary applied to all three would leave the slowest label
-# reaching furthest into the holdout. The symbol-session is carried as one `entity` key,
+# 60-minute window opened from a given bar is still running three quarters of an hour after
+# the 15-minute one opened from that same bar has closed, so one boundary applied to all
+# three would leave the slowest label reaching furthest into the holdout. The symbol-session is carried as one `entity` key,
 # because it is the entity no label may cross and Section F counts overlap within it.
 
 
@@ -496,7 +547,7 @@ ax.set_xlabel("Month")
 ax.set_ylabel("Share of labelled bars")
 sub = f"Class shares of {DIRECTION_LABEL} by month, development window"
 add_message_title(ax, "Up and down stay balanced; the flat share does not hold still", sub)
-ax.legend(loc="center right", frameon=False)
+ax.legend(loc="upper right", frameon=False)
 show_with_alt(
     fig, "Monthly class shares of the ternary direction label across the development window."
 )
@@ -507,18 +558,18 @@ for key, tag in classes.items():
     print(f"{tag}: {share:.3f} of labelled bars, ranging {lo:.3f} to {hi:.3f} across months")
 
 # %% [markdown] tags=["results"]
-# On the development window the primary label has a standard deviation of 0.004142, against
-# 0.002324 for the 5-minute label and 0.007884 for the 60-minute one - 0.56x and 1.90x the
+# On the development window the primary label has a standard deviation of 0.004140, against
+# 0.002321 for the 5-minute label and 0.007884 for the 60-minute one - 0.56x and 1.90x the
 # primary, against the 0.58x and 2.00x square-root-of-horizon scaling implies, so the shorter
 # horizon scales as that rule predicts and the longer one falls a little short of it. None of
-# the three is remotely normal: kurtosis runs from 86.0 at 60 minutes to 1147.8 at 5, so the
+# the three is remotely normal: kurtosis runs from 86.2 at 60 minutes to 1154.7 at 5, so the
 # shorter the horizon the more of its variance sits in rare bars.
 #
-# Against cost, the median absolute move is 8.74bps at 5 minutes, 16.34bps at 15 and 32.75bps
-# at 60, while the median round trip is 4.98, 5.03 and 5.25bps on the same bars - the move
+# Against cost, the median absolute move is 8.76bps at 5 minutes, 16.38bps at 15 and 32.80bps
+# at 60, while the median round trip is 4.97, 5.02 and 5.24bps on the same bars - the move
 # roughly doubles with each step up in horizon and the spread does not move at all. The share
-# of bars whose move clears that round trip climbs from 65.3% to 79.3% to 88.8%. Cut at the
-# 5bps friction floor, the direction label splits 0.414 up, 0.404 down and 0.181 flat, and
+# of bars whose move clears that round trip climbs from 65.4% to 79.4% to 88.9%. Cut at the
+# 5bps friction floor, the direction label splits 0.415 up, 0.405 down and 0.180 flat, and
 # while up and down hold between 0.372-0.471 and 0.359-0.468 across months, the flat share
 # runs from 0.061 to 0.268.
 
@@ -535,7 +586,11 @@ for key, tag in classes.items():
 # What a label consumes is return intervals, and it consumes one fewer than its horizon in
 # bars: entering a bar after the decision and leaving at the horizon spans the moves between
 # those two prices, not the move into the entry. Consecutive rows share all but one of those
-# intervals, so the decay reads as a straight line falling by one interval per lag.
+# intervals, so the decay reads as a straight line falling by one interval per lag. Two rows
+# `lag` bars apart share `H - 1 - lag` of them, which runs out one bar short of the horizon:
+# the last lag that still shares an interval is `H - 2`, and the first that shares none is
+# `H - 1`. That is where the dotted lines sit, and marking the horizon instead would put them
+# a lag past the thing the section is about.
 # The longest label does not stop at zero when it gets there but keeps going negative, and
 # that is a property of the session rather than of the label - a one-hour window is a fifth of
 # a trading day, so each session holds few independent windows, and subtracting the session's
@@ -555,41 +610,47 @@ fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 lags = np.arange(1, max_lag + 1)
 for name, colour in PALETTE.items():
     ax.plot(lags, acf[name], lw=1.8, color=colour, label=name)
-    ax.axvline(HORIZON_BARS[name], color=colour, linestyle=":", lw=1.2)
+    ax.axvline(HORIZON_BARS[name] - 1, color=colour, linestyle=":", lw=1.2)
 ax.axhline(0, color=COLORS["neutral"], lw=0.8)
 ax.set_xlabel("Lag in bars")
 ax.set_ylabel("Panel autocorrelation")
-sub = "Dotted lines mark each horizon; pooled across symbol-sessions on the development window"
+sub = "Dotted lines mark the first lag sharing no interval; pooled across symbol-sessions"
 add_message_title(ax, "Overlap decays linearly with lag at every horizon", sub)
 ax.legend(loc="upper right", frameon=False)
 show_with_alt(fig, "Panel autocorrelation of each forward-return label against lag in bars.")
 
 # %%
 for name in RETURN_LABELS:
-    h_bars, spans = HORIZON_BARS[name], HORIZON_BARS[name] - 1
+    spans = HORIZON_BARS[name] - 1
     n_rows, n_eff = effective_sample_size(
         dev[name], horizon=spans, bar_col="bar_in_session", entity_col="entity"
     )
     print(
         f"{name}: N={n_rows:,}, N_eff={n_eff:,.0f}, ratio {n_eff / n_rows:.4f} against "
         f"{1 / spans:.4f} for {spans} intervals overlapping fully; autocorrelation "
-        f"{acf[name][0]:.3f} at lag one and {acf[name][h_bars - 1]:.3f} at its horizon"
+        f"{acf[name][0]:.3f} at lag one, {acf[name][spans - 2]:.3f} at lag {spans - 1} "
+        f"where one interval is still shared, and {acf[name][spans - 1]:.3f} at lag {spans} "
+        f"where none is"
     )
 
 # %% [markdown] tags=["results"]
-# The primary label's 14,370,375 development rows carry 1,062,039 effective observations, a
+# The primary label's 14,333,835 development rows carry 1,059,429 effective observations, a
 # ratio of 0.0739 against the 0.0714 that fourteen fully overlapping intervals imply; the
-# 5-minute label's 14,753,585 rows carry 3,717,137 at 0.2519 against 0.2500, and the
-# 60-minute label's 12,645,930 carry 252,009 at 0.0199 against 0.0169. Each sits above its
+# 5-minute label's 14,717,045 rows carry 3,708,002 at 0.2520 against 0.2500, and the
+# 60-minute label's 12,609,390 carry 251,390 at 0.0199 against 0.0169. Each sits above its
 # reference because a session end closes an overlap early, and the longest label sits
 # furthest above it because the session ends most often relative to its window. Fourteen
 # million rows are worth about a million: the row count overstates the evidence by roughly
 # the number of intervals each label spans.
 #
-# Autocorrelation falls from 0.920 at lag one to -0.038 at lag fifteen for the primary label
-# and from 0.741 to -0.023 at lag five for the fast one. The 60-minute label falls from 0.976
-# to -0.219 at lag sixty, crossing zero around lag fifty. The purge gap a fold needs is set by
-# the forward window itself, not by any of these counts.
+# The primary label's autocorrelation falls from 0.921 at lag one to 0.032 at lag thirteen,
+# the last lag sharing an interval with it, and to -0.041 at fourteen, the first sharing
+# none; the fast label runs 0.742 to 0.232 at three and -0.024 at four. The 60-minute label
+# falls from 0.976 to -0.198 at fifty-eight and -0.219 at fifty-nine, and it crosses zero
+# near lag fifty rather than at its own boundary - each session holds only a handful of
+# hour-long windows, and centring so few of them on their own mean drives what is left
+# negative. The purge gap a fold needs is set by the forward window itself, not by any of
+# these counts.
 
 # %% [markdown]
 # ## G. Baseline floor
@@ -603,9 +664,15 @@ for name in RETURN_LABELS:
 # The information coefficient is the cross-sectional rank correlation across the symbols
 # priced at each decision minute, averaged over minutes, which is the quantity a ranking
 # model is scored on. The minimum cross-section is half the median rather than a bare
-# count, so it means the same thing on a universe of another size. The standard error is
-# HAC-adjusted: consecutive decision minutes share fourteen of their fifteen bars of
-# outcome, and a naive statistic would count each of them as fresh evidence.
+# count, so it means the same thing on a universe of another size.
+#
+# The standard error is heteroskedasticity- and autocorrelation-consistent (HAC): it widens
+# the error bar by however much neighbouring observations repeat each other, instead of
+# assuming they are independent draws. That matters here because the primary label spans
+# fourteen one-minute return intervals and consecutive decision minutes share thirteen of
+# them, so a naive statistic would count each minute as fresh evidence when the outcomes are
+# almost the same outcome. The printed naive statistic is there to be compared against the
+# adjusted one; the gap between them is the size of the mistake.
 
 # %%
 _h = HORIZON_BARS[PRIMARY_LABEL]
@@ -635,20 +702,20 @@ stats = compute_ic_hac_stats(ic, ic_col="ic", label_horizon=_h)
 print(f"Baseline: trailing {PRIMARY_HORIZON} return against {PRIMARY_LABEL}")
 print(f"  {baseline.height:,} rows, minimum cross-section {min_obs} symbols")
 print(
-    f"  decision minutes scored {ic.height:,}, mean IC {stats['mean_ic']:.5f}, "
+    f"  decision minutes scored {stats['n_periods']:,}, mean IC {stats['mean_ic']:.5f}, "
     f"HAC t {stats['t_stat']:.2f} on {stats['effective_lags']} Bartlett lags, "
     f"naive t {stats['naive_t_stat']:.2f}, p {stats['p_value']:.3g}"
 )
 
 # %% [markdown] tags=["results"]
-# The trailing 15-minute return earns a mean information coefficient of -0.00798 against the
-# primary label, over 135,720 scored decision minutes drawn from 13,795,560 rows on a
+# The trailing 15-minute return earns a mean information coefficient of -0.00783 against the
+# primary label, over 135,359 scored decision minutes drawn from 13,759,020 rows on a
 # cross-section of at least 51 symbols. The sign is negative, so on this universe the recent
 # move tends to give part of itself back rather than continue.
 #
-# The Newey-West rule picks 19 Bartlett lags and returns a t-statistic of -6.02 against a
-# naive -16.78, so pricing in the overlap cuts the apparent evidence by nearly two thirds -
-# and what is left is still far from zero, at p 1.74e-09. That is the floor: a feature that
+# The Newey-West rule picks 19 Bartlett lags and returns a t-statistic of -5.89 against a
+# naive -16.42, so pricing in the overlap cuts the apparent evidence by nearly two thirds -
+# and what is left is still far from zero, at p 3.76e-09. That is the floor: a feature that
 # ranks the cross-section no better than the last quarter-hour of price has added nothing.
 # It is a floor on ranking, not on profit - a coefficient of this size is small next to the
 # round trip Section E priced, which is the tension the rest of the case study works through.
@@ -669,7 +736,7 @@ print(
 # boundaries fall.
 
 # %%
-readers = {PRIMARY_LABEL: "03_financial_features.py, as the label it names directly"}
+readers = {PRIMARY_LABEL: "05_evaluation.py, and every modelling notebook from 06_linear on"}
 for name in LABEL_NAMES:
     record = write_artifact(
         labels_df.select(["timestamp", "symbol", name]).drop_nulls(),
@@ -700,7 +767,7 @@ for name in LABEL_NAMES:
         f"\n  resolution   fixed at t+{horizon}; the closing NBBO quote breaks the within-bar tie"
         f"\n  overlap      {h_bars - 2} of its {h_bars - 1} return intervals, with the next row"
         f"\n  base rate    {scale}"
-        f"\n  consumed by  {readers.get(name, 'the model stages, as a variant')}"
+        f"\n  consumed by  {readers.get(name, '05_evaluation.py, as a declared variant')}"
     )
 
 # %% [markdown]
@@ -714,26 +781,33 @@ for name in LABEL_NAMES:
 #    is a 15-minute return only on a one-minute grid, and a loader that returns a raw
 #    partition promises no such thing. Measure the spacing, require the horizon to be a
 #    whole number of bars, and the conversion stops being an assumption.
-# 3. **Write every label from its own null set.** Dropping rows on the primary label before
+# 3. **Take the end of the session from the exchange, not from the data.** A vendor that pads
+#    every date to the same grid puts bars after an early close, and they are uniformly
+#    spaced, so no grid check finds them. The damage is not confined to those bars: the last
+#    `horizon` genuine bars before the close take their exit price from one of them. Bound
+#    the session by the published schedule before the forward window is built.
+# 4. **Write every label from its own null set.** Dropping rows on the primary label before
 #    saving the others silently truncates the shorter horizons at the session close, and the
 #    row counts look plausible because the file is still large.
-# 4. **Seal a diagnostic on the label's endpoint.** A decision taken before the holdout whose
+# 5. **Seal a diagnostic on the label's endpoint.** A decision taken before the holdout whose
 #    outcome resolves inside it is a holdout row, so the usable boundary is the boundary
 #    minus the horizon, counted within the session.
-# 5. **A row count overstates the evidence when forward windows overlap.** The effective
+# 6. **A row count overstates the evidence when forward windows overlap.** The effective
 #    count says by how much, and the HAC standard error is what stops that overlap from
 #    inflating a t-statistic - here by a factor of nearly three.
 #
 # **Known limitations.** The midprice is not a fill: a marketable order crosses the spread,
 # and the round trip charted in Section E is the quoted spread rather than a measured
 # execution cost - it carries no commission, no market impact and no queue position, so it
-# is a floor on what trading costs. It is also the spread quoted at the decision bar,
-# doubled, rather than the two spreads actually crossed at the entry and exit bars, so it
-# prices the round trip at the moment the decision is taken and not at the moments it is
-# filled. The universe is the fixed NASDAQ-100 membership list `setup.yaml` declares, not a
-# point-in-time index reconstruction, so a name that joined or left mid-sample is present
-# throughout. The flat band is a single constant across every symbol and every regime,
-# where the spread it stands for is neither. The baseline is one signal at one horizon.
+# is a floor on what trading costs. It doubles the half-spread quoted at the decision bar,
+# which is one full spread, rather than adding the two half-spreads actually crossed at the
+# entry and the exit, so it prices the round trip at the moment the decision is taken and
+# not at the two moments it is filled. The universe is the fixed NASDAQ-100 list
+# `setup.yaml` declares, not a point-in-time index reconstruction, so a name that joined or
+# left mid-sample is present throughout. The flat band is a single constant across every
+# symbol and every regime, where the spread it stands for is neither. The baseline is one
+# signal at one horizon.
 #
 # **Next**: `03_financial_features.py` builds the order-flow, liquidity and volatility
-# features and evaluates them against these labels.
+# features from the same bars; `05_evaluation.py` joins them to these labels and measures
+# each feature against them.
