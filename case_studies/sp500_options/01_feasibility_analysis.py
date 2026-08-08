@@ -663,8 +663,8 @@ print(
 # The median stock gives up 0.1184 of the straddle premium to cross both legs, which is the same
 # charge as 70.1 bps of the share price. The median entry's five-session move matches the round trip
 # it would cross, at 1.00x, and 0.497 of entries move more than that; measured against the one leg
-# the cheapest rung of the cascade charges, 0.948 do. The volatility gap averages -0.0003 volatility
-# points across 194 stocks, is positive on 0.598 of sessions, and correlates 0.703 with itself a
+# the cheapest rung of the cascade charges, 0.948 do. The volatility gap averages -0.0008 volatility
+# points across 172 stocks, is positive on 0.596 of sessions, and correlates 0.735 with itself a
 # week later.
 
 # %% [markdown]
