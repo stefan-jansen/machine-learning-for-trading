@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -1529,6 +1529,24 @@ print(
     f"\n{n_temporal_features} features on {len(temporal):,} rows, "
     f"{temporal['symbol'].n_unique():,} stocks, {temporal['fold'].n_unique()} folds"
 )
+
+# %% [markdown]
+# ### What the assembled panel holds
+#
+# The four columns below are not taken over the same rows, and the split is the point.
+#
+# `present` and `missing` count every emitted row, the holdout fold included. They describe
+# the file rather than the market: the model stages read that fold's rows to score the
+# holdout once, so a column with no value there has no value in something they will read, and
+# a count stopping at the boundary would not report it.
+#
+# `mean` and `std` summarize the values a feature takes, and on holdout dates those are values
+# this stage may not read. Both are therefore taken over the cross-validation folds alone. The
+# same restriction stops each development date being counted twice, because the holdout fold
+# re-emits the whole development sample under its own single fit.
+
+# %%
+_development = temporal.filter(pl.col("fold").is_in(_cv_folds))
 display(
     pl.DataFrame(
         [
@@ -1536,8 +1554,8 @@ display(
                 "feature": c,
                 "present": temporal[c].len() - temporal[c].null_count(),
                 "missing": temporal[c].null_count(),
-                "mean": temporal[c].mean(),
-                "std": temporal[c].std(),
+                "mean": _development[c].mean(),
+                "std": _development[c].std(),
             }
             for c in temporal_feature_cols
         ]
