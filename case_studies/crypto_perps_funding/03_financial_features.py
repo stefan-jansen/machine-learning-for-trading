@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -326,7 +326,11 @@ def carry_features(df: pl.DataFrame) -> pl.DataFrame:
         + [pl.col("premium_index_close").alias("premium_level")]
     )
     for label, bars in W["funding_half_life"].items():
-        df = funding_moments(df, bars).with_columns(half_life().alias(f"funding_half_life_{label}"))
+        df = funding_moments(df, bars).with_columns(
+            half_life(bars, clip_variance=False, zero_to_window=False).alias(
+                f"funding_half_life_{label}"
+            )
+        )
     return df.drop("_cov", "_var")
 
 
@@ -343,14 +347,37 @@ def funding_moments(df: pl.DataFrame, bars: int) -> pl.DataFrame:
     )
 
 
-def half_life() -> pl.Expr:
-    """Half-life implied by the trailing AR(1) coefficient of the settlement series."""
+def half_life(bars: int, *, clip_variance: bool, zero_to_window: bool) -> pl.Expr:
+    """Half-life implied by the trailing AR(1) coefficient, with two defects switchable.
+
+    Neither flag reproduces a particular past revision; each reproduces a way this estimator
+    can be wrong, so the cell below can assert against each rather than against a fixture
+    written beside the fix.
+    """
     floor, ceiling = CLIP["half_life"]
-    rho = (
-        pl.when(pl.col("_var") > 0)
-        .then(pl.col("_cov") / pl.col("_var"))
-        .clip(-CLIP["ar1"], CLIP["ar1"])
-    )
+    if clip_variance:
+        # A denominator floored rather than guarded: the clip stands in for a positivity test,
+        # so a non-positive variance still divides and still yields a value rather than a null.
+        rho = (pl.col("_cov") / pl.col("_var").clip(lower_bound=EPS)).clip(
+            -CLIP["ar1"], CLIP["ar1"]
+        )
+    else:
+        rho = (
+            pl.when(pl.col("_var") > 0)
+            .then(pl.col("_cov") / pl.col("_var"))
+            .clip(-CLIP["ar1"], CLIP["ar1"])
+        )
+    if zero_to_window:
+        # A near-zero coefficient routed to the window length, with the inner log clip that
+        # kind of branch travels with.
+        return (
+            pl.when(rho.is_null())
+            .then(None)
+            .when(rho.abs() > 1 / bars)
+            .then(-np.log(2) / rho.abs().log().clip(lower_bound=-10))
+            .otherwise(pl.lit(float(bars)))
+            .clip(floor, ceiling)
+        )
     return (
         pl.when(rho.is_null())
         .then(None)
@@ -378,6 +405,44 @@ print(f"denominator floor EPS:                        {EPS:.0e}")
 print(f"median trailing variance of the settled rate: {_estimable.median():.2e}")
 print(f"share of estimable rows below that floor:     {(_estimable < EPS).mean():.2%}")
 print(f"share the positivity test rejects instead:    {(_estimable <= 0).mean():.2%}")
+
+
+# %% [markdown]
+# Neither branch is pinned by anything else in the notebook. The warmup audit and the seal both
+# pass with the denominator floored again, or with a near-zero coefficient routed to the window
+# length, so neither of them would notice the estimator changing underneath. A separate test file
+# could only re-implement the expression, since the expression lives in this cell, and would then
+# agree with whatever it was written beside.
+#
+# So both wrong versions stay reachable, as flags on the estimator, and the column the notebook
+# emits is asserted against each of them over the whole panel. This is worth copying whenever a
+# statistic is defined inside the notebook that uses it: a switch that reproduces the failure is a
+# cheaper oracle than a fixture, and it stays true when the data changes. Each alternative is
+# asserted separately, because a check that catches the two together does not say which one it
+# caught.
+
+# %%
+_sorted = panel.sort(["symbol", "timestamp"])
+# `now` is read out of `carry_features` rather than recomputed here. Recomputing it with the flags
+# spelled out would make this cell agree with itself and pass however `carry_features` was edited.
+_v = funding_moments(_sorted, _bars).select(
+    carry_features(_sorted)["funding_half_life_14d"].alias("now"),
+    half_life(_bars, clip_variance=True, zero_to_window=False).alias("eps_clipped"),
+    half_life(_bars, clip_variance=True, zero_to_window=True).alias("both_defects"),
+    ((pl.col("_var") > 0) & (pl.col("_var") < EPS)).alias("thin"),
+)
+_thin = _v.filter(pl.col("thin"))
+_differs = (_thin["now"] - _thin["eps_clipped"]).abs() > 1e-9
+# A warmup row has no coefficient to revert, so it cannot reach the window length by that branch.
+# The share is taken over rows that have a coefficient, or the warmup would satisfy the check alone.
+_estimated = _v.filter(pl.col("both_defects").is_not_null())
+_at_window = (_estimated["both_defects"] == float(_bars)).mean()
+assert (_v["now"] == float(_bars)).sum() == 0, "a reverted coefficient reports the window length"
+assert _differs.mean() > 0.5, "the variance is being clipped: thin rows agree with the EPS oracle"
+assert _at_window > 0.01, "no row reaches the window length carrying both defects"
+print(f"variance positive but below the shared floor on {_v['thin'].mean():.2%} of rows")
+print(f"  of those, {_differs.mean():.2%} would move if the denominator were floored there")
+print(f"at the window length, of rows with a coefficient: {_at_window:.2%} with both, 0 now")
 
 
 # %% [markdown]
