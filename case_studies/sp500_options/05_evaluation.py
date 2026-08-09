@@ -80,7 +80,11 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, compute_ic_uncertainty
 from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 
-from case_studies.utils.feature_engineering import assign_families, families_from_config
+from case_studies.utils.feature_engineering import (
+    assign_families,
+    families_from_config,
+    quantile_profile,
+)
 from utils import style
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.paths import get_case_study_dir
@@ -476,7 +480,10 @@ family_register = (
         pl.col("observed").max().round(3).alias("most observed"),
         pl.col("feature").sort().str.join(", ").alias("columns"),
     )
-    .sort("candidates", descending=True)
+    # Families holding the same number of candidates would otherwise be ordered by
+    # whatever the grouping emitted, which differs between runs, so the table printed
+    # here would not be the one a reader re-running the notebook sees.
+    .sort(["candidates", "family"], descending=[True, False])
 )
 with pl.Config(fmt_str_lengths=400, tbl_width_chars=220):
     display(family_register)
@@ -837,12 +844,16 @@ fig.show()
 # sign change and not enough to support a quartile view across periods, which is why the
 # per-period values are drawn rather than summarised.
 #
-# `sign_consistency` records the share of those periods in which the candidate's average
-# is **positive**. It is one of the two routes to promotion in Section 7 and its meaning
-# is worth reading literally: a candidate that ranks names inversely - low value, high
-# straddle return - scores zero on it in every period, however reliably it does so. The
-# ledger column carries the rule as written, and the figure below shows the per-period
-# averages, from which a reader can see agreement in either direction.
+# Direction agreement records the share of those periods in which the candidate points the
+# same way as it does over the window as a whole. A candidate that ranks names inversely -
+# low value, high straddle return - is as usable as one that ranks them directly, since a
+# ranking is read in whichever direction it works, so what matters is whether the direction
+# holds from period to period and not which direction it is. It is one of the two routes to
+# promotion in Section 7, and the figure below shows the per-period averages behind it.
+#
+# The weakest and strongest periods written to the ledger follow the same rule: the weakest
+# is the period furthest against the candidate's own direction, which for an inverse
+# candidate is its algebraic maximum rather than its minimum.
 
 # %%
 fold_stats = {}
@@ -857,19 +868,28 @@ for feat in ic_results:
             fold_ics[int(split["fold"])] = float(fold_ic["ic"].mean())
 
     if fold_ics:
-        sign_consistency = sum(1 for ic in fold_ics.values() if ic > 0) / len(fold_ics)
+        # Everything below is measured against the candidate's own direction, taken from
+        # its average over the whole window, rather than against "positive". The promotion
+        # rule this feeds already accepts either direction on effect size, since it tests
+        # the absolute average; counting only positive periods held a reliably inverse
+        # candidate to a test it cannot pass however reliable it is. So the weakest period
+        # is the one furthest against the candidate's own direction, which for an inverse
+        # candidate is its algebraic maximum rather than its minimum.
+        values = list(fold_ics.values())
+        direction = 1.0 if (ic_results[feat]["mean_ic"] or 0.0) >= 0 else -1.0
+        signed = [ic * direction for ic in values]
         fold_stats[feat] = {
             "n_folds": len(fold_ics),
             "fold_ics": fold_ics,
-            "sign_consistency": sign_consistency,
-            "worst_fold_ic": min(fold_ics.values()),
-            "best_fold_ic": max(fold_ics.values()),
-            "median_fold_ic": float(np.median(list(fold_ics.values()))),
+            "sign_consistency": sum(1 for s in signed if s > 0) / len(values),
+            "worst_fold_ic": values[int(np.argmin(signed))],
+            "best_fold_ic": values[int(np.argmax(signed))],
+            "median_fold_ic": float(np.median(values)),
         }
 
 n_consistent = sum(1 for s in fold_stats.values() if s["sign_consistency"] >= SIGN_CONSISTENCY_MIN)
 print(
-    f"{n_consistent} of {len(fold_stats)} candidates are positive in at least "
+    f"{n_consistent} of {len(fold_stats)} candidates hold one direction in at least "
     f"{SIGN_CONSISTENCY_MIN:.0%} of the validation periods"
 )
 
@@ -1243,8 +1263,14 @@ fig.show()
 # groups. Within the day, because the strategy chooses between names available on the
 # same day; cutting the pooled sample would let one day's distribution set another day's
 # boundaries and would mix movement over time into a diagnostic whose companion
-# measurement is purely across names. Then average the outcome inside each group and
-# score how close the resulting five averages are to a straight climb or fall.
+# measurement is purely across names.
+#
+# Then average the outcome inside each group on that day, average those daily figures
+# across days, and score how close the resulting five averages are to a straight climb or
+# fall. Averaging every name-day in a group in one pass instead would weight the profile
+# by how many names happened to be quoted, so the widest days would decide the shape -
+# and the strategy trades a fixed handful of names each day rather than a share of the
+# cross-section. A day enters here on the same terms it enters the correlation on.
 
 # %%
 N_QUANTILES = 5
@@ -1258,25 +1284,18 @@ monotonicity_scores = {}
 quantile_spreads = {}
 
 for feat in top_features_for_shape:
-    valid = eval_panel.select([DATE_COL, feat, primary_label_col]).drop_nulls()
-    if len(valid) < N_QUANTILES * 20:
+    profile = quantile_profile(
+        eval_panel,
+        feat,
+        primary_label_col,
+        date_col=DATE_COL,
+        n_quantiles=N_QUANTILES,
+        min_cross_section=MIN_CROSS_SECTION,
+    )
+    if profile is None:
         continue
-
-    valid = valid.with_columns(
-        ((pl.col(feat).rank("average").over(DATE_COL) - 1) * N_QUANTILES / pl.len().over(DATE_COL))
-        .floor()
-        .clip(0, N_QUANTILES - 1)
-        .cast(pl.Int8)
-        .alias("quantile_id")
-    ).with_columns((pl.lit("Q") + (pl.col("quantile_id") + 1).cast(pl.String)).alias("quantile"))
-
-    q_means = valid.group_by("quantile").agg(pl.col(primary_label_col).mean()).sort("quantile")
-    means = q_means[primary_label_col].to_list()
-    spread = means[-1] - means[0]
-    quantile_spreads[feat] = {"q_means": means, "spread": spread}
-
-    mono_corr, _ = spearmanr(range(len(means)), means)
-    monotonicity_scores[feat] = float(mono_corr)
+    quantile_spreads[feat] = {"q_means": profile.means, "spread": profile.spread}
+    monotonicity_scores[feat] = profile.monotonicity
 
 MONOTONE_MIN = 0.8  # how close to a straight climb or fall the five averages must sit
 
