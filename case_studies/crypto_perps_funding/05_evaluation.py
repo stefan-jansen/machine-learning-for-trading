@@ -69,7 +69,11 @@ from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats
 from scipy.stats import norm, spearmanr
 
-from case_studies.utils.feature_engineering import assign_families, families_from_config
+from case_studies.utils.feature_engineering import (
+    assign_families,
+    families_from_config,
+    quantile_profile,
+)
 from utils.cv_splits import load_evaluation_config
 from utils.modeling import load_modeling_dataset
 from utils.paths import get_case_study_dir
@@ -665,15 +669,17 @@ show_with_alt(
 # section 4, so the profile and the score are built on one set of settlements rather than two that
 # nearly agree. The second is a settlement offering fewer distinct values than there are groups,
 # which cannot be split five ways at all. A feature taking only two values, such as the fee tier,
-# is in that position at every settlement: most of its group boundaries land inside a tie, where
-# the split reports the order the rows happen to sit in and not the feature. Such a feature gets
-# no profile and no `monotonicity` value.
+# is in that position at every settlement: contracts sharing a value share a rank, so they land in
+# one group together and the five groups collapse to two. Such a feature gets no profile and no
+# `monotonicity` value.
 #
-# Within a group the returns are averaged over every contract-settlement in it, which is the
-# convention the ledger's `monotonicity` column carries across all nine case studies. A settlement
-# quoting nineteen contracts therefore counts for more than one quoting ten, where the score
-# weights every settlement alike. The two answer the same question on the same sample and weight
-# it differently, and the group profile is read as a shape rather than as a return.
+# The return of a group is averaged twice, first over the contracts in it at one settlement and
+# then over settlements, so a settlement quoting nineteen contracts counts once and so does one
+# quoting ten. That is what a book rebalanced at every settlement earns, and it is the unit the
+# score alongside is already built on, so the two weigh the sample the same way. Averaging every
+# contract-settlement in one pass instead would let the widest settlements decide the profile,
+# and it would do so without any sign of having done it: the five bars still appear and still
+# carry a `monotonicity` value.
 #
 # Both the average and the median of each group are drawn. The average is what a book holding
 # every contract in the group earns; the median is where the typical contract ends up. Eight-hour
@@ -690,35 +696,6 @@ show_with_alt(
 FEATURES_SHAPED = 6
 
 
-def quantile_profile(feature: str) -> tuple[pl.DataFrame, int, int]:
-    """Average and median label by within-settlement group, and the settlements used."""
-    valid = eval_panel.select("timestamp", feature, mds.label_col).drop_nulls()
-    splittable = valid.filter(
-        (pl.len().over("timestamp") >= MIN_CROSS_SECTION)
-        & (pl.col(feature).n_unique().over("timestamp") >= N_QUANTILES)
-    )
-    ranked = splittable.with_columns(
-        (
-            (pl.col(feature).rank(method="ordinal").over("timestamp") - 1)
-            * N_QUANTILES
-            / pl.len().over("timestamp")
-        )
-        .floor()
-        .clip(0, N_QUANTILES - 1)
-        .cast(pl.Int8)
-        .alias("quantile")
-    )
-    profile = (
-        ranked.group_by("quantile")
-        .agg(
-            pl.col(mds.label_col).mean().alias("mean"),
-            pl.col(mds.label_col).median().alias("median"),
-        )
-        .sort("quantile")
-    )
-    return profile, splittable["timestamp"].n_unique(), valid["timestamp"].n_unique()
-
-
 shape_features: list[str] = []
 quantile_profiles = {}
 monotonicity = {}
@@ -730,18 +707,24 @@ for candidate in eval_summary.filter(pl.col("fdr_sig"))["feature"].to_list():
         for chosen in shape_features
     ):
         continue
-    profile, used, available = quantile_profile(candidate)
-    if profile.height < N_QUANTILES:
+    profile = quantile_profile(
+        eval_panel,
+        candidate,
+        mds.label_col,
+        date_col="timestamp",
+        n_quantiles=N_QUANTILES,
+        min_cross_section=MIN_CROSS_SECTION,
+    )
+    if profile is None:
         too_coarse.append(candidate)
         continue
-    means = profile["mean"].to_list()
     shape_features.append(candidate)
     quantile_profiles[candidate] = {
-        "mean": means,
-        "median": profile["median"].to_list(),
-        "settlements": (used, available),
+        "mean": profile.means,
+        "median": profile.medians,
+        "settlements": (profile.periods_used, profile.periods_available),
     }
-    monotonicity[candidate] = float(spearmanr(range(len(means)), means).statistic)
+    monotonicity[candidate] = profile.monotonicity
     if len(shape_features) == FEATURES_SHAPED:
         break
 
