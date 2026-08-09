@@ -20,6 +20,7 @@ from __future__ import annotations
 import numpy as np
 from hmmlearn.hmm import GaussianHMM
 from sklearn.cluster import KMeans
+from threadpoolctl import threadpool_limits
 
 __all__ = [
     "filtered_state_probs",
@@ -153,9 +154,17 @@ def fit_hmm_kmeans_init(
     freedom and returns NaN, which the ridge does not repair and ``fit`` does not survive
     - so it starts from the covariance of the whole sample instead.
 
-    This is not a reproducible fit on its own. ``KMeans`` reduces its Lloyd iterations in
-    parallel, so the partition can differ run to run even at a fixed seed; pinning that
-    down is the caller's business (ml4t/agent-workspace#328).
+    The fit runs inside ``threadpool_limits(1)``, and without it a fixed seed does not give
+    a fixed model. Floating-point addition is not associative, so a parallel reduction sums
+    in whatever order the threads finish, and both the k-means partition and the E-step
+    likelihoods inherit that. Measured on this function: five thread counts gave five
+    different log-likelihoods (``-12263.024967575566`` at one thread through
+    ``-12263.024967576186`` at the ambient count) and five different transition matrices.
+    The difference is at the fifteenth digit, but EM amplifies it - the etfs, fx_pairs and
+    crypto_perps_funding stage-04 artifacts each hashed differently run to run because of
+    it, which is a defect in the artifact rather than a rounding curiosity, since the digest
+    is what says the notebook reproduces. Pinning the pool costs nothing measurable here:
+    these fits are seconds on windows of a few thousand bars.
 
     Parameters
     ----------
@@ -168,23 +177,24 @@ def fit_hmm_kmeans_init(
     n_iter
         EM iteration cap.
     """
-    kmeans = KMeans(n_clusters=n_states, random_state=random_state, n_init=10)
-    kmeans.fit(X)
+    with threadpool_limits(1):
+        kmeans = KMeans(n_clusters=n_states, random_state=random_state, n_init=10)
+        kmeans.fit(X)
 
-    model = GaussianHMM(
-        n_components=n_states,
-        covariance_type="full",
-        n_iter=n_iter,
-        random_state=random_state,
-        init_params="st",
-    )
-    model.means_ = kmeans.cluster_centers_
-    ridge = np.eye(X.shape[1]) * 1e-6
-    pooled = np.atleast_2d(np.cov(X.T))
-    model.covars_ = np.array(
-        [_cluster_covariance(X[kmeans.labels_ == k], pooled) + ridge for k in range(n_states)]
-    )
-    model.fit(X)
+        model = GaussianHMM(
+            n_components=n_states,
+            covariance_type="full",
+            n_iter=n_iter,
+            random_state=random_state,
+            init_params="st",
+        )
+        model.means_ = kmeans.cluster_centers_
+        ridge = np.eye(X.shape[1]) * 1e-6
+        pooled = np.atleast_2d(np.cov(X.T))
+        model.covars_ = np.array(
+            [_cluster_covariance(X[kmeans.labels_ == k], pooled) + ridge for k in range(n_states)]
+        )
+        model.fit(X)
     return model
 
 

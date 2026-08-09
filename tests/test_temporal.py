@@ -17,6 +17,7 @@ import warnings
 import numpy as np
 import pytest
 from hmmlearn.hmm import GaussianHMM
+from threadpoolctl import threadpool_limits
 
 from case_studies.utils.temporal import (
     filtered_state_probs,
@@ -223,6 +224,32 @@ def test_cluster_covariance_falls_back_rather_than_returning_nan() -> None:
     np.testing.assert_array_equal(_cluster_covariance(np.array([[1.5]]), pooled), pooled)
     two = np.array([[1.0], [3.0]])
     np.testing.assert_allclose(_cluster_covariance(two, pooled), np.cov(two.T).reshape(1, 1))
+
+
+def test_fit_hmm_kmeans_init_is_the_same_model_at_every_thread_count() -> None:
+    """A fixed seed did not give a fixed model until the fit was pinned to one thread.
+
+    Floating-point addition is not associative, so a parallel reduction sums in whatever
+    order the threads finish. Unpinned, this function returned five different
+    log-likelihoods and five different transition matrices across five thread counts, and
+    EM carried the fifteenth-digit difference into the fitted model. Three stage-04
+    artifacts hashed differently run to run because of it (ml4t/agent-workspace#328).
+
+    Varying the *outer* pool is what makes this a regression test: the limiter inside
+    ``fit_hmm_kmeans_init`` has to override it, so removing that limiter makes the two
+    fits diverge and this assertion fail.
+    """
+    X = _series(n=2000, n_features=2)
+    models = []
+    for outer_threads in (1, 8):
+        with threadpool_limits(outer_threads):
+            models.append(fit_hmm_kmeans_init(X, n_states=2, random_state=42))
+
+    one, eight = models
+    assert one.score(X) == eight.score(X), "log-likelihood moved with the ambient thread count"
+    np.testing.assert_array_equal(one.transmat_, eight.transmat_)
+    np.testing.assert_array_equal(one.means_, eight.means_)
+    np.testing.assert_array_equal(one.covars_, eight.covars_)
 
 
 def test_fit_hmm_kmeans_init_separates_the_two_regimes() -> None:
