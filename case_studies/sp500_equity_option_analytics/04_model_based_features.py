@@ -862,14 +862,18 @@ pl.DataFrame(
 # %% [markdown]
 # ### E.2 Write the artifact
 #
-# The parquet goes out with a digest sidecar beside it, the same way stage 03 writes its matrix: a
-# small JSON file recording a hash of the values, the row count, the key columns, and a hash of
-# everything the values were built from. The hash is over the content rather than the file's
-# bytes, so a re-write in a different row order leaves it alone and any changed value moves it.
-# What that buys is provenance a file name cannot give: a model trained on these values records
-# the hash, and a later run can tell whether the feature it is reading is the feature it trained
-# on. The two inputs recorded here are the share bars the model was estimated on and stage 03's
-# matrix, which supplied the implied volatility the second feature subtracts from.
+# Beside the parquet goes a small JSON file with the same name and a `.digest.json` suffix, the
+# same way stage 03 writes its matrix. What it buys is provenance a file name cannot give: a model
+# trained on these values records the hash, and a later run can tell whether the feature it is
+# reading is the feature it trained on.
+#
+# It holds a hash computed over the values in the file; the number of rows; the columns that
+# identify a row; and a hash of each input the values were built from. The hash is over the content
+# rather than the file's bytes, so a re-write in a different row order leaves it alone and any
+# changed value moves it.
+#
+# The two inputs recorded here are the share bars the model was estimated on and stage 03's matrix,
+# which supplied the implied volatility the second feature subtracts from.
 
 # %%
 record = write_artifact(
