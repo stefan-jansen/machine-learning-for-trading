@@ -1,5 +1,6 @@
 """Equities loaders: market (OHLCV, options, microstructure), fundamentals (SEC filings, XBRL), and positioning (13F)."""
 
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -223,6 +224,67 @@ _QUOTE_OHLCV_AGGS = [
 
 _RESAMPLE_FREQUENCIES = {"5m": "5m", "15m": "15m", "30m": "30m", "1h": "1h", "4h": "4h"}
 
+# NYSE and NASDAQ keep the same US equity session calendar - identical sessions and
+# identical open and close on every one of them - so either name gives the same bound.
+# NYSE is the one `config/setup.yaml` declares for nasdaq100_microstructure.
+_SESSION_CALENDAR = "NYSE"
+
+
+@lru_cache(maxsize=1)
+def _exchange_sessions() -> pl.DataFrame:
+    """One row per trading session: its date, and the exchange's open and close.
+
+    Timestamps in the AlgoSeek archive are naive Eastern, so the bounds are converted
+    to Eastern and stripped of their timezone to compare against them directly.
+    """
+    import pandas_market_calendars as mcal
+
+    schedule = mcal.get_calendar(_SESSION_CALENDAR).schedule(
+        start_date="1990-01-01", end_date="2035-12-31"
+    )
+    eastern = {
+        name: schedule[name].dt.tz_convert("America/New_York").dt.tz_localize(None).to_numpy()
+        for name in ("market_open", "market_close")
+    }
+    return pl.DataFrame(
+        {
+            "session_date": pl.Series(schedule.index.to_numpy()).cast(pl.Date),
+            "session_open": pl.Series(eastern["market_open"], dtype=pl.Datetime("us")),
+            "session_close": pl.Series(eastern["market_close"], dtype=pl.Datetime("us")),
+        }
+    )
+
+
+def _filter_to_exchange_sessions(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """Keep the bars the exchange was open for, session by session.
+
+    A fixed 09:30-16:00 clock bound is wrong on the two sessions a year the exchange
+    closes early: NYSE and NASDAQ close at 13:00 ET the day after Thanksgiving and on
+    Christmas Eve, so the 13:00-16:00 prints on those dates passed as ordinary bars.
+    They are thin - the five narrowest 15-minute cross-sections in the
+    nasdaq100_microstructure development window are all post-close bars on 2020-11-27
+    and 2020-12-24, 40 to 52 symbols against a median of 102 - which is immaterial to a
+    distribution and not immaterial to a rank across the universe or a long-short book
+    that has to fill both legs.
+
+    A date the exchange did not hold a session drops for the same reason.
+    """
+    columns = lf.collect_schema().names()
+    return (
+        lf.with_columns(pl.col("timestamp").dt.date().alias("_session_date"))
+        .join(
+            _exchange_sessions().lazy(),
+            left_on="_session_date",
+            right_on="session_date",
+            how="inner",
+        )
+        .filter(
+            (pl.col("timestamp") >= pl.col("session_open"))
+            & (pl.col("timestamp") < pl.col("session_close"))
+        )
+        .select(columns)
+    )
+
 
 def load_nasdaq100_bars(
     frequency: str = "1m",
@@ -237,9 +299,9 @@ def load_nasdaq100_bars(
 ) -> pl.DataFrame | pl.LazyFrame:
     """Load AlgoSeek NASDAQ-100 bar data.
 
-    Default: minute-frequency trade OHLCV, filtered to regular trading hours
-    (09:30-16:00 ET). Supports resampling to coarser frequencies, optional
-    bid/ask quote OHLCV, and a raw 60-column microstructure mode.
+    Default: minute-frequency trade OHLCV, filtered to the exchange's own session
+    hours. Supports resampling to coarser frequencies, optional bid/ask quote
+    OHLCV, and a raw 60-column microstructure mode.
 
     Args:
         frequency: Bar frequency. ``"1m"`` returns raw minute bars (no
@@ -256,8 +318,11 @@ def load_nasdaq100_bars(
             without projection, regular-hours filtering, or resampling.
             Mutually exclusive with ``frequency != "1m"`` and
             ``include_quotes``.
-        regular_hours: If True (default), filter to 09:30-16:00 ET. Ignored
-            when ``include_microstructure=True``.
+        regular_hours: If True (default), keep only the bars the exchange was
+            open for, bounded by the session open and close the NYSE calendar
+            reports rather than by a fixed 09:30-16:00 clock. The two sessions a
+            year that close at 13:00 ET therefore end at 13:00, and a date with
+            no session drops. Ignored when ``include_microstructure=True``.
         lazy: If True, return a LazyFrame for deferred execution.
         max_symbols: Limit to N random symbols (0 = all). Seed-deterministic.
 
@@ -327,10 +392,7 @@ def load_nasdaq100_bars(
     )
 
     if regular_hours:
-        lf = lf.filter(
-            (pl.col("timestamp").dt.hour() >= 10)
-            | ((pl.col("timestamp").dt.hour() == 9) & (pl.col("timestamp").dt.minute() >= 30))
-        ).filter(pl.col("timestamp").dt.hour() < 16)
+        lf = _filter_to_exchange_sessions(lf)
 
     lf = lf.sort("symbol", "timestamp")
 

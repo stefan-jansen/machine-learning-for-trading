@@ -8,8 +8,6 @@ version is longer than a cell should be.
 
 from __future__ import annotations
 
-import logging
-
 import numpy as np
 import polars as pl
 
@@ -86,15 +84,24 @@ def panel_acf(
     value_col: str,
     max_lags: int,
     min_obs: int = 30,
+    period_col: str | None = None,
 ) -> pl.DataFrame:
     """Within-entity autocorrelation of a panel series, pooled across entities.
 
     A single-series ACF over a stacked panel measures dependence across the
     cross-section wherever one entity's last observation meets the next entity's
-    first. This computes the ACF separately per entity with
-    :func:`ml4t.diagnostic.evaluation.autocorrelation.compute_acf` and returns the
-    cross-entity mean at each lag, with the 10th and 90th percentiles of the
-    per-entity curves and the white-noise band a single entity's sample implies.
+    first. This computes the ACF separately per entity and returns the cross-entity
+    mean at each lag, with the 10th and 90th percentiles of the per-entity curves
+    and two references for reading it.
+
+    The per-entity estimator is the one
+    :func:`ml4t.diagnostic.evaluation.autocorrelation.compute_acf` uses, and
+    ``tests/test_feasibility_helpers.py`` pins the two together on a series with no
+    gaps. It is computed here rather than called because the library's estimator has
+    no gap-aware form: its ``missing="drop"`` closes the gaps and its
+    ``missing="conservative"`` keeps them but shrinks every coefficient by the share
+    of pairs the gaps removed, which on a panel with 20% of periods missing reported
+    0.48 for a first-order autocorrelation of 0.60.
 
     Parameters
     ----------
@@ -108,44 +115,150 @@ def panel_acf(
         observations are skipped.
     min_obs
         Minimum observations an entity needs to contribute a curve.
+    period_col
+        Integer period index, one step per period of the cadence, unique within an
+        entity. Supply it wherever an entity can be missing a period. Each entity's
+        series is then laid out on its own dense period grid and correlated with the
+        gaps in place, so a curve reported at lag *k* pairs observations *k* periods
+        apart. Without it the rows are taken as consecutive, and a pair straddling a
+        missing period is counted at too short a lag. On the ``us_equities_panel``
+        development window that mislabels one pair in ten thousand; on an intraday
+        panel, or a carrier defined on only some periods, it is far higher.
 
     Returns
     -------
     pl.DataFrame
-        Columns ``lag``, ``acf``, ``acf_p10``, ``acf_p90``, ``band``, ``n_entities``.
-    """
-    from ml4t.diagnostic.evaluation.autocorrelation import compute_acf
+        Columns ``lag``, ``acf``, ``acf_p10``, ``acf_p90``, ``band``, ``pooled_se``,
+        ``n_entities``, ``obs_per_entity``, ``n_dropped``.
 
-    logger = logging.getLogger("ml4t.diagnostic.evaluation.autocorrelation")
-    previous_level = logger.level
-    logger.setLevel(logging.WARNING)
-    try:
-        curves: list[np.ndarray] = []
-        lengths: list[int] = []
-        for block in frame.partition_by(entity_col, maintain_order=True):
-            series = block[value_col].drop_nulls().to_numpy()
-            if len(series) < max(min_obs, max_lags + 1):
-                continue
-            curves.append(np.asarray(compute_acf(series, nlags=max_lags).values)[: max_lags + 1])
-            lengths.append(len(series))
-    finally:
-        logger.setLevel(previous_level)
+        ``band`` is ``1.96 / sqrt(T)`` for the mean entity length ``T``: the white
+        noise reference for *one* entity's curve, which is the right reference for a
+        daily panel and useless on an intraday one, where the entity that avoids
+        pooling across session boundaries carries a few dozen observations and the
+        band is drawn wider than the estimate. ``pooled_se`` is the standard error of
+        the plotted quantity itself, the cross-entity mean, and stays usable there.
+        ``obs_per_entity`` is the mean entity length the band is built from.
+
+        ``n_entities`` is counted **per lag**. A sparse entity can have pairs at lag
+        1 and none at lag 12, and it contributes wherever it has them rather than
+        being dropped from the whole curve; where the count moves across lags, the
+        mean at each lag is over a different set and the column says so.
+        ``n_dropped`` counts the entities that contributed at no lag at all, which is
+        what a constant series does - it has no autocorrelation to report.
+    """
+    curves: list[np.ndarray] = []
+    lengths: list[int] = []
+    dropped = 0
+    for block in frame.partition_by(entity_col, maintain_order=True):
+        series = _entity_series(block, value_col=value_col, period_col=period_col)
+        observed = int(np.count_nonzero(~np.isnan(series)))
+        if observed < max(min_obs, max_lags + 1):
+            continue
+        curve = _lag_exact_acf(series, max_lags)
+        # A zero-variance entity has nothing to report at any lag. Pooling it with a
+        # plain mean would propagate its NaN to every lag and draw the figure empty
+        # with nothing raised; one firm in 10,587 did exactly that.
+        if not np.any(np.isfinite(curve[1:])):
+            dropped += 1
+            continue
+        curves.append(curve)
+        lengths.append(observed)
 
     if not curves:
         raise ValueError(f"no {entity_col} carries {min_obs} observations of {value_col}")
 
     stacked = np.vstack(curves)
-    band = 1.96 / np.sqrt(float(np.mean(lengths)))
+    finite = np.isfinite(stacked)
+    obs_per_entity = float(np.mean(lengths))
+
+    def per_lag(reduce) -> np.ndarray:
+        out = np.full(max_lags + 1, np.nan)
+        for lag in range(max_lags + 1):
+            column = stacked[finite[:, lag], lag]
+            if column.size:
+                out[lag] = reduce(column)
+        return out
+
     return pl.DataFrame(
         {
             "lag": np.arange(max_lags + 1),
-            "acf": stacked.mean(axis=0),
-            "acf_p10": np.percentile(stacked, 10, axis=0),
-            "acf_p90": np.percentile(stacked, 90, axis=0),
-            "band": np.full(max_lags + 1, band),
-            "n_entities": np.full(max_lags + 1, len(curves)),
+            "acf": per_lag(np.mean),
+            "acf_p10": per_lag(lambda c: np.percentile(c, 10)),
+            "acf_p90": per_lag(lambda c: np.percentile(c, 90)),
+            "band": np.full(max_lags + 1, 1.96 / np.sqrt(obs_per_entity)),
+            "pooled_se": per_lag(
+                lambda c: c.std(ddof=1) / np.sqrt(c.size) if c.size > 1 else np.nan
+            ),
+            "n_entities": finite.sum(axis=0),
+            "obs_per_entity": np.full(max_lags + 1, obs_per_entity),
+            "n_dropped": np.full(max_lags + 1, dropped),
         }
     )
+
+
+def _lag_exact_acf(series: np.ndarray, max_lags: int) -> np.ndarray:
+    """Autocorrelation of one series, pairing observations by position, not by row.
+
+    ``series`` is laid out one element per period, NaN where the entity has none.
+    At each lag the sum runs over the pairs that exist and is divided by how many
+    there are, so a gap costs the pairs it straddles and nothing else. The
+    ``(T - lag) / T`` taper and the division by the whole-series variance are what
+    ``statsmodels`` applies, which is what makes this equal
+    :func:`ml4t.diagnostic.evaluation.autocorrelation.compute_acf` on a series with
+    no gaps.
+
+    Returns all-NaN for a constant series, which has no autocorrelation.
+    """
+    observed = ~np.isnan(series)
+    n_observed = int(np.count_nonzero(observed))
+    total = float(len(series))
+    out = np.full(max_lags + 1, np.nan)
+    if n_observed == 0 or total <= max_lags:
+        return out
+
+    centred = np.where(observed, series - series[observed].mean(), 0.0)
+    variance = float(np.dot(centred, centred) / n_observed)
+    if variance <= 0.0:
+        return out
+
+    out[0] = 1.0
+    for lag in range(1, max_lags + 1):
+        pairs = observed[:-lag] & observed[lag:]
+        n_pairs = int(np.count_nonzero(pairs))
+        if n_pairs == 0:
+            continue
+        cross = float(np.dot(centred[:-lag], centred[lag:]))
+        out[lag] = (cross / n_pairs) * ((total - lag) / total) / variance
+    return out
+
+
+def _entity_series(
+    block: pl.DataFrame,
+    *,
+    value_col: str,
+    period_col: str | None,
+) -> np.ndarray:
+    """One entity's values, on its own dense period grid when it has one.
+
+    Without ``period_col`` the rows are taken as consecutive and nulls are dropped,
+    which closes the gaps. With it, a missing period stays a hole.
+    """
+    if period_col is None:
+        return block[value_col].drop_nulls().to_numpy().astype(float)
+
+    periods = block[period_col].to_numpy().astype(np.int64)
+    values = block[value_col].cast(pl.Float64).to_numpy()
+    order = np.argsort(periods, kind="mergesort")
+    periods, values = periods[order], values[order]
+
+    grid = np.full(int(periods[-1] - periods[0]) + 1, np.nan)
+    grid[periods - periods[0]] = values
+    # Trim to the observed span: a leading or trailing hole carries no pair, and
+    # leaving it in would lengthen T and taper every coefficient for nothing.
+    observed = np.flatnonzero(~np.isnan(grid))
+    if observed.size == 0:
+        return np.empty(0)
+    return grid[observed[0] : observed[-1] + 1]
 
 
 def cross_sectional_persistence(
