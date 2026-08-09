@@ -86,7 +86,6 @@ import polars as pl
 import yaml
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, compute_ic_uncertainty
-from ml4t.diagnostic.signal import monotonicity_score, quantize_factor
 from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 from scipy.stats import t as student_t
@@ -96,6 +95,7 @@ from case_studies.utils.cv_window import modeling_fold_boundaries
 from case_studies.utils.feature_engineering import (
     assign_families,
     families_from_config,
+    quantile_profile,
     register_frame,
 )
 from utils.cv_splits import load_evaluation_config
@@ -1183,14 +1183,21 @@ fig.show()
 #
 # **The groups are formed inside each session, not over the pooled sample.** On
 # every session the names quoted that session are sorted on the feature and split
-# into five equal groups, and the returns are averaged within group across
-# sessions. Doing it the other way - one set of cut points over the whole
-# development window - would let a session in which the whole market's implied
-# volatility was high place all its names in the top group, so the profile would
-# be mixing "high for this name relative to its peers today" with "a high-
+# into five equal groups. Doing it the other way - one set of cut points over the
+# whole development window - would let a session in which the whole market's
+# implied volatility was high place all its names in the top group, so the profile
+# would be mixing "high for this name relative to its peers today" with "a high-
 # volatility period", while the correlation it sits beside is purely
 # within-session. The two diagnostics would then be answering different questions
 # while appearing to corroborate each other.
+#
+# **The average is taken twice, and the order matters.** First across the names in
+# a group on one session, then across sessions, so a session quoting four hundred
+# names counts exactly as much as one quoting forty. Averaging every name-session
+# in a group in one pass instead weights the profile by how wide the cross-section
+# happened to be, which is neither what a book rebalanced each session earns nor
+# what the correlation beside it measures. A session enters here on the same terms
+# it enters the correlation on, so the two describe one set of sessions.
 
 # %%
 top_features_for_shape = eval_summary.filter(pl.col("fdr_sig").fill_null(False))[
@@ -1203,19 +1210,18 @@ monotonicity_scores = {}
 quantile_spreads = {}
 
 for feat in top_features_for_shape:
-    valid = eval_panel.select([DATE_COL, feat, label_col]).drop_nulls()
-    if len(valid) < N_QUANTILES * MIN_CROSS_SECTION:
-        continue
-
-    binned = quantize_factor(
-        valid, n_quantiles=N_QUANTILES, factor_col=feat, date_col=DATE_COL
-    ).drop_nulls(subset=["quantile"])
-    q_means = binned.group_by("quantile").agg(pl.col(label_col).mean()).sort("quantile")
-    means = q_means[label_col].to_list()
-    quantile_spreads[feat] = {"q_means": means, "spread": means[-1] - means[0]}
-    monotonicity_scores[feat] = monotonicity_score(
-        dict(zip(q_means["quantile"].to_list(), means, strict=True))
+    profile = quantile_profile(
+        eval_panel,
+        feat,
+        label_col,
+        date_col=DATE_COL,
+        n_quantiles=N_QUANTILES,
+        min_cross_section=MIN_CROSS_SECTION,
     )
+    if profile is None or profile.periods_used < MIN_SESSIONS_FOR_INFERENCE:
+        continue
+    quantile_spreads[feat] = {"q_means": profile.means, "spread": profile.spread}
+    monotonicity_scores[feat] = profile.monotonicity
 
 print(f"Quantile profile built for {len(quantile_spreads)} features.")
 
