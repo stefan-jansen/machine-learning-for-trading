@@ -6,6 +6,14 @@ Pins:
   helper exists for still happens on an already-dense frame.
 - plot_persistence: the left panel is the wider of the two, and the right panel's x-axis
   label is drawn inside the figure rather than cut off at the edge.
+- plot_persistence: the lag panel keeps its width when the feature names are as long as
+  the case studies actually make them.
+- _bootstrap_median_interval: the ribbon is a function of the values, not of the order
+  they arrive in.
+- _cycle: no two series share a colour and a style, and the palette's two navies are
+  never both solid.
+- plot_redundancy_clusters: the links above the cut are separable from every colour a
+  cluster can be drawn in.
 
 All eight 03_financial_features notebooks draw both, so a regression here is a regression
 in eight rendered pages at once.
@@ -118,3 +126,81 @@ def test_persistence_draws_its_right_hand_axis_label_inside_the_figure(captured)
     extent = label.get_window_extent(fig.canvas.get_renderer())
     assert extent.x1 <= fig.bbox.x1, "the label runs off the right edge and is cut mid-word"
     assert extent.x0 >= fig.bbox.x0
+
+
+LONG_NAMES = [
+    "funding_half_life_14d",
+    "premium_quantile_pos_30d",
+    "premium_vol_ratio_7d_30d",
+    "funding_rate_zscore_72h",
+]
+
+
+def test_persistence_keeps_the_lag_panel_wide_under_long_feature_names(captured) -> None:
+    # `tight_layout` packs each axes together with its decorations. A legend of feature
+    # names centred under the left panel is much wider than that panel, so the column was
+    # sized to the legend and the axes shrank into what was left - measured at 27% of the
+    # figure for the lag panel against 43% with the legend owned by the figure instead.
+    # crypto_perps_funding, whose names are these lengths, reported it as both panels
+    # squeezed into the left half.
+    panel, columns, schedule = _panel(columns=LONG_NAMES)
+    fe.plot_persistence(
+        panel, columns, entity="symbol", max_lag=10, decision_dates=schedule, title="t", alt="a"
+    )
+    (fig,) = captured
+    lag_panel = fig.axes[0].get_position().width
+    assert lag_panel > 0.40, (
+        f"the lag panel holds {lag_panel:.0%} of the figure width; something anchored to "
+        "the axes is being packed with them"
+    )
+
+
+def test_bootstrap_interval_does_not_depend_on_the_order_of_its_values() -> None:
+    # The callers read these out of a `group_by`, whose row order Polars does not
+    # guarantee, and `rng.choice` draws by index. So the same entities in a different
+    # order gave the same seed a different ribbon, and F6 moved on every re-run (#329).
+    values = np.array([0.9, 0.1, 0.55, 0.42, 0.7, 0.33, 0.61, 0.28, 0.84, 0.05, 0.5, 0.47])
+    first = fe._bootstrap_median_interval(values, seed=42)
+    assert first == fe._bootstrap_median_interval(values[::-1], seed=42)
+    assert first == fe._bootstrap_median_interval(
+        np.random.default_rng(7).permutation(values), seed=42
+    )
+
+
+def test_cycle_never_draws_two_series_the_same_way() -> None:
+    # Six hues over four styles is 24 combinations, but the styles turn over every five
+    # so that the palette's two navies never share one - which costs the last few. Twenty
+    # is well past what any coverage figure in the corpus needs; the most is eleven.
+    assert len(set(fe._cycle(20))) == 20
+
+
+def test_cycle_separates_the_palettes_two_navies() -> None:
+    # COLOR_CYCLER's sixth entry is `slate`, which its own definition says reads close to
+    # `blue`, the first. They are one line to a reader unless something else parts them.
+    from utils.style import COLORS
+
+    styles = {color: style for color, style in fe._cycle(6)}
+    assert styles[COLORS["blue"]] != styles[COLORS["slate"]]
+
+
+def test_redundancy_clusters_draw_above_the_cut_unlike_any_cluster() -> None:
+
+    from matplotlib.colors import to_rgb
+
+    from utils.style import COLORS
+
+    def distance(a: str, b: str) -> float:
+        return float(np.linalg.norm(np.array(to_rgb(a)) - np.array(to_rgb(b))))
+
+    # Everything below the cut is a cluster and carries meaning; everything above it is
+    # background. The background was `neutral`, #334155, which sits 0.13 away from `slate`
+    # and 0.29 from `blue` - so the links above the cut, a navy cluster and a slate cluster
+    # were one indistinguishable mass, and the structure the figure exists to show was not
+    # visible. The palette is five hues for the same reason: the sixth is that second navy.
+    cluster_colors = [color for color, _ in fe._cycle(5)]
+    assert len(set(cluster_colors)) == 5
+    assert COLORS["slate"] not in cluster_colors
+
+    for color in cluster_colors:
+        gap = distance(COLORS["recede"], color)
+        assert gap > 0.35, f"background {COLORS['recede']} sits {gap:.2f} from cluster {color}"

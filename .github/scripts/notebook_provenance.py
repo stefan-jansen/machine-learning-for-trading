@@ -317,6 +317,70 @@ def stamp_notebook(
     return stamp
 
 
+def stamped_at(ref: str = "HEAD") -> set[str]:
+    """Repo-relative notebooks whose committed version at *ref* carries a stamp.
+
+    One `git grep` over the tree rather than a read per notebook, because the answer
+    is needed for every unstamped file and there are several hundred of them.
+    """
+    result = subprocess.run(
+        ["git", "grep", "-l", f'"{STAMP_KEY}"', ref, "--", "*.ipynb"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    prefix = f"{ref}:"
+    return {line[len(prefix) :] for line in result.stdout.splitlines() if line.startswith(prefix)}
+
+
+def stamp_reference(base_branch: str = "main") -> str:
+    """The commit a stamp must not have disappeared since.
+
+    Not ``HEAD``. Comparing the working tree with ``HEAD`` catches a removal that has
+    not been committed yet and nothing else: once it is committed both sides are
+    unstamped, and the check goes quiet exactly where it is needed, which is CI
+    reading a pushed branch. The fork point from the base branch makes the question
+    "did this branch drop a stamp", and answers it the same way in the pre-commit
+    hook, in CI, and days later.
+
+    Falls back to ``HEAD`` when there is no base branch to fork from - a fresh clone
+    with no remote, or work on ``main`` itself, where the fork point IS ``HEAD``.
+    """
+    for ref in (f"origin/{base_branch}", base_branch):
+        merge_base = subprocess.run(
+            ["git", "merge-base", "HEAD", ref],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if merge_base.returncode == 0 and merge_base.stdout.strip():
+            return merge_base.stdout.strip()
+    return "HEAD"
+
+
+def destamped(ref: str | None = None) -> list[str]:
+    """Notebooks stamped at *ref* and unstamped now.
+
+    The gate says nothing about a notebook with no stamp, which is deliberate - the
+    corpus is being stamped as notebooks are re-run, and failing the ones that have
+    not been yet would fail hundreds of teaching notebooks that are not the subject.
+    The hole that leaves is that DROPPING a stamp turns the check off for that file
+    instead of failing it, which is the same shape as a review that passes because
+    it never looked. A stamp is only ever added, so a notebook that had one and does
+    not is a regression whatever removed it.
+    """
+    return sorted(
+        rel
+        for rel in stamped_at(ref or stamp_reference())
+        if (REPO_ROOT / rel).exists()
+        and not json.loads((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        .get("metadata", {})
+        .get(STAMP_KEY)
+    )
+
+
 def check_all(strict: bool = False) -> tuple[list[str], list[str], list[str], list[str]]:
     """Return (stale, testmode, contradicted, unverified) repo-relative offenders."""
     stale: list[str] = []
@@ -368,7 +432,12 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
 
 def _cmd_check(args: argparse.Namespace) -> int:
     stale, testmode, contradicted, unverified = check_all(strict=args.strict)
-    fail = bool(stale or testmode or contradicted) or (args.strict and bool(unverified))
+    lost = destamped()
+    fail = bool(stale or testmode or contradicted or lost) or (args.strict and bool(unverified))
+    if lost:
+        print("DE-STAMPED (carried a provenance stamp where this branch forked, and does not now):")
+        for r in lost:
+            print(f"  {r}")
     if stale:
         print(
             "STALE (paired .py changed since the notebook was executed — re-run in the canonical env):"
