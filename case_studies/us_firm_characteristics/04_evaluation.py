@@ -84,6 +84,7 @@ from scipy.spatial.distance import squareform
 from scipy.stats import spearmanr
 
 from case_studies.utils.artifact_digest import read_digest, value_digest, write_artifact
+from case_studies.utils.feature_engineering import assign_families, families_from_config
 from utils.artifact_specs import load_setup_config, resolve_label_buffer, resolve_label_horizon
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.data_quality import validate_modeling_inputs
@@ -259,37 +260,21 @@ print(
 # Before anything is measured, two questions: what the candidate set actually contains, and
 # which of its members are defined well enough to be worth measuring.
 #
-# The characteristics divide into groups the asset-pricing literature has names for - value,
-# quality, momentum, risk, investment, and size and leverage - plus two groups built in the
-# previous notebook rather than released with the data: averages within a group, and products
-# of two characteristics from different groups. The grouping matters twice below: members of
-# one group tend to be correlated with each other, and a group with many members gets many
-# chances to produce a significant result.
-
+# The groups are declared in `config/setup.yaml::features.families`, the same register
+# `03_financial_features` builds the matrix from, and they are read from there rather than
+# restated here: a second list would drift from the first and neither would then be the
+# answer. Six groups hold the released characteristics -
+# value, quality, investment, momentum, risk, and a residual group for the leverage, turnover
+# and cost-structure measures the five named ones leave out - and the rest hold the columns
+# the previous notebook constructed, split by whether they read annual accounting data,
+# monthly prices, or both. The grouping matters twice below: members of one group are
+# correlated with each other, and a group with many members gets many chances to produce a
+# significant result.
 
 # %%
-def assign_family(feature_name: str) -> str:
-    """Map a characteristic to the group the literature puts it in."""
-    name = feature_name.lower()
-    groups = [
-        # Constructed first: a composite carries its group's name inside its own.
-        (["composite_"], "composite"),
-        (["interaction_"], "interaction"),
-        (["beme", "e2p", "cf2p", "s2p", "d2p", "a2me"], "value"),
-        (["roe", "roa", "prof", "op", "pcm", "pm", "ni", "sga2s", "fc2y", "rna"], "quality"),
-        (["r12_", "r2_1", "r36_", "st_rev", "lt_rev", "rel2high", "suv"], "momentum"),
-        (["beta", "idiovol", "variance", "resid_var", "mktbeta", "spread"], "risk"),
-        (["investment", "dpi2a", "noa", "oa", "ac", "d2a"], "investment"),
-        (["lme", "at", "q", "c", "cf", "lev", "ol", "cto", "ato", "lturnover"], "size_leverage"),
-    ]
-    for prefixes, group in groups:
-        if any(prefix in name for prefix in prefixes):
-            return group
-    return "other"
-
-
-FAMILIES = {feature: assign_family(feature) for feature in CANDIDATES}
-assert "other" not in FAMILIES.values(), "a characteristic no group claims"
+REGISTER = families_from_config(SETUP)
+FAMILIES = assign_families(CANDIDATES, REGISTER, strict=True)
+pl.Config.set_tbl_rows(len(REGISTER))  # the table below has one row per group; show them all
 
 # %% [markdown]
 # Coverage is the share of firm-months on which a characteristic has a value at all. A
@@ -335,11 +320,10 @@ panel_profile
 # previous notebook built rather than what the release shipped, and it is why Section G asks
 # whether a composite says anything its own members had not already said.
 #
-# The panel itself grows over the sample rather than holding a fixed universe, so a
-# correlation taken in 1990 rests on a fraction of the firms one taken in 2015 rests on. That
-# is why every statistic below is one correlation per month averaged over months, rather than
-# one correlation over the pooled rows, which would let the later years outvote the earlier
-# ones.
+# The panel does not hold a fixed universe: firms enter and leave, and the number quoting in a
+# month moves over the sample, as the range printed below shows. That is why every statistic
+# below is one correlation per month averaged over months, rather than one correlation over
+# the pooled rows, which would give the wider months more say than the thin ones.
 
 # %%
 month_sizes = eval_panel.group_by(DATE_COL).len().sort(DATE_COL)
@@ -421,9 +405,12 @@ print(
 # formula assumes each month is an independent draw, and the months are not: whatever makes a
 # characteristic work in one month tends to still be true in the next. **Newey-West** standard
 # errors allow for that by widening the error bar in proportion to how much neighbouring
-# months move together. How many neighbours to allow for is the one choice the method needs,
-# and here it is derived from the label - one month, so consecutive observations share none
-# of their return window - rather than typed in.
+# months move together. How many neighbouring months to allow for is the one choice the
+# method needs, and it is passed the label's horizon rather than a typed lag count. The
+# horizon is a floor: a label spanning h periods makes consecutive observations overlap in
+# h-1 of them, so at least that many have to be allowed for. This label spans one month and
+# overlaps in none, so the floor is zero and the bandwidth is set instead by the library's
+# rule of thumb on the length of the series.
 
 # %%
 ic_stats = {
@@ -446,8 +433,9 @@ summary = pl.DataFrame(
 ).sort(pl.col("ic_mean").abs(), descending=True)
 
 print(
-    f"Newey-West allows for {HAC_LAGS} months of dependence; "
-    f"the largest average correlation in absolute value is {summary['ic_mean'][0]:+.4f} "
+    f"Newey-West bandwidth: {HAC_LAGS} lags, set by the length of the series; "
+    "a non-overlapping one-month label requires none\n"
+    f"Largest average correlation in absolute value: {summary['ic_mean'][0]:+.4f} "
     f"({summary['feature'][0]})"
 )
 
@@ -704,6 +692,14 @@ for feature in ic_stats:
 
 print(f"Group profile built for {len(quantile_profiles)} characteristics")
 
+
+# %%
+def wrap_name(name: str, width: int = 17) -> str:
+    """Break a characteristic's name at its underscores so a panel label fits."""
+    parts = textwrap.wrap(name.replace("_", "_ "), width, break_long_words=False)
+    return "\n".join(parts).replace("_ ", "_")
+
+
 # %%
 shown = [f for f in leading_per_family(summary, 6) if f in quantile_profiles]
 extremes = [v for f in shown for k in ("means", "middles") for v in quantile_profiles[f][k]]
@@ -726,7 +722,7 @@ for ax, feature in zip(axes.flat, shown, strict=False):
     )
     zero_line(ax)
     ax.set_ylim(-y_limit, y_limit)
-    ax.set_title("\n".join(textwrap.wrap(feature, 17)), fontsize=7)
+    ax.set_title(wrap_name(feature), fontsize=7)
 axes.flat[0].legend(frameon=False, fontsize=6, loc="lower left")
 fig.supylabel("Return over the following month", fontsize=9)
 fig.supxlabel("Group the firm falls in that month, lowest to highest", fontsize=9)
@@ -740,19 +736,19 @@ fig.suptitle(
 show_with_alt(
     fig,
     "Six panels, one per characteristic, each with five bars for the average return of each "
-    "group and a line for the middle firm. In four of the six the bars and the line slope in "
-    "opposite directions across the groups.",
+    "group and a line for the middle firm. The two rise together in four panels; in the other "
+    "two the bars and the line slope in opposite directions.",
 )
 
 # %% [markdown]
-# The two series slope in opposite directions in most of these panels, and that is worth
-# more than either alone. It says the extreme groups hold a few firms whose returns are large
-# enough to set the group's average while leaving the typical member of that group where it
-# was. A characteristic whose average climbs while its middle firm falls is one whose payoff
-# sits in a handful of names in the top group, which is a different proposition to hold and
-# to size than one that lifts the whole group.
+# Where the two series slope in opposite directions, the disagreement is worth more than
+# either alone. It says the extreme groups hold a few firms whose returns are large enough to
+# set the group's average while leaving the typical member of that group where it was. A
+# characteristic whose average climbs while its middle firm falls is one whose payoff sits in
+# a handful of names in the top group, which is a different proposition to hold and to size
+# than one that lifts the whole group.
 #
-# In every panel where the two disagree, the direction of the rank correlation reported in
+# In both panels where they disagree, the direction of the rank correlation reported in
 # Section C follows the middle firm rather than the average. A rank statistic counts how many
 # firms are in the right order and cannot be moved by how far the outliers reach, which is
 # why it reads these panels the way it does.
@@ -832,10 +828,10 @@ show_with_alt(
 # absolute value is -0.0613 for Resid_Var, a residual variance measure that ranks firms the
 # other way up: the more idiosyncratic risk a firm carries, the worse it does the following
 # month. Allowing for dependence between months moves almost nothing - 41 characteristics
-# reach the usual threshold assuming independent months and 39 do so under Newey-West, at the
-# 5 months of dependence a one-month label implies - which is what a label whose observations
-# do not overlap looks like. Charging the search for its 57 tests removes one more and leaves
-# 38.
+# reach the usual threshold assuming independent months and 39 do so under Newey-West at the
+# 5-lag bandwidth the length of the series calls for. A label whose observations do not
+# overlap asks for none of its own. Charging the search for its 57 tests removes one more and
+# leaves 38.
 
 # %% [markdown]
 # ## G. Redundancy and families: the same evidence twice
@@ -950,9 +946,10 @@ show_with_alt(
 # both: the choice is made once per cluster, not once per pair.
 #
 # The same grouping supports a coarser reading. Averaging the size of the association within
-# each of the eight groups says where the sorting power sits, and it is a description rather
-# than a test: the group average is not an independent measurement, because members of a
-# group are correlated with each other by construction.
+# each declared group says where the sorting power sits. It is a description and not a test:
+# the members of a group are correlated with each other by construction, so the average is
+# not an independent measurement, and the groups holding one or two constructed columns are
+# an average over that one column.
 
 # %%
 family_strength = (
@@ -964,7 +961,7 @@ family_strength = (
     .sort("mean_abs_ic")
 )
 
-fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
 ax.barh(
     family_strength["family"].to_list(),
     family_strength["mean_abs_ic"].to_list(),
@@ -974,13 +971,14 @@ ax.set_xlabel("Average size of the monthly rank correlation")
 ax.set_ylabel("Group")
 add_message_title(
     ax,
-    "Risk characteristics sort firms harder than accounting ratios",
+    "The strongest and the weakest group are both constructions",
     subtitle="Average across the group's members; not a test of the group",
 )
 show_with_alt(
     fig,
-    "Horizontal bars of the average absolute rank correlation for each of the eight groups, "
-    "with risk highest at about 0.045 and investment lowest at about 0.002.",
+    "Horizontal bars of the average absolute rank correlation for each declared group. The "
+    "top and bottom bars are both groups of constructed columns, with the released groups "
+    "spread between them.",
 )
 
 # %% [markdown]
@@ -1167,14 +1165,18 @@ print(
 #    that count. Adding a candidate after seeing the results changes every p-value in the
 #    table, which is why the candidate set is fixed by the previous notebook.
 #
-# 3. **Average one correlation per period rather than pooling the rows.** Where the panel
-#    grows over the sample, pooling lets the years with the most firms decide the answer. The
-#    same argument sets the group boundaries within each month rather than over the pooled
-#    sample.
+# 3. **Average one correlation per period rather than pooling the rows.** Pooling weights
+#    each period by how many entities it happened to contain, so the answer moves with the
+#    shape of the panel as well as with the signal. The same argument sets the group
+#    boundaries within each month rather than over the pooled sample.
 #
-# 4. **Near-duplicates are one piece of evidence.** Clustering on correlation and keeping the
-#    member with the strongest and steadiest association is what stops a group of three
-#    variance measures counting as three independent findings.
+# 4. **Near-duplicates inflate how much a promoted list appears to hold.** The multiplicity
+#    correction treats every test as separate, which is the conservative choice about false
+#    discoveries and says nothing about how many distinct findings survive: three variance
+#    measures that rank firms identically clear it three times. Clustering on correlation and
+#    naming one member per cluster is what tells a reader how much of the list is repetition.
+#    Nothing above is counted over representatives, so it informs the reader rather than the
+#    rule.
 #
 # **What this evaluation cannot settle.** It measures each characteristic on its own, so it
 # says nothing about one that only works conditional on another, and nothing about what a
