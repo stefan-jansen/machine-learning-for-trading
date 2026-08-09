@@ -757,12 +757,17 @@ register_frame(FAMILIES, feature_cols).select(["family", "columns", "role", "rep
 # until a year of history does, so each family climbs as its own longest window fills and the last
 # of them levels off at the boundary.
 #
-# After it, the gap that stays open is the one Section B measured. The two share-price families
-# run at one, because a row is only in the matrix if the share traded that session. The
-# option-derived families cannot get there: about a fifth of name-sessions carry no readable
-# 30-day at-the-money volatility, and the carry forward covers a short run of misses rather than a
-# long one. Skew and term structure sits lowest, and that is the compounding - a measure taken
-# between two maturities is missing whenever either one is.
+# After it, the gap that stays open needs reading carefully, because the rows with no readable
+# 30-day at-the-money volatility are not in this chart at all - the keep-or-drop removed them
+# before coverage was computed, so every row plotted here has that level. The two share-price
+# families run at one for the same reason: a row is only in the matrix if the share traded.
+#
+# What is left below one is the *other* members of each family. A family's coverage is the average
+# over its columns, so a family loses ground whenever a column that is not the 30-day level is
+# missing: the 7-day and 90-day maturities, which solve on far fewer name-sessions than the 30-day
+# does, and the longer rolling windows, which stay empty until a name has quoted long enough to
+# fill them. Skew and term structure sits lowest because both effects hit it hardest - a measure
+# taken between two maturities is missing whenever either one is.
 
 # %%
 plot_coverage_through_time(
@@ -787,14 +792,19 @@ plot_coverage_through_time(
 # %% [markdown]
 # ### F4. The timing contract
 #
-# What the bars show is the span of history each family reads, and that is what sets where the
-# warmup boundary in F1 falls. Two families read the current session and nothing before it.
+# The bars are the register's declaration, one per family, and a family's declaration is a single
+# bound rather than a per-column statement. For six of the eight it is the longest reach of any
+# member. For the cross-sectional ranks it is not: that family is declared at a year and a
+# one-session delay, while its longest-reaching source is the variance risk premium at 83 sessions
+# and three of its eight sources are share-price columns carrying no delay at all. The
+# declaration overstates on both counts, so nothing leaks and the bar is wider than the family
+# reads. D.2's audit is what holds the emitted columns to a floor, and it is stated per column
+# rather than per family for exactly this reason.
 #
 # The delay is the other half of the contract and it is the half this figure cannot resolve: one
 # session against a lookback of up to a year is thinner than the line that draws the bar, so six
 # of the eight bars appear to touch the decision line when only two of them do. The register
-# printed in Section A is where the delay is legible, and it is what the warmup audit above
-# asserted against.
+# printed in Section A is where the delay is legible.
 
 # %%
 plot_timing_contract(
@@ -887,8 +897,10 @@ plot_cross_sectional_dispersion(
 #
 # Clustering on the distance $1 - |\rho|$ groups features that carry the same ordering, whatever
 # the sign. Above the cut two features are close enough that a linear model cannot separate their
-# contributions. This states the clusters. `05_evaluation` picks one representative per cluster,
-# with a criterion applied fold by fold.
+# contributions. This states the clusters and stops there: which member of a cluster to keep is a
+# question about predictive content, and nothing here has measured any. `05_evaluation` reports
+# the pairs above the same cut beside its own fold-aware screen, and the choice is made by the
+# model notebooks that follow it.
 
 # %%
 CUT = 0.7

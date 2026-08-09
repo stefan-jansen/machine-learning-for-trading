@@ -23,12 +23,16 @@
 # the only thing that decides whether it did is which rows the estimation window contained.
 #
 # The model is a **GJR-GARCH(1,1)**, an equation for how a share's variance evolves from one
-# session to the next. What it gives back is a **conditional volatility**: an estimate, made with
-# what was known at the close of one session, of how much the share will move over the next one.
-# That is a forward-looking quantity, and it is why this notebook exists. Stage 03's variance risk
-# premium subtracts a *backward*-looking realized volatility from the option market's implied
-# volatility, so it compares a forecast against a memory. Replacing the second half with a
-# forecast makes both halves forecasts.
+# session to the next. What it gives back is a **conditional volatility**: how much the share is
+# expected to move over a session, worked out from what was known at the close of the session
+# before it. Following the usual convention, the value is stamped on the session it describes, so
+# `garch_cond_vol` at date $t$ is the forecast *for* $t$ formed at the close of $t-1$ - a
+# prediction rather than a measurement, and one that reads nothing from $t$ itself.
+#
+# That is the difference this notebook is built on. Stage 03's variance risk premium subtracts a
+# *realized* volatility - an average of the last twenty sessions - from the option market's
+# implied volatility, so it compares a forecast against a memory. Replacing the second half with
+# a forecast makes both halves forecasts.
 #
 # ## Learning objectives
 #
@@ -299,6 +303,13 @@ fig.show()
 #
 # $$\sigma^2_t = \omega + (\alpha + \gamma \mathbb{1}_{r_{t-1}<0}) r^2_{t-1} + \beta \sigma^2_{t-1}$$
 #
+# Read the subscripts: $\sigma^2_t$ is built from $r_{t-1}$ and $\sigma^2_{t-1}$ and from nothing
+# dated $t$ or later, which is what makes it a forecast of session $t$ rather than a description
+# of it. Every column below inherits that. `garch_ivrv_spread` at $t$ compares the option market's
+# implied volatility with a forecast of $t$ made before $t$ opened, and `garch_vol_surprise` at
+# $t$ divides what the session actually did by what had been predicted for it - which is only a
+# surprise because the denominator was fixed in advance.
+#
 # The $\gamma$ term is what the GJR variant adds to a plain GARCH: it lets a *negative* return
 # raise the variance by more than a positive return of the same size. That asymmetry is well
 # documented for equities and it is the reason the variant is worth the extra parameter here
@@ -425,25 +436,48 @@ def fit_and_filter(returns: pd.Series, row: dict) -> tuple[pd.Series, dict] | No
 
 
 # %% [markdown]
-# The securities and their returns. A row is emitted for a security in a given fold when the
-# estimation window holds enough sessions and the optimizer returns; the count of those is
-# reported below, because a security missing from one fold's rows is a security a downstream
-# model has no conditional volatility for on those dates, and that is worth knowing before it
-# turns up as a gap.
+# The securities and their returns.
+#
+# **The series a model is estimated on is one security's, not one ticker's.** A ticker is
+# reassigned after a merger or a spin-off and `adj_factor` restarts with the new security, so a
+# return taken across the changeover divides one company's price by another's - and a single such
+# session is a return large enough to move every parameter estimated from a window containing it.
+# `03_financial_features` takes every one of its windows inside `sec_id` for the same reason, and
+# this notebook does the same. The output is written on the ticker, because that is the key the
+# downstream join uses, so the security is what the model is estimated inside and the ticker is
+# what the result is stamped with.
+#
+# A row is emitted for a security in a given fold when the estimation window holds enough sessions
+# and the optimizer returns; the count of those is reported below, because a security missing from
+# one fold's rows is a security a downstream model has no conditional volatility for on those
+# dates, and that is worth knowing before it turns up as a gap.
+#
+# The swap from security to ticker happens on an inner join against the bar panel, so every
+# emitted value is named by the ticker its security actually traded under on that session. The
+# row-count assertion beside it is what would catch a filtered value with no bar to name it,
+# which would be a value nothing downstream could reach.
 
 # %%
-bars = load_sp500_daily_bars(start_date=START_DATE, end_date=END_DATE).sort(["symbol", "timestamp"])
+ENTITY = "sec_id"
+bars = load_sp500_daily_bars(start_date=START_DATE, end_date=END_DATE).sort([ENTITY, "timestamp"])
 bars = bars.with_columns((pl.col("close") * pl.col("adj_factor")).alias("adj_close"))
-symbols = bars["symbol"].unique().sort().to_list()
+# One security trades under one ticker on one session. Without that, `sec_id` does not identify a
+# price series and every window below would be taken across companies - which is the failure this
+# whole section is arranged to avoid, so it is checked rather than assumed.
+assert bars.select([ENTITY, "timestamp"]).is_duplicated().sum() == 0, (
+    "a security carries more than one ticker on the same session, so sec_id does not identify a "
+    "price series in this data"
+)
+securities = bars[ENTITY].unique().sort().to_list()
 if MAX_SYMBOLS is not None:
-    symbols = symbols[:MAX_SYMBOLS]
-    print(f"Reduced run: {MAX_SYMBOLS} of {bars['symbol'].n_unique()} securities")
+    securities = securities[:MAX_SYMBOLS]
+    print(f"Reduced run: {MAX_SYMBOLS} of {bars[ENTITY].n_unique()} securities")
 
-log_returns: dict[str, pd.Series] = {}
+log_returns: dict[int, pd.Series] = {}
 for key, frame in (
-    bars.select(["symbol", "timestamp", "adj_close"])
-    .filter(pl.col("symbol").is_in(symbols))
-    .partition_by("symbol", as_dict=True, maintain_order=True)
+    bars.select([ENTITY, "timestamp", "adj_close"])
+    .filter(pl.col(ENTITY).is_in(securities))
+    .partition_by(ENTITY, as_dict=True, maintain_order=True)
     .items()
 ):
     series = (
@@ -457,7 +491,11 @@ for key, frame in (
     if not series.empty:
         log_returns[key[0]] = series
 
-print(f"{len(log_returns)} securities, {bars['timestamp'].min()} to {bars['timestamp'].max()}")
+TICKER_OF = bars.select([ENTITY, "timestamp", "symbol"])
+print(
+    f"{len(log_returns)} securities under {bars['symbol'].n_unique()} tickers, "
+    f"{bars['timestamp'].min()} to {bars['timestamp'].max()}"
+)
 
 # %% [markdown]
 # ### C.2 What the convenience method would have cost
@@ -479,8 +517,8 @@ print(f"{len(log_returns)} securities, {bars['timestamp'].min()} to {bars['times
 BOUNDS_SAMPLE = 40
 first_split = splits[0]
 bounds_effect = []
-for symbol in symbols[:BOUNDS_SAMPLE]:
-    returns = log_returns.get(symbol)
+for security in securities[:BOUNDS_SAMPLE]:
+    returns = log_returns.get(security)
     if returns is None:
         continue
     fit_slice = returns[
@@ -534,8 +572,8 @@ parameter_rows: list[dict] = []
 attempted = fitted = 0
 
 for row in splits:
-    for symbol in symbols:
-        returns = log_returns.get(symbol)
+    for security in securities:
+        returns = log_returns.get(security)
         if returns is None or returns.empty:
             continue
         attempted += 1
@@ -547,15 +585,22 @@ for row in splits:
         filtered_parts.append(
             pl.DataFrame({"timestamp": path.index.values, "garch_cond_vol": path.to_numpy()})
             .with_columns(pl.col("timestamp").cast(pl.Date))
-            .with_columns(pl.lit(symbol).alias("symbol"), pl.lit(row["fold"]).alias("fold"))
+            .with_columns(pl.lit(security).alias(ENTITY), pl.lit(row["fold"]).alias("fold"))
         )
-        parameter_rows.append({"symbol": symbol, "fold": row["fold"], **params})
+        parameter_rows.append({ENTITY: security, "fold": row["fold"], **params})
     print(f"  fold {row['fold']}: {len(parameter_rows)} cumulative fits")
 
-garch = pl.concat(filtered_parts).sort(["symbol", "timestamp"])
+_filtered = pl.concat(filtered_parts)
+garch = _filtered.join(TICKER_OF, on=[ENTITY, "timestamp"], how="inner").select(
+    ["timestamp", "symbol", ENTITY, "fold", "garch_cond_vol"]
+)
+assert garch.height == _filtered.height, "a filtered value had no bar to name it"
 parameters = pl.DataFrame(parameter_rows)
 print(f"{fitted:,} of {attempted:,} security-folds produced a fit ({fitted / attempted:.1%})")
-print(f"{garch.height:,} filtered values over {garch['symbol'].n_unique()} securities")
+print(
+    f"{garch.height:,} filtered values over {garch[ENTITY].n_unique()} securities, "
+    f"written under {garch['symbol'].n_unique()} tickers"
+)
 
 # %% [markdown]
 # ## D. Fit stability across folds
@@ -653,10 +698,10 @@ stability
 
 # %% [markdown] tags=["results"]
 # The parameters move, and they move enough that re-estimating at each boundary is doing real
-# work. Median persistence runs **0.943**, **0.873** and **0.966** across the three windows in the
+# work. Median persistence runs **0.941**, **0.874** and **0.967** across the three windows in the
 # order they run - a spread of **0.09** between windows that overlap by a year, and the highest
 # value on the window containing 2020. Its parts move more than the sum does: median $\alpha$ goes
-# **0.002**, **0.000**, **0.061** and median $\gamma$ **0.052**, **0.096**, **0.143**, so on the
+# **0.002**, **0.000**, **0.058** and median $\gamma$ **0.051**, **0.096**, **0.143**, so on the
 # earlier windows almost the whole response to a shock is carried by the asymmetric term and only
 # a *down* session raises the estimated variance, while on the window containing 2020 the
 # symmetric term takes a share of it too. A downstream model reading this feature is reading a
@@ -747,24 +792,25 @@ fig.show()
 #   more than the model had any reason to expect.
 #
 # The return in `garch_vol_surprise` is the same adjusted log return the model was estimated on,
-# annualized to the same units as the denominator so the ratio is a comparison of like with like.
+# taken inside the security for the reason C.1 gives and annualized to the denominator's units so
+# the ratio compares like with like.
 
 # %%
 returns_panel = (
-    bars.select(["symbol", "timestamp", "adj_close"])
-    .sort(["symbol", "timestamp"])
-    .with_columns((pl.col("adj_close").log().diff().over("symbol") * ANNUALIZE).alias("_ann_ret"))
-    .select([*PANEL_KEY, "_ann_ret"])
+    bars.select([ENTITY, "timestamp", "adj_close"])
+    .sort([ENTITY, "timestamp"])
+    .with_columns((pl.col("adj_close").log().diff().over(ENTITY) * ANNUALIZE).alias("_ann_ret"))
+    .select([ENTITY, "timestamp", "_ann_ret"])
 )
 
 model_based = (
-    garch.join(returns_panel, on=PANEL_KEY, how="left")
+    garch.join(returns_panel, on=[ENTITY, "timestamp"], how="left")
     .join(financial.select([*PANEL_KEY, "iv_30_atm"]), on=PANEL_KEY, how="left")
     .with_columns(
         (pl.col("_ann_ret").abs() / pl.col("garch_cond_vol")).alias("garch_vol_surprise"),
         (pl.col("iv_30_atm") - pl.col("garch_cond_vol")).alias("garch_ivrv_spread"),
     )
-    .drop(["_ann_ret", "iv_30_atm"])
+    .drop(["_ann_ret", "iv_30_atm", ENTITY])
     .select([*PANEL_KEY, "fold", "garch_cond_vol", "garch_ivrv_spread", "garch_vol_surprise"])
     .sort(["fold", *PANEL_KEY])
 )
@@ -1002,6 +1048,19 @@ if COMPARABLE:
     forecast_stats = compute_ic_hac_stats(forecast_series, label_horizon=LABEL_HORIZON)
     difference_stats = compute_ic_hac_stats(paired, label_horizon=LABEL_HORIZON)
     daily_dependence = paired.select(pl.corr("ic_memory", "ic_forecast")).item()
+    print(
+        f"  memory denominator    IC {memory_stats['mean_ic']:+.4f}, "
+        f"HAC t {memory_stats['t_stat']:+.2f}"
+    )
+    print(
+        f"  forecast denominator  IC {forecast_stats['mean_ic']:+.4f}, "
+        f"HAC t {forecast_stats['t_stat']:+.2f}"
+    )
+    print(f"  their daily values correlate at {daily_dependence:+.2f}")
+    print(
+        f"  paired difference     {difference_stats['mean_ic']:+.4f}, "
+        f"HAC t {difference_stats['t_stat']:+.2f}, p {difference_stats['p_value']:.4f}"
+    )
 else:
     print("Too few dates carry both variants for the comparison; the figure below is skipped.")
 
@@ -1038,11 +1097,11 @@ if COMPARABLE:
     fig.show()
 
 # %% [markdown] tags=["results"]
-# On the **182,379** rows where both variants are defined, across **497** decision dates, the
-# memory denominator gives a mean IC of **-0.0060** with a HAC t of **-0.50** and the forecast
-# denominator **-0.0029** with a HAC t of **-0.34**. Their daily values correlate at **-0.24**,
-# which is the dependence the paired test exists to handle. The paired difference is **+0.0031**
-# with a HAC t of **0.19**, so swapping a backward-looking denominator for a forward-looking one
+# On the **184,299** rows where both variants are defined, across **497** decision dates, the
+# memory denominator gives a mean IC of **-0.0053** with a HAC t of **-0.44** and the forecast
+# denominator **-0.0032** with a HAC t of **-0.37**. Their daily values correlate at **-0.25**,
+# which is the dependence the paired test exists to handle. The paired difference is **+0.0021**
+# with a HAC t of **0.13**, so swapping a backward-looking denominator for a forward-looking one
 # is not distinguishable from making no change at all - and that now rests on a test of the
 # difference rather than on an inference from two tests that were about something else. Taken
 # standalone, none of the three features clears the false-discovery threshold either, the largest
