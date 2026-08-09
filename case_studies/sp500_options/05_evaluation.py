@@ -218,10 +218,14 @@ def _validate_temporal_keys(temporal: pl.DataFrame) -> None:
 # %% [markdown]
 # For each fold, keep only the rows that fold's estimator produced and that fall inside
 # its own validation period. `04_model_based_features` fits one estimator beyond the
-# folds, on everything up to the holdout, and numbers it one past the last fold; that one
-# exists to score the holdout and has seen every validation date, so a value it produced
-# is in sample here. Selecting fold by fold from the folds this notebook generates
-# excludes it, and the check afterwards says so rather than leaving it implied.
+# folds, on everything up to the holdout; it exists to score the holdout, and it has seen
+# every validation date, so a value it produced is in sample here and must not enter.
+#
+# Selecting fold by fold from the folds this notebook generates is what excludes it, and
+# the check afterwards asserts the outcome rather than the mechanism: the fold identifiers
+# left in the panel are exactly the ones asked for. That holds whatever number the
+# extra estimator is written under, which matters because it has been written under more
+# than one.
 
 
 # %%
@@ -232,7 +236,6 @@ def build_validation_temporal_panel(
     """Select exactly the out-of-sample temporal estimate for each validation row."""
     _validate_temporal_keys(temporal)
 
-    holdout_fold = len(cv_folds)
     selected = []
     for split in cv_folds:
         fold_id = int(split["fold"])
@@ -259,9 +262,12 @@ def build_validation_temporal_panel(
         raise ValueError(
             f"Validation temporal panel has {duplicate_rows} multiply assigned date-symbol keys"
         )
-    if validation.filter(pl.col("validation_fold") == holdout_fold).height:
+    requested = {int(split["fold"]) for split in cv_folds}
+    present = set(validation["validation_fold"].unique().to_list())
+    if present != requested:
         raise ValueError(
-            f"Estimates from the holdout pass (fold {holdout_fold}) entered the validation panel"
+            f"Validation panel carries fold ids {sorted(present)}, not the {sorted(requested)} "
+            "this notebook evaluates; an estimator fitted past the folds has entered it"
         )
     return validation
 
@@ -1287,9 +1293,14 @@ print(f"{n_monotone} of {len(monotonicity_scores)} scored candidates reach {MONO
 # One panel per candidate, all on the same vertical scale so that a shallow profile
 # cannot be rescaled into a steep-looking one. Every candidate the diagnostic scored is
 # drawn rather than a selection of them, so the count above can be checked against the
-# chart. The bars darken from the lowest group to the highest, which is an ordering and
-# not a judgement: for this label a *lower* average is the better outcome, because the
-# label is the return to the buyer of the straddle and the strategy is the seller.
+# chart. The bars darken from the lowest group to the highest, which orders the groups and
+# says nothing about which end is preferable.
+#
+# The label is written from the seller's side throughout - `02_labels` defines it as the
+# premium collected less what the position costs to close, over the premium collected - so
+# a positive value is a profitable short straddle and a higher average is the better
+# outcome. Nearly every group here averages negative, which is the sample rather than the
+# convention: these two validation periods contain the volatility of early 2020.
 
 # %%
 if quantile_spreads:
@@ -1347,7 +1358,7 @@ if quantile_spreads:
     fig.update_yaxes(range=[q_low - q_pad, q_high + q_pad])
     fig.update_xaxes(title_text="Quintile within the trading day", row=n_rows_fig, col=1)
     for row in range(1, n_rows_fig + 1):
-        fig.update_yaxes(title_text="Average return to the buyer", row=row, col=1)
+        fig.update_yaxes(title_text="Average return to the seller", row=row, col=1)
     fig.show()
 
 # %% [markdown]
