@@ -1272,26 +1272,55 @@ if quantile_spreads:
 # triage below - and nothing here removes a column from the matrix the models
 # train on.
 #
-# Correlations are computed on a sample of development sessions rather than on
-# every row, which is enough to rank the pairs and keeps the calculation to a size
-# a reader can re-run.
+# **One family is redundant with the others by construction, and it is worth
+# knowing which before reading the figure.** The register declares eight ranked
+# columns, each the percentile of a level column within the decision date. A
+# percentile is a monotone transform of its source inside that date, so on any
+# session the two order the names identically and their rank correlation is
+# exactly one. Both are kept in the matrix because a model fed a level and a model
+# fed a percentile behave differently, but a screen that only reads orderings
+# cannot tell them apart, and it should not be counting them as separate evidence.
+#
+# **The correlation is taken within a session and then averaged**, the same
+# construction as the information coefficient and the quantile profile above.
+# Ordering every symbol-session into one pooled correlation would answer a
+# different question: two features that both rise in a volatile month move
+# together in the pooled frame whether or not they rank names in the same order on
+# any given day, and it is the ordering on the day that this screen acts on.
+#
+# The calculation runs on a sample of development sessions rather than on all of
+# them, which is enough to rank the pairs and keeps it to a size a reader can
+# re-run.
 
 # %%
 sample_step = max(1, n_dates // 200)
 sample_dates = eval_panel[DATE_COL].unique().sort().to_list()[::sample_step]
-corr_data = (
-    eval_panel.filter(pl.col(DATE_COL).is_in(sample_dates)).select(evaluable_features).to_pandas()
-)
-corr_matrix = corr_data.corr(method="spearman")
+
+session_matrices = []
+for dt in sample_dates:
+    cross_section = eval_panel.filter(pl.col(DATE_COL) == dt).select(cs_features)
+    if cross_section.height < MIN_CROSS_SECTION:
+        continue
+    # Ranked within the session, so the Pearson correlation of the ranks is the
+    # Spearman correlation of the values.
+    ranked = cross_section.with_columns(pl.col(c).rank().alias(c) for c in cs_features)
+    masked = np.ma.masked_invalid(ranked.to_numpy().astype(float))
+    session_matrices.append(np.ma.corrcoef(masked, rowvar=False).filled(np.nan))
+
+corr_matrix = np.nanmean(np.stack(session_matrices), axis=0)
 
 high_corr_pairs = []
-cols = corr_matrix.columns
-for i in range(len(cols)):
-    for j in range(i + 1, len(cols)):
-        if abs(corr_matrix.iloc[i, j]) > REDUNDANCY_CUT:
-            high_corr_pairs.append((cols[i], cols[j], float(corr_matrix.iloc[i, j])))
+for i in range(len(cs_features)):
+    for j in range(i + 1, len(cs_features)):
+        rho = corr_matrix[i, j]
+        if np.isfinite(rho) and abs(rho) > REDUNDANCY_CUT:
+            high_corr_pairs.append((cs_features[i], cs_features[j], float(rho)))
 
-print(f"Pairs whose |rank correlation| exceeds {REDUNDANCY_CUT}: {len(high_corr_pairs)}")
+print(f"Averaged over {len(session_matrices)} sampled sessions of {len(sample_dates)}.")
+print(
+    f"Pairs whose mean within-session |rank correlation| exceeds {REDUNDANCY_CUT}: "
+    f"{len(high_corr_pairs)}"
+)
 
 # %% [markdown]
 # ### One feature stands for each group
@@ -1407,9 +1436,9 @@ if high_corr_pairs:
         )
     )
     fig.update_layout(
-        title="The strongest redundancy is among the implied-volatility level columns",
+        title="Within a session, each ranked column carries its source column's ordering",
         xaxis_title=(
-            "Spearman rank correlation on sampled development sessions; "
+            "Mean within-session Spearman rank correlation; "
             "* marks the feature standing for its group"
         ),
         height=640,
