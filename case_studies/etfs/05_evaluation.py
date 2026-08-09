@@ -407,20 +407,43 @@ validate_modeling_inputs(
 )
 
 # %% [markdown]
-# The second question is per column, and it is about whether the column can be screened at
-# all on the panel above:
+# The second question is per column. Before it can be asked, one group has to be separated
+# out: some columns describe the market as a whole rather than one ETF against another -
+# the yield-curve level, the filtered reference series, the regime probabilities. They take
+# the same value for every ETF on a date, so ranking the cross-section by them produces no
+# ordering at all and their cross-sectional rank correlation is undefined rather than zero.
+# Nothing in the screen below can decide anything about them, and they are separated here
+# rather than judged against a statistic they cannot have.
+
+# %%
+cs_std_df = eval_panel.group_by(DATE_COL).agg([pl.col(f).std().alias(f) for f in all_feature_cols])
+date_level_features = {
+    feat
+    for feat in all_feature_cols
+    if (mean_std := cs_std_df[feat].drop_nulls().mean()) is not None and mean_std < 1e-10
+}
+cross_sectional_features = [f for f in all_feature_cols if f not in date_level_features]
+print(
+    f"{len(date_level_features)} columns take one value across the whole cross-section on "
+    f"each date:\n  {', '.join(sorted(date_level_features))}\n"
+    f"{len(cross_sectional_features)} columns vary across ETFs and go on to the screen."
+)
+
+# %% [markdown]
+# For the rest, the question is whether the column can be screened at all on the panel
+# above:
 #
 # - **Coverage** is the share of rows where the feature has a value. A column present on
 #   less than `MIN_COVERAGE` of the panel is being ranked on a different, smaller
 #   cross-section than the one the strategy would trade.
 # - **Staleness** is the share of rows that repeat the same ETF's previous value. Above
 #   `MAX_STALENESS` the column changes so rarely that a daily rank correlation is mostly
-#   reading the same ordering over and over. Some of these are correct by construction - a
-#   regime indicator is meant to hold its value for months - and that is exactly why the
-#   gate reports them rather than silently ranking them: the value is real, but a
-#   cross-sectional screen is the wrong instrument for it.
+#   reading the same ordering over and over.
 #
 # A column failing either gate is recorded STOP in the ledger and takes no further part.
+# Both quantities are computed for the market-wide columns too, so the ledger carries them,
+# but they decide nothing there: a column that cannot be ranked across ETFs is not made
+# usable by changing more often.
 
 # %%
 coverage = {}
@@ -441,18 +464,21 @@ correctness = {
     feat: coverage[feat] >= MIN_COVERAGE and staleness[feat] <= MAX_STALENESS
     for feat in all_feature_cols
 }
-n_pass = sum(correctness.values())
-n_fail = len(correctness) - n_pass
-print(f"Correctness gate: {n_pass} of {len(correctness)} features pass, {n_fail} recorded STOP")
+failed = [f for f in cross_sectional_features if not correctness[f]]
+n_gate_pass = len(cross_sectional_features) - len(failed)
+print(
+    f"Coverage and staleness: {n_gate_pass} of {len(cross_sectional_features)} "
+    f"cross-sectional columns pass, {len(failed)} recorded STOP"
+)
 
-if n_fail > 0:
+if failed:
     display(
         pl.DataFrame(
             {
-                "feature": [f for f, ok in correctness.items() if not ok],
-                "family": [families[f] for f, ok in correctness.items() if not ok],
-                "coverage": [round(coverage[f], 3) for f, ok in correctness.items() if not ok],
-                "staleness": [round(staleness[f], 3) for f, ok in correctness.items() if not ok],
+                "feature": failed,
+                "family": [families[f] for f in failed],
+                "coverage": [round(coverage[f], 3) for f in failed],
+                "staleness": [round(staleness[f], 3) for f in failed],
             }
         )
     )
@@ -498,30 +524,9 @@ print(
 # window $h$ sessions long reaches $h-1$ sessions, so the bandwidth is set to the label
 # horizon itself, which covers it. Deriving that number from the label rather than typing
 # it is what stops the correction and the label from drifting apart.
-#
-# Some columns describe the market as a whole rather than one ETF against another - the
-# yield-curve level, the filtered reference series, the regime probabilities. They take
-# the same value for every ETF on a date, so their cross-sectional rank correlation is
-# undefined rather than zero, and they are separated out here rather than scored against a
-# statistic they cannot have.
 
 # %%
 evaluable_features = [f for f in all_feature_cols if correctness[f]]
-
-cs_std_df = eval_panel.group_by(DATE_COL).agg(
-    [pl.col(f).std().alias(f) for f in evaluable_features]
-)
-date_level_features = set()
-for feat in evaluable_features:
-    mean_std = cs_std_df[feat].drop_nulls().mean()
-    if mean_std is not None and mean_std < 1e-10:
-        date_level_features.add(feat)
-
-if date_level_features:
-    print(
-        f"{len(date_level_features)} columns take one value across the whole cross-section on "
-        f"each date, so they carry no cross-sectional IC:\n  {', '.join(sorted(date_level_features))}"
-    )
 
 # %% [markdown]
 # The series is built in one pass over the dates, computing every feature's rank
@@ -578,8 +583,9 @@ for feat in cs_features:
     ic_timeseries[feat] = ic_df
 
 print(
-    f"An IC series was computed for {len(ic_results)} features. "
-    f"{len(date_level_features)} carry no cross-sectional variation and "
+    f"An IC series was computed for {len(ic_results)} of the {len(all_feature_cols)} candidates. "
+    f"Of the rest, {len(date_level_features)} carry no cross-sectional variation, "
+    f"{len(failed)} failed the coverage or staleness gate, and "
     f"{len(cs_features) - len(ic_results)} had fewer than {MIN_IC_DATES} usable dates."
 )
 
@@ -1209,12 +1215,12 @@ if ranked_pairs:
 # %%
 triage = {}
 for feat in all_feature_cols:
-    if not correctness[feat]:
-        triage[feat] = ("STOP", "correctness_fail")
-        continue
-
     if feat in date_level_features:
         triage[feat] = ("REVISE", "date_level_feature")
+        continue
+
+    if not correctness[feat]:
+        triage[feat] = ("STOP", "correctness_fail")
         continue
 
     if feat not in ic_results:
@@ -1276,9 +1282,10 @@ print(
 # ### The funnel, end to end
 #
 # Every candidate feature ends in one of the three decisions, and the figure below is the
-# whole path: how many were offered, how many could be screened at all, how many produced
-# an IC series, how many cleared false-discovery control, and how many were promoted. The
-# distance between the last two bars is the exploration arm.
+# whole path: how many were offered, how many can be ranked across ETFs at all, how many
+# of those cleared the coverage and staleness gates, how many cleared false-discovery
+# control, and how many were promoted. The distance between the last two bars is the
+# exploration arm.
 
 # %%
 proceed_features = sorted(f for f, (d, _) in triage.items() if d == "PROCEED")
@@ -1287,8 +1294,8 @@ stop_features = [f for f, (d, _) in triage.items() if d == "STOP"]
 
 funnel_stages = [
     ("Candidate features", len(all_feature_cols)),
-    ("Cleared coverage and staleness", n_pass),
-    ("Ranked the cross-section", len(ic_results)),
+    ("Vary across the cross-section", len(cross_sectional_features)),
+    ("Cleared coverage and staleness", n_gate_pass),
     ("Cleared false-discovery control", n_significant_fdr),
     ("Promoted (PROCEED)", len(proceed_features)),
 ]
