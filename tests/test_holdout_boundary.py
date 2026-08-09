@@ -801,3 +801,66 @@ def test_the_holdout_fold_trains_on_everything_before_the_seal(tmp_path, monkeyp
     )
     assert holdout["train_end"] == pd.Timestamp("2018-01-02")
     assert mds._input_lineage is None, "the memoized lineage describes the pre-append fold set"
+
+
+def test_the_holdout_fold_covers_every_bar_of_the_final_configured_session(
+    tmp_path, monkeypatch
+) -> None:
+    """An intraday panel loses its whole last session to a midnight upper bound.
+
+    ``holdout_end`` is configured as a date. Parsed it is that date at midnight,
+    and every fold filter here is ``timestamp <= val_end``, so on minute bars the
+    entire final session sorts after the bound and is written but never scored.
+    Measured on nasdaq100_microstructure: the producer side was fixed in
+    ``04_model_based_features`` and the holdout fold went 19,800,687 to 19,839,297
+    rows, none of which the consumer could read.
+    """
+    import pandas as pd
+
+    import utils.modeling as modeling
+    from utils.modeling import ModelingDataset, append_holdout_fold_if_needed
+
+    case_dir = tmp_path / "cs"
+    (case_dir / "config").mkdir(parents=True)
+    (case_dir / "config" / "setup.yaml").write_text(
+        yaml.safe_dump({"evaluation": {"holdout_start": "2021-01-04", "holdout_end": "2021-12-31"}})
+    )
+    monkeypatch.setattr(modeling, "get_case_study_dir", lambda _cs: case_dir)
+
+    mds = ModelingDataset.__new__(ModelingDataset)
+    mds.splits = [
+        {
+            "fold": 0,
+            "train_start": pd.Timestamp("2020-01-02 09:30"),
+            "train_end": pd.Timestamp("2020-12-30 15:58"),
+            "val_start": pd.Timestamp("2020-12-31 09:32"),
+            "val_end": pd.Timestamp("2020-12-31 15:58"),
+        }
+    ]
+    mds._input_lineage = object()
+
+    append_holdout_fold_if_needed(mds, "holdout", "whatever")
+    holdout = mds.splits[-1]
+
+    # The decision minutes of the final configured session, as an intraday panel
+    # carries them. Not one of these is at midnight.
+    final_session = pd.date_range("2021-12-31 09:32", "2021-12-31 15:58", freq="2min")
+    in_window = (final_session >= holdout["val_start"]) & (final_session <= holdout["val_end"])
+    assert in_window.all(), (
+        f"{(~in_window).sum()} of {len(final_session)} bars of the final configured "
+        f"session fall outside [{holdout['val_start']}, {holdout['val_end']}]"
+    )
+    # And it stops there: the session after the configured end stays out.
+    next_session = pd.Timestamp("2022-01-03 09:32")
+    assert next_session > holdout["val_end"]
+
+
+def test_a_holdout_end_naming_an_instant_is_taken_literally() -> None:
+    """A config that names a time of day means that time, not the end of the day."""
+    import pandas as pd
+
+    from utils.modeling import _inclusive_end_of
+
+    assert _inclusive_end_of(pd.Timestamp("2021-12-31 15:58")) == pd.Timestamp("2021-12-31 15:58")
+    assert _inclusive_end_of(pd.Timestamp("2021-12-31")) > pd.Timestamp("2021-12-31 23:59:59")
+    assert _inclusive_end_of(pd.Timestamp("2021-12-31")) < pd.Timestamp("2022-01-01")
