@@ -794,12 +794,13 @@ plot_coverage_through_time(
 #
 # The bars are the register's declaration, one per family, and a family's declaration is a single
 # bound rather than a per-column statement. For six of the eight it is the longest reach of any
-# member. For the cross-sectional ranks it is not: that family is declared at a year and a
-# one-session delay, while its longest-reaching source is the variance risk premium at 83 sessions
-# and three of its eight sources are share-price columns carrying no delay at all. The
-# declaration overstates on both counts, so nothing leaks and the bar is wider than the family
-# reads. D.2's audit is what holds the emitted columns to a floor, and it is stated per column
-# rather than per family for exactly this reason.
+# member. For the cross-sectional ranks it is not: that family is declared at a year with a
+# one-session delay, while the longest-reaching of the eight columns it ranks is the 63-session
+# return and three of them are share-price columns carrying no delay at all. The declaration
+# overstates on both counts, so the bar is wider and later than the family reads and nothing
+# leaks. The audit in D.2 is stated per column for that reason, though it covers the emitted
+# levels rather than the percentiles taken from them; a percentile inherits whatever warmup its
+# source had, because a null source takes a null rank.
 #
 # The delay is the other half of the contract and it is the half this figure cannot resolve: one
 # session against a lookback of up to a year is thinner than the line that draws the bar, so six
@@ -897,10 +898,12 @@ plot_cross_sectional_dispersion(
 #
 # Clustering on the distance $1 - |\rho|$ groups features that carry the same ordering, whatever
 # the sign. Above the cut two features are close enough that a linear model cannot separate their
-# contributions. This states the clusters and stops there: which member of a cluster to keep is a
-# question about predictive content, and nothing here has measured any. `05_evaluation` reports
-# the pairs above the same cut beside its own fold-aware screen, and the choice is made by the
-# model notebooks that follow it.
+# contributions. This states the clusters and stops there. `05_evaluation` reports the pairs above
+# the same cut beside its own fold-aware screen, and **nothing downstream then drops one member of
+# a pair**: the model notebooks read the whole matrix and the correlated columns reach the
+# estimators together. What the clustering is for is the reader's judgement of a fitted model - a
+# linear coefficient split across four columns carrying one ordering says less about that ordering
+# than its size suggests, and a tree-based importance divides the same way.
 
 # %%
 CUT = 0.7

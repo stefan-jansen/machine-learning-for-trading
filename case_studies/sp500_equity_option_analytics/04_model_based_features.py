@@ -26,8 +26,14 @@
 # session to the next. What it gives back is a **conditional volatility**: how much the share is
 # expected to move over a session, worked out from what was known at the close of the session
 # before it. Following the usual convention, the value is stamped on the session it describes, so
-# `garch_cond_vol` at date $t$ is the forecast *for* $t$ formed at the close of $t-1$ - a
-# prediction rather than a measurement, and one that reads nothing from $t$ itself.
+# `garch_cond_vol` at date $t$ is the variance the model gives session $t$ from the return and
+# variance at $t-1$, and the recursion producing it reads nothing dated $t$ or later.
+#
+# **That makes it a forecast on the dates it is scored, and section C.1 is exact about where the
+# claim stops.** The parameters the recursion runs on were estimated over a window, and on the
+# dates inside that window a value is a retrospective transform rather than something that could
+# have been computed on the day. On the dates after it - the ones every diagnostic here uses - the
+# parameters predate the value entirely.
 #
 # That is the difference this notebook is built on. Stage 03's variance risk premium subtracts a
 # *realized* volatility - an average of the last twenty sessions - from the option market's
@@ -871,7 +877,11 @@ record = write_artifact(
     keys=["fold", *PANEL_KEY],
     written_by=f"case_studies/{CASE_STUDY_ID}/04_model_based_features.py",
     inputs={
-        "load_sp500_daily_bars": value_digest(bars.select([*PANEL_KEY, "close", "adj_factor"])),
+        # `sec_id` belongs in this digest: it decides which rows form one series, so a changed
+        # security mapping moves every fitted value while the prices themselves stand still.
+        "load_sp500_daily_bars": value_digest(
+            bars.select([*PANEL_KEY, ENTITY, "close", "adj_factor"])
+        ),
         "features/financial.parquet": read_digest(FINANCIAL_PATH)["digest"],
     },
 )
