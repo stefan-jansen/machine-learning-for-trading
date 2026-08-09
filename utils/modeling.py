@@ -692,13 +692,19 @@ def append_holdout_fold_if_needed(
 ) -> None:
     """Append a holdout fold to ``mds.splits`` when ``prediction_split=='holdout'``.
 
-    Mirrors the etfs reference pattern at
-    ``case_studies/etfs/04_model_based_features.py`` lines 109-116: train on
-    everything from the first CV fold's ``train_start`` through ``holdout_start``,
-    validate on ``[holdout_start, holdout_end]``. The combined fold becomes
-    fold N+1, so downstream code iterating ``mds.splits`` produces one
-    holdout prediction set per (training run, config) pair without any other
-    change to the training loop.
+    The holdout fold trains on everything available before ``holdout_start`` and
+    validates on ``[holdout_start, holdout_end]``. It becomes fold N+1, so downstream
+    code iterating ``mds.splits`` produces one holdout prediction set per
+    (training run, config) pair without any other change to the training loop.
+
+    "Everything available" is ``min(train_start)`` across the CV folds, not
+    ``splits[0]["train_start"]``. ``generate_cv_splits`` steps backward from the holdout
+    boundary, so fold 0 is the most *recent* fold and carries the *latest* training start.
+    Measured on etfs: ``splits[0]`` starts 2008-01-02 where the earliest fold starts
+    2005-01-03, so indexing the list built a holdout retrain that silently discarded three
+    years. ``case_studies/etfs/04_model_based_features.py`` says so in its CV Fold Setup
+    prose - "Indexing the list hands it the shortest window of the set, silently" - and
+    this function cited that notebook while doing the thing it warns against.
 
     Idempotent — if the trailing fold already covers the holdout window
     (val_end matches setup.yaml's holdout_end), no fold is appended.
@@ -744,7 +750,7 @@ def append_holdout_fold_if_needed(
         return  # already covered
     holdout_fold = {
         "fold": len(mds.splits),
-        "train_start": pd.Timestamp(mds.splits[0]["train_start"]),
+        "train_start": min(pd.Timestamp(s["train_start"]) for s in mds.splits),
         "train_end": ho_start_ts,
         "val_start": ho_start_ts,
         "val_end": ho_end_ts,

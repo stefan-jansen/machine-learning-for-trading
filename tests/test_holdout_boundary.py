@@ -751,3 +751,53 @@ def test_the_narrative_states_the_configured_horizon() -> None:
         f"while setup.yaml configures a {horizon}-day horizon "
         f"({setup['labels']['primary']})"
     )
+
+
+def test_the_holdout_fold_trains_on_everything_before_the_seal(tmp_path, monkeypatch) -> None:
+    """The holdout retrain is the one fit the sealed holdout ever sees, so the window it
+    trains on has to be everything available before the seal.
+
+    ``generate_cv_splits`` steps backward from the holdout boundary: fold 0 is the most
+    recent fold and carries the *latest* training start, and the list runs newest to
+    oldest. ``append_holdout_fold_if_needed`` took ``splits[0]["train_start"]``, which is
+    the shortest window of the set, not the longest. On etfs that is 2008-01-02 against an
+    earliest fold start of 2005-01-03 - three years dropped from the retrain, silently,
+    and only on the holdout path where nothing else would show it.
+    """
+    import pandas as pd
+
+    import utils.modeling as modeling
+    from utils.modeling import ModelingDataset, append_holdout_fold_if_needed
+
+    case_dir = tmp_path / "cs"
+    (case_dir / "config").mkdir(parents=True)
+    (case_dir / "config" / "setup.yaml").write_text(
+        yaml.safe_dump({"evaluation": {"holdout_start": "2018-01-02", "holdout_end": "2018-12-31"}})
+    )
+    monkeypatch.setattr(modeling, "get_case_study_dir", lambda _cs: case_dir)
+
+    # Newest fold first, as generate_cv_splits emits them.
+    splits = [
+        {
+            "fold": i,
+            "train_start": pd.Timestamp(f"{2008 - i}-01-02"),
+            "train_end": pd.Timestamp(f"{2017 - i}-11-29"),
+            "val_start": pd.Timestamp(f"{2017 - i}-12-29"),
+            "val_end": pd.Timestamp(f"{2018 - i}-11-29"),
+        }
+        for i in range(3)
+    ]
+    mds = ModelingDataset.__new__(ModelingDataset)
+    mds.splits = splits
+    mds._input_lineage = object()
+
+    append_holdout_fold_if_needed(mds, "holdout", "whatever")
+
+    holdout = mds.splits[-1]
+    assert holdout["fold"] == 3
+    assert holdout["train_start"] == pd.Timestamp("2006-01-02"), (
+        "the holdout fold must start at the earliest train_start across folds, "
+        f"not splits[0]'s {splits[0]['train_start']}"
+    )
+    assert holdout["train_end"] == pd.Timestamp("2018-01-02")
+    assert mds._input_lineage is None, "the memoized lineage describes the pre-append fold set"
