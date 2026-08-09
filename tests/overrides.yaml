@@ -1154,11 +1154,6 @@ case_studies/cme_futures/04_model_based_features:
   parameters:
     FFT_WINDOW: 126
     MAX_PRODUCTS: 0
-  skip: true
-  skip_reason: ARIMA/HMM/FFT across all 30 products and 5 folds is 20 minutes locally (measured 2026-08-05, 1,188s),
-    and longer on the slower pymc 5.28 / pytensor 2.38 / numpy 2.3 stack CI runs. Downstream notebooks consume the
-    pre-seeded test-data/intermediates/cme_futures/features instead. That fixture is only as current as the last time
-    someone regenerated it with these parameters, and nothing here detects when it drifts from what 05_evaluation reads.
   timeout: 1800
 case_studies/cme_futures/05_evaluation:
   # No MAX_SYMBOLS. The cross-sectional IC in Section 4 keeps a date only when at least
@@ -1456,7 +1451,6 @@ case_studies/fx_pairs/04_model_based_features:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
     N_HMM_RESTARTS: 3
-    START_DATE: '2000-01-01'
   timeout: 300
 case_studies/fx_pairs/05_evaluation:
   parameters:
@@ -1642,9 +1636,9 @@ case_studies/sp500_equity_option_analytics/02_labels:
 case_studies/sp500_equity_option_analytics/03_financial_features:
   timeout: 120
 case_studies/sp500_equity_option_analytics/04_model_based_features:
-  # MIN_OBS: 10 removed - the notebook repeats `MIN_OBS = 252` below the
-  # parameters cell, so the injected value was gone before any function
-  # that reads it could run.
+  parameters:
+    MAX_SYMBOLS: 5
+    MIN_OBS: 10
   timeout: 300
 case_studies/sp500_equity_option_analytics/05_evaluation:
   parameters:
@@ -1802,7 +1796,6 @@ case_studies/sp500_options/04_model_based_features:
   # What is safe to reduce is how many times that sampler runs and how finely the
   # filter resolves: the pool is the per-fold MCMC fit count (10 -> 2) and the
   # particle count is the filter's resolution over every segment (1000 -> 100).
-  gpu: true
   parameters:
     SV_N_PARTICLES: 100
     SV_POOL_SIZE: 2
