@@ -1579,26 +1579,72 @@ tabm_rank1 = collect_rank1_per_cs(
     family="tabular_dl",
 )
 
+# Same coverage rule as 5a and 5b, applied across three families instead of two.
+# Each family's winner is comparable within its own family and not necessarily to
+# the others, so a family is shown for a case study only where it covers the same
+# number of days as that case study's GBM winner. GBM is the reference because
+# this frame is built from it and the chart is ordered by it. A family that does
+# not match becomes null and is drawn as a gap, exactly as a family with no
+# result at all already is.
 three_way = (
-    gbm_rank1.select("case_study", "short_name", pl.col("ic_mean_daily").alias("gbm_ic"))
+    gbm_rank1.select(
+        "case_study",
+        "short_name",
+        pl.col("ic_mean_daily").alias("gbm_ic"),
+        pl.col("ic_n_days").alias("gbm_days"),
+    )
     .join(
-        linear_rank1.select("case_study", pl.col("ic_mean_daily").alias("lin_ic")),
+        linear_rank1.select(
+            "case_study",
+            pl.col("ic_mean_daily").alias("lin_ic"),
+            pl.col("ic_n_days").alias("lin_days"),
+        ),
         on="case_study",
         how="left",
     )
     .join(
-        tabm_rank1.select("case_study", pl.col("ic_mean_daily").alias("tabm_ic")),
+        tabm_rank1.select(
+            "case_study",
+            pl.col("ic_mean_daily").alias("tabm_ic"),
+            pl.col("ic_n_days").alias("tabm_days"),
+        ),
         on="case_study",
         how="left",
+    )
+    .with_columns(
+        lin_ic=pl.when(pl.col("lin_days") == pl.col("gbm_days"))
+        .then(pl.col("lin_ic"))
+        .otherwise(None),
+        tabm_ic=pl.when(pl.col("tabm_days") == pl.col("gbm_days"))
+        .then(pl.col("tabm_ic"))
+        .otherwise(None),
     )
     .sort("gbm_ic", descending=True)
 )
+
+coverage_masked = three_way.filter(
+    ((pl.col("lin_days") != pl.col("gbm_days")) & pl.col("lin_days").is_not_null())
+    | ((pl.col("tabm_days") != pl.col("gbm_days")) & pl.col("tabm_days").is_not_null())
+)
+if not coverage_masked.is_empty():
+    display(
+        Markdown(
+            f"**Masked for unequal coverage:** {coverage_masked.height} case study/family "
+            "cells have a winner scored over a different number of days than the GBM "
+            "winner, so they are left blank rather than plotted beside it."
+        )
+    )
+    display(coverage_masked.select("short_name", "gbm_days", "lin_days", "tabm_days"))
+
 print("Linear / GBM / TabM highest-validation-IC average daily IC per case study (primary label):")
-three_way.select(
-    "short_name",
-    pl.col("lin_ic").round(4).alias("linear"),
-    pl.col("gbm_ic").round(4).alias("gbm"),
-    pl.col("tabm_ic").round(4).alias("tabm"),
+display(
+    three_way.select(
+        "short_name",
+        pl.col("lin_ic").round(4).alias("linear"),
+        pl.col("gbm_ic").round(4).alias("gbm"),
+        pl.col("tabm_ic").round(4).alias("tabm"),
+        "gbm_days",
+    )
 )
 
 # %%
@@ -1632,18 +1678,25 @@ fig.tight_layout()
 fig.show()
 
 # %% [markdown]
-# The comparison remains coverage-explicit: a missing family stays null and is
-# never replaced by a result from another label or an incomplete validation span.
+# The comparison is coverage-explicit in both directions: a family with no result
+# stays null, and so does a family whose winner was scored over a different number
+# of days than the GBM winner it would sit beside. Neither is replaced by a result
+# from another label or a different validation span.
 
 # %%
 tabm_present = set(tabm_rank1["case_study"].to_list())
 tabm_missing = [SHORT_NAMES[cs] for cs in CASE_STUDY_IDS if cs not in tabm_present]
+tabm_mismatched = three_way.filter(
+    pl.col("tabm_days").is_not_null() & (pl.col("tabm_days") != pl.col("gbm_days"))
+)["short_name"].to_list()
 tabm_above_gbm = three_way.filter(pl.col("tabm_ic") > pl.col("gbm_ic"))["short_name"].to_list()
 display(
     Markdown(
-        f"**Computed three-family reading.** TabM coverage is missing for "
-        f"{', '.join(tabm_missing) or 'no case study'}. Among comparable rows, TabM's "
-        f"point estimate exceeds GBM for {', '.join(tabm_above_gbm) or 'none'}."
+        f"**Computed three-family reading.** TabM has no result for "
+        f"{', '.join(tabm_missing) or 'no case study'}, and is masked for unequal coverage "
+        f"in {', '.join(tabm_mismatched) or 'no case study'}. Among the rows where both "
+        "families were scored over the same number of days, TabM's point estimate exceeds "
+        f"GBM for {', '.join(tabm_above_gbm) or 'none'}."
     )
 )
 
