@@ -25,6 +25,7 @@ import json
 import os
 import random
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -416,11 +417,72 @@ def get_classification_eval_label(case_study_id: str, label: str) -> str:
     return str(mapping[label])
 
 
+def verify_artifact_sidecars(artifacts: Mapping[str, Path]) -> dict[str, str]:
+    """Check each input artifact against the digest sidecar its producer wrote.
+
+    ``case_studies/utils/artifact_digest.py`` writes ``<artifact>.digest.json``
+    beside every artifact, recording the content hash, the row count and the key
+    columns. Until this function existed nothing read one: stage 02 and stage 03
+    wrote them and the chain stopped, so an upstream value change could not reach
+    a downstream identity. What it closes is narrow and worth stating exactly - the
+    registry records feature-set *names* and no digest of feature *values*, so a
+    model trained on corrected features and one trained on the leaky version it
+    replaced produce the identical training_hash unless something reads the values.
+
+    Raises on a digest that disagrees with the file, and on an artifact with no
+    sidecar: an artifact whose producer never recorded what it wrote is exactly the
+    case this cannot distinguish from a silent change.
+
+    Returns the verified digest per artifact, so the caller can carry it into the
+    training spec.
+
+    **Not yet on by default**, and the precondition is measured rather than assumed:
+    on 2026-08-09 the production artifacts carried 49 sidecars out of 51, both gaps
+    in sp500_options, while the CI fixtures under
+    ``ml4t/third-edition-test-data/intermediates`` carried **none** - 0 of 7 for
+    cme_futures, 0 of 5 for etfs, 0 of 6 for fx_pairs, 0 of 6 for us_equities_panel.
+    Turning ``verify_input_digests`` on before those are regenerated fails every
+    case-study CI job for a missing sidecar rather than for a changed value.
+    """
+    from case_studies.utils.artifact_digest import read_digest, sidecar_path, value_digest
+
+    verified: dict[str, str] = {}
+    problems: list[str] = []
+    for name, path in sorted(artifacts.items()):
+        side = sidecar_path(path)
+        if not side.exists():
+            problems.append(f"{name}: no digest sidecar beside {path.name}")
+            continue
+        try:
+            record = read_digest(path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            problems.append(f"{name}: sidecar unreadable ({exc})")
+            continue
+        recorded = record.get("digest")
+        if not recorded:
+            problems.append(f"{name}: sidecar records no digest")
+            continue
+        actual = value_digest(pl.read_parquet(path))
+        if actual != recorded:
+            problems.append(f"{name}: {path.name} hashes {actual}, its sidecar records {recorded}")
+            continue
+        verified[name] = recorded
+
+    if problems:
+        raise ValueError(
+            "input artifacts do not match the digests their producers recorded, so a "
+            "training run built on them would carry an identity that does not describe "
+            "its inputs: " + "; ".join(problems)
+        )
+    return verified
+
+
 def load_modeling_dataset(
     case_study_id: str,
     primary_label: str,
     max_symbols: int = 0,
     symbols: list[str] | None = None,
+    verify_input_digests: bool = False,
 ) -> ModelingDataset:
     """Load and join features + temporal + labels for a case study.
 
@@ -658,6 +720,8 @@ def load_modeling_dataset(
         input_artifacts["model_based"] = temporal_path
     if eval_label_path is not None:
         input_artifacts["eval_label"] = eval_label_path
+    if verify_input_digests:
+        verify_artifact_sidecars(input_artifacts)
     return ModelingDataset(
         dataset=dataset,
         feature_names=feature_names,
