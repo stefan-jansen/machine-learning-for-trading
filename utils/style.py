@@ -68,6 +68,36 @@ GRAYSCALE = {
     "silver": 0.97,  # ~97% gray (nearly white)
 }
 
+# Categorical cyclers for `axes.prop_cycle`. The print track pairs GRAY_CYCLER
+# with LINESTYLE_CYCLER so a B&W readout stays legible; the color track relies
+# on hue alone (no linestyle pairing - see apply_book_style). Color order
+# prioritizes perceptual separation for the first 4 entries (most figures use
+# <=4 series). GRAY_CYCLER mirrors the GRAY_FILLS weight order (secondary widened
+# to #808080 for print contrast) while keeping every entry dark enough to read
+# as a line on white.
+#
+# The sixth entry was `slate`, and slate is a second navy: CIEDE2000 8.1 from
+# `blue`, and 48 against 28 once a page is reduced to gray. So every six-series
+# chart drew its first and last series as one line, which is what a reader saw in
+# the stage-03 coverage figure and in the six products of ch16's futures backtest.
+# `recede` is the only entry in the locked palette that parts from navy on both
+# readings at once - CIEDE2000 50.1, gray 160 against 28 - and it stays clear of
+# the other five in color (nearest is 30.6, to `positive`). It is light, so it
+# reads as the least emphatic series; that is the trade a sixth series buys, and
+# there is no seventh. Beyond six, pair the hue with a line style (`_cycle` in
+# case_studies/utils/feature_engineering.py) rather than extending this list.
+COLOR_CYCLER = [
+    COLORS["blue"],  # navy   - primary
+    COLORS["amber"],  # gold   - secondary
+    COLORS["copper"],  # orange - tertiary
+    COLORS["positive"],  # green  - fourth
+    COLORS["negative"],  # red    - fifth (semantic, use sparingly)
+    COLORS["recede"],  # light slate - sixth (only when >=6 series)
+]
+GRAY_CYCLER = ["#000000", "#808080", "#404040", "#a8a8a8", "#666666", "#c8c8c8"]
+LINESTYLE_CYCLER = ["-", "--", ":", "-.", "-", "--"]
+MARKER_CYCLER = ["o", "s", "^", "D", "v", "P"]
+
 # =============================================================================
 # MATPLOTLIB STYLE CONFIGURATIONS
 # =============================================================================
@@ -174,13 +204,11 @@ def ml4t_palette(n: int = 5, categorical: bool = False) -> list[str]:
         List of hex color strings
     """
     if categorical:
-        colors = [
-            COLORS["blue"],
-            COLORS["amber"],
-            COLORS["slate"],
-            COLORS["copper"],
-            COLORS["silver_muted"],
-        ]
+        # The cycle's first five, so the one categorical helper a notebook is told to
+        # call and the cycle a bare figure draws from cannot disagree. This list had
+        # `slate` third, so three categories already drew two navies, and
+        # `silver_muted` fifth, which is #e8e8e6 and barely visible on the page at all.
+        colors = list(COLOR_CYCLER[:5])
     else:
         colors = [
             COLORS["blue"],
@@ -541,14 +569,11 @@ def _register_plotly_template() -> None:
                 showgrid=True,
                 gridwidth=0.5,
             ),
-            colorway=[
-                COLORS["blue"],
-                COLORS["amber"],
-                COLORS["slate"],
-                COLORS["copper"],
-                COLORS["positive"],
-                COLORS["negative"],
-            ],
+            # The list itself, not a copy of it. This carried `slate` third, so a bare
+            # `go.Figure` with three traces already drew two of them in navy - the same
+            # defect as the Matplotlib cycle and one series sooner. Deriving it removes
+            # the possibility of the two drifting apart again.
+            colorway=list(COLOR_CYCLER),
             legend=dict(
                 bgcolor="rgba(255,255,255,0.8)",
                 bordercolor=COLORS["silver_muted"],
@@ -615,35 +640,6 @@ COLOR_FILLS = {
     "canvas": "#ffffff",
 }
 
-# Categorical cyclers for `axes.prop_cycle`. The print track pairs GRAY_CYCLER
-# with LINESTYLE_CYCLER so a B&W readout stays legible; the color track relies
-# on hue alone (no linestyle pairing - see apply_book_style). Color order
-# prioritizes perceptual separation for the first 4 entries (most figures use
-# <=4 series). GRAY_CYCLER mirrors the GRAY_FILLS weight order (secondary widened
-# to #808080 for print contrast) while keeping every entry dark enough to read
-# as a line on white.
-#
-# The sixth entry was `slate`, and slate is a second navy: CIEDE2000 8.1 from
-# `blue`, and 48 against 28 once a page is reduced to gray. So every six-series
-# chart drew its first and last series as one line, which is what a reader saw in
-# the stage-03 coverage figure and in the six products of ch16's futures backtest.
-# `recede` is the only entry in the locked palette that parts from navy on both
-# readings at once - CIEDE2000 50.1, gray 160 against 28 - and it stays clear of
-# the other five in color (nearest is 30.6, to `positive`). It is light, so it
-# reads as the least emphatic series; that is the trade a sixth series buys, and
-# there is no seventh. Beyond six, pair the hue with a line style (`_cycle` in
-# case_studies/utils/feature_engineering.py) rather than extending this list.
-COLOR_CYCLER = [
-    COLORS["blue"],  # navy   - primary
-    COLORS["amber"],  # gold   - secondary
-    COLORS["copper"],  # orange - tertiary
-    COLORS["positive"],  # green  - fourth
-    COLORS["negative"],  # red    - fifth (semantic, use sparingly)
-    COLORS["recede"],  # light slate - sixth (only when >=6 series)
-]
-GRAY_CYCLER = ["#000000", "#808080", "#404040", "#a8a8a8", "#666666", "#c8c8c8"]
-LINESTYLE_CYCLER = ["-", "--", ":", "-.", "-", "--"]
-MARKER_CYCLER = ["o", "s", "^", "D", "v", "P"]
 
 # =============================================================================
 # CANONICAL FIGURE SIZES (Packt embed width = 5.833")

@@ -17,10 +17,13 @@ series as one line and no check anywhere noticed.
 from __future__ import annotations
 
 import importlib.util
+import re
+from pathlib import Path
 
 import matplotlib
 import numpy as np
 import pytest
+from cycler import cycler
 
 matplotlib.use("Agg")
 
@@ -36,6 +39,7 @@ from utils.style import (  # noqa: E402
     SUBPLOT_TITLE_SIZE,
     add_message_title,
     apply_book_style,
+    ml4t_palette,
     style_subplot_titles,
 )
 
@@ -129,6 +133,56 @@ def test_a_six_series_chart_draws_six_different_colours():
         ax.plot([0, 1], [i, i + 1], label=f"series {i}")
     drawn = [line.get_color() for line in ax.get_lines()]
     plt.close(fig)
+    assert len(set(drawn)) == 6
+    worst = min(_distance(a, b) for i, a in enumerate(drawn) for b in drawn[i + 1 :])
+    assert worst >= SEPARABLE
+
+
+def _matplotlibrc_cycle() -> list[str]:
+    """The colours repo-root `matplotlibrc` hands a bare `plt.subplots()`."""
+    text = (Path(__file__).resolve().parents[1] / "matplotlibrc").read_text()
+    line = next(
+        ln
+        for ln in text.splitlines()
+        if ln.startswith("axes.prop_cycle") and not ln.startswith("#")
+    )
+    return ["#" + h.lower() for h in re.findall(r"'([0-9a-fA-F]{6})'", line)]
+
+
+def test_every_cycle_in_the_repo_is_the_same_cycle():
+    """Four palettes ordered by hand in four files, and three of them held a stale one.
+
+    `COLOR_CYCLER` is what `apply_book_style("color")` sets and what the book-figure
+    scripts read, and it is the only one the first version of this fix corrected. It is
+    also the one almost nothing draws from: `matplotlibrc` is what a bare
+    `plt.subplots()` uses, the Plotly template colorway is what a bare `go.Figure()`
+    uses, and `ml4t_palette(categorical=True)` is what the figure skill tells a notebook
+    to call. All three still carried `slate` - at the fourth, third and third positions
+    - so the two-navy collision arrived at four series, three traces and three
+    categories rather than at six, in the paths that draw nearly every figure here.
+    """
+    assert _matplotlibrc_cycle() == [c.lower() for c in COLOR_CYCLER], (
+        "matplotlibrc and COLOR_CYCLER disagree, so a bare plt.subplots() draws "
+        "something other than the palette"
+    )
+    assert ml4t_palette(5, categorical=True) == COLOR_CYCLER[:5]
+
+
+@requires_plotly
+def test_the_plotly_colorway_is_the_same_cycle():
+    import plotly.io as pio
+
+    assert list(pio.templates["ml4t"].layout.colorway) == COLOR_CYCLER
+
+
+def test_a_bare_matplotlib_figure_draws_six_different_colours():
+    """What a notebook actually gets: no style call, just `matplotlibrc`."""
+    with plt.rc_context({"axes.prop_cycle": cycler(color=_matplotlibrc_cycle())}):
+        fig, ax = plt.subplots()
+        for i in range(6):
+            ax.plot([0, 1], [i, i + 1])
+        drawn = [line.get_color() for line in ax.get_lines()]
+        plt.close(fig)
     assert len(set(drawn)) == 6
     worst = min(_distance(a, b) for i, a in enumerate(drawn) for b in drawn[i + 1 :])
     assert worst >= SEPARABLE

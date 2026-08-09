@@ -36,7 +36,11 @@ axes.labelsize: 9
 axes.labelpad: 4
 axes.grid: False
 axes.axisbelow: True
-axes.prop_cycle: cycler('color', ['0a1628', 'D4A84B', 'C87533', '1a2d4a', '10b981', 'ef4444'])
+# Must stay equal to utils.style.COLOR_CYCLER, which tests/test_style.py asserts. This
+# file is what a bare plt.subplots() draws from, so it is the cycle almost every figure
+# in the repo actually uses. It carried `1a2d4a` (slate) at the fourth position, a second
+# navy next to the first entry, so a four-series chart drew two of them as one line.
+axes.prop_cycle: cycler('color', ['0a1628', 'D4A84B', 'C87533', '10b981', 'ef4444', '94a3b8'])
 
 # Grid (disabled by default; enable per-axes via ax.grid(axis='y') when needed)
 grid.color: e8e8e6
