@@ -78,7 +78,11 @@ from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 
 import utils.style as style
-from case_studies.utils.feature_engineering import assign_families, families_from_config
+from case_studies.utils.feature_engineering import (
+    assign_families,
+    families_from_config,
+    quantile_profile,
+)
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.cv_splits import generate_cv_splits
 from utils.data_quality import validate_modeling_inputs
@@ -484,27 +488,37 @@ if failed:
     )
 
 # %% [markdown]
-# ### How many independent observations the panel really holds
+# ### How much independent evidence the panel really holds
 #
-# The panel has one row per ETF per date, but the label on consecutive dates is built from
-# almost the same stretch of prices: a return measured over $h$ sessions and sampled every
-# session shares $h-1$ of them with the next one. So the dates do not contribute
-# independent evidence, and a rough count of how much evidence there is divides them by
-# the horizon:
+# The panel has one row per ETF per date, and neither of its two dimensions contributes a
+# row's worth of evidence.
 #
-# $$N_{\text{eff}} \approx \frac{N_{\text{dates}}}{h} \times N_{\text{ETFs}}$$
+# Across ETFs, the observation the test is built on is not a row. Section C scores the
+# whole cross-section at one date into a single number, the information coefficient for
+# that date, and it is that series the average and its standard error are computed on. The
+# ETFs also move together, so forty rows on one date are nothing like forty independent
+# readings even before the statistic pools them.
 #
-# This is not the correction the notebook applies - that is the standard-error adjustment
-# in the next section, which handles the dependence properly. It is here so the row count
-# printed above is read for what it is, which is not a sample size.
+# Across dates, the readings overlap: a return measured over $h$ sessions and sampled every
+# session shares $h-1$ of them with the next one, so consecutive dates score almost the
+# same stretch of prices. Dividing the dates by the horizon counts the blocks that do not
+# overlap:
+#
+# $$N_{\text{eff}} \approx \frac{N_{\text{dates}}}{h}$$
+#
+# So the evidence is measured in tens of independent blocks, not in tens of thousands of
+# rows, and that is worth knowing before reading a p-value computed from it. This is not
+# the correction the notebook applies - that is the standard-error adjustment in the next
+# section, which handles the overlap properly. It is here so the row count printed above is
+# read for what it is, which is not a sample size.
 
 # %%
 n_eff_dates = n_dates // LABEL_HORIZON
-n_eff = n_eff_dates * n_symbols
 print(
     f"Panel rows: {n_rows:,} ({n_dates:,} dates x {n_symbols} ETFs)\n"
-    f"Roughly independent observations: ~{n_eff:,} "
-    f"({n_eff_dates:,} non-overlapping date blocks x {n_symbols} ETFs), "
+    f"Information coefficients, one per date: {n_dates:,}\n"
+    f"Roughly independent blocks among them: ~{n_eff_dates:,} "
+    f"(the {n_dates:,} dates over a {LABEL_HORIZON}-session label), "
     f"a factor of {n_dates / n_eff_dates:.0f} fewer."
 )
 
@@ -650,10 +664,13 @@ print(
 # that cleared the correctness gate and produced an IC series**, and its size is printed
 # below beside the results.
 #
-# The Benjamini-Hochberg procedure adjusts for that. Rather than fixing the chance of any
-# false promotion, it fixes the share of the promotions that are allowed to be false, at
-# `FDR_ALPHA`, which is the right question when the point is to choose a set of features
-# rather than to defend a single claim.
+# The Benjamini-Hochberg procedure adjusts for that. Rather than holding down the chance of
+# any false promotion at all, it holds down the false share *on average*: run this
+# procedure over many such searches and the share of promotions that are false averages no
+# more than the level set below. That is the right question when the point is to choose a
+# set of features rather than to defend a single claim, and it is a weaker guarantee than
+# it first sounds - it says nothing about the particular set promoted here, which can carry
+# a higher false share than the level or none at all.
 #
 # Three counts follow, and the gaps between them are the two prices being paid. Naive
 # significance ignores the overlap in the labels. The lag-aware count pays for the
@@ -942,42 +959,25 @@ monotonicity_scores = {}
 quantile_spreads = {}
 
 for feat in top_features_for_shape:
-    valid = eval_panel.select([DATE_COL, feat, label_col]).drop_nulls()
-    # A date needs at least one ETF per bucket before it can be cut into them.
-    valid = valid.filter(pl.len().over(DATE_COL) >= N_QUANTILES)
-    if valid[DATE_COL].n_unique() < MIN_SHAPE_DATES:
+    profile = quantile_profile(
+        eval_panel,
+        feat,
+        label_col,
+        date_col=DATE_COL,
+        n_quantiles=N_QUANTILES,
+        min_cross_section=MIN_CROSS_SECTION,
+    )
+    if profile is None or profile.periods_used < MIN_SHAPE_DATES:
         continue
-
-    binned = valid.with_columns(
-        pl.col(feat)
-        .qcut(N_QUANTILES, labels=QUANTILE_LABELS, allow_duplicates=True)
-        .over(DATE_COL)
-        .alias("quantile")
-    )
-    per_date = binned.group_by([DATE_COL, "quantile"]).agg(
-        pl.col(label_col).mean().alias("date_mean"),
-        pl.col(label_col).median().alias("date_median"),
-    )
-    profile = (
-        per_date.group_by("quantile")
-        .agg(
-            pl.col("date_mean").mean().alias("mean"),
-            pl.col("date_median").mean().alias("median"),
-        )
-        .sort("quantile")
-    )
-    means = profile["mean"].to_list()
     quantile_spreads[feat] = {
-        "q_means": means,
-        "q_medians": profile["median"].to_list(),
-        "spread": means[-1] - means[0],
+        "q_means": profile.means,
+        "q_medians": profile.medians,
+        "spread": profile.spread,
     }
-
     # The ledger's monotonicity column is the rank correlation between the bucket index
     # and the bucket's mean return: +1 for a profile that rises all the way across, -1
     # for one that falls all the way, and near zero for one that turns in the middle.
-    mono_corr, _ = spearmanr(range(len(means)), means)
-    monotonicity_scores[feat] = float(mono_corr)
+    monotonicity_scores[feat] = profile.monotonicity
 
 print(f"Bucket profiles built for {len(quantile_spreads)} features.")
 
