@@ -221,11 +221,12 @@ def _validate_temporal_keys(temporal: pl.DataFrame) -> None:
 # folds, on everything up to the holdout; it exists to score the holdout, and it has seen
 # every validation date, so a value it produced is in sample here and must not enter.
 #
-# Selecting fold by fold from the folds this notebook generates is what excludes it, and
-# the check afterwards asserts the outcome rather than the mechanism: the fold identifiers
-# left in the panel are exactly the ones asked for. That holds whatever number the
-# extra estimator is written under, which matters because it has been written under more
-# than one.
+# The exclusion is structural: the loop below names the folds it wants and takes only
+# those, so a fold the notebook did not ask for cannot reach the panel whatever number it
+# carries. What the checks after the loop cover is the part that is not structural - a fold
+# with no rows in its own validation period, which would mean the artifact was built
+# against a different fold configuration, and a date-and-name key claimed by two folds at
+# once, which would mean their validation periods overlap.
 
 
 # %%
@@ -261,13 +262,6 @@ def build_validation_temporal_panel(
     if duplicate_rows:
         raise ValueError(
             f"Validation temporal panel has {duplicate_rows} multiply assigned date-symbol keys"
-        )
-    requested = {int(split["fold"]) for split in cv_folds}
-    present = set(validation["validation_fold"].unique().to_list())
-    if present != requested:
-        raise ValueError(
-            f"Validation panel carries fold ids {sorted(present)}, not the {sorted(requested)} "
-            "this notebook evaluates; an estimator fitted past the folds has entered it"
         )
     return validation
 
