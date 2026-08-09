@@ -519,15 +519,16 @@ def family_coverage(
 def _cycle(n: int) -> list[tuple[str, str]]:
     """Colour and line style per series, so more series than hues stay separable.
 
-    The palette has six hues. Beyond that, cycling colour alone puts two series in
-    the same navy and the reader cannot tell which line is which; the style cycles
-    at a different rate, so each pair is distinct.
+    The palette's sixth entry is ``slate``, a second navy that its own definition
+    describes as reading close to ``blue``. Cycling the style once per six put the
+    first and sixth series in near-identical navy, both solid, in the same block -
+    so every stage-03 coverage figure with six or more families drew two of them as
+    one line. The style therefore turns over every *five*, which puts the twin in a
+    different style from the original while still keeping the first five solid.
     """
     styles = ["-", "--", ":", "-."]
-    return [
-        (COLOR_CYCLER[i % len(COLOR_CYCLER)], styles[(i // len(COLOR_CYCLER)) % len(styles)])
-        for i in range(n)
-    ]
+    hues = len(COLOR_CYCLER)
+    return [(COLOR_CYCLER[i % hues], styles[(i // (hues - 1)) % len(styles)]) for i in range(n)]
 
 
 def plot_coverage_through_time(
@@ -769,8 +770,11 @@ def plot_redundancy_clusters(
 ) -> dict[str, int]:
     """F5. Hierarchical clustering on distance :math:`1 - |\\rho|`, with the cut drawn.
 
-    Returns the cluster each column falls in, which is what ``05_evaluation`` needs
-    in order to pick one representative per cluster on a fold-aware criterion.
+    Returns the cluster each column falls in, which the calling notebook uses to state
+    how many distinct orderings its matrix carries. Nothing downstream reads it: the
+    feature screens in ``05_evaluation`` test one column at a time, and the one case
+    study that does pick a representative per cluster builds its own clusters from its
+    own fold ICs rather than from this tree.
     """
     columns = list(columns)
     frame = df.select(columns)
@@ -792,13 +796,19 @@ def plot_redundancy_clusters(
     labels = fcluster(tree, t=height, criterion="distance")
 
     fig, ax = plt.subplots(figsize=(FIGSIZE["single"][0], max(2.4, 0.13 * len(columns) + 1.2)))
-    set_link_color_palette([c for c, _ in _cycle(6)])
+    # Five hues, not six: the sixth is `slate`, a second navy, and a cluster drawn in it
+    # is indistinguishable from one drawn in `blue`. Above the cut the links are the
+    # figure's background - they say only "these two clusters eventually join" - so they
+    # recede to a light slate. They were `neutral`, #334155, which is the same dark
+    # blue-grey as `blue` and `slate` at the same weight, so all three read as one thing
+    # and the cluster structure the figure exists to show was not visible.
+    set_link_color_palette([c for c, _ in _cycle(5)])
     dendrogram(
         tree,
         labels=columns,
         orientation="left",
         color_threshold=height,
-        above_threshold_color=COLORS["neutral"],
+        above_threshold_color=COLORS["recede"],
         ax=ax,
     )
     ax.axvline(height, color=COLORS["amber"], linestyle="--", linewidth=1)
@@ -814,9 +824,18 @@ def plot_redundancy_clusters(
 def _bootstrap_median_interval(
     values: np.ndarray, *, seed: int, draws: int = 500, level: float = 0.95
 ) -> tuple[float, float]:
-    """Percentile bootstrap interval for the median of *values*, resampling entities."""
+    """Percentile bootstrap interval for the median of *values*, resampling entities.
+
+    *values* is sorted first. The median does not care what order it arrives in, but
+    ``rng.choice`` draws by index, so the same entities in a different order give the
+    same seed a different resample and a different interval. The callers read their
+    values out of a ``group_by``, whose row order Polars does not guarantee, so the
+    ribbon moved between runs on byte-identical input - a seed that fixed the sampling
+    and not the ordering (#329, #333).
+    """
     if values.size < 3:
         return float("nan"), float("nan")
+    values = np.sort(values)
     rng = np.random.default_rng(seed)
     medians = np.median(rng.choice(values, size=(draws, values.size), replace=True), axis=1)
     lo, hi = np.quantile(medians, [(1 - level) / 2, (1 + level) / 2])
@@ -927,16 +946,17 @@ def plot_persistence(
     left.set_xlabel("lag (bars)")
     left.set_ylabel("autocorrelation")
     # Below the axes, not inside them. A persistent feature fills the upper half and a
-    # decaying one fills the lower left, so every in-axes position covers either a
-    # curve or the y-axis label depending on the data - which is not something the
-    # caller should have to tune per notebook.
-    left.legend(
-        fontsize=6,
-        ncol=3,
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.22),
-        frameon=False,
-    )
+    # decaying one fills the lower left, so every in-axes position covers either a curve
+    # or the y-axis label depending on the data - which is not something the caller
+    # should have to tune per notebook.
+    #
+    # It belongs to the FIGURE, not to the left panel. `tight_layout` packs each axes
+    # together with its decorations, and a legend of feature names centred under a
+    # panel is far wider than the panel - so the whole column was sized to the legend
+    # and the axes inside it shrank to whatever was left. Measured on four names of
+    # `premium_vol_ratio_7d_30d` length: the lag panel held 27% of the figure with the
+    # legend attached and 42% without it. A figure legend is outside that packing, so
+    # the space it needs is reserved once, in the `rect` below.
 
     # One cross-sectional rank correlation per consecutive pair of decision dates, then
     # the median over pairs. Pooling every entity-date row into one correlation instead
@@ -971,6 +991,15 @@ def plot_persistence(
     right.barh(range(len(columns)), stability, color=COLORS["blue"], height=0.6)
     right.set_yticks(range(len(columns)))
     right.set_yticklabels(columns, fontsize=6)
+    # Feature names on the OUTER edge. `width_ratios` divides the axes, not the figure,
+    # and these labels are drawn outside the right panel - so on the inner edge they take
+    # their width out of the gap between the panels, and `tight_layout` pays for it by
+    # shrinking both. Names in this corpus run to `premium_vol_ratio_7d_30d`, which left
+    # the autocorrelation panel - the one the prose reads four curves off - at about a
+    # third of the figure. On the outer edge they grow into the right margin, which
+    # nothing else is using.
+    right.yaxis.set_ticks_position("right")
+    right.yaxis.set_label_position("right")
     # The lower bound follows the data and is never clipped at zero: a negative value is
     # rank reversal between rebalances, which is the most interesting thing this panel can
     # show and the one an axis pinned at zero hides.
@@ -985,6 +1014,21 @@ def plot_persistence(
     # between the panels instead, which no case study can exhaust.
     right.set_xlabel("rank correlation,\nconsecutive rebalances", fontsize=8, ha="right", x=1.0)
     add_message_title(left, title, subtitle=subtitle)
-    fig.tight_layout()
+    # The legend is drawn, measured, and only then is the strip it needs reserved. A
+    # guess from the row count leaves a band of dead space under one notebook's figure
+    # and clips another's, because how tall it is depends on the feature names.
+    legend = fig.legend(
+        *left.get_legend_handles_labels(),
+        fontsize=6,
+        ncol=min(3, len(columns)),
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.0),
+        frameon=False,
+    )
+    fig.canvas.draw()
+    strip = legend.get_window_extent(fig.canvas.get_renderer()).transformed(
+        fig.transFigure.inverted()
+    )
+    fig.tight_layout(rect=(0.0, strip.height + 0.02, 1.0, 1.0))
     show_with_alt(fig, alt)
     return None

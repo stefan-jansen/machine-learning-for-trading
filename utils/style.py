@@ -53,6 +53,7 @@ COLORS = {
     "positive": "#10b981",  # Success green - profits, gains
     "negative": "#ef4444",  # Error red - losses (use sparingly!)
     "neutral": "#334155",  # Slate gray - neutral elements
+    "recede": "#94a3b8",  # Light slate - structure that must not compete with the data
     # Backgrounds
     "bg_light": "#FAFAF9",  # Warm off-white (light mode)
     "bg_dark": "#0a1628",  # Deep blue (dark mode)
