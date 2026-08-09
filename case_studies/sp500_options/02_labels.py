@@ -869,6 +869,7 @@ for name in LABEL_NAMES:
 # with a quoted matched-strike straddle, with the liquidity screen applied downstream rather
 # than here. The baseline is one signal, on one month of realised volatility.
 #
-# **Next**: `03_financial_features.py` builds the volatility-surface, term-structure and
-# instrument-state features on the same panel; `05_evaluation.py` is where those features
-# are first measured against the labels written here.
+# **Next**: `03_financial_features.py` builds the instrument-state, surface-level and
+# surface-dynamics features on the same panel, along with the variance risk premium, realised
+# volatility, cross-sectional and underlying families; `05_evaluation.py` is where those
+# features are first measured against the labels written here.
