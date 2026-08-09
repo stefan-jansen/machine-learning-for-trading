@@ -393,7 +393,11 @@ plt.show()
 # below measures, one point per stock, sorted.
 #
 # It is measured at the decision dates Section B.2 counted rather than over every session, because
-# what a position gives up is the spread quoted when it is opened. The line marking the cheapest
+# what a position gives up is the spread quoted around the time it is opened. Those dates are the
+# Fridays the ranking is formed on, and the fill itself lands one session later, at the following
+# close, for the reason Section C.1 gives. Both this cost and the move in B.4 are read at that same
+# Friday quote, which is what lets B.5 compare them; what neither of them is, is the price of any
+# particular fill. The line marking the cheapest
 # fifth is the threshold the strategy trades inside; it is drawn here over the whole development
 # period, while the strategy applies it separately on each date, which is what the second figure
 # looks at.
@@ -634,8 +638,8 @@ plt.show()
 # ### B.5 Move size against cost
 #
 # Three numbers summarise what B.3 and B.4 drew. The first is the median move over one weekly step,
-# divided by the round trip that entry would cross, which says how much larger a typical move is
-# than a typical cost. The second pair is the share of moves larger than each of the two cost lines,
+# divided by the round trip quoted at that same decision session, which says how much larger a
+# typical move is than a typical cost. The second pair is the share of moves larger than each of the two cost lines,
 # which is where the exceedance curve crosses them. The third is how much of the volatility gap is
 # still there a week later.
 #
