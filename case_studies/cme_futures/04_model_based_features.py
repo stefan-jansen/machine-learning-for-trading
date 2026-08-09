@@ -253,10 +253,11 @@ universe_table
 # period on that period's training sessions and then hold the parameters fixed while the
 # model is applied forward - what the hidden Markov model in C.3 does, and what section
 # C.3 asserts by comparing the last session behind every estimate against its own training
-# end. The other is to re-estimate continuously, each time on the sessions before the one
-# being predicted - what ARIMA in C.1 does, so its weights keep updating across the
-# evaluation window and are never fitted on the session they forecast. Both are causal.
-# What neither may do is fit on the session it is about to speak for.
+# end. The other is to re-estimate as the walk proceeds - what ARIMA in C.1 does, refitting
+# every `ARIMA_REFIT_FREQ` sessions on everything up to that point, so its weights go on
+# being refreshed across the evaluation window and each set is fitted only on sessions
+# earlier than the ones it then forecasts. Both are causal. What neither may do is fit on
+# the session it is about to speak for.
 #
 # **Run the fitted model forward, never backward.** Even a model estimated on training
 # data can look ahead when it is *applied*. A hidden Markov model can be asked two
@@ -350,8 +351,8 @@ print(
 # Read it with section A's rule in hand. The training window is where the hidden Markov
 # model's parameters come from, all of them, which is why C.3 can check its estimates
 # against the right-hand edge of that bar. ARIMA's weights are not confined to it - they
-# keep updating across the evaluation window too - so what bounds ARIMA is not this
-# picture but the direction it walks, which C.1 sets out. What the figure does show for
+# are refreshed every `ARIMA_REFIT_FREQ` sessions across the evaluation window too - so
+# what bounds ARIMA is not this picture but the direction it walks, which C.1 sets out. What the figure does show for
 # both is the gap between the two bars, sized to the label horizon so that no training
 # session's outcome reaches into the window the model is scored on, and that no bar
 # crosses into the shaded region at all.
@@ -696,8 +697,8 @@ else:
 # Be clear about what that does and does not establish. It bounds the dates ARIMA speaks
 # for; it does not bound where its weights came from, and no assertion over the output
 # frame could, because the weights are not in the frame. What bounds them is the shape of
-# the call: the walk only ever fits on the prefix ending at the session before the one it
-# forecasts, so a weight fitted on a session it then predicts cannot arise. That is a
+# the call: every refit reads a prefix that ends before the sessions it goes on to
+# forecast, so a weight fitted on a session it then predicts cannot arise. That is a
 # property of `cross_validation` with `h=1`, not something this notebook re-checks - the
 # hidden Markov model in C.3, whose parameters are fixed per period and therefore *are*
 # checkable against a date, is where an assertion of that kind belongs and where one runs.
@@ -2061,8 +2062,8 @@ else:
 #    C.3 does rather than asserting.
 # 3. **There is more than one honest way to bound the parameters, and they need different
 #    evidence.** Estimating once per period and holding the parameters fixed is checkable
-#    against a date, so C.3 checks it. Re-estimating as the walk proceeds, always on the
-#    sessions before the one being predicted, is equally causal but leaves no date to
+#    against a date, so C.3 checks it. Refitting as the walk proceeds, each time on a
+#    prefix that ends before what it forecasts, is equally causal but leaves no date to
 #    check - it is guaranteed by how the call is constructed instead, so C.1 says so
 #    rather than asserting something weaker and calling it proof. Decide which of the two
 #    a model is doing before deciding what would count as evidence for it.
