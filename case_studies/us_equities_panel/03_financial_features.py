@@ -37,8 +37,10 @@
 #
 # Chapter 8, Section 8.2. Reads the adjusted daily panel through `load_us_equities()`,
 # `config/setup.yaml` for the holdout boundary, and `labels/fwd_ret_1d.parquet` written by
-# [`02_labels`](02_labels.ipynb). Writes `features/financial.parquet`, which
-# [`04_model_based_features`](04_model_based_features.ipynb) reads and extends.
+# [`02_labels`](02_labels.ipynb). Writes `features/financial.parquet`.
+# [`04_model_based_features`](04_model_based_features.ipynb) writes a second matrix beside this
+# one and does not read it; `utils/modeling.py::load_modeling_dataset` joins the two when a
+# model stage loads the dataset.
 
 # %%
 """US Equities Panel: Feature Engineering."""
@@ -48,6 +50,7 @@ from datetime import date
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 import yaml
@@ -57,12 +60,14 @@ warnings.filterwarnings("ignore")
 
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats
+from ml4t.diagnostic.splitters.calendar import TradingCalendar
 from ml4t.engineer.features.momentum import adx, cci, macd, rsi, stochastic
 from ml4t.engineer.features.trend import ema, kama, sma
 from ml4t.engineer.features.volatility import natr
 
 from case_studies.utils.artifact_digest import read_digest, value_digest, write_artifact
 from data import load_us_equities
+from utils.artifact_specs import resolve_label_horizon
 from utils.paths import display_path, get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, ml4t_diverging
 
@@ -75,6 +80,9 @@ FEATURES_DIR = CASE_DIR / "features"
 MOMENTUM_HORIZONS = [5, 10, 21, 42, 63, 126, 189, 252]
 VOLATILITY_HORIZONS = [21, 63, 126, 252]
 MA_HORIZONS = [10, 20, 50, 100, 200]
+# 12-1 momentum, the case study's declared treatment. `02_labels` Section G carries the same
+# two numbers and scores this construction as the baseline.
+MOMENTUM_LOOKBACK, MOMENTUM_SKIP = 252, 21
 
 # The tradability screen, declared in Section 1 and applied in Section 6.
 # `02_labels` carries the same three constants and rebuilds the screen from them.
@@ -102,9 +110,14 @@ START_DATE = "1990-01-01"
 SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 
 PRIMARY_LABEL = SETUP["labels"]["primary"]
+# The horizon the primary label resolves over, in trading sessions, read from the same place
+# `02_labels` reads it. Section 9 stops on it and corrects the IC standard error for it, so a
+# hardcoded 1 here would silently misstate both if the primary label were ever changed.
+PRIMARY_HORIZON = int(resolve_label_horizon(CASE_STUDY_ID, PRIMARY_LABEL, SETUP).rstrip("Dd"))
 HOLDOUT_START = date.fromisoformat(SETUP["evaluation"]["holdout_start"])
 END_DATE = str(SETUP["evaluation"]["holdout_end"])
 REBALANCES_PER_YEAR = SETUP["evaluation"]["periods_per_year"]
+CALENDAR = SETUP["evaluation"]["calendar"]
 
 print(f"Primary label {PRIMARY_LABEL}, holdout opens {HOLDOUT_START}, panel ends {END_DATE}")
 print(
@@ -129,18 +142,39 @@ print(
 #
 # Load from the canonical data loader and declare the same eligibility screen as
 # [`02_labels`](02_labels.ipynb): a printed close above \$5, and dollar volume
-# `close * volume` averaging above \$1M over the previous 21 sessions. Both legs
+# `close * volume` averaging above \$1M over 21 sessions. Both legs
 # read figures the tape carried on the day, so neither depends on a corporate
 # action that had not happened yet. Section B of [`02_labels`](02_labels.ipynb)
 # derives why the adjusted close cannot serve here. Both notebooks rebuild the
 # screen from the same three constants on the same columns, so the trainable
 # panel and the label files agree on the universe.
 #
+# **Sessions are numbered first, as they are in [`02_labels`](02_labels.ipynb) and
+# [`01_feasibility_analysis`](01_feasibility_analysis.ipynb).** The archive carries stray
+# prints on dates the exchange held no market, and `get_sessions` identifies them: a date
+# that maps to itself is a session, a stray print maps to a neighbour. Dropping them and
+# numbering what is left gives a counter whose difference between two rows is a count of
+# sessions. Two things in this notebook need it. The turnover leg of the screen is only
+# meaningful over an unbroken window, so a stock returning from a halt cannot qualify on the
+# volume it traded before the halt. And Section 9 reconciles this stage's index against the
+# label index, which was built on that same counter - a feature row sitting on a date no
+# label file can carry would otherwise show up there as two stages disagreeing.
+#
 # **Declared here, applied in Section 6.** The screen removes whole rows, and a
 # per-symbol shift or rolling window applied afterwards counts the rows that
 # survived rather than trading sessions. Section 6 states what that costs and
 # applies the screen between the per-symbol features and the cross-sectional
-# ones, which is the only ordering that gives both their intended meaning.
+# ones, which is the only ordering that gives both their intended meaning. Its third leg,
+# `adv_covered`, is the coverage condition [`01_feasibility_analysis`](01_feasibility_analysis.ipynb)
+# and [`02_labels`](02_labels.ipynb) also apply: the 21 rows the average runs over have to be
+# the 21 consecutive sessions ending on the row, or the average describes a stretch of calendar
+# the stock was not trading through.
+#
+# The digest printed below is the panel this stage read, taken over the same five columns
+# [`02_labels`](02_labels.ipynb) digests. The two stages screen the same universe only if they
+# read the same download, and printing it here is what makes that checkable: it has to equal the
+# `market_data` digest in the label sidecars, so the assertions in Section 9 are reconciling two
+# files rather than one file against a stale copy of another.
 #
 # Returns and every price-derived feature below still read `adj_close`: a return
 # has to divide out splits and dividends to mean anything.
@@ -150,7 +184,9 @@ print(
 # feature needs a warm-up the first sessions do not have. Section 9 attributes
 # every row on both sides to one of those causes and **asserts the remainder is
 # empty**, so a screen that drifted apart between the two stages fails there rather
-# than printing a larger number and passing.
+# than printing a larger number and passing. That check is only as good as the two
+# stages sharing one definition of a session, which is why the counter below is
+# built the same way in both.
 
 # %%
 raw_df = load_us_equities(start_date=START_DATE, end_date=END_DATE)
@@ -161,11 +197,6 @@ if raw_df.schema["timestamp"] == pl.Datetime:
 
 raw_df = raw_df.sort(["symbol", "timestamp"])
 
-# The digest of the panel this stage read, over the same five columns
-# [`02_labels`](02_labels.ipynb) digests. The two stages screen the same universe only if they
-# read the same download, and printing the digest here is what makes that checkable: it has to
-# equal the `market_data` digest in the label sidecars, and the assertions in Section 9 are
-# reconciling two files rather than one file against a stale copy of another.
 MARKET_DATA_DIGEST = value_digest(raw_df, ["symbol", "timestamp", "close", "volume", "adj_close"])
 LABEL_INPUT_DIGEST = read_digest(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")["inputs"][
     "market_data"
@@ -176,6 +207,28 @@ assert MARKET_DATA_DIGEST == LABEL_INPUT_DIGEST, (
     f"{MARKET_DATA_DIGEST}. Re-run 02_labels before scoring features against its output."
 )
 
+# The session counter, built exactly as `02_labels` builds it: the dates that map to
+# themselves under the exchange calendar, numbered in order. The join drops the stray prints,
+# so no row here sits on a date a label file cannot carry.
+dates = raw_df.select("timestamp").unique().sort("timestamp")
+settling_session = pl.Series(
+    TradingCalendar(CALENDAR)
+    .get_sessions(pd.DatetimeIndex(dates["timestamp"].to_list(), tz="UTC"))
+    .to_numpy()
+).cast(pl.Date)
+sessions = (
+    dates.filter(settling_session == pl.col("timestamp"))
+    .with_row_index("session")
+    .with_columns(pl.col("session").cast(pl.Int64))
+)
+_archive_rows = raw_df.height
+raw_df = raw_df.join(sessions, on="timestamp", how="inner").sort(["symbol", "timestamp"])
+print(
+    f"{sessions.height:,} of {dates.height:,} dates in the archive are {CALENDAR} sessions; "
+    f"the other {dates.height - sessions.height} carry stray prints and take "
+    f"{_archive_rows - raw_df.height:,} rows with them"
+)
+
 # Compute base columns
 raw_df = raw_df.with_columns(
     (pl.col("adj_close") / pl.col("adj_close").shift(1).over("symbol") - 1).alias("returns"),
@@ -183,13 +236,14 @@ raw_df = raw_df.with_columns(
 )
 
 raw_df = raw_df.with_columns(
-    pl.col("dollar_volume").rolling_mean(ADV_WINDOW).over("symbol").alias("adv_21d")
+    pl.col("dollar_volume").rolling_mean(ADV_WINDOW).over("symbol").alias("adv_21d"),
+    (pl.col("session") - pl.col("session").shift(ADV_WINDOW - 1) == ADV_WINDOW - 1)
+    .over("symbol")
+    .alias("adv_covered"),
 )
 
-# The screen is declared here and applied in Section 6, between the per-symbol
-# features and the cross-sectional ones. It is not applied yet, and that ordering
-# is the point: see Section 6.
-ELIGIBLE = (pl.col("close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD)
+# Declared here, applied in Section 6.
+ELIGIBLE = pl.col("adv_covered") & (pl.col("close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD)
 
 print(f"Loaded {len(raw_df):,} rows, {raw_df['symbol'].n_unique()} symbols")
 print(f"Date range: {raw_df['timestamp'].min()} to {raw_df['timestamp'].max()}")
@@ -208,9 +262,32 @@ print(f"Date range: {raw_df['timestamp'].min()} to {raw_df['timestamp'].max()}")
 # compound, so the recent month is removed by dividing prices rather than by
 # subtracting $r_{1M}$ from $r_{12M}$; the difference of two simple returns is
 # only a first-order approximation and is not a return over any window.
+#
+# Its two lookbacks are read off the **session counter**, not off the stock's own rows, and
+# it is the one feature here built that way. `setup.yaml` declares this construction as the
+# case study's causal treatment, and [`02_labels`](02_labels.ipynb) Section G measures what it
+# earns as the baseline every feature below has to beat. A row-counted version would reach
+# past twelve months in any stock that missed a session, so the column the models consume
+# would not be the quantity the baseline scored - the two have to be the same signal for the
+# comparison to mean anything.
+#
+# The other windows on this page - the raw return horizons, the rolling volatilities, and the
+# library oscillators - still count the stock's own rows. What that costs is bounded and
+# one-directional: a stock that missed sessions inside the window has its feature measured
+# over a slightly longer stretch of calendar than the name says, which widens the window
+# rather than shifting it forward, and none of them is a quantity another stage recomputes
+# independently. Rewriting the library indicators to a dense session grid is a change to the
+# feature definitions rather than a correction to them, so it is not made here.
 
 
 # %%
+def close_sessions_back(data: pl.DataFrame, lag: int, name: str) -> pl.DataFrame:
+    """Each stock's close `lag` sessions earlier, re-keyed to the session reading it."""
+    return data.select(
+        "symbol", (pl.col("session") + lag).alias("session"), pl.col("adj_close").alias(name)
+    )
+
+
 def compute_momentum_returns(data: pl.DataFrame) -> pl.DataFrame:
     """Multi-horizon raw returns and skip-month momentum."""
     data = data.sort(["symbol", "timestamp"])
@@ -220,14 +297,26 @@ def compute_momentum_returns(data: pl.DataFrame) -> pl.DataFrame:
                 f"ret_{h}d"
             )
         )
-    # Skip-month momentum (12-1): Jegadeesh-Titman (1993) construction, the
-    # return from t-252 to t-21.
-    data = data.with_columns(
-        (
-            pl.col("adj_close").shift(21).over("symbol")
-            / pl.col("adj_close").shift(252).over("symbol").clip(lower_bound=1e-8)
-            - 1
-        ).alias("ret_12m_skip")
+    # Skip-month momentum (12-1): Jegadeesh-Titman (1993) construction, the return from
+    # t-252 to t-21, both counted on the market's session list as `02_labels` counts them.
+    data = (
+        data.join(
+            close_sessions_back(data, MOMENTUM_SKIP, "_skip_close"),
+            on=["symbol", "session"],
+            how="left",
+        )
+        .join(
+            close_sessions_back(data, MOMENTUM_LOOKBACK, "_start_close"),
+            on=["symbol", "session"],
+            how="left",
+        )
+        .with_columns(
+            (pl.col("_skip_close") / pl.col("_start_close").clip(lower_bound=1e-8) - 1).alias(
+                "ret_12m_skip"
+            )
+        )
+        .drop("_skip_close", "_start_close")
+        .sort(["symbol", "timestamp"])
     )
     return data
 
@@ -510,7 +599,7 @@ def compute_composites(data: pl.DataFrame) -> pl.DataFrame:
 #
 # **The percentiles are taken within each cross-section, not over the whole sample.** A
 # bound estimated over every date is estimated partly on dates the strategy has not reached
-# yet, including the sealed holdout, and it is then applied to rows that precede them - the
+# yet, including the holdout, and it is then applied to rows that precede them - the
 # clip a stock receives in 1994 would depend on what the panel did in 2017. It is also the
 # wrong bound: the width of a daily cross-section is not a constant of the panel.
 # [`02_labels`](02_labels.ipynb) measured that directly, and cross-sectional dispersion more
@@ -519,7 +608,7 @@ def compute_composites(data: pl.DataFrame) -> pl.DataFrame:
 # figure below shows the second effect on the primary momentum feature.
 #
 # It shows it on the development window alone. The flat pair it draws is the counterfactual,
-# and computing the true sample-wide one is the very read the seal forbids, so the
+# and computing the true sample-wide one is the very read the holdout boundary forbids, so the
 # counterfactual is estimated on development rows only - which understates the case rather
 # than overstating it, since the sample-wide pair would additionally be wrong by whatever
 # the two holdout years did. The clip itself still runs on every row the file carries: a
@@ -579,12 +668,32 @@ print("  Rolling liquidity done")
 # The screen is applied here, between the two kinds of feature.
 df = raw_df.filter(ELIGIBLE)
 print(f"  Eligible: {df.height:,} of {raw_df.height:,} rows, {df['symbol'].n_unique()} stocks")
+print(
+    f"  {raw_df.filter(~pl.col('adv_covered').fill_null(False)).height:,} of those rows carry no "
+    f"unbroken {ADV_WINDOW}-session volume window and cannot be screened on turnover at all"
+)
 
 df = df.pipe(compute_xs_ranks).pipe(compute_xs_liquidity_reversion).pipe(compute_composites)
 print("  Cross-sectional ranks and composites done")
 
 # %% [markdown]
 # ## 7. Select and Clean Features
+#
+# Two things happen here that a row count would hide.
+#
+# **A missing value is a null, and several of the library oscillators return a float NaN
+# instead** - an efficiency ratio that divides by zero on a flat window, a true range that does
+# the same. Polars treats the two as different things: `drop_nulls` keeps a NaN, and every
+# summary it reaches returns NaN rather than skipping the row. The consequence is not a dropped
+# row but a dropped *date*: `spearmanr` propagates NaN, so a single stock carrying one poisons
+# that feature's correlation for the whole cross-section it sits in, and the feature is then
+# scored on whatever dates happen to be left. Converting NaN to null once, here, is what makes
+# the rest of the notebook's null handling apply to them.
+#
+# **The winsorization bounds are measured before the clip is applied**, so the figure below can
+# show what a single flat pair would have done to each cross-section it was applied to. Both are
+# read from development rows only - see the section note below on why the counterfactual is not
+# the true sample-wide pair.
 
 # %%
 # Metadata columns to exclude from features
@@ -606,6 +715,8 @@ metadata_cols = {
     "dollar_volume",
     "returns",
     "adv_21d",
+    "adv_covered",
+    "session",
     "amihud_illiq",
     # Corporate actions
     "split_ratio",
@@ -622,14 +733,11 @@ output_cols = ["symbol", "timestamp"] + feature_cols
 available_cols = [c for c in output_cols if c in df.columns]
 output_df = df.select(available_cols).drop_nulls(subset=essential_cols)
 
-# A missing value is a null. Several of the library oscillators return a float NaN instead -
-# an efficiency ratio that divides by zero on a flat window, a true range that does the same
-# - and Polars treats the two as different things: `drop_nulls` keeps a NaN, and every
-# summary it reaches returns NaN rather than skipping the row. The consequence is not a
-# dropped row but a dropped *date*: `spearmanr` propagates NaN, so a single stock carrying
-# one poisons that feature's correlation for the whole cross-section it sits in, and the
-# feature is then scored on whatever dates happen to be left. Converting to null once, here,
-# is what makes the rest of the notebook's null handling apply to them.
+# `df` carried the price columns and the helpers alongside the features and is superseded here.
+# On the full panel it is about eight gigabytes, and Section 9 partitions the evaluation frame by
+# date while every frame still referenced stays resident - which is where this notebook peaks.
+del df
+
 _nan_counts = {
     c: int(output_df[c].is_nan().sum())
     for c in feature_cols
@@ -646,10 +754,6 @@ print(
     f"{sum(_nan_carriers.values()):,} values: {sorted(_nan_carriers)}"
 )
 
-# The bounds are measured before the clip is applied, so the figure below can show what a
-# single flat pair would have done to each cross-section it was applied to. Both are read
-# from development rows only - see the section note above on why the counterfactual is not
-# the true sample-wide pair.
 WINSOR_EXAMPLE = "ret_21d"
 _winsor_dev = output_df.filter(pl.col("timestamp") < HOLDOUT_START)
 per_date_bounds = (
@@ -824,11 +928,11 @@ print(f"financial.parquet: {record['n_rows']:,} rows, digest {record['digest']}"
 #   clear a nominal threshold by construction.
 # - **Pairwise correlation**: which features are close enough to be one feature.
 #
-# **The evaluation is sealed on the label's endpoint**, not on the observation date. A row
+# **The evaluation stops on the label's endpoint**, not on the observation date. A row
 # observed the session before the holdout opens resolves inside it, so a filter on the
-# observation date looks sealed and is not - this is the boundary
+# observation date reads holdout prices while appearing not to - this is the boundary
 # [`02_labels`](02_labels.ipynb) Section E derives. The feature file written above keeps
-# every eligible row, holdout included, because the seal governs what this notebook reads
+# every eligible row, holdout included, because the boundary governs what this notebook reads
 # rather than what it writes: the model stages need holdout features to score the holdout
 # once, and nothing here may look at them.
 
@@ -866,32 +970,56 @@ assert not _unfamilied_eval, f"features in no evaluation family: {_unfamilied_ev
 
 
 # %% [markdown]
-# ### Load labels, join, and seal on the label endpoint
+# ### Load labels, join, and stop on the label endpoint
+#
+# The label's endpoint is the session numbered `PRIMARY_HORIZON` higher, looked up in the
+# stock's own series - the identical construction [`02_labels`](02_labels.ipynb) writes the
+# labels with, so this notebook stops on the date each label actually resolves on rather than
+# on an approximation of it. Reading the endpoint off the next *row* would return a later date
+# wherever the stock missed a session, and reading it off the screened frame would return the
+# next *eligible* session, which depends on what happens after the decision. It is derived on
+# the complete price frame for that second reason.
 
 # %%
 _label_col = PRIMARY_LABEL
 _label_df = pl.read_parquet(CASE_DIR / "labels" / f"{_label_col}.parquet")
 
-# The endpoint of a one-session label is the next session in that stock's own series, so it
-# is derived on the complete price frame. Shifting the screened frame would return the next
-# *eligible* session, which is a later date and depends on eligibility after the decision.
-_label_end = raw_df.select(
-    "symbol",
-    "timestamp",
-    pl.col("timestamp").shift(-1).over("symbol").alias("_label_end"),
+
+def rows_sessions_ahead(data: pl.DataFrame, horizon: int) -> pl.DataFrame:
+    """Each stock's row `horizon` sessions later, re-keyed to the session the window opens on."""
+    return data.select(
+        "symbol",
+        (pl.col("session") - horizon).alias("session"),
+        pl.col("session").alias("_end_session"),
+        pl.col("timestamp").alias("_label_end"),
+        pl.col("adj_close").alias("_end_close"),
+    )
+
+
+_panel_ends = (
+    raw_df.select("symbol", "timestamp", "session", "adj_close")
+    .with_columns((pl.col("session").max().over("symbol") - pl.col("session")).alias("_from_end"))
+    .join(rows_sessions_ahead(raw_df, PRIMARY_HORIZON), on=["symbol", "session"], how="left")
 )
 
 _joined = output_df.join(_label_df, on=["timestamp", "symbol"], how="inner")
 eval_df = (
-    _joined.join(_label_end, on=["symbol", "timestamp"], how="left")
+    _joined.join(
+        _panel_ends.select("symbol", "timestamp", "_label_end"),
+        on=["symbol", "timestamp"],
+        how="left",
+    )
     .filter(pl.col("_label_end") < HOLDOUT_START)
     .drop("_label_end")
 )
 assert eval_df["timestamp"].max() < HOLDOUT_START, "a scored row resolves inside the holdout"
 
-print(f"Feature rows joined to a label: {_joined.height:,}, label column {_label_col}")
+_n_joined = _joined.height
+del _joined  # superseded by eval_df; see the note at the end of Section 7
+
+print(f"Feature rows joined to a label: {_n_joined:,}, label column {_label_col}")
 print(
-    f"Evaluation set after the endpoint seal: {eval_df.height:,} rows through "
+    f"Evaluation set after the endpoint restriction: {eval_df.height:,} rows through "
     f"{eval_df['timestamp'].max()}, holdout opens {HOLDOUT_START}"
 )
 
@@ -905,11 +1033,12 @@ print(
 # for survived a review each.
 #
 # A feature row can lack a label only where [`02_labels`](02_labels.ipynb) wrote none, and
-# its Section D enumerates exactly three causes: the row is the last session of the stock's
-# price series, so no forward window exists; the window to the next session spans more
-# calendar time than holidays explain, which is that notebook's one-session span tolerance;
-# or a price is missing at one end of the window. All three are reproduced below, because a
-# cause left out would be indistinguishable from the two screens having drifted apart.
+# its Section D enumerates exactly three causes: the window reaches past the last session the
+# stock has; the stock has no observation on the session that closes the window; or a price is
+# missing at one of its two ends. All three are reproduced below on the same session counter
+# that notebook used, because a cause left out would be indistinguishable from the two screens
+# having drifted apart, and a cause stated in calendar days rather than in sessions would be an
+# approximation of the rule instead of the rule.
 #
 # A label row can lack a feature row only where a feature the selection requires is still
 # null, which is the warm-up at the start of a stock's series. `essential_cols` is the set
@@ -917,26 +1046,18 @@ print(
 # guessed at.
 
 # %%
-_fwd = raw_df.select(
-    "symbol",
-    "timestamp",
-    (pl.col("timestamp").shift(-1).over("symbol") - pl.col("timestamp"))
-    .dt.total_days()
-    .alias("_fwd_days"),
-    (pl.col("adj_close").is_null() | pl.col("adj_close").shift(-1).over("symbol").is_null()).alias(
-        "_unpriced"
-    ),
-)
-LABEL_SPAN_TOLERANCE_1D = 9  # 02_labels: ceil(1 * 7 / 5) + 7
-
 _feature_orphans = output_df.join(_label_df, on=["timestamp", "symbol"], how="anti").join(
-    _fwd, on=["symbol", "timestamp"], how="left"
+    _panel_ends, on=["symbol", "timestamp"], how="left"
 )
-_no_forward_window = pl.col("_fwd_days").is_null()
-_window_spans_a_hole = pl.col("_fwd_days") > LABEL_SPAN_TOLERANCE_1D
-_no_price_at_an_end = pl.col("_unpriced")
+_past_last_session = pl.col("_from_end") < PRIMARY_HORIZON
+_missed_the_closing_session = ~_past_last_session & pl.col("_end_session").is_null()
+_no_price_at_an_end = (
+    ~_past_last_session
+    & ~_missed_the_closing_session
+    & (pl.col("adj_close").is_null() | pl.col("_end_close").is_null())
+)
 _unexplained_features = _feature_orphans.filter(
-    ~(_no_forward_window | _window_spans_a_hole | _no_price_at_an_end)
+    ~(_past_last_session | _missed_the_closing_session | _no_price_at_an_end)
 )
 
 _essential_features = [c for c in essential_cols if c not in ("symbol", "timestamp")]
@@ -950,11 +1071,11 @@ _unexplained_labels = _label_orphans.join(
 
 print(
     f"  features with no label: {_feature_orphans.height:,} — "
-    f"{_feature_orphans.filter(_no_forward_window).height:,} at the end of a stock's series, "
-    f"{_feature_orphans.filter(~_no_forward_window & _window_spans_a_hole).height:,} whose next "
-    f"session is more than {LABEL_SPAN_TOLERANCE_1D} calendar days away, "
-    f"{_feature_orphans.filter(~_no_forward_window & ~_window_spans_a_hole & _no_price_at_an_end).height:,} "
-    "with no price at an end of the window"
+    f"{_feature_orphans.filter(_past_last_session).height:,} within {PRIMARY_HORIZON} session(s) "
+    f"of the end of a stock's series, "
+    f"{_feature_orphans.filter(_missed_the_closing_session).height:,} whose stock did not trade "
+    f"on the session that closes the window, "
+    f"{_feature_orphans.filter(_no_price_at_an_end).height:,} with no price at an end of it"
 )
 print(
     f"  labels with no feature: {_label_orphans.height:,} — "
@@ -962,14 +1083,20 @@ print(
 )
 
 assert _unexplained_features.height == 0, (
-    f"{_unexplained_features.height} feature rows have no label and neither end a stock's "
-    "series nor precede a gap. The two stages are screening different universes."
+    f"{_unexplained_features.height} feature rows have no label, and none of the three causes "
+    "02_labels enumerates explains them. The two stages are screening different universes."
 )
 assert _unexplained_labels.height == 0, (
     f"{_unexplained_labels.height} label rows have no feature row and are not explained by "
     "the feature warm-up. The two stages are screening different universes."
 )
 print("  reconciled: no unexplained rows on either side")
+
+# The reconciliation was the last reader of the complete price panel and of the frames built
+# from it. The IC loop below partitions the evaluation frame by date, so what is still
+# referenced here is what the notebook has to hold at its peak.
+del raw_df, _panel_ends, _feature_orphans, _label_orphans, _warmup
+
 # %% [markdown]
 # ### Per-feature IC with a HAC standard error
 #
@@ -1011,7 +1138,7 @@ for feat in feature_cols:
                 ic_vals.append(ic)
                 ic_dates.append(_key[0])
     if len(ic_vals) >= 20:
-        ic_results[feat] = compute_ic_hac_stats(np.array(ic_vals), label_horizon=1)
+        ic_results[feat] = compute_ic_hac_stats(np.array(ic_vals), label_horizon=PRIMARY_HORIZON)
         ic_series[feat] = pl.DataFrame({"timestamp": ic_dates, "ic": ic_vals})
 
 print(f"IC computed for {len(ic_results)} of {len(feature_cols)} features")
@@ -1043,6 +1170,25 @@ assert ic_results, "no feature carried enough scored dates to compute an IC"
 # picked on the sample it is measured on, so it is a selection artifact and overstates what the feature
 # would repeat out of sample. The typical feature's $|IC|$ is the defensible summary; the
 # maximum is printed only so the gap between the two is visible.
+#
+# Both counts behind the discovery ratio are taken from the same HAC p-values, so the ratio
+# prices the multiple testing and nothing else. "Nominal" there means uncorrected for
+# multiplicity, not uncorrected for autocorrelation - that second correction is already inside
+# every p-value on both sides of the ratio, and a ratio of HAC to naive $|t|$ below one means
+# HAC widened the standard error.
+#
+# One assertion guards the ranking. Features are compared against each other, so they have to
+# have been scored over near enough the same span: a feature scored on a fraction of the dates
+# is not a weaker signal, it is a different sample, and its place in the ranking means nothing.
+# A feature's IC series begins once its own rolling window has filled, so the spread between
+# the widest and the narrowest support is bounded by the longest window in the set, and that is
+# the bound applied - in the sessions the windows are declared in rather than as a share of the
+# sample. On this panel the observed spread is far under it, because names enter over decades
+# and the early dates fall below the minimum cross-section for every feature at once; a denser
+# panel whose names all start on the same day loses the first window from its longest features
+# alone, and nothing is wrong in either case. What the bound still rejects is the defect it was
+# written for: a feature scored on a fraction of the dates before the NaN conversion in
+# Section 7, which is short by thousands of sessions, not by one window.
 
 # %%
 if ic_results:
@@ -1067,33 +1213,12 @@ if ic_results:
     ).sort("ic_mean", descending=True)
 
     n_significant = int(fdr_result["n_rejected"])
-    # Both counts are taken from the same HAC p-values, so the ratio between them prices
-    # the multiple testing and nothing else. "Nominal" here means uncorrected for
-    # multiplicity, not uncorrected for autocorrelation - that second correction is
-    # already inside every p-value on both sides of the ratio, and is sized separately
-    # below.
     n_nominal_sig = sum(1 for p in _p_values if p < FDR_ALPHA)
     fdr_discovery_ratio = n_nominal_sig / max(n_significant, 1)
-    # A ratio below 1 means HAC widened the standard error.
     _t_ratio = (eval_summary["hac_tstat"].abs() / eval_summary["naive_tstat"].abs()).drop_nans()
     hac_t_ratio_median = float(_t_ratio.median())
     n_t_grew = int((_t_ratio > 1).sum())
 
-    # The ranking below compares features against each other, so they have to have been
-    # scored over near enough the same span. A feature scored on a fraction of the dates is
-    # not a weaker signal, it is a different sample, and its place in the ranking means
-    # nothing.
-    #
-    # A feature's IC series begins once its own rolling window has filled, so the spread
-    # between the widest and the narrowest support is bounded by the longest window in the
-    # set - and that is the bound applied here, in the sessions the windows are declared in
-    # rather than as a share of the sample. On this panel the observed spread is far under
-    # it, because names enter over decades and the early dates fall below the minimum
-    # cross-section for every feature at once; a denser panel whose names all start on the
-    # same day loses the first window from its longest features alone, and nothing is wrong
-    # in either case. What the bound still rejects is the defect it was written for - a
-    # feature scored on a fraction of the dates before the NaN conversion in Section 7,
-    # which is short by thousands of sessions, not by one window.
     _max_warmup = max(*MOMENTUM_HORIZONS, *VOLATILITY_HORIZONS, *MA_HORIZONS)
     _date_floor, _date_ceiling = eval_summary["n_dates"].min(), eval_summary["n_dates"].max()
     _short = (
@@ -1426,9 +1551,9 @@ print(
 #    every date is estimated partly on dates that have not happened yet, and it is the wrong
 #    width on almost all of them, because the panel's dispersion more than doubles between
 #    regimes.
-# 3. **A feature evaluation is sealed on the label's endpoint.** The last development
-#    session's label resolves after the holdout opens, so an observation-date filter looks
-#    sealed and is not.
+# 3. **A feature evaluation stops on the label's endpoint.** The last development
+#    session's label resolves after the holdout opens, so an observation-date filter reads
+#    holdout prices while appearing not to.
 # 4. **Sort the IC series before correcting it.** A Newey-West standard error reads the
 #    autocovariances of the series it is handed, and `partition_by` returns groups in no
 #    particular order, so the correction is otherwise computed over a permutation of time.
@@ -1445,5 +1570,6 @@ print(
 # - The Fundamental Law arithmetic here is an upper bound on an upper bound, because
 #   nothing in it estimates how dependent the bets are.
 #
-# **Next**: [`04_model_based_features`](04_model_based_features.ipynb) fits features that
-# have to be learned per fold, and extends this matrix with them.
+# **Next**: [`04_model_based_features`](04_model_based_features.ipynb) fits features that have
+# to be learned per fold. It writes them to a matrix of their own rather than into this one,
+# and the two are joined when a model stage loads the dataset.

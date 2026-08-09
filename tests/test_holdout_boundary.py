@@ -41,6 +41,8 @@ HOLDOUT_SCOPED_NOTEBOOKS = [
     ),
     ("case_studies/sp500_options/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/nasdaq100_microstructure/02_labels.py", "cross_sectional_ic_series("),
+    ("case_studies/us_equities_panel/02_labels.py", "cross_sectional_ic_series("),
+    ("case_studies/us_equities_panel/03_financial_features.py", "ic_results[feat] = "),
 ]
 
 
@@ -143,6 +145,7 @@ def test_holdout_filter_precedes_first_ic_computation(rel_path: str, first_ic_ma
 # short-term-reversal characteristic, against the label at three candidate lags and only the
 # previous row's return carries it.
 LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
+    "case_studies/us_equities_panel/02_labels.py",
     "case_studies/etfs/02_labels.py",
     "case_studies/etfs/05_evaluation.py",
     "case_studies/crypto_perps_funding/02_labels.py",
@@ -196,12 +199,61 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
 # calendar shift of the signal date. The notebook checks the recorded exit dates against a
 # shift of the panel calendar by the declared horizon, which is what
 # ``test_holdout_purge_is_on_the_label_endpoint`` above matches on.
+# ``us_equities_panel/02_labels`` is deliberately absent from this third list while being in
+# the two above. Its endpoint is not shifted within ``symbol`` at all: the row is looked up at
+# the session numbered one higher in that stock's own series, so the entity boundary is part of
+# the join key rather than of a window function, and a stock that missed the closing session
+# gets no endpoint instead of a later one. That is what this list's per-symbol requirement is
+# for, reached by a construction the regex below cannot express.
 PER_SYMBOL_ENDPOINT_NOTEBOOKS = [
     ("case_studies/etfs/02_labels.py", "symbol"),
     ("case_studies/crypto_perps_funding/02_labels.py", "symbol"),
     ("case_studies/cme_futures/02_labels.py", "product"),
     ("case_studies/fx_pairs/02_labels.py", "symbol"),
 ]
+
+
+def test_us_equities_panel_03_restricts_the_evaluation_on_the_label_endpoint() -> None:
+    """``us_equities_panel/03_financial_features`` needs its own check, not a list entry.
+
+    It belongs in ``HOLDOUT_SCOPED_NOTEBOOKS`` and cannot join
+    ``LABEL_ENDPOINT_PURGED_NOTEBOOKS``: the winsorization figure draws a
+    counterfactual bound from development rows with
+    ``filter(pl.col("timestamp") < HOLDOUT_START)``, which is a per-date quantile
+    that crosses no boundary but which that list's leaky-filter regex would reject.
+
+    Membership of the scoped list alone is a vacuous gate here, and this test exists
+    because the review of the commit that added it said so: the winsorization
+    comparison against ``HOLDOUT_START`` precedes the first IC computation on its own,
+    so deleting the endpoint restriction entirely would leave that check green. What
+    has to hold is the mechanism -- the endpoint comes from the label's own horizon,
+    the evaluation frame is restricted on it, and that happens before any IC is
+    computed.
+    """
+    rel_path = "case_studies/us_equities_panel/03_financial_features.py"
+    source = (REPO_ROOT / rel_path).read_text()
+
+    assert re.search(r"pl\.col\(\"session\"\)\s*-\s*horizon", source), (
+        f"{rel_path}: the label endpoint must be looked up at the session numbered "
+        "PRIMARY_HORIZON higher, as 02_labels writes it, not read off the next row"
+    )
+    assert "rows_sessions_ahead(raw_df, PRIMARY_HORIZON)" in source, (
+        f"{rel_path}: the endpoint must be derived for the declared primary horizon, "
+        "not for a bare integer that can drift from setup.yaml"
+    )
+
+    restriction = source.find('.filter(pl.col("_label_end") < HOLDOUT_START)')
+    assert restriction != -1, (
+        f"{rel_path}: the evaluation frame must be restricted to rows whose label "
+        "window closes strictly before the holdout. A filter on the observation date "
+        "reads holdout prices while appearing not to."
+    )
+    first_ic = source.find("ic_results[feat] = ")
+    assert first_ic != -1, f"{rel_path}: first-IC marker not found -- update this test"
+    assert restriction < first_ic, (
+        f"{rel_path}: the endpoint restriction must be applied before the first IC "
+        f"computation (restriction at char {restriction}, first IC at {first_ic})"
+    )
 
 
 @pytest.mark.parametrize("rel_path", LABEL_ENDPOINT_PURGED_NOTEBOOKS, ids=lambda p: p)
@@ -223,9 +275,21 @@ def test_holdout_purge_is_on_the_label_endpoint(rel_path: str) -> None:
         "forward-label window (shift the dense calendar by the label horizon), "
         "not on the signal date -- see case_studies/etfs/05_evaluation.py"
     )
-    assert re.search(r"\.shift\(-\s*[A-Za-z_]*horizon", source, re.IGNORECASE), (
-        f"{rel_path}: the label endpoint must be shifted by the declared label "
-        "horizon, not by a bare integer that can drift from the label config"
+    # Two mechanisms move a row to its label's endpoint by the declared horizon, and the
+    # second is the stronger one. Shifting rows is correct only where the entity trades every
+    # session inside the window; looking the row up at the session numbered `horizon` higher
+    # is correct whether it does or not, and returns nothing rather than a later date where
+    # the entity missed that session. ``us_equities_panel/02_labels`` uses the second after
+    # agent-workspace #218, so the pattern accepts either -- what it still refuses is a bare
+    # integer, which can drift from the horizon declared in setup.yaml.
+    assert re.search(
+        r"\.shift\(-\s*[A-Za-z_]*horizon|pl\.col\(\"session\"\)\s*-\s*[A-Za-z_]*horizon",
+        source,
+        re.IGNORECASE,
+    ), (
+        f"{rel_path}: the label endpoint must be moved by the declared label horizon - by a "
+        "shift of the entity's rows or by a lookup on the session counter - and not by a bare "
+        "integer that can drift from the label config"
     )
 
     # The endpoint must actually gate a frame, not merely be computed.

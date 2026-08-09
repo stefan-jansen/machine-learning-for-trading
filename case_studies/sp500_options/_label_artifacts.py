@@ -67,17 +67,23 @@ def ensure_label_artifacts(
             .to_list()
         )
         entry_rows = straddles.filter(pl.col("symbol").is_in(top_syms))
-    valid_range = len(trading_dates) - (1 + MAX_HOLDING)
-    offset_data = {"feature_date": trading_dates[:valid_range]}
-    offset_data["entry_date"] = trading_dates[1 : valid_range + 1]
-    for horizon in HORIZONS:
-        offset_data[f"exit_{horizon}d_date"] = trading_dates[
-            1 + horizon : valid_range + 1 + horizon
-        ]
-    for day in range(MAX_HOLDING + 1):
-        offset_data[f"path_date_{day}"] = trading_dates[1 + day : valid_range + 1 + day]
 
-    date_offsets = pl.DataFrame(offset_data)
+    # A signal date qualifies once the panel has a session to enter on; how far past
+    # that the panel has to run is a property of each horizon, so every offset column
+    # runs off the end of the panel as a null rather than shortening the frame. Sizing
+    # one frame for the longest horizon instead trims the five-session labels by the
+    # ten-session one, and drops signal dates from the hold-to-expiry label, which
+    # needs only an entry price and an expiration.
+    def _shifted(step: int) -> list[object]:
+        return trading_dates[step:] + [None] * step
+
+    offset_data = {"feature_date": trading_dates, "entry_date": _shifted(1)}
+    for horizon in HORIZONS:
+        offset_data[f"exit_{horizon}d_date"] = _shifted(1 + horizon)
+    for day in range(MAX_HOLDING + 1):
+        offset_data[f"path_date_{day}"] = _shifted(1 + day)
+
+    date_offsets = pl.DataFrame(offset_data).drop_nulls("entry_date")
     entries = (
         entry_rows.select(["timestamp", "symbol", "strike", "expiration"])
         .join(date_offsets.rename({"feature_date": "timestamp"}), on="timestamp", how="inner")
