@@ -1745,7 +1745,15 @@ stop_features = [f for f, (d, _) in triage.items() if d == "STOP"]
 
 display(
     triage_ledger.filter(pl.col("decision") == "PROCEED")
-    .select("feature", "family", "ic_mean", "hac_t", "sign_consistency", "note")
+    .select(
+        "feature",
+        "family",
+        pl.col("ic_mean").round(4),
+        pl.col("hac_t").round(2),
+        pl.col("fdr_p").round(3),
+        "sign_consistency",
+        "note",
+    )
     .sort(pl.col("ic_mean").abs(), descending=True)
 )
 
