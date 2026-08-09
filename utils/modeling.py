@@ -574,9 +574,7 @@ def load_modeling_dataset(
         primary_entity = entity_cols[0]
         dataset = dataset.filter(pl.col(primary_entity).is_in(list(symbols)))
     elif max_symbols > 0 and entity_cols:
-        primary_entity = entity_cols[0]
-        top = dataset.group_by(primary_entity).len().sort("len", descending=True).head(max_symbols)
-        dataset = dataset.filter(pl.col(primary_entity).is_in(top[primary_entity]))
+        dataset = reduce_to_top_entities(dataset, entity_cols[0], max_symbols)
 
     # Feature columns = everything except IDs and label
     feature_names = [c for c in dataset.columns if c not in ID_COLS and c != label_col]
@@ -683,6 +681,34 @@ def load_modeling_dataset(
             "symbols": symbols,
         },
     )
+
+
+def reduce_to_top_entities(
+    dataset: pl.DataFrame,
+    primary_entity: str,
+    max_symbols: int,
+) -> pl.DataFrame:
+    """Keep the ``max_symbols`` entities with the most rows, ties broken by name.
+
+    Row counts tie readily on these panels, and a tie broken by frame order is
+    not stable across runs or across callers. The entity name is the secondary
+    key so that every caller reducing the same dataset to the same size gets the
+    same universe. Without it a reduced stage-04 run and the reduced model
+    notebooks downstream of it can choose different equal-history symbols, and
+    the ones only a single side chose carry null temporal features - a wrong
+    answer that runs clean rather than a failure.
+
+    Production runs set ``max_symbols=0`` and never reach this.
+    """
+    top = (
+        dataset.group_by(primary_entity)
+        .len()
+        .sort(["len", primary_entity], descending=[True, False])
+        .head(max_symbols)
+    )
+    # implode: is_in against a bare Series of the same dtype is deprecated in
+    # polars as ambiguous, and membership in the value set is what is meant.
+    return dataset.filter(pl.col(primary_entity).is_in(top[primary_entity].implode()))
 
 
 def _inclusive_end_of(boundary: pd.Timestamp) -> pd.Timestamp:
