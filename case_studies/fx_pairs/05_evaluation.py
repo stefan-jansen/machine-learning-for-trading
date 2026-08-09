@@ -26,8 +26,10 @@
 # a training window followed by the stretch of later sessions that window did not see.
 # Only those later stretches are read here, so no column is judged on data its own
 # estimator was fitted on. The last two years of the sample, from 2024 on, are the
-# holdout: this notebook does not read them at all, and they stay unread until one
-# finished strategy is measured on them once.
+# holdout. The files loaded below run through it, and the panel every statistic here is
+# computed on stops before it, with a further gap so that no label settling inside the
+# holdout is read either. Nothing in this notebook measures anything on those sessions,
+# and they stay that way until one finished strategy is measured on them once.
 #
 # **Learning objectives**
 #
@@ -1183,18 +1185,16 @@ fig.show()
 # ranked highest.
 #
 # The rank correlation between bucket number and bucket mean summarizes how close the
-# profile is to a staircase. It is recorded in the ledger at the end beside each
-# column's decision; the triage rule itself does not read it, because a nonlinear shape
-# is a reason to model a column differently rather than to drop it.
+# profile is to a staircase. It is computed for every scored column and recorded in the
+# ledger beside that column's decision, while the panels below draw the few with the
+# largest average agreement. The triage rule does not read the score, because a shape
+# that is not a staircase is a reason to model a column differently rather than to drop
+# it.
 
 # %%
-shape_features = eval_summary.filter(pl.col("fdr_sig"))["feature"].to_list()[:12]
-if not shape_features:
-    shape_features = eval_summary.head(10)["feature"].to_list()
-
 monotonicity_scores = {}
 quantile_spreads = {}
-for feature in shape_features:
+for feature in eval_summary["feature"].to_list():
     valid = eval_panel.select([DATE_COL, feature, LABEL_COL]).drop_nulls()
     valid = valid.filter(pl.len().over(DATE_COL) >= N_QUANTILES)
     if len(valid) < N_QUANTILES * 20:
@@ -1219,8 +1219,8 @@ for feature in shape_features:
 
 features_to_show = list(quantile_spreads)[:N_SHAPE_PANELS]
 print(
-    f"Bucket profile built for {len(quantile_spreads)} columns; "
-    f"the {len(features_to_show)} drawn below are:"
+    f"Bucket profile built for {len(quantile_spreads)} of the {len(eval_summary)} scored "
+    f"columns; the {len(features_to_show)} with the largest average agreement are drawn:"
 )
 if features_to_show:
     shape_table = pl.DataFrame(
