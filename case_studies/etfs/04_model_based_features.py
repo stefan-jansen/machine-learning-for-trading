@@ -1114,9 +1114,17 @@ plt.show()
 # A regime self-transition probability $p$ says how long a state lasts: the expected run is
 # $1/(1-p)$ sessions. A GARCH coefficient sum says how a variance shock decays: the fraction of
 # it still present after $k$ sessions is $(\alpha+\beta)^k$, so the number of sessions after
-# which half of it is left is $\ln(1/2)/\ln(\alpha+\beta)$. Converting both to sessions is what
-# makes the refit cadence a decision rather than an assumption: a fold is a year long, and the
-# question is whether the quantity being estimated turns over faster than that.
+# which half of it is left is $\ln(1/2)/\ln(\alpha+\beta)$. Converted to sessions they become
+# readable as statements about the market rather than as coefficients, and both are printed
+# below alongside the ranges.
+#
+# What decides the refit cadence is a different quantity, and it is worth keeping the two apart.
+# How long a regime lasts, or how long a shock takes to decay, is what the fitted model says
+# about the world; a model can describe fast-moving states and still have parameters that never
+# need re-estimating. The cadence question is how far the parameters themselves move from one
+# fold to the next. Parameters identical across folds would say refitting bought nothing;
+# parameters that swing would say any feature depending on them inherits that movement. The two
+# ranges below are that measurement, and the figure above is its shape.
 
 
 # %%
@@ -1148,11 +1156,14 @@ print(
 # %% [markdown] tags=["results"]
 # Across the nine folds the regime model's probability of staying in a state moves by at most
 # 0.0079 - from 0.9761 to 0.9840 for the stressed state, and from 0.9876 to 0.9943 for the calm
-# one. The median GARCH persistence moves by 0.0268, from 0.9624 to 0.9892. In sessions that is a
-# stressed regime expected to run 42 to 62 of them and a calm one 80 to 176, against a variance
-# shock that is half gone after 18 to 64. All three turn over well inside the year between
-# refits, so refitting is doing something; that it lands close to the previous fold's answer
-# every time is what says the something is small.
+# one. The median GARCH persistence moves by 0.0268, from 0.9624 to 0.9892. Refitting therefore
+# lands close to the previous fold's answer every time: over this sample the annual refit is not
+# correcting a parameter that had drifted far. Whether a longer interval would still be safe is
+# a question about more history than this notebook reads, and it does not answer it.
+#
+# Read as descriptions of the market rather than as coefficients, the same fits put a stressed
+# regime at an expected 42 to 62 sessions and a calm one at 80 to 176, against a variance shock
+# that is half gone after 18 to 64.
 
 # %% [markdown]
 # ## E. Combine and emit
