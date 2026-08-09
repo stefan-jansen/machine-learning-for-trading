@@ -81,6 +81,7 @@ from ml4t.diagnostic.metrics import (
 from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 
+from case_studies.utils.feature_engineering import quantile_profile
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.cv_splits import generate_cv_splits
 from utils.data_quality import validate_modeling_inputs
@@ -978,8 +979,14 @@ fig.show()
 # Each horizon is held out of the holdout on its own terms. A longer forward return
 # settles later, so a session safely inside the development period for the weekly label
 # can have its monthly label realized inside the holdout. The sessions within one
-# horizon's reach of the holdout are therefore dropped for that horizon separately,
-# counted on the panel's own sessions rather than in calendar days.
+# horizon's reach of the holdout are therefore dropped for that horizon separately.
+#
+# The count runs over the sessions each *product* trades, not over the sessions the market
+# trades. The products here do not quote the same calendar: the equity-index contract
+# quotes 2,170 sessions in this window and the grains over 3,750, so twenty-one of the
+# market's sessions can be a good deal fewer than twenty-one of a given product's, and a
+# row sealed on the market's calendar can still have its outcome fall inside the holdout.
+# Counting within the product is what makes the seal mean the same thing for every one.
 #
 # Two quantities per feature per horizon. The **average IC** is the level. The **IC
 # information ratio** is that average divided by how much it varies across the
@@ -989,25 +996,28 @@ fig.show()
 # the longer horizon for a reason that has nothing to do with the feature.
 
 # %%
-sessions = label_df.select(DATE_COL).unique().sort(DATE_COL).with_row_index("pos")
-holdout_pos = sessions.filter(pl.col(DATE_COL) >= HOLDOUT_START)["pos"].min()
-assert holdout_pos is not None, "no session on or after the holdout start; cannot seal by position"
-
 leaders = eval_summary.head(HORIZON_SHOWN)["feature"].to_list()
 horizon_rows = []
 for variant_label, variant_horizon in LABEL_HORIZONS.items():
-    # Drop the sessions whose label at this horizon would resolve inside the holdout.
-    eligible = sessions.filter(pl.col("pos") < holdout_pos - variant_horizon)[DATE_COL]
     variant = (
         pl.read_parquet(CASE_DIR / "labels" / f"{variant_label}.parquet")
         .filter(pl.col("position") == 0)
         .select([*JOIN_COLS, variant_label])
     )
-    joined = (
-        eval_panel.select([*JOIN_COLS, *leaders])
-        .filter(pl.col(DATE_COL).is_in(eligible.to_list()))
-        .join(variant, on=JOIN_COLS, how="inner")
+    # A label advances over the sessions its own product trades, and the products do not
+    # trade the same sessions: RTY quotes 2,170 of the 3,853 in this window while the
+    # grains quote over 3,750. Counting the horizon on the market's calendar therefore
+    # lands short for a product that skips sessions, and the row it leaves in has its
+    # outcome realized inside the holdout. So each row's settling session is found within
+    # its own product, and a row is kept only when that session falls before the holdout.
+    sealed = (
+        variant.sort(["product", DATE_COL])
+        .with_columns(pl.col(DATE_COL).shift(-variant_horizon).over("product").alias("_settles"))
+        .filter(pl.col("_settles").is_not_null() & (pl.col("_settles") < HOLDOUT_START))
+        .drop("_settles")
     )
+    joined = eval_panel.select([*JOIN_COLS, *leaders]).join(sealed, on=JOIN_COLS, how="inner")
+    assert joined.is_empty() or joined[DATE_COL].max() < HOLDOUT_START
     for feat in leaders:
         valid = joined.select([DATE_COL, "product", feat, variant_label]).drop_nulls()
         series = (
@@ -1139,44 +1149,25 @@ QUANTILE_LABELS = [f"Q{i + 1}" for i in range(N_QUANTILES)]
 monotonicity_scores = {}
 quantile_spreads = {}
 for feat in top_features_for_shape:
-    valid = eval_panel.select([DATE_COL, feat, label_col]).drop_nulls()
-    # A session needs at least one product per bucket before it can be cut into them.
-    valid = valid.filter(pl.len().over(DATE_COL) >= N_QUANTILES)
-    if valid[DATE_COL].n_unique() < MIN_IC_DATES:
+    profile = quantile_profile(
+        eval_panel,
+        feat,
+        label_col,
+        date_col=DATE_COL,
+        n_quantiles=N_QUANTILES,
+        min_cross_section=MIN_CROSS_SECTION,
+    )
+    if profile is None or profile.periods_used < MIN_IC_DATES:
         continue
-    binned = valid.with_columns(
-        pl.col(feat)
-        .qcut(N_QUANTILES, labels=QUANTILE_LABELS, allow_duplicates=True)
-        .over(DATE_COL)
-        .alias("quantile")
-    )
-    # Per session first, then across sessions, so every session carries the same
-    # weight - which is how the correlation series beside this is built.
-    per_date = binned.group_by([DATE_COL, "quantile"]).agg(
-        pl.col(label_col).mean().alias("date_mean"),
-        pl.col(label_col).median().alias("date_median"),
-    )
-    profile = (
-        per_date.group_by("quantile")
-        .agg(
-            pl.col("date_mean").mean().alias("mean"),
-            pl.col("date_median").mean().alias("median"),
-        )
-        .sort("quantile")
-    )
-    means = profile["mean"].to_list()
-    medians = profile["median"].to_list()
     quantile_spreads[feat] = {
-        "q_means": means,
-        "q_medians": medians,
-        "spread": means[-1] - means[0],
+        "q_means": profile.means,
+        "q_medians": profile.medians,
+        "spread": profile.spread,
     }
-
     # The recorded shape score is the rank correlation between the bucket's position
     # and its mean return: one at a profile that rises all the way across, minus one at
     # one that falls all the way, near zero at one that turns in the middle.
-    mono_corr, _ = spearmanr(range(len(means)), means)
-    monotonicity_scores[feat] = float(mono_corr)
+    monotonicity_scores[feat] = profile.monotonicity
 
 # %%
 if quantile_spreads:
