@@ -519,16 +519,19 @@ def family_coverage(
 def _cycle(n: int) -> list[tuple[str, str]]:
     """Colour and line style per series, so more series than hues stay separable.
 
-    The palette's sixth entry is ``slate``, a second navy that its own definition
-    describes as reading close to ``blue``. Cycling the style once per six put the
-    first and sixth series in near-identical navy, both solid, in the same block -
-    so every stage-03 coverage figure with six or more families drew two of them as
-    one line. The style therefore turns over every *five*, which puts the twin in a
-    different style from the original while still keeping the first five solid.
+    The style turns over once per full pass through the palette, so the first six
+    series are told apart by hue alone and only a seventh onwards needs a dash to
+    part it from the series six earlier.
+
+    It used to turn over every *five*. ``COLOR_CYCLER``'s sixth entry was ``slate``,
+    a second navy, so a solid first and a solid sixth series were one line, and
+    parting them by style was the only lever this helper had. The palette now ends
+    in ``recede``, which is a hue away from navy in colour and in gray, so the
+    workaround is gone and with it the combinations it cost.
     """
     styles = ["-", "--", ":", "-."]
     hues = len(COLOR_CYCLER)
-    return [(COLOR_CYCLER[i % hues], styles[(i // (hues - 1)) % len(styles)]) for i in range(n)]
+    return [(COLOR_CYCLER[i % hues], styles[(i // hues) % len(styles)]) for i in range(n)]
 
 
 def plot_coverage_through_time(
@@ -730,6 +733,7 @@ def plot_timing_contract(
     ax.set_yticklabels([f.name for f in reversed(families)], fontsize=7)
     ax.axvline(0, color=COLORS["negative"], linewidth=1)
     ax.set_xlabel(f"{bar_unit} before the decision timestamp")
+    legend = None
     if any(f.lag for f in families):
         ax.barh(
             0,
@@ -741,11 +745,34 @@ def plot_timing_contract(
             linewidth=0.8,
             label="published but not yet available",
         )
-        ax.legend(fontsize=7, frameon=False, loc="lower left")
+        # Below the axes, and owned by the figure. Inside them at the bottom left it
+        # sat on the last family's bar - the register declares the families and the
+        # axes grow one row per family, so the more a case study declares the further
+        # the bottom row reaches under the legend, and at the eight of
+        # us_firm_characteristics and cme_futures the entry crossed the `interaction`
+        # bar and touched the tick labels under it. There is no in-axes corner that is
+        # safe here: a lag bar can reach any of them, because which families are
+        # lagged and how far is exactly what the figure is drawn to show.
+        legend = fig.legend(
+            *ax.get_legend_handles_labels(),
+            fontsize=7,
+            frameon=False,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.0),
+        )
+    # A strip under the bottom row that belongs to the "decision" label and to nothing
+    # else, and the label anchored to the axes' floor rather than to a data coordinate
+    # guessed once. At -0.45 it was inside the bottom row's bar - which spans 0.55 - so
+    # it was drawn over the last family's lookback and its lag hatch, the same thing the
+    # legend was doing a few lines above and in the same corner. How far the label
+    # reached into the bar varied with the family count, because that sets the axes
+    # height and so what 7pt is worth in data units.
+    ax.set_ylim(-1.0, len(families) - 0.5)
     ax.annotate(
         "decision",
-        xy=(0, -0.45),
-        xytext=(-3, 0),
+        xy=(0, 0),
+        xycoords=ax.get_xaxis_transform(),
+        xytext=(-3, 3),
         textcoords="offset points",
         ha="right",
         va="bottom",
@@ -753,7 +780,17 @@ def plot_timing_contract(
         color=COLORS["negative"],
     )
     add_message_title(ax, title, subtitle=subtitle)
-    fig.tight_layout()
+    # The strip the legend needs is measured after it is drawn, not guessed from the
+    # entry count, so a longer label cannot clip and a shorter one cannot leave a band
+    # of dead space. Same reservation `plot_persistence` makes for its own legend.
+    if legend is not None:
+        fig.canvas.draw()
+        strip = legend.get_window_extent(fig.canvas.get_renderer()).transformed(
+            fig.transFigure.inverted()
+        )
+        fig.tight_layout(rect=(0.0, strip.height + 0.02, 1.0, 1.0))
+    else:
+        fig.tight_layout()
     show_with_alt(fig, alt)
 
 
@@ -884,6 +921,20 @@ def plot_persistence(
     # ago", which is a different date for every entity and crosses any stretch the
     # entity was absent for - after an eligibility gate, by months or years.
     dates = frame[time].unique().sort()
+    # Both lag maps below are built from Python objects and handed to
+    # `replace_strict`, which types its output from the values it was given, not from
+    # the column it replaces. A Python `datetime` carries microseconds, so on a panel
+    # stamped in anything else the new column came back `datetime[us]` and the join
+    # that follows failed outright:
+    #
+    #   SchemaError: `_then`: datetime[us, UTC] does not match `_then`: datetime[ms, UTC]
+    #
+    # Binance stamps in milliseconds, so the whole crypto_perps_funding pipeline is
+    # `datetime[ms]` and this figure could not be drawn for it at all; its notebook
+    # cast the frame it passed here and nothing else, which fixes one caller and
+    # leaves the helper broken for the next. Pinning the return type to the column's
+    # own dtype fixes it for every panel, at whatever precision it is stamped in.
+    when = frame.schema[time]
     acf: dict[str, list[float]] = {c: [] for c in columns}
     lower: dict[str, list[float]] = {c: [] for c in columns}
     upper: dict[str, list[float]] = {c: [] for c in columns}
@@ -891,7 +942,7 @@ def plot_persistence(
     for lag in lags:
         back = dict(zip(dates[lag:].to_list(), dates[: -int(lag)].to_list(), strict=True))
         pairs = frame.with_columns(
-            pl.col(time).replace_strict(back, default=None).alias("_then")
+            pl.col(time).replace_strict(back, default=None, return_dtype=when).alias("_then")
         ).join(
             frame.select(
                 *keys,
@@ -977,7 +1028,9 @@ def plot_persistence(
             time, *keys, pl.col(column).rank().over(time).alias("_r")
         ).drop_nulls()
         joined = (
-            ranked.with_columns(pl.col(time).replace_strict(step, default=None).alias("_prev"))
+            ranked.with_columns(
+                pl.col(time).replace_strict(step, default=None, return_dtype=when).alias("_prev")
+            )
             .join(
                 ranked.select(*keys, pl.col(time).alias("_prev"), pl.col("_r").alias("_r_prev")),
                 on=[*keys, "_prev"],
