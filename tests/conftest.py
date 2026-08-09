@@ -249,11 +249,21 @@ def seeded_output_dir(tmp_path_factory):
             dst = output_dir / cs_id
             # Copy features, labels, evaluation, run_log, results, benchmark —
             # anything that downstream notebooks look for in get_case_study_dir()
+            # Replace rather than fill a gap. CI checks the fixture out into a
+            # clean container every time; a lane re-running into an existing
+            # ML4T_OUTPUT_DIR kept whatever the previous run had left, which for
+            # run_log/registry.db means every training run, prediction set and
+            # backtest that run registered. The notebooks then saw identities
+            # neither the fixture nor production carries, so the same code
+            # produced a different failure list locally than in CI.
             for subdir in ["features", "labels", "evaluation", "run_log", "results", "benchmark"]:
                 src_sub = src / subdir
                 dst_sub = dst / subdir
-                if src_sub.exists() and not dst_sub.exists():
-                    shutil.copytree(src_sub, dst_sub)
+                if not src_sub.exists():
+                    continue
+                if dst_sub.exists():
+                    shutil.rmtree(dst_sub)
+                shutil.copytree(src_sub, dst_sub)
             # Copy top-level intermediate files (e.g. etfs/eligibility.csv,
             # protocol.yaml, baseline_checkpoint.yaml) that sit directly in
             # intermediates/{cs_id}/ rather than in a subdir. Downstream
@@ -261,10 +271,8 @@ def seeded_output_dir(tmp_path_factory):
             # get_case_study_dir(); without this they fail with FileNotFoundError.
             for item in src.iterdir():
                 if item.is_file():
-                    dst_file = dst / item.name
-                    if not dst_file.exists():
-                        dst.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(item, dst_file)
+                    dst.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(item, dst / item.name)
             # Schema reconciliation: test-data predictions parquets were
             # generated with an older column convention (y_score / y_true /
             # fold_id). Production registry uses (prediction / actual / fold).
@@ -283,8 +291,9 @@ def seeded_output_dir(tmp_path_factory):
             if not src.exists():
                 continue
             dst = output_dir / extra_id
-            if not dst.exists():
-                shutil.copytree(src, dst)
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
 
     # Seed minimal results fixtures so downstream notebooks (latent factors, DL,
     # backtest) can find baseline results without depending on upstream execution.
