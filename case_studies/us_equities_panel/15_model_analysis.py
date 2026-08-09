@@ -699,7 +699,10 @@ plot_learning_curves(cp_data, cp_families)
 #
 # Feature importance from a single model fit is anecdotal. Recurring
 # importance across 16 walk-forward folds is strong evidence. We examine
-# which of the 71 features consistently drive the best model's predictions.
+# which features consistently drive the best model's predictions. The
+# booster's own importance covers all 71; where no booster file is
+# available, the fallback correlates predictions against the 62
+# financial columns only.
 #
 # For daily equity prediction, we expect short-term reversal features
 # (5d momentum, overnight return proxies) and liquidity indicators to
