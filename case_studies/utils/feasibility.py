@@ -138,8 +138,13 @@ def panel_acf(
         band is drawn wider than the estimate. ``pooled_se`` is the standard error of
         the plotted quantity itself, the cross-entity mean, and stays usable there.
         ``obs_per_entity`` is the mean entity length the band is built from.
-        ``n_dropped`` counts entities whose curve was not finite - a constant series
-        has no autocorrelation - and which are therefore not in the mean.
+
+        ``n_entities`` is counted **per lag**. A sparse entity can have pairs at lag
+        1 and none at lag 12, and it contributes wherever it has them rather than
+        being dropped from the whole curve; where the count moves across lags, the
+        mean at each lag is over a different set and the column says so.
+        ``n_dropped`` counts the entities that contributed at no lag at all, which is
+        what a constant series does - it has no autocorrelation to report.
     """
     curves: list[np.ndarray] = []
     lengths: list[int] = []
@@ -150,10 +155,10 @@ def panel_acf(
         if observed < max(min_obs, max_lags + 1):
             continue
         curve = _lag_exact_acf(series, max_lags)
-        # A zero-variance entity has no autocorrelation to report, and a plain mean
-        # over the stack would propagate its NaN to every lag and draw the figure
-        # empty with nothing raised. One firm in 10,587 did exactly that.
-        if not np.all(np.isfinite(curve)):
+        # A zero-variance entity has nothing to report at any lag. Pooling it with a
+        # plain mean would propagate its NaN to every lag and draw the figure empty
+        # with nothing raised; one firm in 10,587 did exactly that.
+        if not np.any(np.isfinite(curve[1:])):
             dropped += 1
             continue
         curves.append(curve)
@@ -163,19 +168,28 @@ def panel_acf(
         raise ValueError(f"no {entity_col} carries {min_obs} observations of {value_col}")
 
     stacked = np.vstack(curves)
+    finite = np.isfinite(stacked)
     obs_per_entity = float(np.mean(lengths))
-    filled = np.full(max_lags + 1, np.nan)
+
+    def per_lag(reduce) -> np.ndarray:
+        out = np.full(max_lags + 1, np.nan)
+        for lag in range(max_lags + 1):
+            column = stacked[finite[:, lag], lag]
+            if column.size:
+                out[lag] = reduce(column)
+        return out
+
     return pl.DataFrame(
         {
             "lag": np.arange(max_lags + 1),
-            "acf": stacked.mean(axis=0),
-            "acf_p10": np.percentile(stacked, 10, axis=0),
-            "acf_p90": np.percentile(stacked, 90, axis=0),
+            "acf": per_lag(np.mean),
+            "acf_p10": per_lag(lambda c: np.percentile(c, 10)),
+            "acf_p90": per_lag(lambda c: np.percentile(c, 90)),
             "band": np.full(max_lags + 1, 1.96 / np.sqrt(obs_per_entity)),
-            "pooled_se": (
-                stacked.std(axis=0, ddof=1) / np.sqrt(len(curves)) if len(curves) > 1 else filled
+            "pooled_se": per_lag(
+                lambda c: c.std(ddof=1) / np.sqrt(c.size) if c.size > 1 else np.nan
             ),
-            "n_entities": np.full(max_lags + 1, len(curves)),
+            "n_entities": finite.sum(axis=0),
             "obs_per_entity": np.full(max_lags + 1, obs_per_entity),
             "n_dropped": np.full(max_lags + 1, dropped),
         }
@@ -242,6 +256,8 @@ def _entity_series(
     # Trim to the observed span: a leading or trailing hole carries no pair, and
     # leaving it in would lengthen T and taper every coefficient for nothing.
     observed = np.flatnonzero(~np.isnan(grid))
+    if observed.size == 0:
+        return np.empty(0)
     return grid[observed[0] : observed[-1] + 1]
 
 

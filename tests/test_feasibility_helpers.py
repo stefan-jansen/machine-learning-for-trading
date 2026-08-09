@@ -163,6 +163,56 @@ class TestOneConstantEntity:
         assert result["n_dropped"][0] == 1
         assert result["n_entities"][0] == N_ENTITIES
 
+    def test_an_entity_with_no_values_at_all_is_skipped(self):
+        """An all-null entity has no period grid, and must not raise on the way out."""
+        rng = np.random.default_rng(6)
+        panel = _panel(rng)
+        empty = pl.DataFrame(
+            {
+                "symbol": ["GONE"] * N_PERIODS,
+                "period": np.arange(N_PERIODS),
+                "value": np.full(N_PERIODS, None, dtype=object),
+            },
+            schema={"symbol": pl.String, "period": pl.Int64, "value": pl.Float64},
+        )
+
+        result = panel_acf(
+            pl.concat([panel, empty]),
+            entity_col="symbol",
+            value_col="value",
+            max_lags=MAX_LAGS,
+            period_col="period",
+        )
+
+        assert result["n_entities"][1] == N_ENTITIES
+        assert np.all(np.isfinite(result["acf"].to_numpy()))
+
+    def test_an_entity_short_of_pairs_at_one_lag_still_counts_at_the_others(self):
+        """Dropping it from every lag would discard estimates that are perfectly good."""
+        rng = np.random.default_rng(7)
+        panel = _panel(rng)
+        # Periods 0, 1, 100, 101, 200, 201, ...: plenty of lag-1 pairs, no lag-3 pairs.
+        periods = np.concatenate([[100 * k, 100 * k + 1] for k in range(60)])
+        sparse = pl.DataFrame(
+            {
+                "symbol": ["SPARSE"] * periods.size,
+                "period": periods,
+                "value": _ar1(rng, periods.size),
+            }
+        )
+
+        result = panel_acf(
+            pl.concat([panel, sparse]),
+            entity_col="symbol",
+            value_col="value",
+            max_lags=MAX_LAGS,
+            period_col="period",
+        )
+
+        assert result["n_entities"][1] == N_ENTITIES + 1, "it has lag-1 pairs"
+        assert result["n_entities"][3] == N_ENTITIES, "it has no lag-3 pairs"
+        assert result["n_dropped"][0] == 0, "it contributed somewhere, so it is not dropped"
+
     def test_every_entity_constant_is_an_error_not_a_blank_figure(self):
         frame = pl.DataFrame(
             {

@@ -93,6 +93,62 @@ class TestSessionBounds:
         }
 
 
+class TestThroughTheLoader:
+    """The helper is only worth anything if `load_nasdaq100_bars` still calls it."""
+
+    @pytest.fixture
+    def archive(self, tmp_path, monkeypatch):
+        """A minute-bar archive in the layout the loader scans."""
+        rows = []
+        for date in [FULL_DAY, HOLIDAY, *HALF_DAYS]:
+            stamp = dt.datetime.combine(date, dt.time(9, 0))
+            while stamp.time() <= dt.time(16, 45):
+                rows.append(
+                    {
+                        "timestamp": stamp,
+                        "symbol": "AAPL",
+                        "date": date,
+                        "first_trade_price": 100.0,
+                        "high_trade_price": 101.0,
+                        "low_trade_price": 99.0,
+                        "last_trade_price": 100.5,
+                        "volume": 1_000.0,
+                    }
+                )
+                stamp += dt.timedelta(minutes=15)
+
+        partition = tmp_path / "equities" / "market" / "nasdaq100" / "minute_bars" / "year=2020"
+        partition.mkdir(parents=True)
+        pl.DataFrame(rows).write_parquet(partition / "part.parquet")
+
+        from data.equities import loader
+
+        monkeypatch.setattr(loader, "ML4T_DATA_PATH", tmp_path)
+        return loader
+
+    def test_regular_hours_stops_at_the_early_close(self, archive):
+        bars = archive.load_nasdaq100_bars(regular_hours=True)
+        last = (
+            bars.group_by(pl.col("timestamp").dt.date().alias("date"))
+            .agg(pl.col("timestamp").max().dt.time().alias("last"))
+            .sort("date")
+        )
+
+        assert dict(zip(last["date"], last["last"], strict=True)) == {
+            FULL_DAY: dt.time(15, 45),
+            HALF_DAYS[0]: dt.time(12, 45),
+            HALF_DAYS[1]: dt.time(12, 45),
+        }
+        assert HOLIDAY not in last["date"].to_list()
+
+    def test_regular_hours_false_keeps_everything(self, archive):
+        bars = archive.load_nasdaq100_bars(regular_hours=False)
+
+        assert bars["timestamp"].min().time() == dt.time(9, 0)
+        assert bars["timestamp"].max().time() == dt.time(16, 45)
+        assert bars["timestamp"].dt.date().n_unique() == 4
+
+
 class TestTheSessionTable:
     def test_the_two_early_closes_are_the_only_ones_in_the_window(self):
         sessions = _exchange_sessions().filter(
