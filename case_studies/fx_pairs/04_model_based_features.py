@@ -1179,11 +1179,13 @@ arima_df = pl.DataFrame(arima_results)
 print(f"\nARIMA features: {len(arima_df):,} rows")
 
 # %% [markdown] tags=[]
-# **The same two checks again.** Containment is checked against the emitted frame. In
-# place of the truncation test the other two sections run, this one checks the claim the
-# section actually rests on: that extending the series does not re-estimate. Both parameter
-# vectors are compared element by element, and the series they are compared on stops at the
-# holdout boundary like every other series in this notebook.
+# **The same checks again, plus one this section needs on its own.** Containment first.
+# Then the truncation test the other two sections run, on the forecasts this one emits.
+# Between them sits the claim particular to this model: that `apply(..., refit=False)`
+# extends the recursion without re-estimating. Truncation alone would not catch a re-fit,
+# because a model re-estimated on the longer series is still a forward pass over it - so
+# the two parameter vectors are also compared element by element. Every series here stops
+# at the holdout boundary, like every other series in this notebook.
 
 # %% tags=[]
 for fold in folds:
@@ -1215,11 +1217,21 @@ seal_fit = ARIMA(seal_train, order=ARIMA_ORDER).fit()
 seal_applied = seal_fit.apply(seal_path, refit=False)
 param_drift = float(np.abs(np.asarray(seal_fit.params) - np.asarray(seal_applied.params)).max())
 assert param_drift == 0.0, f"apply() re-estimated: parameters moved by {param_drift:.2e}"
+
+seal_cut = len(seal_path) // 2
+full_pred = np.asarray(seal_applied.predict(start=0, end=len(seal_path) - 1))
+prefix_pred = np.asarray(
+    seal_fit.apply(seal_path[:seal_cut], refit=False).predict(start=0, end=seal_cut - 1)
+)
+arima_drift = float(np.abs(full_pred[:seal_cut] - prefix_pred).max())
+assert arima_drift < 1e-10, f"forecasts moved by {arima_drift:.2e} - not a forward pass"
 print(
     f"Return-model checks hold across {len(folds)} folds; last emitted date "
     f"{arima_df['timestamp'].max()} < holdout start {HOLDOUT_START}; extending "
     f"{SYMBOLS[0]} fold {seal_fold['fold']} from {len(seal_train)} to {len(seal_path)} "
-    f"observations moves the fitted parameters by {param_drift:.2e}"
+    f"observations moves the fitted parameters by {param_drift:.2e}, and deleting the "
+    f"last {len(seal_path) - seal_cut} of them moves the first {seal_cut} forecasts by "
+    f"{arima_drift:.2e}"
 )
 
 # %% [markdown] tags=[]
@@ -1748,7 +1760,8 @@ else:
     print(f"Ranking omitted: no session reaches {MIN_PAIRS_PER_DATE} pairs in this run.")
 
 # %% [markdown] tags=[]
-# The screen in full, one row per column, largest estimate first. Reading across a row:
+# The screen in full, one row per column, largest in absolute size first - so a strong
+# negative correlation sorts above a weaker positive one. Reading across a row:
 # the average correlation, the corrected standard error behind it, what the uncorrected
 # and corrected t-statistics would each have said, and what still clears the threshold once
 # testing ten columns at once is adjusted for. The gap between the two t-statistics is how
@@ -1774,7 +1787,8 @@ eval_summary
 # measured in `05_evaluation`.
 
 # %% [markdown] tags=[]
-# Gold is painted only where the largest estimate fails the adjusted threshold, so the
+# Gold is painted only where the largest absolute estimate fails the adjusted threshold,
+# so the
 # sentence in the subtitle follows the same branch as the colour and cannot describe a
 # chart the run did not draw.
 
@@ -1794,9 +1808,9 @@ if len(eval_summary):
     ]
     leader_significant = bool(eval_summary["significant_fdr05"][0])
     leader_note = (
-        f"{leader} carries the largest estimate and clears the adjusted threshold."
+        f"{leader} is the largest in absolute size and clears the adjusted threshold."
         if leader_significant
-        else f"Gold marks {leader}, the largest estimate; it does not clear the threshold."
+        else f"Gold marks {leader}, largest in absolute size; it does not clear the threshold."
     )
     ic_title = (
         "Some columns clear the threshold once ten tests are adjusted for"
@@ -1897,7 +1911,7 @@ if len(eval_summary):
     print(f"Columns rankable across pairs:            {len(feature_names)}")
     print(f"Clearing the adjusted 5% threshold:       {n_fdr_sig}")
     print(
-        f"Largest estimate:                         {top_result['feature']} "
+        f"Largest in absolute size:                 {top_result['feature']} "
         f"({top_result['ic_mean']:+.4f}, t {top_result['hac_tstat']:+.2f})"
     )
 else:
