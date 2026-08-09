@@ -18,18 +18,33 @@
 # # Crypto Perps Funding: Feature Engineering
 #
 # A perpetual future has no expiry, so the only thing tying it to spot is a payment between its
-# holders. That payment is the funding rate, it settles every eight hours, and the premium index
-# it is computed from is published on the same grid. Every feature here is a transformation of
-# those two series, and the question each one has to answer first is not whether it predicts but
-# whether it is knowable: at a settlement, which observations have already been published, and
-# what does the feature make of them?
+# holders. That payment is the funding rate, and its sign says who pays whom: where the rate is
+# positive the holders of long positions pay the holders of short ones, and where it is negative
+# the payment runs the other way. What drives the sign is mostly how far the contract trades from
+# spot, but not only that - the exchange adds a small interest term, so a contract trading a
+# little below spot can still leave longs paying. It normally settles every eight hours, though
+# the exchange can shorten an individual contract's interval, and Section B counts how often that
+# happened here.
+#
+# What the exchange computes the rate from is the **premium index**, its own published measure of
+# how far the contract sits from the spot price it tracks. Two things carry that name and this
+# notebook uses only one of them: the funding formula takes a time-weighted average of the premium
+# index over the interval ending at the settlement, and adds an interest term and a cap, while the
+# features below read `premium_index_close`, the index's value at the close of each eight-hour
+# bar. Every feature meant to rank one contract against another is a transformation of that series
+# and of the settled rate; a handful of others describe the conditions a ranking is formed in and
+# come from elsewhere - the contract's own price for its volatility, the timestamp for which of
+# the three daily settlements a row belongs to, and the configuration for its fee tier. The
+# question each feature has to answer first is not whether it predicts but whether it is knowable:
+# at a settlement, which observations have already been published, and what does the feature make
+# of them?
 #
 # ## Learning objectives
 #
 # - State a feature's timing contract - its lookback and its information lag - before writing the
 #   code that computes it
-# - Move a provider's bar-open clock onto an availability clock, and see why every later shift
-#   inherits that one decision
+# - Restamp a provider's bars from the time each one opened to the time it became knowable, and
+#   see why every later shift, join and window inherits that single decision
 # - Show that withholding later settlements leaves every feature value unchanged, which separates
 #   a trailing statistic from one fitted over the whole sample
 # - Read a feature set for scale, dispersion, redundancy and decay before any model sees it
@@ -41,8 +56,9 @@
 # Writes `features/financial.parquet` with a `.digest.json` sidecar, read by
 # [`04_model_based_features`](04_model_based_features.ipynb), which fits regime and volatility
 # features on top of it fold by fold, and by [`05_evaluation`](05_evaluation.ipynb), which tests
-# whether any of it predicts. [`02_labels`](02_labels.ipynb) builds the forward returns on the
-# same availability clock this notebook uses; nothing here reads a label.
+# whether any of it predicts. [`02_labels`](02_labels.ipynb) stamps its forward returns the same
+# way Section B stamps these features, so a feature row and a label row carrying one timestamp
+# describe one decision; nothing here reads a label.
 
 # %%
 """Crypto Perps Funding: Feature Engineering."""
@@ -53,6 +69,7 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 import polars as pl
 import yaml
+from IPython.display import display
 from ml4t.engineer.features.ml import percentile_rank_features
 
 from case_studies.crypto_perps_funding.funding_data import load_funding_rates
@@ -84,9 +101,10 @@ CASE_DIR = get_case_study_dir("crypto_perps_funding")
 FEATURES_DIR = CASE_DIR / "features"
 
 # %% [markdown]
-# `START_DATE` is unset in production and read below; CI overrides it to shorten the history. The
-# universe is nineteen symbols and the cross-sectional families need a cross-section to rank
-# within, so there is no symbol cap.
+# `START_DATE` is unset, so the loader below returns each perpetual's full history. Readers can
+# override it through Papermill to run the notebook over a shorter window. There is no matching
+# cap on the number of symbols: the within-settlement features rank each perpetual against the
+# others trading at the same moment, and a truncated universe changes every one of those values.
 
 # %% tags=["parameters"]
 START_DATE = None
@@ -109,7 +127,6 @@ CLIP = features_cfg["clip"]
 MAJORS = set(features_cfg["majors"])
 RANKED = features_cfg["ranked"]
 REDUNDANCY_CUT = features_cfg["redundancy_cut"]
-MIN_CROSS_SECTION = 2
 BAR_HOURS = features_cfg["bar_hours"]
 BARS_PER_YEAR = setup["evaluation"]["periods_per_year"] * 24 / BAR_HOURS
 HOLDOUT_START = datetime.fromisoformat(setup["evaluation"]["holdout_start"]).replace(tzinfo=UTC)
@@ -128,21 +145,25 @@ print(f"Holdout opens {HOLDOUT_START.date()}; Section D rebuilds the panel witho
 # how one-sided the positioning is. A perpetual whose holders are paying most is expected to give
 # ground relative to the rest of the universe over the following settlements. Three things follow.
 #
-# The **carrier** is the funding-and-premium block, in four representations rather than one,
-# because a raw premium is comparable neither across symbols nor across regimes: the level, its
-# z-score against its own history, its percentile within the settlement, and the speed at which it
-# decays back. Which of those the effect lives in is a question `05_evaluation` asks.
+# The **signal families** are funding and the premium it is computed from, entered in four
+# representations rather than one, because a raw premium is comparable neither across symbols nor
+# across regimes: the level, its z-score against its own history, its percentile within the
+# settlement, and the speed at which it decays back. Which of those the effect lives in is a
+# question `05_evaluation` asks.
 #
-# The **conditioning** is regime. Crowding unwinds differently in a liquidation cascade than in a
-# quiet week, so the matrix also carries the dispersion of the premium and of the price, the
+# The **conditioning** is regime. Crowding unwinds differently in a quiet week than in a
+# liquidation cascade - a stretch where falling prices force leveraged positions to be closed,
+# which pushes prices down further and forces more of them - so the matrix also carries the
+# dispersion of the premium and of the price, the
 # short-over-long volatility ratios, a sustained-premium indicator and the settlement slot. These
 # rank nothing against each other; they say which environment a ranking is being formed in, which
 # is what the register's `role` column records and no assertion can recover from the values.
 #
 # The **failure modes** are stated with the families rather than discovered later: the exchange
-# clamps the funding rate, so the carrier saturates in the regimes that matter most, and momentum
-# and mean reversion read one series with opposite signs, so a model given both may find they
-# cancel. Every lag in the register is zero, and Section B is where that is earned.
+# caps the funding rate at a fixed bound, so the rate stops moving in exactly the regimes that
+# matter most, and momentum and mean reversion read one series with opposite signs, so a model
+# given both may find they cancel. Every lag in the register is zero, and Section B is where that
+# is earned.
 
 # %%
 register_frame(FAMILIES).select(["family", "role", "inputs", "lookback (bars)", "lag (bars)"])
@@ -160,9 +181,16 @@ register_frame(FAMILIES).select(["family", "role", "inputs", "lookback (bars)", 
 # The official settlement series needs no such shift. Its `calc_time` is the settlement instant
 # itself, and the rate is the time-weighted premium over the interval ending there plus the
 # interest component and the exchange clamp - so the newest input to `funding_rate` at a
-# timestamp is dated at that timestamp. The last line below is what would catch that being wrong:
-# a rate determined by the interval that ends at its own stamp tracks the return over that
+# timestamp is dated at that timestamp. The last two lines below are what would catch that being
+# wrong: a rate determined by the interval that ends at its own stamp tracks the return over that
 # interval, and a rate stamped a bar early would instead track the one that follows it.
+#
+# One feature is summed on the funding series' own clock rather than as a fixed number of rows on
+# the eight-hour panel. Binance can shorten a contract's settlement interval to two or four hours
+# when the premium runs far from its band, and during such a stretch seven days hold more than
+# twenty-one settlements. A fixed twenty-one-row sum would then omit real cash flows, so the
+# seven-day total is taken over a seven-day *time* window and counts whatever settlements fall in
+# it. The count of shortened intervals printed below is how much of the sample this affects.
 
 # %%
 available_at = (pl.col("timestamp") + pl.duration(hours=BAR_HOURS)).alias("timestamp")
@@ -178,9 +206,6 @@ assert not required - set(prices.columns), (
     f"loader missing {sorted(required - set(prices.columns))}"
 )
 
-# The trailing seven days of settlements are summed on the funding series' own clock rather than
-# as a fixed row count on the eight-hour panel, because Binance can shorten one contract's
-# settlement interval to two or four hours and a fixed-row sum would then omit real cash flows.
 cashflow_label, cashflow_days = next(iter(W["funding_cashflow"].items()))
 cashflows = (
     funding.with_columns(pl.col("funding_rate").clip(lower_bound=0.0).alias("_paid"))
@@ -205,30 +230,80 @@ print(f"funding against the interval it is computed from: {observability['backwa
 print(f"funding against the interval that follows it:     {observability['forward'][0]:+.4f}")
 
 # %% [markdown]
+# ### What is actually in the panel
+#
+# The universe is a fixed list of nineteen perpetuals, and it is unbalanced: a contract enters the
+# panel when Binance lists it and nothing is backfilled before that date. The table below carries
+# the three properties of it that later sections here depend on, and
+# [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) describes the universe in full.
+#
+# **First settlement** is the earliest bar a contract contributes, and the spread of those dates is
+# what makes the panel unbalanced - which is why C.5 normalizes its cross-sectional position by the
+# number of contracts quoting rather than by a fixed nineteen. **Missing premium** counts the bars
+# whose premium index the exchange did not publish; those are the gaps whose cost Section E
+# measures, and they are not spread evenly across contracts. **Fee tier** is the `cost_tier_alt`
+# feature, and it records an assumption rather than a measurement: the configuration assumes the
+# five largest contracts can be traded passively, at the two-basis-point maker fee, and that the
+# rest have to take liquidity at four. It reaches the matrix only as something a model can
+# condition on. It does not set what a trade costs anywhere downstream - the backtest configuration
+# charges one commission rate on every contract - so a difference between the two groups in the
+# reported results comes from the model using the column, never from one group being charged more.
+
+# %%
+universe = (
+    panel.group_by("symbol")
+    .agg(
+        pl.col("timestamp").min().dt.date().alias("first settlement"),
+        pl.len().alias("bars"),
+        pl.col("premium_index_close").is_null().sum().alias("missing premium"),
+    )
+    .with_columns(
+        pl.when(pl.col("symbol").is_in(list(MAJORS)))
+        .then(pl.lit("maker"))
+        .otherwise(pl.lit("taker"))
+        .alias("fee tier")
+    )
+    .sort(["first settlement", "symbol"])
+)
+with pl.Config(tbl_rows=universe.height, tbl_cols=universe.width):
+    display(universe)
+
+# %% [markdown]
 # ## C. Feature construction, one subsection per family
 #
 # ### C.1 Carry: the funding rate and the premium it is computed from
 #
 # The z-score is the shared trailing primitive: mean and dispersion over the row's own history,
-# with the one denominator guard the stage uses everywhere. Its clip is not a guard but a decision
-# the configuration declares, because a settlement-day outlier otherwise sets the scale a model
-# reads. The half-life is local, since no library call covers it: the decay time implied by a
-# rolling AR(1) coefficient, built from a trailing covariance and a trailing variance so nothing
-# is estimated across the sample, clipped where the coefficient approaches one and the implied
-# half-life diverges.
+# divided by a dispersion held off zero by `EPS`, a small floor the case-study helpers apply so a
+# window in which the series never moved returns a bounded number instead of dividing by zero. It
+# does not rescue a window that has no dispersion to compute - one still filling, or one spanning
+# a missing observation, is null before the floor and stays null after it. Its clip is not a guard
+# but a decision the configuration declares, because a settlement-day outlier otherwise sets the
+# scale a model reads.
 #
-# Two details of it are worth stating, because both were wrong in the shipped version and in
-# opposite directions. Its denominator is guarded on being **positive** rather than clipped at the
-# stage's shared `EPS`. `EPS` is the right guard where the two sides of a ratio are on comparable
-# scales; here the denominator is the variance of a rate whose typical magnitude is a basis point,
-# so its median over this panel is around seven parts in a billion - below `EPS` - and clipping
-# there stops being a guard and becomes the floor that sets the answer on most rows.
+# The half-life is local, since no library call covers it. It is the time a deviation in the
+# settled rate takes to decay by half, read off a rolling AR(1) coefficient. That coefficient is
+# the slope of a regression of the rate on its own previous value,
+# $\rho = \mathrm{Cov}(r_t, r_{t-1}) / \mathrm{Var}(r_{t-1})$ - a slope, not a correlation, which
+# would divide by both standard deviations instead. A series that decays geometrically at rate
+# $\rho$ halves in $-\log 2 / \log|\rho|$ periods. Both moments are taken over trailing windows so
+# nothing is estimated across the sample, and the result is clipped where the coefficient
+# approaches one and the implied half-life diverges.
 #
-# And a coefficient that cannot be estimated has no single sensible default, so each case is named
-# rather than swept into one `otherwise`. Before the trailing moments exist the column is null. A
-# coefficient of exactly zero is a series that has **already** reverted, so its half-life is the
-# configured floor - routing it to the window length instead, as the shipped version did, reports
-# the least persistent rows as the slowest to decay.
+# Two choices in it are worth making explicit, because a reader building the same feature on their
+# own data faces both. The first is that its denominator is guarded on being **positive** rather
+# than floored at `EPS`. A floor is a guard only while it sits far below the quantity it protects,
+# and that is a property of the units, not of the code: the denominator here is the variance of a
+# rate whose typical magnitude is a basis point, so squaring it lands the whole distribution near
+# the floor. The measurement below the definitions locates the floor against that distribution.
+# Where it falls inside, flooring stops guarding and starts setting the answer, and a positivity
+# test is what the guard should have been.
+#
+# The second is that a coefficient which cannot be estimated has no single sensible default, so
+# each case is named rather than swept into one `otherwise`. Before the trailing moments exist
+# there is no coefficient and the column is null. A coefficient of exactly zero is a series that
+# has **already** reverted, so its half-life is the configured floor; the tempting alternative, to
+# hand those rows the window length, reports the least persistent rows as the slowest to decay.
 
 
 # %%
@@ -251,11 +326,7 @@ def carry_features(df: pl.DataFrame) -> pl.DataFrame:
         + [pl.col("premium_index_close").alias("premium_level")]
     )
     for label, bars in W["funding_half_life"].items():
-        df = funding_moments(df, bars).with_columns(
-            half_life(bars, clip_variance=False, zero_to_window=False).alias(
-                f"funding_half_life_{label}"
-            )
-        )
+        df = funding_moments(df, bars).with_columns(half_life().alias(f"funding_half_life_{label}"))
     return df.drop("_cov", "_var")
 
 
@@ -272,37 +343,14 @@ def funding_moments(df: pl.DataFrame, bars: int) -> pl.DataFrame:
     )
 
 
-def half_life(bars: int, *, clip_variance: bool, zero_to_window: bool) -> pl.Expr:
-    """Half-life implied by the trailing AR(1) coefficient, with two defects switchable.
-
-    Neither flag reproduces a particular past revision; each reproduces a way this estimator
-    can be wrong, so the cell below can assert against each rather than against a fixture
-    written beside the fix.
-    """
+def half_life() -> pl.Expr:
+    """Half-life implied by the trailing AR(1) coefficient of the settlement series."""
     floor, ceiling = CLIP["half_life"]
-    if clip_variance:
-        # A denominator floored rather than guarded: the clip stands in for a positivity test,
-        # so a non-positive variance still divides and still yields a value rather than a null.
-        rho = (pl.col("_cov") / pl.col("_var").clip(lower_bound=EPS)).clip(
-            -CLIP["ar1"], CLIP["ar1"]
-        )
-    else:
-        rho = (
-            pl.when(pl.col("_var") > 0)
-            .then(pl.col("_cov") / pl.col("_var"))
-            .clip(-CLIP["ar1"], CLIP["ar1"])
-        )
-    if zero_to_window:
-        # A near-zero coefficient routed to the window length, with the inner log clip that
-        # kind of branch travels with.
-        return (
-            pl.when(rho.is_null())
-            .then(None)
-            .when(rho.abs() > 1 / bars)
-            .then(-np.log(2) / rho.abs().log().clip(lower_bound=-10))
-            .otherwise(pl.lit(float(bars)))
-            .clip(floor, ceiling)
-        )
+    rho = (
+        pl.when(pl.col("_var") > 0)
+        .then(pl.col("_cov") / pl.col("_var"))
+        .clip(-CLIP["ar1"], CLIP["ar1"])
+    )
     return (
         pl.when(rho.is_null())
         .then(None)
@@ -314,37 +362,22 @@ def half_life(bars: int, *, clip_variance: bool, zero_to_window: bool) -> pl.Exp
 
 
 # %% [markdown]
-# Neither choice above is pinned by the warmup audit or by the seal: both pass with the denominator
-# floored again, or with a near-zero coefficient routed back to the window length. A test file could
-# only re-implement the expression, since it lives in this cell, and would agree with whatever it
-# was written beside. So both defects stay switchable, and each is asserted against separately on
-# the production panel - an assertion that catches one of them says nothing about the other, which
-# is how the first version of this check passed while the denominator was still floored.
+# Whether `EPS` would work as the denominator's floor is a question about this panel's units, and
+# it is cheaper to answer than to reason about. The trailing variance is compared against the floor
+# directly: if the floor sits in the body of that distribution rather than below it, a floored
+# denominator returns the floor on those rows and the half-life they report is a property of the
+# constant, not of the rate. The same comparison is worth running on any series before reusing a
+# shared epsilon on it: the same quantity expressed in percent and in basis points differs by four
+# orders of magnitude once squared, and only one of the two clears a fixed floor.
 
 # %%
 _bars = W["funding_half_life"]["14d"]
-_sorted = panel.sort(["symbol", "timestamp"])
-# `now` is read out of `carry_features` rather than recomputed here. Recomputing it with the flags
-# spelled out would make this cell agree with itself and pass however `carry_features` was edited,
-# which is the failure it exists to catch.
-_v = funding_moments(_sorted, _bars).select(
-    carry_features(_sorted)["funding_half_life_14d"].alias("now"),
-    half_life(_bars, clip_variance=True, zero_to_window=False).alias("eps_clipped"),
-    half_life(_bars, clip_variance=True, zero_to_window=True).alias("both_defects"),
-    ((pl.col("_var") > 0) & (pl.col("_var") < EPS)).alias("thin"),
-)
-_thin = _v.filter(pl.col("thin"))
-_differs = (_thin["now"] - _thin["eps_clipped"]).abs() > 1e-9
-# A warmup row has no coefficient to revert, so it cannot show the defect. Counting the warmup as
-# window-length hits is what let the last assertion below pass without a single reverted coefficient.
-_estimated = _v.filter(pl.col("both_defects").is_not_null())
-_at_window = (_estimated["both_defects"] == float(_bars)).mean()
-assert (_v["now"] == float(_bars)).sum() == 0, "a reverted coefficient reports the window length"
-assert _differs.mean() > 0.5, "the variance is being clipped: thin rows agree with the EPS oracle"
-assert _at_window > 0.01, "no row reaches the window length carrying both defects"
-print(f"variance below the shared guard on {_v['thin'].mean():.2%} of rows")
-print(f"  of those, {_differs.mean():.2%} would move if the denominator were clipped there")
-print(f"at the window length, of rows with a coefficient: {_at_window:.2%} with both, 0 now")
+_var = funding_moments(panel.sort(["symbol", "timestamp"]), _bars)["_var"]
+_estimable = _var.drop_nulls()
+print(f"denominator floor EPS:                        {EPS:.0e}")
+print(f"median trailing variance of the settled rate: {_estimable.median():.2e}")
+print(f"share of estimable rows below that floor:     {(_estimable < EPS).mean():.2%}")
+print(f"share the positivity test rejects instead:    {(_estimable <= 0).mean():.2%}")
 
 
 # %% [markdown]
@@ -464,8 +497,11 @@ def volatility_features(df: pl.DataFrame) -> pl.DataFrame:
 # Three statistics taken with `.over("timestamp")`, so each reads every symbol trading at that
 # settlement and no other date. The percentile uses the shared primitive, whose denominator is the
 # count plus one: that keeps the widest-premium perpetual off the boundary, so the column is a
-# position in the cross-section rather than a rank divided by its own maximum, and it means the
-# same thing on an early date with three symbols as on a late one with nineteen.
+# position in the cross-section rather than a rank divided by its own maximum. That distinction is
+# what makes it comparable across dates, and the table above is why it matters here - the panel is
+# unbalanced, so an early settlement ranks a handful of contracts and a late one ranks nineteen,
+# and a rank divided by its own maximum would put the widest premium at the top of the scale in
+# both, whether it beat two contracts or eighteen.
 
 
 # %%
@@ -486,11 +522,16 @@ def cross_sectional_features(df: pl.DataFrame) -> pl.DataFrame:
 # %% [markdown]
 # ### C.6 Regime and calendar
 #
-# The oscillator would be `ml4t.engineer.features.momentum.rsi`, and is computed here instead. That
-# call carries Wilder's recursive average, which cannot resume after a missing observation: on this
-# premium series it returns the saturated value on four rows in five, where an average taken over a
-# fixed window returns nothing while the window spans a gap and a usable number once it has passed.
-# The two are different statistics, so this one is not called a Wilder RSI.
+# The oscillator is the relative strength index: the share of recent movement that was upward,
+# mapped onto a nought-to-hundred scale, so a premium that has only widened reads near a hundred
+# and one that has only narrowed reads near nought. The library call
+# `ml4t.engineer.features.momentum.rsi` is the standard form, and it is deliberately not used here.
+# It carries Wilder's smoothing, a recursive average in which each value is computed from the one
+# before it, and a recursion has no way to skip a missing observation: the premium index has gaps,
+# and the first one a contract meets propagates into every value after it. An average over a fixed
+# window has a defined answer in both cases - nothing while the window spans the gap, and a usable
+# number once the gap has passed out of it. The two are different statistics rather than two
+# implementations of one, which is why this column is not called a Wilder RSI.
 #
 # The settlement slot and the fee tier are the two columns with no lookback at all: the slot is a
 # property of the timestamp, and the tier is a fixed list the configuration declares.
@@ -542,24 +583,19 @@ def regime_features(df: pl.DataFrame) -> pl.DataFrame:
 # %% [markdown]
 # ### C.7 The order the three steps run in
 #
-# Everything above is computed from one perpetual's own history. The four within-settlement
-# statistics are not, and that puts the null policy **between** them rather than after both. A
-# percentile, a median and a dispersion are properties of the cross-section they are taken over, so
-# a perpetual the matrix will not carry must not be in that cross-section: including it moves the
-# number written for every perpetual that is. Running the gate last is the shape `etfs` documents,
-# and it is what this notebook did until the ordering was measured - at the settlement of
-# 2020-01-31 the emitted cross-section holds two perpetuals, and `premium_rank` was a position
-# among five.
+# Everything above is computed from one perpetual's own history, so the order those steps run in
+# does not matter. The four within-settlement statistics are different, and they put the null
+# policy **between** the two groups rather than after both. A percentile, a median and a dispersion
+# are properties of the cross-section they are taken over, so a perpetual the matrix will not carry
+# must not be in that cross-section: leaving it in moves the number written for every perpetual
+# that is. Gate first, then take the cross-section over exactly the rows that survived.
 #
-# Ordering the two steps this way decides which cross-section is read; it does not yet say that
-# there is one. The z-score and the dispersion are both standard deviations over the settlement,
-# which one observation does not define, so a settlement where the gate leaves a single perpetual
-# has no value to write for either. Emitting a null there and then asserting the matrix has none is
-# a contradiction the panel reaches whenever the surviving cross-section narrows to one, so the
-# gate takes `MIN_CROSS_SECTION` as its second clause and that settlement does not reach the matrix.
-# A median and a percentile are defined at one observation and are dropped with it: they are
-# properties of the same cross-section, and keeping the row for the two columns that survive would
-# ship a settlement whose position statistics have nothing to be a position among.
+# That ordering decides which cross-section is read. It does not yet establish that there is one.
+# The z-score and the dispersion are both standard deviations over the settlement, and a standard
+# deviation is undefined at a single observation, so a settlement the gate reduces to one perpetual
+# has no value to write for either. The gate therefore takes a second clause - a settlement reaches
+# the matrix only if at least `MIN_CROSS_SECTION` perpetuals survive it - and the median and the
+# percentile go with them, because a position in a cross-section of one is not a position at all.
 
 
 # %%
@@ -577,6 +613,11 @@ def per_symbol_features(df: pl.DataFrame) -> pl.DataFrame:
         .pipe(volatility_features)
         .pipe(regime_features)
     )
+
+
+# Two, because that is the smallest cross-section a standard deviation is defined on. This is not
+# a tuning choice and it is not declared in the configuration for that reason.
+MIN_CROSS_SECTION = 2
 
 
 def build_features(df: pl.DataFrame) -> pl.DataFrame:
@@ -614,16 +655,17 @@ print(f"{len(built):,} pass the gate and carry the {len(XS_COLS)} within-settlem
 # every perpetual at that settlement and no other date. A **time-based rolling** aggregate builds
 # the seven-day cash flow on the settlement series' own clock, which is what lets it span an
 # interval the exchange shortened. None of the three reaches forward, and D.2 and D.3 establish it
-# rather than asserting it.
+# rather than asserting it. F4, below the coverage figure, draws the same contract as a picture.
 #
 # ### D.2 Warmup
 #
 # A trailing window cannot produce a value until it has enough settlements to fill, so every family
 # has a leading stretch of nulls as long as its lookback. The audit checks that length rather than
 # describing it: a column holding a value before its window could have filled is reading bars that
-# do not exist, and that is what it raises on. It caught one here - the half-life fell through to
-# its own fallback while its covariance was still null, so it reported a reversion speed on every
-# bar from the first, and C.1 now returns null until the window has filled.
+# do not exist, and that is what it raises on. It is worth running even where the windows look
+# obvious, because the failure it catches is not a wrong window but a branch that returns a
+# fallback instead of a null - a column that reports a value from the first bar of the sample has
+# a default somewhere, and a default is indistinguishable from an estimate once it is in a model.
 #
 # It runs on the panel before the gate, because the gate drops the warmup stretch it measures.
 
@@ -677,25 +719,41 @@ seal.filter(pl.col("column").is_in(["premium_rank", "premium_xs_zscore", "fundin
 # One null policy is applied once, and C.7 is where: a row reaches the matrix only when every
 # per-symbol feature on it is observed and its settlement retains the two perpetuals a
 # within-settlement statistic needs, and those statistics are then taken over exactly the rows that
-# survived. A model handed a null has to be told what to do with it, and the successor stages
-# include sequence models with no answer, so a matrix that carries every feature on every row it
-# emits is worth more here than the rows a looser rule recovers - and the assertion below is what
-# makes that a fact rather than an intention.
+# survived. Dropping a row is the strictest of the available policies and it is chosen deliberately:
+# a model handed a null has to be told what to do with it, the successor stages include sequence
+# models that have no answer, and the alternative - filling the gap with a carried-forward or
+# imputed value - invents an observation the exchange never published. The assertion below is what
+# makes the resulting matrix complete by fact rather than by intention.
 #
-# It is worth being exact about what that does and does not buy, because the two are easy to run
-# together. Every emitted row is complete. The emitted settlements are **not** consecutive: this
-# gate removes rows, and the paragraph below is the measurement of how many. The sequence stages
-# build their windows by position within each symbol's sorted rows
-# (`case_studies/utils/sequence_dataset.py`), so a window closes over whatever rows are adjacent in
-# that array and can span a removed settlement. That is a property of the panel the premium index
-# already forces - one missing observation empties a thirty-day window - and not something the
-# second clause introduces: it removes whole settlements, and on the shipped nineteen-perpetual
-# panel it removes none.
+# What that buys is that every row emitted is complete on every feature. What it does not buy is
+# that the rows are consecutive: dropping a row leaves a hole in the settlement sequence. A model
+# reading this matrix row by row - and the sequence models downstream do - forms a window by
+# counting rows, so a window of sixty rows that spans a hole covers more than sixty settlements of
+# elapsed time. That is a property of the emitted panel, and the timestamp column is what a
+# consumer would have to read to detect it.
 #
-# What that costs is worth reading rather than absorbing, because almost none of it is warmup. The
-# perpetual close and its volume are complete, but the premium index has scattered gaps, and one
-# missing observation empties every rolling window spanning it - so the thirty-day percentile loses
-# ninety settlements per gap where a thirty-day difference loses one.
+# That policy has a price, and it is worth knowing where the price is paid before reading the
+# coverage figure. The perpetual close and its volume are complete. The other two inputs are not:
+# the premium index has scattered gaps, and a small share of bars carry no official settlement,
+# both of which Section B counts. One missing observation of either empties every window that
+# spans it. How many rows that costs depends on
+# the shape of the statistic: a rolling window of ninety settlements is spanned by ninety
+# successive rows, so one gap removes ninety, while a difference against the value ninety
+# settlements back reads only two rows and removes two. Gaps close together cost less than gaps
+# far apart, because their invalidated stretches overlap - two gaps k settlements apart, with k
+# below the window length, remove the window length plus k rows rather than twice the window - but
+# they never cost nothing extra. And because a row is kept only when every feature on it is
+# observed, it is the longest window in the matrix that sets the reach of each gap.
+#
+# The cell below splits the discarded rows between those gaps and the warmup, and it does so by
+# measurement rather than by reasoning about which input feeds which feature. Each contract's
+# first complete row is the boundary: anything dropped before it is that contract filling its
+# windows after listing, and anything dropped after it was lost while the contract was already
+# producing every feature, which only a missing input can do. The second figure is therefore an
+# attribution by elimination rather than by inspection - it does not say which of the two inputs
+# was missing, only that one of them was. Splitting on an observed boundary rather than on a
+# reconstruction of the causes is what makes the two parts add up to the discard count exactly,
+# with nothing left over.
 
 # %%
 features = built.select(["timestamp", "symbol", *feature_cols]).sort(["timestamp", "symbol"])
@@ -703,8 +761,24 @@ assert features.select(["timestamp", "symbol"]).is_duplicated().sum() == 0, "dup
 incomplete = {c: features[c].null_count() for c in feature_cols if features[c].null_count()}
 assert not incomplete, f"the gate left nulls behind: {incomplete}"
 gaps = panel["premium_index_close"].is_null().sum()
+first_complete = features.group_by("symbol").agg(pl.col("timestamp").min().alias("_first")).lazy()
+discarded = (
+    panel.lazy()
+    .join(
+        features.lazy().select("symbol", "timestamp").with_columns(pl.lit(True).alias("_kept")),
+        on=["symbol", "timestamp"],
+        how="left",
+    )
+    .filter(pl.col("_kept").is_null())
+    .join(first_complete, on="symbol", how="left")
+    .select((pl.col("timestamp") < pl.col("_first")).fill_null(True).alias("filling"))
+    .collect()
+)
+filling_rows = int(discarded["filling"].sum())
 print(f"{trailing.height:,} bars assembled, {features.height:,} complete on every feature")
 print(f"{gaps:,} premium-index gaps in the input, {trailing.height - features.height:,} discarded")
+print(f"  {filling_rows:,} of those are a contract still filling its windows after listing")
+print(f"  {len(discarded) - filling_rows:,} are a missing input reaching through a window later")
 assignment = assign_families(feature_cols, FAMILIES)
 register_frame(FAMILIES, feature_cols).select(["family", "columns", "role", "representation"])
 
@@ -713,10 +787,24 @@ register_frame(FAMILIES, feature_cols).select(["family", "columns", "role", "rep
 #
 # Coverage is drawn on the panel the gate acts on rather than on the emitted matrix. On the emitted
 # matrix it is a check that the policy ran - flat lines at exactly one, by construction, and nothing
-# else to see. Drawn on what the gate reads, it shows which family loses which months, and how much
-# of the discarded seven percent is warmup at the left edge against premium-index gaps spread
-# through the sample. The cross-sectional family is absent because it does not exist yet at this
-# point: C.7 computes it after the gate, over the rows that survived.
+# else to see. Drawn on what the gate reads, it shows where in the sample the coverage was lost.
+#
+# It does not, on its own, say why, and the dashed boundary is easy to over-read. That line is the
+# earliest row the matrix emits - the settlement at which the *first* contracts to list finished
+# filling their windows - and it says nothing about the rest. This panel is unbalanced, and every
+# contract has its own warmup beginning on its own listing date, so almost every contract in the
+# universe table above finishes filling somewhere to the right of that line, the ones listing in
+# 2022 and 2023 by years. While any of them fills, the share of non-null rows across the panel
+# falls. The dips through 2020 are that -
+# contracts arriving and filling their windows, which the universe table above dates. The deeper
+# dips from 2021 onward
+# are premium-index gaps, which arrive at no particular time and hit the widest windows hardest.
+# The count above separates the two over the whole sample; the figure shows when each happened.
+# Both would shrink if the longest window were shortened, since a shorter window fills sooner and
+# spans fewer gaps, but only the warmup is bounded by the window alone - it costs one stretch per
+# contract and no more, while what the gaps cost also follows how many there are. The
+# cross-sectional family is absent because it does not exist yet at this point: C.7 computes it
+# after the gate, over the rows that survived.
 
 # %%
 plot_coverage_through_time(
@@ -729,17 +817,29 @@ plot_coverage_through_time(
     alt=(
         "Line chart of non-null share against date for the five per-symbol families - carry, mean "
         "reversion, momentum, volatility and regime - on a y-axis running from about 0.35 to one. "
-        "Every family sits at one for most months. The dips are sharp, isolated, and scattered "
-        "from 2020 to 2023 rather than gathered at the warmup boundary marked at the left edge; "
-        "the deepest is mid-2021, where mean reversion falls to about 0.35 and volatility to "
-        "about 0.6, and there is a shallower one at the end of 2025. Mean reversion falls "
-        "furthest at every dip because its longest window is the thirty-day percentile, and the "
-        "other four follow it down by progressively less in the same months."
+        "Every family sits at one for most months, with sharp isolated dips scattered from 2020 "
+        "to 2023 and a shallow one at the end of 2025. A dashed line at the left edge marks the "
+        "first settlement at which the contracts listed at the start have filled their windows; "
+        "the dips through the rest of 2020 are later contracts listing and filling theirs. The "
+        "deepest dips come after that and are missing premium-index observations: mid-2021, where "
+        "mean reversion falls to about 0.35 and volatility to about 0.6, then late 2022 and early "
+        "2023. Mean reversion falls furthest at every dip because its longest window is the "
+        "thirty-day percentile, and the other four follow it down by progressively less in the "
+        "same months."
     ),
 )
 
 # %% [markdown]
 # ### F4. The timing contract
+#
+# The register's two timing columns, drawn. Each bar runs leftward from the decision timestamp by
+# that family's lookback, so its length is how far back the family reads. A family that waited for
+# data - one whose newest input is published after the decision it feeds - would show a gap between
+# the end of its bar and the decision line. None here does, because every observation any of these
+# families reads is published no later than the decision timestamp itself. That is the condition
+# that matters, and it is weaker than sharing a grid: the seven-day cash flow deliberately counts
+# the shortened two- and four-hour settlements from Section B, which fall between the eight-hour
+# decision times rather than on them, and those are knowable at the decision all the same.
 
 # %%
 plot_timing_contract(
@@ -796,7 +896,7 @@ plot_feature_distributions(
         "premium_rank",
         "funding_half_life_14d",
     ],
-    title="Normalizing turns a spiked, clamped carrier into something a model can use",
+    title="Normalizing spreads a spiked settled rate across a range a model can read",
     subtitle="The carry family, display tails clipped at the half-percent",
     alt=(
         "Six histograms in two rows. The raw funding rate and the premium level are both a narrow "
@@ -834,10 +934,21 @@ plot_cross_sectional_dispersion(
 # %% [markdown]
 # ### F5. Redundancy structure
 #
-# Clustering on the distance $1 - |\rho|$ groups features that carry the same ordering, whatever
-# the sign. Above the cut two features are close enough that a linear model cannot separate their
-# contributions. This states the clusters. Picking one representative from each is a fold-aware
-# choice, and `05_evaluation` is where it is made.
+# Two features can be built from different quantities and still move together closely enough that
+# a model has little to gain from carrying both. This screens for that. Every feature is ranked
+# over the whole panel - all contracts, all settlements pooled - and the ranks are correlated, so
+# the distance $1 - |\rho_s|$ is small for a pair that rises and falls together across the sample.
+# The absolute value is what makes a feature and its negation land in the same group. The cut is
+# drawn at the correlation the configuration calls redundant, and the merges to the right of it,
+# at smaller distances, are the ones that exceed it.
+#
+# Two limits are worth carrying forward, because a dendrogram invites more confidence than this
+# one has earned. A pooled correlation is not the cross-sectional ordering a long-short strategy
+# acts on: two features can track each other over the sample and still rank the universe
+# differently at a given settlement. And a correlation at the cut is a strong association, not
+# collinearity - a linear model can still estimate both coefficients, less precisely. So this is
+# an exploratory screen for what is worth investigating together, and picking one representative
+# from each group is a fold-aware decision `05_evaluation` makes against the labels.
 
 # %%
 clusters = plot_redundancy_clusters(
@@ -865,26 +976,36 @@ clusters = plot_redundancy_clusters(
 # %% [markdown]
 # ### F6. Persistence and rank stability
 #
-# The autocorrelation on the left is of the feature, not of any return. A feature whose value has
-# decayed inside one rebalance cycle cannot support that cadence, however well it predicts at the
-# settlement it is computed on. It is estimated per perpetual on pairs of settlements exactly one
+# The autocorrelation on the left is of the feature, not of any return, so what it measures is how
+# long a value lasts rather than how well it works. It is estimated per perpetual on pairs of
+# settlements exactly one
 # lag apart and summarized by the median over perpetuals, with a bootstrap interval: a correlation
 # pooled over every symbol-settlement pair would read high whenever symbols sit at different
 # levels, whether or not any one of them persists. The right-hand panel asks the same question of
 # the ordering rather than the level, across consecutive rebalances - which here are consecutive
 # settlements, because that is the cadence this case study trades at.
 #
-# Two readings are worth taking from it. The trailing statistics keep their ordering and the
-# normalized premium carriers do not, so the carriers are usable at this cadence and would not be
-# at a slower one - the eight-hour rebalance is doing work the register cannot show. And the
-# oscillator turns negative at a lag equal to its own window, which is what a bounded average of a
-# fixed number of differences does when the differences themselves carry no memory: it is measuring
-# its own window rather than the market's.
+# Two readings are worth taking from it. The trailing volatility and the settled rate keep most of
+# their ordering from one settlement to the next; the normalized premium features keep very little
+# of theirs. That is a measurement of decay and nothing more - how fast a feature's value and its
+# ordering change, with no label anywhere in it. It is the earliest warning of turnover a feature
+# set can give: a ranking that is gone by the next rebalance would name a different set of
+# positions each time it is read. Whether it does is not settled here, because what a strategy
+# actually trades depends on how the ranking is mapped to positions, how many names are held, how
+# they are weighted, and the minimum weight change and trade size the configuration sets before a
+# rebalance happens at all. The backtest stages measure realized turnover under those rules; this
+# figure says which features would drive it. Whether any of them predicts, at this horizon or a
+# longer one, is a question `05_evaluation` asks against the labels, and this figure does not
+# answer it in either direction.
 #
-# Binance stamps to the millisecond and every artifact here carries that precision. The figure maps
-# timestamps through a Python dictionary, which returns microseconds and will not join against a
-# millisecond column, so the frame handed to it is cast first. Only that frame; the emitted matrix
-# keeps the precision its siblings read.
+# The second reading is that the oscillator turns negative at a lag equal to its own window, which
+# is what a bounded average of a fixed number of differences does when the differences themselves
+# carry no memory: it is measuring its own window rather than the market's.
+#
+# The right-hand panel needs the list of rebalance times to correlate one against the next. It
+# indexes them through a Python dictionary, which carries microsecond precision, while this matrix
+# is stamped to the millisecond, so the copy handed to the figure is cast to match. The emitted
+# matrix keeps its own precision.
 
 # %%
 persistence_frame = features.with_columns(pl.col("timestamp").cast(pl.Datetime("us", "UTC")))
@@ -896,7 +1017,7 @@ plot_persistence(
     entity="symbol",
     max_lag=W["premium_zscore"]["14d"],
     decision_dates=DECISION_DATES,
-    title="Volatility state persists across rebalances; the premium carriers do not",
+    title="Volatility persists across rebalances; the normalized premium does not",
     subtitle="Median over perpetuals across two weeks of settlements; rank correlation across rebalances",
     alt=(
         "Two panels. On the left, autocorrelation against lag. The two-week price volatility "
@@ -912,23 +1033,33 @@ plot_persistence(
 )
 
 # %% [markdown] tags=["results"]
-# Read together, the four figures say the matrix is usable, redundant, and short-lived. The
-# cross-section disagrees except in the quietest stretches, where there is little to rank; the
-# redundancy cut leaves **23** distinct orderings among **39** columns; and only the trailing
-# volatility and the raw settled rate keep their ordering from one settlement to the next, while
-# the normalized premium carriers turn over almost completely. That is a constraint on cadence
-# rather than a defect: the carriers are usable at the eight-hour rebalance this case study trades
-# and would carry nothing at a weekly one.
+# Read together, the four figures describe a matrix that is on usable scales, carries a lot of
+# repetition, and turns over fast. The cross-section disagrees except in the quietest stretches,
+# where there is little to rank; the **39** columns fall into **23** groups once features that
+# move together over the sample are gathered; and only the trailing volatility and the raw settled
+# rate keep their ordering from one settlement to the next, while the normalized premium features
+# turn over almost completely. None of that is a statement about predictive content, which no
+# figure here measures.
 
 # %% [markdown]
 # ## G. Emit
 #
-# The parquet is written with a sidecar recording the digest of its values, its row count and key
-# columns, and the digests of what it was built from. The digest is computed over content rather
-# than file bytes, so row order and parquet metadata leave it alone and any feature value moves it.
-# That is the property the registry's own hashes lack: a feature-set *name* reaches the registry, a
-# feature-set *value* does not, so a corrected feature moves every number downstream without
-# changing anything the registry stores.
+# The matrix is written to `features/financial.parquet`, and everything downstream reads it from
+# there. [`04_model_based_features`](04_model_based_features.ipynb) opens the file directly, joins
+# it to the primary label, and fits the volatility and regime features that sit on top of it, fold
+# by fold. [`05_evaluation`](05_evaluation.ipynb) opens it directly too, and screens every column
+# in it for information content. The model-fitting notebooks from `06_linear` onward reach it
+# through the shared loader in `utils.modeling`, which assembles this file, the model-based
+# features and the labels into one training frame.
+#
+# Beside the parquet goes a **digest sidecar**, a small JSON file recording what was written: a
+# short hash of the values themselves, the row count, the key columns, and the same hash taken over
+# each input the matrix was built from. Its point is that the hash is computed over content rather
+# than file bytes, so rewriting the file in a different row order leaves it alone while changing a
+# single feature value moves it. That is the check the experiment registry cannot make on its own:
+# the registry records the *name* of a feature set, so a corrected feature changes every number
+# downstream without changing anything the registry stores, and the sidecar is what makes the
+# change visible.
 
 # %%
 FEATURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -942,9 +1073,6 @@ record = write_artifact(
         "load_funding_rates": value_digest(funding),
     },
 )
-# Named relative to the repository rather than passed through `display_path`, which resolves
-# symlinks before relativizing: an agent worktree points its artifact directories at the canonical
-# store, so the resolved path lands outside the repo and gets printed absolute into the commit.
 print(f"Wrote case_studies/crypto_perps_funding/features/financial.parquet, {record['digest']}")
 print(f"{len(set(clusters.values()))} redundancy clusters at the cut drawn in F5")
 
@@ -955,11 +1083,12 @@ print(f"{len(set(clusters.values()))} redundancy clusters at the cut drawn in F5
 #   a feature has to be stamped with the time it became knowable. Every shift, join and window
 #   here inherits that one decision, and `02_labels` makes the same one.
 # - **State the timing contract before writing the feature.** The register fixes each family's
-#   lookback and lag in the configuration, and the warmup assertion, the timing figure and any
-#   review a reader runs read those numbers rather than re-deriving them from the code.
-# - **Test the seal by construction, not by inspection.** Rebuilding the panel with the holdout
-#   withheld catches any transform fitted across the sample, including the ones nobody flagged.
-# - **Normalize what the exchange distorts.** The settled rate is clamped and spiked; its trailing
+#   lookback and lag in the configuration, and the warmup assertion and the timing figure both read
+#   those numbers rather than re-deriving them from the code.
+# - **Establish the holdout boundary by construction, not by inspection.** Rebuilding the whole
+#   panel with the holdout withheld and comparing every column catches a transform fitted across
+#   the sample without anyone having to know in advance which transform to look at.
+# - **Normalize what the exchange distorts.** The settled rate is capped and spiked; its trailing
 #   z-score and its position within the settlement stay comparable across symbols and regimes, and
 #   F6 is where that difference shows up as persistence.
 #

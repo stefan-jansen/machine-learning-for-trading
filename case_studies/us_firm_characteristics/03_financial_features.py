@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -48,8 +48,10 @@
 # | Read by | [`04_evaluation`](04_evaluation.ipynb), and the modeling stages downstream of it |
 #
 # The feature *screen* - information coefficients, HAC uncertainty, false-discovery control - is
-# not here. `04_evaluation` owns it and runs it fold-aware; a screen run once over the whole
-# development period, as an appendix to construction, reports a number no fold ever saw.
+# not here. `04_evaluation` owns it, and it reaches one decision per feature with three things
+# around the correlation: how uncertain that correlation is once monthly overlap is accounted for,
+# whether its sign holds across the walk-forward folds, and how many features were tested at once.
+# A bare correlation computed here, as an appendix to construction, would carry none of them.
 
 # %%
 """US Firm Characteristics: Feature Engineering."""
@@ -104,6 +106,7 @@ FAMILIES = families_from_config(setup)
 WINDOW = setup["features"]["window"]
 PRIMARY_LABEL = setup["labels"]["primary"]
 HOLDOUT_START = date.fromisoformat(str(setup["evaluation"]["holdout_start"]))
+PERIODS_PER_YEAR = setup["evaluation"]["periods_per_year"]
 
 WINDOW_START = date.fromisoformat(START_DATE) if START_DATE else WINDOW["start"]
 WINDOW_END = date.fromisoformat(END_DATE) if END_DATE else WINDOW["end"]
@@ -112,33 +115,65 @@ WINDOW_END = date.fromisoformat(END_DATE) if END_DATE else WINDOW["end"]
 ENTITY = "symbol"
 PANEL_KEY = ["symbol", "timestamp"]
 
-print(f"{len(FAMILIES)} declared families; window {WINDOW_START} to {WINDOW_END}")
-print(f"Label {PRIMARY_LABEL}; holdout starts {HOLDOUT_START}; Section D rebuilds without it")
+# Two features whose orderings agree this closely are read as one piece of evidence in F5.
+# It is a reading aid for the dendrogram and not a screen: nothing is dropped at this level,
+# here or anywhere. `04_evaluation` decides what survives, from its own correlation matrix.
+REDUNDANCY_CUT = 0.7
+
+# Every table below is meant to be read in full. Polars shows ten rows and cuts a string cell
+# at 32 characters by default, which would hide three of the register's families and clip the
+# longest failure mode, so both limits are taken from what the register actually holds.
+WIDEST_REGISTER_CELL = max(len(str(v)) for row in register_frame(FAMILIES).iter_rows() for v in row)
+pl.Config.set_tbl_rows(max(50, len(FAMILIES)))
+pl.Config.set_fmt_str_lengths(WIDEST_REGISTER_CELL)
+
+print(f"Feature window: {WINDOW_START} to {WINDOW_END}, both months included.")
+print(f"Register: {len(FAMILIES)} families - the whole of what the matrix may contain.")
+print(f"Primary label: {PRIMARY_LABEL}, the one-month forward return Section E keys against.")
+print(f"Holdout: {HOLDOUT_START} onward. In the artifact, and in D and E's integrity checks.")
+print("  Section F, where a reader forms a view of the feature set, reads only what precedes it.")
+print(f"Decision dates per year: {PERIODS_PER_YEAR}, which is how far F6 runs its lag axis.")
 
 # %% [markdown]
 # ## A. What the thesis says should carry information
 #
-# The thesis is cross-sectional and it is not one claim but six: among roughly 2,500 firms a month,
-# the ones that are cheap against fundamentals, more profitable, growing their asset base less
-# aggressively, and trending, earn the higher subsequent return, read against a risk and liquidity
-# state that says how much of that ordering is tradable.
+# The thesis is cross-sectional and it is not one claim but six: among the several thousand firms
+# the release covers in a month, the ones that are cheap against fundamentals, more profitable,
+# growing their asset base less aggressively, and trending, earn the higher subsequent return, read
+# against a risk and liquidity state that says how much of that ordering is tradable.
 #
 # The register below is declared in `config/setup.yaml::features.families` rather than here, for the
 # same reason the label name and the holdout boundary are: it states what the feature set *is*, and
 # a statement only the notebook holds cannot be read by a test, by a later stage, or by anyone
 # asking what changed between two runs.
 #
-# One column of it needs reading with care. `lag` is fully sourced - the release publishes its
-# update conventions, and an annual variable is published at the end of June against a December
-# fiscal year end, so six months separate the accounting period from the decision that may use it.
-# `lookback` is not equally sourced: the release does not publish a per-characteristic estimation
-# window. Where a characteristic names its own window it is used (`r36_13` reads 36 months back to
-# 13); otherwise the entry is the span of one provider observation. Section B says what follows from
-# that, and Section D audits only what this notebook is in a position to audit.
+# It comes in two halves. The first says **when** each family is knowable, which is what decides
+# whether a feature is usable at all; the second says **why** it should carry information, which is
+# what the rest of the pipeline is going to test.
+#
+# A **bar** here is one month, because this panel is monthly: a lookback of 12 bars is a window a
+# year long, and a lag of 6 bars means six months pass between the period a number describes and
+# the decision allowed to read it. Of the two columns, `lag` is the one that decides look-ahead and
+# it is fully sourced - the release publishes its update conventions, and an annual variable is
+# published at the end of June against a December fiscal year end. `lookback` is not equally
+# sourced: the release does not publish a per-characteristic estimation window. Where a
+# characteristic names its own window it is used (`r36_13` reads 36 months back to 13); otherwise
+# the entry is the span of one provider observation. Section B says what follows from that, and
+# Section D audits only what this notebook is in a position to audit.
 
 # %%
-register = register_frame(FAMILIES)
-print(register.select("family", "role", "lookback (bars)", "lag (bars)", "frame"))
+register_frame(FAMILIES).select(
+    ["family", "role", "inputs", "lookback (bars)", "lag (bars)", "frame", "representation"]
+)
+
+# %% [markdown]
+# The second half is the claim itself. `driver hypothesis` is what the family is expected to say
+# about subsequent returns, and `failure mode` is the way that claim is most likely to be wrong -
+# written down here, before anything is measured, so that a later stage finding nothing has a
+# stated alternative to weigh rather than an absence to explain.
+
+# %%
+register_frame(FAMILIES).select(["family", "driver hypothesis", "failure mode"])
 
 # %% [markdown]
 # ## B. Inputs and their observability
@@ -148,12 +183,17 @@ print(register.select("family", "role", "lookback (bars)", "lag (bars)", "frame"
 # 46 characteristics and the panel key. It does not consume `ret` - the label panel is built by
 # `02_labels`, and reading a realized return here would put the outcome in the feature matrix.
 #
-# **The firm identity is the load-bearing input.** `symbol` is the persistent anonymous firm axis
-# recovered from the published tensors, and it is what `02_labels` keys on. An earlier vintage of
-# this notebook's output was keyed on a *positional* identifier - 1..N within each month, where N is
-# that month's cross-section size - which is why the shipped matrix carried ids `1..2826` while the
-# labels carried `1000000..2007140`, and joined to nothing. Section E asserts the join rather than
-# trusting it.
+# **The firm identity is the load-bearing input, and it has to be recovered.** The release
+# publishes three blocks of a three-dimensional array - date by firm by characteristic - and within
+# a block the firm axis is fixed, so position *j* on that axis is the same company at every date.
+# That position is what `symbol` holds, offset per block because the archive publishes no mapping
+# between them, and it is what `02_labels` keys its labels on.
+#
+# What is not a firm is a row's place in a month's cross-section. A firm appears in a month only
+# where its return is present, so flattening the array to one row per firm-month leaves a different
+# number of rows each month and renumbers them as firms enter and leave. Keying a matrix on that
+# position produces something that looks like an identifier, joins to no label, and raises nothing
+# while doing it - which is why Section E asserts the join against the label panel.
 #
 # **What observability means for a panel that arrives ranked.** The provider computed each
 # characteristic's window and applied its own publication convention before releasing the panel, and
@@ -176,6 +216,34 @@ print(f"Loaded {len(firm_chars):,} firm-months over {firm_chars['timestamp'].n_u
 print(f"Period {firm_chars['timestamp'].min()} to {firm_chars['timestamp'].max()}")
 print(f"Persistent anonymous firms: {firm_chars['symbol'].n_unique():,}")
 print(f"Released characteristics consumed: {len(RELEASED)}")
+
+# %% [markdown]
+# ### What the released panel actually contains
+#
+# The table below is the whole input: every characteristic the release publishes, under the
+# register family whose pattern claims it. The names are the provider's own abbreviations, and the
+# ones this notebook goes on to use by themselves are worth reading off before it does.
+#
+# `BEME` is book value of equity over market value of equity - the classic measure of cheapness,
+# high when the market prices a firm below what its accounts say it owns. `CF2P` is cash flow over
+# price and `E2P` earnings over price, the same question asked of two different accounting lines.
+# `PROF` is gross profitability and `ROE` return on equity, two ways of asking how much a firm earns
+# on what it holds. `LME` is log market equity, which is size. `IdioVol` is the volatility of the
+# part of a firm's return that its market exposure does not explain. `r12_2` is the cumulative
+# return from twelve months back to two months back and `r12_7` from twelve back to seven: momentum
+# measured over roughly a year, both stopping short of the most recent month, which tends to
+# reverse rather than continue.
+
+# %%
+MEMBERS = {family.name: [c for c in RELEASED if family.matches(c)] for family in FAMILIES}
+
+pl.DataFrame(
+    [
+        {"family": name, "n": len(columns), "the release's names": ", ".join(sorted(columns))}
+        for name, columns in MEMBERS.items()
+        if columns
+    ]
+)
 
 # %% [markdown]
 # ## C. Feature construction
@@ -202,10 +270,10 @@ print(f"Released characteristics carried through: {len(RELEASED)}")
 # characteristics, and three cross-family pairs. Averaging ranks cancels characteristic-specific
 # noise while keeping the members' scale, so a composite is comparable with the columns it averages.
 #
-# Each mean divides by the number of members that are present in that row rather than by the family
-# size, so a composite is null only where every member is null. Section D.2 asserts exactly that,
-# because a mean that silently reads a shorter member list is the difference between a composite and
-# whichever of its members happened to be published.
+# Each mean divides by the number of members present in that row rather than by the family size, so
+# a composite is null only where every member is null. On this release that distinction never bites,
+# because the panel is complete; it is written this way so the same code gives a composite rather
+# than whichever members happened to be published on a release that is not.
 
 
 # %%
@@ -220,7 +288,6 @@ def family_mean(df: pl.DataFrame, columns: list[str], alias: str) -> pl.DataFram
 
 
 # %%
-MEMBERS = {family.name: [c for c in RELEASED if family.matches(c)] for family in FAMILIES}
 MOMENTUM_12M = [c for c in ("r12_2", "r12_7") if c in RELEASED]
 
 features = family_mean(features, MEMBERS["value"], "composite_value")
@@ -313,24 +380,19 @@ plot_timing_contract(
 # `warmup_audit` holds each constructed column to the number of bars its window spans and raises if
 # a column is populated earlier than that, or is null everywhere.
 #
-# **What this audit can and cannot establish here, stated rather than implied.** The released
-# characteristics are complete cases: their warmup nulls were removed by the provider before
-# release, so holding them to the register's lookbacks would fail on every one of them and would be
-# measuring the provider's screen rather than this notebook's construction. They are therefore not
-# in the audit. The constructed columns are functions of their own row and span no window of their
-# own, so their declared floor is zero and the branch that fires for them is the one that catches a
-# column that is null everywhere - which is what a mis-typed member list produces.
+# **What this audit reaches, and what it cannot.** The released characteristics are complete cases:
+# the provider removed their warmup nulls before publishing, so holding them to the register's
+# lookbacks would fail on every one of them, and what it would be measuring is the provider's screen
+# rather than this notebook's construction. They are therefore not in the audit. The constructed
+# columns are functions of their own row and span no window of their own, so their declared floor is
+# zero, and the branch that fires for them is the one that catches a column null everywhere - which
+# is what a mistyped member list produces.
 #
-# **A nullity check would be vacuous here, so it is not the evidence.** The obvious second check -
-# that a composite is null exactly where all its members are null - compares two conditions that
-# are both false on every row of a complete panel, so it passes whatever the composites contain.
-# It is kept below because it is the check that would bite on an incomplete release, and it is
-# labelled as vacuous rather than reported as though it had discriminated.
-#
-# What can actually fail is the member list. Two assertions cover it: the register's patterns must
-# partition the 46 released columns - each claimed exactly once, no family empty - and each
-# composite must equal the mean of its declared members recomputed by a separate route. A mistyped
-# pattern breaks the first; a fault in `family_mean` breaks the second.
+# What can actually go wrong here is the member list, and two assertions cover it. The register's
+# patterns must partition the released columns, each claimed exactly once and no family left empty,
+# which a mistyped pattern breaks. And each composite must equal the mean of its declared members,
+# recomputed by a separate route, which a fault in `family_mean` breaks. Neither is satisfied by the
+# panel being complete, so neither passes for free.
 
 # %%
 census = warmup_audit(features, dict.fromkeys(CONSTRUCTED, 0), entity=ENTITY)
@@ -370,19 +432,6 @@ for name, members in COMPOSED_OF.items():
     )
 print(f"Register claims all {len(RELEASED)} released columns exactly once")
 print(f"All {len(COMPOSED_OF)} composites equal the mean of their declared members")
-
-# 3. kept for an incomplete release, and vacuous on this one - say so rather than score it
-rows_all_members_null = sum(
-    features.filter(pl.all_horizontal(pl.col(c).is_null() for c in members)).height
-    for members in COMPOSED_OF.values()
-)
-for name, members in COMPOSED_OF.items():
-    all_null = pl.all_horizontal(pl.col(c).is_null() for c in members)
-    assert features.filter(pl.col(name).is_null() != all_null).height == 0
-print(
-    f"Nullity check passed on {len(features):,} rows and is VACUOUS: "
-    f"{rows_all_members_null} rows have all members of any composite null"
-)
 
 # %% [markdown]
 # ### D.3 Rebuild without the holdout, and compare
@@ -429,8 +478,14 @@ agreement = assert_values_agree(
     columns=FEATURE_COLS,
     keys=PANEL_KEY,
 )
-print(f"Rebuilt without the holdout: {len(FEATURE_COLS)} columns agree on every pre-holdout row")
-print(agreement.head())
+print(
+    f"Compared {len(FEATURE_COLS)} columns over "
+    f"{agreement['rows compared'].max():,} pre-holdout rows."
+)
+print(f"Largest disagreement in any of them: {agreement['max abs difference'].max():g}")
+print(
+    f"Values present on one side and null on the other: {agreement['null only on one side'].sum()}"
+)
 
 # %% [markdown]
 # ## E. Matrix assembly and coverage
@@ -446,8 +501,8 @@ print(agreement.head())
 # **One null policy, applied once.** The release publishes complete cases, so the policy is to
 # assert completeness rather than to impose a rule: every released characteristic must be fully
 # populated over the window, and every constructed column must be populated wherever its members
-# are. Nothing is dropped. Dropping rows on a subset of columns would key the screen on column
-# order, which removes nothing on this data and something arbitrary on any other.
+# are. Nothing is dropped, so the row set the artifact carries is the row set the release
+# published, and the assertions below say so loudly the first time that stops being true.
 
 # %%
 assert features.select(PANEL_KEY).n_unique() == len(features), "panel key is not unique"
@@ -516,14 +571,18 @@ print(f"Features: {len(FEATURE_COLS)}")
 released_min = min(features[c].min() for c in RELEASED)
 released_max = max(features[c].max() for c in RELEASED)
 print(f"Released characteristics span [{released_min:.3f}, {released_max:.3f}]")
-print(register_frame(FAMILIES, columns=FEATURE_COLS).select("family", "columns", "role"))
+
+register_frame(FAMILIES, columns=FEATURE_COLS).select(
+    ["family", "columns", "role", "representation"]
+)
 
 # %% [markdown]
 # ## F. What the features look like
 #
 # Four descriptive views: shape, spread through time, redundancy, and persistence. None of them
-# states an information coefficient - `04_evaluation` owns predictive strength and computes it
-# fold-aware. What these establish is whether the columns are shaped the way the register says they
+# states an information coefficient - `04_evaluation` owns predictive strength and measures it with
+# fold stability and false-discovery control around it. What these establish is whether the columns
+# are shaped the way the register says they
 # are, and whether they are distinct enough and stable enough to be worth screening at all.
 #
 # **Every view below reads development rows only.** Section E wrote the full panel, because the
@@ -535,7 +594,13 @@ print(register_frame(FAMILIES, columns=FEATURE_COLS).select("family", "columns",
 # The cluster assignment below is **descriptive and local**: it stays in this notebook, and
 # `04_evaluation` builds its own pairwise Spearman matrix and triages every feature rather than
 # one representative per cluster. What this view is for is telling a reader how many distinct
-# orderings 57 columns actually carry, before any of them is scored.
+# orderings the matrix actually carries, before any column is scored. It is computed on a seeded
+# 200,000-row sample of the development panel rather than all of it, which is enough to place a
+# correlation to two decimals and keeps a full pairwise rank matrix over every column affordable.
+#
+# Read the dendrogram by where branches meet rather than by how they are coloured: two columns are
+# in the same cluster when the branch joining them meets to the right of the dashed cut. The cell
+# after the figure lists the memberships that matter, one line per composite.
 
 # %%
 development = features.filter(pl.col("timestamp") < pl.lit(HOLDOUT_START))
@@ -574,17 +639,21 @@ plot_cross_sectional_dispersion(
 clusters = plot_redundancy_clusters(
     development,
     FEATURE_COLS,
-    cut=0.7,
+    cut=REDUNDANCY_CUT,
     title="Only the momentum composite clusters with all the columns it averages",
-    subtitle=r"Hierarchical clustering on $1-|\rho|$ over Spearman ranks; cut drawn at 0.7",
+    subtitle=(
+        r"Distance is $1-|\rho_s|$ over Spearman ranks, so the dashed cut at "
+        rf"{1 - REDUNDANCY_CUT:.1f} is $|\rho_s|={REDUNDANCY_CUT}$"
+    ),
     alt=(
-        "A dendrogram over all 57 columns with a cut line drawn at a distance of 0.7, leaving "
-        "37 clusters of which ten hold more than one column. Averaging does not make a composite "
-        "redundant with what it averages: composite_momentum is the only one sharing a cluster "
-        "with all of its members, r12_2 and r12_7, and the two cross-family momentum composites "
-        "sit in that cluster as well. composite_quality shares its cluster with four of its "
-        "seven members, composite_value with only CF2P of its six, and composite_investment and "
-        "all four interaction columns with none of theirs."
+        "A dendrogram over every column of the matrix, drawn from a distance of 1.0 on the left "
+        "down to 0.0 on the right, with each column named along the right edge. A dashed "
+        "vertical line marks the cut. Two columns belong to the same cluster when the branch "
+        "joining them meets to the right of that line; most branches meet well to the left of "
+        "it, so most columns stand alone. One of the two largest groups to the right of the cut "
+        "holds the momentum composite together with the two return characteristics it averages "
+        "and the two cross-family composites built from it. The cell below counts the clusters and "
+        "lists, for each composite, which of its own members ended up beside it."
     ),
 )
 
@@ -594,7 +663,7 @@ plot_persistence(
     development,
     ["composite_value", "composite_quality", "r12_2"],
     entity=ENTITY,
-    max_lag=12,
+    max_lag=PERIODS_PER_YEAR,
     decision_dates=decision_dates,
     title="Accounting composites persist at 12 months; momentum has reversed",
     subtitle=("Left: per-firm autocorrelation by lag. Right: month-to-month rank correlation"),
@@ -606,25 +675,29 @@ plot_persistence(
 )
 
 # %% [markdown] tags=["results"]
-# ### F. Redundancy and persistence, as numbers
+# ### F. Redundancy, as numbers
 #
-# The two figures above are read together: a cluster count says how many distinct orderings the
-# 57 columns actually carry, and rank survival says how long any of them lasts. Both are over
-# development rows only.
+# A dendrogram shows structure but not counts, so the counts go here: how many groups the matrix
+# falls into once closely-agreeing features are read together, and how many of the columns a
+# composite averages end up beside it. Both are over development rows only.
+#
+# The linkage is average, so a group is one whose *average* distance to its neighbours is below the
+# cut. Two columns can therefore share a group without their own correlation reaching 0.7, which is
+# why the count below is reported as clusters at a cut and not as a pairwise threshold.
 
 # %%
 n_clusters = len(set(clusters.values()))
 largest = max(sum(1 for v in clusters.values() if v == c) for c in set(clusters.values()))
-print(f"Redundancy clusters at |rho| > 0.7: {n_clusters} over {len(FEATURE_COLS)} columns")
-print(f"Largest cluster: {largest} columns")
-
-survival = (
-    development.select(["timestamp", "composite_value", "r12_2"])
-    .sort("timestamp")
-    .group_by("timestamp")
-    .agg(pl.len())
+shared = sum(1 for c in set(clusters.values()) if sum(1 for v in clusters.values() if v == c) > 1)
+print(
+    f"Average-linkage clusters cut at distance {1 - REDUNDANCY_CUT:.1f}: "
+    f"{n_clusters} over {len(FEATURE_COLS)} columns"
 )
-print(f"Decision dates before the holdout: {survival.height} months, from {WINDOW_START}")
+print(f"Clusters holding more than one column: {shared}; the largest holds {largest}")
+
+for name, members in COMPOSED_OF.items():
+    together = sorted(m for m in members if clusters[m] == clusters[name])
+    print(f"  {name}: {len(together)} of {len(members)} members in its cluster - {together}")
 
 # %% [markdown]
 # ## G. Emit
@@ -636,11 +709,8 @@ print(f"Decision dates before the holdout: {survival.height} months, from {WINDO
 #
 # | Artifact | Read by |
 # |---|---|
-# | `features/financial.parquet` | `04_evaluation:70`, and the modeling stages downstream of it |
-# | `features/financial.parquet.digest.json` | nothing yet - it is the provenance record a reader checks by hand, and what stage 04 will declare as an input when it adopts the sidecar |
-#
-# The register of families and their normalization lives in `setup.yaml`, where a test can
-# reach it, rather than in a description this notebook would write beside the matrix.
+# | `features/financial.parquet` | [`04_evaluation`](04_evaluation.ipynb), which screens the columns and writes one decision per feature, and the modeling stages downstream of it |
+# | `features/financial.parquet.digest.json` | a reader, or a maintainer, checking by hand which build of the matrix a downstream result came from |
 
 # %%
 matrix = features.select(PANEL_KEY + FEATURE_COLS).sort(PANEL_KEY)
@@ -669,19 +739,23 @@ print(f"  rows {record['n_rows']:,}   digest {record['digest']}")
 # 2. State what an audit can reach. The provider releases complete cases, so its warmup nulls are
 #    gone and no assertion made here can recover the windows the register records; saying so is
 #    worth more than an assertion that passes because there is nothing left for it to catch.
-# 3. A composite is only a composite if it averages the member list it declares, and what
-#    establishes that is D.2 recomputing each one from its declared members by a separate route.
-#    The nullity check sitting beside it cannot fail on a complete panel, and is labelled so.
-# 4. A null policy keyed on column order is a screen nobody chose. Asserting the completeness the
-#    release already guarantees says the same thing and fails loudly when it stops being true.
-# 5. The firm identity is part of the artifact's contract, not an implementation detail. Section E
-#    asserts the one-to-one join against the labels because the previous vintage of this matrix was
-#    keyed on a positional identifier and joined to nothing.
+# 3. A composite is only a composite if it averages the member list it declares. What establishes
+#    that is D.2 recomputing each one from its declared members by a separate route, and asserting
+#    the register's patterns claim every released column exactly once. Choose checks that can fail
+#    on the data in front of you: on a panel with no nulls anywhere, a nullity check passes whatever
+#    the composites contain.
+# 4. Where a release already guarantees complete cases, the null policy is to assert that guarantee
+#    rather than to impose a rule on top of it. Dropping rows on whichever columns a frame happens
+#    to list first is a screen nobody chose, and it stays invisible until the data changes.
+# 5. The firm identity is part of the artifact's contract, not an implementation detail. Flattening
+#    an array to a panel offers two positions that both look like identifiers - the fixed axis,
+#    which is one, and the row's place in a filtered cross-section, which is not - so Section E
+#    asserts the one-to-one join against the labels instead of assuming it.
 #
 # **Known limitations.** The register's lookbacks are the provider's stated conventions and the
 # windows some characteristics name, not per-characteristic estimation windows, which the release
 # does not publish. The `other` family is a residual grouping with no single thesis, so a
 # family-level reading of it means less than it does for the five named families.
 #
-# **Next**: [`04_evaluation`](04_evaluation.ipynb) screens these features fold-aware, with HAC
-# uncertainty and false-discovery control.
+# **Next**: [`04_evaluation`](04_evaluation.ipynb) screens these features, with HAC uncertainty,
+# fold-level sign stability and false-discovery control.

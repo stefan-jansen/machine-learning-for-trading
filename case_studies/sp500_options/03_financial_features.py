@@ -28,21 +28,24 @@
 #
 # ## Learning objectives
 #
-# - State each family's lookback and information lag before writing the code that computes it
+# - Write down, for every group of features, how many sessions back it reaches and how old its
+#   newest input is, and put those two numbers in the configuration before writing the code
 # - Count every trailing window on the underlying's session grid rather than on the rows an
 #   intermittently quoted instrument happens to occupy
-# - Separate what is being traded (the straddle and its Greeks) from what is being predicted about
-#   (the volatility surface), and rank the second within the date a decision is taken
+# - Separate what is being traded - the straddle, and the sensitivities of its price to spot,
+#   time and volatility - from what is being predicted about, which is the volatility the options
+#   are quoted at, and compare the second across the symbols quoted on the same day
 # - Show that withholding the holdout leaves every feature value unchanged
 #
 # ## Book reference, prerequisites and artifacts
 #
 # Chapter 8, Sections 8.1-8.6. Reads pre-materialized 30-day ATM straddles via
 # `load_sp500_options_straddles()`, underlying daily bars via `load_sp500_daily_bars()`, and
-# `config/setup.yaml`. Writes `features/financial.parquet` with a `.digest.json` sidecar, read by
-# [`04_model_based_features`](04_model_based_features.ipynb), which fits GARCH and stochastic-
-# volatility features on top of it, and by [`05_evaluation`](05_evaluation.ipynb), which tests fold
-# by fold whether any of it predicts.
+# `config/setup.yaml`. Writes `features/financial.parquet` with a `.digest.json` sidecar.
+# [`04_model_based_features`](04_model_based_features.ipynb) reads it for the span of dates its
+# walk-forward folds are cut on, and adds features that are themselves fitted models of the
+# underlying's volatility. [`05_evaluation`](05_evaluation.ipynb) reads every column of it and
+# tests fold by fold whether any of them predicts.
 
 # %%
 """S&P 500 Options: Feature Engineering."""
@@ -95,13 +98,15 @@ START_DATE = None
 # ## Configuration
 #
 # Every window, threshold, ranked column and the null policy are declared in `config/setup.yaml`
-# and bound here. A window retyped in the notebook is a second source of truth for a decision the
-# register, the warmup assertion and the timing figure all have to agree on.
+# and bound here rather than typed in. The register below, the warmup assertion in D.2 and the
+# timing figure all have to state the same lookback for a family, and they can only be checked
+# against each other if there is one place the number comes from.
 #
-# `min_observations_fraction` is the one parameter this case study needs and the other eight do
-# not. Because the straddle panel is not dense on the session grid, a 252-session window holds
-# fewer than 252 straddle quotes, and this is the share of the window that must be quoted before
-# it produces a value.
+# One of those settings is specific to this data. Because a straddle is not quoted on every
+# session, a window of 252 sessions holds fewer than 252 quotes, and
+# `min_observations_fraction` is the share of the window that must carry one before the window
+# produces a value at all. The bound value is printed below, and C.4 measures what it buys and
+# what it costs.
 
 # %%
 setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
@@ -126,31 +131,37 @@ PANEL_KEY = ["symbol", "instrument_id", "timestamp"]
 print(
     f"{len(FAMILIES)} declared families, {TARGET_DTE}-day straddle held ~{HOLD_SESSIONS} sessions"
 )
+print(f"A trailing window produces a value once {MIN_OBS:.0%} of its sessions carry a quote")
 print(f"Holdout starts {HOLDOUT_START}; Section D rebuilds the panel without it")
 
 # %% [markdown]
 # ## A. What the thesis says should carry information
 #
-# The **carrier** is the variance risk premium: at-the-money implied volatility minus the realized
-# volatility of the same underlying. Selling a straddle collects it, and the claim is that it is
-# positive on average and unevenly distributed across names. It is carried at five horizons,
-# because the horizon over which realized volatility is measured is a modelling choice and not a
-# fact, and as a difference, a ratio and a z-score, because a five-point premium means one thing
-# on a name that usually quotes at two and another on a name that usually quotes at fifteen.
+# The quantity the whole case study rests on is the variance risk premium: at-the-money implied
+# volatility minus the realized volatility of the same underlying. Selling a straddle collects it,
+# and the claim is that it is positive on average and unevenly distributed across names. It is
+# built at five horizons, because the horizon over which realized volatility is measured is a
+# modelling choice and not a fact, and as a difference, a ratio and a z-score, because a
+# five-point premium means one thing on a name that usually quotes at two and another on a name
+# that usually quotes at fifteen.
 #
-# The **conditioning** is everything that decides whether the premium is collectable rather than
-# merely on offer. The instrument-state family is the cost side: an at-the-money option's quoted
+# The remaining families are there to say whether the premium is collectable rather than merely
+# on offer. The instrument-state family is the cost side: an at-the-money option's quoted
 # spread is wide relative to its premium, and a straddle whose spread is in the top decile is one
 # whose edge is spent on entry. The realized-volatility and underlying families are the risk side.
 # The quality family predicts nothing by construction and is carried so that a model leaning on it
 # is visible.
 #
-# The **frame** is the decision date. The strategy sells some straddles and not others on the same
-# Friday, so only relative standing within that date can drive it, which is what the four
-# percentiles record. Every lag in the register is zero: straddle quotes and underlying closes are
-# both dated to the session that produced them, and the decision is taken at that session's close.
+# The table below is the register: one row per family, declared in `config/setup.yaml` and read
+# from there by everything that has to agree with it. Its `frame` column says what a feature is
+# measured against - one symbol's own past, or every symbol quoted on the same day. That
+# distinction decides what the feature can be used for. The strategy sells some straddles and not
+# others on the same Friday, so only standing relative to the other names quoted that Friday can
+# drive it, which is what the four percentile columns record.
 #
-# The register is declared in `config/setup.yaml`, one row per family.
+# The `lag` column is zero on every row: straddle quotes and underlying closes are both dated to
+# the session that produced them, and the decision is taken at that session's close, so no feature
+# here is waiting on a value that arrives later than the decision it feeds.
 
 # %%
 register_frame(FAMILIES).select(
@@ -266,9 +277,9 @@ def session_grid(prices: pl.DataFrame) -> pl.DataFrame:
 
 
 # %%
-grid = session_grid(underlying)
 panel = (
-    grid.join(
+    session_grid(underlying)
+    .join(
         underlying.select(["timestamp", *SEGMENT, "close", "adj_factor", "volume"]),
         on=["timestamp", *SEGMENT],
         how="left",
@@ -431,13 +442,21 @@ def premium_features(df: pl.DataFrame) -> pl.DataFrame:
 # has moved. Both z-scores are trailing: the mean and standard deviation at each row come from that
 # row's own past, so nothing is estimated across the sample.
 #
-# The z-score below is the one construction this case study writes locally, because every shared
-# primitive requires its window to be complete and on this panel that is the wrong requirement.
-# Demanding a straddle quote on all 252 sessions leaves the z-score defined on a small fraction
-# of the rows that carry one at the configured rule, and
-# `config/setup.yaml::features.min_observations_fraction` records both shares beside the rule
-# itself. `session_zscore` takes the same trailing mean over the same trailing dispersion under
-# the same denominator guard as `rolling_zscore`, and adds the minimum-observation argument.
+# A trailing z-score subtracts the mean of the last *n* sessions and divides by their standard
+# deviation, so it says how unusual today's level is for this symbol rather than how high it is.
+# The shared primitives require every session in the window to carry a value before they return
+# one, which is the right rule on a dense price series and the wrong rule here: a symbol whose
+# straddle is quoted on four sessions out of five has no complete 252-session window anywhere in
+# the sample. `session_zscore` below is therefore written locally. It is the same trailing mean
+# over the same trailing dispersion, guarded the same way against a dispersion of zero, with one
+# addition - the number of sessions in the window that must actually carry a quote.
+#
+# That number is what `min_observations_fraction` sets, and the cell after it measures the trade
+# the fraction makes. Requiring the whole window leaves the longest z-score defined on almost none
+# of the rows that carry a quote; the configured rule recovers most of them. What it costs is
+# comparability, because two z-scores over the same window that were computed from different
+# numbers of observations are not quite the same statistic, and nothing downstream is told which
+# it received.
 
 
 # %%
@@ -456,6 +475,33 @@ def session_zscore(column: str, window: int) -> pl.Expr:
     mean = pl.col(column).rolling_mean(window, min_samples=observations).over(SEGMENT)
     std = pl.col(column).rolling_std(window, min_samples=observations).over(SEGMENT)
     return (pl.col(column) - mean) / std.clip(lower_bound=EPS)
+
+
+# %% [markdown]
+# The longest z-score is the one the rule decides, so it is the one to measure it on: the share of
+# quoted rows that carry a value under each of the two requirements.
+
+# %%
+LONGEST = WINDOWS["iv_zscore"][-1]
+strict_mean = pl.col("iv_atm").rolling_mean(LONGEST, min_samples=LONGEST).over(SEGMENT)
+strict_std = pl.col("iv_atm").rolling_std(LONGEST, min_samples=LONGEST).over(SEGMENT)
+defined = (
+    panel.with_columns(
+        ((pl.col("iv_atm") - strict_mean) / strict_std.clip(lower_bound=EPS)).alias("_every"),
+        session_zscore("iv_atm", LONGEST).alias("_configured"),
+    )
+    .filter(QUOTED)
+    .select(
+        pl.col("_every").is_not_null().mean().alias("every"),
+        pl.col("_configured").is_not_null().mean().alias("configured"),
+    )
+    .row(0, named=True)
+)
+print(
+    f"the {LONGEST}-session z-score is defined on {defined['every']:.1%} of quoted rows when every "
+    f"session in the window must carry a quote, and on {defined['configured']:.1%} when "
+    f"{min_observations(LONGEST)} of them must"
+)
 
 
 # %%
@@ -585,6 +631,31 @@ print(
 # None of the four is fitted: no bound, scaler or encoder here has parameters estimated once and
 # applied to every row. D.2 checks the windows and D.3 checks all four at once.
 #
+# ### F4. The timing contract the register declares
+#
+# Each bar runs leftward from the
+# decision to the oldest session that family reads, so its length is the lookback; a bar that
+# stopped short of the decision line on the right would be a family whose newest input is already
+# stale when the decision is taken. None of them does.
+
+# %%
+plot_timing_contract(
+    FAMILIES,
+    bar_unit="NYSE sessions",
+    title="Two families reach back a year, and none reads past the decision",
+    subtitle="Register lookback per family; a gap at the right edge is a lag",
+    alt=(
+        "Horizontal bars, one per feature family, each extending leftward from the decision line "
+        "by that family's lookback: 252 sessions for surface dynamics and the variance risk "
+        "premium, 63 for realized volatility, 21 for the underlying family and for the "
+        "cross-sectional percentiles, and five for instrument state. The surface-level and "
+        "quality families read only the current session and so are drawn with no bar at all. "
+        "Every bar reaches the decision line, so none of them is drawn with a gap at its "
+        "right-hand end."
+    ),
+)
+
+# %% [markdown]
 # ### D.2 Warmup
 #
 # The audit checks each column's leading nulls against the number of sessions its window spans,
@@ -631,14 +702,22 @@ seal.filter(pl.col("column").is_in(["vrp_zscore_252", "vrp_21d_pctl", "rv_63d"])
 # %% [markdown]
 # ## E. Matrix assembly and coverage
 #
-# The panel key is `symbol` + `instrument_id` + `timestamp`. Nine columns the two loaders supplied
-# or the construction needed are excluded, each for its own reason, and the exclusion list below
-# carries them. The assertion under it is what keeps the list honest: a column added to the
-# construction and registered nowhere fails here rather than reaching the parquet unnoticed.
+# The panel key is `symbol` + `instrument_id` + `timestamp`. `instrument_id` names which
+# instrument was built on the symbol, and here it takes one value on every row, because one
+# instrument is materialized per symbol-session: the 30-day at-the-money straddle. It is in the
+# key so that a case study materializing several instruments per symbol - a second expiry, a
+# different moneyness - keys its matrix the same way rather than needing a different schema.
+#
+# Nine columns the two loaders supplied or the construction needed are excluded, each for its own
+# reason, and the exclusion list below carries them. The assertion under it is what keeps the list
+# honest: a column added to the construction and registered nowhere fails here rather than
+# reaching the parquet unnoticed.
 #
 # Four further columns are written that are **not** features and are declared as such in
 # `config/setup.yaml::features.metadata`: the underlying price and the straddle's mid, bid and ask.
-# `05_evaluation` excludes them by the same name, and the backtest needs them to price a position.
+# They travel with the matrix so that a row's feature values can be read against the prices they
+# were quoted at. Nothing models them: `05_evaluation` and the shared modelling loader both drop
+# them from the feature list by these exact names.
 
 # %%
 EXCLUDED = {
@@ -689,46 +768,35 @@ print(f"thinnest family-month past warmup {thinnest:.3f}")
 # %% [markdown]
 # ### F1. Coverage through time
 #
-# Four families are complete everywhere by construction: they read the underlying, which is dense,
-# or the quote itself. The three that thin out are the ones whose windows need a straddle to have
-# been quoted on a particular earlier session, and they thin together, because it is the same
-# churn in the quoted universe that empties all three.
+# Read this chart to the right of the dashed line. Everything to its left is the panel's longest
+# windows still filling for the first time, so the low values there say nothing about the data -
+# which is what the boundary is drawn for.
+#
+# Past it, four families are complete everywhere by construction: they read the underlying, which
+# is dense, or the quote itself. Realized volatility joins them once its own windows have filled.
+# The three that stay short are the ones whose windows need a straddle to have been quoted on a
+# particular earlier session, and they thin together, because it is the same churn in the quoted
+# universe that empties all three.
 
 # %%
 plot_coverage_through_time(
     coverage,
     warmup_boundary=WARMUP_END,
-    title="April 2020 is the worst coverage month for every family that thins",
+    title="Past the warmup, April 2020 is the worst month for every family that thins",
     subtitle="Monthly non-null share per feature family",
     alt=(
         "Line chart of non-null share by feature family by month, on a y-axis running from about "
-        "0.47 to one. The cross-sectional, quality, surface-level and underlying families sit "
-        "flat at one for the whole sample and realized volatility just below them. Instrument "
-        "state runs near 0.97. The variance-risk-premium family runs near 0.90 and surface "
-        "dynamics is the lowest line throughout, rising from about 0.6 in 2017 to about 0.8 by "
-        "2019. All three of the lines that move dip sharply in April 2020, surface dynamics "
-        "furthest, to 0.49, and all three recover over the following year without regaining "
-        "their 2019 level."
-    ),
-)
-
-# %% [markdown]
-# ### F4. The timing contract
-
-# %%
-plot_timing_contract(
-    FAMILIES,
-    bar_unit="NYSE sessions",
-    title="Two families reach back a year, and none reads past the decision",
-    subtitle="Register lookback per family; a gap at the right edge is a lag",
-    alt=(
-        "Horizontal bars, one per feature family, each extending leftward from the decision line "
-        "by that family's lookback: 252 sessions for surface dynamics and the variance risk "
-        "premium, 63 for realized volatility, 21 for the underlying family and for the "
-        "cross-sectional percentiles, and five for instrument state. The surface-level and "
-        "quality families read only the current session and so are drawn with no bar at all. "
-        "Every bar reaches the decision line, so none of them is drawn with a gap at its "
-        "right-hand end."
+        "0.47 to one, with a dashed vertical line at the start of 2018 marking the end of the "
+        "warmup. The cross-sectional, quality, surface-level and underlying families sit flat at "
+        "one for the whole sample. Realized volatility starts at about 0.6 and climbs to one "
+        "within the first half of 2017, then stays there. To the left of the warmup line the "
+        "variance-risk-premium and surface-dynamics families are still filling their longest "
+        "windows and run at their lowest values of the whole chart, about 0.57 and 0.48. Past "
+        "the warmup line, instrument state runs near 0.97, the variance-risk-premium family near "
+        "0.90, and surface dynamics is the lowest line throughout, rising from about 0.73 in "
+        "early 2018 to about 0.8 by 2019. All three dip sharply in April 2020 - to 0.945, 0.824 "
+        "and 0.494 - which is the lowest each of them reaches after the warmup, and all three "
+        "recover over the following year without regaining their 2019 level."
     ),
 )
 
@@ -747,7 +815,7 @@ plot_feature_distributions(
     features,
     ["vrp_21d", "vrp_63d", "iv_rv_ratio", "vrp_zscore_252", "vrp_mom_5d", "vrp_21d_pctl"],
     title="The same premium is peaked, bell-shaped or flat by representation",
-    subtitle="Premium family across all quoted symbol-sessions, display tails clipped",
+    subtitle="Premium family over every row in the matrix, display tails clipped",
     alt=(
         "Six histograms in two rows. The 21-session and 63-session premiums and the five-session "
         "premium change are all very sharply peaked just above zero with a long thin tail to the "
@@ -785,10 +853,32 @@ plot_cross_sectional_dispersion(
 # %% [markdown]
 # ### F5. Redundancy structure
 #
-# Clustering on the distance $1 - |\rho|$ groups features that carry the same ordering, whatever
-# the sign. Above the cut two features are close enough that a linear model cannot separate their
-# contributions. This states the clusters. Choosing one representative from each needs a
-# fold-aware criterion, which `05_evaluation` applies fold by fold.
+# Two features that order the panel almost the same way add little to each other. Fit an
+# unpenalized linear model on both and it splits their shared contribution between two
+# coefficients that are then unstable from fold to fold - each can move a long way while the
+# pair's joint effect barely changes. A penalty on the coefficients damps that, and a tree does
+# not have the problem in the same form, but in every case the second column is buying less than
+# its own presence suggests. Grouping the features is how the notebook makes that visible before
+# any model is fitted.
+#
+# Each column is replaced by its rank, the ranks are correlated pairwise - a Spearman
+# correlation - and the features are clustered on the distance $1 - |\rho|$, so a strongly
+# negative correlation counts as the same information as a strongly positive one. The dashed line
+# is the cut, drawn at the rank correlation named in the subtitle; every branch that has already
+# merged to the right of it is one group.
+#
+# Two properties of that estimate are worth knowing before reading the tree. The ranking is over
+# rows pooled across symbols and dates, not within each date, so two features can land in one
+# group because they separate symbols the same way, because they move together through time, or
+# both - which is the right question for whether the matrix carries a column twice, and a
+# different question from whether they order the same names on the same Friday. And it is taken
+# on a fixed random sample of the rows rather than all of them, because the pairwise correlation
+# is quadratic in the columns; the sample is drawn under a fixed seed, so the tree is the same on
+# every run.
+#
+# The groups are what this section produces. `05_evaluation` runs its own pooled Spearman
+# correlation later, over the features that reach its screen and on dates before the holdout, and
+# counts the pairs that clear the same threshold before printing the strongest of them.
 
 # %%
 CUT = 0.7
@@ -805,9 +895,10 @@ clusters = plot_redundancy_clusters(
         "volatility windows, together with the straddle's premium as a share of spot and the "
         "theta-vega ratio. The premium columns themselves sit in a separate branch, where the "
         "42-session and 63-session premiums pair off and the 21-session premium joins the ratio, "
-        "the z-score and their percentiles. The momentum columns form a third branch. The two "
-        "quality controls, the skew and the two spread columns attach only near the root, "
-        "sharing an ordering with nothing else."
+        "the z-score and their percentiles. The momentum columns form a third branch. The "
+        "straddle's relative spread and its percentile pair off tightly with each other and with "
+        "nothing else, and that pair, the two quality controls and the skew all attach to the "
+        "rest of the tree only near the root."
     ),
 )
 
@@ -857,8 +948,9 @@ plot_persistence(
     alt=(
         "Two panels. On the left, autocorrelation against lag. The 21-session premium and its "
         "252-session z-score both start near 0.94 at lag one and fall almost on top of each "
-        "other in a near-straight line, crossing zero at lag 20 and lag 18 respectively and "
-        "drifting a little below it, to about minus 0.06, out to lag 42. Implied volatility and "
+        "other in a near-straight line, crossing zero at lag 20 and lag 18 respectively, reaching "
+        "about minus 0.14 near lag 25 and coming back to about minus 0.06 by lag 42. Implied "
+        "volatility and "
         "21-session realized volatility start slightly higher, near 0.97, and decay far more "
         "slowly, still at 0.35 and 0.20 at lag 42 and never crossing zero. The relative spread "
         "starts much lower, at about 0.51, and flattens near 0.19. The bootstrap ribbons are "
@@ -906,9 +998,9 @@ print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}, digest {record
 #   review a reader can run all read those numbers rather than re-deriving them from the code.
 # - **Say what a column is when its name suggests something better.** The change in the price of a
 #   reselected 30-day straddle is not a return anyone held, and only the prose can carry that.
-# - **Test the seal by construction, not by inspection.** Rebuilding the panel with later dates
-#   withheld and comparing values catches any transform that fits across the sample, including the
-#   ones nobody thought to flag.
+# - **Check that the holdout was untouched by rebuilding, not by reading the code.** Recomputing
+#   the panel with the later dates withheld and comparing every value catches any transform that
+#   fits across the sample, including the ones nobody thought to flag.
 # - **Read the matrix before modelling it.** Distribution, dispersion, redundancy and decay each
 #   rule out a use: a feature with no cross-sectional spread cannot rank, and one whose ordering
 #   decays inside the holding period cannot be traded at this cadence.
