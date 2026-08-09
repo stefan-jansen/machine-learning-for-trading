@@ -176,6 +176,41 @@ def intermediates_dir(test_data_dir):
     return None
 
 
+SEEDED_SUBDIRS = ("features", "labels", "evaluation", "run_log", "results", "benchmark")
+
+
+def seed_case_study_intermediates(src: Path, dst: Path) -> None:
+    """Make ``dst`` hold the fixture's intermediates for one case study, and only those.
+
+    Replace, never fill a gap. CI checks the fixture out into a clean container every
+    time; a lane re-running into an existing ``ML4T_OUTPUT_DIR`` used to keep whatever
+    the previous run had left, which for ``run_log/registry.db`` means every training
+    run, prediction set and backtest that run registered. The notebooks then resolved
+    identities neither the fixture nor production carries, so the same code produced a
+    different failure list locally than it did in CI.
+
+    A destination subdir is removed whether or not the fixture still ships a source for
+    it. One the fixture has stopped shipping is precisely the leftover nothing would
+    ever overwrite.
+
+    ``src`` also holds top-level files (``etfs/eligibility.csv``, ``protocol.yaml``,
+    ``baseline_checkpoint.yaml``) that downstream notebooks read through
+    ``get_case_study_dir()``, so they are copied too.
+    """
+    for subdir in SEEDED_SUBDIRS:
+        src_sub = src / subdir
+        dst_sub = dst / subdir
+        if dst_sub.exists():
+            shutil.rmtree(dst_sub)
+        if src_sub.exists():
+            shutil.copytree(src_sub, dst_sub)
+
+    for item in src.iterdir():
+        if item.is_file():
+            dst.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, dst / item.name)
+
+
 @pytest.fixture(scope="session")
 def seeded_output_dir(tmp_path_factory):
     """Session-scoped output dir seeded with case study config files.
@@ -247,32 +282,7 @@ def seeded_output_dir(tmp_path_factory):
             if not src.exists():
                 continue
             dst = output_dir / cs_id
-            # Copy features, labels, evaluation, run_log, results, benchmark —
-            # anything that downstream notebooks look for in get_case_study_dir()
-            # Replace rather than fill a gap. CI checks the fixture out into a
-            # clean container every time; a lane re-running into an existing
-            # ML4T_OUTPUT_DIR kept whatever the previous run had left, which for
-            # run_log/registry.db means every training run, prediction set and
-            # backtest that run registered. The notebooks then saw identities
-            # neither the fixture nor production carries, so the same code
-            # produced a different failure list locally than in CI.
-            for subdir in ["features", "labels", "evaluation", "run_log", "results", "benchmark"]:
-                src_sub = src / subdir
-                dst_sub = dst / subdir
-                if not src_sub.exists():
-                    continue
-                if dst_sub.exists():
-                    shutil.rmtree(dst_sub)
-                shutil.copytree(src_sub, dst_sub)
-            # Copy top-level intermediate files (e.g. etfs/eligibility.csv,
-            # protocol.yaml, baseline_checkpoint.yaml) that sit directly in
-            # intermediates/{cs_id}/ rather than in a subdir. Downstream
-            # notebooks (etfs 02_labels, 03_financial_features) read these via
-            # get_case_study_dir(); without this they fail with FileNotFoundError.
-            for item in src.iterdir():
-                if item.is_file():
-                    dst.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(item, dst / item.name)
+            seed_case_study_intermediates(src, dst)
             # Schema reconciliation: test-data predictions parquets were
             # generated with an older column convention (y_score / y_true /
             # fold_id). Production registry uses (prediction / actual / fold).
