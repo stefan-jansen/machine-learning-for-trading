@@ -2,8 +2,8 @@
 
 Four hygiene defects have reached readers from committed ``.ipynb`` files:
 
-* machine-specific absolute paths (``/home/<user>/...``) baked into cell
-  outputs and papermill metadata,
+* machine-specific absolute paths baked into cell outputs and papermill
+  metadata - ``/home/<user>/...``, and a scratch root under ``/tmp``,
 * an empty ``tags: []`` stamped on every cell by papermill, which desynced the
   notebook from its jupytext-paired ``.py`` and made JupyterLab refuse to open
   it (public issue #372), and
@@ -33,6 +33,7 @@ from sanitize_notebook_paths import (  # noqa: E402
     BINARY_MIME,
     _iter_notebooks,
     sanitize_notebook,
+    sanitize_text,
 )
 from strip_empty_cell_tags import paired_py_has_fossil, strip_text  # noqa: E402
 
@@ -66,6 +67,53 @@ def test_no_machine_specific_paths_in_committed_notebooks() -> None:
         "to fix; a leak it reports as unrewritable has to be removed by hand or by "
         "re-executing the notebook:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_a_scratch_root_under_tmp_is_rewritten() -> None:
+    """An agent scratchpad and a staging notebook executed from /tmp are both leaks."""
+    scratchpad = (
+        "/tmp/claude-1000/-home-someone-ml4t-agents/"
+        "adaaf42e-c336-4616-bea6-f139792daf17/scratchpad/nb.ipynb"
+    )
+    assert sanitize_text(scratchpad)[0] == "~/scratch/nb.ipynb"
+    assert sanitize_text("/tmp/dpgan_final_out.ipynb")[0] == "~/scratch/dpgan_final_out.ipynb"
+
+
+def test_the_documented_test_output_directory_is_not_rewritten() -> None:
+    """`/tmp/ml4t-test-output` is real configuration, not one machine's layout.
+
+    `AGENTS.md` ("Output isolation") makes tests write there, so a notebook
+    printing it is telling the reader where its output went. Rewriting it would
+    repeat the mistake the raw-text sanitizer made with the `/app` mount path in
+    `02_financial_data_universe/16_provider_comparison`.
+    """
+    for path in (
+        "/tmp/ml4t-test-output/ch04_kalshi/kalshi_features.parquet",
+        "/tmp/ml4t-test-output-ch15/ch15_momentum_causal_trading/artifacts.json",
+    ):
+        assert sanitize_text(path) == (path, 0)
+
+
+def test_an_ipython_cell_path_is_not_rewritten() -> None:
+    """`/tmp/ipykernel_<pid>/<hash>.py` is what IPython calls a cell in any kernel.
+
+    It carries a process id, not a user or a directory layout, and it appears
+    inside tracebacks and warnings where the line number is the point. Rewriting
+    the root would corrupt a location a reader may need to follow.
+    """
+    frame = "/tmp/ipykernel_790523/2252327757.py:76: FutureWarning"
+    assert sanitize_text(frame) == (frame, 0)
+
+
+def test_an_already_rewritten_path_is_not_rewritten_again() -> None:
+    """The `/tmp` rules match a filesystem root, not the segment `tmp` anywhere.
+
+    `~/.claude/jobs/<id>/tmp/run.ipynb` is what the `/home/<user>/` rule leaves
+    behind. An unanchored `/tmp/` rule would splice a second `~` into the middle
+    of it, which is why the rules carry a lookbehind.
+    """
+    nested = "~/.claude/jobs/7c96381e/tmp/dpgan_final_out.ipynb"
+    assert sanitize_text(nested) == (nested, 0)
 
 
 def test_the_sanitizer_reports_a_string_it_cannot_safely_rewrite() -> None:
@@ -137,6 +185,53 @@ def test_the_sanitizer_leaves_an_image_payload_alone_when_it_encodes_app() -> No
     assert replaced == 1
     rewritten = json.loads(new)["cells"][0]["outputs"][0]["data"]
     assert rewritten["text/plain"] == ["figure.py"]
+    assert rewritten["image/png"] == payload
+    base64.b64decode(rewritten["image/png"], validate=True)
+
+
+def test_the_sanitizer_leaves_an_image_payload_alone_when_it_encodes_tmp() -> None:
+    """The `/tmp` rules carry the same exposure as the `/app/` one, by the same alphabet.
+
+    `t`, `m` and `p` are as much a part of base64 as `a` and `p` are, and the
+    filesystem-root lookbehind does not help: `+` and `/` are both in the alphabet
+    and both satisfy it. So `/tmp/` occurs inside a long payload by chance exactly
+    as `/app/` does, and rewriting it to `~/scratch/` would corrupt the image just
+    as deleting five characters did. What prevents it is the MIME filter, not the
+    anchor - which is why this is pinned separately rather than assumed from the
+    `/app/` case.
+    """
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16).decode()
+    payload = png + "A+/tmp/dpgan" + "A" * 4
+    assert len(payload) % 4 == 0
+    base64.b64decode(payload, validate=True)
+    # The same string outside a payload is a leak, so the rule does fire on it.
+    assert sanitize_text("/tmp/dpgan")[1] == 1
+
+    raw = json.dumps(
+        {
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "source": ["fig.show()"],
+                    "outputs": [
+                        {
+                            "output_type": "display_data",
+                            "data": {"image/png": payload, "text/plain": ["/tmp/dpgan.ipynb"]},
+                            "metadata": {},
+                        }
+                    ],
+                }
+            ],
+            "metadata": {},
+        }
+    )
+
+    new, replaced, skipped = sanitize_notebook(raw)
+
+    assert skipped == []
+    assert replaced == 1
+    rewritten = json.loads(new)["cells"][0]["outputs"][0]["data"]
+    assert rewritten["text/plain"] == ["~/scratch/dpgan.ipynb"]
     assert rewritten["image/png"] == payload
     base64.b64decode(rewritten["image/png"], validate=True)
 
