@@ -42,7 +42,7 @@ from utils.artifact_specs import (
     resolve_market_semantics,
     resolve_storage_path,
 )
-from utils.cv_splits import generate_cv_splits, make_wf_config
+from utils.cv_splits import earliest_train_start, generate_cv_splits, make_wf_config
 
 RANDOM_SEED = 42
 MIN_TEMPORAL_DATE_COVERAGE = 0.95  # Allow short calendar-edge gaps, not missing windows.
@@ -741,16 +741,20 @@ def append_holdout_fold_if_needed(
     # string) and risked a tz-naive/aware comparison on the pandas filter path.
     ho_start_ts = pd.Timestamp(holdout_start)
     ho_end_ts = pd.Timestamp(holdout_end)
-    trailing = mds.splits[-1]
-    if (
-        trailing.get("val_end") is not None
-        and pd.Timestamp(trailing.get("val_end")) == ho_end_ts
-        and pd.Timestamp(trailing.get("val_start")) == ho_start_ts
-    ):
-        return  # already covered
+    # Any fold covering the holdout window, not just the trailing one: the CV
+    # folds run newest first and only the appended holdout fold lands at the end,
+    # so reading one position is a second place the ordering has to be right.
+    already_covered = any(
+        s.get("val_end") is not None
+        and pd.Timestamp(s["val_end"]) == ho_end_ts
+        and pd.Timestamp(s["val_start"]) == ho_start_ts
+        for s in mds.splits
+    )
+    if already_covered:
+        return
     holdout_fold = {
         "fold": len(mds.splits),
-        "train_start": min(pd.Timestamp(s["train_start"]) for s in mds.splits),
+        "train_start": earliest_train_start(mds.splits),
         "train_end": ho_start_ts,
         "val_start": ho_start_ts,
         "val_end": ho_end_ts,

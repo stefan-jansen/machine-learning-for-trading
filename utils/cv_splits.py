@@ -29,6 +29,7 @@ Design decisions:
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -269,8 +270,19 @@ def generate_cv_splits(
     Returns
     -------
     list[dict]
-        List of split dicts with keys: ``fold``, ``train_start``,
-        ``train_end``, ``val_start``, ``val_end``.
+        Split dicts with keys ``fold``, ``train_start``, ``train_end``,
+        ``val_start``, ``val_end``, **ordered newest first**. Fold 0 validates
+        on the most recent window and carries the *latest* ``train_start``; the
+        last element is the oldest fold and carries the earliest. The order is
+        asserted before the list is returned, so it cannot change silently.
+
+        Index it only when you mean a position in that order. For "the most
+        recent fold" and "everything available before the holdout", call
+        :func:`most_recent_split` and :func:`earliest_train_start`, which read
+        the boundaries rather than the position and are correct whatever order
+        the list is in. ``splits[0]["train_start"]`` under a comment reading
+        "train on everything up to holdout_start" is the measured failure: on
+        etfs it starts 2013-01-17 where the earliest fold starts 2006-01-13.
     """
     from ml4t.diagnostic.splitters import WalkForwardCV
     from ml4t.diagnostic.splitters.config import WalkForwardConfig as LibWalkForwardConfig
@@ -384,4 +396,49 @@ def generate_cv_splits(
             }
         )
 
+    _assert_newest_first(splits)
     return splits
+
+
+def _assert_newest_first(splits: list[dict[str, Any]]) -> None:
+    """Fail if the folds are not ordered newest first.
+
+    The order is a property of ``fold_direction="backward"`` in the library
+    config, and roughly forty call sites depend on it - some by indexing, some
+    by writing the fold id into an artifact that a later stage reads back by id.
+    If a library change reversed it, every one of them would keep running and
+    quietly mean the opposite. This turns that into an immediate failure.
+    """
+    val_starts = [s["val_start"] for s in splits]
+    if any(later >= earlier for earlier, later in zip(val_starts, val_starts[1:], strict=False)):
+        raise RuntimeError(
+            "generate_cv_splits returned folds that are not ordered newest first: "
+            f"val_starts {val_starts}. Every caller reads fold 0 as the most recent "
+            "fold, and stage-04 artifacts carry these ids. Fix the ordering here "
+            "rather than at the call sites."
+        )
+
+
+def most_recent_split(splits: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """The fold whose validation window ends last.
+
+    Reads the boundaries rather than a list position, so it is correct whichever
+    end of the list that fold sits at. Use it wherever a caller means "the latest
+    fold" - ``splits[-1]`` under the name ``last_fold`` takes the *earliest* one.
+    """
+    if not splits:
+        raise ValueError("No splits to choose from")
+    return max(splits, key=lambda s: pd.Timestamp(s["val_end"]))
+
+
+def earliest_train_start(splits: Sequence[dict[str, Any]]) -> pd.Timestamp:
+    """The earliest training start across the folds - "everything available".
+
+    A holdout retrain trains on the whole history before the holdout boundary,
+    which is ``min(train_start)`` over the fold set and never one fold's own
+    start. Folds run newest first, so ``splits[0]["train_start"]`` is the latest
+    start in the set and hands the retrain the shortest window it could have had.
+    """
+    if not splits:
+        raise ValueError("No splits to choose from")
+    return min(pd.Timestamp(s["train_start"]) for s in splits)

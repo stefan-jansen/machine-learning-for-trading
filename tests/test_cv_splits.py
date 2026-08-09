@@ -27,13 +27,16 @@ import pytest
 import yaml
 
 from utils.cv_splits import (
+    _assert_newest_first,
     _map_calendar_id,
     _normalize_duration,
     _normalize_label_buffer,
+    earliest_train_start,
     generate_cv_splits,
     load_evaluation_config,
     make_walk_forward_config,
     make_wf_config,
+    most_recent_split,
 )
 from utils.modeling import validate_temporal_fold_coverage
 
@@ -528,3 +531,63 @@ def test_make_wf_config_is_alias_of_make_walk_forward_config() -> None:
     a = make_walk_forward_config("etfs", label_horizon="21D")
     b = make_wf_config("etfs", label_horizon="21D")
     assert a.model_dump() == b.model_dump()
+
+
+# -----------------------------------------------------------------------------
+# Fold ordering, and the accessors that do not depend on it
+# -----------------------------------------------------------------------------
+
+
+def test_generate_cv_splits_returns_folds_newest_first(etfs_splits) -> None:
+    """Fold 0 validates most recently. Roughly forty call sites read it that way."""
+    val_starts = [s["val_start"] for s in etfs_splits]
+    assert val_starts == sorted(val_starts, reverse=True)
+    assert etfs_splits[0]["val_end"] > etfs_splits[-1]["val_end"]
+
+
+def test_fold_0_carries_the_latest_train_start_not_the_earliest(etfs_splits) -> None:
+    """The shape behind the measured defect: indexing for "everything available"."""
+    assert etfs_splits[0]["train_start"] > etfs_splits[-1]["train_start"]
+    assert etfs_splits[0]["train_start"] != earliest_train_start(etfs_splits)
+
+
+def test_an_ascending_fold_list_is_refused_rather_than_returned() -> None:
+    """A library change to fold_direction must fail here, not at forty call sites."""
+    ascending = [
+        {"fold": 0, "val_start": pd.Timestamp("2020-01-01"), "val_end": pd.Timestamp("2020-12-31")},
+        {"fold": 1, "val_start": pd.Timestamp("2021-01-01"), "val_end": pd.Timestamp("2021-12-31")},
+    ]
+    with pytest.raises(RuntimeError, match="not ordered newest first"):
+        _assert_newest_first(ascending)
+    _assert_newest_first(list(reversed(ascending)))
+
+
+def test_most_recent_split_reads_the_boundaries_not_the_position() -> None:
+    """Same folds, three orders, one answer - unlike splits[0] and splits[-1]."""
+    folds = [
+        {
+            "fold": 0,
+            "val_end": pd.Timestamp("2023-11-29"),
+            "train_start": pd.Timestamp("2013-01-17"),
+        },
+        {
+            "fold": 1,
+            "val_end": pd.Timestamp("2022-12-28"),
+            "train_start": pd.Timestamp("2012-01-18"),
+        },
+        {
+            "fold": 2,
+            "val_end": pd.Timestamp("2016-12-23"),
+            "train_start": pd.Timestamp("2006-01-13"),
+        },
+    ]
+    for ordering in (folds, list(reversed(folds)), [folds[1], folds[2], folds[0]]):
+        assert most_recent_split(ordering)["fold"] == 0
+        assert earliest_train_start(ordering) == pd.Timestamp("2006-01-13")
+
+
+def test_the_accessors_refuse_an_empty_fold_set() -> None:
+    with pytest.raises(ValueError, match="No splits"):
+        most_recent_split([])
+    with pytest.raises(ValueError, match="No splits"):
+        earliest_train_start([])
