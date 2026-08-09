@@ -503,12 +503,12 @@ def _overlay_fold_temporal_features(
     """Return the requested fold with its training-fitted temporal features."""
     if temporal_by_fold is None or not temporal_keys or not temporal_feature_names:
         return dataset_pd
-    from utils.modeling import _replace_temporal_columns
+    from utils.modeling import replace_temporal_columns
 
     fold_mask = (dataset_pd[date_col] >= split["train_start"]) & (
         dataset_pd[date_col] <= split["val_end"]
     )
-    return _replace_temporal_columns(
+    return replace_temporal_columns(
         dataset_pd,
         fold_mask,
         temporal_by_fold,

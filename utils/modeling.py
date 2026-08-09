@@ -1171,7 +1171,7 @@ def validate_temporal_fold_coverage(
         )
 
 
-def _replace_temporal_columns(
+def replace_temporal_columns(
     dataset_pd: pd.DataFrame,
     mask: np.ndarray,
     temporal_by_fold: pd.DataFrame,
@@ -1259,7 +1259,7 @@ def prepare_cv_folds(
         val_mask = (dates_series >= val_start) & (dates_series <= val_end)
 
         if has_fold_temporal:
-            train_rows = _replace_temporal_columns(
+            train_rows = replace_temporal_columns(
                 dataset_pd,
                 train_mask,
                 temporal_by_fold,
@@ -1267,7 +1267,7 @@ def prepare_cv_folds(
                 temporal_feature_names,
                 fold_id,
             )
-            val_rows = _replace_temporal_columns(
+            val_rows = replace_temporal_columns(
                 dataset_pd,
                 val_mask,
                 temporal_by_fold,
@@ -1461,7 +1461,7 @@ def prepare_single_fold(
         val_mask = (dates_series >= val_start) & (dates_series <= val_end)
 
         if _has_fold_temporal:
-            train_rows = _replace_temporal_columns(
+            train_rows = replace_temporal_columns(
                 dataset,
                 train_mask,
                 temporal_by_fold,
@@ -1469,7 +1469,7 @@ def prepare_single_fold(
                 temporal_feature_names,
                 fold_id,
             )
-            val_rows = _replace_temporal_columns(
+            val_rows = replace_temporal_columns(
                 dataset,
                 val_mask,
                 temporal_by_fold,
@@ -1650,3 +1650,10 @@ def compute_classification_metrics(
                 metrics[f"auc_class_{c}"] = auc
 
     return metrics
+
+
+# Deprecated private aliases. Thirty notebook cells import these names with their leading
+# underscore, which is what made them look private in the first place; each is a
+# cross-module interface and is now public. The aliases keep those callers working until
+# each notebook is re-executed with the public name, and go when the last one moves.
+_replace_temporal_columns = replace_temporal_columns

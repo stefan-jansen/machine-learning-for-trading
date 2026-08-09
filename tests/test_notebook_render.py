@@ -66,7 +66,7 @@ def test_conformal_diagnostic_excludes_partial_and_orders_folds_chronologically(
             }
         ).write_parquet(path / "predictions.parquet")
 
-    monkeypatch.setattr(notebook_render, "_registry_path", lambda _case_study: db_path)
+    monkeypatch.setattr(notebook_render, "registry_path", lambda _case_study: db_path)
     result = notebook_render.conformal_coverage_diagnostic("test", label="fwd_ret_5d")
 
     assert result["config_name"].unique().to_list() == ["full"]
@@ -128,7 +128,7 @@ def test_conformal_quantile_is_the_exact_order_statistic(tmp_path, monkeypatch):
     calibration = [0.1] * 33 + [5.0] * 7
     _write_predictions(pred_dir, calibration, [1.0] * 40)
 
-    monkeypatch.setattr(notebook_render, "_registry_path", lambda _cs: db_path)
+    monkeypatch.setattr(notebook_render, "registry_path", lambda _cs: db_path)
     result = notebook_render.conformal_coverage_diagnostic(
         "test", label="fwd_ret_5d", levels=(0.80,)
     )
@@ -162,7 +162,7 @@ def test_conformal_reports_an_unbounded_interval_when_the_level_is_unattainable(
     calibration = [0.1] * 33 + [5.0] * 7
     _write_predictions(pred_dir, calibration, [1.0] * 40)
 
-    monkeypatch.setattr(notebook_render, "_registry_path", lambda _cs: db_path)
+    monkeypatch.setattr(notebook_render, "registry_path", lambda _cs: db_path)
     result = notebook_render.conformal_coverage_diagnostic(
         "test", label="fwd_ret_5d", levels=(0.99,)
     )
@@ -187,7 +187,7 @@ def test_conformal_width_is_scaled_by_the_calibration_window_alone(tmp_path, mon
     test_residuals = [40.0, -40.0] * 20  # far wider spread than the calibration fold
     _write_predictions(pred_dir, calibration, test_residuals)
 
-    monkeypatch.setattr(notebook_render, "_registry_path", lambda _cs: db_path)
+    monkeypatch.setattr(notebook_render, "registry_path", lambda _cs: db_path)
     result = notebook_render.conformal_coverage_diagnostic(
         "test", label="fwd_ret_5d", levels=(0.80,)
     )
