@@ -262,6 +262,35 @@ features:
       representation: signed regime average, bounded oscillator, categorical slot and fee tier
       failure_mode: The fee tier is a fixed list, so it does not follow a symbol across a tier change.
 
+# What `04_model_based_features` decides, declared here for the same reason the
+# feature windows above are. Every count is in 8-hour settlement bars, the unit
+# `features.bar_hours` sets and `features.windows` already uses.
+model_based:
+  # Trailing returns a symbol needs inside a fold's training window before either
+  # model is fitted for it. 500 settlements is about five and a half months; below
+  # that the leverage term of a GJR recursion and the transition matrix of a
+  # two-state chain are estimated off too few regime switches to mean anything.
+  min_train_bars: 500
+  garch:
+    # The conditional-volatility z-score compares a symbol's current forecast
+    # against its own recent level: 90 bars is 30 days.
+    vol_zscore_window: 90
+    # Bound on the emitted z-score, so one liquidation cascade does not set the
+    # scale a model reads. Same role as `features.clip.zscore`.
+    zscore_clip: 10.0
+  hmm:
+    # Calm funding and stressed funding.
+    n_states: 2
+    # Expectation-maximization reaches a local optimum, so the fit is repeated
+    # from this many starting points and the highest training likelihood is kept.
+    n_restarts: 10
+  incremental_ic:
+    # A settlement needs this many symbols quoting before its cross-sectional rank
+    # correlation is used, and a feature needs this many usable settlements before
+    # its mean is reported.
+    min_cross_section: 10
+    min_decision_times: 20
+
 modeling:
   gbm:
     libraries: [lightgbm]
