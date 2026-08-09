@@ -1138,9 +1138,11 @@ print(
 # says where each feature sits on its own. It does **not** say whether a feature adds
 # anything on top of the others: two features with the same stand-alone correlation can
 # carry the same information twice or carry different information entirely, and nothing
-# in a marginal comparison tells them apart. Answering that takes a model fitted with
-# and without the feature, which is [`05_evaluation`](05_evaluation.ipynb) and the model
-# notebooks. **Nothing is selected here.**
+# in a marginal comparison tells them apart. Separating them takes a model fitted with
+# the feature and again without it, and a comparison of the two - which is a different
+# measurement from anything drawn here, and one this pipeline does not currently make.
+# **Nothing is selected here**; the feature screen that decides what goes forward is
+# [`05_evaluation`](05_evaluation.ipynb).
 #
 # The measure is the **information coefficient**: at each settlement, the rank
 # correlation across the perpetuals quoting then, between what the feature says and what
@@ -1324,8 +1326,9 @@ show_with_alt(
 # settlement has nothing to rank. It does not follow that they carry no information: what
 # it means is that this particular screen cannot see it. Their use is as conditioning
 # variables, telling a nonlinear model that the same funding z-score should be read
-# differently in a stressed week, and that is a question the model notebooks answer by
-# fitting with and without them.
+# differently in a stressed week. A cross-sectional rank correlation is the wrong
+# instrument for that, so their value has to be judged where a model can use them that
+# way rather than here.
 
 # %% [markdown] tags=["results"]
 # **What the screen establishes, and what it does not.** Of the three features it can
@@ -1396,9 +1399,9 @@ show_with_alt(
 #   alternative is to refit before every training row, which this notebook does not do.
 # - Nothing is emitted for the holdout, so a model that needs these features there has to
 #   fit them, and a join that silently fills them instead will train on imputed values.
-# - The screen at the end scores each feature on its own. It says nothing about what
-#   these features contribute inside a model that also has the other 39, which is the
-#   question `05_evaluation` and the model notebooks take up.
+# - The screen at the end scores each feature on its own, so it says nothing about what
+#   these features contribute inside a model that also holds the other 39. Answering
+#   that needs a with-and-without comparison, and no stage of this pipeline runs one.
 #
 # **Next**: [`05_evaluation`](05_evaluation.ipynb) screens the complete feature set
 # before any model is fitted in Chapters 11 to 15.
