@@ -27,13 +27,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from matplotlib.figure import Figure
+from ml4t.diagnostic.signal import quantize_factor
 from scipy.cluster.hierarchy import dendrogram, fcluster, linkage, set_link_color_palette
 from scipy.spatial.distance import squareform
+from scipy.stats import spearmanr
 
 from utils.style import COLOR_CYCLER, COLORS, FIGSIZE, add_message_title, show_with_alt
 
 __all__ = [
     "FeatureFamily",
+    "QuantileProfile",
     "assert_values_agree",
     "assign_families",
     "cross_sectional_percentile",
@@ -47,6 +50,7 @@ __all__ = [
     "plot_redundancy_clusters",
     "momentum_volatility_block",
     "plot_timing_contract",
+    "quantile_profile",
     "register_frame",
     "relative_volume_block",
     "rolling_zscore",
@@ -509,6 +513,111 @@ def family_coverage(
         for family, cols in families.items()
     ]
     return frame.group_by(time).agg(aggs).sort(time)
+
+
+@dataclass(frozen=True)
+class QuantileProfile:
+    """What each quantile of a feature earned, one decision time at a time."""
+
+    means: list[float]
+    medians: list[float]
+    monotonicity: float
+    spread: float
+    periods_used: int
+    periods_available: int
+
+
+def quantile_profile(
+    frame: pl.DataFrame,
+    feature: str,
+    label: str,
+    *,
+    date_col: str,
+    n_quantiles: int = 5,
+    min_cross_section: int | None = None,
+    demean_within_date: bool = False,
+) -> QuantileProfile | None:
+    """Average and median label by feature quantile, averaged over decision times.
+
+    Sorting on a feature and reading what each quantile went on to earn is the
+    shape behind a rank correlation, and the two have to be built on the same
+    inferential unit or they answer different questions while appearing to agree.
+    Both averages here are therefore taken twice: first across the assets in one
+    quantile at one decision time, and then across decision times. Every decision
+    time counts once however many assets it quoted, which is what a portfolio
+    rebalanced at every decision time earns and what the information coefficient
+    already measures.
+
+    Pooling every row into one average instead is the failure this exists to
+    prevent, and it is silent: the profile comes out looking the same, weighted by
+    how many assets happened to be quoted rather than by time.
+
+    Quantiles are assigned inside each decision time, so a quantile means "high
+    relative to the assets quoted alongside it" rather than "high relative to the
+    whole history". Cutting the pooled sample instead lets a period when the whole
+    market sat high place all of its assets in the top quantile, which mixes
+    movement over time into a diagnostic that is meant to be purely across assets.
+
+    A decision time enters only when it quotes at least *min_cross_section* assets
+    (the number of quantiles, where none is given) and at least *n_quantiles*
+    distinct feature values. A feature taking two values cannot be split five ways,
+    and forcing it produces boundaries that fall inside a tie, where the split
+    reports the order the rows sit in rather than the feature.
+
+    Set *demean_within_date* where every quantile earns whatever the market earned
+    that period and the difference between quantiles is the only quantity a
+    long-short book collects: the label is then taken relative to its own decision
+    time's average before the quantiles are formed.
+
+    Returns ``None`` where nothing survives the floor, or where the surviving rows
+    do not fill all *n_quantiles* quantiles - both mean the feature has no profile
+    to read, not that its profile is flat.
+    """
+    valid = frame.select(date_col, feature, label).drop_nulls()
+    periods_available = valid[date_col].n_unique()
+    floor = max(min_cross_section or n_quantiles, n_quantiles)
+    valid = valid.filter(
+        (pl.len().over(date_col) >= floor)
+        & (pl.col(feature).n_unique().over(date_col) >= n_quantiles)
+    )
+    periods_used = valid[date_col].n_unique()
+    if not valid.height:
+        return None
+
+    scored = label
+    if demean_within_date:
+        scored = "_excess"
+        valid = valid.with_columns(
+            (pl.col(label) - pl.col(label).mean().over(date_col)).alias(scored)
+        )
+
+    binned = quantize_factor(valid, n_quantiles=n_quantiles, factor_col=feature, date_col=date_col)
+    profile = (
+        binned.group_by([date_col, "quantile"])
+        .agg(
+            pl.col(scored).mean().alias("_mean"),
+            pl.col(scored).median().alias("_median"),
+        )
+        .group_by("quantile")
+        .agg(
+            pl.col("_mean").mean().alias("mean"),
+            pl.col("_median").mean().alias("median"),
+        )
+        .sort("quantile")
+    )
+    means = profile["mean"].to_list()
+    medians = profile["median"].to_list()
+    if len(means) < n_quantiles or any(value is None for value in means):
+        return None
+
+    return QuantileProfile(
+        means=[float(value) for value in means],
+        medians=[float(value) for value in medians],
+        monotonicity=float(spearmanr(range(len(means)), means).statistic),
+        spread=float(means[-1] - means[0]),
+        periods_used=int(periods_used),
+        periods_available=int(periods_available),
+    )
 
 
 # ---------------------------------------------------------------------------
