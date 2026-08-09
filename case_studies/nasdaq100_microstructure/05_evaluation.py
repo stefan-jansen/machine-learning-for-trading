@@ -1447,12 +1447,17 @@ print(f"Feature pairs above the cut: {len(high_corr_pairs)}")
 #
 # Two views of the same grouping, because they answer different questions. The left
 # panel averages the absolute mean IC within each family, which is how strong the
-# family's typical candidate is. The right panel counts the family's candidates and
-# marks how many of them cleared the false-discovery adjustment, which is how broadly
-# that strength is spread. A family carrying one strong column and eleven weak ones
-# and a family carrying twelve middling ones can average alike; only the second panel
-# separates them, and the redundancy figure below then says whether the several are
-# really several.
+# family's typical ranked feature is. The right panel counts the family's ranked
+# features and marks how many of them cleared the false-discovery adjustment, which is
+# how broadly that strength is spread. A family carrying one strong column and eleven
+# weak ones and a family carrying twelve middling ones can average alike; only the
+# second panel separates them, and the redundancy figure below then says whether the
+# several are really several.
+#
+# Both panels cover the features that produced an IC, not every candidate: a feature
+# the correctness screen removed, or one identical across the cross-section, has no
+# association to average or to adjust. The candidate-set table near the top of the
+# notebook is where the full column counts per family are.
 
 # %%
 family_ic = {}
@@ -1487,8 +1492,8 @@ if family_summary:
         cols=2,
         column_widths=[0.5, 0.5],
         subplot_titles=(
-            "Mean absolute IC of the family's candidates",
-            "Candidates per family, and how many cleared BH-FDR",
+            "Mean absolute IC of the family's ranked features",
+            "Ranked features per family, and how many cleared BH-FDR",
         ),
         horizontal_spacing=0.22,
     )
@@ -1537,7 +1542,7 @@ if family_summary:
         legend={"orientation": "h", "y": -0.18},
     )
     fig.update_xaxes(title_text="Mean |IC| across the family", row=1, col=1)
-    fig.update_xaxes(title_text="Candidate features", row=1, col=2)
+    fig.update_xaxes(title_text="Features with a computable IC", row=1, col=2)
     fig.show()
 
 # %% [markdown]
