@@ -1115,11 +1115,19 @@ def _regime_duration(test_states: np.ndarray) -> np.ndarray:
 
 
 # %% [markdown]
-# One period: estimate on its training window, then run the model forward across both its
-# training and its evaluation window. Both windows get a value because the models
-# downstream need a feature everywhere they have a row, and a value on a training session
-# is no less legitimate - it was produced by running forward from the start of the window
-# to that session, exactly as the evaluation values were.
+# One period: estimate on its training window, then run the model forward from the first
+# training session to the last evaluation session. Both windows get a value because the
+# models downstream need a feature everywhere they have a row, and a value on a training
+# session is no less legitimate - it was produced by running forward from the start of the
+# window to that session, exactly as the evaluation values were.
+#
+# The walk covers the purge gap between the two windows as well, even though no feature is
+# written there. A filtered probability is a running summary of everything seen so far, so
+# it has to be carried across the gap session by session; jumping the gap in one step would
+# hand the first evaluation session a summary a week out of date, and the regime durations
+# would restart at the gap rather than continue through it. Reading the gap's own sessions
+# is not look-ahead, because every one of them is in the past of every evaluation session.
+# The gap exists so that a training label does not overlap an evaluation label.
 
 
 # %%
@@ -1145,8 +1153,21 @@ def _fit_hmm_fold(portfolio_df: pl.DataFrame, split: dict[str, str], fold_idx: i
         print(f"Period {fold_idx}: skipping, not enough sessions")
         return None, None
 
+    # The sessions the filter walks: every session from the start of training to the end
+    # of evaluation, with none missing in the middle. The purge gap between the two
+    # windows holds real sessions, and they sit in the past of every evaluation session,
+    # so reading them is not look-ahead - the gap is there to stop a training label
+    # overlapping an evaluation one, not to blind a forward recursion. Stacking the two
+    # windows straight onto each other instead skipped them, which applied a single
+    # transition across the whole gap and started the evaluation window from a state
+    # distribution that had seen nothing for a week.
+    path = portfolio_df.filter(
+        (pl.col("timestamp") >= train_start) & (pl.col("timestamp") <= test_end)
+    ).sort("timestamp")
+    emitted = (pl.col("timestamp") <= train_end) | (pl.col("timestamp") >= test_start)
+
     X_train = train_carry["portfolio_carry"].to_numpy().reshape(-1, 1)
-    X_test = test_carry["portfolio_carry"].to_numpy().reshape(-1, 1)
+    X_path = path["portfolio_carry"].to_numpy().reshape(-1, 1)
     # One thread, so that two runs land on the same parameters: see above.
     with threadpool_limits(limits=1):
         try:
@@ -1157,24 +1178,23 @@ def _fit_hmm_fold(portfolio_df: pl.DataFrame, split: dict[str, str], fold_idx: i
 
         order = sort_states_by_mean(model)
 
-        # Forward, over training and evaluation together. Each probability reads its own
-        # session and the ones before it, and nothing after.
-        X_full = np.vstack([X_train, X_test])
-        full_probs = filtered_state_probs(model, X_full)[:, order]
-    all_dates = train_carry["timestamp"].to_list() + test_carry["timestamp"].to_list()
-    all_states = np.argmax(full_probs, axis=1)
-    duration = _regime_duration(all_states)
+        # Forward, from the start of training to the end of evaluation. Each probability
+        # reads its own session and the ones before it, and nothing after. Parameters
+        # come from the training rows alone, above.
+        path_probs = filtered_state_probs(model, X_path)[:, order]
+    path_states = np.argmax(path_probs, axis=1)
+    # Run length is counted along the walked path, so a regime that carries through the
+    # gap is one run rather than two.
+    path_duration = _regime_duration(path_states)
 
-    fold_df = pl.DataFrame(
-        {
-            "timestamp": all_dates,
-            "hmm_carry_regime_prob": full_probs[:, 1].tolist(),  # P(higher-carry state)
-            "hmm_regime_duration": duration.tolist(),
-            "fold": fold_idx,
-        }
+    fold_df = path.select("timestamp").with_columns(
+        pl.Series("hmm_carry_regime_prob", path_probs[:, 1]),  # P(higher-carry state)
+        pl.Series("hmm_regime_duration", path_duration),
+        pl.lit(fold_idx).alias("fold"),
     )
+    fold_df = fold_df.filter(emitted)
 
-    test_states = all_states[len(X_train) :]
+    test_states = path_states[path["timestamp"].to_numpy() >= test_start]
     for k in range(2):
         label = "Lower-carry" if k == 0 else "Higher-carry"
         frac = (test_states == k).mean() if len(test_states) > 0 else 0
