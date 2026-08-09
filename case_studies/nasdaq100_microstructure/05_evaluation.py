@@ -82,6 +82,7 @@ from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 from scipy.stats import t as student_t
 
+from case_studies.utils.feature_engineering import quantile_profile
 from utils.cv_splits import generate_cv_splits
 from utils.data_quality import validate_modeling_inputs
 from utils.paths import get_case_study_dir
@@ -888,20 +889,28 @@ for feat in ic_results:
             fold_ics.append(float(fold_ic["ic"].mean()))
 
     if fold_ics:
-        sign_consistency = sum(1 for ic in fold_ics if ic > 0) / len(fold_ics)
+        # Measured against the feature's own direction rather than against "positive".
+        # The promotion route this feeds tests the absolute average agreement, so it
+        # accepts a feature that ranks names inversely; counting only positive folds
+        # would score that feature zero however reliably it held its direction, and it
+        # could never reach the route. The weakest fold follows the same rule - it is
+        # the fold furthest against the feature's own direction, which for an inverse
+        # feature is its algebraic maximum.
+        direction = 1.0 if (ic_results[feat]["mean_ic"] or 0.0) >= 0 else -1.0
+        signed = [ic * direction for ic in fold_ics]
         fold_stats[feat] = {
             "n_folds": len(fold_ics),
-            "sign_consistency": sign_consistency,
-            "worst_fold_ic": min(fold_ics),
-            "best_fold_ic": max(fold_ics),
+            "sign_consistency": sum(1 for s in signed if s > 0) / len(fold_ics),
+            "worst_fold_ic": fold_ics[int(np.argmin(signed))],
+            "best_fold_ic": fold_ics[int(np.argmax(signed))],
             "median_fold_ic": float(np.median(fold_ics)),
             "fold_ics": fold_ics,
         }
 
 n_consistent = sum(1 for s in fold_stats.values() if s["sign_consistency"] >= SIGN_CONSISTENCY_MIN)
 print(
-    f"Fold stability: {n_consistent}/{len(fold_stats)} features with sign consistency"
-    f" >= {SIGN_CONSISTENCY_MIN:.0%}"
+    f"Fold stability: {n_consistent}/{len(fold_stats)} features holding one direction in"
+    f" >= {SIGN_CONSISTENCY_MIN:.0%} of folds"
 )
 
 # %%
@@ -1308,7 +1317,7 @@ fig.show()
 # ## 4. Shape Diagnostics
 #
 # A rank correlation says the ordering is right on average. It does not say the
-# relationship is usable. Sorting the panel into five equal-sized bins by the feature
+# relationship is usable. Sorting the names into five equal-sized bins by the feature
 # and taking the mean forward return in each shows the shape behind the correlation: a
 # profile that climbs from the lowest bin to the highest is what a strategy that goes
 # long the top names and short the bottom ones is relying on, while a correlation of
@@ -1317,17 +1326,21 @@ fig.show()
 # index and the bin's mean return, so plus one is a profile that rises at every step
 # and minus one is one that falls at every step.
 #
-# **How the bins are assigned, and what that costs.** The edges come from the pooled
-# sample rather than from within each timestamp, so a bin mixes where a name sits
-# relative to its peers with where the whole market sits relative to other times, and
-# every other timestamp's distribution helps set this timestamp's edges. Book §7.3
-# specifies the within-timestamp construction, which is what the companion IC already
-# uses, so the two diagnostics on this page answer slightly different questions.
+# **The bins are cut inside each minute, and the averages are taken in that order too.**
+# A name's bin says where it sits against the other names quoted in the same minute,
+# which is the choice the strategy faces, and the mean return of a bin is taken across
+# those names first and then across minutes, so every minute counts once however many
+# names it quoted. Cutting the edges over the whole sample instead would let every other
+# minute's distribution help set this minute's edges, so a bin would mix where a name
+# sits against its peers with where the market sits against other times; averaging every
+# name-minute in one pass would let the busiest minutes set the shape. Both are silent
+# and both would leave this diagnostic answering a different question from the
+# correlation it sits beside, which is already a per-minute statistic averaged over
+# minutes.
 #
-# The clearest way to see what that costs is a feature next to its own
-# cross-sectional z-score twin. Ranking within a timestamp leaves the two in exactly
-# the same order, so their ICs agree to every digit; any difference between their
-# quantile profiles here is the pooled binning speaking rather than the features.
+# One consequence is worth reading off the chart: a feature and its own cross-sectional
+# z-score twin rank the names identically inside a minute, so their correlations agree to
+# every digit and their profiles now agree as well.
 
 # %%
 N_QUANTILES = 5
@@ -1341,21 +1354,18 @@ if not top_features_for_shape:
 monotonicity_scores = {}
 quantile_spreads = {}
 for feat in top_features_for_shape:
-    valid = eval_panel.select([feat, label_col]).drop_nulls()
-    if len(valid) < N_QUANTILES * 20:
-        continue
-    valid = valid.with_columns(
-        pl.col(feat)
-        .qcut(N_QUANTILES, labels=[f"Q{i + 1}" for i in range(N_QUANTILES)])
-        .alias("quantile")
+    profile = quantile_profile(
+        eval_panel,
+        feat,
+        label_col,
+        date_col=DATE_COL,
+        n_quantiles=N_QUANTILES,
+        min_cross_section=MIN_PERIODS,
     )
-    q_means = valid.group_by("quantile").agg(pl.col(label_col).mean()).sort("quantile")
-    means = q_means[label_col].to_list()
-    spread = means[-1] - means[0]
-    quantile_spreads[feat] = {"q_means": means, "spread": spread}
-
-    mono_corr, _ = spearmanr(range(len(means)), means)
-    monotonicity_scores[feat] = float(mono_corr)
+    if profile is None:
+        continue
+    quantile_spreads[feat] = {"q_means": profile.means, "spread": profile.spread}
+    monotonicity_scores[feat] = profile.monotonicity
 
 n_monotone = sum(1 for s in monotonicity_scores.values() if abs(s) >= MONOTONICITY_MIN)
 print(
@@ -1742,7 +1752,13 @@ fig.show()
 
 # %% tags=["results"]
 decisions = dict(triage_ledger.group_by("decision").len().iter_rows())
-above_threshold = sum(1 for f in ic_results if abs(ic_results[f]["mean_ic"]) >= IC_THRESHOLD)
+# The exploration arm only ever sees what the confirmation arm did not take: the decision
+# above is an if/elif, so a feature satisfying both is recorded against the confirmation
+# arm. Counting the bar over every feature would therefore compare the arm's promotions
+# against a group it never chose from, and attribute to fold agreement a difference that
+# is partly the other arm having gone first.
+eligible = [f for f in ic_results if f not in fdr_sig_features]
+above_threshold = sum(1 for f in eligible if abs(ic_results[f]["mean_ic"]) >= IC_THRESHOLD)
 print(
     f"{decisions.get('PROCEED', 0)} features are recorded PROCEED,"
     f" {decisions.get('REVISE', 0)} REVISE and {decisions.get('STOP', 0)} STOP."
@@ -1752,9 +1768,10 @@ print(
     f" and {arm_counts['stable_and_above_threshold']} through the exploration arm."
 )
 print(
-    f"The exploration arm's effect-size bar of {IC_THRESHOLD} is cleared by {above_threshold}"
-    f" of the {n_searched} features with a computable IC, so what separates its promotions"
-    " from the rest of that group is fold agreement rather than the bar."
+    f"The exploration arm chooses among the {len(eligible)} features the confirmation arm"
+    f" did not take. Its effect-size bar of {IC_THRESHOLD} is cleared by {above_threshold}"
+    " of them, so what separates its promotions from the rest of that group is fold"
+    " agreement rather than the bar."
 )
 
 # %% [markdown]
