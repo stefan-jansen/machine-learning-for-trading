@@ -435,6 +435,16 @@ def _assert_newest_first(
             "ascending set joins each fold against the wrong end of the sample. "
             "Renumber the source rather than reversing it at the call site."
         )
+    # The ids, not just the order. Reversing an ascending list leaves fold 0 on the
+    # oldest window while the list reads newest first, and every join is by id.
+    ids = [s["fold"] for s in splits]
+    if ids != list(range(len(splits))):
+        raise RuntimeError(
+            f"{source} produced fold ids {ids} against list positions "
+            f"{list(range(len(splits)))}. The list runs newest first, so fold 0 is "
+            "the most recent fold and the ids have to follow the positions - a "
+            "downstream artifact is joined on the id, never on the position."
+        )
 
 
 def _split_value(split: dict[str, Any], *names: str) -> Any:

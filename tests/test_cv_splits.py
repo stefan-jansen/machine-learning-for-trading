@@ -559,7 +559,13 @@ def test_an_ascending_fold_list_is_refused_rather_than_returned() -> None:
     ]
     with pytest.raises(RuntimeError, match="not ordered newest first"):
         _assert_newest_first(ascending)
-    _assert_newest_first(list(reversed(ascending)))
+
+    # Reversing the list alone leaves fold 0 on the oldest window. Every join is
+    # by id, so the ids have to move with the positions.
+    with pytest.raises(RuntimeError, match="fold ids"):
+        _assert_newest_first(list(reversed(ascending)))
+
+    _assert_newest_first([{**split, "fold": i} for i, split in enumerate(reversed(ascending))])
 
 
 def test_a_precomputed_split_set_is_held_to_the_same_order() -> None:
@@ -582,8 +588,16 @@ def test_a_precomputed_split_set_is_held_to_the_same_order() -> None:
     with pytest.raises(RuntimeError, match="not ordered newest first"):
         generate_cv_splits(df, cv_config=ascending)
 
-    descending = {"splits": list(reversed(ascending["splits"]))}
-    assert len(generate_cv_splits(df, cv_config=descending)) == 2
+    # Reversing the list is not the fix: fold 0 still names the oldest window and
+    # every downstream join is by id.
+    reversed_only = {"splits": list(reversed(ascending["splits"]))}
+    with pytest.raises(RuntimeError, match="fold ids"):
+        generate_cv_splits(df, cv_config=reversed_only)
+
+    renumbered = {
+        "splits": [{**split, "fold": i} for i, split in enumerate(reversed(ascending["splits"]))]
+    }
+    assert [s["fold"] for s in generate_cv_splits(df, cv_config=renumbered)] == [0, 1]
 
 
 def test_the_order_check_reads_a_stored_config_spelling() -> None:
