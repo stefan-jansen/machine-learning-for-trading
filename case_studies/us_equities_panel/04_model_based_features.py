@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -25,39 +25,51 @@
 # discipline that removes it is to refit inside every walk-forward fold on that fold's
 # training bars alone.
 #
-# Three fitted transforms are built that way:
+# Three transforms are built that way, each explained where it is used:
 #
-# 1. **Wasserstein regime distance**: k-means on overlapping windows of the cross-sectional
-#    median return under the one-dimensional Wasserstein distance. Centroids come from the
-#    training window; the assignment runs forward over training and validation.
-# 2. **Fractional differencing**: FFD on log prices and log volume per stock. The weights are
-#    a deterministic function of the differencing order, so nothing is estimated and the
-#    transform is identical in every fold. Section 3 measures what the order chosen here
-#    costs in stationarity and buys in memory, rather than asserting the trade.
-# 3. **GARCH(1,1)** conditional volatility, fitted on the most liquid stocks of each training
-#    window with a market-level fit standing in for the rest. Parameters come from the
-#    training bars; `model.fix()` runs the variance recursion forward over validation without
-#    re-estimating them, so the volatility a row carries is filtered rather than smoothed.
+# 1. **A regime distance.** Recent months of market-wide return are compared against two
+#    reference months learned from the training window, and each date is given how far it sits
+#    from the nearer of them. Section 2.
+# 2. **A fractionally differenced price.** A price level is differenced to a fractional order,
+#    which keeps part of what the level knows where a return keeps none of it. The weights
+#    follow from the order alone, so nothing here is estimated and the transform is the same in
+#    every fold. Section 3.
+# 3. **A conditional volatility.** Each of the most liquid stocks in a training window gets a
+#    volatility model fitted on that window, run forward over the validation period without
+#    being re-estimated; every other stock takes a market-level fit. Section 4.
 #
 # ## Learning objectives
 #
-# - Separate the two windows a fitted feature has - the one its parameters come from and the
-#   one it is evaluated over - and keep the first inside the fold
-# - Read a per-fold parameter path as evidence about refit cadence rather than as noise
-# - Measure a stationarity-versus-memory trade instead of quoting the default that encodes it
-# - Score a marginal IC on validation rows, in time order, with the autocorrelation and
-#   multiplicity corrections separated
+# By the end of this notebook you will be able to:
+#
+# - Tell apart the two date ranges any fitted feature has - the range its parameters were
+#   estimated from, and the range it produces values over - and keep the first one inside the
+#   training window of the fold it belongs to
+# - Draw the fold design as bars on a calendar and read off it whether any estimation window
+#   crosses the date the test period begins
+# - Chart how a model's fitted parameters move as the training window rolls forward, and use
+#   that to decide how often the model is worth re-estimating
+# - Measure what a differencing order costs in the memory it discards and buys in the
+#   stationarity it gains, rather than adopting the number a library defaults to
+# - Score how well a single column ranks stocks against their later returns, using only test
+#   rows, correcting the standard error for the persistence of the series and the test's
+#   threshold for the number of columns tried
 #
 # ## Book reference, prerequisites and artifacts
 #
-# Chapter 9, Sections 9.1 (Stationarity), 9.3 (Volatility), 9.5 (Regimes). Reads the adjusted
-# daily panel through `load_us_equities()`, `config/setup.yaml` for the fold design and the
-# holdout boundary, and the primary label file written by [`02_labels`](02_labels.ipynb) for
-# the marginal IC in Section 7. Writes `features/model_based.parquet` and its digest
-# sidecar, which the model stages join to the stage-03 matrix on `(symbol, timestamp, fold)`.
+# Chapter 9, Sections 9.1 (Stationarity), 9.3 (Volatility), 9.5 (Regimes). Assumes
+# [`02_labels`](02_labels.ipynb) and [`03_financial_features`](03_financial_features.ipynb)
+# have been run.
+#
+# Reads the adjusted daily panel through `load_us_equities()`, `config/setup.yaml` for the
+# fold design and the holdout boundary, and the primary label file written by
+# [`02_labels`](02_labels.ipynb) for the ranking check in Section 7. Writes
+# `features/model_based.parquet`, which the model stages join to the stage-03 matrix on
+# `(symbol, timestamp, fold)`, alongside a small companion file recording what was written -
+# the digest sidecar Section 6 describes.
 
 # %%
-"""US Equities Panel: Temporal Features."""
+"""US Equities Panel: Model-Based Features."""
 
 import warnings
 from dataclasses import dataclass
@@ -65,6 +77,7 @@ from datetime import date
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import polars as pl
 import yaml
 from numpy.typing import NDArray
@@ -72,16 +85,19 @@ from numpy.typing import NDArray
 warnings.filterwarnings("ignore")
 
 from arch import arch_model
+from IPython.display import display
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
+from ml4t.diagnostic.splitters.calendar import TradingCalendar
 from ml4t.engineer.features.fdiff import ffdiff, get_ffd_weights
 from statsmodels.tsa.stattools import adfuller
 
 from case_studies.utils.artifact_digest import read_digest, value_digest, write_artifact
+from case_studies.utils.cv_window import modeling_fold_boundaries
 from data import load_us_equities
 from utils.artifact_specs import resolve_label_horizon
-from utils.cv_splits import generate_cv_splits
 from utils.paths import display_path, get_case_study_dir
+from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, FIGSIZE, add_message_title
 
 CASE_DIR = get_case_study_dir("us_equities_panel")
@@ -99,30 +115,54 @@ FFD_D = 0.4  # equity-class default; Section 3 measures what it costs and buys
 FFD_D_GRID = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0]
 FFD_THRESHOLD = 1e-5
 
-WASSERSTEIN_WINDOW = 21
-WASSERSTEIN_OVERLAP = 5
+WASSERSTEIN_WINDOW = 21  # one month of sessions per clustered window
+WASSERSTEIN_OVERLAP = 5  # consecutive windows share a week, so a shift is seen more than once
 N_CLUSTERS = 2  # risk-on vs risk-off
 
 GARCH_TOP_N = 200
-GARCH_MIN_OBS = 504
 
 FDR_ALPHA = 0.05
 
 FloatArray = NDArray[np.float64]
 IntArray = NDArray[np.int64]
 
+# %% [markdown]
+# ### The four values a run can be given
+#
+# These four are the only ones a caller overrides, so they sit in their own cell where
+# Papermill can reach them, and nothing below re-assigns them. What each decides:
+#
+# - **`START_DATE`** is the first session the price panel is read from. It has to match the
+#   date `02_labels` ran from, because Section 1 asserts that the panel this notebook reads
+#   digests to the value recorded against the label file Section 7 scores against.
+# - **`MAX_FOLDS`** truncates the walk-forward design to its first *n* cross-validation folds
+#   and keeps the holdout fold. Zero, the default, keeps all of them. A shortened run still
+#   exercises every transform; it just fits each one fewer times.
+# - **`XS_MIN_STOCKS`** is the narrowest cross-section a daily return distribution is
+#   summarized from. The clustering in Section 2 reads the median of that distribution, and a
+#   median over a handful of names is not a market. It belongs here rather than with the
+#   transform constants above because it is a property of the panel rather than of the
+#   transform: a run over fewer stocks has to lower it or every date is dropped and the
+#   clustering has nothing to fit on.
+# - **`GARCH_MIN_OBS`** is how many returns a stock must have inside a fold's training window
+#   before that fold will fit it a GARCH model. Two years of daily bars is the floor because a
+#   maximum-likelihood fit of three parameters on a shorter series returns estimates whose
+#   standard errors swamp them. A run over a shorter history has to lower it or no stock
+#   qualifies and every fit is skipped.
+#
+# `SEED` fixes the one random step in the notebook, the initialization of the Wasserstein
+# clustering in Section 2.
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
 START_DATE = "1990-01-01"
-MAX_FOLDS = 0  # 0 = all folds; papermill injects 2 for CI
-# The narrowest cross-section a daily return distribution is summarized from. The
-# Wasserstein clustering in Section 2 reads the median of that distribution, and a
-# median over a handful of names is not a market. It is declared here rather than with
-# the transform constants above because it is a property of the panel rather than of the
-# transform: a reduced panel has to lower it or every date is dropped and the clustering
-# has nothing to fit on.
+MAX_FOLDS = 0
 XS_MIN_STOCKS = 50
+GARCH_MIN_OBS = 504
+SEED = 42
+
+# %%
+set_global_seeds(SEED)
 
 # %% [markdown]
 # ## Configuration
@@ -131,6 +171,11 @@ XS_MIN_STOCKS = 50
 # The label's horizon is what binds Section 7: an IC series scored on a one-session forward
 # return needs its Newey-West lag set from that horizon, and the validation window it may be
 # scored over ends one session before the holdout opens rather than on the holdout date.
+#
+# The horizon is stated in sessions and the buffer in calendar days because that is how the
+# splitter takes them. A buffer of one day is the gap the walk-forward design leaves between
+# the last training session of a fold and the first session it is scored on, so that the
+# outcome of the last training decision is already known when the validation window opens.
 
 # %%
 SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
@@ -140,51 +185,91 @@ LABEL_HORIZON = int(resolve_label_horizon(CASE_STUDY_ID, PRIMARY_LABEL, SETUP).r
 LABEL_BUFFER = SETUP["labels"]["buffer"]
 HOLDOUT_START = str(SETUP["evaluation"]["holdout_start"])
 END_DATE = str(SETUP["evaluation"]["holdout_end"])
+CALENDAR = SETUP["evaluation"]["calendar"]
 
-print(f"Primary label {PRIMARY_LABEL} over {LABEL_HORIZON} session(s), buffer {LABEL_BUFFER}")
-print(f"Holdout opens {HOLDOUT_START}, panel ends {END_DATE}")
 print(
-    f"Screen: printed close over ${MIN_PRICE:.0f}, {ADV_WINDOW}-session ADV over ${MIN_ADV_USD:,}"
+    f"Section 7 scores against {PRIMARY_LABEL}, the return over the next {LABEL_HORIZON} "
+    f"session(s), so its Newey-West lag is set from {LABEL_HORIZON}."
+)
+print(
+    f"The walk-forward design leaves {LABEL_BUFFER} between a fold's last training session "
+    "and the first session it is scored on."
+)
+print(
+    f"Everything from {HOLDOUT_START} to {END_DATE} is held out: no parameter here is "
+    "estimated from it, and no number here is measured on it."
+)
+print(
+    f"A stock is eligible on a date when its printed close is above ${MIN_PRICE:.0f} and its "
+    f"dollar volume has averaged above ${MIN_ADV_USD:,} over the previous {ADV_WINDOW} "
+    "sessions - the screen 02_labels and 03_financial_features apply."
 )
 
 # %% [markdown]
-# ## Why Regime Detection for Momentum?
+# ## Why this panel is given regime and volatility features
 #
-# Momentum strategies are vulnerable to sharp reversals at regime
-# transitions -- "momentum crashes" (Daniel and Moskowitz 2016). The
-# temporal features below detect these transitions: Wasserstein regime
-# distance flags shifts in market central tendency, GARCH captures
-# volatility clustering, and FFD preserves the long-memory structure
-# in price levels that standard differencing would destroy.
+# The strategy this case study builds ranks stocks cross-sectionally and holds the top names
+# against the bottom ones. A ranking like that earns steadily for long stretches and then
+# gives several years back in a few weeks, and the weeks it gives them back in are the ones
+# where the market turns sharply after a decline - Daniel and Moskowitz (2016) call these
+# momentum crashes and show they cluster where volatility is high and the market is
+# rebounding. A model that only sees each stock's own price history has no way to tell those
+# weeks apart from any other.
+#
+# So the three transforms fitted below each supply something a per-stock price feature cannot:
+#
+# - **Where the whole cross-section currently sits.** The Wasserstein clustering in Section 2
+#   compares the recent month of market-wide returns against two reference months learned from
+#   the training window, and reports how close the match is. Its useful output is the *distance*
+#   rather than the state, because a crash happens while the market is between states.
+# - **How turbulent each stock is right now.** The GARCH fit in Section 4 gives each stock a
+#   conditional volatility that responds to its own recent moves, which is the quantity the
+#   crash literature conditions on.
+# - **A price level that is still usable as a regressor.** Fractional differencing in Section 3
+#   keeps part of what the level of a price knows, which a return has thrown away entirely.
+#
+# None of the three is a trading rule. They are inputs a model in the later stages can
+# condition on, and whether conditioning on them helps is a question for `05_evaluation` and
+# the model notebooks, not for this page.
 
 # %% [markdown]
-# ## 1. Load Data
+# ## 1. Load the panel and screen it
 #
-# The same eligibility screen as [`02_labels`](02_labels.ipynb) and
-# [`03_financial_features`](03_financial_features.ipynb), rebuilt from the same three
-# constants on the same columns: a printed close above \$5, and dollar volume
-# `close * volume` averaging above \$1M over the previous month. Both legs read figures the
-# tape carried on the day, so neither depends on a corporate action that had not happened
-# yet, and Section B of [`02_labels`](02_labels.ipynb) derives why the adjusted close cannot
-# serve for either.
+# Two screens run here, and they are the ones
+# [`02_labels`](02_labels.ipynb) and [`03_financial_features`](03_financial_features.ipynb)
+# already run, rebuilt from the same constants on the same columns so that all three stages
+# describe one universe.
 #
-# **The screen is declared here and applied after the per-symbol transforms**, exactly as
-# [`03_financial_features`](03_financial_features.ipynb) Section 6 argues. Fractional
-# differencing and a GARCH recursion both read a stock's series in order and count rows; on
-# the screened frame they would count *eligible* rows, so a stock that falls below a
-# threshold for two years and recovers would have its FFD window and its variance recursion
-# reach straight across the excursion as if it were consecutive sessions. Both run on the
-# complete series, and the eligible frame decides only which rows are emitted.
+# **Sessions are numbered first.** The archive carries a small number of stray prints on dates
+# the exchange held no market. A date that was never open is not a date a position can be taken
+# on, and `get_sessions` identifies them: a date that maps to itself is a session, and a stray
+# print maps to a neighbouring one. Dropping them and numbering what is left gives a counter
+# whose difference between two rows is a count of sessions rather than a count of rows. Every
+# window on this page needs it - a variance recursion, a fractional-difference convolution and
+# a rolling turnover average all read their input in order and treat consecutive elements as
+# consecutive sessions.
 #
-# The digest of the panel read here has to equal the one
-# [`02_labels`](02_labels.ipynb) recorded against the label file this notebook scores
-# against in Section 7; the assertion below is what makes the two files comparable rather
-# than merely both present.
+# **Then eligibility**, on three conditions: a printed close above \$5, dollar volume
+# `close * volume` averaging above \$1M over the previous month, and that month being an
+# unbroken run of sessions rather than whatever twenty-one rows the stock happens to have. The
+# first two legs read figures the tape carried on the day, so neither depends on a corporate
+# action that had not happened yet, and Section B of [`02_labels`](02_labels.ipynb) derives why
+# the adjusted close cannot serve for either. The third is what stops a stock returning from a
+# halt qualifying on volume it traded before the halt.
+#
+# **Eligibility is applied only to what is emitted, never to what the transforms read.** On the
+# eligible frame a per-stock window would count *eligible* rows, so a stock that falls below a
+# threshold for two years and recovers would have its convolution and its variance recursion
+# reach straight across the excursion as though those were consecutive sessions. Both run on
+# the full session panel; the eligible frame decides only which rows leave this notebook.
+#
+# The digest of the panel read here has to equal the one [`02_labels`](02_labels.ipynb)
+# recorded against the label file this notebook scores against in Section 7; the assertion
+# below is what makes the two files comparable rather than merely both present.
 
 # %%
 raw_df = load_us_equities(start_date=START_DATE, end_date=END_DATE)
 
-# Normalize types
 if raw_df.schema["timestamp"] == pl.Datetime:
     raw_df = raw_df.with_columns(pl.col("timestamp").dt.date().alias("timestamp"))
 
@@ -200,116 +285,210 @@ assert MARKET_DATA_DIGEST == LABEL_INPUT_DIGEST, (
     f"{MARKET_DATA_DIGEST}. Re-run 02_labels before scoring features against its output."
 )
 
-# Compute base columns on the complete series
+# %%
+# The session counter, built exactly as 02_labels and 03_financial_features build it.
+_dates = raw_df.select("timestamp").unique().sort("timestamp")
+_settling_session = pl.Series(
+    TradingCalendar(CALENDAR)
+    .get_sessions(pd.DatetimeIndex(_dates["timestamp"].to_list(), tz="UTC"))
+    .to_numpy()
+).cast(pl.Date)
+_sessions = (
+    _dates.filter(_settling_session == pl.col("timestamp"))
+    .with_row_index("session")
+    .with_columns(pl.col("session").cast(pl.Int64))
+)
+_archive_rows = raw_df.height
+raw_df = raw_df.join(_sessions, on="timestamp", how="inner").sort(["symbol", "timestamp"])
+print(
+    f"{_sessions.height:,} of {_dates.height:,} dates in the archive are {CALENDAR} sessions; "
+    f"the other {_dates.height - _sessions.height} carry stray prints and take "
+    f"{_archive_rows - raw_df.height:,} rows with them"
+)
+
+# %%
 raw_df = raw_df.with_columns(
     (pl.col("adj_close") / pl.col("adj_close").shift(1).over("symbol") - 1).alias("returns"),
     (pl.col("close") * pl.col("volume")).alias("dollar_volume"),
 )
 raw_df = raw_df.with_columns(
-    pl.col("dollar_volume").rolling_mean(ADV_WINDOW).over("symbol").alias("adv_21d")
+    pl.col("dollar_volume").rolling_mean(ADV_WINDOW).over("symbol").alias("adv_21d"),
+    (pl.col("session") - pl.col("session").shift(ADV_WINDOW - 1) == ADV_WINDOW - 1)
+    .over("symbol")
+    .alias("adv_covered"),
 )
 
-ELIGIBLE = (pl.col("close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD)
+ELIGIBLE = pl.col("adv_covered") & (pl.col("close") > MIN_PRICE) & (pl.col("adv_21d") > MIN_ADV_USD)
 df = raw_df.filter(ELIGIBLE)
 
-print(f"Loaded {len(raw_df):,} rows, {raw_df['symbol'].n_unique()} symbols")
-print(f"Eligible: {len(df):,} rows, {df['symbol'].n_unique()} symbols")
-print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
+print(
+    f"{len(raw_df):,} session rows on {raw_df['symbol'].n_unique():,} symbols, "
+    f"{raw_df['timestamp'].min()} to {raw_df['timestamp'].max()}"
+)
+print(
+    f"{len(df):,} of them on {df['symbol'].n_unique():,} symbols pass all three conditions and "
+    "are eligible to be emitted"
+)
+
+# %% [markdown]
+# Those two totals are sums over twenty-eight years, and what every transform below actually
+# works with is one day's slice of the panel. The figure is that slice through time: how many
+# stocks are eligible on each session, with the two thresholds that read the count drawn across
+# it.
+#
+# It is worth looking at before anything is fitted, because three of the decisions on this page
+# are decisions about that count. The clustering in Section 2 takes a median across the slice
+# and skips any date holding fewer than `XS_MIN_STOCKS` names, so where that line sits relative
+# to the curve says whether the threshold ever binds. The GARCH section fits the most liquid
+# `GARCH_TOP_N` names and gives every other stock a market-level value, so the distance from
+# that line up to the curve is how much of the panel that feature is a broadcast for. And the
+# count rises for most of the sample before turning down, which is why two fold windows of the
+# same length in sessions are not comparable in how many stocks they saw.
+
+# %%
+_coverage = df.group_by("timestamp").len().sort("timestamp")
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.plot(
+    _coverage["timestamp"],
+    _coverage["len"],
+    color=COLORS["blue"],
+    lw=0.8,
+    label="eligible on the session",
+)
+ax.axhline(
+    GARCH_TOP_N,
+    color=COLORS["copper"],
+    ls="--",
+    lw=1.0,
+    label=f"{GARCH_TOP_N}: given their own volatility fit",
+)
+ax.axhline(
+    XS_MIN_STOCKS,
+    color=COLORS["neutral"],
+    ls=":",
+    lw=1.0,
+    label=f"{XS_MIN_STOCKS}: below this a date is not summarized",
+)
+ax.set_ylim(0, None)
+ax.set_xlabel("Date")
+ax.set_ylabel("Eligible stocks")
+ax.legend(frameon=False, fontsize=7, loc="upper left")
+add_message_title(
+    ax,
+    "The panel these transforms fit on grows for two decades, then turns down",
+    subtitle="Stocks passing the price and dollar-volume screen on each session",
+)
+plt.show()
 
 # %% [markdown]
 # ## 1b. The fold contract
 #
 # The folds are resolved here, before any model runs, because every fit below is defined
 # relative to them and a transform that resolves its own boundaries afterwards has nothing
-# to be checked against. They come from one route - `generate_cv_splits` reading the
-# `evaluation` block of `config/setup.yaml` - with the label buffer bound from the same file.
+# to be checked against.
+#
+# **They are resolved from the label file, through the same call the model stages use.** A
+# walk-forward splitter counts backward from the holdout boundary in rows of whatever frame it
+# is handed, and it seals the end of each validation window by the horizon of the label being
+# predicted. Both of those are properties of the label file, not of the price panel: a price
+# frame that differs from it by even a handful of dates yields windows that carry the same fold
+# numbers and cover different spans. Since a fold id is the key this artifact is joined on
+# downstream, that disagreement would be invisible and wrong. `modeling_fold_boundaries` reads
+# the label file's own date index and its own configured buffer and horizon, and it is what
+# `load_modeling_dataset` calls on the other side of the join, so the two agree by construction
+# rather than by luck.
+#
+# **Both ends of a window are inclusive**, which is how `validate_temporal_fold_coverage`
+# reads them downstream: `train_end` is the last session a fold's parameters may be estimated
+# from, and `test_end` is the last session it emits a value for.
 #
 # A holdout fold is appended and its features **are** emitted: the transforms here are
 # unsupervised, they read prices and never labels, so a parameter set estimated entirely
 # before `holdout_start` may be run forward to produce filtered values *for* holdout dates.
 # The model stages need those rows to score the holdout once. What may not happen is a fit
 # that reads a holdout bar, and the assertion below is what rules that out.
+#
+# The cross-validation folds each carry the rolling ten-year training window `setup.yaml`
+# declares. The holdout fold is given the whole pre-holdout sample instead, because it is
+# fitted once and there is no later fold whose comparability a shorter window would preserve.
 
 # %%
-holdout_start = HOLDOUT_START
-holdout_end = END_DATE
+holdout_start = date.fromisoformat(HOLDOUT_START)
+holdout_end = date.fromisoformat(END_DATE)
 
-splits = generate_cv_splits(df, case_study_id=CASE_STUDY_ID, label_buffer=LABEL_BUFFER)
+# The trading calendar the folds are counted on, taken from the label file itself.
+SESSIONS = sorted(
+    pl.read_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")["timestamp"]
+    .unique()
+    .to_list()
+)
+
+splits = modeling_fold_boundaries(CASE_STUDY_ID, PRIMARY_LABEL)
 n_cv_folds = len(splits)
 
-# Build list of folds: CV folds + holdout fold
-folds = []
-for s in splits:
-    folds.append(
-        {
-            "fold": s["fold"],
-            "is_holdout": False,
-            "train_start": str(s["train_start"])[:10],
-            "train_end": str(s["train_end"])[:10],
-            "test_start": str(s["val_start"])[:10],
-            "test_end": str(s["val_end"])[:10],
-        }
-    )
+folds = [
+    {
+        "fold": s["fold"],
+        "is_holdout": False,
+        "train_start": s["train_start"],
+        "train_end": s["train_end"],
+        "test_start": s["val_start"],
+        "test_end": s["val_end"],
+    }
+    for s in splits
+]
 
-# Holdout fold: fit on everything before the boundary, emit through the end of the panel.
-# The CV folds each carry the rolling ten-year window `setup.yaml` declares; the holdout
-# fold is deliberately given the whole pre-holdout sample instead, because it is fitted once
-# and there is no later fold whose comparability a shorter window would preserve.
-last_cv_train_start = folds[-1]["train_start"] if folds else str(df["timestamp"].min())
 folds.append(
     {
         "fold": n_cv_folds,
         "is_holdout": True,
-        "train_start": last_cv_train_start,
-        "train_end": holdout_start,
+        "train_start": folds[-1]["train_start"],
+        "train_end": max(d for d in SESSIONS if d < holdout_start),
         "test_start": holdout_start,
         "test_end": holdout_end,
     }
 )
 
 if MAX_FOLDS > 0:
-    # Keep first MAX_FOLDS CV folds + holdout
-    cv_folds = [f for f in folds if not f["is_holdout"]][:MAX_FOLDS]
-    holdout_folds = [f for f in folds if f["is_holdout"]]
-    folds = cv_folds + holdout_folds
+    folds = [f for f in folds if not f["is_holdout"]][:MAX_FOLDS] + [
+        f for f in folds if f["is_holdout"]
+    ]
 
-print(f"Walk-Forward Folds ({len(folds)} total, {n_cv_folds} CV + 1 holdout):")
+print(f"Walk-forward folds ({len(folds)} total, {n_cv_folds} cross-validation + 1 holdout):")
 for f in folds:
-    tag = " [HOLDOUT]" if f.get("is_holdout", False) else ""
+    tag = " [HOLDOUT]" if f["is_holdout"] else ""
     print(
-        f"  Fold {f['fold']}{tag}: train [{f['train_start']} to {f['train_end']}) "
-        f"test [{f['test_start']} to {f['test_end']})"
+        f"  Fold {f['fold']}{tag}: fitted on {f['train_start']} to {f['train_end']}, "
+        f"emitted through {f['test_start']} to {f['test_end']}"
     )
 
-# Every training window ends at or before the holdout boundary. This is the one condition
-# the whole stage rests on, and it is asserted rather than described: a fold whose training
-# span crept past the boundary would still produce features and still print a fold table.
+# The one condition the whole stage rests on, asserted rather than described: a fold whose
+# training span crept past the boundary would still produce features and still print a table.
 for f in folds:
-    assert f["train_end"] <= holdout_start, (
+    assert f["train_end"] < holdout_start, (
         f"fold {f['fold']} fits parameters on bars through {f['train_end']}, which is inside "
         f"the holdout opening {holdout_start}"
     )
-# Only the holdout fold emits rows dated at or after the boundary.
-for f in folds:
     if not f["is_holdout"]:
-        assert f["test_end"] <= holdout_start, (
-            f"CV fold {f['fold']} emits rows through {f['test_end']}, past {holdout_start}"
+        assert f["test_end"] < holdout_start, (
+            f"cross-validation fold {f['fold']} emits rows through {f['test_end']}, past "
+            f"{holdout_start}"
         )
-print(f"  every training window ends at or before {holdout_start}")
+print(f"  every fitting window ends before {holdout_start}, and only fold {n_cv_folds} emits")
 
 # %% [markdown]
-# The figure is the fold contract itself. Each row is one fold: the shaded bar is the span
-# the parameters come from, the open bar is the span they are run forward over, and the rule
-# is the holdout boundary. What the reader should be able to see is that no shaded bar
-# crosses the rule, and that the only bar of any kind to the right of it belongs to the
-# holdout fold.
+# The figure is the fold contract itself. Each row is one fold: the filled bar is the span
+# the parameters come from, the open bar is the span they are run forward over, and the
+# dashed rule is the date the holdout opens. What the reader should be able to see is that no
+# filled bar crosses the rule, and that the one open bar to the right of it is the holdout
+# fold's.
 
 # %%
 fig, ax = plt.subplots(figsize=FIGSIZE["single_wide"])
-_hold = date.fromisoformat(holdout_start)
 for row, f in enumerate(folds):
-    tr0, tr1 = date.fromisoformat(f["train_start"]), date.fromisoformat(f["train_end"])
-    te0, te1 = date.fromisoformat(f["test_start"]), date.fromisoformat(f["test_end"])
+    tr0, tr1 = f["train_start"], f["train_end"]
+    te0, te1 = f["test_start"], f["test_end"]
     ax.barh(row, (tr1 - tr0).days, left=tr0, height=0.62, color=COLORS["blue"], alpha=0.85)
     ax.barh(
         row,
@@ -320,7 +499,7 @@ for row, f in enumerate(folds):
         edgecolor=COLORS["copper"] if f["is_holdout"] else COLORS["neutral"],
         linewidth=1.2,
     )
-ax.axvline(_hold, color=COLORS["copper"], ls="--", lw=1.4)
+ax.axvline(holdout_start, color=COLORS["copper"], ls="--", lw=1.4)
 ax.set_yticks(range(len(folds)))
 ax.set_yticklabels([f"{f['fold']}{'  H' if f['is_holdout'] else ''}" for f in folds], fontsize=7)
 ax.invert_yaxis()
@@ -328,33 +507,37 @@ ax.set_xlabel("Date")
 ax.set_ylabel("Fold")
 add_message_title(
     ax,
-    "No fitting window reaches past the boundary it is sealed on",
+    "No fitting window reaches past the date the holdout opens",
     subtitle="Filled: bars the parameters come from. Outlined: bars they run forward over",
 )
 plt.show()
 
 # %% [markdown]
-# ## 2. Wasserstein Regime Distance
+# ## 2. Wasserstein regime distance
 #
-# Regime shifts in market central tendency are detected by clustering windowed sequences of
-# the cross-sectional median return. At each date the median return is taken across every
-# eligible stock trading that day - the count is printed below, and it is a fraction of the
-# symbols the panel holds over the whole sample, because most of them were not listed or not
-# tradable on any given date. That scalar series is how the market's centre of mass moves.
-# Wasserstein k-means then clusters overlapping windows of it into $k=2$ regimes (risk-on
-# versus risk-off), treating each window as an empirical measure.
+# At each date the median return is taken across every eligible stock trading that day. That
+# one number per date is how the centre of the whole cross-section moves, and it is the series
+# everything in this section reads.
 #
-# **What this captures**: Shifts in the *central tendency* of cross-sectional
-# returns over time. This is distinct from modeling the full distributional
-# shape (tails, skewness, bimodality), which would require quantile vectors
-# or the full cross-sectional distribution as input. The cross-sectional
-# std, skew, and tail quantiles are computed for diagnostics but not used
-# in clustering.
+# The method compares one recent month of that series against reference months learned from
+# the training window, and it needs a way to say how far apart two months are. Two months of
+# returns are two collections of twenty-one numbers, and the natural comparison is not
+# value-by-value in date order - the same month reordered is the same market - but
+# distribution against distribution. The **Wasserstein distance** measures exactly that: sort
+# both collections, pair the smallest with the smallest and the largest with the largest, and
+# average how far each pair has to move. It answers "how much return would have to be shifted,
+# and how far, to turn one month into the other".
 #
-# **Walk-forward approach**: For each CV fold, fit centroids on the training
-# window only, then assign regime labels for the full train+test period.
-# Since this is a market-level feature, all stocks share the same regime
-# signal at each date.
+# With a distance in hand, ordinary k-means applies. **k-means** repeatedly assigns each
+# window to its nearest of $k$ reference windows and then recomputes each reference as the
+# centre of the windows assigned to it, until the references stop moving. Those references are
+# called **centroids**, and with $k=2$ the two the algorithm settles on separate the calm,
+# mildly positive months from the falling, turbulent ones. Two states is the coarsest split
+# that can express that distinction, and it is the one the momentum-crash literature works in.
+#
+# The centroids are fitted on each fold's training window and then held fixed while every
+# window in that fold, training and validation alike, is scored against them. Every stock
+# carries the same value on a date, because the series being clustered is market-wide.
 
 
 # %%
@@ -460,46 +643,46 @@ def fit_wasserstein_kmeans(
 
 
 # %% [markdown]
-# ### Compute Cross-Sectional Returns per Date
+# ### The series the clustering reads
 #
-# Compute cross-sectional return statistics at each date. Only the median is
-# used for Wasserstein clustering (see Section 2 narrative); the std, skew,
-# and tail quantiles are retained for diagnostic inspection and potential
-# future enrichment of the clustering input.
+# One median per date, over the eligible stocks that traded that date. Dates whose
+# cross-section is thinner than `XS_MIN_STOCKS` are dropped rather than summarized, because a
+# median over a handful of names describes those names and not the market.
 
 # %%
-# Cross-sectional return statistics per date
 xs_stats = (
     df.filter(pl.col("returns").is_not_null())
     .group_by("timestamp")
     .agg(
         pl.col("returns").median().alias("xs_median_ret"),
-        pl.col("returns").std().alias("xs_std_ret"),
-        pl.col("returns").skew().alias("xs_skew"),
-        pl.col("returns").quantile(0.1).alias("xs_q10"),
-        pl.col("returns").quantile(0.9).alias("xs_q90"),
         pl.col("returns").count().alias("n_stocks"),
     )
     .sort("timestamp")
     .filter(pl.col("n_stocks") >= XS_MIN_STOCKS)
 )
 
-# Use cross-sectional median return as market-level signal for clustering
 market_ret = xs_stats["xs_median_ret"].to_numpy()
 dates = xs_stats["timestamp"].to_list()
 
-print(f"Cross-sectional stats: {len(xs_stats):,} dates")
-if len(xs_stats) > 0:
-    print(f"  Median stocks/date: {int(xs_stats['n_stocks'].median())}")
+print(
+    f"{len(xs_stats):,} dates carry a cross-section of at least {XS_MIN_STOCKS} eligible "
+    f"stocks and are summarized; the median date carries "
+    f"{int(xs_stats['n_stocks'].median()):,}"
+)
 
 # %% [markdown]
-# ### Per-Fold Wasserstein Clustering
+# ### Fitting the centroids inside each fold
 #
-# For each fold, fit Wasserstein k-means centroids on the training window only,
-# then assign regime labels for the full train+test period. The reference
-# distribution (centroids) sees no future data relative to the fold boundary.
-# Since this is a market-level feature, all stocks share the same regime
-# signal at each date.
+# The centroids come from the fold's training window and are then held fixed, so the reference
+# each window is scored against was learned from bars that close before the window opens. What
+# the loop emits per date is the assigned cluster, the distance to the nearer and the farther
+# centroid, their ratio, and how differently the window's best and worst days sit against the
+# centroid it matched.
+#
+# k-means labels are arbitrary - which of the two states the algorithm happens to call zero
+# depends on where it started - so after each fit the two are reordered by their mean, and
+# state zero is always the lower-return one. Without that step a downstream model would see the
+# same market condition under one number in one fold and the other number in the next.
 
 
 # %%
@@ -552,22 +735,21 @@ min_length = WASSERSTEIN_WINDOW + (2 * N_CLUSTERS - 1) * step
 wasserstein_all_folds = []
 wass_centroid_rows = []  # per-fold centroid summary, read by the stability figure
 
-print("Computing per-fold Wasserstein features...")
-print(f"  Window: {WASSERSTEIN_WINDOW}, Overlap: {WASSERSTEIN_OVERLAP}, Clusters: {N_CLUSTERS}")
+print(
+    f"Clustering {WASSERSTEIN_WINDOW}-session windows overlapping by {WASSERSTEIN_OVERLAP} "
+    f"into {N_CLUSTERS} states, once per fold"
+)
 
 for fold in folds:
     fold_idx = fold["fold"]
+    train_start_date = fold["train_start"]
     train_end_date = fold["train_end"]
     test_end_date = fold["test_end"]
-    train_start_date = fold["train_start"]
 
-    # Find index boundaries in the xs_stats date array
-    train_indices = [
-        i for i, d in enumerate(dates) if str(d) >= train_start_date and str(d) < train_end_date
-    ]
-    full_indices = [
-        i for i, d in enumerate(dates) if str(d) >= train_start_date and str(d) < test_end_date
-    ]
+    # Both window ends are inclusive, matching what the fold table states and what the
+    # downstream coverage check reads.
+    train_indices = [i for i, d in enumerate(dates) if train_start_date <= d <= train_end_date]
+    full_indices = [i for i, d in enumerate(dates) if train_start_date <= d <= test_end_date]
 
     if len(train_indices) < min_length:
         print(
@@ -579,10 +761,10 @@ for fold in folds:
     train_ret = market_ret[train_indices[0] : train_indices[-1] + 1]
     lifted = lift_stream(train_ret, WASSERSTEIN_WINDOW, WASSERSTEIN_OVERLAP)
     _, centroids = fit_wasserstein_kmeans(
-        lifted.sorted_segments, n_clusters=N_CLUSTERS, random_state=42
+        lifted.sorted_segments, n_clusters=N_CLUSTERS, random_state=SEED
     )
 
-    # Sort centroids by mean value: cluster 0 = lower return (stress), 1 = higher (normal)
+    # State 0 is the lower-return one in every fold.
     sort_idx = np.argsort([c.mean() for c in centroids])
     centroids = centroids[sort_idx]
 
@@ -609,16 +791,20 @@ for fold in folds:
             row["fold"] = fold_idx
         wasserstein_all_folds.extend(fold_features)
 
-    tag = " [HOLDOUT]" if fold.get("is_holdout", False) else ""
-    print(f"  Fold {fold_idx}{tag}: {len(fold_features)} dates ({len(train_indices)} train)")
+    tag = " [HOLDOUT]" if fold["is_holdout"] else ""
+    print(
+        f"  Fold {fold_idx}{tag}: fitted on {len(train_indices):,} dates, assigned "
+        f"{len(fold_features):,}"
+    )
 
 wass_df = pl.DataFrame(wasserstein_all_folds) if wasserstein_all_folds else pl.DataFrame()
 n_wass_folds = wass_df["fold"].n_unique() if "fold" in wass_df.columns else 0
-print(f"\nWasserstein features: {len(wass_df):,} rows across {n_wass_folds} folds")
+print(f"\n{len(wass_df):,} date-fold assignments across {n_wass_folds} folds")
 if len(wass_df) > 0:
     cluster_counts = wass_df.group_by("wass_cluster").len().sort("wass_cluster")
     for row in cluster_counts.iter_rows(named=True):
-        print(f"  Cluster {row['wass_cluster']}: {row['len']:,} rows")
+        state = "lower-return" if row["wass_cluster"] == 0 else "higher-return"
+        print(f"  state {row['wass_cluster']} ({state}): {row['len']:,}")
 
 # %% [markdown]
 # ### What the clustering inferred, on validation dates
@@ -633,26 +819,31 @@ if len(wass_df) > 0:
 # below it marks the dates assigned to the low-return centroid. Nothing in the fitting
 # procedure required those dates to be the market's stressed ones.
 #
-# **The hard label is not comparable across folds, and the chart is where that becomes
-# visible.** Centroid zero is whichever of the two has the lower mean *in that fold's
-# training window*, which fixes the label-switching that k-means would otherwise produce but
-# does not fix what the label refers to: a fold trained through the crisis and a fold trained
-# on the recovery place their low-return centroid in different places, so "cluster 0" in one
-# fold and "cluster 0" in another are different states wearing one name. That is why the
-# low-return share thins out over the second half rather than tracking anything the line does
-# there, and it is why `wass_dist_ratio` - a distance, comparable within a fold and
-# interpretable without knowing which centroid won - is the more usable of the two outputs.
+# **What the lower panel shows is why the state number is the weaker of the two outputs.**
+# State zero is whichever centroid has the lower mean *in that fold's training window*. That
+# fixes the arbitrariness of k-means labelling within a fold; it does not make the number mean
+# the same thing across folds. A fold trained through the 2008 decline and a fold trained on
+# the recovery that followed put their lower-return centroid in quite different places, so
+# state zero in one and state zero in the next describe different markets under one number.
+# The visible consequence is that the share in state zero drains away over the later folds
+# while the line above it goes on doing what it always did. `wass_dist_ratio` does not have
+# this problem: it is a distance, it is comparable within the fold that produced it, and
+# reading it needs no knowledge of which centroid won.
+#
+# The assignment gets its own panel and is aggregated to a monthly share rather than drawn as
+# a daily strip. Sixteen years of daily flags give each session a fraction of a pixel, isolated
+# days vanish, and the reader concludes the state stopped occurring when it did not.
 
 # %%
-_val_spans = [(f["test_start"], f["test_end"], f["fold"]) for f in folds if not f["is_holdout"]]
 _val_regime = pl.concat(
     [
         wass_df.filter(
-            (pl.col("fold") == fold_idx)
-            & (pl.col("timestamp") >= date.fromisoformat(t0))
-            & (pl.col("timestamp") < date.fromisoformat(t1))
+            (pl.col("fold") == f["fold"])
+            & (pl.col("timestamp") >= f["test_start"])
+            & (pl.col("timestamp") <= f["test_end"])
         )
-        for t0, t1, fold_idx in _val_spans
+        for f in folds
+        if not f["is_holdout"]
     ]
 ).sort("timestamp")
 _val_ret = xs_stats.join(_val_regime.select("timestamp", "wass_cluster"), on="timestamp").sort(
@@ -665,14 +856,17 @@ _smoothed = _val_ret.select(
 ).drop_nulls()
 
 fig, (ax1, ax2) = plt.subplots(
-    2, 1, figsize=FIGSIZE["single_wide"], sharex=True, height_ratios=[3, 1]
+    2,
+    1,
+    figsize=FIGSIZE["single"],
+    sharex=True,
+    height_ratios=[3, 1],
+    gridspec_kw={"hspace": 0.22},
 )
 ax1.plot(_smoothed["timestamp"], _smoothed["trailing"], color=COLORS["blue"], lw=0.8)
 ax1.axhline(0, color=COLORS["neutral"], lw=0.7)
-ax1.set_ylabel("Trailing median return")
-# The assignment goes in its own panel, aggregated to a monthly share. A binary strip over
-# sixteen years of daily data gives each session a fraction of a pixel, so isolated assigned
-# days vanish entirely and the reader concludes the state stopped when it did not.
+ax1.set_ylabel("Trailing median return", fontsize=8)
+ax1.locator_params(axis="y", nbins=4)
 _monthly = (
     _smoothed.with_columns(pl.col("timestamp").dt.truncate("1mo").alias("month"))
     .group_by("month")
@@ -682,12 +876,12 @@ _monthly = (
 ax2.fill_between(_monthly["month"], 0, _monthly["share"], color=COLORS["copper"], lw=0, step="mid")
 ax2.set_ylim(0, 1)
 ax2.set_yticks([0, 1])
-ax2.set_ylabel("Share in the\nlow-return state", fontsize=7)
+ax2.set_ylabel("Share in the\nlower state", fontsize=7)
 ax2.set_xlabel("Date")
 add_message_title(
     ax1,
-    "The hard regime label is not comparable across folds",
-    subtitle="Validation dates only. Below: monthly share assigned to the low-return centroid",
+    "The lower-return state drains away while the series does not change",
+    subtitle="Validation dates only. Below: monthly share assigned to that state",
 )
 plt.show()
 
@@ -697,9 +891,9 @@ _runs = _smoothed.with_columns(
 )
 _run_lengths = _runs.filter(pl.col("wass_cluster") == 0).group_by("run").len()["len"]
 print(
-    f"validation dates {_smoothed.height:,}, assigned to the low-return centroid "
+    f"validation dates {_smoothed.height:,}, assigned to the lower-return state "
     f"{_shaded.height:,} ({_shaded.height / _smoothed.height:.0%}); mean trailing return "
-    f"{_shaded['trailing'].mean():+.5f} in that cluster against "
+    f"{_shaded['trailing'].mean():+.5f} in that state against "
     f"{_smoothed.filter(pl.col('wass_cluster') == 1)['trailing'].mean():+.5f} in the other"
 )
 print(
@@ -710,20 +904,20 @@ print(
 )
 
 # %% [markdown]
-# `wass_dist_ratio` is the second thing the clustering yields: the distance to the nearest
-# centroid over the distance to the furthest. A window that sits squarely inside one regime
-# drives it toward zero and a window equidistant from both drives it toward one, so the
-# feature carries how *certain* the assignment is rather than which regime it picked. That
-# is the part a momentum model needs, because momentum crashes cluster at the transitions
-# (Daniel and Moskowitz 2016) rather than inside either state.
+# `wass_dist_ratio` is the second thing the clustering yields: the distance to the nearer
+# centroid divided by the distance to the farther one. A window sitting squarely inside one
+# state drives it toward zero and a window equidistant from both drives it toward one, so the
+# feature carries how *certain* the match is rather than which state it picked. That is the
+# part a momentum model needs, because momentum crashes fall at the transitions rather than
+# inside either state.
 #
-# Clustering on the median alone reads a shift in the centre of the cross-section and
-# nothing else. A regime that keeps its median and widens its tails is invisible to it; the
-# cross-sectional standard deviation, skew and tail quantiles are computed above and left as
-# diagnostics for exactly that reason.
+# The cost of clustering the median and nothing else is worth stating plainly: this reads a
+# shift in the centre of the cross-section, and a market that keeps its centre while its tails
+# widen looks unchanged to it. Reaching that would mean clustering quantile vectors rather than
+# a scalar, which is a different transform and not a tuning of this one.
 
 # %% [markdown]
-# ## 3. Fractional Differencing
+# ## 3. Fractional differencing
 #
 # A log price is not stationary and a log return has thrown away everything the level knew.
 # Fractional differencing (Hosking 1981; Lopez de Prado 2018) takes the difference to a
@@ -795,18 +989,31 @@ def apply_ffd_per_symbol(
 
 
 # %% [markdown]
-# The sweep below runs on a stratified sample of stocks - every symbol with a long enough
-# eligible history, taken at a fixed stride so the sample is not the alphabet's first few
-# hundred names. The augmented Dickey-Fuller test is run per stock per order, and what is
-# reported is the *share* of stocks rejecting a unit root, because a single stock's test says
-# very little and the question is whether the order works across the panel.
+# The sweep runs on a sample of stocks - every symbol with a long enough eligible history,
+# taken at a fixed stride so the sample is not the alphabet's first few hundred names. The
+# augmented Dickey-Fuller test asks whether a series has a unit root, which is the formal
+# version of "wanders without returning"; what is reported is the *share* of sampled stocks
+# whose test rejects that, because a single stock's test says very little and the question is
+# whether the order works across the panel.
+#
+# **The sweep stops at the holdout boundary, on both counts.** It is a measurement that argues
+# for a setting, so it is a development-time decision, and a development-time decision may not
+# read a held-out bar. That governs which stocks it samples as much as which bars it reads: a
+# sample drawn on history-length over the whole panel would let a stock's post-2016 record
+# decide whether it is in the sample at all.
 
 # %%
+_ffd_dev = raw_df.filter(pl.col("timestamp") < holdout_start)
 _ffd_symbols = (
-    df.group_by("symbol").len().filter(pl.col("len") >= 2000).sort("symbol")["symbol"].to_list()
+    df.filter(pl.col("timestamp") < holdout_start)
+    .group_by("symbol")
+    .len()
+    .filter(pl.col("len") >= 2000)
+    .sort("symbol")["symbol"]
+    .to_list()
 )
 _ffd_sample = _ffd_symbols[:: max(1, len(_ffd_symbols) // 120)][:120]
-_ffd_panel = raw_df.filter(pl.col("symbol").is_in(_ffd_sample)).sort(["symbol", "timestamp"])
+_ffd_panel = _ffd_dev.filter(pl.col("symbol").is_in(_ffd_sample)).sort(["symbol", "timestamp"])
 _ffd_by_symbol = _ffd_panel.partition_by("symbol", as_dict=True)
 
 grid_rows = []
@@ -832,8 +1039,11 @@ for d in FFD_D_GRID:
     )
 
 ffd_grid = pl.DataFrame(grid_rows)
-print(f"FFD sweep over {ffd_grid['n_symbols'].max()} sampled stocks")
-print(ffd_grid)
+print(
+    f"{len(FFD_D_GRID)} differencing orders, each measured on the same "
+    f"{ffd_grid['n_symbols'].max()} sampled stocks, on bars before {holdout_start}"
+)
+display(ffd_grid)
 
 # %% [markdown]
 # The two curves cross, and where they cross is the whole argument for a fractional order.
@@ -958,8 +1168,7 @@ def fit_garch_per_fold(
 
         # Training data for parameter estimation
         train_data = sym_data.filter(
-            (pl.col("timestamp").cast(pl.Utf8) >= fold["train_start"])
-            & (pl.col("timestamp").cast(pl.Utf8) < fold["train_end"])
+            pl.col("timestamp").is_between(fold["train_start"], fold["train_end"])
         )
 
         if len(train_data) < GARCH_MIN_OBS:
@@ -992,8 +1201,7 @@ def fit_garch_per_fold(
 
             # Full train+test period for feature extraction
             full_data = sym_data.filter(
-                (pl.col("timestamp").cast(pl.Utf8) >= fold["train_start"])
-                & (pl.col("timestamp").cast(pl.Utf8) < fold["test_end"])
+                pl.col("timestamp").is_between(fold["train_start"], fold["test_end"])
             )
             full_returns_pct = (full_data["returns"] * 100).to_numpy()
 
@@ -1027,8 +1235,8 @@ def fit_garch_per_fold(
         except Exception:
             n_fail += 1
 
-    tag = " [HOLDOUT]" if fold.get("is_holdout", False) else ""
-    print(f"  Fold {fold_idx}{tag} GARCH: {n_success}/{len(symbols)} fitted, {n_fail} failed")
+    tag = " [HOLDOUT]" if fold["is_holdout"] else ""
+    print(f"  Fold {fold_idx}{tag}: {n_success} of {len(symbols)} fitted, {n_fail} skipped")
     return (pl.concat(results) if results else pl.DataFrame()), params_rows
 
 
@@ -1041,14 +1249,12 @@ def fit_market_garch_per_fold(
     """Fit market-level GARCH for one fold, return (timestamp, mkt_garch_vol, fold)."""
     fold_idx = fold["fold"]
 
-    # Build date-indexed arrays
-    train_mask = [
-        (str(d) >= fold["train_start"] and str(d) < fold["train_end"]) for d in dates_list
+    train_indices = [
+        i for i, d in enumerate(dates_list) if fold["train_start"] <= d <= fold["train_end"]
     ]
-    full_mask = [(str(d) >= fold["train_start"] and str(d) < fold["test_end"]) for d in dates_list]
-
-    train_indices = [i for i, m in enumerate(train_mask) if m]
-    full_indices = [i for i, m in enumerate(full_mask) if m]
+    full_indices = [
+        i for i, d in enumerate(dates_list) if fold["train_start"] <= d <= fold["test_end"]
+    ]
 
     if len(train_indices) < GARCH_MIN_OBS:
         return pl.DataFrame()
@@ -1101,11 +1307,14 @@ def fit_market_garch_per_fold(
         return pl.DataFrame()
 
 
-# %%
-print("Per-fold GARCH fitting...")
+# %% [markdown]
+# The recursion reads the complete per-symbol series, so the panel is partitioned by symbol
+# once, outside the fold loop. The eligible frame decides only which stocks are liquid enough
+# inside a training window to be worth fitting, and that ranking is redone every fold.
 
-# The recursion reads the complete per-symbol series; the eligible frame decides only which
-# stocks are liquid enough to be worth fitting. Partitioned once, outside the fold loop.
+# %%
+print(f"Fitting up to {GARCH_TOP_N} stocks per fold, plus one market-level fit:")
+
 _returns_by_symbol = raw_df.select("symbol", "timestamp", "returns").partition_by(
     "symbol", as_dict=True
 )
@@ -1115,11 +1324,7 @@ mkt_garch_all_folds = []
 garch_param_rows = []
 
 for fold in folds:
-    # Select subsample by liquidity inside the training window, on the eligible frame
-    train_data = df.filter(
-        (pl.col("timestamp").cast(pl.Utf8) >= fold["train_start"])
-        & (pl.col("timestamp").cast(pl.Utf8) < fold["train_end"])
-    )
+    train_data = df.filter(pl.col("timestamp").is_between(fold["train_start"], fold["train_end"]))
     garch_symbols = select_garch_subsample(train_data, GARCH_TOP_N)
 
     fold_garch, fold_params = fit_garch_per_fold(_returns_by_symbol, fold, garch_symbols)
@@ -1127,7 +1332,6 @@ for fold in folds:
         garch_all_folds.append(fold_garch)
     garch_param_rows.extend(fold_params)
 
-    # Market-level GARCH fallback
     fold_mkt = fit_market_garch_per_fold(market_ret, dates, fold)
     if len(fold_mkt) > 0:
         mkt_garch_all_folds.append(fold_mkt)
@@ -1138,11 +1342,14 @@ garch_params = pl.DataFrame(garch_param_rows)
 
 if len(garch_df) > 0:
     print(
-        f"\nGARCH features: {len(garch_df):,} rows, {garch_df['symbol'].n_unique()} symbols, {garch_df['fold'].n_unique()} folds"
+        f"\nPer-stock conditional volatility: {len(garch_df):,} rows on "
+        f"{garch_df['symbol'].n_unique():,} distinct stocks across "
+        f"{garch_df['fold'].n_unique()} folds"
     )
 if len(mkt_garch_df) > 0:
     print(
-        f"Market GARCH: {len(mkt_garch_df):,} rows across {mkt_garch_df['fold'].n_unique()} folds"
+        f"Market-level conditional volatility, one value per date per fold: "
+        f"{len(mkt_garch_df):,} rows across {mkt_garch_df['fold'].n_unique()} folds"
     )
 
 # %% [markdown]
@@ -1166,11 +1373,11 @@ if len(mkt_garch_df) > 0:
 #
 # **Two things have to be held fixed for the comparison to be about the parameters.** The
 # holdout fold is excluded, because its training window is the whole pre-holdout sample
-# against the CV folds' rolling ten years, so a difference there would be a window-length
-# difference. And the liquidity ranking selects a slightly different top-`GARCH_TOP_N` each
-# fold, so the persistence path is restricted to the symbols every CV fold selected - the
-# count is printed. Without both restrictions the line would move for three reasons at once
-# and support no statement about any of them.
+# against the cross-validation folds' rolling ten years, so a difference there would be a
+# window-length difference. And the liquidity ranking selects a slightly different top
+# `GARCH_TOP_N` each fold, so the persistence path is restricted to the stocks every fold
+# selected - the count is printed. Without both restrictions the line would move for three
+# reasons at once and support no statement about any of them.
 
 # %%
 _cv_folds = [f["fold"] for f in folds if not f["is_holdout"]]
@@ -1195,11 +1402,12 @@ _persistence = (
 _centroids = pl.DataFrame(wass_centroid_rows).filter(pl.col("fold").is_in(_cv_folds)).sort("fold")
 print(
     f"{len(_common_symbols)} of the {GARCH_TOP_N} fitted stocks were selected by all "
-    f"{len(_cv_folds)} CV folds; the persistence path below is those, and the holdout fold is "
-    "excluded because its training window is a different length"
+    f"{len(_cv_folds)} cross-validation folds; the persistence path below is those"
 )
 
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+fig, (ax1, ax2) = plt.subplots(
+    2, 1, figsize=FIGSIZE["dual_v"], sharex=True, gridspec_kw={"hspace": 0.18}
+)
 ax1.plot(_persistence["fold"], _persistence["median"], color=COLORS["blue"], marker="o", ms=3)
 ax1.fill_between(
     _persistence["fold"],
@@ -1208,80 +1416,79 @@ ax1.fill_between(
     color=COLORS["blue"],
     alpha=0.18,
 )
+_lo, _hi = _persistence["q25"].min(), _persistence["q75"].max()
+ax1.set_ylim(_lo - 0.08 * (_hi - _lo), _hi + 0.08 * (_hi - _lo))
 ax1.set_ylabel(r"GARCH $\alpha+\beta$", fontsize=8)
 ax2.plot(
     _centroids["fold"], _centroids["centroid_separation"], color=COLORS["copper"], marker="s", ms=3
 )
-ax2.set_ylabel("Wasserstein centroid separation", fontsize=8)
+ax2.set_ylabel("Distance between the two centroids", fontsize=8)
 ax2.set_xlabel("Fold")
 add_message_title(
     ax1,
     "The volatility fit repeats across folds; the regime fit does not",
-    subtitle="One cohort of stocks across the CV folds, and the centroid gap",
+    subtitle="Persistence median and interquartile band, and the centroid gap",
 )
 plt.show()
 
+# %% [markdown] tags=["results"]
+# **How far the fitted parameters move as the window rolls.** The persistence range is over
+# one cohort of stocks held fixed across the cross-validation folds; the centroid range is the
+# gap between the two clustered states in each fold's own training window.
+
+# %%
 print(
-    f"GARCH persistence: median per fold from {_persistence['median'].min():.4f} to "
-    f"{_persistence['median'].max():.4f} over {_persistence.height} CV folds"
+    f"GARCH persistence: the per-fold median runs from {_persistence['median'].min():.4f} to "
+    f"{_persistence['median'].max():.4f} over {_persistence.height} folds"
 )
 print(
-    f"Wasserstein centroid separation: {_centroids['centroid_separation'].min():.5f} to "
+    f"Distance between the two Wasserstein centroids: "
+    f"{_centroids['centroid_separation'].min():.5f} to "
     f"{_centroids['centroid_separation'].max():.5f}"
 )
 
 # %% [markdown]
-# ## 5. Assemble Temporal Features
+# ## 5. Assemble the panel
 #
-# Merge all temporal features per fold. The fold column is the primary
-# organizing key: GARCH and Wasserstein features carry fold from their
-# per-fold fitting; FFD (deterministic, no parameters) is replicated
-# across folds during the join.
+# One frame per fold, then stacked. Each fold's frame starts from the eligible symbol-dates
+# inside that fold's span and the three transforms are joined onto it. The two that were
+# fitted per fold - the clustering and the GARCH volatility - are filtered to the matching
+# fold before they are joined; fractional differencing has no parameters and therefore no
+# fold, so the same values are attached to every fold whose span covers them.
+#
+# The clustering and the market-level volatility are one value per date, so they broadcast
+# across every stock trading that date. The per-stock volatility exists only for the stocks
+# that fold fitted, and every other stock takes the market-level value in its place, so no
+# emitted row is left without a volatility.
 
 # %%
-# Build per-fold feature panels
-# GARCH has fold column already; it's the base for per-fold assembly
-# Wasserstein has fold column; it's market-level, broadcast to all symbols
-# FFD has no fold column (deterministic); joined by (symbol, timestamp)
-
 temporal_frames = []
 
-fold_ids = sorted(set(f["fold"] for f in folds))
+for fold_info in folds:
+    fold_idx = fold_info["fold"]
 
-for fold_idx in fold_ids:
-    fold_info = next(f for f in folds if f["fold"] == fold_idx)
-
-    # Build (symbol, timestamp) skeleton for this fold's full period
     fold_skeleton = (
-        df.filter(
-            (pl.col("timestamp").cast(pl.Utf8) >= fold_info["train_start"])
-            & (pl.col("timestamp").cast(pl.Utf8) < fold_info["test_end"])
-        )
+        df.filter(pl.col("timestamp").is_between(fold_info["train_start"], fold_info["test_end"]))
         .select(["symbol", "timestamp"])
         .unique()
         .with_columns(pl.lit(fold_idx).alias("fold"))
     )
 
-    # Join Wasserstein features (market-level, broadcast to all stocks)
     if len(wass_df) > 0:
         wass_fold = wass_df.filter(pl.col("fold") == fold_idx).drop("fold")
         fold_skeleton = fold_skeleton.join(wass_fold, on="timestamp", how="left")
 
-    # Join FFD features (per-stock, no fold column needed)
     if len(ffd_df) > 0:
         fold_skeleton = fold_skeleton.join(ffd_df, on=["symbol", "timestamp"], how="left")
 
-    # Join per-stock GARCH
     if len(garch_df) > 0:
         garch_fold = garch_df.filter(pl.col("fold") == fold_idx).drop("fold")
         fold_skeleton = fold_skeleton.join(garch_fold, on=["symbol", "timestamp"], how="left")
 
-    # Join market GARCH (broadcast to all stocks)
     if len(mkt_garch_df) > 0:
         mkt_fold = mkt_garch_df.filter(pl.col("fold") == fold_idx).drop("fold")
         fold_skeleton = fold_skeleton.join(mkt_fold, on="timestamp", how="left")
 
-    # For stocks without per-stock GARCH, fill with market GARCH
     if "garch_cond_vol" in fold_skeleton.columns and "mkt_garch_vol" in fold_skeleton.columns:
         fold_skeleton = fold_skeleton.with_columns(
             pl.when(pl.col("garch_cond_vol").is_null())
@@ -1293,18 +1500,19 @@ for fold_idx in fold_ids:
     temporal_frames.append(fold_skeleton)
 
 temporal = pl.concat(temporal_frames).sort(["fold", "symbol", "timestamp"])
-
-# Drop rows with no temporal features at all
 temporal = temporal.drop_nulls(subset=["symbol", "timestamp"])
 
 temporal_feature_cols = [c for c in temporal.columns if c not in ("symbol", "timestamp", "fold")]
 n_temporal_features = len(temporal_feature_cols)
 
-# A missing value is a null. `ffdiff` returns a float NaN where the log price it is handed
-# is not finite, and Polars does not treat that as null: `drop_nulls` keeps it, and every
-# summary that reaches it returns NaN rather than skipping the row - including the one
-# printed immediately below, which is why the conversion happens before it and not at the
-# write. 03_financial_features Section 7 converts the oscillators' NaN for the same reason.
+# %% [markdown]
+# A missing value has to be a null and not a NaN. `ffdiff` returns a float NaN where the log
+# price it is handed is not finite, and Polars does not treat that as missing: `drop_nulls`
+# keeps the row, and every summary that reaches it returns NaN rather than skipping it -
+# including the one printed immediately below. So the conversion happens here rather than at
+# the write. `03_financial_features` converts its oscillators' NaN for the same reason.
+
+# %%
 _nan_carriers = {
     c: int(temporal[c].is_nan().sum())
     for c in temporal_feature_cols
@@ -1317,31 +1525,48 @@ print(
     f"{sum(_nan_carriers.values()):,} values: {sorted(_nan_carriers)}"
 )
 
-print(f"\nTemporal features: {n_temporal_features} features")
-print(f"  Rows: {len(temporal):,}")
-print(f"  Symbols: {temporal['symbol'].n_unique()}")
-print(f"  Folds: {temporal['fold'].n_unique()}")
-
-# Feature summary (exclude fold from summary)
-for col in temporal_feature_cols:
-    valid = temporal[col].drop_nulls()
-    if len(valid) > 0:
-        print(f"  {col}: {len(valid):,} valid (mean={valid.mean():.6f}, std={valid.std():.4f})")
+print(
+    f"\n{n_temporal_features} features on {len(temporal):,} rows, "
+    f"{temporal['symbol'].n_unique():,} stocks, {temporal['fold'].n_unique()} folds"
+)
+display(
+    pl.DataFrame(
+        [
+            {
+                "feature": c,
+                "present": temporal[c].len() - temporal[c].null_count(),
+                "missing": temporal[c].null_count(),
+                "mean": temporal[c].mean(),
+                "std": temporal[c].std(),
+            }
+            for c in temporal_feature_cols
+        ]
+    )
+)
 
 # %% [markdown]
-# ## 6. Save Temporal Features
+# ## 6. Write the artifact
 #
 # The panel key is `(symbol, timestamp, fold)`, not `(symbol, timestamp)`: the same
 # symbol-date appears once per fold whose span covers it, carrying that fold's fit. A
 # downstream join that forgets the fold column would multiply rows silently, so the
 # uniqueness of the three-column key is asserted before the write rather than trusted.
 #
-# The schema is frozen against the columns each transform declared it would emit, and the
-# file is written with a digest sidecar recording the content hash of the values, the row
-# count, the key columns, the notebook that wrote them, and the digest of the price panel
-# they were built from - the same record [`02_labels`](02_labels.ipynb) and
-# [`03_financial_features`](03_financial_features.ipynb) write, so a stage that reads this
-# file can check it was built from the same download it was.
+# Three checks run before the write, and each of them is a claim the file would otherwise make
+# silently: that the columns present are exactly the ones the three transforms said they would
+# emit, that no missing value slipped through as a NaN, and that the three-column key is
+# unique.
+#
+# Beside the parquet the write also leaves a small companion file, the **digest sidecar**. A
+# digest is a hash of the values in a frame, so two files with the same digest hold the same
+# numbers. The sidecar's job is to let anything reading this artifact establish what it was
+# built from, without re-running anything. It records the digest of the values written here,
+# how many rows they occupy, which columns identify a row, which notebook wrote them, and the
+# digest of the price panel they were computed from. That last entry is what Section 1
+# compared against at the top of this notebook, and it is what lets a model notebook confirm
+# that the features and the labels it is joining came from one download.
+# [`02_labels`](02_labels.ipynb) and [`03_financial_features`](03_financial_features.ipynb)
+# leave the same record beside their own artifacts.
 
 # %%
 EMITTED_FEATURES = [
@@ -1372,11 +1597,23 @@ assert temporal.select(_key).n_unique() == temporal.height, (
     f"{temporal.height - temporal.select(_key).n_unique()} duplicate rows on {_key}"
 )
 
-# The emitted frame reconciles against the eligible frame it was built from: every emitted
-# symbol-date is one this stage's screen kept, and no fold emits a row outside its own span.
 _eligible_keys = df.select("symbol", "timestamp").unique()
 assert temporal.join(_eligible_keys, on=["symbol", "timestamp"], how="anti").height == 0, (
     "the emitted panel carries symbol-dates the eligibility screen removed"
+)
+
+for f in folds:
+    _outside = temporal.filter(
+        (pl.col("fold") == f["fold"])
+        & ~pl.col("timestamp").is_between(f["train_start"], f["test_end"])
+    )
+    assert _outside.height == 0, (
+        f"fold {f['fold']} emits {_outside.height} rows outside {f['train_start']}..."
+        f"{f['test_end']}"
+    )
+print(
+    f"{temporal.height:,} rows, all inside their own fold's span and all on symbol-dates the "
+    "screen kept"
 )
 
 FEATURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -1391,28 +1628,32 @@ record = write_artifact(
 print(f"Saved {n_temporal_features} features to {display_path(output_path)}")
 print(f"model_based.parquet: {record['n_rows']:,} rows, digest {record['digest']}")
 print(f"  Folds: {sorted(temporal['fold'].unique().to_list())}")
+
 # %% [markdown]
-# ## 7. Marginal IC Evaluation
+# ## 7. What each column ranks on its own
 #
-# What each feature ranks the cross-section by, on its own, against the primary label. That
-# is a **marginal** quantity and not an incremental one, and the difference matters: a
-# feature can carry a real marginal IC and add nothing a model did not already have from the
-# stage-03 matrix, or carry almost none and still matter once the model conditions on it.
-# Answering the incremental question means fitting with and without these columns on the same
-# folds, which needs both matrices and a model - so it is
-# [`05_evaluation`](05_evaluation.ipynb)'s, and this section neither answers it nor selects
-# anything.
+# The **information coefficient** of a column is the rank correlation, across the stocks
+# scored on one date, between the value the column gives each stock and the return that stock
+# actually went on to earn. One correlation per date gives a series, and the series is what is
+# summarized below.
+#
+# What it measures here is each column **on its own**, which is not the same question as what
+# each column adds. A column can rank the cross-section well and still add nothing a model did
+# not already have from the stage-03 matrix, or rank it barely at all and still matter once a
+# model conditions on it. Answering the second question means fitting with and without these
+# columns on the same folds, which needs both matrices and a model, so it belongs to
+# [`05_evaluation`](05_evaluation.ipynb). This section neither answers it nor selects anything.
 #
 # **Validation rows only.** Each fold's training bars are the bars its parameters came from,
 # so scoring them measures the fit rather than the feature. The frame below is the union of
-# the CV folds' validation spans, each row taken from the fold whose validation window
-# covers it, and the holdout fold contributes nothing.
+# the cross-validation folds' validation spans, each row taken from the fold whose validation
+# window covers it, and the holdout fold contributes nothing.
 #
-# **Sealed on the label's endpoint, not the observation date.** A row observed on the last
-# validation session of the last CV fold resolves `LABEL_HORIZON` sessions later, and if that
-# lands on or after `holdout_start` the row has read a holdout outcome. The usable boundary
-# is therefore the last session whose forward window closes before the holdout opens, which
-# is derived below from the panel's own calendar rather than typed.
+# **The boundary is where the label resolves, not where it is observed.** A row observed on
+# the last validation session of the last fold resolves `LABEL_HORIZON` sessions later, and if
+# that lands on or after `holdout_start` the row has read a held-out outcome. The usable
+# boundary is therefore the last session whose forward window closes before the holdout opens,
+# which is derived below from the panel's own calendar rather than typed.
 #
 # **Chronologically ordered.** `cross_sectional_ic_series` sorts the dates it returns.
 # Feeding a Newey-West correction a series assembled in partition-scan order computes the
@@ -1440,33 +1681,38 @@ print(f"  Folds: {sorted(temporal['fold'].unique().to_list())}")
 # questions about a fitted model, so both belong downstream; neither is answerable with the
 # statistic this section computes.
 
+# %% [markdown]
+# The endpoint of a label is the `LABEL_HORIZON`-th next session in the stock's own series,
+# read off the complete price frame so that it is the next session and not the next session on
+# which the stock happened to still be eligible - a later date, and one decided by what
+# happened after the decision was made.
+#
+# Two assertions carry the section. The first is that the validation windows tile the
+# development period without overlapping, so a symbol-date reaches the scored frame from
+# exactly one fold; were they ever to overlap, the correlation helper's self-join would
+# quietly multiply the cross-section rather than raise. The second is that no scored row sits
+# inside the training window of the fold whose parameters produced its features.
+
 # %%
 _label_df = pl.read_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")
 label_col = PRIMARY_LABEL
 
-# The endpoint of the label is the LABEL_HORIZON-th next session in the stock's own series,
-# derived on the complete price frame: shifting the screened frame would return the next
-# *eligible* session, which is a later date and depends on eligibility after the decision.
 _label_end = raw_df.select(
     "symbol",
     "timestamp",
     pl.col("timestamp").shift(-LABEL_HORIZON).over("symbol").alias("_label_end"),
 )
 
-# Validation spans of the CV folds only - never the training bars, never the holdout fold.
-_val_frames = [
-    temporal.filter(
-        (pl.col("fold") == f["fold"])
-        & (pl.col("timestamp") >= date.fromisoformat(f["test_start"]))
-        & (pl.col("timestamp") < date.fromisoformat(f["test_end"]))
-    )
-    for f in folds
-    if not f["is_holdout"]
-]
-_val_rows = pl.concat(_val_frames)
-# The validation windows tile the development period without overlapping, so a symbol-date
-# reaches the scored frame from exactly one fold. If they ever overlapped, the IC helper's
-# self-join would multiply the cross-section instead of raising.
+_val_rows = pl.concat(
+    [
+        temporal.filter(
+            (pl.col("fold") == f["fold"])
+            & pl.col("timestamp").is_between(f["test_start"], f["test_end"])
+        )
+        for f in folds
+        if not f["is_holdout"]
+    ]
+)
 assert _val_rows.select("symbol", "timestamp").n_unique() == _val_rows.height, (
     "a symbol-date appears in more than one fold's validation window"
 )
@@ -1474,34 +1720,32 @@ assert _val_rows.select("symbol", "timestamp").n_unique() == _val_rows.height, (
 eval_df = (
     _val_rows.join(_label_df, on=["symbol", "timestamp"], how="inner")
     .join(_label_end, on=["symbol", "timestamp"], how="left")
-    .filter(pl.col("_label_end") < date.fromisoformat(holdout_start))
+    .filter(pl.col("_label_end") < holdout_start)
     .drop("_label_end")
 )
-assert eval_df["timestamp"].max() < date.fromisoformat(holdout_start), (
-    "a scored row resolves inside the holdout"
-)
-_train_spans = [
-    (date.fromisoformat(f["train_start"]), date.fromisoformat(f["train_end"]), f["fold"])
-    for f in folds
-]
-for t0, t1, fold_idx in _train_spans:
+assert eval_df["timestamp"].max() < holdout_start, "a scored row resolves inside the holdout"
+for f in folds:
     _bled = eval_df.filter(
-        (pl.col("fold") == fold_idx) & (pl.col("timestamp") >= t0) & (pl.col("timestamp") < t1)
+        (pl.col("fold") == f["fold"])
+        & pl.col("timestamp").is_between(f["train_start"], f["train_end"])
     )
-    assert _bled.height == 0, f"{_bled.height} scored rows sit inside fold {fold_idx}'s own fit"
+    assert _bled.height == 0, f"{_bled.height} scored rows sit inside fold {f['fold']}'s own fit"
 
-print(f"Scoring {len(temporal_feature_cols)} temporal features against {label_col}")
+print(f"Scoring {len(temporal_feature_cols)} columns against {label_col}")
 print(
-    f"  validation rows {eval_df.height:,} over {eval_df['timestamp'].n_unique():,} dates, "
-    f"through {eval_df['timestamp'].max()}, holdout opens {holdout_start}"
+    f"  {eval_df.height:,} validation rows over {eval_df['timestamp'].n_unique():,} dates, "
+    f"the last resolving before {holdout_start}"
 )
 
-# The minimum cross-section is half the median, as in 02_labels Section G, rather than a
-# fixed count: a rank correlation over a handful of names is mostly noise, and a bare
-# threshold means something different on a panel of a hundred names than on one of a
-# thousand.
+# %% [markdown]
+# The narrowest cross-section a correlation is computed over is half the median date's, rather
+# than a fixed count, for the reason `02_labels` gives: a rank correlation over a handful of
+# names is mostly noise, and a fixed threshold means something different on a panel of a
+# hundred stocks than on one of a thousand. Dates below it contribute no point to the series.
+
+# %%
 _min_obs = int(eval_df.group_by("timestamp").len()["len"].median() // 2)
-print(f"  minimum cross-section {_min_obs:,} stocks")
+print(f"A date is scored when at least {_min_obs:,} stocks are ranked on it")
 
 # %% [markdown]
 # Which columns vary across a cross-section is measured, not declared. A feature whose
@@ -1520,10 +1764,18 @@ _variation = (
 CROSS_SECTIONAL = [c for c in temporal_feature_cols if _variation[c] > 1]
 MARKET_LEVEL = [c for c in temporal_feature_cols if _variation[c] <= 1]
 
-print("distinct values in the median date's cross-section:")
-for c in temporal_feature_cols:
-    kind = "cross-sectional" if _variation[c] > 1 else "market-level, not scored below"
-    print(f"  {c:18s} {int(_variation[c]):>6,}   {kind}")
+display(
+    pl.DataFrame(
+        [
+            {
+                "feature": c,
+                "distinct_values_on_median_date": int(_variation[c]),
+                "scored_below": _variation[c] > 1,
+            }
+            for c in temporal_feature_cols
+        ]
+    )
+)
 assert CROSS_SECTIONAL, "no emitted feature varies across the cross-section"
 
 # %%
@@ -1564,21 +1816,29 @@ temporal_ic = temporal_ic.with_columns(
     pl.Series("significant_fdr05", list(_fdr["rejected"])),
 ).sort(pl.col("ic_mean").abs(), descending=True)
 
+# %% [markdown] tags=["results"]
+# **What each column ranks on its own, over the validation rows.** The count set aside is the
+# market-level columns the statistic cannot reach; of the rest, the first figure is how many
+# clear the 5% level on their own t-statistic and the second how many survive the
+# Benjamini-Hochberg correction for testing several columns at once.
+
+# %%
 print(
-    f"features tested {temporal_ic.height} of {len(temporal_feature_cols)} emitted "
-    f"({len(MARKET_LEVEL)} set aside as market-level), nominally significant "
-    f"{int((temporal_ic['p_value'] < FDR_ALPHA).sum())}, rejected under Benjamini-Hochberg "
-    f"{int(_fdr['n_rejected'])}"
+    f"{temporal_ic.height} of {len(temporal_feature_cols)} columns scored "
+    f"({len(MARKET_LEVEL)} set aside as market-level); "
+    f"{int((temporal_ic['p_value'] < FDR_ALPHA).sum())} significant on their own and "
+    f"{int(_fdr['n_rejected'])} after Benjamini-Hochberg"
 )
-print(temporal_ic.select("feature", "n_dates", "ic_mean", "hac_tstat", "significant_fdr05"))
+display(temporal_ic.select("feature", "n_dates", "ic_mean", "hac_tstat", "significant_fdr05"))
 
 # %% [markdown]
-# The bars are signed, because a feature the panel ranks one way and a feature it ranks the
-# other are different signals and a sorted magnitude hides that. The interval is
-# $\pm2$ HAC standard errors, and colour marks whether Benjamini-Hochberg still rejects the
-# null for that feature. Only the columns that vary across a cross-section appear, and the
-# print above names the ones set aside; the comparison against the stage-03 features is
-# deferred to [`05_evaluation`](05_evaluation.ipynb), which scores both matrices on one frame.
+# The bars are signed, because a column the panel ranks one way and a column it ranks the
+# other are different signals and a sorted magnitude hides that. The whisker is
+# $\pm2$ Newey-West standard errors, and the fill marks whether Benjamini-Hochberg still
+# rejects the null for that column. Only the columns that vary across a cross-section appear,
+# and the table above names the ones set aside; the comparison against the stage-03 features
+# is deferred to [`05_evaluation`](05_evaluation.ipynb), which scores both matrices on one
+# frame.
 
 # %%
 fig, ax = plt.subplots(figsize=FIGSIZE["single_wide"])
@@ -1599,45 +1859,57 @@ ax.set_yticks(_ypos)
 ax.set_yticklabels(_order["feature"].to_list(), fontsize=8)
 ax.set_ylim(-0.6, _order.height - 0.4)
 ax.axvline(0, color=COLORS["neutral"], lw=0.8)
-ax.set_xlabel(f"Mean IC against {label_col}, validation rows")
+ax.set_xlabel(f"Mean information coefficient against {label_col}, validation rows")
 add_message_title(
     ax,
-    "The cross-sectional columns point in both directions, and none is large",
-    subtitle="Mean signed IC with two HAC standard errors. Filled: rejected by BH",
+    "The columns that vary across stocks rank in both directions",
+    subtitle="Mean signed IC with two Newey-West standard errors. Filled: survives BH",
 )
 plt.show()
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
 # 1. **A fitted feature carries its estimation window, so resolve the folds before anything
 #    is fitted.** Every parameter here comes from one fold's training bars, and the assertion
 #    after the fold table is what establishes that rather than the prose around it. A
 #    notebook that resolves its boundaries after the fit has nothing left to check them
 #    against.
-# 2. **Run inference forward, never backward.** `model.fix()` applies training parameters to
+# 2. **Derive the folds from the same frame the consumer derives them from.** A fold id is a
+#    join key between this artifact and every model notebook downstream, and a walk-forward
+#    splitter counts backward from the holdout boundary in rows of whatever frame it is handed
+#    and seals each window by the horizon of the label being predicted. Two frames that differ
+#    by a handful of dates give two sets of windows that carry the same numbers and cover
+#    different spans, and nothing about the join says so. Take the boundaries from the artifact
+#    the consumer takes them from, and the question stops arising.
+# 3. **Count windows in sessions, and get sessions from the exchange calendar.** An archive
+#    carries stray prints on dates no market was held. A rolling average, a difference
+#    convolution and a variance recursion all read their input in order and treat consecutive
+#    elements as consecutive sessions, so a stray row silently widens every window that spans
+#    it. Screening on the calendar first is what makes "twenty-one sessions" mean that.
+# 4. **Run inference forward, never backward.** `model.fix()` applies training parameters to
 #    later returns without re-estimating them, so a row's conditional volatility is built
 #    from returns up to that row. The smoothed alternative - refitting or running a smoother
 #    over the whole span - conditions every value on the end of the series, and it fails
 #    silently because the output looks the same.
-# 3. **Emit the holdout fold, and say why that is allowed.** These transforms read prices and
+# 5. **Emit the holdout fold, and say why that is allowed.** These transforms read prices and
 #    never labels, so a pre-holdout fit may produce filtered values *for* holdout dates and
 #    the model stages need them. What is forbidden is a fit that reads a holdout bar.
-# 4. **Measure the trade a default encodes.** The differencing order is not searched per fold
+# 6. **Measure the trade a default encodes.** The differencing order is not searched per fold
 #    and does not have to be, but the memory it keeps and the stationarity it buys are
 #    measurable in a few lines and were worth measuring rather than quoting.
-# 5. **Score on validation rows, in time order, and call the result what it is.** Training
+# 7. **Score on validation rows, in time order, and call the result what it is.** Training
 #    rows measure the fit rather than the feature; a per-date IC series in partition order
 #    gives a Newey-West standard error computed over a permutation of time; the multiplicity
 #    correction is a separate quantity from the autocorrelation one; and a per-feature IC is
 #    marginal, so it cannot answer the incremental question however many corrections it
 #    carries.
-# 6. **Check that the statistic can reach the feature before reporting it.** Most of what a
-#    market-level transform emits is constant within a date, and a cross-sectional
-#    correlation against a constant is undefined rather than zero. The helper will still
-#    return a number - here it returned the same number for every one of them - so the
-#    classification is measured from the data and the columns it cannot reach are named and
-#    set aside instead of ranked.
+# 8. **Check that the statistic can reach the column before reporting it.** Most of what a
+#    market-level transform emits is constant within a date, and a rank correlation across a
+#    cross-section of identical values is undefined rather than zero. A correlation helper
+#    handed such a column still returns a number, decided by how it breaks the ties, so which
+#    columns to score is measured from the data rather than taken from a list, and the ones it
+#    cannot reach are named and set aside instead of ranked.
 #
 # ### Known limitations
 #
