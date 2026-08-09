@@ -714,7 +714,13 @@ linear_fold = collect_fold_ic_per_cs(linear_rank1)
 
 
 # %%
-delta_primary = (
+# `select_rank1` makes a family's own candidates comparable - same folds, same
+# number of days - but it does that within a family. Two families can each be
+# internally comparable and still be scored over different windows, which is what
+# the day counts printed below reveal. Subtracting across such a pair attributes
+# a window difference to the model family, so those pairs are dropped rather than
+# shown with a caveat.
+delta_all = (
     gbm_rank1.select(
         "case_study",
         "short_name",
@@ -735,39 +741,67 @@ delta_primary = (
     .with_columns(delta=pl.col("gbm_ic") - pl.col("linear_ic"))
     .sort("delta", descending=True)
 )
-print("Descriptive GBM minus Linear daily-IC delta at matched full coverage:")
-delta_primary.select(
-    "short_name",
-    pl.col("gbm_ic").round(4),
-    pl.col("linear_ic").round(4),
-    pl.col("delta").round(4),
-    "gbm_days",
-    "linear_days",
-)
+delta_excluded = delta_all.filter(pl.col("gbm_days") != pl.col("linear_days"))
+delta_primary = delta_all.filter(pl.col("gbm_days") == pl.col("linear_days"))
+
+if not delta_excluded.is_empty():
+    display(
+        Markdown(
+            f"**Excluded for unequal coverage:** {delta_excluded.height} of "
+            f"{delta_all.height} case studies have a GBM and a Linear winner scored "
+            "over a different number of days. Their difference would mix a window "
+            "effect into a family effect, so they are left out of the chart below."
+        )
+    )
+    display(delta_excluded.select("short_name", "gbm_days", "linear_days"))
+
+if delta_primary.is_empty():
+    display(
+        Markdown(
+            "**No comparison survives.** No case study has a GBM and a Linear "
+            "winner scored over the same number of days, so there is no matched "
+            "primary-label delta to report."
+        )
+    )
+else:
+    print("Descriptive GBM minus Linear daily-IC delta at matched full coverage:")
+    display(
+        delta_primary.select(
+            "short_name",
+            pl.col("gbm_ic").round(4),
+            pl.col("linear_ic").round(4),
+            pl.col("delta").round(4),
+            "gbm_days",
+            "linear_days",
+        )
+    )
 
 # %%
-fig, ax = plt.subplots(figsize=(9, 4.5))
-y = np.arange(delta_primary.height)
-delta = delta_primary["delta"].to_numpy()
-colors = [COLORS["blue"] if value >= 0 else COLORS["amber"] for value in delta]
-ax.barh(y, delta, color=colors, alpha=0.9)
-ax.axvline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
-ax.set_yticks(y)
-ax.set_yticklabels(delta_primary["short_name"].to_list())
-ax.invert_yaxis()
-ax.set_xlabel("Average daily IC point-estimate delta (GBM - Linear)")
-ax.set_title("Full-coverage GBM minus Linear at the primary label")
-fig.tight_layout()
-fig.show()
+if not delta_primary.is_empty():
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    y = np.arange(delta_primary.height)
+    delta = delta_primary["delta"].to_numpy()
+    colors = [COLORS["blue"] if value >= 0 else COLORS["amber"] for value in delta]
+    ax.barh(y, delta, color=colors, alpha=0.9)
+    ax.axvline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
+    ax.set_yticks(y)
+    ax.set_yticklabels(delta_primary["short_name"].to_list())
+    ax.invert_yaxis()
+    ax.set_xlabel("Average daily IC point-estimate delta (GBM - Linear)")
+    ax.set_title("Matched-coverage GBM minus Linear at the primary label")
+    fig.tight_layout()
+    fig.show()
 
 # %%
 n_positive = delta_primary.filter(pl.col("delta") > 0).height
 display(
     Markdown(
-        f"**Computed comparison.** GBM has the higher full-coverage daily-IC point estimate "
-        f"in {n_positive} of {delta_primary.height} case studies. This chart is descriptive: "
-        "the two model families have separate daily-series HAC intervals, so no paired-fold "
-        "confidence claim is attached to their difference."
+        f"**Computed comparison.** GBM has the higher daily-IC point estimate in "
+        f"{n_positive} of the {delta_primary.height} case studies whose two winners were "
+        f"scored over the same number of days, out of {delta_all.height} with a winner in "
+        "both families. This chart is descriptive: the two model families have separate "
+        "daily-series HAC intervals, so no paired-fold confidence claim is attached to "
+        "their difference."
     )
 )
 
@@ -810,8 +844,10 @@ def regression_labels(cs: str, family: str) -> list[str]:
 
 
 # %% [markdown]
-# Both families now pass through the same complete-coverage selector before
-# their point estimates are joined.
+# Both families pass through the same complete-coverage selector, which makes
+# each family's winner comparable against its own alternatives. It does not make
+# the two winners comparable to each other, so the join below keeps only the
+# cells where both were scored over the same number of days.
 
 # %%
 gbm_horizon = collect_multi_label_per_cs(
@@ -836,18 +872,20 @@ lin_horizon = collect_multi_label_per_cs(
 # Matched case-study and label rows form the descriptive family-difference panel.
 
 # %%
-facet_df = (
+facet_all = (
     gbm_horizon.select(
         "case_study",
         "short_name",
         "label",
         pl.col("ic_mean_daily").alias("gbm_ic"),
+        pl.col("ic_n_days").alias("gbm_days"),
     )
     .join(
         lin_horizon.select(
             "case_study",
             "label",
             pl.col("ic_mean_daily").alias("lin_ic"),
+            pl.col("ic_n_days").alias("lin_days"),
         ),
         on=["case_study", "label"],
         how="inner",
@@ -855,14 +893,41 @@ facet_df = (
     .with_columns(delta=pl.col("gbm_ic") - pl.col("lin_ic"))
     .sort(["short_name", "label"])
 )
-print(f"GBM-minus-Linear deltas across {facet_df.height} (CS, label) cells:")
-facet_df.select(
-    "short_name",
-    "label",
-    pl.col("gbm_ic").round(4).alias("gbm"),
-    pl.col("lin_ic").round(4).alias("lin"),
-    pl.col("delta").round(4).alias("delta"),
-)
+# Same cross-family coverage rule as 5a: each family's winner is comparable
+# within its own family, which does not make the two comparable to each other.
+facet_excluded = facet_all.filter(pl.col("gbm_days") != pl.col("lin_days"))
+facet_df = facet_all.filter(pl.col("gbm_days") == pl.col("lin_days"))
+
+if not facet_excluded.is_empty():
+    display(
+        Markdown(
+            f"**Excluded for unequal coverage:** {facet_excluded.height} of "
+            f"{facet_all.height} (case study, label) cells pair winners scored over a "
+            "different number of days."
+        )
+    )
+    display(facet_excluded.select("short_name", "label", "gbm_days", "lin_days"))
+
+if facet_df.is_empty():
+    display(
+        Markdown(
+            "**No comparison survives.** No (case study, label) cell pairs a GBM and a "
+            "Linear winner scored over the same number of days."
+        )
+    )
+else:
+    print(f"GBM-minus-Linear deltas across {facet_df.height} matched-coverage (CS, label) cells:")
+    display(
+        facet_df.select(
+            "short_name",
+            "label",
+            pl.col("gbm_ic").round(4).alias("gbm"),
+            pl.col("lin_ic").round(4).alias("lin"),
+            pl.col("delta").round(4).alias("delta"),
+            "gbm_days",
+            "lin_days",
+        )
+    )
 
 # %%
 if not facet_df.is_empty():
