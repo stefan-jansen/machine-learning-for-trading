@@ -52,11 +52,17 @@ def render(notebook: Path, out_dir: Path, name: str | None) -> Path:
 
 
 def report_alt_coverage(html: str) -> tuple[int, int]:
-    """Return (images carrying a description, images carrying the placeholder)."""
+    """Return (images carrying a description, images carrying none).
+
+    An empty or whitespace-only ``alt`` counts as none. It reaches the page exactly as
+    the placeholder does - a screen reader announces an unlabelled image either way -
+    so counting it would let this report call the coverage complete while the figure
+    is undescribed.
+    """
     from bs4 import BeautifulSoup
 
     images = BeautifulSoup(html, features="html.parser").select("img")
-    missing = sum(1 for img in images if img.attrs.get("alt", PLACEHOLDER) == PLACEHOLDER)
+    missing = sum(1 for img in images if img.attrs.get("alt", "").strip() in ("", PLACEHOLDER))
     return len(images) - missing, missing
 
 
