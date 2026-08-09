@@ -356,8 +356,8 @@ show_with_alt(
 # `03_financial_features` assigns, extended here to cover the model-based features, which
 # are named after their transform rather than their input. The groups matter twice over:
 # they are how Section G reads the redundancy, and they are why a count of candidates
-# overstates how many separate ideas are being tested. Six horizons of one return are six
-# columns and one idea.
+# overstates how many separate ideas are being tested. Several horizons of one return are
+# several columns and one idea.
 
 
 # %%
@@ -670,12 +670,13 @@ show_with_alt(
 # by one that held in three years and not the rest, and those call for different decisions.
 # Scoring each walk-forward fold separately separates them.
 #
-# The summary is the median across folds, the spread between the quartiles, the worst fold,
-# and how often the fold agrees with the feature's own direction. That last one has to be
-# measured against the feature's own sign: a feature that ranks stocks the wrong way round
-# is as useful as one that ranks them the right way, because the strategy can sort in
-# either direction, and counting positive folds would score a perfectly steady inverse
-# predictor at zero.
+# The summary is the median across folds, the spread between the quartiles, the highest and
+# lowest fold, and how often a fold agrees with the feature's own direction. That last one
+# has to be measured against the feature's own sign: a feature that ranks stocks the wrong
+# way round is as useful as one that ranks them the right way, because the strategy can
+# sort in either direction, and counting positive folds would score a perfectly steady
+# inverse predictor at zero. For the same reason the fold worth looking at is the one
+# furthest against that direction, which for a negative predictor is its highest.
 #
 # A fold counts towards that only where the feature was actually present across it, held to
 # the same coverage bar Section B applies to the panel. A feature that exists for a tenth of
@@ -1326,8 +1327,8 @@ print(f"families; {len(pairs)} screened pairs correlate above {REDUNDANCY_CUT:.2
 #
 # 7. **A count of candidates is not a count of tests.** A feature and its within-session
 #    rank produce the same information coefficient to the last digit, and the multiplicity
-#    correction is told they are two independent tests. Measure the duplication before
-#    reading the corrected p-values, not after.
+#    correction is told they are two independent tests. Read the corrected p-values
+#    against the duplication the redundancy section measures, not on their own.
 #
 # **Known limitations.** Sixteen folds of one year each is a fine grid for stability and a
 # coarse one for regimes: a feature that works in expansions and not in contractions shows
