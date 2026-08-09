@@ -113,6 +113,10 @@ CONFIGURED_LABELS = [PRIMARY_LABEL, *SETUP["labels"].get("variants", [])]
 CALENDAR = EVAL_CFG["calendar"]
 HOLDOUT_START = pd.Timestamp(EVAL_CFG["holdout_start"])
 HOLDOUT_END = pd.Timestamp(EVAL_CFG["holdout_end"])
+# The config states the holdout's last date; parsed as a timestamp it is that date at midnight,
+# which is before every intraday bar of the session it names. Anything comparing a bar against the
+# end of the holdout uses the exclusive bound instead.
+HOLDOUT_END_EXCLUSIVE = HOLDOUT_END + pd.Timedelta(days=1)
 
 # The bar is one minute, so a horizon written as a duration converts to a bar count exactly.
 BAR = pd.Timedelta(minutes=1)
@@ -512,7 +516,7 @@ spans += [
         min(w[0] for w in fold_window.values()),
         HOLDOUT_START,
     ),
-    (f"Fold {N_FOLDS}", "Holdout bars", HOLDOUT_START, HOLDOUT_END),
+    (f"Fold {N_FOLDS}", "Holdout bars", HOLDOUT_START, HOLDOUT_END_EXCLUSIVE),
 ]
 span_colors = {
     "Training bars": COLORS["blue"],
@@ -538,7 +542,7 @@ for row, kind, start, end in spans:
 
 fig.add_vrect(
     x0=HOLDOUT_START.isoformat(),
-    x1=HOLDOUT_END.isoformat(),
+    x1=HOLDOUT_END_EXCLUSIVE.isoformat(),
     fillcolor=COLORS["recede"],
     opacity=0.12,
     line_width=0,
@@ -1062,7 +1066,14 @@ def compute_depth2_signature(path: np.ndarray) -> np.ndarray:
     """The depth-2 truncated signature of a path of shape ``(T, d)``.
 
     Returns ``d`` net displacements followed by the ``d * d`` iterated integrals
-    ``S^{i,j} = sum_{s<t} dX^i_s dX^j_t``, flattened row-major.
+    ``S^{i,j} = int int_{s<t} dX^i_s dX^j_t``, flattened row-major.
+
+    The path is piecewise linear between samples, so a pair of increments contributes to
+    ``S^{i,j}`` in two ways: whole earlier segments, ``dX^i_s dX^j_t`` for ``s < t``, and the
+    half of each segment that lies below its own diagonal, ``0.5 dX^i_t dX^j_t``. Dropping the
+    second is the difference between the signature and a strictly-lagged double sum, and it is
+    visible in the diagonal: the identity below fails without it, and ``S^{i,i}`` goes negative
+    whenever the increments partly cancel.
     """
     T, d = path.shape
     increments = np.diff(path, axis=0)
@@ -1072,10 +1083,31 @@ def compute_depth2_signature(path: np.ndarray) -> np.ndarray:
     sig2 = np.zeros((d, d))
     cumsum = np.zeros(d)
     for t in range(len(increments)):
-        sig2 += np.outer(cumsum, increments[t])
+        sig2 += np.outer(cumsum, increments[t]) + 0.5 * np.outer(increments[t], increments[t])
         cumsum += increments[t]
 
     return np.concatenate([sig1, sig2.ravel()])
+
+
+# %% [markdown]
+# Two identities hold for the depth-2 signature of any path, whatever the path is, so they are
+# what says the implementation computes a signature rather than something that resembles one.
+# The diagonal is fixed by the net displacement alone, $S^{i,i} = \frac{1}{2}(\Delta X^i)^2$,
+# which also makes it non-negative; and the shuffle relation
+# $S^{i,j} + S^{j,i} = \Delta X^i \Delta X^j$ says the symmetric part carries no information
+# beyond depth one, which is why the *antisymmetric* part is the feature worth reading.
+
+# %%
+_rng = np.random.default_rng(0)
+for _trial in range(20):
+    _p = np.cumsum(_rng.standard_normal((30, 3)), axis=0)
+    _sig = compute_depth2_signature(_p)
+    _s1, _s2 = _sig[:3], _sig[3:].reshape(3, 3)
+    assert np.allclose(np.diag(_s2), 0.5 * _s1**2), (
+        "depth-2 diagonal is not half the squared net move"
+    )
+    assert np.allclose(_s2 + _s2.T, np.outer(_s1, _s1)), "depth-2 shuffle identity fails"
+print("Depth-2 signature identities hold on 20 random 3-dimensional paths.")
 
 
 # %%
@@ -1426,8 +1458,11 @@ for fold, (start, end) in sorted(fold_window.items()):
 
 earliest_train_start = min(w[0] for w in fold_window.values())
 holdout_df = temporal_clean.filter(
-    (pl.col("timestamp") >= earliest_train_start) & (pl.col("timestamp") <= HOLDOUT_END)
+    (pl.col("timestamp") >= earliest_train_start) & (pl.col("timestamp") < HOLDOUT_END_EXCLUSIVE)
 ).with_columns(pl.lit(N_FOLDS, dtype=pl.Int32).alias("fold"))
+assert holdout_df.filter(pl.col("timestamp").dt.date() == HOLDOUT_END.date()).height > 0, (
+    f"the holdout fold does not reach {HOLDOUT_END.date()}, the last date it is configured to cover"
+)
 fold_frames.append(holdout_df)
 print(f"  Fold {N_FOLDS} (holdout): {holdout_df.height:,} rows")
 
