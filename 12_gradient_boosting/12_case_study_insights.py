@@ -60,6 +60,7 @@ import torch  # noqa: F401
 from IPython.display import Markdown, display
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.lines import Line2D
+from scipy.stats import rankdata
 from sklearn.metrics import roc_auc_score
 
 # %%
@@ -1340,9 +1341,15 @@ def _feature_ranks(
     gbm_imp = dict(
         gbm_imp_df.group_by("feature").agg(pl.col("importance").mean().alias("imp")).iter_rows()
     )
-    common = set(gbm_imp) & set(ridge_imp)
-    gbm_order = sorted(common, key=gbm_imp.get, reverse=True)
-    ridge_order = sorted(common, key=ridge_imp.get, reverse=True)
+    # Ties are broken by feature name, not by set iteration order. Gain
+    # importances tie readily - every feature the booster never split on scores
+    # zero - and `sorted` is stable, so ranking a set left the tied block in
+    # whatever order that set happened to iterate. Python randomizes string
+    # hashing per process, so the same registries produced different ranks from
+    # one run to the next.
+    common = sorted(set(gbm_imp) & set(ridge_imp))
+    gbm_order = sorted(common, key=lambda feature: (-gbm_imp[feature], feature))
+    ridge_order = sorted(common, key=lambda feature: (-ridge_imp[feature], feature))
     return (
         {feature: rank for rank, feature in enumerate(gbm_order, 1)},
         {feature: rank for rank, feature in enumerate(ridge_order, 1)},
@@ -1466,8 +1473,14 @@ if rank_shift_summary:
 
 # %%
 def pairwise_rank_correlation(fold_arrays: list[np.ndarray]) -> tuple[float, float] | None:
-    """Return mean and minimum pairwise feature-rank correlation."""
-    ranks = [np.argsort(np.argsort(-values)) for values in fold_arrays]
+    """Return mean and minimum pairwise feature-rank correlation.
+
+    Ranks are tie-aware. A double ``argsort`` assigns distinct ordinals to equal
+    importances and breaks those ties by array position, which both overstates
+    the correlation between folds that agree only up to a tie and makes the
+    result depend on row order. Spearman is defined on average ranks.
+    """
+    ranks = [rankdata(-values, method="average") for values in fold_arrays]
     pairs = [
         np.corrcoef(ranks[i], ranks[j])[0, 1]
         for i in range(len(ranks))
@@ -1500,7 +1513,7 @@ def feature_rank_stability(cs: str) -> dict | None:
     top_features = (
         gbm_imp_df.group_by("feature")
         .agg(pl.col("importance").mean().alias("mean_imp"))
-        .sort("mean_imp", descending=True)
+        .sort(["mean_imp", "feature"], descending=[True, False])
         .head(10)["feature"]
         .to_list()
     )
