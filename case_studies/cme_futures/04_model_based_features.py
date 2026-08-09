@@ -190,9 +190,8 @@ print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 # product-sessions it contributes. Two things to read off it.
 #
 # The panel starts together. Every sector's two date columns hold the same session, with
-# one exception, and that exception is why the equity-index row contributes the fewest
-# sessions of any sector despite having four products. Comparing the two date columns is
-# how to find it.
+# one exception, and that exception is why the equity-index row contributes fewer sessions
+# than any other four-product sector. Comparing the two date columns is how to find it.
 #
 # The rest of the spread in the session counts is holiday calendars. These sectors do not
 # close on the same days, so per product the agricultural and livestock contracts quote
@@ -245,12 +244,19 @@ universe_table
 # on such a feature reports a performance the same strategy could never have earned, and
 # the gap only appears when someone tries to trade it.
 #
-# The discipline that removes it has two halves, and both are enforced below.
+# The rule that removes it is one sentence: **no parameter behind the value for a session
+# may have seen that session or any later one.** It has two halves, and both are enforced
+# below.
 #
-# **Estimate the parameters on training sessions only.** The history is cut into periods;
-# in each one, the model sees the training sessions and only those. Section B draws the
-# cuts and section C asserts, per model, that the last session behind every estimated
-# parameter falls inside its own training window.
+# **Bound where the parameters come from.** There are two honest ways to do that, and this
+# notebook uses both, because they suit different models. One is to estimate once per
+# period on that period's training sessions and then hold the parameters fixed while the
+# model is applied forward - what the hidden Markov model in C.3 does, and what section
+# C.3 asserts by comparing the last session behind every estimate against its own training
+# end. The other is to re-estimate continuously, each time on the sessions before the one
+# being predicted - what ARIMA in C.1 does, so its weights keep updating across the
+# evaluation window and are never fitted on the session they forecast. Both are causal.
+# What neither may do is fit on the session it is about to speak for.
 #
 # **Run the fitted model forward, never backward.** Even a model estimated on training
 # data can look ahead when it is *applied*. A hidden Markov model can be asked two
@@ -329,8 +335,8 @@ print(
 print(f"{len(splits)} walk-forward periods, most recent first:")
 for s in splits:
     print(
-        f"  Period {s['fold']}: estimate on {s['train_start']} → {s['train_end']}, "
-        f"evaluate on {s['val_start']} → {s['val_end']}"
+        f"  Period {s['fold']}: train {s['train_start']} → {s['train_end']}, "
+        f"evaluate {s['val_start']} → {s['val_end']}"
     )
 print(
     f"The holdout opens {HOLDOUT_START}. Section F scores no decision after "
@@ -338,11 +344,17 @@ print(
 )
 
 # %% [markdown]
-# The figure draws what the saved file will contain: for each period, the window every
-# model's parameters are estimated on, the window they are then applied to, and the
-# holdout. It is the one picture in which the hazard section A describes would be
-# visible - an estimation bar reaching to the right of the window it is applied to, or
-# any bar crossing into the shaded region.
+# The figure draws what the saved file will contain: for each period, its training
+# window, the evaluation window that follows, and the holdout.
+#
+# Read it with section A's rule in hand. The training window is where the hidden Markov
+# model's parameters come from, all of them, which is why C.3 can check its estimates
+# against the right-hand edge of that bar. ARIMA's weights are not confined to it - they
+# keep updating across the evaluation window too - so what bounds ARIMA is not this
+# picture but the direction it walks, which C.1 sets out. What the figure does show for
+# both is the gap between the two bars, sized to the label horizon so that no training
+# session's outcome reaches into the window the model is scored on, and that no bar
+# crosses into the shaded region at all.
 #
 # Every bar stops short of the holdout, because this notebook writes features for the
 # walk-forward periods only. A later stage that needs the models fitted through to the
@@ -359,15 +371,15 @@ print(
 # %%
 fig = go.Figure()
 _span_style = {
-    "Parameters estimated here": COLORS["blue"],
-    "Applied out of sample here": COLORS["amber"],
+    "Training window": COLORS["blue"],
+    "Evaluation window": COLORS["amber"],
 }
 _seen: set[str] = set()
 for split in splits:
     row = f"Period {split['fold']}"
     for kind, (start, end) in (
-        ("Parameters estimated here", (split["train_start"], split["train_end"])),
-        ("Applied out of sample here", (split["val_start"], split["val_end"])),
+        ("Training window", (split["train_start"], split["train_end"])),
+        ("Evaluation window", (split["val_start"], split["val_end"])),
     ):
         fig.add_trace(
             go.Scatter(
@@ -395,9 +407,9 @@ fig.add_vline(
 )
 fig.update_layout(
     title=(
-        "No period's parameters come from the right of its own estimation bar"
-        "<br><sup>The dashed rule is where the holdout opens; the shaded region is "
-        "held out.</sup>"
+        "Each period trains, waits out the label horizon, then evaluates"
+        "<br><sup>The gap between the bars is the purge. The dashed rule is where the "
+        "holdout opens; the shaded region is held out.</sup>"
     ),
     xaxis_title="Session",
     yaxis_title="",
@@ -498,8 +510,8 @@ print(f"Carry data: {len(carry):,} product-dates")
 #
 # ## C. The three models
 #
-# Each subsection below states what the model infers, how its parameters are kept to
-# training sessions, and ends with an assertion that runs - not a comment claiming the
+# Each subsection below states what the model infers, where its parameters are allowed to
+# come from, and ends with an assertion that runs - not a comment claiming the
 # window held, but a check that fails the notebook if it did not.
 #
 # ### C.1 ARIMA: what carry does next
@@ -677,10 +689,18 @@ else:
     print("No ARIMA results generated")
 
 # %% [markdown]
-# **Check the ARIMA window held.** The next cell asserts against the emitted rows what
-# the design above intends, rather than asserting it in prose: every row a period
-# contributes is dated inside that period's own start-to-end span, and no period reaches
-# the holdout.
+# **Check what the emitted rows are dated.** The next cell asserts that every row a
+# period contributes falls inside that period's own span and that no period reaches the
+# holdout.
+#
+# Be clear about what that does and does not establish. It bounds the dates ARIMA speaks
+# for; it does not bound where its weights came from, and no assertion over the output
+# frame could, because the weights are not in the frame. What bounds them is the shape of
+# the call: the walk only ever fits on the prefix ending at the session before the one it
+# forecasts, so a weight fitted on a session it then predicts cannot arise. That is a
+# property of `cross_validation` with `h=1`, not something this notebook re-checks - the
+# hidden Markov model in C.3, whose parameters are fixed per period and therefore *are*
+# checkable against a date, is where an assertion of that kind belongs and where one runs.
 #
 # It then measures what the shared walk length costs. The walk is as long as the shortest
 # series allows, so a product with more history in this period than that one loses the
@@ -737,7 +757,7 @@ if len(arima_pl) > 0:
 # series' movement each wave accounts for. That amount is conventionally called the
 # **power** at that wave's length.
 #
-# Four numbers per product per session come out of the transform of the previous
+# Five numbers per product per session come out of the transform of the previous
 # `FFT_WINDOW` sessions:
 #
 # - `fft_dominant_period` - the length, in sessions, of the wave with the most power.
@@ -1859,9 +1879,9 @@ def _compute_temporal_ic_stats(eval_df, feature_cols, label_col):
 
 
 # %% [markdown]
-# Every feature is screened against the same return on the same rows, so testing each one
-# at the usual threshold and reporting whichever passes gives as many chances at a false
-# positive as there are features. **Benjamini-Hochberg** corrects for that: it raises the
+# The features the screen can measure are all screened against the same return over the
+# same evaluation windows, so testing each one at the usual threshold and reporting
+# whichever passes gives as many chances at a false positive as there are features tested. **Benjamini-Hochberg** corrects for that: it raises the
 # bar each feature has to clear according to how many were tested, so that `FDR_ALPHA` is
 # the share of false positives among the features *declared* significant rather than the
 # share among all the tests run.
@@ -1935,9 +1955,9 @@ ic_table
 #
 # Average IC per feature, sorted, with the bars that clear the corrected threshold filled
 # and the rest drawn hollow. Read the filled-or-hollow distinction rather than the
-# t-statistic beside it: every one of these features was screened against the same return
-# on the same rows, so a large t-statistic on one of nine is not on its own evidence
-# about that one.
+# t-statistic beside it: all of these features were screened against the same return over
+# the same evaluation windows, so a large t-statistic on any one of them is not on its own
+# evidence about that one.
 #
 # The two regime features are absent from the chart. They take the same value for every
 # product on a given session, so ranking products by them produces no ranking at all and
@@ -2029,18 +2049,23 @@ else:
 #
 # 1. **A feature whose value comes out of an estimated model carries the estimation
 #    window in its information set.** That is the difference between this stage and the
-#    last one, and it is why every model here is estimated inside a period on training
-#    sessions alone. The hazard does not show up as an error or as an implausible number;
-#    it shows up as a feature that works in research and not afterwards.
-# 2. **Estimating on training rows is only half of it. The model also has to be applied
-#    forward.** The library call that answers "which state was the market in" conditions
+#    last one, and the rule it implies is that no parameter behind a session's value may
+#    have seen that session or a later one. The hazard does not show up as an error or as
+#    an implausible number; it shows up as a feature that works in research and not
+#    afterwards.
+# 2. **Bounding where the parameters came from is only half of it. The model also has to
+#    be applied forward.** The library call that answers "which state was the market in" conditions
 #    on the whole series by default, and its answer for a past session changes when later
 #    data arrives. Ask for the forward answer, and check it by deleting later
 #    observations and confirming the earlier values do not move - which is what section
 #    C.3 does rather than asserting.
-# 3. **Assert the window in code, not in a comment.** Each of the three models ends with
-#    a check that fails the notebook if its window did not hold. Prose describing a
-#    discipline is not evidence the discipline held; a comment cannot fail.
+# 3. **There is more than one honest way to bound the parameters, and they need different
+#    evidence.** Estimating once per period and holding the parameters fixed is checkable
+#    against a date, so C.3 checks it. Re-estimating as the walk proceeds, always on the
+#    sessions before the one being predicted, is equally causal but leaves no date to
+#    check - it is guaranteed by how the call is constructed instead, so C.1 says so
+#    rather than asserting something weaker and calling it proof. Decide which of the two
+#    a model is doing before deciding what would count as evidence for it.
 # 4. **Distinguish a model that estimates from one that only transforms.** ARIMA and the
 #    hidden Markov model estimate parameters and so are confined to a period. The Fourier
 #    transform estimates nothing, so it runs over the full history and its values on
@@ -2048,8 +2073,8 @@ else:
 #    kinds are visibly different rather than assumed alike.
 # 5. **Correct twice before reading a t-statistic, and report what the correction did.**
 #    Consecutive decisions share most of their outcome window, so the uncorrected
-#    standard error is too small; and testing nine features at once gives nine chances at
-#    a false positive. Neither correction is a single fixed number - the lag the first one
+#    standard error is too small; and testing a family of features at once gives as many
+#    chances at a false positive as there are members. Neither correction is a single fixed number - the lag the first one
 #    uses is chosen from the data, so section F prints it per feature rather than letting
 #    the reader assume it equals the horizon.
 # 6. **Record what the features were, not just what they were called.** The fingerprint
