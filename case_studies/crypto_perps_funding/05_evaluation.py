@@ -660,12 +660,20 @@ show_with_alt(
 # the diagnostic asks the same question as the score it accompanies: given what is on the screen
 # right now, does the top group beat the bottom one?
 #
-# A settlement offering fewer distinct values than there are groups cannot be split five ways, and
-# is left out. This matters more than it sounds: a feature that takes only two values, such as the
-# fee tier, would otherwise be split into five groups anyway, with the boundaries inside each tier
-# falling wherever the rows happened to be ordered. The result would be a shape the reader could
-# read and the data does not contain, so such a feature gets no profile and no `monotonicity`
-# value rather than a fabricated one.
+# Two kinds of settlement are left out, and for the profile to mean what the score means it has to
+# be the same two. The first is a settlement below the minimum cross-section, exactly as in
+# section 4, so the profile and the score are built on one set of settlements rather than two that
+# nearly agree. The second is a settlement offering fewer distinct values than there are groups,
+# which cannot be split five ways at all. A feature taking only two values, such as the fee tier,
+# is in that position at every settlement: most of its group boundaries land inside a tie, where
+# the split reports the order the rows happen to sit in and not the feature. Such a feature gets
+# no profile and no `monotonicity` value.
+#
+# Within a group the returns are averaged over every contract-settlement in it, which is the
+# convention the ledger's `monotonicity` column carries across all nine case studies. A settlement
+# quoting nineteen contracts therefore counts for more than one quoting ten, where the score
+# weights every settlement alike. The two answer the same question on the same sample and weight
+# it differently, and the group profile is read as a shape rather than as a return.
 #
 # Both the average and the median of each group are drawn. The average is what a book holding
 # every contract in the group earns; the median is where the typical contract ends up. Eight-hour
@@ -685,7 +693,10 @@ FEATURES_SHAPED = 6
 def quantile_profile(feature: str) -> tuple[pl.DataFrame, int, int]:
     """Average and median label by within-settlement group, and the settlements used."""
     valid = eval_panel.select("timestamp", feature, mds.label_col).drop_nulls()
-    splittable = valid.filter(pl.col(feature).n_unique().over("timestamp") >= N_QUANTILES)
+    splittable = valid.filter(
+        (pl.len().over("timestamp") >= MIN_CROSS_SECTION)
+        & (pl.col(feature).n_unique().over("timestamp") >= N_QUANTILES)
+    )
     ranked = splittable.with_columns(
         (
             (pl.col(feature).rank(method="ordinal").over("timestamp") - 1)
