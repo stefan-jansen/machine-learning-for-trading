@@ -36,6 +36,7 @@ import notebook_provenance  # noqa: E402
 from notebook_provenance import (  # noqa: E402
     check_all,
     contradicts_injected_cell,
+    destamped,
     injected_parameters,
     production_parameters,
     stamp_notebook,
@@ -253,4 +254,19 @@ def test_stamped_notebooks_are_current_and_production() -> None:
             if contradicted
             else ""
         )
+    )
+
+
+def test_no_notebook_loses_a_provenance_stamp_it_already_had() -> None:
+    """The hole in "unstamped notebooks are not failed here".
+
+    Not failing an unstamped notebook is deliberate, and it means dropping a stamp
+    switches this gate off for that file rather than failing it - a gate that passes
+    because its subject is absent, which is the shape the September sign-offs had.
+    fx_pairs lost its stamp twice during stage 03 before anything said so. Stamps are
+    only ever added, so a notebook stamped at HEAD and unstamped now is a regression.
+    """
+    lost = destamped()
+    assert not lost, "these notebooks had a provenance stamp at HEAD and do not now:\n    " + (
+        "\n    ".join(lost)
     )
