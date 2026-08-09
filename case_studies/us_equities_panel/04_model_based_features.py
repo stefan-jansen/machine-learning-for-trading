@@ -1541,9 +1541,13 @@ print(
 # a count stopping at the boundary would not report it.
 #
 # `mean` and `std` summarize the values a feature takes, and on holdout dates those are values
-# this stage may not read. Both are therefore taken over the cross-validation folds alone. The
-# same restriction stops each development date being counted twice, because the holdout fold
-# re-emits the whole development sample under its own single fit.
+# this stage may not read. Both are therefore taken over the cross-validation folds alone.
+#
+# What they summarize is fold-specific values rather than dates. The folds' training windows
+# overlap, so a symbol-date carries one value for every fold whose span covers it and enters
+# the average that many times. Dropping the holdout fold removes every holdout-dated row, and
+# with it one further copy of the development sample - the copy that fold produced from a
+# single fit over the whole of it rather than from a fit per fold.
 
 # %%
 _development = temporal.filter(pl.col("fold").is_in(_cv_folds))
