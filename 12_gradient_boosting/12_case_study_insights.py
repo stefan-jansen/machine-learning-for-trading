@@ -1622,16 +1622,19 @@ three_way = (
     .sort("gbm_ic", descending=True)
 )
 
-coverage_masked = three_way.filter(
-    ((pl.col("lin_days") != pl.col("gbm_days")) & pl.col("lin_days").is_not_null())
-    | ((pl.col("tabm_days") != pl.col("gbm_days")) & pl.col("tabm_days").is_not_null())
-)
+_lin_mismatch = pl.col("lin_days").is_not_null() & (pl.col("lin_days") != pl.col("gbm_days"))
+_tabm_mismatch = pl.col("tabm_days").is_not_null() & (pl.col("tabm_days") != pl.col("gbm_days"))
+coverage_masked = three_way.filter(_lin_mismatch | _tabm_mismatch)
+# Counted per family cell, not per row: one case study can mismatch on both
+# Linear and TabM, and a row count would report that as one.
+n_masked_cells = three_way.select((_lin_mismatch.sum() + _tabm_mismatch.sum()).alias("n")).item()
 if not coverage_masked.is_empty():
     display(
         Markdown(
-            f"**Masked for unequal coverage:** {coverage_masked.height} case study/family "
-            "cells have a winner scored over a different number of days than the GBM "
-            "winner, so they are left blank rather than plotted beside it."
+            f"**Masked for unequal coverage:** {n_masked_cells} case study/family "
+            f"cells across {coverage_masked.height} case studies have a winner scored over "
+            "a different number of days than the GBM winner, so they are left blank rather "
+            "than plotted beside it."
         )
     )
     display(coverage_masked.select("short_name", "gbm_days", "lin_days", "tabm_days"))
