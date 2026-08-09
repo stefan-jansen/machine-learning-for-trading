@@ -26,14 +26,15 @@
 # session to the next. What it gives back is a **conditional volatility**: how much the share is
 # expected to move over a session, worked out from what was known at the close of the session
 # before it. Following the usual convention, the value is stamped on the session it describes, so
-# `garch_cond_vol` at date $t$ is the variance the model gives session $t$ from the return and
-# variance at $t-1$, and the recursion producing it reads nothing dated $t$ or later.
+# `garch_cond_vol` at date $t$ is the square root of the variance the model gives session $t$ from
+# the return and variance at $t-1$, annualized, and the recursion producing it reads nothing dated
+# $t$ or later.
 #
-# **That makes it a forecast on the dates it is scored, and section C.1 is exact about where the
-# claim stops.** The parameters the recursion runs on were estimated over a window, and on the
+# **The recursion is only half of what decides whether a value is a forecast, and section C.1 is
+# exact about the other half.** The parameters it runs on were estimated over a window, and on the
 # dates inside that window a value is a retrospective transform rather than something that could
-# have been computed on the day. On the dates after it - the ones every diagnostic here uses - the
-# parameters predate the value entirely.
+# have been computed on the day. On the dates after it the parameters predate the value entirely,
+# which is why section F scores those dates alone and F2 draws them alone.
 #
 # That is the difference this notebook is built on. Stage 03's variance risk premium subtracts a
 # *realized* volatility - an average of the last twenty sessions - from the option market's
