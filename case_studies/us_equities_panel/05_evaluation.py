@@ -77,11 +77,11 @@ from ml4t.diagnostic.metrics import (
     compute_ic_uncertainty,
     cross_sectional_ic_series,
 )
-from ml4t.diagnostic.signal import quantize_factor
 from scipy.cluster import hierarchy
 from scipy.spatial.distance import squareform
 from scipy.stats import spearmanr
 
+from case_studies.utils.feature_engineering import quantile_profile
 from utils.artifact_specs import load_setup_config, resolve_label_buffer, resolve_label_horizon
 from utils.cv_splits import generate_cv_splits
 from utils.data_quality import validate_modeling_inputs
@@ -706,14 +706,18 @@ for feat, series in ic_series.items():
         continue
     median_ic = float(np.median(fold_ics))
     direction = 1.0 if median_ic >= 0 else -1.0
+    # Weakest and strongest are read against the feature's own direction, the same way
+    # sign consistency below is and the same way the chart marks them. For a feature that
+    # ranks stocks inversely the weakest fold is its algebraic maximum, so exporting the
+    # algebraic minimum under the name "worst" told a reader the opposite of the truth for
+    # every such feature - and the ledger is what Chapter 20 reads.
     fold_stats[feat] = {
         "n_folds": len(fold_ics),
         "fold_ics": fold_ics,
         "median_fold_ic": median_ic,
         "fold_iqr": float(np.subtract(*np.percentile(fold_ics, [75, 25]))),
-        "worst_fold_ic": min(fold_ics),
-        "best_fold_ic": max(fold_ics),
-        "weakest_fold_ic": min(fold_ics, key=lambda ic: ic * direction),
+        "worst_fold_ic": min(fold_ics, key=lambda ic: ic * direction),
+        "best_fold_ic": max(fold_ics, key=lambda ic: ic * direction),
         "sign_consistency": sum(1 for ic in fold_ics if ic * direction > 0) / len(fold_ics),
     }
 n_stable = sum(1 for s in fold_stats.values() if s["sign_consistency"] >= SIGN_CONSISTENCY_FLOOR)
@@ -738,7 +742,7 @@ for row, feat in enumerate(ranked):
     )
     ax.plot([s["median_fold_ic"]] * 2, [row - 0.3, row + 0.3], color=COLORS["blue"], linewidth=2)
     ax.scatter(
-        s["weakest_fold_ic"],
+        s["worst_fold_ic"],
         row,
         s=34,
         facecolors="none",
@@ -805,30 +809,21 @@ show_with_alt(
 N_QUANTILES = 5
 profiles = {}
 for feat in by_abs_ic:
-    binned = quantize_factor(
-        eval_panel.select([DATE_COL, feat, label_col])
-        .drop_nulls()
-        .with_columns(
-            (pl.col(label_col) - pl.col(label_col).mean().over(DATE_COL)).alias("excess")
-        ),
-        n_quantiles=N_QUANTILES,
-        factor_col=feat,
+    profile = quantile_profile(
+        eval_panel,
+        feat,
+        label_col,
         date_col=DATE_COL,
+        n_quantiles=N_QUANTILES,
+        min_cross_section=MIN_CROSS_SECTION,
+        demean_within_date=True,
     )
-    means = (
-        binned.group_by([DATE_COL, "quantile"])
-        .agg(pl.col("excess").mean())
-        .group_by("quantile")
-        .agg(pl.col("excess").mean())
-        .sort("quantile")["excess"]
-        .to_list()
-    )
-    if len(means) < N_QUANTILES or any(m is None for m in means):
+    if profile is None:
         continue
     profiles[feat] = {
-        "means": means,
-        "spread": means[-1] - means[0],
-        "monotonicity": float(spearmanr(range(len(means)), means).statistic),
+        "means": profile.means,
+        "spread": profile.spread,
+        "monotonicity": profile.monotonicity,
     }
 monotonicity_scores = {f: p["monotonicity"] for f, p in profiles.items()}
 disagree = [
