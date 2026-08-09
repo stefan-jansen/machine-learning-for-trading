@@ -40,6 +40,7 @@ __all__ = [
     "drawdown_block",
     "families_from_config",
     "family_coverage",
+    "has_value",
     "plot_coverage_through_time",
     "plot_cross_sectional_dispersion",
     "plot_feature_distributions",
@@ -385,6 +386,27 @@ def trailing_sharpe(
 # ---------------------------------------------------------------------------
 
 
+def has_value(dtype: pl.DataType, column: str) -> pl.Expr:
+    """True where the column holds a number: neither null nor NaN.
+
+    Polars counts NaN as a value, so ``is_not_null()`` is True for it, and the
+    feature calls do not agree on which one a warm-up head is written with -
+    polars' own ``rolling_mean`` emits null, ``ml4t.engineer.features.momentum``
+    emits NaN. Reading a NaN as covered breaks both directions: ``warmup_audit``
+    takes the first bar as populated for any NaN-warmup column and raises the
+    look-ahead assertion on a column that is correctly warmed up, which is what
+    ``rsi_14d`` did in fx_pairs, and ``family_coverage`` draws a stretch holding
+    no values as fully covered, which is silent.
+
+    A notebook should not have to normalize its frame before a helper can count
+    it, so both helpers apply this rather than expecting a ``fill_nan(None)``.
+    """
+    populated = pl.col(column).is_not_null()
+    if dtype.is_float():
+        populated = populated & pl.col(column).is_not_nan()
+    return populated
+
+
 def warmup_audit(
     df: pl.DataFrame,
     expected: Mapping[str, int],
@@ -399,13 +421,16 @@ def warmup_audit(
     bars. A column that is populated **earlier** than its lookback allows is
     reading rows it cannot see, so the check raises rather than reporting.
 
+    A NaN is not a value here: see :func:`has_value`.
+
     Returns the per-column census so the notebook can show it.
     """
     keys = [entity] if isinstance(entity, str) else list(entity)
     ranked = df.sort([*keys, time]).with_columns(pl.col(time).cum_count().over(keys).alias("_bar"))
+    schema = ranked.schema
     rows = []
     for column, bars in expected.items():
-        observed = ranked.filter(pl.col(column).is_not_null())["_bar"].min()
+        observed = ranked.filter(has_value(schema[column], column))["_bar"].min()
         observed = None if observed is None else int(observed)
         rows.append(
             {
@@ -493,7 +518,11 @@ def family_coverage(
     time: str = "timestamp",
     every: str | None = None,
 ) -> pl.DataFrame:
-    """Non-null share per family per decision timestamp.
+    """Share of a family's columns holding a value, per decision timestamp.
+
+    A NaN is not a value here: see :func:`has_value`. Counting one as covered
+    draws a warm-up head, or any stretch a library call filled with NaN, as a
+    dense line.
 
     *every* buckets the time axis (``"1mo"``) where the panel has more decision
     timestamps than a chart can resolve.
@@ -501,11 +530,12 @@ def family_coverage(
     frame = df
     if every is not None:
         frame = frame.with_columns(pl.col(time).dt.truncate(every).alias(time))
+    schema = frame.schema
     families: dict[str, list[str]] = {}
     for column, family in assignment.items():
         families.setdefault(family, []).append(column)
     aggs = [
-        pl.mean_horizontal([pl.col(c).is_not_null() for c in cols]).mean().alias(family)
+        pl.mean_horizontal([has_value(schema[c], c) for c in cols]).mean().alias(family)
         for family, cols in families.items()
     ]
     return frame.group_by(time).agg(aggs).sort(time)
