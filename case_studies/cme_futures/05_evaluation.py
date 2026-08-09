@@ -108,10 +108,11 @@ MAX_SYMBOLS = 0
 #   significant that we are willing to have be noise.
 # - **The exploration bar** is a pair of conditions. A feature that is not significant on
 #   its own is still carried forward if it points the same way in most of the validation
-#   years and its average correlation clears a floor. The floor is a judgement about what
-#   a weekly rebalance would have to earn to cover commission, bid-ask spread and roll
-#   slippage; it is not estimated from the data, and Section 6 says what follows from
-#   that.
+#   years and its average correlation clears a floor. A rank correlation is unitless and
+#   does not convert into a return, so the floor is a judgement about how weak an
+#   association can be and still be worth carrying into a strategy that pays commission,
+#   bid-ask spread and roll slippage. It is a stated choice rather than an estimate, and
+#   Section 6 says what follows from that.
 # - **The redundancy cut** is the correlation above which two features are reported as
 #   one piece of evidence rather than two.
 # - **The minimum cross-section** is how many products must carry both a feature value
@@ -1232,9 +1233,10 @@ if quantile_spreads:
 # %% [markdown]
 # Three things to read off these panels. Whether the profile runs all the way across or
 # turns, which is what decides whether a single coefficient can carry it. Whether it
-# runs in the direction the feature's correlation implies - it has to, given the buckets
-# are cut the same way the correlation ranks, and a panel that contradicted its own
-# correlation would mean one of the two was built wrong. And whether the median markers
+# runs in the direction the feature's correlation implies. It usually will, because both
+# are formed within the session, but they are different statistics - a profile that is
+# flat at the ends and turns in the middle can average out either way - so a disagreement
+# is something to look into rather than a result to accept. And whether the median markers
 # track the bars: where they do, the shape is a property of the typical product; where a
 # bar runs well past its marker, that bucket's average is a few large returns.
 #
@@ -1458,10 +1460,12 @@ if ranked_pairs:
 # thirty-product cross-section at a weekly cadence will often clear nothing at all, and
 # a screen that returns an empty shortlist has not told the modelling notebooks anything
 # about which candidates are worth their compute. Its correlation floor is a judgement
-# about what a weekly rebalance has to earn to cover commission, bid-ask spread and roll
-# slippage - the same cost components `config/setup.yaml` declares for the backtest. It
-# is not estimated from the data, and a feature that reaches PROCEED through it has not
-# been confirmed by anything.
+# about how weak an association can be and still be worth carrying into a strategy that
+# pays the cost components `config/setup.yaml` declares for the backtest - commission,
+# bid-ask spread and roll slippage. There is no conversion from a rank correlation to a
+# return that would let the floor be computed from those costs, which is exactly why it
+# is stated rather than derived, and why a feature reaching PROCEED through this route
+# has not been confirmed by anything.
 #
 # **REVISE means not ruled out.** It is not a weaker version of PROCEED and not a
 # rejection: it says this screen found no standalone evidence, and a feature can be
