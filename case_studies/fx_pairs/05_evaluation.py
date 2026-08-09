@@ -74,6 +74,7 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, compute_ic_uncertainty
 from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 
+from case_studies.utils.feature_engineering import quantile_profile
 from utils.artifact_specs import resolve_label_buffer
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.data_quality import validate_modeling_inputs
@@ -394,7 +395,10 @@ family_table = (
     )
     .group_by(["source", "family"])
     .agg(pl.len().alias("columns"), pl.col("feature").sort().str.join(", ").alias("names"))
-    .sort(["source", "columns"], descending=[False, True])
+    # Two families holding the same number of columns would otherwise be ordered by
+    # whatever the grouping happened to emit, which differs between runs, so the table
+    # printed here would not be the table a reader re-running the notebook sees.
+    .sort(["source", "columns", "family"], descending=[False, True, False])
 )
 with pl.Config(tbl_rows=family_table.height, tbl_width_chars=260, fmt_str_lengths=200):
     display(family_table)
@@ -1176,13 +1180,22 @@ fig.show()
 # return to climb across the buckets, not just to differ at the ends.
 #
 # So on each session the pairs are sorted by the column and split into five buckets, and
-# the returns they went on to earn are averaged inside each bucket. The bucket edges are
-# cut **within** each session, from that session's twenty values alone. The natural
-# instinct is to cut them once over the whole sample, and it is worth naming because it
-# fails without any sign of failing: bucket edges taken over the whole sample are set by
-# every other session's levels, so on a calm week every pair lands in the low buckets
-# and the profile then describes when the market was volatile rather than which pairs
-# ranked highest.
+# the returns they went on to earn are averaged inside each bucket on that session. Those
+# session averages are then averaged across sessions, so every session counts once. That
+# is what a book rebalanced each session earns, and it is the unit the rank correlation
+# above already uses, so the two are comparable rather than merely adjacent.
+#
+# The bucket edges are cut **within** each session, from that session's twenty values
+# alone. The natural instinct is to cut them once over the whole sample, and it is worth
+# naming because it fails without any sign of failing: bucket edges taken over the whole
+# sample are set by every other session's levels, so on a calm week every pair lands in
+# the low buckets and the profile then describes when the market was volatile rather than
+# which pairs ranked highest.
+#
+# A session enters the profile on the same two terms it enters the correlation on: enough
+# pairs quoting both the column and the return to be worth ranking, and enough such
+# sessions behind the column to average over. Building the two on different sets would
+# leave a column whose score and whose shape describe different weeks.
 #
 # The rank correlation between bucket number and bucket mean summarizes how close the
 # profile is to a staircase. It is computed for every scored column and recorded in the
@@ -1195,27 +1208,18 @@ fig.show()
 monotonicity_scores = {}
 quantile_spreads = {}
 for feature in eval_summary["feature"].to_list():
-    valid = eval_panel.select([DATE_COL, feature, LABEL_COL]).drop_nulls()
-    valid = valid.filter(pl.len().over(DATE_COL) >= N_QUANTILES)
-    if len(valid) < N_QUANTILES * 20:
-        continue
-    shaped = valid.with_columns(
-        (
-            (pl.col(feature).rank(method="average").over(DATE_COL) - 1)
-            * N_QUANTILES
-            / pl.len().over(DATE_COL)
-        )
-        .floor()
-        .clip(0, N_QUANTILES - 1)
-        .cast(pl.Int8)
-        .alias("quantile")
+    profile = quantile_profile(
+        eval_panel,
+        feature,
+        LABEL_COL,
+        date_col=DATE_COL,
+        n_quantiles=N_QUANTILES,
+        min_cross_section=MIN_PERIODS,
     )
-    q_means = shaped.group_by("quantile").agg(pl.col(LABEL_COL).mean()).sort("quantile")
-    if len(q_means) != N_QUANTILES:
+    if profile is None or profile.periods_used < MIN_SESSIONS:
         continue
-    means = q_means[LABEL_COL].to_list()
-    quantile_spreads[feature] = means
-    monotonicity_scores[feature] = float(spearmanr(range(N_QUANTILES), means).statistic)
+    quantile_spreads[feature] = profile.means
+    monotonicity_scores[feature] = profile.monotonicity
 
 features_to_show = list(quantile_spreads)[:N_SHAPE_PANELS]
 print(
