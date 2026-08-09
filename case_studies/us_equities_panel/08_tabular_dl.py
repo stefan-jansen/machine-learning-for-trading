@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -15,7 +15,7 @@
 # %% [markdown]
 # # Tabular Deep Learning — US Equities Panel
 #
-# TabM applies attention-style ensembling over the same 72-feature matrix used by
+# TabM applies attention-style ensembling over the same 71-feature matrix used by
 # linear models and GBMs. On the US equities panel, where both linear and GBM
 # produce nearly identical daily predictions, the question is
 # whether neural network expressiveness discovers interactions that tree-based
@@ -26,7 +26,7 @@
 #
 # **Learning Objectives**:
 # - Test whether attention-based tabular models improve on GBMs for broad panels
-# - Compare TabM sizes (small/medium/large) on a 72-feature daily equity dataset
+# - Compare TabM sizes (small/medium/large) on a 71-feature daily equity dataset
 # - Evaluate whether model complexity helps when per-stock signal is weak (IC~0.02)
 # - Generate backtesting-ready predictions from the best configuration
 #
@@ -84,7 +84,7 @@ print(f"Epochs: {N_EPOCHS} | Batch: {BATCH_SIZE}")
 # %% [markdown]
 # ## 1. Load Artifacts
 #
-# Same 72-feature dataset as linear and GBM. The 16 walk-forward folds (10-year
+# Same 71-feature dataset as linear and GBM. The 16 walk-forward folds (10-year
 # train, 1-year test) provide stable estimates --- though TabM's epoch-based
 # training means runtime scales with the number of epochs rather than tree count.
 
@@ -272,7 +272,7 @@ val_ic_mean = float(fold_metrics["ic_mean"].mean()) if fold_metrics.height > 0 e
 #
 # On the broadest equity panel, tabular DL faces the same challenge as GBMs:
 # the cross-sectional signal in daily returns is predominantly linear, leaving
-# limited room for non-linear models to add value. Attention over 72 features
+# limited room for non-linear models to add value. Attention over 71 features
 # × 3,199 stocks creates a high-dimensional interaction space, but the marginal
 # IC per stock (~0.02) may not contain enough structure to reward the additional
 # parameters. The consistent theme: breadth --- not model sophistication ---

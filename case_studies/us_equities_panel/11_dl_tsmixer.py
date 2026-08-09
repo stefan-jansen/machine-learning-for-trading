@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -16,7 +16,7 @@
 # # TSMixer — US Equities Panel
 #
 # TSMixer alternates time-mixing (across the 60-day lookback) and feature-mixing
-# (across 72 features), seeking cross-feature interactions that LSTM's sequential
+# (across 71 features), seeking cross-feature interactions that LSTM's sequential
 # gating might miss. On ETFs, TSMixer achieves the highest IC because the
 # 99-ETF panel has structured sector and style groupings. The question is whether
 # TSMixer's mixing layers find similar structure across 3,199 heterogeneous stocks.

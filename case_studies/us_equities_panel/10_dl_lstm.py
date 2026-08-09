@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -16,7 +16,7 @@
 # # LSTM — US Equities Panel
 #
 # Can sequential memory capture dynamics that flat-feature models miss across
-# 3,199 stocks? The LSTM processes 60-day lookback windows of 72 features,
+# 3,199 stocks? The LSTM processes 60-day lookback windows of 71 features,
 # seeking temporal patterns in daily returns. On this panel, the linear baseline
 # exploits cross-sectional breadth --- the question is whether
 # looking back in time per stock adds information or just noise.

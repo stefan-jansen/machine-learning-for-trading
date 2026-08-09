@@ -22,7 +22,7 @@ The pipeline is unusually long because the universe is unusually large. Sixteen 
 |-------|----------|---------|-------------|--------|
 | Feasibility | [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) | Ch6 | Universe breadth per decision date, cost regime, move-to-cost scale, walk-forward folds | Nothing - the evidence stays in the notebook |
 | Labels | [`02_labels`](02_labels.ipynb) | Ch7 | 1-day, 5-day, and 21-day forward returns | `labels/fwd_ret_1d.parquet`, `labels/fwd_ret_5d.parquet`, `labels/fwd_ret_21d.parquet`, each with a `.digest.json` sidecar |
-| Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | 63 cross-sectional factors: momentum, volatility, liquidity, value | `features/financial.parquet` |
+| Features | [`03_financial_features`](03_financial_features.ipynb) | Ch8 | 62 cross-sectional factors: momentum, volatility, liquidity, value | `features/financial.parquet` |
 | Temporal | [`04_model_based_features`](04_model_based_features.ipynb) | Ch9 | Walk-forward Wasserstein regime distance, FFD, GARCH features | `features/model_based.parquet` |
 | Evaluation | [`05_evaluation`](05_evaluation.ipynb) | Ch7--9 | Feature-label IC diagnostics across the full panel | `evaluation/triage_ledger.parquet`, `evaluation/ic_timeseries.parquet` |
 | Linear | [`06_linear`](06_linear.ipynb) | Ch11 | Ridge, LASSO, ElasticNet on the full feature matrix | Training runs and prediction sets in `run_log/registry.db`; coefficients under `run_log/training/{hash}/`, scores under `run_log/predictions/{hash}/` |
