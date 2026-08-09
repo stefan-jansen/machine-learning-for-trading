@@ -205,12 +205,17 @@ print(
 )
 
 # %% [markdown]
-# One consequence of writing values across the holdout is easy to miss. Every summary this
-# notebook prints or draws - a mean, a spread, a median - would otherwise be computed over those
-# rows too, and a number computed over the holdout is a number read off it. The models may write
-# there; the notebook may not look. Every descriptive statistic below therefore goes through the
-# filter defined here, and the row counts and date ranges that are not statistics do not, because
-# they are fixed by the configuration rather than measured from the data.
+# One consequence of writing values across the holdout is easy to miss. Every summary this notebook
+# prints or draws - a mean, a spread, a median - would otherwise be computed over those rows too,
+# and a number computed over the holdout is a number read off it. The models may write there; the
+# notebook may not look.
+#
+# The line is drawn where a number stops describing the shape of a file and starts describing what
+# is inside it. How many rows a panel holds, how many symbols it names and what dates it spans are
+# shape; they are fixed by the loaders and the fold windows, and they are shown whole because the
+# rest of the notebook cannot be followed without them. Anything computed from the values - a mean,
+# a spread, a median, a count of how often a column is empty, a per-period breakdown - goes through
+# the filter defined here.
 
 
 # %%
@@ -1519,16 +1524,25 @@ per_pass = (
         pl.col("timestamp").min().alias("first_date"),
         pl.col("timestamp").max().alias("last_date"),
         pl.col("symbol").n_unique().alias("symbols"),
-        *[pl.col(c).null_count().alias(f"null_{c}") for c in ("sv_vol", "garch_vrp")],
+    )
+    .join(
+        # How often a column has no value is a measurement of the data rather than a fact about
+        # the file's shape, so it is counted before the holdout like every other measurement here.
+        before_holdout(temporal)
+        .group_by("fold")
+        .agg(*[pl.col(c).null_count().alias(f"null_{c}") for c in ("sv_vol", "garch_vrp")]),
+        on="fold",
     )
     .sort("fold")
 )
 per_pass
 
 # %% [markdown]
-# The premium columns are null wherever the straddle panel had no quote on a date the underlying
-# traded, which is most of the gap above. The volatility columns are never null: both models write
-# a value for every date in their pass, and the check before the write would have stopped the
+# The first four columns are the shape of what was written, which is fixed by the fold windows in
+# `setup.yaml`. The two null counts are a measurement and so are taken before the holdout: they
+# count where the premium columns have no value, which happens wherever the straddle panel carried
+# no quote on a date the underlying traded. The volatility columns are never null - both models
+# write a value for every date in their pass, and the check before the write would have stopped the
 # notebook otherwise.
 #
 # ### E.1 Writing the file
