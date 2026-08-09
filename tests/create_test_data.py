@@ -47,7 +47,7 @@ import shutil
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -356,26 +356,55 @@ def build_institutional_holdings_13f(source: Path, output: Path) -> list[Path]:
 # because the case study builds two cross-validation folds plus a holdout over
 # the full span and validate_temporal_fold_coverage fails when an artifact
 # covers none of a fold.
+#
+# The final calendar quarter is exempt from the stride and kept whole. Four
+# Chapter 18 notebooks configure 2021-10-01..2021-12-31 by name and estimate on
+# 20-session rolling windows inside it, so a stride that samples that quarter
+# leaves them nothing to measure. What each one needs of the quarter, and where
+# it says so:
+#
+#   02_spread_estimation           CS_WINDOW = ROLL_WINDOW = 20 daily rows per
+#                                  symbol, and >= 2 symbols surviving both.
+#   03_market_impact_calibration   >= 4 symbols with a positive normalized Huber
+#                                  coefficient (`len(lambda_cross) < 4` raises).
+#                                  Measured over the six fixture symbols: the
+#                                  whole quarter gives 5, and every shorter
+#                                  window inside it gives exactly 4, because
+#                                  MSFT's coefficient is +0.001 over the quarter
+#                                  and negative over any part of it.
+#   07_ml4t_volume_participation   CALIBRATION_SESSIONS = 20 completed sessions
+#                                  for AAPL before `execution_sessions[0]`.
+#   11_cost_cliff                  SPREAD_START_DATE..SPREAD_END_DATE, which is
+#                                  December 2021 alone.
+#
+# The binding minimum is 03's, and it is the only one the fixture cannot meet by
+# holding part of the quarter. 64 sessions is therefore the smallest sample that
+# satisfies all four. The sessions before the cutoff keep exactly the selection
+# they had, so nothing the microstructure case study reads changes.
 
 NASDAQ100_MINUTE_DIR = Path("equities") / "market" / "nasdaq100" / "minute_bars"
 NASDAQ100_MINUTE_SYMBOLS = ("AAPL", "AMD", "AMZN", "FB", "GOOGL", "MSFT")
 # Six consecutive sessions kept per six skipped runs: one week in six, which
-# keeps a fifth of the fixture's sessions preceded by their true predecessor and
-# leaves 84 of 505 sessions, holding the fixture near its previous size.
+# keeps a fifth of the fixture's sessions preceded by their true predecessor.
 NASDAQ100_MINUTE_RUN_SESSIONS = 6
 NASDAQ100_MINUTE_RUN_STRIDE = 6
+# Sessions from this date on are kept whole, whatever the stride would have done
+# with them. Chapter 18 names this quarter; see the comment above.
+NASDAQ100_MINUTE_DENSE_FROM = date(2021, 10, 1)
 
 
-def _session_runs(sessions: pl.Series, run: int, stride: int) -> pl.Series:
-    """Every ``stride``-th consecutive run of ``run`` sessions, in order."""
+def _session_runs(sessions: pl.Series, run: int, stride: int, dense_from: date) -> pl.Series:
+    """Every ``stride``-th run of ``run`` sessions, then every session from ``dense_from``."""
+    strided = sessions.filter(sessions < dense_from)
     keep: list = []
-    for start in range(0, len(sessions) - run + 1, run * stride):
-        keep.extend(sessions[start : start + run].to_list())
+    for start in range(0, len(strided) - run + 1, run * stride):
+        keep.extend(strided[start : start + run].to_list())
+    keep.extend(sessions.filter(sessions >= dense_from).to_list())
     return pl.Series("date", keep, dtype=sessions.dtype)
 
 
 def build_nasdaq100_minute_bars(source: Path, output: Path) -> list[Path]:
-    """Keep one week of sessions in six, whole and at native one-minute spacing."""
+    """One week of sessions in six, plus the final quarter whole, at one-minute spacing."""
     source_dir = source / NASDAQ100_MINUTE_DIR
     if not source_dir.exists() or not list(source_dir.glob("year=*")):
         raise FileNotFoundError(
@@ -389,7 +418,12 @@ def build_nasdaq100_minute_bars(source: Path, output: Path) -> list[Path]:
         pl.col("symbol").is_in(NASDAQ100_MINUTE_SYMBOLS)
     )
     sessions = lf.select("date").unique().collect()["date"].sort()
-    keep = _session_runs(sessions, NASDAQ100_MINUTE_RUN_SESSIONS, NASDAQ100_MINUTE_RUN_STRIDE)
+    keep = _session_runs(
+        sessions,
+        NASDAQ100_MINUTE_RUN_SESSIONS,
+        NASDAQ100_MINUTE_RUN_STRIDE,
+        NASDAQ100_MINUTE_DENSE_FROM,
+    )
     frame = lf.filter(pl.col("date").is_in(keep.implode())).collect().sort("symbol", "timestamp")
 
     # The reduction is only sound if the grid it leaves is the production grid.
@@ -420,7 +454,8 @@ DATASETS: tuple[Dataset, ...] = (
             f"{len(NASDAQ100_MINUTE_SYMBOLS)} symbols, every "
             f"{NASDAQ100_MINUTE_RUN_STRIDE}th run of "
             f"{NASDAQ100_MINUTE_RUN_SESSIONS} consecutive sessions kept whole at "
-            "native one-minute spacing including extended hours"
+            "native one-minute spacing including extended hours, and every session "
+            f"from {NASDAQ100_MINUTE_DENSE_FROM.isoformat()} on"
         ),
         build=build_nasdaq100_minute_bars,
         owns=(NASDAQ100_MINUTE_DIR,),
@@ -428,6 +463,7 @@ DATASETS: tuple[Dataset, ...] = (
             "symbols": list(NASDAQ100_MINUTE_SYMBOLS),
             "session_run": NASDAQ100_MINUTE_RUN_SESSIONS,
             "run_stride": NASDAQ100_MINUTE_RUN_STRIDE,
+            "dense_from": NASDAQ100_MINUTE_DENSE_FROM.isoformat(),
             "bar_spacing": "1m (unchanged from production)",
         },
     ),

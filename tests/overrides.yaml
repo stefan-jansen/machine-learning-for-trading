@@ -780,9 +780,13 @@
     MAX_SYMBOLS: 10
   timeout: 300
 18_transaction_costs/03_market_impact_calibration:
+  # No NQ100_SYMBOLS override. The notebook's default of 100 selects every symbol
+  # the fixture carries, which is 6, and the cross-sectional inference needs >= 4
+  # of them to have a positive normalized coefficient. Cutting the sample to 5
+  # dropped GOOGL and left exactly 3. The reduction was ours and it cost nothing
+  # to keep: the fixture has 6 symbols either way.
   parameters:
     MAX_SYMBOLS: 10
-    NQ100_SYMBOLS: 5
   timeout: 300
 18_transaction_costs/04_vwap_twap_execution:
   timeout: 300
