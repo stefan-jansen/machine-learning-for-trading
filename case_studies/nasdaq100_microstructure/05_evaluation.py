@@ -1372,6 +1372,8 @@ print(
     f"Quantile profiles: {n_monotone} of {len(monotonicity_scores)} features climb or fall"
     f" steadily enough to reach |monotonicity| >= {MONOTONICITY_MIN}"
 )
+for feat, score in list(monotonicity_scores.items())[:6]:
+    print(f"  {feat:<26} {score:+.2f}")
 
 # %%
 QUANTILE_SHADES = [
@@ -1389,9 +1391,7 @@ if quantile_spreads:
     fig = make_subplots(
         rows=nrows,
         cols=ncols,
-        subplot_titles=[
-            f"{feat}<br>monotonicity {monotonicity_scores[feat]:+.2f}" for feat in feats_to_show
-        ],
+        subplot_titles=feats_to_show,
         vertical_spacing=0.26,
     )
     for idx, feat in enumerate(feats_to_show):
@@ -1408,7 +1408,7 @@ if quantile_spreads:
             col=c + 1,
         )
     fig.update_layout(
-        title="Pooled bins give a rank-identical pair two different shapes",
+        title="A feature and its cross-sectional twin draw the same profile",
         height=290 * nrows + 110,
         width=1150,
     )
