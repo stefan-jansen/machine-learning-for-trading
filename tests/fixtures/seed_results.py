@@ -1068,17 +1068,26 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         # The exemption above can only preserve an artifact that exists. A leader with
         # none still falls through to the synthetic write, and the notebook that pins
         # its hash then fails a >0.99 correlation gate against real prices several
-        # stages downstream, nowhere near this function. Nothing here can reconstruct
-        # the artifact - it has to be copied in from the production run_log - so the
-        # gap is reported by hash at regeneration time rather than left to surface as
-        # an unexplained correlation failure. Not fatal: seven of the nine fixtures
-        # are missing at least one leader artifact today, so raising would stop every
-        # regeneration on a pre-existing gap this function did not introduce.
+        # stages downstream, nowhere near this function. The gap is reported by hash
+        # at regeneration time rather than left to surface there. Not fatal: seven of
+        # the nine fixtures are missing at least one leader artifact today, so raising
+        # would stop every regeneration on a pre-existing gap this function did not
+        # introduce.
+        #
+        # Do NOT close the gap by copying the production artifact in. A copied fixture
+        # is stale the moment anything upstream is regenerated, and every case study is
+        # being retrained end to end. What the correlation gate needs is a panel whose
+        # entities and timestamps are the ones the fixture's own labels carry, and whose
+        # historical target is derived from the same synthetic series the scores come
+        # from, so the check is satisfied by construction. That is what the branch below
+        # already does wherever a reference panel exists; a leader with no artifact of
+        # its own is the case that still falls back to a fabricated grid.
         warnings.warn(
             f"{cs_id}: no predictions.parquet on disk for cohort-leader prediction(s) "
-            f"{', '.join(missing_leaders)}; each gets synthetic scores that a replay "
-            "notebook's historical-target check will reject. Copy the real artifacts "
-            "from the production run_log into the fixture.",
+            f"{', '.join(missing_leaders)}; each gets synthetic scores on a fabricated "
+            "entity grid that a replay notebook's historical-target check will reject. "
+            "Generate the artifact against the fixture's own labels, deriving its "
+            "target from the series the scores come from; never copy the production one.",
             RuntimeWarning,
             stacklevel=2,
         )
