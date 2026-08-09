@@ -712,6 +712,7 @@ for feat, series in ic_series.items():
         "fold_iqr": float(np.subtract(*np.percentile(fold_ics, [75, 25]))),
         "worst_fold_ic": min(fold_ics),
         "best_fold_ic": max(fold_ics),
+        "weakest_fold_ic": min(fold_ics, key=lambda ic: ic * direction),
         "sign_consistency": sum(1 for ic in fold_ics if ic * direction > 0) / len(fold_ics),
     }
 n_stable = sum(1 for s in fold_stats.values() if s["sign_consistency"] >= SIGN_CONSISTENCY_FLOOR)
@@ -722,7 +723,9 @@ print(f"in at least {SIGN_CONSISTENCY_FLOOR:.0%} of the folds they were scored o
 # The chart is one row per feature and one dot per fold, for the features with the largest
 # median. Read the horizontal spread: a tight row is a feature that behaved the same way in
 # every period, and a row with one dot far from the rest is an average carried by a single
-# fold. The bar marks the median and the open circle the worst fold.
+# fold. The bar marks the median and the open circle the fold that ran furthest against
+# the feature's own direction, which for a negative predictor is its highest fold, not
+# its lowest.
 
 # %%
 ranked = sorted(fold_stats, key=lambda f: abs(fold_stats[f]["median_fold_ic"]), reverse=True)[:18]
@@ -734,7 +737,7 @@ for row, feat in enumerate(ranked):
     )
     ax.plot([s["median_fold_ic"]] * 2, [row - 0.3, row + 0.3], color=COLORS["blue"], linewidth=2)
     ax.scatter(
-        s["worst_fold_ic"],
+        s["weakest_fold_ic"],
         row,
         s=34,
         facecolors="none",
@@ -749,13 +752,14 @@ ax.set_xlabel("Fold mean rank correlation")
 add_message_title(
     ax,
     "Most features change size across folds, and several change direction",
-    subtitle="One dot per walk-forward fold; bar is the median, open circle the worst fold",
+    subtitle="One dot per walk-forward fold; bar is the median, circle the fold most against it",
 )
 show_with_alt(
     fig,
     "Strip plot with one row per feature and one dot per walk-forward fold, showing each "
     "fold's mean rank correlation. Rows are ordered by the absolute median. A vertical bar "
-    "marks each feature's median and an open circle marks its worst fold. Most rows spread "
+    "marks each feature's median and an open circle marks the fold running furthest against "
+    "its direction. Most rows spread "
     "across a range several times the width of their median, and many straddle the zero "
     "reference line.",
 )
@@ -777,6 +781,12 @@ show_with_alt(
 # return, not the raw return. Every quintile of every feature earns the market's drift, so
 # raw levels put five bars of almost equal height on the chart and hide the only quantity
 # the long-short book actually collects: the difference between the quintiles.
+#
+# The average is taken twice, first across the stocks in a quintile on one session and then
+# across sessions, so every session counts once however many names it quoted. That is both
+# what the strategy earns - it rebalances every session and holds each quintile equally
+# weighted - and what keeps the profile comparable with the correlation above, which is
+# also a per-session statistic averaged over sessions.
 #
 # The monotonicity score is the rank correlation between quintile number and that average:
 # one where it rises across every quintile, minus one where it falls across every quintile,
@@ -805,7 +815,9 @@ for feat in by_abs_ic:
         date_col=DATE_COL,
     )
     means = (
-        binned.group_by("quantile")
+        binned.group_by([DATE_COL, "quantile"])
+        .agg(pl.col("excess").mean())
+        .group_by("quantile")
         .agg(pl.col("excess").mean())
         .sort("quantile")["excess"]
         .to_list()
@@ -1225,8 +1237,8 @@ display(ledger.head(6))
 # %% [markdown]
 # The funnel is where the counts belong: how many candidates were built, how many could be
 # scored at all, how many the correction confirmed, and how many are carried forward once
-# the exploration route is included. The gap between the third bar and the fourth is exactly
-# what that route adds.
+# the exploration route is included. The gap between the fourth bar and the fifth is exactly
+# what the exploration route adds on top of the correction.
 
 # %%
 stage_counts = [
