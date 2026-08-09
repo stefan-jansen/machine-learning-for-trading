@@ -954,18 +954,27 @@ if not facet_df.is_empty():
     fig.show()
 
 # %%
-facet_positive = facet_df.filter(pl.col("delta") > 0).height
-largest_facet = facet_df.sort("delta", descending=True).row(0, named=True)
-smallest_facet = facet_df.sort("delta").row(0, named=True)
-display(
-    Markdown(
-        f"**Computed horizon comparison.** GBM has the higher point estimate in "
-        f"{facet_positive} of {facet_df.height} matched case-study/label cells. The range runs "
-        f"from {smallest_facet['short_name']} {smallest_facet['label']} "
-        f"({smallest_facet['delta']:+.4f}) to {largest_facet['short_name']} "
-        f"{largest_facet['label']} ({largest_facet['delta']:+.4f})."
+if facet_df.is_empty():
+    display(
+        Markdown(
+            "**No horizon comparison.** Every (case study, label) cell paired winners "
+            "scored over a different number of days, so there is no matched range to "
+            "report."
+        )
     )
-)
+else:
+    facet_positive = facet_df.filter(pl.col("delta") > 0).height
+    largest_facet = facet_df.sort("delta", descending=True).row(0, named=True)
+    smallest_facet = facet_df.sort("delta").row(0, named=True)
+    display(
+        Markdown(
+            f"**Computed horizon comparison.** GBM has the higher point estimate in "
+            f"{facet_positive} of {facet_df.height} matched case-study/label cells. The range "
+            f"runs from {smallest_facet['short_name']} {smallest_facet['label']} "
+            f"({smallest_facet['delta']:+.4f}) to {largest_facet['short_name']} "
+            f"{largest_facet['label']} ({largest_facet['delta']:+.4f})."
+        )
+    )
 
 # %% [markdown]
 # ## 6. Multi-Label Horizon and Metric Symmetry
@@ -1632,16 +1641,25 @@ display(
 # complete fold panels.
 
 # %%
-top_delta = delta_primary.row(0, named=True)
-display(
-    Markdown(
-        "**Key takeaways**\n\n"
+if delta_primary.is_empty():
+    delta_takeaway = (
+        "- No case study has a GBM and a Linear winner scored over the same number of "
+        "days, so there is no matched primary-label comparison to summarize.\n"
+    )
+else:
+    top_delta = delta_primary.row(0, named=True)
+    delta_takeaway = (
         f"- GBM has the higher average-daily-IC point estimate in {n_positive} of "
-        f"{delta_primary.height} full-coverage primary-label comparisons.\n"
+        f"{delta_primary.height} matched-coverage primary-label comparisons.\n"
         f"- The largest GBM-minus-linear point estimate is {top_delta['short_name']} "
         f"at {top_delta['delta']:+.4f}; family differences remain descriptive without a "
         "registered daily paired-difference estimator.\n"
-        f"- {len(HORIZON_EXCLUSIONS)} ambiguous optional family-horizon cells are excluded "
+    )
+display(
+    Markdown(
+        "**Key takeaways**\n\n"
+        + delta_takeaway
+        + f"- {len(HORIZON_EXCLUSIONS)} ambiguous optional family-horizon cells are excluded "
         "rather than selected arbitrarily.\n"
         f"- TabM exceeds GBM on {len(tabm_above_gbm)} comparable rows; missing TabM coverage "
         "remains null rather than being substituted.\n\n"
