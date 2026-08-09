@@ -83,6 +83,7 @@ from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr, robust_ic
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 from ml4t.engineer.features.fdiff import ffdiff
 from statsmodels.tsa.stattools import adfuller
+from threadpoolctl import threadpool_limits
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
 from case_studies.utils.temporal import (
@@ -137,6 +138,10 @@ VOL_WINDOW = min(SETUP["features"]["windows"]["volatility"])
 # dropped from the evaluation at the end.
 MIN_CROSS_SECTION = max(SETUP["backtest"]["sweep"]["top_k_grid"][PRIMARY_LABEL])
 
+# The serial-dependence correction on the coefficient series uses lags out to the label horizon,
+# so the series needs to be several times that long before the correction means anything.
+MIN_IC_SESSIONS = 3 * LABEL_HORIZON_DAYS
+
 EVAL_CONFIG = load_evaluation_config(CASE_STUDY_ID)
 HOLDOUT_START = str(EVAL_CONFIG["holdout_start"])
 HOLDOUT_END = str(EVAL_CONFIG["holdout_end"])
@@ -160,7 +165,8 @@ print(
 )
 print(
     f"A validation session needs at least {MIN_CROSS_SECTION} ETFs quoting to be scored - the "
-    "largest basket the strategy holds."
+    f"largest basket the strategy holds - and at least {MIN_IC_SESSIONS} such sessions before "
+    "the coefficient across them is corrected for serial dependence."
 )
 print(
     f"GARCH is fitted only where a fold offers {GARCH_MIN_OBS} training sessions, about two years."
@@ -502,7 +508,18 @@ print(
 # each state's observations are, so state zero is always the calm one and state one always the
 # stressed one.
 #
-# The third choice is the one section A named. `filtered_state_probs` runs the model forward
+# The third is that a seeded fit is not yet a reproducible fit. Both k-means and the
+# expectation-maximisation steps behind it sum over the observations in parallel, and addition
+# in floating point is not associative, so the total depends on how the work was divided between
+# threads. On this data that moves the fitted parameters in their last few digits, which moves
+# the emitted probabilities by around $10^{-11}$ - invisible in any printed table and enough to
+# change the content digest of the saved file, so that two runs of identical code produce
+# artifacts that cannot be shown to be the same. Running the fit inside `threadpool_limits(1)`
+# fixes the division of work, and the fit then reproduces exactly whatever else the machine is
+# doing. It is worth the cost only around the fit: this model reads two columns and a few
+# thousand rows, so it was never gaining much from the extra threads.
+#
+# The fourth choice is the one section A named. `filtered_state_probs` runs the model forward
 # through the series, so the probability it reports for a session is conditioned on that session
 # and everything before it. The library's own convenience methods return the smoothed
 # probabilities, conditioned on the whole window including sessions that had not happened yet,
@@ -566,14 +583,15 @@ for fold in all_folds:
         continue
 
     best_model, best_ll = None, -np.inf
-    for seed in range(N_RESTARTS):
-        try:
-            candidate = fit_hmm_kmeans_init(X_train, n_states=STATE_COUNT, random_state=seed)
-            ll = candidate.score(X_train)
-            if ll > best_ll:
-                best_model, best_ll = candidate, ll
-        except Exception:
-            continue
+    with threadpool_limits(limits=1):
+        for seed in range(N_RESTARTS):
+            try:
+                candidate = fit_hmm_kmeans_init(X_train, n_states=STATE_COUNT, random_state=seed)
+                ll = candidate.score(X_train)
+                if ll > best_ll:
+                    best_model, best_ll = candidate, ll
+            except Exception:
+                continue
     if best_model is None:
         print(f"  Fold {fold_idx}: regime model did not converge from any starting point")
         continue
@@ -1091,26 +1109,50 @@ sns.despine()
 fig_stab.tight_layout()
 plt.show()
 
+# %% [markdown]
+# The two persistences are both numbers close to one, and they are not the same kind of number.
+# A regime self-transition probability $p$ says how long a state lasts: the expected run is
+# $1/(1-p)$ sessions. A GARCH coefficient sum says how a variance shock decays: the fraction of
+# it still present after $k$ sessions is $(\alpha+\beta)^k$, so the number of sessions after
+# which half of it is left is $\ln(1/2)/\ln(\alpha+\beta)$. Converting both to sessions is what
+# makes the refit cadence a decision rather than an assumption: a fold is a year long, and the
+# question is whether the quantity being estimated turns over faster than that.
+
+
 # %%
-_hmm_spread = float(
-    max(
-        hmm_param_df["persist_stress"].max() - hmm_param_df["persist_stress"].min(),
-        hmm_param_df["persist_calm"].max() - hmm_param_df["persist_calm"].min(),
-    )
+def _range(series: pl.Series) -> float:
+    return float(series.max() - series.min())
+
+
+hmm_spread = max(_range(hmm_param_df["persist_stress"]), _range(hmm_param_df["persist_calm"]))
+garch_spread = _range(garch_param_summary["persistence_median"])
+print(f"Widest regime persistence range across folds: {hmm_spread:.4f}")
+print(f"GARCH median persistence range across folds:  {garch_spread:.4f}")
+
+_p_stress = hmm_param_df["persist_stress"]
+_p_calm = hmm_param_df["persist_calm"]
+_p_garch = garch_param_summary["persistence_median"]
+print(
+    f"Expected run in the stressed state: {1 / (1 - _p_stress.max()):.0f} sessions at the most "
+    f"persistent fold, {1 / (1 - _p_stress.min()):.0f} at the least."
 )
-_garch_spread = float(
-    garch_param_summary["persistence_median"].max()
-    - garch_param_summary["persistence_median"].min()
+print(
+    f"Expected run in the calm state: {1 / (1 - _p_calm.max()):.0f} sessions at the most "
+    f"persistent fold, {1 / (1 - _p_calm.min()):.0f} at the least."
 )
-print(f"Widest regime persistence range across folds: {_hmm_spread:.4f}")
-print(f"GARCH median persistence range across folds:  {_garch_spread:.4f}")
+print(
+    f"GARCH variance-shock half-life: {np.log(0.5) / np.log(_p_garch.max()):.0f} sessions at the "
+    f"most persistent fold, {np.log(0.5) / np.log(_p_garch.min()):.0f} at the least."
+)
 
 # %% [markdown] tags=["results"]
 # Across the nine folds the regime model's probability of staying in a state moves by at most
 # 0.0079 - from 0.9761 to 0.9840 for the stressed state, and from 0.9876 to 0.9943 for the calm
-# one. The median GARCH persistence moves by 0.0268, from 0.9624 to 0.9892. Refitting therefore
-# lands close to the previous fold's answer every time, and both models describe shocks that
-# decay slowly: at these values a volatility shock is still half-present a month later.
+# one. The median GARCH persistence moves by 0.0268, from 0.9624 to 0.9892. In sessions that is a
+# stressed regime expected to run 42 to 62 of them and a calm one 80 to 176, against a variance
+# shock that is half gone after 18 to 64. All three turn over well inside the year between
+# refits, so refitting is doing something; that it lands close to the previous fold's answer
+# every time is what says the something is small.
 
 # %% [markdown]
 # ## E. Combine and emit
@@ -1318,7 +1360,13 @@ for feat in GARCH_COLS:
         method="spearman",
         min_obs=MIN_CROSS_SECTION,
     )
-    if ic_series.height <= 50:
+    # A session below the floor comes back as a row with a null coefficient rather than as no
+    # row at all, so the guard has to count coefficients and not rows - otherwise a universe
+    # too narrow to rank would still reach the correction below, as an all-null series.
+    ic_series = ic_series.filter(pl.col("ic").is_not_null() & pl.col("ic").is_finite())
+    print(f"{feat}: {ic_series.height:,} sessions carry a cross-sectional coefficient")
+    if ic_series.height < MIN_IC_SESSIONS:
+        print(f"  fewer than {MIN_IC_SESSIONS}; not enough to correct for serial dependence")
         continue
     stats = compute_ic_hac_stats(ic_series, ic_col="ic", label_horizon=LABEL_HORIZON_DAYS)
     feature_stats[feat] = {
@@ -1349,7 +1397,7 @@ for feat in DATE_LEVEL_COLS:
     x = date_series[feat].to_numpy()
     y = date_series["panel_ret"].to_numpy()
     keep = ~(np.isnan(x) | np.isnan(y))
-    if keep.sum() < 50:
+    if keep.sum() < MIN_IC_SESSIONS:
         continue
     result = robust_ic(x[keep], y[keep], return_details=True)
     feature_stats[feat] = {
