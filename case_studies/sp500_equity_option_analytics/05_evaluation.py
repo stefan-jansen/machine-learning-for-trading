@@ -1288,6 +1288,12 @@ if quantile_spreads:
 # together in the pooled frame whether or not they rank names in the same order on
 # any given day, and it is the ordering on the day that this screen acts on.
 #
+# Each column is ranked across the names quoted that session before the
+# correlation is taken, so what is measured is how far two orderings agree rather
+# than how far two levels move together. Where a pair is quoted on different names
+# - and coverage as low as the floor is allowed through - each column is ranked
+# over the names it has and the correlation is taken over the names they share.
+#
 # The calculation runs on a sample of development sessions rather than on all of
 # them, which is enough to rank the pairs and keeps it to a size a reader can
 # re-run.
@@ -1301,8 +1307,6 @@ for dt in sample_dates:
     cross_section = eval_panel.filter(pl.col(DATE_COL) == dt).select(cs_features)
     if cross_section.height < MIN_CROSS_SECTION:
         continue
-    # Ranked within the session, so the Pearson correlation of the ranks is the
-    # Spearman correlation of the values.
     ranked = cross_section.with_columns(pl.col(c).rank().alias(c) for c in cs_features)
     masked = np.ma.masked_invalid(ranked.to_numpy().astype(float))
     session_matrices.append(np.ma.corrcoef(masked, rowvar=False).filled(np.nan))
