@@ -10,8 +10,11 @@ Pins:
   the case studies actually make them.
 - _bootstrap_median_interval: the ribbon is a function of the values, not of the order
   they arrive in.
-- _cycle: no two series share a colour and a style, and the palette's two navies are
-  never both solid.
+- _cycle: no two series share a colour and a style, and six series get six colours a
+  reader can tell apart on the page and in gray.
+- plot_persistence: the panel it is handed can be stamped at any precision, not only
+  the microseconds a Python datetime happens to carry.
+- plot_timing_contract: the legend is clear of every bar, whatever the register declares.
 - plot_redundancy_clusters: the links above the cut are separable from every colour a
   cluster can be drawn in.
 
@@ -21,7 +24,7 @@ in eight rendered pages at once.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import matplotlib
 
@@ -155,6 +158,72 @@ def test_persistence_keeps_the_lag_panel_wide_under_long_feature_names(captured)
     )
 
 
+@pytest.mark.parametrize("unit", ["us", "ms", "ns"])
+def test_persistence_draws_a_panel_stamped_at_any_precision(captured, unit) -> None:
+    # Both lag maps go through `replace_strict`, which types its output from the Python
+    # objects it was handed rather than from the column it replaces - and a Python
+    # datetime is microseconds. On a millisecond panel the join that follows raised
+    # outright, so the figure could not be drawn at all: Binance stamps in milliseconds,
+    # so every crypto_perps_funding frame is `datetime[ms]`. Its notebook cast the frame
+    # it passed and nothing else, which is a fix for one caller and no fix for the helper.
+    panel, columns, schedule = _panel()
+    panel = panel.with_columns(
+        pl.col("timestamp").cast(pl.Datetime(time_unit=unit, time_zone="UTC"))
+    )
+    schedule = [
+        d.replace(tzinfo=UTC)
+        if isinstance(d, datetime)
+        else datetime(d.year, d.month, d.day, tzinfo=UTC)
+        for d in schedule
+    ]
+    fe.plot_persistence(
+        panel, columns, entity="symbol", max_lag=10, decision_dates=schedule, title="t", alt="a"
+    )
+    (fig,) = captured
+    assert fig.axes[0].get_lines(), "the autocorrelation panel drew nothing"
+
+
+def test_timing_contract_keeps_its_legend_clear_of_every_bar(captured) -> None:
+    # The register declares the families and the axes grow a row per family, so the more
+    # a case study declares the further its bottom row reaches under a legend pinned to
+    # the axes' lower left. At the eight of us_firm_characteristics the entry crossed the
+    # `interaction` bar and touched the tick labels beneath it.
+    families = [
+        fe.FeatureFamily(
+            name=name,
+            pattern=f"{name}_*",
+            role="signal",
+            hypothesis="h",
+            inputs="close",
+            lookback=20 + 5 * i,
+            lag=2 if i % 2 else 0,
+            frame="cross-sectional",
+            representation="z-score",
+            failure_mode="f",
+        )
+        for i, name in enumerate(
+            ["momentum", "volatility", "volume", "value", "quality", "carry", "flow", "interaction"]
+        )
+    ]
+    fe.plot_timing_contract(families, bar_unit="sessions", title="t", alt="a")
+    (fig,) = captured
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    axes = fig.axes[0]
+    bars = [patch.get_window_extent(renderer) for patch in axes.patches]
+    legend = fig.legends[0].get_window_extent(renderer)
+    for bar in bars:
+        assert not legend.overlaps(bar), "the legend is drawn on top of a family's bar"
+    assert legend.y1 <= axes.get_window_extent(renderer).y0, "the legend is inside the axes"
+
+    # The same corner, and the same failure: at a fixed -0.45 this label sat inside the
+    # bottom row's bar, which spans 0.55, and how far in depended on the family count.
+    decision = next(t for t in axes.texts if t.get_text() == "decision")
+    label = decision.get_window_extent(renderer)
+    for bar in bars:
+        assert not label.overlaps(bar), "the decision label is drawn on top of a family's bar"
+
+
 def test_bootstrap_interval_does_not_depend_on_the_order_of_its_values() -> None:
     # The callers read these out of a `group_by`, whose row order Polars does not
     # guarantee, and `rng.choice` draws by index. So the same entities in a different
@@ -168,19 +237,28 @@ def test_bootstrap_interval_does_not_depend_on_the_order_of_its_values() -> None
 
 
 def test_cycle_never_draws_two_series_the_same_way() -> None:
-    # Six hues over four styles is 24 combinations, but the styles turn over every five
-    # so that the palette's two navies never share one - which costs the last few. Twenty
-    # is well past what any coverage figure in the corpus needs; the most is eleven.
-    assert len(set(fe._cycle(20))) == 20
+    # Six hues over four styles is 24 combinations. Twenty is well past what any
+    # coverage figure in the corpus needs; the most is eleven.
+    assert len(set(fe._cycle(24))) == 24
 
 
-def test_cycle_separates_the_palettes_two_navies() -> None:
-    # COLOR_CYCLER's sixth entry is `slate`, which its own definition says reads close to
-    # `blue`, the first. They are one line to a reader unless something else parts them.
+def test_cycle_tells_six_families_apart_on_hue_alone() -> None:
+    # The first six series carry the whole palette and nothing repeats, so a reader
+    # separates them without consulting a line style. It took a style to do that while
+    # COLOR_CYCLER ended in `slate`, a second navy; the palette now ends in `recede`.
     from utils.style import COLORS
 
-    styles = {color: style for color, style in fe._cycle(6)}
-    assert styles[COLORS["blue"]] != styles[COLORS["slate"]]
+    six = fe._cycle(6)
+    assert len({color for color, _ in six}) == 6
+    assert {style for _, style in six} == {"-"}
+    assert COLORS["slate"] not in {color for color, _ in six}
+
+
+def test_cycle_parts_a_seventh_family_from_the_first() -> None:
+    # Past the palette the hues repeat, so the style has to carry the difference.
+    seven = fe._cycle(7)
+    assert seven[6][0] == seven[0][0]
+    assert seven[6][1] != seven[0][1]
 
 
 def test_redundancy_clusters_draw_above_the_cut_unlike_any_cluster() -> None:
