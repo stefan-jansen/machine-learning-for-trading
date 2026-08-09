@@ -1129,12 +1129,18 @@ print(
 # %% [markdown]
 # ## F. Incremental evaluation
 #
-# One question, on validation settlements only: do these five features rank the
-# cross-section any better than the price and funding features the last notebook
-# already produced? That is what
-# "incremental" means here, and it is a diagnostic - **nothing is selected in this
-# notebook**. Feature selection is [`05_evaluation`](05_evaluation.ipynb), which screens
-# the whole set together.
+# One question, on validation settlements only: how strongly does each of these five
+# features rank the cross-section on its own, and where does that put it against the
+# price and funding features the last notebook already produced?
+#
+# Be precise about what that can and cannot settle, because the loose version of it is
+# the commonest way to oversell a feature. A side-by-side of stand-alone correlations
+# says where each feature sits on its own. It does **not** say whether a feature adds
+# anything on top of the others: two features with the same stand-alone correlation can
+# carry the same information twice or carry different information entirely, and nothing
+# in a marginal comparison tells them apart. Answering that takes a model fitted with
+# and without the feature, which is [`05_evaluation`](05_evaluation.ipynb) and the model
+# notebooks. **Nothing is selected here.**
 #
 # The measure is the **information coefficient**: at each settlement, the rank
 # correlation across the perpetuals quoting then, between what the feature says and what
@@ -1335,8 +1341,12 @@ show_with_alt(
 # The dot row is what keeps this from being read as more than it is. The conditional
 # volatility bar sits at the negative edge of the existing features rather than beyond
 # it, and the dot next to it is `price_vol_14d`, printed above as the most negative of
-# the 37 - a trailing realized volatility computed with no model at all. So what the GJR
-# fit buys over the arithmetic version, measured this way, is marginal. That is a useful answer
+# the 37 - a trailing realized volatility computed with no model at all. On this
+# measure the fitted feature and the arithmetic one are hard to tell apart, which is a
+# reason to ask whether they carry the same information rather than an answer to it.
+# The two are built from the same returns and would be expected to correlate; whether
+# the GJR fit contributes anything the trailing window does not is a question about the
+# pair, and a chart of separate correlations cannot reach it. That is a useful answer
 # rather than a disappointing one: the case for the fitted feature has to rest on the
 # asymmetry and the conditioning it supplies to a nonlinear model, which a
 # stand-alone rank correlation cannot see, and the model notebooks are where it is
