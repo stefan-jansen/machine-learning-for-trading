@@ -775,7 +775,7 @@ def reduce_to_top_entities(
     return dataset.filter(pl.col(primary_entity).is_in(top[primary_entity].implode()))
 
 
-def _inclusive_end_of(boundary: pd.Timestamp) -> pd.Timestamp:
+def _inclusive_end_of(boundary: str) -> pd.Timestamp:
     """Widen a configured end *date* to cover every bar of that session.
 
     ``setup.yaml`` configures ``holdout_end`` as a date. Parsed, it is that date
@@ -787,11 +787,16 @@ def _inclusive_end_of(boundary: pd.Timestamp) -> pd.Timestamp:
     side was fixed - and no consumer scores one of them.
 
     A boundary that already carries a time of day is meant literally and is
-    returned unchanged, so a config can still name an instant inside a session.
+    returned unchanged, so a config can still name an instant inside a session -
+    including an explicit midnight. That is why this reads the configured *string*
+    rather than the parsed Timestamp: "2021-12-31" and "2021-12-31 00:00:00" parse
+    to the same instant, and only the first one means the whole day.
     """
-    if boundary != boundary.normalize():
-        return boundary
-    return boundary + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+    parsed = pd.Timestamp(boundary)
+    names_a_time = any(sep in str(boundary) for sep in (" ", "T"))
+    if names_a_time or parsed != parsed.normalize():
+        return parsed
+    return parsed + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
 
 
 def append_holdout_fold_if_needed(
@@ -849,7 +854,7 @@ def append_holdout_fold_if_needed(
     # made the idempotency check below never match (str(Timestamp) != YAML
     # string) and risked a tz-naive/aware comparison on the pandas filter path.
     ho_start_ts = pd.Timestamp(holdout_start)
-    ho_end_ts = _inclusive_end_of(pd.Timestamp(holdout_end))
+    ho_end_ts = _inclusive_end_of(holdout_end)
     # Any fold covering the holdout window, not just the trailing one: the CV
     # folds run newest first and only the appended holdout fold lands at the end,
     # so reading one position is a second place the ordering has to be right.

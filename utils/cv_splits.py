@@ -287,9 +287,13 @@ def generate_cv_splits(
     from ml4t.diagnostic.splitters import WalkForwardCV
     from ml4t.diagnostic.splitters.config import WalkForwardConfig as LibWalkForwardConfig
 
-    # Legacy path: pre-computed explicit splits
+    # Legacy path: pre-computed explicit splits. Held to the same contract as the
+    # generated ones, because the caller cannot tell which path produced its list
+    # and reads fold 0 the same way either way.
     if cv_config is not None and "splits" in cv_config:
-        return cv_config["splits"]
+        precomputed = cv_config["splits"]
+        _assert_newest_first(precomputed, source="the precomputed splits in cv_config")
+        return precomputed
 
     # Normalize label buffer (strip ISO prefix, convert M → days)
     label_buffer = _normalize_label_buffer(label_buffer)
@@ -400,7 +404,10 @@ def generate_cv_splits(
     return splits
 
 
-def _assert_newest_first(splits: list[dict[str, Any]]) -> None:
+def _assert_newest_first(
+    splits: list[dict[str, Any]],
+    source: str = "generate_cv_splits",
+) -> None:
     """Fail if the folds are not ordered newest first.
 
     The order is a property of ``fold_direction="backward"`` in the library
@@ -408,15 +415,34 @@ def _assert_newest_first(splits: list[dict[str, Any]]) -> None:
     by writing the fold id into an artifact that a later stage reads back by id.
     If a library change reversed it, every one of them would keep running and
     quietly mean the opposite. This turns that into an immediate failure.
+
+    It applies to a ``cv_config`` carrying explicit splits too. A caller cannot
+    tell which path produced its list, so a stored fold set that runs oldest
+    first hands fold id 0 to the earliest window while everything built through
+    the generated path gives it to the latest. Measured on the two committed
+    configs: ``us_firm_characteristics/config/cv_config.json`` runs newest first
+    and agrees, ``fx_pairs/config/cv_config.json`` runs oldest first - fold 0
+    validates from 2015-10-28, fold 7 from 2022-12-15 - while
+    ``fx_pairs/04_model_based_features`` tags its artifact through
+    ``generate_cv_splits``. The two meanings of "fold 0" then meet in a join.
     """
-    val_starts = [s["val_start"] for s in splits]
+    val_starts = [_split_value(s, "val_start", "test_start") for s in splits]
     if any(later >= earlier for earlier, later in zip(val_starts, val_starts[1:], strict=False)):
         raise RuntimeError(
-            "generate_cv_splits returned folds that are not ordered newest first: "
-            f"val_starts {val_starts}. Every caller reads fold 0 as the most recent "
-            "fold, and stage-04 artifacts carry these ids. Fix the ordering here "
-            "rather than at the call sites."
+            f"{source} produced folds that are not ordered newest first: "
+            f"val_starts {[str(v) for v in val_starts]}. Fold 0 is read as the most "
+            "recent fold everywhere, and stage-04 artifacts carry these ids, so an "
+            "ascending set joins each fold against the wrong end of the sample. "
+            "Renumber the source rather than reversing it at the call site."
         )
+
+
+def _split_value(split: dict[str, Any], *names: str) -> Any:
+    """Read the first key a split carries, so a stored config's spelling still resolves."""
+    for name in names:
+        if split.get(name) is not None:
+            return split[name]
+    raise KeyError(f"split carries none of {names}: {sorted(split)}")
 
 
 def most_recent_split(splits: Sequence[dict[str, Any]]) -> dict[str, Any]:

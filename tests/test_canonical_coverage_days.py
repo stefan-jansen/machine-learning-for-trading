@@ -46,13 +46,18 @@ def _write(
     ).write_parquet(out / "predictions.parquet")
 
 
-def _rows(day: int, n: int, prediction=1.0, actual=1.0) -> list[dict]:
+def _rows(day: int, n: int, prediction=None, actual=None) -> list[dict]:
+    """A cross-section that varies across names, because a rank correlation needs it.
+
+    ``prediction`` and ``actual`` override the per-name value with a constant, which
+    is how a test asks for the undefined-correlation case.
+    """
     return [
         {
             "timestamp": dt.datetime(2020, 1, day, 16, 0),
             "entity": f"S{i}",
-            "prediction": prediction if not callable(prediction) else prediction(i),
-            "actual": actual if not callable(actual) else actual(i),
+            "prediction": float(i) if prediction is None else prediction,
+            "actual": float(i) * 0.5 if actual is None else actual,
         }
         for i in range(n)
     ]
@@ -100,6 +105,47 @@ def test_a_repeated_entity_does_not_widen_the_cross_section(tmp_path: Path) -> N
     """The cross-section is a set of names. Four names duplicated is still four."""
     duplicated = _rows(2, IC_MIN_OBS - 1) * 3
     _write(tmp_path, duplicated + _rows(3, 40))
+    assert _count(tmp_path) == 1
+
+
+def test_a_constant_cross_section_has_no_correlation_to_count(tmp_path: Path) -> None:
+    """Forty names on the 2nd, every one scored the same. Spearman is undefined.
+
+    Breadth alone would count the date, and the IC series returns null for it, so
+    the two counts this stands in for would disagree by exactly that date.
+    """
+    _write(tmp_path, _rows(2, 40, prediction=0.7) + _rows(3, 40))
+    assert _count(tmp_path) == 1
+
+
+def test_a_constant_realized_return_is_the_same_case(tmp_path: Path) -> None:
+    _write(tmp_path, _rows(2, 40, actual=0.0) + _rows(3, 40))
+    assert _count(tmp_path) == 1
+
+
+def test_the_continuous_return_decides_a_classification_prediction_set(tmp_path: Path) -> None:
+    """A classification label stores the class target and the return it is scored on.
+
+    `registry/store.py` writes the continuous return as `eval_actual` beside the
+    class column. IC is computed against the return, so a date whose classes vary
+    while its returns do not produces no coefficient - and resolving `actual` first
+    would count it.
+    """
+    out = tmp_path / "run_log" / "predictions" / "abc"
+    out.mkdir(parents=True)
+    rows = _rows(2, 40) + _rows(3, 40)
+    pl.DataFrame(
+        {
+            "timestamp": [r["timestamp"] for r in rows],
+            "symbol": [r["entity"] for r in rows],
+            "prediction": [r["prediction"] for r in rows],
+            # The class target varies on both dates ...
+            "actual": [float(i % 2) for i in range(len(rows))],
+            # ... while the return the IC is taken against is flat on the 2nd.
+            "eval_actual": [0.0 if r["timestamp"].day == 2 else r["actual"] for r in rows],
+        }
+    ).write_parquet(out / "predictions.parquet")
+
     assert _count(tmp_path) == 1
 
 

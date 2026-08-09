@@ -16,7 +16,11 @@ IC_MIN_OBS = 5
 # Measured: etfs / fx_pairs / us_firm_characteristics use prediction+actual+symbol,
 # sp500_equity_option_analytics uses y_score+y_true+symbol, cme_futures keys on product.
 _PREDICTION_ALIASES = ("prediction", "y_score", "y_pred", "score")
-_ACTUAL_ALIASES = ("actual", "y_true", "realized", "target")
+# `eval_actual` first: for a classification label the stored IC is computed against
+# the continuous return, which `registry/store.py:712-745` writes under that name
+# beside the class target. Resolving `actual`/`y_true` ahead of it would judge a
+# date's validity on the class column while the metric used the return.
+_ACTUAL_ALIASES = ("eval_actual", "actual", "y_true", "realized", "target")
 _ENTITY_ALIASES = ("symbol", "product", "asset", "entity")
 
 
@@ -189,8 +193,21 @@ def canonical_coverage_days(
     # The cross-section is a set of entities, so a duplicated entity on a date does
     # not widen it. Without an entity column a row is the best available proxy.
     breadth = pl.col(entity_col).n_unique() if entity_col else pl.len()
-    per_date = scorable.group_by(date_col).agg(breadth.alias("_breadth"))
-    return int((per_date["_breadth"] >= IC_MIN_OBS).sum())
+    per_date = scorable.group_by(date_col).agg(
+        breadth.alias("_breadth"),
+        # A rank correlation is undefined where either side is the same value for
+        # every name on the date, so breadth alone would count a date the IC series
+        # returns null for. n_unique rather than a variance: Spearman ranks, and a
+        # constant column has one rank whatever its spread.
+        pl.col(prediction_col).n_unique().alias("_pred_levels"),
+        pl.col(actual_col).n_unique().alias("_actual_levels"),
+    )
+    defined = (
+        (per_date["_breadth"] >= IC_MIN_OBS)
+        & (per_date["_pred_levels"] > 1)
+        & (per_date["_actual_levels"] > 1)
+    )
+    return int(defined.sum())
 
 
 def filter_active_model_rows(

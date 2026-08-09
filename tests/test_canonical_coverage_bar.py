@@ -136,8 +136,10 @@ def test_intraday_timestamps_count_one_decision_date_once(
 
     The frame carries a realized return and an entity column because the count is
     of *scorable* dates, and a date is scorable only where at least `min_obs`
-    entities hold a finite prediction and a finite return. Eight names per bar puts
-    every date above the floor, so what this measures is the dedup and nothing else.
+    entities hold a finite prediction and a finite return, varying across the
+    cross-section - a rank correlation is undefined where either side is constant.
+    Eight names per bar, each with its own value, puts every date above the floor
+    with a defined coefficient, so what this measures is the dedup and nothing else.
     """
     import datetime as dt
 
@@ -153,8 +155,8 @@ def test_intraday_timestamps_count_one_decision_date_once(
         {
             "timestamp": [t for t, _ in rows],
             "symbol": [s for _, s in rows],
-            "prediction": [0.5] * len(rows),
-            "actual": [0.1] * len(rows),
+            "prediction": [float(s[1:]) for _, s in rows],
+            "actual": [float(s[1:]) * 0.5 for _, s in rows],
         }
     ).write_parquet(pred_dir / "predictions.parquet")
     monkeypatch.setattr(

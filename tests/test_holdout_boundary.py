@@ -861,6 +861,10 @@ def test_a_holdout_end_naming_an_instant_is_taken_literally() -> None:
 
     from utils.modeling import _inclusive_end_of
 
-    assert _inclusive_end_of(pd.Timestamp("2021-12-31 15:58")) == pd.Timestamp("2021-12-31 15:58")
-    assert _inclusive_end_of(pd.Timestamp("2021-12-31")) > pd.Timestamp("2021-12-31 23:59:59")
-    assert _inclusive_end_of(pd.Timestamp("2021-12-31")) < pd.Timestamp("2022-01-01")
+    assert _inclusive_end_of("2021-12-31 15:58") == pd.Timestamp("2021-12-31 15:58")
+    assert _inclusive_end_of("2021-12-31") > pd.Timestamp("2021-12-31 23:59:59")
+    assert _inclusive_end_of("2021-12-31") < pd.Timestamp("2022-01-01")
+
+    # An explicitly configured midnight is an instant, not a day. It parses to the
+    # same Timestamp as the bare date, so the configured string is what decides.
+    assert _inclusive_end_of("2021-12-31 00:00:00") == pd.Timestamp("2021-12-31")

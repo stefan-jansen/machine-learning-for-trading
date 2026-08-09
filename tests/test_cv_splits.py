@@ -562,6 +562,47 @@ def test_an_ascending_fold_list_is_refused_rather_than_returned() -> None:
     _assert_newest_first(list(reversed(ascending)))
 
 
+def test_a_precomputed_split_set_is_held_to_the_same_order() -> None:
+    """A caller cannot tell which path produced its list, so both owe the contract.
+
+    The two committed configs disagree with each other:
+    us_firm_characteristics/config/cv_config.json runs newest first, and
+    fx_pairs/config/cv_config.json runs oldest first - fold 0 validates from
+    2015-10-28 against fold 7 at 2022-12-15 - while fx_pairs/04_model_based_features
+    tags its artifact through generate_cv_splits. Fold 0 then means the earliest
+    window on one side of the join and the latest on the other.
+    """
+    df = pl.DataFrame({"timestamp": pd.date_range("2010-01-01", "2020-01-01", freq="B")})
+    ascending = {
+        "splits": [
+            {"fold": 0, "val_start": "2015-10-28", "val_end": "2016-10-28"},
+            {"fold": 1, "val_start": "2016-11-15", "val_end": "2017-11-15"},
+        ]
+    }
+    with pytest.raises(RuntimeError, match="not ordered newest first"):
+        generate_cv_splits(df, cv_config=ascending)
+
+    descending = {"splits": list(reversed(ascending["splits"]))}
+    assert len(generate_cv_splits(df, cv_config=descending)) == 2
+
+
+def test_the_order_check_reads_a_stored_config_spelling() -> None:
+    """A legacy config writes test_start where the generated path writes val_start."""
+    _assert_newest_first(
+        [
+            {"fold": 0, "test_start": pd.Timestamp("2020-01-01")},
+            {"fold": 1, "test_start": pd.Timestamp("2019-01-01")},
+        ]
+    )
+    with pytest.raises(RuntimeError):
+        _assert_newest_first(
+            [
+                {"fold": 0, "test_start": pd.Timestamp("2019-01-01")},
+                {"fold": 1, "test_start": pd.Timestamp("2020-01-01")},
+            ]
+        )
+
+
 def test_most_recent_split_reads_the_boundaries_not_the_position() -> None:
     """Same folds, three orders, one answer - unlike splits[0] and splits[-1]."""
     folds = [
