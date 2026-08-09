@@ -1023,7 +1023,12 @@ if plot_horizon.height > 0:
     markers = ["o", "s", "D", "^", "v", "P", "X", "*"]
     linestyles = ["-", "--", "-.", ":", "-", "--", "-.", ":"]
     for idx, cs in enumerate(cs_sorted):
-        sub = plot_horizon.filter(pl.col("short_name") == cs).sort("horizon_days")
+        # Sorted on (horizon_days, label), not horizon_days alone. Two targets can
+        # share a horizon - sp500_equity_option_analytics trains both fwd_ret_5d
+        # and fwd_ret_risk_adj_5d, and HORIZON_DAYS maps both to 5.0 - and their
+        # tie order decides which point the line and the CI band reach first, so
+        # sorting on the horizon alone made the published figure differ run to run.
+        sub = plot_horizon.filter(pl.col("short_name") == cs).sort(["horizon_days", "label"])
         if sub.height < 2:
             continue
         x = sub["horizon_days"].to_numpy()
