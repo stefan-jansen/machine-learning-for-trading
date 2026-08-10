@@ -166,11 +166,13 @@ display(result.select(["timestamp", "close"] + new_cols).tail(5))
 # and suffix the columns before joining.
 
 # %%
-# Distinct features, each with an explicit (non-default) parameter set:
+# Distinct features, each with an explicit parameter set. Bollinger bands take the
+# two deviations separately, following TA-Lib, so the upper and lower band need not
+# sit the same distance from the moving average:
 parameterized = [
     {"name": "rsi", "params": {"period": 10}},
     {"name": "atr", "params": {"period": 20}},
-    {"name": "bollinger_bands", "params": {"period": 20, "std_dev": 2.0}},
+    {"name": "bollinger_bands", "params": {"period": 20, "nbdevup": 2.0, "nbdevdn": 2.0}},
 ]
 
 result = compute_features(spy, parameterized)
