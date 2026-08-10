@@ -7,7 +7,7 @@ its ``inputs`` field records the digests of the artifacts it was built from.
 It is a record, not propagation. Nothing downstream reads these sidecars today -
 stage 02 writes them and the chain stops there - so an upstream value change does
 not yet flow into any later artifact's digest. Note also that a model run is
-separately pinned to its input bytes by ``_training_input_identity``, which
+separately pinned to its input bytes by ``training_input_identity``, which
 hashes the label, feature and setup files directly rather than through a sidecar.
 
 The digest is over content, not file bytes: it is invariant to row order and to

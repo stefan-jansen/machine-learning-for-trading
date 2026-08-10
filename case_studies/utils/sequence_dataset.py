@@ -372,10 +372,10 @@ def prepare_fold_sequence_stores(
         and temporal_feature_names
         and fold_id is not None
     ):
-        from utils.modeling import _replace_temporal_columns
+        from utils.modeling import replace_temporal_columns
 
         train_df = (
-            _replace_temporal_columns(
+            replace_temporal_columns(
                 dataset_pd,
                 train_mask,
                 temporal_by_fold,
@@ -391,7 +391,7 @@ def prepare_fold_sequence_stores(
             # Source = train-rows-before-val + val-rows (temporal columns
             # replaced consistently per fold across both halves).
             train_tail_mask = train_mask & (dataset_pd[date_col] < val_start_ts)
-            full_val_source = _replace_temporal_columns(
+            full_val_source = replace_temporal_columns(
                 dataset_pd,
                 train_tail_mask | val_mask,
                 temporal_by_fold,
@@ -408,7 +408,7 @@ def prepare_fold_sequence_stores(
             ).copy()
         else:
             val_df = (
-                _replace_temporal_columns(
+                replace_temporal_columns(
                     dataset_pd,
                     val_mask,
                     temporal_by_fold,

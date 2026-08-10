@@ -146,7 +146,7 @@ class TestQuarantinePolicy:
 # ---------------------------------------------------------------------------
 
 
-def _registry_path(case_study: str) -> Path:
+def registry_path(case_study: str) -> Path:
     return CASE_STUDIES_DIR / case_study / "run_log" / "registry.db"
 
 
@@ -171,7 +171,7 @@ class TestRegistryReconciliation:
 
     @pytest.mark.parametrize("case_study", MIGRATED_CASES)
     def test_rank1_signal_method_in_declared_sweep(self, case_study):
-        reg_path = _registry_path(case_study)
+        reg_path = registry_path(case_study)
         if not reg_path.exists():
             pytest.skip(f"{case_study}: registry.db not present")
 

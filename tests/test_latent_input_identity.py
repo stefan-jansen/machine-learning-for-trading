@@ -31,12 +31,12 @@ def test_feature_content_enters_latent_training_hash(tmp_path: Path, monkeypatch
         lambda _case_study_id, _spec, fallback: case_dir / fallback,
     )
 
-    first = case_study._training_input_identity("etfs", "fwd_ret_21d")
+    first = case_study.training_input_identity("etfs", "fwd_ret_21d")
     first_spec = {"family": "latent_factors", "label": "fwd_ret_21d", "seed": 42}
     first_spec["input_data"] = first
 
     (case_dir / "features" / "financial.parquet").write_bytes(b"financial-v2")
-    second = case_study._training_input_identity("etfs", "fwd_ret_21d")
+    second = case_study.training_input_identity("etfs", "fwd_ret_21d")
     second_spec = {**first_spec, "input_data": second}
 
     assert first["input_digest"] != second["input_digest"]

@@ -32,7 +32,7 @@ from case_studies.utils.analytics import (
     PRIMARY_LABELS,
     SHORT_NAMES,
     _query,
-    _registry_path,
+    registry_path,
 )
 from case_studies.utils.notebook_contracts import (
     degenerate_prediction_sql,
@@ -69,7 +69,7 @@ def holdout_decay_table(
         decay_pp, decay_pct
     """
     label = label or PRIMARY_LABELS[case_study]
-    db = _registry_path(case_study)
+    db = registry_path(case_study)
     if not db.exists():
         return pl.DataFrame()
 
@@ -206,7 +206,7 @@ def selection_adjusted_leader_table(
         ras_leader, ras_pvalue,
         reality_check_pvalue, pbo, k_variants
     """
-    db = _registry_path(case_study)
+    db = registry_path(case_study)
     if not db.exists():
         return pl.DataFrame()
 
@@ -389,7 +389,7 @@ def fold_heatmap_with_ci(
     matplotlib.figure.Figure
     """
     label = label or PRIMARY_LABELS[case_study]
-    db = _registry_path(case_study)
+    db = registry_path(case_study)
     if not db.exists():
         raise FileNotFoundError(f"no registry for {case_study}")
 
@@ -670,7 +670,7 @@ def conformal_coverage_diagnostic(
         empirical_coverage, mean_interval_width_frac_std, n_test
     """
     label = label or PRIMARY_LABELS[case_study]
-    db = _registry_path(case_study)
+    db = registry_path(case_study)
     if not db.exists():
         return pl.DataFrame()
 

@@ -7,6 +7,8 @@ rewrites them in place:
 
 * repo-internal paths -> repo-relative (matching ``utils.paths.display_path``)
 * anything else under ``~/ml4t`` -> a ``~``-prefixed generic path
+* a scratch root under ``/tmp`` -> ``~/scratch/``, except the two shapes that are
+  not machine-specific (see ``REPLACEMENTS``)
 
 Outputs and metadata only; ``source`` is never touched
 ------------------------------------------------------
@@ -77,6 +79,31 @@ REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"/app/"), ""),
     (re.compile(r"/home/[^/]+/ml4t/"), "~/ml4t/"),
     (re.compile(r"/home/[^/]+/"), "~/"),
+    # Scratch roots under /tmp. Two of the four shapes found under /tmp are leaks
+    # and two are not, so the rules below are anchored and the two exemptions are
+    # excluded by name rather than left to ordering:
+    #
+    # rewritten - an agent session's scratchpad, whose path carries a user id, a
+    #   working-directory slug and a session uuid, and a staging notebook or
+    #   output directory a maintainer executed from /tmp, whose name is
+    #   per-session and so has no stable replacement;
+    # left alone - `/tmp/ml4t-test-output...`, which is the documented test
+    #   output directory (`AGENTS.md`, "Output isolation"), so a notebook
+    #   printing it is showing real configuration, and `/tmp/ipykernel_<pid>/`,
+    #   which is how IPython names a cell in every user's kernel rather than one
+    #   machine's layout, and which appears inside tracebacks a reader may need
+    #   to follow.
+    #
+    # `(?<![\w.~-])` requires the match to be a filesystem root: without it the
+    # `/tmp/` inside an already-rewritten `~/.claude/jobs/<id>/tmp/run.ipynb`
+    # would be rewritten a second time, splicing a `~` into the middle of a path.
+    # The anchor is not what keeps these rules out of a base64 payload - `+` and
+    # `/` are both in that alphabet and both satisfy it. What does that is the
+    # MIME filter above, which every rule in this list depends on: `t`, `m` and
+    # `p` are as much a part of base64 as `a` and `p` are.
+    (re.compile(r"(?<![\w.~-])/tmp/claude-\d+/[^/\s]+/[0-9a-fA-F-]{36}/scratchpad/"), "~/scratch/"),
+    (re.compile(r"(?<![\w.~-])/tmp/claude-\d+/"), "~/scratch/"),
+    (re.compile(r"(?<![\w.~-])/tmp/(?!ml4t-test-output|ipykernel_)"), "~/scratch/"),
 ]
 
 SKIP_PARTS = {"_reference", ".venv", ".git"}

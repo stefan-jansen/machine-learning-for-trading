@@ -116,7 +116,7 @@ _DIM_INJECT: dict[str, dict[str, str]] = {
 }
 
 
-def _build_arch_kwargs(cfg: dict[str, Any], n_features: int, lookback: int) -> dict[str, Any]:
+def build_arch_kwargs(cfg: dict[str, Any], n_features: int, lookback: int) -> dict[str, Any]:
     """Extract architecture constructor kwargs from a config dict.
 
     Takes the YAML ``params`` dict, removes ``architecture`` and ``lookback``
@@ -128,7 +128,7 @@ def _build_arch_kwargs(cfg: dict[str, Any], n_features: int, lookback: int) -> d
     params.pop("lookback", None)
 
     dim_vals = {"n_features": n_features, "lookback": lookback}
-    arch = cfg["params"].get("architecture", _resolve_arch_name(cfg["config_name"]))
+    arch = cfg["params"].get("architecture", resolve_arch_name(cfg["config_name"]))
     for param_name, source_key in _DIM_INJECT.get(arch, {}).items():
         params[param_name] = dim_vals[source_key]
 
@@ -349,7 +349,7 @@ _CONFIG_ARCH_MAP: dict[str, str] = {
 }
 
 
-def _resolve_arch_name(config_name: str) -> str:
+def resolve_arch_name(config_name: str) -> str:
     """Map a grid config name (e.g., 'lstm_h64') to a model registry key ('lstm')."""
     if config_name in _CONFIG_ARCH_MAP:
         return _CONFIG_ARCH_MAP[config_name]
@@ -762,8 +762,8 @@ def run_dl_cv(
             cfg_n_epochs = cfg.get("n_epochs", 100)
             cfg_batch_size = cfg.get("batch_size", 2048)
             cfg_checkpoint = cfg.get("checkpoint_interval", 5)
-            arch_name = cfg["params"].get("architecture", _resolve_arch_name(config_name))
-            arch_kwargs = _build_arch_kwargs(cfg, n_features, lookback)
+            arch_name = cfg["params"].get("architecture", resolve_arch_name(config_name))
+            arch_kwargs = build_arch_kwargs(cfg, n_features, lookback)
 
             if config_acc[config_name]["started_at"] is None:
                 config_acc[config_name]["started_at"] = datetime.now(UTC).isoformat()
@@ -1004,7 +1004,7 @@ def run_dl_cv(
             try:
                 from case_studies.utils.registry import register_prediction_set
 
-                arch = _resolve_arch_name(config_name)
+                arch = resolve_arch_name(config_name)
                 cfg_curves_df = pl.DataFrame([c for c in all_curves if c["config"] == config_name])
                 epoch_ic = {epoch: ic for epoch, ic, _std, _days in epoch_scores}
                 epochs = sorted(cfg_preds["epoch"].unique().to_list())
@@ -1098,3 +1098,11 @@ def run_dl_cv(
             entity_col=entity_col,
         )
     return fresh_result
+
+
+# Deprecated private aliases. Thirty notebook cells import these names with their leading
+# underscore, which is what made them look private in the first place; each is a
+# cross-module interface and is now public. The aliases keep those callers working until
+# each notebook is re-executed with the public name, and go when the last one moves.
+_resolve_arch_name = resolve_arch_name
+_build_arch_kwargs = build_arch_kwargs

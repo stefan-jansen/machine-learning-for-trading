@@ -491,8 +491,9 @@ print(
 #
 # What evaluation spends is independent observations, not rows. Summing the initial positive
 # sequence of B.4's mean curve gives the integrated autocorrelation time, the funding periods one
-# independent premium observation is worth - for one contract's carrier, not for the decisions a
-# portfolio takes. The sequence never turns negative here, so the count below is a ceiling.
+# independent premium observation is worth - for one contract's own premium series, not for the
+# decisions a portfolio takes across contracts. The sequence never turns negative here, so the
+# count below is a ceiling.
 
 # %%
 curve = acf["acf"].to_numpy()

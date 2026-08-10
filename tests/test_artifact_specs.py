@@ -81,7 +81,9 @@ def test_us_equities_pilot_helpers_preserve_current_outputs() -> None:
     assert mds.date_col == "timestamp"
     assert mds.entity_cols == ["symbol"]
     assert mds.join_cols == ["symbol", "timestamp"]
-    assert len(mds.feature_names) == 72
+    # 62 financial + 9 temporal. `03_financial_features` dropped `size_rank`, which was a
+    # bit-for-bit duplicate of `liq_rank`, and both artifacts on disk carry the new counts.
+    assert len(mds.feature_names) == 71
     assert len(mds.splits) == 16
     assert mds.label_buffer == "1D"
     assert mds.task_type == "regression"
