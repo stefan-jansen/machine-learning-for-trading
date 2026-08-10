@@ -68,7 +68,7 @@ from case_studies.utils.feasibility import exceedance_curve, fold_timeline, pane
 from data import load_crypto_perps
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt, zero_line
 
 warnings.filterwarnings("ignore")
 
@@ -294,7 +294,14 @@ add_message_title(
     "The universe never fills the largest book the strategy may hold",
     subtitle="Perpetuals with a settled funding bar at each timestamp, against the 20 a top-10 book needs",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Step line of the number of perpetuals quoting at each funding timestamp, rising from 2 at "
+    "the start of 2020 to 7 by the spring, then to 16 by the end of that year. It holds at 16 "
+    "through 2021 and 2022, apart from two narrow drops to 12 in early 2022, and steps up again "
+    "to 19 during 2023. A dashed line at 20, the contracts a top-10 book needs on both sides, "
+    "runs above the series for the whole window and is never reached.",
+)
 
 # %% [markdown]
 # ### B.3 What a move is worth against the fee
@@ -344,7 +351,15 @@ add_message_title(
     "Moves at both horizons clear the round trip that captures them",
     subtitle="Exceedance of absolute perpetual returns against the declared maker and taker round trips",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two exceedance curves on a logarithmic move axis running from 1 bp to beyond 10,000 bps. "
+    "Both sit at essentially 1.0 out to about 10 bps, fall away through the hundreds, and reach "
+    "zero by roughly 2,000 bps. The 24-hour curve lies above the 8-hour one at every size, so a "
+    "longer horizon carries more mass at every threshold. A dotted line at the 4 bp maker round "
+    "trip and a dashed line at the 8 bp taker round trip both fall inside the flat left-hand "
+    "stretch, where almost every move is larger than the fee charged to capture it.",
+)
 
 # %% [markdown]
 # ### B.4 How long the premium describes the contract
@@ -401,7 +416,16 @@ add_message_title(
     "Premium persistence outlasts every horizon the labels declare",
     subtitle="Mean within-contract autocorrelation, shaded 10th-90th percentile across contracts",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Bars of the mean within-contract autocorrelation of the premium index against lag, from one "
+    "settlement to sixty-three. The first bar is about 0.48, the next few fall to about 0.40, and "
+    "the decay is slow from there to roughly 0.22 at the longest lag drawn. A shaded band for the "
+    "10th to 90th percentile across contracts runs from about 0.68 down to about 0.42 at its "
+    "upper edge and is wide throughout. A narrow strip around zero marks the range expected from "
+    "no information, and every bar sits far above it, so persistence outlasts both the 8-hour and "
+    "the 24-hour label horizon.",
+)
 
 # %% [markdown]
 # A cross-sectional book also needs contracts to disagree at one timestamp, so quantiles are taken
@@ -438,7 +462,16 @@ add_message_title(
     "The premium moves as a common level more than contracts disperse",
     subtitle="Cross-sectional quantiles at each funding timestamp, shown at their daily median",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "The 10th to 90th percentile of the premium index across contracts at each funding timestamp, "
+    "shaded, with the median contract drawn through it, both thinned to a daily median. Through "
+    "2020 and 2021 the median swings between roughly minus 20 and plus 40 basis points and the "
+    "band moves with it rather than around it. From 2022 the whole picture narrows to within a "
+    "few basis points of zero, apart from isolated spikes to about minus 35, and turns positive "
+    "again through late 2023. The band is narrow relative to how far the median travels, which is "
+    "the level a long-short book cancels.",
+)
 
 # %% [markdown]
 # ### B.5 Move scale against cost
@@ -491,8 +524,9 @@ print(
 #
 # What evaluation spends is independent observations, not rows. Summing the initial positive
 # sequence of B.4's mean curve gives the integrated autocorrelation time, the funding periods one
-# independent premium observation is worth - for one contract's carrier, not for the decisions a
-# portfolio takes. The sequence never turns negative here, so the count below is a ceiling.
+# independent premium observation is worth - for one contract's own premium series, not for the
+# decisions a portfolio takes across contracts. The sequence never turns negative here, so the
+# count below is a ceiling.
 
 # %%
 curve = acf["acf"].to_numpy()
@@ -570,7 +604,16 @@ add_message_title(
     "Folds roll forward and stop short of the holdout",
     subtitle="Boundaries as generate_cv_splits returned them; the one-settlement purge is too narrow to see",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two horizontal fold bars against a date axis. Fold 1 trains from the start of 2020 to the "
+    "end of 2021 and validates through 2022; fold 0 trains from the start of 2021 to the end of "
+    "2022 and validates through 2023, so the pair slides forward by one year and the later fold "
+    "carries the higher position on the axis while holding the lower number. A shaded holdout "
+    "block covers 2024 and 2025 and neither validation window reaches it. The one-settlement "
+    "purge gap between each training and validation window is present in the legend and too "
+    "narrow to resolve at this scale.",
+)
 
 # %% [markdown]
 # ## E. Derived artifacts
