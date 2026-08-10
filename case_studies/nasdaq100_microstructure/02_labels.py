@@ -119,10 +119,12 @@ FLAT_BAND = setup["costs"]["friction_floor_bps"] / 10_000
 CALENDAR = setup["evaluation"]["calendar"]
 HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
 HOLDOUT_TS = datetime.combine(HOLDOUT_START, time())
+UNIVERSE = sorted(setup["universe"]["symbols"])
 GROUP_COLS = ["symbol", "session_date"]
 PALETTE = dict(zip(RETURN_LABELS, (COLORS["blue"], COLORS["amber"], COLORS["copper"])))
 
 print(f"Labels {LABEL_NAMES}, primary {PRIMARY_LABEL}, flat band {FLAT_BAND:.2%}")
+print(f"Universe: the {len(UNIVERSE)} names `setup.yaml` declares")
 print(f"Sessions come from the {CALENDAR} calendar; holdout opens {HOLDOUT_START}")
 print("Each label is sealed on its own endpoint, not on the bar it was observed from")
 
@@ -209,6 +211,7 @@ padded = (
         end_date=END_DATE,
         include_microstructure=True,
         max_symbols=MAX_SYMBOLS,
+        symbols=UNIVERSE,
         lazy=True,
     )
     .select(["timestamp", "symbol", "close_bid_price", "close_ask_price"])
@@ -562,19 +565,19 @@ for key, tag in classes.items():
     print(f"{tag}: {share:.3f} of labelled bars, ranging {lo:.3f} to {hi:.3f} across months")
 
 # %% [markdown] tags=["results"]
-# On the development window the primary label has a standard deviation of 0.004140, against
-# 0.002321 for the 5-minute label and 0.007884 for the 60-minute one - 0.56x and 1.90x the
+# On the development window the primary label has a standard deviation of 0.004139, against
+# 0.002315 for the 5-minute label and 0.007887 for the 60-minute one - 0.56x and 1.91x the
 # primary, against the 0.58x and 2.00x square-root-of-horizon scaling implies, so the shorter
 # horizon scales as that rule predicts and the longer one falls a little short of it. None of
-# the three is remotely normal: kurtosis runs from 86.2 at 60 minutes to 1154.7 at 5, so the
+# the three is remotely normal: kurtosis runs from 85.4 at 60 minutes to 1135.3 at 5, so the
 # shorter the horizon the more of its variance sits in rare bars.
 #
-# Against cost, the median absolute move is 8.76bps at 5 minutes, 16.38bps at 15 and 32.80bps
-# at 60, while the median round trip is 4.97, 5.02 and 5.24bps on the same bars - the move
+# Against cost, the median absolute move is 8.77bps at 5 minutes, 16.39bps at 15 and 32.84bps
+# at 60, while the median round trip is 4.94, 4.99 and 5.22bps on the same bars - the move
 # roughly doubles with each step up in horizon and the spread does not move at all. The share
-# of bars whose move clears that round trip climbs from 65.4% to 79.4% to 88.9%. Cut at the
+# of bars whose move clears that round trip climbs from 65.5% to 79.5% to 89.0%. Cut at the
 # 5bps friction floor, the direction label splits 0.415 up, 0.405 down and 0.180 flat, and
-# while up and down hold between 0.372-0.471 and 0.359-0.468 across months, the flat share
+# while up and down hold between 0.372-0.471 and 0.360-0.468 across months, the flat share
 # runs from 0.061 to 0.268.
 
 # %% [markdown]
@@ -638,19 +641,19 @@ for name in RETURN_LABELS:
     )
 
 # %% [markdown] tags=["results"]
-# The primary label's 14,333,835 development rows carry 1,059,429 effective observations, a
+# The primary label's 14,474,850 development rows carry 1,069,852 effective observations, a
 # ratio of 0.0739 against the 0.0714 that fourteen fully overlapping intervals imply; the
-# 5-minute label's 14,717,045 rows carry 3,708,002 at 0.2520 against 0.2500, and the
-# 60-minute label's 12,609,390 carry 251,390 at 0.0199 against 0.0169. Each sits above its
+# 5-minute label's 14,861,830 rows carry 3,744,481 at 0.2520 against 0.2500, and the
+# 60-minute label's 12,733,440 carry 253,863 at 0.0199 against 0.0169. Each sits above its
 # reference because a session end closes an overlap early, and the longest label sits
 # furthest above it because the session ends most often relative to its window. Fourteen
 # million rows are worth about a million: the row count overstates the evidence by roughly
 # the number of intervals each label spans.
 #
-# The primary label's autocorrelation falls from 0.921 at lag one to 0.032 at lag thirteen,
-# the last lag sharing an interval with it, and to -0.041 at fourteen, the first sharing
-# none; the fast label runs 0.742 to 0.232 at three and -0.024 at four. The 60-minute label
-# falls from 0.976 to -0.198 at fifty-eight and -0.219 at fifty-nine, and it crosses zero
+# The primary label's autocorrelation falls from 0.923 at lag one to 0.032 at lag thirteen,
+# the last lag sharing an interval with it, and to -0.040 at fourteen, the first sharing
+# none; the fast label runs 0.748 to 0.233 at three and -0.020 at four. The 60-minute label
+# falls from 0.977 to -0.198 at fifty-eight and -0.218 at fifty-nine, and it crosses zero
 # near lag fifty rather than at its own boundary - each session holds only a handful of
 # hour-long windows, and centring so few of them on their own mean drives what is left
 # negative. The purge gap a fold needs is set by the forward window itself, not by any of
@@ -712,14 +715,14 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# The trailing 15-minute return earns a mean information coefficient of -0.00783 against the
-# primary label, over 135,359 scored decision minutes drawn from 13,759,020 rows on a
+# The trailing 15-minute return earns a mean information coefficient of -0.00781 against the
+# primary label, over 135,360 scored decision minutes drawn from 13,894,380 rows on a
 # cross-section of at least 51 symbols. The sign is negative, so on this universe the recent
 # move tends to give part of itself back rather than continue.
 #
-# The Newey-West rule picks 19 Bartlett lags and returns a t-statistic of -5.89 against a
-# naive -16.42, so pricing in the overlap cuts the apparent evidence by nearly two thirds -
-# and what is left is still far from zero, at p 3.76e-09. That is the floor: a feature that
+# The Newey-West rule picks 19 Bartlett lags and returns a t-statistic of -5.91 against a
+# naive -16.47, so pricing in the overlap cuts the apparent evidence by nearly two thirds -
+# and what is left is still far from zero, at p 3.5e-09. That is the floor: a feature that
 # ranks the cross-section no better than the last quarter-hour of price has added nothing.
 # It is a floor on ranking, not on profit - a coefficient of this size is small next to the
 # round trip Section E priced, which is the tension the rest of the case study works through.
@@ -806,9 +809,12 @@ for name in LABEL_NAMES:
 # is a floor on what trading costs. It doubles the half-spread quoted at the decision bar,
 # which is one full spread, rather than adding the two half-spreads actually crossed at the
 # entry and the exit, so it prices the round trip at the moment the decision is taken and
-# not at the two moments it is filled. The universe is the fixed NASDAQ-100 list
-# `setup.yaml` declares, not a point-in-time index reconstruction, so a name that joined or
-# left mid-sample is present throughout. The flat band is a single constant across every
+# not at the two moments it is filled. The universe is the list `setup.yaml` declares, and
+# the archive behind it is point-in-time: a name carries bars only for the sessions it was a
+# constituent, so AAL and WLTW stop in May 2020 where they left the index and the
+# cross-section is narrower at the end of the sample than at its start. What the declared
+# list fixes is membership over the whole sample, not presence in every session. The flat
+# band is a single constant across every
 # symbol and every regime, where the spread it stands for is neither. The baseline is one
 # signal at one horizon.
 #
