@@ -134,16 +134,17 @@ N_QUANTILES = 5  # groups the firms are split into each month for the shape diag
 
 # %% [markdown]
 # The declared label is a single month's return, so no two consecutive observations of it
-# share any part of their window. The Newey-West correction below is told that horizon
-# rather than a lag count, so the width it allows for is derived from the label and not
-# typed here.
+# share any part of their window. The Newey-West correction below is told that span rather
+# than a lag count, so the width it allows for is read from `setup.yaml` and not typed here.
+# `labels.horizons` is a different quantity and is not what the correction wants: it says how
+# far past its own timestamp an outcome is still unresolved, which on this panel is zero.
 
 # %%
 LABEL_NAME = SETUP["labels"]["primary"]
 LABEL_PATH = CASE_DIR / "labels" / f"{LABEL_NAME}.parquet"
 LABEL_BUFFER = resolve_label_buffer(CASE_STUDY_ID, LABEL_NAME, SETUP)
 OUTCOME_HORIZON = resolve_label_horizon(CASE_STUDY_ID, LABEL_NAME, SETUP)
-LABEL_HORIZON_MONTHS = int(str(LABEL_BUFFER).rstrip("Mm"))
+LABEL_SPAN_MONTHS = int(str(LABEL_BUFFER).rstrip("Mm"))
 
 # %%
 print(
@@ -228,8 +229,13 @@ n_firms = eval_panel[ENTITY_COL].n_unique()
 #
 # A walk-forward scheme cuts the history into overlapping training windows, each followed by
 # a validation window it is scored on, stepping backwards from the boundary of the held-back
-# period. A gap the width of the label separates each training window from its validation
-# window, so that no training row's return is still unresolved when validation begins.
+# period. A month separates each training window from its validation window, the width declared
+# as `labels.buffer`. Nothing forces that gap here - the section above establishes that a row's
+# return is already realised on the row's own timestamp, so no training row's return is ever
+# still unresolved - and it is left in place as the conservative choice. The second setting the
+# generator is given, `labels.horizons`, is what would shorten the last validation window if an
+# outcome did reach past its timestamp; it is zero for the same reason, so the last window runs
+# up to the boundary.
 
 # %%
 splits = generate_cv_splits(
@@ -308,7 +314,10 @@ panel_profile = (
         pl.col("coverage").min().alias("min_coverage"),
         pl.col("coverage").median().alias("median_coverage"),
     )
-    .sort("characteristics", descending=True)
+    # `group_by` does not promise an output order, so a single-key sort leaves the groups that
+    # tie on it in whatever order the grouping happened to emit, and the table reorders itself
+    # between runs. The family name breaks every remaining tie.
+    .sort(["characteristics", "family"], descending=[True, False])
 )
 panel_profile
 
@@ -414,7 +423,7 @@ print(
 
 # %%
 ic_stats = {
-    feature: compute_ic_hac_stats(series, ic_col="ic", label_horizon=LABEL_HORIZON_MONTHS)
+    feature: compute_ic_hac_stats(series, ic_col="ic", label_horizon=LABEL_SPAN_MONTHS)
     for feature, series in ic_series.items()
 }
 HAC_LAGS = next(iter(ic_stats.values()))["effective_lags"]
@@ -472,7 +481,7 @@ fig, axes = plt.subplots(len(SERIES_FEATURES), 1, figsize=FIGSIZE["grid_3x2"], s
 for ax, feature in zip(axes, SERIES_FEATURES, strict=True):
     series = ic_series[feature]
     stats = ic_stats[feature]
-    bootstrap = compute_ic_uncertainty(series, horizon=LABEL_HORIZON_MONTHS, ic_col="ic")
+    bootstrap = compute_ic_uncertainty(series, horizon=LABEL_SPAN_MONTHS, ic_col="ic")
     half_width = 1.96 * stats["hac_se"]
     months = series[DATE_COL].to_list()
     ax.plot(months, series["ic"].to_list(), color=COLORS["recede"], linewidth=0.5)
