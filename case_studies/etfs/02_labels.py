@@ -60,7 +60,7 @@ from case_studies.utils.label_diagnostics import effective_sample_size, panel_au
 from data import load_etfs
 from utils.artifact_specs import resolve_label_horizon
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -280,7 +280,13 @@ add_message_title(
     subtitle="Position 0 is each symbol's last session, so time runs right to left",
 )
 ax.legend(loc="center left", frameon=False)
-plt.show()
+show_with_alt(
+    fig,
+    "Two step curves against sessions counted back from the end of each symbol's series. The "
+    "share of symbols carrying a non-null label is zero at the tail and jumps to one at "
+    "position 5 for the 5-session label and at position 21 for the 21-session label, so each "
+    "goes null over exactly as many tail sessions as its own horizon.",
+)
 
 # %% [markdown]
 # ## E. Distribution and base rate
@@ -336,7 +342,12 @@ add_message_title(
     subtitle="Identical bins, development window; each label's standard deviation is in the legend",
 )
 ax.legend(loc="upper left", frameon=False)
-plt.show()
+show_with_alt(
+    fig,
+    "Two forward-return distributions on identical bins, centred on zero. The 5-session label "
+    "is a tall narrow filled histogram peaking near density 26, and the 21-session label a "
+    "lower, much wider outline peaking near 13 and still visible at plus and minus 0.15.",
+)
 
 # %% [markdown]
 # The second stability question is about the spread the model ranks within. A cross-sectional
@@ -375,7 +386,12 @@ add_message_title(
     subtitle="Spread across symbols within a date, averaged over the year",
 )
 ax.legend(loc="upper right", frameon=False)
-plt.show()
+show_with_alt(
+    fig,
+    "One bar per year of the mean daily cross-sectional standard deviation, against a dashed "
+    "line at the median year near 0.039. The bars run from about 0.030 to 0.067, with the two "
+    "tallest in 2008 and 2020 and no trend between them.",
+)
 
 print(
     f"scale: std ratio {ratio:.2f} against {theory:.2f} under root-horizon scaling; "
@@ -435,7 +451,12 @@ add_message_title(
     subtitle=f"{PRIMARY_LABEL} pooled across the panel, development window",
 )
 ax.legend(loc="upper right", frameon=False)
-plt.show()
+show_with_alt(
+    fig,
+    "Bars of panel autocorrelation against lag in trading sessions, falling almost in a "
+    "straight line from about 0.94 at lag 1 to zero at lag 21, where a dotted vertical line "
+    "marks the label horizon. Beyond that lag the bars sit at zero.",
+)
 
 print(
     f"{PRIMARY_LABEL}: N={n_rows:,} N_eff={n_eff:,.0f} ({n_eff / n_rows:.2%} of N, against "
@@ -511,13 +532,25 @@ ax.fill_between(
 ax.set_ylim(0, None)
 ax.set_xlabel("Date")
 ax.set_ylabel("Eligible ETFs quoting")
+# Computed rather than asserted: on the corrected eligibility screen no date falls short, and a
+# subtitle promising a shaded region the figure does not draw is what this sentence used to be.
+_short = int((counts < min_obs).sum())
 add_message_title(
     ax,
     "The eligible cross-section more than doubles over the sample",
-    subtitle="Shaded dates fall below the minimum and contribute nothing to the IC series",
+    subtitle=(
+        f"{_short} dates fall below the minimum and contribute nothing to the IC series"
+        if _short
+        else "Every date carrying an eligible cross-section clears the minimum and is scored"
+    ),
 )
 ax.legend(loc="lower right", frameon=False)
-plt.show()
+show_with_alt(
+    fig,
+    "A step line of eligible ETFs quoting on each date, rising from about 47 at the start of "
+    "2007 to about 96 by 2018 and flat afterwards, against a dashed line at the minimum of 44. "
+    "The line is above the minimum on every date it covers.",
+)
 
 print(
     f"{eligible_per_date.height:,} dates carry an eligible cross-section; {scored.height:,} of "
@@ -552,12 +585,13 @@ print(
 
 # %% [markdown] tags=["results"]
 # On the point-in-time eligible panel - the one `03_financial_features` builds features over
-# and `05_evaluation` scores them on - raw momentum earns a mean IC of 0.0203 against the
-# monthly label, averaged over the 4,006 dates that reach the 44-ETF minimum. The other 251 of
-# the 4,257 are the earliest in the panel, so the series is scored from 2008-01-02 rather than
-# from the first date momentum can be measured on. The naive standard error puts that IC at a
-# t-statistic of 3.77; the HAC standard error puts it at 1.08, with a p-value of 0.282. A
-# feature has to clear the second number.
+# and `05_evaluation` scores them on - raw momentum earns a mean IC of 0.0266 against the
+# monthly label, averaged over the 4,257 dates that reach the 44-ETF minimum. Every date that
+# carries an eligible cross-section now reaches it, so the series is scored from the first date
+# momentum can be measured on. The naive standard error puts that IC at a t-statistic of 5.06;
+# the HAC standard error puts it at 1.44, with a p-value of 0.150. A feature has to clear the
+# second number, and this one does not: the gap between the two t-statistics is the overlap
+# between consecutive monthly windows, not evidence.
 
 # %% [markdown]
 # ## H. Artifacts and the audit record

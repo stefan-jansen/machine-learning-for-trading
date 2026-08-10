@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -19,6 +19,127 @@ from utils.downloading import (
     resolve_data_dir,
     resolve_storage_path,
 )
+
+
+def undo_splits(panel: pl.DataFrame) -> pl.DataFrame:
+    """Restate a split-adjusted panel as the price and share count that reached the tape.
+
+    A split on date ``d`` restates every price strictly before ``d``, so the factor that
+    undoes it at ``t`` is the product of every split after ``t``. The split date's own
+    price is already post-split and keeps whatever later splits apply to it. Yahoo writes
+    ``0`` in the split column where nothing split.
+
+    Turnover is invariant under this: price is multiplied and volume divided by the same
+    factor, which is why a split distorts a per-share commission but not a dollar-volume
+    screen.
+
+    Args:
+        panel: ``timestamp``, ``symbol``, ``close``, ``volume``, ``split``, sorted within
+            symbol by timestamp.
+
+    Returns:
+        ``timestamp``, ``symbol``, ``close``, ``volume``, with the splits removed.
+    """
+    ratio = pl.when(pl.col("split") > 0).then(pl.col("split")).otherwise(1.0)
+    return (
+        panel.with_columns(ratio.alias("_ratio"))
+        .with_columns(
+            pl.col("_ratio")
+            .reverse()
+            .cum_prod()
+            .reverse()
+            .shift(-1, fill_value=1.0)
+            .over("symbol")
+            .alias("_future_splits")
+        )
+        .select(
+            "timestamp",
+            "symbol",
+            close=pl.col("close") * pl.col("_future_splits"),
+            volume=pl.col("volume") / pl.col("_future_splits"),
+        )
+        .sort(["symbol", "timestamp"])
+    )
+
+
+def write_unadjusted(manager) -> Path:
+    """Download the price a share actually traded at, and the number of shares that traded.
+
+    `etf_universe.parquet` is split- and dividend-adjusted throughout, which is what a
+    return needs and what a dollar amount must not use. An adjusted close is the traded
+    price divided by every distribution that followed it, so on SPY's first session here
+    it reads $87.23 against the $126.70 the fund actually changed hands at. Anything
+    denominated in dollars or in shares - a turnover screen, a commission quoted per share
+    - is wrong by that factor, and wrong by more the further back it looks.
+
+    Two adjustments have to come off, and Yahoo removes only one of them for you.
+    ``auto_adjust=False`` gives a close still carrying every **split**: after IVW's 4:1 in
+    2020 its whole earlier history reads a quarter of what it traded at, and after OIH's
+    1:20 twenty times. Splits leave turnover alone, because the share count is scaled the
+    opposite way and the product is unchanged, but a commission quoted per share is wrong
+    by the split factor. So the cumulative future split is multiplied back out here and
+    the share count divided by it, which is what the two columns then mean: the price on
+    the tape that day, and the shares that changed hands that day.
+
+    Splits are read to the present rather than to the end of the sample, because a split
+    restates the history behind it: VUG's 6:1 in April 2026 and PPLT's 10:1 in May 2026
+    both moved every price in this window.
+    """
+    import yfinance as yf
+
+    symbols = sorted(manager.config.get_all_symbols())
+    frames: list[pl.DataFrame] = []
+
+    # Read to today, not to the configured end: a split after the sample still restates
+    # every price inside it, so the factor is only complete if the window reaches it.
+    today = (date.today() + timedelta(days=1)).isoformat()
+    sample_end = date.fromisoformat(str(manager.config.end))
+
+    for start in range(0, len(symbols), 50):
+        chunk = symbols[start : start + 50]
+        raw = yf.download(
+            chunk,
+            start=manager.config.start,
+            end=today,
+            auto_adjust=False,
+            actions=True,
+            progress=False,
+            threads=False,
+        )
+        if raw is None or raw.empty:
+            continue
+
+        parts: list[pl.DataFrame] = []
+        for field, name in (("Close", "close"), ("Volume", "volume"), ("Stock Splits", "split")):
+            panel = raw[field]
+            if panel.ndim != 2:
+                raise TypeError(
+                    f"yfinance returned a 1-D {field} for {len(chunk)} symbols; "
+                    "expected one column per ticker"
+                )
+            # yfinance names the column axis "Ticker" and leaves the index unnamed once a
+            # field is selected out of the multi-index, so name both here rather than
+            # depending on what reset_index() invents.
+            tidy = panel.rename_axis(index="timestamp", columns=None).reset_index()
+            long = pl.from_pandas(tidy).unpivot(
+                index="timestamp", variable_name="symbol", value_name=name
+            )
+            parts.append(long.with_columns(pl.col("timestamp").cast(pl.Datetime("us"))))
+
+        merged = parts[0]
+        for part in parts[1:]:
+            merged = merged.join(part, on=["timestamp", "symbol"], how="inner")
+        frames.append(merged)
+        print(f"  {chunk[0]}..{chunk[-1]}: {len(chunk)} symbols")
+
+    panel = pl.concat(frames, how="vertical").drop_nulls("close").sort(["symbol", "timestamp"])
+    unadjusted = undo_splits(panel).filter(
+        pl.col("timestamp") <= pl.lit(sample_end).cast(pl.Datetime("us"))
+    )
+
+    output_path = manager.config.storage_path / "etf_universe_unadjusted.parquet"
+    unadjusted.write_parquet(output_path)
+    return output_path
 
 
 def write_dictionary(manager) -> Path:
@@ -47,6 +168,16 @@ def main() -> None:
         "--update",
         action="store_true",
         help="Extend the configured end date to today and append new data",
+    )
+    parser.add_argument(
+        "--unadjusted-only",
+        action="store_true",
+        help=(
+            "Refresh only etf_universe_unadjusted.parquet, leaving the adjusted panel "
+            "untouched. The traded close is settled history and reproduces exactly; the "
+            "adjusted panel moves whenever a fund distributes, so re-downloading it "
+            "restates every earlier price."
+        ),
     )
     args = parser.parse_args()
 
@@ -99,12 +230,22 @@ def main() -> None:
 
     manager.config.storage_path.mkdir(parents=True, exist_ok=True)
 
+    if args.unadjusted_only:
+        print("Traded (unadjusted) close and volume, for dollar- and share-denominated screens:")
+        unadjusted_path = write_unadjusted(manager)
+        print(f"Written: {unadjusted_path}")
+        return
+
     if output_path.exists() and not args.force:
         stats = manager.update()
         action = "updated"
     else:
         stats = manager.download_all(force=args.force)
         action = "downloaded"
+
+    print("Traded (unadjusted) close and volume, for dollar- and share-denominated screens:")
+    unadjusted_path = write_unadjusted(manager)
+    print(f"Written: {unadjusted_path}")
 
     dictionary_path = write_dictionary(manager)
     metadata_path = manager.config.storage_path / "etf_universe_metadata.json"

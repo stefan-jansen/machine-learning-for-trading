@@ -86,6 +86,11 @@ from statsmodels.tsa.stattools import adfuller
 from threadpoolctl import threadpool_limits
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.cv_window import (
+    assert_variant_folds_are_out_of_sample,
+    configured_labels,
+    modeling_fold_boundaries,
+)
 from case_studies.utils.temporal import (
     filtered_state_probs,
     fit_hmm_kmeans_init,
@@ -96,7 +101,7 @@ from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.modeling import resolve_label_buffer, resolve_label_horizon
 from utils.paths import REPO_ROOT, display_path, get_case_study_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -357,6 +362,62 @@ print(
 )
 
 # %% [markdown]
+# ### The window each fold has to cover
+#
+# The folds above are the primary label's. This case study configures a second, `fwd_ret_5d`,
+# and a fold's boundaries depend on the horizon of the label being predicted: the gap held empty
+# between training and validation is the horizon wide, so a **shorter** horizon holds back less
+# and its validation window runs **later**. The cell below prints where each one reaches.
+#
+# One table is written, and a model reads it by fold number, so two things have to be true of it
+# and only one of them was.
+#
+# The first is that no variant label may be scored on sessions this fold's parameters were
+# estimated on. That is `variant.val_start > primary.train_end`, checked here by the shared
+# `assert_variant_folds_are_out_of_sample`, which resolves each label through the same
+# derivation `load_modeling_dataset` uses so that producer and consumer cannot disagree.
+#
+# The second is coverage: a fold has to carry a row for every session any configured label will
+# ask of it. Emitting only the primary's window left the 5-session label's fold 0 sixteen
+# sessions short, which is a model reading no features for the tail of its own validation window
+# rather than reading wrong ones. So the window each fold is **applied** to is widened to the
+# latest validation session any configured label reaches, while the window it is **fitted** on
+# is untouched - every model here filters forward, so applying one further into the future adds
+# sessions without changing a value already computed, and without reading anything the fit did
+# not already exclude.
+
+# %%
+variant_gaps = assert_variant_folds_are_out_of_sample(CASE_STUDY_ID, PRIMARY_LABEL)
+
+label_val_ends: dict[int, list] = {}
+for label in configured_labels(CASE_STUDY_ID):
+    label_folds = modeling_fold_boundaries(CASE_STUDY_ID, label)
+    if label_folds is None:
+        continue
+    for split in label_folds:
+        label_val_ends.setdefault(int(split["fold"]), []).append(pd.Timestamp(split["val_end"]))
+
+for f in all_folds:
+    reach = max(label_val_ends.get(f["fold"], []), default=pd.Timestamp(f["val_end"]))
+    f["emit_end"] = max(reach, pd.Timestamp(f["val_end"])).date()
+
+display(pd.DataFrame(variant_gaps))
+_widened = [f for f in all_folds if f["emit_end"] > pd.Timestamp(f["val_end"]).date()]
+print(
+    f"Every variant fold opens after the primary fold it reads stopped fitting; smallest gap "
+    f"{min(r['gap'] for r in variant_gaps).days} days."
+)
+print(
+    f"{len(_widened)} of {len(all_folds)} folds are applied past the primary label's validation "
+    f"window so a variant label's is covered: "
+    + ", ".join(
+        f"fold {f['fold']} to {f['emit_end']} (+{sessions_between(f['val_end'], f['emit_end'])} "
+        f"sessions)"
+        for f in _widened
+    )
+)
+
+# %% [markdown]
 # Figure F1 draws what the saved table will contain. For each fold the dark bar is the window
 # the parameters are estimated on and the amber bar is the window they are then applied to
 # without having seen it. Inference runs forward across both bars - the table carries a value
@@ -370,7 +431,9 @@ fig_folds, ax = plt.subplots(figsize=(12, 0.5 * len(all_folds) + 2))
 for f in all_folds:
     y = f["fold"]
     tr0, tr1 = pd.Timestamp(f["train_start"]), pd.Timestamp(f["train_end"])
-    va0, va1 = pd.Timestamp(f["val_start"]), pd.Timestamp(f["val_end"])
+    # The applied bar runs to emit_end, not val_end: the table carries every session the
+    # fold is applied to, including the tail a shorter-horizon label validates on.
+    va0, va1 = pd.Timestamp(f["val_start"]), pd.Timestamp(f["emit_end"])
     is_holdout = f["fold"] == len(cv_splits)
     ax.barh(y, tr1 - tr0, left=tr0, height=0.55, color=COLORS["blue"])
     ax.barh(
@@ -423,7 +486,13 @@ ax.set_title(
 )
 sns.despine()
 fig_folds.tight_layout()
-plt.show()
+show_with_alt(
+    fig_folds,
+    "Nine horizontal bars, one per fold plus the holdout, each a long dark bar for the window "
+    "the parameters are estimated on followed by a short amber bar for the window they are "
+    "applied to unseen. Each fold starts and ends a year earlier than the one above it, and a "
+    "dashed line with a shaded column marks the holdout, which no amber bar crosses.",
+)
 
 display(
     pl.DataFrame(
@@ -571,7 +640,8 @@ hmm_params = []
 
 for fold in all_folds:
     fold_idx = fold["fold"]
-    train_start, train_end, val_end = fold["train_start"], fold["train_end"], fold["val_end"]
+    train_start, train_end = fold["train_start"], fold["train_end"]
+    emit_end = fold["emit_end"]
 
     train = market.filter(
         (pl.col("timestamp") >= pl.lit(train_start).cast(pl.Date))
@@ -600,7 +670,7 @@ for fold in all_folds:
 
     window = market.filter(
         (pl.col("timestamp") >= pl.lit(train_start).cast(pl.Date))
-        & (pl.col("timestamp") <= pl.lit(val_end).cast(pl.Date))
+        & (pl.col("timestamp") <= pl.lit(emit_end).cast(pl.Date))
     )
     filtered = filtered_state_probs(best_model, window.select(MARKET_COLS).to_numpy())
 
@@ -634,7 +704,7 @@ print(f"Regime features: {len(hmm_features):,} rows across {hmm_features['fold']
 
 # %% [markdown]
 # The fit window has to end where the fold says it does, and the emitted window has to be the
-# fold window. Asserting it is what separates a claim from a check.
+# window the fold is applied to. Asserting it is what separates a claim from a check.
 
 # %%
 for f in all_folds:
@@ -643,7 +713,7 @@ for f in all_folds:
         continue
     emitted = hmm_features.filter(pl.col("fold") == f["fold"])
     assert emitted["timestamp"].min() >= pd.Timestamp(f["train_start"]).date()
-    assert emitted["timestamp"].max() <= pd.Timestamp(f["val_end"]).date()
+    assert emitted["timestamp"].max() <= pd.Timestamp(f["emit_end"]).date()
     trainable = market.filter(
         (pl.col("timestamp") >= pl.lit(f["train_start"]).cast(pl.Date))
         & (pl.col("timestamp") < pl.lit(f["train_end"]).cast(pl.Date))
@@ -725,7 +795,13 @@ ax.set_title(
 )
 sns.despine()
 fig_regime.tight_layout()
-plt.show()
+show_with_alt(
+    fig_regime,
+    "SPY cumulative return from 2016 to 2024 as a dark line rising from about 100 to just over "
+    "400 percent, with vertical pink bands marking the sessions the regime model calls "
+    "stressed. The bands sit on the drawdowns - early 2016, early 2018, late 2018, the "
+    "February 2020 crash and most of 2022 - and are absent from the steady climbs between.",
+)
 
 # %% [markdown]
 # ### C.2 Fractional differencing
@@ -792,7 +868,7 @@ for fold in all_folds:
             prices.filter(
                 (pl.col("symbol") == symbol)
                 & (pl.col("timestamp") >= pl.lit(fold["train_start"]).cast(pl.Date))
-                & (pl.col("timestamp") <= pl.lit(fold["val_end"]).cast(pl.Date))
+                & (pl.col("timestamp") <= pl.lit(fold["emit_end"]).cast(pl.Date))
             )
             .sort("timestamp")
             .select(["timestamp", "close"])
@@ -910,7 +986,7 @@ def fit_garch_fold(
             prices_df.filter(
                 (pl.col("symbol") == sym)
                 & (pl.col("timestamp") >= pl.lit(fold["train_start"]).cast(pl.Date))
-                & (pl.col("timestamp") <= pl.lit(fold["val_end"]).cast(pl.Date))
+                & (pl.col("timestamp") <= pl.lit(fold["emit_end"]).cast(pl.Date))
             )
             .sort("timestamp")
             .with_columns(ret=pl.col("close").pct_change())
@@ -1001,7 +1077,7 @@ for f in all_folds:
     fold_params = garch_param_df.filter(pl.col("fold") == f["fold"])
     fold_values = garch_features.filter(pl.col("fold") == f["fold"])
     assert fold_values["timestamp"].min() >= pd.Timestamp(f["train_start"]).date()
-    assert fold_values["timestamp"].max() <= pd.Timestamp(f["val_end"]).date()
+    assert fold_values["timestamp"].max() <= pd.Timestamp(f["emit_end"]).date()
     trainable = (
         prices.filter(
             (pl.col("timestamp") >= pl.lit(f["train_start"]).cast(pl.Date))
@@ -1107,7 +1183,14 @@ fig_stab.suptitle(
 )
 sns.despine()
 fig_stab.tight_layout()
-plt.show()
+show_with_alt(
+    fig_stab,
+    "Two panels against fold number, 0 being the most recent. On the left the probability of "
+    "staying in each regime state, calm near 0.99 and stressed near 0.98, both moving by less "
+    "than 0.01 across the nine refits. On the right the GARCH persistence, alpha plus beta, "
+    "rising from about 0.962 at fold 1 to about 0.989 and staying below the dashed line at "
+    "one, above which shocks would never decay.",
+)
 
 # %% [markdown]
 # The two persistences are both numbers close to one, and they are not the same kind of number.
@@ -1185,7 +1268,7 @@ for fold in all_folds:
     skeleton = (
         prices.filter(
             (pl.col("timestamp") >= pl.lit(fold["train_start"]).cast(pl.Date))
-            & (pl.col("timestamp") <= pl.lit(fold["val_end"]).cast(pl.Date))
+            & (pl.col("timestamp") <= pl.lit(fold["emit_end"]).cast(pl.Date))
         )
         .select(["timestamp", "symbol"])
         .unique()
@@ -1222,7 +1305,7 @@ assert sorted(model_based["fold"].unique().to_list()) == [f["fold"] for f in all
 expected_rows = sum(
     prices.filter(
         (pl.col("timestamp") >= pl.lit(f["train_start"]).cast(pl.Date))
-        & (pl.col("timestamp") <= pl.lit(f["val_end"]).cast(pl.Date))
+        & (pl.col("timestamp") <= pl.lit(f["emit_end"]).cast(pl.Date))
     )
     .select(["timestamp", "symbol"])
     .unique()
@@ -1232,6 +1315,35 @@ expected_rows = sum(
 assert model_based.height == expected_rows, (
     f"emitted {model_based.height:,} rows against {expected_rows:,} session-symbol pairs "
     "inside the fold windows"
+)
+
+# %% [markdown]
+# Every configured label reads this table by fold number, so every configured label's validation
+# window has to lie inside the fold that carries it. A model whose label is not the primary one
+# otherwise finds no features for the tail of its own validation window - not wrong values, no
+# values - which is the coverage shortfall that made `11a_pca` refuse the 5-session label.
+
+# %%
+sessions = prices.select("timestamp").unique()
+for label in configured_labels(CASE_STUDY_ID):
+    label_folds = modeling_fold_boundaries(CASE_STUDY_ID, label)
+    if label_folds is None:
+        continue
+    for split in label_folds:
+        wanted = sessions.filter(
+            (pl.col("timestamp") >= pl.lit(split["val_start"]).cast(pl.Date))
+            & (pl.col("timestamp") <= pl.lit(split["val_end"]).cast(pl.Date))
+        )["timestamp"]
+        carried = model_based.filter(pl.col("fold") == split["fold"])["timestamp"].unique()
+        missing = wanted.is_in(carried).not_().sum()
+        assert missing == 0, (
+            f"fold {split['fold']} carries {len(wanted) - missing} of {len(wanted)} sessions in "
+            f"{label}'s validation window; a model on that label would read no features for the "
+            f"last {missing}"
+        )
+print(
+    f"Every configured label's validation window is covered by the fold that carries it: "
+    f"{', '.join(configured_labels(CASE_STUDY_ID))}."
 )
 EXPECTED_COLUMNS = [
     "fold",
@@ -1492,7 +1604,14 @@ ax.set_title(
 )
 sns.despine()
 fig_ic.tight_layout()
-plt.show()
+show_with_alt(
+    fig_ic,
+    "Fourteen horizontal bars of information coefficient on validation sessions, sorted from "
+    "about +0.20 for the stressed-regime probability down to about -0.20 for the fractionally "
+    "differenced SPY series. Filled bars are retained by Benjamini-Hochberg at 5 percent and "
+    "hollow ones are not, and the two do not follow the ordering: a hollow bar near +0.07 sits "
+    "above a filled one of the same size.",
+)
 
 # %% [markdown] tags=["results"]
 # The screen runs on 198,877 validation rows - 100 ETFs across 1,995 sessions - and
