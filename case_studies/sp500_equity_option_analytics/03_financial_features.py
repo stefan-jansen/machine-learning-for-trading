@@ -257,24 +257,20 @@ register_frame(FAMILIES).select(
 # off. The share-bar extract is wider than that and the loader takes a `symbols=` argument nothing
 # was passing. The keep-or-drop in Section C would have removed the surplus names from the matrix
 # anyway, so bounding here moves no emitted value; what it changes is that the universe becomes a
-# stated bound with an assertion behind it rather than a by-product of a later filter. The roster
-# is derived from the surface rather than typed out, and checked in both directions: its size
-# against the declared `n_assets`, and every roster name against the share bars. A guard that only
-# asks whether every declared name is present says nothing about a present name never declared.
+# stated bound rather than a by-product of a later filter. The roster is derived from the surface
+# rather than typed out, and every roster name is checked against the share bars.
 #
-# The roster is read off the **whole** extract rather than off the requested window, because
-# `n_assets` is a statement about the dataset: a run that narrows `START_DATE` would otherwise
-# assert against a roster missing every name that had not yet listed, and the declaration would
-# fail on a parameter this notebook documents as free to change. The dates bound the panels.
+# The roster is read off the **whole** extract rather than off the requested window, because which
+# names have listed options is a property of the dataset rather than of a run. How many that comes
+# to is reported rather than asserted: `n_assets` describes the production extract, and the reduced
+# one CI runs on carries a handful of names by design.
+# `tests/test_eoa_universe_roster.py` holds the declaration to the production data.
 
 # %%
 full_surface = load_sp500_options_surface()
 full_bars = load_sp500_daily_bars()
 ROSTER = sorted(full_surface["symbol"].unique().to_list())
-assert len(ROSTER) == setup["universe"]["n_assets"], (
-    f"{len(ROSTER)} names carry an option surface against a declared "
-    f"universe.n_assets of {setup['universe']['n_assets']}"
-)
+assert ROSTER, "the option-surface extract carries no names to rank"
 priced = set(full_bars["symbol"].unique().to_list())
 assert not set(ROSTER) - priced, f"no share bars for {sorted(set(ROSTER) - priced)}"
 outside = sorted(priced - set(ROSTER))
@@ -295,9 +291,11 @@ print(f"{daily.height:,} name-sessions of share bars, {daily['symbol'].n_unique(
 print(f"{daily[SECURITY].n_unique()} securities behind those tickers")
 print(f"{surface_raw.height:,} surface rows carrying {len(SURFACE_COLS)} columns")
 print(f"{daily['timestamp'].min()} to {daily['timestamp'].max()}")
+DECLARED = setup["universe"]["n_assets"]
 print(
-    f"{len(outside)} priced names carry no option surface and are outside the declared universe "
-    f"({', '.join(outside)})"
+    f"Universe {len(ROSTER)} names with an option surface"
+    + ("" if len(ROSTER) == DECLARED else f" (a reduced extract; n_assets declares {DECLARED})")
+    + f"; {len(outside)} priced names carry none and are excluded ({', '.join(outside)})"
 )
 
 # %%
