@@ -110,6 +110,7 @@ EVAL_CFG = load_evaluation_config(CASE_STUDY_ID)
 PRIMARY_LABEL = SETUP["labels"]["primary"]
 LABEL_BUFFER = SETUP["labels"]["buffer"]
 CONFIGURED_LABELS = [PRIMARY_LABEL, *SETUP["labels"].get("variants", [])]
+UNIVERSE = sorted(SETUP["universe"]["symbols"])
 CALENDAR = EVAL_CFG["calendar"]
 HOLDOUT_START = pd.Timestamp(EVAL_CFG["holdout_start"])
 HOLDOUT_END = pd.Timestamp(EVAL_CFG["holdout_end"])
@@ -192,6 +193,7 @@ df = load_nasdaq100_bars(
     start_date=START_DATE,
     end_date=str(END_DATE),
     include_microstructure=True,
+    symbols=UNIVERSE,
 ).select(READ)
 
 if MAX_SYMBOLS:
