@@ -1463,10 +1463,14 @@ add_message_title(
 show_with_alt(
     fig,
     "Two stacked panels against the fold number. The upper panel plots the median GARCH "
-    "persistence per fold as a line of markers inside a shaded interquartile band; the line "
-    "is nearly flat across every fold and the band is narrow, widening only at the last "
-    "folds. The lower panel plots the distance between the two regime centroids, which "
-    "falls steadily from its largest value at the first fold to a small one at the last.",
+    "persistence per fold as a line of markers inside a shaded interquartile band. The "
+    "line rises gently over the first third of the folds, holds a slight plateau through "
+    "the middle, and eases back by the last, staying inside a narrow span near the top of "
+    "the axis throughout; the band around it is tight except at the final folds, where it "
+    "opens downwards. The lower panel plots the distance between the two regime centroids. "
+    "It declines over the fold sequence, steeply at first and then more gradually, but not "
+    "monotonically - it steps up at two folds in the second half before resuming - and "
+    "ends at a small fraction of where it started.",
 )
 
 # %% [markdown] tags=["results"]

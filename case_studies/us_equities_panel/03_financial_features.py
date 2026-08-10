@@ -1446,9 +1446,11 @@ show_plotly_with_alt(
     "A scatter of each feature's t-statistic computed with the naive standard error "
     "against the same statistic computed with the autocorrelation-consistent one, with a "
     "dashed diagonal marking where the two would agree and reference lines at zero on both "
-    "axes. Every point sits on the inner side of the diagonal, so each feature's statistic "
-    "is smaller in magnitude once serial correlation is allowed for, and the points "
-    "furthest from zero are pulled the furthest.",
+    "axes, with points shaded by whether the feature survives the false-discovery "
+    "correction. The points lie close to the diagonal and span both signs, thinning out "
+    "away from the origin. Most sit just inside it, where allowing for serial correlation "
+    "has shrunk the statistic; a small number sit just outside, where it has grown "
+    "instead. The line above the chart reports how many go each way.",
 )
 
 # %% [markdown]
