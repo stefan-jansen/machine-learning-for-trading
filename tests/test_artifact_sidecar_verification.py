@@ -72,6 +72,40 @@ def test_an_unreadable_sidecar_is_refused(tmp_path: Path) -> None:
         verify_artifact_sidecars({"financial": path})
 
 
+def test_a_missing_sidecar_is_skipped_when_presence_is_not_required(tmp_path: Path) -> None:
+    """The CI fixtures predate the sidecar, so absence must not fail an ordinary load.
+
+    A skipped artifact is absent from the returned mapping rather than present with a
+    null, so a caller carrying these into a training spec records what it verified and
+    not what it declined to.
+    """
+    good = _artifact(tmp_path, "financial")
+    bare = tmp_path / "model_based.parquet"
+    pl.DataFrame({"timestamp": [1], "symbol": ["A"], "f": [1.0]}).write_parquet(bare)
+
+    verified = verify_artifact_sidecars(
+        {"financial": good, "model_based": bare}, require_sidecar=False
+    )
+    assert verified == {"financial": value_digest(pl.read_parquet(good))}
+
+
+def test_a_disagreeing_sidecar_is_refused_even_when_presence_is_not_required(
+    tmp_path: Path,
+) -> None:
+    """Absence and disagreement carry different evidence, and only absence is excused.
+
+    This is the case the issue is about, and it is the one that has to fire on an
+    ordinary load: the values moved and the record did not move with them.
+    """
+    path = _artifact(tmp_path)
+    pl.DataFrame(
+        {"timestamp": [1, 2, 3], "symbol": ["A", "B", "C"], "feature": [9.0, 9.0, 9.0]}
+    ).write_parquet(path)
+
+    with pytest.raises(ValueError, match="hashes .*, its sidecar records"):
+        verify_artifact_sidecars({"financial": path}, require_sidecar=False)
+
+
 def test_every_failing_artifact_is_named_not_just_the_first(tmp_path: Path) -> None:
     """A run with two stale inputs should report two, so one pass fixes both."""
     good = _artifact(tmp_path, "financial")

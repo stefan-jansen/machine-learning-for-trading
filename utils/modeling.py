@@ -417,7 +417,11 @@ def get_classification_eval_label(case_study_id: str, label: str) -> str:
     return str(mapping[label])
 
 
-def verify_artifact_sidecars(artifacts: Mapping[str, Path]) -> dict[str, str]:
+def verify_artifact_sidecars(
+    artifacts: Mapping[str, Path],
+    *,
+    require_sidecar: bool = True,
+) -> dict[str, str]:
     """Check each input artifact against the digest sidecar its producer wrote.
 
     ``case_studies/utils/artifact_digest.py`` writes ``<artifact>.digest.json``
@@ -429,20 +433,27 @@ def verify_artifact_sidecars(artifacts: Mapping[str, Path]) -> dict[str, str]:
     model trained on corrected features and one trained on the leaky version it
     replaced produce the identical training_hash unless something reads the values.
 
-    Raises on a digest that disagrees with the file, and on an artifact with no
-    sidecar: an artifact whose producer never recorded what it wrote is exactly the
-    case this cannot distinguish from a silent change.
+    Raises on a digest that disagrees with the file. Whether a *missing* sidecar
+    also raises is the caller's to choose, because the two carry different
+    evidence. A disagreeing sidecar is a value that moved without its record
+    moving with it, which is the defect itself, and it is never acceptable. A
+    missing sidecar means the producer recorded nothing, which cannot be told
+    apart from a silent change but is also the state of every artifact written
+    before the sidecar existed.
 
     Returns the verified digest per artifact, so the caller can carry it into the
-    training spec.
+    training spec. Artifacts skipped under ``require_sidecar=False`` are absent
+    from the mapping rather than present with a null.
 
-    **Not yet on by default**, and the precondition is measured rather than assumed:
+    ``load_modeling_dataset`` checks agreement on every load and requires presence
+    only under ``verify_input_digests``. The split is measured rather than assumed:
     on 2026-08-09 the production artifacts carried 49 sidecars out of 51, both gaps
     in sp500_options, while the CI fixtures under
     ``ml4t/third-edition-test-data/intermediates`` carried **none** - 0 of 7 for
     cme_futures, 0 of 5 for etfs, 0 of 6 for fx_pairs, 0 of 6 for us_equities_panel.
-    Turning ``verify_input_digests`` on before those are regenerated fails every
-    case-study CI job for a missing sidecar rather than for a changed value.
+    Requiring presence before those are regenerated fails every case-study CI job
+    for a missing sidecar rather than for a changed value, which is the failure the
+    gate is not for.
     """
     from case_studies.utils.artifact_digest import read_digest, sidecar_path, value_digest
 
@@ -451,7 +462,8 @@ def verify_artifact_sidecars(artifacts: Mapping[str, Path]) -> dict[str, str]:
     for name, path in sorted(artifacts.items()):
         side = sidecar_path(path)
         if not side.exists():
-            problems.append(f"{name}: no digest sidecar beside {path.name}")
+            if require_sidecar:
+                problems.append(f"{name}: no digest sidecar beside {path.name}")
             continue
         try:
             record = read_digest(path)
@@ -667,6 +679,25 @@ def load_modeling_dataset(
             splits,
             date_col=date_col,
         )
+        # The artifact carries one fold set, built on the primary label's geometry, and
+        # the rows above were selected from it by ``fold`` id. So the values this load
+        # returns for fold F were fit on data through the *primary* label's train_end,
+        # and a label whose own validation opens earlier than that is scored on sessions
+        # its features already saw. Coverage does not see this: an artifact can cover
+        # every date a variant is scored on and still have been fit past the start of
+        # that window. Checked here rather than in a notebook because every model
+        # notebook reaches its data through this call, and only the label being loaded
+        # is checked, so the cost is one label timeline rather than all of them.
+        from case_studies.utils.cv_window import (
+            assert_variant_folds_are_out_of_sample,
+            configured_labels,
+        )
+
+        configured = configured_labels(case_study_id)
+        if configured and primary_label != configured[0]:
+            assert_variant_folds_are_out_of_sample(
+                case_study_id, configured[0], variants=[primary_label]
+            )
 
     # WalkForwardConfig for library integration
     # Normalize month-based buffers to days (pd.Timedelta rejects 'M' as ambiguous)
@@ -720,8 +751,11 @@ def load_modeling_dataset(
         input_artifacts["model_based"] = temporal_path
     if eval_label_path is not None:
         input_artifacts["eval_label"] = eval_label_path
-    if verify_input_digests:
-        verify_artifact_sidecars(input_artifacts)
+    # Agreement is checked on every load: a sidecar that disagrees with its artifact
+    # is a value that changed without its record changing, which is the defect the
+    # sidecar exists to catch. Presence is required only on request, because the CI
+    # fixtures predate the sidecar and would fail for the wrong reason.
+    verify_artifact_sidecars(input_artifacts, require_sidecar=verify_input_digests)
     return ModelingDataset(
         dataset=dataset,
         feature_names=feature_names,
