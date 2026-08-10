@@ -69,7 +69,14 @@ from case_studies.utils.artifact_digest import read_digest, value_digest, write_
 from data import load_us_equities
 from utils.artifact_specs import resolve_label_horizon
 from utils.paths import display_path, get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title, ml4t_diverging
+from utils.style import (
+    COLORS,
+    FIGSIZE,
+    add_message_title,
+    ml4t_diverging,
+    show_plotly_with_alt,
+    show_with_alt,
+)
 
 CASE_DIR = get_case_study_dir("us_equities_panel")
 FEATURES_DIR = CASE_DIR / "features"
@@ -743,15 +750,15 @@ _nan_counts = {
     for c in feature_cols
     if output_df.schema[c] in (pl.Float32, pl.Float64)
 }
-_nan_carriers = {c: n for c, n in _nan_counts.items() if n}
+_nan_columns = {c: n for c, n in _nan_counts.items() if n}
 output_df = output_df.with_columns(
     pl.col(c).fill_nan(None)
     for c in feature_cols
     if output_df.schema[c] in (pl.Float32, pl.Float64)
 )
 print(
-    f"NaN converted to null in {len(_nan_carriers)} of {len(_nan_counts)} float features, "
-    f"{sum(_nan_carriers.values()):,} values: {sorted(_nan_carriers)}"
+    f"NaN converted to null in {len(_nan_columns)} of {len(_nan_counts)} float features, "
+    f"{sum(_nan_columns.values()):,} values: {sorted(_nan_columns)}"
 )
 
 WINSOR_EXAMPLE = "ret_21d"
@@ -799,7 +806,15 @@ add_message_title(
     subtitle="Per-date first and ninety-ninth percentile against a single flat pair (dashed), "
     "development window",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two ragged lines run across the development window, one above zero and one below, "
+    "tracing the per-date upper and lower percentile of the example return. Both widen "
+    "sharply around the 2000 and 2008 crises and narrow in the calm stretches between. A "
+    "shaded band between them marks the region a single flat pair of clip bounds would "
+    "keep, and two dashed horizontal lines draw those flat bounds; the ragged lines spend "
+    "long periods well inside them and spike far outside them in the crises.",
+)
 
 print(
     f"{WINSOR_EXAMPLE}: flat bounds {flat_lower:.4f} to {flat_upper:.4f} | per-date "
@@ -888,11 +903,15 @@ assert not _unfamilied, f"features in no family: {_unfamilied}"
 # %% [markdown]
 # ## 8. Save Features
 #
-# Written with a digest sidecar beside it, as [`02_labels`](02_labels.ipynb) writes its label
-# files: the record carries the content digest of the values written, the row count, the key
-# columns, the notebook that wrote them, and the digest of the price panel they were built
-# from. Prices are the only input - the labels are read in Section 9, after this write, and
-# score the features rather than shaping them.
+# Beside the parquet, `write_artifact` leaves a small JSON file with the same name and a
+# `.digest.json` suffix, the same way [`02_labels`](02_labels.ipynb) writes its label files. Its
+# job is to make the matrix self-describing, so that a later reader can tell which build of the
+# features a result came from.
+#
+# It holds a hash computed over the values in the file; the number of rows; the columns that
+# identify a row, here the symbol and the timestamp; the notebook that wrote them; and a hash of
+# each input the values were built from. Prices are the only input - the labels are read in
+# Section 9, after this write, and score the features rather than shaping them.
 
 # %%
 output_path = FEATURES_DIR / "financial.parquet"
@@ -1308,7 +1327,15 @@ fig.update_layout(
     height=620,
     margin=dict(b=190),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A bar chart of the mean rank correlation of each of the twenty strongest features "
+    "against the next session's return, ordered by the size of that correlation and "
+    "labelled with each feature's name. Most bars hang below the zero line and only three "
+    "rise above it. Every bar is short against the axis, and the largest in each direction "
+    "are of similar length, so the strongest features disagree on sign without any of them "
+    "being large.",
+)
 
 # %% [markdown]
 # ### Pairwise feature correlation
@@ -1365,7 +1392,16 @@ fig.update_layout(
     yaxis=dict(tickfont=dict(size=8)),
     margin=dict(l=170, b=170),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A square correlation heat map over the feature set, with the features on both axes "
+    "ordered so that related ones sit together, and a diverging green-to-red colour scale "
+    "running from one to minus one. Solid green squares stand along the diagonal: a large "
+    "block covering the moving-average, oscillator, Sharpe and past-return columns, a "
+    "smaller one over the volatility columns, and a two-column one over the liquidity "
+    "ranks. Away from those blocks most of the map is pale, and a few narrow red stripes "
+    "mark the columns that move opposite to a block.",
+)
 
 # %% [markdown]
 # ### The HAC correction against the naive one
@@ -1405,7 +1441,15 @@ fig.update_layout(
     yaxis_title="t-statistic under the HAC standard error",
     height=500,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A scatter of each feature's t-statistic computed with the naive standard error "
+    "against the same statistic computed with the autocorrelation-consistent one, with a "
+    "dashed diagonal marking where the two would agree and reference lines at zero on both "
+    "axes. Every point sits on the inner side of the diagonal, so each feature's statistic "
+    "is smaller in magnitude once serial correlation is allowed for, and the points "
+    "furthest from zero are pulled the furthest.",
+)
 
 # %% [markdown]
 # **Interpretation**:
@@ -1478,7 +1522,15 @@ add_message_title(
     "The families split on direction, and the negative side is the larger",
     subtitle="Mean of the signed information coefficients of each family's members",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "A horizontal bar for each feature family, giving the mean signed information "
+    "coefficient of its members against the one-day forward return, with a vertical line "
+    "at zero. Three families - composite, liquidity and sharpe - extend to the right of "
+    "zero and are shaded dark; the remaining five, led by reversal and volatility, extend "
+    "to the left and are shaded copper. The longest bars on the negative side reach "
+    "further from zero than the longest on the positive side.",
+)
 
 print(family_summary)
 print(
@@ -1528,7 +1580,14 @@ add_message_title(
     "The strongest feature holds its sign between years but not its size",
     subtitle="Annual mean of the daily information coefficient behind its full-sample average",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "One bar per year giving the mean daily information coefficient of the strongest "
+    "feature. Every bar hangs below the zero line, so the sign never changes, but their "
+    "lengths vary by more than an order of magnitude: the earliest years reach far down "
+    "the axis and the later ones are short. A dashed horizontal line marks the "
+    "full-sample mean, and the bars sit on both sides of it.",
+)
 
 _negative_years = int((annual_ic["ic"] < 0).sum())
 _by_size = annual_ic["ic"].abs()
