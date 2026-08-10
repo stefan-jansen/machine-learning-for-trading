@@ -696,6 +696,6 @@ for name in LABEL_NAMES:
 # to measure that difference with. The comparison signal is one characteristic of the several
 # dozen the release carries.
 #
-# **Next**: `03_financial_features.py` builds value, quality, investment, momentum and risk
-# features from these characteristics, and the composites and interactions over them;
-# `04_evaluation.py` is where those features are scored against these labels.
+# **Next**: `03_financial_features.py` builds fundamental, momentum and cross-sectional rank
+# features from these characteristics; `04_evaluation.py` is where those features are scored
+# against these labels.
