@@ -751,11 +751,15 @@ def load_modeling_dataset(
         input_artifacts["model_based"] = temporal_path
     if eval_label_path is not None:
         input_artifacts["eval_label"] = eval_label_path
-    # Agreement is checked on every load: a sidecar that disagrees with its artifact
-    # is a value that changed without its record changing, which is the defect the
-    # sidecar exists to catch. Presence is required only on request, because the CI
-    # fixtures predate the sidecar and would fail for the wrong reason.
-    verify_artifact_sidecars(input_artifacts, require_sidecar=verify_input_digests)
+    # Opt-in here, and the reason is cost rather than caution. The sidecar records
+    # a *content* digest, deliberately independent of row and column order, so
+    # verifying one means reading the parquet and hashing every row of it. On
+    # us_equities_panel that is a multi-GB re-read plus a sort over 68M row hashes,
+    # paid on every load, to catch a state only an artifact regeneration creates.
+    # The place the check belongs is once after that regeneration, which is what
+    # scripts/verify_artifact_sidecars.py does across every case study.
+    if verify_input_digests:
+        verify_artifact_sidecars(input_artifacts)
     return ModelingDataset(
         dataset=dataset,
         feature_names=feature_names,
