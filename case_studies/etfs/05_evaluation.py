@@ -1171,10 +1171,12 @@ fig.update_layout(
 style.show_plotly_with_alt(
     fig,
     "Horizontal bars of the average absolute rank IC within each feature family, with an amber "
-    "diamond for the average signed IC. Conditional volatility and volatility keep their sign, "
-    "their diamonds sitting near the end of their bars, while momentum, oscillator and volume "
-    "have diamonds near or left of zero against bars of similar length, so those families "
-    "cancel out inside themselves.",
+    "diamond for the average signed IC. Conditional volatility and volatility keep their "
+    "sign, their diamonds sitting near the end of their bars, and the oscillator and "
+    "risk-adjusted-momentum families point as consistently the other way, their diamonds "
+    "as far to the left as their bars are long. Only range-and-drawdown and cross-sectional "
+    "position have a diamond near zero against a much longer bar, which is what cancelling "
+    "inside a family looks like.",
 )
 
 # %% [markdown]

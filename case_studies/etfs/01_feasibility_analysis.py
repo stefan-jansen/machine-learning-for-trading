@@ -575,9 +575,9 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# The round trip costs between 0.90 and 38.91 bps at each fund's median close, a universe median of
-# 9.45 bps. The median absolute 21-session move is 286.2 bps, thirty times that, and 0.968 of moves
-# are larger than the round trip charged by the fund on which they occurred.
+# The round trip costs between 0.86 and 35.23 bps at each fund's median traded close, a universe
+# median of 6.29 bps. The median absolute 21-session move is 288.3 bps, forty-six times that, and
+# 0.973 of moves are larger than the round trip charged by the fund on which they occurred.
 
 # %% [markdown]
 # ## C. Design decisions
