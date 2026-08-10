@@ -86,7 +86,7 @@ from case_studies.utils.feature_engineering import (
 from data import load_cme_futures
 from utils.artifact_specs import resolve_label_horizon
 from utils.paths import display_path, get_case_study_dir
-from utils.style import COLORS, style_subplot_titles
+from utils.style import COLORS, show_plotly_with_alt, style_subplot_titles
 
 warnings.filterwarnings("ignore")
 
@@ -130,6 +130,12 @@ DECISION_CYCLE = int(
 )
 HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
 HOLDOUT_END = date.fromisoformat(setup["evaluation"]["holdout_end"])
+# Two sessions carry one clearing venue's settlement file and not the other's; `setup.yaml`
+# says which and why. Every percentile in C.5 is taken within the date, and one taken over a
+# single venue's products is not comparable with one taken over thirty, so both are dropped.
+EXCLUDED_SESSIONS = [
+    date.fromisoformat(str(d)) for d in setup["universe"].get("excluded_sessions", [])
+]
 
 # The panel key, and the partition every cross-sectional statistic is taken over.
 ENTITY = ["product", "position"]
@@ -192,8 +198,9 @@ register_frame(FAMILIES).select(
 # %%
 PRICES = ["adj_open", "adj_high", "adj_low", "adj_close", "raw_close"]
 bars = (
-    load_cme_futures()
+    load_cme_futures(products=sorted(SECTOR))
     .rename({"session_date": "timestamp", "tenor": "position"})
+    .filter(~pl.col("timestamp").is_in(EXCLUDED_SESSIONS))
     .with_columns(pl.when(pl.col(c) > 0).then(pl.col(c)).otherwise(None).alias(c) for c in PRICES)
     .sort([*ENTITY, "timestamp"])
 )
@@ -646,7 +653,7 @@ assignment = assign_families(feature_cols, FAMILIES)
 register_frame(FAMILIES, feature_cols).select(["family", "columns", "role", "representation"])
 
 # %% [markdown] tags=["results"]
-# The matrix carries **62 features** on **310,947 rows** across **30 products** at three contract
+# The matrix carries **62 features** on **310,866 rows** across **30 products** at three contract
 # positions, from **2011-02-01** to **2025-12-31**. The null policy dropped **1,912 rows**. Past the
 # warmup boundary at **2011-12-21** the thinnest family in any month is **0.906** covered, and it is
 # term structure: carry needs a second listed contract and curvature needs a third, so a product
@@ -926,7 +933,15 @@ fig.update_layout(
     height=600, title_text="The carry z-score oscillates where the momentum percentile trends"
 )
 style_subplot_titles(fig)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two stacked time-series panels for crude oil and the E-mini S&P 500 from 2011 to 2025. The "
+    "upper panel plots the carry z-score against 63 sessions: both series cross zero constantly, "
+    "in rapid spikes reaching roughly plus or minus 4, with no sustained excursion. The lower "
+    "panel plots the momentum composite percentile on a 0 to 100 scale against a dashed rule at "
+    "50: both series move in long slow arcs that hold near the top or the bottom of the range "
+    "for months at a time. The contrast between the two panels is the point.",
+)
 
 # %% [markdown]
 # ### F8. The curve on one date
@@ -973,7 +988,14 @@ fig = px.bar(
     labels={"carry_pct": "Carry", "product": "Product"},
 )
 fig.update_layout(height=400)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bar chart of carry on one date, one bar per product, sorted from most negative to most "
+    "positive and coloured by regime. Lean hogs sits furthest into contango at the left and "
+    "natural gas furthest into backwardation at the right, each roughly twice the size of any "
+    "other bar. Between them the bars shrink to almost nothing, so most of the universe is close "
+    "to flat and the two extremes carry the spread.",
+)
 
 # %% [markdown]
 # ## G. Emit
