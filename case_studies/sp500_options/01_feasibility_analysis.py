@@ -639,9 +639,9 @@ plt.show()
 #
 # Three numbers summarise what B.3 and B.4 drew. The first is the median move over one weekly step,
 # divided by the round trip quoted at that same decision session, which says how much larger a
-# typical move is than a typical cost. The second pair is the share of moves larger than each of the two cost lines,
-# which is where the exceedance curve crosses them. The third is how much of the volatility gap is
-# still there a week later.
+# typical move is than a typical cost. The second pair is the share of moves larger than each of
+# the two cost lines, which is where the exceedance curve crosses them. The third is how much of
+# the volatility gap is still there a week later.
 #
 # None of them says the strategy earns anything. A move counts the same whether the premium rises or
 # falls, and a seller of the straddle is hurt by one and helped by the other. What they rule out is
