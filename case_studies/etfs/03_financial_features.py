@@ -864,8 +864,8 @@ record = write_artifact(
 print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}")
 
 # %% [markdown] tags=["results"]
-# The matrix carries **57 features** on **396,186 rows** across **99 ETFs**, from **2007-01-03**
-# to **2025-12-31**, under content digest **de36d366fc1614c0**. Cutting the redundancy tree
+# The matrix carries **57 features** on **404,500 rows** across **99 ETFs**, from **2007-01-03**
+# to **2025-12-31**, under content digest **9c02a41ef4364257**. Cutting the redundancy tree
 # leaves **22 clusters**, so well over half the columns repeat an ordering another column
 # already carries.
 
