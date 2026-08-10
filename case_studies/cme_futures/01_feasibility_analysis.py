@@ -50,6 +50,7 @@
 
 import re
 import warnings
+from datetime import date
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -63,7 +64,7 @@ from data import load_cme_futures
 from utils.config import REPO_ROOT
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -193,7 +194,7 @@ print(
 # it below is guarded for that.
 
 # %%
-futures = load_cme_futures(start_date=START_DATE, end_date=END_DATE)
+futures = load_cme_futures(products=DECLARED_PRODUCTS, start_date=START_DATE, end_date=END_DATE)
 front = (
     futures.filter(pl.col("tenor") == 0)
     .select(["product", "session_date", "raw_close", "adj_close"])
@@ -201,8 +202,15 @@ front = (
 )
 research = front.filter(pl.col("session_date") < pl.lit(HOLDOUT_START).str.to_date())
 
+# Both directions. A roster checked only for what is declared and absent cannot see a product
+# the archive carries and `setup.yaml` does not, which would join every cross-section and every
+# rank unannounced. The load above is bounded to the declared roster, so this asserts that the
+# bound removed nothing: the two sets are equal.
+archive = set(load_cme_futures(start_date=START_DATE, end_date=END_DATE)["product"].unique())
 missing = sorted(set(DECLARED_PRODUCTS) - set(research["product"].unique().to_list()))
+undeclared = sorted(archive - set(DECLARED_PRODUCTS))
 assert not missing, f"declared in setup.yaml but absent from the data: {missing}"
+assert not undeclared, f"carried by the archive but not declared in setup.yaml: {undeclared}"
 print(
     f"{research['product'].n_unique()} products, {len(research):,} settlements, "
     f"{research['session_date'].min()} to {research['session_date'].max()}"
@@ -392,7 +400,14 @@ add_message_title(
     "A handful of holiday weeks leave too few products to trade",
     subtitle="Products settling on the last session of each week, when the strategy rebalances",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Line chart of products quoting on each rebalancing date from 2011 to 2024. The line sits "
+    "flat at 29 until mid-2017, when it steps to 30 as the E-mini Russell 2000 first settles, "
+    "and holds there. A dozen narrow downward spikes interrupt it, most reaching the high teens "
+    "or low twenties and the deepest falling to 8. A dashed horizontal rule at 20 marks the "
+    "breadth at which both sides of the book can still be filled; only the spikes cross it.",
+)
 
 # %% [markdown]
 # ### B.3 What crossing the spread costs, and what a move is worth
@@ -455,7 +470,14 @@ add_message_title(
     "The same universe spans an order of magnitude in what a trade costs",
     subtitle="The assumed spread over the median settlement price, one bar per product",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Bar chart of round-trip spread in basis points, one bar per product, sorted from cheapest "
+    "to dearest. The equity index and currency contracts sit lowest at roughly half a basis "
+    "point, the bars rise gradually through the metals and energy products, and the grains and "
+    "livestock occupy the expensive tail, with corn highest at several times the median. A "
+    "dashed horizontal rule marks the universe median, which about half the products sit below.",
+)
 
 # %% [markdown]
 # Because those costs differ by an order of magnitude, a single cost line drawn across raw
@@ -502,7 +524,15 @@ add_message_title(
     "Almost every move at either horizon is larger than the spread it crosses",
     subtitle="Absolute price moves, each divided by the spread of the product it belongs to",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Survival curves on a logarithmic x axis showing the fraction of absolute price moves at "
+    "least as large as a given multiple of the product's own spread. Two curves, one for the "
+    "5-session horizon and one for 21 sessions, both start at 1.0 and stay flat out to a "
+    "multiple of about 3 before falling away, the 21-session curve staying above the 5-session "
+    "one throughout. A dashed vertical rule at a multiple of 1 marks break-even on the spread; "
+    "both curves are still at essentially 1.0 where it crosses.",
+)
 
 # %% [markdown]
 # ### B.4 How long the carry signal stays informative
@@ -560,7 +590,15 @@ add_message_title(
     "Carry changes slowly enough that a weekly rebalance still acts on it",
     subtitle="Averaged within each product, shaded from the 10th to the 90th percentile",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Bar chart of the autocorrelation of the term-structure slope against the number of "
+    "sessions between the two observations, from 0 to 21. The bars start at 1.0 and decay "
+    "smoothly, passing roughly 0.5 near the one-week mark and still standing near 0.2 at 21 "
+    "sessions. A grey band shows the 10th-to-90th-percentile spread across products, widening "
+    "with distance, and a shaded horizontal strip around zero marks the range expected from no "
+    "information; every bar stays clear of it.",
+)
 
 # %% [markdown]
 # ### B.5 Move size against cost
@@ -705,7 +743,14 @@ add_message_title(
     "Each fold trains, pauses, then validates, and none reaches the holdout",
     subtitle="Training, purge and validation blocks exactly as the splitter returns them",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Horizontal timeline with one row per fold, folds 0 to 4, spanning 2011 to 2026. Each row "
+    "shows a long dark training block, a narrow unshaded purge gap, then a shorter amber "
+    "validation block. The blocks step forward and the training window lengthens from fold to "
+    "fold, so the validation blocks tile successive periods without overlapping. A shaded band "
+    "on the right marks the holdout, which no fold's blocks reach.",
+)
 
 # %% [markdown]
 # ## E. What this notebook hands on
@@ -734,6 +779,20 @@ plt.show()
 # is listed with its weekday and whether it is Good Friday. The step upward in the chart is dated
 # the same way, from the first settlement of the product that joined last, rather than read off
 # the axis.
+#
+# Two of the dates below the floor are ordinary Fridays, and they are worth separating from the
+# holidays because they are not a fact about the market at all. What distinguishes a missing
+# settlement file from a session that traded thinly is the **shape** of the absence: a thin
+# session loses the least liquid contracts first and keeps the front month, whereas a file that
+# did not load takes a product out at every tenor at once. The check below measures that shape,
+# and it also asks which sectors each date loses. A settlement run covers a clearing venue and
+# not a risk factor, so the sectors are expected to come away in whole blocks with one exception:
+# the equity index group is split across venues, the E-mini Dow being a CBOT contract while the
+# other three are CME, and it is the group that loses only part on both dates - the Dow alone on
+# one, the other three on the other. Both dates fail the thin-market reading on every count, so
+# `setup.yaml` declares them under `universe.excluded_sessions` and the notebooks that build
+# labels and features drop them. This notebook keeps them: it is the one that diagnoses the
+# panel, and a chart of breadth that has already removed the breadth problem shows nothing.
 
 # %%
 listings = (
@@ -752,6 +811,33 @@ thin_lines = "\n".join(
     for d, n in zip(thin["session_date"], thin["n_products"], strict=True)
 )
 
+# The two ordinary Fridays, measured against the full three-tenor panel rather than the front
+# month, so "absent at every tenor" is something this cell establishes rather than assumes.
+TENORS = futures["tenor"].n_unique()
+gap_lines = []
+for gap_date in [date.fromisoformat(str(d)) for d in SETUP["universe"]["excluded_sessions"]]:
+    day = futures.filter(pl.col("session_date") == gap_date)
+    absent = sorted(set(DECLARED_PRODUCTS) - set(day["product"].unique().to_list()))
+    tenors_per_present = day.group_by("product").agg(pl.col("tenor").n_unique().alias("t"))
+    partial = tenors_per_present.filter(pl.col("t") < TENORS).height
+    absent_set = set(absent)
+    whole, part = [], []
+    for sector, members in PRODUCT_GROUPS.items():
+        gone = sorted(p for p in members if p in absent_set)
+        if not gone:
+            continue
+        if len(gone) == len(members):
+            whole.append(sector)
+        else:
+            part.append(f"{sector} ({', '.join(gone)})")
+    gap_lines.append(
+        f"  {gap_date} {gap_date:%a} {len(absent)} of {len(DECLARED_PRODUCTS)} products absent, "
+        f"each at all {TENORS} tenors; {partial} of the {len(day['product'].unique())} present "
+        f"are short a tenor\n"
+        f"    sectors losing every product: {', '.join(sorted(whole))}\n"
+        f"    sectors losing only part: {', '.join(sorted(part)) if part else 'none'}"
+    )
+
 print(
     f"universe.n_products {SETUP['universe']['n_products']}, products per rebalancing date "
     f"{breadth['n_products'].min()} to {breadth['n_products'].max()}, most often {modal_before} "
@@ -759,6 +845,7 @@ print(
     f"below the floor of {BREADTH_FLOOR} on {thin.height} of {len(breadth)} rebalancing dates, "
     f"{sum(d in good_friday for d in thin['session_date'])} of them Good Friday:\n"
     f"{thin_lines}\n"
+    f"the two ordinary Fridays, against the full panel:\n" + "\n".join(gap_lines) + "\n"
     f"decision.cadence {SETUP['decision']['cadence']} | labels.primary {PRIMARY_LABEL}\n"
     f"evaluation.n_splits {SETUP['evaluation']['n_splits']}, generated {len(splits)}, "
     f"last validation ends {last_val.date()}, holdout untouched\n"
@@ -769,10 +856,26 @@ print(
 # %% [markdown] tags=["results"]
 # The universe holds 29 products until the E-mini Russell 2000 first settles on 2017-07-10 and
 # 30 after that, falling as low as 8 on one Good Friday. It sits below the floor of 20 on 7 of
-# 678 rebalancing dates: five Good Fridays, and two ordinary Fridays where the settlement file
-# carries only part of the universe. Five folds are generated, the last validation window ending
-# 2023-12-21, and the narrowest gap between a training block and the validation window that
-# follows it is 5 sessions, exactly the horizon of the primary label.
+# 678 rebalancing dates: five Good Fridays, and two ordinary Fridays.
+#
+# Those two Fridays are a settlement-file gap and not a thin market, and the measurement above is
+# what says so. On 2020-02-28 the panel loses 18 of its 30 products outright, on 2014-06-13 the
+# other 12, and the two sets do not overlap: between them they account for the universe exactly
+# once. Each loss is total - an absent product has no settlement at any of the three tenors,
+# rather than keeping its front month and dropping the back - and the sectors come away in whole
+# blocks. The one group that splits, both times, is the equity index, and it splits along the
+# line that explains the rest: 2020-02-28 keeps the three CME contracts and loses the CBOT one,
+# 2014-06-13 does the reverse. What each date is missing is a venue, which is how a settlement
+# run is organised and not how trading interest thins out. Neighbouring sessions trade normally
+# in the products that vanish. So the panel these dates belong to is missing a file, and
+# `setup.yaml` lists both under `universe.excluded_sessions`;
+# `02_labels`, `03_financial_features` and `04_model_based_features` drop them before computing
+# anything, because a percentile taken within a date is not comparable across dates when one of
+# them ranks half a universe.
+#
+# Five folds are generated, the last validation window ending 2023-12-21, and the narrowest gap
+# between a training block and the validation window that follows it is 5 sessions, exactly the
+# horizon of the primary label.
 
 # %% [markdown]
 # ## Key takeaways
