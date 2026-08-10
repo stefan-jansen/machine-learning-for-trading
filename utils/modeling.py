@@ -421,6 +421,7 @@ def verify_artifact_sidecars(
     artifacts: Mapping[str, Path],
     *,
     require_sidecar: bool = True,
+    values: bool = True,
 ) -> dict[str, str]:
     """Check each input artifact against the digest sidecar its producer wrote.
 
@@ -442,18 +443,35 @@ def verify_artifact_sidecars(
     before the sidecar existed.
 
     Returns the verified digest per artifact, so the caller can carry it into the
-    training spec. Artifacts skipped under ``require_sidecar=False`` are absent
-    from the mapping rather than present with a null.
+    training spec. Artifacts skipped under ``require_sidecar=False``, and every
+    artifact under ``values=False``, are absent from the mapping rather than
+    present with a null.
 
-    ``load_modeling_dataset`` checks agreement on every load and requires presence
-    only under ``verify_input_digests``. The split is measured rather than assumed:
-    on 2026-08-09 the production artifacts carried 49 sidecars out of 51, both gaps
-    in sp500_options, while the CI fixtures under
+    ``values`` chooses what the check costs, and the two settings answer different
+    questions. With it, the parquet is read and every row hashed, which is what the
+    recorded content digest is - order-independent, so it moves when and only when
+    a value moves. Without it, only the row count is compared, which parquet
+    metadata answers without reading a column. The cheap check cannot see a value
+    change that preserves the row count, and it does see the case that a crash
+    creates: ``write_artifact`` writes the parquet before its sidecar, so an
+    interrupted regeneration leaves new data beside the previous record, and new
+    data almost always has a different number of rows.
+
+    ``load_modeling_dataset`` runs the cheap check on every load and the full one
+    under ``verify_input_digests``; ``scripts/verify_artifact_sidecars.py`` runs the
+    full one over every case study, once, after a regeneration. That split is about
+    cost: hashing us_equities_panel's feature matrix is a multi-GB read plus a sort
+    over 68M row hashes.
+
+    Whether a *missing* sidecar raises is the caller's to choose, because presence
+    and disagreement carry different evidence. A missing sidecar means the producer
+    recorded nothing, which is the state of every artifact written before the
+    sidecar existed, and requiring presence before those are regenerated fails for
+    absence rather than for a changed value. Measured rather than assumed: on
+    2026-08-09 the production artifacts carried 49 sidecars out of 51, both gaps in
+    sp500_options, while the CI fixtures under
     ``ml4t/third-edition-test-data/intermediates`` carried **none** - 0 of 7 for
     cme_futures, 0 of 5 for etfs, 0 of 6 for fx_pairs, 0 of 6 for us_equities_panel.
-    Requiring presence before those are regenerated fails every case-study CI job
-    for a missing sidecar rather than for a changed value, which is the failure the
-    gate is not for.
     """
     from case_studies.utils.artifact_digest import read_digest, sidecar_path, value_digest
 
@@ -474,9 +492,35 @@ def verify_artifact_sidecars(
         if not recorded:
             problems.append(f"{name}: sidecar records no digest")
             continue
-        actual = value_digest(pl.read_parquet(path))
+
+        rows = record.get("n_rows")
+        if not values:
+            if rows is None:
+                continue
+            try:
+                actual_rows = pl.scan_parquet(path).select(pl.len()).collect().item()
+            except (OSError, pl.exceptions.PolarsError) as exc:
+                problems.append(f"{name}: {path.name} unreadable ({exc})")
+                continue
+            if int(rows) != int(actual_rows):
+                problems.append(
+                    f"{name}: {path.name} holds {actual_rows} rows, its sidecar records {rows}"
+                )
+            continue
+
+        try:
+            frame = pl.read_parquet(path)
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            problems.append(f"{name}: {path.name} unreadable ({exc})")
+            continue
+        actual = value_digest(frame)
         if actual != recorded:
             problems.append(f"{name}: {path.name} hashes {actual}, its sidecar records {recorded}")
+            continue
+        if rows is not None and int(rows) != frame.height:
+            problems.append(
+                f"{name}: {path.name} holds {frame.height} rows, its sidecar records {rows}"
+            )
             continue
         verified[name] = recorded
 
@@ -751,15 +795,21 @@ def load_modeling_dataset(
         input_artifacts["model_based"] = temporal_path
     if eval_label_path is not None:
         input_artifacts["eval_label"] = eval_label_path
-    # Opt-in here, and the reason is cost rather than caution. The sidecar records
-    # a *content* digest, deliberately independent of row and column order, so
-    # verifying one means reading the parquet and hashing every row of it. On
-    # us_equities_panel that is a multi-GB re-read plus a sort over 68M row hashes,
-    # paid on every load, to catch a state only an artifact regeneration creates.
-    # The place the check belongs is once after that regeneration, which is what
-    # scripts/verify_artifact_sidecars.py does across every case study.
-    if verify_input_digests:
-        verify_artifact_sidecars(input_artifacts)
+    # Two depths, and the flag chooses between them rather than between checking
+    # and not. The row-count comparison reads parquet metadata and no column, so it
+    # runs always: write_artifact writes the parquet before its sidecar, and an
+    # interrupted regeneration therefore leaves new data beside the previous
+    # record, which almost always has a different number of rows. Comparing the
+    # content digest is what catches a value change that keeps the row count, and
+    # that means hashing every row - a multi-GB read plus a sort over 68M row
+    # hashes on us_equities_panel, paid per load. It is the same work
+    # scripts/verify_artifact_sidecars.py does once over everything after a
+    # regeneration, which is where a sweep should pay it.
+    verify_artifact_sidecars(
+        input_artifacts,
+        require_sidecar=verify_input_digests,
+        values=verify_input_digests,
+    )
     return ModelingDataset(
         dataset=dataset,
         feature_names=feature_names,

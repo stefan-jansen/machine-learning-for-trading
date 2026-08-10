@@ -211,3 +211,42 @@ def test_the_loader_accepts_an_artifact_that_matches_its_sidecar(
     assert modeling.load_modeling_dataset("cs", "primary", verify_input_digests=True).label_col == (
         "primary"
     )
+
+
+def test_the_cheap_check_catches_an_artifact_whose_row_count_moved(tmp_path: Path) -> None:
+    """`write_artifact` writes the parquet first, so a crash leaves new data, old record.
+
+    The row count comes out of parquet metadata, so this costs no column read and can
+    run on every load.
+    """
+    path = _artifact(tmp_path)
+    pl.DataFrame({"timestamp": [1], "symbol": ["A"], "feature": [1.0]}).write_parquet(path)
+
+    with pytest.raises(ValueError, match="holds 1 rows, its sidecar records 3"):
+        verify_artifact_sidecars({"financial": path}, values=False)
+
+
+def test_the_cheap_check_does_not_see_a_value_change_at_the_same_row_count(
+    tmp_path: Path,
+) -> None:
+    """Stated rather than left implicit: this is what `values=True` is for."""
+    path = _artifact(tmp_path)
+    pl.DataFrame(
+        {"timestamp": [1, 2, 3], "symbol": ["A", "B", "C"], "feature": [9.0, 9.0, 9.0]}
+    ).write_parquet(path)
+
+    assert verify_artifact_sidecars({"financial": path}, values=False) == {}
+    with pytest.raises(ValueError, match="hashes .*, its sidecar records"):
+        verify_artifact_sidecars({"financial": path})
+
+
+def test_the_loader_catches_a_truncated_artifact_without_the_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default load is not silent about everything, only about values."""
+    modeling = _tiny_case_study(tmp_path, monkeypatch, stale=False)
+    features = tmp_path / "cs" / "features" / "financial.parquet"
+    pl.read_parquet(features).head(3).write_parquet(features)
+
+    with pytest.raises(ValueError, match="holds 3 rows, its sidecar records"):
+        modeling.load_modeling_dataset("cs", "primary")

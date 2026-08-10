@@ -61,8 +61,14 @@ def check(path: Path, *, require_sidecar: bool) -> tuple[str, str]:
     recorded = record.get("digest")
     if not recorded:
         return "no-digest", "sidecar records no digest"
-    frame = pl.read_parquet(path)
-    actual = value_digest(frame)
+    try:
+        frame = pl.read_parquet(path)
+        actual = value_digest(frame)
+    except (OSError, KeyError, pl.exceptions.PolarsError) as exc:
+        # Reported and carried on rather than raised: the point of this script is
+        # that one run tells you about every artifact, and a truncated parquet is
+        # exactly the kind of thing you want listed beside the others.
+        return "unreadable", f"{type(exc).__name__}: {exc}"
     if actual != recorded:
         return "changed", f"hashes {actual}, sidecar records {recorded}"
     rows = record.get("n_rows")
