@@ -98,7 +98,7 @@ from data import load_us_equities
 from utils.artifact_specs import resolve_label_horizon
 from utils.paths import display_path, get_case_study_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 CASE_DIR = get_case_study_dir("us_equities_panel")
 FEATURES_DIR = CASE_DIR / "features"
@@ -379,7 +379,15 @@ add_message_title(
     "The panel these transforms fit on grows for two decades, then turns down",
     subtitle="Stocks passing the price and dollar-volume screen on each session",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "A single line counts the stocks eligible on each session across the sample. It climbs "
+    "for about two decades, drops sharply in the 2008 crisis, recovers to its highest point "
+    "and then declines over the final years. Two flat reference lines sit far below it: a "
+    "dashed one for the number of stocks needed to fit a volatility model per stock, and a "
+    "dotted one for the count below which a date is not summarized. The eligible-stock line "
+    "stays above both throughout.",
+)
 
 # %% [markdown]
 # ## 1b. The fold contract
@@ -510,7 +518,14 @@ add_message_title(
     "No fitting window reaches past the date the holdout opens",
     subtitle="Filled: bars the parameters come from. Outlined: bars they run forward over",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "One horizontal row per fold, fold zero at the top and the holdout row at the bottom. "
+    "Each row is a filled bar for the window the parameters are estimated on, followed by a "
+    "short outlined bar for the window they are then run forward over. The pairs step later "
+    "in time as the fold number falls. A dashed vertical line marks the date the holdout "
+    "opens, and no filled bar crosses it; only the bottom row extends past it.",
+)
 
 # %% [markdown]
 # ## 2. Wasserstein regime distance
@@ -883,7 +898,15 @@ add_message_title(
     "The lower-return state drains away while the series does not change",
     subtitle="Validation dates only. Below: monthly share assigned to that state",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two stacked panels sharing a date axis over the validation window. The upper panel is a "
+    "noisy trailing median return oscillating around zero, with its largest excursions in "
+    "2008 and 2009 and no visible change in character before or after. The lower panel is a "
+    "bar chart of the monthly share of dates assigned to the lower-return state; the bars "
+    "are frequent and often reach the top of the panel in the earlier years, become sparse "
+    "after 2010, and stop entirely for the last few years.",
+)
 
 _shaded = _smoothed.filter(pl.col("wass_cluster") == 0)
 _runs = _smoothed.with_columns(
@@ -1074,7 +1097,15 @@ add_message_title(
     "A fractional order keeps memory the first difference throws away",
     subtitle="Correlation with the log level, and the share of stocks rejecting a unit root",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two curves against the differencing order on the horizontal axis. One falls "
+    "monotonically from one at order zero to near zero at order one, the correlation the "
+    "series keeps with its own log level. The other rises from near zero to one and then "
+    "runs flat, the share of stocks whose unit root is rejected. A dashed vertical line "
+    "marks the order chosen; it stands where the rising curve has just reached its ceiling "
+    "and the falling curve still retains a substantial part of its height.",
+)
 
 print(
     f"at d={FFD_D}: memory {_chosen['memory']:.3f}, {_chosen['stationary_share']:.1%} of "
@@ -1429,7 +1460,18 @@ add_message_title(
     "The volatility fit repeats across folds; the regime fit does not",
     subtitle="Persistence median and interquartile band, and the centroid gap",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two stacked panels against the fold number. The upper panel plots the median GARCH "
+    "persistence per fold as a line of markers inside a shaded interquartile band. The "
+    "line rises gently over the first third of the folds, holds a slight plateau through "
+    "the middle, and eases back by the last, staying inside a narrow span near the top of "
+    "the axis throughout; the band around it is tight except at the final folds, where it "
+    "opens downwards. The lower panel plots the distance between the two regime centroids. "
+    "It declines over the fold sequence, steeply at first and then more gradually, but not "
+    "monotonically - it steps up at two folds in the second half before resuming - and "
+    "ends at a small fraction of where it started.",
+)
 
 # %% [markdown] tags=["results"]
 # **How far the fitted parameters move as the window rolls.** The persistence range is over
@@ -1513,16 +1555,16 @@ n_temporal_features = len(temporal_feature_cols)
 # the write. `03_financial_features` converts its oscillators' NaN for the same reason.
 
 # %%
-_nan_carriers = {
+_nan_columns = {
     c: int(temporal[c].is_nan().sum())
     for c in temporal_feature_cols
     if temporal.schema[c] in (pl.Float32, pl.Float64) and temporal[c].is_nan().any()
 }
-if _nan_carriers:
-    temporal = temporal.with_columns(pl.col(c).fill_nan(None) for c in _nan_carriers)
+if _nan_columns:
+    temporal = temporal.with_columns(pl.col(c).fill_nan(None) for c in _nan_columns)
 print(
-    f"NaN converted to null in {len(_nan_carriers)} of {n_temporal_features} features, "
-    f"{sum(_nan_carriers.values()):,} values: {sorted(_nan_carriers)}"
+    f"NaN converted to null in {len(_nan_columns)} of {n_temporal_features} features, "
+    f"{sum(_nan_columns.values()):,} values: {sorted(_nan_columns)}"
 )
 
 print(
@@ -1887,7 +1929,16 @@ add_message_title(
     "The columns that vary across stocks rank in both directions",
     subtitle="Mean signed IC with two Newey-West standard errors. Filled: survives BH",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "One horizontal bar per temporal feature, giving its mean information coefficient "
+    "against the one-day forward return over validation rows, with a whisker of two "
+    "Newey-West standard errors and a vertical line at zero. The two fractionally "
+    "differenced columns extend well clear of zero in opposite directions and are filled "
+    "solid, marking them as surviving the false-discovery correction. The conditional "
+    "volatility column sits just left of zero, is drawn unfilled, and its whisker crosses "
+    "the zero line.",
+)
 
 # %% [markdown]
 # ## Key takeaways

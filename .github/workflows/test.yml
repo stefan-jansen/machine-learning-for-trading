@@ -557,6 +557,22 @@ jobs:
             tests/test_notebook_pair_metadata_filter.py \
             -q --tb=short
 
+      # The order us_equities_panel/03 builds its features in: per-symbol
+      # windows on the complete price series, then the eligibility screen, then
+      # the cross-sectional ranks. Built the other way round, a "252-session"
+      # lookback counts 252 *eligible* rows and silently reaches back over a
+      # stock's absence from the universe. The fix landed months ago; this file
+      # is the guard, and it was written on a branch and never reached main, so
+      # nothing has been checking the property since. It parses the notebook and
+      # runs its functions over a synthetic panel, so it needs no data.
+      - name: us_equities_panel builds features in the order the screen requires
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          .venv/bin/python -m pytest \
+            tests/test_us_equities_panel_feature_ordering.py \
+            -q --tb=short
+
       # The methodology ratchet. Both files are static AST/source scans over the
       # notebook tree, so they need no data and no model deps, and both were
       # ungated: nothing invoked either one. The cost of that showed up the first

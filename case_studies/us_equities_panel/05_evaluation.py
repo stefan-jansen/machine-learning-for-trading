@@ -406,7 +406,9 @@ inventory = (
     )
     .group_by("family", "built_by")
     .len()
-    .sort("len", descending=True)
+    # Family name breaks ties, or two families of equal size swap places between runs
+    # and the committed table stops reproducing.
+    .sort(["len", "family"], descending=[True, False])
 )
 display(inventory)
 
@@ -706,11 +708,7 @@ for feat, series in ic_series.items():
         continue
     median_ic = float(np.median(fold_ics))
     direction = 1.0 if median_ic >= 0 else -1.0
-    # Weakest and strongest are read against the feature's own direction, the same way
-    # sign consistency below is and the same way the chart marks them. For a feature that
-    # ranks stocks inversely the weakest fold is its algebraic maximum, so exporting the
-    # algebraic minimum under the name "worst" told a reader the opposite of the truth for
-    # every such feature - and the ledger is what Chapter 20 reads.
+    # Worst, best and sign consistency all read against the feature's own direction.
     fold_stats[feat] = {
         "n_folds": len(fold_ics),
         "fold_ics": fold_ics,
@@ -864,7 +862,6 @@ add_message_title(
     "The strongest ranking feature moves the mean return the other way",
     subtitle="Next-session return against the session average, by within-session quintile",
 )
-fig.subplots_adjust(hspace=0.15, wspace=0.2)
 show_with_alt(
     fig,
     "Four small bar charts, one per feature, each showing the average next-session return "
@@ -1125,9 +1122,21 @@ ax.barh(
 )
 ax.set_yticks(
     range(len(shown_pairs)),
-    [f"{a} + {b}   (cluster keeps {representative_of[a]})" for a, b, _ in shown_pairs],
+    [f"{a} + {b}" for a, b, _ in shown_pairs],
     fontsize=7,
 )
+# The kept feature goes in the empty half of each row rather than into the tick label.
+# Twenty labels carrying it as well ran the y-axis out of width, and constrained layout
+# then reported the axes collapsing to zero on the rendered page.
+for i, (a, _, r) in enumerate(shown_pairs):
+    ax.annotate(
+        f"keeps {representative_of[a]}",
+        xy=(-0.03 if r > 0 else 0.03, i),
+        ha="right" if r > 0 else "left",
+        va="center",
+        fontsize=6.5,
+        color=COLORS["neutral"],
+    )
 ax.invert_yaxis()
 zero_line(ax, axis="x")
 ax.set_xlabel("Rank correlation between the two features")

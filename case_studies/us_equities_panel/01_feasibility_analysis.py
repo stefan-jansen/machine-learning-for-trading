@@ -67,7 +67,7 @@ from case_studies.utils.feasibility import exceedance_curve, fold_timeline, pane
 from data import load_us_equities
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -361,7 +361,14 @@ add_message_title(
     "Far more stocks qualify than the strategy has positions to fill",
     subtitle="Stocks clearing the price and turnover thresholds, counted on each date",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "A single line traces how many stocks pass the screen on each date across the sample. "
+    "It rises steadily over the period, dips sharply in the 2008 crisis, recovers to its "
+    "highest level, and falls back over the last two years. A dashed horizontal line near "
+    "the bottom of the panel marks the number of positions the strategy fills, and the "
+    "line stays far above it throughout.",
+)
 
 # %% [markdown]
 # ### B.3 What a round trip costs, and what a move is worth
@@ -403,7 +410,15 @@ add_message_title(
     "The per-share charge costs low-priced stocks orders of magnitude more",
     subtitle="The configured per-share spread and commission over each stock's median price",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Round-trip cost in basis points on a logarithmic axis, against stocks ordered from "
+    "the highest median printed price to the lowest. The curve climbs almost vertically "
+    "out of the bottom left, flattens across most of the middle of the range, then turns "
+    "up again and rises steeply at the right-hand end. A dashed horizontal line marks the "
+    "declared proportional round trip; the curve crosses it about two thirds of the way "
+    "along and finishes an order of magnitude above it.",
+)
 
 # %% [markdown]
 # That is why the production cost model is the proportional one. One proportional number is wrong
@@ -457,7 +472,14 @@ add_message_title(
     "Most moves at every horizon are larger than the cost of trading them",
     subtitle="Absolute returns from the adjusted price, against the configured round trip",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Three curves show the fraction of absolute moves at least as large as the value on a "
+    "logarithmic basis-point axis, one for each of the one-day, five-day and twenty-one-day "
+    "horizons. Each falls from one to zero, and the longer the horizon the further right "
+    "the curve sits. A dotted vertical line marks the round-trip cost, and all three curves "
+    "are still close to the top of the panel where it stands.",
+)
 
 # %% [markdown]
 # ### B.4 How much of one day's return carries into the next
@@ -513,7 +535,14 @@ add_message_title(
     "Only the one-day lag clears the band, and it points down",
     subtitle="Averaged within each stock, over the range expected from no information",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Bars give the average autocorrelation of the daily return at each lag from one to "
+    "twenty-one days. A shaded horizontal band spans the range expected from no "
+    "information, and a second, wider shaded region traces the tenth to ninetieth "
+    "percentile across stocks. Only the bar at lag one reaches below the no-information "
+    "band, and it points downwards; every other bar is short and sits inside it.",
+)
 
 # %%
 beyond_one = acf.filter(pl.col("lag") > 1)["acf"].abs().max()
@@ -678,7 +707,14 @@ add_message_title(
     subtitle=f"Boundaries as generate_cv_splits returned them; the {LABEL_BUFFER} purge is one "
     "session and too narrow to see",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "One horizontal row per walk-forward fold, the highest-numbered at the top and fold "
+    "zero at the bottom. Each row is a long dark training bar followed immediately by a "
+    "short lighter validation bar. Reading down the rows, both bars shift later in time, "
+    "so the folds roll forward across the sample. A shaded holdout block stands at the "
+    "right-hand edge, and no fold's validation bar reaches it.",
+)
 
 # %% [markdown]
 # ## E. What this notebook hands on
