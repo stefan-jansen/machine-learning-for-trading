@@ -2,6 +2,14 @@ strategy_id: nasdaq100_microstructure
 setup_version: v1
 
 universe:
+  # Point-in-time NASDAQ-100 membership over the sample, restricted to the names
+  # that contribute at least one session before evaluation.holdout_start. The
+  # published AlgoSeek archive carries 123 symbols; eight of them first quote
+  # after 2021-07-01, so nothing is ever fit on them, the pre-holdout liquidity
+  # profile has no spread for them, and 05_evaluation drops them before it
+  # screens anything. 01_feasibility_analysis asserts this list against the
+  # archive in both directions. Names that leave the index end where they left:
+  # AAL and WLTW stop at 2020-05-01, which is the membership, not a gap.
   symbols:
     - AAL
     - AAPL
@@ -100,6 +108,7 @@ universe:
     - SNPS
     - SPLK
     - SWKS
+    - TCOM
     - TEAM
     - TMUS
     - TSLA
@@ -117,8 +126,8 @@ universe:
     - XEL
     - XLNX
     - ZM
-  n_assets: 114
-  eligibility_rule: nasdaq100_membership
+  n_assets: 115
+  eligibility_rule: nasdaq100_membership_with_pre_holdout_session
   # Cost-feasible universe: the cheapest-to-trade names by round-trip cost,
   # frozen per split. Provenance: _build_cost_feasible_universe.py
   # (round-trip proxy 2*(per_share/mean_price)*1e4 + 2*median_half_spread_bps).
@@ -128,7 +137,7 @@ universe:
   # strategy.signal.universe_filter='cost_feasible'; the split-specific list is
   # chosen at backtest time by resolving the prediction set's split (NOT a
   # spec-hash input — like the 'liquid' filter, the hash carries only the
-  # filter name). The full 114 universe collapses out of sample (featured
+  # filter name). The full 115 universe collapses out of sample (featured
   # config holdout -0.42) while the cost-feasible universe is positive; the
   # screen is load-bearing. See 16_costs.py for the full-vs-screened contrast.
   cost_feasible:
@@ -433,7 +442,7 @@ backtest:
       min_trade_value: 0.0
   sweep:
     # Canonical strategy universe. The 15-min round-trip cost on the
-    # cost-expensive tail of the 114-name panel consumes the intraday edge:
+    # cost-expensive tail of the 115-name panel consumes the intraday edge:
     # the featured config collapses out of sample on the full universe
     # (holdout -0.42) but is positive on the cost-feasible subset (the
     # cheapest-to-trade names, frozen per split — see universe.cost_feasible).

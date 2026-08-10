@@ -39,6 +39,7 @@ CS = "nasdaq100_microstructure"
 CASE_DIR = get_case_study_dir(CS)
 SETUP = yaml.safe_load((CASE_DIR / "config/setup.yaml").open())
 PER_SHARE_USD = float(SETUP["costs"]["per_share"])
+UNIVERSE = sorted(SETUP["universe"]["symbols"])
 
 START_DATE = "2020-01-01"
 VALIDATION_START = "2020-06-30"
@@ -49,7 +50,7 @@ OUT = Path(__file__).parent
 
 
 def build_profile(start: str, end: str) -> pl.DataFrame:
-    qb = load_nasdaq100_bars(start_date=start, end_date=end, include_quotes=True)
+    qb = load_nasdaq100_bars(start_date=start, end_date=end, include_quotes=True, symbols=UNIVERSE)
     qb = (
         qb.with_columns(
             mid=(pl.col("bid_close") + pl.col("ask_close")) / 2,
