@@ -92,14 +92,14 @@ from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 warnings.filterwarnings("ignore")
 
 # %% [markdown]
 # ## Configuration
 #
-# Five settings, and each one decides something a reader would otherwise have to guess
+# Seven settings, and each one decides something a reader would otherwise have to guess
 # at. `MAX_PRODUCTS` and `MAX_FOLDS` exist so a smoke test can run a fraction of the
 # work; both are zero here, which means the full universe and every period.
 
@@ -123,6 +123,14 @@ FFT_TARGET_PERIODS = [63, 126]
 # The share of false positives tolerated among the features section F declares
 # significant, after correcting for how many were tested at once.
 FDR_ALPHA = 0.05
+# How much of a product's history inside a period is spent before the first ARIMA
+# forecast: 252, a trading year, so the first order is chosen from a full year of the
+# series. It also sets how many forecasts the walk makes, one per session after it.
+ARIMA_BURNIN = 252
+# How often the ARIMA order and weights are re-chosen as the walk proceeds: 21, monthly.
+# The stepwise order search is the expensive step, so this is what bounds the walk's cost
+# without changing how many products or periods it covers.
+ARIMA_REFIT_FREQ = 21
 
 # %% [markdown]
 # Three more settings come from `config/setup.yaml`, the file that also configures
@@ -150,6 +158,13 @@ assert len(ALL_PRODUCTS) == SETUP["universe"]["n_products"], (
 CARRY_SMOOTHING = int(SETUP["features"]["windows"]["carry_smoothing"])
 CARRY_ZSCORE_WINDOW = int(SETUP["features"]["windows"]["carry_zscore"][0])
 
+# Two sessions carry one clearing venue's settlement file and not the other's; `setup.yaml`
+# says which and why. They are dropped here so no series is differenced across a date on
+# which half the universe has no settlement price.
+EXCLUDED_SESSIONS = [
+    date.fromisoformat(str(d)) for d in SETUP["universe"].get("excluded_sessions", [])
+]
+
 if MAX_PRODUCTS > 0:
     ARIMA_PRODUCTS = ALL_PRODUCTS[:MAX_PRODUCTS]
 else:
@@ -172,7 +187,10 @@ print(f"Modelling {len(ARIMA_PRODUCTS)} of the {len(ALL_PRODUCTS)} products in t
 # **front month**; position 1 is the one after it; position 2 the one after that.
 
 # %%
-df = load_cme_futures().rename({"session_date": "timestamp", "tenor": "position"})
+df = load_cme_futures(products=sorted(ALL_PRODUCTS)).rename(
+    {"session_date": "timestamp", "tenor": "position"}
+)
+df = df.filter(~pl.col("timestamp").is_in(EXCLUDED_SESSIONS))
 
 if MAX_PRODUCTS > 0:
     df = df.filter(pl.col("product").is_in(ARIMA_PRODUCTS))
@@ -417,7 +435,15 @@ fig.update_layout(
     height=360,
     margin={"l": 90},
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Horizontal timeline with one row per period, periods 0 to 4, running from about 2012 to "
+    "2025. Each row shows a long dark training window followed, after a visible gap, by a "
+    "shorter amber evaluation window; the gap between them is the purge that waits out the label "
+    "horizon. The windows step forward period by period. A dashed vertical rule marks where the "
+    "holdout opens and a shaded band covers everything after it; no evaluation window reaches "
+    "into that band.",
+)
 
 # %% [markdown]
 # ## The input all three models read: carry
@@ -549,16 +575,16 @@ print(f"Carry data: {len(carry):,} product-dates")
 # [`10_uncertainty_features`](../../09_model_based_features/10_uncertainty_features.ipynb).
 
 # %% [markdown]
-# Two settings govern the walk. `ARIMA_BURNIN` is how much of a product's history inside
-# a period is spent before the first forecast: a trading year, so the first order is
-# chosen from a full year of the series rather than from a few weeks of it.
-# `ARIMA_REFIT_FREQ` is how often the order and weights are re-chosen as the walk
-# proceeds: monthly, which keeps them current without repeating the order search on every
-# session of a training window that runs to several thousand.
+# Two settings govern the walk, and both are bound in the parameters cell so a reduced
+# run can lower the cost of this section without narrowing the universe or the periods.
+# `ARIMA_BURNIN` is how much of a product's history inside a period is spent before the
+# first forecast: a trading year, so the first order is chosen from a full year of the
+# series rather than from a few weeks of it. `ARIMA_REFIT_FREQ` is how often the order
+# and weights are re-chosen as the walk proceeds: monthly, which keeps them current
+# without repeating the order search on every session of a training window that runs to
+# several thousand.
 
 # %%
-ARIMA_BURNIN = 252
-ARIMA_REFIT_FREQ = 21
 _carry_ts_dtype = carry.schema["timestamp"]
 
 
@@ -1441,7 +1467,16 @@ if len(hmm_pl) > 0:
     fig.update_yaxes(title_text="Average carry (spread x12)", row=1, col=1)
     fig.update_yaxes(title_text="P(higher-carry state)", row=2, col=1)
     fig.update_xaxes(title_text="Session", row=2, col=1)
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Two stacked panels over the most recent evaluation window, about one year of sessions. "
+        "The upper panel is a line of carry averaged across the book, wandering either side of "
+        "zero and spending most of the window below it. The lower panel is the filtered "
+        "probability of the higher-carry state, shaded under the line, against a dashed rule at "
+        "0.5. That probability does not drift across the middle: it sits pinned near 0 or near "
+        "1 for stretches of weeks and switches between them quickly, so the state reads as "
+        "blocks rather than as a session-by-session wobble.",
+    )
 
 # %% [markdown]
 # ## D. Do the estimates move as the window rolls?
@@ -1567,7 +1602,16 @@ if len(hmm_param_df) > 0:
         height=440,
         margin={"t": 150},
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Two side-by-side line panels with one point per period, period 0 most recent, five "
+        "periods in all. The left panel plots average carry in each state: the higher-carry "
+        "state stays above zero and the lower-carry state well below it in every period, and "
+        "the two lines never approach each other. The right panel plots how many sessions each "
+        "state lasts, with the estimated run length and the expected run length implied by the "
+        "staying probability drawn together; both states persist for roughly three weeks and "
+        "the two states' lines sit close to one another throughout.",
+    )
 
 # %% [markdown] tags=["results"]
 # **What the re-estimation bought.** Across the five periods the estimated average carry
@@ -2046,7 +2090,19 @@ if temporal_ic:
         height=460,
         margin={"l": 190, "t": 150},
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Horizontal bar chart of the average rank correlation with the next return, one bar per "
+        "temporal feature, sorted from the most positive at the top to the most negative at the "
+        "bottom. Every bar is short, within a few hundredths of zero, and each carries a "
+        "Newey-West whisker several times its own length that crosses zero. "
+        + (
+            "No bar is filled, because none clears the multiplicity-corrected threshold."
+            if n_fdr_sig == 0
+            else f"{n_fdr_sig} filled bars clear the multiplicity-corrected threshold; the "
+            "hollow ones do not."
+        ),
+    )
 else:
     print("Chart omitted: no feature produced enough sessions to measure.")
 
