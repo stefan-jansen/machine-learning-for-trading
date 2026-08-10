@@ -484,15 +484,17 @@ def fit_and_filter(returns: pd.Series, row: dict) -> tuple[pd.Series, dict] | No
 
 # %%
 ENTITY = "sec_id"
-# The surface is loaded for its roster alone; no column of it is read here.
-_surface = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
+# The surface is loaded for its roster alone; no column of it is read here. Both extracts are
+# read whole rather than over the requested window: `n_assets` is a statement about the dataset,
+# so a narrowed START_DATE must not fail the declaration. The dates bound the panel below.
+_surface = load_sp500_options_surface()
+full_bars = load_sp500_daily_bars()
 ROSTER = sorted(_surface["symbol"].unique().to_list())
-extract = load_sp500_daily_bars(start_date=START_DATE, end_date=END_DATE)
 assert len(ROSTER) == SETUP["universe"]["n_assets"], (
     f"{len(ROSTER)} names carry an option surface against a declared "
     f"universe.n_assets of {SETUP['universe']['n_assets']}"
 )
-priced = set(extract["symbol"].unique().to_list())
+priced = set(full_bars["symbol"].unique().to_list())
 assert not set(ROSTER) - priced, f"no share bars for {sorted(set(ROSTER) - priced)}"
 outside = sorted(priced - set(ROSTER))
 print(
@@ -500,7 +502,10 @@ print(
     f"and are excluded ({', '.join(outside)})"
 )
 
-bars = extract.filter(pl.col("symbol").is_in(ROSTER)).sort([ENTITY, "timestamp"])
+window = pl.col("timestamp").is_between(
+    pl.lit(START_DATE).str.to_date(), pl.lit(END_DATE).str.to_date()
+)
+bars = full_bars.filter(window & pl.col("symbol").is_in(ROSTER)).sort([ENTITY, "timestamp"])
 bars = bars.with_columns((pl.col("close") * pl.col("adj_factor")).alias("adj_close"))
 # One security trades under one ticker on one session. Without that, `sec_id` does not identify a
 # price series and every window below would be taken across companies - which is the failure this

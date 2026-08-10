@@ -261,24 +261,32 @@ register_frame(FAMILIES).select(
 # is derived from the surface rather than typed out, and checked in both directions: its size
 # against the declared `n_assets`, and every roster name against the share bars. A guard that only
 # asks whether every declared name is present says nothing about a present name never declared.
+#
+# The roster is read off the **whole** extract rather than off the requested window, because
+# `n_assets` is a statement about the dataset: a run that narrows `START_DATE` would otherwise
+# assert against a roster missing every name that had not yet listed, and the declaration would
+# fail on a parameter this notebook documents as free to change. The dates bound the panels.
 
 # %%
-surface_raw = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
-SURFACE_COLS = [c for c in surface_raw.columns if c not in PANEL_KEY]
-
-# The bound is stated, not a by-product of the keep-or-drop below.
-ROSTER = sorted(surface_raw["symbol"].unique().to_list())
-extract = load_sp500_daily_bars(start_date=START_DATE, end_date=END_DATE)
+full_surface = load_sp500_options_surface()
+full_bars = load_sp500_daily_bars()
+ROSTER = sorted(full_surface["symbol"].unique().to_list())
 assert len(ROSTER) == setup["universe"]["n_assets"], (
     f"{len(ROSTER)} names carry an option surface against a declared "
     f"universe.n_assets of {setup['universe']['n_assets']}"
 )
-priced = set(extract["symbol"].unique().to_list())
+priced = set(full_bars["symbol"].unique().to_list())
 assert not set(ROSTER) - priced, f"no share bars for {sorted(set(ROSTER) - priced)}"
 outside = sorted(priced - set(ROSTER))
 
+window = pl.col("timestamp").is_between(
+    pl.lit(START_DATE).str.to_date(), pl.lit(END_DATE).str.to_date()
+)
+surface_raw = full_surface.filter(window)
+SURFACE_COLS = [c for c in surface_raw.columns if c not in PANEL_KEY]
+
 daily = (
-    extract.filter(pl.col("symbol").is_in(ROSTER))
+    full_bars.filter(window & pl.col("symbol").is_in(ROSTER))
     .with_columns((pl.col("close") * pl.col("adj_factor")).alias("adj_close"))
     .sort([SECURITY, "timestamp"])
 )

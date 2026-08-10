@@ -194,21 +194,32 @@ print(
 # bars. Checking one direction is what let this through - a guard that only asks whether every
 # declared name is present says nothing about a present name that was never declared.
 #
+# **The roster is read off the whole extract, not off the requested window.** `universe.n_assets`
+# is a statement about the dataset, so a run that narrows `START_DATE` would otherwise assert
+# against a roster missing every name that had not yet listed - the declaration would fail on a
+# parameter the notebook documents as free to change. The dates bound the panels below it.
+#
 # The session grid is taken from the **unbounded** extract, because a session is a property of the
 # market rather than of the universe, and the horizon is counted on it.
 
 # %%
-surface = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
-ROSTER = sorted(surface["symbol"].unique().to_list())
-extract = load_sp500_daily_bars(start_date=START_DATE, end_date=END_DATE)
+full_surface = load_sp500_options_surface()
+full_bars = load_sp500_daily_bars()
+ROSTER = sorted(full_surface["symbol"].unique().to_list())
 
 assert len(ROSTER) == setup["universe"]["n_assets"], (
     f"{len(ROSTER)} names carry an option surface against a declared "
     f"universe.n_assets of {setup['universe']['n_assets']}"
 )
-priced = set(extract["symbol"].unique().to_list())
+priced = set(full_bars["symbol"].unique().to_list())
 assert not set(ROSTER) - priced, f"no share bars for {sorted(set(ROSTER) - priced)}"
 outside = sorted(priced - set(ROSTER))
+
+window = pl.col("timestamp").is_between(
+    pl.lit(START_DATE).str.to_date(), pl.lit(END_DATE).str.to_date()
+)
+surface = full_surface.filter(window)
+extract = full_bars.filter(window)
 
 sessions = extract.select("timestamp").unique().sort("timestamp").with_row_index("session")
 sessions = sessions.with_columns(pl.col("session").cast(pl.Int64))

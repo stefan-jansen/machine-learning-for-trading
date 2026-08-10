@@ -1208,10 +1208,12 @@ show_plotly_with_alt(
     "skip-month momentum and the skew ratio run positive. Every bar is drawn in the colour the "
     "chart uses for a feature that did not clear the false-discovery adjustment. On the right, "
     "the Newey-West t-statistic against its unadjusted twin for every feature in the searched "
-    "set, with a dashed diagonal for equality. The points form a band that follows the diagonal "
-    "in direction but lies well inside it on both sides: an unadjusted t of about minus 2.7 maps "
-    "to about minus 1.6, and one of about plus 3.3 to about plus 2.2. No point sits outside the "
-    "diagonal.",
+    "set, with a dashed diagonal for equality. The points follow the diagonal in direction and "
+    "lie inside it almost everywhere, and the contraction is largest where the unadjusted "
+    "statistic is largest: an unadjusted t of about minus 2.7 maps to about minus 1.6, and one "
+    "of about plus 3.5 to about plus 2.2. Four of the thirty-six move the other way, every one "
+    "of them with a small unadjusted t, and only one is far enough from the diagonal to see - a "
+    "point near plus 0.8 that rises to about plus 1.1.",
 )
 
 # %% [markdown]
