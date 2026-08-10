@@ -778,7 +778,13 @@ fig.update_layout(
     title_text="The daily IC swings far wider than the mean it averages to",
 )
 fig.update_yaxes(title_text="Rank IC")
-fig.show()
+style.show_plotly_with_alt(
+    fig,
+    "One stacked panel per leading feature, each showing the daily rank IC as a pale noisy "
+    "series swinging between about -0.75 and +0.75 and a dark rolling mean that stays within "
+    "roughly -0.1 to +0.35. Dashed reference lines mark the full-sample mean, which every "
+    "panel's rolling line crosses repeatedly.",
+)
 
 # %% [markdown]
 # ### Every feature, ranked by how strongly it ranks
@@ -819,7 +825,13 @@ fig.update_layout(
     yaxis_title="Feature",
     margin=dict(l=170),
 )
-fig.show()
+style.show_plotly_with_alt(
+    fig,
+    "Horizontal bars of mean cross-sectional rank IC per feature, sorted, with each bar "
+    "annotated by its overlap-aware t-statistic. The volatility and distance-from-low features "
+    "run positive to about +0.08 with t near 2.4 to 3.3, and the momentum, oscillator and "
+    "drawdown features run negative to about -0.09 with t between -1.1 and -2.8.",
+)
 
 # %% [markdown]
 # ### The same association, fold by fold
@@ -869,7 +881,13 @@ fig.update_layout(
     legend=dict(orientation="h", y=-0.12),
     margin=dict(l=170),
 )
-fig.show()
+style.show_plotly_with_alt(
+    fig,
+    "One row per leading feature, with a grey dot for each fold's mean rank IC and an amber "
+    "diamond at the median fold. Every row has dots on both sides of the zero line, so each "
+    "feature changes sign in at least one fold, and the spread within a feature is wider than "
+    "the gap between features.",
+)
 
 # %% [markdown]
 # ### What the overlap correction costs
@@ -916,7 +934,13 @@ fig.update_layout(
     xaxis_title="Naive t",
     yaxis_title="HAC t",
 )
-fig.show()
+style.show_plotly_with_alt(
+    fig,
+    "A scatter of each feature's HAC t-statistic against its naive one, with a dashed diagonal "
+    "marking equality. Every point sits between the diagonal and the horizontal zero line - "
+    "naive values spread from about -10 to +11 while the HAC values stay inside roughly -3 to "
+    "+3.5 - so correcting for overlap shrinks every t-statistic toward zero.",
+)
 
 # %% [markdown]
 # Every point sits inside the diagonal, and the ones furthest along it lose the most: a
@@ -1033,7 +1057,13 @@ if quantile_spreads:
         legend=dict(orientation="h", y=-0.08),
     )
     fig.update_yaxes(title_text="Mean forward return", col=1)
-    fig.show()
+    style.show_plotly_with_alt(
+        fig,
+        "A grid of panels, one per leading feature, each with five bars for quintiles Q1 to Q5 of "
+        "mean forward return and an amber diamond for the median. In every panel Q1 is the lowest "
+        "bar at roughly a quarter of the others, while Q2 through Q5 sit close together, so the "
+        "signal separates the bottom bucket rather than ordering the whole cross-section.",
+    )
 
 # %% [markdown]
 # A profile that rises or falls all the way across is the shape a linear coefficient can
@@ -1138,7 +1168,14 @@ fig.update_layout(
     legend=dict(orientation="h", y=-0.18),
     margin=dict(l=200),
 )
-fig.show()
+style.show_plotly_with_alt(
+    fig,
+    "Horizontal bars of the average absolute rank IC within each feature family, with an amber "
+    "diamond for the average signed IC. Conditional volatility and volatility keep their sign, "
+    "their diamonds sitting near the end of their bars, while momentum, oscillator and volume "
+    "have diamonds near or left of zero against bars of similar length, so those families "
+    "cancel out inside themselves.",
+)
 
 # %% [markdown]
 # ### The pairs that are one measurement
@@ -1174,7 +1211,12 @@ if ranked_pairs:
         yaxis_title="Feature pair",
         margin=dict(l=300),
     )
-    fig.show()
+    style.show_plotly_with_alt(
+        fig,
+        "Horizontal bars of pairwise Spearman correlation for the most correlated feature pairs, on "
+        "an axis spanning -1 to 1. Every bar is positive and close to the right edge, above about "
+        "0.9, so the strongest pairs are near-duplicates rather than merely related.",
+    )
 
 # %% [markdown]
 # The leading pairs are the same measurement at two window lengths, two arrangements of
@@ -1319,7 +1361,14 @@ fig.update_layout(
     xaxis_range=[0, len(all_feature_cols) * 1.15],
     margin=dict(l=250),
 )
-fig.show()
+style.show_plotly_with_alt(
+    fig,
+    "A funnel of five rows counting the features surviving each screen, each labelled with its "
+    "count. The rows narrow from the candidate set down through the cross-sectional and "
+    "coverage screens, and the false-discovery row counts zero, so it draws no bar at all - "
+    "yet the promoted row beneath it is longer than the coverage row is short of, which is "
+    "the gap the title names.",
+)
 
 # %% [markdown] tags=["results"]
 # **What the triage decided, and on what.** Every candidate feature carries a decision in
