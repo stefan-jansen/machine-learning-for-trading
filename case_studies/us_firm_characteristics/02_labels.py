@@ -44,7 +44,8 @@
 # `config/setup.yaml`, which declares the label set, the buffer and the holdout boundary.
 # Writes `labels/prices.parquet`, which the backtest reads to price positions; one parquet
 # per declared label; a small JSON record beside each of those files describing what is in
-# it; and `config/cv_config.json`, which `04_evaluation.py` reads for its fold boundaries.
+# it; and `config/cv_config.json`, the committed record of the fold boundaries these labels
+# imply.
 
 # %%
 """US Firm Characteristics: Label Engineering."""
@@ -91,10 +92,14 @@ END_DATE = "2016-12-31"
 # horizon or a boundary typed into a cell is a second copy of a value the rest of the
 # pipeline reads from the file, and the two drift apart the first time either is edited.
 #
-# `resolve_label_horizon` prefers an explicit `labels.horizons` entry and falls back to the
-# cross-validation buffer. The two fields are separate, because the gap that keeps folds
-# independent need not equal the horizon an outcome resolves over; here they coincide, and
-# both are declared in months.
+# Three durations are declared, and conflating any two of them is the mistake this panel
+# invites. `labels.buffer` is the gap left between a training window and the validation window
+# that follows it. `labels.horizons` is how far past its own timestamp a label's outcome
+# resolves, which is what the splitter seals the last validation fold on. The span the label
+# measures over is a third thing again, and it is what a Newey-West lag and an effective sample
+# size are counted in. Here the buffer is one month, the outcome horizon is zero because the
+# release dates each row by the month its return was earned in, and the span is the one month
+# the buffer was sized to. Section D measures the alignment the middle one rests on.
 
 # %%
 SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
@@ -102,15 +107,16 @@ SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 PRIMARY_LABEL = SETUP["labels"]["primary"]
 LABEL_NAMES = [PRIMARY_LABEL, *SETUP["labels"].get("variants", [])]
 WINSORIZED_LABEL, CLASS_LABEL = LABEL_NAMES[1], LABEL_NAMES[2]
-HORIZON = resolve_label_horizon(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
+OUTCOME_HORIZON = resolve_label_horizon(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
 LABEL_BUFFER = resolve_label_buffer(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
-HORIZON_MONTHS = int(HORIZON.rstrip("Mm"))
+LABEL_SPAN_MONTHS = int(str(LABEL_BUFFER).rstrip("Mm"))
 HOLDOUT_START = date.fromisoformat(str(SETUP["evaluation"]["holdout_start"]))
 BASELINE_SIGNAL = SETUP["causal"]["treatment"]
 KEYS = ["timestamp", "symbol"]
 
 print(
-    f"Labels: {LABEL_NAMES}, primary {PRIMARY_LABEL}, horizon {HORIZON}, buffer {LABEL_BUFFER}\n"
+    f"Labels: {LABEL_NAMES}, primary {PRIMARY_LABEL}, span {LABEL_SPAN_MONTHS} month, "
+    f"buffer {LABEL_BUFFER}, outcome horizon {OUTCOME_HORIZON}\n"
     f"Study window {START_DATE} to {END_DATE}, holdout opens {HOLDOUT_START}"
 )
 
@@ -319,9 +325,9 @@ for described, column in (
 profile = (
     labels_df.with_columns(
         (pl.col("month").max().over("symbol") - pl.col("month")).alias("from_end"),
-        pl.col(PRIMARY_LABEL).shift(-HORIZON_MONTHS).over("symbol").alias("_shifted"),
+        pl.col(PRIMARY_LABEL).shift(-LABEL_SPAN_MONTHS).over("symbol").alias("_shifted"),
     )
-    .filter(pl.col("from_end") <= HORIZON_MONTHS + 4)
+    .filter(pl.col("from_end") <= LABEL_SPAN_MONTHS + 4)
     .group_by("from_end")
     .agg(pl.col(c).is_not_null().mean() for c in [*LABEL_NAMES, "_shifted"])
     .sort("from_end")
@@ -493,7 +499,7 @@ show_with_alt(fig, "Panel autocorrelation of all three labels against lag in mon
 
 # A horizon-h label consumes the h returns realised over its window and its neighbour one
 # period later shares h-1 of them, so at a one-period horizon nothing is shared at all.
-n_rows, n_eff = effective_sample_size(dev, horizon=HORIZON_MONTHS, bar_col="month")
+n_rows, n_eff = effective_sample_size(dev, horizon=LABEL_SPAN_MONTHS, bar_col="month")
 assert n_eff == n_rows, "a one-month label overlaps nothing, so every row must weigh one"
 print(
     f"{PRIMARY_LABEL}: N={n_rows:,}, N_eff={n_eff:,.0f}, ratio {n_eff / n_rows:.4f}; "
@@ -545,7 +551,7 @@ ic = cross_sectional_ic_series(
     entity_col="symbol",
     min_obs=min_obs,
 ).sort("timestamp")  # HAC autocovariances are meaningless over a permutation of time
-stats = compute_ic_hac_stats(ic, ic_col="ic", label_horizon=HORIZON_MONTHS)
+stats = compute_ic_hac_stats(ic, ic_col="ic", label_horizon=LABEL_SPAN_MONTHS)
 
 # `ic` carries one row per month-end whatever its cross-section, with the correlation left
 # null below `min_obs`; the statistic drops those, so its own count is what is reported.
@@ -609,16 +615,24 @@ for name in LABEL_NAMES:
 # The training and validation periods the model stages use are worked out per label by
 # `case_studies/utils/cv_window.py`, from `config/setup.yaml` and the range of dates in the
 # label file written above - so which rows land in that file is what decides where the period
-# boundaries fall. The cell below runs the same generator once more and saves the result to
-# `config/cv_config.json`, which `04_evaluation.py` reads so that it scores each feature over
-# the same periods the models are trained and validated on.
+# boundaries fall. Every stage that needs those periods derives them the same way rather than
+# reading a file an earlier notebook happened to write, so none of them depends on the order the
+# pipeline was run in. The cell below runs the generator once more and saves the result to
+# `config/cv_config.json` as a committed record of the geometry these labels imply, which is what
+# makes a change in it show up in a diff.
+#
+# The two durations the generator is given are the ones separated above. `label_buffer` sets the
+# gap between a training window and its validation window. `outcome_horizon` is how far past the
+# last validation date an outcome is still unresolved, and it is what decides how much of the
+# last fold has to be given back before the holdout opens - zero here, because a row's return is
+# realised on the timestamp the row carries.
 
 # %%
 splits = generate_cv_splits(
     labels_df.select("timestamp"),
     case_study_id=CASE_STUDY_ID,
     label_buffer=LABEL_BUFFER,
-    outcome_horizon=HORIZON,
+    outcome_horizon=OUTCOME_HORIZON,
 )
 assert len(splits) == int(SETUP["evaluation"]["n_splits"])
 assert max(split["val_end"] for split in splits).date() < HOLDOUT_START
@@ -659,9 +673,10 @@ for name in LABEL_NAMES:
     )
     print(
         f"\n{name}\n  anchor       the adjusted close of the month before the one dating the row"
-        f"\n  horizon      {HORIZON}, the month the row is dated by"
-        f"\n  resolution   fixed at that month's close; monthly bars need no intraday tie-break"
-        f"\n  overlap      {HORIZON_MONTHS - 1} months shared by consecutive rows"
+        f"\n  span         {LABEL_SPAN_MONTHS} month, the month the row is dated by"
+        f"\n  resolution   fixed at that month's close, the timestamp the row itself carries;"
+        f" monthly bars need no intraday tie-break"
+        f"\n  overlap      {LABEL_SPAN_MONTHS - 1} months shared by consecutive rows"
         f"\n  base rate    {base_rate}"
         f"\n  consumed by  {readers.get(name, shared)}"
     )
@@ -696,6 +711,6 @@ for name in LABEL_NAMES:
 # to measure that difference with. The comparison signal is one characteristic of the several
 # dozen the release carries.
 #
-# **Next**: `03_financial_features.py` builds fundamental, momentum and cross-sectional rank
-# features from these characteristics; `04_evaluation.py` is where those features are scored
-# against these labels.
+# **Next**: `03_financial_features.py` builds value, quality, investment, momentum and risk
+# features from these characteristics, and the composites and interactions over them;
+# `04_evaluation.py` is where those features are scored against these labels.
