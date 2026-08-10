@@ -62,7 +62,7 @@ import yaml
 from IPython.display import display
 
 from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
-from data import load_etfs
+from data import load_etfs, load_etfs_unadjusted
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title
@@ -195,17 +195,37 @@ print(
 # The loader returns one row per fund and session. Its `close` is *adjusted*: when a fund splits its
 # shares or pays a distribution, the whole earlier history is rescaled so that the change does not
 # appear as a price move. Differences of an adjusted series are therefore returns rather than
-# corporate-action artefacts, which is why it is the series used for measuring moves. It has a
-# consequence worth knowing now, and Section B.2 runs into it: an adjusted price from years ago is
-# lower than the price the fund actually traded at that day.
+# corporate-action artefacts, which is why it is the series used for measuring moves.
 #
-# Two properties are checked before anything is computed: nothing outside the declared list of
-# funds, and no close at or below zero, since every ratio below divides by one.
+# A dollar amount cannot use it. The rescaling divides out of a ratio and does not divide out of a
+# price, so an early adjusted close is not the price anyone paid. A second series is therefore
+# loaded alongside, carrying the traded price and the shares that traded. **Returns come from the
+# adjusted series and dollars from the traded one**, and every quantity below says which it used.
+#
+# The two agree at the end of the sample and diverge going back, for two separate reasons that the
+# first session below shows together. Every distribution a fund has paid since lowers its adjusted
+# price, which is why the adjusted close is the lower of the two for most funds. Every split
+# rescales it as well, and that one runs either way: a fund that later split four for one has an
+# adjusted 2006 close near a quarter of what it traded at, and a fund that later did a reverse
+# split has one several times above it.
+#
+# Three properties are checked before anything is computed: nothing outside the declared list of
+# funds, no close at or below zero, since every ratio below divides by one, and a traded price for
+# every adjusted one, since a missing one would silently drop a fund from the screen.
 
 # %%
+traded = load_etfs_unadjusted(start_date=START_DATE, end_date=END_DATE).select(
+    [
+        "symbol",
+        "timestamp",
+        pl.col("close").alias("traded_close"),
+        pl.col("volume").alias("traded_volume"),
+    ]
+)
 prices = (
     load_etfs(start_date=START_DATE, end_date=END_DATE)
     .select(["symbol", "timestamp", "close", "volume"])
+    .join(traded, ["symbol", "timestamp"], how="left")
     .sort(["symbol", "timestamp"])
 )
 research = prices.filter(pl.col("timestamp") < pl.lit(HOLDOUT_START).str.to_date())
@@ -213,9 +233,34 @@ research = prices.filter(pl.col("timestamp") < pl.lit(HOLDOUT_START).str.to_date
 undeclared = sorted(set(prices["symbol"].unique().to_list()) - DECLARED_ASSETS)
 assert not undeclared, f"loaded but absent from setup.yaml::universe.assets: {undeclared}"
 assert prices["close"].min() > 0, "a non-positive close is not a denominator"
+untraded = prices.filter(pl.col("traded_close").is_null())
+assert untraded.is_empty(), (
+    f"{len(untraded):,} adjusted closes have no traded price, so any dollar screen would "
+    f"silently skip them: {sorted(untraded['symbol'].unique().to_list())[:5]}"
+)
 print(
     f"{research['symbol'].n_unique()} funds, {len(research):,} daily closes, "
     f"{research['timestamp'].min()} to {research['timestamp'].max()}"
+)
+
+_first = research.filter(pl.col("timestamp") == pl.col("timestamp").min())
+_gaps = _first.with_columns(traded_over_adjusted=pl.col("traded_close") / pl.col("close")).sort(
+    "traded_over_adjusted", descending=True
+)
+print(
+    f"On the first session, {_first['timestamp'][0]}, {len(_gaps)} funds were quoting. The traded "
+    f"close is above the adjusted one for "
+    f"{(_gaps['traded_over_adjusted'] > 1).sum()} of them, median "
+    f"{_gaps['traded_over_adjusted'].median():.2f}x, and the two extremes are the funds that later "
+    f"split:"
+)
+display(
+    pl.concat([_gaps.head(2), _gaps.tail(2)]).select(
+        "symbol",
+        adjusted=pl.col("close").round(2),
+        traded=pl.col("traded_close").round(2),
+        traded_over_adjusted=pl.col("traded_over_adjusted").round(2),
+    )
 )
 
 # %% [markdown]
@@ -243,7 +288,10 @@ half_spread = pl.col("symbol").replace_strict(
 )
 arrivals = research.group_by("symbol").agg(pl.col("timestamp").min().alias("arrived"))
 tiers = (
-    research.with_columns(half_spread_usd=half_spread, turnover=pl.col("close") * pl.col("volume"))
+    research.with_columns(
+        half_spread_usd=half_spread,
+        turnover=pl.col("traded_close") * pl.col("traded_volume"),
+    )
     .join(arrivals, "symbol")
     .group_by("half_spread_usd")
     .agg(
@@ -274,15 +322,16 @@ with pl.Config(tbl_rows=tiers.height, tbl_cols=tiers.width):
 #
 # Two details of the rule are worth stating. A fund quoting for only part of a year has no full year
 # of turnover to be admitted on, so a minimum number of trading days is required before the average
-# means anything. And the turnover is computed from the adjusted close described above, which
-# understates what a fund actually traded in its early years - so the rule is slightly stricter in
-# the distant past than a rule reading traded prices would be. The daily bars carry no unadjusted
-# price, so that is a property of the data rather than a choice.
+# means anything. And the turnover is the traded price times the shares that changed hands, not the
+# adjusted price: a distribution rescales the earlier history of an adjusted series, so reading a
+# dollar floor off it would apply the rule to a number no one ever traded at, and apply it hardest
+# in the earliest years where the accumulated distributions are largest.
 
 # %%
 eligibility = (
     prices.with_columns(
-        turnover=pl.col("close") * pl.col("volume"), year=pl.col("timestamp").dt.year()
+        turnover=pl.col("traded_close") * pl.col("traded_volume"),
+        year=pl.col("timestamp").dt.year(),
     )
     .group_by(["symbol", "year"])
     .agg(pl.col("turnover").mean().alias("avg_turnover"), pl.len().alias("n_days"))
@@ -353,7 +402,7 @@ plt.show()
 # %%
 cost = (
     research.group_by("symbol")
-    .agg(pl.col("close").median().alias("price"))
+    .agg(pl.col("traded_close").median().alias("price"))
     .with_columns((2 * (half_spread + PER_SHARE) / pl.col("price") * 1e4).alias("cost_bps"))
     .sort("cost_bps")
 )
@@ -400,7 +449,7 @@ tradable = research.with_columns(year=pl.col("timestamp").dt.year()).join(
     eligibility.rename({"eligible_year": "year"}), ["symbol", "year"], how="semi"
 )
 returns = tradable.with_columns(
-    cost_bps=2 * (half_spread + PER_SHARE) / pl.col("close") * 1e4
+    cost_bps=2 * (half_spread + PER_SHARE) / pl.col("traded_close") * 1e4
 ).with_columns(
     (pl.col("close").pct_change(h).abs() * 1e4 / pl.col("cost_bps").shift(h))
     .over("symbol")
@@ -718,9 +767,9 @@ print(
 #
 # - The hundred funds were chosen knowing which of them still trade today. The point-in-time rule
 #   removes a bias within that list; it cannot remove the bias in the list itself.
-# - `close` is adjusted for splits and distributions, so early prices sit below what a fund actually
-#   traded at. Dollar volume is understated there, which makes the eligibility rule stricter in the
-#   distant past, and the round trip, being dollars per share over a price, is overstated.
+# - The traded price is read from Yahoo, which restates it for splits but not for distributions, so
+#   the splits are multiplied back out when the series is built. A fund's split history is therefore
+#   part of the input, and a split Yahoo has not recorded would misstate that fund's cost per share.
 # - The half-spread is assigned by liquidity tier rather than measured, because daily bars carry no
 #   bid and no ask. The dollar-volume floor is a fixed amount that is not adjusted for inflation.
 # - Eligibility is decided once a year while positions change once a month, so a fund that becomes
