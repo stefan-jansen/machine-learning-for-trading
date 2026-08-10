@@ -86,7 +86,7 @@ from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.cv_splits import generate_cv_splits
 from utils.data_quality import validate_modeling_inputs
 from utils.paths import display_path, get_case_study_dir
-from utils.style import COLORS, GRAY_FILLS
+from utils.style import COLORS, GRAY_FILLS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0
@@ -819,7 +819,15 @@ fig.update_layout(
     title_text="The daily IC swings far wider than the mean it averages to",
     legend=dict(orientation="h", y=-0.12),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "One stacked time-series panel per feature. In each, the per-session rank correlation is a "
+    "pale line filling most of the vertical range, swinging between roughly plus and minus 0.5 "
+    "from one session to the next. Over it sit a dark rolling mean that stays within a narrow "
+    "band near zero, a flat full-sample average line, and a dashed Newey-West interval around "
+    "that average. The session-by-session scatter is an order of magnitude wider than the mean "
+    "it averages to, which is the comparison the figure is making.",
+)
 
 # %% [markdown]
 # ### Every feature ranked, with the correction attached
@@ -863,7 +871,15 @@ fig.update_layout(
     margin=dict(l=170),
     legend=dict(orientation="h", y=-0.14),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Horizontal bar chart of the mean cross-sectional rank correlation with the forward return, "
+    "one bar per feature, sorted from the most positive at the top through zero to the most "
+    "negative at the bottom, with each bar annotated by its t-statistic. The volatility family "
+    "occupies the positive end and the carry-momentum family the negative end, but every bar is "
+    "small, within a few hundredths of zero. Bars are shaded by whether they clear "
+    "false-discovery control, and almost the whole chart is in the colour that does not.",
+)
 
 # %% [markdown]
 # ### The same features, one window at a time
@@ -908,7 +924,15 @@ fig.update_layout(
     xaxis_title="Mean rank correlation within one validation window (diamond marks the middle one)",
     margin=dict(l=170),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Dot plot with one row per leading feature. Each row shows the feature's mean rank "
+    "correlation in each validation window as a small grey dot, with an amber diamond marking "
+    "the middle window. A vertical rule marks zero. Most rows have dots on both sides of that "
+    "rule, so the feature's direction reverses from one window to the next; only a couple of "
+    "rows keep every dot on one side. The dots for a given feature spread far wider than the "
+    "distance any of them sits from zero.",
+)
 
 # %% [markdown]
 # ### What the overlap correction costs
@@ -956,7 +980,15 @@ fig.update_layout(
     xaxis_title="t-statistic treating each session as independent",
     yaxis_title="t-statistic after the Newey-West correction",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Scatter plot of each feature's t-statistic after the Newey-West correction against the "
+    "same t-statistic computed as if sessions were independent, with a dashed 45-degree "
+    "reference line. Every point sits between that line and the horizontal axis rather than on "
+    "it, so each corrected value is smaller in magnitude than the uncorrected one, and the gap "
+    "widens with distance from the origin. Points shaded dark are the features that still clear "
+    "the threshold once the correction is applied.",
+)
 
 # %% [markdown]
 # The correction moves points toward the horizontal axis, which is what a positive
@@ -1107,7 +1139,15 @@ for column_index in (1, 2):
     )
 fig.update_yaxes(title_text="Mean rank correlation", row=1, col=1)
 fig.update_yaxes(title_text="Mean divided by its spread across windows", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two side-by-side slope panels, each with one line per leading feature joining its value at "
+    "the 5-session horizon to its value at the 21-session horizon. Lines are coloured by their "
+    "sign at the primary horizon. In the left panel, measuring the mean rank correlation, the "
+    "positive and negative groups stay cleanly on their own sides of zero at both horizons and "
+    "no line crosses over. The right panel divides each mean by its spread across windows; the "
+    "same separation holds, and every value there is far below one in magnitude.",
+)
 
 # %% [markdown]
 # ## 4. What shape is the relationship?
@@ -1219,7 +1259,15 @@ if quantile_spreads:
         title_text="Each profile runs in the direction its own correlation gives it",
         legend=dict(orientation="h", y=-0.08),
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "A grid of small bar charts, one per feature, each showing mean forward return across "
+        "the five quintiles of that feature from Q1 to Q5, with a diamond marking the median "
+        "beside every bar. All panels share one vertical scale. The volatility features step "
+        "upward from Q1 to Q5 and the carry-momentum features step downward, each matching the "
+        "sign of its own rank correlation, and the medians track the means. The profiles are "
+        "close to monotonic rather than driven by one extreme quintile.",
+    )
 
 # %% [markdown]
 # Three things to read off these panels. Whether the profile runs all the way across or
@@ -1407,7 +1455,14 @@ if ranked_pairs:
         yaxis_title="Feature pair",
         margin=dict(l=260),
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Horizontal bar chart of pairwise Spearman correlation, one bar per feature pair, "
+        "sorted from the most correlated at the top. Every bar reaches past 0.9 and the "
+        "strongest approaches 1.0, and the bars shorten only slightly down the list, so the "
+        "chart is a nearly flat block rather than a decaying one. The pair labels show why: "
+        "most are the same quantity at two windows or a level beside its own rank.",
+    )
 
 # %% [markdown] tags=["results"]
 # **The carry family runs negative over these validation windows, and the screen reports
