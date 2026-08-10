@@ -77,7 +77,7 @@ from data import (
 )
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -380,7 +380,16 @@ add_message_title(
     "The universe swells whenever a monthly expiration falls in the window",
     subtitle="Stocks with a target-maturity straddle at each weekly decision date, by listing",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Stacked area chart of the count of stocks quoting a straddle at each weekly decision "
+    "date from 2017 to 2021, split into weekly-listed and monthly-listed expirations. The "
+    "weekly-listed base sits between roughly 150 and 250 names throughout, and the monthly "
+    "band spikes to between 400 and 470 in the weeks a monthly expiration falls inside the "
+    "target-maturity window, giving the series a regular sawtooth. A dashed line at 100 marks "
+    "the straddles the cheapest fifth needs to fill the book; the total clears it at every "
+    "decision date except a single trough in early 2020.",
+)
 
 # %% [markdown]
 # ### B.3 What a round trip costs, and what a move is worth
@@ -437,7 +446,16 @@ add_message_title(
     "Where a stock sits in this ordering decides what its move has to clear",
     subtitle="Median gap between the combined bid and ask over the combined mid, per stock",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Line chart of each of about 600 stocks' median round-trip cost, as a percentage of the "
+    "straddle premium, with the stocks sorted along the horizontal axis by that cost. The "
+    "curve rises from under 4 percent at the cheapest names, passes 10 percent around the "
+    "200th stock, and steepens after the 500th to reach nearly 27 percent at the most "
+    "expensive. A dashed line marks the universe median near 12 percent and a dotted line the "
+    "cheapest-fifth threshold near 9 percent, so the ordering is shallow across the middle of "
+    "the universe and steep only at its expensive tail.",
+)
 
 # %% [markdown]
 # A cost measured once over five years hides whether it is the same cost every week. The figure
@@ -487,7 +505,15 @@ add_message_title(
     "Spreads widen and the universe thins in the same weeks",
     subtitle="Cost of crossing, recomputed across the stocks quoting at each decision date",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two lines tracking the round trip as a percentage of straddle premium at each weekly "
+    "decision date from 2017 to 2021: the median stock that day, and the cheapest fifth that "
+    "day. The cheapest-fifth line runs three to five points below the median line throughout "
+    "and the two move together. Both sit between roughly 5 and 12 percent for most of the "
+    "period and both jump sharply in March 2020, the median peaking above 22 percent, before "
+    "settling at a level higher than they held before that date.",
+)
 
 # %% [markdown]
 # Against that cost sits the move in the premium itself. Each straddle the panel selected on a
@@ -542,7 +568,17 @@ add_message_title(
     "Which cost line the position pays decides whether its move clears it",
     subtitle="Exceedance of absolute premium moves at entry, over the spread that entry crosses",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two exceedance curves on a logarithmic horizontal axis, giving the fraction of absolute "
+    "premium moves at least as large as a given multiple of the entry's own round trip, for "
+    "the 5-session and the 10-session move. Both start near 1.0 at the left and fall to "
+    "almost zero beyond ten times the round trip, with the 10-session curve above the "
+    "5-session curve everywhere. A dashed vertical line at one times the round trip marks "
+    "both legs crossed, where the 5-session curve reads about 0.5 and the 10-session about "
+    "0.7; a dotted vertical line near one tenth marks the one-leg cheapest rung, where both "
+    "curves are still above 0.95.",
+)
 
 # %% [markdown]
 # ### B.4 How long the volatility premium lasts
@@ -632,7 +668,16 @@ add_message_title(
     "A week on, the volatility gap still resembles what it was",
     subtitle="Mean within-stock autocorrelation of implied less realized volatility",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Bar chart of the mean within-stock autocorrelation of implied less realized volatility "
+    "against the number of sessions between the two observations, from 1 to 20, with a shaded "
+    "band showing the 10th to 90th percentile across stocks and a horizontal band showing the "
+    "range expected from no information. The bars decay smoothly from about 0.92 at one "
+    "session to roughly 0.25 at ten and to near zero by twenty. They clear the "
+    "no-information band out to about session 17, so the gap a week later still resembles the "
+    "gap observed at entry.",
+)
 
 # %% [markdown]
 # ### B.5 Move size against cost
@@ -810,7 +855,15 @@ add_message_title(
     "Folds roll forward and stop where the last outcome still resolves",
     subtitle="Boundaries as generate_cv_splits returned them; the purge gap separates each pair",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Horizontal timeline with one row per cross-validation fold, each row drawn as a training "
+    "span, a narrow purge gap, and a validation span, with the sealed holdout shaded at the "
+    "right of both. Fold 0 trains from 2018 to late 2019 and validates into late 2020; fold 1 "
+    "starts earlier and shifts both spans forward, training to late 2018 and validating "
+    "through 2019 into 2020. Every training span is separated from its own validation span by "
+    "the purge gap, and both folds stop short of the holdout, which begins in 2021.",
+)
 
 # %% [markdown]
 # ## E. What this notebook hands on
