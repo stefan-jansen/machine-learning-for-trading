@@ -1446,16 +1446,13 @@ case_studies/fx_pairs/01_feasibility_analysis:
 case_studies/fx_pairs/02_labels:
   timeout: 120
 case_studies/fx_pairs/03_financial_features:
-  parameters:
-    START_DATE: '2000-01-01'
   timeout: 300
 case_studies/fx_pairs/04_model_based_features:
   parameters:
     KALMAN_MAXITER: 50
-    MAX_FOLDS: 2
     MAX_SYMBOLS: 5
     N_HMM_RESTARTS: 3
-  timeout: 300
+  timeout: 900
 case_studies/fx_pairs/05_evaluation:
   parameters:
     MAX_SYMBOLS: 5
