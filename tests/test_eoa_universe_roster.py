@@ -11,6 +11,12 @@ did, at different times:
   declaration fail on any run that narrows `START_DATE` - a documented parameter that
   `tests/overrides.yaml` is allowed to set. It passes at the full window, which is why it
   survived a re-run and was caught only by review.
+
+The count itself is checked **here and not in the notebooks**. `universe.n_assets` describes the
+production extract; the reduced one CI runs the pipeline against carries 23 names by design, so an
+assertion on the count inside a notebook fails there for being small rather than for being wrong -
+which is exactly what it did, taking three notebooks red. A declaration about the dataset belongs
+in a test over the dataset, and this file skips when that dataset is absent.
 """
 
 import ast

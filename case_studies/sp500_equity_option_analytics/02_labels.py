@@ -189,15 +189,19 @@ print(
 # was passing, so every count below and every label file would otherwise have covered names the
 # strategy can never hold.
 #
-# The roster is derived from the surface rather than typed out, and then checked in both
-# directions: its size against the declared `n_assets`, and every roster name against the share
-# bars. Checking one direction is what let this through - a guard that only asks whether every
-# declared name is present says nothing about a present name that was never declared.
+# The roster is derived from the surface rather than typed out, and every roster name is then
+# checked against the share bars: a name that can be ranked must have a price to trade at.
 #
-# **The roster is read off the whole extract, not off the requested window.** `universe.n_assets`
-# is a statement about the dataset, so a run that narrows `START_DATE` would otherwise assert
-# against a roster missing every name that had not yet listed - the declaration would fail on a
-# parameter the notebook documents as free to change. The dates bound the panels below it.
+# **The roster is read off the whole extract, not off the requested window**, because which names
+# have listed options is a property of the dataset. Deriving it after `START_DATE` would give a
+# roster missing every name not yet listed, and the bound would then vary with a parameter the
+# notebook documents as free to change.
+#
+# **How many names that comes to is a fact about the extract, so it is reported rather than
+# asserted.** `universe.n_assets` describes the production dataset, and the reduced extract CI
+# runs on carries a handful of names by design; an assertion on the count fails there for being
+# small rather than for being wrong. `tests/test_eoa_universe_roster.py` holds the declaration to
+# the production data, which is the only place the comparison means anything.
 #
 # The session grid is taken from the **unbounded** extract, because a session is a property of the
 # market rather than of the universe, and the horizon is counted on it.
@@ -207,10 +211,7 @@ full_surface = load_sp500_options_surface()
 full_bars = load_sp500_daily_bars()
 ROSTER = sorted(full_surface["symbol"].unique().to_list())
 
-assert len(ROSTER) == setup["universe"]["n_assets"], (
-    f"{len(ROSTER)} names carry an option surface against a declared "
-    f"universe.n_assets of {setup['universe']['n_assets']}"
-)
+assert ROSTER, "the option-surface extract carries no names to rank"
 priced = set(full_bars["symbol"].unique().to_list())
 assert not set(ROSTER) - priced, f"no share bars for {sorted(set(ROSTER) - priced)}"
 outside = sorted(priced - set(ROSTER))
@@ -238,8 +239,14 @@ prices = (
 PRICE_COLS = ["symbol", "sec_id", "timestamp", "open", "close", "adj_factor"]
 MARKET_DATA_DIGEST = value_digest(bars, PRICE_COLS)
 print(f"market_data digest: {MARKET_DATA_DIGEST}")
+DECLARED = setup["universe"]["n_assets"]
+against = (
+    "as universe.n_assets declares"
+    if len(ROSTER) == DECLARED
+    else f"a reduced extract; universe.n_assets declares {DECLARED}"
+)
 print(
-    f"Universe {len(ROSTER)} names with an option surface, as universe.n_assets declares; "
+    f"Universe {len(ROSTER)} names with an option surface ({against}); "
     f"{len(outside)} priced names carry no surface and are excluded ({', '.join(outside)})"
 )
 

@@ -479,27 +479,28 @@ def fit_and_filter(returns: pd.Series, row: dict) -> tuple[pd.Series, dict] | No
 # argument nothing was passing, so this artifact carried a fitted conditional volatility for
 # names the strategy can never hold - they have no implied volatility to rank on, so
 # `garch_ivrv_spread` was null for every one of their rows while the other two columns were not.
-# The roster is derived from the surface rather than typed out, and checked in both directions:
-# its size against the declared `n_assets`, and every roster name against the share bars.
+# The roster is derived from the surface rather than typed out, and every roster name is checked
+# against the share bars. How many names that comes to is reported rather than asserted:
+# `n_assets` describes the production extract, and the reduced one CI runs on carries a handful by
+# design. `tests/test_eoa_universe_roster.py` holds the declaration to the production data.
 
 # %%
 ENTITY = "sec_id"
-# The surface is loaded for its roster alone; no column of it is read here. Both extracts are
-# read whole rather than over the requested window: `n_assets` is a statement about the dataset,
-# so a narrowed START_DATE must not fail the declaration. The dates bound the panel below.
+# The surface is loaded for its roster alone; no column of it is read here. Both extracts are read
+# whole rather than over the requested window, because which names have listed options is a
+# property of the dataset. The dates bound the panel below.
 _surface = load_sp500_options_surface()
 full_bars = load_sp500_daily_bars()
 ROSTER = sorted(_surface["symbol"].unique().to_list())
-assert len(ROSTER) == SETUP["universe"]["n_assets"], (
-    f"{len(ROSTER)} names carry an option surface against a declared "
-    f"universe.n_assets of {SETUP['universe']['n_assets']}"
-)
+assert ROSTER, "the option-surface extract carries no names to rank"
 priced = set(full_bars["symbol"].unique().to_list())
 assert not set(ROSTER) - priced, f"no share bars for {sorted(set(ROSTER) - priced)}"
 outside = sorted(priced - set(ROSTER))
+DECLARED = SETUP["universe"]["n_assets"]
 print(
-    f"Universe {len(ROSTER)} names with an option surface; {len(outside)} priced names carry none "
-    f"and are excluded ({', '.join(outside)})"
+    f"Universe {len(ROSTER)} names with an option surface"
+    + ("" if len(ROSTER) == DECLARED else f" (a reduced extract; n_assets declares {DECLARED})")
+    + f"; {len(outside)} priced names carry none and are excluded ({', '.join(outside)})"
 )
 
 window = pl.col("timestamp").is_between(
