@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -15,51 +15,79 @@
 # ---
 
 # %% [markdown]
-# # Feature Evaluation — ETFs
+# # ETFs: which features carry information about the forward return
 #
-# Consolidated evaluation of Ch8 financial features and Ch9 temporal features
-# against forward return labels. Produces triage decisions for Ch11 modeling.
+# Chapters 8 and 9 built two feature matrices for this case study. `financial.parquet`
+# holds arithmetic on past bars - trailing returns, volatility, oscillators. Neither
+# notebook asked whether any of it predicts anything, and `04_model_based_features` wrote
+# `model_based.parquet`, whose columns are the output of models fitted inside each
+# walk-forward window. This notebook asks the question, one feature at a time.
 #
-# **Learning Objectives**:
-# - Evaluate individual feature predictive power via Information Coefficient (IC)
-# - Apply HAC adjustment for overlapping-return autocorrelation
-# - Control false discovery rate with Benjamini-Hochberg correction
-# - Assess feature redundancy and family-level signal concentration
-# - Produce a triage ledger for downstream model selection
+# The measurement is the **information coefficient**, IC for short: on each date, rank the
+# ETFs by the feature, rank them by the return they went on to earn over the following
+# month, and correlate the two rankings. That gives one number per date and a series over
+# the development sample. Everything after it is inference on that series - how much of
+# its average is left once the overlap between consecutive monthly returns is allowed for,
+# how much is left after allowing for having asked the same question of every feature at
+# once, and whether the association holds across the walk-forward windows or came out of a
+# single favorable stretch.
 #
-# **Book Reference**: Chapter 7, Section 7.3 (Univariate feature-label evaluation)
-# and Section 7.4 (Search accounting and multiple testing). Chapter 8.6 is the
-# secondary reference for search control.
+# **Learning objectives.** By the end of this notebook you will be able to:
 #
-# **Prerequisites**: `03_financial_features.py` and `04_model_based_features.py` must
-# have run (produce `features/financial.parquet` and `features/model_based.parquet`).
+# - Measure how well a feature ranks assets against what they went on to earn, date by
+#   date, and read the resulting series rather than only its average.
+# - Correct a t-statistic for the serial dependence that overlapping forward returns
+#   create, and say how much of the apparent significance that correction removes.
+# - Adjust a set of simultaneous tests for the number of tests in it, and report the size
+#   of the search beside the result, so a reader can judge what a p-value here is worth.
+# - Separate a feature that works in every walk-forward window from one that worked in a
+#   single period, using the sign the feature takes in each window.
+# - Find the pairs of features that are close to the same measurement, so a family's
+#   breadth is not read as independent corroboration.
+#
+# **Book reference**: Chapter 7, Section 7.3 (Univariate feature-label evaluation) and
+# Section 7.4 (Search accounting and multiple testing). Section 8.6 is the secondary
+# reference for search control.
+#
+# **Prerequisites**: `02_labels` has written the forward-return labels, and
+# `03_financial_features` and `04_model_based_features` have written
+# `features/financial.parquet` and `features/model_based.parquet`.
+#
+# **What it writes.** `evaluation/triage_ledger.parquet`, one row per candidate feature
+# carrying its statistics and a PROCEED, REVISE or STOP decision, and
+# `evaluation/ic_timeseries.parquet`, the per-date series those statistics summarize. The
+# ledger is read by `20_strategy_synthesis/02_feature_evaluation.py`, which sets the nine
+# case studies' decisions side by side. The model notebooks from `06_linear` on train on
+# the whole feature matrix: this screen is evidence about the features, not a filter
+# applied to them.
 
 # %%
-"""Feature Evaluation - ETFs case study."""
+"""Feature evaluation - ETFs case study."""
 
 import re
-import warnings
 from datetime import date
-
-warnings.filterwarnings("ignore")
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
+from IPython.display import display
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, compute_ic_uncertainty
 from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 
 import utils.style as style
+from case_studies.utils.feature_engineering import (
+    assign_families,
+    families_from_config,
+    quantile_profile,
+)
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.cv_splits import generate_cv_splits
+from utils.data_quality import validate_modeling_inputs
 from utils.paths import get_case_study_dir
 
-# Register the ML4T Plotly template (colorway, fonts, gridlines) as the default
-# and expose the book palette so every figure sources color from utils.style.
-style.apply_ml4t_style()
 COLORS = style.COLORS
 GRAY_FILLS = style.GRAY_FILLS
 
@@ -67,100 +95,183 @@ GRAY_FILLS = style.GRAY_FILLS
 # Production defaults
 MAX_SYMBOLS = 0
 
+# %% [markdown]
+# ## Settings, and what each one decides
+#
+# Everything the screens, the triage rule and the figures depend on is bound here: from
+# `config/setup.yaml` where the case study declares it, and as a named constant where this
+# notebook is the one making the choice. A threshold retyped further down would be a
+# second source of truth for a decision already made once.
+#
+# Four of them come from the configuration. The **primary label** is the forward return
+# every statistic below is measured against, and its **horizon** sets two other things:
+# the width of the seal that keeps the holdout out of this notebook, and the bandwidth of
+# the standard-error correction, because a return measured over a month and sampled every
+# day overlaps its neighbours for all but one of those days. The **holdout boundary** is
+# the date from which no row may inform anything here. The **walk-forward folds** come
+# from the same configuration and are re-derived rather than stored.
+#
+# The rest are this notebook's own judgements, and each one is a place a reader working on
+# their own data would choose differently:
+#
+# - A date needs a minimum number of ETFs quoted before a rank correlation across them
+#   means anything; below that the date contributes nothing to the series.
+# - A feature has to be present on most rows to be screened at all, and it has to actually
+#   change from date to date - a column that repeats yesterday's value for half the panel
+#   is describing the feed rather than the market.
+# - The false-discovery level is the share of the promotions that are allowed to be false.
+# - The exploration arm's threshold is the smallest average rank correlation worth
+#   carrying into a monthly rebalance, and the sign-agreement bar is how much of the
+#   walk-forward history has to point the same way for that to count as stable.
+# - Two features whose ranks agree above the redundancy cut are treated as one piece of
+#   evidence rather than two.
+
 # %%
 CASE_STUDY_ID = "etfs"
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 EVAL_DIR = CASE_DIR / "evaluation"
 EVAL_DIR.mkdir(exist_ok=True)
 
-# ETFs config. Every threshold the screens, the triage rule and the prose refer to
-# is bound here. A threshold retyped into a markdown table is a second source of
-# truth for a decision the code has already made.
 SETUP = load_setup_config(CASE_STUDY_ID)
 eval_config = SETUP["evaluation"]
 
-# The label and its horizon come from setup.yaml. The HAC bandwidth is the label
-# horizon: it is the overlap the daily-sampled forward return induces, so typing it
-# separately would let the correction and the label drift apart.
 PRIMARY_LABEL = SETUP["labels"]["primary"]
 LABEL_BUFFER = resolve_label_buffer(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
 assert LABEL_BUFFER, f"No label buffer configured for {PRIMARY_LABEL}"
 HAC_MAXLAGS = int(re.match(r"^(\d+)", LABEL_BUFFER).group(1))
+LABEL_HORIZON = HAC_MAXLAGS
+HOLDOUT_START = date.fromisoformat(eval_config["holdout_start"])
 
-MIN_PERIODS = 10  # symbols a date needs before its IC enters the series
-IC_THRESHOLD = 0.01  # |IC| the exploration arm requires, at a monthly horizon
-N_QUANTILES = 5
+MIN_CROSS_SECTION_TARGET = 10  # ETFs a date needs before its rank correlation is read
+IC_THRESHOLD = 0.01  # smallest average IC the exploration arm will promote on
+N_QUANTILES = 5  # buckets the shape diagnostic sorts each date into
 MIN_COVERAGE = 0.70  # non-null share the correctness gate requires
 MAX_STALENESS = 0.50  # unchanged-from-prior-date share the correctness gate allows
-FDR_ALPHA = 0.05  # Benjamini-Hochberg level
+FDR_ALPHA = 0.05  # share of promotions allowed to be false discoveries
 NAIVE_T = 1.96  # two-sided normal critical value, for the naive-versus-HAC comparison
 MIN_SIGN_CONSISTENCY = 0.60  # fold-sign agreement the exploration arm requires
 REDUNDANCY_CUT = 0.7  # |rho| above which two features are one piece of evidence
 
+print(
+    f"Label: {PRIMARY_LABEL}, a forward return over {LABEL_HORIZON} trading sessions.\n"
+    f"Consecutive labels therefore share {LABEL_HORIZON - 1} of those sessions, so the\n"
+    f"  standard-error correction is given {HAC_MAXLAGS} sessions of dependence to allow for,\n"
+    f"  and the holdout seal is {LABEL_HORIZON} sessions wide.\n"
+    f"Holdout: dates from {HOLDOUT_START} onward inform nothing in this notebook.\n"
+    f"Walk-forward design: {eval_config['n_splits']} folds, "
+    f"{eval_config['train_size']} of training and {eval_config['val_size']} of validation each."
+)
+
 # %% [markdown]
-# ## 0. Load Artifacts & Build Evaluation Panel
+# ## A. The panel this is measured on
 #
-# We load the pre-computed feature matrices and labels, then join into a single
-# evaluation panel. Temporal features include both date-level (HMM regime, FFD)
-# and per-symbol (GARCH) features, so we join on `[date, symbol]`.
+# Three files come in: the two feature matrices and the forward-return label. They are
+# joined on the date and the ETF, which is the pair that identifies a row everywhere in
+# this case study.
 #
-# The panel is then **sealed to the training+validation window**: because the
-# triage here promotes features for downstream modeling, the holdout must not
-# inform feature evaluation. We purge on the 21-day label endpoint, so no
-# pre-holdout date whose forward label reaches into the holdout survives.
+# The model-based matrix needs one more key resolved before it can join. Each of its
+# columns is the output of a model - a two-state description of whether the broad market
+# is calm or stressed, a filtered version of ten reference price series, and a volatility
+# model per ETF - and `04_model_based_features` fits every one of them inside a single
+# walk-forward window, on that window's training sessions only, then writes the values it
+# infers across the whole window. So each row carries the number of the window whose model
+# produced it, and the same date and ETF appear once per window.
 #
-# **The fold contract for the Ch9 features.** `model_based.parquet` carries one row
-# per `(timestamp, symbol, fold)`, and every temporal family in it - the HMM regime
-# probabilities, the fractionally differenced series and the GARCH conditional
-# volatility - is fitted on its fold's training window and then written over the
-# whole fold window (`04_model_based_features.py:20`). A training-date value is
-# therefore in-sample: the parameters behind it came from a window that extends past
-# that date. `04` also writes one extra fold, numbered past the last CV fold, whose
-# training window is everything before `holdout_start`; that one exists to produce
-# holdout features and has no validation window on this side of the seal.
+# A **walk-forward window**, or fold, is a pair of adjacent date ranges: a stretch of
+# history the model is fitted on, and the stretch that follows it, which the model has not
+# seen. A value dated inside the training range was produced by parameters estimated from
+# sessions that run past it, so it is not something a reader could have computed at that
+# date. Only the values dated inside the validation range are. This notebook therefore
+# keeps each model-based row only inside the validation range of the fold that produced
+# it, and drops the extra fold `04` appends past the last one - the fold that trains on
+# everything before the holdout begins so that the final notebook has features to score
+# the holdout with, and which has no validation range on this side of it.
 #
-# So the fold column is resolved rather than dropped: a temporal feature is read
-# only inside the validation window of the fold that produced it, and the extra
-# holdout fold is dropped. **The evaluation frame is then the union of those
-# validation windows**, so the Ch8 features are screened on the same rows as the
-# Ch9 ones. Screening them on the full span instead would compare an IC measured
-# over eighteen years against one measured over eight, and would leave every
-# temporal feature failing the coverage gate for a property of its design rather
-# than a defect.
+# What is left is one value per date and ETF, and **the evaluation panel is the union of
+# those validation ranges**, so the two matrices are screened on the same rows.
 
 # %%
-# Load features (normalize date column type to pl.Date for consistent joins)
+JOIN_COLS = ["timestamp", "symbol"]
+DATE_COL = "timestamp"
+
 features = pl.read_parquet(CASE_DIR / "features" / "financial.parquet").with_columns(
     pl.col("timestamp").cast(pl.Date)
 )
-temporal_artifact = pl.read_parquet(CASE_DIR / "features" / "model_based.parquet").with_columns(
+model_based_artifact = pl.read_parquet(CASE_DIR / "features" / "model_based.parquet").with_columns(
     pl.col("timestamp").cast(pl.Date)
 )
-
-# Load primary label
 label_df = pl.read_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet").with_columns(
     pl.col("timestamp").cast(pl.Date)
 )
 label_col = [c for c in label_df.columns if c not in ("timestamp", "symbol")][0]
 
-print(f"Features: {features.shape}")
-print(f"Temporal: {temporal_artifact.shape}")
-print(f"Labels: {label_df.shape}, column: {label_col}")
+financial_cols = [c for c in features.columns if c not in JOIN_COLS]
+model_based_cols = [c for c in model_based_artifact.columns if c not in (*JOIN_COLS, "fold")]
+
+print(
+    f"financial.parquet:   {features.height:,} rows, {len(financial_cols)} features, "
+    f"{features[DATE_COL].min()} to {features[DATE_COL].max()}\n"
+    f"model_based.parquet: {model_based_artifact.height:,} rows, {len(model_based_cols)} features, "
+    f"one row per date, ETF and fold\n"
+    f"{PRIMARY_LABEL}.parquet:  {label_df.height:,} rows, label column {label_col!r}"
+)
+
+# %% [markdown]
+# ### What is in the feature set
+#
+# `config/setup.yaml` declares the case study's feature register: one row per family,
+# saying what the family reads, how far back, and whether it is meant to rank ETFs against
+# each other or to describe the environment a ranking is formed in.
+# `03_financial_features` builds the matrix from that register, and reading the same
+# register here is what keeps a feature in the same family on both sides. The model-based
+# columns are not in it - the register covers the price-derived matrix - so they are named
+# by the model that produced them.
 
 # %%
-# Identify feature columns by source
-JOIN_COLS = ["timestamp", "symbol"]
-DATE_COL = "timestamp"
+FAMILY_REGISTER = families_from_config(SETUP)
+families = assign_families(financial_cols, FAMILY_REGISTER)
 
-financial_cols = [c for c in features.columns if c not in JOIN_COLS]
-temporal_cols = [c for c in temporal_artifact.columns if c not in (*JOIN_COLS, "fold")]
+
+def model_based_family(column: str) -> str:
+    """Name a model-based column by the model that produced it."""
+    if column.startswith("regime_"):
+        return "market regime (HMM)"
+    if column.startswith("ffd_"):
+        return "fractional differencing"
+    return "conditional volatility (GARCH)"
+
+
+families |= {c: model_based_family(c) for c in model_based_cols}
+
+all_feature_cols = financial_cols + model_based_cols
+source_of = {c: ("financial" if c in financial_cols else "model-based") for c in all_feature_cols}
+
+inventory = (
+    pl.DataFrame(
+        {
+            "family": [families[c] for c in all_feature_cols],
+            "source": [source_of[c] for c in all_feature_cols],
+            "feature": all_feature_cols,
+        }
+    )
+    .group_by(["source", "family"])
+    .agg(pl.len().alias("features"), pl.col("feature").sort().str.join(", ").alias("columns"))
+    .sort(["source", "features"], descending=[False, True])
+)
+display(inventory)
 
 # %% [markdown]
 # ### The walk-forward folds
 #
-# `generate_cv_splits` derives the folds from the label frame. It is the same call
-# `04_model_based_features` makes and the one `load_modeling_dataset` makes in
-# Chapter 11, so a fold id denotes the same window everywhere it appears.
+# `generate_cv_splits` derives the folds from the dates the label frame carries and the
+# design declared in `config/setup.yaml`. It is the call `04_model_based_features` makes
+# to decide which fold each of its rows belongs to, and the one `load_modeling_dataset`
+# makes for the model notebooks, so a fold number denotes the same pair of date ranges
+# wherever it appears.
+#
+# The folds step backwards from the holdout boundary, so fold 0 is the most recent one.
+# Each validation range stops far enough before the boundary that the forward return of
+# its last date has finished before the holdout opens.
 
 # %%
 splits = generate_cv_splits(
@@ -181,15 +292,28 @@ for split in splits:
         f"{_as_date(split['val_end'])}"
     )
 
+# %% [markdown]
+# ### Resolving the fold dimension, and sealing the holdout
+#
+# Two filters build the panel. The first keeps each model-based row only inside the
+# validation range of its own fold and drops the appended holdout fold, which leaves one
+# value per date and ETF; the assertion below is what proves it, since two overlapping
+# ranges would silently give a feature two values on one date.
+#
+# The second is the seal. The holdout must not inform which features look predictive, and
+# the date a decision is taken is the wrong place to cut: a date a week before the
+# boundary carries a forward return that finishes inside the holdout, so keeping it would
+# put holdout prices into the rank correlation, the multiple-testing adjustment and the
+# triage. The cut is therefore on the date the label **finishes**, found by stepping
+# forward one horizon along the label's own calendar of trading dates.
+
 # %%
-# A fitted value is out of sample only inside its own fold's validation window, so
-# keeping it there and dropping the holdout fold leaves one value per date and symbol.
 val_windows = {int(s["fold"]): (_as_date(s["val_start"]), _as_date(s["val_end"])) for s in splits}
 IN_VALIDATION = pl.any_horizontal(
     [(pl.col(DATE_COL) >= start) & (pl.col(DATE_COL) <= end) for start, end in val_windows.values()]
 )
-temporal = (
-    temporal_artifact.filter(pl.col("fold").is_in(list(val_windows)))
+model_based = (
+    model_based_artifact.filter(pl.col("fold").is_in(list(val_windows)))
     .filter(
         pl.col("fold").replace_strict({f: s for f, (s, _) in val_windows.items()}, default=None)
         <= pl.col(DATE_COL)
@@ -200,78 +324,69 @@ temporal = (
     )
     .drop("fold")
 )
-assert temporal.select(JOIN_COLS).is_duplicated().sum() == 0, (
+assert model_based.select(JOIN_COLS).is_duplicated().sum() == 0, (
     "validation windows overlap; a fitted feature would take two values on one date"
 )
 
 # %%
-# Join: features + temporal (on [date, symbol]) + labels
-eval_panel = features.join(temporal, on=JOIN_COLS, how="left")
+eval_panel = features.join(model_based, on=JOIN_COLS, how="left")
+assert eval_panel.height == features.height, "the model-based join changed the panel's row count"
 eval_panel = eval_panel.join(label_df, on=JOIN_COLS, how="inner")
 
-# Seal the holdout. Feature evaluation is a development decision — the triage
-# ledger below promotes features for downstream modeling — so the sealed holdout
-# (setup.yaml `evaluation.holdout_start`) must not inform which features look
-# predictive. Purge on the LABEL endpoint, not the signal date: a pre-holdout
-# date whose 21-day forward label reaches into the holdout would leak holdout
-# prices into the IC ranking, BH-FDR, and triage. The label calendar is dense
-# (built from the full price panel before eligibility gating), so the endpoint is
-# computed there. Same purge as the 02_labels baseline IC and the 03 selection IC.
-holdout_start_dt = date.fromisoformat(eval_config["holdout_start"])
-LABEL_HORIZON = HAC_MAXLAGS  # fwd_ret_21d: forward window whose endpoint must clear the holdout
 last_signal_date = (
-    label_df.select("timestamp")
+    label_df.select(DATE_COL)
     .unique()
-    .sort("timestamp")
-    .with_columns(pl.col("timestamp").shift(-LABEL_HORIZON).alias("_label_end"))
-    .filter(pl.col("_label_end") < holdout_start_dt)["timestamp"]
+    .sort(DATE_COL)
+    .with_columns(pl.col(DATE_COL).shift(-LABEL_HORIZON).alias("_label_end"))
+    .filter(pl.col("_label_end") < HOLDOUT_START)[DATE_COL]
     .max()
 )
-n_before_seal = len(eval_panel)
-eval_panel = eval_panel.filter(pl.col("timestamp") <= last_signal_date).filter(IN_VALIDATION)
+n_before_seal = eval_panel.height
+eval_panel = eval_panel.filter(pl.col(DATE_COL) <= last_signal_date).filter(IN_VALIDATION)
 assert eval_panel[DATE_COL].max() <= last_signal_date
-print(
-    f"Holdout sealed and narrowed to the validation windows: {n_before_seal:,} -> "
-    f"{len(eval_panel):,} rows (labels end < {eval_config['holdout_start']}; "
-    f"last eligible signal date {last_signal_date})"
-)
-
-all_feature_cols = financial_cols + temporal_cols
 
 if MAX_SYMBOLS > 0:
     top = eval_panel.group_by("symbol").len().sort("len", descending=True).head(MAX_SYMBOLS)
     eval_panel = eval_panel.filter(pl.col("symbol").is_in(top["symbol"]))
 
-n_rows = len(eval_panel)
+n_rows = eval_panel.height
 n_symbols = eval_panel["symbol"].n_unique()
 n_dates = eval_panel[DATE_COL].n_unique()
-print(f"\nEval panel: {n_rows:,} rows, {n_symbols} symbols, {n_dates:,} dates")
+
+# A date needs enough ETFs quoted before a rank correlation across them says anything.
+# The floor tracks the universe actually loaded, so a run on a reduced universe narrows
+# the gate with it instead of screening every feature out.
+MIN_CROSS_SECTION = min(MIN_CROSS_SECTION_TARGET, n_symbols)
+
 print(
-    f"Features: {len(financial_cols)} financial + {len(temporal_cols)} temporal"
-    f" = {len(all_feature_cols)} total"
+    f"Cut on the date the label finishes, then narrowed to the validation ranges: "
+    f"{n_before_seal:,} -> {n_rows:,} rows.\n"
+    f"The last date whose forward return finishes before {HOLDOUT_START} is "
+    f"{last_signal_date}.\n"
+    f"Evaluation panel: {n_symbols} ETFs over {n_dates:,} dates, "
+    f"{eval_panel[DATE_COL].min()} to {eval_panel[DATE_COL].max()}, "
+    f"{len(all_feature_cols)} candidate features.\n"
+    f"A date enters the series once {MIN_CROSS_SECTION} ETFs carry both the feature and the label."
 )
-print(f"Label: {label_col}")
 
 # %% [markdown]
-# ## Data Quality Gate
+# ## B. Is the artifact sound, and is each column usable?
 #
-# Verify upstream artifacts are free of critical defects (negative prices,
-# infinities, extreme returns) before any statistical evaluation.
+# Two different questions, and they read different rows.
 #
-# **This gate and the per-feature screens below read different rows on purpose.**
-# The screens are a selection decision and run on the frame where every candidate
-# exists. This gate asks whether the artifact is sound, and Ch11 trains on every
-# fold's training window back to the start of the panel, so a broken value outside
-# the validation windows reaches the model whether or not this notebook screened it.
-# It reads the whole pre-holdout span, and the temporal artifact as `04` wrote it,
-# one row per key and fold. It stops at the seal because its counts are printed and
-# its `fail_on_critical` decides whether this notebook runs at all.
+# The first is about the artifacts as `03` and `04` wrote them: does either contain a
+# value no amount of screening can make usable - an infinity, a negative price, a monthly
+# return so large it can only be a price-adjustment failure? The model notebooks train on
+# every fold's training range, back to the start of the panel, so a broken value outside
+# the validation ranges reaches them whether or not it is screened here. This check
+# therefore reads the whole span up to the seal, and the model-based matrix as it was
+# written, one row per date, ETF and fold. It stops at the seal like everything else, and
+# it raises rather than warns, because a broken input makes the rest of the notebook
+# meaningless.
 
 # %%
-from utils.data_quality import validate_modeling_inputs
-
 sealed_features = features.filter(pl.col(DATE_COL) <= last_signal_date)
-sealed_temporal = temporal_artifact.filter(pl.col(DATE_COL) <= last_signal_date)
+sealed_model_based = model_based_artifact.filter(pl.col(DATE_COL) <= last_signal_date)
 sealed_labels = label_df.filter(pl.col(DATE_COL) <= last_signal_date)
 
 validate_modeling_inputs(
@@ -285,9 +400,9 @@ validate_modeling_inputs(
     fail_on_critical=True,
 )
 validate_modeling_inputs(
-    features_df=sealed_temporal,
+    features_df=sealed_model_based,
     label_df=sealed_labels,
-    feature_cols=temporal_cols,
+    feature_cols=model_based_cols,
     label_col=label_col,
     join_cols=JOIN_COLS,
     asset_col="symbol",
@@ -296,14 +411,43 @@ validate_modeling_inputs(
 )
 
 # %% [markdown]
-# ## 1. Correctness Screens
+# The second question is per column. Before it can be asked, one group has to be separated
+# out: some columns describe the market as a whole rather than one ETF against another -
+# the yield-curve level, the filtered reference series, the regime probabilities. They take
+# the same value for every ETF on a date, so ranking the cross-section by them produces no
+# ordering at all and their cross-sectional rank correlation is undefined rather than zero.
+# Nothing in the screen below can decide anything about them, and they are separated here
+# rather than judged against a statistic they cannot have.
+
+# %%
+cs_std_df = eval_panel.group_by(DATE_COL).agg([pl.col(f).std().alias(f) for f in all_feature_cols])
+date_level_features = {
+    feat
+    for feat in all_feature_cols
+    if (mean_std := cs_std_df[feat].drop_nulls().mean()) is not None and mean_std < 1e-10
+}
+cross_sectional_features = [f for f in all_feature_cols if f not in date_level_features]
+print(
+    f"{len(date_level_features)} columns take one value across the whole cross-section on "
+    f"each date:\n  {', '.join(sorted(date_level_features))}\n"
+    f"{len(cross_sectional_features)} columns vary across ETFs and go on to the screen."
+)
+
+# %% [markdown]
+# For the rest, the question is whether the column can be screened at all on the panel
+# above:
 #
-# Before evaluating predictive power, we check data quality:
-# - **Coverage**: fraction of non-null values, against `MIN_COVERAGE`
-# - **Staleness**: fraction of unchanged values from the prior date, against
-#   `MAX_STALENESS`
+# - **Coverage** is the share of rows where the feature has a value. A column present on
+#   less than `MIN_COVERAGE` of the panel is being ranked on a different, smaller
+#   cross-section than the one the strategy would trade.
+# - **Staleness** is the share of rows that repeat the same ETF's previous value. Above
+#   `MAX_STALENESS` the column changes so rarely that a daily rank correlation is mostly
+#   reading the same ordering over and over.
 #
-# Features that fail either gate are marked STOP in the triage.
+# A column failing either gate is recorded STOP in the ledger and takes no further part.
+# Both quantities are computed for the market-wide columns too, so the ledger carries them,
+# but they decide nothing there: a column that cannot be ranked across ETFs is not made
+# usable by changing more often.
 
 # %%
 coverage = {}
@@ -313,7 +457,6 @@ for feat in all_feature_cols:
     col = eval_panel[feat]
     coverage[feat] = col.drop_nulls().len() / n_rows
 
-    # Staleness: fraction unchanged from prior row within same symbol
     unchanged = (
         eval_panel.sort(JOIN_COLS)
         .select((pl.col(feat) == pl.col(feat).shift(1).over("symbol")).alias("same"))["same"]
@@ -325,137 +468,156 @@ correctness = {
     feat: coverage[feat] >= MIN_COVERAGE and staleness[feat] <= MAX_STALENESS
     for feat in all_feature_cols
 }
-n_pass = sum(correctness.values())
-n_fail = len(correctness) - n_pass
-print(f"Correctness gate: {n_pass} PASS, {n_fail} FAIL")
+failed = [f for f in cross_sectional_features if not correctness[f]]
+n_gate_pass = len(cross_sectional_features) - len(failed)
+print(
+    f"Coverage and staleness: {n_gate_pass} of {len(cross_sectional_features)} "
+    f"cross-sectional columns pass, {len(failed)} recorded STOP"
+)
 
-if n_fail > 0:
-    fail_df = pl.DataFrame(
-        {
-            "feature": [f for f, ok in correctness.items() if not ok],
-            "coverage": [round(coverage[f], 3) for f, ok in correctness.items() if not ok],
-            "staleness": [round(staleness[f], 3) for f, ok in correctness.items() if not ok],
-        }
+if failed:
+    display(
+        pl.DataFrame(
+            {
+                "feature": failed,
+                "family": [families[f] for f in failed],
+                "coverage": [round(coverage[f], 3) for f in failed],
+                "staleness": [round(staleness[f], 3) for f in failed],
+            }
+        )
     )
-    print(fail_df)
 
 # %% [markdown]
-# ### Effective Sample Size
+# ### How much independent evidence the panel really holds
 #
-# With daily observations and 21-day forward return labels, consecutive labels
-# overlap by 20 days. This autocorrelation reduces the effective number of
-# independent observations:
+# The panel has one row per ETF per date, and neither of its two dimensions contributes a
+# row's worth of evidence.
 #
-# $$N_{\text{eff}} \approx \frac{N_{\text{dates}}}{h} \times N_{\text{symbols}}$$
+# Across ETFs, the observation the test is built on is not a row. Section C scores the
+# whole cross-section at one date into a single number, the information coefficient for
+# that date, and it is that series the average and its standard error are computed on. The
+# ETFs also move together, so forty rows on one date are nothing like forty independent
+# readings even before the statistic pools them.
 #
-# where $h = 21$ is the label horizon. HAC standard errors (below) account for
-# this, but raw row counts overstate statistical power.
+# Across dates, the readings overlap: a return measured over $h$ sessions and sampled every
+# session shares $h-1$ of them with the next one, so consecutive dates score almost the
+# same stretch of prices. Dividing the dates by the horizon counts the blocks that do not
+# overlap:
+#
+# $$N_{\text{eff}} \approx \frac{N_{\text{dates}}}{h}$$
+#
+# So the evidence is measured in tens of independent blocks, not in tens of thousands of
+# rows, and that is worth knowing before reading a p-value computed from it. This is not
+# the correction the notebook applies - that is the standard-error adjustment in the next
+# section, which handles the overlap properly. It is here so the row count printed above is
+# read for what it is, which is not a sample size.
 
 # %%
-n_eff_dates = n_dates // HAC_MAXLAGS
-n_eff = n_eff_dates * n_symbols
-print(f"Raw panel: {n_rows:,} rows ({n_dates:,} dates × {n_symbols} symbols)")
+n_eff_dates = n_dates // LABEL_HORIZON
 print(
-    f"Effective sample size: ~{n_eff:,} ({n_eff_dates:,} independent date blocks × {n_symbols} symbols)"
+    f"Panel rows: {n_rows:,} ({n_dates:,} dates x {n_symbols} ETFs)\n"
+    f"Information coefficients, one per date: {n_dates:,}\n"
+    f"Roughly independent blocks among them: ~{n_eff_dates:,} "
+    f"(the {n_dates:,} dates over a {LABEL_HORIZON}-session label), "
+    f"a factor of {n_dates / n_eff_dates:.0f} fewer."
 )
-print(f"Overlap reduction factor: {n_dates / n_eff_dates:.0f}x")
 
 # %% [markdown]
-# ## 2. Univariate Association (IC + HAC)
+# ## C. Does the feature rank the cross-section the way the return does?
 #
-# For each feature that passes correctness, we compute:
-# - **IC time series**: daily cross-sectional Spearman rank correlation with the label
-# - **HAC-adjusted t-statistics**: Newey-West standard errors with bandwidth = 21
-#   (matching the 21-day label horizon) to account for overlapping-return autocorrelation
+# On each date, the ETFs quoted that day are ranked by the feature and by the return they
+# went on to earn, and the two rankings are correlated. That is one information
+# coefficient per date. Ranks rather than levels, because what a ranking strategy acts on
+# is the order, and because a single outlying return would otherwise set the number.
 #
-# Date-level features (identical across all symbols on a given date) produce zero
-# cross-sectional IC by construction. We detect and flag these separately.
+# Averaging that series gives the feature's association with the label. Testing whether
+# the average is distinguishable from zero needs more care than a textbook t-test, because
+# the series is serially dependent by construction: neighbouring dates score overlapping
+# return windows. The Newey-West estimator widens the standard error to allow for that,
+# given a bandwidth - how many neighbouring dates to treat as dependent. Overlap of a
+# window $h$ sessions long reaches $h-1$ sessions, so the bandwidth is set to the label
+# horizon itself, which covers it. Deriving that number from the label rather than typing
+# it is what stops the correction and the label from drifting apart.
 
 # %%
 evaluable_features = [f for f in all_feature_cols if correctness[f]]
 
-# Detect date-level features (zero cross-sectional variance)
-# Compute std per date for all features at once, then check which have ~zero mean std
-cs_std_df = eval_panel.group_by(DATE_COL).agg(
-    [pl.col(f).std().alias(f) for f in evaluable_features]
-)
-date_level_features = set()
-for feat in evaluable_features:
-    mean_std = cs_std_df[feat].drop_nulls().mean()
-    if mean_std is not None and mean_std < 1e-10:
-        date_level_features.add(feat)
-
-if date_level_features:
-    print(f"Date-level features (zero CS variance): {sorted(date_level_features)}")
+# %% [markdown]
+# The series is built in one pass over the dates, computing every feature's rank
+# correlation on each date's cross-section. A feature enters a date's series only when
+# enough ETFs carry both it and the label on that date, which is what keeps a sparsely
+# covered column from contributing a correlation over a handful of pairs at the same
+# weight as one measured over the whole universe.
 
 # %%
-# Batch IC computation: one pass over dates, all features at once
-# This is much faster than calling cross_sectional_ic_series per feature
 cs_features = [f for f in evaluable_features if f not in date_level_features]
-cols_needed = [DATE_COL] + cs_features + [label_col]
-eval_sub = eval_panel.select(cols_needed).drop_nulls(subset=[label_col])
+eval_sub = eval_panel.select([DATE_COL, *cs_features, label_col]).drop_nulls(subset=[label_col])
 
-# Group by date and compute Spearman IC for all features per date
 dates_list = eval_sub[DATE_COL].unique().sort().to_list()
 n_total = len(dates_list)
-
-# Pre-allocate: dict of feature -> list of (date, ic, n_obs)
 ic_series_data = {feat: [] for feat in cs_features}
 
 for i, dt in enumerate(dates_list):
     cross_section = eval_sub.filter(pl.col(DATE_COL) == dt)
-    n_obs = len(cross_section)
-    if n_obs < MIN_PERIODS:
-        continue
-
     label_arr = cross_section[label_col].to_numpy()
     label_valid = ~np.isnan(label_arr)
 
     for feat in cs_features:
         feat_arr = cross_section[feat].to_numpy()
         valid_mask = label_valid & ~np.isnan(feat_arr)
-        n_valid = int(valid_mask.sum())
-        if n_valid >= MIN_PERIODS:
+        if int(valid_mask.sum()) >= MIN_CROSS_SECTION:
             ic_val, _ = spearmanr(feat_arr[valid_mask], label_arr[valid_mask])
             if not np.isnan(ic_val):
-                ic_series_data[feat].append((dt, float(ic_val), n_valid))
+                ic_series_data[feat].append((dt, float(ic_val), int(valid_mask.sum())))
 
     if (i + 1) % 1000 == 0:
-        print(f"  IC progress: {i + 1}/{n_total} dates")
+        print(f"  {i + 1}/{n_total} dates")
 
-print(f"  IC progress: {n_total}/{n_total} dates (done)")
+print(f"  {n_total}/{n_total} dates")
+
+# %% [markdown]
+# The series is sorted by date before the standard error is computed. The estimator reads
+# the values in the order it is given them, so a series in any other order would be
+# measuring dependence between dates that are not neighbours.
 
 # %%
-# Convert to DataFrames and compute HAC stats
+MIN_IC_DATES = 20  # dates a feature needs before its series is summarized at all
+
 ic_results = {}
 ic_timeseries = {}
 for feat in cs_features:
     data = ic_series_data[feat]
-    if len(data) < 20:
+    if len(data) < MIN_IC_DATES:
         continue
     dates_f, ics_f, nobs_f = zip(*data, strict=False)
-    ic_df = pl.DataFrame({DATE_COL: list(dates_f), "ic": list(ics_f), "n_obs": list(nobs_f)})
-    hac_stats = compute_ic_hac_stats(ic_df, ic_col="ic", maxlags=HAC_MAXLAGS)
-    ic_results[feat] = hac_stats
+    ic_df = pl.DataFrame({DATE_COL: list(dates_f), "ic": list(ics_f), "n_obs": list(nobs_f)}).sort(
+        DATE_COL
+    )
+    ic_results[feat] = compute_ic_hac_stats(ic_df, ic_col="ic", maxlags=HAC_MAXLAGS)
     ic_timeseries[feat] = ic_df
 
-print(f"IC computed for {len(ic_results)} cross-sectional features")
-print(f"Skipped {len(date_level_features)} date-level features")
+print(
+    f"An IC series was computed for {len(ic_results)} of the {len(all_feature_cols)} candidates. "
+    f"Of the rest, {len(date_level_features)} carry no cross-sectional variation, "
+    f"{len(failed)} failed the coverage or staleness gate, and "
+    f"{len(cs_features) - len(ic_results)} had fewer than {MIN_IC_DATES} usable dates."
+)
 
 # %% [markdown]
-# ### Fold-Level Stability
+# ## D. Does it hold across the walk-forward windows, or in one of them?
 #
-# Whether a feature's IC keeps the same sign across the walk-forward validation
-# windows, which is what separates a feature that works across market regimes from
-# one that had a single favorable period. The windows are the folds' own validation
-# windows, so this column and the fold ids everything else in the pipeline uses
-# denote the same periods.
+# An average taken over eight years can be produced by eight ordinary years or by one
+# extraordinary one, and the two say different things about what a reader should expect
+# next. So the series is cut into the folds' own validation ranges - the same ranges
+# everything else in this pipeline numbers the same way - and summarized within each: the
+# mean IC per fold, its median and spread across folds, the worst fold, and how much of
+# the history agrees on a direction.
 #
-# The quantity measured is agreement with the feature's *own* full-sample sign, not
-# agreement with a positive sign. A feature that is negative in every fold is as
-# stable as one that is positive in every fold, and it is the direction a long-short
-# book would take; counting positive folds instead scores a reliably negative
-# predictor at zero and makes it unpromotable by construction.
+# Agreement is measured against the feature's **own** overall sign, not against a positive
+# sign. A feature that is negative in every window is exactly as stable as one that is
+# positive in every window, and just as usable: a ranking strategy reads it upside-down
+# and is otherwise unaffected. A rule that counted positive folds would score the most
+# dependable inverse predictor in the panel at zero.
 
 # %%
 MIN_FOLD_DATES = 5  # dates a fold must contribute before its mean IC is read
@@ -488,21 +650,31 @@ for feat in ic_results:
 
 n_consistent = sum(1 for s in fold_stats.values() if s["sign_consistency"] >= MIN_SIGN_CONSISTENCY)
 print(
-    f"Fold stability computed for {len(fold_stats)} features; {n_consistent} agree with their "
-    f"own sign in >= {MIN_SIGN_CONSISTENCY:.0%} of folds"
+    f"Fold statistics for {len(fold_stats)} features. {n_consistent} of them keep their own "
+    f"overall sign in at least {MIN_SIGN_CONSISTENCY:.0%} of the folds."
 )
 
 # %% [markdown]
-# ## 3. Multiple Testing (BH-FDR)
+# ## E. What the search costs
 #
-# Testing this many features simultaneously at `FDR_ALPHA` expects several false
-# positives by construction, and how many depends on the size of the searched set -
-# every feature that cleared the correctness gate and produced an IC series, whose
-# count is printed below. Without it no p-value here is interpretable. The
-# Benjamini-Hochberg procedure controls the false discovery rate over that set, and
-# the **inflation factor** measures how much naive significance overstates it:
+# Every feature above was tested against the same label at the same level, so some of them
+# clear the bar by chance alone: at a five percent level, one test in twenty does. How
+# many depends on how many tests were run, which is why a p-value here cannot be read
+# without the size of the search that produced it. **The searched set is every feature
+# that cleared the correctness gate and produced an IC series**, and its size is printed
+# below beside the results.
 #
-# $$\text{Inflation} = \frac{N_{\text{naive significant}}}{N_{\text{FDR significant}}}$$
+# The Benjamini-Hochberg procedure adjusts for that. Rather than holding down the chance of
+# any false promotion at all, it holds down the false share *on average*: run this
+# procedure over many such searches and the share of promotions that are false averages no
+# more than the level set below. That is the right question when the point is to choose a
+# set of features rather than to defend a single claim, and it is a weaker guarantee than
+# it first sounds - it says nothing about the particular set promoted here, which can carry
+# a higher false share than the level or none at all.
+#
+# Three counts follow, and the gaps between them are the two prices being paid. Naive
+# significance ignores the overlap in the labels. The lag-aware count pays for the
+# overlap. The false-discovery count pays for the number of tests on top of that.
 
 # %%
 feature_names = list(ic_results.keys())
@@ -513,7 +685,7 @@ fdr_result = benjamini_hochberg_fdr(p_values, alpha=FDR_ALPHA, return_details=Tr
 eval_summary = pl.DataFrame(
     {
         "feature": feature_names,
-        "source": ["temporal" if f in temporal_cols else "financial" for f in feature_names],
+        "source": [source_of[f] for f in feature_names],
         "ic_mean": [ic_results[f]["mean_ic"] for f in feature_names],
         "hac_se": [ic_results[f]["hac_se"] for f in feature_names],
         "hac_t": [ic_results[f]["t_stat"] for f in feature_names],
@@ -524,41 +696,39 @@ eval_summary = pl.DataFrame(
     }
 ).sort(pl.col("ic_mean").cast(pl.Float64, strict=False).abs(), descending=True)
 
-# `p_values` holds the HAC p-value, so the naive tier has to come from the naive
-# t-statistic. Reading `p_values` here made "naive" a second name for the HAC test
-# and forced the HAC inflation ratio to 1.00x whatever the data did.
 n_significant_naive = sum(1 for f in feature_names if abs(ic_results[f]["naive_t_stat"]) > NAIVE_T)
 n_significant_hac = sum(1 for f in feature_names if abs(ic_results[f]["t_stat"]) > NAIVE_T)
 n_significant_fdr = int(fdr_result["n_rejected"])
 
 
-def inflation(numerator: int, denominator: int) -> str:
-    """The ratio, or the reason there isn't one.
-
-    Substituting 1 for a zero denominator turns "the corrected test rejected
-    nothing" into a finite ratio that reads as a measurement. The two are
-    different statements and the reader gets the one that is true.
-    """
-    if denominator == 0:
-        return "undefined (the corrected test rejects nothing)"
-    return f"{numerator / denominator:.2f}x"
+def survivor_share(remaining: int, started: int) -> str:
+    """How much of the naive count a correction leaves, or that it leaves none."""
+    if remaining == 0:
+        return "nothing left"
+    return f"{remaining / started:.0%} of the naive count"
 
 
-print(f"Features tested: {len(feature_names)}")
-print(f"Naive significant (|t| > {NAIVE_T}): {n_significant_naive}")
-print(f"HAC significant (|t| > {NAIVE_T}):   {n_significant_hac}")
-print(f"FDR significant (q < {FDR_ALPHA}):    {n_significant_fdr}")
-print(f"Inflation factor (HAC): {inflation(n_significant_naive, n_significant_hac)}")
-print(f"Inflation factor (FDR): {inflation(n_significant_naive, n_significant_fdr)}")
+print(
+    f"Searched set: {len(feature_names)} features, each tested once against {label_col}.\n"
+    f"  |t| > {NAIVE_T} treating dates as independent: {n_significant_naive}\n"
+    f"  |t| > {NAIVE_T} with the overlap-aware standard error: {n_significant_hac} "
+    f"({survivor_share(n_significant_hac, n_significant_naive)})\n"
+    f"  Benjamini-Hochberg at q < {FDR_ALPHA}: {n_significant_fdr} "
+    f"({survivor_share(n_significant_fdr, n_significant_naive)})"
+)
 
 # %% [markdown]
-# ### The IC series itself
+# ### The series behind the average
 #
-# Every statistic above is a scalar summary of one object: the per-date IC series.
-# Two failure modes are visible only in the series - an IC that comes from a single
-# episode and is flat around it, and an IC that changes sign between folds - so it is
-# drawn before it is reduced. The band is the HAC interval around the full-sample
-# mean, which allows for the serial dependence the overlapping label induces.
+# Every statistic so far is one number standing for a series, and two things that decide
+# whether a feature is worth anything are invisible once it has been averaged: an
+# association that comes from a single episode and is absent around it, and one that
+# changes direction partway through. So the series is drawn for the three features with
+# the largest average association, before it is reduced any further. The heavy line is a
+# six-month moving average, and the dotted pair marks the overlap-aware interval around the
+# full-sample mean. That interval is narrow enough on this axis to be worth stating: the
+# swing of the daily series is an order of magnitude wider than any uncertainty about where
+# its average sits.
 
 # %%
 LEADING_FOR_SERIES = 3
@@ -569,8 +739,8 @@ fig = make_subplots(
     rows=len(series_features), cols=1, shared_xaxes=True, subplot_titles=series_features
 )
 for row, feat in enumerate(series_features, start=1):
-    series = ic_timeseries[feat].sort(DATE_COL)
-    bands = compute_ic_uncertainty(series, horizon=HAC_MAXLAGS, ic_col="ic")
+    series = ic_timeseries[feat]
+    bands = compute_ic_uncertainty(series, horizon=LABEL_HORIZON, ic_col="ic")
     dates = series[DATE_COL].to_list()
     fig.add_trace(
         go.Scatter(
@@ -607,19 +777,22 @@ fig.update_layout(
     width=900,
     title_text="The daily IC swings far wider than the mean it averages to",
 )
+fig.update_yaxes(title_text="Rank IC")
 fig.show()
 
 # %% [markdown]
-# ### Feature ranking, with the inference adjustment visible
+# ### Every feature, ranked by how strongly it ranks
+#
+# The features with the largest average association, with the overlap-aware t-statistic
+# printed against each bar so the size of the association and the confidence in it are
+# read together. Blue marks a feature that clears false-discovery control; grey is
+# everything else, and that is the one colour convention every figure in this section
+# uses.
 
 # %%
 top_n = min(25, len(eval_summary))
 top = eval_summary.head(top_n).sort("ic_mean")
 
-# One colour convention across every figure in this section: the feature survives
-# BH-FDR, or it does not. The earlier version coloured the same category green
-# against grey in one panel and green against red in the next, so a reader mapping
-# colour to meaning got two answers inside one figure.
 SURVIVES, DOES_NOT = COLORS["blue"], GRAY_FILLS["muted"]
 
 fig = go.Figure(
@@ -640,8 +813,8 @@ fig.update_layout(
     template="ml4t",
     height=620,
     width=900,
-    title_text="Nothing here survives false-discovery control",
-    xaxis_title="Mean cross-sectional IC (Spearman)",
+    title_text="Volatility ranks the cross-section upward and recent strength downward",
+    xaxis_title="Mean cross-sectional rank IC, with the overlap-aware t-statistic",
     xaxis_range=[-ic_span, ic_span],
     yaxis_title="Feature",
     margin=dict(l=170),
@@ -649,13 +822,12 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# ### Fold-level stability
+# ### The same association, fold by fold
 #
-# A pooled mean IC hides the difference between a feature that works in every fold
-# and one that had a single good year. Each feature's per-fold means are drawn with
-# its median marked, for the same leading features the ranking shows. The dots and
-# the diamond come from `per_fold_mean_ics`, the function the screen itself reads, so
-# the median cannot be drawn over a set of folds the chart does not show.
+# Each row is one feature and each dot is its average IC inside one fold's validation
+# range. The amber diamond is the median of those folds. A feature whose dots sit on one
+# side of zero behaved the same way in every period; one whose dots straddle zero did not,
+# whatever its overall average says.
 
 # %%
 FOLDS_SHOWN = 12
@@ -663,13 +835,16 @@ fold_features = [f for f in eval_summary["feature"].to_list() if f in fold_stats
 fig = go.Figure()
 for feat in fold_features:
     per_fold = per_fold_mean_ics(feat)
+    first = feat == fold_features[0]
     fig.add_trace(
         go.Scatter(
             x=per_fold,
             y=[feat] * len(per_fold),
             mode="markers",
             marker=dict(color=GRAY_FILLS["muted"], size=7),
-            showlegend=False,
+            name="one fold",
+            legendgroup="fold",
+            showlegend=first,
         )
     )
     fig.add_trace(
@@ -678,7 +853,9 @@ for feat in fold_features:
             y=[feat],
             mode="markers",
             marker=dict(color=COLORS["amber"], size=11, symbol="diamond"),
-            showlegend=False,
+            name="median fold",
+            legendgroup="median",
+            showlegend=first,
         )
     )
 fig.add_vline(x=0, line=dict(color=GRAY_FILLS["border"], width=1))
@@ -687,13 +864,19 @@ fig.update_layout(
     height=520,
     width=900,
     title_text="Every leading feature changes sign in at least one fold",
-    xaxis_title="Mean IC within fold (amber diamond marks the median fold)",
+    xaxis_title="Mean rank IC within the fold's validation range",
+    yaxis_title="Feature",
+    legend=dict(orientation="h", y=-0.12),
     margin=dict(l=170),
 )
 fig.show()
 
 # %% [markdown]
-# ### Naive against HAC inference
+# ### What the overlap correction costs
+#
+# The same t-statistic computed twice: once treating each date as independent evidence,
+# once allowing for the overlap between neighbouring labels. A point on the dashed
+# diagonal would mean the overlap cost nothing.
 
 # %%
 fig = go.Figure(
@@ -736,36 +919,35 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# **Interpretation**: points inside the 45-degree line have naive t-statistics that
-# the HAC correction pulls toward zero, because the overlapping label induces the
-# autocorrelation a raw test ignores. BH-FDR then penalizes the number of
-# simultaneous tests on top of that. The markers drawn in blue are the ones that
-# survive both corrections.
+# Every point sits inside the diagonal, and the ones furthest along it lose the most: a
+# t-statistic of ten computed as if each date were fresh evidence is worth about three
+# once the overlap is allowed for. The number of simultaneous tests is charged on top of
+# that, which is what leaves the false-discovery count where it is.
 
 # %% [markdown]
-# ## 4. Shape Diagnostics
+# ## F. Is the relationship shaped like something a model can use?
 #
-# Does the label spread monotonically across feature quintiles? A monotone profile
-# is what a linear model can carry in a single coefficient; a U-shaped one says the
-# same information is there but not in a form a linear coefficient can hold.
+# A rank correlation says the ordering carries information. It does not say the
+# information is spread evenly across the ordering, and that matters for what a model can
+# do with it. So on each date the ETFs are sorted by the feature and split into five equal
+# buckets, and the return of each bucket is averaged - first within the date, then across
+# dates, so that every date counts the same and a busy year does not outvote a quiet one.
 #
-# **The quantiles are formed within each date and each date is weighted equally.**
-# The IC beside them is a within-date rank statistic, so a profile built by pooling
-# every row and cutting once would be a different object: it would sort a 2016
-# observation against a 2023 one and let the time-series variation of the feature
-# stand in for the cross-sectional variation the IC measures. A feature with a
-# negative IC would then be free to show a rising profile with nothing in the
-# notebook to reconcile the two.
+# The buckets are cut **within each date**. Cutting once over the pooled panel would sort a
+# 2016 observation against a 2023 one, so the feature's drift through time would decide
+# which bucket a row lands in, and the profile would be answering a different question
+# from the rank correlation printed beside it.
 #
-# The mean and the median profile are drawn together. The mean is what a long-short
-# book earns; the median describes the typical symbol, and a rank statistic like the
-# IC agrees with the median. Where they disagree the gap is the return tail, not the
-# shape.
+# Both the mean and the median of each bucket are drawn. The mean is what a book holding
+# that bucket would earn; the median describes the typical ETF in it. Where the two are far
+# apart, a few large moves are carrying the bucket.
+
+# %% [markdown]
+# The panels show the features that clear false-discovery control first, then the largest
+# remaining associations, so the diagnostic still shows something when few features clear
+# it.
 
 # %%
-# Show the FDR-significant features first, then fill up to the panel count with the
-# next-highest |IC| features, so the diagnostic stays informative when few features
-# clear FDR.
 fdr_shape = eval_summary.filter(pl.col("fdr_sig").fill_null(False))["feature"].to_list()
 ranked_shape = eval_summary["feature"].to_list()
 top_features_for_shape = (fdr_shape + [f for f in ranked_shape if f not in fdr_shape])[:6]
@@ -777,45 +959,27 @@ monotonicity_scores = {}
 quantile_spreads = {}
 
 for feat in top_features_for_shape:
-    valid = eval_panel.select([DATE_COL, feat, label_col]).drop_nulls()
-    # A date needs at least one symbol per bucket before it can be cut into them.
-    valid = valid.filter(pl.len().over(DATE_COL) >= N_QUANTILES)
-    if valid[DATE_COL].n_unique() < MIN_SHAPE_DATES:
+    profile = quantile_profile(
+        eval_panel,
+        feat,
+        label_col,
+        date_col=DATE_COL,
+        n_quantiles=N_QUANTILES,
+        min_cross_section=MIN_CROSS_SECTION,
+    )
+    if profile is None or profile.periods_used < MIN_SHAPE_DATES:
         continue
-
-    binned = valid.with_columns(
-        pl.col(feat)
-        .qcut(N_QUANTILES, labels=QUANTILE_LABELS, allow_duplicates=True)
-        .over(DATE_COL)
-        .alias("quantile")
-    )
-    # Per date first, then across dates: every date carries the same weight, which is
-    # how the IC series beside this is built and how a rebalance experiences it.
-    per_date = binned.group_by([DATE_COL, "quantile"]).agg(
-        pl.col(label_col).mean().alias("date_mean"),
-        pl.col(label_col).median().alias("date_median"),
-    )
-    profile = (
-        per_date.group_by("quantile")
-        .agg(
-            pl.col("date_mean").mean().alias("mean"),
-            pl.col("date_median").mean().alias("median"),
-        )
-        .sort("quantile")
-    )
-    means = profile["mean"].to_list()
     quantile_spreads[feat] = {
-        "q_means": means,
-        "q_medians": profile["median"].to_list(),
-        "spread": means[-1] - means[0],
+        "q_means": profile.means,
+        "q_medians": profile.medians,
+        "spread": profile.spread,
     }
+    # The ledger's monotonicity column is the rank correlation between the bucket index
+    # and the bucket's mean return: +1 for a profile that rises all the way across, -1
+    # for one that falls all the way, and near zero for one that turns in the middle.
+    monotonicity_scores[feat] = profile.monotonicity
 
-    # monotonicity in the ledger is the Spearman rank correlation between quantile
-    # index and mean return, which is the convention the other case studies share.
-    mono_corr, _ = spearmanr(range(len(means)), means)
-    monotonicity_scores[feat] = float(mono_corr)
-
-print(f"Shape analysis for {len(quantile_spreads)} features")
+print(f"Bucket profiles built for {len(quantile_spreads)} features.")
 
 # %%
 if quantile_spreads:
@@ -850,11 +1014,8 @@ if quantile_spreads:
             row=r + 1,
             col=c + 1,
         )
-    # One y range across the panels: the point of six panels side by side is that
-    # their heights are comparable, which independent auto-scaling destroys. The
-    # range is taken from the values and includes zero, rather than being made
-    # symmetric, so a panel of same-signed buckets does not spend half its height
-    # on empty space.
+    # One y range across the panels, so their heights are comparable. It includes zero
+    # and is otherwise taken from the values.
     profile_values = [
         value
         for feat in feats_to_show
@@ -868,72 +1029,42 @@ if quantile_spreads:
         template="ml4t",
         height=260 * n_rows_fig + 60,
         width=900,
-        title_text="Every panel rises from Q1 to Q5, and in the volatility panels the step out of Q1 is most of it",
+        title_text="The lowest-returning bucket is the bottom-ranked one in every panel",
         legend=dict(orientation="h", y=-0.08),
     )
+    fig.update_yaxes(title_text="Mean forward return", col=1)
     fig.show()
 
 # %% [markdown]
-# **Interpretation**: a monotone profile — Q1 to Q5 consistently rising or falling —
-# is the shape a Ridge or Lasso fit in Ch11 can carry in a single coefficient.
-# Where a panel instead turns at one end, the same information is present but a
-# linear coefficient has to average the turn away, and a tree in Ch12 can split on
-# it. The median markers separate shape from return tail: where a median sits far
-# from its bar, that bucket's mean is carried by a few large moves rather than by the
-# typical symbol.
+# A profile that rises or falls all the way across is the shape a linear coefficient can
+# carry on its own, which is what the ridge and elastic-net fits in `06_linear` are
+# limited to. Where a panel turns at one end instead, the information is there but a
+# single coefficient has to average the turn away, and the tree ensembles in `07_gbm` can
+# split on it rather than fit through it. Where a median marker sits far from the top of
+# its bar, that bucket's average is carried by a few large moves rather than by the ETF in
+# the middle of it.
 
 # %% [markdown]
-# ## 5. Redundancy & Feature Families
+# ## G. Which of these are the same evidence twice?
 #
-# We group features into interpretive families and compute family-level IC
-# aggregates. Feature pairs correlated above `REDUNDANCY_CUT` flag redundancy
-# that downstream modeling should address via clustering or selection.
-
-
-# %%
-def assign_feature_family(feature_name: str) -> str:
-    """Map feature name to family based on prefix."""
-    FAMILY_MAP = [
-        (["sharpe_", "risk_adj"], "risk_adj_momentum"),
-        (["skip_recent", "mom_"], "momentum"),
-        (["ret_"], "momentum"),
-        (["vol_ratio"], "vol_ratio"),
-        (["vol_"], "volatility"),
-        (["natr", "range_", "max_dd"], "volatility"),
-        (["rsi", "macd", "adx", "cci", "stoch", "aroon", "bb_"], "technical"),
-        (["sma_", "ema_"], "trend"),
-        (["yield_curve", "spy_tlt", "regime", "chop", "hurst"], "regime"),
-        (["rank_"], "cross_sectional"),
-        (["obv", "turnover", "volume"], "volume"),
-        (["pct_positive", "up_ratio"], "consistency"),
-        (["dist_"], "distance"),
-        (["corr_"], "correlation"),
-    ]
-    for prefixes, family in FAMILY_MAP:
-        if any(p in feature_name.lower() for p in prefixes):
-            return family
-    return "other"
-
-
-families = {feat: assign_feature_family(feat) for feat in all_feature_cols}
-
-# Override temporal features with specific families
-for feat in temporal_cols:
-    if "regime" in feat.lower():
-        families[feat] = "temporal_regime"
-    elif "ffd" in feat.lower():
-        families[feat] = "temporal_ffd"
-    else:
-        families[feat] = "temporal_other"
+# Nothing above stops two features from measuring the same thing. Volatility at 63 and at
+# 126 sessions is one measurement at two speeds; an oscillator and the ratio of price to
+# its own moving average are two arrangements of the same recent path. Counting them
+# separately makes a family's breadth look like independent corroboration, and it is not.
+#
+# So the ranks of every screened pair are correlated across a sample of the panel's dates,
+# and the pairs above `REDUNDANCY_CUT` are counted and ranked. The sample keeps the
+# comparison cheap; correlations this strong do not depend on the last decimal place.
 
 # %%
-# Pairwise correlation on sampled dates
 sample_step = max(1, n_dates // 200)
 sample_dates = eval_panel[DATE_COL].unique().sort().to_list()[::sample_step]
-corr_data = (
-    eval_panel.filter(pl.col(DATE_COL).is_in(sample_dates)).select(evaluable_features).to_pandas()
+corr_matrix = (
+    eval_panel.filter(pl.col(DATE_COL).is_in(sample_dates))
+    .select(evaluable_features)
+    .to_pandas()
+    .corr(method="spearman")
 )
-corr_matrix = corr_data.corr(method="spearman")
 
 high_corr_pairs = []
 cols = corr_matrix.columns
@@ -942,57 +1073,80 @@ for i in range(len(cols)):
         if abs(corr_matrix.iloc[i, j]) > REDUNDANCY_CUT:
             high_corr_pairs.append((cols[i], cols[j], float(corr_matrix.iloc[i, j])))
 
-print(f"Feature pairs with |corr| > {REDUNDANCY_CUT}: {len(high_corr_pairs)}")
-
-# %%
-# Family-level IC summary
-family_ic = {}
-fdr_sig_set = set(eval_summary.filter(pl.col("fdr_sig").fill_null(False))["feature"].to_list())
-
-for feat in ic_results:
-    fam = families.get(feat, "other")
-    family_ic.setdefault(fam, []).append(
-        {
-            "feature": feat,
-            "ic": ic_results[feat]["mean_ic"],
-            "fdr_sig": feat in fdr_sig_set,
-        }
-    )
-
-family_summary = {}
-for fam, feats in sorted(family_ic.items()):
-    ics = [f["ic"] for f in feats if f["ic"] is not None]
-    n_sig = sum(1 for f in feats if f["fdr_sig"])
-    family_summary[fam] = {
-        "n_features": len(feats),
-        "avg_abs_ic": float(np.mean([abs(ic) for ic in ics])) if ics else 0.0,
-        "avg_ic": float(np.mean(ics)) if ics else 0.0,
-        "n_fdr_sig": n_sig,
-    }
-
-if family_summary:
-    fam_df = pl.DataFrame([{"family": fam, **stats} for fam, stats in family_summary.items()]).sort(
-        "avg_abs_ic", descending=True
-    )
-else:
-    fam_df = pl.DataFrame(
-        schema={
-            "family": pl.Utf8,
-            "n_features": pl.Int64,
-            "avg_abs_ic": pl.Float64,
-            "avg_ic": pl.Float64,
-            "n_fdr_sig": pl.Int64,
-        }
-    )
-print(fam_df)
+print(
+    f"{len(high_corr_pairs)} of the "
+    f"{len(evaluable_features) * (len(evaluable_features) - 1) // 2:,} feature pairs agree "
+    f"above |rho| = {REDUNDANCY_CUT}, sampled every {sample_step} dates."
+)
 
 # %% [markdown]
-# ### Redundancy, as ranked pairs
+# ### Where the association sits, by family
 #
-# A full correlation matrix over this many features has unreadable tick labels and
-# is mostly empty space. What the reader has to decide is which pairs are the same
-# evidence counted twice, so the strongest pairs are ranked instead, and the count
-# above `REDUNDANCY_CUT` is printed rather than written into the title.
+# The register's families are the groups a reader would think in, so the association is
+# summarized over them: how large it is on average within the family, and whether the
+# family points one way or cancels out inside itself. A family whose features disagree in
+# direction is not a family carrying a signal, it is a label over several different ones.
+
+# %%
+fdr_sig_set = set(eval_summary.filter(pl.col("fdr_sig").fill_null(False))["feature"].to_list())
+
+family_summary = (
+    pl.DataFrame(
+        {
+            "family": [families[f] for f in ic_results],
+            "ic": [ic_results[f]["mean_ic"] for f in ic_results],
+            "fdr_sig": [f in fdr_sig_set for f in ic_results],
+        }
+    )
+    .group_by("family")
+    .agg(
+        pl.len().alias("n_features"),
+        pl.col("ic").abs().mean().alias("avg_abs_ic"),
+        pl.col("ic").mean().alias("avg_ic"),
+        pl.col("fdr_sig").sum().alias("n_fdr_sig"),
+    )
+    .sort("avg_abs_ic", descending=True)
+)
+
+fig = go.Figure()
+fig.add_trace(
+    go.Bar(
+        x=family_summary["avg_abs_ic"].to_list()[::-1],
+        y=family_summary["family"].to_list()[::-1],
+        orientation="h",
+        marker_color=GRAY_FILLS["muted"],
+        name="average |IC| in the family",
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=family_summary["avg_ic"].to_list()[::-1],
+        y=family_summary["family"].to_list()[::-1],
+        mode="markers",
+        marker=dict(color=COLORS["amber"], size=11, symbol="diamond"),
+        name="average IC, signs kept",
+    )
+)
+fig.add_vline(x=0, line=dict(color=GRAY_FILLS["border"], width=1))
+fig.update_layout(
+    template="ml4t",
+    height=460,
+    width=900,
+    title_text="Only some families point one way; the rest cancel out inside themselves",
+    xaxis_title="Mean cross-sectional rank IC across the family's features",
+    yaxis_title="Feature family",
+    legend=dict(orientation="h", y=-0.18),
+    margin=dict(l=200),
+)
+fig.show()
+
+# %% [markdown]
+# ### The pairs that are one measurement
+#
+# A full correlation matrix over this many features has unreadable tick labels and is
+# mostly empty space, and the reader's question is narrower than a matrix answers: which
+# specific pairs are one measurement entered twice. So the strongest pairs are ranked
+# instead.
 
 # %%
 TOP_PAIRS = 15
@@ -1023,46 +1177,50 @@ if ranked_pairs:
     fig.show()
 
 # %% [markdown]
-# **Interpretation**: the leading pairs are multi-horizon members of one family -
-# realized volatility at several windows, returns at several windows, the
-# fractionally differenced series of ETFs that track overlapping markets. Each pair
-# is one piece of evidence entered twice, and a ranking that counts them separately
-# reports a family's breadth as if it were independent corroboration. Ch11 addresses
-# this by clustering or selecting within families, or by using tree-based models,
-# which handle correlated inputs without inflating a coefficient.
+# The leading pairs are the same measurement at two window lengths, two arrangements of
+# the same recent price path, or two filtered series of ETFs that track overlapping
+# markets. Nothing downstream has to drop one of each pair: the ridge and elastic-net
+# penalties in `06_linear` shrink correlated coefficients together rather than letting one
+# of them absorb the pair, and the tree ensembles in `07_gbm` split on whichever member
+# happens to be available. What the pair count does change is how this section's own
+# results are read, because a family with eight members above the cut is not eight
+# independent pieces of evidence.
 
 # %% [markdown]
-# ## 6. Triage & Handoff
+# ## H. The decision each feature gets
 #
-# Each feature receives a triage decision:
+# | Decision | When | Arm |
+# |----------|------|-----|
+# | **PROCEED** | clears Benjamini-Hochberg at `FDR_ALPHA` | confirmation |
+# | **PROCEED** | keeps its own sign in at least `MIN_SIGN_CONSISTENCY` of the folds, and its average IC is at least `IC_THRESHOLD` in size | exploration |
+# | **STOP** | failed the coverage or staleness gate | - |
+# | **REVISE** | everything else | - |
 #
-# | Decision | Criteria | Arm |
-# |----------|----------|-----|
-# | **PROCEED** | BH-FDR significant at `FDR_ALPHA` | confirmation |
-# | **PROCEED** | sign consistency at least `MIN_SIGN_CONSISTENCY` and abs(IC) at least `IC_THRESHOLD` | exploration |
-# | **STOP** | correctness FAIL: coverage below `MIN_COVERAGE` or staleness above `MAX_STALENESS` | - |
-# | **REVISE** | everything else, to be judged in the multivariate context of Ch11 | - |
+# The two promotion rules are an **or**, not an **and**, so the promoted set can be larger
+# than the set that clears false-discovery control, and the ledger's `note` column records
+# which of the two promoted each feature. Reading the count without that column would
+# credit the exploration arm's promotions to the confirmation arm.
 #
-# The rule is a **disjunction**, so PROCEED can exceed the count of FDR-significant
-# features, and the `note` column records which arm fired. The second arm is an
-# exploration filter in the sense of Section 7.4, not a significance test: it exists
-# so false-discovery control does not empty the menu, and a feature promoted through
-# it has not been confirmed. `IC_THRESHOLD` is a stated judgement about what a
-# monthly rebalance would need to clear its costs, not a quantity derived from the
-# data.
+# The second arm exists because false-discovery control over a search this wide can leave
+# nothing at all, and a screen that returns an empty menu has told the reader nothing about
+# which features to look at first. It is an exploration filter in the sense of Section 7.4
+# rather than a test: `IC_THRESHOLD` is a stated judgement about the smallest association
+# worth carrying into a monthly rebalance, not a quantity derived from the data, and a
+# feature promoted through it has not been confirmed by anything.
 #
-# Date-level features are triaged as REVISE with a note, since their value
-# lies in regime-conditional interactions rather than standalone cross-sectional IC.
+# The columns that take one value across the whole cross-section are recorded REVISE. They
+# cannot have a cross-sectional IC, so there is nothing here to decide them on, and they
+# stay in the feature matrix the model notebooks train on.
 
 # %%
 triage = {}
 for feat in all_feature_cols:
-    if not correctness[feat]:
-        triage[feat] = ("STOP", "correctness_fail")
-        continue
-
     if feat in date_level_features:
         triage[feat] = ("REVISE", "date_level_feature")
+        continue
+
+    if not correctness[feat]:
+        triage[feat] = ("STOP", "correctness_fail")
         continue
 
     if feat not in ic_results:
@@ -1081,14 +1239,13 @@ for feat in all_feature_cols:
         triage[feat] = ("REVISE", "not_significant_standalone")
 
 # %%
-# Build triage ledger
 ledger_rows = []
 for feat in all_feature_cols:
     decision, note = triage[feat]
     row = {
         "feature": feat,
-        "family": families.get(feat, "other"),
-        "source": "temporal" if feat in temporal_cols else "financial",
+        "family": families[feat],
+        "source": source_of[feat],
         "ic_mean": ic_results.get(feat, {}).get("mean_ic"),
         "hac_t": ic_results.get(feat, {}).get("t_stat"),
         "hac_p": ic_results.get(feat, {}).get("p_value"),
@@ -1110,90 +1267,116 @@ for feat in all_feature_cols:
 
 triage_ledger = pl.DataFrame(ledger_rows)
 triage_ledger.write_parquet(EVAL_DIR / "triage_ledger.parquet")
-print(f"Triage ledger saved: {EVAL_DIR / 'triage_ledger.parquet'}")
-print(triage_ledger.group_by("decision").len().sort("decision"))
+
+ic_ts_all = pl.concat(
+    [ts.with_columns(pl.lit(feat).alias("feature")) for feat, ts in ic_timeseries.items()]
+)
+ic_ts_all.write_parquet(EVAL_DIR / "ic_timeseries.parquet")
+
+print(
+    f"evaluation/triage_ledger.parquet: {triage_ledger.height} features, one row each.\n"
+    f"evaluation/ic_timeseries.parquet: {ic_ts_all.height:,} rows, the per-date series behind them."
+)
+
+# %% [markdown]
+# ### The funnel, end to end
+#
+# Every candidate feature ends in one of the three decisions, and the figure below is the
+# whole path: how many were offered, how many can be ranked across ETFs at all, how many
+# of those cleared the coverage and staleness gates, how many cleared false-discovery
+# control, and how many were promoted. The distance between the last two bars is the
+# exploration arm.
 
 # %%
-# Save IC time series (long format)
-ic_ts_frames = []
-for feat, ts in ic_timeseries.items():
-    ic_ts_frames.append(ts.with_columns(pl.lit(feat).alias("feature")))
-
-if ic_ts_frames:
-    ic_ts_all = pl.concat(ic_ts_frames)
-    ic_ts_all.write_parquet(EVAL_DIR / "ic_timeseries.parquet")
-    print(f"IC time series saved: {EVAL_DIR / 'ic_timeseries.parquet'}")
-
-# %%
-# Write results JSON
 proceed_features = sorted(f for f, (d, _) in triage.items() if d == "PROCEED")
 revise_features = [f for f, (d, _) in triage.items() if d == "REVISE"]
 stop_features = [f for f, (d, _) in triage.items() if d == "STOP"]
 
-sorted_by_ic = sorted(ic_results.items(), key=lambda x: x[1].get("mean_ic") or 0, reverse=True)
-best = sorted_by_ic[0] if sorted_by_ic else ("n/a", {})
-worst = sorted_by_ic[-1] if sorted_by_ic else ("n/a", {})
-
-# %%
-print(f"\n{'=' * 60}")
-print(f"TRIAGE SUMMARY: {CASE_STUDY_ID}")
-print(f"{'=' * 60}")
-print(f"  PROCEED: {len(proceed_features)} features")
-print(f"  REVISE:  {len(revise_features)} features")
-print(f"  STOP:    {len(stop_features)} features")
-print("\nPROMOTED (PROCEED) features:")
-for f in proceed_features:
-    ic = ic_results[f]["mean_ic"]
-    t = ic_results[f]["t_stat"]
-    print(f"  {f:40s}  IC={ic:+.4f}  t={t:.2f}  [{families.get(f, '?')}]")
+funnel_stages = [
+    ("Candidate features", len(all_feature_cols)),
+    ("Vary across the cross-section", len(cross_sectional_features)),
+    ("Cleared coverage and staleness", n_gate_pass),
+    ("Cleared false-discovery control", n_significant_fdr),
+    ("Promoted (PROCEED)", len(proceed_features)),
+]
+fig = go.Figure(
+    go.Bar(
+        x=[n for _, n in funnel_stages][::-1],
+        y=[stage for stage, _ in funnel_stages][::-1],
+        orientation="h",
+        marker_color=[COLORS["blue"] if i == 4 else GRAY_FILLS["muted"] for i in range(5)][::-1],
+        text=[str(n) for _, n in funnel_stages][::-1],
+        textposition="outside",
+        showlegend=False,
+    )
+)
+fig.update_layout(
+    template="ml4t",
+    height=380,
+    width=900,
+    title_text="The promoted set is wider than what clears false-discovery control",
+    xaxis_title="Features",
+    xaxis_range=[0, len(all_feature_cols) * 1.15],
+    margin=dict(l=250),
+)
+fig.show()
 
 # %% [markdown] tags=["results"]
-# **What the triage decided, and on what.** The counts printed above are the whole
-# output of this notebook: a per-feature decision, with the `note` column recording
-# which arm promoted it, and **no feature on this panel survives BH-FDR, so every
-# promotion is an exploration promotion.** The confirmation arm never fires and the
-# `note` column reads `stable_and_above_threshold` for the whole PROCEED set.
+# **What the triage decided, and on what.** Every candidate feature carries a decision in
+# `evaluation/triage_ledger.parquet` and a `note` recording which rule produced it. **No
+# feature on this panel clears false-discovery control**, so the confirmation arm never
+# fires and every promotion above is an exploration promotion, with `note` reading
+# `stable_and_above_threshold` throughout.
 #
-# That is a property of the data rather than a fault in the screen. The effective
-# sample printed above is what a 21-day label leaves of a daily IC series, and
-# false-discovery control over this many candidates rejects nothing at that sample
-# size. What the exploration arm keeps on the table is a set that agrees with its own
-# sign across folds and clears `IC_THRESHOLD`; none of it has been confirmed, and
-# Ch11 has to read the `note` column to know that.
+# That is a statement about how much evidence a panel of this size holds, not a fault in
+# the screen. A monthly forward return sampled daily leaves the rough count of independent
+# observations printed in section C, and over a search this wide, false-discovery control
+# at this level rejects nothing at that amount of evidence. What the exploration arm keeps
+# on the table is the set that holds its own direction across the folds and clears the
+# threshold in size. None of it has been confirmed, and a reader who takes the promoted
+# count as a count of confirmed features will have read past the `note` column.
 #
-# This notebook does not pronounce on the case study. A univariate screen is
-# necessary and not sufficient, and whether any of these features are tradable is
-# settled by a backtest Sharpe several stages later.
+# This notebook does not pronounce on the case study. A screen of one feature at a time is
+# necessary and not sufficient, and whether any of this is tradable is decided by a
+# backtest several stages later.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **Report the searched set beside the p-value.** The naive, HAC and BH-FDR
-#    counts printed above are three different answers to "how many features carry
-#    signal", and the gap between them is the price of having tested every feature
-#    rather than one. A significance claim without the size of the search that
-#    produced it cannot be read.
+# 1. **Report the size of the search beside the p-value.** The three counts in section E
+#    are three answers to "how many of these features carry information", and the gaps
+#    between them are what was paid for the overlap in the labels and for having asked
+#    the question of every feature at once. A significance claim without the size of the
+#    search that produced it cannot be read at all.
 #
-# 2. **HAC adjustment matters**: overlapping 21-day returns create autocorrelation
-#    in the IC time series, and the Newey-West bandwidth is bound to the label
-#    horizon rather than typed, so the correction cannot drift from the label.
+# 2. **Bind the standard-error bandwidth to the label, not to a number.** Overlapping
+#    forward returns make neighbouring dates dependent, and how far that dependence
+#    reaches is the label horizon. Passing the horizon rather than typing a lag is what
+#    stops the correction and the label from drifting apart when the horizon changes.
 #
-# 3. **Screen on the frame where every candidate exists.** The Ch9 features are
-#    fitted per fold and are out of sample only inside their own validation window.
-#    Measured over the whole pre-holdout span their coverage is the share of it the
-#    folds happen to reach, and the correctness gate reads a design property as a
-#    broken feature; measured over the union of the windows, they are covered and
-#    comparable with the Ch8 features beside them.
+# 3. **Screen every feature on the rows where every feature exists.** Features fitted
+#    inside a fold are usable only inside that fold's validation range. Measured over the
+#    whole history their coverage is the share of it the folds reach, and the coverage
+#    gate reads a property of the design as a broken column; measured over the union of
+#    the validation ranges they are comparable with the price-derived features beside
+#    them.
 #
-# 4. **Date-level features require special handling**: regime and macro features
-#    have zero cross-sectional IC by construction. Their value emerges through
-#    conditional interactions in Ch11 modeling, so they are triaged REVISE with a
-#    note rather than scored against a statistic they cannot have.
+# 4. **A statistic a column cannot have says nothing about the column.** Anything
+#    describing the market as a whole takes one value across the cross-section, so it has
+#    no cross-sectional rank correlation. It is recorded as undecided rather than scored
+#    at zero, and it stays in the matrix the model notebooks train on.
 #
-# 5. **Redundancy within families**: momentum and volatility features are highly
-#    correlated, and the ranked-pairs figure says which pairs are one piece of
-#    evidence counted twice. Downstream modeling should cluster or select
-#    representative features from each family.
+# 5. **Count evidence, not columns.** Features within a family are strongly correlated,
+#    and the ranked pairs say which ones are one measurement entered twice. A family with
+#    many members above the redundancy cut is not many independent findings.
 #
-# **Next**: `06_linear.py` (Ch11) trains ridge/lasso baselines on the promoted
-# features, loading the full modeling dataset via `load_modeling_dataset`.
+# **Known limitations.** One feature at a time says nothing about what a set of them does
+# together, which is what `06_linear` onward measures. The screen is run against the
+# primary label only, so a feature that predicts at a different horizon is not visible
+# here. And the exploration arm's threshold is a judgement about what a monthly rebalance
+# would need, not a quantity the data determined - a reader working at a different horizon
+# or cost level should set their own and say so.
+#
+# **Next**: `06_linear` fits regularized linear models to the whole feature matrix, and
+# `20_strategy_synthesis/02_feature_evaluation` reads this ledger alongside the other
+# eight case studies'.

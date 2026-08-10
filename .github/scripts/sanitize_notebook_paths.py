@@ -22,6 +22,23 @@ cell metadata and cell outputs are candidates. Two strings in this repository's
 source survive precisely because of that: the mount path above, and a comment in
 ``12_gradient_boosting/02_gbm_comparison`` that names ``/app/`` to explain it.
 
+Image payloads are outputs and are never rewritten
+--------------------------------------------------
+
+A figure is stored in its cell's outputs as base64, and base64's alphabet
+includes ``/``, ``a`` and ``p``, so a long enough payload contains ``/app/`` by
+chance - roughly once per quarter-megabyte. Treating that as a Docker mount path
+and deleting it removes five characters from the encoding, which both corrupts the
+image and leaves a length no longer divisible by four, so the payload stops
+decoding at all and the rendered page shows a broken figure. Measured on
+``case_studies/etfs/05_evaluation``: one 244,684-character PNG, one chance
+occurrence, and the result did not decode.
+
+Nothing announces this. The notebook still parses, the cell still has an output,
+and the only symptom is an image that fails to draw. So binary payloads are held
+out of the candidate set by MIME type, and ``_assert_binary_intact`` re-reads the
+rewritten text and compares every one of them byte for byte before it is returned.
+
 The rewrite itself is still done on the raw text, one substring at a time, so the
 diff is the replaced paths and nothing else - no JSON reserialization, no
 reflowed formatting, no reordered keys. A string that also occurs inside the
@@ -64,6 +81,19 @@ REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
 
 SKIP_PARTS = {"_reference", ".venv", ".git"}
 
+# The output MIME types nbformat stores base64-encoded rather than as text. A path
+# rule that fires inside one of these has matched the encoding, not a path.
+BINARY_MIME = frozenset(
+    {
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/bmp",
+        "image/tiff",
+        "application/pdf",
+    }
+)
+
 
 def _iter_notebooks() -> list[Path]:
     out = []
@@ -97,20 +127,68 @@ def _strings(obj: object, out: list[str]) -> None:
             _strings(value, out)
 
 
+def _binary_payloads(nb: dict) -> list[str]:
+    """Every base64 output payload in the notebook, in cell order."""
+    out: list[str] = []
+    for cell in nb.get("cells", []):
+        for output in cell.get("outputs", []):
+            data = output.get("data") or {}
+            for mime in BINARY_MIME & data.keys():
+                payload = data[mime]
+                out.append(payload if isinstance(payload, str) else "".join(payload))
+    return out
+
+
+def _output_strings(outputs: list, into: list[str]) -> None:
+    """Strings from one cell's outputs, minus the base64 image payloads.
+
+    A payload is skipped by MIME rather than by looking at the string, because
+    what makes it ineligible is that it is an encoding rather than prose - not
+    that it happens to be long or to look like base64.
+    """
+    for output in outputs:
+        for key, value in output.items():
+            if key != "data":
+                _strings(value, into)
+                continue
+            for mime, payload in value.items():
+                if mime not in BINARY_MIME:
+                    _strings(payload, into)
+
+
 def _partition(nb: dict) -> tuple[list[str], list[str]]:
     """(strings this tool may rewrite, strings it must leave alone).
 
     The second list is the notebook's ``source``. Everything in the first is
-    reachable only through notebook metadata, cell metadata or cell outputs.
+    reachable only through notebook metadata, cell metadata or cell outputs, and
+    excludes the base64 image payloads for the reason given at the top of this file.
     """
     rewritable: list[str] = []
     protected: list[str] = []
     _strings(nb.get("metadata", {}), rewritable)
     for cell in nb.get("cells", []):
         _strings(cell.get("metadata", {}), rewritable)
-        _strings(cell.get("outputs", []), rewritable)
+        _output_strings(cell.get("outputs", []), rewritable)
         _strings(cell.get("source", []), protected)
     return rewritable, protected
+
+
+def _assert_binary_intact(before: dict, raw: str) -> None:
+    """Every base64 payload survives the rewrite unchanged, or nothing is written.
+
+    The MIME filter above is what keeps payloads out of the candidate set. This is
+    the check that the filter worked, and it runs on the rewritten text rather than
+    on the plan, so a future rule that reaches a payload some other way is caught
+    here instead of in a rendered page.
+    """
+    after = _binary_payloads(json.loads(raw))
+    expected = _binary_payloads(before)
+    if after != expected:
+        moved = sum(1 for a, b in zip(expected, after, strict=False) if a != b)
+        raise AssertionError(
+            f"the rewrite changed {moved} base64 output payload(s): a path rule matched "
+            "inside an encoding rather than inside a path, which corrupts the figure"
+        )
 
 
 def _encoded(text: str) -> str:
@@ -128,7 +206,8 @@ def sanitize_notebook(raw: str) -> tuple[str, int, list[str]]:
         (new text, paths rewritten, strings skipped because the notebook's
         ``source`` contains them too).
     """
-    rewritable, protected = _partition(json.loads(raw))
+    parsed = json.loads(raw)
+    rewritable, protected = _partition(parsed)
     protected_encoded = [_encoded(s) for s in protected]
 
     targets = {value: sanitize_text(value) for value in rewritable}
@@ -146,6 +225,7 @@ def sanitize_notebook(raw: str) -> tuple[str, int, list[str]]:
         occurrences = raw.count(encoded)
         raw = raw.replace(encoded, _encoded(targets[original]))
         replaced += occurrences * sanitize_text(original)[1]
+    _assert_binary_intact(parsed, raw)
     return raw, replaced, skipped
 
 

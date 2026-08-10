@@ -16,18 +16,42 @@
 # %% [markdown]
 # # Feature Evaluation - Crypto Perpetuals Funding
 #
-# This notebook evaluates the complete financial and model-based feature frame on
-# the two out-of-sample development windows used by downstream model selection.
+# A perpetual futures contract has no expiry, so instead of converging to a spot price at
+# settlement it is pulled toward it by a periodic cash payment between longs and shorts called
+# **funding**. On Binance that payment settles every eight hours. The features built in the two
+# previous notebooks describe how rich that payment is, how far the contract trades from the spot
+# index, and how volatile both have been. This notebook asks the first question anyone should ask
+# of a feature before training on it: taken one at a time, does it say anything about what the
+# contract returns over the next eight hours?
 #
-# **Learning Objectives**:
-# - Assemble 39 financial and five fold-specific temporal features without duplicating rows
-# - Compute decision-time rank IC with HAC and Benjamini-Hochberg FDR control
-# - Diagnose cross-sectional identifiability, feature shape, and redundancy
-# - Record triage diagnostics without filtering the downstream training matrix
+# The method is univariate screening. Each feature is scored on its own, the scores are corrected
+# for the fact that many features were searched, and the result is a per-feature record. It is
+# deliberately not a feature-selection step: nothing here removes a column from what the model
+# notebooks train on.
 #
-# **Book Reference**: Chapter 8, Section 8.5 (Feature Evaluation and Triage)
+# **Reads** `features/financial.parquet` (notebook 03), `features/model_based.parquet`
+# (notebook 04) and `labels/fwd_ret_8h.parquet` (notebook 02).
+# **Writes** `evaluation/triage_ledger.parquet`, one row per feature carrying its evidence and its
+# decision, and `evaluation/ic_timeseries.parquet`, the score series the ledger summarizes.
 #
-# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and
+# **Learning objectives**:
+# - Build the frame a walk-forward evaluation is allowed to use, so that no feature is scored on a
+#   period the model that produced it was trained on, and no score reaches the period held back
+#   for the final test.
+# - Measure how well a feature ranks the perpetuals against each other at one moment, repeat that
+#   at every moment, and average the result into a single number with an honest error bar.
+# - Read the same evidence a second way, one validation year at a time, to tell a feature that
+#   works throughout from one that worked once.
+# - Adjust the significance of forty scores for the fact that forty were looked at, and say what
+#   that adjustment costs.
+# - Record a decision per feature, with the evidence that produced it, in a form the strategy
+#   synthesis in Chapter 20 can read.
+#
+# **Book reference**: Chapter 7, Section 7.3 (Univariate feature-label evaluation) and
+# Section 7.4 (Search accounting and multiple testing).
+#
+# **Prerequisites**: [`02_labels`](02_labels.ipynb),
+# [`03_financial_features`](03_financial_features.ipynb) and
 # [`04_model_based_features`](04_model_based_features.ipynb).
 
 # %%
@@ -40,19 +64,44 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import yaml
+from IPython.display import display
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats
 from scipy.stats import norm, spearmanr
 
+from case_studies.utils.feature_engineering import (
+    assign_families,
+    families_from_config,
+    quantile_profile,
+)
 from utils.cv_splits import load_evaluation_config
 from utils.modeling import load_modeling_dataset
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0
+
+# %% [markdown]
+# ## Settings
+#
+# Everything the case study has already decided is read from `config/setup.yaml` rather than
+# retyped here, so this notebook cannot end up screening a different label, a different holdout
+# boundary or a different redundancy threshold than the notebooks around it.
+#
+# Four settings are this notebook's own, and each one decides something:
+#
+# - **Minimum cross-section, 10 perpetuals.** A rank correlation is computed across the contracts
+#   quoted at one moment. The universe is nineteen contracts, and a rank correlation over a
+#   handful of them is mostly noise, so a settlement offering fewer than ten usable pairs
+#   contributes no score rather than a bad one. Section 2 shows how often that bites.
+# - **Minimum score count, 20 settlements.** A feature needs a score series long enough to average
+#   before it gets a row in the ledger.
+# - **HAC bandwidth, one funding day.** Explained where it is used, in section 4.
+# - **Exploration threshold on the average score.** Printed with the other bound settings below
+#   and explained where it is used, in section 8.
 
 # %%
 CASE_STUDY_ID = "crypto_perps_funding"
@@ -60,30 +109,46 @@ CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 EVAL_DIR = CASE_DIR / "evaluation"
 EVAL_DIR.mkdir(exist_ok=True)
 
-# The label is read from setup.yaml rather than retyped, so this stage cannot end up
-# evaluating a different label than the one the case study declares and the model
-# stages train on.
 with open(CASE_DIR / "config" / "setup.yaml") as _f:
     setup_config = yaml.safe_load(_f)
 PRIMARY_LABEL = setup_config["labels"]["primary"]
+BAR_HOURS = setup_config["features"]["bar_hours"]
+REDUNDANCY_CUT = setup_config["features"]["redundancy_cut"]
+FAMILY_REGISTER = families_from_config(setup_config)
 
 JOIN_COLS = ["timestamp", "symbol"]
-# Not the label horizon. `fwd_ret_8h` spans exactly one 8-hourly bar, so consecutive
-# decision times share no outcome window and overlap contributes no autocorrelation.
-# The three lags cover one funding day: the premium and funding features are driven
-# by a settlement cycle that repeats every third bar, and that is what the IC series
-# carries instead.
-HAC_MAXLAGS = 3
 MIN_CROSS_SECTION = min(10, MAX_SYMBOLS) if MAX_SYMBOLS else 10
+MIN_IC_PERIODS = 20
+HAC_MAXLAGS = 24 // BAR_HOURS
 IC_THRESHOLD = 0.005
 N_QUANTILES = 5
 
+print(f"screening label {PRIMARY_LABEL} on {BAR_HOURS}-hour settlement bars")
+print(f"minimum cross-section {MIN_CROSS_SECTION}, minimum score count {MIN_IC_PERIODS}")
+print(f"HAC bandwidth {HAC_MAXLAGS} settlements, exploration threshold {IC_THRESHOLD}")
+print(f"redundancy threshold {REDUNDANCY_CUT} and {N_QUANTILES} groups per settlement")
+
 # %% [markdown]
-# ## 1. Assemble the Exact Validation Frame
+# ## 1. The frame this notebook is allowed to score on
 #
-# `load_modeling_dataset()` is the same assembly path used by notebooks 06-11.
-# Its placeholder temporal join is schema-only; this notebook replaces those
-# columns with the matching fold artifact before evaluating each validation slice.
+# The case study trains with **walk-forward cross-validation**: the history is cut into folds,
+# each fold trains on a block of time and is tested on the block that follows it, and the whole
+# arrangement is repeated further along the history. The folds stop short of the end: a final
+# stretch of history, the **holdout**, is reserved for one measurement of the finished strategy,
+# several notebooks from here.
+#
+# Two constraints follow, and together they fix which rows may be scored.
+#
+# First, the five features from notebook 04 are themselves model output: a volatility model and a
+# regime model are fitted inside each fold's training block and then run forward. A row therefore
+# has a different value for those five columns depending on which fold you are in, and it is out
+# of sample only in the fold whose training block ended before it. So each row enters exactly
+# once, carrying the version of those columns belonging to the fold that tests it.
+#
+# Second, a feature scored at time `t` is scored against the return realized by `t` plus eight
+# hours. Reading a return that lands inside the holdout would spend the holdout on a diagnostic.
+# `load_modeling_dataset` derives the folds through `generate_cv_splits`, which ends the last
+# validation block one label horizon before the holdout begins; the check below confirms it.
 
 # %%
 mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
@@ -91,9 +156,6 @@ financial = pl.read_parquet(CASE_DIR / "features" / "financial.parquet")
 financial_cols = [name for name in financial.columns if name not in JOIN_COLS]
 temporal_cols = mds.temporal_feature_names
 
-assert len(financial_cols) == 39
-assert len(temporal_cols) == 5
-assert len(mds.feature_names) == 44
 assert set(mds.feature_names) == set(financial_cols) | set(temporal_cols)
 assert mds.temporal_by_fold is not None
 
@@ -101,12 +163,6 @@ symbols = mds.dataset["symbol"].unique().to_list()
 base_frame = mds.dataset.select([*JOIN_COLS, *financial_cols, mds.label_col])
 temporal_by_fold = pl.from_pandas(mds.temporal_by_fold).filter(pl.col("symbol").is_in(symbols))
 
-# %% [markdown]
-# Each row is included once, in the fold where it is out of sample. This prevents
-# the many-to-many join that results from dropping `fold` before joining the
-# fold-keyed temporal parquet.
-
-# %%
 validation_frames = []
 for split in mds.splits:
     base = base_frame.filter(
@@ -125,30 +181,113 @@ for split in mds.splits:
 
 eval_panel = pl.concat(validation_frames).sort(["timestamp", "symbol"])
 assert eval_panel.select(JOIN_COLS).is_duplicated().sum() == 0
+assert eval_panel.columns == [*JOIN_COLS, *financial_cols, mds.label_col, *temporal_cols, "cv_fold"]
+
 holdout_start = (
     pl.Series([load_evaluation_config(CASE_STUDY_ID)["holdout_start"]])
     .str.to_datetime()
     .dt.replace_time_zone("UTC")[0]
 )
-assert eval_panel["timestamp"].max() + timedelta(hours=8) < holdout_start
-assert eval_panel.columns == [*JOIN_COLS, *financial_cols, mds.label_col, *temporal_cols, "cv_fold"]
+assert eval_panel["timestamp"].max() + timedelta(hours=BAR_HOURS) < holdout_start
 
-print(f"Validation frame: {len(eval_panel):,} rows, {eval_panel['symbol'].n_unique()} symbols")
-print(f"Decision timestamps: {eval_panel['timestamp'].n_unique():,}")
-print("Feature contract: 39 financial + 5 fold-specific temporal = 44 [OK]")
+print(f"{len(financial_cols)} features from notebook 03, {len(temporal_cols)} from notebook 04")
+print(f"{len(eval_panel):,} rows, {eval_panel['symbol'].n_unique()} perpetuals")
+print(f"{eval_panel['timestamp'].n_unique():,} settlements over {len(mds.splits)} validation folds")
+for split in mds.splits:
+    print(f"  fold {split['fold']}: {split['val_start']:%Y-%m-%d} to {split['val_end']:%Y-%m-%d}")
+print(
+    f"last settlement scored {eval_panel['timestamp'].max():%Y-%m-%d %H:%M}, "
+    f"holdout opens {holdout_start:%Y-%m-%d %H:%M}"
+)
 
 # %% [markdown]
-# ## 2. Data Quality and Identifiability
+# ## 2. What is actually in the panel
 #
-# Coverage measures whether a feature is available on the canonical validation
-# frame. Staleness is diagnostic rather than a failure rule because cost tier and
-# fold-fitted GARCH parameters are intentionally persistent. Cross-sectional IC
-# additionally requires variation across symbols at the same timestamp.
+# Every number below rests on how many contracts are quoted side by side at each settlement, so
+# that is worth seeing before any of it. This is an **unbalanced panel**: a perpetual enters on
+# the date the exchange listed it and there is no history before that. Three of the nineteen
+# listed part-way through the two validation years.
+
+# %%
+universe = (
+    eval_panel.group_by("symbol")
+    .agg(
+        pl.col("timestamp").min().alias("first settlement"),
+        pl.col("timestamp").max().alias("last settlement"),
+        pl.len().alias("settlements"),
+    )
+    .with_columns(
+        (pl.col("settlements") / eval_panel["timestamp"].n_unique()).alias("share of window")
+    )
+    .sort("first settlement", "symbol")
+)
+display(universe)
+
+# %% [markdown]
+# Listing dates are not the whole story. Notebook 03 emits a row only where every one of its
+# thirty-nine features is complete, so a contract also leaves the panel while any of its windows
+# is filling, and the longest of those windows spans ninety settlements. The effect on this
+# notebook is not spread evenly: the cross-section thins into two long stretches where fewer than
+# ten contracts are left, and every score below skips those settlements entirely.
+
+# %%
+cross_section = (
+    eval_panel.group_by("timestamp", "cv_fold").agg(pl.len().alias("perpetuals")).sort("timestamp")
+)
+thin = cross_section.filter(pl.col("perpetuals") < MIN_CROSS_SECTION)
+
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.fill_between(
+    cross_section["timestamp"].to_list(),
+    cross_section["perpetuals"].to_list(),
+    color=COLORS["slate"],
+    alpha=0.55,
+    linewidth=0,
+)
+ax.axhline(
+    MIN_CROSS_SECTION,
+    color=COLORS["amber"],
+    linewidth=1.4,
+    label=f"minimum cross-section ({MIN_CROSS_SECTION})",
+)
+ax.set(xlabel="Settlement (UTC)", ylabel="Perpetuals with a complete feature row", ylim=(0, None))
+ax.legend(frameon=False, fontsize=7, loc="lower right")
+add_message_title(
+    ax,
+    "The cross-section thins twice below the minimum this notebook ranks on",
+    subtitle="Contracts quoted at each settlement of the two validation folds",
+)
+fig.tight_layout()
+show_with_alt(
+    fig,
+    "Filled area of contracts quoted per settlement across both validation folds, with a "
+    "horizontal line at the minimum cross-section. Two runs of about a month fall below it.",
+)
+
+print(f"{thin.height} of {cross_section.height} settlements carry fewer than {MIN_CROSS_SECTION}")
+print(f"smallest cross-section: {cross_section['perpetuals'].min()} perpetuals")
+
+# %% [markdown]
+# ## 3. Can each feature be trusted, and can it be ranked?
+#
+# Two different questions, and the notebook keeps them apart.
+#
+# **Is the column usable?** Coverage is the share of rows where the feature has a value, and a
+# column below ninety per cent coverage, or with a single value throughout, fails and stops the
+# run. Staleness, the share of rows equal to the previous row for the same contract, is reported
+# and not enforced: the fee tier and the fitted volatility parameters are meant to persist, so a
+# repeated value is correct rather than a stale feed.
+#
+# **Can the column rank contracts against each other?** The score used below is a correlation
+# computed *across* the contracts quoted at one settlement. A column that takes the same value
+# for every contract at that settlement carries no ordering, so no such correlation exists for it,
+# however informative it may be. Those columns are identified here rather than discovered as a
+# failure later, and they stay in the training frame.
 
 # %%
 quality_rows = []
+ordered = eval_panel.sort(["symbol", "timestamp"])
 for feature in mds.feature_names:
-    ordered = eval_panel.sort(["symbol", "timestamp"])
     unchanged = ordered.select(
         (pl.col(feature) == pl.col(feature).shift(1).over("symbol")).sum()
     ).item()
@@ -174,34 +313,52 @@ quality = pl.DataFrame(quality_rows).with_columns(
     (pl.col("varying_date_fraction") > 0).alias("cross_sectionally_identifiable"),
 )
 assert quality.filter(~pl.col("quality_pass")).is_empty()
-print(
+display(
     quality.group_by("source").agg(
         pl.len().alias("features"),
-        pl.col("coverage").min().alias("minimum_coverage"),
-        pl.col("cross_sectionally_identifiable").sum().alias("identifiable"),
+        pl.col("coverage").min().alias("minimum coverage"),
+        pl.col("staleness").max().alias("maximum staleness"),
+        pl.col("cross_sectionally_identifiable").sum().alias("rankable"),
     )
 )
 
 # %% [markdown]
-# Four common market-state columns are not cross-sectionally identifiable at a
-# decision timestamp: funding session and funding dispersion from the financial
-# frame, plus both HMM probabilities. They remain valid conditioning variables in
-# the 44-column training frame and are not removed by this diagnostic.
-
-# %% [markdown]
-# ## 3. Decision-Time IC and HAC Inference
-#
-# IC is Spearman correlation within each decision timestamp. The resulting time
-# series is ordered before Newey-West inference. This notebook never pools rows
-# across dates or averages per-fold summary statistics.
+# The columns that cannot be ranked are market-wide state: the settlement slot of the day and the
+# dispersion of funding across the universe are one number per settlement by construction, and
+# both regime probabilities from notebook 04 are fitted on the market rather than per contract.
+# They condition how a signal should be read, which is why they stay in the training frame, and
+# they simply have no cross-sectional score to report.
 
 # %%
-identifiable = quality.filter(pl.col("cross_sectionally_identifiable"))["feature"].to_list()
+not_rankable = quality.filter(~pl.col("cross_sectionally_identifiable"))["feature"].to_list()
+print(f"cannot be ranked across contracts: {', '.join(not_rankable)}")
+
+# %% [markdown]
+# ## 4. The score: how well does a feature rank the next eight hours?
+#
+# At each settlement, rank the contracts by the feature, rank them by the return they go on to
+# earn, and take the Spearman correlation of the two rankings. This is the **information
+# coefficient**, and it is deliberately a within-settlement quantity: it asks whether the feature
+# picks the better contract *right now*, not whether it moves with the market over time.
+# Repeating it at every settlement gives a series, and the feature's headline number is the
+# average of that series.
+#
+# Averaging a series is only half of it. The average has a standard error, and the usual formula
+# for one assumes the settlements are independent. Two things here argue against that assumption
+# and they pull in opposite directions. Consecutive labels do not overlap, because `fwd_ret_8h`
+# spans exactly one settlement interval, so there is none of the artificial persistence that a
+# multi-day label would create. But funding settles three times a day and several features are
+# built from that cycle, so dependence at the scale of a funding day is expected. The standard
+# error below is therefore a **Newey-West** one, which widens or narrows the error bar according
+# to the correlation actually present in the series, at a bandwidth of one funding day.
+
+# %%
+rankable = quality.filter(pl.col("cross_sectionally_identifiable"))["feature"].to_list()
 partitions = eval_panel.partition_by("timestamp", as_dict=True, maintain_order=True)
 ic_results = {}
 ic_timeseries = {}
 
-for feature in identifiable:
+for feature in rankable:
     observations = []
     for key, group in partitions.items():
         values = group.select(feature, mds.label_col, "cv_fold").drop_nulls()
@@ -218,19 +375,30 @@ for feature in identifiable:
                     "n_obs": len(values),
                 }
             )
-    if len(observations) >= 20:
+    if len(observations) >= MIN_IC_PERIODS:
         series = pl.DataFrame(observations).sort("timestamp")
         ic_results[feature] = compute_ic_hac_stats(series["ic"].to_numpy(), maxlags=HAC_MAXLAGS)
         ic_timeseries[feature] = series
 
-print(f"IC evaluated: {len(ic_results)} of {len(mds.feature_names)} features")
-print(f"Not cross-sectionally identifiable: {len(mds.feature_names) - len(ic_results)}")
+scored_lengths = [series.height for series in ic_timeseries.values()]
+print(f"{len(ic_results)} of {len(mds.feature_names)} features carry a score")
+print(f"  {len(mds.feature_names) - len(rankable)} cannot be ranked across contracts")
+print(f"  {len(rankable) - len(ic_results)} were rankable but had too few scored settlements")
+print(
+    f"scored settlements per feature: {min(scored_lengths):,} to {max(scored_lengths):,} "
+    f"of {eval_panel['timestamp'].n_unique():,}"
+)
 
 # %% [markdown]
-# Fold stability uses the same two validation windows. With only two folds the
-# score can take three values and an interquartile range would be degenerate, so
-# what it reports is whether the sign agrees in both windows, in one, or in
-# neither - not a distribution.
+# ### Is the score the same in both validation years?
+#
+# The average above pools both folds. A feature that worked once and not again averages to the
+# same place as one that worked throughout, and only the fold-by-fold view separates them. With
+# two folds there is no distribution to summarize, so what is reported is simply whether the
+# fold averages agree in sign with the feature's own overall direction, in both, one or neither.
+# Comparing against the feature's *own* direction rather than against zero matters: a feature
+# that reliably ranks the contracts backwards is as stable as one that ranks them forwards, and
+# is just as usable once the model is allowed to trade it the other way.
 
 # %%
 fold_stats = {}
@@ -239,83 +407,88 @@ for feature, series in ic_timeseries.items():
     fold_ics = per_fold["ic"].to_list()
     overall_sign = np.sign(ic_results[feature]["mean_ic"])
     fold_stats[feature] = {
-        "n_folds": len(fold_ics),
         "sign_consistency": float(np.mean([np.sign(value) == overall_sign for value in fold_ics])),
-        "worst_fold_ic": min(fold_ics, key=abs),
-        "best_fold_ic": max(fold_ics, key=abs),
     }
 
 stable_count = sum(stats["sign_consistency"] == 1.0 for stats in fold_stats.values())
-print(f"Same IC sign in both validation folds: {stable_count}/{len(fold_stats)}")
+print(f"same score sign in both validation folds: {stable_count} of {len(fold_stats)}")
 
 # %% [markdown]
-# ### The IC series, before it is reduced
+# ### The score series, before it is reduced
 #
-# Everything below is a scalar summary of one object: the per-decision-time IC
-# series. Two things are visible only in the series - an IC that comes from a
-# single episode and is flat around it, and an IC that changes sign between the
-# two validation windows - so it is drawn first. The band is the HAC interval
-# around the full-sample mean, computed from the same `compute_ic_hac_stats` call
-# and therefore at the same `HAC_MAXLAGS` bandwidth as the t-statistics reported
-# below. `compute_ic_uncertainty` would have drawn it at the Newey-West automatic
-# lag instead, so the band and the significance test in one notebook would have
-# rested on different bandwidths. Each validation window is drawn as its own segment:
-# the folds do not abut, and a line joining the last bar of one to the first bar of
-# the next would draw a trend across months the notebook never evaluated.
+# Everything from here on is a scalar summary of one object, the series computed above, so the
+# series is drawn first. Two patterns are visible in it and in nothing downstream of it: a score
+# that comes from a single episode and sits at zero either side of it, and a score that changes
+# sign between the two validation years. The band is the Newey-West interval around the average,
+# taken from the same call that produces the significance tests below, so the band and the tests
+# rest on one bandwidth.
+#
+# The line is broken wherever the series is, which is at the two stretches section 2 identified
+# and at the join between the folds. Drawing through a break would suggest the notebook had
+# scored settlements it skipped.
 
 # %%
 LEADING_FOR_SERIES = 3
-ROLLING_BARS = 90
-series_features = (
-    eval_summary_ordering := sorted(ic_results, key=lambda name: -abs(ic_results[name]["mean_ic"]))
-)[:LEADING_FOR_SERIES]
+ROLLING_BARS = 90  # thirty days at three settlements a day
+eval_summary_ordering = sorted(ic_results, key=lambda name: -abs(ic_results[name]["mean_ic"]))
+series_features = eval_summary_ordering[:LEADING_FOR_SERIES]
+
+
+def contiguous_segments(series: pl.DataFrame) -> list[pl.DataFrame]:
+    """Split a score series wherever it skips at least one settlement."""
+    marked = series.sort("timestamp").with_columns(
+        (pl.col("timestamp").diff() > timedelta(hours=BAR_HOURS))
+        .fill_null(False)
+        .cum_sum()
+        .alias("_segment")
+    )
+    return [part.drop("_segment") for part in marked.partition_by("_segment", maintain_order=True)]
+
 
 fig, axes = plt.subplots(len(series_features), 1, figsize=(10, 7), sharex=True, sharey=True)
 for ax, feature in zip(axes, series_features, strict=True):
-    series = ic_timeseries[feature].sort("timestamp")
     stats = ic_results[feature]
     half_width = 1.96 * stats["hac_se"]
-    bands = {
-        "mean_ic": stats["mean_ic"],
-        "ci_hac_lower": stats["mean_ic"] - half_width,
-        "ci_hac_upper": stats["mean_ic"] + half_width,
-    }
-    for index, (_, window) in enumerate(
-        sorted(series.group_by("cv_fold"), key=lambda item: item[1]["timestamp"].min())
-    ):
-        window = window.sort("timestamp")
-        stamps = window["timestamp"].to_list()
-        ax.plot(stamps, window["ic"].to_list(), color=COLORS["slate"], linewidth=0.4, alpha=0.5)
+    for index, segment in enumerate(contiguous_segments(ic_timeseries[feature])):
+        stamps = segment["timestamp"].to_list()
+        ax.plot(stamps, segment["ic"].to_list(), color=COLORS["slate"], linewidth=0.4, alpha=0.5)
         ax.plot(
             stamps,
-            window["ic"].rolling_mean(ROLLING_BARS, min_samples=ROLLING_BARS).to_list(),
+            segment["ic"].rolling_mean(ROLLING_BARS, min_samples=ROLLING_BARS).to_list(),
             color=COLORS["blue"],
             linewidth=1.3,
-            label=f"{ROLLING_BARS}-bar mean" if index == 0 else "_nolegend_",
+            label=f"{ROLLING_BARS}-settlement mean" if index == 0 else "_nolegend_",
         )
-    ax.axhline(bands["mean_ic"], color=COLORS["amber"], linewidth=1.0, label="mean IC")
+    ax.axhline(stats["mean_ic"], color=COLORS["amber"], linewidth=1.0, label="average")
     ax.axhspan(
-        bands["ci_hac_lower"], bands["ci_hac_upper"], color=COLORS["amber"], alpha=0.25, lw=0
+        stats["mean_ic"] - half_width,
+        stats["mean_ic"] + half_width,
+        color=COLORS["amber"],
+        alpha=0.25,
+        lw=0,
     )
     ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
     ax.set_ylabel(feature, fontsize=7)
 axes[0].legend(frameon=False, fontsize=6, ncols=2, loc="upper left")
-axes[-1].set_xlabel("Decision timestamp (UTC)")
+axes[-1].set_xlabel("Settlement (UTC)")
 add_message_title(
     axes[0],
-    "The per-decision IC swings far wider than the mean it averages to",
-    subtitle="Leading features by absolute IC; amber band is the HAC interval",
+    "The score at one settlement swings far wider than the average it makes",
+    subtitle="The three features with the largest average; amber band is the Newey-West interval",
 )
 fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Three stacked panels, one per feature, each showing the per-settlement score in grey, a "
+    "rolling mean in blue, and a narrow amber band around the average near zero.",
+)
 
 # %% [markdown]
-# ### Fold-level IC
+# ### Fold by fold
 #
-# A pooled mean hides the difference between a feature that works in both
-# validation windows and one that had a single good year. With two folds there is
-# no distribution to summarize, so both fold means are drawn per feature and the
-# reader can see which side of zero each falls on.
+# The same evidence split in two. Each feature gets one point per validation year and a diamond
+# at its pooled average, so a feature whose two years land on opposite sides of zero is visible
+# as such rather than hidden inside an average.
 
 # %%
 FOLD_FEATURES_SHOWN = 12
@@ -325,7 +498,14 @@ for row, feature in enumerate(reversed(fold_features)):
     per_fold = (
         ic_timeseries[feature].group_by("cv_fold").agg(pl.col("ic").mean()).sort("cv_fold")["ic"]
     ).to_list()
-    ax.scatter(per_fold, [row] * len(per_fold), color=COLORS["slate"], s=34, zorder=3)
+    ax.scatter(
+        per_fold,
+        [row] * len(per_fold),
+        color=COLORS["slate"],
+        s=34,
+        zorder=3,
+        label="validation year" if row == 0 else "_nolegend_",
+    )
     ax.scatter(
         [ic_results[feature]["mean_ic"]],
         [row],
@@ -333,25 +513,37 @@ for row, feature in enumerate(reversed(fold_features)):
         marker="D",
         s=44,
         zorder=4,
+        label="pooled average" if row == 0 else "_nolegend_",
     )
 ax.axvline(0, color=COLORS["neutral"], linewidth=0.8)
 ax.set_yticks(range(len(fold_features)))
 ax.set_yticklabels(list(reversed(fold_features)), fontsize=7)
-ax.set_xlabel("Mean IC within validation fold (amber diamond marks the pooled mean)")
+ax.set_xlabel("Average score within a validation year")
+ax.legend(frameon=False, fontsize=7, loc="lower left")
 add_message_title(
     ax,
-    "Every leading feature keeps its sign in both validation windows",
-    subtitle="Per-fold mean IC by feature, ordered by absolute pooled IC",
+    "The strongest features keep their sign in both validation years",
+    subtitle=f"The {FOLD_FEATURES_SHOWN} features with the largest average, one point per year",
 )
 fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Horizontal strip plot of per-year average scores for the twelve strongest features, with a "
+    "diamond marking each feature's pooled average. All points sit left of zero.",
+)
 
 # %% [markdown]
-# ## 4. Multiple Testing
+# ## 5. Paying for the search
 #
-# Benjamini-Hochberg correction covers every cross-sectionally identifiable
-# feature. Naive and HAC significance counts use their respective t-statistics;
-# neither count is inferred from the other's p-values.
+# Forty features were scored, so the weakest of them would clear a five per cent significance
+# test roughly twice by chance alone. The **Benjamini-Hochberg** procedure controls that: instead
+# of asking whether each feature alone is unlikely under no relationship, it fixes the share of
+# false ones among those declared significant, and adjusts every test for the size of the set it
+# came from. The searched set here is those forty features on the primary label, and it is the
+# whole of what was looked at.
+#
+# The naive and Newey-West counts below come from their own t-statistics; neither is read off the
+# other's p-values.
 
 # %%
 feature_names = list(ic_results)
@@ -376,35 +568,56 @@ eval_summary = pl.DataFrame(
 n_naive = sum(value < 0.05 for value in naive_p_values)
 n_hac = sum(value < 0.05 for value in hac_p_values)
 n_fdr = int(fdr_result["n_rejected"])
-print(f"Significant features: naive={n_naive}, HAC={n_hac}, FDR={n_fdr}")
+leading = eval_summary.row(0, named=True)
+print(f"significant at 5%: naive {n_naive}, Newey-West {n_hac}, after BH correction {n_fdr}")
+print(f"largest average score: {leading['mean_ic']:.3f} on {leading['feature']}")
 
 # %% [markdown]
-# The ranked chart shows sign and magnitude; color distinguishes features that
-# survive FDR control without implying that non-significant conditioning features
-# should be discarded.
+# ### Sign first, then magnitude
 #
-# Read the sign before the ranking. Every one of the twenty strongest features
-# carries a **negative** mean rank IC: high premium, high funding and high realized
-# volatility all precede *lower* forward returns over the next eight hours. That is
-# the direction the funding-arbitrage hypothesis predicts - a rich premium is paid
-# by longs and decays - so the sign is the result, not a defect, and a model built
-# on these features has to be allowed to trade them short. A feature ranked by
-# `|IC|` hides that, which is why it is stated here rather than left to the axis.
+# The chart below is ordered by size, which makes it easy to miss that the sign is the same
+# throughout. Every one of the strongest features scores **negative**: contracts trading at a
+# high premium, paying high funding, or moving most violently are the ones that go on to earn
+# *less* over the next eight hours. That is the direction the crowding argument predicts, since a
+# rich premium is a payment longs are making to hold a position that is already popular. It also
+# means a model built on these features has to be free to sell them, and that a feature ranked by
+# the size of its score alone would hide the fact entirely.
 
 # %%
 top_ic = eval_summary.head(20).sort("mean_ic")
 fig, ax = plt.subplots(figsize=(10, 7))
-# Blue against amber, the same pair the HAC scatter below uses for the same
-# distinction. COLORS["neutral"] (#334155) beside COLORS["blue"] (#0a1628) is two
-# near-black navies: at bar size the encoding is invisible and the reader is told
-# about a distinction the chart does not draw.
 bar_colors = [COLORS["blue"] if value else COLORS["amber"] for value in top_ic["fdr_sig"]]
 ax.barh(top_ic["feature"].to_list(), top_ic["mean_ic"].to_list(), color=bar_colors)
 ax.axvline(0, color=COLORS["neutral"], linewidth=0.8)
-ax.set(xlabel="Mean validation rank IC", ylabel="Feature")
-add_message_title(ax, "Every one of the twenty strongest features predicts with a negative IC")
+ax.set(xlabel="Average score across the validation folds", ylabel="Feature")
+handles = [
+    plt.Rectangle((0, 0), 1, 1, color=COLORS["blue"]),
+    plt.Rectangle((0, 0), 1, 1, color=COLORS["amber"]),
+]
+ax.legend(
+    handles,
+    ["clears the correction", "does not clear it"],
+    frameon=False,
+    fontsize=7,
+    loc="upper left",
+)
+add_message_title(ax, "Every one of the twenty strongest features scores negative")
 fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Horizontal bars of the twenty largest average scores, all extending left of zero, coloured "
+    "by whether the feature clears the multiple-testing correction.",
+)
+
+# %% [markdown]
+# ### What the correction for dependence costs, or pays
+#
+# Plotting the two t-statistics against each other shows what the Newey-West standard error did to
+# each feature. Points on the diagonal were unaffected. Points below it, in this quadrant, are
+# features the correction made *more* significant, not less: the score series carries negative
+# dependence at the funding cycle, so treating settlements as independent understated the
+# precision of the average rather than overstating it. The shift is small, which is what a
+# non-overlapping label should produce.
 
 # %%
 limit = 1.1 * max(eval_summary["naive_t"].abs().max(), eval_summary["hac_t"].abs().max())
@@ -417,150 +630,176 @@ ax.scatter(
 )
 ax.plot([-limit, limit], [-limit, limit], color=COLORS["neutral"], linestyle="--")
 ax.set(
-    xlabel="Naive t-statistic", ylabel="HAC t-statistic", xlim=(-limit, limit), ylim=(-limit, limit)
+    xlabel="t-statistic treating settlements as independent",
+    ylabel="t-statistic corrected for dependence",
+    xlim=(-limit, limit),
+    ylim=(-limit, limit),
 )
 ax.set_aspect("equal", adjustable="box")
-add_message_title(ax, "HAC barely moves these t-statistics: the label does not overlap")
+add_message_title(ax, "Correcting for funding-cycle dependence strengthens the strongest")
 fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Scatter of corrected against uncorrected t-statistics with a diagonal reference line. The "
+    "largest negative points sit slightly below the diagonal.",
+)
+
+# %% [markdown] tags=["results"]
+# **40** of the **44** features carry a score; the other four take one value across the whole
+# cross-section at a settlement and cannot be ranked. Every score is computed on at most **2,003**
+# of the **2,189** settlements in the two validation years, because **186** of them offer fewer
+# than ten contracts. **30** of the 40 clear the Benjamini-Hochberg correction, and **34** hold
+# the same sign in both validation years. The largest average score is **-0.041**, on
+# `price_vol_7d`.
 
 # %% [markdown]
-# ## 5. Cross-Sectional Shape
+# ## 6. Is the relationship shaped like a ranking?
 #
-# Quantiles are assigned separately at each timestamp before returns are averaged.
-# This preserves the cross-sectional meaning of IC and avoids letting market-wide
-# time trends manufacture a pooled quantile relationship.
+# A rank correlation would look the same whether the effect sits in the extremes or spreads
+# evenly across the middle, and a strategy that goes long one end and short the other cares a
+# great deal which. So at each settlement the contracts are split into five equal groups by the
+# feature, and the return of each group is averaged over all settlements.
 #
-# Two summaries of each bin are drawn. The mean is what a long-short book earns;
-# the median is where the typical symbol in that bin ends up. Eight-hourly crypto
-# returns have heavy tails, so the two can point in opposite directions: a handful
-# of very large moves shift a mean and cannot shift a median. Where they disagree,
-# the rank IC above sides with the median - not as a theorem, but because both are
-# insensitive to how far the extreme returns reach, and it is that tail the mean is
-# reading. `monotonicity` in the ledger is computed on the means, which is the
-# convention shared across the nine case studies.
+# The group boundaries come from the contracts quoted at that settlement and from nothing else, so
+# the diagnostic asks the same question as the score it accompanies: given what is on the screen
+# right now, does the top group beat the bottom one?
+#
+# Two kinds of settlement are left out, and for the profile to mean what the score means it has to
+# be the same two. The first is a settlement below the minimum cross-section, exactly as in
+# section 4, so the profile and the score are built on one set of settlements rather than two that
+# nearly agree. The second is a settlement offering fewer distinct values than there are groups,
+# which cannot be split five ways at all. A feature taking only two values, such as the fee tier,
+# is in that position at every settlement: contracts sharing a value share a rank, so they land in
+# one group together and the five groups collapse to two. Such a feature gets no profile and no
+# `monotonicity` value.
+#
+# The return of a group is averaged twice, first over the contracts in it at one settlement and
+# then over settlements, so a settlement quoting nineteen contracts counts once and so does one
+# quoting ten. That is what a book rebalanced at every settlement earns, and it is the unit the
+# score alongside is already built on, so the two weigh the sample the same way. Averaging every
+# contract-settlement in one pass instead would let the widest settlements decide the profile,
+# and it would do so without any sign of having done it: the five bars still appear and still
+# carry a `monotonicity` value.
+#
+# Both the average and the median of each group are drawn. The average is what a book holding
+# every contract in the group earns; the median is where the typical contract ends up. Eight-hour
+# crypto returns have heavy tails, so the two can point in opposite directions, and where they do
+# the rank score sides with the median, because both ignore how far the extremes reach and it is
+# exactly that reach the average is picking up. The `monotonicity` column written to the ledger
+# is computed on the averages, which is the convention shared with the other eight case studies.
+#
+# Features are chosen for this figure by score, skipping any whose score series is identical to
+# one already drawn. Four of the premium features produce the same ordering of contracts at every
+# settlement, so drawing them all would repeat one chart four times. Section 7 comes back to that.
 
 # %%
-shape_features = eval_summary.filter(pl.col("fdr_sig"))["feature"].to_list()[:6]
-if not shape_features:
-    shape_features = eval_summary.head(6)["feature"].to_list()
+FEATURES_SHAPED = 6
 
+
+shape_features: list[str] = []
 quantile_profiles = {}
 monotonicity = {}
-for feature in shape_features:
-    valid = eval_panel.select("timestamp", feature, mds.label_col).drop_nulls()
-    ranked = valid.with_columns(
-        (
-            (pl.col(feature).rank(method="ordinal").over("timestamp") - 1)
-            * N_QUANTILES
-            / pl.len().over("timestamp")
-        )
-        .floor()
-        .clip(0, N_QUANTILES - 1)
-        .cast(pl.Int8)
-        .alias("quantile")
+too_coarse: list[str] = []
+for candidate in eval_summary.filter(pl.col("fdr_sig"))["feature"].to_list():
+    if any(
+        ic_timeseries[candidate].height == ic_timeseries[chosen].height
+        and np.allclose(ic_timeseries[candidate]["ic"], ic_timeseries[chosen]["ic"])
+        for chosen in shape_features
+    ):
+        continue
+    profile = quantile_profile(
+        eval_panel,
+        candidate,
+        mds.label_col,
+        date_col="timestamp",
+        n_quantiles=N_QUANTILES,
+        min_cross_section=MIN_CROSS_SECTION,
     )
-    profile = (
-        ranked.group_by("quantile")
-        .agg(
-            pl.col(mds.label_col).mean().alias("mean"),
-            pl.col(mds.label_col).median().alias("median"),
-        )
-        .sort("quantile")
-    )
-    means = profile["mean"].to_list()
-    quantile_profiles[feature] = {"mean": means, "median": profile["median"].to_list()}
-    monotonicity[feature] = float(spearmanr(range(len(means)), means).statistic)
+    if profile is None:
+        too_coarse.append(candidate)
+        continue
+    shape_features.append(candidate)
+    quantile_profiles[candidate] = {
+        "mean": profile.means,
+        "median": profile.medians,
+        "settlements": (profile.periods_used, profile.periods_available),
+    }
+    monotonicity[candidate] = profile.monotonicity
+    if len(shape_features) == FEATURES_SHAPED:
+        break
 
-print(
-    f"Strongly monotone profiles: {sum(abs(value) >= 0.8 for value in monotonicity.values())}/{len(monotonicity)}"
-)
+print(f"profiles built for {len(shape_features)} features with distinct score series")
+for feature in shape_features:
+    used, available = quantile_profiles[feature]["settlements"]
+    print(f"  {feature}: {used:,} of {available:,} settlements split {N_QUANTILES} ways")
+if too_coarse:
+    print(f"too few distinct values to split at any settlement: {', '.join(too_coarse)}")
 
 # %%
 fig, axes = plt.subplots(2, 3, figsize=(12, 7), sharex=True)
 for ax, feature in zip(axes.flat, shape_features, strict=False):
     profile = quantile_profiles[feature]
     bins = range(1, len(profile["mean"]) + 1)
-    ax.bar(bins, profile["mean"], color=COLORS["blue"], label="mean")
+    ax.bar(bins, profile["mean"], color=COLORS["blue"], label="group average")
     ax.plot(
-        bins, profile["median"], color=COLORS["amber"], marker="o", markersize=3, label="median"
+        bins,
+        profile["median"],
+        color=COLORS["amber"],
+        marker="o",
+        markersize=3,
+        label="group median",
     )
     ax.axhline(0, color=COLORS["neutral"], linewidth=0.7)
-    ax.set_title(feature)
-    ax.set_xlabel("Within-time quintile")
-    ax.set_ylabel("Forward return (decimal)")
+    ax.set_title(feature, fontsize=9)
+    ax.set_ylabel("Forward eight-hour return")
+for ax in axes[-1]:
+    ax.set_xlabel("Group, lowest to highest within a settlement")
 axes.flat[0].legend(frameon=False, fontsize=7)
 for ax in axes.flat[len(shape_features) :]:
     ax.set_visible(False)
 fig.suptitle(
-    "Where the mean and the median disagree, the rank IC follows the median",
+    "Where the average and the median disagree, the score follows the median",
     x=0.06,
     ha="left",
     color=COLORS["blue"],
     fontweight="semibold",
 )
 fig.tight_layout(rect=(0, 0, 1, 0.95))
-plt.show()
+show_with_alt(
+    fig,
+    "Six small panels, one per feature, each with five bars for the group average return and an "
+    "amber line for the group median across the same five groups.",
+)
 
 # %% [markdown]
-# ## 6. Redundancy and Feature Families
+# ## 7. Which features are the same evidence twice?
 #
-# The family map is one-to-one and matches notebook 03. Temporal features form
-# separate volatility and regime families.
+# Forty scores are not forty independent pieces of evidence. Features built from the same input
+# over overlapping windows move together, and a linear model given both cannot separate their
+# contributions. The pairwise rank correlation below is computed on a sample of roughly two
+# hundred settlements, which is enough to rank the pairs and cheap enough to compute over every
+# pair; the threshold above which a pair counts as redundant is the same one notebook 03 uses to
+# cut its redundancy tree, read from the configuration rather than retyped.
+#
+# Each feature also carries a **family**, the group of features built from one input under one
+# hypothesis. The register lives in `config/setup.yaml` and notebook 03 assigns from it, so this
+# notebook assigns from the same register rather than restating it. The two families produced by
+# notebook 04 are added here, because they are the output of a model rather than a construction
+# from the price and funding record.
 
 # %%
-financial_families = {
-    "carry_funding": [
-        name
-        for name in financial_cols
-        if name.startswith("premium_zscore_")
-        or name.startswith("funding_rate")
-        or name
-        in {"premium_level", "premium_rank", "cum_positive_funding_7d", "funding_half_life_14d"}
-    ],
-    "mean_reversion": [
-        name
-        for name in financial_cols
-        if any(key in name for key in ["dev_mean", "quantile_pos", "persistence"])
-    ],
-    "momentum": [
-        name
-        for name in financial_cols
-        if name.startswith("premium_change_") or name.startswith("premium_accel_")
-    ],
-    "volatility": [
-        name
-        for name in financial_cols
-        if name.startswith(("premium_vol_", "price_vol_", "vol_ratio_"))
-    ],
-    "cross_sectional": [
-        name
-        for name in financial_cols
-        if name in {"premium_vs_median", "premium_xs_zscore", "xs_funding_dispersion"}
-    ],
-    "regime_calendar": [
-        name
-        for name in financial_cols
-        if name.startswith(("premium_regime_", "premium_rsi_"))
-        or name in {"funding_session", "cost_tier_alt"}
-    ],
-}
-
-# %% [markdown]
-# Temporal family membership follows the model that produced each column.
-
-# %%
-families = {
-    **financial_families,
-    "temporal_volatility": [name for name in temporal_cols if name.startswith("garch_")],
-    "temporal_regime": [name for name in temporal_cols if name.startswith("hmm_")],
-}
-memberships = {
-    name: [family for family, columns in families.items() if name in columns]
-    for name in mds.feature_names
-}
-assert all(len(value) == 1 for value in memberships.values())
-feature_family = {name: value[0] for name, value in memberships.items()}
+families = dict(assign_families(financial_cols, FAMILY_REGISTER))
+families.update(
+    {name: "temporal_volatility" for name in temporal_cols if name.startswith("garch_")}
+)
+families.update({name: "temporal_regime" for name in temporal_cols if name.startswith("hmm_")})
+assert set(families) == set(mds.feature_names)
+display(
+    pl.DataFrame({"feature": list(families), "family": list(families.values())})
+    .group_by("family")
+    .agg(pl.len().alias("features"))
+    .sort("family")
+)
 
 # %%
 sample_dates = (
@@ -571,17 +810,18 @@ sample_dates = (
 )
 correlation_sample = eval_panel.filter(pl.col("timestamp").is_in(sample_dates))
 high_corr_pairs = []
-for left_idx, left in enumerate(identifiable):
-    for right in identifiable[left_idx + 1 :]:
+for left_idx, left in enumerate(rankable):
+    for right in rankable[left_idx + 1 :]:
         pair = correlation_sample.select(left, right).drop_nulls()
-        if len(pair) < 20:
+        if len(pair) < MIN_IC_PERIODS:
             continue
         correlation = float(spearmanr(pair[left].to_numpy(), pair[right].to_numpy()).statistic)
-        if np.isfinite(correlation) and abs(correlation) > 0.7:
+        if np.isfinite(correlation) and abs(correlation) > REDUNDANCY_CUT:
             high_corr_pairs.append((left, right, correlation))
 
 high_corr_pairs.sort(key=lambda item: abs(item[2]), reverse=True)
-print(f"Feature pairs with |rho| > 0.7: {len(high_corr_pairs)}")
+print(f"{len(high_corr_pairs)} pairs correlate above {REDUNDANCY_CUT:.2f} in absolute value")
+print(f"measured on {len(sample_dates)} sampled settlements")
 
 # %%
 pair_plot = high_corr_pairs[:20][::-1]
@@ -594,24 +834,86 @@ ax.barh(
     color=[COLORS["blue"] if value >= 0 else COLORS["amber"] for value in pair_values],
 )
 ax.axvline(0, color=COLORS["neutral"], linewidth=0.8)
-ax.set(xlabel="Spearman correlation", ylabel="Feature pair", xlim=(-1, 1))
-add_message_title(ax, "The strongest pairs are near-duplicates, not merely related")
+ax.axvline(REDUNDANCY_CUT, color=COLORS["amber"], linewidth=1.0, linestyle="--")
+ax.axvline(-REDUNDANCY_CUT, color=COLORS["amber"], linewidth=1.0, linestyle="--")
+ax.set(xlabel="Rank correlation over sampled settlements", ylabel="Feature pair", xlim=(-1, 1))
+add_message_title(
+    ax,
+    "The strongest pairs are near-duplicates, not merely related",
+    subtitle="Dashed lines mark the redundancy threshold the case study declares",
+)
 fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Horizontal bars of the twenty most strongly correlated feature pairs, all positive and "
+    "close to one, with dashed lines at the declared redundancy threshold.",
+)
 
 # %% [markdown]
-# ## 7. Triage Ledger
+# A pairwise correlation over pooled settlements understates the sharpest case. Four premium
+# features - the level, its cross-sectional rank, its distance from the cross-sectional median
+# and its cross-sectional z-score - are each a strictly increasing function of the same quantity
+# *within* a settlement. They therefore produce one ordering of the contracts, one score at every
+# settlement, and one row of evidence between them, even though their pooled correlation is below
+# one because the mapping differs from settlement to settlement. Counting them as four is what
+# the search accounting in section 5 does, and it is conservative in the right direction.
+
+# %%
+identical_groups: dict[str, list[str]] = {}
+for feature in eval_summary_ordering:
+    for representative, members in identical_groups.items():
+        if ic_timeseries[feature].height == ic_timeseries[representative].height and np.allclose(
+            ic_timeseries[feature]["ic"], ic_timeseries[representative]["ic"]
+        ):
+            members.append(feature)
+            break
+    else:
+        identical_groups[feature] = [feature]
+display(
+    pl.DataFrame(
+        [
+            {"features carrying one ordering": ", ".join(members), "count": len(members)}
+            for members in identical_groups.values()
+            if len(members) > 1
+        ]
+    )
+)
+
+# %% [markdown]
+# ## 8. The ledger
 #
-# `PROCEED` means the feature has useful univariate validation evidence. `REVISE`
-# means it remains a plausible conditioning or interaction variable. `STOP` is
-# reserved for an upstream quality failure. These labels are diagnostic only:
-# downstream notebooks continue to train the declared 44-feature matrix, avoiding
-# a second layer of selection on the same validation windows.
+# Every feature gets a decision and the evidence behind it, written to
+# `evaluation/triage_ledger.parquet`. Chapter 20 reads that file for all nine case studies at once
+# and builds its comparison from it.
+#
+# The rule has two ways to reach `PROCEED`, and they answer different questions. The first is the
+# **confirmation** arm: the feature cleared the correction for the size of the search, so its
+# score is unlikely to be an artifact of having looked at forty things. The second is the
+# **exploration** arm: the feature held its sign in both validation years and its average score
+# clears the exploration threshold printed at the top of the notebook in absolute value. That
+# threshold is a judgment, not an inference. It exists so
+# that a small cross-section, where almost nothing clears a corrected significance test, does not
+# leave the next stage with nothing to model, and it is set an order of magnitude below the
+# strongest scores here and an order of magnitude above the ones indistinguishable from zero. A
+# feature promoted this way has not been confirmed, and the ledger's `note` column records which
+# arm fired so that a reader can tell the two apart.
+#
+# `REVISE` is not a rejection. It says the feature has no univariate evidence of its own, which is
+# the expected outcome for a conditioning variable whose job is to change how another feature
+# should be read.
+#
+# The third outcome the book's rule defines, `STOP`, is for a feature whose column cannot be
+# trusted. It does not appear in this ledger, because the completeness check in section 3 raises
+# rather than passing such a column through to here.
+#
+# None of the three filters anything. The model notebooks train on all forty-four features. Making
+# this a selection step would choose features on the same validation years the models are then
+# scored on, which is how a validation result stops meaning anything.
 
 
 # %%
 def assign_triage(feature: str, quality_row: dict, result: dict | None) -> tuple[str, str]:
-    """Apply diagnostic triage without changing the model input contract."""
+    """Apply the book's triage rule without changing the model input contract."""
     if not quality_row["quality_pass"]:
         return "STOP", "quality_failure"
     if result is None:
@@ -626,9 +928,6 @@ def assign_triage(feature: str, quality_row: dict, result: dict | None) -> tuple
     return "REVISE", "weak_univariate"
 
 
-# %% [markdown]
-# The ledger retains the evidence needed to reproduce each label.
-
 # %%
 fdr_lookup = {row["feature"]: row for row in eval_summary.to_dicts()}
 ledger_rows = []
@@ -639,7 +938,7 @@ for feature in mds.feature_names:
     ledger_rows.append(
         {
             "feature": feature,
-            "family": feature_family[feature],
+            "family": families[feature],
             "source": quality_row["source"],
             "mean_ic": None if result is None else result["mean_ic"],
             "hac_t": None if result is None else result["t_stat"],
@@ -655,7 +954,7 @@ for feature in mds.feature_names:
 
 triage_ledger = pl.DataFrame(ledger_rows)
 triage_ledger.write_parquet(EVAL_DIR / "triage_ledger.parquet")
-print(triage_ledger.group_by("decision").len().sort("decision"))
+display(triage_ledger.group_by("decision", "note").len().sort("decision", "note"))
 
 # %%
 ic_ts_all = pl.concat(
@@ -665,20 +964,51 @@ ic_ts_all = pl.concat(
     ]
 )
 ic_ts_all.write_parquet(EVAL_DIR / "ic_timeseries.parquet")
-print(f"Saved triage ledger: {len(triage_ledger)} features")
-print(f"Saved IC series: {len(ic_ts_all):,} feature-timestamps")
+print(f"triage ledger: {len(triage_ledger)} features")
+print(f"score series: {len(ic_ts_all):,} feature-settlements")
+
+# %% [markdown] tags=["results"]
+# The ledger records **32** features at `PROCEED` and **12** at `REVISE`. **30** of the 32 were
+# promoted by clearing the correction for the size of the search, and the other **2** by the
+# exploration arm; **4** of the 12 are the market-wide columns with no cross-sectional score at
+# all. **45** feature pairs correlate above **0.70** in absolute value, and **4** premium features
+# produce one and the same ordering of the contracts, so the forty-four columns carry
+# substantially fewer than forty-four distinct pieces of evidence.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. The evaluation frame contains each validation key once and preserves the
-#    current 39-plus-five feature contract; `fold` is metadata, never a feature.
-# 2. IC is computed within each decision-time cross-section and HAC inference uses
-#    the ordered validation IC series from the canonical purged folds.
-# 3. Market-level state variables remain in the training frame even though they
-#    cannot have cross-sectional IC at a single timestamp.
-# 4. Triage records univariate evidence but does not filter the 44 model inputs,
-#    preventing validation-driven feature selection from being reused downstream.
+# 1. **Score a feature the way the strategy will use it.** The strategy ranks contracts against
+#    each other at one settlement, so the score is a correlation across contracts at one
+#    settlement, averaged over settlements. Every diagnostic built on top of it - the group
+#    profile, the redundancy check - is built the same way, so they answer one question rather
+#    than three that happen to agree.
+# 2. **Build the evaluation frame from the folds, not from the calendar.** Where a feature is
+#    itself fitted per fold, a row is out of sample only in the fold that tests it, and using one
+#    fold's version of the column everywhere quietly scores a model on its own training data.
+# 3. **The error bar is part of the estimate.** The average of a score series is easy; whether the
+#    settlements are independent enough to average that way is the question, and it is answered by
+#    the dependence actually present in the series rather than assumed away.
+# 4. **Adjust for the size of the search and say what the size was.** A significance claim with no
+#    statement of how many candidates were tried cannot be interpreted, and the number of features
+#    scored is not the same as the number searched when several are the same ordering in disguise.
+# 5. **Screening is not selection.** The ledger is a record. Filtering the training matrix on
+#    validation evidence, and then measuring the model on the same validation years, is the
+#    mistake this separation exists to prevent.
 #
-# **Next**: `06_linear` establishes regularized linear baselines on this fixed
-# modeling contract.
+# **Known limitations**
+#
+# - Univariate screening cannot see an interaction. A feature that only works in one regime, or
+#   only in combination with another, scores near zero here and may still be useful. Chapters 11
+#   and 12 make the decisive judgments.
+# - Two folds is enough to tell "worked twice" from "worked once" and not enough for a
+#   distribution. An interquartile range across two numbers would be an ornament.
+# - The score is measured on the settlements where at least ten contracts are quoted, which
+#   excludes two stretches of about a month. Whatever happened in those stretches is not in any
+#   number here.
+# - Nothing in this notebook says a feature is tradable. A score of the size seen here has to
+#   survive costs, position sizing and turnover before it earns anything, and those are the
+#   subject of the backtest notebooks.
+#
+# **Next**: [`06_linear`](06_linear.ipynb) fits the first models on the full forty-four-column
+# frame.
