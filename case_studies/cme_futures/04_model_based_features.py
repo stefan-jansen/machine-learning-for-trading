@@ -1607,10 +1607,10 @@ if len(hmm_param_df) > 0:
         "Two side-by-side line panels with one point per period, period 0 most recent, five "
         "periods in all. The left panel plots average carry in each state: the higher-carry "
         "state stays above zero and the lower-carry state well below it in every period, and "
-        "the two lines never approach each other. The right panel plots how many sessions each "
-        "state lasts, with the estimated run length and the expected run length implied by the "
-        "staying probability drawn together; both states persist for roughly three weeks and "
-        "the two states' lines sit close to one another throughout.",
+        "the two lines never approach each other. The right panel plots one dotted line per "
+        "state, each the run length that state's own staying probability implies as 1/(1 - p). "
+        "Both sit a little above twenty sessions in every period and stay close together, so "
+        "the states differ in the carry they carry rather than in how long they last.",
     )
 
 # %% [markdown] tags=["results"]

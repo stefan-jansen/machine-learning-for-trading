@@ -930,8 +930,9 @@ show_plotly_with_alt(
     "correlation in each validation window as a small grey dot, with an amber diamond marking "
     "the middle window. A vertical rule marks zero. Most rows have dots on both sides of that "
     "rule, so the feature's direction reverses from one window to the next; only a couple of "
-    "rows keep every dot on one side. The dots for a given feature spread far wider than the "
-    "distance any of them sits from zero.",
+    "rows keep every dot on one side. Within a row the dots are spread across much of the "
+    "chart's width, so the disagreement between windows is the dominant feature of the "
+    "picture rather than the position of any one of them.",
 )
 
 # %% [markdown]
@@ -986,8 +987,8 @@ show_plotly_with_alt(
     "same t-statistic computed as if sessions were independent, with a dashed 45-degree "
     "reference line. Every point sits between that line and the horizontal axis rather than on "
     "it, so each corrected value is smaller in magnitude than the uncorrected one, and the gap "
-    "widens with distance from the origin. Points shaded dark are the features that still clear "
-    "the threshold once the correction is applied.",
+    "widens with distance from the origin. Points are shaded by whether the feature clears "
+    "false-discovery control, and almost all of them are in the colour that does not.",
 )
 
 # %% [markdown]
@@ -1146,7 +1147,8 @@ show_plotly_with_alt(
     "sign at the primary horizon. In the left panel, measuring the mean rank correlation, the "
     "positive and negative groups stay cleanly on their own sides of zero at both horizons and "
     "no line crosses over. The right panel divides each mean by its spread across windows; the "
-    "same separation holds, and every value there is far below one in magnitude.",
+    "same separation holds there, and the negative group sits further from zero on that scale "
+    "than the positive group does.",
 )
 
 # %% [markdown]
