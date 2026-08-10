@@ -27,7 +27,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from matplotlib.figure import Figure
-from ml4t.diagnostic.signal import quantize_factor
 from scipy.cluster.hierarchy import dendrogram, fcluster, linkage, set_link_color_palette
 from scipy.spatial.distance import squareform
 from scipy.stats import spearmanr
@@ -590,6 +589,13 @@ def quantile_profile(
         valid = valid.with_columns(
             (pl.col(label) - pl.col(label).mean().over(date_col)).alias(scored)
         )
+
+    # Imported here rather than at module scope. `test-unit` builds a deliberately small
+    # environment for this module's figure tests - its own comment says matplotlib and
+    # hmmlearn are the whole import surface and that nothing here pulls an `ml4t-*`
+    # package, which is what keeps it a fast per-commit gate. A module-level import of
+    # `ml4t.diagnostic` fails that job at collection, which is exactly what it did.
+    from ml4t.diagnostic.signal import quantize_factor
 
     binned = quantize_factor(valid, n_quantiles=n_quantiles, factor_col=feature, date_col=date_col)
     profile = (
