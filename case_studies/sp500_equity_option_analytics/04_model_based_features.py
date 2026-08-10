@@ -84,11 +84,11 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_ser
 
 from case_studies.utils.artifact_digest import read_digest, value_digest, write_artifact
 from case_studies.utils.cv_window import modeling_fold_boundaries
-from data import load_sp500_daily_bars
+from data import load_sp500_daily_bars, load_sp500_options_surface
 from utils.artifact_specs import load_setup_config, resolve_label_horizon
 from utils.cv_splits import load_evaluation_config
 from utils.paths import display_path, get_case_study_dir
-from utils.style import ml4t_palette
+from utils.style import ml4t_palette, show_plotly_with_alt
 
 # %% [markdown]
 # `MIN_OBS` is the shortest estimation window a fit is attempted on. A GJR-GARCH has four
@@ -300,7 +300,16 @@ fig.update_layout(
     height=340,
 )
 fig.update_yaxes(autorange="reversed")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Timeline with one row per fold, earliest at the top. Each row carries a dark two-year "
+    "estimation bar and, immediately to its right, a gold inference bar. Fold 1 estimates from "
+    "January 2017 to December 2018 and runs over 2019; fold 0 estimates from January 2018 to "
+    "December 2019 and runs over 2020; the third row, labelled as the holdout fold, estimates "
+    "from January 2019 to December 2020 and runs over 2021. A dashed vertical rule marks the "
+    "start of 2021. Every dark bar ends to the left of both its own gold bar and the rule, and "
+    "the holdout fold's gold bar is the only one that crosses the rule.",
+)
 
 # %% [markdown]
 # ## C. The conditional volatility model
@@ -463,10 +472,35 @@ def fit_and_filter(returns: pd.Series, row: dict) -> tuple[pd.Series, dict] | No
 # emitted value is named by the ticker its security actually traded under on that session. The
 # row-count assertion beside it is what would catch a filtered value with no bar to name it,
 # which would be a value nothing downstream could reach.
+#
+# **The universe is bounded before any fit, and the bound is the one `setup.yaml::universe`
+# declares.** `eligibility_rule` is `sp500_with_options`, so a name qualifies by carrying an
+# option surface. The share-bar extract is wider than that and the loader takes a `symbols=`
+# argument nothing was passing, so this artifact carried a fitted conditional volatility for
+# names the strategy can never hold - they have no implied volatility to rank on, so
+# `garch_ivrv_spread` was null for every one of their rows while the other two columns were not.
+# The roster is derived from the surface rather than typed out, and checked in both directions:
+# its size against the declared `n_assets`, and every roster name against the share bars.
 
 # %%
 ENTITY = "sec_id"
-bars = load_sp500_daily_bars(start_date=START_DATE, end_date=END_DATE).sort([ENTITY, "timestamp"])
+# The surface is loaded for its roster alone; no column of it is read here.
+_surface = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
+ROSTER = sorted(_surface["symbol"].unique().to_list())
+extract = load_sp500_daily_bars(start_date=START_DATE, end_date=END_DATE)
+assert len(ROSTER) == SETUP["universe"]["n_assets"], (
+    f"{len(ROSTER)} names carry an option surface against a declared "
+    f"universe.n_assets of {SETUP['universe']['n_assets']}"
+)
+priced = set(extract["symbol"].unique().to_list())
+assert not set(ROSTER) - priced, f"no share bars for {sorted(set(ROSTER) - priced)}"
+outside = sorted(priced - set(ROSTER))
+print(
+    f"Universe {len(ROSTER)} names with an option surface; {len(outside)} priced names carry none "
+    f"and are excluded ({', '.join(outside)})"
+)
+
+bars = extract.filter(pl.col("symbol").is_in(ROSTER)).sort([ENTITY, "timestamp"])
 bars = bars.with_columns((pl.col("close") * pl.col("adj_factor")).alias("adj_close"))
 # One security trades under one ticker on one session. Without that, `sec_id` does not identify a
 # price series and every window below would be taken across companies - which is the failure this
@@ -640,8 +674,8 @@ ordered_folds = sorted(splits, key=lambda row: row["fit_start"])
 axis_labels = [
     f"fold {row['fold']}<br>{row['fit_start'][:7]} to {row['fit_end'][:7]}" for row in ordered_folds
 ]
-# Two of the four palette colours are near-identical navies, so each line also carries its own
-# dash pattern and marker; the chart stays readable where the colours do not separate.
+# Each line carries its own dash pattern and marker as well as its colour, so the four stay
+# separable in a monochrome print and for a reader who cannot distinguish two of them.
 parameter_colours = ml4t_palette(4, categorical=True)
 styles = [
     ("alpha", parameter_colours[0], "solid", "circle", 2),
@@ -672,7 +706,17 @@ fig.update_layout(
     yaxis_title="Estimated parameter value",
     height=430,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four series against the three estimation windows in the order they run, each drawn at the "
+    "median across securities with a bar spanning the middle half. Persistence is highest "
+    "throughout, near 0.94 on the first window, dipping to about 0.87 on the second and rising "
+    "to about 0.97 on the third. Beta tracks just below it and moves the same way, from about "
+    "0.85 down to 0.76 and back to 0.82. Gamma rises steadily across the three windows from "
+    "about 0.05 to about 0.14, and alpha sits near zero on the first two windows before rising "
+    "to about 0.06 on the third. The middle-half bars are widest on beta and persistence and "
+    "narrow on alpha and gamma. No series is flat across the three windows.",
+)
 
 # %%
 stability = (
@@ -781,7 +825,17 @@ fig.update_layout(
     yaxis_title="Annualized volatility",
     height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two lines of median annualized volatility across securities over the two inference spans, "
+    "2019 and 2020, with dotted rules at each fold start. Through 2019 both run together between "
+    "roughly 0.18 and 0.30. In late February 2020 both climb steeply; the conditional volatility "
+    "peaks first, near 1.0, and falls back below 0.4 within about six weeks, while the "
+    "twenty-session realized volatility peaks higher, near 1.2, holds that level for several "
+    "weeks and then declines in steps through the summer. From July 2020 the realized line stays "
+    "above the conditional one for most of the rest of the year, including a separate rise to "
+    "about 0.42 in the autumn that the conditional line barely registers.",
+)
 
 # %% [markdown]
 # ## E. Combine and emit
@@ -1016,7 +1070,15 @@ else:
         margin=dict(l=170, r=70),
         height=340,
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Three horizontal bars of mean information coefficient on an axis running from minus "
+        "0.01 to plus 0.01, with a rule at zero. `garch_cond_vol` reaches furthest left at about "
+        "minus 0.0065, `garch_ivrv_spread` to about minus 0.0032, and `garch_vol_surprise` right "
+        "to about plus 0.003. Each bar is labelled with its HAC t-statistic, none of which "
+        "exceeds 0.6 in absolute value. Every bar is drawn in the lighter colour, which is what "
+        "the chart uses for a feature that did not clear the false-discovery threshold.",
+    )
 
 # %% [markdown]
 # ### F5. The forecast denominator against the memory denominator
@@ -1109,7 +1171,16 @@ if COMPARABLE:
         margin=dict(t=90),
         height=440,
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Three bars of mean information coefficient about a rule at zero, each labelled with its "
+        "value and HAC t-statistic. The memory denominator and the forecast denominator are both "
+        "negative and drawn in the same dark colour, the memory one about twice the depth of the "
+        "forecast one. The paired difference is drawn in a separate lighter colour and is "
+        "positive, and it is the smallest of the three in absolute size. All three sit inside a "
+        "range of about 0.008, and none of the three t-statistics reaches half of the "
+        "conventional threshold of two.",
+    )
 
 # %% [markdown] tags=["results"]
 # On the **184,299** rows where both variants are defined, across **497** decision dates, the
