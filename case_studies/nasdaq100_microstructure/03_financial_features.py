@@ -552,8 +552,10 @@ def order_flow_features(df: pl.DataFrame) -> pl.DataFrame:
 # traded, and the library's estimator is what computes it here. Averaging is what makes it a
 # statement about how deep the market for a name is rather than about one bar: a single
 # bar's ratio of return to dollars is dominated by whichever bar happened to trade thinnest,
-# and carries a different scale. It is null on a bar that printed no trades at all, because
-# price impact per dollar traded is undefined when nothing traded. **Kyle's lambda**
+# and carries a different scale. On a bar that printed no trades the ratio itself is
+# undefined, because price impact per dollar traded means nothing when nothing traded; the
+# estimator drops that bar from the window it averages rather than emptying the window, so
+# the feature is null only where no bar in the window traded. **Kyle's lambda**
 # regresses the return on the signed share over a rolling hour
 # and is kept local: the identity form below has a warmup of exactly its window where a
 # two-pass covariance would need twice that.
