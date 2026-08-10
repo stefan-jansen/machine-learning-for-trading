@@ -13,6 +13,9 @@ never reads ``val_start``.
 
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -147,3 +150,118 @@ def test_a_variant_fold_with_no_counterpart_is_a_violation(geometries) -> None:
 def test_a_missing_primary_geometry_raises_rather_than_passing(geometries) -> None:
     with pytest.raises(ValueError, match="No folds derivable"):
         assert_variant_folds_are_out_of_sample("cs", "primary")
+
+
+def _tiny_case_study(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, splits: list[dict]):
+    """A case study with one primary label, one variant, and a fold-tagged artifact.
+
+    Small enough to be read at a glance and complete enough that
+    ``load_modeling_dataset`` runs the same path a model notebook does.
+    """
+    import polars as pl
+
+    import utils.modeling as modeling
+
+    case_dir = tmp_path / "cs"
+    (case_dir / "config").mkdir(parents=True)
+    (case_dir / "features").mkdir()
+    (case_dir / "labels").mkdir()
+    (case_dir / "config" / "setup.yaml").write_text(
+        "labels:\n  primary: primary\n  buffer: 1D\n  variants: [variant]\n"
+        "  variant_buffers:\n    variant: 1D\n"
+    )
+
+    days = pl.datetime_range(
+        datetime(2020, 1, 1), datetime(2020, 12, 31), "1d", eager=True
+    ).dt.date()
+    frame = {"timestamp": days, "symbol": ["AAA"] * len(days)}
+    pl.DataFrame({**frame, "primary": [0.1] * len(days)}).write_parquet(
+        case_dir / "labels" / "primary.parquet"
+    )
+    pl.DataFrame({**frame, "variant": [0.1] * len(days)}).write_parquet(
+        case_dir / "labels" / "variant.parquet"
+    )
+    pl.DataFrame({**frame, "feature": [1.0] * len(days)}).write_parquet(
+        case_dir / "features" / "financial.parquet"
+    )
+    pl.DataFrame({**frame, "fold": [0] * len(days), "fitted": [2.0] * len(days)}).write_parquet(
+        case_dir / "features" / "model_based.parquet"
+    )
+
+    monkeypatch.setattr(modeling, "get_case_study_dir", lambda _case_id: case_dir)
+    monkeypatch.setattr(modeling, "load_feature_spec", lambda *_args: {})
+    monkeypatch.setattr(modeling, "load_label_spec", lambda *_args: {})
+    monkeypatch.setattr(
+        modeling,
+        "resolve_storage_path",
+        lambda _case_id, _spec, fallback: case_dir / fallback,
+    )
+    monkeypatch.setattr(modeling, "resolve_label_buffer", lambda *_args: "1D")
+    monkeypatch.setattr(modeling, "resolve_label_horizon", lambda *_args: "1D")
+    monkeypatch.setattr(modeling, "generate_cv_splits", lambda *_a, **_k: splits)
+    monkeypatch.setattr(modeling, "make_wf_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cv_window,
+        "_load_setup_yaml",
+        lambda _cs: {"labels": {"primary": "primary", "variants": ["variant"]}},
+    )
+    return modeling
+
+
+# The whole fold: the artifact's fold 0 covers it, so coverage has nothing to say.
+_WHOLE_YEAR = _splits([("2020-01-01", "2020-06-20", "2020-06-25", "2020-12-31")])
+
+
+def test_loading_a_variant_whose_validation_opens_inside_the_fit_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard had no production call site, so nothing ran it on a real load.
+
+    ``validate_temporal_fold_coverage`` passes here - the artifact covers every date
+    in the window - which is why coverage was never going to catch this.
+    """
+    modeling = _tiny_case_study(tmp_path, monkeypatch, _WHOLE_YEAR)
+    store = {
+        "primary": _splits([("2020-01-01", "2020-06-20", "2020-06-25", "2020-12-31")]),
+        "variant": _splits([("2020-01-01", "2020-06-10", "2020-06-15", "2020-12-31")]),
+    }
+    monkeypatch.setattr(cv_window, "_derive_modeling_splits", lambda _cs, lab: store.get(lab))
+
+    with pytest.raises(AssertionError, match="reach into a variant label's validation span"):
+        modeling.load_modeling_dataset("cs", "variant")
+
+
+def test_loading_a_variant_whose_validation_opens_after_the_fit_is_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    modeling = _tiny_case_study(tmp_path, monkeypatch, _WHOLE_YEAR)
+    store = {
+        "primary": _splits([("2020-01-01", "2020-06-20", "2020-06-25", "2020-12-31")]),
+        "variant": _splits([("2020-01-01", "2020-06-24", "2020-06-30", "2020-12-31")]),
+    }
+    monkeypatch.setattr(cv_window, "_derive_modeling_splits", lambda _cs, lab: store.get(lab))
+
+    mds = modeling.load_modeling_dataset("cs", "variant")
+    assert mds.label_col == "variant"
+    # The check hangs off the fold-tagged artifact, so a fixture that loaded no
+    # artifact would pass this file vacuously.
+    assert mds.temporal_by_fold is not None
+
+
+def test_loading_the_primary_label_does_not_check_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The artifact is built on the primary's own geometry, so there is nothing to check.
+
+    The variant geometry left in the store leaks, and loading the primary still
+    succeeds: the check is scoped to the label being loaded rather than sweeping
+    every configured label on every load.
+    """
+    modeling = _tiny_case_study(tmp_path, monkeypatch, _WHOLE_YEAR)
+    store = {
+        "primary": _splits([("2020-01-01", "2020-06-20", "2020-06-25", "2020-12-31")]),
+        "variant": _splits([("2020-01-01", "2020-06-10", "2020-06-15", "2020-12-31")]),
+    }
+    monkeypatch.setattr(cv_window, "_derive_modeling_splits", lambda _cs, lab: store.get(lab))
+
+    assert modeling.load_modeling_dataset("cs", "primary").label_col == "primary"

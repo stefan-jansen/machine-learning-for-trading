@@ -433,10 +433,17 @@ jobs:
         # matplotlib and hmmlearn are the import surface of the shared stage-03
         # and stage-04 helpers below. Neither pulls torch or an ml4t-* package,
         # so this stays a fast per-commit gate.
+        #
+        # pyarrow is what polars converts through in `DataFrame.to_pandas`, which
+        # `load_modeling_dataset` calls on the fold-tagged temporal artifact. The
+        # variant-geometry guard hangs off exactly that frame, so without pyarrow
+        # the tests that establish the guard runs on a real load fail at the
+        # conversion rather than at the property. Found by this job, not by
+        # inspection: the helper-level tests never reach the conversion and passed.
         run: |
           uv venv --python 3.14
           uv pip install pytest numpy polars pyyaml python-dotenv plotly gymnasium requests \
-            scipy statsmodels scikit-learn matplotlib hmmlearn
+            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -514,6 +521,15 @@ jobs:
       # defect in eight rendered notebooks at once, which is exactly why they are
       # fixed centrally rather than per notebook - and why the fix needs a gate
       # rather than trusting that eight re-runs would catch a regression.
+      #
+      # The last three are the guards over what load_modeling_dataset returns,
+      # and adding them here is the point rather than tidiness. Both
+      # assert_variant_folds_are_out_of_sample and verify_artifact_sidecars
+      # shipped with tests that no job invoked, which is the same shape as the
+      # defect they were written to catch: a check nothing runs establishes
+      # nothing. They need no data and no ml4t-* package - every ml4t import in
+      # utils/cv_splits.py is inside a function, and these tests substitute the
+      # functions that reach them.
       - name: Run shared case-study helper tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -525,7 +541,21 @@ jobs:
             tests/test_data_quality.py \
             tests/test_feature_engineering_figures.py \
             tests/test_temporal.py \
+            tests/test_variant_fold_geometry.py \
+            tests/test_artifact_sidecar_verification.py \
+            tests/test_artifact_digest.py \
             -v --tb=short
+
+      # Reads only committed notebook JSON and its paired .py, so it belongs to
+      # the fast per-commit gate rather than to a job that needs data. What it
+      # holds is the state a 44-notebook re-execution depends on: a pair without
+      # cell_metadata_filter desyncs on the run, and the notebook-sync gate then
+      # refuses every commit in the repo, not only that notebook's.
+      - name: Every stage 01-05 notebook pair survives a re-execution
+        run: |
+          .venv/bin/python -m pytest \
+            tests/test_notebook_pair_metadata_filter.py \
+            -q --tb=short
 
       # The methodology ratchet. Both files are static AST/source scans over the
       # notebook tree, so they need no data and no model deps, and both were
