@@ -99,7 +99,7 @@ from data.equities.loader import (
 )
 
 # ETFs
-from data.etfs.loader import list_etfs, load_etfs
+from data.etfs.loader import list_etfs, load_etfs, load_etfs_unadjusted
 
 # Exceptions
 from data.exceptions import (
@@ -129,6 +129,7 @@ __all__ = [
     # ETFs
     "list_etfs",
     "load_etfs",
+    "load_etfs_unadjusted",
     # Crypto
     "list_crypto_perps",
     "load_crypto_premium",
