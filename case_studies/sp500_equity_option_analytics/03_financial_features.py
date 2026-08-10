@@ -250,20 +250,55 @@ register_frame(FAMILIES).select(
 # forward fill carries a level over at most the number of sessions `features.windows.iv_forward_fill`
 # declares, which is a stated tolerance for a thin quote rather than a claim that the level is
 # current.
+#
+# **The universe is bounded before either frame is read, and the bound is the one
+# `setup.yaml::universe` declares.** `eligibility_rule` is `sp500_with_options`, and what makes a
+# name satisfy it is carrying an option surface, because the surface is what the ranking is read
+# off. The share-bar extract is wider than that and the loader takes a `symbols=` argument nothing
+# was passing. The keep-or-drop in Section C would have removed the surplus names from the matrix
+# anyway, so bounding here moves no emitted value; what it changes is that the universe becomes a
+# stated bound with an assertion behind it rather than a by-product of a later filter. The roster
+# is derived from the surface rather than typed out, and checked in both directions: its size
+# against the declared `n_assets`, and every roster name against the share bars. A guard that only
+# asks whether every declared name is present says nothing about a present name never declared.
+#
+# The roster is read off the **whole** extract rather than off the requested window, because
+# `n_assets` is a statement about the dataset: a run that narrows `START_DATE` would otherwise
+# assert against a roster missing every name that had not yet listed, and the declaration would
+# fail on a parameter this notebook documents as free to change. The dates bound the panels.
 
 # %%
+full_surface = load_sp500_options_surface()
+full_bars = load_sp500_daily_bars()
+ROSTER = sorted(full_surface["symbol"].unique().to_list())
+assert len(ROSTER) == setup["universe"]["n_assets"], (
+    f"{len(ROSTER)} names carry an option surface against a declared "
+    f"universe.n_assets of {setup['universe']['n_assets']}"
+)
+priced = set(full_bars["symbol"].unique().to_list())
+assert not set(ROSTER) - priced, f"no share bars for {sorted(set(ROSTER) - priced)}"
+outside = sorted(priced - set(ROSTER))
+
+window = pl.col("timestamp").is_between(
+    pl.lit(START_DATE).str.to_date(), pl.lit(END_DATE).str.to_date()
+)
+surface_raw = full_surface.filter(window)
+SURFACE_COLS = [c for c in surface_raw.columns if c not in PANEL_KEY]
+
 daily = (
-    load_sp500_daily_bars(start_date=START_DATE, end_date=END_DATE)
+    full_bars.filter(window & pl.col("symbol").is_in(ROSTER))
     .with_columns((pl.col("close") * pl.col("adj_factor")).alias("adj_close"))
     .sort([SECURITY, "timestamp"])
 )
-surface_raw = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
-SURFACE_COLS = [c for c in surface_raw.columns if c not in PANEL_KEY]
 
 print(f"{daily.height:,} name-sessions of share bars, {daily['symbol'].n_unique()} tickers")
 print(f"{daily[SECURITY].n_unique()} securities behind those tickers")
 print(f"{surface_raw.height:,} surface rows carrying {len(SURFACE_COLS)} columns")
 print(f"{daily['timestamp'].min()} to {daily['timestamp'].max()}")
+print(
+    f"{len(outside)} priced names carry no option surface and are outside the declared universe "
+    f"({', '.join(outside)})"
+)
 
 # %%
 SURFACE_DESCRIPTIONS = {
@@ -741,7 +776,7 @@ register_frame(FAMILIES, feature_cols).select(["family", "columns", "role", "rep
 # %% [markdown] tags=["results"]
 # The matrix carries **45 features** on **481,184 rows** across **626 names**, from **2017-02-01**
 # to **2021-12-31**. Keeping only the rows that carry both an implied and a realized volatility
-# dropped **154,519 name-sessions**, **24.3%** of the sessions the shares traded. Those are the
+# dropped **151,418 name-sessions**, **23.9%** of the sessions the shares traded. Those are the
 # sessions on which a name had no readable implied volatility even after the one-session delay and
 # the five-session carry forward, plus the month of warmup the realized-volatility window costs at
 # the start of each security's series. Past the warmup boundary at **2018-02-01** the thinnest

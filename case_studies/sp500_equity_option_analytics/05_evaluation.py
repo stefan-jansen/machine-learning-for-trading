@@ -110,6 +110,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 style.apply_ml4t_style()
 COLORS = style.COLORS
 GRAY_FILLS = style.GRAY_FILLS
+show_plotly_with_alt = style.show_plotly_with_alt
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0
@@ -551,7 +552,17 @@ fig.update_layout(
     width=1000,
     legend={"orientation": "h", "y": -0.18},
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Scatter of every candidate feature, coverage on the vertical axis against staleness on the "
+    "horizontal, with a dashed rule at each bound. Most points sit in a dense cluster at the top "
+    "left: staleness at or near zero and coverage between about 0.85 and one, all in the colour "
+    "used for features that cleared. The features that failed form two separate groups. One is a "
+    "band below the coverage rule, between about 0.03 and 0.60 covered, at staleness under 0.16. "
+    "The other is a single point at the far right, fully covered but with about 0.99 of its rows "
+    "repeating the previous session. No point sits in the lower-right quadrant, which is where a "
+    "feature failing both bounds would fall.",
+)
 only_staleness = sum(
     1
     for f in all_feature_cols
@@ -809,7 +820,19 @@ if leader:
     fig.update_yaxes(title_text="Cross-sectional Spearman IC", row=1, col=1)
     fig.update_xaxes(title_text="Development session", row=1, col=1)
     fig.update_xaxes(title_text="Mean IC, 95% intervals", row=1, col=2)
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Two panels. On the left, the session-by-session information coefficient of the strongest "
+        "feature as a pale noisy series spanning roughly minus 0.8 to plus 0.65, with a darker "
+        "rolling quarterly mean drawn through it that stays within about 0.1 of zero for most of "
+        "the development window and dips to about minus 0.22 during the first half of 2020. On "
+        "the right, eight features each drawn three ways: a short pale block for the naive "
+        "interval, a longer thin whisker with a dot at the mean for the Newey-West interval, and "
+        "a pair of tick marks for the block-bootstrap bounds. The Newey-West whisker is wider "
+        "than the naive block for every one of the eight. Seven of the eight whiskers cross the "
+        "rule at zero; the near-term term-structure slope is the one that does not, and its "
+        "block-bootstrap ticks reach zero even though its whisker stops short of it.",
+    )
 
 # %% [markdown]
 # ### Is it the same association in every window, or one episode?
@@ -930,7 +953,17 @@ if stability_features:
         margin={"l": 220},
         legend={"orientation": "h", "y": -0.18},
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Eight features, one row each, on an axis of mean information coefficient within a fold "
+        "running from about minus 0.04 to plus 0.03 with a rule at zero. Each row carries the two "
+        "fold means as plain markers, a diamond at the median fold and a cross at the fold "
+        "furthest against the feature's own direction. For five of the eight - the three momentum "
+        "columns, the 7-day implied volatility and the near-term term slope - the two fold means "
+        "sit on opposite sides of zero, so the cross and the diamond straddle the rule. For "
+        "`rv_63` and `gk_vol_21` both folds are negative and the markers bunch together left of "
+        "zero. `mom_skip_recent` has both folds positive.",
+    )
 
 # %% [markdown]
 # ## 3. What did the search cost?
@@ -1167,7 +1200,21 @@ fig.update_yaxes(categoryorder="array", categoryarray=top["feature"].to_list(), 
 fig.update_xaxes(title_text="Mean cross-sectional Spearman IC", row=1, col=1)
 fig.update_xaxes(title_text="Unadjusted t", row=1, col=2)
 fig.update_yaxes(title_text="Newey-West t", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels. On the left, horizontal bars of mean information coefficient for the leading "
+    "features, ordered by absolute size, spanning about minus 0.014 to plus 0.011; the momentum "
+    "horizons and the realized volatility columns run negative and the near-term term slope, "
+    "skip-month momentum and the skew ratio run positive. Every bar is drawn in the colour the "
+    "chart uses for a feature that did not clear the false-discovery adjustment. On the right, "
+    "the Newey-West t-statistic against its unadjusted twin for every feature in the searched "
+    "set, with a dashed diagonal for equality. The points follow the diagonal in direction and "
+    "lie inside it almost everywhere, and the contraction is largest where the unadjusted "
+    "statistic is largest: an unadjusted t of about minus 2.7 maps to about minus 1.6, and one "
+    "of about plus 3.5 to about plus 2.2. Four of the thirty-six move the other way, every one "
+    "of them with a small unadjusted t, and only one is far enough from the diagonal to see - a "
+    "point near plus 0.8 that rises to about plus 1.1.",
+)
 
 # %% [markdown]
 # ## 4. Is the relationship the shape a ranking can use?
@@ -1252,12 +1299,21 @@ if quantile_spreads:
             col=c + 1,
         )
     fig.update_layout(
-        title="The momentum profiles order cleanly; the rest only separate at the top",
+        title="Momentum descends, the term slope ascends, the rest are flat past Q1",
         height=270 * n_rows_fig + 90,
         width=980,
     )
     fig.update_yaxes(title_text="Mean forward return", col=1)
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Six small bar charts, one per feature, each showing the mean forward return of five "
+        "quantile groups formed within each session. The three momentum panels descend from Q1 "
+        "to Q5, `mom_5d` most cleanly from about 0.0035 to 0.0010 and the two 21-day panels with "
+        "a small rise at Q4 before dropping to about 0.0012 at Q5. `term_slope_near_atm` runs the "
+        "other way, rising from about 0.0017 at Q1 to about 0.0031 at Q5. `rv_63` and `gk_vol_21` "
+        "have their highest group at Q1, about 0.0026 and 0.0025, and the remaining four groups "
+        "sit within about 0.0003 of each other with no order among them.",
+    )
     print("Top group minus bottom group, and how ordered the five groups are:")
     for feat in feats_to_show:
         print(
@@ -1456,7 +1512,17 @@ if high_corr_pairs:
         margin={"l": 480},
         showlegend=False,
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Twenty horizontal bars, one per redundant pair, on an axis of mean within-session rank "
+        "correlation running from zero to one. Each is labelled with both members and the family "
+        "each belongs to, and an asterisk marks the member standing for its group. The eight "
+        "strongest all sit at exactly plus 1.00 and every one of them pairs a level column with "
+        "the cross-sectional rank taken from it. Below them the correlations fall slowly through "
+        "0.96, 0.95 and 0.94 - implied volatility maturities against each other, and the "
+        "63-session return against its risk-adjusted twin - and the last four sit at 0.86 and "
+        "0.84, all involving the 7-day implied volatility. Every bar is positive.",
+    )
     print(f"Of the {len(ranked)} strongest pairs, {cross_family} span two families")
 
 # %% [markdown]
@@ -1507,7 +1573,17 @@ if family_rows:
         margin={"l": 230, "r": 180},
         showlegend=False,
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Nine horizontal bars, one per feature family, of mean absolute information coefficient "
+        "within the family, each labelled with how many features stand behind the average. "
+        "Realized volatility, implied volatility level and equity momentum are the top three and "
+        "are within about 0.0002 of each other near 0.0089, on five, four and seven features. "
+        "Skew and term structure and the cross-sectional ranks follow at about 0.0060 and 0.0052. "
+        "Implied volatility dynamics and conditional volatility sit near 0.0037 and 0.0034, both "
+        "on three features. Surface quality and the variance risk premium are lowest at about "
+        "0.0019 and 0.0014, and each rests on a single feature.",
+    )
 
 # %% [markdown]
 # ## 6. One decision per feature
@@ -1657,7 +1733,15 @@ fig.update_layout(
     showlegend=False,
 )
 fig.update_yaxes(autorange="reversed")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Six horizontal bars reading down as a funnel, each labelled with its count. The register "
+    "carries 48 candidates; 36 clear coverage and staleness; the same 36 are rankable and are "
+    "scored across sessions; none clears the false-discovery adjustment, so that bar and the "
+    "confirmation-arm bar below it are both zero and have no visible length. The last bar, in "
+    "the second colour, is the exploration arm at 13. Every promotion in the notebook is in that "
+    "final bar.",
+)
 print("Promoted features, with the arm that promoted each:")
 for f in proceed_features:
     print(
