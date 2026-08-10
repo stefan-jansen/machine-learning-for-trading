@@ -11,6 +11,7 @@ Pins:
 from __future__ import annotations
 
 import polars as pl
+import pytest
 
 from utils.data_quality import (
     apply_max_symbols,
@@ -18,6 +19,7 @@ from utils.data_quality import (
     describe_coverage,
     null_rate,
     validate_features,
+    validate_modeling_inputs,
 )
 
 
@@ -259,5 +261,62 @@ def test_validate_features_handles_an_integer_column() -> None:
     assert validate_features(pl.DataFrame({"f": [1, 2 * 10**9]}), ["f"], max_abs_value=1e6) != []
 
 
-def test_validate_features_skips_columns_the_frame_does_not_have() -> None:
-    assert validate_features(pl.DataFrame({"a": [1.0]}), ["absent"]) == []
+def test_validate_features_refuses_a_column_the_frame_does_not_have() -> None:
+    with pytest.raises(ValueError, match="cannot find 1 of the 1 columns"):
+        validate_features(pl.DataFrame({"a": [1.0]}), ["absent"])
+
+
+def test_validate_features_refuses_an_empty_column_list() -> None:
+    with pytest.raises(ValueError, match="no columns to check"):
+        validate_features(pl.DataFrame({"a": [1.0]}), [])
+
+
+def test_validate_features_allow_missing_reports_the_skipped_names_rather_than_hiding_them() -> (
+    None
+):
+    issues = validate_features(pl.DataFrame({"a": [1.0]}), ["a", "absent"], allow_missing=True)
+    (issue,) = issues
+    assert issue.startswith("WARNING") and "1 of 2" in issue and "absent" in issue
+
+
+def test_the_gate_refuses_a_feature_frame_that_holds_none_of_the_columns_named() -> None:
+    """The nasdaq100_microstructure/05 shape: the financial frame, the model-based names.
+
+    Two artifacts share a key and are joined further down the notebook, so the
+    column list and the frame both exist and neither looks wrong on its own. Every
+    name was skipped and the gate printed ALL CLEAR over nothing.
+    """
+    keys = {"timestamp": [1, 2], "symbol": ["A", "B"]}
+    financial = pl.DataFrame({**keys, "ret_5m": [0.01, -0.02], "spread": [0.3, 0.4]})
+    model_based = pl.DataFrame({**keys, "regime_prob": [0.7, 0.2], "ffd_close": [1.5, 1.6]})
+    labels = pl.DataFrame({**keys, "fwd_ret_15m": [0.01, -0.01]})
+    model_based_cols = [c for c in model_based.columns if c not in keys]
+
+    with pytest.raises(ValueError, match="cannot find 2 of the 2 columns"):
+        validate_modeling_inputs(
+            features_df=financial,
+            label_df=labels,
+            feature_cols=model_based_cols,
+            label_col="fwd_ret_15m",
+        )
+
+    # Against the frame those names come from it passes, and it reads a value:
+    # an infinity in a model-based column is what the gate is there to stop.
+    assert (
+        validate_modeling_inputs(
+            features_df=model_based,
+            label_df=labels,
+            feature_cols=model_based_cols,
+            label_col="fwd_ret_15m",
+        )["n_critical"]
+        == 0
+    )
+
+    broken = model_based.with_columns(pl.Series("regime_prob", [float("inf"), 0.2]))
+    with pytest.raises(ValueError, match="critical issues"):
+        validate_modeling_inputs(
+            features_df=broken,
+            label_df=labels,
+            feature_cols=model_based_cols,
+            label_col="fwd_ret_15m",
+        )

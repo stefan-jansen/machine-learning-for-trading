@@ -435,6 +435,7 @@ def validate_features(
     df: pl.DataFrame,
     feature_cols: Sequence[str],
     max_abs_value: float = 1e6,
+    allow_missing: bool = False,
 ) -> list[str]:
     """Check feature columns for infinities, absent values, and extreme values.
 
@@ -446,14 +447,51 @@ def validate_features(
     that is entirely NaN carries no value at all, and was previously reported as
     neither absent nor extreme.
 
+    A column named in ``feature_cols`` that ``df`` does not carry raises. A check
+    that cannot find what it is checking has not passed, and reporting success is
+    the one thing it must not do: called with one frame's column names against a
+    different frame, this skipped all 22 columns it was given and reported the
+    panel clean. An empty ``feature_cols`` fails for the same reason. Where a
+    caller genuinely holds a superset - a column list spanning several artifacts,
+    checked one artifact at a time - pass ``allow_missing=True`` and the absent
+    names are reported as a warning instead.
+
     Args:
         df: DataFrame containing feature columns
         feature_cols: List of feature column names to validate
         max_abs_value: Threshold for flagging extreme values
+        allow_missing: Report columns absent from ``df`` as a warning rather than
+            raising. The default refuses them.
 
     Returns list of warning/error strings.
+
+    Raises:
+        ValueError: If ``feature_cols`` is empty, or names a column ``df`` does
+            not carry and ``allow_missing`` is False.
     """
     issues: list[str] = []
+
+    if not feature_cols:
+        raise ValueError(
+            "validate_features was given no columns to check. A gate over nothing "
+            "reports success without reading a value; pass the columns the frame "
+            "carries, or do not call the gate."
+        )
+
+    missing = [col for col in feature_cols if col not in df.columns]
+    if missing and not allow_missing:
+        raise ValueError(
+            f"validate_features cannot find {len(missing)} of the {len(feature_cols)} "
+            f"columns it was asked to check: {missing[:10]}"
+            f"{'...' if len(missing) > 10 else ''}. The frame carries "
+            f"{len(df.columns)} columns. Pass the frame these names come from, or "
+            f"allow_missing=True if the list deliberately spans several frames."
+        )
+    if missing:
+        issues.append(
+            f"WARNING: {len(missing)} of {len(feature_cols)} columns are not in the frame "
+            f"and were not checked: {missing[:10]}{'...' if len(missing) > 10 else ''}"
+        )
 
     inf_cols = []
     absent_cols = []
@@ -514,6 +552,7 @@ def validate_modeling_inputs(
     max_abs_return: float = 0.5,
     max_abs_feature: float = 1e6,
     fail_on_critical: bool = True,
+    allow_missing_features: bool = False,
 ) -> dict:
     """Run all data quality checks before modeling.
 
@@ -531,12 +570,16 @@ def validate_modeling_inputs(
         max_abs_return: Max plausible absolute return for labels
         max_abs_feature: Max plausible absolute feature value
         fail_on_critical: If True, raise ValueError on CRITICAL issues
+        allow_missing_features: Passed to ``validate_features``. The default
+            refuses a feature column ``features_df`` does not carry, because the
+            gate would otherwise skip it and still report the panel clean.
 
     Returns:
         Dict with 'issues' (list of strings), 'n_critical', 'n_warning'
 
     Raises:
-        ValueError: If fail_on_critical=True and any CRITICAL issues found
+        ValueError: If fail_on_critical=True and any CRITICAL issues found, or if
+            ``feature_cols`` names a column ``features_df`` does not carry
     """
     all_issues: list[str] = []
 
@@ -548,7 +591,14 @@ def validate_modeling_inputs(
     all_issues.extend(validate_labels(label_df, label_col, max_abs_return))
 
     # 3. Feature checks
-    all_issues.extend(validate_features(features_df, feature_cols, max_abs_feature))
+    all_issues.extend(
+        validate_features(
+            features_df,
+            feature_cols,
+            max_abs_feature,
+            allow_missing=allow_missing_features,
+        )
+    )
 
     # Summarize
     n_critical = sum(1 for i in all_issues if i.startswith("CRITICAL"))

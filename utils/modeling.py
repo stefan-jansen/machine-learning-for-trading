@@ -25,6 +25,7 @@ import json
 import os
 import random
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,7 +43,7 @@ from utils.artifact_specs import (
     resolve_market_semantics,
     resolve_storage_path,
 )
-from utils.cv_splits import generate_cv_splits, make_wf_config
+from utils.cv_splits import earliest_train_start, generate_cv_splits, make_wf_config
 
 RANDOM_SEED = 42
 MIN_TEMPORAL_DATE_COVERAGE = 0.95  # Allow short calendar-edge gaps, not missing windows.
@@ -416,11 +417,72 @@ def get_classification_eval_label(case_study_id: str, label: str) -> str:
     return str(mapping[label])
 
 
+def verify_artifact_sidecars(artifacts: Mapping[str, Path]) -> dict[str, str]:
+    """Check each input artifact against the digest sidecar its producer wrote.
+
+    ``case_studies/utils/artifact_digest.py`` writes ``<artifact>.digest.json``
+    beside every artifact, recording the content hash, the row count and the key
+    columns. Until this function existed nothing read one: stage 02 and stage 03
+    wrote them and the chain stopped, so an upstream value change could not reach
+    a downstream identity. What it closes is narrow and worth stating exactly - the
+    registry records feature-set *names* and no digest of feature *values*, so a
+    model trained on corrected features and one trained on the leaky version it
+    replaced produce the identical training_hash unless something reads the values.
+
+    Raises on a digest that disagrees with the file, and on an artifact with no
+    sidecar: an artifact whose producer never recorded what it wrote is exactly the
+    case this cannot distinguish from a silent change.
+
+    Returns the verified digest per artifact, so the caller can carry it into the
+    training spec.
+
+    **Not yet on by default**, and the precondition is measured rather than assumed:
+    on 2026-08-09 the production artifacts carried 49 sidecars out of 51, both gaps
+    in sp500_options, while the CI fixtures under
+    ``ml4t/third-edition-test-data/intermediates`` carried **none** - 0 of 7 for
+    cme_futures, 0 of 5 for etfs, 0 of 6 for fx_pairs, 0 of 6 for us_equities_panel.
+    Turning ``verify_input_digests`` on before those are regenerated fails every
+    case-study CI job for a missing sidecar rather than for a changed value.
+    """
+    from case_studies.utils.artifact_digest import read_digest, sidecar_path, value_digest
+
+    verified: dict[str, str] = {}
+    problems: list[str] = []
+    for name, path in sorted(artifacts.items()):
+        side = sidecar_path(path)
+        if not side.exists():
+            problems.append(f"{name}: no digest sidecar beside {path.name}")
+            continue
+        try:
+            record = read_digest(path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            problems.append(f"{name}: sidecar unreadable ({exc})")
+            continue
+        recorded = record.get("digest")
+        if not recorded:
+            problems.append(f"{name}: sidecar records no digest")
+            continue
+        actual = value_digest(pl.read_parquet(path))
+        if actual != recorded:
+            problems.append(f"{name}: {path.name} hashes {actual}, its sidecar records {recorded}")
+            continue
+        verified[name] = recorded
+
+    if problems:
+        raise ValueError(
+            "input artifacts do not match the digests their producers recorded, so a "
+            "training run built on them would carry an identity that does not describe "
+            "its inputs: " + "; ".join(problems)
+        )
+    return verified
+
+
 def load_modeling_dataset(
     case_study_id: str,
     primary_label: str,
     max_symbols: int = 0,
     symbols: list[str] | None = None,
+    verify_input_digests: bool = False,
 ) -> ModelingDataset:
     """Load and join features + temporal + labels for a case study.
 
@@ -574,9 +636,7 @@ def load_modeling_dataset(
         primary_entity = entity_cols[0]
         dataset = dataset.filter(pl.col(primary_entity).is_in(list(symbols)))
     elif max_symbols > 0 and entity_cols:
-        primary_entity = entity_cols[0]
-        top = dataset.group_by(primary_entity).len().sort("len", descending=True).head(max_symbols)
-        dataset = dataset.filter(pl.col(primary_entity).is_in(top[primary_entity]))
+        dataset = reduce_to_top_entities(dataset, entity_cols[0], max_symbols)
 
     # Feature columns = everything except IDs and label
     feature_names = [c for c in dataset.columns if c not in ID_COLS and c != label_col]
@@ -660,6 +720,8 @@ def load_modeling_dataset(
         input_artifacts["model_based"] = temporal_path
     if eval_label_path is not None:
         input_artifacts["eval_label"] = eval_label_path
+    if verify_input_digests:
+        verify_artifact_sidecars(input_artifacts)
     return ModelingDataset(
         dataset=dataset,
         feature_names=feature_names,
@@ -683,6 +745,58 @@ def load_modeling_dataset(
             "symbols": symbols,
         },
     )
+
+
+def reduce_to_top_entities(
+    dataset: pl.DataFrame,
+    primary_entity: str,
+    max_symbols: int,
+) -> pl.DataFrame:
+    """Keep the ``max_symbols`` entities with the most rows, ties broken by name.
+
+    Row counts tie readily on these panels, and a tie broken by frame order is
+    not stable across runs or across callers. The entity name is the secondary
+    key so that every caller reducing the same dataset to the same size gets the
+    same universe. Without it a reduced stage-04 run and the reduced model
+    notebooks downstream of it can choose different equal-history symbols, and
+    the ones only a single side chose carry null temporal features - a wrong
+    answer that runs clean rather than a failure.
+
+    Production runs set ``max_symbols=0`` and never reach this.
+    """
+    top = (
+        dataset.group_by(primary_entity)
+        .len()
+        .sort(["len", primary_entity], descending=[True, False])
+        .head(max_symbols)
+    )
+    # implode: is_in against a bare Series of the same dtype is deprecated in
+    # polars as ambiguous, and membership in the value set is what is meant.
+    return dataset.filter(pl.col(primary_entity).is_in(top[primary_entity].implode()))
+
+
+def _inclusive_end_of(boundary: str) -> pd.Timestamp:
+    """Widen a configured end *date* to cover every bar of that session.
+
+    ``setup.yaml`` configures ``holdout_end`` as a date. Parsed, it is that date
+    at midnight, and every fold filter in this module is ``timestamp <= val_end``.
+    On a daily panel the bar already sits at midnight and the two agree. On an
+    intraday panel every bar of the final session sorts *after* midnight, so the
+    whole session is excluded from every modeling path: nasdaq100_microstructure
+    writes 2021-12-31 into its holdout fold - 38,610 rows added when the producer
+    side was fixed - and no consumer scores one of them.
+
+    A boundary that already carries a time of day is meant literally and is
+    returned unchanged, so a config can still name an instant inside a session -
+    including an explicit midnight. That is why this reads the configured *string*
+    rather than the parsed Timestamp: "2021-12-31" and "2021-12-31 00:00:00" parse
+    to the same instant, and only the first one means the whole day.
+    """
+    parsed = pd.Timestamp(boundary)
+    names_a_time = any(sep in str(boundary) for sep in (" ", "T"))
+    if names_a_time or parsed != parsed.normalize():
+        return parsed
+    return parsed + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
 
 
 def append_holdout_fold_if_needed(
@@ -740,17 +854,21 @@ def append_holdout_fold_if_needed(
     # made the idempotency check below never match (str(Timestamp) != YAML
     # string) and risked a tz-naive/aware comparison on the pandas filter path.
     ho_start_ts = pd.Timestamp(holdout_start)
-    ho_end_ts = pd.Timestamp(holdout_end)
-    trailing = mds.splits[-1]
-    if (
-        trailing.get("val_end") is not None
-        and pd.Timestamp(trailing.get("val_end")) == ho_end_ts
-        and pd.Timestamp(trailing.get("val_start")) == ho_start_ts
-    ):
-        return  # already covered
+    ho_end_ts = _inclusive_end_of(holdout_end)
+    # Any fold covering the holdout window, not just the trailing one: the CV
+    # folds run newest first and only the appended holdout fold lands at the end,
+    # so reading one position is a second place the ordering has to be right.
+    already_covered = any(
+        s.get("val_end") is not None
+        and pd.Timestamp(s["val_end"]) == ho_end_ts
+        and pd.Timestamp(s["val_start"]) == ho_start_ts
+        for s in mds.splits
+    )
+    if already_covered:
+        return
     holdout_fold = {
         "fold": len(mds.splits),
-        "train_start": min(pd.Timestamp(s["train_start"]) for s in mds.splits),
+        "train_start": earliest_train_start(mds.splits),
         "train_end": ho_start_ts,
         "val_start": ho_start_ts,
         "val_end": ho_end_ts,
