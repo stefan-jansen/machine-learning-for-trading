@@ -65,6 +65,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 from hmmlearn.hmm import GaussianHMM
+from IPython.display import display
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 from ml4t.diagnostic.splitters.calendar import TradingCalendar
@@ -74,12 +75,13 @@ from statsmodels.tsa.arima.model import ARIMA
 from threadpoolctl import threadpool_limits
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.cv_window import assert_variant_folds_are_out_of_sample
 from case_studies.utils.temporal import filtered_state_probs, sort_states_by_variance
 from data import load_fx_pairs
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.paths import get_case_study_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 warnings.filterwarnings("ignore")
 logging.getLogger("hmmlearn.base").setLevel(logging.ERROR)
@@ -130,6 +132,23 @@ MIN_PAIRS_PER_DATE = 8
 
 SETUP = load_setup_config(CASE_STUDY_ID)
 SESSION_CALENDAR = SETUP["decision"]["session_calendar"]
+
+# Two windows this notebook needs are already decided in `setup.yaml`, and both are read
+# from it rather than typed, so a configuration change reaches the models rather than
+# leaving them measuring against a window the feature stage no longer uses.
+#
+# `kalman_trend` is the fitted level less a moving average of the price, and it is the
+# middle of the three moving-average windows the feature configuration declares: the
+# shortest sits inside the filter's own responsiveness, so the difference would be mostly
+# filter noise, and the longest is slower than a fold's validation year. Taking the same
+# window `03_financial_features` gives `price_to_ma_63d` also means the two columns
+# measure price against one reference rather than two.
+KALMAN_TREND_WINDOW = int(sorted(SETUP["features"]["windows"]["moving_average"])[1])
+# The dollar-regime model is given the shortest close-to-close volatility window the
+# configuration declares - about a trading month, long enough for a stable estimate and
+# short enough to move when the market does.
+USD_VOL_WINDOW = int(min(SETUP["features"]["windows"]["close_to_close_volatility"]))
+USD_VOL_COL = f"usd_vol_{USD_VOL_WINDOW}d"
 
 # %% [markdown] tags=[]
 # ## 1. Load the Price History and the Universe
@@ -235,7 +254,11 @@ universe_table = (
         pl.col("timestamp").n_unique().alias("sessions"),
         (pl.col("_ret").std() * np.sqrt(252) * 100).round(1).alias("annualised_vol_pct"),
     )
-    .sort("pairs", descending=True)
+    # Two of the three groups hold the same number of pairs, so sorting on the count
+    # alone leaves their order to whatever `group_by` happened to emit, which differs
+    # between runs. The name breaks the tie, so a reader re-running this sees the table
+    # printed here.
+    .sort(["pairs", "group"], descending=[True, False])
 )
 universe_table
 
@@ -366,11 +389,26 @@ for f in folds:
 # sessions that label's version of the fold asks for. Where they do not, the model finds
 # no feature value for part of its window and fills the gap with an imputed one.
 #
-# The check below is the whole of what makes reading by `fold` id safe, so it is executed
-# rather than argued. A longer gap moves `train_end` earlier and leaves `train_start`
+# The checks below are the whole of what makes reading by `fold` id safe, so they are
+# executed rather than argued, and there are two of them because coverage is not the only
+# way the arrangement can fail.
+#
+# The first is coverage. A longer gap moves `train_end` earlier and leaves `train_start`
 # where it was, so each longer label's fold is contained in the one written here; the
 # assertion is what would catch a future label whose gap is shorter than the primary's,
 # for which the containment runs the other way and this artifact would be short of rows.
+#
+# The second is that the values a longer label's model is scored on were not fitted on the
+# sessions it is scoring. Every value this notebook writes for fold F was fitted on the
+# **primary** label's training window for fold F, and a model reading fold F by id gets
+# those values whatever its own boundaries are. Containment does not settle it: a variant
+# whose validation window opened inside the primary's training window would be contained
+# and would still be scoring on sessions its features had already seen, so the property
+# has to be stated directly: the variant's validation opens after the primary's training
+# closes. `assert_variant_folds_are_out_of_sample` is that check, shared with the loader
+# every downstream model calls, and it compares timestamps rather than dates - on a
+# minute-bar case study the two disagree, and a fit closing at 15:22 against a validation
+# opening at 15:38 reads as a violation on the calendar day alone.
 
 # %% tags=[]
 label_geometries = {}
@@ -405,11 +443,27 @@ for _label, _geometry in label_geometries.items():
         )
     print(
         f"  {_label:<14} buffer {resolve_label_buffer(CASE_STUDY_ID, _label, SETUP):<4} "
-        f"fold 0 train ends {_geometry[0][1]}, validation ends {_geometry[0][3]}"
+        f"fold 0 train ends {_geometry[0][1]}, validates {_geometry[0][2]} to "
+        f"{_geometry[0][3]}"
     )
 print(
     f"All {len(label_geometries)} configured label geometries are covered by the "
     f"{len(folds)} folds written here."
+)
+
+# %% [markdown] tags=[]
+# The gaps the second check measures, one row per variant label and fold. Every one is
+# positive, and the narrowest is the one to watch: it is the label whose validation opens
+# closest to the sessions its features were fitted on.
+
+# %% tags=[]
+variant_gaps = pl.DataFrame(assert_variant_folds_are_out_of_sample(CASE_STUDY_ID, PRIMARY_LABEL))
+# The gap ties across labels and folds, so the label and fold break it: without them
+# the five rows shown are whichever five the tie happened to order first.
+display(variant_gaps.sort(["gap", "label", "fold"]).head(5))
+print(
+    f"Narrowest gap between a variant's validation opening and the {PRIMARY_LABEL} "
+    f"training window its features were fitted through: {variant_gaps['gap'].min()}."
 )
 
 # %% [markdown] tags=[]
@@ -481,7 +535,14 @@ fig.update_layout(
     height=420,
     margin={"l": 90},
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "One horizontal bar per fold, split into the stretch each fold's models are "
+    "estimated on and the later stretch they are applied to out of sample. The bars step "
+    "up and to the right, fold zero covering the most recent window and the "
+    "highest-numbered fold the oldest. A dashed vertical rule marks where the holdout "
+    "opens, with the region beyond it shaded, and every bar ends to the left of it.",
+)
 
 
 # %% [markdown] tags=[]
@@ -672,7 +733,9 @@ def extract_kalman_features(fold: dict, symbol: str) -> tuple[list[dict], dict |
     train_idx = np.array([d <= fold["train_end"] for d in path_dates])
     slope_mean = np.mean(filtered["slope"][train_idx])
     slope_std = np.std(filtered["slope"][train_idx]) + 1e-10
-    moving_average = pl.Series(path_prices).rolling_mean(63, min_samples=1).to_numpy()
+    moving_average = (
+        pl.Series(path_prices).rolling_mean(KALMAN_TREND_WINDOW, min_samples=1).to_numpy()
+    )
     params = {
         "fold": fold["fold"],
         "symbol": symbol,
@@ -817,14 +880,13 @@ usd_daily = (
 
 # %% [markdown] tags=[]
 # The model is given two numbers per session rather than one: the average dollar return
-# and a 21-session rolling standard deviation of it. The return alone would let the model
-# separate the states only through how far individual sessions scatter, and the rolling
-# figure states the recent scale directly, which is the quantity the two states differ in.
-# Twenty-one sessions is about a trading month, long enough to be a stable estimate and
-# short enough to move when the market does.
+# and a rolling standard deviation of it over the window bound above. The return alone
+# would let the model separate the states only through how far individual sessions
+# scatter, and the rolling figure states the recent scale directly, which is the quantity
+# the two states differ in.
 
 # %% tags=[]
-usd_daily = usd_daily.with_columns(pl.col("usd_ret").rolling_std(21).alias("usd_vol_21d"))
+usd_daily = usd_daily.with_columns(pl.col("usd_ret").rolling_std(USD_VOL_WINDOW).alias(USD_VOL_COL))
 
 print(f"USD factor series: {len(usd_daily):,} dates")
 
@@ -977,11 +1039,11 @@ HMM_COVARS_PRIOR = GaussianHMM().covars_prior  # added at every fitting step
 # on, so it has to be measured on the same history the models are allowed to see.
 
 # %% tags=[]
-valid_usd = usd_daily.drop_nulls(subset=["usd_ret", "usd_vol_21d"]).filter(
+valid_usd = usd_daily.drop_nulls(subset=["usd_ret", USD_VOL_COL]).filter(
     pl.col("timestamp") < HOLDOUT_START
 )
 valid_dates = valid_usd["timestamp"].to_list()
-_native = valid_usd.select(["usd_ret", "usd_vol_21d"]).to_numpy()
+_native = valid_usd.select(["usd_ret", USD_VOL_COL]).to_numpy()
 usd_arr = _native * HMM_SCALE
 print(
     f"USD series, cut at {HOLDOUT_START}: {len(valid_dates):,} sessions, "
@@ -1392,7 +1454,18 @@ fig.update_layout(
     height=460,
     margin={"t": 150},
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels against fold number, with fold zero the most recent. On the left, the "
+    "three fitted state-space noise sizes on a logarithmic axis: the level noise is the "
+    "largest and holds a nearly flat line across folds, the slope noise sits many orders "
+    "below it and also holds, while the observation noise tracks near the level noise "
+    "for most folds and drops away by more than ten orders of magnitude on the few where "
+    "the search puts it at zero. On the right, the expected run length of each "
+    "dollar-regime state in sessions: the calm state starts far higher, falls steeply "
+    "over the first few folds, and by the oldest folds the two states have converged to "
+    "a similar length.",
+)
 
 
 # %% [markdown] tags=[]
@@ -1489,6 +1562,33 @@ print(
 # %% [markdown] tags=[]
 # ## 9. Write the Artifact
 #
+# Section 3 said in words that fold 0 is the most recent window and the highest-numbered
+# fold the oldest. Downstream that sentence is load-bearing: a reader that takes a lower
+# fold id for an earlier period joins every fold against the wrong end of the sample, and
+# because the row counts and the schema are unaffected, nothing about the result looks
+# wrong. A convention held only in prose is how that happens, so the last thing checked
+# before the file is written is the ordering of the file itself, read back off the frame
+# rather than off the split list it was built from.
+
+# %% tags=[]
+fold_spans = (
+    temporal_df.group_by("fold")
+    .agg(pl.col("timestamp").min().alias("first"), pl.col("timestamp").max().alias("last"))
+    .sort("fold")
+)
+for _earlier, _later in zip(fold_spans.iter_rows(named=True), fold_spans[1:].iter_rows(named=True)):
+    assert _later["last"] < _earlier["last"], (
+        f"fold {_later['fold']} ends {_later['last']} and fold {_earlier['fold']} ends "
+        f"{_earlier['last']}: the fold ids in this artifact are not ordered newest first, "
+        f"so anything reading them positionally selects the wrong window"
+    )
+print(
+    f"Fold ids run newest to oldest: fold {fold_spans['fold'][0]} covers "
+    f"{fold_spans['first'][0]} to {fold_spans['last'][0]}, fold {fold_spans['fold'][-1]} "
+    f"covers {fold_spans['first'][-1]} to {fold_spans['last'][-1]}."
+)
+
+# %% [markdown] tags=[]
 # The parquet is written together with a short record beside it, in the same form
 # `03_financial_features` writes beside its own matrix. The record holds a digest -- a short
 # string computed from the file's contents, such that two files with the same values get
@@ -1572,7 +1672,7 @@ if "hmm_regime_prob_high_vol" in eval_features.columns:
         .unique("timestamp", keep="last")
         .sort("timestamp")
         .drop_nulls()
-        .join(usd_daily.select("timestamp", "usd_vol_21d"), on="timestamp", how="left")
+        .join(usd_daily.select("timestamp", USD_VOL_COL), on="timestamp", how="left")
     )
     high_vol_share = float((hmm_validation["hmm_regime_prob_high_vol"] >= 0.5).mean())
     print(
@@ -1600,7 +1700,7 @@ if "hmm_regime_prob_high_vol" in eval_features.columns:
     fig.add_trace(
         go.Scatter(
             x=hmm_validation["timestamp"],
-            y=(hmm_validation["usd_vol_21d"] * 100),
+            y=(hmm_validation[USD_VOL_COL] * 100),
             mode="lines",
             line={"color": COLORS["copper"], "width": 1.2},
             showlegend=False,
@@ -1614,7 +1714,12 @@ if "hmm_regime_prob_high_vol" in eval_features.columns:
             x=fold["val_start"].isoformat(), line_dash="dot", line_color=COLORS["neutral"]
         )
     fig.update_yaxes(title_text="P(turbulent)", range=[0, 1], row=1, col=1)
-    fig.update_yaxes(title_text="Dollar volatility, 21d (%)", rangemode="tozero", row=2, col=1)
+    fig.update_yaxes(
+        title_text=f"Dollar volatility, {USD_VOL_WINDOW}d (%)",
+        rangemode="tozero",
+        row=2,
+        col=1,
+    )
     fig.update_xaxes(title_text="Validation session", row=2, col=1)
     fig.update_layout(
         title=(
@@ -1626,7 +1731,16 @@ if "hmm_regime_prob_high_vol" in eval_features.columns:
         height=560,
         margin={"t": 130},
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Two stacked panels sharing a time axis of validation sessions. The upper panel "
+        "is the probability the model assigns to the turbulent state, which spends most "
+        "of its time pinned at zero or one and switches between them abruptly rather "
+        "than drifting. The lower panel is the dollar volatility over the same "
+        "sessions, and its sustained rises line up with the stretches the upper panel "
+        "holds at one. Dotted vertical rules mark the fold handovers, and the series "
+        "runs continuously across them.",
+    )
 else:
     high_vol_share = float("nan")
     print("Regime figure omitted: the reduced run produces no dollar series.")
@@ -1858,7 +1972,16 @@ if len(eval_summary):
         margin={"l": 180, "r": 60, "t": 140},
         height=520,
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Horizontal bars of the mean rank correlation between each model-derived column "
+        "and the next session's return, ordered from the most negative at the bottom to "
+        "the most positive at the top, each carrying a whisker of plus and minus 1.96 "
+        f"overlap-corrected standard errors. {len(feature_names)} columns are shown. "
+        "Every estimate is small against its own whisker, and the whiskers cross the "
+        "zero rule the chart draws, so the bars are ordered by size without any of them "
+        "standing clear of its own uncertainty.",
+    )
 else:
     print(f"Chart omitted: no session reaches {MIN_PAIRS_PER_DATE} pairs.")
 

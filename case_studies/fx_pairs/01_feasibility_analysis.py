@@ -68,7 +68,7 @@ from case_studies.utils.feasibility import exceedance_curve, fold_timeline, pane
 from data import load_fx_pairs
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -337,7 +337,13 @@ add_message_title(
     "Every pair quotes at the decision bar; the four-hour grid drops some",
     subtitle="Pairs with a price at each daily snapshot, and at each four-hour bar that falls short",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Count of pairs quoting, plotted against time from 2011 to 2024. A solid band sits at "
+    "the full universe for the whole history, because every daily decision bar carries "
+    "every pair. Below it, scattered points mark four-hour bars that carry fewer - dense "
+    "through 2011 to 2013 and again around 2019 and 2020, and rare in between.",
+)
 
 # %% [markdown]
 # Twenty pairs are not twenty bets. Only eight currencies appear across the twenty, so each one
@@ -385,7 +391,14 @@ add_message_title(
     "Shared currencies leave far fewer bets than there are pairs",
     subtitle="Variance explained by each component, with the participation ratio marked",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Bars of the variance each principal component of the daily return correlation matrix "
+    "explains, falling from about thirty percent for the first to near zero by the "
+    "eighth, with a cumulative curve rising over them and flattening at one hundred "
+    "percent. A dashed vertical rule marks the participation ratio at just over five, "
+    "well short of the twenty pairs the matrix is built from.",
+)
 
 # %% [markdown]
 # ### B.3 What a round trip costs, and what a move is worth
@@ -478,7 +491,15 @@ add_message_title(
     "Each longer horizon puts more of the move clear of the round trip",
     subtitle="Absolute returns scaled by each pair's own assumed cost, development period",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Four curves on a logarithmic horizontal axis, each giving the fraction of absolute "
+    "moves at least as large as a given multiple of the pair's own round-trip cost. All "
+    "four fall away to the right, and they are ordered by horizon throughout: the "
+    "four-hour bar is lowest and the twenty-one-day move highest. At the break-even "
+    "multiple of one, marked by a dotted rule, the four-hour curve has already dropped "
+    "below half while the longer horizons are still near the top of the axis.",
+)
 
 # %% [markdown]
 # ### B.4 How much of one day's return carries into the next
@@ -538,7 +559,14 @@ add_message_title(
     "A pair's own past return accounts for almost none of its next one",
     subtitle="Averaged within each pair",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Bars of the average within-pair autocorrelation of daily returns at lags one to "
+    "twenty-one. Every bar is small and they alternate in sign with no run of one "
+    "direction, and all of them sit inside the shaded band the chart marks as the range "
+    "expected from no information. A wider shaded band behind them gives the tenth to "
+    "ninetieth percentile across pairs, and it too straddles zero at every lag.",
+)
 
 # %% [markdown]
 # ### B.5 Move size against cost
@@ -701,7 +729,14 @@ add_message_title(
     "Folds roll forward and stop short of the holdout",
     subtitle="Boundaries as generate_cv_splits returned them; the one-day purge is too narrow to see",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "One horizontal bar per walk-forward fold, each a long training stretch running "
+    "straight into a shorter validation stretch. The bars step up and to the right from "
+    "fold seven at the bottom of the history to fold zero at the top, so the lowest fold "
+    "number is the most recent window. A shaded region on the right marks the holdout, "
+    "and no bar reaches into it.",
+)
 
 # %% [markdown]
 # ## E. What this notebook hands on
