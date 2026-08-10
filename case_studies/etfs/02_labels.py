@@ -552,12 +552,13 @@ print(
 
 # %% [markdown] tags=["results"]
 # On the point-in-time eligible panel - the one `03_financial_features` builds features over
-# and `05_evaluation` scores them on - raw momentum earns a mean IC of 0.0203 against the
-# monthly label, averaged over the 4,006 dates that reach the 44-ETF minimum. The other 251 of
-# the 4,257 are the earliest in the panel, so the series is scored from 2008-01-02 rather than
-# from the first date momentum can be measured on. The naive standard error puts that IC at a
-# t-statistic of 3.77; the HAC standard error puts it at 1.08, with a p-value of 0.282. A
-# feature has to clear the second number.
+# and `05_evaluation` scores them on - raw momentum earns a mean IC of 0.0266 against the
+# monthly label, averaged over the 4,257 dates that reach the 44-ETF minimum. Every date that
+# carries an eligible cross-section now reaches it, so the series is scored from the first date
+# momentum can be measured on. The naive standard error puts that IC at a t-statistic of 5.06;
+# the HAC standard error puts it at 1.44, with a p-value of 0.150. A feature has to clear the
+# second number, and this one does not: the gap between the two t-statistics is the overlap
+# between consecutive monthly windows, not evidence.
 
 # %% [markdown]
 # ## H. Artifacts and the audit record
