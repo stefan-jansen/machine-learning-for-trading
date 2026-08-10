@@ -180,11 +180,39 @@ print(
 # before the shift, because once rows are dropped from inside a series a shift counts survivors,
 # the horizon stops being measured in trading sessions, and the window silently spans whatever
 # was removed. Point-in-time eligibility is applied downstream in `03_financial_features`.
+#
+# **The universe is bounded before any label is built, and the bound is the one
+# `setup.yaml::universe` declares.** `eligibility_rule` is `sp500_with_options`, and what makes a
+# name satisfy it is having a row in the option-surface summary: this strategy reads an option to
+# rank a share, so a share with no listed options is not a candidate however liquid it is. The
+# share-bar extract is wider than that, and the loader takes a `symbols=` argument that nothing
+# was passing, so every count below and every label file would otherwise have covered names the
+# strategy can never hold.
+#
+# The roster is derived from the surface rather than typed out, and then checked in both
+# directions: its size against the declared `n_assets`, and every roster name against the share
+# bars. Checking one direction is what let this through - a guard that only asks whether every
+# declared name is present says nothing about a present name that was never declared.
+#
+# The session grid is taken from the **unbounded** extract, because a session is a property of the
+# market rather than of the universe, and the horizon is counted on it.
 
 # %%
-bars = load_sp500_daily_bars(start_date=START_DATE, end_date=END_DATE)
-sessions = bars.select("timestamp").unique().sort("timestamp").with_row_index("session")
+surface = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
+ROSTER = sorted(surface["symbol"].unique().to_list())
+extract = load_sp500_daily_bars(start_date=START_DATE, end_date=END_DATE)
+
+assert len(ROSTER) == setup["universe"]["n_assets"], (
+    f"{len(ROSTER)} names carry an option surface against a declared "
+    f"universe.n_assets of {setup['universe']['n_assets']}"
+)
+priced = set(extract["symbol"].unique().to_list())
+assert not set(ROSTER) - priced, f"no share bars for {sorted(set(ROSTER) - priced)}"
+outside = sorted(priced - set(ROSTER))
+
+sessions = extract.select("timestamp").unique().sort("timestamp").with_row_index("session")
 sessions = sessions.with_columns(pl.col("session").cast(pl.Int64))
+bars = extract.filter(pl.col("symbol").is_in(ROSTER))
 prices = (
     bars.join(sessions, on="timestamp")
     .with_columns(
@@ -194,10 +222,15 @@ prices = (
     .sort([ENTITY, "session"])
 )
 
-# Every label's `inputs`: without it a re-run against a refreshed download is invisible.
+# Every label's `inputs`: without it a re-run against a refreshed download is invisible. It is
+# taken over the bounded panel, which is what the labels are actually built from.
 PRICE_COLS = ["symbol", "sec_id", "timestamp", "open", "close", "adj_factor"]
 MARKET_DATA_DIGEST = value_digest(bars, PRICE_COLS)
 print(f"market_data digest: {MARKET_DATA_DIGEST}")
+print(
+    f"Universe {len(ROSTER)} names with an option surface, as universe.n_assets declares; "
+    f"{len(outside)} priced names carry no surface and are excluded ({', '.join(outside)})"
+)
 
 pairs = prices.select("symbol", ENTITY).unique()
 shared = {
@@ -524,11 +557,11 @@ for label_name, table in annual.items():
     )
 
 # %% [markdown] tags=["results"]
-# On the development window the weekly label has a standard deviation of 0.04694 and the
-# two-weekly one 0.06535, a ratio of 1.39 against the 1.41 that square-root-of-horizon scaling
+# On the development window the weekly label has a standard deviation of 0.04697 and the
+# two-weekly one 0.06540, a ratio of 1.39 against the 1.41 that square-root-of-horizon scaling
 # implies; dividing the weekly label by each name's trailing volatility cuts its kurtosis from
-# 16.48 to 7.15. Neither the spread nor the base rate is stable: the daily cross-name spread of
-# the weekly label runs from 0.0284 in 2017 to 0.0476 in 2020, and the share of weeks that end
+# 16.48 to 7.16. Neither the spread nor the base rate is stable: the daily cross-name spread of
+# the weekly label runs from 0.0285 in 2017 to 0.0476 in 2020, and the share of weeks that end
 # higher from 0.5070 in 2018 to 0.5783 in 2019.
 
 # %% [markdown]
@@ -593,12 +626,12 @@ for label_name in PLAIN_RETURNS:
     )
 
 # %% [markdown] tags=["results"]
-# The weekly label's 505,398 development rows carry 101,566 effective observations, a ratio of
+# The weekly label's 503,079 development rows carry 101,099 effective observations, a ratio of
 # 0.2010 against the 0.2000 a fully overlapped five-session window implies; the two-weekly
-# label's 502,366 rows carry 50,781, a ratio of 0.1011 against 0.1000. Both sit just above the
+# label's 500,062 rows carry 50,548, a ratio of 0.1011 against 0.1000. Both sit just above the
 # reference value, because a security that stops trading ends an overlap early. Panel
-# autocorrelation falls from 0.772 at lag one to -0.052 at lag five for the weekly label, and
-# from 0.891 to 0.004 at lag ten for the two-weekly one. The purge gap a fold needs is set by the
+# autocorrelation falls from 0.772 at lag one to -0.051 at lag five for the weekly label, and
+# from 0.891 to 0.005 at lag ten for the two-weekly one. The purge gap a fold needs is set by the
 # forward window itself, not by these counts.
 
 # %% [markdown]
@@ -633,7 +666,6 @@ for label_name in PLAIN_RETURNS:
 # consecutive sessions of one week's return as five separate pieces of evidence.
 
 # %%
-surface = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
 signal_panel = (
     prices.select("timestamp", "symbol", ENTITY, "session")
     .join(surface.select("timestamp", "symbol", IV_COL), on=["timestamp", "symbol"], how="left")
@@ -752,8 +784,10 @@ for label_name, horizon in HORIZONS.items():
 #
 # **Known limitations.** The label is a total return to a holder of the share, because the
 # adjustment factor carries dividends as well as splits; a strategy credited only with price
-# returns would be measured against a slightly different target. The universe is every ticker in
-# the extract rather than a liquidity screen applied point in time. The hole rule tests each
+# returns would be measured against a slightly different target. The universe is every name
+# carrying an option surface, which is what `universe.eligibility_rule` declares, and not a
+# liquidity screen applied point in time: a name enters on having listed options, not on trading
+# enough of them. Point-in-time eligibility is `03_financial_features`'. The hole rule tests each
 # security's own position on the market calendar, so it finds an absent session and not a session
 # on which the name barely traded. The baseline is one signal, read raw off the surface with no
 # adjustment for the level of volatility a name usually carries.
