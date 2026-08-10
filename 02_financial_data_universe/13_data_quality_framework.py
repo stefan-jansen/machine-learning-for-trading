@@ -152,7 +152,7 @@ per_symbol_rows
 validator = OHLCVValidator(
     check_nulls=True,
     check_price_consistency=True,
-    check_negative_prices=True,
+    negative_price_policy="forbid",
     check_negative_volume=True,
     check_duplicate_timestamps=True,
     check_chronological_order=True,
