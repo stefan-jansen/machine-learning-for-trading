@@ -634,7 +634,7 @@ for label_name in PLAIN_RETURNS:
 
 # %%
 surface = load_sp500_options_surface(start_date=START_DATE, end_date=END_DATE)
-carrier = (
+signal_panel = (
     prices.select("timestamp", "symbol", ENTITY, "session")
     .join(surface.select("timestamp", "symbol", IV_COL), on=["timestamp", "symbol"], how="left")
     .sort([ENTITY, "session"])
@@ -644,7 +644,7 @@ carrier = (
     .drop_nulls("signal")
 )
 baseline = dev[PRIMARY_LABEL].join(
-    carrier.select("timestamp", "symbol", "signal"), on=["timestamp", "symbol"], how="inner"
+    signal_panel.select("timestamp", "symbol", "signal"), on=["timestamp", "symbol"], how="inner"
 )
 min_obs = int(baseline.group_by("timestamp").len()["len"].median() // 2)
 
