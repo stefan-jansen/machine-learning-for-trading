@@ -71,7 +71,7 @@ from case_studies.utils.feasibility import exceedance_curve, fold_timeline, pane
 from data import load_nasdaq100_bars
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -345,7 +345,10 @@ add_message_title(
     "The eligible book clears the floor, with a quarter of its names to spare",
     subtitle="Symbols quoting per decision bar, declared universe against the frozen eligible list",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two lines across the sample: the count of declared names quoting at each decision bar, and the count from the frozen eligible list, against a horizontal line at the forty names the largest book has to fill.",
+)
 _thin_dates = thin["timestamp"].dt.date().unique().sort().to_list()
 print(
     f"Declared {breadth['declared'].min()} to {breadth['declared'].max()} per bar, cost-feasible "
@@ -407,7 +410,10 @@ add_message_title(
     "One cost level fits neither end of this universe",
     subtitle="Round trip per symbol; the names eligible to hold are the dark bars",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "One bar per symbol, ordered from the tightest round-trip cost to the widest, with the eligible names drawn dark and horizontal lines at the universe median and at the declared friction floor.",
+)
 
 # %% [markdown]
 # ### B.4 Whether the last move says anything about the next
@@ -460,7 +466,10 @@ add_message_title(
     "Nothing in the return itself carries to the next decision bar",
     subtitle="Mean within-symbol autocorrelation, interdecile range across symbols shaded",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Autocorrelation of a symbol's return with its own past, one bar per lag in decision bars, with the interdecile range across symbols shaded behind the mean.",
+)
 
 # %% [markdown]
 # That is a useful negative result rather than a discouraging one. It rules out the simplest
@@ -513,7 +522,10 @@ add_message_title(
     "Most moves are larger than the round trip that captures them",
     subtitle="Exceedance of absolute midpoint moves scaled by each symbol's own measured cost",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Three curves, one per forecast horizon, giving the fraction of absolute midpoint moves at least as large as each multiple of the symbol's own round-trip cost, on a logarithmic axis with break-even marked at one.",
+)
 
 # %%
 print(
@@ -667,7 +679,10 @@ add_message_title(
     "Folds roll forward and stop short of the holdout",
     subtitle="Boundaries as generate_cv_splits returned them; the one-bar purge is too narrow to see",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Each fold drawn as a training span followed by a validation span, rolling forward through the sample and stopping before the holdout period begins.",
+)
 
 # %% [markdown]
 # ## E. Derived artifacts

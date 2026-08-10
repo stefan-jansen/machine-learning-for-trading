@@ -86,7 +86,7 @@ from case_studies.utils.feature_engineering import quantile_profile
 from utils.cv_splits import generate_cv_splits
 from utils.data_quality import validate_modeling_inputs
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, GRAY_FILLS
+from utils.style import COLORS, GRAY_FILLS, show_plotly_with_alt
 
 
 def _normalize_symbol_column(df: pl.DataFrame) -> pl.DataFrame:
@@ -843,7 +843,10 @@ if leader:
     fig.update_yaxes(title_text="Cross-sectional Spearman IC", row=1, col=1)
     fig.update_xaxes(title_text="Development period", row=1, col=1)
     fig.update_xaxes(title_text="Mean IC, 95% intervals", row=1, col=2)
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Two panels: the leading feature's cross-sectional information coefficient plotted through the development period with block-bootstrap bounds around it, and beside it the mean IC of each feature with its 95% interval.",
+    )
 
 # %% [markdown]
 # ### Fold-Level Stability
@@ -958,7 +961,10 @@ if stability_features:
         margin={"l": 210},
         legend={"orientation": "h", "y": -0.18},
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Each feature's mean information coefficient in its median fold against the same measure in its weakest fold, showing how far apart the two folds place the same feature.",
+    )
 
 # %% [markdown]
 # ## 3. Search Accounting and Multiple Testing
@@ -1184,7 +1190,10 @@ fig.update_yaxes(categoryorder="array", categoryarray=top["feature"].to_list(), 
 fig.update_xaxes(title_text="Mean cross-sectional Spearman IC", row=1, col=1)
 fig.update_xaxes(title_text="Unadjusted t", row=1, col=2)
 fig.update_yaxes(title_text="Newey-West t", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels: each feature's mean cross-sectional information coefficient, and its unadjusted t-statistic against its Newey-West t-statistic, with the points sitting close to the diagonal.",
+)
 
 # %% [markdown]
 # ### The Same Features Against the Other Declared Horizons
@@ -1311,7 +1320,10 @@ for column_index in (1, 2):
     )
 fig.update_yaxes(title_text="Mean cross-sectional IC", row=1, col=1)
 fig.update_yaxes(title_text="Mean IC / standard deviation of the IC series", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels across forward horizons of five, fifteen and sixty minutes: the mean cross-sectional information coefficient of each feature, and that mean divided by the standard deviation of its IC series.",
+)
 
 # %% [markdown]
 # ## 4. Shape Diagnostics
@@ -1413,7 +1425,10 @@ if quantile_spreads:
         width=1150,
     )
     fig.update_yaxes(title_text="Mean forward return", col=1)
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "One panel per feature, each a bar chart of the mean forward return in every quantile bin of that feature, drawn for a feature and its cross-sectional z-score side by side.",
+    )
 
 # %% [markdown]
 # ## 5. Redundancy and Feature Families
@@ -1553,7 +1568,10 @@ if family_summary:
     )
     fig.update_xaxes(title_text="Mean |IC| across the family", row=1, col=1)
     fig.update_xaxes(title_text="Features with a computable IC", row=1, col=2)
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Two panels of bars by feature family: the mean absolute information coefficient across the family, and the number of features in it with a computable IC, split by whether they cleared the screen.",
+    )
 
 # %% [markdown]
 # ### The Strongest Redundant Pairs
@@ -1605,7 +1623,10 @@ if high_corr_pairs:
         margin={"l": 520},
         showlegend=False,
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "A histogram of the Spearman rank correlation between feature pairs over the sampled development bars, with the pairs drawn from within a family separated from those spanning two families.",
+    )
     print(f"Of the {len(ranked)} strongest pairs, {cross_family} span two families")
     print(f"Of the {len(ranked)} strongest pairs, {same_twin} are a level against its own z-score")
 
@@ -1748,7 +1769,10 @@ fig.update_layout(
     showlegend=False,
 )
 fig.update_yaxes(autorange="reversed")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A bar chart counting the candidate features surviving each stage of the screen, from the full set through the correctness gate and the information coefficient to the multiple-testing adjustment.",
+)
 
 # %% tags=["results"]
 decisions = dict(triage_ledger.group_by("decision").len().iter_rows())
