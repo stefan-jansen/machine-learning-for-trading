@@ -114,6 +114,12 @@ HORIZONS = {
 }
 PRIMARY_HORIZON = HORIZONS[PRIMARY_LABEL]
 HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
+# Two sessions carry one clearing venue's settlement file and not the other's; `setup.yaml`
+# says which and why. Dropping them here keeps a forward return from being measured across a
+# date on which half the universe has no settlement price.
+EXCLUDED_SESSIONS = [
+    date.fromisoformat(str(d)) for d in setup["universe"].get("excluded_sessions", [])
+]
 GROUPS = setup["universe"]["product_groups"]
 SECTORS = {product: sector for sector, ps in GROUPS.items() for product in ps}
 REBALANCE_STEP = setup["labels"]["rebalance_step"]
@@ -181,7 +187,10 @@ print(
 # silently spans whatever was removed.
 
 # %%
-bars = load_cme_futures().rename({"session_date": "timestamp", "tenor": "position"})
+bars = load_cme_futures(products=sorted(SECTORS)).rename(
+    {"session_date": "timestamp", "tenor": "position"}
+)
+bars = bars.filter(~pl.col("timestamp").is_in(EXCLUDED_SESSIONS))
 if START_DATE is not None:
     bars = bars.filter(pl.col("timestamp") >= date.fromisoformat(START_DATE))
 if MAX_PRODUCTS is not None:
@@ -574,10 +583,10 @@ print(
 
 # %% [markdown] tags=["results"]
 # On the development window the weekly label has a standard deviation of 0.03138 and the
-# monthly label 0.06405, a ratio of 2.04 against the 2.05 that square-root-of-horizon
+# monthly label 0.06407, a ratio of 2.04 against the 2.05 that square-root-of-horizon
 # scaling implies. One target column, two ways of not being one scale: across products the
 # daily spread peaks at 3.9% in 2020 against a 2.7% median year, and within sector the weekly
-# label runs from 0.008212 in treasuries to 0.055865 in energy, so the widest sector is 6.8x
+# label runs from 0.008213 in treasuries to 0.055872 in energy, so the widest sector is 6.8x
 # the narrowest.
 
 # %% [markdown]
@@ -648,12 +657,12 @@ for label_name, horizon in HORIZONS.items():
     )
 
 # %% [markdown] tags=["results"]
-# The weekly label's 97,951 development rows carry 19,617 effective observations, a ratio of
+# The weekly label's 97,921 development rows carry 19,611 effective observations, a ratio of
 # 0.2003 against the 0.2000 a fully overlapped five-session window implies; the monthly
-# label's 97,423 rows carry 4,671, a ratio of 0.0479 against 0.0476. Both sit just above the
+# label's 97,393 rows carry 4,669, a ratio of 0.0479 against 0.0476. Both sit just above the
 # reference value because each product's series has two ends: the windows there overlap fewer
 # neighbours than an interior one does, and the reference assumes every window is full.
-# Autocorrelation falls from 0.797 at lag one to -0.005 at lag five for the weekly label, and
+# Autocorrelation falls from 0.797 at lag one to -0.004 at lag five for the weekly label, and
 # from 0.950 to -0.013 at lag twenty-one for the monthly one - a straight line to zero at
 # each label's own horizon, and nothing left beyond it.
 
@@ -729,7 +738,7 @@ print(
 
 # %% [markdown] tags=["results"]
 # Carry earns a mean information coefficient of 0.0069 against the weekly label, positive as
-# the backwardation hypothesis implies, over the 3,338 of 3,352 development sessions that
+# the backwardation hypothesis implies, over the 3,337 of 3,350 development sessions that
 # have at least 14 products quoted. Under the plain standard error that is a t-statistic of
 # 1.61; the Newey-West rule picks 8 lags here, above the four the horizon alone requires, and
 # the HAC statistic is 0.87 with a p-value of 0.387. So the level any feature has to beat is

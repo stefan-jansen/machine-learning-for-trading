@@ -42,6 +42,18 @@ universe:
       - HE   # Lean Hogs
       - GF   # Feeder Cattle
   n_products: 30
+  # Two sessions where one clearing venue's settlement file is absent. On each, the
+  # missing products are missing at every tenor, and the two missing sets partition the
+  # universe exactly: 2020-02-28 carries no CBOT, NYMEX or COMEX product (YM, the four
+  # treasuries, five grains, four energy, four metals) and 2014-06-13 carries no CME
+  # product (three equity index, six currencies, three livestock). Neighbouring sessions
+  # trade normally, so this is a missing file rather than a thin market. Eleven of the
+  # levels in stage 03 are carried as a percentile within the decision date, and a
+  # percentile taken over one venue's products is not comparable with one taken over
+  # thirty, so both dates are dropped rather than ranked against a partial universe.
+  excluded_sessions:
+    - 2020-02-28
+    - 2014-06-13
 
 decision:
   cadence: weekly_friday_close
