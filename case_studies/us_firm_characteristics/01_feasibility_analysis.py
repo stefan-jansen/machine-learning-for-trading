@@ -70,9 +70,10 @@ from matplotlib.ticker import PercentFormatter
 
 from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
 from data import load_firm_characteristics
+from utils.artifact_specs import resolve_label_horizon
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -107,9 +108,9 @@ ACF_LAGS = 12
 # both ends gives the range a round trip pays. Section B.3 draws that range rather than a line,
 # because a single number would claim a precision this release cannot support.
 #
-# **What is being predicted.** The return over the next month. Two variants of the same horizon are
+# **What is being predicted.** The return over the next month. Two variants of the same outcome are
 # also declared - one with extreme returns trimmed, one turned into an up-or-down label - so all
-# three resolve one month out and share a single gap between training and validation data.
+# three measure over one month and share a single gap between training and validation data.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -119,6 +120,7 @@ HOLDOUT_START = str(SETUP["evaluation"]["holdout_start"])
 HOLDOUT_END = str(SETUP["evaluation"]["holdout_end"])
 PRIMARY_LABEL = SETUP["labels"]["primary"]
 LABEL_BUFFER = str(SETUP["labels"]["buffer"])
+OUTCOME_HORIZON = resolve_label_horizon(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
 BREADTH_FLOOR = 2 * max(SETUP["backtest"]["sweep"]["top_k_grid"][PRIMARY_LABEL])
 LEG_BPS = SETUP["costs"]["per_leg_cost_bps_range"]
 ROUND_TRIP_BPS = (2 * LEG_BPS[0], 2 * LEG_BPS[1])
@@ -324,7 +326,10 @@ add_message_title(
     "The cross-section never comes near the number of positions to fill",
     subtitle="Firms with every measure available, counted at each month-end",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Firms carrying every characteristic at each month-end, against the number of positions the long-short book has to fill on both sides.",
+)
 
 # %% [markdown]
 # ### B.3 What a round trip costs, and what a move is worth
@@ -369,7 +374,10 @@ add_message_title(
     "The spread a long-short sorts within never approaches the round trip",
     subtitle="Monthly spread between the firms at the 90th and 10th percentiles",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Monthly spread between the firms at the 90th and 10th percentiles of return, on a log scale, against the band of assumed round-trip cost.",
+)
 
 # %% [markdown]
 # Two features of that series are worth naming, because both bear on decisions made later. It widens
@@ -403,7 +411,10 @@ add_message_title(
     "Almost every monthly move is larger than the round trip it has to clear",
     subtitle="Absolute firm returns over the development period",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Exceedance curve of absolute monthly firm returns: the fraction of firm-months moving at least a given size, against the assumed round-trip cost band.",
+)
 
 # %% [markdown]
 # ### B.4 How long a firm keeps its place in the ranking
@@ -454,7 +465,10 @@ add_message_title(
     "Momentum ranks decay inside a year; the accounting ranks do not",
     subtitle="Averaged within each firm, over firms with an unbroken monthly history",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Autocorrelation of a firm's cross-sectional rank with its own past, by months of lag, for book-to-market, profitability and momentum, against the band expected from no information.",
+)
 
 # %% [markdown]
 # ### B.5 Move size against cost
@@ -557,12 +571,17 @@ print(
 # evaluating this way is called **walk-forward**, because the split always runs in the direction
 # time does.
 #
-# One detail decides whether the evaluation is honest. The return being predicted lands a month
-# ahead, so a training row dated at the end of its block is labelled with a return from after the
-# block ends. Validating on the month immediately after training would score the model on data it
-# had partly seen already. The fix is to leave a gap between the two, at least as wide as the
-# horizon, and that gap is called **purging**. Its width comes from `labels.buffer` in `setup.yaml`,
-# and here all three labels resolve one month out, so one gap covers all of them.
+# Two settings decide where the boundaries fall, and they answer different questions. The gap left
+# between a training window and the validation window that follows it is called **purging**, and its
+# width comes from `labels.buffer` in `setup.yaml`: one month here, applying to all three labels.
+# Separately, `labels.horizons` says how far past its own timestamp a label's outcome is still
+# unresolved, which is what decides how much of the last validation window has to be given back
+# before the held-back period opens. On this release those are not the same number. Each row pairs
+# the characteristics observed at the end of one month with the return earned over the next and is
+# dated by the month that return was earned in, so a row's outcome is realised on the timestamp the
+# row carries, the horizon is zero, and nothing is given back. The buffer stays a month anyway,
+# which is the conservative choice rather than a forced one.
+# [`02_labels`](02_labels.ipynb) measures that alignment out of the data rather than assuming it.
 #
 # The splitter is given the whole sample, holdout included, and applies the holdout boundary itself
 # from `evaluation.holdout_start`, which is what every later stage does too. It is handed month-end
@@ -581,6 +600,7 @@ splits = generate_cv_splits(
     panel.select("timestamp"),
     case_study_id=CASE_STUDY_ID,
     label_buffer=LABEL_BUFFER,
+    outcome_horizon=OUTCOME_HORIZON,
     date_col="timestamp",
 )
 last_val = max(split["val_end"] for split in splits)
@@ -588,7 +608,8 @@ assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from 
 assert last_val < np.datetime64(HOLDOUT_START), "a fold reaches into the holdout"
 print(
     f"{len(splits)} folds | training {SETUP['evaluation']['train_size']} and validation "
-    f"{SETUP['evaluation']['val_size']} each, purged by labels.buffer {LABEL_BUFFER}\n"
+    f"{SETUP['evaluation']['val_size']} each, purged by labels.buffer {LABEL_BUFFER}, "
+    f"outcome horizon {OUTCOME_HORIZON}\n"
     f"Validation runs {min(split['val_start'] for split in splits).date()} to "
     f"{last_val.date()}, and the holdout opens {HOLDOUT_START}"
 )
@@ -599,9 +620,12 @@ ax.set_xlabel("Month-end")
 add_message_title(
     ax,
     "Folds roll forward and stop short of the holdout",
-    subtitle="Boundaries as generate_cv_splits returned them; the one-month purge is narrow here",
+    subtitle="Boundaries as generate_cv_splits returned them; one month separates each pair",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Walk-forward fold boundaries as generate_cv_splits returned them: ten training windows each followed by its validation window, and the held-back period after the last of them.",
+)
 
 # %% [markdown]
 # ## E. What this notebook hands on
@@ -638,7 +662,7 @@ print(
 # %% [markdown] tags=["results"]
 # The month-end cross-section runs from 2,032 to 2,826 firms, well above the 100 positions the sort
 # has to fill across both sides, and it is never below that on any of the 312 month-ends. Ten folds
-# are generated, their validation windows covering 2006-11-30 to 2015-11-30, and the holdout year
+# are generated, their validation windows covering 2006-11-30 to 2015-12-31, and the holdout year
 # begins after the last of them.
 
 # %% [markdown]

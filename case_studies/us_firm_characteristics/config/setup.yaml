@@ -78,9 +78,24 @@ labels:
   variant_buffers:
     fwd_ret_1m_win: 1M
     fwd_class_1m: 1M
+  # How far past its own timestamp each label's outcome resolves. This is the quantity
+  # generate_cv_splits seals the last validation fold on, and it is not the buffer above.
+  # The release pairs the characteristics observed at the close of month t-1 with the return
+  # earned over month t and dates the row by month t, so a row's return is already realised on
+  # the timestamp the row carries, and no validation month has to be given back before the
+  # holdout opens. 02_labels section D measures that alignment rather than assuming it: ST_REV,
+  # a firm's own most recent monthly return, has rank correlation +0.904 with the previous
+  # row's label and -0.028 with its own.
+  # The buffer above stays 1M. Separating a training window from the validation window that
+  # follows it is a different decision from when an outcome becomes known, and that one is
+  # deliberately conservative here.
+  horizons:
+    fwd_ret_1m: 0D
+    fwd_ret_1m_win: 0D
+    fwd_class_1m: 0D
   # Vectorized-backtest thinning step per label: number of schedule slots
   # to advance per trade so holding periods don't overlap. Authored from
-  # (schedule cadence, label horizon); add an entry here for any new label.
+  # (schedule cadence, the span the label measures over); add an entry for any new label.
   rebalance_step:
     fwd_ret_1m: 1
     fwd_ret_1m_win: 1
