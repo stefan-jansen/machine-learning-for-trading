@@ -65,7 +65,7 @@ from case_studies.utils.feasibility import exceedance_curve, fold_timeline, pane
 from data import load_etfs, load_etfs_unadjusted
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -374,7 +374,13 @@ add_message_title(
     "From the second year on, more funds are eligible than the strategy can hold",
     subtitle="Funds clearing the prior year's dollar-volume floor, counted at each month-end",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "A step line rising from zero at the start of 2006 to about 96 funds by 2018 and flat "
+    "afterwards, against a dashed horizontal line at 20 marking the largest book the strategy "
+    "ever holds. The line crosses 20 during 2007 and stays well above it for the rest of the "
+    "sample.",
+)
 
 # %% [markdown]
 # ### B.3 What a round trip costs, and what a move is worth
@@ -418,9 +424,14 @@ ax.legend(frameon=False, fontsize=8)
 add_message_title(
     ax,
     "Round-trip cost spans an order of magnitude across the same universe",
-    subtitle="Each fund's two half-spreads and two commissions over its median close, sorted",
+    subtitle="Each fund's two half-spreads and two commissions over its median traded close, sorted",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "One bar per fund, sorted left to right, rising from under 1 basis point to about 35. A "
+    "dashed line marks the universe median near 6 basis points; most funds sit between 2 and "
+    "12, and a short tail at the right runs above 20.",
+)
 
 # %% [markdown]
 # Because those costs differ by an order of magnitude, a single cost line drawn across raw returns
@@ -468,7 +479,13 @@ ax.set_xlabel("Absolute move as a multiple of the fund's own round trip (log sca
 ax.set_ylabel("Fraction of moves at least this large")
 ax.legend(frameon=False, fontsize=8, loc="lower left")
 add_message_title(ax, "Almost every move at either horizon exceeds the cost of taking it")
-plt.show()
+show_with_alt(
+    fig,
+    "Two falling curves on a logarithmic horizontal axis giving the fraction of moves at least "
+    "a given multiple of the fund's own round-trip cost. Both start near 1.0 and are still "
+    "close to it at the dashed break-even line at one times cost, the 21-session curve sitting "
+    "above the 5-session one throughout, and both reach zero beyond a hundred times cost.",
+)
 
 # %% [markdown]
 # ### B.4 How much of one month's return carries into the next
@@ -523,7 +540,13 @@ add_message_title(
     "A fund's own past return accounts for almost none of its next one",
     subtitle="Averaged within each fund",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Bars for lags of one to twelve months, alternating in sign and all between -0.05 and "
+    "+0.05, drawn against a shaded band marking what no information would produce. Every bar "
+    "is small enough to sit inside that band, and the 10th-to-90th-percentile spread across "
+    "funds is several times wider than the average bar at every lag.",
+)
 
 # %% [markdown]
 # ### B.5 Move size against cost
@@ -681,7 +704,12 @@ purge_note = f"Training, the {PRIMARY_HORIZON}-session purge gap, validation, an
 add_message_title(
     ax, "Each fold trains, pauses, then validates, and none reaches the holdout", purge_note
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Eight horizontal bars, one per fold, each made of a long dark training block, a thin pale "
+    "purge gap and a short amber validation block. Each fold sits one year earlier than the "
+    "one below it, and the shaded holdout column on the right is reached by none of them.",
+)
 
 # %% [markdown]
 # ## E. What this notebook hands on
