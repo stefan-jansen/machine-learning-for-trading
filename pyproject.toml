@@ -51,9 +51,9 @@ dependencies = [
     # ML4T Libraries (PyPI)
     # ===================
     # ml4t-live is the only one still pre-release; the rest are on stable releases.
-    # ml4t-data 0.1.0: the missing-data errors name the download command a reader can
-    # run and the path the data root resolved from, instead of a Python API call.
-    "ml4t-data>=0.1.0",
+    # ml4t-data 0.1.1: HiveStorage.partitions() reports what a write committed, and the
+    # anomaly detectors accept a date-typed timestamp column.
+    "ml4t-data>=0.1.1",
     "ml4t-diagnostic>=0.1.0",
     "ml4t-engineer>=0.1.2",
     "ml4t-backtest>=0.1.1",
