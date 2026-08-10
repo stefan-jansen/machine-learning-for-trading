@@ -79,7 +79,7 @@ from utils.artifact_specs import resolve_label_buffer
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.data_quality import validate_modeling_inputs
 from utils.paths import get_case_study_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -773,7 +773,16 @@ if leader:
         col=1,
     )
     fig.update_xaxes(title_text="Mean daily Spearman IC, 95% intervals", row=1, col=2)
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Two panels. On the left, the daily rank correlation of the leading feature "
+        "against time, a dense band swinging across the full range from minus one to "
+        "one, with a rolling mean drawn over it that stays close to zero and wanders "
+        "only slightly either side. On the right, the mean rank correlation of each "
+        "leading column with three intervals drawn around it - naive, Newey-West and "
+        "block-bootstrap. The three are close to the same width for every column, and "
+        "each interval reaches across zero or ends very near it.",
+    )
 
 # %% [markdown]
 # ### Did the Folds Agree, or Was It One Window?
@@ -876,7 +885,14 @@ fig.update_layout(
     margin={"l": 200},
     legend={"orientation": "h", "y": -0.16},
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "One row per leading feature, with a point for each fold's mean rank correlation, a "
+    "diamond at the median fold and a cross on the fold furthest against the feature's "
+    "own direction. Every row has points on both sides of the zero rule, and on most "
+    "rows the spread across folds is several times the distance of the median from "
+    "zero.",
+)
 
 # %% [markdown]
 # ## 4. What Was Searched, and What That Costs
@@ -1049,7 +1065,15 @@ fig.update_layout(
 fig.update_xaxes(title_text="Mean daily Spearman IC", row=1, col=1)
 fig.update_xaxes(title_text="Naive t-statistic", row=1, col=2)
 fig.update_yaxes(title_text="Newey-West t-statistic", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels. On the left, horizontal bars of mean rank correlation for the candidate "
+    "columns, ranked from the most positive at the top through zero to the most negative "
+    "at the bottom, each labelled with its value and all drawn in the single colour the "
+    "legend gives to columns that did not clear the false-discovery adjustment. On the "
+    "right, the Newey-West t-statistic against the naive one, with the points lying "
+    "along the diagonal, so correcting for overlap moves the t-statistics very little.",
+)
 
 # %% [markdown]
 # ### The Same Columns Against the Longer Labels
@@ -1168,7 +1192,16 @@ for column_index in (1, 2):
     )
 fig.update_yaxes(title_text="Mean Spearman IC", row=1, col=1)
 fig.update_yaxes(title_text="Mean fold IC / dispersion across folds", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels against forward horizon, at one, five and twenty-one sessions, with one "
+    "line per leading column coloured by the sign it takes at the primary horizon. On "
+    "the left, mean rank correlation: the lines fan out from a tight cluster near zero "
+    "at one session, the positive group rising and part of the negative group falling "
+    "further, so agreement with the label is larger at the longer horizons. On the "
+    "right, the same columns as a fold-level information ratio, where the lines are much "
+    "flatter across horizons and stay on the side of zero they started.",
+)
 
 # %% [markdown]
 # ## 5. Is the Relationship the Shape a Ranking Strategy Needs?
@@ -1270,7 +1303,15 @@ if quantile_spreads:
     fig.update_yaxes(range=[-1.1 * span, 1.1 * span], tickformat=".0e")
     for row in range(1, figure_rows + 1):
         fig.update_yaxes(title_text="Mean next-day return", row=row, col=1)
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "A small-multiple grid, one panel per leading column, each showing the mean "
+        "next-day return of the five within-session buckets from the lowest to the "
+        "highest value of that column. All panels share one vertical range. Some rise "
+        "or fall monotonically across the buckets, and others turn in the middle or put "
+        "their extreme in an interior bucket, so a similar mean correlation is produced "
+        "by quite different shapes.",
+    )
 
 # %% [markdown]
 # ## 6. How Much of This Is the Same Evidence Counted Twice?
@@ -1444,7 +1485,14 @@ if high_correlation_pairs:
         width=1000,
         margin={"l": 320},
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Horizontal bars of absolute rank correlation for the most correlated pairs of "
+        "feature columns, each row labelling the two columns and marking with an "
+        "asterisk the one standing for its group. Every bar reaches past 0.95 and the "
+        "longest reach 1.00, so these pairs order the cross-section almost "
+        "identically.",
+    )
 
 # %% [markdown]
 # ## 7. One Decision per Column
