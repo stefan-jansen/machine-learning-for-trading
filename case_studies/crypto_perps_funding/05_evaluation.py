@@ -677,9 +677,8 @@ show_with_alt(
 # then over settlements, so a settlement quoting nineteen contracts counts once and so does one
 # quoting ten. That is what a book rebalanced at every settlement earns, and it is the unit the
 # score alongside is already built on, so the two weigh the sample the same way. Averaging every
-# contract-settlement in one pass instead would let the widest settlements decide the profile,
-# and it would do so without any sign of having done it: the five bars still appear and still
-# carry a `monotonicity` value.
+# contract-settlement in one pass hands the profile to the widest settlements, and leaves no
+# trace of having done it: the five bars still appear and still carry a `monotonicity` value.
 #
 # Both the average and the median of each group are drawn. The average is what a book holding
 # every contract in the group earns; the median is where the typical contract ends up. Eight-hour
