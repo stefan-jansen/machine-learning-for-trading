@@ -126,6 +126,7 @@ PRIMARY_LABEL = setup["labels"]["primary"]
 HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
 DECISION_MINUTES = int(setup["decision"]["bar_frequency"].removesuffix("_minute"))
 CALENDAR = setup["evaluation"]["calendar"]
+UNIVERSE = sorted(setup["universe"]["symbols"])
 
 # The panel key, the entity every trailing window is bounded by, and the partition every
 # cross-sectional statistic is taken over.
@@ -312,6 +313,7 @@ _archive = load_nasdaq100_bars(
     end_date=END_DATE,
     include_microstructure=True,
     max_symbols=MAX_SYMBOLS,
+    symbols=UNIVERSE,
     lazy=True,
 )
 ARCHIVE_COLUMNS = _archive.collect_schema().names()
@@ -550,8 +552,10 @@ def order_flow_features(df: pl.DataFrame) -> pl.DataFrame:
 # traded, and the library's estimator is what computes it here. Averaging is what makes it a
 # statement about how deep the market for a name is rather than about one bar: a single
 # bar's ratio of return to dollars is dominated by whichever bar happened to trade thinnest,
-# and carries a different scale. It is null on a bar that printed no trades at all, because
-# price impact per dollar traded is undefined when nothing traded. **Kyle's lambda**
+# and carries a different scale. On a bar that printed no trades the ratio itself is
+# undefined, because price impact per dollar traded means nothing when nothing traded; the
+# estimator drops that bar from the window it averages rather than emptying the window, so
+# the feature is null only where no bar in the window traded. **Kyle's lambda**
 # regresses the return on the signed share over a rolling hour
 # and is kept local: the identity form below has a warmup of exactly its window where a
 # two-pass covariance would need twice that.
@@ -985,18 +989,19 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# The matrix carries **66 features** on **16,726,378 rows** across **114 symbols** and **505
+# The matrix carries **66 features** on **16,871,167 rows** across **115 symbols** and **505
 # sessions**, from **2020-01-02 10:31** to **2021-12-31 15:59**. The null policy dropped
-# **3,127,306 rows**, **15.8%**, which is the hour of warmup every session pays before Kyle's
+# **3,153,863 rows**, **15.7%**, which is the hour of warmup every session pays before Kyle's
 # lambda exists plus the bar its publication lag costs - and it is why the panel starts at
 # 10:31 rather than at the open. The
-# thinnest family-month is **0.991** covered, in the price-impact family. Of those
-# rows, **1,067,580** fall on the **10,562** minutes of the 15-minute decision grid, which is
+# thinnest family-month is **0.996** covered, in the price-impact family. Of those
+# rows, **1,076,821** fall on the **10,562** minutes of the 15-minute decision grid, which is
 # the subset F3 and F6 read.
 #
-# Bars on which neither venue printed are **0.05%** of the matrix, and they leave **1.13%** of
-# it without an Amihud value, because the estimator's rolling average nulls every one of the
-# thirty bars whose window contains one of them.
+# Bars on which neither venue printed are **0.05%** of the matrix and leave **0.00%** of it
+# without an Amihud value. Amihud (2002) averages the ratio over the periods that traded, so a
+# bar with no prints leaves the window rather than emptying it; a plain rolling average would
+# instead propagate that gap across all thirty bars whose window contains it.
 
 # %% [markdown]
 # ### F1. Coverage through time

@@ -71,7 +71,7 @@ from case_studies.utils.feasibility import exceedance_curve, fold_timeline, pane
 from data import load_nasdaq100_bars
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -100,6 +100,14 @@ MAX_SYMBOLS = 0  # 0 loads the declared universe; a positive value takes a deter
 # full roster. The strategy holds both ends of its ranking, up to 20 names per side, so at least 40
 # eligible names have to be quoting whenever it rebalances.
 #
+# The roster itself follows one rule: **a symbol enters the universe only if it contributes at
+# least one session before `holdout_start`.** The archive carries more names than that. Some first
+# quote inside the holdout, and a name that appears only there cannot be fit on, has no spread in
+# the pre-holdout liquidity profile this notebook writes, and would therefore be traded in a
+# holdout backtest at a cost that was never measured for it. Section B.1 asserts the declared list
+# against the archive in both directions, so a delivery that adds or drops a name stops the
+# notebook rather than quietly changing every cross-sectional statistic below.
+#
 # **When it is allowed to act.** `decision.bar_frequency` places a decision at the close of every
 # fifteen-minute bar, and `execution_delay` puts the resulting trade in the following bar. Scoring
 # a bar and trading at that same bar's close would let the strategy trade on a price it has already
@@ -125,7 +133,12 @@ COST_FEASIBLE = SETUP["universe"]["cost_feasible"]["validation"]
 CADENCE = f"{SETUP['decision']['bar_frequency'].split('_')[0]}m"
 LABEL_BUFFER = SETUP["labels"]["buffer"]
 HORIZONS = sorted({int(b.rstrip("min")) for b in SETUP["labels"]["variant_buffers"].values()})
-WINDOW = {"start_date": START_DATE, "end_date": HOLDOUT_START, "max_symbols": MAX_SYMBOLS}
+WINDOW = {
+    "start_date": START_DATE,
+    "end_date": HOLDOUT_START,
+    "max_symbols": MAX_SYMBOLS,
+    "symbols": sorted(DECLARED_SYMBOLS),
+}
 
 print(f"Sample: {START_DATE} to {HOLDOUT_END}")
 print(f"  Development period, used everywhere below:  {START_DATE} to {HOLDOUT_START}")
@@ -216,14 +229,34 @@ def load_bars(frequency: str = "1m") -> pl.DataFrame:
 # ### B.1 Load the data and look at the universe
 #
 # The loader returns one row per symbol and minute, carrying the traded close and the bid and
-# offer quoted at the end of that minute. Two properties are checked before anything is computed: that
-# every declared symbol is present, and that no quote is inverted or non-positive, since the
-# midpoint of a crossed quote is not a price.
+# offer quoted at the end of that minute. Two properties are checked before anything is computed:
+# that the declared roster is exactly the set of names the rule admits, and that no quote is
+# inverted or non-positive, since the midpoint of a crossed quote is not a price.
+#
+# The first check runs in both directions. A declared name the archive never quotes would leave the
+# panel one column short of what every section below assumes; an archived name that quotes before
+# the holdout and is *not* declared would silently join every cross-section, every rank and the
+# liquidity profile without ever having been decided on. Comparing only the first direction is what
+# let a delivery of 123 symbols be read through a roster of 114.
 
 # %%
+eligible = (
+    set(
+        load_nasdaq100_bars(start_date=START_DATE, end_date=HOLDOUT_START, lazy=True)
+        .filter(pl.col("timestamp") < pl.lit(HOLDOUT_START).str.to_datetime())
+        .select("symbol")
+        .unique()
+        .collect()["symbol"]
+    )
+    if not MAX_SYMBOLS
+    else DECLARED_SYMBOLS
+)
+assert eligible == DECLARED_SYMBOLS, (
+    f"declared but never quoted before {HOLDOUT_START}: {sorted(DECLARED_SYMBOLS - eligible)}; "
+    f"quoted before {HOLDOUT_START} but not declared: {sorted(eligible - DECLARED_SYMBOLS)}"
+)
+
 minute_bars = load_bars()
-missing = sorted(DECLARED_SYMBOLS - set(minute_bars["symbol"].unique())) if not MAX_SYMBOLS else []
-assert not missing, f"declared in setup.yaml but absent from the data: {missing}"
 print(
     f"{minute_bars['symbol'].n_unique()} symbols, {len(minute_bars):,} quoted minutes, "
     f"{minute_bars['timestamp'].min()} to {minute_bars['timestamp'].max()}"
@@ -309,15 +342,19 @@ ax.set_ylabel("Symbols quoting at the decision bar")
 ax.legend(frameon=False, fontsize=8, loc="center left")
 add_message_title(
     ax,
-    "The eligible book, not the index, is what the floor binds on",
+    "The eligible book clears the floor, with a quarter of its names to spare",
     subtitle="Symbols quoting per decision bar, declared universe against the frozen eligible list",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two lines across the sample: the count of declared names quoting at each decision bar, and the count from the frozen eligible list, against a horizontal line at the forty names the largest book has to fill.",
+)
+_thin_dates = thin["timestamp"].dt.date().unique().sort().to_list()
 print(
     f"Declared {breadth['declared'].min()} to {breadth['declared'].max()} per bar, cost-feasible "
     f"{breadth['screened'].min()} to {breadth['screened'].max()}; under the floor of "
-    f"{BREADTH_FLOOR} on {len(thin)} of {len(breadth):,} bars, all on "
-    + ", ".join(str(d) for d in thin["timestamp"].dt.date().unique().sort().to_list())
+    f"{BREADTH_FLOOR} on {len(thin)} of {len(breadth):,} bars"
+    + (", all on " + ", ".join(str(d) for d in _thin_dates) if _thin_dates else "")
 )
 
 # %% [markdown]
@@ -373,7 +410,10 @@ add_message_title(
     "One cost level fits neither end of this universe",
     subtitle="Round trip per symbol; the names eligible to hold are the dark bars",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "One bar per symbol, ordered from the tightest round-trip cost to the widest, with the eligible names drawn dark and horizontal lines at the universe median and at the declared friction floor.",
+)
 
 # %% [markdown]
 # ### B.4 Whether the last move says anything about the next
@@ -426,7 +466,10 @@ add_message_title(
     "Nothing in the return itself carries to the next decision bar",
     subtitle="Mean within-symbol autocorrelation, interdecile range across symbols shaded",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Autocorrelation of a symbol's return with its own past, one bar per lag in decision bars, with the interdecile range across symbols shaded behind the mean.",
+)
 
 # %% [markdown]
 # That is a useful negative result rather than a discouraging one. It rules out the simplest
@@ -479,7 +522,10 @@ add_message_title(
     "Most moves are larger than the round trip that captures them",
     subtitle="Exceedance of absolute midpoint moves scaled by each symbol's own measured cost",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Three curves, one per forecast horizon, giving the fraction of absolute midpoint moves at least as large as each multiple of the symbol's own round-trip cost, on a logarithmic axis with break-even marked at one.",
+)
 
 # %%
 print(
@@ -492,11 +538,11 @@ for h in HORIZONS:
     print(f"  {h:>2}-minute move: median {med:.1f} bps, clears its own round trip {share:.3f}")
 
 # %% [markdown] tags=["results"]
-# Measured round-trip cost across the 114 declared names runs from 1.16 bps on the tightest-quoted
+# Measured round-trip cost across the 115 declared names runs from 1.16 bps on the tightest-quoted
 # to 28.17 bps on the widest, with a median of 6.16 bps - a spread of more than a factor of twenty,
 # which is why one cost level would not do. Over the 50 names the strategy is allowed to hold, the
 # median absolute midpoint move is 9.1 bps at 5 minutes, 15.8 bps at 15 and 30.6 bps at 60, and the
-# fraction of moves clearing the symbol's own round trip is 0.756, 0.856 and 0.926 at those
+# fraction of moves clearing the symbol's own round trip is 0.757, 0.856 and 0.926 at those
 # horizons. At the traded cadence a typical move is under three times the round trip, and a strategy
 # keeps only the part of it whose direction it called correctly.
 
@@ -590,6 +636,7 @@ full_timeline = (
         start_date=START_DATE,
         end_date=HOLDOUT_END,
         max_symbols=MAX_SYMBOLS,
+        symbols=sorted(DECLARED_SYMBOLS),
     )
     .select("timestamp")
     .unique()
@@ -632,7 +679,10 @@ add_message_title(
     "Folds roll forward and stop short of the holdout",
     subtitle="Boundaries as generate_cv_splits returned them; the one-bar purge is too narrow to see",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Each fold drawn as a training span followed by a validation span, rolling forward through the sample and stopping before the holdout period begins.",
+)
 
 # %% [markdown]
 # ## E. Derived artifacts
@@ -674,13 +724,12 @@ print(
 )
 
 # %% [markdown] tags=["results"]
-# The declared universe carries 40 to 102 symbols per decision bar, but the eligible book carries
-# 26 to 50 and falls under the 40 the largest declared portfolio needs on 20 of 9,802 bars, every
-# one of them a post-close print on 2020-11-27 or 2020-12-24, both half-days. The measured
-# round-trip median of 6.16 bps sits above the friction floor of 5 bps `setup.yaml` declares, so
-# that floor is the optimistic end of what this universe charges rather than a typical case. Two
-# folds are generated over 13,130 decision bars, training from 2020-01-02 and ending its last
-# validation on 2021-06-30, with the holdout untouched.
+# The declared universe carries 101 to 103 symbols per decision bar and the eligible book 46 to 50,
+# so the 40 the largest declared portfolio needs is available at every one of the 9,778 decision
+# bars. The measured round-trip median of 6.16 bps sits above the friction floor of 5 bps
+# `setup.yaml` declares, so that floor is the optimistic end of what this universe charges rather
+# than a typical case. Two folds are generated over 13,094 decision bars, training from 2020-01-02
+# and ending its last validation on 2021-06-30, with the holdout untouched.
 
 # %% [markdown]
 # ## Key takeaways

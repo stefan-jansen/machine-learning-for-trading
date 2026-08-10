@@ -417,6 +417,24 @@ def show_with_alt(fig: object, alt: str) -> None:
     plt.close(fig)
 
 
+def show_plotly_with_alt(fig: object, alt: str) -> None:
+    """Render a Plotly *fig* carrying alt text for screen readers.
+
+    Neither `fig.show()` nor `display(fig, metadata=...)` attaches it. Plotly returns
+    its own metadata from `_repr_mimebundle_`, and IPython uses that in preference to
+    a caller's, so the alt is silently dropped and the PNG reaches the page described
+    as "No description has been provided for this image". Publishing the bundle
+    directly is what carries it through.
+
+    The alt text is a sentence saying what the chart shows, not a repeat of the title.
+    """
+    from IPython.display import publish_display_data
+
+    bundle = fig._repr_mimebundle_()
+    data, metadata = bundle if isinstance(bundle, tuple) else (bundle, {})
+    publish_display_data(data=data, metadata={**metadata, "image/png": {"alt": alt}})
+
+
 def label_line_ends(ax: Axes, xpad_points: int = 4, expand_right: float = 0.10) -> None:
     """Direct-label each labeled line at its last finite point; use instead of a legend.
 
