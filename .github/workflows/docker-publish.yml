@@ -6,7 +6,7 @@
 #
 # Images published:
 #   ml4t/ml4t:latest            — Main (Python 3.14, PyTorch CUDA 12.8)
-#   ml4t/ml4t-py312:latest      — Python 3.12 (signatory/esig/gensim/pfhedge/tfcausalimpact)
+#   ml4t/ml4t-py312:latest      — Python 3.12 (signatory/esig/gensim/tfcausalimpact)
 #   ml4t/ml4t-benchmark:latest  — Storage benchmarks (DuckDB, HDF5, DB clients)
 
 name: Docker Publish

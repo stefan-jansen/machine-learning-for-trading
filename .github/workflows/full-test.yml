@@ -127,7 +127,7 @@ jobs:
             --timeout=600
 
   # ---------------------------------------------------------------------------
-  # Py312 notebooks (signatory, gensim, esig, pfhedge, tfcausalimpact, torch CUDA bug)
+  # Py312 notebooks (signatory, gensim, esig, tfcausalimpact, torch CUDA bug)
   # ---------------------------------------------------------------------------
   py312:
     if: github.event.inputs.scope == 'all'

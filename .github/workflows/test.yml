@@ -757,8 +757,8 @@ jobs:
             -k "$FILTER"
 
   # ---------------------------------------------------------------------------
-  # Py312 Docker image (Python 3.12: gensim, signatory, esig, pfhedge,
-  # tfcausalimpact, plus notebooks affected by the Py3.14 torch CUDA bug)
+  # Py312 Docker image (Python 3.12: gensim, signatory, esig, tfcausalimpact,
+  # plus notebooks affected by the Py3.14 torch CUDA bug)
   # ---------------------------------------------------------------------------
   test-py312:
     timeout-minutes: 45

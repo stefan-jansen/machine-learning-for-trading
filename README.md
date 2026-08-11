@@ -467,7 +467,7 @@ preamble. Full details in the **[Docker environments guide](envs/README.md)**.
 |--------------|------------------------------------------------------------------|-------------------------|
 | `ml4t`       | All 27 chapters + 9 case studies (CPU)                           | Default for everything  |
 | `ml4t-gpu`   | Same `ml4t` image, run with the NVIDIA runtime (`--profile gpu`) | Deep-learning chapters  |
-| `ml4t-py312` | Python 3.12 for signatory, esig, gensim, pfhedge, tfcausalimpact | ~10 notebooks           |
+| `ml4t-py312` | Python 3.12 for signatory, esig, gensim, tfcausalimpact           | ~10 notebooks           |
 | `benchmark`  | Database clients (TimescaleDB, ClickHouse, QuestDB, InfluxDB)    | Ch02 storage benchmarks |
 | `rapids`     | RAPIDS cuML + LightGBM CUDA (build locally)                      | One Ch12 GPU benchmark  |
 
