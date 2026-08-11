@@ -260,6 +260,108 @@ def git_blob(path: Path) -> str:
     ).stdout.strip()
 
 
+ALT_FUNCS = frozenset({"show_with_alt", "show_plotly_with_alt"})
+
+
+class _AltBlanker(ast.NodeTransformer):
+    """Replace each ``show_*_with_alt`` alt-text argument with a placeholder.
+
+    Collects the literals it replaced in source order, so the same walk answers both
+    "is this the only thing that changed" and "does the notebook's output metadata
+    still agree with the source".
+    """
+
+    def __init__(self) -> None:
+        self.alts: list[str] = []
+
+    def visit_Call(self, node: ast.Call) -> ast.Call:
+        self.generic_visit(node)
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id in ALT_FUNCS
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+        ):
+            self.alts.append(node.args[1].value)
+            node.args[1] = ast.Constant(value="<alt>")
+        return node
+
+
+def _blanked(src: str) -> tuple[str, list[str]] | None:
+    """(alt-blanked AST dump, alt literals) for *src*, or None if it does not parse."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return None
+    blanker = _AltBlanker()
+    tree = blanker.visit(tree)
+    ast.fix_missing_locations(tree)
+    # No attributes: the dump must not depend on the line numbers that a longer or
+    # shorter alt string shifts.
+    return ast.dump(tree), blanker.alts
+
+
+def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
+    """Whether the ``.py`` drifted from its stamp ONLY in alt text already in the outputs.
+
+    A stamp records the ``.py`` blob that was executed, and any edit to the ``.py``
+    moves the blob, so the gate reads a corrected figure description as a notebook
+    that needs re-executing. For alt text that is the wrong answer, and expensively
+    so: ``show_plotly_with_alt`` publishes ``metadata={..., "image/png": {"alt": alt}}``
+    and takes the image itself from ``fig._repr_mimebundle_()``, which never sees the
+    alt string. So the alt in a notebook's output metadata is a verbatim copy of the
+    source literal, and re-executing to change one cannot produce different outputs.
+    ``nasdaq100_microstructure/04`` is 90 minutes and 43 GB to restate four sentences.
+
+    Both halves have to hold, and neither is a judgement:
+
+    * the two sources are identical once every alt literal is blanked, so nothing that
+      executes changed - comments and markdown cells are invisible to ``ast`` and
+      cannot affect outputs either, and
+    * every alt in the notebook's output metadata already equals the literal in its own
+      cell, so the outputs on disk are the ones this source produces.
+
+    Anything else - a changed constant, a reordered call, an alt the outputs do not
+    carry - is stale, which is what the stamp is for.
+    """
+    old = subprocess.run(
+        ["git", "cat-file", "blob", stamped_blob],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if old.returncode != 0:
+        return False  # the stamped blob is not in this repo; cannot compare
+    old_blanked = _blanked(old.stdout)
+    new_blanked = _blanked(py.read_text(encoding="utf-8"))
+    if old_blanked is None or new_blanked is None:
+        return False
+    if old_blanked[0] != new_blanked[0]:
+        return False
+
+    for cell in nb.get("cells", []):
+        if cell.get("cell_type") != "code":
+            continue
+        src = "".join(cell.get("source", []))
+        if not any(fn in src for fn in ALT_FUNCS):
+            continue
+        blanked = _blanked(src)
+        if blanked is None:
+            return False
+        carried = [
+            (out.get("metadata") or {}).get("image/png", {}).get("alt")
+            for out in cell.get("outputs", [])
+            if "image/png" in out.get("data", {})
+        ]
+        if len(blanked[1]) != len(carried) or any(
+            a != c for a, c in zip(blanked[1], carried, strict=True)
+        ):
+            return False
+    return True
+
+
 def contradicts_injected_cell(nb: dict, parameters: dict[str, object]) -> str | None:
     """Why ``parameters`` disagrees with the notebook's injected cell, or None.
 
@@ -381,12 +483,20 @@ def destamped(ref: str | None = None) -> list[str]:
     )
 
 
-def check_all(strict: bool = False) -> tuple[list[str], list[str], list[str], list[str]]:
-    """Return (stale, testmode, contradicted, unverified) repo-relative offenders."""
+def check_all(
+    strict: bool = False,
+) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
+    """Return (stale, testmode, contradicted, unverified, alt_only) repo-relative rows.
+
+    Only the first four fail. ``alt_only`` is reported so that forgiving a drift is
+    never silent: a notebook in that list has a ``.py`` that no longer matches its
+    stamp, and the reason it is allowed is printed rather than assumed.
+    """
     stale: list[str] = []
     testmode: list[str] = []
     contradicted: list[str] = []
     unverified: list[str] = []
+    alt_only: list[str] = []
     for nb_path in iter_notebooks():
         rel = str(nb_path.relative_to(REPO_ROOT))
         py = paired_py(nb_path)
@@ -400,14 +510,18 @@ def check_all(strict: bool = False) -> tuple[list[str], list[str], list[str], li
         if not stamp:
             unverified.append(rel)
             continue
-        if stamp.get("source_py_blob") != git_blob(py):
-            stale.append(rel)
+        stamped_blob = stamp.get("source_py_blob")
+        if stamped_blob != git_blob(py):
+            if alt_text_only_drift(stamped_blob, py, nb):
+                alt_only.append(rel)
+            else:
+                stale.append(rel)
         if not stamp.get("production", False):
             testmode.append(f"{rel} (params={stamp.get('parameters')})")
         conflict = contradicts_injected_cell(nb, stamp.get("parameters") or {})
         if conflict:
             contradicted.append(f"{rel} ({conflict})")
-    return stale, testmode, contradicted, unverified
+    return stale, testmode, contradicted, unverified, alt_only
 
 
 def _cmd_stamp(args: argparse.Namespace) -> int:
@@ -431,7 +545,7 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
-    stale, testmode, contradicted, unverified = check_all(strict=args.strict)
+    stale, testmode, contradicted, unverified, alt_only = check_all(strict=args.strict)
     lost = destamped()
     fail = bool(stale or testmode or contradicted or lost) or (args.strict and bool(unverified))
     if lost:
@@ -457,6 +571,13 @@ def _cmd_check(args: argparse.Namespace) -> int:
         )
         for r in contradicted:
             print(f"  {r}")
+    if alt_only:
+        print(
+            "ALT-TEXT ONLY (the .py drifted from its stamp only in figure alt text the "
+            "outputs already carry, so re-executing could not change them — allowed):"
+        )
+        for r in alt_only:
+            print(f"  {r}")
     if unverified:
         verb = "UNVERIFIED (no provenance stamp"
         verb += (
@@ -468,7 +589,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
     if not fail:
         print(
             f"notebook sync OK: {len(stale)} stale, {len(testmode)} test-mode, "
-            f"{len(contradicted)} contradicted, {len(unverified)} unverified (advisory)"
+            f"{len(contradicted)} contradicted, {len(alt_only)} alt-text-only, "
+            f"{len(unverified)} unverified (advisory)"
         )
     return 1 if fail else 0
 
