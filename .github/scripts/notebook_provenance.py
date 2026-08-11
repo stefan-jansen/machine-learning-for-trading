@@ -263,6 +263,21 @@ def git_blob(path: Path) -> str:
 ALT_FUNCS = frozenset({"show_with_alt", "show_plotly_with_alt"})
 
 
+def _alt_call_name(func: ast.expr) -> str | None:
+    """The called name for a bare ``f(...)`` or a qualified ``mod.f(...)``, else None.
+
+    Both forms occur in the corpus: ``from utils.style import show_plotly_with_alt``
+    gives the bare call, and ``import utils.style as style`` gives the qualified one.
+    Matching only ``ast.Name`` left the qualified form outside the exception, so a
+    corrected caption there was still read as a stale run.
+    """
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
 def _percent_cells(src: str) -> list[tuple[str, str, str]]:
     """(marker line, kind, body) per jupytext percent cell.
 
@@ -306,8 +321,7 @@ def _blank_alts(code: str) -> tuple[str, list[str]] | None:
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id in ALT_FUNCS
+            and _alt_call_name(node.func) in ALT_FUNCS
             and len(node.args) >= 2
             and isinstance(node.args[1], ast.Constant)
             and isinstance(node.args[1].value, str)

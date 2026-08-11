@@ -284,12 +284,18 @@ def test_no_notebook_loses_a_provenance_stamp_it_already_had() -> None:
 # -----------------------------------------------------------------------------
 
 
-def _alt_cell(alt: str, *, png: str = "iVBORw0KGgo=", carried: str | None = None) -> dict:
-    """A code cell calling show_plotly_with_alt with one png output carrying *carried*."""
+def _alt_cell(
+    alt: str,
+    *,
+    png: str = "iVBORw0KGgo=",
+    carried: str | None = None,
+    call: str = "show_plotly_with_alt",
+) -> dict:
+    """A code cell calling *call* with one png output carrying *carried*."""
     return {
         "cell_type": "code",
         "metadata": {},
-        "source": f'fig = build()\nshow_plotly_with_alt(fig, "{alt}")\n',
+        "source": f'fig = build()\n{call}(fig, "{alt}")\n',
         "outputs": [
             {
                 "output_type": "display_data",
@@ -324,6 +330,27 @@ def test_correcting_only_the_alt_text_is_not_stale(tmp_path, monkeypatch) -> Non
     new = 'fig = build()\nshow_plotly_with_alt(fig, "the top row is the holdout")\n'
     nb = _notebook([_alt_cell("the top row is the holdout")])
     assert _drift(tmp_path, monkeypatch, old, new, nb)
+
+
+def test_correcting_alt_text_on_a_qualified_call_is_not_stale(tmp_path, monkeypatch) -> None:
+    """``import utils.style as style`` gives ``style.show_plotly_with_alt(...)``.
+
+    The exception matched only bare ``ast.Name`` calls, so the qualified form fell
+    outside it. ``case_studies/etfs/05_evaluation.py`` is the one notebook in the
+    corpus written this way, and ``import utils.style as style`` appears 19 times.
+    """
+    old = 'fig = build()\nstyle.show_plotly_with_alt(fig, "the bottom row is the holdout")\n'
+    new = 'fig = build()\nstyle.show_plotly_with_alt(fig, "the top row is the holdout")\n'
+    nb = _notebook([_alt_cell("the top row is the holdout", call="style.show_plotly_with_alt")])
+    assert _drift(tmp_path, monkeypatch, old, new, nb)
+
+
+def test_a_code_change_beside_a_qualified_alt_change_is_still_stale(tmp_path, monkeypatch) -> None:
+    """Recognising the qualified form must not also forgive a changed constant."""
+    old = 'fig = build(n=5)\nstyle.show_plotly_with_alt(fig, "old words")\n'
+    new = 'fig = build(n=20)\nstyle.show_plotly_with_alt(fig, "new words")\n'
+    nb = _notebook([_alt_cell("new words", call="style.show_plotly_with_alt")])
+    assert not _drift(tmp_path, monkeypatch, old, new, nb)
 
 
 def test_a_code_change_beside_an_alt_change_is_still_stale(tmp_path, monkeypatch) -> None:
