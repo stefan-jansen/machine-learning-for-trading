@@ -566,13 +566,15 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Horizontal timeline with one row per fold on a session axis. Each row is a long dark navy "
-    "training bar followed by the shorter amber validation bar it is scored on. Fold 0 is the "
-    "bottom row and holds the latest validation window; each row above it holds an earlier one, "
-    "so the bars of neighbouring folds overlap. A dashed red rule marks where the holdout opens "
-    "and a shaded band to its right is the holdout itself. The top row is the extra fold written "
-    "for the holdout: its training bar runs from the left edge up to the rule and its light grey "
-    "holdout bar sits inside the band. No training bar of any row crosses the rule.",
+    "Horizontal timeline with one row per fold on a session axis. Every row below the top is a "
+    "validation fold: a long dark navy training bar followed by the shorter amber validation bar "
+    "it is scored on. Fold 0 is the bottom row and holds the latest of those validation windows, "
+    "and each validation row above it holds an earlier one, so their bars overlap. A dashed red "
+    "rule marks where the holdout opens and a shaded band to its right is the holdout itself. "
+    "The top row is the extra fold written for the holdout and has no validation bar: its "
+    "training bar runs from the left edge up to the rule and its light grey holdout bar sits "
+    "inside the band, later than every validation window. No training bar of any row crosses "
+    "the rule.",
 )
 
 # %% [markdown]

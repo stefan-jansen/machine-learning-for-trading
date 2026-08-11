@@ -342,10 +342,57 @@ def test_alt_text_the_outputs_do_not_carry_is_stale(tmp_path, monkeypatch) -> No
     assert not _drift(tmp_path, monkeypatch, old, new, nb)
 
 
+def test_a_trailing_semicolon_is_stale(tmp_path, monkeypatch) -> None:
+    """A semicolon suppresses a cell's automatic display and leaves the AST identical."""
+    old = '# %%\nfig = build()\nshow_plotly_with_alt(fig, "words")\nsummary\n'
+    new = '# %%\nfig = build()\nshow_plotly_with_alt(fig, "words")\nsummary;\n'
+    nb = _notebook([_alt_cell("words")])
+    assert not _drift(tmp_path, monkeypatch, old, new, nb)
+
+
+def test_moving_a_cell_boundary_is_stale(tmp_path, monkeypatch) -> None:
+    """Which code shares a cell decides which value is its last expression."""
+    old = "# %%\nfig = build()\n\n# %%\nsummary\n"
+    new = "# %%\nfig = build()\nsummary\n"
+    assert not _drift(tmp_path, monkeypatch, old, new, _notebook([]))
+
+
+def test_retagging_a_cell_is_stale(tmp_path, monkeypatch) -> None:
+    """The marker carries cell tags, so it is compared even for a markdown cell."""
+    old = "# %% [markdown]\n# words\n"
+    new = '# %% [markdown] tags=["results"]\n# words\n'
+    assert not _drift(tmp_path, monkeypatch, old, new, _notebook([]))
+
+
+def test_rewrapping_the_alt_literal_is_not_stale(tmp_path, monkeypatch) -> None:
+    """ruff format rewraps a long alt string; the value is what matters, not the wrapping."""
+    old = '# %%\nshow_plotly_with_alt(fig, "one two three")\n'
+    new = '# %%\nshow_plotly_with_alt(\n    fig,\n    "one two "\n    "three",\n)\n'
+    nb = _notebook([_alt_cell("one two three")])
+    assert _drift(tmp_path, monkeypatch, old, new, nb)
+
+
 def test_a_comment_only_change_is_not_stale(tmp_path, monkeypatch) -> None:
     """Markdown cells are comments in a jupytext .py and cannot affect outputs."""
     old = "# %% [markdown]\n# the last row is the holdout\n\n# %%\nfig = build()\n"
     new = "# %% [markdown]\n# the top row is the holdout\n\n# %%\nfig = build()\n"
+    assert _drift(tmp_path, monkeypatch, old, new, _notebook([]))
+
+
+def test_code_appended_into_a_markdown_cell_is_stale(tmp_path, monkeypatch) -> None:
+    """A markdown body is only ignorable while it is all comments.
+
+    Measured against the real notebook: its last cell is `# %% [markdown]`, so appending
+    `fig;` landed in a markdown body and was forgiven until the body was compared.
+    """
+    old = "# %% [markdown]\n# words\n"
+    new = "# %% [markdown]\n# words\nfig;\n"
+    assert not _drift(tmp_path, monkeypatch, old, new, _notebook([]))
+
+
+def test_editing_markdown_prose_is_still_not_stale(tmp_path, monkeypatch) -> None:
+    old = "# %% [markdown]\n# the last row is the holdout\n"
+    new = "# %% [markdown]\n# the top row is the holdout\n"
     assert _drift(tmp_path, monkeypatch, old, new, _notebook([]))
 
 

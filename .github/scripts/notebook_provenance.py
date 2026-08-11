@@ -263,43 +263,131 @@ def git_blob(path: Path) -> str:
 ALT_FUNCS = frozenset({"show_with_alt", "show_plotly_with_alt"})
 
 
-class _AltBlanker(ast.NodeTransformer):
-    """Replace each ``show_*_with_alt`` alt-text argument with a placeholder.
+def _percent_cells(src: str) -> list[tuple[str, str, str]]:
+    """(marker line, kind, body) per jupytext percent cell.
 
-    Collects the literals it replaced in source order, so the same walk answers both
-    "is this the only thing that changed" and "does the notebook's output metadata
-    still agree with the source".
+    Comparing cell structure and raw source, rather than an AST, is deliberate. An AST
+    is blind to three things that change a notebook's outputs: a trailing semicolon,
+    which suppresses a cell's automatic display; a moved ``# %%``, which changes which
+    code shares a cell and therefore which value is the cell's last expression; and a
+    changed cell tag, which changes how the cell is treated. All three leave the AST
+    identical, so an AST comparison would forgive them.
     """
+    cells: list[tuple[str, str, list[str]]] = []
+    marker, kind, buf = "", "code", []
+    for line in src.splitlines(keepends=True):
+        if line.startswith("# %%"):
+            cells.append((marker, kind, buf))
+            marker = line
+            kind = "markdown" if "[markdown]" in line or "[raw]" in line else "code"
+            buf = []
+            continue
+        buf.append(line)
+    cells.append((marker, kind, buf))
+    return [(m, k, "".join(b)) for m, k, b in cells]
 
-    def __init__(self) -> None:
-        self.alts: list[str] = []
 
-    def visit_Call(self, node: ast.Call) -> ast.Call:
-        self.generic_visit(node)
+def _blank_alts(code: str) -> tuple[str, list[str]] | None:
+    """(*code* with each alt literal replaced by a placeholder, the literals in source order).
+
+    None if *code* does not parse. Works in bytes because ``col_offset`` is a UTF-8
+    byte offset, and replaces from the end so earlier spans keep their offsets.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    data = code.encode("utf-8")
+    line_start = [0]
+    for line in data.splitlines(keepends=True):
+        line_start.append(line_start[-1] + len(line))
+
+    found: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
         if (
-            isinstance(node.func, ast.Name)
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
             and node.func.id in ALT_FUNCS
             and len(node.args) >= 2
             and isinstance(node.args[1], ast.Constant)
             and isinstance(node.args[1].value, str)
         ):
-            self.alts.append(node.args[1].value)
-            node.args[1] = ast.Constant(value="<alt>")
-        return node
+            arg = node.args[1]
+            if arg.end_lineno is None or arg.end_col_offset is None:
+                return None
+            found.append(
+                (
+                    line_start[arg.lineno - 1] + arg.col_offset,
+                    line_start[arg.end_lineno - 1] + arg.end_col_offset,
+                    arg.value,
+                )
+            )
+    # ast.walk is breadth-first, not source order; the outputs it is compared against
+    # are in source order.
+    found.sort()
+    for begin, finish, _ in reversed(found):
+        data = data[:begin] + b'"<alt>"' + data[finish:]
+    return data.decode("utf-8"), [alt for _, _, alt in found]
 
 
-def _blanked(src: str) -> tuple[str, list[str]] | None:
-    """(alt-blanked AST dump, alt literals) for *src*, or None if it does not parse."""
-    try:
-        tree = ast.parse(src)
-    except SyntaxError:
-        return None
-    blanker = _AltBlanker()
-    tree = blanker.visit(tree)
-    ast.fix_missing_locations(tree)
-    # No attributes: the dump must not depend on the line numbers that a longer or
-    # shorter alt string shifts.
-    return ast.dump(tree), blanker.alts
+def _semicolon_flags(code: str, tree: ast.Module) -> tuple[bool, ...]:
+    """Whether each top-level statement is terminated by ``;``, in source order.
+
+    An AST cannot see this and it changes the outputs: Jupyter suppresses the automatic
+    display of a cell's last expression when it ends with a semicolon, so ``summary``
+    and ``summary;`` produce identical ASTs and different notebooks. Only top-level
+    statements matter, because only the last of them is auto-displayed.
+    """
+    lines = code.encode("utf-8").splitlines()
+    flags = []
+    for stmt in tree.body:
+        if stmt.end_lineno is None or stmt.end_col_offset is None:
+            flags.append(False)
+            continue
+        line = lines[stmt.end_lineno - 1] if stmt.end_lineno - 1 < len(lines) else b""
+        rest = line[stmt.end_col_offset :].split(b"#", 1)[0].strip()
+        flags.append(rest.startswith(b";"))
+    return tuple(flags)
+
+
+def _comparable(src: str) -> list[tuple] | None:
+    """Cells of *src* reduced to what an alt-text edit is allowed to leave alone.
+
+    Per cell: the marker line, the kind, and for a code cell an alt-blanked AST dump
+    plus its semicolon flags. The AST dump is taken without attributes so that neither
+    a longer alt string nor ``ruff format`` rewrapping a call can move it - both are
+    formatting, and formatting cannot change an output.
+
+    What the AST would miss is added back explicitly. The marker line carries the cell
+    tags, so retagging is a change. The list of cells carries the ``# %%`` boundaries,
+    so moving one is a change - it decides which code shares a cell and therefore which
+    value is the cell's last expression. The semicolon flags carry display suppression.
+
+    A markdown cell's body is dropped: it is a comment in the ``.py`` and cannot affect
+    outputs, so its text may change freely while its marker and position still count.
+    """
+    out: list[tuple] = []
+    for marker, kind, body in _percent_cells(src):
+        if kind != "code":
+            # Only when the body really is all comments. A percent-format markdown cell
+            # holds nothing else, so a non-comment line means the marker does not
+            # describe the content - and dropping the body would then hide executable
+            # code. Measured: appending `fig;` after the last `# %% [markdown]` marker
+            # of a real notebook was forgiven until this compared the body.
+            if all(not ln.strip() or ln.lstrip().startswith("#") for ln in body.splitlines()):
+                out.append((marker, kind))
+            else:
+                out.append((marker, kind, body))
+            continue
+        blanked = _blank_alts(body)
+        if blanked is None:
+            return None
+        try:
+            tree = ast.parse(blanked[0])
+        except SyntaxError:
+            return None
+        out.append((marker, kind, ast.dump(tree), _semicolon_flags(blanked[0], tree)))
+    return out
 
 
 def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
@@ -316,14 +404,15 @@ def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
 
     Both halves have to hold, and neither is a judgement:
 
-    * the two sources are identical once every alt literal is blanked, so nothing that
-      executes changed - comments and markdown cells are invisible to ``ast`` and
-      cannot affect outputs either, and
+    * every cell lines up - same markers, same kinds, same order - and every code cell's
+      source is byte-identical once the alt literals are blanked, so nothing that
+      executes changed. Only markdown bodies are free, because they are comments in the
+      ``.py``, and
     * every alt in the notebook's output metadata already equals the literal in its own
       cell, so the outputs on disk are the ones this source produces.
 
-    Anything else - a changed constant, a reordered call, an alt the outputs do not
-    carry - is stale, which is what the stamp is for.
+    Anything else - a changed constant, a reordered call, a trailing semicolon, a moved
+    ``# %%``, an alt the outputs do not carry - is stale, which is what the stamp is for.
     """
     old = subprocess.run(
         ["git", "cat-file", "blob", stamped_blob],
@@ -334,11 +423,9 @@ def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
     )
     if old.returncode != 0:
         return False  # the stamped blob is not in this repo; cannot compare
-    old_blanked = _blanked(old.stdout)
-    new_blanked = _blanked(py.read_text(encoding="utf-8"))
-    if old_blanked is None or new_blanked is None:
-        return False
-    if old_blanked[0] != new_blanked[0]:
+    old_cells = _comparable(old.stdout)
+    new_cells = _comparable(py.read_text(encoding="utf-8"))
+    if old_cells is None or new_cells is None or old_cells != new_cells:
         return False
 
     for cell in nb.get("cells", []):
@@ -347,7 +434,7 @@ def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
         src = "".join(cell.get("source", []))
         if not any(fn in src for fn in ALT_FUNCS):
             continue
-        blanked = _blanked(src)
+        blanked = _blank_alts(src)
         if blanked is None:
             return False
         carried = [
