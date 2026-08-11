@@ -112,8 +112,13 @@ def effective_sample_size(
     """
     if (horizon is None) == (horizon_col is None):
         raise ValueError("pass exactly one of horizon and horizon_col")
+    # `maintain_order=True` is what makes the total reproducible. Summing floats is not
+    # associative, and polars does not fix the order groups come back in, so the same frame
+    # summed twice differs in the last bits. Printed as an integer that lands on either side
+    # of a rounding boundary: sp500_options' fwd_ret_10d reported N_eff 39,746 on one run and
+    # 39,747 on the next, from identical inputs and an unchanged label digest.
     rows, weight = 0, 0.0
-    for _, group in frame.group_by([entity_col]):
+    for _, group in frame.group_by([entity_col], maintain_order=True):
         bars = group[bar_col].to_numpy()
         order = np.argsort(bars)
         events = bars[order] - bars.min()
