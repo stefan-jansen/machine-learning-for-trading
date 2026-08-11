@@ -387,8 +387,9 @@ show_with_alt(
     "weekly-listed base sits between roughly 150 and 250 names throughout, and the monthly "
     "band spikes to between 400 and 470 in the weeks a monthly expiration falls inside the "
     "target-maturity window, giving the series a regular sawtooth. A dashed line at 100 marks "
-    "the straddles the cheapest fifth needs to fill the book; the total clears it at every "
-    "decision date except a single trough in early 2020.",
+    "the straddles the cheapest fifth needs to fill the book; the total falls below it on 4 of "
+    "the 209 decision dates, all of them consecutive weeks in the March-April 2020 trough, "
+    "which reads as a single notch in the series.",
 )
 
 # %% [markdown]
@@ -510,9 +511,9 @@ show_with_alt(
     "Two lines tracking the round trip as a percentage of straddle premium at each weekly "
     "decision date from 2017 to 2021: the median stock that day, and the cheapest fifth that "
     "day. The cheapest-fifth line runs three to five points below the median line throughout "
-    "and the two move together. Both sit between roughly 5 and 12 percent for most of the "
-    "period and both jump sharply in March 2020, the median peaking above 22 percent, before "
-    "settling at a level higher than they held before that date.",
+    "and the two move together. The median runs mostly between 9 and 16 percent and the "
+    "cheapest fifth between 4 and 11. Both jump sharply in March 2020, the median peaking "
+    "above 22 percent, and both settle after it at a level higher than they held before.",
 )
 
 # %% [markdown]
@@ -576,8 +577,8 @@ show_with_alt(
     "almost zero beyond ten times the round trip, with the 10-session curve above the "
     "5-session curve everywhere. A dashed vertical line at one times the round trip marks "
     "both legs crossed, where the 5-session curve reads about 0.5 and the 10-session about "
-    "0.7; a dotted vertical line near one tenth marks the one-leg cheapest rung, where both "
-    "curves are still above 0.95.",
+    "0.7; a dotted vertical line near one tenth marks the one-leg cheapest rung, where the "
+    "5-session curve still reads 0.948 and the 10-session sits just above it.",
 )
 
 # %% [markdown]
@@ -673,10 +674,10 @@ show_with_alt(
     "Bar chart of the mean within-stock autocorrelation of implied less realized volatility "
     "against the number of sessions between the two observations, from 1 to 20, with a shaded "
     "band showing the 10th to 90th percentile across stocks and a horizontal band showing the "
-    "range expected from no information. The bars decay smoothly from about 0.92 at one "
-    "session to roughly 0.25 at ten and to near zero by twenty. They clear the "
-    "no-information band out to about session 17, so the gap a week later still resembles the "
-    "gap observed at entry.",
+    "range expected from no information. The bars decay almost linearly, from about 0.92 at "
+    "one session to 0.74 at five, 0.47 at ten and 0.01 at twenty. They stay clear of the "
+    "no-information band, which spans roughly plus or minus 0.065, out to session 18, so the "
+    "gap a week later still resembles the gap observed at entry.",
 )
 
 # %% [markdown]
@@ -857,12 +858,13 @@ add_message_title(
 )
 show_with_alt(
     fig,
-    "Horizontal timeline with one row per cross-validation fold, each row drawn as a training "
-    "span, a narrow purge gap, and a validation span, with the sealed holdout shaded at the "
-    "right of both. Fold 0 trains from 2018 to late 2019 and validates into late 2020; fold 1 "
-    "starts earlier and shifts both spans forward, training to late 2018 and validating "
-    "through 2019 into 2020. Every training span is separated from its own validation span by "
-    "the purge gap, and both folds stop short of the holdout, which begins in 2021.",
+    "Horizontal timeline with one row per cross-validation fold, fold 1 on the upper row and "
+    "fold 0 on the lower, each drawn as a training span, a narrow purge gap and a validation "
+    "span, with the holdout drawn as a separate pale band running from 2021 to 2022. Fold 1 is "
+    "the earlier pass, training from early 2017 to late 2018 and validating through 2019 into "
+    "the first days of 2020; fold 0 trains from early 2018 to late 2019 and validates through "
+    "2020 to November. Each training span is separated from its own validation span by the "
+    "purge gap, and neither validation span reaches the holdout.",
 )
 
 # %% [markdown]
