@@ -373,7 +373,14 @@ add_message_title(
     "How long a trade is held varies by about a third of its own window",
     subtitle="Dashed line marks the median; the label resolves when the contract expires",
 )
-show_with_alt(fig, "Histogram of calendar days between the signal date and expiration.")
+show_with_alt(
+    fig,
+    "Histogram of the calendar days between the signal date and the contract's expiration, "
+    "spanning 24 to 36 days. It is lumpy rather than concentrated: tall bars at about 25, 28, "
+    "29 to 31, 32 and 35 days, each holding between 34,000 and 68,000 trades, separated by "
+    "near-empty bins at 26 and 33. A dashed line marks the median at 30 days. So the same "
+    "nominal one-month trade is held for anywhere from three and a half to five weeks.",
+)
 
 print(
     f"Settlement: {resolution['dte_calendar'].min()}-{resolution['dte_calendar'].max()} calendar days, "
@@ -484,7 +491,16 @@ add_message_title(
     subtitle="Dotted line marks the median settlement; a fabricated tail would sit flat across it",
 )
 ax.legend(loc="center right", frameon=False, fontsize=7)
-show_with_alt(fig, "Non-null label rate by session position from the end of the straddle panel.")
+show_with_alt(
+    fig,
+    "Step chart of the share of rows carrying a non-null label against how far the row sits "
+    "from the end of the straddle panel, from 0 to 40 sessions, one line per label. Each line "
+    "is flat at zero across the tail its own horizon cannot reach and then steps up to about "
+    "1.0 and stays there: fwd_ret_5d and fwd_ret_dh_5d at 5 sessions, fwd_ret_10d and "
+    "fwd_ret_dh_10d at 10, and ret_to_expiry through an intermediate step near 0.42 at 18 "
+    "sessions before reaching 1.0 at 20. A dotted line marks the median settlement at 20 "
+    "sessions. A fabricated tail would run flat across it instead of stepping.",
+)
 
 # %% [markdown]
 # ## E. Distribution and base rate
@@ -533,7 +549,17 @@ add_message_title(
     subtitle="Identical bins, development window; trades beyond the axis are counted below",
 )
 ax.legend(loc="upper left", frameon=False, fontsize=7)
-show_with_alt(fig, "Histograms of all five labels on identical bins and a log count axis.")
+show_with_alt(
+    fig,
+    "Five overlaid step histograms of label value as a fraction of the premium collected, on "
+    "identical bins from -2.0 to +1.0 and a logarithmic count axis. ret_to_expiry is much the "
+    "widest, standard deviation 1.04, with a loss tail that runs the full width of the axis at "
+    "between 200 and 4,000 trades a bin and a spike of about 4,000 at exactly +1.0, where the "
+    "straddle expires worthless and the seller keeps the whole premium. The four early-exit "
+    "labels are far narrower, standard deviations 0.16 to 0.35, each peaking near 30,000 "
+    "trades just above zero and falling away to nothing by about 0.8 either side. A dashed "
+    "line marks zero; trades beyond the axis are counted in the text below.",
+)
 
 for name, frame in dev.items():
     beyond = frame.filter(~pl.col(name).is_between(bins[0], bins[-1])).height
@@ -581,7 +607,14 @@ add_message_title(
     subtitle=f"Daily spread across names in {PRIMARY_LABEL}, averaged over each year",
 )
 ax.legend(loc="upper right", frameon=False)
-show_with_alt(fig, "Annual mean of the daily cross-sectional dispersion of the primary label.")
+show_with_alt(
+    fig,
+    "Bar chart of the daily cross-sectional standard deviation of ret_to_expiry across names, "
+    "averaged over each development year. Four bars: about 0.86 in 2017, 0.78 in 2018, 0.73 in "
+    "2019 and 0.78 in 2020, against a dashed line at the median year near 0.78. The whole "
+    "range across the four years is under 0.15, so the spread a model ranks within is close to "
+    "the same size in every year of the development window.",
+)
 
 print(annual.with_columns(pl.col("dispersion").round(3)))
 
@@ -638,7 +671,16 @@ add_message_title(
     subtitle="Dotted lines mark each holding window; what remains past one is not overlap",
 )
 ax.legend(loc="upper right", frameon=False, fontsize=7)
-show_with_alt(fig, "Panel autocorrelation of all five labels against lag in panel sessions.")
+show_with_alt(
+    fig,
+    "Line chart of panel autocorrelation against lag in panel sessions, from 1 to 28, one line "
+    "per label, with dotted vertical rules at 5, 10 and 20 marking each label's own holding "
+    "window. Every line starts high at lag 1 - about 0.91 for ret_to_expiry and between 0.6 "
+    "and 0.85 for the four early-exit labels - and decays to zero at its own window and not "
+    "before: the 5-session labels at 5, the 10-session labels at 10, ret_to_expiry at 20. "
+    "Beyond that each line sits on the zero rule with only small wiggles, so what is left past "
+    "a label's own window is not overlap.",
+)
 
 for name in LABEL_NAMES:
     window = PRIMARY_WINDOW if name == PRIMARY_LABEL else HORIZONS[name]
