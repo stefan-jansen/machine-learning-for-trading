@@ -87,7 +87,7 @@ from data import load_sp500_daily_bars, load_sp500_options_straddles
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 logging.getLogger("pymc").setLevel(logging.ERROR)
@@ -347,7 +347,16 @@ add_message_title(
         f"The red rule marks the start of the holdout at {holdout_start}"
     ),
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal timeline with one row per pass, each row drawn as the window its parameters "
+    "are estimated from followed by the window it may be scored over. Fold 0 estimates across "
+    "2018 to late 2019 and is scorable through 2020; fold 1 starts earlier, estimating to late "
+    "2018 and scorable through 2019 into 2020; the holdout pass estimates across everything up "
+    "to 2021 and is scorable only after it. A dashed red vertical rule marks the start of the "
+    f"holdout at {holdout_start}, and no pass's scorable window begins before its own "
+    "estimation window ends.",
+)
 
 # %% [markdown]
 # ### The returns both models read
@@ -806,7 +815,17 @@ add_message_title(
         "fold's validation start"
     ),
 )
-fig.show()
+show_with_alt(
+    fig,
+    f"Line chart of annualized conditional volatility for one symbol ({_symbol}) from early "
+    "2017 to the start of 2021, with one line per pass drawn over the same dates. The series "
+    "is spiky, sitting near 0.2 for long stretches and rising above 1.0 on three dates - May "
+    "2018, May 2019 and March 2020 - the largest being May 2019 at about 1.16. The March 2020 "
+    "one sits inside a sustained cluster of high readings that runs from late February into "
+    "June. Where two passes cover the same day their lines sit close but not on top of each "
+    "other, so each pass assigns the day its own value. Dotted vertical rules mark each fold's "
+    "validation start and a dashed red rule marks the holdout, which no line crosses.",
+)
 
 # %% [markdown]
 # ### C.2 Stochastic volatility
@@ -1395,7 +1414,16 @@ add_message_title(
         "a shock would never decay"
     ),
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Box plot of fitted GARCH persistence, alpha plus gamma over two plus beta, with one box "
+    "per pass. Fold 0 is the widest, its whiskers running from about 0.20 to 1.00 with a "
+    "median near 0.87; fold 1 is narrower, from about 0.34 upward with a median near 0.91; "
+    "fold 2 is tightest, from about 0.84 upward with a median near 0.97. A dashed red line at "
+    "1.0 marks where a shock would never decay, and all three upper whiskers reach it. So a "
+    "longer estimation window both raises the central persistence and narrows its spread, "
+    "without moving the top of the range.",
+)
 
 # %% [markdown]
 # The comparison figure F2 drew for one symbol is worth putting a number on across all of them.
@@ -1851,7 +1879,17 @@ add_message_title(
         "discovery. The band holds nine in ten of the stage-03 features on the same rows"
     ),
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Dot-and-interval chart of the mean cross-sectional information coefficient against "
+    f"{label_col} for the four model-based columns, each with a 95 percent Newey-West "
+    "interval, ordered sv_vrp, garch_cond_vol, garch_vrp and sv_vol from top to bottom. Every "
+    "point sits within about 0.01 of zero and every interval crosses the dashed zero rule, so "
+    "no marker is filled and none of the four is a discovery. A shaded band from about -0.013 "
+    "to +0.013 marks where nine in ten of the stage-03 features fall on the same rows, and all "
+    "four markers sit inside it, so these columns do not separate themselves from the features "
+    "already written.",
+)
 
 # %% [markdown] tags=["results"]
 # The screen was run over **124,689** validation rows across **487** symbols, and no row had to be
