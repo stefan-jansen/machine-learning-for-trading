@@ -88,7 +88,10 @@ from case_studies.utils.feature_engineering import (
 from utils import style
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.paths import get_case_study_dir
-from utils.style import COLORS  # registers the ml4t Plotly template on import
+from utils.style import (  # COLORS registers the ml4t Plotly template on import
+    COLORS,
+    show_plotly_with_alt,
+)
 
 # %% tags=["parameters"]
 # Production defaults (Papermill overrides for testing)
@@ -832,7 +835,18 @@ fig.update_yaxes(
     row=1,
     col=2,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels. On the left, the daily rank IC of ret_21d against the hold-to-expiry "
+    "short-straddle return across the validation periods, drawn as a noisy grey daily series "
+    "with a 21-session rolling mean over it; the rolling mean oscillates between about -0.15 "
+    "and +0.18, crossing zero repeatedly, and a dotted vertical rule marks where one "
+    "validation period ends and the next begins. On the right, the average daily rank IC for "
+    "each of ten candidates, each with three error bars from a naive, a HAC and a block "
+    "bootstrap interval. ret_21d and ret_10d have the largest positive averages at about 0.035 "
+    "and 0.033, instr_delta the largest negative at about -0.018, and for every candidate the "
+    "naive interval is the narrowest of the three.",
+)
 
 # %% [markdown]
 # ### Did it hold over both periods, or over one?
@@ -868,13 +882,6 @@ for feat in ic_results:
             fold_ics[int(split["fold"])] = float(fold_ic["ic"].mean())
 
     if fold_ics:
-        # Everything below is measured against the candidate's own direction, taken from
-        # its average over the whole window, rather than against "positive". The promotion
-        # rule this feeds already accepts either direction on effect size, since it tests
-        # the absolute average; counting only positive periods held a reliably inverse
-        # candidate to a test it cannot pass however reliable it is. So the weakest period
-        # is the one furthest against the candidate's own direction, which for an inverse
-        # candidate is its algebraic maximum rather than its minimum.
         values = list(fold_ics.values())
         direction = 1.0 if (ic_results[feat]["mean_ic"] or 0.0) >= 0 else -1.0
         signed = [ic * direction for ic in values]
@@ -941,7 +948,17 @@ fig.update_layout(
 )
 fig.update_xaxes(title_text="Average daily rank IC within the period")
 fig.update_yaxes(title_text="Candidate", autorange="reversed")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped horizontal bar chart of the average daily rank IC inside each validation period, "
+    "two bars per candidate, for the ten candidates with the largest average over the two "
+    "periods combined. Seven keep their side in both periods: ret_21d, ret_10d, ret_5d, "
+    "instr_ret_5d and the two iv_rv_ratio columns positive, instr_delta negative. Three do not - "
+    "iv_mom_10d, vrp_mom_10d and vrp_mom_5d are each negative in fold 0 and positive in fold 1, "
+    "iv_mom_10d swinging from about -0.032 to about +0.005. So the three that change direction "
+    "between the periods are all momentum terms, and ret_5d, while it keeps its sign, falls from "
+    "about 0.036 to about 0.011.",
+)
 
 # %% [markdown]
 # ## 3. What the search cost
@@ -1129,7 +1146,17 @@ fig.update_xaxes(title_text="Average daily rank IC", zeroline=True, row=1, col=1
 fig.update_xaxes(title_text="t-statistic, overlap ignored", row=1, col=2)
 fig.update_yaxes(title_text="Candidate", row=1, col=1)
 fig.update_yaxes(title_text="t-statistic, overlap allowed for", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels. On the left, a horizontal bar chart of the average daily rank IC by "
+    "candidate, ordered by size, with only ret_21d, ret_10d and instr_delta shaded as "
+    "individually significant once the overlap is allowed for and the other twelve left pale. "
+    "On the right, a scatter of the t-statistic with the overlap ignored against the "
+    "t-statistic with it allowed for, one point per candidate, with a dashed diagonal marking "
+    "where the two would agree. Every point sits inside the diagonal, so each t-statistic "
+    "shrinks towards zero; the three largest move the most, ret_21d from 6.0 to 2.4 and ret_10d "
+    "from 5.7 to 2.7 on the positive side, instr_delta from -4.6 to -2.4 on the negative.",
+)
 
 # %% [markdown]
 # The gap between what the two panels support is the point of the section. Some candidates
@@ -1248,7 +1275,16 @@ fig.update_layout(
 fig.update_xaxes(title_text="Sessions held", tickvals=horizons)
 fig.update_yaxes(title_text="Average daily rank IC", row=1, col=1)
 fig.update_yaxes(title_text="Average divided by daily standard deviation", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels sharing a horizontal axis of sessions held, at 5, 10 and 21. On the left the "
+    "average daily rank IC and on the right the same average divided by its daily standard "
+    "deviation. ret_21d, ret_10d and ret_5d are drawn as named coloured lines and the other "
+    "leading candidates as pale grey lines. All three named lines dip at 10 sessions and rise "
+    "to their highest value at 21, ret_21d reaching about 0.035 on the left and about 0.28 on "
+    "the right. The grey lines mostly sit below zero and do not share that shape, so agreement "
+    "holds out to the horizon the strategy actually trades for the named three.",
+)
 
 # %% [markdown]
 # ## 4. Is the relationship one a ranking strategy can use?
@@ -1267,10 +1303,10 @@ fig.show()
 #
 # Then average the outcome inside each group on that day, average those daily figures
 # across days, and score how close the resulting five averages are to a straight climb or
-# fall. Averaging every name-day in a group in one pass instead would weight the profile
-# by how many names happened to be quoted, so the widest days would decide the shape -
-# and the strategy trades a fixed handful of names each day rather than a share of the
-# cross-section. A day enters here on the same terms it enters the correlation on.
+# fall. Every day carries the same weight in that second average, because the strategy
+# trades a fixed handful of names each day rather than a share of the cross-section.
+# Averaging every name-day in a group in one pass would let the widest days decide the
+# shape. A day enters here on the same terms it enters the correlation on.
 
 # %%
 N_QUANTILES = 5
@@ -1372,7 +1408,19 @@ if quantile_spreads:
     fig.update_xaxes(title_text="Quintile within the trading day", row=n_rows_fig, col=1)
     for row in range(1, n_rows_fig + 1):
         fig.update_yaxes(title_text="Average return to the seller", row=row, col=1)
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Grid of small bar charts, one per leading candidate, each showing the average "
+        "hold-to-expiry short-straddle return by within-day candidate quintile from Q1 on the "
+        "left to Q5 on the right, on a shared vertical scale where every bar is negative. Only "
+        "ret_10d orders the outcome without a reversal, rising from about -0.098 at Q1 to about "
+        "-0.016 at Q5; ret_21d has the same shape but its first two bars are level, at about "
+        "-0.095. instr_delta runs the other way, least negative at Q1 and most negative at Q5, "
+        "but not steadily. The other seven reverse somewhere in the interior: ret_5d, "
+        "instr_ret_5d, iv_rv_ratio and iv_rv_ratio_pctl are most negative at Q2, iv_mom_10d at "
+        "Q3, and vrp_mom_10d and vrp_mom_5d at Q4, so their quintile ordering does not carry "
+        "through.",
+    )
 
 # %% [markdown]
 # ## 5. Which candidates are the same evidence twice?
@@ -1459,7 +1507,19 @@ fig.update_layout(
 )
 fig.update_xaxes(tickfont=dict(size=9))
 fig.update_yaxes(tickfont=dict(size=9))
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Lower-triangular heatmap of the Spearman rank correlation between 25 candidates on a "
+    "sample of trading days, ordered by average agreement with the strongest first, on a "
+    "red-to-green scale from -1 to +1. Three quarters of the 300 off-diagonal cells are paler "
+    "than 0.3 either way. The green ones mark pairs that are close to one quantity written "
+    "twice: instr_dte with dte_normalized at exactly 1.00, rv_10d and rv_21d with sv_vol at "
+    "0.94 and 0.92, instr_rel_spread with spread_pctl and sv_vrp with vrp_10d both at 0.86, and "
+    "iv_rv_ratio with iv_rv_ratio_pctl at 0.78. The strongest red cells set realized volatility "
+    "against the variance-risk-premium terms - rv_5d with vrp_5d and rv_21d with iv_rv_ratio "
+    "both at -0.63, sv_vrp with sv_vol at -0.58 - so those pairs move opposite each other "
+    "rather than independently.",
+)
 
 # %% [markdown]
 # ### The same evidence, grouped by family
@@ -1642,7 +1702,20 @@ if dh_rows:
         yaxis_range=[-label_limit, label_limit],
         margin=dict(l=90, r=30, t=110, b=80),
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Scatter of the average rank IC against the ten-session delta-hedged outcome on the "
+        "vertical axis versus the hold-to-expiry unhedged outcome on the horizontal, one point "
+        "per candidate, with a dashed diagonal marking where the two would agree. The three "
+        "underlying-return candidates are labelled and sit close to the diagonal on the "
+        "positive side, ret_21d the highest of them at 0.035 unhedged and 0.038 hedged, so "
+        "their direction survives both outcome definitions. instr_delta is labelled in the "
+        "upper-left quadrant at about -0.018 unhedged and +0.017 hedged, changing sign between "
+        "them. Several unlabelled points sit far above the diagonal - the variance-risk-premium "
+        "and iv_rv_ratio columns reach 0.04 to 0.05 hedged on an unhedged reading near 0.01. "
+        "Hedge treatment and horizon both differ between the axes, so the gap is not a hedge "
+        "effect on its own.",
+    )
 
 # %% [markdown]
 # ## 7. The decision each candidate earned
