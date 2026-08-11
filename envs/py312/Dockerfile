@@ -1,5 +1,5 @@
 # ML4T Python 3.12 Environment (x86 only)
-# For packages without Python 3.14 support: gensim, signatory, esig, pfhedge, pycausalimpact
+# For packages without Python 3.14 support: gensim, signatory, esig, pycausalimpact
 # Also covers notebooks hitting Python 3.14 torch CUDA import bug
 #
 # Covers:
@@ -14,7 +14,10 @@
 #   Ch12 NB10 (shap_nlp_sentiment)   — torch CUDA + shap
 #   Ch14 NB06 (conditional_autoencoder) — torch CUDA + shap
 #   Ch15 NB06 (fed_announcement_bsts) - tfcausalimpact in isolated /opt/bsts
-#   Ch21 deep_hedging_pfhedge        — pfhedge (unmaintained, numpy<2)
+#
+# Ch21 deep_hedging_pfhedge is NOT here: pfhedge is a main dependency and 0.22.0
+# imports and prices on Python 3.14 under numpy 2.3.5, so that notebook runs in
+# the default image and declares `ml4t-gpu`.
 #
 # Usage:
 #   docker compose --profile py312 run --rm py312 python 10_text_feature_engineering/01_word2vec_training.py
@@ -53,20 +56,16 @@ COPY pyproject.toml uv.lock /build/root/
 # reader on the container path and a reader on `uv sync` were running different
 # libraries.
 #
-# Packages this image deliberately holds away from the lock, and only these:
-# - kaleido: capped <1.0 here because 1.x needs a Chrome runtime this image does
-#   not carry (fig.write_image is wrapped in try/except for that reason). Same
-#   exemption, same reason, as envs/benchmark/Dockerfile.
-# - pfhedge: the lock pins 0.22.0, whose metadata is Requires-Python <3.12, so it
-#   cannot install here at all; 0.23.0 is the first release that allows 3.12.
-#   0.23.0 in turn declares numpy>=1.26,<2.0, which no constrained resolve can
-#   satisfy alongside arviz (numpy>=2.0). It is installed --no-deps below.
+# One package is held away from the lock: kaleido, capped <1.0 here because 1.x
+# needs a Chrome runtime this image does not carry (fig.write_image is wrapped in
+# try/except for that reason). Same exemption, same reason, as
+# envs/benchmark/Dockerfile.
 # Only packages the lock knows about are pinned; this image's 3.12-only extras
 # (gensim, signatory, esig, pyrecombine, roughpy) are absent from the lock and
 # resolve freely.
 RUN cd /build/root && uv export --frozen --no-emit-project --no-hashes --format requirements-txt \
       | grep -iE '^[a-z0-9._-]+==' \
-      | grep -viE '^(kaleido|pfhedge)==' \
+      | grep -viE '^kaleido==' \
       > /tmp/locked-constraints.txt && \
     test -s /tmp/locked-constraints.txt
 RUN uv pip install --python /opt/ml4t/bin/python --no-cache \
@@ -79,20 +78,6 @@ RUN /opt/ml4t/bin/pip install --no-cache-dir --no-build-isolation "signatory>=1.
     /opt/ml4t/bin/pip install --no-cache-dir --no-deps "esig>=1.0" && \
     /opt/ml4t/bin/pip install --no-cache-dir -c /tmp/locked-constraints.txt \
         "numpy>=2,<2.5" "pyrecombine>=1.0" "roughpy>=0.2"
-
-# pfhedge (Ch21 deep hedging): --no-deps because its declared numpy>=1.26,<2.0 is
-# unsatisfiable next to arviz, and because the published image has always ended up
-# running it on numpy 2.x anyway - the old free-resolving `numpy>=2,<2.5` step
-# above overrode the bound after the fact. Verified against numpy 2.4.6 in
-# ml4t/ml4t-py312:latest and 2.3.5 here: BrownianStock/EuropeanOption simulate and
-# payoff both work. torch and tqdm, its only other dependencies, come from
-# pyproject.toml above.
-# The version is pinned exactly rather than floated: uv.lock cannot carry it (the
-# lock's 0.22.0 does not install on 3.12) and --no-deps means a later release
-# could add a dependency that is then silently missing. 0.23.0 is also currently
-# the newest release; pfhedge is unmaintained.
-RUN /opt/ml4t/bin/pip install --no-cache-dir --no-deps "pfhedge==0.23.0" && \
-    /opt/ml4t/bin/python -c "import pfhedge; assert pfhedge.__version__ == '0.23.0', pfhedge.__version__; import numpy; print('pfhedge', pfhedge.__version__, 'numpy', numpy.__version__)"
 
 # tfcausalimpact requires pandas<=2.2 and NumPy 1.x, while the signature stack
 # above requires NumPy 2.x. Keep both valid dependency sets in isolated
