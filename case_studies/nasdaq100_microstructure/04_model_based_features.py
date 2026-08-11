@@ -82,7 +82,7 @@ from data import load_nasdaq100_bars
 from utils.artifact_specs import resolve_label_buffer, resolve_label_horizon
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
 from utils.paths import get_case_study_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -564,7 +564,15 @@ fig.update_layout(
     height=460,
     margin={"l": 90, "t": 140},
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Horizontal timeline with one row per fold on a session axis. Each row is a long blue "
+    "training bar followed by the shorter amber validation bar it is scored on, and successive "
+    "rows step to the right, so the bars of neighbouring folds overlap. A dashed red rule marks "
+    "where the holdout opens and a shaded band to its right is the holdout itself. The bottom "
+    "row is the extra fold written for the holdout: its training bar runs up to the rule and its "
+    "grey holdout bar sits inside the band. No training bar of any row crosses the rule.",
+)
 
 # %% [markdown]
 # ## C. One section per model: what it infers, and why it cannot see ahead
@@ -910,7 +918,14 @@ fig.update_layout(
     height=440,
     margin={"t": 120},
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two lines over validation sessions on a shared axis of mean squared one-minute log return. "
+    "A thin blue line is realized 5-bar variance, spiky, with occasional tall isolated peaks. A "
+    "thicker amber line is the HAR forecast, following the same path closely but smoother, and "
+    "rising above the blue line where it peaks. Dotted vertical rules divide the axis into "
+    "consecutive validation windows.",
+)
 
 # %% [markdown]
 # ### C.2 A rolling spectrum of volume and of variance
@@ -1327,7 +1342,14 @@ fig.update_layout(
     height=440,
     margin={"t": 120},
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped box plots with one group of three boxes per fold along the horizontal axis, "
+    "coloured amber, copper and slate for the 5-, 15- and 60-minute components. A dashed rule "
+    "marks zero. In every fold the amber 5-minute box sits highest and above the rule, while the "
+    "copper and slate boxes for the two longer horizons sit lower and straddle it. Boxes span "
+    "the quartiles and the whiskers the 5th to 95th percentiles.",
+)
 
 # %% [markdown] tags=["results"]
 # ### What the coefficient distributions say
@@ -1751,7 +1773,16 @@ if n_tested > 0:
         margin={"l": 180, "t": 120},
         height=580,
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        "Horizontal bar chart with one bar per temporal feature, feature names down the left and "
+        "mean cross-sectional Spearman IC across the bottom, sorted from the most negative at the "
+        "bottom to the most positive at the top. Every bar is short, within a few hundredths of "
+        "zero, and each carries a Newey-West 95% interval whisker. A dashed rule marks zero; most "
+        "whiskers cross it and those bars are left neutral grey, while the few features "
+        "Benjamini-Hochberg retains are coloured, green where the IC is positive and red where "
+        "it is negative.",
+    )
 else:
     print("Validation IC chart omitted: too few symbols per timestamp to rank a cross-section.")
 
