@@ -87,8 +87,12 @@ RUN /opt/ml4t/bin/pip install --no-cache-dir --no-build-isolation "signatory>=1.
 # ml4t/ml4t-py312:latest and 2.3.5 here: BrownianStock/EuropeanOption simulate and
 # payoff both work. torch and tqdm, its only other dependencies, come from
 # pyproject.toml above.
-RUN /opt/ml4t/bin/pip install --no-cache-dir --no-deps "pfhedge>=0.23" && \
-    /opt/ml4t/bin/python -c "import pfhedge, numpy; print('pfhedge', pfhedge.__version__, 'numpy', numpy.__version__)"
+# The version is pinned exactly rather than floated: uv.lock cannot carry it (the
+# lock's 0.22.0 does not install on 3.12) and --no-deps means a later release
+# could add a dependency that is then silently missing. 0.23.0 is also currently
+# the newest release; pfhedge is unmaintained.
+RUN /opt/ml4t/bin/pip install --no-cache-dir --no-deps "pfhedge==0.23.0" && \
+    /opt/ml4t/bin/python -c "import pfhedge; assert pfhedge.__version__ == '0.23.0', pfhedge.__version__; import numpy; print('pfhedge', pfhedge.__version__, 'numpy', numpy.__version__)"
 
 # tfcausalimpact requires pandas<=2.2 and NumPy 1.x, while the signature stack
 # above requires NumPy 2.x. Keep both valid dependency sets in isolated
