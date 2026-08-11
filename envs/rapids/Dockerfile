@@ -47,8 +47,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # RAPIDS stack - cudf/cuml/rmm declare only numpy<3.0a0,>=1.23 and scipy>=1.8.0,
 # which the locked numpy 2.3.5 and scipy 1.17.1 satisfy.
 #
-# xgboost stays at the base image's conda build for the same reason, and it is
-# not pinned here: pip never resolves it, so the constraint does not reach it.
+# The constraint reaches only what pip resolves. Everything the RAPIDS conda env
+# already provides and pip never touches keeps the base image's version - about
+# 28 packages, xgboost (2.1.4 against the lock's 3.2.0) and dask, xarray, fsspec,
+# aiohttp, networkx and cuda-bindings among them. Forcing those would mean
+# installing over the conda stack cuDF and cuML are built against, which is the
+# same conflict as pandas above. Everything the benchmark actually measures is
+# pinned: numpy, scipy, scikit-learn, polars, matplotlib, lightgbm, catboost and
+# the three ml4t-* libraries all match the lock.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock /build/root/
 RUN cd /build/root && uv export --frozen --no-emit-project --no-hashes --format requirements-txt \
