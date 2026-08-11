@@ -24,7 +24,9 @@ dependencies = [
     "lightgbm>=4.3",
     "shap>=0.45",
     "opacus>=1.4",
-    "pfhedge>=0.23",
+    # pfhedge is installed --no-deps in the Dockerfile: its declared
+    # numpy>=1.26,<2.0 cannot be satisfied alongside arviz under the uv.lock
+    # constraint, and the image has always run it on numpy 2.x regardless.
     "ml4t-diagnostic>=0.1.0b25",
     # Bayesian (arviz/pymc for uncertainty features, pycausalimpact for ARIMA event studies)
     "arviz>=0.18,<1.0",

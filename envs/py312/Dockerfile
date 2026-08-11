@@ -42,12 +42,53 @@ RUN /opt/ml4t/bin/pip install --no-cache-dir pip setuptools wheel
 
 WORKDIR /build
 COPY envs/py312/pyproject.toml /build/
-RUN uv pip install --python /opt/ml4t/bin/python --no-cache /build
+COPY pyproject.toml uv.lock /build/root/
 
-# x86-only signature stack (signatory + esig) for Ch05/Ch09 notebooks
+# Derive a fully-pinned constraint from uv.lock so this image reproduces the
+# locked environment readers get from `uv sync`, the same way envs/ml4t and
+# envs/benchmark do. Without it this image free-resolved and drifted off the
+# lock: the published image carries numpy 2.4.6 where the lock pins 2.3.5,
+# pyarrow 25.0.0 where the lock pins 23.0.1, polars 1.42.1 for 1.41.1, plotly
+# 6.9.0 for 6.7.0, and an ml4t-diagnostic older than the one in the lock. A
+# reader on the container path and a reader on `uv sync` were running different
+# libraries.
+#
+# Packages this image deliberately holds away from the lock, and only these:
+# - kaleido: capped <1.0 here because 1.x needs a Chrome runtime this image does
+#   not carry (fig.write_image is wrapped in try/except for that reason). Same
+#   exemption, same reason, as envs/benchmark/Dockerfile.
+# - pfhedge: the lock pins 0.22.0, whose metadata is Requires-Python <3.12, so it
+#   cannot install here at all; 0.23.0 is the first release that allows 3.12.
+#   0.23.0 in turn declares numpy>=1.26,<2.0, which no constrained resolve can
+#   satisfy alongside arviz (numpy>=2.0). It is installed --no-deps below.
+# Only packages the lock knows about are pinned; this image's 3.12-only extras
+# (gensim, signatory, esig, pyrecombine, roughpy) are absent from the lock and
+# resolve freely.
+RUN cd /build/root && uv export --frozen --no-emit-project --no-hashes --format requirements-txt \
+      | grep -iE '^[a-z0-9._-]+==' \
+      | grep -viE '^(kaleido|pfhedge)==' \
+      > /tmp/locked-constraints.txt && \
+    test -s /tmp/locked-constraints.txt
+RUN uv pip install --python /opt/ml4t/bin/python --no-cache \
+    --constraint /tmp/locked-constraints.txt /build
+
+# x86-only signature stack (signatory + esig) for Ch05/Ch09 notebooks.
+# numpy carries the constraint too, or this step would immediately undo the
+# pinning above - it is what pulled numpy to 2.4.6 in the published image.
 RUN /opt/ml4t/bin/pip install --no-cache-dir --no-build-isolation "signatory>=1.2" && \
     /opt/ml4t/bin/pip install --no-cache-dir --no-deps "esig>=1.0" && \
-    /opt/ml4t/bin/pip install --no-cache-dir "numpy>=2,<2.5" "pyrecombine>=1.0" "roughpy>=0.2"
+    /opt/ml4t/bin/pip install --no-cache-dir -c /tmp/locked-constraints.txt \
+        "numpy>=2,<2.5" "pyrecombine>=1.0" "roughpy>=0.2"
+
+# pfhedge (Ch21 deep hedging): --no-deps because its declared numpy>=1.26,<2.0 is
+# unsatisfiable next to arviz, and because the published image has always ended up
+# running it on numpy 2.x anyway - the old free-resolving `numpy>=2,<2.5` step
+# above overrode the bound after the fact. Verified against numpy 2.4.6 in
+# ml4t/ml4t-py312:latest and 2.3.5 here: BrownianStock/EuropeanOption simulate and
+# payoff both work. torch and tqdm, its only other dependencies, come from
+# pyproject.toml above.
+RUN /opt/ml4t/bin/pip install --no-cache-dir --no-deps "pfhedge>=0.23" && \
+    /opt/ml4t/bin/python -c "import pfhedge, numpy; print('pfhedge', pfhedge.__version__, 'numpy', numpy.__version__)"
 
 # tfcausalimpact requires pandas<=2.2 and NumPy 1.x, while the signature stack
 # above requires NumPy 2.x. Keep both valid dependency sets in isolated
@@ -61,7 +102,7 @@ RUN uv pip install --python /opt/bsts/bin/python --no-cache /build/bsts && \
 COPY envs/py312/kernels/bsts-quiet/kernel.json /opt/bsts/share/jupyter/kernels/bsts-quiet/kernel.json
 
 # Test infrastructure — pytest + helpers so CI doesn't need runtime pip install
-RUN /opt/ml4t/bin/pip install --no-cache-dir \
+RUN /opt/ml4t/bin/pip install --no-cache-dir -c /tmp/locked-constraints.txt \
     "pytest>=8.0" "pytest-timeout>=2.3"
 
 WORKDIR /app
