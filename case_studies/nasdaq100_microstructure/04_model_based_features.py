@@ -500,7 +500,7 @@ def validation_rows(frame: pl.DataFrame) -> pl.DataFrame:
 
 # %% [markdown]
 # **Figure F1** draws what the artifact will contain. Each fold is a training span and the
-# validation span that follows it; the last row is the extra fold written for the holdout
+# validation span that follows it; the top row is the extra fold written for the holdout
 # period, whose training bars all lie before the holdout opens so that a model scored on the
 # holdout has features for it without any of them having been built from it. The point to read
 # off the figure is that no bar of any training span lies to the right of the rule.
@@ -566,12 +566,13 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Horizontal timeline with one row per fold on a session axis. Each row is a long blue "
-    "training bar followed by the shorter amber validation bar it is scored on, and successive "
-    "rows step to the right, so the bars of neighbouring folds overlap. A dashed red rule marks "
-    "where the holdout opens and a shaded band to its right is the holdout itself. The bottom "
-    "row is the extra fold written for the holdout: its training bar runs up to the rule and its "
-    "grey holdout bar sits inside the band. No training bar of any row crosses the rule.",
+    "Horizontal timeline with one row per fold on a session axis. Each row is a long dark navy "
+    "training bar followed by the shorter amber validation bar it is scored on. Fold 0 is the "
+    "bottom row and holds the latest validation window; each row above it holds an earlier one, "
+    "so the bars of neighbouring folds overlap. A dashed red rule marks where the holdout opens "
+    "and a shaded band to its right is the holdout itself. The top row is the extra fold written "
+    "for the holdout: its training bar runs from the left edge up to the rule and its light grey "
+    "holdout bar sits inside the band. No training bar of any row crosses the rule.",
 )
 
 # %% [markdown]
@@ -921,10 +922,10 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Two lines over validation sessions on a shared axis of mean squared one-minute log return. "
-    "A thin blue line is realized 5-bar variance, spiky, with occasional tall isolated peaks. A "
-    "thicker amber line is the HAR forecast, following the same path closely but smoother, and "
-    "rising above the blue line where it peaks. Dotted vertical rules divide the axis into "
-    "consecutive validation windows.",
+    "A thin dark navy line is realized 5-bar variance, spiky, with occasional tall isolated "
+    "peaks. A thicker amber line is the HAR forecast, tracking the same path closely and rising "
+    "above the navy line at every peak. A single dotted vertical rule near the middle is the "
+    "boundary between the two consecutive validation windows.",
 )
 
 # %% [markdown]
@@ -1776,12 +1777,12 @@ if n_tested > 0:
     show_plotly_with_alt(
         fig,
         "Horizontal bar chart with one bar per temporal feature, feature names down the left and "
-        "mean cross-sectional Spearman IC across the bottom, sorted from the most negative at the "
-        "bottom to the most positive at the top. Every bar is short, within a few hundredths of "
+        "mean cross-sectional Spearman IC across the bottom, sorted from the most positive at "
+        "the top to the most negative at the bottom. Every bar is short, within one hundredth of "
         "zero, and each carries a Newey-West 95% interval whisker. A dashed rule marks zero; most "
-        "whiskers cross it and those bars are left neutral grey, while the few features "
-        "Benjamini-Hochberg retains are coloured, green where the IC is positive and red where "
-        "it is negative.",
+        "whiskers cross it and those bars are left dark slate, while the two features "
+        "Benjamini-Hochberg retains are coloured, green for the positive IC at the top and red "
+        "for the negative one at the bottom.",
     )
 else:
     print("Validation IC chart omitted: too few symbols per timestamp to rank a cross-section.")
