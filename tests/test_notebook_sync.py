@@ -235,7 +235,7 @@ def test_stamp_records_declared_overrides_as_test_mode(tmp_path, monkeypatch) ->
 
 
 def test_stamped_notebooks_are_current_and_production() -> None:
-    stale, testmode, contradicted, _unverified = check_all(strict=False)
+    stale, testmode, contradicted, _unverified, _alt_only = check_all(strict=False)
     assert not stale and not testmode and not contradicted, (
         "Committed notebooks are out of sync with their source .py:\n"
         + (
@@ -270,3 +270,170 @@ def test_no_notebook_loses_a_provenance_stamp_it_already_had() -> None:
     assert not lost, "these notebooks had a provenance stamp at HEAD and do not now:\n    " + (
         "\n    ".join(lost)
     )
+
+
+# -----------------------------------------------------------------------------
+# Alt-text-only drift
+#
+# The stamp records the .py blob, so any edit to the .py moves it and the gate reads
+# a corrected figure description as a notebook needing re-execution. For alt text
+# that is wrong: show_plotly_with_alt puts the string in output metadata and takes
+# the image from fig._repr_mimebundle_(), which never sees it, so no re-run can
+# produce different outputs. nasdaq100_microstructure/04 is 90 minutes to restate
+# four sentences. These pin the carve-out and its edges.
+# -----------------------------------------------------------------------------
+
+
+def _alt_cell(
+    alt: str,
+    *,
+    png: str = "iVBORw0KGgo=",
+    carried: str | None = None,
+    call: str = "show_plotly_with_alt",
+) -> dict:
+    """A code cell calling *call* with one png output carrying *carried*."""
+    return {
+        "cell_type": "code",
+        "metadata": {},
+        "source": f'fig = build()\n{call}(fig, "{alt}")\n',
+        "outputs": [
+            {
+                "output_type": "display_data",
+                "data": {"image/png": png},
+                "metadata": {"image/png": {"alt": alt if carried is None else carried}},
+            }
+        ],
+    }
+
+
+def _drift(tmp_path, monkeypatch, old_src: str, new_src: str, nb: dict) -> bool:
+    """Run alt_text_only_drift with *old_src* as the stamped blob and *new_src* on disk."""
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", tmp_path)
+    blob = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=tmp_path,
+        input=old_src,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    py = tmp_path / "nb.py"
+    py.write_text(new_src, encoding="utf-8")
+    return notebook_provenance.alt_text_only_drift(blob, py, nb)
+
+
+def test_correcting_only_the_alt_text_is_not_stale(tmp_path, monkeypatch) -> None:
+    old = 'fig = build()\nshow_plotly_with_alt(fig, "the bottom row is the holdout")\n'
+    new = 'fig = build()\nshow_plotly_with_alt(fig, "the top row is the holdout")\n'
+    nb = _notebook([_alt_cell("the top row is the holdout")])
+    assert _drift(tmp_path, monkeypatch, old, new, nb)
+
+
+def test_correcting_alt_text_on_a_qualified_call_is_not_stale(tmp_path, monkeypatch) -> None:
+    """``import utils.style as style`` gives ``style.show_plotly_with_alt(...)``.
+
+    The exception matched only bare ``ast.Name`` calls, so the qualified form fell
+    outside it. ``case_studies/etfs/05_evaluation.py`` is the one notebook in the
+    corpus written this way, and ``import utils.style as style`` appears 19 times.
+    """
+    old = 'fig = build()\nstyle.show_plotly_with_alt(fig, "the bottom row is the holdout")\n'
+    new = 'fig = build()\nstyle.show_plotly_with_alt(fig, "the top row is the holdout")\n'
+    nb = _notebook([_alt_cell("the top row is the holdout", call="style.show_plotly_with_alt")])
+    assert _drift(tmp_path, monkeypatch, old, new, nb)
+
+
+def test_a_code_change_beside_a_qualified_alt_change_is_still_stale(tmp_path, monkeypatch) -> None:
+    """Recognising the qualified form must not also forgive a changed constant."""
+    old = 'fig = build(n=5)\nstyle.show_plotly_with_alt(fig, "old words")\n'
+    new = 'fig = build(n=20)\nstyle.show_plotly_with_alt(fig, "new words")\n'
+    nb = _notebook([_alt_cell("new words", call="style.show_plotly_with_alt")])
+    assert not _drift(tmp_path, monkeypatch, old, new, nb)
+
+
+def test_a_code_change_beside_an_alt_change_is_still_stale(tmp_path, monkeypatch) -> None:
+    """The whole point of the stamp. One changed constant must not ride along."""
+    old = 'fig = build(n=5)\nshow_plotly_with_alt(fig, "old words")\n'
+    new = 'fig = build(n=20)\nshow_plotly_with_alt(fig, "new words")\n'
+    nb = _notebook([_alt_cell("new words")])
+    assert not _drift(tmp_path, monkeypatch, old, new, nb)
+
+
+def test_alt_text_the_outputs_do_not_carry_is_stale(tmp_path, monkeypatch) -> None:
+    """A source-only edit. The outputs still describe the figure the old way."""
+    old = 'fig = build()\nshow_plotly_with_alt(fig, "old words")\n'
+    new = 'fig = build()\nshow_plotly_with_alt(fig, "new words")\n'
+    nb = _notebook([_alt_cell("new words", carried="old words")])
+    assert not _drift(tmp_path, monkeypatch, old, new, nb)
+
+
+def test_a_trailing_semicolon_is_stale(tmp_path, monkeypatch) -> None:
+    """A semicolon suppresses a cell's automatic display and leaves the AST identical."""
+    old = '# %%\nfig = build()\nshow_plotly_with_alt(fig, "words")\nsummary\n'
+    new = '# %%\nfig = build()\nshow_plotly_with_alt(fig, "words")\nsummary;\n'
+    nb = _notebook([_alt_cell("words")])
+    assert not _drift(tmp_path, monkeypatch, old, new, nb)
+
+
+def test_moving_a_cell_boundary_is_stale(tmp_path, monkeypatch) -> None:
+    """Which code shares a cell decides which value is its last expression."""
+    old = "# %%\nfig = build()\n\n# %%\nsummary\n"
+    new = "# %%\nfig = build()\nsummary\n"
+    assert not _drift(tmp_path, monkeypatch, old, new, _notebook([]))
+
+
+def test_retagging_a_cell_is_stale(tmp_path, monkeypatch) -> None:
+    """The marker carries cell tags, so it is compared even for a markdown cell."""
+    old = "# %% [markdown]\n# words\n"
+    new = '# %% [markdown] tags=["results"]\n# words\n'
+    assert not _drift(tmp_path, monkeypatch, old, new, _notebook([]))
+
+
+def test_rewrapping_the_alt_literal_is_not_stale(tmp_path, monkeypatch) -> None:
+    """ruff format rewraps a long alt string; the value is what matters, not the wrapping."""
+    old = '# %%\nshow_plotly_with_alt(fig, "one two three")\n'
+    new = '# %%\nshow_plotly_with_alt(\n    fig,\n    "one two "\n    "three",\n)\n'
+    nb = _notebook([_alt_cell("one two three")])
+    assert _drift(tmp_path, monkeypatch, old, new, nb)
+
+
+def test_a_comment_only_change_is_not_stale(tmp_path, monkeypatch) -> None:
+    """Markdown cells are comments in a jupytext .py and cannot affect outputs."""
+    old = "# %% [markdown]\n# the last row is the holdout\n\n# %%\nfig = build()\n"
+    new = "# %% [markdown]\n# the top row is the holdout\n\n# %%\nfig = build()\n"
+    assert _drift(tmp_path, monkeypatch, old, new, _notebook([]))
+
+
+def test_code_appended_into_a_markdown_cell_is_stale(tmp_path, monkeypatch) -> None:
+    """A markdown body is only ignorable while it is all comments.
+
+    Measured against the real notebook: its last cell is `# %% [markdown]`, so appending
+    `fig;` landed in a markdown body and was forgiven until the body was compared.
+    """
+    old = "# %% [markdown]\n# words\n"
+    new = "# %% [markdown]\n# words\nfig;\n"
+    assert not _drift(tmp_path, monkeypatch, old, new, _notebook([]))
+
+
+def test_editing_markdown_prose_is_still_not_stale(tmp_path, monkeypatch) -> None:
+    old = "# %% [markdown]\n# the last row is the holdout\n"
+    new = "# %% [markdown]\n# the top row is the holdout\n"
+    assert _drift(tmp_path, monkeypatch, old, new, _notebook([]))
+
+
+def test_an_unparseable_source_is_stale(tmp_path, monkeypatch) -> None:
+    old = "fig = build()\n"
+    new = "fig = build(\n"
+    assert not _drift(tmp_path, monkeypatch, old, new, _notebook([]))
+
+
+def test_a_stamped_blob_this_repo_does_not_have_is_stale(tmp_path, monkeypatch) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", tmp_path)
+    py = tmp_path / "nb.py"
+    py.write_text("fig = build()\n", encoding="utf-8")
+    assert not notebook_provenance.alt_text_only_drift("0" * 40, py, _notebook([]))
