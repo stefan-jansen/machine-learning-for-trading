@@ -392,6 +392,7 @@ modeling:
     macro_availability_lag_days: 1
     model_kwargs:
       ipca:
+        max_iter: 10000
         factor_ridge: 0.01
         gamma_ridge: 0.01
       sdf:

@@ -611,13 +611,14 @@ def test_fx_materialized_folds_match_the_canonical_label_clock() -> None:
     label = "fwd_ret_1d"
     case_dir = get_case_study_dir(case_study)
     setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
-    labels = pl.read_parquet(
-        resolve_storage_path(
-            case_study,
-            load_label_spec(case_study, label),
-            f"labels/{label}.parquet",
-        )
+    label_path = resolve_storage_path(
+        case_study,
+        load_label_spec(case_study, label),
+        f"labels/{label}.parquet",
     )
+    if not label_path.exists():
+        pytest.skip("Production FX label artifact is not available")
+    labels = pl.read_parquet(label_path)
     canonical = generate_cv_splits(
         labels,
         case_study_id=case_study,
