@@ -11,6 +11,8 @@ from torch.utils.data import Dataset
 
 from utils.modeling import RANDOM_SEED
 
+_SEQUENCE_PERIOD_COL = "__sequence_period__"
+
 
 @dataclass(slots=True)
 class SequenceStore:
@@ -126,7 +128,6 @@ def materialize_sequences(
 
 def _sample_sequence_positions(
     counts: np.ndarray,
-    lookback: int,
     max_sequences: int,
 ) -> list[np.ndarray | None]:
     """Sample sequence endpoints while preserving full symbol coverage."""
@@ -135,16 +136,18 @@ def _sample_sequence_positions(
     if max_sequences <= 0 or int(counts.sum()) <= max_sequences:
         return sampled_positions
 
-    n_symbols = len(counts)
-    if max_sequences < n_symbols:
+    active_symbols = np.flatnonzero(counts > 0)
+    n_active_symbols = len(active_symbols)
+    if max_sequences < n_active_symbols:
         raise ValueError(
             f"max_sequences={max_sequences:,} is smaller than the symbol count "
-            f"({n_symbols:,}); cannot preserve full universe coverage"
+            f"({n_active_symbols:,}); cannot preserve full universe coverage"
         )
 
-    alloc = np.ones(n_symbols, dtype=np.int64)
-    remaining = max_sequences - n_symbols
-    extra_capacity = counts - 1
+    alloc = np.zeros(len(counts), dtype=np.int64)
+    alloc[active_symbols] = 1
+    remaining = max_sequences - n_active_symbols
+    extra_capacity = np.maximum(counts - alloc, 0)
 
     if remaining > 0 and extra_capacity.sum() > 0:
         weighted_extra = np.floor(extra_capacity / extra_capacity.sum() * remaining).astype(
@@ -168,7 +171,7 @@ def _sample_sequence_positions(
         if take >= n_seq:
             continue
         offsets = (np.arange(take, dtype=np.int64) * n_seq) // take
-        sampled_positions[idx] = offsets + lookback
+        sampled_positions[idx] = offsets
 
     return sampled_positions
 
@@ -181,17 +184,17 @@ def _build_symbol_arrays(
     date_col: str,
     entity_col: str,
     lookback: int,
-) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], list[str], np.ndarray]:
-    """Convert a fold dataframe into per-symbol arrays and sequence counts."""
+) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], list[str], list[np.ndarray]]:
+    """Convert a fold dataframe into per-symbol arrays and valid endpoints."""
 
     if fold_df.empty:
-        return [], [], [], [], np.array([], dtype=np.int64)
+        return [], [], [], [], []
 
     features_list: list[np.ndarray] = []
     targets_list: list[np.ndarray] = []
     timestamps_list: list[np.ndarray] = []
     entities: list[str] = []
-    counts: list[int] = []
+    valid_positions_list: list[np.ndarray] = []
 
     sorted_df = fold_df.sort_values([entity_col, date_col], kind="stable")
     # Coerce the date column to tz-naive datetime64[ns] once. tz-aware pandas
@@ -212,18 +215,27 @@ def _build_symbol_arrays(
         # Cast to datetime64[ns] explicitly so concat/np.asarray downstream
         # never falls back to object dtype.
         timestamps = sym_df[date_col].to_numpy(dtype="datetime64[ns]")
+        periods = sym_df[_SEQUENCE_PERIOD_COL].to_numpy(dtype=np.int64)
+        candidate_positions = np.arange(lookback, n_rows, dtype=np.int32)
+        steps = np.diff(periods)
+        bad_step_prefix = np.concatenate(([0], np.cumsum(steps != 1, dtype=np.int64)))
+        gap_free = (
+            bad_step_prefix[candidate_positions] == bad_step_prefix[candidate_positions - lookback]
+        )
+        target_is_finite = np.isfinite(targets[candidate_positions])
+        valid_positions = candidate_positions[gap_free & target_is_finite]
         features_list.append(feats)
         targets_list.append(targets)
         timestamps_list.append(timestamps)
         entities.append(str(symbol))
-        counts.append(n_rows - lookback)
+        valid_positions_list.append(valid_positions)
 
     return (
         features_list,
         targets_list,
         timestamps_list,
         entities,
-        np.asarray(counts, dtype=np.int64),
+        valid_positions_list,
     )
 
 
@@ -263,31 +275,55 @@ def _normalize_feature_arrays(
 
 
 def _build_sequence_index(
-    counts: np.ndarray,
+    valid_positions_list: list[np.ndarray],
     entities: list[str],
-    lookback: int,
     max_sequences: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build flat symbol/end-position indices for a sequence store."""
 
-    sampled_positions = _sample_sequence_positions(counts, lookback, max_sequences)
+    counts = np.asarray([len(positions) for positions in valid_positions_list], dtype=np.int64)
+    sampled_offsets = _sample_sequence_positions(counts, max_sequences)
     symbol_parts: list[np.ndarray] = []
     end_parts: list[np.ndarray] = []
 
-    for symbol_id, (entity, n_seq, positions) in enumerate(
-        zip(entities, counts, sampled_positions, strict=True)
+    for symbol_id, (entity, valid_positions, offsets) in enumerate(
+        zip(entities, valid_positions_list, sampled_offsets, strict=True)
     ):
         del entity  # entity order is already captured by the symbol_id list
-        if positions is None:
-            positions = np.arange(lookback, lookback + n_seq, dtype=np.int32)
-        else:
-            positions = positions.astype(np.int32, copy=False)
+        positions = valid_positions
+        if offsets is not None:
+            positions = positions[offsets]
+        positions = positions.astype(np.int32, copy=False)
         symbol_parts.append(np.full(len(positions), symbol_id, dtype=np.int32))
         end_parts.append(positions)
 
     symbol_idx = np.concatenate(symbol_parts) if symbol_parts else np.array([], dtype=np.int32)
     end_idx = np.concatenate(end_parts) if end_parts else np.array([], dtype=np.int32)
     return symbol_idx, end_idx
+
+
+def _sequence_period_numbers(timestamps: pd.Series) -> np.ndarray:
+    """Map timestamps to consecutive expected observation periods."""
+
+    values = pd.DatetimeIndex(pd.to_datetime(timestamps))
+    unique = values.dropna().unique().sort_values()
+    if len(unique) < 2:
+        return np.zeros(len(values), dtype=np.int64)
+
+    diffs = np.diff(unique.asi8)
+    median_days = float(np.median(diffs)) / float(pd.Timedelta(days=1).value)
+    intraday = unique.normalize().nunique() < len(unique)
+    trades_on_weekends = bool(np.any(unique.dayofweek >= 5))
+
+    if intraday and trades_on_weekends:
+        positive_diffs = diffs[diffs > 0]
+        cadence_ns = int(pd.Series(positive_diffs).mode().iloc[0])
+        return ((values.asi8 - unique[0].value) // cadence_ns).astype(np.int64)
+
+    if median_days >= 20:
+        return (values.year * 12 + values.month).astype(np.int64)
+
+    return unique.get_indexer(values).astype(np.int64)
 
 
 def _build_val_df_with_priming(
@@ -298,9 +334,9 @@ def _build_val_df_with_priming(
     val_start: pd.Timestamp,
     lookback: int,
 ) -> pd.DataFrame:
-    """Per-symbol, keep last `lookback` train-tail rows + all val rows.
+    """Per-symbol, keep last `lookback` pre-validation rows plus all validation rows.
 
-    Train-tail rows provide the input window (priming) for the first val
+    Pre-validation rows provide the input window for the first validation
     target prediction; their labels are not emitted as val targets because
     sequence positions start at index `lookback` within each symbol's
     sorted array, and with exactly `lookback` priming rows the first
@@ -310,11 +346,11 @@ def _build_val_df_with_priming(
     for _, sym_df in full_val_source.groupby(entity_col, sort=False):
         sym_df = sym_df.sort_values(date_col, kind="stable")
         is_val = sym_df[date_col] >= val_start
-        train_tail = sym_df.loc[~is_val].tail(lookback)
+        context_tail = sym_df.loc[~is_val].tail(lookback)
         val_part = sym_df.loc[is_val]
-        if train_tail.empty and val_part.empty:
+        if context_tail.empty and val_part.empty:
             continue
-        pieces.append(pd.concat([train_tail, val_part], ignore_index=True))
+        pieces.append(pd.concat([context_tail, val_part], ignore_index=True))
     if not pieces:
         return full_val_source.iloc[0:0].copy()
     return pd.concat(pieces, ignore_index=True)
@@ -339,11 +375,10 @@ def prepare_fold_sequence_stores(
 ) -> tuple[SequenceStore, SequenceStore, dict[str, int]]:
     """Build normalized train/validation sequence stores for a fold.
 
-    When ``val_start`` is provided, val sequences are built from the
-    concatenation of (a) each symbol's last ``lookback`` train-tail rows
-    and (b) its val-period rows. This "train-tail priming" ensures the
-    first val sequence predicts the target at ``val_start`` — matching
-    production behavior and Chapter 13's teaching implementation.
+    When ``val_start`` is provided, validation sequences use each symbol's
+    last ``lookback`` observable rows before validation plus its validation
+    rows. This includes a label-buffer period after the training endpoint.
+    Windows that cross a missing expected observation period are excluded.
 
     When ``val_start`` is None, val sequences start at position
     ``lookback`` within the val slice, which discards the first
@@ -351,7 +386,9 @@ def prepare_fold_sequence_stores(
     ``val_start`` so the val window aligns with production.
     """
 
-    use_cols = [date_col, entity_col, label_col, *feature_names]
+    if _SEQUENCE_PERIOD_COL not in dataset_pd.columns:
+        dataset_pd[_SEQUENCE_PERIOD_COL] = _sequence_period_numbers(dataset_pd[date_col])
+    use_cols = [date_col, entity_col, label_col, _SEQUENCE_PERIOD_COL, *feature_names]
     val_start_ts: pd.Timestamp | None
     if val_start is None:
         val_start_ts = None
@@ -374,59 +411,47 @@ def prepare_fold_sequence_stores(
     ):
         from utils.modeling import replace_temporal_columns
 
-        train_df = (
-            replace_temporal_columns(
+        train_df = replace_temporal_columns(
+            dataset_pd,
+            train_mask,
+            temporal_by_fold,
+            temporal_keys,
+            temporal_feature_names,
+            fold_id,
+        )[use_cols].copy()
+
+        if val_start_ts is not None:
+            context_mask = dataset_pd[date_col] < val_start_ts
+            full_val_source = replace_temporal_columns(
                 dataset_pd,
-                train_mask,
+                context_mask | val_mask,
                 temporal_by_fold,
                 temporal_keys,
                 temporal_feature_names,
                 fold_id,
             )[use_cols]
-            .dropna(subset=[label_col])
-            .copy()
-        )
-
-        if val_start_ts is not None:
-            # Source = train-rows-before-val + val-rows (temporal columns
-            # replaced consistently per fold across both halves).
-            train_tail_mask = train_mask & (dataset_pd[date_col] < val_start_ts)
-            full_val_source = replace_temporal_columns(
+            val_df = _build_val_df_with_priming(
+                full_val_source,
+                entity_col=entity_col,
+                date_col=date_col,
+                val_start=val_start_ts,
+                lookback=lookback,
+            ).copy()
+        else:
+            val_df = replace_temporal_columns(
                 dataset_pd,
-                train_tail_mask | val_mask,
+                val_mask,
                 temporal_by_fold,
                 temporal_keys,
                 temporal_feature_names,
                 fold_id,
-            )[use_cols].dropna(subset=[label_col])
-            val_df = _build_val_df_with_priming(
-                full_val_source,
-                entity_col=entity_col,
-                date_col=date_col,
-                val_start=val_start_ts,
-                lookback=lookback,
-            ).copy()
-        else:
-            val_df = (
-                replace_temporal_columns(
-                    dataset_pd,
-                    val_mask,
-                    temporal_by_fold,
-                    temporal_keys,
-                    temporal_feature_names,
-                    fold_id,
-                )[use_cols]
-                .dropna(subset=[label_col])
-                .copy()
-            )
+            )[use_cols].copy()
     else:
-        train_df = dataset_pd.loc[train_mask, use_cols].dropna(subset=[label_col]).copy()
+        train_df = dataset_pd.loc[train_mask, use_cols].copy()
 
         if val_start_ts is not None:
-            train_tail_mask = train_mask & (dataset_pd[date_col] < val_start_ts)
-            full_val_source = dataset_pd.loc[train_tail_mask | val_mask, use_cols].dropna(
-                subset=[label_col]
-            )
+            context_mask = dataset_pd[date_col] < val_start_ts
+            full_val_source = dataset_pd.loc[context_mask | val_mask, use_cols]
             val_df = _build_val_df_with_priming(
                 full_val_source,
                 entity_col=entity_col,
@@ -435,9 +460,9 @@ def prepare_fold_sequence_stores(
                 lookback=lookback,
             ).copy()
         else:
-            val_df = dataset_pd.loc[val_mask, use_cols].dropna(subset=[label_col]).copy()
+            val_df = dataset_pd.loc[val_mask, use_cols].copy()
 
-    train_features, train_targets, train_timestamps, train_entities, train_counts = (
+    train_features, train_targets, train_timestamps, train_entities, train_positions = (
         _build_symbol_arrays(
             train_df,
             feature_names=feature_names,
@@ -447,7 +472,7 @@ def prepare_fold_sequence_stores(
             lookback=lookback,
         )
     )
-    val_features, val_targets, val_timestamps, val_entities, val_counts = _build_symbol_arrays(
+    val_features, val_targets, val_timestamps, val_entities, val_positions = _build_symbol_arrays(
         val_df,
         feature_names=feature_names,
         label_col=label_col,
@@ -476,9 +501,9 @@ def prepare_fold_sequence_stores(
     _normalize_feature_arrays(val_features, means, stds)
 
     train_symbol_idx, train_end_idx = _build_sequence_index(
-        train_counts, train_entities, lookback, max_train_sequences
+        train_positions, train_entities, max_train_sequences
     )
-    val_symbol_idx, val_end_idx = _build_sequence_index(val_counts, val_entities, lookback, 0)
+    val_symbol_idx, val_end_idx = _build_sequence_index(val_positions, val_entities, 0)
 
     train_store = SequenceStore(
         features=train_features,

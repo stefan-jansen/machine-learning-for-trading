@@ -200,3 +200,114 @@ def test_backwards_compatible_without_val_start():
         assert int(end_positions.min()) == lookback, (
             "Legacy path should start sequences at position=lookback"
         )
+
+
+def test_sequence_windows_do_not_span_missing_entity_periods():
+    from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
+
+    df, train_mask, val_mask, val_start_ts, _ = _synthetic_fold_df(
+        train_end="2021-03-31",
+        val_start="2021-04-01",
+        val_end="2021-06-30",
+    )
+    missing_date = pd.Timestamp("2020-10-15")
+    keep = ~((df["symbol"] == "S0") & (df["timestamp"] == missing_date))
+    df = df.loc[keep].reset_index(drop=True)
+    train_mask = train_mask.loc[keep].reset_index(drop=True)
+    val_mask = val_mask.loc[keep].reset_index(drop=True)
+    lookback = 20
+
+    train_store, _, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0", "feat1"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=lookback,
+        val_start=val_start_ts,
+    )
+
+    calendar = pd.Index(sorted(df["timestamp"].unique()))
+    for symbol_id, end_idx in zip(train_store.symbol_idx, train_store.end_idx, strict=True):
+        timestamps = train_store.timestamps[int(symbol_id)]
+        window = timestamps[int(end_idx) - lookback : int(end_idx) + 1]
+        positions = calendar.get_indexer(window)
+        assert np.all(np.diff(positions) == 1)
+
+
+def test_fixed_cadence_windows_do_not_span_missing_panel_periods():
+    from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
+
+    dates = pd.date_range("2021-01-01", periods=100, freq="8h", tz="UTC")
+    missing_date = dates[40]
+    rows = [
+        {
+            "symbol": symbol,
+            "timestamp": timestamp,
+            "feat0": float(i),
+            "y": float(i),
+        }
+        for symbol in ("S0", "S1")
+        for i, timestamp in enumerate(dates)
+        if timestamp != missing_date
+    ]
+    df = pd.DataFrame(rows)
+    train_mask = df["timestamp"] < dates[75]
+    val_mask = df["timestamp"] >= dates[75]
+    lookback = 12
+
+    train_store, _, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=lookback,
+        val_start=dates[75],
+    )
+
+    cadence = np.timedelta64(8, "h")
+    for symbol_id, end_idx in zip(train_store.symbol_idx, train_store.end_idx, strict=True):
+        timestamps = train_store.timestamps[int(symbol_id)]
+        window = timestamps[int(end_idx) - lookback : int(end_idx) + 1]
+        assert np.all(np.diff(window) == cadence)
+
+
+def test_priming_includes_label_buffer_gap_rows():
+    from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
+
+    train_end = pd.Timestamp("2020-12-30")
+    df, train_mask, val_mask, val_start_ts, _ = _synthetic_fold_df(
+        train_end=str(train_end.date()),
+        val_start="2021-01-04",
+    )
+    gap_mask = (df["timestamp"] > train_end) & (df["timestamp"] < val_start_ts) & ~train_mask
+    assert gap_mask.any()
+    lookback = 20
+
+    _, val_store, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0", "feat1"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=lookback,
+        val_start=val_start_ts,
+    )
+
+    for symbol_id in range(val_store.n_symbols):
+        entity = val_store.entities[symbol_id]
+        end_positions = val_store.end_idx[val_store.symbol_idx == symbol_id]
+        first_end = int(end_positions.min())
+        last_context = pd.Timestamp(val_store.timestamps[symbol_id][first_end - 1])
+        expected_context = pd.Timestamp(
+            df.loc[(df["symbol"] == entity) & (df["timestamp"] < val_start_ts), "timestamp"].max()
+        )
+        assert last_context == expected_context
+        assert last_context > train_end
