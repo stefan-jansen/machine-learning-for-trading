@@ -63,17 +63,16 @@ def _validate_prediction_dispersion(predictions) -> None:
     fold_health = (
         typed.group_by("fold")
         .agg(
-            pl.col("score").is_infinite().sum().alias("n_infinite"),
+            pl.len().alias("n_total"),
             pl.col("score").is_finite().sum().alias("n_finite"),
         )
         .collect()
     )
     invalid_folds = []
     for row in fold_health.iter_rows(named=True):
-        if row["n_infinite"]:
-            invalid_folds.append(f"fold {row['fold']}: {row['n_infinite']} infinite score(s)")
-        elif row["n_finite"] == 0:
-            invalid_folds.append(f"fold {row['fold']}: no finite scores")
+        n_invalid = row["n_total"] - row["n_finite"]
+        if n_invalid:
+            invalid_folds.append(f"fold {row['fold']}: {n_invalid} non-finite score(s)")
     if invalid_folds:
         raise ValueError(
             "Refusing to register predictions with a non-finite fold: " + "; ".join(invalid_folds)

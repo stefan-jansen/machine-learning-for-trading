@@ -123,8 +123,13 @@ def test_wide_but_finite_prediction_dispersion_is_registered(tmp_path) -> None:
 
 @pytest.mark.parametrize(
     "invalid_scores",
-    ([0.2, float("inf")], [float("nan"), float("nan")]),
-    ids=("partly-infinite", "entirely-non-finite"),
+    (
+        [0.2, float("inf")],
+        [0.2, float("nan")],
+        [0.2, None],
+        [float("nan"), float("nan")],
+    ),
+    ids=("partly-infinite", "partly-nan", "partly-null", "entirely-non-finite"),
 )
 def test_non_finite_fold_is_rejected_before_registry_or_artifact_write(
     tmp_path, invalid_scores
