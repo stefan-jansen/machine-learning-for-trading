@@ -305,7 +305,7 @@ def _build_sequence_index(
 def _sequence_period_numbers(timestamps: pd.Series) -> np.ndarray:
     """Map timestamps to consecutive expected observation periods."""
 
-    values = pd.DatetimeIndex(pd.to_datetime(timestamps))
+    values = pd.DatetimeIndex(pd.to_datetime(timestamps)).as_unit("ns")
     unique = values.dropna().unique().sort_values()
     if len(unique) < 2:
         return np.zeros(len(values), dtype=np.int64)

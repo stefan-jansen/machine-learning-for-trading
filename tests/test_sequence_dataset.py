@@ -277,6 +277,18 @@ def test_fixed_cadence_windows_do_not_span_missing_panel_periods():
         assert np.all(np.diff(window) == cadence)
 
 
+def test_monthly_period_numbers_preserve_gaps_at_millisecond_resolution():
+    from case_studies.utils.sequence_dataset import _sequence_period_numbers
+
+    timestamps = pd.Series(
+        np.asarray(["2021-01-31", "2021-02-28", "2021-04-30"], dtype="datetime64[ms]")
+    )
+
+    periods = _sequence_period_numbers(timestamps)
+
+    assert np.diff(periods).tolist() == [1, 2]
+
+
 def test_priming_includes_label_buffer_gap_rows():
     from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
 
