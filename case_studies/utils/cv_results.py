@@ -52,6 +52,8 @@ def assemble_cv_result(
     curve_df = _as_frame(curves)
     if curve_df.is_empty():
         raise ValueError("Cannot assemble CV results without checkpoint metrics.")
+    if all_predictions.is_empty():
+        raise ValueError("Cannot assemble CV results without prediction rows.")
 
     required = {"config", "epoch", "ic_mean"}
     missing = required.difference(curve_df.columns)

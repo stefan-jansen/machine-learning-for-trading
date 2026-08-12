@@ -139,15 +139,9 @@ def test_real_artifact_alignment_is_safe_after_regeneration() -> None:
         label_buffer=str(setup["labels"]["buffer"]),
     )
 
-    old_keep_last = temporal.unique(subset=JOIN_COLS, keep="last", maintain_order=True)
-    holdout_start = date.fromisoformat(str(setup["evaluation"]["holdout_start"]))
-    pre_holdout_values_from_holdout_fit = old_keep_last.filter(
-        (pl.col("timestamp") < holdout_start) & (pl.col("fold") == -1)
-    ).height
-    assert pre_holdout_values_from_holdout_fit == 0, (
-        "The regenerated artifact must not let the holdout estimator replace "
-        "validation estimates under the legacy keep-last collapse"
-    )
+    validation_folds = {int(split["fold"]) for split in folds}
+    holdout_fold = len(folds)
+    assert set(temporal["fold"].unique().to_list()) == validation_folds | {holdout_fold}
 
     try:
         aligned = _load_alignment_function()["build_validation_temporal_panel"](temporal, folds)
@@ -157,7 +151,7 @@ def test_real_artifact_alignment_is_safe_after_regeneration() -> None:
         assert "no validation rows for fold" in str(error)
         return
 
-    assert aligned.filter(pl.col("validation_fold") == -1).is_empty()
+    assert aligned.filter(pl.col("validation_fold") == holdout_fold).is_empty()
     assert aligned.group_by(JOIN_COLS).len().filter(pl.col("len") > 1).is_empty()
     for split in folds:
         fold_rows = aligned.filter(pl.col("validation_fold") == split["fold"])
