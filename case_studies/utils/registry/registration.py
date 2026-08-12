@@ -55,14 +55,32 @@ def _validate_prediction_dispersion(predictions) -> None:
     if fold_col is None or not {y_true_col, y_score_col}.issubset(predictions.columns):
         return
 
-    dispersion = (
-        predictions.lazy()
-        .select(
-            pl.col(fold_col).alias("fold"),
-            pl.col(y_true_col).cast(pl.Float64, strict=False).alias("actual"),
-            pl.col(y_score_col).cast(pl.Float64, strict=False).alias("score"),
+    typed = predictions.lazy().select(
+        pl.col(fold_col).alias("fold"),
+        pl.col(y_true_col).cast(pl.Float64, strict=False).alias("actual"),
+        pl.col(y_score_col).cast(pl.Float64, strict=False).alias("score"),
+    )
+    fold_health = (
+        typed.group_by("fold")
+        .agg(
+            pl.col("score").is_infinite().sum().alias("n_infinite"),
+            pl.col("score").is_finite().sum().alias("n_finite"),
         )
-        .filter(pl.col("actual").is_finite() & pl.col("score").is_finite())
+        .collect()
+    )
+    invalid_folds = []
+    for row in fold_health.iter_rows(named=True):
+        if row["n_infinite"]:
+            invalid_folds.append(f"fold {row['fold']}: {row['n_infinite']} infinite score(s)")
+        elif row["n_finite"] == 0:
+            invalid_folds.append(f"fold {row['fold']}: no finite scores")
+    if invalid_folds:
+        raise ValueError(
+            "Refusing to register predictions with a non-finite fold: " + "; ".join(invalid_folds)
+        )
+
+    dispersion = (
+        typed.filter(pl.col("actual").is_finite() & pl.col("score").is_finite())
         .group_by("fold")
         .agg(
             pl.len().alias("n"),
