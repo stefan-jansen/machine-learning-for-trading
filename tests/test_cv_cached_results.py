@@ -228,6 +228,44 @@ def test_result_assembly_preserves_backend_metadata() -> None:
     assert result["grid_results"][0]["input_chunk_length"] == 60
 
 
+def test_result_assembly_reports_and_rejects_invalid_checkpoint_scores() -> None:
+    predictions = pl.concat(
+        [
+            _predictions("valid", 10),
+            _predictions("invalid", 10).with_columns(
+                pl.when(pl.int_range(pl.len()) == 0)
+                .then(float("inf"))
+                .otherwise(pl.col("y_score"))
+                .alias("y_score")
+            ),
+        ]
+    )
+    result = cv_results.assemble_cv_result(
+        [
+            {"config": "valid", "epoch": 10, "ic_mean": 0.03, "ic_n_days": 3},
+            {"config": "invalid", "epoch": 10, "ic_mean": 0.90, "ic_n_days": 3},
+        ],
+        predictions,
+        date_col="timestamp",
+        entity_col="symbol",
+    )
+
+    assert result["best_config_name"] == "valid"
+    assert result["grid_results"] == [
+        {
+            "config_name": "valid",
+            "best_epoch": 10,
+            "best_ic": pytest.approx(0.03),
+            "ic_n_days": pytest.approx(3.0),
+            "n_invalid": 0,
+            "n_folds": 3,
+            "selectable": True,
+            "elapsed_s": 0.0,
+            "started_at": None,
+        }
+    ]
+
+
 def test_result_assembly_rejects_mixed_known_and_unknown_coverage() -> None:
     curves = pl.DataFrame(
         [
