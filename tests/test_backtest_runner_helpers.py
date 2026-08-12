@@ -100,6 +100,7 @@ def test_vectorized_plumbing_test_resolves_primary_predictions(
         }
     )
     requested: dict[str, object] = {}
+    backtest_call: dict[str, object] = {}
 
     monkeypatch.setattr(
         br,
@@ -114,11 +115,13 @@ def test_vectorized_plumbing_test_resolves_primary_predictions(
 
     monkeypatch.setattr(registry, "load_prediction_index", fake_index)
     monkeypatch.setattr(registry, "read_predictions", lambda *_args: predictions)
-    monkeypatch.setattr(
-        br,
-        "run_backtest",
-        lambda *args, **kwargs: SimpleNamespace(metrics={"sharpe": 0.0}),
-    )
+
+    def fake_backtest(*args, **kwargs):
+        backtest_call["prediction_hash"] = args[1]
+        backtest_call.update(kwargs)
+        return SimpleNamespace(metrics={"sharpe": 0.0})
+
+    monkeypatch.setattr(br, "run_backtest", fake_backtest)
 
     observed = run_plumbing_test("demo", pl.DataFrame(), spec)
 
@@ -128,6 +131,8 @@ def test_vectorized_plumbing_test_resolves_primary_predictions(
         "label": "fwd_ret_1d",
         "split": "validation",
     }
+    assert backtest_call["prediction_hash"] == "abc123"
+    assert backtest_call["register"] is False
 
 
 def test_align_symbol_dtype_same_dtype_passthrough() -> None:

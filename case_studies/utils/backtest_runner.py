@@ -2218,6 +2218,7 @@ def run_plumbing_test(
     rebal_spec = strategy.get("rebalance", {})
 
     if rebal_spec["mode"] == "vectorized":
+        prediction_hash = "plumbing_test"
         label = label or backtest_config.primary_label
         if predictions is None:
             from case_studies.utils.registry import load_prediction_index, read_predictions
@@ -2232,10 +2233,8 @@ def run_plumbing_test(
                     f"Vectorized plumbing test found no validation predictions for "
                     f"{case_study}/{label}"
                 )
-            predictions = read_predictions(
-                case_study,
-                prediction_index.row(0, named=True)["prediction_hash"],
-            )
+            prediction_hash = prediction_index.row(0, named=True)["prediction_hash"]
+            predictions = read_predictions(case_study, prediction_hash)
 
         random_predictions = normalize_prediction_columns(predictions)
         rng = np.random.default_rng(seed)
@@ -2244,7 +2243,7 @@ def run_plumbing_test(
         )
         result = run_backtest(
             case_study,
-            "plumbing_test",
+            prediction_hash,
             strategy_spec,
             prices=prices,
             predictions=random_predictions,
