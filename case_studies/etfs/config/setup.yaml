@@ -297,6 +297,8 @@ modeling:
       ipca:
         max_iter: 10000
         tol: 0.00001
+        factor_ridge: 0.01
+        gamma_ridge: 0.01
       sdf:
         checkpoint_epochs: [256, 512, 768, 1024, 1280]
         beta_checkpoint_epochs: [256]
