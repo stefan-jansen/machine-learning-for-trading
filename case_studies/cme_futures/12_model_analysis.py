@@ -1,18 +1,19 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
 #     name: python3
 # ---
 
-# %% [markdown] papermill={"duration": 0.004457, "end_time": "2026-07-10T19:21:25.376526+00:00", "exception": false, "start_time": "2026-07-10T19:21:25.372069+00:00", "status": "completed"}
+# %% [markdown]
 # # Model Analysis: CME Futures
 #
 # This notebook evaluates all predictive models trained on the CME futures
@@ -69,7 +70,7 @@
 # in Ch11–15 compare each model family *across* case studies; here we compare
 # all families *within* a single dataset.
 
-# %% papermill={"duration": 4.165944, "end_time": "2026-07-10T19:21:29.545506+00:00", "exception": false, "start_time": "2026-07-10T19:21:25.379562+00:00", "status": "completed"}
+# %%
 """Model Analysis: CME Futures — comparative evaluation across all model families."""
 
 import warnings
@@ -107,7 +108,7 @@ from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
 
-# %% papermill={"duration": 0.006264, "end_time": "2026-07-10T19:21:29.554890+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.548626+00:00", "status": "completed"} tags=["parameters"]
+# %% tags=["parameters"]
 CASE_STUDY = "cme_futures"
 PRIMARY_LABEL = "fwd_ret_5d"
 DATE_COL = "timestamp"
@@ -116,7 +117,7 @@ N_BUCKETS = 5  # 30 products — quintiles
 TOP_N_FEATURES = 15
 REGIME_WINDOW = 63
 
-# %% papermill={"duration": 0.01412, "end_time": "2026-07-10T19:21:29.573643+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.559523+00:00", "status": "completed"}
+# %%
 CASE_DIR = get_case_study_dir(CASE_STUDY)
 
 with open(CASE_DIR / "config" / "setup.yaml") as f:
@@ -147,7 +148,7 @@ print(
     f"{setup['costs'].get('spread_ticks', {}).get('illiquid', 2)} tick spread)"
 )
 
-# %% [markdown] papermill={"duration": 0.002876, "end_time": "2026-07-10T19:21:29.579637+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.576761+00:00", "status": "completed"}
+# %% [markdown]
 # ## 1. What Is the Prediction Problem?
 #
 # **Primary target tuple**: `fwd_ret_5d` | regression | IC | weekly rebalancing
@@ -184,7 +185,7 @@ print(
 # carry and momentum signals generalize across sectors versus those that
 # are sector-specific.
 
-# %% papermill={"duration": 0.018493, "end_time": "2026-07-10T19:21:29.601405+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.582912+00:00", "status": "completed"}
+# %%
 # Phase 1: Load pre-computed metrics for ALL labels (coverage + multi-label analysis)
 # Note: some families (latent_factors) store label=null in the registry — assign PRIMARY_LABEL
 _raw_all = load_all_metrics(CASE_STUDY, label=None)
@@ -235,7 +236,7 @@ if missing:
 else:
     print("\nFull coverage: all 5 IC families present; causal_dml evaluated via causal_runs (§7).")
 
-# %% papermill={"duration": 0.007702, "end_time": "2026-07-10T19:21:29.612259+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.604557+00:00", "status": "completed"}
+# %%
 # Best model per family. Rank on the daily-pooled IC (`ic_mean_daily`) — the
 # same metric the HAC credibility intervals are built on — rather than the
 # fold-averaged `ic_mean`. The two disagree only for latent_factors, where
@@ -260,7 +261,7 @@ best_per_family = (
 print("\nBest model per family:")
 print(best_per_family.select(["family", "config_name", "checkpoint_value", "ic_mean", "ic_std"]))
 
-# %% papermill={"duration": 0.008041, "end_time": "2026-07-10T19:21:29.623425+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.615384+00:00", "status": "completed"}
+# %%
 # Phase 2a: Load per-fold metrics from registry (fast path — no raw predictions needed)
 fold_metrics = load_fold_metrics_from_registry(CASE_STUDY, label=PRIMARY_LABEL)
 if fold_metrics.height > 0:
@@ -268,7 +269,7 @@ if fold_metrics.height > 0:
 else:
     print("No fold_metrics table — will compute from raw predictions")
 
-# %% papermill={"duration": 0.034858, "end_time": "2026-07-10T19:21:29.661220+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.626362+00:00", "status": "completed"}
+# %%
 # Phase 2: Load raw predictions ONLY for the ~5 best models (not all)
 representative_preds = []
 
@@ -306,7 +307,7 @@ else:
     best_preds = pl.DataFrame()
     print("WARNING: No raw predictions could be loaded")
 
-# %% papermill={"duration": 0.013467, "end_time": "2026-07-10T19:21:29.678027+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.664560+00:00", "status": "completed"}
+# %%
 # Fold date ranges for timeline
 if best_preds.height > 0:
     fold_ranges = (
@@ -319,14 +320,14 @@ if best_preds.height > 0:
         .sort("fold_id")
     )
 
-# %% [markdown] papermill={"duration": 0.0031, "end_time": "2026-07-10T19:21:29.684296+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.681196+00:00", "status": "completed"}
+# %% [markdown]
 # ### Figure 1: Cross-Validation Timeline
 
-# %% papermill={"duration": 0.119313, "end_time": "2026-07-10T19:21:29.806543+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.687230+00:00", "status": "completed"}
+# %%
 if best_preds.height > 0 and fold_ranges.height > 0:
     plot_cv_timeline(fold_ranges, n_splits, holdout_start)
 
-# %% [markdown] papermill={"duration": 0.003139, "end_time": "2026-07-10T19:21:29.813095+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.809956+00:00", "status": "completed"}
+# %% [markdown]
 # Each fold trains on an expanding window and validates on the following
 # year. With 5 folds, the validation windows run one year each from 2019
 # (fold 4) through 2023 (fold 0), with 2024 sealed as the holdout. This span
@@ -336,7 +337,7 @@ if best_preds.height > 0 and fold_ranges.height > 0:
 # backwardation-dominated regimes, which is essential for evaluating
 # carry-based signals.
 
-# %% [markdown] papermill={"duration": 0.003493, "end_time": "2026-07-10T19:21:29.819612+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.816119+00:00", "status": "completed"}
+# %% [markdown]
 # ## 2. What Was Actually Run?
 #
 # Before comparing results, we map what is actually comparable. Not all
@@ -346,7 +347,7 @@ if best_preds.height > 0 and fold_ranges.height > 0:
 # causal effects. Forcing all of these into a single ranking would be
 # misleading.
 
-# %% papermill={"duration": 0.009315, "end_time": "2026-07-10T19:21:29.832105+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.822790+00:00", "status": "completed"}
+# %%
 # Coverage map: family x label x evidence type
 EVIDENCE_TYPE = {
     "linear": "predictive",
@@ -381,7 +382,7 @@ coverage = (
 print("Coverage Map: Families x Labels")
 print(coverage.select(["chapter", "family", "label", "evidence", "n_configs", "best_ic"]))
 
-# %% papermill={"duration": 0.008198, "end_time": "2026-07-10T19:21:29.844002+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.835804+00:00", "status": "completed"}
+# %%
 # Primary label coverage summary
 primary_coverage = coverage.filter(pl.col("label") == PRIMARY_LABEL)
 predictive_families = primary_coverage.filter(pl.col("evidence") == "predictive")[
@@ -399,7 +400,7 @@ print(f"  Structural families: {structural_families or 'none'}")
 print(f"  Causal families: {causal_families or 'none'}")
 print(f"\nAll labels trained: {all_labels}")
 
-# %% [markdown] papermill={"duration": 0.003085, "end_time": "2026-07-10T19:21:29.850414+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.847329+00:00", "status": "completed"}
+# %% [markdown]
 # Six families touch the CME panel across Ch11–15; five produce comparable
 # IC on the primary label (`fwd_ret_5d`) and the table above orders those by
 # daily-pooled IC with HAC standard errors (causal DML is evaluated separately
@@ -422,7 +423,7 @@ print(f"\nAll labels trained: {all_labels}")
 # credibly separate from zero, and linear, LSTM, and TabM with their
 # default tunings struggle to clear the noise.
 
-# %% [markdown] papermill={"duration": 0.004988, "end_time": "2026-07-10T19:21:29.859708+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.854720+00:00", "status": "completed"}
+# %% [markdown]
 # ## 3. Headline Comparative View
 #
 # Before comparing model families, we establish a baseline. If the simplest
@@ -430,7 +431,7 @@ print(f"\nAll labels trained: {all_labels}")
 # the carry signal is not learnable from these features. Given the well-
 # documented carry premium in futures, we expect a positive baseline.
 
-# %% papermill={"duration": 0.008259, "end_time": "2026-07-10T19:21:29.871076+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.862817+00:00", "status": "completed"}
+# %%
 # Linear baseline
 linear_metrics = all_metrics.filter(pl.col("family") == "linear")
 if linear_metrics.height > 0:
@@ -447,7 +448,7 @@ if linear_metrics.height > 0:
                 print(f"  t-stat:   {t_stat:.1f} (across {n_splits} folds)")
             break
 
-# %% papermill={"duration": 0.007019, "end_time": "2026-07-10T19:21:29.881458+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.874439+00:00", "status": "completed"}
+# %%
 # Full ranking (top 15), ordered by the daily-pooled IC shown as `ic`
 _ranked = (
     all_metrics.with_columns(_rank_ic.alias("ic")).sort("ic", descending=True)
@@ -457,7 +458,7 @@ _ranked = (
 print(f"\nFull ranking ({all_metrics.height} model × checkpoint variants, by daily-pooled IC):")
 print(_ranked.head(15).select(["family", "config_name", "checkpoint_value", "ic", "ic_std"]))
 
-# %% [markdown] papermill={"duration": 0.003053, "end_time": "2026-07-10T19:21:29.887795+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.884742+00:00", "status": "completed"}
+# %% [markdown]
 # **The linear baseline is flat.** The highest-IC ridge ($\alpha=10^6$)
 # sits at IC $\approx +0.000$, with the broader ridge sweep ranging across
 # roughly [−0.024, +0.000]. The carry cross-section is not linearly separable at
@@ -475,7 +476,7 @@ print(_ranked.head(15).select(["family", "config_name", "checkpoint_value", "ic"
 # concentrated in a regime where carry term structure was unusually
 # informative.
 
-# %% [markdown] papermill={"duration": 0.003147, "end_time": "2026-07-10T19:21:29.897028+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.893881+00:00", "status": "completed"}
+# %% [markdown]
 # ### Which Model Families Extract the Most Signal?
 #
 # The primary comparison uses the best configuration from each family,
@@ -483,7 +484,7 @@ print(_ranked.head(15).select(["family", "config_name", "checkpoint_value", "ic"
 # A model with the highest average IC is not the most credible choice
 # if that average is carried by one or two exceptional windows.
 
-# %% papermill={"duration": 0.010028, "end_time": "2026-07-10T19:21:29.911386+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.901358+00:00", "status": "completed"}
+# %%
 # Phase 2c: Build fold × family IC matrix — prefer registry fold_metrics, fall back to raw predictions
 if fold_metrics.height > 0:
     # Fast path: use pre-computed fold-level IC from registry
@@ -517,16 +518,16 @@ else:
         else pl.DataFrame()
     )
 
-# %% [markdown] papermill={"duration": 0.003567, "end_time": "2026-07-10T19:21:29.918871+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.915304+00:00", "status": "completed"}
+# %% [markdown]
 # ### Figure 2: Fold-by-Model Performance Heatmap
 
-# %% papermill={"duration": 0.170948, "end_time": "2026-07-10T19:21:30.092952+00:00", "exception": false, "start_time": "2026-07-10T19:21:29.922004+00:00", "status": "completed"}
+# %%
 if fold_ic.height > 0:
     model_labels, fold_cols, matrix = plot_fold_heatmap(fold_ic)
 else:
     model_labels, fold_cols, matrix = [], [], np.array([])
 
-# %% papermill={"duration": 0.011428, "end_time": "2026-07-10T19:21:30.110799+00:00", "exception": false, "start_time": "2026-07-10T19:21:30.099371+00:00", "status": "completed"}
+# %%
 # Summary statistics per family
 if fold_ic.height > 0:
     family_stats = (
@@ -545,7 +546,7 @@ if fold_ic.height > 0:
     print("Family performance summary:")
     print(family_stats)
 
-# %% [markdown] papermill={"duration": 0.003197, "end_time": "2026-07-10T19:21:30.117366+00:00", "exception": false, "start_time": "2026-07-10T19:21:30.114169+00:00", "status": "completed"}
+# %% [markdown]
 # The fold-by-family heatmap separates the families along the same axis
 # the daily-pooled IC summary suggests. Reading per family:
 #
@@ -579,7 +580,7 @@ if fold_ic.height > 0:
 # Causal DML is evaluated separately in §7 as a credibility check on the
 # carry-as-treatment hypothesis, not as a return-prediction competitor.
 
-# %% [markdown] papermill={"duration": 0.003143, "end_time": "2026-07-10T19:21:30.123612+00:00", "exception": false, "start_time": "2026-07-10T19:21:30.120469+00:00", "status": "completed"}
+# %% [markdown]
 # ## 4. Stability Over Time
 #
 # Mean IC can be misleading when carried by a few strong folds.
@@ -589,14 +590,14 @@ if fold_ic.height > 0:
 # foundation than one that delivers IC = 0.15 in one fold
 # and IC = −0.05 in four.
 
-# %% [markdown] papermill={"duration": 0.003434, "end_time": "2026-07-10T19:21:30.130391+00:00", "exception": false, "start_time": "2026-07-10T19:21:30.126957+00:00", "status": "completed"}
+# %% [markdown]
 # ### Figure 3: Fold Performance Distribution by Model Family
 
-# %% papermill={"duration": 0.105686, "end_time": "2026-07-10T19:21:30.239521+00:00", "exception": false, "start_time": "2026-07-10T19:21:30.133835+00:00", "status": "completed"}
+# %%
 if fold_ic.height > 0:
     plot_fold_boxplot(fold_ic)
 
-# %% [markdown] papermill={"duration": 0.003288, "end_time": "2026-07-10T19:21:30.246312+00:00", "exception": false, "start_time": "2026-07-10T19:21:30.243024+00:00", "status": "completed"}
+# %% [markdown]
 # The fold strip-plot confirms the credibility-CI ordering and adds a
 # distributional reading. SDF's HAC CI excludes zero and GBM's is the
 # next-highest but touches zero; both sit majority-positive across folds
@@ -618,7 +619,7 @@ if fold_ic.height > 0:
 # mathematical priors — this convergence is itself evidence that the
 # signal is not an artifact of a single estimator's idiosyncrasy.
 
-# %% [markdown] papermill={"duration": 0.003399, "end_time": "2026-07-10T19:21:30.252989+00:00", "exception": false, "start_time": "2026-07-10T19:21:30.249590+00:00", "status": "completed"}
+# %% [markdown]
 # ## 5. What Are the Models Learning?
 #
 # Beyond aggregate IC, we examine the *structure* of predictions. Two
@@ -630,7 +631,7 @@ if fold_ic.height > 0:
 #    different rankings? Low correlation between families means ensemble
 #    value; high correlation means diminishing returns from complexity.
 
-# %% papermill={"duration": 1.802881, "end_time": "2026-07-10T19:21:32.059415+00:00", "exception": false, "start_time": "2026-07-10T19:21:30.256534+00:00", "status": "completed"}
+# %%
 # Compute prediction bucket monotonicity for best model per family
 bucket_results = {}
 for row in best_per_family.iter_rows(named=True):
@@ -650,10 +651,10 @@ for row in best_per_family.iter_rows(named=True):
     if buckets.height > 0:
         bucket_results[family] = buckets
 
-# %% [markdown] papermill={"duration": 0.003256, "end_time": "2026-07-10T19:21:32.066534+00:00", "exception": false, "start_time": "2026-07-10T19:21:32.063278+00:00", "status": "completed"}
+# %% [markdown]
 # ### Figure 4: Prediction Bucket Monotonicity
 
-# %% papermill={"duration": 0.151272, "end_time": "2026-07-10T19:21:32.221145+00:00", "exception": false, "start_time": "2026-07-10T19:21:32.069873+00:00", "status": "completed"}
+# %%
 if bucket_results:
     unconditional_mean = best_preds["y_true"].mean() if best_preds.height > 0 else None
     plot_bucket_monotonicity(
@@ -664,7 +665,7 @@ if bucket_results:
         cost_range=cost_range,
     )
 
-# %% [markdown] papermill={"duration": 0.003592, "end_time": "2026-07-10T19:21:32.228857+00:00", "exception": false, "start_time": "2026-07-10T19:21:32.225265+00:00", "status": "completed"}
+# %% [markdown]
 # Quintile monotonicity reads the same ordering: SDF and GBM produce
 # the cleanest monotonic relationships between predicted score and
 # realized 5-day return, with the top quintile averaging meaningfully
@@ -682,7 +683,7 @@ if bucket_results:
 # families (TabM-L, LSTM), where the spread is small relative to round-
 # trip costs.
 
-# %% papermill={"duration": 1.880006, "end_time": "2026-07-10T19:21:34.113089+00:00", "exception": false, "start_time": "2026-07-10T19:21:32.233083+00:00", "status": "completed"}
+# %%
 # Pairwise prediction correlations
 corr_matrix, corr_labels = (
     prediction_correlation_matrix(best_preds, date_col=DATE_COL, entity_col=ENTITY_COL)
@@ -690,14 +691,14 @@ corr_matrix, corr_labels = (
     else (np.array([]), [])
 )
 
-# %% [markdown] papermill={"duration": 0.003573, "end_time": "2026-07-10T19:21:34.120553+00:00", "exception": false, "start_time": "2026-07-10T19:21:34.116980+00:00", "status": "completed"}
+# %% [markdown]
 # ### Figure 5: Prediction Correlation Across Models
 
-# %% papermill={"duration": 0.171378, "end_time": "2026-07-10T19:21:34.295653+00:00", "exception": false, "start_time": "2026-07-10T19:21:34.124275+00:00", "status": "completed"}
+# %%
 if corr_matrix.size > 0 and len(corr_labels) >= 2:
     plot_correlation_matrix(corr_matrix, corr_labels)
 
-# %% [markdown] papermill={"duration": 0.003722, "end_time": "2026-07-10T19:21:34.304994+00:00", "exception": false, "start_time": "2026-07-10T19:21:34.301272+00:00", "status": "completed"}
+# %% [markdown]
 # The prediction-correlation matrix shows substantial diversity across
 # families: SDF and GBM, the two highest-IC families, are not strongly
 # correlated despite both producing positive IC. That decorrelation is
@@ -718,14 +719,14 @@ if corr_matrix.size > 0 and len(corr_labels) >= 2:
 # enough breadth for variance-maximizing factor projection (PCA) to
 # select directions that align with returns.
 
-# %% [markdown] papermill={"duration": 0.003774, "end_time": "2026-07-10T19:21:34.312490+00:00", "exception": false, "start_time": "2026-07-10T19:21:34.308716+00:00", "status": "completed"}
+# %% [markdown]
 # ### How Much Does Additional Model Complexity Help?
 #
 # For models with checkpoint data, we observe how validation IC evolves
 # with training. This reveals where diminishing returns begin and
 # whether models overfit with additional epochs or trees.
 
-# %% papermill={"duration": 0.008622, "end_time": "2026-07-10T19:21:34.325136+00:00", "exception": false, "start_time": "2026-07-10T19:21:34.316514+00:00", "status": "completed"}
+# %%
 # Learning curves from pre-computed metrics (fast path)
 cp_data = all_metrics.filter(pl.col("checkpoint_value").is_not_null())
 cp_families = (
@@ -739,14 +740,14 @@ cp_families = (
 
 print(f"Families with checkpoint data: {cp_families}")
 
-# %% [markdown] papermill={"duration": 0.003776, "end_time": "2026-07-10T19:21:34.332864+00:00", "exception": false, "start_time": "2026-07-10T19:21:34.329088+00:00", "status": "completed"}
+# %% [markdown]
 # ### Figure 6: Learning Curves
 
-# %% papermill={"duration": 0.398133, "end_time": "2026-07-10T19:21:34.734780+00:00", "exception": false, "start_time": "2026-07-10T19:21:34.336647+00:00", "status": "completed"}
+# %%
 if cp_families:
     plot_learning_curves(cp_data, cp_families)
 
-# %% [markdown] papermill={"duration": 0.004736, "end_time": "2026-07-10T19:21:34.743867+00:00", "exception": false, "start_time": "2026-07-10T19:21:34.739131+00:00", "status": "completed"}
+# %% [markdown]
 # Learning curves expose where each family's signal forms and decays
 # along its training trajectory. GBM's training notebooks log MSE per
 # iteration but do not record per-iteration validation IC — the registry
@@ -779,7 +780,7 @@ if cp_families:
 # 30-product cross-section gives little signal-to-noise margin for
 # high-capacity sequential or tabular-DL models.
 
-# %% [markdown] papermill={"duration": 0.004411, "end_time": "2026-07-10T19:21:34.752405+00:00", "exception": false, "start_time": "2026-07-10T19:21:34.747994+00:00", "status": "completed"}
+# %% [markdown]
 # ### Which Features Drive the Forecasts?
 #
 # Feature importance from a single model fit is anecdotal. Recurring
@@ -787,7 +788,7 @@ if cp_families:
 # of the 63 carry, momentum, volatility, and structural features
 # consistently drive the best model's predictions.
 
-# %% papermill={"duration": 0.757362, "end_time": "2026-07-10T19:21:35.513966+00:00", "exception": false, "start_time": "2026-07-10T19:21:34.756604+00:00", "status": "completed"}
+# %%
 # Try GBM booster-based importance first, fall back to feature-prediction correlation
 gbm_importance = load_gbm_feature_importance(CASE_STUDY, label=PRIMARY_LABEL, top_n=TOP_N_FEATURES)
 
@@ -858,14 +859,14 @@ if gbm_importance is not None and gbm_importance.height > 0:
 else:
     print("Feature importance data not available.")
 
-# %% [markdown] papermill={"duration": 0.004133, "end_time": "2026-07-10T19:21:35.523595+00:00", "exception": false, "start_time": "2026-07-10T19:21:35.519462+00:00", "status": "completed"}
+# %% [markdown]
 # ### Figure 7: Feature Importance Stability Heatmap
 
-# %% papermill={"duration": 0.331234, "end_time": "2026-07-10T19:21:35.859027+00:00", "exception": false, "start_time": "2026-07-10T19:21:35.527793+00:00", "status": "completed"}
+# %%
 if gbm_importance is not None and gbm_importance.height > 0:
     plot_feature_importance_heatmap(gbm_importance, TOP_N_FEATURES)
 
-# %% [markdown] papermill={"duration": 0.004702, "end_time": "2026-07-10T19:21:35.868870+00:00", "exception": false, "start_time": "2026-07-10T19:21:35.864168+00:00", "status": "completed"}
+# %% [markdown]
 # The feature-importance heatmap reads importance via feature-prediction
 # correlation across folds (no GBM booster files are persisted in this
 # case study's run_log, so the fall-back path uses the highest-IC linear
@@ -891,14 +892,14 @@ if gbm_importance is not None and gbm_importance.height > 0:
 # relevant story; both require model-specific attribution code deferred to
 # the case-study insights notebooks in Ch14 and Ch12 respectively.
 
-# %% [markdown] papermill={"duration": 0.005148, "end_time": "2026-07-10T19:21:35.878752+00:00", "exception": false, "start_time": "2026-07-10T19:21:35.873604+00:00", "status": "completed"}
+# %% [markdown]
 # ## 6. Heterogeneity: Labels, Horizons, and Regimes
 #
 # This section answers two questions: does the signal change across
 # different label definitions? And does model ranking depend on the
 # market regime? Both matter for strategy design.
 
-# %% [markdown] papermill={"duration": 0.004572, "end_time": "2026-07-10T19:21:35.888035+00:00", "exception": false, "start_time": "2026-07-10T19:21:35.883463+00:00", "status": "completed"}
+# %% [markdown]
 # ### Multi-Label Comparison
 #
 # Two labels were trained for CME futures: the primary `fwd_ret_5d`
@@ -907,7 +908,7 @@ if gbm_importance is not None and gbm_importance.height > 0:
 # estimate with its HAC 95% CI; tiles labeled "no run" mean a family
 # was not trained on that label, which is itself part of the diagnosis.
 
-# %% papermill={"duration": 0.014414, "end_time": "2026-07-10T19:21:35.906952+00:00", "exception": false, "start_time": "2026-07-10T19:21:35.892538+00:00", "status": "completed"}
+# %%
 multi_rows = []
 for lbl in [PRIMARY_LABEL] + [l for l in all_labels if l != PRIMARY_LABEL]:
     lbl_metrics = all_labels_metrics.filter(pl.col("label") == lbl)
@@ -934,7 +935,7 @@ for lbl in [PRIMARY_LABEL] + [l for l in all_labels if l != PRIMARY_LABEL]:
 multi_label_df = pl.DataFrame(multi_rows)
 multi_label_df
 
-# %% papermill={"duration": 0.172662, "end_time": "2026-07-10T19:21:36.088341+00:00", "exception": false, "start_time": "2026-07-10T19:21:35.915679+00:00", "status": "completed"}
+# %%
 plot_label_horizon_forest(
     multi_label_df,
     families=["linear", "gbm", "tabular_dl", "deep_learning", "latent_factors", "causal_dml"],
@@ -946,7 +947,7 @@ plot_label_horizon_forest(
     title="CME futures — highest IC per family × horizon (HAC 95% CI)",
 )
 
-# %% [markdown] papermill={"duration": 0.005214, "end_time": "2026-07-10T19:21:36.099051+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.093837+00:00", "status": "completed"}
+# %% [markdown]
 # The forest reveals a stark horizon dependence, and both horizons are now
 # covered for every family: `fwd_ret_5d` and `fwd_ret_21d` each carry runs
 # for linear, GBM, TabM, LSTM, and the SDF/PCA latent-factor estimators.
@@ -965,7 +966,7 @@ plot_label_horizon_forest(
 # at the monthly horizon SDF is the sole survivor while GBM turns
 # negative.
 
-# %% [markdown] papermill={"duration": 0.004821, "end_time": "2026-07-10T19:21:36.108678+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.103857+00:00", "status": "completed"}
+# %% [markdown]
 # ### Regime Conditioning
 #
 # Models do not have one universal performance level. The futures
@@ -976,7 +977,7 @@ plot_label_horizon_forest(
 # cross-sectional return dispersion — a natural proxy for commodity
 # market stress.
 
-# %% papermill={"duration": 0.41512, "end_time": "2026-07-10T19:21:36.529041+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.113921+00:00", "status": "completed"}
+# %%
 # Compute regime-conditional IC
 regime_results = []
 
@@ -1000,14 +1001,14 @@ for row in best_per_family.iter_rows(named=True):
 
 regime_df = pl.concat(regime_results) if regime_results else pl.DataFrame()
 
-# %% [markdown] papermill={"duration": 0.005008, "end_time": "2026-07-10T19:21:36.540348+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.535340+00:00", "status": "completed"}
+# %% [markdown]
 # ### Figure 8: Conditional Performance by Volatility Regime
 
-# %% papermill={"duration": 0.143618, "end_time": "2026-07-10T19:21:36.689106+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.545488+00:00", "status": "completed"}
+# %%
 if regime_df.height > 0:
     plot_regime_bars(regime_df)
 
-# %% [markdown] papermill={"duration": 0.005106, "end_time": "2026-07-10T19:21:36.699785+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.694679+00:00", "status": "completed"}
+# %% [markdown]
 # Regime conditioning splits each model's predictions into high- and
 # low-cross-sectional-dispersion sub-windows. SDF and GBM — the two
 # highest-IC families — show modestly elevated IC in high-dispersion
@@ -1029,20 +1030,20 @@ if regime_df.height > 0:
 # stage if dispersion proves to be a useful overlay on top of the
 # baseline signal.
 
-# %% [markdown] papermill={"duration": 0.004609, "end_time": "2026-07-10T19:21:36.708916+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.704307+00:00", "status": "completed"}
+# %% [markdown]
 # ## 7. Structural and Causal Evidence
 #
 # Not all model chapters produce comparable predictive scores. Ch14
 # (latent factors) extracts structure; Ch15 (causal DML) estimates
 # treatment effects. These require separate evidence blocks.
 
-# %% [markdown] papermill={"duration": 0.005011, "end_time": "2026-07-10T19:21:36.718851+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.713840+00:00", "status": "completed"}
+# %% [markdown]
 # ### Latent Factors (Ch14)
 #
 # Two latent factor models were trained on the 30-product CME universe:
 # PCA and SDF. The diagnostics below examine model internals.
 
-# %% papermill={"duration": 0.015925, "end_time": "2026-07-10T19:21:36.739784+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.723859+00:00", "status": "completed"}
+# %%
 # Load latent factor diagnostics
 lf_models = ["pca", "sdf"]
 lf_extras = {m: load_fold_extras(CASE_STUDY, m) for m in lf_models}
@@ -1065,14 +1066,14 @@ if lf_metrics.height > 0:
 
 print(f"\nFold extras available: {list(lf_extras.keys())}")
 
-# %% [markdown] papermill={"duration": 0.004959, "end_time": "2026-07-10T19:21:36.750007+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.745048+00:00", "status": "completed"}
+# %% [markdown]
 # #### PCA Variance Decomposition
 #
 # With only N=30 products, PCA operates in a favorable N/T regime.
 # The scree plot reveals whether term structure factors (level, slope,
 # curvature) dominate the cross-section.
 
-# %% papermill={"duration": 0.155491, "end_time": "2026-07-10T19:21:36.910816+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.755325+00:00", "status": "completed"}
+# %%
 if "pca" in lf_extras:
     var_ratios = [e["explained_variance_ratio"] for e in lf_extras["pca"]]
     mean_var = np.mean(var_ratios, axis=0)
@@ -1091,7 +1092,7 @@ if "pca" in lf_extras:
     fig.tight_layout()
     fig.show()
 
-# %% [markdown] papermill={"duration": 0.005362, "end_time": "2026-07-10T19:21:36.922479+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.917117+00:00", "status": "completed"}
+# %% [markdown]
 # **Interpretation**: With 30 products, the first few principal
 # components capture the dominant cross-sectional variance —
 # interpretable as level (broad commodity beta), slope (sector
@@ -1110,7 +1111,7 @@ if "pca" in lf_extras:
 # predictive results — one credible nonzero, one indistinguishable
 # from zero**.
 
-# %% [markdown] papermill={"duration": 0.005823, "end_time": "2026-07-10T19:21:36.933461+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.927638+00:00", "status": "completed"}
+# %% [markdown]
 # #### SDF Sharpe Ratios
 #
 # The SDF model's internal Sharpe measures the pricing kernel's span
@@ -1120,7 +1121,7 @@ if "pca" in lf_extras:
 # Sharpe values printed below characterize the kernel's in-sample
 # pricing accuracy fold-by-fold, not its forward predictive return.
 
-# %% papermill={"duration": 0.009338, "end_time": "2026-07-10T19:21:36.948629+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.939291+00:00", "status": "completed"}
+# %%
 if "sdf" in lf_extras:
     sharpes = [e.get("sdf_sharpe", None) for e in lf_extras["sdf"]]
     sharpes = [s for s in sharpes if s is not None]
@@ -1128,7 +1129,7 @@ if "sdf" in lf_extras:
         print(f"SDF Sharpe across folds: mean={np.mean(sharpes):.3f}, std={np.std(sharpes):.3f}")
         print(f"  Range: [{min(sharpes):.3f}, {max(sharpes):.3f}]")
 
-# %% [markdown] papermill={"duration": 0.005584, "end_time": "2026-07-10T19:21:36.960015+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.954431+00:00", "status": "completed"}
+# %% [markdown]
 # **Interpretation**: The SDF's internal Sharpe measures how well the
 # learned pricing kernel spans the cross-section in-sample. The
 # fold-level Sharpe range characterizes the kernel's ability to price
@@ -1142,10 +1143,10 @@ if "sdf" in lf_extras:
 # is the only latent-factor route that translates into a credible
 # predictive signal on this panel — PCA on the same data does not.
 
-# %% [markdown] papermill={"duration": 0.005711, "end_time": "2026-07-10T19:21:36.971436+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.965725+00:00", "status": "completed"}
+# %% [markdown]
 # ### Causal DML (Ch15)
 
-# %% papermill={"duration": 0.010487, "end_time": "2026-07-10T19:21:36.987409+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.976922+00:00", "status": "completed"}
+# %%
 # Load causal_dml evidence from the dedicated causal_runs table
 # (see case_studies/utils/causal.py).
 import sqlite3
@@ -1182,7 +1183,7 @@ if _causal_rows:
 else:
     print("No causal_runs rows for this case study")
 
-# %% [markdown] papermill={"duration": 0.005359, "end_time": "2026-07-10T19:21:36.998676+00:00", "exception": false, "start_time": "2026-07-10T19:21:36.993317+00:00", "status": "completed"}
+# %% [markdown]
 # Causal DML estimates the average treatment effect of carry
 # (`carry_pct`) on forward returns after orthogonalizing the
 # confounders `vol_21d`, `momentum_composite`, and `carry_rank`,
@@ -1218,7 +1219,7 @@ else:
 # GBM extract in §6; the causal panel is a robustness check whose null
 # result is consistent with the wide HAC CIs in §3.
 
-# %% [markdown] papermill={"duration": 0.00542, "end_time": "2026-07-10T19:21:37.009333+00:00", "exception": false, "start_time": "2026-07-10T19:21:37.003913+00:00", "status": "completed"}
+# %% [markdown]
 # ### Calibration: Are Prediction Intervals Honest?
 #
 # Point IC tells us whether the ranking is correct on average; it says
@@ -1238,14 +1239,14 @@ else:
 # minimal residual-calibration diagnostic on the highest-IC `fwd_ret_5d`
 # config per family.
 
-# %% papermill={"duration": 0.034684, "end_time": "2026-07-10T19:21:37.049725+00:00", "exception": false, "start_time": "2026-07-10T19:21:37.015041+00:00", "status": "completed"}
+# %%
 conformal_cme = conformal_coverage_diagnostic(
     CASE_STUDY,
     label=PRIMARY_LABEL,
 )
 conformal_cme
 
-# %% papermill={"duration": 0.011096, "end_time": "2026-07-10T19:21:37.066778+00:00", "exception": false, "start_time": "2026-07-10T19:21:37.055682+00:00", "status": "completed"}
+# %%
 if conformal_cme.height > 0:
     pivot = conformal_cme.pivot(
         on="nominal_level",
@@ -1255,7 +1256,7 @@ if conformal_cme.height > 0:
     print("Empirical coverage and width (× std of returns) at 80/90/95% nominal:")
     print(pivot)
 
-# %% [markdown] papermill={"duration": 0.010283, "end_time": "2026-07-10T19:21:37.083799+00:00", "exception": false, "start_time": "2026-07-10T19:21:37.073516+00:00", "status": "completed"}
+# %% [markdown]
 # Coverage tracks the three nominal levels closely across all five
 # families on `fwd_ret_5d`: deviations run about 2 to 4 percentage points
 # (largest is TabM at the 80% level, 0.76 vs 0.80), well within sampling
@@ -1275,7 +1276,7 @@ if conformal_cme.height > 0:
 # (Ch12 §12.6) update interval width online to track regime shifts in
 # residual variance.
 
-# %% [markdown] papermill={"duration": 0.006123, "end_time": "2026-07-10T19:21:37.097150+00:00", "exception": false, "start_time": "2026-07-10T19:21:37.091027+00:00", "status": "completed"}
+# %% [markdown]
 # ## 8. Pre-Backtest Judgment and Handoff
 #
 # We synthesize the evidence into explicit recommendations. Not every
@@ -1283,7 +1284,7 @@ if conformal_cme.height > 0:
 # wastes compute and risks false confidence from overfitting the
 # backtest configuration.
 
-# %% papermill={"duration": 0.016155, "end_time": "2026-07-10T19:21:37.119638+00:00", "exception": false, "start_time": "2026-07-10T19:21:37.103483+00:00", "status": "completed"}
+# %%
 synthesis_rows = []
 
 for row in best_per_family.iter_rows(named=True):
@@ -1345,7 +1346,7 @@ synthesis = pl.DataFrame(synthesis_rows).sort("ic_mean", descending=True)
 print("Synthesis Table:")
 print(synthesis)
 
-# %% [markdown] papermill={"duration": 0.006468, "end_time": "2026-07-10T19:21:37.132987+00:00", "exception": false, "start_time": "2026-07-10T19:21:37.126519+00:00", "status": "completed"}
+# %% [markdown]
 # ### Pre-backtest verdicts
 #
 # Synthesizing §3–§7, the families separate into three credibility tiers
@@ -1437,7 +1438,7 @@ print(synthesis)
 # `14_portfolio_management.py` for position sizing and sector
 # constraints, and `17_strategy_analysis.py` for end-to-end results.
 
-# %% [markdown] papermill={"duration": 0.005872, "end_time": "2026-07-10T19:21:37.148680+00:00", "exception": false, "start_time": "2026-07-10T19:21:37.142808+00:00", "status": "completed"}
+# %% [markdown]
 # ## Key Takeaways
 #
 # 1. **One family clears the credibility line on `fwd_ret_5d`**:

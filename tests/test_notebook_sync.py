@@ -406,6 +406,40 @@ def test_a_comment_only_change_is_not_stale(tmp_path, monkeypatch) -> None:
     assert _drift(tmp_path, monkeypatch, old, new, _notebook([]))
 
 
+def test_removing_papermill_markers_under_the_exact_filter_is_not_stale(
+    tmp_path, monkeypatch
+) -> None:
+    old = (
+        "# ---\n# jupyter:\n#   jupytext:\n#     text_representation:\n# ---\n"
+        '# %% papermill={"duration": 1.2, "status": "completed"} tags=["parameters"]\n'
+        "MAX_FOLDS = 0\n"
+    )
+    new = (
+        "# ---\n# jupyter:\n#   jupytext:\n"
+        "#     cell_metadata_filter: tags,-all\n#     text_representation:\n# ---\n"
+        '# %% tags=["parameters"]\nMAX_FOLDS = 0\n'
+    )
+    nb = _notebook([], metadata={"jupytext": {"cell_metadata_filter": "tags,-all"}})
+    assert _drift(tmp_path, monkeypatch, old, new, nb)
+
+
+def test_papermill_cleanup_does_not_forgive_a_tag_change(tmp_path, monkeypatch) -> None:
+    old = '# %% papermill={"duration": 1.2} tags=["parameters"]\nMAX_FOLDS = 0\n'
+    new = (
+        "# ---\n# jupyter:\n#   jupytext:\n#     cell_metadata_filter: tags,-all\n# ---\n"
+        '# %% tags=["results"]\nMAX_FOLDS = 0\n'
+    )
+    nb = _notebook([], metadata={"jupytext": {"cell_metadata_filter": "tags,-all"}})
+    assert not _drift(tmp_path, monkeypatch, old, new, nb)
+
+
+def test_papermill_cleanup_requires_the_exact_filter(tmp_path, monkeypatch) -> None:
+    old = '# %% papermill={"duration": 1.2}\nresult = compute()\n'
+    new = "# %%\nresult = compute()\n"
+    nb = _notebook([], metadata={"jupytext": {"cell_metadata_filter": "tags,-papermill"}})
+    assert not _drift(tmp_path, monkeypatch, old, new, nb)
+
+
 def test_code_appended_into_a_markdown_cell_is_stale(tmp_path, monkeypatch) -> None:
     """A markdown body is only ignorable while it is all comments.
 

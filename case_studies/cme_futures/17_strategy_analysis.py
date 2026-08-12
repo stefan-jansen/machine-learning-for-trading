@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -12,7 +13,7 @@
 #     name: python3
 # ---
 
-# %% [markdown] papermill={"duration": 0.005386, "end_time": "2026-07-10T19:24:56.927426+00:00", "exception": false, "start_time": "2026-07-10T19:24:56.922040+00:00", "status": "completed"}
+# %% [markdown]
 # # CME Futures — Strategy Analysis
 #
 # This notebook converts the cme_futures backtest registry into a
@@ -45,7 +46,7 @@
 # (`cohort_metrics`, `backtest_paired_metrics`) directly from the registry, so
 # the notebook is self-contained and does not depend on Chapter 20.
 
-# %% papermill={"duration": 3.923565, "end_time": "2026-07-10T19:25:00.854319+00:00", "exception": false, "start_time": "2026-07-10T19:24:56.930754+00:00", "status": "completed"}
+# %%
 """CME Futures — Strategy Analysis."""
 
 import json
@@ -88,10 +89,10 @@ from case_studies.utils.strategy_analysis import (
 )
 from utils.paths import get_case_study_dir, get_output_dir
 
-# %% papermill={"duration": 0.00527, "end_time": "2026-07-10T19:25:00.864064+00:00", "exception": false, "start_time": "2026-07-10T19:25:00.858794+00:00", "status": "completed"} tags=["parameters"]
+# %% tags=["parameters"]
 MAX_SYMBOLS = 0
 
-# %% papermill={"duration": 0.01315, "end_time": "2026-07-10T19:25:00.879550+00:00", "exception": false, "start_time": "2026-07-10T19:25:00.866400+00:00", "status": "completed"}
+# %%
 CASE_STUDY = "cme_futures"
 # Strategy-analysis convention: use the registry-resolved rank-1 label for the
 # lineage analysis. The current rank-1 sits on fwd_ret_5d (matches setup.yaml
@@ -124,7 +125,7 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
     return "—" if val is None else format(val, fmt)
 
 
-# %% [markdown] papermill={"duration": 0.002218, "end_time": "2026-07-10T19:25:00.884177+00:00", "exception": false, "start_time": "2026-07-10T19:25:00.881959+00:00", "status": "completed"}
+# %% [markdown]
 # ## §0 Regenerate the uncertainty tables
 #
 # The strategy assessment reads two registry tables: `cohort_metrics`
@@ -139,7 +140,7 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # SSOT. The population itself is idempotent (keyed upserts) and reproduces the
 # stored values exactly.
 
-# %% papermill={"duration": 32.161184, "end_time": "2026-07-10T19:25:33.047754+00:00", "exception": false, "start_time": "2026-07-10T19:25:00.886570+00:00", "status": "completed"}
+# %%
 import sqlite3 as _sqlite3
 
 from case_studies.utils.cohort_metrics import compute_and_register
@@ -179,7 +180,7 @@ else:
     )
 
 
-# %% [markdown] papermill={"duration": 0.002862, "end_time": "2026-07-10T19:25:33.053706+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.050844+00:00", "status": "completed"}
+# %% [markdown]
 # ## §1 Handoff from model analysis
 #
 # The strategy phase inherits a single rank-1 model from
@@ -197,7 +198,7 @@ else:
 # small number of high-magnitude ranks, so a modest IC translates into a
 # sharper portfolio edge through cross-sectional magnitude.
 
-# %% papermill={"duration": 0.0503, "end_time": "2026-07-10T19:25:33.106896+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.056596+00:00", "status": "completed"}
+# %%
 # Rank-1 selection pools validation backtests across the holdout-eligible
 # stages (signal / allocation / risk_overlay) and dedupes by prediction_hash,
 # keeping the highest-Sharpe strategy_spec per trained model. Mirrors
@@ -241,7 +242,7 @@ print(f"  t_HAC = {ic_t:.3f}, p_HAC = {ic_p:.3f}")
 print(f"  n_days = {int(ic_ndays)}, pct_positive = {ic_pct:.1%}")
 print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 
-# %% [markdown] papermill={"duration": 0.002954, "end_time": "2026-07-10T19:25:33.113143+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.110189+00:00", "status": "completed"}
+# %% [markdown]
 # Daily-pooled IC at the rank-1 prediction set sits at 0.015 with a
 # HAC-adjusted 95% CI [-0.012, 0.041] that straddles zero (t = 1.08,
 # p = 0.28 at lag 7); pct_positive sits at 53.5% over 1,290 trading days.
@@ -263,7 +264,7 @@ print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 # paired CI does not exclude zero on the negative side. Both are
 # reported as pass / partial / fail without verdict labels.
 
-# %% [markdown] papermill={"duration": 0.002917, "end_time": "2026-07-10T19:25:33.119015+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.116098+00:00", "status": "completed"}
+# %% [markdown]
 # ## §2 Search context, family comparison, and lineage waterfall
 #
 # The signal stage of the locked sweep produced 302 validation
@@ -272,7 +273,7 @@ print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 # its context — where the rank-1 sits in the family-level distribution
 # and how its performance evolves through the pipeline stages.
 
-# %% papermill={"duration": 0.010648, "end_time": "2026-07-10T19:25:33.132778+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.122130+00:00", "status": "completed"}
+# %%
 ctx = explorer.search_context("signal")
 search_table = pl.DataFrame(
     [
@@ -288,7 +289,7 @@ search_table = pl.DataFrame(
 print("Signal-stage search context:")
 print(search_table)
 
-# %% papermill={"duration": 0.011486, "end_time": "2026-07-10T19:25:33.147398+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.135912+00:00", "status": "completed"}
+# %%
 # Family comparison reads sharpe_ci95 from backtest_metrics directly so
 # the forest plot can render proper error bars rather than median-only points.
 with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as _con:
@@ -329,7 +330,7 @@ family_summary = (
 print("Family-level signal-stage Sharpe summary:")
 print(family_summary)
 
-# %% papermill={"duration": 0.130548, "end_time": "2026-07-10T19:25:33.281189+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.150641+00:00", "status": "completed"}
+# %%
 fig, ax = plt.subplots(figsize=(9, 4))
 fams = family_summary["family"].to_list()
 y = np.arange(len(fams))
@@ -360,7 +361,7 @@ ax.legend(loc="lower right", frameon=False)
 fig.tight_layout()
 fig.show()
 
-# %% [markdown] papermill={"duration": 0.003433, "end_time": "2026-07-10T19:25:33.288261+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.284828+00:00", "status": "completed"}
+# %% [markdown]
 # At the signal stage, latent_factors leads the family medians (0.40,
 # 84% positive, max 1.13) with GBM second (0.26, 60% positive, max 0.56);
 # linear and tabular_dl medians sit just below zero (-0.16 and -0.14), and
@@ -373,7 +374,7 @@ fig.show()
 # than a stable family-wide advantage — the search-cost setting the
 # selection-adjustment in §3 is built for.
 
-# %% papermill={"duration": 0.018163, "end_time": "2026-07-10T19:25:33.310018+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.291855+00:00", "status": "completed"}
+# %%
 # Lineage with CI bars. champion_lineage gives stage hashes; we re-pull
 # Sharpe CIs from backtest_metrics for each stage to render error bars.
 lineage = explorer.champion_lineage(TOP_PHASH)
@@ -400,11 +401,11 @@ if missing_stages:
     print()
     print(f"Stage transitions not run for this prediction: {missing_stages}")
 
-# %% papermill={"duration": 0.149477, "end_time": "2026-07-10T19:25:33.462927+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.313450+00:00", "status": "completed"}
+# %%
 fig = plot_sharpe_waterfall(lineage, ci_lo=ci_lo, ci_hi=ci_hi)
 fig.show()
 
-# %% papermill={"duration": 0.008239, "end_time": "2026-07-10T19:25:33.476082+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.467843+00:00", "status": "completed"}
+# %%
 # Stage-transition deltas via load_paired_metrics — never recompute paired
 # metrics inline. For cme_futures the only present transition is signal →
 # allocation, registered as benchmark_kind=signal_leader with the
@@ -427,7 +428,7 @@ if ALLOC_HASH is not None:
         print(f"  prob_challenger_wins = {r['prob_challenger_wins']:.3f}")
         print(f"  CI status: {ci_status(r['sharpe_diff_ci95_lo'], r['sharpe_diff_ci95_hi'])}")
 
-# %% [markdown] papermill={"duration": 0.003582, "end_time": "2026-07-10T19:25:33.483157+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.479575+00:00", "status": "completed"}
+# %% [markdown]
 # Allocation-stage Sharpe rises above the signal-stage rank-1
 # (0.84 vs 0.47; paired diff +0.36 [-0.14, +0.82]). The diff CI straddles
 # zero (prob_chal_wins ≈ 0.92), so the lift is not resolved at 95% — but
@@ -442,7 +443,7 @@ if ALLOC_HASH is not None:
 # estimate (paired diff +0.38 [-0.22, +1.04], unresolved in the
 # bootstrap-paired CI but the largest single-stage lift in the lineage).
 
-# %% papermill={"duration": 0.203611, "end_time": "2026-07-10T19:25:33.690024+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.486413+00:00", "status": "completed"}
+# %%
 conc_df = explorer.concentration_curve(TOP_PHASH)
 if not conc_df.is_empty():
     fig = plot_concentration_curve(conc_df)
@@ -453,7 +454,7 @@ if not conc_df.is_empty():
 else:
     print("No concentration data — allocation stage absent for this prediction.")
 
-# %% [markdown] papermill={"duration": 0.003542, "end_time": "2026-07-10T19:25:33.697246+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.693704+00:00", "status": "completed"}
+# %% [markdown]
 # With 30 products spread across 7 sectors, concentration is structurally
 # constrained: sextile concentration (top_k ≈ 5) leaves a single sector
 # dominating the long side, while half-universe concentration (top_k ≈
@@ -462,7 +463,7 @@ else:
 # constraint; for production use the allocation stage would need a
 # sector-cap layer that this signal-only lineage does not impose.
 
-# %% [markdown] papermill={"duration": 0.003371, "end_time": "2026-07-10T19:25:33.704113+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.700742+00:00", "status": "completed"}
+# %% [markdown]
 # ## §3 Headline performance with uncertainty
 #
 # The rank-1 specification is the validation-window backtest associated
@@ -471,7 +472,7 @@ else:
 # shows the cumulative trajectory against the equal-weight CME universe
 # benchmark.
 
-# %% papermill={"duration": 0.013083, "end_time": "2026-07-10T19:25:33.720606+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.707523+00:00", "status": "completed"}
+# %%
 full = load_backtest_metrics(CASE_STUDY, backtest_hash=TOP_HASH).row(0, named=True)
 # When the spine rank-1 is not the cohort leader for its (stage, label,
 # family) family cohort, `load_backtest_metrics` returns NULL selection-
@@ -578,7 +579,7 @@ print(
 )
 
 
-# %% papermill={"duration": 0.009162, "end_time": "2026-07-10T19:25:33.733838+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.724676+00:00", "status": "completed"}
+# %%
 def _row(metric: str, point: str, lo: str, hi: str, status: str) -> dict:
     return {"metric": metric, "point": point, "ci95_lo": lo, "ci95_hi": hi, "status": status}
 
@@ -674,7 +675,7 @@ if _cohort_leader_hash is not None:
         f"properties of the cohort, not of this specific backtest row."
     )
 
-# %% papermill={"duration": 0.097541, "end_time": "2026-07-10T19:25:33.834866+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.737325+00:00", "status": "completed"}
+# %%
 # Forest plot: rank-1 metrics with CI bars + reference lines
 ew_val = load_benchmark_metrics(CASE_STUDY, PRIMARY_LABEL, period="validation")
 forest_metrics = [
@@ -726,7 +727,7 @@ ax.legend(loc="lower right", fontsize=8, frameon=False)
 fig.tight_layout()
 fig.show()
 
-# %% papermill={"duration": 0.11513, "end_time": "2026-07-10T19:25:33.953764+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.838634+00:00", "status": "completed"}
+# %%
 # Equity-curve overlay vs validation EW benchmark
 strat_returns_path = CASE_DIR / "run_log" / "backtest" / TOP_HASH / "daily_returns.parquet"
 strat_df = (
@@ -759,7 +760,7 @@ ax.legend(loc="best", frameon=False)
 fig.tight_layout()
 fig.show()
 
-# %% [markdown] papermill={"duration": 0.003695, "end_time": "2026-07-10T19:25:33.961357+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.957662+00:00", "status": "completed"}
+# %% [markdown]
 # The rank-1 cross-stage Sharpe of 1.264 has a 95% CI of [+0.345,
 # +2.087] — the lower bound clears zero by ≈ 0.35 Sharpe units, so the
 # validation window's Sharpe is not consistent with zero edge under
@@ -781,7 +782,7 @@ fig.show()
 # p = 0.0054 — the rank-1 still clears 1% even when the full search
 # history is priced in.
 
-# %% [markdown] papermill={"duration": 0.003831, "end_time": "2026-07-10T19:25:33.968982+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.965151+00:00", "status": "completed"}
+# %% [markdown]
 # ## §4 Risk and drawdown analysis
 #
 # Risk metrics use the validation-window strategy returns paired
@@ -792,7 +793,7 @@ fig.show()
 # sector-wide regime shifts (energy collapse, rates reversal) rather
 # than idiosyncratic events.
 
-# %% papermill={"duration": 0.009468, "end_time": "2026-07-10T19:25:33.982303+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.972835+00:00", "status": "completed"}
+# %%
 strat_arr = aligned["strategy"].to_numpy()
 bench_arr = aligned["benchmark"].to_numpy()
 ts_arr = aligned["ts"].to_list()
@@ -808,11 +809,11 @@ dd = pa.compute_drawdown_analysis()
 print("Drawdown analysis (validation window):")
 print(dd)
 
-# %% papermill={"duration": 0.188671, "end_time": "2026-07-10T19:25:34.176294+00:00", "exception": false, "start_time": "2026-07-10T19:25:33.987623+00:00", "status": "completed"}
+# %%
 fig = plot_equity_drawdown(strat_returns_path)
 fig.show()
 
-# %% papermill={"duration": 0.010772, "end_time": "2026-07-10T19:25:34.191284+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.180512+00:00", "status": "completed"}
+# %%
 # Rolling Sharpe + rolling beta
 roll = pa.compute_rolling_metrics(windows=[126], metrics=["sharpe", "beta"])
 print("Rolling-window keys:")
@@ -833,7 +834,7 @@ print()
 print("Tail risk profile:")
 print(tail_table)
 
-# %% papermill={"duration": 0.008531, "end_time": "2026-07-10T19:25:34.204242+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.195711+00:00", "status": "completed"}
+# %%
 fold_df = load_backtest_fold_metrics(CASE_STUDY, backtest_hash=TOP_HASH)
 print(f"Per-fold breakdown ({fold_df.height} folds):")
 print(fold_df.select("fold_id", "sharpe", "max_drawdown", "n_days"))
@@ -841,7 +842,7 @@ print()
 print(f"Fold Sharpe range: [{fold_df['sharpe'].min():.3f}, {fold_df['sharpe'].max():.3f}]")
 print(f"Fold Sharpe std:   {fold_df['sharpe'].std():.3f}")
 
-# %% [markdown] papermill={"duration": 0.004118, "end_time": "2026-07-10T19:25:34.212573+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.208455+00:00", "status": "completed"}
+# %% [markdown]
 # All five validation folds are positive: fold 0 at +0.44, fold 1 at
 # +1.10, fold 2 at +0.69, fold 3 at +0.30, fold 4 at +0.19. The
 # fold-Sharpe range of [+0.19, +1.10] reflects regime-dependent
@@ -856,7 +857,7 @@ print(f"Fold Sharpe std:   {fold_df['sharpe'].std():.3f}")
 # lower bound of −47.4% indicates that the bootstrap resampling is
 # consistent with deeper drawdowns under alternative draws.
 
-# %% [markdown] papermill={"duration": 0.006545, "end_time": "2026-07-10T19:25:34.223578+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.217033+00:00", "status": "completed"}
+# %% [markdown]
 # ## §5 Friction budget & cost sensitivity
 #
 # CME futures sit at the low end of friction across asset classes —
@@ -871,7 +872,7 @@ print(f"Fold Sharpe std:   {fold_df['sharpe'].std():.3f}")
 # spread overlay marks the per-contract commission band (~0.5–1.6 bps
 # at typical CME notionals) and the liquid-spread band (1–3 bps).
 
-# %% papermill={"duration": 0.015968, "end_time": "2026-07-10T19:25:34.243691+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.227723+00:00", "status": "completed"}
+# %%
 with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as _con:
     cost_df = pl.DataFrame(
         _con.execute(
@@ -931,7 +932,7 @@ cost_curve = (
 print("Cost sensitivity curve (validation, all configs):")
 print(cost_curve)
 
-# %% papermill={"duration": 0.149144, "end_time": "2026-07-10T19:25:34.400595+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.251451+00:00", "status": "completed"}
+# %%
 fig, ax = plt.subplots(figsize=(9, 4))
 xs = cost_curve["cost_bps"].to_numpy()
 ax.fill_between(
@@ -970,7 +971,7 @@ ax.legend(loc="best", fontsize=8, frameon=False)
 fig.tight_layout()
 fig.show()
 
-# %% papermill={"duration": 0.008455, "end_time": "2026-07-10T19:25:34.416183+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.407728+00:00", "status": "completed"}
+# %%
 # Breakeven cost: where the best-config Sharpe lower bound crosses zero.
 # Use the lower bound, not the point estimate, to guard against
 # CI-implied false breakeven.
@@ -990,7 +991,7 @@ print(
 )
 print("See Chapter 18 for transaction-cost framework details.")
 
-# %% [markdown] papermill={"duration": 0.004284, "end_time": "2026-07-10T19:25:34.425008+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.420724+00:00", "status": "completed"}
+# %% [markdown]
 # Sharpe degrades roughly monotonically with cost, but the across-config
 # dispersion at every cost level is wider than the cost-induced effect:
 # the envelope's lower CI bound dips below zero on the worst configs
@@ -1001,7 +1002,7 @@ print("See Chapter 18 for transaction-cost framework details.")
 # signal stability across regimes (§4 fold variance), not cost
 # friction. Chapter 18 develops the transaction-cost framework.
 
-# %% [markdown] papermill={"duration": 0.004046, "end_time": "2026-07-10T19:25:34.433194+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.429148+00:00", "status": "completed"}
+# %% [markdown]
 # ## §6 Holdout closure with paired bootstrap
 #
 # Two paired tests anchor the holdout read: (i) the holdout rank-1 versus
@@ -1011,7 +1012,7 @@ print("See Chapter 18 for transaction-cost framework details.")
 # `backtest_paired_metrics` — never from val_sharpe minus holdout_sharpe
 # arithmetic.
 
-# %% papermill={"duration": 0.010605, "end_time": "2026-07-10T19:25:34.447874+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.437269+00:00", "status": "completed"}
+# %%
 # Identify the holdout backtest matching val rank-1's strategy spec.
 # Picking max-Sharpe over all holdout backtests on the same training_hash
 # silently displaces the canonical lineage when an experimental
@@ -1029,7 +1030,7 @@ print(f"Holdout rank-1 hash:    {HO_HASH}")
 ho_full = load_backtest_metrics(CASE_STUDY, backtest_hash=HO_HASH).row(0, named=True)
 val_full = full
 
-# %% papermill={"duration": 0.010439, "end_time": "2026-07-10T19:25:34.463040+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.452601+00:00", "status": "completed"}
+# %%
 # Paired val→ho decay table from load_paired_metrics
 val_ho_pair = load_paired_metrics(
     CASE_STUDY,
@@ -1135,7 +1136,7 @@ print(
     "overlap."
 )
 
-# %% papermill={"duration": 0.010358, "end_time": "2026-07-10T19:25:34.477812+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.467454+00:00", "status": "completed"}
+# %%
 # Paired strategy-vs-EW-benchmark on the holdout window
 ho_vs_ew = load_paired_metrics(
     CASE_STUDY,
@@ -1187,7 +1188,7 @@ print(
 )
 print(f"  CI status: {ci_status(he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_hi'])}")
 
-# %% [markdown] papermill={"duration": 0.004296, "end_time": "2026-07-10T19:25:34.486702+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.482406+00:00", "status": "completed"}
+# %% [markdown]
 # **Decay reading (val_rank1_self pair):** holdout Sharpe of 1.14 sits
 # just below the validation Sharpe of 1.26 — the paired point estimate
 # decays by about 0.10 Sharpe units. The diff CI [−1.68, +1.41]
@@ -1208,7 +1209,7 @@ print(f"  CI status: {ci_status(he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_
 # two-year commodity window is too short to resolve the dispersion.
 # Both rows enter Ch20 as "straddles_zero" decay classifications.
 
-# %% [markdown] papermill={"duration": 0.004339, "end_time": "2026-07-10T19:25:34.495340+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.491001+00:00", "status": "completed"}
+# %% [markdown]
 # ## §7 Benchmark-aware diagnostics
 #
 # Layer 1 reports the universal alpha/beta/IR profile via
@@ -1222,7 +1223,7 @@ print(f"  CI status: {ci_status(he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_
 # inside the notebook. Chapter 20's cross-asset layer carries the
 # futures-appropriate factor construction.
 
-# %% papermill={"duration": 0.010791, "end_time": "2026-07-10T19:25:34.510684+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.499893+00:00", "status": "completed"}
+# %%
 metrics = pa.compute_summary_stats()
 attr_df = pl.DataFrame(
     [
@@ -1237,7 +1238,7 @@ attr_df = pl.DataFrame(
 print("Layer 1: rank-1 vs validation EW universe (PortfolioAnalysis):")
 print(attr_df)
 
-# %% papermill={"duration": 0.13971, "end_time": "2026-07-10T19:25:34.654944+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.515234+00:00", "status": "completed"}
+# %%
 # Placebo regression: residual α and HAC t-stat from regressing on EW alone.
 # This is the cleanest "edge after universe exposure" check.
 import statsmodels.api as sm
@@ -1256,7 +1257,7 @@ print(f"  α t-stat = {alpha_t:.3f}, p = {alpha_p:.3f}")
 print(f"  β        = {beta:.3f}, β t-stat = {beta_t:.3f}")
 print(f"  CI status (α): {'excludes_zero_strong' if alpha_p < 0.05 else 'straddles_zero'}")
 
-# %% [markdown] papermill={"duration": 0.007372, "end_time": "2026-07-10T19:25:34.667052+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.659680+00:00", "status": "completed"}
+# %% [markdown]
 # Layer-1 metrics surface the universe-exposure profile for cme_futures.
 # The placebo regression's HAC t-stat on annualized α resolves whether
 # the rank-1's outperformance vs EW survives a regression-based
@@ -1265,7 +1266,7 @@ print(f"  CI status (α): {'excludes_zero_strong' if alpha_p < 0.05 else 'stradd
 # of 30 products are non-equity rates/FX/commodities) would manufacture
 # loadings without economic meaning.
 
-# %% [markdown] papermill={"duration": 0.004454, "end_time": "2026-07-10T19:25:34.675842+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.671388+00:00", "status": "completed"}
+# %% [markdown]
 # ## §8 Strategy tear sheet
 #
 # The diagnostic library renders the rank-1 lineage's full tear sheet
@@ -1274,7 +1275,7 @@ print(f"  CI status (α): {'excludes_zero_strong' if alpha_p < 0.05 else 'stradd
 # HTML is written under `OUTPUT_DIR` and is gitignored — readers
 # regenerate it locally.
 
-# %% papermill={"duration": 1.615049, "end_time": "2026-07-10T19:25:36.295379+00:00", "exception": false, "start_time": "2026-07-10T19:25:34.680330+00:00", "status": "completed"}
+# %%
 backtest_dir = CASE_DIR / "run_log" / "backtest" / TOP_HASH
 ho_dir = CASE_DIR / "run_log" / "backtest" / HO_HASH
 ho_has_trades = (ho_dir / "trades.parquet").exists()
@@ -1317,14 +1318,14 @@ html = generate_tearsheet_from_run_artifacts(
 print(f"Tear sheet written to: {tear_path}")
 print(f"HTML size: {len(html):,} bytes")
 
-# %% [markdown] papermill={"duration": 0.004589, "end_time": "2026-07-10T19:25:36.305011+00:00", "exception": false, "start_time": "2026-07-10T19:25:36.300422+00:00", "status": "completed"}
+# %% [markdown]
 # ## §9 Pre-Ch20 judgment & handoff
 #
 # This section is the explicit hand-off point to Chapter 20. Numbers
 # below stay strictly inside cme_futures — cross-case-study comparison
 # is Ch20's lane.
 
-# %% papermill={"duration": 0.008323, "end_time": "2026-07-10T19:25:36.317676+00:00", "exception": false, "start_time": "2026-07-10T19:25:36.309353+00:00", "status": "completed"}
+# %%
 op_profile = compute_operating_profile(lineage, setup)
 # cme_futures setup uses `decision.cadence` (weekly_friday_close) rather
 # than the evaluation_protocol.rebalance_frequency key the helper
@@ -1344,7 +1345,7 @@ print(
 print(f"Info ratio (vs EW val): {_fmt_ci(getattr(metrics, 'information_ratio', None), None, None)}")
 print(f"Max drawdown: {val_full['max_drawdown']:.3f}")
 
-# %% papermill={"duration": 0.008697, "end_time": "2026-07-10T19:25:36.331543+00:00", "exception": false, "start_time": "2026-07-10T19:25:36.322846+00:00", "status": "completed"}
+# %%
 # Kill-condition assessment (universal gates — see §1)
 gate1_status = gate1_validation_sharpe_geq_zero(val_full["sharpe_ci95_lo"])
 _gate1_phrase = {
@@ -1369,7 +1370,7 @@ print(f"      {gate1_evidence}")
 print(f"  [{fmt_gate(gate2_status)}] Holdout strategy CI does not exclude zero negatively:")
 print(f"      {gate2_evidence}")
 
-# %% [markdown] papermill={"duration": 0.004378, "end_time": "2026-07-10T19:25:36.340438+00:00", "exception": false, "start_time": "2026-07-10T19:25:36.336060+00:00", "status": "completed"}
+# %% [markdown]
 # **What this analysis does not say.** The cme_futures holdout window
 # covers 2024–2025, a period of unusual commodity-rates correlation
 # regimes (rate-hike pause, energy normalization, agricultural weather
@@ -1393,7 +1394,7 @@ print(f"      {gate2_evidence}")
 # (k = 320, cross-stage cross-family) also has the rank-1 as leader
 # and DSR_ER still excludes zero.
 
-# %% [markdown] papermill={"duration": 0.004606, "end_time": "2026-07-10T19:25:36.349469+00:00", "exception": false, "start_time": "2026-07-10T19:25:36.344863+00:00", "status": "completed"}
+# %% [markdown]
 # **Forward pointer to Ch20.** This case study contributes the
 # commodity-futures / weekly / non-equity-factor datapoint to Ch20
 # nb01's rank-1-Sharpe + holdout-decay aggregation; the §6 decay
@@ -1402,7 +1403,7 @@ print(f"      {gate2_evidence}")
 # p = 0.28, while §3 Sharpe 1.26 [+0.35, +2.09] excludes zero) feed
 # Ch20 nb02's signal-quality layer.
 
-# %% papermill={"duration": 0.01042, "end_time": "2026-07-10T19:25:36.364304+00:00", "exception": false, "start_time": "2026-07-10T19:25:36.353884+00:00", "status": "completed"}
+# %%
 # Strategy-assessment JSON: extend the existing schema with strategy-analysis notebook fields.
 search_ctx = ctx
 assessment = {
