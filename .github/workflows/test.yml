@@ -11,7 +11,7 @@
 #
 # Trigger policy:
 #   - PR: incremental (path-filtered, only changed chapters)
-#   - Push to main: incremental (same path filter as PR) — see below
+#   - Push to main: full suite
 #   - Weekly: full suite on schedule (Monday 6 AM UTC)
 #   - After Docker Publish: full suite (workflow_run trigger)
 #   - Manual: workflow_dispatch with optional run_all flag
@@ -19,9 +19,8 @@
 # Push to main was previously NOT triggered, to conserve minutes. Exports land on
 # main as pushes, so nothing CI ran had ever seen what shipped: issue #372 (59 of
 # 122 shipped notebooks would not open in JupyterLab) reached a reader through
-# that gap, and the weekly cron is up to 7 days late. The push run is
-# path-filtered exactly like the PR run, so the marginal cost is one duplicate
-# run per merge — cheaper than one reader-found defect.
+# that gap, and the weekly cron is up to 7 days late. Every push to main now
+# runs the full matrix so failures outside a merged diff remain visible.
 
 name: Tests
 
