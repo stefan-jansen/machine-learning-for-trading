@@ -18,13 +18,13 @@ JOIN_COLS = ["timestamp", "symbol"]
 
 
 def _load_alignment_function():
-    """Load only the two pure alignment functions without executing the notebook."""
+    """Load the pure alignment functions without executing the notebook."""
     tree = ast.parse(NOTEBOOK.read_text())
     wanted = {
         "_as_date",
         "_validate_temporal_keys",
         "build_validation_temporal_panel",
-        "purge_labels_before_holdout",
+        "keep_outcomes_resolved_before_holdout",
     }
     definitions = [
         node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted
@@ -114,14 +114,14 @@ def test_primary_label_purge_uses_each_rows_actual_expiry() -> None:
         }
     )
 
-    purge = _load_alignment_function()["purge_labels_before_holdout"]
+    purge = _load_alignment_function()["keep_outcomes_resolved_before_holdout"]
     selected = purge(labels, date(2021, 1, 1))
     assert selected["timestamp"].to_list() == [date(2020, 11, 20)]
     assert selected["_label_end"].to_list() == [date(2020, 12, 25)]
 
 
-def test_real_artifact_old_collapse_is_contaminated_and_alignment_is_safe() -> None:
-    """Exercise the contract against the available full production artifact."""
+def test_real_artifact_alignment_is_safe_after_regeneration() -> None:
+    """Exercise the alignment contract against the available production artifact."""
     default_root = Path.home() / "ml4t/code/case_studies/sp500_options"
     artifact_root = Path(os.environ.get("ML4T_SP500_OPTIONS_ARTIFACT_ROOT", default_root))
     financial_path = artifact_root / "features/financial.parquet"
@@ -141,10 +141,13 @@ def test_real_artifact_old_collapse_is_contaminated_and_alignment_is_safe() -> N
 
     old_keep_last = temporal.unique(subset=JOIN_COLS, keep="last", maintain_order=True)
     holdout_start = date.fromisoformat(str(setup["evaluation"]["holdout_start"]))
-    contaminated = old_keep_last.filter(
+    pre_holdout_values_from_holdout_fit = old_keep_last.filter(
         (pl.col("timestamp") < holdout_start) & (pl.col("fold") == -1)
     ).height
-    assert contaminated > 0
+    assert pre_holdout_values_from_holdout_fit == 0, (
+        "The regenerated artifact must not let the holdout estimator replace "
+        "validation estimates under the legacy keep-last collapse"
+    )
 
     try:
         aligned = _load_alignment_function()["build_validation_temporal_panel"](temporal, folds)

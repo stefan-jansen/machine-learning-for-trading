@@ -193,6 +193,27 @@ def _expands_one_level(expr: str, definitions: dict[str, str]) -> str:
     return "".join(parts)
 
 
+def _window_filtered_frames(source: str, tree: ast.Module, definitions: dict[str, str]) -> set[str]:
+    """Frames whose rows are restricted to the configured validation windows."""
+    filtered: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        for call in ast.walk(node.value):
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+                continue
+            if call.func.attr != "filter":
+                continue
+            expanded = "".join(
+                _expands_one_level(ast.get_source_segment(source, arg) or "", definitions)
+                for arg in call.args
+            )
+            if "val_windows" in expanded:
+                filtered.update(targets)
+    return filtered
+
+
 @pytest.mark.parametrize("notebook", _evaluation_notebooks(), ids=lambda p: p.parent.name)
 def test_validation_windows_also_narrow_the_evaluation_panel(notebook: Path) -> None:
     """Resolving the fold by validation window obliges screening on those windows.
@@ -209,6 +230,7 @@ def test_validation_windows_also_narrow_the_evaluation_panel(notebook: Path) -> 
 
     tree = ast.parse(source)
     definitions = _name_definitions(source, tree)
+    window_filtered = _window_filtered_frames(source, tree, definitions)
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
@@ -225,6 +247,21 @@ def test_validation_windows_also_narrow_the_evaluation_panel(notebook: Path) -> 
                 segment = ast.get_source_segment(source, arg) or ""
                 if "val_windows" in _expands_one_level(segment, definitions):
                     return
+
+        # An inner join to an already window-filtered temporal frame narrows the
+        # evaluation panel by construction. This is the form used when every
+        # financial-feature row must also have one out-of-sample temporal estimate.
+        for call in ast.walk(node.value):
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+                continue
+            if call.func.attr != "join" or not call.args:
+                continue
+            how = next((kw.value for kw in call.keywords if kw.arg == "how"), None)
+            if not isinstance(how, ast.Constant) or how.value != "inner":
+                continue
+            joined = ast.get_source_segment(source, call.args[0]) or ""
+            if any(name in joined for name in window_filtered):
+                return
 
     raise AssertionError(
         f"{notebook.parent.name}/{notebook.stem}: resolves the fold dimension with "
