@@ -84,6 +84,7 @@ IMAGE_OVERRIDES: dict[str, str] = {
     "tables": "benchmark",
     # optional — broker / market-data SDKs readers may skip
     "databento": "optional",
+    "okx": "optional",
     "voyageai": "optional",
 }
 
@@ -99,7 +100,10 @@ def _first_party_names(root: Path) -> set[str]:
     names: set[str] = set()
     for path in root.rglob("*.py"):
         parts = path.relative_to(root).parts
-        if any(p in SKIP_DIRS for p in parts):
+        # Repository scripts remain first-party even when their directory is
+        # excluded from dependency scanning. Tests import these modules after
+        # adding .github/scripts to sys.path.
+        if any(p in SKIP_DIRS - {".github"} for p in parts):
             continue
         names.add(path.stem)
         if (path.parent / "__init__.py").exists():
