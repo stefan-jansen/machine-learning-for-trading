@@ -78,7 +78,7 @@ def test_classification_cv_keeps_continuous_evaluation_target(
     def capture_fold(**kwargs):
         captured["fit"] = kwargs["y_val"].copy()
         captured["eval"] = kwargs["y_eval_val"].copy()
-        predictions = np.zeros(len(kwargs["y_val"]), dtype=np.float32)
+        predictions = np.arange(len(kwargs["y_val"]), dtype=np.float32)
         return {1: 0.25}, {1: predictions}, {1: 0.5}
 
     monkeypatch.setattr(tabular_dl, "_train_tabm_fold", capture_fold)
@@ -555,3 +555,58 @@ def test_saved_artifact_message_does_not_leak_absolute_path(
     output = capsys.readouterr().out
     assert str(tmp_path) not in output
     assert "Saved TabM artifacts for fwd_ret_1m" in output
+
+
+def test_tabm_selection_rejects_higher_ic_with_partial_decision_time_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dates = [pd.Timestamp("2020-01-31"), pd.Timestamp("2020-02-28")]
+    full = pl.DataFrame(
+        {
+            "timestamp": np.repeat(dates, 5),
+            "symbol": list(range(5)) * 2,
+            "y_true": list(range(5)) * 2,
+            "y_score": list(range(5)) * 2,
+            "fold_id": [0] * 5 + [1] * 5,
+            "config": ["full"] * 10,
+            "epoch": [25] * 10,
+        }
+    )
+    partial = full.head(5).with_columns(pl.lit("partial").alias("config"))
+    monkeypatch.setattr(
+        tabular_dl,
+        "compute_fold_metrics_from_predictions",
+        lambda *_args, **_kwargs: pl.DataFrame(),
+    )
+
+    result = tabular_dl._assemble_tabm_results(
+        config_results=[
+            {
+                "config_name": "partial",
+                "best_epoch": 25,
+                "best_ic": 0.9,
+                "ic_n_days": 1,
+                "n_invalid": 0,
+                "elapsed_s": 0.0,
+            },
+            {
+                "config_name": "full",
+                "best_epoch": 25,
+                "best_ic": 0.2,
+                "ic_n_days": 2,
+                "n_invalid": 0,
+                "elapsed_s": 0.0,
+            },
+        ],
+        all_predictions=pl.concat([partial, full]),
+        curve_rows=[],
+        training_rows=[],
+        save_dir=None,
+        date_col="timestamp",
+        entity_col="symbol",
+        eval_col=None,
+    )
+
+    assert result["best_config_name"] == "full"
+    assert result["grid_results"][0]["selectable"] is True
+    assert result["grid_results"][1]["selectable"] is False
