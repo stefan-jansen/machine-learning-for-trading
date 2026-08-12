@@ -600,6 +600,50 @@ def test_a_precomputed_split_set_is_held_to_the_same_order() -> None:
     assert [s["fold"] for s in generate_cv_splits(df, cv_config=renumbered)] == [0, 1]
 
 
+def test_fx_materialized_folds_match_the_canonical_label_clock() -> None:
+    import json
+
+    from utils.artifact_specs import load_label_spec, resolve_storage_path
+    from utils.modeling import resolve_label_buffer, resolve_label_horizon
+    from utils.paths import get_case_study_dir
+
+    case_study = "fx_pairs"
+    label = "fwd_ret_1d"
+    case_dir = get_case_study_dir(case_study)
+    setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
+    labels = pl.read_parquet(
+        resolve_storage_path(
+            case_study,
+            load_label_spec(case_study, label),
+            f"labels/{label}.parquet",
+        )
+    )
+    canonical = generate_cv_splits(
+        labels,
+        case_study_id=case_study,
+        label_buffer=resolve_label_buffer(case_study, label, setup),
+        outcome_horizon=resolve_label_horizon(case_study, label, setup),
+    )
+    materialized = generate_cv_splits(
+        labels,
+        cv_config=json.loads((case_dir / "config" / "cv_config.json").read_text()),
+        label_buffer=resolve_label_buffer(case_study, label, setup),
+    )
+
+    boundary_keys = ("fold", "train_start", "train_end", "val_start", "val_end")
+
+    def normalized(splits):
+        return [
+            {
+                key: split[key] if key == "fold" else pd.Timestamp(split[key])
+                for key in boundary_keys
+            }
+            for split in splits
+        ]
+
+    assert normalized(materialized) == normalized(canonical)
+
+
 def test_the_order_check_reads_a_stored_config_spelling() -> None:
     """A legacy config writes test_start where the generated path writes val_start."""
     _assert_newest_first(
