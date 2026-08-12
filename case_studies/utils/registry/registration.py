@@ -31,6 +31,66 @@ from .store import (
 logger = logging.getLogger(__name__)
 
 VALID_PREDICTION_SPLITS = frozenset({"validation", "holdout"})
+MAX_PREDICTION_STD_RATIO = 100.0
+
+
+def _validate_prediction_dispersion(predictions) -> None:
+    """Reject a prediction set with an implausible score scale on any fold.
+
+    The bound is deliberately wide. Across 8,090 finite folds in the nine
+    production registries, the largest fold below the failure population was
+    72.72. The known divergent folds started at 187.41 and extended to
+    9.22e39. Rank correlation cannot detect this failure because it is invariant
+    to score scale.
+    """
+    import math
+
+    import polars as pl
+
+    if not isinstance(predictions, pl.DataFrame):
+        predictions = pl.from_pandas(predictions)
+
+    fold_col = _detect_fold_col(predictions)
+    y_true_col, y_score_col = _detect_score_cols(predictions)
+    if fold_col is None or not {y_true_col, y_score_col}.issubset(predictions.columns):
+        return
+
+    dispersion = (
+        predictions.lazy()
+        .select(
+            pl.col(fold_col).alias("fold"),
+            pl.col(y_true_col).cast(pl.Float64, strict=False).alias("actual"),
+            pl.col(y_score_col).cast(pl.Float64, strict=False).alias("score"),
+        )
+        .filter(pl.col("actual").is_finite() & pl.col("score").is_finite())
+        .group_by("fold")
+        .agg(
+            pl.len().alias("n"),
+            pl.col("actual").std().alias("actual_std"),
+            pl.col("score").std().alias("score_std"),
+        )
+        .collect()
+    )
+
+    violations = []
+    for row in dispersion.iter_rows(named=True):
+        actual_std = row["actual_std"]
+        score_std = row["score_std"]
+        if row["n"] < 2 or actual_std is None or actual_std <= 0 or score_std is None:
+            continue
+        ratio = float(score_std / actual_std)
+        if not math.isfinite(ratio) or ratio > MAX_PREDICTION_STD_RATIO:
+            violations.append(
+                f"fold {row['fold']}: prediction dispersion ratio {ratio:.6g} "
+                f"(score std {score_std:.6g} / target std {actual_std:.6g})"
+            )
+
+    if violations:
+        raise ValueError(
+            "Refusing to register predictions with a diverged fold; "
+            f"the maximum allowed per-fold dispersion ratio is "
+            f"{MAX_PREDICTION_STD_RATIO:g}: " + "; ".join(violations)
+        )
 
 
 def clear_prediction_sets(
@@ -467,6 +527,9 @@ def register_prediction_set(
 
     if case_dir is None:
         case_dir = _case_dir(case_study)
+
+    if predictions is not None:
+        _validate_prediction_dispersion(predictions)
 
     p_hash = prediction_hash_from_parts(training_hash, checkpoint_value, split)
 
